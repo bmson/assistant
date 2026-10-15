@@ -194,13 +194,112 @@ describe('source-backed fictional history', () => {
     expect(result.selections).toEqual([ownerSelection, assistantSelection]);
     expect(validMemoryReadSelection(result, evidence, request)).toBe(true);
     const rendered = renderMemoryReadAnswer(result, evidence, request);
-    expect(rendered).toContain('records the original statement');
-    expect(rendered).toContain('not evidence of owner intent');
+    expect(rendered).toContain(
+      'That wording appears in the assistant’s suggestion. Your cited message doesn’t use it, so I can’t verify it as your instruction.',
+    );
+
+    const sourceEvidence = evidence[0];
+    if (!sourceEvidence) throw new Error('Expected source evidence');
+    const sourceRows = (sourceEvidence.result as { matches: Array<Record<string, unknown>> })
+      .matches;
+    const ownerRow = sourceRows[0];
+    const assistantRow = sourceRows[1];
+    if (!ownerRow) throw new Error('Expected owner source row');
+    if (!assistantRow) throw new Error('Expected assistant source row');
+    const conflictingOwnerBody = `${ownerBody} I did not earmark the budget for public transport.`;
+    const conflictEvidence: ActionEvidence[] = [
+      {
+        ...sourceEvidence,
+        result: {
+          matches: [
+            {
+              ...ownerRow,
+              text: conflictingOwnerBody,
+              speakerRevision: conversationMessageSpeakerRevision(
+                String(ownerRow.messageId),
+                conflictingOwnerBody,
+                'user',
+                'owner',
+              ),
+            },
+            assistantRow,
+          ],
+        },
+      },
+    ];
+    const conflictSelection = {
+      ...result,
+      selections: [
+        { sourceKey: 'message:owner-nimbus', quote: conflictingOwnerBody },
+        assistantSelection,
+      ],
+    };
+    expect(validMemoryReadSelection(conflictSelection, conflictEvidence, request)).toBe(true);
+    expect(renderMemoryReadAnswer(conflictSelection, conflictEvidence, request)).not.toContain(
+      'no literal “public transport” wording',
+    );
     expect(rendered).toContain('Recorded owner message');
     expect(rendered).toContain('Earlier assistant claim (not verified fact)');
     expect(rendered).toContain('conversation exercise-chat; message owner-nimbus');
     expect(rendered).toContain('conversation exercise-chat; message assistant-nimbus');
     expect(rendered).not.toContain('These are facts about you');
+  });
+
+  it('does not describe a negated assistant statement as a positive suggestion', () => {
+    const request =
+      'Look back at the earlier hypothetical Nimbus exercise. Did I earmark its budget for public transport, or was that the Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step.';
+    const negativeSuggestion =
+      'For Nimbus, do not map public transport options; that is not the suggested next step.';
+    const negativeEvidence: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        result: {
+          matches: [
+            {
+              messageId: 'owner-nimbus',
+              conversationId: 'exercise-chat',
+              text: ownerBody,
+              role: 'user',
+              origin: 'owner',
+              speakerRevision: conversationMessageSpeakerRevision(
+                'owner-nimbus',
+                ownerBody,
+                'user',
+                'owner',
+              ),
+            },
+            {
+              messageId: 'assistant-nimbus',
+              conversationId: 'exercise-chat',
+              text: negativeSuggestion,
+              role: 'assistant',
+              origin: 'assistant',
+              speakerRevision: conversationMessageSpeakerRevision(
+                'assistant-nimbus',
+                negativeSuggestion,
+                'assistant',
+                'assistant',
+              ),
+            },
+          ],
+        },
+      },
+    ];
+    const selection = {
+      version: 1 as const,
+      status: 'complete' as const,
+      selections: [
+        ownerSelection,
+        { sourceKey: 'message:assistant-nimbus', quote: negativeSuggestion },
+      ],
+    };
+
+    expect(validMemoryReadSelection(selection, negativeEvidence, request)).toBe(true);
+    expect(renderMemoryReadAnswer(selection, negativeEvidence, request)).not.toContain(
+      'no literal “public transport” wording',
+    );
   });
 
   it('keeps consistent duplicate citations omitted by a successful selector', async () => {
@@ -240,6 +339,7 @@ describe('source-backed fictional history', () => {
     const rows = [
       makeOwner('owner-solstice-1', ownerText),
       makeOwner('owner-solstice-2', ownerText),
+      makeOwner('owner-solstice-3', ownerText),
       makeAssistant('assistant-solstice', assistantText),
     ];
     const request =
@@ -264,11 +364,14 @@ describe('source-backed fictional history', () => {
     expect(result.selections.map((selection) => selection.sourceKey)).toEqual([
       'message:owner-solstice-1',
       'message:owner-solstice-2',
+      'message:owner-solstice-3',
       'message:assistant-solstice',
     ]);
     const rendered = renderMemoryReadAnswer(result, search(rows), request);
+    expect(rendered.split(`“${ownerText}”`).length - 1).toBe(1);
     expect(rendered).toContain('message owner-solstice-1');
     expect(rendered).toContain('message owner-solstice-2');
+    expect(rendered).toContain('message owner-solstice-3');
     expect(rendered).toContain('message assistant-solstice');
   });
 

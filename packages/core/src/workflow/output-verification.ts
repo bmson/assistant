@@ -37,6 +37,8 @@ export type OutputVerificationResult = {
   revised: boolean;
   /** Optional verification was skipped or failed; known contradictions still fail closed. */
   unavailable: boolean;
+  /** A transparent fallback does not complete the requested answer. */
+  incomplete?: boolean;
 };
 
 type OutputVerifier = Pick<ModelRouter, 'object'>;
@@ -206,6 +208,279 @@ export function shortBulletFindings(request: string, text: string): string[] {
   return findings;
 }
 
+function safePublicPageUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  let candidate = value.trim().replace(/[.,!?;:'"”’]+$/, '');
+  while (
+    candidate.endsWith(')') &&
+    (candidate.match(/\)/g)?.length ?? 0) > (candidate.match(/\(/g)?.length ?? 0)
+  )
+    candidate = candidate.slice(0, -1);
+  try {
+    const parsed = new URL(candidate);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password)
+      return undefined;
+    parsed.hash = '';
+    return parsed.href;
+  } catch {
+    return undefined;
+  }
+}
+
+function nativeWorkspaceResourceId(raw: string): string | undefined {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:' || url.username || url.password || url.port) return undefined;
+    if (url.hostname === 'docs.google.com') {
+      const match =
+        /^\/(?:document|spreadsheets|presentation)\/d\/([A-Za-z0-9_-]{10,200})(?:\/|$)/.exec(
+          url.pathname,
+        );
+      return match?.[1];
+    }
+    if (url.hostname === 'drive.google.com') {
+      const pathMatch = /^\/file\/d\/([A-Za-z0-9_-]{10,200})(?:\/|$)/.exec(url.pathname);
+      if (pathMatch?.[1]) return pathMatch[1];
+      if (url.pathname === '/open') {
+        const id = url.searchParams.get('id');
+        return id && /^[A-Za-z0-9_-]{10,200}$/.test(id) ? id : undefined;
+      }
+    }
+  } catch {
+    /* Not a native Workspace resource URL. */
+  }
+  return undefined;
+}
+
+function hasCurrentNativeRead(resourceId: string, evidence: readonly ActionEvidence[]): boolean {
+  const pages = evidence.flatMap((row) => {
+    if (
+      row.status !== 'succeeded' ||
+      row.fromCurrentTask === false ||
+      !['docs.get', 'drive.read'].includes(row.toolName)
+    )
+      return [];
+    const args =
+      row.args && typeof row.args === 'object' && !Array.isArray(row.args)
+        ? (row.args as Record<string, unknown>)
+        : undefined;
+    const result =
+      row.result && typeof row.result === 'object' && !Array.isArray(row.result)
+        ? (row.result as Record<string, unknown>)
+        : undefined;
+    const requestedId = row.toolName === 'docs.get' ? args?.documentId : args?.fileId;
+    const receipt =
+      result?.receipt && typeof result.receipt === 'object' && !Array.isArray(result.receipt)
+        ? (result.receipt as Record<string, unknown>)
+        : undefined;
+    const source =
+      receipt?.source && typeof receipt.source === 'object' && !Array.isArray(receipt.source)
+        ? (receipt.source as Record<string, unknown>)
+        : undefined;
+    const requested =
+      receipt?.requested &&
+      typeof receipt.requested === 'object' &&
+      !Array.isArray(receipt.requested)
+        ? (receipt.requested as Record<string, unknown>)
+        : undefined;
+    const covered =
+      receipt?.covered && typeof receipt.covered === 'object' && !Array.isArray(receipt.covered)
+        ? (receipt.covered as Record<string, unknown>)
+        : undefined;
+    if (
+      requestedId !== resourceId ||
+      !result ||
+      result.ok === false ||
+      typeof result.text !== 'string' ||
+      !result.text.trim() ||
+      receipt?.version !== 1 ||
+      source?.id !== resourceId ||
+      !['google-doc', 'google-drive-file'].includes(String(source.kind)) ||
+      typeof receipt.complete !== 'boolean' ||
+      receipt.complete !== (result.complete === true) ||
+      result.truncated !== (result.complete !== true) ||
+      !covered ||
+      typeof covered.start !== 'number' ||
+      typeof covered.end !== 'number' ||
+      typeof covered.total !== 'number' ||
+      typeof covered.count !== 'number' ||
+      covered.start < 0 ||
+      covered.end <= covered.start ||
+      covered.total <= 0 ||
+      covered.end > covered.total ||
+      covered.count !== covered.end - covered.start ||
+      result.text.length !== covered.count ||
+      (args?.startOffset ?? 0) !== covered.start ||
+      (requested?.start ?? 0) !== covered.start
+    )
+      return [];
+    return [
+      {
+        kind: source.kind,
+        revision: source.revision,
+        start: covered.start,
+        end: covered.end,
+        total: covered.total,
+        complete: receipt.complete,
+        losses: receipt.losses,
+      },
+    ];
+  });
+  // A single receipt covering the entire source is sufficient on its own.
+  // Older partial reads or duplicate first pages must not poison a later,
+  // independently complete current read.
+  if (
+    pages.some(
+      (page) =>
+        page.start === 0 &&
+        page.complete &&
+        page.end === page.total &&
+        Array.isArray(page.losses) &&
+        page.losses.length === 0,
+    )
+  )
+    return true;
+
+  for (const revision of new Set(pages.map((page) => page.revision))) {
+    const revisionPages = pages
+      .filter((page) => page.revision === revision)
+      .sort((left, right) => left.start - right.start);
+    if (revisionPages.length > 1 && (typeof revision !== 'string' || !revision)) continue;
+    for (const kind of new Set(revisionPages.map((page) => page.kind))) {
+      for (const total of new Set(
+        revisionPages.filter((page) => page.kind === kind).map((page) => page.total),
+      )) {
+        const candidates = revisionPages.filter(
+          (page) => page.kind === kind && page.total === total,
+        );
+        const reachable = new Set<number>([0]);
+        let advanced = true;
+        while (advanced) {
+          advanced = false;
+          for (const page of candidates) {
+            if (!reachable.has(page.start)) continue;
+            const losses = Array.isArray(page.losses) ? page.losses : undefined;
+            const supportedPartialLoss =
+              !page.complete && losses?.every((loss) => loss === 'character-budget') === true;
+            if (page.complete) {
+              if (page.end === total && Array.isArray(losses) && losses.length === 0) return true;
+              continue;
+            }
+            if (!supportedPartialLoss || reachable.has(page.end)) continue;
+            reachable.add(page.end);
+            advanced = true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function requestClause(text: string, start: number, end: number): string {
+  const prefix = text.slice(0, start);
+  const suffix = text.slice(end);
+  const startBoundaries = [
+    ...prefix.matchAll(/;|\n|\.(?=\s)|[!?](?=\s)|,\s*(?:but|however|instead)\b/gi),
+  ];
+  const endBoundary = /;|\n|\.(?=\s)|[!?](?=\s)|,\s*(?:but|however|instead)\b/i.exec(suffix);
+  const clauseStart = startBoundaries.at(-1)?.index ?? 0;
+  const clauseEnd = endBoundary ? end + endBoundary.index : text.length;
+  return text.slice(clauseStart, clauseEnd);
+}
+
+function requestedPageTargets(request: string): string[] {
+  const candidates = [...request.matchAll(/https?:\/\/[^\s<>]+/gi)].flatMap((match) => {
+    const raw = match[0];
+    const start = match.index ?? 0;
+    const trailingPunctuation = /[.,!?;:]+$/.exec(raw)?.[0] ?? '';
+    const target = trailingPunctuation ? raw.slice(0, -trailingPunctuation.length) : raw;
+    const url = safePublicPageUrl(raw);
+    if (!url) return [];
+    const quotedSuffix = /(["'”’])([.,!?;:]*)$/.exec(raw);
+    const closeQuote = quotedSuffix?.[1];
+    const quotePairs: Record<string, string> = { "'": "'", '"': '"', '“': '”', '‘': '’' };
+    const openQuote = Object.keys(quotePairs).find((quote) => quotePairs[quote] === closeQuote);
+    const openQuoteIndex = openQuote ? request.lastIndexOf(openQuote, start - 1) : -1;
+    const quotePrefix =
+      openQuoteIndex >= 0 ? request.slice(openQuoteIndex + 1, start).trim() : undefined;
+    const token =
+      openQuote && openQuoteIndex >= 0 && quotePrefix === ''
+        ? `${openQuote}SOURCE_URL${closeQuote}${quotedSuffix?.[2] ?? ''}`
+        : `${closeQuote ? `SOURCE_URL${closeQuote}${quotedSuffix?.[2] ?? ''}` : 'SOURCE_URL'}`;
+    let clause = requestClause(request, start, start + target.length).replace(target, token);
+    // A URL may itself be quoted as the target, while quoted instructions around
+    // other URLs remain examples or untrusted text and cannot authorize a fetch.
+    clause = clause
+      .replace(/```[\s\S]*?```|`[^`\n]*`/g, ' ')
+      .replace(/"([^"\n]*)"|'([^'\n]*)'|“([^”\n]*)”|‘([^’\n]*)’/g, (_quoted, ...args) => {
+        const offset = args.at(-2) as number;
+        const clauseText = args.at(-1) as string;
+        const content = String(args[0] ?? args[1] ?? args[2] ?? args[3] ?? '').trim();
+        const prefix = clauseText.slice(0, offset);
+        const quotedTargetIntent =
+          /\b(?:summari[sz]e|review|analy[sz]e|inspect|extract)\s+(?:(?:the|this|that)\s+)?(?:(?:page|article|site|website|webpage|document|doc|url|link|source|contents?|text)(?:\s+of)?\s*:?\s*)?$/i.test(
+            prefix,
+          );
+        return content === 'SOURCE_URL' &&
+          (/\b(?:read|fetch|open|visit|load)\s+(?:(?:the|this|that)\s+)?$/i.test(prefix) ||
+            quotedTargetIntent)
+          ? 'SOURCE_URL'
+          : ' ';
+      });
+    const noBrowse =
+      /\b(?:do not|don['’]t|never)\s+browse\s*(?=[;,]|$)/i.test(clause) ||
+      /\b(?:do not|don['’]t|never)\s+browse\b[^.!?;\n]{0,80}\b(?:page|article|site|website|webpage|document|doc|url|link|source|contents?)\b/i.test(
+        clause,
+      ) ||
+      /\b(?:do not|don['’]t|never)\s+(?:fetch|open|visit|read)\b[^.!?;\n]{0,80}\b(?:page|article|site|website|webpage|document|doc|url|link|source|contents?)\b/i.test(
+        clause,
+      ) ||
+      (() => {
+        const before = request.slice(0, start);
+        const precedingClauses = before.split(/;|\n|\.(?=\s)|[!?](?=\s)/);
+        const previousClause = precedingClauses.at(-2) ?? '';
+        return /^\s*(?:(?:please|just)\s+)?(?:do not|don['’]t|never)\s+browse\s*$/i.test(
+          previousClause,
+        );
+      })();
+    const negatedDirectPageRead =
+      /\b(?:do not|don['’]t|never)\s+(?:browse|read|fetch|open|visit|load)\s+(?:(?:the|this|that)\s+)?SOURCE_URL/i.test(
+        clause,
+      ) ||
+      /\b(?:do not|don['’]t|never)\s+(?:browse|read|fetch|open|visit|load)\b[^.!?;\n]{0,80}\b(?:page|article|site|website|webpage|document|doc|url|link|source|contents?)\b/i.test(
+        clause,
+      );
+    if (noBrowse || negatedDirectPageRead) return [];
+    // The owner must have authorized this specific URL target. A neighboring
+    // URL's read verb cannot authorize a quoted/example URL in the same clause.
+    const directPageRead = /\b(?:read|fetch|open|visit|load)\b[^;!?\n]{0,500}\bSOURCE_URL/i.test(
+      clause,
+    );
+    const pageSummary =
+      /\b(?:summari[sz](?:e|ing|ation)|review|analy[sz]e|inspect|extract)\b[^.!?\n]{0,80}\b(?:page|article|site|website|webpage|document|doc|url|link|contents?|text|source)\b/i.test(
+        clause,
+      ) ||
+      /\b(?:summari[sz]e|review|analy[sz]e|inspect|extract)\b[^.!?\n]{0,40}SOURCE_URL\b/i.test(
+        clause,
+      ) ||
+      /\bwhat\s+does\b[^?\n]{0,100}\b(?:page|article|site|website|document|doc|link|url)\b[^?\n]{0,60}\b(?:say|contain|cover|mean)\b/i.test(
+        clause,
+      );
+    const searchResultsOnly =
+      /\bsearch(?:\s+the\s+web)?\b[^.!?\n]{0,100}\bresults?\b/i.test(clause) &&
+      !/\b(?:page|article|site|website|webpage|contents?|text|source)\b/i.test(clause);
+    if (!(directPageRead || (clause.includes('SOURCE_URL') && pageSummary && !searchResultsOnly)))
+      return [];
+    return [url];
+  });
+  return [...new Set(candidates)];
+}
+
+function requestedPageUrls(request: string): string[] {
+  return requestedPageTargets(request).filter((url) => !nativeWorkspaceResourceId(url));
+}
+
 function successfulWebSources(evidence: readonly ActionEvidence[]) {
   return evidence.flatMap((row) => {
     const result =
@@ -218,13 +493,97 @@ function successfulWebSources(evidence: readonly ActionEvidence[]) {
       row.fromCurrentTask === false ||
       !result ||
       typeof result.text !== 'string' ||
+      !result.text.trim() ||
       result.truncated !== false ||
       typeof result.status !== 'number' ||
       result.status < 200 ||
       result.status >= 300
     )
       return [];
-    return [{ text: result.text, url: typeof result.finalUrl === 'string' ? result.finalUrl : '' }];
+    const args =
+      row.args && typeof row.args === 'object' && !Array.isArray(row.args)
+        ? (row.args as Record<string, unknown>)
+        : undefined;
+    return [
+      {
+        text: result.text,
+        url: typeof result.finalUrl === 'string' ? result.finalUrl : '',
+        requestedUrl: safePublicPageUrl(args?.url),
+      },
+    ];
+  });
+}
+
+/** Each requested source must have its own current, complete, source-bound read receipt. */
+export function requestedPublicPageReceiptFindings(
+  request: string,
+  evidence: readonly ActionEvidence[],
+): string[] {
+  const targets = requestedPageTargets(request);
+  if (!targets.length) return [];
+  const publicPages = targets.filter((url) => !nativeWorkspaceResourceId(url));
+  const nativeDocuments = targets.filter((url) => Boolean(nativeWorkspaceResourceId(url)));
+  const missingNative = nativeDocuments.filter((url) => {
+    const resourceId = nativeWorkspaceResourceId(url);
+    return resourceId ? !hasCurrentNativeRead(resourceId, evidence) : false;
+  });
+  const sources = successfulWebSources(evidence);
+  const missingPublic = publicPages.filter(
+    (url) =>
+      !sources.some(
+        (source) => source.requestedUrl === url && Boolean(safePublicPageUrl(source.url)),
+      ),
+  );
+  return [
+    ...(missingPublic.length
+      ? [
+          `No complete current web.fetch receipt is bound to ${missingPublic.length} requested public ${missingPublic.length === 1 ? 'page' : 'pages'}.`,
+        ]
+      : []),
+    ...(missingNative.length
+      ? [
+          `No complete current native read receipt is bound to ${missingNative.length} requested Workspace ${missingNative.length === 1 ? 'document' : 'documents'}.`,
+        ]
+      : []),
+  ];
+}
+
+export function requestedPublicPageFallback(): string {
+  return 'I couldn’t verify a complete current read of every requested page or document, so I can’t safely summarize its contents.';
+}
+
+function sourceLink(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password)
+      return ` [Source](<${parsed.href}>)`;
+  } catch {
+    /* No verified public source URL. */
+  }
+  return '';
+}
+
+/** A requested citation must remain joined to the complete current fetch. */
+function requestedWebLinkFindings(
+  request: string,
+  draft: string,
+  evidence: readonly ActionEvidence[],
+): string[] {
+  if (!/\b(?:source|citation)\s+links?\b|\blink\s+to\s+(?:the\s+)?source\b/i.test(request))
+    return [];
+  const requested = requestedPageUrls(request);
+  if (!requested.length) return [];
+  const sources = successfulWebSources(evidence).filter(
+    (source) => source.requestedUrl && requested.includes(source.requestedUrl),
+  );
+  const links = [...draft.matchAll(/\[[^\]\n]+\]\(<?([^\s<>)]*)>?\)/g)]
+    .map((match) => safePublicPageUrl(match[1]))
+    .filter((url): url is string => Boolean(url));
+  return sources.flatMap((source) => {
+    const finalUrl = safePublicPageUrl(source.url);
+    return finalUrl && links.includes(finalUrl)
+      ? []
+      : ['The requested source link to a complete current fetched page is missing.'];
   });
 }
 
@@ -559,15 +918,10 @@ function webFetchEvidenceForVerifier(
   // A draft that names a service lets us send only its source passage. When
   // the draft itself is a refusal or generic summary, that selection is empty
   // and the verifier cannot recover the useful sections at the end of a long
-  // successful fetch. Include bounded late sections in that case so the
+  // successful fetch. Include bounded early and late sections in that case so the
   // verifier can distinguish a readable page from an actually missing detail.
   const selectedPassages = lateNamedPassage
-    ? (passages.length > 0
-        ? passages
-        : allNamedSourcePassages(sourceText).filter(
-            (passage) => passage.end > WEB_SOURCE_EXCERPT_LIMIT,
-          )
-      ).slice(0, 24)
+    ? (passages.length > 0 ? passages : allPassages).slice(0, 24)
     : [];
   let passageLimit = EVIDENCE_ITEM_LIMIT;
   let excerptLength = Math.min(
@@ -599,9 +953,7 @@ function webFetchEvidenceForVerifier(
               },
               sourcePassagesOmittedCount: Math.max(
                 0,
-                (passages.length ||
-                  allPassages.filter((passage) => passage.end > WEB_SOURCE_EXCERPT_LIMIT).length) -
-                  selectedPassages.length,
+                (passages.length || allPassages.length) - selectedPassages.length,
               ),
             }
           : {}),
@@ -727,7 +1079,14 @@ export async function verifyFinalOutput(
     text: string,
     attempted: boolean,
     unavailable: boolean,
-  ): OutputVerificationResult => ({ text, attempted, revised: text !== input.draft, unavailable });
+    incomplete = false,
+  ): OutputVerificationResult => ({
+    text,
+    attempted,
+    revised: text !== input.draft,
+    unavailable,
+    ...(incomplete ? { incomplete: true } : {}),
+  });
   const limitation = () => {
     const source = successfulWebSources(input.evidence)[0];
     let url = '';
@@ -740,8 +1099,11 @@ export async function verifyFinalOutput(
     }
     return `I couldn’t verify the summarized services’ frequencies, stops or required transfers from the retrieved evidence. I can’t safely publish those route details.${url ? ` [Source](${url})` : ''}`;
   };
+  if (requestedPublicPageReceiptFindings(input.request, input.evidence).length)
+    return result(requestedPublicPageFallback(), false, false, true);
   let attempted = false;
   let incompleteCorrectionPending = false;
+  let unresolvedFormatPending = false;
   try {
     const outcome = await router.object<OutputVerification>('rewrite', {
       taskId: input.taskId,
@@ -754,13 +1116,12 @@ export async function verifyFinalOutput(
     });
     attempted = outcome.ok;
     if (!outcome.ok || outcome.finishReason === 'length') {
-      return result(
-        publicWebClaimFindings(original, input.evidence, ownerFacts).length
-          ? limitation()
-          : original,
-        outcome.ok,
-        true,
-      );
+      const contradicted = publicWebClaimFindings(original, input.evidence, ownerFacts).length > 0;
+      const incomplete =
+        contradicted ||
+        shortBulletFindings(input.request, original).length > 0 ||
+        requestedWebLinkFindings(input.request, original, input.evidence).length > 0;
+      return result(contradicted ? limitation() : original, outcome.ok, true, incomplete);
     }
     const revision = outcome.object.revisedText?.trim();
     let candidate =
@@ -786,9 +1147,13 @@ export async function verifyFinalOutput(
       (rejectedGroundingRevision || isVisiblyIncompleteReplacement(revision ?? ''));
     const correctionDraft = incompleteReplacement ? (revision ?? candidate) : candidate;
     const findings = publicWebClaimFindings(correctionDraft, input.evidence, ownerFacts);
-    const formatFindings = shortBulletFindings(input.request, correctionDraft);
+    const formatFindings = [
+      ...shortBulletFindings(input.request, correctionDraft),
+      ...requestedWebLinkFindings(input.request, correctionDraft, input.evidence),
+    ];
     if (findings.length || incompleteReplacement || formatFindings.length) {
       incompleteCorrectionPending = incompleteReplacement;
+      unresolvedFormatPending = formatFindings.length > 0;
       // Share one extra correction across source attribution and visibly
       // incomplete revisions. A second failure never restores the original.
       const correctionInstructions = [
@@ -819,11 +1184,13 @@ export async function verifyFinalOutput(
           Math.max(1_024, Math.ceil(correctionDraft.length / 2) + 512),
         ),
       });
+      // Publish approves the draft that this correction actually reviewed.
+      // It never approves the earlier rejected original or unsubmitted text.
       const text =
-        correction.ok &&
-        correction.finishReason !== 'length' &&
-        correction.object.decision === 'revise'
-          ? correction.object.revisedText?.trim()
+        correction.ok && correction.finishReason !== 'length'
+          ? correction.object.decision === 'publish'
+            ? correctionDraft
+            : correction.object.revisedText?.trim()
           : undefined;
       const corrected = text ? repairRequestedBullets(input.request, text) : undefined;
       if (
@@ -833,15 +1200,39 @@ export async function verifyFinalOutput(
           : revisionLosesAnswer(input.draft, corrected)) ||
         isVisiblyIncompleteReplacement(corrected) ||
         shortBulletFindings(input.request, corrected).length ||
+        requestedWebLinkFindings(input.request, corrected, input.evidence).length ||
         publicWebClaimFindings(corrected, input.evidence, ownerFacts).length
       ) {
+        const source = successfulWebSources(input.evidence)[0];
+        // A formatting failure cannot establish a missing-source fact. Retain
+        // a usable checked answer only when neither reviewer nor deterministic
+        // source checks rejected its grounding; keep the unmet format visible.
+        const preserveAnswer =
+          (outcome.object.decision === 'publish' ||
+            (outcome.object.reasons.length > 0 &&
+              outcome.object.reasons.every((reason) => reason === 'clarity_or_format'))) &&
+          (!correction.ok ||
+            correction.object.reasons.every((reason) => reason === 'clarity_or_format')) &&
+          !findings.length &&
+          !hasStructuralOutputDefect(candidate) &&
+          !isVisiblyIncompleteReplacement(candidate);
         const safeFailure = findings.length
           ? limitation()
-          : 'I couldn’t produce a complete answer that I can support from the available evidence.';
-        return result(safeFailure, true, !correction.ok || correction.finishReason === 'length');
+          : preserveAnswer
+            ? `${candidate}\n\nI couldn’t complete the requested formatting.${source ? sourceLink(source.url) : ''}`
+            : source
+              ? `The page was retrieved, but I couldn’t complete a verified summary of its contents.${sourceLink(source.url)}`
+              : 'I couldn’t produce a complete answer that I can support from the available evidence.';
+        return result(
+          safeFailure,
+          true,
+          !correction.ok || correction.finishReason === 'length',
+          true,
+        );
       }
       candidate = corrected;
       incompleteCorrectionPending = false;
+      unresolvedFormatPending = false;
     }
     return result(candidate, true, false);
   } catch (error) {
@@ -851,12 +1242,19 @@ export async function verifyFinalOutput(
     });
     return result(
       incompleteCorrectionPending
-        ? 'I couldn’t produce a complete answer that I can support from the available evidence.'
+        ? successfulWebSources(input.evidence)[0]
+          ? `The page was retrieved, but I couldn’t complete a verified summary of its contents.${sourceLink(successfulWebSources(input.evidence)[0]?.url ?? '')}`
+          : 'I couldn’t produce a complete answer that I can support from the available evidence.'
         : publicWebClaimFindings(original, input.evidence, ownerFacts).length
           ? limitation()
           : original,
       attempted,
       true,
+      incompleteCorrectionPending ||
+        unresolvedFormatPending ||
+        shortBulletFindings(input.request, original).length > 0 ||
+        requestedWebLinkFindings(input.request, original, input.evidence).length > 0 ||
+        publicWebClaimFindings(original, input.evidence, ownerFacts).length > 0,
     );
   }
 }

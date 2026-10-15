@@ -33,6 +33,14 @@ assertAllocatedTestTarget({
   kind: 'standard',
 });
 
+const correctionModes = [
+  'validated',
+  'unavailable',
+  'unfinished',
+  'family-validated',
+  'family-unavailable',
+] as const;
+
 describe('revision-bound multi-source Activity answer through allocated PostgreSQL', () => {
   let db: Db;
   beforeAll(() => {
@@ -42,7 +50,7 @@ describe('revision-bound multi-source Activity answer through allocated PostgreS
   afterAll(async () => {
     await (db as unknown as { $client: { end(): Promise<void> } }).$client.end();
   });
-  it.each(['validated', 'unavailable', 'unfinished'] as const)(
+  it.each(correctionModes)(
     'keeps the exact correction truthful when synthesis is %s',
     async (mode) => {
       const agent = await db.query.agents.findFirst();
@@ -56,8 +64,13 @@ describe('revision-bound multi-source Activity answer through allocated PostgreS
       const correctionId = randomUUID();
       const priorReceiptId = randomUUID();
       const original = 'Check my emails for Cedar and check Assistant history for Cedar';
-      const correction = 'Check Assistant history and my emails for Cedar.';
-      const historyText = 'Cedar review requires budget notes.';
+      const family = mode.startsWith('family-');
+      const correction = family
+        ? 'Check my saved memories and earlier conversations: when is my sister’s birthday?'
+        : 'Check Assistant history and my emails for Cedar.';
+      const historyText = family
+        ? "My sister Alex's birthday is March 4."
+        : 'Cedar review requires budget notes.';
       const at = new Date('2026-10-15T19:00:00Z');
       await db.insert(conversations).values({
         id: conversationId,
@@ -212,11 +225,13 @@ describe('revision-bound multi-source Activity answer through allocated PostgreS
       const calls: Array<{ toolName: string; args: Record<string, unknown> }> = [];
       const dispatcher = {
         toolDefs: () =>
-          ['conversations.search', 'gmail.search', 'gmail.read_thread'].map((name) => ({
-            name,
-            description: 'Synthetic read only',
-            inputSchema: {},
-          })),
+          ['conversations.search', 'gmail.search', 'gmail.read_thread', 'memory.recall'].map(
+            (name) => ({
+              name,
+              description: 'Synthetic read only',
+              inputSchema: {},
+            }),
+          ),
         resultIsUntrusted: () => true,
         executeApproved: vi.fn(),
         dispatch: vi.fn(
@@ -237,7 +252,9 @@ describe('revision-bound multi-source Activity answer through allocated PostgreS
                 ? { mode: 'semantic', matches: [source] }
                 : toolName === 'gmail.search'
                   ? searchResult(String(args.query), Number(args.maxResults))
-                  : threadResult('Cedar review date is 2026-10-20.');
+                  : toolName === 'memory.recall'
+                    ? { memories: [] }
+                    : threadResult('Cedar review date is 2026-10-20.');
             const [stored] = await db
               .insert(toolCalls)
               .values({
@@ -265,7 +282,23 @@ describe('revision-bound multi-source Activity answer through allocated PostgreS
         }),
         object: vi.fn(
           async (_role: string, _input: { prompt: string; requestProfile: unknown }) => {
-            if (mode === 'unavailable') return { ok: false };
+            if (mode === 'unavailable' || mode === 'family-unavailable') return { ok: false };
+            if (family)
+              return {
+                ok: true,
+                object: {
+                  selections: [{ sourceKey: `message:${historyId}`, quote: historyText }],
+                  familyBirthdays: [
+                    {
+                      person: 'Alex',
+                      relationship: 'sister',
+                      birthday: 'March 4',
+                      relationshipSelection: 0,
+                      birthdaySelection: 0,
+                    },
+                  ],
+                },
+              };
             return {
               ok: true,
               object: {
@@ -335,7 +368,7 @@ describe('revision-bound multi-source Activity answer through allocated PostgreS
         steps: [],
         missingInfo: [],
       });
-      const success = mode === 'validated';
+      const success = mode === 'validated' || mode === 'family-validated';
       const call = router.object.mock.calls[0]?.[1];
       expect(call?.requestProfile).toEqual({
         tools: 'none',
@@ -345,26 +378,29 @@ describe('revision-bound multi-source Activity answer through allocated PostgreS
       const payload = JSON.parse(call?.prompt ?? '{}');
       expect(payload.request).toBe(correction.replace(/[.!?]+$/, ''));
       expect(payload.sources.map((row: { key: string }) => row.key).sort()).toEqual(
-        [`message:${historyId}`, 'mail:thread-1:mail-1'].sort(),
+        (family
+          ? [`message:${historyId}`]
+          : [`message:${historyId}`, 'mail:thread-1:mail-1']
+        ).sort(),
       );
       expect(result).toMatchObject({ outcome: success ? 'done' : 'needs_attention' });
-      expect(calls.map((row) => row.toolName)).toEqual([
-        'conversations.search',
-        'gmail.search',
-        'gmail.read_thread',
-      ]);
+      expect(calls.map((row) => row.toolName)).toEqual(
+        family
+          ? ['conversations.search', 'memory.recall']
+          : ['conversations.search', 'gmail.search', 'gmail.read_thread'],
+      );
       expect(state.requestChecklist?.items.find((item) => item.id === selectedId)?.status).toBe(
         success ? 'completed' : 'blocked',
       );
-      expect(calls.map((row) => row.toolName)).toEqual([
-        'conversations.search',
-        'gmail.search',
-        'gmail.read_thread',
-      ]);
+      expect(calls.map((row) => row.toolName)).toEqual(
+        family
+          ? ['conversations.search', 'memory.recall']
+          : ['conversations.search', 'gmail.search', 'gmail.read_thread'],
+      );
       expect(router.object).toHaveBeenCalledTimes(1);
       expect(router.step).not.toHaveBeenCalled();
       expect(dispatcher.executeApproved).not.toHaveBeenCalled();
-      expect(state.step).toBe(4);
+      expect(state.step).toBe(family ? 3 : 4);
       expect(state.step).toBeLessThanOrEqual(lease.maxSteps);
       const persisted = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
       expect(persisted?.status).toBe(success ? 'done' : 'needs_attention');
@@ -373,7 +409,9 @@ describe('revision-bound multi-source Activity answer through allocated PostgreS
         await db.query.messages.findMany({ where: eq(messages.taskId, taskId) })
       ).find((row) => row.role === 'assistant');
       if (success) {
-        expect(assistant?.text).toContain('Cedar review requires budget notes.');
+        expect(assistant?.text).toContain(
+          family ? '**Alex** (sister): March 4.' : 'Cedar review requires budget notes.',
+        );
         expect(assistant?.text).toContain(`/chat/${conversationId}`);
       } else expect(assistant?.text).not.toMatch(/requested.*(?:fully )?completed/i);
       expect((state.plannerState.restrictedSourceRead as { completed?: boolean }).completed).toBe(

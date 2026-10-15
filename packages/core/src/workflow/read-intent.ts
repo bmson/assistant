@@ -7,6 +7,13 @@
 
 import { requestedSavedSkillInventory } from '../memory/saved-skill-inventory.js';
 import {
+  type BillingAuditScope,
+  isBillingAuditIntent,
+  requestedBillingAuditMonthCount,
+  requestedBillingAuditMonths,
+  resolveBillingAuditScope,
+} from './billing-audit.js';
+import {
   type CalendarEventAnalysisRequest,
   parseCalendarWeekdayCount,
   requestedCalendarEventAnalysis,
@@ -33,6 +40,7 @@ import {
   emailReviewNextThreadRead,
 } from './email-review.js';
 import { DEFAULT_TOOL_RESULT_CHAR_LIMIT, toolResultCharacterLimit } from './executor/util.js';
+import { type FamilyBirthdayRequest, requestedFamilyBirthdays } from './family-birthday.js';
 import { detectFutureWatchIntent } from './future-watch-intent.js';
 import { requestedCalendarPerson } from './person-calendar.js';
 
@@ -70,6 +78,7 @@ export type TemporalIntentResolution =
 
 export interface PersonalReadRequest {
   kind: PersonalReadKind;
+  familyBirthday?: FamilyBirthdayRequest;
   /** Explicit owner-requested private sources, scheduled fairly within the existing task cap. */
   sourceReads?: PersonalReadRequest[];
   explicitSource?: 'history' | 'mail' | 'calendar';
@@ -182,6 +191,11 @@ export interface PersonalReadRequest {
   includeCalendarBriefing?: boolean;
   /** Omit optional lodging and default next-step commentary when brevity is explicit. */
   compactCalendarBriefing?: boolean;
+  /** Bounded owner-local Gmail review of billing evidence. */
+  billingAudit?: BillingAuditScope;
+  billingAuditIssue?: string;
+  /** Explicitly requested non-mail private-source reads not executed by the billing lane. */
+  billingAuditCompanionGap?: string;
 }
 
 export interface PersonalReadDetectionOptions {
@@ -219,43 +233,112 @@ const SAME_SUBJECT_LOOKUP_OFFER =
   /\b(?:would you like me to|shall i|should i|i can)\s+(?:check|verify|look up|read|search for)\s+(?:that|it|the (?:details|confirmation)|(?:your|the|our) hotel(?: confirmation| reservation)?)\b/i;
 const MUTATING_OFFER =
   /\b(?:add|archive|book|cancel|create|delete|edit|forward|invite|move|reply|reschedule|save|schedule|send|submit|update)\b/i;
-const NEGATED_LOOKUP_VERB = String.raw`(?:look(?:\s+up)?|check|search|read|open|access|review|scan|inspect|consult|use)`;
+const NEGATED_LOOKUP_VERB = String.raw`(?:look(?:\s+up)?|check|search|read|open|access|review|scan|inspect|consult|use|recall|retrieve)`;
+const NEGATED_LOOKUP_FORM = String.raw`(?:look(?:ing)?(?:\s+up)?|check(?:ing)?|search(?:ing)?|read(?:ing)?|open(?:ing)?|access(?:ing)?|review(?:ing)?|scan(?:ning)?|inspect(?:ing)?|consult(?:ing)?|us(?:e|ing)|recall(?:ing)?|retriev(?:e|ing)?)`;
+
+function privateReadProhibitionClauses(text: string): string[] {
+  const prefix = new RegExp(
+    String.raw`\b(?:(?:do\s+not|don['’]?t|never)\s+${NEGATED_LOOKUP_VERB}\b|without\s+${NEGATED_LOOKUP_FORM}\b)`,
+    'giu',
+  );
+  const matches = [...text.matchAll(prefix)];
+  const positiveRead =
+    /(?:,\s*|\b(?:but|however|instead|then|and)\s+)(?=(?:look(?:\s+up)?|check|search|read|open|access|review|scan|inspect|consult|use|recall|retrieve)\b)/iu;
+
+  return matches.map((match, index) => {
+    const start = (match.index ?? 0) + match[0].length;
+    const nextPrefix = matches[index + 1]?.index ?? text.length;
+    const maxEnd = Math.min(start + 180, nextPrefix, text.length);
+    const remaining = text.slice(start, maxEnd);
+    const sentenceEnd = remaining.search(/[.!?;\n]/u);
+    // A later retention/action prohibition is a separate instruction too.
+    // It must not turn its object (for example “new memories”) into this
+    // earlier lookup prohibition's object.
+    const nextInstruction = remaining.search(/\b(?:do\s+not|don['’]?t|never|without)\b/iu);
+    const positiveStart = remaining.search(positiveRead);
+    const end = Math.min(
+      maxEnd,
+      sentenceEnd < 0 ? maxEnd : start + sentenceEnd,
+      nextInstruction < 0 ? maxEnd : start + nextInstruction,
+      positiveStart < 0 ? maxEnd : start + positiveStart,
+    );
+    return text.slice(start, end);
+  });
+}
+
+function positivePrivateReadText(text: string): string {
+  return text.replace(
+    /\b(?:do not|don't|don’t|never|without|avoid)\b[^.!?;\n]*?(?=(?:,\s*|\b(?:but|however|instead|then|and)\s+)(?:read|search|check|use|consult|retrieve)\b|[.!?;\n]|$)/giu,
+    '',
+  );
+}
 
 function explicitlyProhibitsPrivateRead(
   text: string,
-  surface: 'calendar' | 'email' | 'memory',
+  surface: 'calendar' | 'email' | 'history' | 'memory',
 ): boolean {
   const accountSurface =
     surface === 'calendar'
       ? String.raw`(?:google\s+)?(?:calendars?|schedules?|agendas?)`
       : surface === 'email'
         ? `(?:gmail|e-?mails?|mail|inboxes|mailboxes|messages?|threads?)`
-        : String.raw`(?:memories|memory|saved\s+(?:facts?|memories)|what\s+you\s+know)`;
+        : surface === 'history'
+          ? String.raw`(?:(?:(?:earlier|previous|prior|past)\s+)?(?:owner\s+)?(?:chats?|conversations?)|conversation\s+history|history)`
+          : String.raw`(?:memories|memory|saved\s+(?:facts?|memories)|what\s+you\s+know)`;
   const sourceOwner = String.raw`(?:my|our)\s+(?:(?:real|actual|personal)\s+)?`;
-  const clause = String.raw`[^.!?\n]{0,180}`;
-  const prefix = String.raw`\b(?:do\s+not|don['’]?t|never)\s+${NEGATED_LOOKUP_VERB}\b`;
-  const negatedClause = new RegExp(`${prefix}(${clause})`, 'i').exec(text)?.[1] ?? '';
+  const negatedClauses = privateReadProhibitionClauses(text);
   const direct = new RegExp(`\\b${sourceOwner}${accountSurface}\\b`, 'i');
-  const allPrivateSurfaces = String.raw`(?:gmail|e-?mails?|mail|inboxes|mailboxes|messages?|threads?|(?:google\s+)?calendars?|schedules?|agendas?|memories|memory|saved\s+(?:facts?|memories)|what\s+you\s+know)`;
-  const firstOwnedSource = new RegExp(`\\b${sourceOwner}${allPrivateSurfaces}\\b`, 'i').exec(
-    negatedClause,
-  );
-  const listed = firstOwnedSource
-    ? negatedClause
-        .slice(firstOwnedSource.index + firstOwnedSource[0].length)
-        .split(/,|\b(?:and|or)\b/i)
-        .some((item) => new RegExp(`^\\s*(?:${sourceOwner})?${accountSurface}\\b`, 'i').test(item))
-    : false;
-  const without = new RegExp(
-    String.raw`\bwithout\s+${NEGATED_LOOKUP_VERB}(?:ing)?\b${clause}\b${sourceOwner}${accountSurface}\b`,
-    'i',
-  );
+  const allPrivateSurfaces = String.raw`(?:gmail|e-?mails?|mail|inboxes|mailboxes|messages?|threads?|(?:google\s+)?calendars?|schedules?|agendas?|memories|memory|saved\s+(?:facts?|memories)|what\s+you\s+know|(?:(?:(?:earlier|previous|prior|past)\s+)?(?:owner\s+)?(?:chats?|conversations?)|conversation\s+history|history))`;
+  const ownedSource = new RegExp(`\\b${sourceOwner}${allPrivateSurfaces}\\b`, 'i');
+  const unownedSourceMention = new RegExp(`\\b${accountSurface}\\b`, 'i');
+  const listed = negatedClauses.some((negatedClause) => {
+    const firstOwnedSource = ownedSource.exec(negatedClause);
+    return firstOwnedSource
+      ? negatedClause
+          .slice(firstOwnedSource.index + firstOwnedSource[0].length)
+          .split(/,|\b(?:and|or)\b/i)
+          .some((item) =>
+            new RegExp(`^\\s*(?:${sourceOwner})?${accountSurface}\\b`, 'i').test(item),
+          )
+      : false;
+  });
+  const memorySurface = String.raw`(?:(?:my|our|any|the|all)\s+)?(?:saved\s+)?(?:memor(?:y|ies))\b`;
   return (
-    direct.test(negatedClause) ||
+    negatedClauses.some((negatedClause) => direct.test(negatedClause)) ||
+    negatedClauses.some((negatedClause) => unownedSourceMention.test(negatedClause)) ||
     listed ||
-    without.test(text) ||
-    (surface === 'calendar' && /^\s*(?:(?:any|the|all)\s+)?calendars?\b/i.test(negatedClause))
+    (surface === 'memory' &&
+      negatedClauses.some((negatedClause) =>
+        new RegExp(`^\\s*${memorySurface}`, 'i').test(negatedClause),
+      )) ||
+    (surface === 'calendar' &&
+      negatedClauses.some((negatedClause) =>
+        /^\s*(?:(?:any|the|all)\s+)?calendars?\b/i.test(negatedClause),
+      ))
   );
+}
+
+export interface FamilyBirthdaySourceScope {
+  conversationHistory: boolean;
+  savedMemory: boolean;
+}
+
+/** Preserve default family-recall coverage, while honoring explicit source boundaries. */
+export function familyBirthdaySourceScope(text: string): FamilyBirthdaySourceScope {
+  const positiveText = positivePrivateReadText(text);
+  const historyRequested = CONVERSATION_HISTORY_REQUEST.test(positiveText);
+  const savedMemoryRequested =
+    /\b(?:saved|long[- ]term|personal)\s+memor(?:y|ies)\b/i.test(positiveText) &&
+    READ_OR_QUESTION.test(positiveText);
+  const historyProhibited = explicitlyProhibitsPrivateRead(text, 'history');
+  const savedMemoryProhibited = explicitlyProhibitsPrivateRead(text, 'memory');
+  const explicitlyScoped =
+    historyRequested || savedMemoryRequested || historyProhibited || savedMemoryProhibited;
+
+  return {
+    conversationHistory: !historyProhibited && (historyRequested || !explicitlyScoped),
+    savedMemory: !savedMemoryProhibited && (savedMemoryRequested || !explicitlyScoped),
+  };
 }
 
 function explicitlyRequestsCalendarOverlapSummary(text: string): boolean {
@@ -383,7 +466,7 @@ const KNOWLEDGE_GRAPH_SURFACE =
 const MEMORY_SURFACE =
   /\b(?:memor(?:y|ies)|remember(?:ed)?|saved facts?|what you know|knowledge about me)\b/i;
 const CONVERSATION_HISTORY_REQUEST =
-  /\b(?:earlier|previous|prior|past)\s+(?:owner\s+)?(?:conversations?|chats?)\b|\b(?:previously|before)\s+(?:told|said|mentioned)\s+you\b|\bwhat\s+(?:did|have)\s+i\s+(?:tell|say|mention)\s+you\b|\bwhat\s+did\s+i\s+say\s+about\b|\b(?:earlier|previous|prior|past)\s+(?:(?:hypothetical|fictional)\s+)?(?:[\p{L}\p{N}_-]+\s+){0,3}(?:exercise|scenario|discussion)\b/iu;
+  /\b(?:earlier|previous|prior|past)\s+(?:owner\s+)?(?:conversations?|chats?)\b|\b(?:previously|before)\s+(?:told|said|mentioned)\s+you\b|\bwhat\s+(?:did|have)\s+i\s+(?:tell|say|mention)\s+you\b|\bwhat\s+did\s+i\s+say\s+about\b|\b(?:earlier|previous|prior|past)\s+(?:(?:hypothetical|fictional)\s+)?(?:[\p{L}\p{N}_-]+\s+){0,3}(?:exercise|scenario|discussion)\b|\b(?:read|search|check|review|consult|look(?:\s+up|\s+at)?|use)\b[^.!?\n]{0,100}\b(?:(?:my|our|the)\s+)?conversation\s+history\b/iu;
 const AUTOBIOGRAPHICAL_READ =
   /\b(?:when|where)\s+did\s+i\b|\bhave\s+i\s+ever\b|\bdid\s+i\s+(?:attend|visit|see|go|meet|live|work|travel)\b/i;
 const AVAILABILITY_SURFACE =
@@ -436,6 +519,10 @@ const READ_THEN_MUTATION =
  */
 function readThenMutationText(text: string): string {
   return text
+    .replace(
+      /\b(?:no|zero|without)\b[^.!?;\n]{0,220}\b(?:writes?|changes?|updates?)\b[^.!?;\n]*/giu,
+      ' ',
+    )
     .replace(
       /\b(?:do\s+not|don['’]?t|never)\s+(?:add|archive|block|book|cancel|compose|create|delete|draft|edit|email|flag|forward|hold|invite|label|make|mark|move|prepare|remember|remind|reply|reschedule|save|schedule|send|update|write)\b[^.!?\n]*/gi,
       ' ',
@@ -2004,22 +2091,19 @@ function explicitPrivateSourceRequest(
   text: string,
   options: PersonalReadDetectionOptions,
 ): PersonalReadRequest | undefined {
-  const positive = text.replace(
-    /\b(?:do not|don't|don’t|never|without|avoid)\b[^.!?;\n]*?(?=\b(?:but|however|instead|then)\s+(?:read|search|check|use|consult|retrieve)\b|[.!?;\n]|$)/giu,
-    '',
-  );
+  const positive = positivePrivateReadText(text);
   if (!/\b(?:check|search|read|use|using|from|consult|review|look|build|compare)\b/i.test(positive))
     return undefined;
   const history =
     /\b(?:assistant history|(?:earlier|previous|past|prior) (?:chats?|conversations?)|conversation history)\b/i.test(
       positive,
-    ) && !explicitlyProhibitsPrivateRead(text, 'memory');
+    ) && !explicitlyProhibitsPrivateRead(text, 'history');
   // Existing trip discovery already binds both requested accounts and has a
   // stronger itinerary/route contract. Preserve it unless history adds a source.
   if (!history && (isCompoundTripDiscovery(text) || isUpcomingFlightDiscovery(text)))
     return undefined;
   const mail =
-    /\b(?:emails?|gmail|mailbox|inbox|travel mail|(?:authorized|my|our) messages)\b/i.test(
+    /\b(?:emails?|gmail|mailbox|inbox|travel mail|billing messages?|(?:authorized|my|our) messages)\b/i.test(
       positive,
     ) && !explicitlyProhibitsPrivateRead(text, 'email');
   const calendar =
@@ -2264,11 +2348,25 @@ function detectPersonalReadRequestInternal(
     }
   }
   if (latestIndex === -1) return null;
-  const latest = stripNegativePrivateWriteConstraints(readIntentText(messages[latestIndex]));
+  const originalLatest = readIntentText(messages[latestIndex]);
+  const latest = stripNegativePrivateWriteConstraints(originalLatest);
+  const positiveLatest = positivePrivateReadText(originalLatest);
+  const readOnlyBillingIntent =
+    isBillingAuditIntent(latest) && !READ_THEN_MUTATION.test(readThenMutationText(originalLatest));
   if (requestedSavedSkillInventory(latest)) return null;
-  const calendarReadProhibited = explicitlyProhibitsPrivateRead(latest, 'calendar');
-  const emailReadProhibited = explicitlyProhibitsPrivateRead(latest, 'email');
-  const memoryReadProhibited = explicitlyProhibitsPrivateRead(latest, 'memory');
+  const calendarReadProhibited = explicitlyProhibitsPrivateRead(originalLatest, 'calendar');
+  const emailReadProhibited = explicitlyProhibitsPrivateRead(originalLatest, 'email');
+  const savedMemoryReadProhibited = explicitlyProhibitsPrivateRead(originalLatest, 'memory');
+  const historyReadProhibited = explicitlyProhibitsPrivateRead(originalLatest, 'history');
+  const historyReadRequested = CONVERSATION_HISTORY_REQUEST.test(positiveLatest);
+  const explicitSavedMemoryReadRequested =
+    /\b(?:saved|long[- ]term|personal)\s+memor(?:y|ies)\b/i.test(positiveLatest) &&
+    READ_OR_QUESTION.test(positiveLatest);
+  const historyReadAllowed = historyReadRequested && !historyReadProhibited;
+  const savedMemoryReadAllowed = explicitSavedMemoryReadRequested && !savedMemoryReadProhibited;
+  const memoryReadProhibited =
+    (historyReadProhibited || savedMemoryReadProhibited) &&
+    !(historyReadAllowed || savedMemoryReadAllowed);
   if (isConversationLocalContext(latest)) return null;
   const flightContinuation =
     clarificationDepth < 2 && !calendarReadProhibited && !emailReadProhibited
@@ -2410,11 +2508,66 @@ function detectPersonalReadRequestInternal(
   if (
     !latest ||
     /^\s*i\s+(?:read|checked|reviewed|looked|searched|scanned|opened)\b/i.test(latest) ||
-    READ_THEN_MUTATION.test(readThenMutationText(latest)) ||
+    (READ_THEN_MUTATION.test(readThenMutationText(latest)) && !readOnlyBillingIntent) ||
     EMAIL_COMMAND_LEAD.test(latest) ||
     (MUTATION_LEAD.test(latest) && !/\b(?:check|find|search|look|show)\b/i.test(latest))
   ) {
     return null;
+  }
+
+  if (isBillingAuditIntent(latest) && !emailReadProhibited) {
+    const billingMonths = requestedBillingAuditMonths(latest);
+    const mentionedMonthCount = requestedBillingAuditMonthCount(latest);
+    const scope =
+      billingMonths && options.timeZone
+        ? resolveBillingAuditScope(billingMonths, options.now ?? new Date(), options.timeZone)
+        : undefined;
+    const issue = scope
+      ? undefined
+      : !billingMonths
+        ? mentionedMonthCount
+          ? `Should I review the last ${mentionedMonthCount} complete local calendar months?`
+          : 'How many complete local calendar months should I review?'
+        : !options.timeZone
+          ? 'What time zone should I use for the complete local-month boundary?'
+          : 'I could not resolve those complete local months in the owner time zone.';
+    const query = scope?.query ?? '';
+    const companionIntentText = latest.replace(
+      /\b(?:no|zero|without)\b[^.!?;\n]*(?:calendar|history|memories?)[^.!?;\n]*\b(?:writes?|writing|changes?|changing|updates?|updating|creates?|creating)\b/giu,
+      '',
+    );
+    const companionSources = [
+      ...(/\b(?:read|search|check|review|consult|look(?:\s+up|\s+at)?|use)\b[^.!?\n]{0,120}\b(?:earlier|previous|past)\s+(?:conversations?|chats?)\b|\b(?:read|search|check|review|consult|look(?:\s+up|\s+at)?|use)\b[^.!?\n]{0,80}\b(?:my|our)\s+(?:conversation\s+)?history\b/iu.test(
+        companionIntentText,
+      ) && !explicitlyProhibitsPrivateRead(companionIntentText, 'history')
+        ? ['history']
+        : []),
+      ...(/\b(?:check|search|read|review|consult|look(?:\s+up|\s+at)?|use|compare)\b[^.!?\n]{0,100}\b(?:my|our)\s+(?:calendars?|schedule|agenda)\b/iu.test(
+        companionIntentText,
+      ) && !explicitlyProhibitsPrivateRead(companionIntentText, 'calendar')
+        ? ['calendar']
+        : []),
+    ];
+    return {
+      kind: 'email',
+      explicitSource: 'mail',
+      queryTerms: [],
+      firstToolName: 'gmail.search',
+      requiresThreadRead: true,
+      requiresExhaustiveMail: true,
+      mailQuery: query,
+      ...(issue ? { scopeIssue: issue, billingAuditIssue: issue } : {}),
+      ...(scope
+        ? {
+            billingAudit: scope,
+            ...(companionSources.length
+              ? {
+                  billingAuditCompanionGap: `The requested ${[...new Set(companionSources)].join(' and ')} source check was not run; only the bounded billing mailbox was reviewed.`,
+                }
+              : {}),
+          }
+        : {}),
+    };
   }
 
   const explicitSources = explicitPrivateSourceRequest(latest, options);
@@ -2495,19 +2648,29 @@ function detectPersonalReadRequestInternal(
     ((MEMORY_SURFACE.test(memoryLookupText(latest)) &&
       (READ_OR_QUESTION.test(latest) || verification)) ||
       (CONVERSATION_HISTORY_REQUEST.test(latest) && READ_OR_QUESTION.test(latest)) ||
-      AUTOBIOGRAPHICAL_READ.test(latest));
+      AUTOBIOGRAPHICAL_READ.test(latest) ||
+      requestedFamilyBirthdays(latest) !== undefined);
   if (graphRead || driveRead || memoryRead) {
     const kind: PersonalReadKind = graphRead ? 'knowledge_graph' : driveRead ? 'drive' : 'memory';
+    const familyBirthday = kind === 'memory' ? requestedFamilyBirthdays(latest) : undefined;
+    const familySourceScope = familyBirthday
+      ? familyBirthdaySourceScope(originalLatest)
+      : undefined;
     const conversationHistoryRequested =
-      kind === 'memory' && CONVERSATION_HISTORY_REQUEST.test(latest);
+      kind === 'memory' && (familySourceScope?.conversationHistory ?? historyReadAllowed);
     const savedMemoryRequested =
       kind === 'memory' &&
-      (!conversationHistoryRequested ||
-        /\b(?:saved|long[- ]term|personal)\s+memor(?:y|ies)\b/i.test(memoryLookupText(latest)));
+      (familySourceScope?.savedMemory ??
+        (!savedMemoryReadProhibited &&
+          (!conversationHistoryRequested ||
+            /\b(?:saved|long[- ]term|personal)\s+memor(?:y|ies)\b/i.test(
+              memoryLookupText(latest),
+            ))));
     const focusedQuery = kind === 'memory' ? focusedMemoryTopic(latest) : undefined;
     const historyAnchor = conversationHistoryRequested ? namedHistoricalAnchor(latest) : undefined;
     return {
       kind,
+      ...(familyBirthday ? { familyBirthday } : {}),
       queryTerms: conversationHistoryRequested
         ? privateQueryTerms(focusedQuery ?? latest)
         : contextualPrivateTerms(),
@@ -2517,11 +2680,15 @@ function detectPersonalReadRequestInternal(
         ? {
             conversationQuery: focusedQuery,
             ...(historyAnchor ? { conversationAnchorQuery: historyAnchor } : {}),
-            conversationFollowupQuery:
-              `Owner-authored statements and corrections about ${focusedQuery}`.slice(
-                0,
-                MAX_CONVERSATION_SEARCH_QUERY_CHARS,
-              ),
+            ...(!familyBirthday
+              ? {
+                  conversationFollowupQuery:
+                    `Owner-authored statements and corrections about ${focusedQuery}`.slice(
+                      0,
+                      MAX_CONVERSATION_SEARCH_QUERY_CHARS,
+                    ),
+                }
+              : {}),
             ...(requestsOwnerAssistantCorrectionComparison(latest)
               ? {
                   conversationCorrectionQuery: `Owner correction ${focusedQuery}`.slice(
@@ -3294,9 +3461,11 @@ export function gmailThreadIdsToRead(
   if (request?.emailReview) return request.emailReview.selectedThreadIds ?? [];
   const limit = request?.compoundTripDiscovery
     ? MAX_COMPOUND_TRIP_THREADS_TO_READ
-    : request?.upcomingFlightDiscovery
-      ? 2
-      : MAX_GMAIL_THREADS_TO_READ;
+    : request?.billingAudit
+      ? 6
+      : request?.upcomingFlightDiscovery
+        ? 2
+        : MAX_GMAIL_THREADS_TO_READ;
   return gmailSearchThreadIds(evidence, request).slice(0, limit);
 }
 
@@ -3399,11 +3568,13 @@ function nextGmailSearchTarget(
   );
   const pageLimit = request.emailReview
     ? EMAIL_REVIEW_MAX_SEARCH_PAGES
-    : request.explicitSource === 'mail'
-      ? 2
-      : hasTypedTripRead(request)
+    : request.billingAudit
+      ? 3
+      : request.explicitSource === 'mail'
         ? 2
-        : MAX_GMAIL_SEARCH_PAGES;
+        : hasTypedTripRead(request)
+          ? 2
+          : MAX_GMAIL_SEARCH_PAGES;
   if (searches.length >= pageLimit) return undefined;
   if (searches.length === 0 && request.mailQuery) return { query: request.mailQuery };
   const latest = searches.at(-1);

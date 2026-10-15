@@ -74,6 +74,47 @@ function page(threadId: string, text: string) {
   };
 }
 
+function pageWithQuotedHistory(threadId: string, earlierText: string, latestText: string) {
+  const sourceMessages = [
+    {
+      messageId: `earlier-${threadId}`,
+      from: 'owner@example.com',
+      to: 'sender@example.net',
+      date: '2026-10-11T10:00:00Z',
+      subject: `Earlier context ${threadId}`,
+      text: earlierText,
+      sourceLength: earlierText.length,
+      truncated: false,
+    },
+    {
+      messageId: `latest-${threadId}`,
+      from: 'sender@example.net',
+      to: 'owner@example.com',
+      date: '2026-10-12T10:00:00Z',
+      subject: `Request ${threadId}`,
+      text: latestText,
+      sourceLength: latestText.length,
+      truncated: false,
+    },
+  ];
+  return {
+    threadId,
+    messages: sourceMessages,
+    complete: true,
+    hasMore: false,
+    coverage: { requested: 20, discovered: 2, returned: 2, unavailable: 0, complete: true },
+    receipt: {
+      version: 1,
+      source: { kind: 'gmail-thread', id: threadId },
+      requested: { start: 0, offset: 0, limit: 20, scope: 'thread-messages' },
+      covered: { start: 0, offset: 0, end: 2, count: 2, total: 2, unavailable: 0 },
+      complete: true,
+      losses: [],
+      continuation: null,
+    },
+  };
+}
+
 describe('executor email review composition', () => {
   let db: Db;
   let dbUp = false;
@@ -242,6 +283,93 @@ describe('executor email review composition', () => {
       status: 'partial',
       assessmentGaps: 1,
       unassessedThreadIds: [reserveIds[2]],
+    });
+  });
+
+  it('assesses five requested threads when large context is mostly exact quoted repetition', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const initialIds = rankedIds.slice(0, 5);
+    const repeatedLines = (threadId: string) =>
+      Array.from(
+        { length: 50 },
+        (_, index) =>
+          `Background detail ${threadId}-${String(index).padStart(3, '0')} records a separate source fact with no owner decision.`,
+      );
+    const fixture: GoldenFixture = {
+      name: 'email-review-compacts-duplicate-quoted-history',
+      event: { source: 'chat', trust: 'owner', payload: { text: request } },
+      taskType: 'chat_turn',
+      pinOwnerRequest: true,
+      maxSteps: 14,
+      plan: {
+        action: 'workflow',
+        reasoning: 'review recent email requests and prepare source-grounded drafts',
+        steps: ['read email threads', 'assess reply requests', 'prepare the review'],
+        missingInfo: [],
+      },
+      script: [{ text: 'The review is ready.' }],
+      objects: [
+        { role: 'reason', value: { threadIds: rankedIds } },
+        { role: 'reason', value: { items: initialIds.map((id) => answerItem(id, 'draft')) } },
+      ],
+      tools: {
+        'gmail.search': {
+          schema: z.object({
+            query: z.string(),
+            maxResults: z.number().optional(),
+            pageToken: z.string().optional(),
+          }),
+          execute: async () => ({
+            query: 'newer_than:7d -from:me',
+            mailboxSearched: 'owner@example.com',
+            configuredOwnerMailbox: 'owner@example.com',
+            complete: true,
+            hasMore: false,
+            unavailable: [],
+            results: rankedIds.map((threadId, index) => ({
+              threadId,
+              messageId: `search-${threadId}`,
+              from: 'sender@example.net',
+              to: 'owner@example.com',
+              date: `2026-10-12T${String(15 - index).padStart(2, '0')}:00:00Z`,
+              subject: `Request ${threadId}`,
+              snippet: `Could you confirm request ${threadId}?`,
+            })),
+          }),
+        },
+        'gmail.read_thread': {
+          schema: z.object({
+            threadId: z.string(),
+            startMessageIndex: z.number().optional(),
+            startMessageOffset: z.number().optional(),
+            maxMessages: z.number().optional(),
+            maxChars: z.number().optional(),
+          }),
+          execute: async (input) => {
+            const { threadId } = input as { threadId: string };
+            const lines = repeatedLines(threadId);
+            const earlierText = lines.join('\n');
+            const latestText = `Could you confirm request ${threadId}?\n\nOn the earlier message wrote:\n${lines.map((line) => `> ${line}`).join('\n')}`;
+            return pageWithQuotedHistory(threadId, earlierText, latestText);
+          },
+        },
+      },
+    };
+    const result = await runGoldenTask(db, agentId, fixture);
+    taskIds.push(result.taskId);
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
+    if (task?.conversationId) conversationIds.push(task.conversationId);
+
+    expect(result.toolNames).toContain('gmail.read_thread');
+    expect(result.toolNames).not.toContain('gmail.send');
+    expect(result.finalText.match(/\*\*Draft:\*\*/g)).toHaveLength(5);
+    expect(result.finalText).toContain('Reviewed 5 of 5 selected threads');
+    expect(result.finalText).not.toContain('context did not fit');
+    expect(result.status).toBe('done');
+    expect(TaskStateSchema.parse(task?.state).plannerState.emailReviewGeneration).toMatchObject({
+      status: 'validated',
+      assessmentGaps: 0,
+      unassessedThreadIds: [],
     });
   });
 });

@@ -82,6 +82,38 @@ describe('exact historical source projection', () => {
     expect(text).toContain('not a fresh check');
     expect(text).not.toContain('job applications');
   });
+  it('does not deduplicate identical wording across different speakers', () => {
+    const shared = 'The Berlin flight is at 13:45.';
+    const sources: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: {
+          matches: [
+            message('owner-shared', shared, 'user', 'owner'),
+            message('assistant-shared', shared, 'assistant', 'assistant'),
+          ],
+        },
+      },
+    ];
+    const rendered = renderMemoryReadAnswer(
+      {
+        version: 1,
+        status: 'complete',
+        selections: [
+          { sourceKey: 'message:owner-shared', quote: shared },
+          { sourceKey: 'message:assistant-shared', quote: shared },
+        ],
+      },
+      sources,
+    );
+
+    expect(rendered.split(`“${shared}”`).length - 1).toBe(2);
+    expect(rendered).toContain('Recorded owner message');
+    expect(rendered).toContain('Earlier assistant claim (not verified fact)');
+    expect(rendered).toContain('message owner-shared');
+    expect(rendered).toContain('message assistant-shared');
+  });
   it('does not promote legacy or forged speaker metadata to owner authorship', () => {
     const row = message('legacy', 'The UI is minimal.', 'user', 'owner');
     row.speakerRevision = 'forged';

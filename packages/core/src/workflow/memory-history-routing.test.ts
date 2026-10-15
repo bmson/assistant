@@ -126,6 +126,122 @@ describe('named historical exercises and retention constraints', () => {
     expect(nextRequiredReadTool(request, finishSearches(request))).toBe('memory.recall');
   });
 
+  it('keeps an explicitly requested history read when another source or saved-memory lookup is prohibited', () => {
+    const noSave = history(
+      'Find the earlier hypothetical planning exercise called Nimbus in our past chats. Recall its budget and travel constraint. Do not use email or calendar, and do not save new memories.',
+    );
+    expect(noSave).toMatchObject({
+      kind: 'memory',
+      firstToolName: 'conversations.search',
+      searchSavedMemory: false,
+    });
+
+    const historyOnly = history(
+      'What did I tell you earlier about meeting summaries? Use conversation history, but do not use saved personal memory.',
+    );
+    expect(historyOnly).toMatchObject({
+      kind: 'memory',
+      firstToolName: 'conversations.search',
+      searchSavedMemory: false,
+    });
+
+    const noEmail = history(
+      'Find my earlier conversations about a telescope. Do not use email; use history.',
+    );
+    expect(noEmail).toMatchObject({
+      kind: 'memory',
+      firstToolName: 'conversations.search',
+      searchSavedMemory: false,
+    });
+  });
+
+  it('still blocks each history source explicitly prohibited by the owner', () => {
+    expect(
+      detectPersonalReadRequest(
+        turn('What did I say earlier about a telescope? Do not use conversation history.'),
+      ),
+    ).toBeNull();
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'What do my saved personal memories say about telescope preferences? Do not use saved personal memory.',
+        ),
+      ),
+    ).toBeNull();
+
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'What do my saved personal memories say about telescope preferences? Do not use conversation history.',
+        ),
+      ),
+    ).toMatchObject({
+      kind: 'memory',
+      firstToolName: 'memory.recall',
+      searchSavedMemory: true,
+    });
+  });
+
+  it('keeps separately stated lookup prohibitions scoped to their own clauses', () => {
+    expect(
+      detectPersonalReadRequest(
+        turn('What is on my calendar tomorrow? Do not use email and do not use calendar.'),
+      ),
+    ).toBeNull();
+
+    expect(
+      detectPersonalReadRequest(
+        turn('What is on my calendar tomorrow? Do not use email or calendar.'),
+      ),
+    ).toBeNull();
+
+    expect(
+      detectPersonalReadRequest(
+        turn('What is on my calendar tomorrow? Do not use email, but check the calendar.'),
+      ),
+    ).toMatchObject({ kind: 'calendar' });
+
+    expect(
+      detectPersonalReadRequest(
+        turn('What is on my calendar tomorrow? Without using my calendar.'),
+      ),
+    ).toBeNull();
+
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'What do my saved memories say about telescope preferences? Without reading my earlier chats, use saved memory.',
+        ),
+      ),
+    ).toMatchObject({ kind: 'memory', firstToolName: 'memory.recall', searchSavedMemory: true });
+
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'What do my saved memories say about telescope preferences? Without reading history, use saved memory.',
+        ),
+      ),
+    ).toMatchObject({
+      kind: 'memory',
+      firstToolName: 'memory.recall',
+      searchSavedMemory: true,
+    });
+  });
+
+  it.each([
+    'What do my saved memories say about telescope preferences? Do not use email and do not save new memories.',
+    'What do my saved memories say about telescope preferences? Without using email and without saving new memories.',
+  ])(
+    'does not mistake a following retention constraint for a saved-memory read ban: %s',
+    (text) => {
+      expect(detectPersonalReadRequest(turn(text))).toMatchObject({
+        kind: 'memory',
+        firstToolName: 'memory.recall',
+        searchSavedMemory: true,
+      });
+    },
+  );
+
   it('preserves a saved-memory read after a same-sentence retention restriction', () => {
     const request = detectPersonalReadRequest(
       turn(

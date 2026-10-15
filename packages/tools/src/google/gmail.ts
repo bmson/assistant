@@ -64,6 +64,8 @@ function attachmentFilename(workspacePath: string): string {
 interface GmailMessage {
   id: string;
   threadId: string;
+  /** Gmail's provider timestamp; message Date headers are owner-controlled text. */
+  internalDate?: string;
   snippet?: string;
   payload?: GmailPayload;
 }
@@ -228,6 +230,7 @@ export function registerGmailTools(registry: ToolRegistry, deps: GmailToolDeps):
           from: string;
           to: string;
           date: string;
+          receivedAt?: string;
           subject: string;
           text: string;
           truncated: boolean;
@@ -237,6 +240,10 @@ export function registerGmailTools(registry: ToolRegistry, deps: GmailToolDeps):
           if (remainingChars <= 0) break;
           const fullText = extractGmailText(m.payload);
           const sourceIndex = startMessageIndex + index;
+          const receivedMs =
+            typeof m.internalDate === 'string' && /^\d{1,16}$/.test(m.internalDate)
+              ? Number(m.internalDate)
+              : NaN;
           const startOffset = sourceIndex === startMessageIndex ? startMessageOffset : 0;
           const page = boundedTextPage(fullText, startOffset, Math.min(remainingChars, 8_000));
           remainingChars -= page.text.length;
@@ -254,6 +261,9 @@ export function registerGmailTools(registry: ToolRegistry, deps: GmailToolDeps):
             from: gmailHeader(m.payload, 'From'),
             to: gmailHeader(m.payload, 'To'),
             date: gmailHeader(m.payload, 'Date'),
+            ...(Number.isFinite(receivedMs) && Math.abs(receivedMs) <= 8_640_000_000_000_000
+              ? { receivedAt: new Date(receivedMs).toISOString() }
+              : {}),
             subject: gmailHeader(m.payload, 'Subject'),
             text: page.text,
             truncated: page.end < fullText.length,

@@ -11,6 +11,7 @@ import {
   emailReviewNextThreadRead,
   emailReviewOwnerMailbox,
   emailReviewPendingAssessmentThreads,
+  emailReviewPrompt,
   emailReviewRankContext,
   emailReviewRecentMetadataFallback,
   emailReviewSelectionWithinAuthorizedPool,
@@ -2697,6 +2698,97 @@ describe('bounded no-send email review', () => {
       completeThreads: 1,
       contextLimitedThreads: 1,
     });
+  });
+
+  it('collapses only exact repeated quoted history while keeping unique latest and deadline evidence', () => {
+    const thread = required(
+      emailReviewCompleteThread('thread-repeat-history', 'owner@example.com', [
+        search('thread-repeat-history'),
+        read('thread-repeat-history', messages('thread-repeat-history')),
+      ]),
+      'complete thread',
+    );
+    const [earlier, latest] = thread.messages;
+    if (!earlier || !latest) throw new Error('expected two source messages');
+    const repeated = 'The committee vote closes on October 19 at midnight.';
+    const uniqueQuoted = 'The application deadline remains November 12.';
+    earlier.text = `${repeated}\nEarlier source context is retained here.`;
+    latest.text = `Please share your view on the motion.\n${repeated}\n\nOn the earlier message wrote:\n> ${repeated}\n> ${uniqueQuoted}\n`;
+    const prompt = emailReviewPrompt([thread]);
+    const projected = JSON.parse(prompt) as {
+      threads: Array<{ messages: Array<{ messageId: string; text: string }> }>;
+    };
+    const promptText = projected.threads[0]?.messages.map((message) => message.text).join('\n');
+
+    expect(
+      promptText?.match(/The committee vote closes on October 19 at midnight\./g),
+    ).toHaveLength(2);
+    expect(promptText).toContain('Please share your view on the motion.');
+    expect(promptText).toContain(uniqueQuoted);
+    expect(projected.threads[0]?.messages.map((message) => message.messageId)).toEqual(
+      thread.messages.map((message) => message.messageId),
+    );
+    expect(thread.messages.at(-1)?.text).toContain(repeated);
+  });
+
+  it('retains quoted lines with different case or significant inner spacing', () => {
+    const thread = required(
+      emailReviewCompleteThread('thread-distinct-quote', 'owner@example.com', [
+        search('thread-distinct-quote'),
+        read('thread-distinct-quote', messages('thread-distinct-quote')),
+      ]),
+      'complete thread',
+    );
+    const [earlier, latest] = thread.messages;
+    if (!earlier || !latest) throw new Error('expected two source messages');
+    earlier.text =
+      'Use the case-sensitive identifier ApprovalCaseA.\nReference spacing remains part  one.';
+    latest.text =
+      'Please confirm the identifiers.\nOn the earlier message wrote:\n> Use the case-sensitive identifier approvalcasea.\n> Reference spacing remains part one.\n> Use the case-sensitive identifier ApprovalCaseA.';
+    const projected = JSON.parse(emailReviewPrompt([thread])) as {
+      threads: Array<{ messages: Array<{ text: string }> }>;
+    };
+    const latestText = projected.threads[0]?.messages.at(-1)?.text;
+    expect(latestText).toContain('> Use the case-sensitive identifier approvalcasea.');
+    expect(latestText).toContain('> Reference spacing remains part one.');
+    expect(latestText).not.toContain('> Use the case-sensitive identifier ApprovalCaseA.');
+    expect(latest.text).toContain('> Use the case-sensitive identifier ApprovalCaseA.');
+  });
+
+  it('fits multiple large threads when excess context is exact quoted repetition without truncating source threads', () => {
+    const repeatedLines = Array.from(
+      { length: 300 },
+      (_, index) =>
+        `Proposal detail ${String(index).padStart(3, '0')} remains under review before the committee closes its vote.`,
+    );
+    const makeThread = (threadId: string) => {
+      const thread = required(
+        emailReviewCompleteThread(threadId, 'owner@example.com', [
+          search(threadId),
+          read(threadId, messages(threadId)),
+        ]),
+        'complete thread',
+      );
+      const [earlier, latest] = thread.messages;
+      if (!earlier || !latest) throw new Error('expected two source messages');
+      earlier.text = repeatedLines.join('\n');
+      latest.text = `Please send your recommendation.\n\nOn the earlier message wrote:\n${repeatedLines.map((line) => `> ${line}`).join('\n')}`;
+      return thread;
+    };
+    const threads = [makeThread('large-thread-a'), makeThread('large-thread-b')];
+    const before = threads.map((thread) => thread.messages.at(-1)?.text);
+
+    const bounded = boundEmailReviewThreads(threads);
+
+    expect(bounded.threads).toHaveLength(2);
+    expect(bounded.omittedThreadIds).toEqual([]);
+    expect(bounded.threads.map((thread) => thread.messages.at(-1)?.text)).toEqual(before);
+    const prompt = JSON.parse(emailReviewPrompt(bounded.threads)) as {
+      threads: Array<{ messages: Array<{ text: string }> }>;
+    };
+    expect(prompt.threads).toHaveLength(2);
+    expect(prompt.threads[0]?.messages.at(-1)?.text).not.toContain('> Proposal detail 000');
+    expect(prompt.threads[0]?.messages.at(-1)?.text).toContain('Please send your recommendation.');
   });
 
   it('authorizes reserve reads only for freshly verified complete exclusions', () => {

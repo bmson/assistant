@@ -758,14 +758,12 @@ describe('golden tasks', () => {
     ]);
     expect(result.status).toBe('needs_attention');
     expect(result.extractCalls).toBe(1);
+    expect(result.finalText).toContain('- **Outbound LH777 SFO→FRA:**');
     expect(result.finalText).toContain(
-      '| Leg | Departure | Arrival | Source |\n|---|---|---|---|\n|',
+      `- **Outbound LH777 SFO→FRA:** ${departureDay} 10:10 (Europe/Berlin) → ${departureDay} 11:45 (Europe/Berlin).`,
     );
     expect(result.finalText).toContain(
-      `| Outbound: LH777 SFO→FRA | ${departureDay} 10:10 (Europe/Berlin) | ${departureDay} 11:45 (Europe/Berlin) |`,
-    );
-    expect(result.finalText).toContain(
-      `| Outbound: LH101 FRA→BER | ${departureDay} 12:30 (Europe/Berlin) | ${departureDay} 13:20 (Europe/Berlin) |`,
+      `- **Outbound LH101 FRA→BER:** ${departureDay} 12:30 (Europe/Berlin) → ${departureDay} 13:20 (Europe/Berlin).`,
     );
     expect(result.finalText).toContain(
       'Hotel candidate (city/date match; separate booking): **Hotel Linden**',
@@ -780,11 +778,9 @@ describe('golden tasks', () => {
     expect(result.finalText).toContain('Booking-email search or thread coverage is incomplete');
     expect(result.finalText).not.toContain('Calendar coverage is incomplete');
     expect(result.finalText).toContain(`Transfer candidate: **BER Airport → ${address}**`);
-    expect(result.finalText).toContain(
-      '| Option | Fare | Duration | Source |\n|---|---|---|---|\n|',
-    );
-    expect(result.finalText).toContain('| Public transport | EUR 4.90 | 35 minutes |');
-    expect(result.finalText).toContain('| Taxi | EUR 62.00 | 45 minutes |');
+    expect(result.finalText).toContain('- **Public transport:**');
+    expect(result.finalText).toContain('- **Public transport:** EUR 4.90; 35 minutes.');
+    expect(result.finalText).toContain('- **Taxi:** EUR 62.00; 45 minutes.');
     const visibleAnswer = result.finalText.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
     expect(visibleAnswer.split(/\s+/).length).toBeLessThanOrEqual(330);
     expect(result.finalText).toContain(

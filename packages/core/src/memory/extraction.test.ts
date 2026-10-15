@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   addTombstone,
+  agents,
   contacts,
   conversations,
   createDb,
@@ -37,6 +38,7 @@ const OCCASION_PERSON = 'Aino Väisänen';
 let db: Db;
 let dbUp = false;
 let agentId: string;
+let seedAgentId: string;
 const conversationIds: string[] = [];
 const retentionTaskIds: string[] = [];
 const extractionSpace = {
@@ -81,7 +83,7 @@ describe('typed memory extraction subjects', () => {
 
 /**
  * Scripted router: object() returns fixed facts ONLY for the test conversation
- * (a dev DB can hold other recent conversations — extraction scans them all);
+ * for this fixture owner; unrelated owners must never enter the extraction scan;
  * embed() returns constant vectors.
  */
 const fakeRouter = {
@@ -183,12 +185,23 @@ const fakeRouter = {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   try {
-    agentId = (await getAgent(db)).id;
+    seedAgentId = (await getAgent(db)).id;
     dbUp = true;
   } catch {
     console.warn('extraction.test: database unreachable — skipping');
     return;
   }
+  const fixtureId = randomUUID();
+  const [fixtureAgent] = await db
+    .insert(agents)
+    .values({
+      name: 'Memory extraction fixture',
+      email: `extraction-${fixtureId}@example.test`,
+      workspacePrefix: `test/extraction/${fixtureId}`,
+    })
+    .returning({ id: agents.id });
+  if (!fixtureAgent) throw new Error('test agent was not created');
+  agentId = fixtureAgent.id;
   const [conversation] = await db
     .insert(conversations)
     .values({ agentId, channel: 'chat', trust: 'owner', title: MARKER })
@@ -254,6 +267,7 @@ afterAll(async () => {
       await db.delete(occasions).where(eq(occasions.contactId, occasionPerson.id));
     await db.delete(contacts).where(eq(contacts.name, OCCASION_PERSON));
     await db.delete(contacts).where(eq(contacts.name, 'Solveig Extractsdottir'));
+    await db.delete(agents).where(eq(agents.id, agentId));
   }
   await (db as unknown as { $client: { end: () => Promise<void> } }).$client?.end?.();
 });
@@ -363,6 +377,78 @@ describe('memory extraction (integration)', () => {
     expect(transcript).toContain(normalText);
   });
 
+  it('scopes extraction to the fixture owner despite a future-dated seed-owner conversation', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const since = new Date(Date.now() + 5_000);
+    const ownText = `${MARKER}: I prefer reading quietly before breakfast each morning.`;
+    const decoyText = `${MARKER}: This separate owner prefers loud music before breakfast.`;
+    const rows = await db
+      .insert(conversations)
+      .values([
+        { agentId, channel: 'chat', trust: 'owner', title: `${MARKER}-scoped` },
+        { agentId: seedAgentId, channel: 'chat', trust: 'owner', title: `${MARKER}-decoy` },
+      ])
+      .returning({ id: conversations.id, agentId: conversations.agentId });
+    const own = rows.find((row) => row.agentId === agentId);
+    const decoy = rows.find((row) => row.agentId === seedAgentId);
+    if (!own || !decoy) throw new Error('test conversations were not created');
+    const prompts: string[] = [];
+    const router = {
+      ...fakeRouter,
+      async object(_role: string, opts: { prompt?: string }) {
+        prompts.push(opts.prompt ?? '');
+        return { ok: true, modelId: 'fake', degraded: false, object: { facts: [], occasions: [] } };
+      },
+    } as unknown as ModelRouter;
+    try {
+      await db.insert(messages).values([
+        {
+          conversationId: own.id,
+          role: 'user',
+          origin: 'owner',
+          parts: [],
+          text: ownText,
+          createdAt: new Date(since.getTime() + 1_000),
+        },
+        {
+          conversationId: decoy.id,
+          role: 'user',
+          origin: 'owner',
+          parts: [],
+          text: decoyText,
+          createdAt: new Date(since.getTime() + 2_000),
+        },
+      ]);
+      const result = await runMemoryExtraction({ db, router }, { agentId, since });
+      expect(result).toMatchObject({
+        conversationsScanned: 1,
+        saved: 0,
+        occasionsSaved: 0,
+        failedBatches: [],
+      });
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toContain(ownText);
+      expect(prompts[0]).not.toContain(decoyText);
+      expect(
+        await db
+          .select({ text: messages.text })
+          .from(messages)
+          .where(eq(messages.conversationId, decoy.id)),
+      ).toEqual([{ text: decoyText }]);
+      expect(
+        await db
+          .select()
+          .from(maintenanceCursors)
+          .where(
+            eq(maintenanceCursors.name, `prepared-memory-extraction:${seedAgentId}:${decoy.id}`),
+          ),
+      ).toEqual([]);
+    } finally {
+      await db.delete(messages).where(inArray(messages.conversationId, [own.id, decoy.id]));
+      await db.delete(conversations).where(inArray(conversations.id, [own.id, decoy.id]));
+    }
+  });
+
   it('refuses prepared PostgreSQL vectors after the embedding space changes', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const marker = `${MARKER}-prepared-retry-${Date.now()}`;
@@ -445,7 +531,7 @@ describe('memory extraction (integration)', () => {
     } as unknown as ModelRouter;
 
     try {
-      const first = await runMemoryExtraction({ db, router }, { since });
+      const first = await runMemoryExtraction({ db, router }, { agentId, since });
       expect(first.failedBatches).toEqual([
         { conversationId: conversation.id, category: 'storage' },
       ]);
@@ -459,7 +545,7 @@ describe('memory extraction (integration)', () => {
 
       await db.execute(sql.raw(`DROP TRIGGER "${trigger}" ON memories`));
       activeEmbeddingModel = 'prepared-b';
-      await expect(runMemoryExtraction({ db, router }, { since })).rejects.toThrow(
+      await expect(runMemoryExtraction({ db, router }, { agentId, since })).rejects.toThrow(
         'Prepared memory vectors belong to a different embedding space',
       );
       expect(modelCalls).toBe(1);
@@ -482,7 +568,7 @@ describe('memory extraction (integration)', () => {
         .update(maintenanceCursors)
         .set({ cursor: JSON.stringify(unknownFactPayload) })
         .where(eq(maintenanceCursors.name, cursor));
-      await expect(runMemoryExtraction({ db, router }, { since })).rejects.toThrow(
+      await expect(runMemoryExtraction({ db, router }, { agentId, since })).rejects.toThrow(
         'Prepared memory vectors belong to a different embedding space',
       );
       expect(modelCalls).toBe(1);
@@ -491,7 +577,7 @@ describe('memory extraction (integration)', () => {
         .update(maintenanceCursors)
         .set({ cursor: prepared.cursor })
         .where(eq(maintenanceCursors.name, cursor));
-      const recovered = await runMemoryExtraction({ db, router }, { since });
+      const recovered = await runMemoryExtraction({ db, router }, { agentId, since });
       expect(recovered.saved).toBe(1);
       const [saved] = await db
         .select()
@@ -542,7 +628,7 @@ describe('memory extraction (integration)', () => {
       },
     ]);
 
-    const result = await runMemoryExtraction({ db, router: fakeRouter }, { since });
+    const result = await runMemoryExtraction({ db, router: fakeRouter }, { agentId, since });
     expect(result).toMatchObject({ saved: 0, occasionsSaved: 1, occasionsRejected: 0 });
     const [person] = await db.select().from(contacts).where(eq(contacts.name, OCCASION_PERSON));
     const saved = await db
@@ -555,7 +641,7 @@ describe('memory extraction (integration)', () => {
   it('attributes facts to entities, auto-creates unknown contacts, respects tombstones, dedupes', async (ctx) => {
     if (!dbUp) return ctx.skip();
 
-    const first = await runMemoryExtraction({ db, router: fakeRouter });
+    const first = await runMemoryExtraction({ db, router: fakeRouter }, { agentId });
     expect(first.saved).toBeGreaterThanOrEqual(2);
     expect(first.tombstoned).toBeGreaterThanOrEqual(1);
 
@@ -598,7 +684,7 @@ describe('memory extraction (integration)', () => {
 
     // second run: everything already stored → duplicates, nothing new (the
     // occasion dedupes on its unique date, so nothing new there either).
-    const second = await runMemoryExtraction({ db, router: fakeRouter });
+    const second = await runMemoryExtraction({ db, router: fakeRouter }, { agentId });
     expect(second.saved).toBe(0);
     expect(second.duplicates).toBeGreaterThanOrEqual(2);
     expect(second.occasionsSaved).toBe(0);
@@ -613,7 +699,7 @@ describe('memory extraction (integration)', () => {
       .set({ trust: 'unknown' })
       .where(inArray(conversations.id, conversationIds));
 
-    const result = await runMemoryExtraction({ db, router: fakeRouter });
+    const result = await runMemoryExtraction({ db, router: fakeRouter }, { agentId });
     expect(result.saved).toBeGreaterThanOrEqual(2);
     expect(result.quarantined).toBe(result.saved);
 

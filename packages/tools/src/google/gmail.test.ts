@@ -29,6 +29,36 @@ function context(tainted: boolean): ToolContext {
   };
 }
 
+describe('gmail.read_thread receive time', () => {
+  it('exposes provider receive time separately from the editable Date header', async () => {
+    const api = vi.fn().mockResolvedValue({
+      messages: [
+        {
+          id: 'message-1',
+          threadId: 'thread-1',
+          internalDate: '1791531760567',
+          payload: {
+            mimeType: 'text/plain',
+            headers: [{ name: 'Date', value: 'Mon, 01 Jan 2001 00:00:00 +0000' }],
+            body: { data: Buffer.from('Your invoice').toString('base64url') },
+          },
+        },
+      ],
+    });
+    const read = registerGmailTools(new ToolRegistry(), {
+      client: { api } as never,
+      botEmail: 'bot@example.com',
+    }).get('gmail.read_thread')?.tool;
+    const result = (await read?.execute({ threadId: 'thread-1' }, {} as never)) as {
+      messages: Array<{ date: string; receivedAt: string }>;
+    };
+    expect(result.messages[0]).toMatchObject({
+      date: 'Mon, 01 Jan 2001 00:00:00 +0000',
+      receivedAt: '2026-10-09T07:42:40.567Z',
+    });
+  });
+});
+
 describe('gmail.search', () => {
   it.each([
     'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.',

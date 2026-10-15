@@ -148,7 +148,13 @@ function row(
       fromCurrentTask: true,
     };
   }
-  return { toolName, status: 'succeeded', args, result, fromCurrentTask: true };
+  return {
+    toolName,
+    status: 'succeeded',
+    args,
+    result: toolName === 'web.fetch' ? { status: 200, truncated: false, ...result } : result,
+    fromCurrentTask: true,
+  };
 }
 
 function completeCalendarEvents(events: unknown[], read = request()): ReadToolEvidence {
@@ -1347,7 +1353,12 @@ describe('compound trip read projection', () => {
       eventId: 'yearless-berlin-flight',
       summary: 'Flight to Berlin (United)',
       start: '2026-11-12T14:00:00Z',
-      links: [{ type: 'calendar', url: 'https://www.google.com/calendar/event?eid=yearless' }],
+      links: [
+        {
+          type: 'calendar',
+          url: 'https://www.google.com/calendar/event?eid=yearless&token=source-secret#code=fragment-secret',
+        },
+      ],
     };
     const evidence = [
       completeCalendarEvents([event], flightRequest),
@@ -1398,6 +1409,8 @@ describe('compound trip read projection', () => {
     expect(projection.text).toContain(
       '[Calendar source](https://www.google.com/calendar/event?eid=yearless)',
     );
+    expect(projection.text).not.toContain('source-secret');
+    expect(projection.text).not.toContain('fragment-secret');
     expect(projection.text).not.toContain('\\(United\\)');
     expect(projection.text).not.toContain('7:30 AM');
     expect(projection.text).not.toContain('2026-11-12 7:30');
@@ -5393,13 +5406,11 @@ San Francisco (SFO-San Francisco Intl.)`;
     const projection = upcomingFlightReadProjection(read, evidence);
     expect(projection.flight).toBeUndefined();
     expect(projection.blocked).toBe(true);
+    expect(projection.text).toContain('LH778 BER→SFO:** 2026-10-17 6:00 AM (zone unknown)');
     expect(projection.text).toContain(
-      'LH778 BER→SFO; departs 2026-10-17 6:00 AM (departure time zone not stated)',
+      'likely return (inferred from reversed itinerary route groups)',
     );
-    expect(projection.text).toContain('direction not explicitly stated');
-    expect(projection.text).toContain(
-      'A return is an inference from those reversed itinerary groups',
-    );
+    expect(projection.text).toContain('booking order is not proof of travel');
     expect(projection.text).toContain(
       'Unresolved carrier difference under the same itinerary reference',
     );
@@ -5438,12 +5449,14 @@ San Francisco (SFO-San Francisco Intl.)`;
   it('preserves complementary airports and arrival fields when valid extraction has only departure fields', () => {
     const { read, evidence } = sources();
     const projection = upcomingFlightReadProjection(read, evidence, thinExtraction());
-    expect(projection.text).toContain('LH778 BER→SFO; departs 2026-10-17 06:00 AM');
-    expect(projection.text).toContain('arrives 2026-10-17 11:45 AM');
-    expect(projection.text.match(/Booking email observation/g)).toHaveLength(1);
+    expect(projection.text).toContain('LH778 BER→SFO:** 2026-10-17 06:00 AM');
+    expect(projection.text).toContain('→ 2026-10-17 11:45 AM');
+    expect(projection.text.match(/Booked leg LH778/g)).toHaveLength(1);
     expect(projection.flight).toBeUndefined();
-    expect(projection.text).toContain('departure time zone not stated');
-    expect(projection.text).toContain('direction not explicitly stated');
+    expect(projection.text).toContain('zone unknown');
+    expect(projection.text).toContain(
+      'likely return (inferred from reversed itinerary route groups)',
+    );
     expect(compoundTripRoute(read, evidence)).toBeUndefined();
   });
   it('never fills a thin extraction with another thread’s table fields even when message and leg keys match', () => {
@@ -5710,8 +5723,9 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(answer.length).toBeLessThanOrEqual(3800);
     expect(answer.startsWith('The booking is for a current trip')).toBe(true);
     expect(answer).toContain('A new outbound trip is not verified');
-    expect(answer).toContain('| Leg | Departure | Arrival | Source |\n|---|---|---|---|\n|');
-    expect(answer).toContain('| Option | Fare | Duration | Source |\n|---|---|---|---|\n|');
+    expect(answer).toContain('- **Outbound (inferred) KL700 BOS→AMS:**');
+    expect(answer).not.toContain('|---|');
+    expect(answer).toContain('- **Public transport:**');
     for (const number of ['KL700', 'KL701', 'KL702', 'KL703']) expect(answer).toContain(number);
     expect(answer).toContain('2030-11-10');
     expect(answer).toContain('2030-11-17');
@@ -5719,10 +5733,12 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(answer).toContain('Canal Street 42');
     expect(answer).toContain('zone unknown');
     expect(answer).toContain('Direction inferred');
-    expect(answer).toContain('operated by KLM instead of Example Air');
+    expect(answer).toContain(
+      'calendar Example Air (operating carrier); booking KLM (operating carrier)',
+    );
     expect(answer).toContain('clock difference cannot be verified');
-    expect(answer).toContain('| Public transport | EUR 5 | 40 minutes |');
-    expect(answer).toContain('| Taxi | EUR 45 | 30 minutes |');
+    expect(answer).toContain('- **Public transport:** EUR 5; 40 minutes.');
+    expect(answer).toContain('- **Taxi:** EUR 45; 30 minutes.');
     for (const url of [
       'https://transit.example/route',
       'https://taxi.example/route',
@@ -5734,6 +5750,332 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(answer).not.toContain('Needs confirmation:');
     expect(final.presentation.gaps.length).toBeGreaterThan(0);
     expect(final.text.length).toBeGreaterThan(answer.length);
+  });
+
+  function withLocalClockEvidence() {
+    const base = fixture();
+    const query = base.read.mailQueries?.find((entry) => entry.category === 'flight')?.query;
+    const searchIndex = base.rows.findIndex(
+      (item) =>
+        item.toolName === 'gmail.search' && (item.args as Record<string, unknown>).query === query,
+    );
+    if (!query || searchIndex < 0) throw new Error('Missing flight search');
+    base.rows[searchIndex] = row(
+      'gmail.search',
+      { query, maxResults: 20 },
+      {
+        results: [
+          { threadId: 'flight-thread', subject: 'Flight booked' },
+          { threadId: 'clock-thread', subject: 'Individual flight confirmation' },
+        ],
+        complete: true,
+        hasMore: false,
+      },
+    );
+    const body =
+      'Itinerary number: 123456789012\nKLM 702\nScheduled Departure\nNov 17, 2030, 6:00 am, Copenhagen (CPH-Airport)\nArrives\nNov 17, 2030, 7:25 am, Amsterdam (AMS-Schiphol)';
+    const clock = row(
+      'gmail.read_thread',
+      { threadId: 'clock-thread' },
+      {
+        complete: true,
+        hasMore: false,
+        messages: [
+          {
+            messageId: 'clock-message',
+            subject: 'Passenger - KLM 702 - departs 6:00 AM local time - Confirmation code: ZXCV12',
+            text: body,
+          },
+        ],
+      },
+    );
+    base.rows.push(clock);
+    return { ...base, clock };
+  }
+
+  it('keeps a source-bound local departure label and stated layover without inventing a time zone', () => {
+    const { read, rows } = withLocalClockEvidence();
+    const projection = compoundTripReadProjection(read, rows);
+    expect(
+      projection.sourceFlightSegments.find((leg) => leg.flightNumber === 'KL702'),
+    ).toMatchObject({
+      departureClockSourceThreadId: 'clock-thread',
+      sourceStatedLayover: 'AMS 2h 25m',
+    });
+    expect(
+      projection.sourceFlightSegments.find((leg) => leg.flightNumber === 'KL703')
+        ?.departureClockSourceThreadId,
+    ).toBeUndefined();
+    const answer = renderCompoundTripReadResponse(projection);
+    expect(answer).toContain('2030-11-17 6:00 AM (local; zone unspecified)');
+    expect(answer).toContain(
+      '[Local-clock confirmation](https://mail.google.com/mail/u/0/#all/clock-thread)',
+    );
+    expect(answer).toContain('Booking-stated layover: AMS 2h 25m; timing unverified');
+    expect(answer).not.toContain('Europe/Copenhagen');
+    expect(answer).not.toContain('|---|');
+    expect(projection.flight).toBeUndefined();
+    expect(projection.blocked).toBe(true);
+  });
+
+  it.each(['reference', 'flight', 'carrier', 'date', 'clock', 'airport', 'partial', 'old-task'])(
+    'never borrows a local-clock label from a mismatched %s source',
+    (failure) => {
+      const { read, rows, clock } = withLocalClockEvidence();
+      const result = clock.result as {
+        messages: Array<{ subject: string; text: string; sourceLength: number }>;
+      };
+      const message = result.messages[0];
+      if (!message) throw new Error('Missing clock fixture');
+      if (failure === 'reference')
+        message.text = message.text.replace('123456789012', '999888777666');
+      if (failure === 'flight') message.subject = message.subject.replace('702', '703');
+      if (failure === 'carrier') message.subject = message.subject.replace('KLM', 'Other Air');
+      if (failure === 'date') message.text = message.text.replace('Nov 17', 'Nov 18');
+      if (failure === 'clock') message.text = message.text.replace('6:00 am', '7:00 am');
+      if (failure === 'airport') message.text = message.text.replace('CPH-Airport', 'XXX-Airport');
+      if (failure === 'partial') (clock.result as Record<string, unknown>).complete = false;
+      if (failure === 'old-task') clock.fromCurrentTask = false;
+      message.sourceLength = message.text.length;
+      const projection = compoundTripReadProjection(read, rows);
+      expect(
+        projection.sourceFlightSegments.find((leg) => leg.flightNumber === 'KL702')
+          ?.departureClockSourceThreadId,
+      ).toBeUndefined();
+      expect(renderCompoundTripReadResponse(projection)).not.toContain('Local-clock confirmation');
+    },
+  );
+
+  function withTransferSearch() {
+    const base = fixture();
+    const initial = compoundTripReadProjection(base.read, base.rows);
+    base.add('maps.directions', {
+      origin: initial.routeOrigin,
+      destination: initial.routeDestination,
+    });
+    const query = initial.webQuery;
+    if (!query) throw new Error('Missing transfer query');
+    const search = row(
+      'web.search',
+      { query },
+      {
+        results: [
+          {
+            url: 'https://blocked.example/airport/hotel',
+            title: 'Airport to hotel',
+            snippet: 'Taxi trip takes 26 minutes and costs EUR 75.',
+          },
+          {
+            url: 'https://hotel.example/canal-house/map',
+            title: 'Location: Canal House',
+            snippet: 'Change to the metro. Taxi takes 30–40 minutes, around EUR 50.',
+          },
+          {
+            url: 'https://blocked.example/alternative',
+            title: 'Taxi airport route',
+            snippet: 'Taxi airport transfer.',
+          },
+        ],
+      },
+    );
+    base.rows.push(search);
+    return { ...base, search };
+  }
+
+  it('fetches the relevant hotel directions page after a blocked aggregator, shares one complete read across modes, and stops', () => {
+    const { read, rows } = withTransferSearch();
+    rows.push({
+      toolName: 'web.fetch',
+      status: 'failed',
+      fromCurrentTask: true,
+      args: { url: 'https://blocked.example/airport/hotel' },
+      result: null,
+      error: 'HTTP403 challenge',
+    });
+    expect(compoundTripReadProjection(read, rows).comparison).toEqual([]);
+    expect(compoundTripFetchTargets(read, rows)).toEqual([
+      { mode: 'public transport', url: 'https://hotel.example/canal-house/map' },
+      { mode: 'taxi', url: 'https://hotel.example/canal-house/map' },
+    ]);
+    expect(nextRequiredReadTool(read, rows)).toBe('web.fetch');
+    expect(buildReadToolInput(read, 'web.fetch', rows)).toEqual({
+      url: 'https://hotel.example/canal-house/map',
+    });
+    rows.push(
+      row(
+        'web.fetch',
+        { url: 'https://hotel.example/canal-house/map' },
+        {
+          finalUrl: 'https://hotel.example/canal-house/map',
+          text: 'Public transport from CPH Airport to Canal House costs EUR 5 and takes 30 minutes.\n\nTaxi from CPH Airport to Canal House costs EUR 50 and takes 30–40 minutes.',
+        },
+      ),
+    );
+    const projection = compoundTripReadProjection(read, rows);
+    expect(projection.comparison).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          mode: 'public transport',
+          fare: 'EUR 5',
+          duration: '30 minutes',
+          endpointMatched: true,
+        }),
+        expect.objectContaining({
+          mode: 'taxi',
+          fare: 'EUR 50',
+          duration: '30–40 minutes',
+          endpointMatched: true,
+        }),
+      ]),
+    );
+    expect(nextRequiredReadTool(read, rows)).toBeUndefined();
+    expect(compoundTripFetchTargets(read, rows)).toEqual([]);
+    expect(rows.filter((item) => item.toolName === 'web.fetch')).toHaveLength(2);
+    expect(rows.filter((item) => item.toolName === 'web.search')).toHaveLength(1);
+    expect(renderCompoundTripReadResponse(projection)).toContain(
+      '- **Taxi:** EUR 50; 30–40 minutes.',
+    );
+    expect(projection.blocked).toBe(true); // Remaining itinerary/zone gates still apply.
+  });
+
+  it.each(['failed', 'truncated', 'wrong endpoints', 'old-task'])(
+    'does not publish hotel transfer facts from a %s read or search snippet',
+    (failure) => {
+      const { read, rows } = withTransferSearch();
+      const fetched = row(
+        'web.fetch',
+        { url: 'https://hotel.example/canal-house/map' },
+        {
+          finalUrl: 'https://hotel.example/canal-house/map',
+          text: 'Taxi from CPH Airport to Canal House costs EUR 50 and takes 30–40 minutes.',
+        },
+      );
+      if (failure === 'failed') fetched.status = 'failed';
+      if (failure === 'truncated') (fetched.result as Record<string, unknown>).truncated = true;
+      if (failure === 'wrong endpoints')
+        (fetched.result as Record<string, unknown>).text =
+          'Taxi from the city to Other Hotel costs EUR 50 and takes 30 minutes.';
+      if (failure === 'old-task') fetched.fromCurrentTask = false;
+      rows.push(fetched);
+      expect(compoundTripReadProjection(read, rows).comparison.some((item) => item.fare)).toBe(
+        false,
+      );
+      expect(renderCompoundTripReadResponse(compoundTripReadProjection(read, rows))).not.toContain(
+        'EUR 50',
+      );
+    },
+  );
+
+  it('keeps ambiguous dollar currency and separate-mode amounts honest', () => {
+    const { read, rows } = withTransferSearch();
+    const fetched = row(
+      'web.fetch',
+      { url: 'https://hotel.example/canal-house/map' },
+      {
+        finalUrl: 'https://hotel.example/canal-house/map',
+        text: 'Taxi from CPH Airport to Canal House costs $50 and takes 30 minutes.',
+      },
+    );
+    rows.push(fetched);
+    expect(
+      compoundTripReadProjection(read, rows).comparison.find((item) => item.mode === 'taxi')?.fare,
+    ).toBe('$50 (currency unspecified)');
+    (fetched.result as Record<string, unknown>).text =
+      'Public transport from CPH Airport to Canal House costs EUR 5 and takes 40 minutes, while taxi costs EUR 50 and takes 30 minutes.';
+    const mixed = compoundTripReadProjection(read, rows).comparison;
+    expect(mixed.some((item) => item.fare || item.duration)).toBe(false);
+  });
+
+  it.each([
+    ['€50', 'EUR 50'],
+    ['around €50', 'about EUR 50'],
+    ['approximately EUR 50', 'about EUR 50'],
+    ['from €50', 'from EUR 50'],
+    ['starting at EUR 50', 'from EUR 50'],
+    ['at least €50', 'from EUR 50'],
+    ['up to €50', 'up to EUR 50'],
+    ['at most €50', 'up to EUR 50'],
+    ['no more than €50', 'up to EUR 50'],
+    ['€50 or less', 'up to EUR 50'],
+    ['€50–60', 'EUR 50–60'],
+    ['€50 - €60', 'EUR 50–60'],
+    ['between EUR 50 and EUR 60', 'EUR 50–60'],
+    ['about €50 to 60', 'about EUR 50–60'],
+    ['around €50,50', 'about EUR 50.50'],
+    ['around $50–60', 'about $50–60 (currency unspecified)'],
+    ['up to USD 50', 'up to USD 50'],
+    ['less than GBP 50', 'less than GBP 50'],
+  ])('preserves the source-bound fare qualifier/range %s', (stated, expected) => {
+    const { read, rows } = withTransferSearch();
+    rows.push(
+      row(
+        'web.fetch',
+        { url: 'https://hotel.example/canal-house/map' },
+        {
+          finalUrl: 'https://hotel.example/canal-house/map',
+          text: `Taxi from CPH Airport to Canal House takes 30 minutes and costs ${stated}.`,
+        },
+      ),
+    );
+    const projection = compoundTripReadProjection(read, rows);
+    expect(projection.comparison.find((item) => item.mode === 'taxi')?.fare).toBe(expected);
+    expect(renderCompoundTripReadResponse(projection)).toContain(
+      `**Taxi:** ${expected}; 30 minutes.`,
+    );
+  });
+
+  it.each([
+    '€60–50',
+    '€50 or €60',
+    '€50 plus €5',
+    '€50–GBP 60',
+    '€50–',
+    '€50 ± 5',
+    '€50~60',
+    '€50–60 USD',
+    'not around €50',
+    'between €50',
+    'not €50',
+    'from €50 maximum',
+    '€1,200',
+  ])('leaves an ambiguous, negated or unsupported fare unverified: %s', (stated) => {
+    const { read, rows } = withTransferSearch();
+    rows.push(
+      row(
+        'web.fetch',
+        { url: 'https://hotel.example/canal-house/map' },
+        {
+          finalUrl: 'https://hotel.example/canal-house/map',
+          text: `Taxi from CPH Airport to Canal House costs ${stated} and takes 30 minutes.`,
+        },
+      ),
+    );
+    const projection = compoundTripReadProjection(read, rows);
+    expect(projection.comparison.find((item) => item.mode === 'taxi')?.fare).toBeUndefined();
+    expect(renderCompoundTripReadResponse(projection)).toContain('**Taxi:** fare unverified;');
+  });
+
+  it('does not silently label an address geocode as the hotel entrance', () => {
+    const { read, rows } = fixture();
+    const initial = compoundTripReadProjection(read, rows);
+    rows.push(
+      row(
+        'maps.directions',
+        { origin: initial.routeOrigin, destination: initial.routeDestination },
+        {
+          durationSeconds: 1800,
+          destination: { label: 'Street Charging Point', address: 'Canal Street 42' },
+          mapsUrl: 'https://maps.example/route',
+        },
+      ),
+    );
+    const projection = compoundTripReadProjection(read, rows);
+    const answer = renderCompoundTripReadResponse(projection);
+    expect(answer).toContain('Map destination: Street Charging Point; hotel entrance unverified');
+    expect(answer).toContain('not a taxi quote');
+    expect(projection.presentation.gaps).toContain(
+      'The map destination place is not verified as the hotel entrance.',
+    );
   });
 
   it('labels a separately sourced, unlinked stay as a hotel candidate', () => {

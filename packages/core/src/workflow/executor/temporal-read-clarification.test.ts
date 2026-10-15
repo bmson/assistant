@@ -719,7 +719,7 @@ describe('unsupported temporal requests through the actual executor step loop', 
       'calendar.list_events',
       'calendar.list_events',
     ]);
-    expect(state.pendingFinal?.text).toContain('review-only plan for next week');
+    expect(state.pendingFinal?.text).toContain('Review-only plan for next week');
     expect(state.pendingFinal?.text).toContain('Holidays in United States');
     expect(state.pendingFinal?.responseCards ?? []).toEqual([]);
   });
@@ -742,9 +742,17 @@ describe('unsupported temporal requests through the actual executor step loop', 
     });
     expect(dispatch.mock.calls[1]?.[0].args.pageToken).toBeUndefined();
     expect(dispatch.mock.calls[2]?.[0].args.pageToken).toBe('weekly-page-2');
-    expect(state.pendingFinal?.text).toContain('review-only plan for next week');
-    expect(state.pendingFinal?.text.match(/\(90 minutes\)/g)).toHaveLength(3);
-    expect(state.pendingFinal?.text).toContain('I haven’t changed your calendar.');
+    expect(state.pendingFinal?.text).toContain('Review-only plan for next week');
+    expect(state.pendingFinal?.text).toContain(
+      [
+        '| Candidate | Break |',
+        '| --- | --- |',
+        '| Tue, Oct 13, 9:00 AM–10:30 AM (90m) | 15m |',
+        '| Thu, Oct 15, 9:00 AM–10:30 AM (90m) | 15m |',
+        '| Fri, Oct 16, 9:00 AM–10:30 AM (90m) | 15m |',
+      ].join('\n'),
+    );
+    expect(state.pendingFinal?.text).toContain('no calendar changes made.');
     // The fixture returns an empty model final after the source reads. Keep
     // the checked plan, without reconstructing a raw agenda or busy-block dump.
     expect(state.pendingFinal?.responseCards ?? []).toEqual([]);
@@ -781,7 +789,7 @@ describe('unsupported temporal requests through the actual executor step loop', 
       });
       expect(result.outcome).toBe(incomplete ? 'needs_attention' : 'done');
       expect(state.pendingFinal?.terminalStatus).toBe(incomplete ? 'needs_attention' : 'done');
-      expect(state.pendingFinal?.text).toContain('review-only plan for next week');
+      expect(state.pendingFinal?.text).toContain('Review-only plan for next week');
       expect(state.pendingFinal?.responseCards ?? []).toEqual([]);
       if (incomplete) {
         expect(state.pendingFinal?.preserveCheckedReadResponse).toBe(true);

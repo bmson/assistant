@@ -68,7 +68,11 @@ import {
   taskState,
 } from '../machine.js';
 import { selectMemoryReadAnswer } from '../memory-read-answer.js';
-import { verifyFinalOutput } from '../output-verification.js';
+import {
+  requestedPublicPageFallback,
+  requestedPublicPageReceiptFindings,
+  verifyFinalOutput,
+} from '../output-verification.js';
 import { isConversationLocalContext, latestOwnerIntent } from '../owner-intent.js';
 import { PLANNER_VERSION } from '../planner.js';
 import { detectPersonalReadRequest, type PersonalReadRequest } from '../read-intent.js';
@@ -93,6 +97,39 @@ import {
 import { authorizesSilentCompletion } from './silent-completion.js';
 import { type ExecuteResult, type ExecutorDeps, LOST_LEASE } from './types.js';
 import { compact, latestUserText } from './util.js';
+
+function savedSkillRequestsNextUsefulAction(advice: string): boolean {
+  return (
+    /\bnext useful action\b|\bnext useful step\b|\buseful next step\b|\bactionable next step\b/i.test(
+      advice,
+    ) ||
+    /\b(?:end|finish|conclude)\b[^.!?\n]{0,100}\b(?:next step|action|recommendation|suggestion)\b/i.test(
+      advice,
+    )
+  );
+}
+
+function savedSkillCalendarFallbackStep(
+  request: PersonalReadRequest,
+  evidence: ActionEvidence[],
+): string | undefined {
+  const projection = verifiedReadResponse(request, evidence);
+  if (/^\s*-\s*(?:Possible overlap|Scheduling conflict):/m.test(projection))
+    return 'Check whether you need to attend both.';
+
+  const completeProjection = verifiedReadResponse(
+    { ...request, compactCalendarBriefing: false },
+    evidence,
+  );
+  return /^Next step:\s*([^\r\n]+)$/m.exec(completeProjection)?.[1]?.trim();
+}
+
+function calendarSkillNextStepOutput(projection: string, nextStep: string): string {
+  const existingStep = /^Next step: [^\r\n]*$/m;
+  return existingStep.test(projection)
+    ? projection.replace(existingStep, () => `Next step: ${nextStep}`)
+    : `${projection}\n\nNext step: ${nextStep}`;
+}
 
 /**
  * Deferred work is only real once a durable row exists. Left to prose the
@@ -870,10 +907,15 @@ export async function stageModelFinalResponse(
     groundingCorpus: readContext?.groundingCorpus,
     liveCorpus: liveLookups.length > 0 ? liveLookupCorpus(rows) : undefined,
   };
+  const missingRequestedPageReceipts = requestedPublicPageReceiptFindings(
+    latestUserText(window) ?? '',
+    evidence,
+  );
   // The named skill is advice, not calendar evidence. Rebind its exact content
   // to the durable receipt before using it to recover a practical briefing.
   let calendarSkillAdvice: string | undefined;
   if (
+    !missingRequestedPageReceipts.length &&
     classifiedRead?.includeCalendarBriefing &&
     task.trust === 'owner' &&
     !isForwardedIngest(task)
@@ -911,7 +953,20 @@ export async function stageModelFinalResponse(
   // grounding recovery, or stripped links) are already the safest available
   // answer and must not be reworded by a discretionary model call.
   let initialCheck = enforceResponseContract(pending.text, evidence, contractOptions);
+  if (missingRequestedPageReceipts.length) {
+    // A prose summary cannot substitute for a complete read receipt bound to
+    // each explicitly requested public page or native Workspace document.
+    // Preserve the gap as incomplete even though the optional reviewer is skipped.
+    initialCheck = {
+      ...initialCheck,
+      text: requestedPublicPageFallback(),
+      blocked: false,
+      unsupported: [],
+      groundingFallback: missingRequestedPageReceipts,
+    };
+  }
   if (
+    !missingRequestedPageReceipts.length &&
     classifiedRead?.includeCalendarBriefing &&
     !initialCheck.blocked &&
     (initialCheck.text.match(/^Next step:/gm)?.length ?? 0) > 1
@@ -925,12 +980,26 @@ export async function stageModelFinalResponse(
     );
   }
 
+  const skillRequestsNextUsefulAction = Boolean(
+    calendarSkillAdvice &&
+      savedSkillRequestsNextUsefulAction(calendarSkillAdvice) &&
+      !/^Next step:/m.test(initialCheck.text),
+  );
+  const skillStepMayReplacePresentationFallback = Boolean(
+    initialCheck.groundingFallback?.length &&
+      initialCheck.groundingFallback.every(
+        (reason) => reason === 'calendar briefing is rendered from checked event rows',
+      ),
+  );
+  let calendarSkillAdviceAttempted = false;
   if (
+    !missingRequestedPageReceipts.length &&
     calendarSkillAdvice &&
     classifiedRead?.includeCalendarBriefing &&
     !initialCheck.blocked &&
-    initialCheck.groundingFallback
+    (initialCheck.groundingFallback || skillRequestsNextUsefulAction)
   ) {
+    calendarSkillAdviceAttempted = true;
     try {
       const advice = await deps.router.object<{ nextStep: string }>('rewrite', {
         taskId: task.id,
@@ -954,24 +1023,23 @@ export async function stageModelFinalResponse(
           !/[\r\n]/.test(nextStep) &&
           !/\bNext step:/i.test(nextStep)
         ) {
-          const candidate = `${initialCheck.text}\n\nNext step: ${nextStep}`;
+          const projection = verifiedReadResponse(classifiedRead, evidence);
+          const candidate = `${projection}\n\nNext step: ${nextStep}`;
           // Procedure text supplies advice, never fresh personal facts. Keep
           // named places and times grounded only in calendar/owner evidence.
           const checkedAdvice = enforceResponseContract(candidate, evidence, contractOptions);
           if (
             !checkedAdvice.blocked &&
             !checkedAdvice.groundingFallback &&
+            (!initialCheck.groundingFallback || skillStepMayReplacePresentationFallback) &&
             checkedAdvice.text === candidate
           ) {
-            // Validate the added advisory tail against the full canonical
-            // projection first. Only after validation replace its source-derived
-            // default step; event facts/links remain byte-for-byte unchanged.
-            const canonicalStep = /^Next step: [^\r\n]*$/m;
+            // Replace a presentation-only fallback with the accepted canonical
+            // ledger projection; a source/coverage fallback remains authoritative.
+            const { groundingFallback: _ignored, ...withoutPresentationFallback } = initialCheck;
             initialCheck = {
-              ...initialCheck,
-              text: canonicalStep.test(initialCheck.text)
-                ? initialCheck.text.replace(canonicalStep, () => `Next step: ${nextStep}`)
-                : candidate,
+              ...withoutPresentationFallback,
+              text: calendarSkillNextStepOutput(projection, nextStep),
             };
           }
         }
@@ -980,7 +1048,36 @@ export async function stageModelFinalResponse(
       /* Keep the source projection if guidance cannot be safely applied. */
     }
   }
+  if (
+    !missingRequestedPageReceipts.length &&
+    calendarSkillAdvice &&
+    classifiedRead?.includeCalendarBriefing &&
+    skillRequestsNextUsefulAction &&
+    (!initialCheck.groundingFallback || skillStepMayReplacePresentationFallback) &&
+    !initialCheck.blocked &&
+    !/^Next step:/m.test(initialCheck.text)
+  ) {
+    const nextStep = savedSkillCalendarFallbackStep(classifiedRead, evidence);
+    if (nextStep) {
+      const projection = verifiedReadResponse(classifiedRead, evidence);
+      const candidate = `${projection}\n\nNext step: ${nextStep}`;
+      const checkedAdvice = enforceResponseContract(candidate, evidence, contractOptions);
+      if (
+        !checkedAdvice.blocked &&
+        !checkedAdvice.groundingFallback &&
+        checkedAdvice.text === candidate
+      ) {
+        const { groundingFallback: _ignored, ...withoutPresentationFallback } = initialCheck;
+        initialCheck = {
+          ...withoutPresentationFallback,
+          text: calendarSkillNextStepOutput(projection, nextStep),
+        };
+      }
+    }
+  }
   const canReflect =
+    !missingRequestedPageReceipts.length &&
+    !calendarSkillAdviceAttempted &&
     !initialCheck.blocked &&
     initialCheck.text === pending.text &&
     initialCheck.groundingFallback === undefined;
@@ -997,7 +1094,13 @@ export async function stageModelFinalResponse(
             ? window.slice(0, Math.max(0, latestOwnerIndex))
             : undefined,
       })
-    : { text: initialCheck.text, attempted: false, revised: false, unavailable: false };
+    : {
+        text: initialCheck.text,
+        attempted: false,
+        revised: false,
+        unavailable: false,
+        incomplete: missingRequestedPageReceipts.length > 0,
+      };
   // A reviser is another generative surface: strip companion tags a second
   // time, then re-run the same authoritative response contract before publish.
   const reflectedText = stripCueTags(reflection.text).text;
@@ -1110,6 +1213,7 @@ export async function stageModelFinalResponse(
   if (
     !classifiedRead?.personCalendar &&
     !classifiedRead?.sourceReads &&
+    !classifiedRead?.familyBirthday &&
     (!contractOptions.readRequest?.includeCalendarBriefing ||
       cardRequested ||
       Boolean(refreshCardId)) &&
@@ -1243,16 +1347,21 @@ export async function stageModelFinalResponse(
   // Stamp the contract verdict on pending; recordQualitySignals reads it from
   // the single funnel in finalizePendingResponse, so every terminal path — not
   // just this prose-model one — persists its verdict and loop-health counters.
-  pending.contractBlocked = checked.blocked || (rejectedRevision && reflectedCheck.blocked);
+  pending.contractBlocked =
+    checked.blocked ||
+    (rejectedRevision && reflectedCheck.blocked) ||
+    reflection.incomplete === true;
   pending.contractUnsupportedCount = Math.max(
     checked.unsupported.length,
     rejectedRevision ? reflectedCheck.unsupported.length : 0,
+    reflection.incomplete ? 1 : 0,
   );
   // A transparent replacement is a truthful reply, not proof the requested
   // work finished. Keep unresolved effects visible and re-queueable. Grounded
   // factual corrections with no missing effect may still complete normally.
   if (
     checked.qualityFallback ||
+    reflection.incomplete ||
     checked.unsupported.length > 0 ||
     (checked.blocked && contractOptions.readRequest)
   ) {

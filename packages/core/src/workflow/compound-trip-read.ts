@@ -1,4 +1,5 @@
 import { gmailSearchReceiptSourceId } from '@assistant/persistence/gmail-search-identity';
+import { safeCalendarSourceUrl } from './calendar-source-link.js';
 import type { CompoundTripExtraction, CompoundTripHotelFact } from './compound-trip-extraction.js';
 import type { PersonalReadRequest, ReadToolEvidence } from './read-intent.js';
 
@@ -25,6 +26,9 @@ export interface CompoundTripFlightSegment {
   departureDate: string;
   departureTime: string;
   departureTimeZone?: string;
+  /** Presentation-only exact-leg corroboration; never licenses a zone/instant. */
+  departureClockSourceThreadId?: string;
+  sourceStatedLayover?: string;
   arrivalDate?: string;
   arrivalTime?: string;
   arrivalTimeZone?: string;
@@ -115,6 +119,8 @@ export interface CompoundTripReadProjection {
     comparison?: CompoundTripComparisonEvidence;
   }>;
   flightSegments: CompoundTripFlightSegment[];
+  /** All validated current source observations, before next-trip selection. */
+  sourceFlightSegments: CompoundTripFlightSegment[];
   unmatchedBookingSegments: CompoundTripFlightSegment[];
   bookingObservationLines?: string[];
   connectionSummary?: string;
@@ -189,7 +195,7 @@ export function compoundTripThreadIdsToRead(
               : [];
           }),
       ),
-    ].slice(0, 3);
+    ].slice(0, request.billingAudit ? 6 : 3);
   }
   const calendarLodgingTitles = evidence.flatMap((row) => {
     if (
@@ -367,7 +373,9 @@ export function compoundTripThreadReadInputs(
     request.compoundTripDiscovery
       ? MAX_COMPOUND_TRIP_THREADS_TO_READ
       : request.explicitSource === 'mail'
-        ? 3
+        ? request.billingAudit
+          ? 6
+          : 3
         : 2,
   );
   for (const threadId of selectedThreadIds) {
@@ -814,13 +822,14 @@ function completeSearchQuery(rows: ReadonlyArray<ReadToolEvidence>, query: strin
 function validSearchPrefixRows(
   rows: ReadonlyArray<ReadToolEvidence>,
   query: string,
+  limit = 2,
 ): ReadToolEvidence[] {
   const validRows = rows.filter((row) => validSearchPage(row, query));
   const used = new Set<ReadToolEvidence>();
   const prefix: ReadToolEvidence[] = [];
   let cursor: string | undefined;
   const seen = new Set<string>();
-  for (let index = 0; index < 2; index += 1) {
+  for (let index = 0; index < limit; index += 1) {
     const key = cursor ?? '<first-page>';
     if (seen.has(key)) break;
     seen.add(key);
@@ -855,6 +864,7 @@ export function boundedMailSearchPages(
         (row) => text(object(row.args)?.query, 4096)?.toLowerCase() === query.toLowerCase(),
       ),
       query,
+      request.billingAudit ? 3 : 2,
     ),
   );
 }
@@ -1556,7 +1566,7 @@ function flightChronology(
 }
 
 function formatFlightSegment(leg: CompoundTripFlightSegment): string {
-  const departure = `${leg.departureDate} ${leg.departureTime}${leg.departureTimeZone ? ` ${markdownText(leg.departureTimeZone)}` : ' (departure time zone not stated)'}`;
+  const departure = `${leg.departureDate} ${leg.departureTime}${leg.departureTimeZone ? ` ${markdownText(leg.departureTimeZone)}` : leg.departureClockSourceThreadId ? ' local (time zone not stated)' : ' (departure time zone not stated)'}`;
   const arrival =
     leg.arrivalDate && leg.arrivalTime
       ? `${leg.arrivalDate} ${leg.arrivalTime}${leg.arrivalTimeZone ? ` ${markdownText(leg.arrivalTimeZone)}` : ' (arrival time zone not stated)'}`
@@ -2214,7 +2224,8 @@ function parseEgenciaTableSegments(message: SourceThreadMessage): CompoundTripFl
     return validDate(iso) ? iso : undefined;
   };
   const airport = (value: string) => /\(([A-Z]{3})(?:[-)]|\b)/.exec(value)?.[1];
-  return [...normalized.matchAll(table)].slice(0, 8).flatMap((match) => {
+  const matches = [...normalized.matchAll(table)].slice(0, 8);
+  return matches.flatMap((match, index) => {
     const [, flightNumber, , departure, departureTime, origin, arrival, arrivalTime, destination] =
       match;
     if (
@@ -2242,6 +2253,13 @@ function parseEgenciaTableSegments(message: SourceThreadMessage): CompoundTripFl
       return [];
     const reference = bookingReference(`${message.subject}\n${message.text}`);
     const itineraryReference = egenciaItineraryReference(message.text);
+    const next = matches[index + 1];
+    const between = normalized
+      .slice((match.index ?? 0) + match[0].length, next?.index)
+      .slice(0, 1500);
+    const layover = /\*Layover in [^\n*]{1,80}\b([A-Z]{3})\*\s+(\d{1,2}h(?:\s+\d{1,2}m)?)/.exec(
+      between,
+    );
     return [
       {
         threadId: message.threadId,
@@ -2258,13 +2276,65 @@ function parseEgenciaTableSegments(message: SourceThreadMessage): CompoundTripFl
         destinationAirport,
         direction: 'unknown' as const,
         excerpt: match[0].trim(),
+        ...(layover?.[1] === destinationAirport &&
+        next?.[5] &&
+        airport(next[5]) === destinationAirport
+          ? { sourceStatedLayover: `${destinationAirport} ${layover[2]}` }
+          : {}),
       },
     ];
   });
 }
 
 function egenciaItineraryReference(value: string): string | undefined {
-  return /\bEgencia(?:\s+(?:reference|ref)(?:\s*#)?)?\s+([0-9]{6,16})\b/i.exec(value)?.[1];
+  return /\b(?:Itinerary(?:\/Egencia)?(?:\s+(?:reference|number))?|Egencia(?:\s+(?:reference|ref))?)\s*[:#]?\s+([0-9]{6,16})\b/i.exec(
+    value,
+  )?.[1];
+}
+
+/** Corroborate only a local-clock label, never a time zone or calendar match. */
+function withSourceLocalDepartureClocks(
+  segments: CompoundTripFlightSegment[],
+  messages: ReadonlyArray<SourceThreadMessage>,
+): CompoundTripFlightSegment[] {
+  return segments.map((segment) => {
+    if (!segment.itineraryReference || !segment.originAirport) return segment;
+    const carrier = carrierRoleLabel(segment.excerpt, segment.flightNumber)?.name;
+    const number = segment.flightNumber.match(/\d+$/)?.[0];
+    const identity =
+      carrier && number
+        ? new RegExp(
+            `\\b(?:${escapeRegExp(segment.flightNumber)}|${escapeRegExp(carrier)}\\s+(?:flight\\s*)?${number})\\b`,
+            'i',
+          )
+        : new RegExp(`\\b${escapeRegExp(segment.flightNumber)}\\b`, 'i');
+    const matches = messages.filter((message) => {
+      if (egenciaItineraryReference(message.text) !== segment.itineraryReference) return false;
+      const subject = message.subject.replace(/\s+/g, ' ');
+      const local = /\bdeparts\s+(\d{1,2}:\d{2}\s*[ap]m)\s+local time\b/i.exec(subject);
+      if (
+        !identity.test(subject) ||
+        !local?.[1] ||
+        parseClockMinutes(local[1]) !== parseClockMinutes(segment.departureTime)
+      )
+        return false;
+      const departure = /\bScheduled Departure\s*\n([\s\S]{1,500}?)\n\s*Arrives\b/i.exec(
+        message.text.replace(/\r\n/g, '\n'),
+      )?.[1];
+      const stated = departure
+        ? /^([A-Za-z]{3,9} \d{1,2}, 20\d{2}),\s*(\d{1,2}:\d{2}\s*[ap]m),/i.exec(departure)
+        : undefined;
+      if (!stated?.[1] || !stated[2] || !departure) return false;
+      return (
+        compoundTripSourceHasDate(stated[1], segment.departureDate) &&
+        parseClockMinutes(stated[2]) === parseClockMinutes(segment.departureTime) &&
+        new RegExp(`\\(${escapeRegExp(segment.originAirport ?? '')}(?:[-)]|\\b)`).test(departure)
+      );
+    });
+    return matches.length === 1
+      ? { ...segment, departureClockSourceThreadId: matches[0]?.threadId }
+      : segment;
+  });
 }
 
 function sameSourceTableLeg(
@@ -2323,6 +2393,7 @@ function mergeSourceTableSegments(
     // missing booking identity, direction or time zone for route selection.
     if (!enriched.itineraryReference && table.itineraryReference)
       enriched.itineraryReference = table.itineraryReference;
+    if (table.sourceStatedLayover) enriched.sourceStatedLayover = table.sourceStatedLayover;
     return enriched;
   });
   return [...merged, ...tables.filter((table) => !used.has(table))];
@@ -2359,9 +2430,15 @@ function bookedRouteGroups(
       first[3] !== second[3]
     )
       return [];
-    const tables = parseEgenciaTableSegments(message).filter((leg) =>
-      validated.some((item) => sameSourceTableLeg(item, leg) && compatibleTableFields(item, leg)),
-    );
+    const tables = parseEgenciaTableSegments(message).flatMap((leg) => {
+      const matches = validated.filter(
+        (item) => sameSourceTableLeg(item, leg) && compatibleTableFields(item, leg),
+      );
+      if (!matches.length) return [];
+      // Keep exact-row, already validated clock qualifiers. Re-parsing a table
+      // must not discard its separate source-bound local-clock corroboration.
+      return [{ ...leg, ...(matches.length === 1 ? matches[0] : {}), excerpt: leg.excerpt }];
+    });
     const groups = headers.map((header, index) => {
       const start = header.index ?? -1;
       const end = headers[index + 1]?.index ?? body.length;
@@ -2476,8 +2553,23 @@ function bookedCalendarDifferences(
       const carrierDifference =
         carrier?.role === 'operating' && carriers.length === 1 && carrier.name !== carriers[0];
       if (compact) {
+        const identity = calendarFlightNumber(details);
+        const exact = group.legs.find((leg) => {
+          const instant = sourceLocalInstant(leg);
+          return (
+            identity === leg.flightNumber &&
+            route?.origin === leg.originAirport &&
+            route?.destination === leg.destinationAirport &&
+            instant !== undefined &&
+            Math.abs(Date.parse(calendarField(event, 'start')) - instant) <= 5 * 60_000
+          );
+        });
+        const carrierNote =
+          carrier && carriers.length === 1 && carrier.name !== carriers[0]
+            ? `${exact && carrier.role === 'operating' ? 'Source conflict for the same dated flight leg' : 'Unresolved carrier difference under the same itinerary reference'}: calendar ${markdownText(carrier.name)} (${carrierRoleDescription(carrier.role)}); booking ${markdownText(carriers[0] ?? '')} (operating carrier). `
+            : '';
         lines.push(
-          `Calendar: ${markdownText(text(event.summary, 120))}, start ${markdownText(calendarField(event, 'start'))}; booking: ${group.legs.map((leg) => leg.originAirport).join('→')}→${group.destination}, ${first?.departureDate} ${first?.departureTime}${carrierDifference ? `, operated by ${markdownText(carriers[0] ?? '')} instead of ${markdownText(carrier.name)}` : ''}. Same itinerary reference; ${first?.departureTimeZone ? 'exact segment identity still needs checking' : 'clock difference cannot be verified without the booking time zone'}.${calendarSource(event) ? ` [Calendar](${calendarSource(event)})` : ''}${links.get(group.threadId) ? ` [Booking](${links.get(group.threadId)})` : ''}`,
+          `Calendar: ${markdownText(text(event.summary, 120))}, start ${markdownText(calendarField(event, 'start'))}; booking: ${group.legs.map((leg) => leg.originAirport).join('→')}→${group.destination}, ${first?.departureDate} ${first?.departureTime}. ${carrierNote}Same itinerary reference; ${first?.departureTimeZone ? 'exact segment identity still needs checking' : 'clock difference cannot be verified without the booking time zone'}.${calendarSource(event) ? ` [Calendar](${calendarSource(event)})` : ''}${links.get(group.threadId) ? ` [Booking](${links.get(group.threadId)})` : ''}`,
         );
         continue;
       }
@@ -2993,18 +3085,7 @@ function calendarSource(event: Record<string, unknown>): string {
   const links = Array.isArray(event.links) ? event.links.map(object).filter(Boolean) : [];
   const raw = links.find((link) => link?.type === 'calendar')?.url;
   if (typeof raw !== 'string') return '';
-  try {
-    const url = new URL(raw);
-    return url.protocol === 'https:' &&
-      !url.username &&
-      !url.password &&
-      ['calendar.google.com', 'www.google.com'].includes(url.hostname) &&
-      url.pathname === '/calendar/event'
-      ? url.toString()
-      : '';
-  } catch {
-    return '';
-  }
+  return safeCalendarSourceUrl(raw) ?? '';
 }
 
 function calendarField(event: Record<string, unknown>, edge: 'start' | 'end'): string {
@@ -3166,13 +3247,19 @@ export function compoundTripFetchTargets(
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): Array<{ mode: 'public transport' | 'taxi'; url: string }> {
   const projection = compoundTripReadProjection(request, evidence);
-  return projection.webSearch
-    ? compoundTripFetchTargetsFromResult({
-        toolName: 'web.search',
-        status: 'succeeded',
-        result: projection.webSearch,
-      })
+  const targets = projection.webSearch
+    ? compoundTripFetchTargetsFromResult(
+        { toolName: 'web.search', status: 'succeeded', result: projection.webSearch },
+        evidence,
+        projection.hotel,
+      )
     : [];
+  const completeModes = new Set(
+    projection.comparison
+      .filter((item) => item.endpointMatched && item.fare && item.duration)
+      .map((item) => item.mode),
+  );
+  return targets.filter((target) => !completeModes.has(target.mode));
 }
 
 export function compoundTripRoute(
@@ -3245,7 +3332,13 @@ export function compoundTripReadProjection(
   const allowSourceLocalFallback =
     tripExtraction === undefined ||
     (tripExtraction.status === 'complete' && tripExtraction.segments.length === 0);
-  const extractionSegments = tripExtraction?.status === 'complete' ? tripExtraction.segments : [];
+  const extractionSegments =
+    tripExtraction?.status === 'complete'
+      ? tripExtraction.segments.map(
+          ({ departureClockSourceThreadId: _clock, sourceStatedLayover: _layover, ...segment }) =>
+            segment,
+        )
+      : [];
   // Use strict source-local facts only when there was no extractor or a
   // completed extraction accepted none. An unavailable extraction retains
   // its existing coverage gate. Explicit cancellations suppress only same-
@@ -3286,26 +3379,29 @@ export function compoundTripReadProjection(
             sourceMessages,
           ),
       );
-  const flightSegments = mergeSourceTableSegments(
-    extractedSegments,
-    sourceMessages.flatMap(parseEgenciaTableSegments).filter(
-      (segment) =>
-        !sourceFactInvalidated(
-          segment.threadId,
-          segment.messageId,
-          'flight',
-          {
-            bookingReference: segment.bookingReference,
-            flightNumber: segment.flightNumber,
-            dates: [segment.departureDate, segment.arrivalDate].filter((date): date is string =>
-              Boolean(date),
-            ),
-          },
-          sourceInvalidations,
-          sourceMessages,
-          allowSourceLocalFallback,
-        ),
+  const flightSegments = withSourceLocalDepartureClocks(
+    mergeSourceTableSegments(
+      extractedSegments,
+      sourceMessages.flatMap(parseEgenciaTableSegments).filter(
+        (segment) =>
+          !sourceFactInvalidated(
+            segment.threadId,
+            segment.messageId,
+            'flight',
+            {
+              bookingReference: segment.bookingReference,
+              flightNumber: segment.flightNumber,
+              dates: [segment.departureDate, segment.arrivalDate].filter((date): date is string =>
+                Boolean(date),
+              ),
+            },
+            sourceInvalidations,
+            sourceMessages,
+            allowSourceLocalFallback,
+          ),
+      ),
     ),
+    sourceMessages,
   );
   const candidates = flightCandidates(request, calendarRows);
   const selectedFlight = nextOutboundFlight(request, candidates, flightSegments);
@@ -3620,7 +3716,9 @@ export function compoundTripReadProjection(
           successful(row) && row.toolName === 'web.search' && object(row.args)?.query === webQuery,
       )
     : undefined;
-  const fetchTargets = webSearch ? compoundTripFetchTargetsFromResult(webSearch) : [];
+  const fetchTargets = webSearch
+    ? compoundTripFetchTargetsFromResult(webSearch, evidence, hotel)
+    : [];
   const webFetches = fetchTargets.flatMap((target) => {
     const row = evidence.find(
       (item) =>
@@ -3811,6 +3909,8 @@ export function compoundTripReadProjection(
     gaps.push(
       'I could not verify a driving route from the stated arrival airport to the hotel candidate.',
     );
+  if (mapRoute && hotel && !mapDestinationNamesHotel(object(mapRoute.result), hotel))
+    gaps.push('The map destination place is not verified as the hotel entrance.');
   if (webQuery && !webSearch)
     gaps.push(
       'I could not retrieve public-transport and taxi source results for this candidate route.',
@@ -3820,6 +3920,12 @@ export function compoundTripReadProjection(
   if (webSearch && !fetchTargets.some((target) => target.mode === 'taxi'))
     gaps.push('The search did not return a taxi source to inspect.');
   for (const target of fetchTargets) {
+    if (
+      comparison.some(
+        (item) => item.mode === target.mode && item.endpointMatched && item.fare && item.duration,
+      )
+    )
+      continue;
     const fetched = webFetches.find(
       (item) => item.mode === target.mode && object(item.row.args)?.url === target.url,
     );
@@ -4054,6 +4160,7 @@ export function compoundTripReadProjection(
             .filter((group) => group.threadId === bookedTransfer.group.threadId)
             .flatMap((group) => group.legs)
         : [],
+    sourceFlightSegments: flightSegments,
     bookingObservationLines,
     unmatchedBookingSegments,
     ...(connectionSummary ? { connectionSummary } : {}),
@@ -4090,21 +4197,19 @@ export function compoundTripReadProjection(
 export function renderCompoundTripReadResponse(projection: CompoundTripReadProjection): string {
   const view = projection.presentation;
   const cell = (value: string) => markdownText(value).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
-  const clock = (date: string | undefined, time: string | undefined, zone: string | undefined) =>
-    `${date ?? 'date unknown'} ${time ?? 'time unknown'} (${zone ?? 'zone unknown'})`;
   const links = threadSourceLinks(projection.readThreads);
   const lines = [view.summary];
   const groups = view.groups.filter((group) => group.legs.length);
   if (groups.length) {
-    const table = ['| Leg | Departure | Arrival | Source |', '|---|---|---|---|'];
+    const legs: string[] = [];
     for (const group of groups) {
       for (const leg of group.legs) {
-        table.push(
-          `| ${cell(`${group.label}${group.inferred ? '*' : ''}: ${leg.flightNumber} ${leg.originAirport ?? '?'}→${leg.destinationAirport ?? '?'}`)} | ${cell(clock(leg.departureDate, leg.departureTime, leg.departureTimeZone))} | ${cell(clock(leg.arrivalDate, leg.arrivalTime, leg.arrivalTimeZone))} | ${links.get(leg.threadId) ? `[Booking](${links.get(leg.threadId)})` : 'link unavailable'} |`,
+        legs.push(
+          compactFlightLeg(leg, `${group.label}${group.inferred ? ' (inferred)' : ''}`, links),
         );
       }
     }
-    lines.push(table.join('\n'));
+    lines.push(legs.join('\n'));
     if (groups.some((group) => group.inferred))
       lines.push('*Direction inferred from the reversed itinerary route groups.*');
     if (view.localClocks)
@@ -4145,23 +4250,23 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
     lines.push(
       `Transfer candidate: **${cell(projection.routeOrigin)} → ${cell(projection.routeDestination)}**.`,
     );
-    const table = ['| Option | Fare | Duration | Source |', '|---|---|---|---|'];
+    const options: string[] = [];
     for (const mode of ['public transport', 'taxi'] as const) {
       const item = projection.comparison.find(
         (entry) => entry.mode === mode && entry.endpointMatched,
       );
-      table.push(
-        `| ${mode === 'taxi' ? 'Taxi' : 'Public transport'} | ${cell(item?.fare ?? 'unverified')} | ${cell(item?.duration ?? 'unverified')} | ${item ? `[Source](${item.url})` : 'no checked endpoint-matched source'} |`,
+      options.push(
+        `- **${mode === 'taxi' ? 'Taxi' : 'Public transport'}:** ${cell(item?.fare ?? 'fare unverified')}; ${cell(item?.duration ?? 'duration unverified')}.${item ? ` [Source](${item.url})` : ' A complete endpoint-matched page is still needed.'}`,
       );
     }
-    lines.push(table.join('\n'));
+    lines.push(options.join('\n'));
     if (
       projection.mapRoute &&
       !projection.comparison.some((item) => item.mode === 'taxi' && item.duration)
     ) {
       const url = text(projection.mapRoute.mapsUrl, 1000);
       lines.push(
-        `Driving estimate: ${routeDuration(projection.mapRoute)}; not a taxi quote.${safePublicSourceUrl(url) ? ` [Maps](${url})` : ''}`,
+        `Driving estimate: ${routeDuration(projection.mapRoute)}; not a taxi quote.${projection.hotel && !mapDestinationNamesHotel(projection.mapRoute, projection.hotel) ? ` Map destination: ${cell(text(object(projection.mapRoute.destination)?.label, 160) || 'unidentified place')}; hotel entrance unverified.` : ''}${safePublicSourceUrl(url) ? ` [Maps](${url})` : ''}`,
       );
     }
   } else
@@ -4188,7 +4293,9 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
       unknowns.add('Connection/nonstop completeness remains unverified.');
     else if (/outbound|which flight is next|which leg is next|plausible flight/i.test(gap)) {
       /* The answer-first summary carries next-trip uncertainty. */
-    } else if (/hotel|stay dates|lodging/i.test(gap))
+    } else if (/map destination/i.test(gap))
+      unknowns.add('Map destination is not verified as the hotel entrance.');
+    else if (/hotel|stay dates|lodging/i.test(gap))
       unknowns.add('Hotel selection, stay details or flight association remain unverified.');
     else if (
       /driving route|public.transport|taxi|route comparison|route endpoints|source to inspect|source results/i.test(
@@ -4200,6 +4307,26 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
   }
   if (unknowns.size) lines.push(`Unverified: ${[...unknowns].join(' ')}`);
   return lines.join('\n\n');
+}
+
+function mapDestinationNamesHotel(
+  route: Record<string, unknown> | undefined,
+  hotel: CompoundTripHotelCandidate,
+): boolean {
+  const name = normalizePlace(hotel.hotelName ?? '');
+  const label = normalizePlace(text(object(route?.destination)?.label, 200));
+  return name.length >= 5 && label === name;
+}
+
+function compactFlightLeg(
+  leg: CompoundTripFlightSegment,
+  label: string,
+  links: Map<string, string>,
+): string {
+  const localLink = leg.departureClockSourceThreadId
+    ? links.get(leg.departureClockSourceThreadId)
+    : undefined;
+  return `- **${markdownText(label)} ${markdownText(leg.flightNumber)} ${leg.originAirport ?? '?'}→${leg.destinationAirport ?? '?'}:** ${leg.departureDate} ${leg.departureTime} (${markdownText(leg.departureTimeZone ?? (localLink ? 'local; zone unspecified' : 'zone unknown'))}) → ${leg.arrivalDate ?? 'arrival date unknown'} ${leg.arrivalTime ?? 'time unknown'} (${markdownText(leg.arrivalTimeZone ?? 'zone unknown')}).${leg.sourceStatedLayover ? ` Booking-stated layover: ${markdownText(leg.sourceStatedLayover)}; timing unverified.` : ''}${links.get(leg.threadId) ? ` [Booking](${links.get(leg.threadId)})` : ''}${localLink && localLink !== links.get(leg.threadId) ? ` [Local-clock confirmation](${localLink})` : ''}`;
 }
 
 /**
@@ -4218,12 +4345,7 @@ export function upcomingFlightReadProjection(
     extractedFacts ?? compoundTripExtractionFromEvidence(evidence),
   );
   const trip = compoundTripReadProjection(request, evidence, extraction);
-  const allSegments =
-    extraction?.status === 'complete'
-      ? extraction.segments
-      : extraction === undefined
-        ? parseFlightSegments(threadMessages(compoundTripCompleteSourceThreads(request, evidence)))
-        : trip.flightSegments;
+  const allSegments = trip.sourceFlightSegments;
   const futureOutboundBookings = new Set(
     allSegments.flatMap((segment) => {
       const instant = sourceLocalInstant(segment);
@@ -4506,6 +4628,52 @@ export function upcomingFlightReadProjection(
     summary.push(
       'Calendar coverage is proven through this flight across the checked calendars; later dates in the requested 365-day window were not fully read.',
     );
+  const sourceGroups = bookedRouteGroups(
+    threadMessages(compoundTripCompleteSourceThreads(request, evidence)),
+    allSegments,
+  );
+  const upcomingGroups = sourceGroups.filter((group) => {
+    const first = group.legs[0];
+    const minutes = first ? parseClockMinutes(first.departureTime) : undefined;
+    if (!first || minutes === undefined) return false;
+    // Even the latest possible civil offset must leave this source clock in
+    // the future. This does not choose a time zone or rank separate bookings.
+    const earliest =
+      Date.parse(`${first.departureDate}T00:00:00Z`) + minutes * 60_000 - 14 * 60 * 60_000;
+    const latest = earliest + 28 * 60 * 60_000;
+    return (
+      earliest > Date.parse(request.timeWindow?.timeMin ?? '') &&
+      latest < Date.parse(request.timeWindow?.timeMax ?? '')
+    );
+  });
+  const observedGroup =
+    !selectedFlight?.segment &&
+    upcomingGroups.length === 1 &&
+    allSegments.every((segment) =>
+      sourceGroups.some((group) => group.legs.some((leg) => sameSourceTableLeg(segment, leg))),
+    )
+      ? upcomingGroups[0]
+      : undefined;
+  const observedCalendarNotes = observedGroup
+    ? bookedCalendarDifferences(
+        [observedGroup],
+        trip.calendarRows,
+        threadSourceLinks(trip.readThreads),
+        true,
+      )
+    : [];
+  const compactSummary = observedGroup
+    ? [
+        `Observed booking candidate: **${observedGroup.legs.map((leg) => leg.originAirport).join('→')}→${observedGroup.destination}, ${observedGroup.legs[0]?.departureDate}** — likely ${observedGroup.direction} (inferred from reversed itinerary route groups). Its calendar match and whether it is the next flight remain unverified; booking order is not proof of travel.`,
+        observedGroup.legs
+          .map((leg) => compactFlightLeg(leg, 'Booked leg', threadSourceLinks(trip.readThreads)))
+          .join('\n'),
+        ...observedCalendarNotes,
+        ...(observedCalendarNotes.length
+          ? []
+          : summary.filter((line) => line.startsWith('Next future calendar flight candidate:'))),
+      ]
+    : summary;
   return {
     calendarComplete: trip.calendarComplete,
     calendarPrefixCompleteThroughCandidate,
@@ -4519,8 +4687,8 @@ export function upcomingFlightReadProjection(
     unmatchedBookingSegments: unmatchedBookingCandidate ? [unmatchedBookingCandidate] : [],
     blocked: gaps.length > 0 || calendarCandidate !== undefined,
     text: [
-      summary.length > 0
-        ? summary.join('\n\n')
+      compactSummary.length > 0
+        ? compactSummary.join('\n\n')
         : 'I could not verify a dated flight from the checked sources.',
       ...gaps.map((gap) => `Needs confirmation: ${gap}`),
     ].join('\n\n'),
@@ -4592,9 +4760,31 @@ function safePublicSourceUrl(raw: string): boolean {
 
 function compoundTripFetchTargetsFromResult(
   row: ReadToolEvidence,
+  evidence: ReadonlyArray<ReadToolEvidence> = [],
+  hotel?: CompoundTripHotelCandidate,
 ): Array<{ mode: 'public transport' | 'taxi'; url: string }> {
   const results = object(row.result)?.results;
   if (!Array.isArray(results)) return [];
+  const normalize = (value: string) =>
+    value
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/\p{M}/gu, '')
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim();
+  const hotelWords = normalize(hotel?.hotelName ?? '')
+    .split(' ')
+    .filter(Boolean);
+  const fetched = evidence.filter(
+    (item) => item.toolName === 'web.fetch' && item.fromCurrentTask !== false,
+  );
+  const failedHosts = new Set(
+    fetched.flatMap((item) => {
+      const url = text(object(item.args)?.url, 1000);
+      if (!safePublicSourceUrl(url) || successful(item)) return [];
+      return [new URL(url).hostname];
+    }),
+  );
   const candidates = results
     .map(object)
     .filter((result): result is Record<string, unknown> => Boolean(result))
@@ -4603,43 +4793,119 @@ function compoundTripFetchTargetsFromResult(
       const title = text(result.title, 200);
       const snippet = text(result.snippet, 400);
       if (!safePublicSourceUrl(url)) return [];
-      return [{ url, text: `${title} ${snippet}`.toLowerCase() }];
-    });
-  const transit = candidates.find((candidate) =>
-    /\b(?:public transport|transit|metro|rail|train|bus|airport express)\b/i.test(candidate.text),
+      if (failedHosts.has(new URL(url).hostname)) return [];
+      const description = `${title} ${snippet}`.toLowerCase();
+      // A location/directions page for the identified hotel is a discovery
+      // candidate for both modes, even when its snippet mentions only one.
+      // Its facts still require a complete read and endpoint-local evidence.
+      const hotelDirections =
+        hotelWords.length >= 2 &&
+        hotelWords.every((word) => normalize(title).split(' ').includes(word)) &&
+        /\b(?:location|directions|getting here|how to reach)\b|\/(?:map|location|directions)(?:[/?#]|$)/i.test(
+          `${title} ${url}`,
+        );
+      const modes: Array<'public transport' | 'taxi'> = [];
+      if (
+        hotelDirections ||
+        /\b(?:public transport|transit|metro|rail|train|bus|airport express)\b/i.test(description)
+      )
+        modes.push('public transport');
+      if (hotelDirections || /\b(?:taxi|cab|airport transfer)\b/i.test(description))
+        modes.push('taxi');
+      return modes.length ? [{ url, modes, hotelDirections }] : [];
+    })
+    .sort((left, right) => Number(right.hotelDirections) - Number(left.hotelDirections));
+  const resultUrls = new Set(results.map((item) => text(object(item)?.url, 1000)));
+  const attemptedUrls = new Set(
+    fetched.map((item) => text(object(item.args)?.url, 1000)).filter((url) => resultUrls.has(url)),
   );
-  const taxi = candidates.find(
-    (candidate) =>
-      candidate.url !== transit?.url && /\b(?:taxi|cab|airport transfer)\b/i.test(candidate.text),
-  );
-  return [
-    ...(transit ? [{ mode: 'public transport' as const, url: transit.url }] : []),
-    ...(taxi ? [{ mode: 'taxi' as const, url: taxi.url }] : []),
-  ];
+  // Preserve the existing two-page ceiling. Failed pages consume their slot;
+  // a changed URL on a blocked host is not a retry strategy.
+  const selected = new Set<string>();
+  return candidates.flatMap((candidate) => {
+    if (
+      !attemptedUrls.has(candidate.url) &&
+      !selected.has(candidate.url) &&
+      attemptedUrls.size + selected.size >= 2
+    )
+      return [];
+    if (!attemptedUrls.has(candidate.url)) selected.add(candidate.url);
+    return candidate.modes.map((mode) => ({ mode, url: candidate.url }));
+  });
 }
 
 function durationFromQuote(quote: string): string | undefined {
-  const match = /\b(\d{1,3})\s*(minutes?|mins?|hours?|hrs?)\b/i.exec(quote);
+  const match = /\b(\d{1,3}(?:\s*[-–]\s*\d{1,3})?)\s*(minutes?|mins?|hours?|hrs?)\b/i.exec(quote);
   if (!match?.[1] || !match[2]) return undefined;
-  const amount = Number(match[1]);
-  const minutes = /^(?:hours?|hrs?)$/i.test(match[2]) ? amount * 60 : amount;
-  return minutes > 0 && minutes <= 24 * 60 ? `${amount} ${match[2].toLowerCase()}` : undefined;
+  const amounts = match[1].split(/\s*[-–]\s*/).map(Number);
+  const minutes = amounts.map((amount) =>
+    /^(?:hours?|hrs?)$/i.test(match[2] ?? '') ? amount * 60 : amount,
+  );
+  return minutes.every((amount) => amount > 0 && amount <= 24 * 60) &&
+    (minutes.length < 2 || Number(minutes[0]) <= Number(minutes[1]))
+    ? `${match[1].replace(/\s*[-–]\s*/, '–')} ${match[2].toLowerCase()}`
+    : undefined;
 }
 
 function fareFromQuote(quote: string): string | undefined {
-  const match =
-    /(?:€|EUR\s?)(\d{1,4}(?:[.,]\d{1,2})?)|(?:£|GBP\s?)(\d{1,4}(?:[.,]\d{1,2})?)|(?:\$|USD\s?)(\d{1,4}(?:[.,]\d{1,2})?)/i.exec(
-      quote,
-    );
-  if (!match) return undefined;
-  const currency =
-    match[0].startsWith('€') || /^EUR/i.test(match[0])
-      ? 'EUR'
-      : match[0].startsWith('£') || /^GBP/i.test(match[0])
-        ? 'GBP'
-        : 'USD';
-  const amount = match[1] ?? match[2] ?? match[3];
-  return amount ? `${currency} ${amount.replace(',', '.')}` : undefined;
+  const token = String.raw`(€|£|\$|\b(?:EUR|GBP|USD)\b)\s*(\d{1,4}(?:[.,]\d{1,2})?)(?!\d|[.,]\d)`;
+  const amounts = [...quote.matchAll(new RegExp(token, 'gi'))];
+  const first = amounts[0];
+  if (!first?.[1] || !first[2] || amounts.length > 2) return undefined;
+  const currency = (label: string) =>
+    label === '€' ? 'EUR' : label === '£' ? 'GBP' : label.toUpperCase();
+  const before = quote.slice(0, first.index);
+  // Negated, alternative and additive amounts cannot become one exact fare.
+  if (
+    /\b(?:no|not|never|rather than|instead of)\s*$/i.test(before) ||
+    /\b(?:not|never)\s+(?:around|about|approximately|approx\.?)\s*$/i.test(before)
+  )
+    return undefined;
+  const between = /\bbetween\s*$/i.test(before);
+  const after = quote.slice(first.index + first[0].length);
+  const range = new RegExp(
+    String.raw`^\s*(?:[-–—]|to${between ? '|and' : ''})\s*(?:(€|£|\$|EUR|GBP|USD)\s*)?(\d{1,4}(?:[.,]\d{1,2})?)(?!\d|[.,]\d)`,
+    'i',
+  ).exec(after);
+  if (/^\s*(?:[-–—~]|to\b|±|\+\/-)/.test(after) && !range) return undefined;
+  if (between && !range) return undefined;
+  if (
+    amounts.length === 2 &&
+    (!range?.[1] ||
+      amounts[1]?.index !==
+        first.index + first[0].length + (range.index ?? 0) + range[0].indexOf(range[1]))
+  )
+    return undefined;
+  if (range?.[1] && currency(range[1]) !== currency(first[1])) return undefined;
+  const value = first[2].replace(',', '.');
+  const end = range?.[2]?.replace(',', '.');
+  if (end && Number(end) < Number(value)) return undefined;
+  const prefix =
+    /\b(around|about|approximately|approx\.?|from|starting at|at least|up to|at most|minimum|maximum|no more than|not more than|no less than|not less than|less than|more than)\s*$/i
+      .exec(before)?.[1]
+      ?.toLowerCase() ?? (/~\s*$/.test(before) ? 'about' : undefined);
+  const remaining = after.slice(range?.[0].length ?? 0);
+  const trailingCurrency = /^\s*(EUR|GBP|USD)\b/i.exec(remaining)?.[1];
+  if (trailingCurrency && currency(trailingCurrency) !== currency(first[1])) return undefined;
+  const suffix = /^\s*(or less|or more|maximum|minimum|approximately|approx\.?|about)\b/i
+    .exec(remaining)?.[1]
+    ?.toLowerCase();
+  const qualifier = (label: string | undefined) =>
+    label === undefined
+      ? undefined
+      : /^(?:from|starting at|at least|minimum|or more|no less than|not less than)$/.test(label)
+        ? 'from'
+        : /^(?:up to|at most|maximum|or less|no more than|not more than)$/.test(label)
+          ? 'up to'
+          : /^(?:less than|more than)$/.test(label)
+            ? label
+            : 'about';
+  const leading = qualifier(prefix);
+  const trailing = qualifier(suffix);
+  if (leading && trailing && leading !== trailing) return undefined;
+  const caveat = leading ?? trailing;
+  const rendered = `${first[1] === '$' ? '$' : `${currency(first[1])} `}${value}${end ? `–${end}` : ''}${first[1] === '$' ? ' (currency unspecified)' : ''}`;
+  return `${caveat ? `${caveat} ` : ''}${rendered}`;
 }
 
 function sentenceNamesAirport(
@@ -4670,6 +4936,13 @@ function comparisonFromPage(
 ): CompoundTripComparisonEvidence | undefined {
   if (!successful(page) || !successful(search)) return undefined;
   const result = object(page.result);
+  if (
+    result?.truncated !== false ||
+    typeof result.status !== 'number' ||
+    result.status < 200 ||
+    result.status >= 300
+  )
+    return undefined;
   const finalUrl = text(result?.finalUrl, 1000);
   if (!safePublicSourceUrl(finalUrl)) return undefined;
   const targetUrl = text(object(page.args)?.url, 1000);
@@ -4716,14 +4989,17 @@ function comparisonFromPage(
     .find(Boolean);
   if (!endpointMatched || !support)
     return { mode, title: title || mode, url: finalUrl, endpointMatched };
+  const mixedModes =
+    /\b(?:taxi|cab|ride[- ]?hail)\b/i.test(support) &&
+    /\b(?:public transport|transit|metro|rail|train|bus|airport express)\b/i.test(support);
   const quote = support.replace(/[<>]/g, '').replace(/\s+/g, ' ').slice(0, 240);
   return {
     mode,
     title: title || mode,
     url: finalUrl,
     endpointMatched: true,
-    ...(fareFromQuote(support) ? { fare: fareFromQuote(support) } : {}),
-    ...(durationFromQuote(support) ? { duration: durationFromQuote(support) } : {}),
+    ...(!mixedModes && fareFromQuote(support) ? { fare: fareFromQuote(support) } : {}),
+    ...(!mixedModes && durationFromQuote(support) ? { duration: durationFromQuote(support) } : {}),
     quote,
   };
 }

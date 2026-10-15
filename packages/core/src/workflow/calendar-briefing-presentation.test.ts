@@ -73,6 +73,62 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain('Studio B, 12 Main Street');
   });
 
+  it('keeps official event IDs but omits credentialed hotel-management links in calendar briefs', () => {
+    const links = [
+      {
+        type: 'calendar',
+        label: 'Manage hotel booking',
+        url: 'https://hotel.example/manage?access_token=booking-secret#session=fragment-secret',
+      },
+      {
+        type: 'calendar',
+        label: 'Open calendar event',
+        url: 'https://calendar.google.com/event?eid=hotel-event&token=query-secret#code=fragment-secret',
+      },
+    ];
+    const event = { ...timed, summary: 'Hotel reservation', links };
+    const compact = { ...request, compactCalendarBriefing: true };
+
+    const compactResponse = verifiedReadResponse(compact, evidence([event], true, compact));
+    const standardResponse = verifiedReadResponse(request, evidence([event]));
+
+    expect(compactResponse).toContain(
+      '[Hotel reservation](https://calendar.google.com/event?eid=hotel-event)',
+    );
+    expect(standardResponse).toContain(
+      '[Open calendar event](https://calendar.google.com/event?eid=hotel-event)',
+    );
+    for (const response of [compactResponse, standardResponse]) {
+      expect(response).not.toContain('hotel.example');
+      expect(response).not.toContain('booking-secret');
+      expect(response).not.toContain('query-secret');
+      expect(response).not.toContain('fragment-secret');
+    }
+  });
+
+  it('preserves a validated video meeting link in the standard agenda while dropping provider links', () => {
+    const event = {
+      ...timed,
+      links: [
+        {
+          type: 'calendar',
+          label: 'Manage booking',
+          url: 'https://hotel.example/manage?token=booking-secret',
+        },
+        {
+          type: 'video',
+          label: 'Join meeting',
+          url: 'https://zoom.us/j/12345?pwd=meeting-password',
+        },
+      ],
+    };
+    const response = verifiedReadResponse(request, evidence([event]));
+
+    expect(response).toContain('[Join meeting](https://zoom.us/j/12345?pwd=meeting-password)');
+    expect(response).not.toContain('hotel.example');
+    expect(response).not.toContain('booking-secret');
+  });
+
   it('keeps unknown-zone floating records dated and outside the confirmed local agenda/cards', () => {
     const rows = evidence([timed, floating]);
     const response = verifiedReadResponse(request, rows);
@@ -287,10 +343,11 @@ describe('calendar day and practical briefing fidelity', () => {
       evidence([berlin, utc, losAngeles, multiDay], true, compactRequest),
     );
 
-    expect(response).toContain('- All day: [Payday]');
-    expect(response).toContain('(blocks time; attendance accepted)');
+    expect(response).toContain('All-day records (source date and local intersection):');
+    expect(response).toContain('- [Payday]');
+    expect(response).toContain('(Personal; blocks time; attendance accepted)');
     expect(response).toContain('[Team offsite]');
-    expect(response).toContain('Local holiday (Family)');
+    expect(response).toContain('Local holiday (Family; blocks time; attendance accepted)');
     expect(response).not.toContain('[Local holiday](');
     expect(response).toContain('[Berlin festival]');
     expect(response).toContain('event?eid=berlin-day');
@@ -299,11 +356,11 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain('Europe/Berlin');
     expect(response).toContain('UTC');
     expect(response).toContain('America/Los_Angeles');
-    expect(response).toContain('local window Fri 16 Oct 12:00 AM–3:00 PM');
-    expect(response).toContain('local window Fri 16 Oct 12:00 AM–5:00 PM');
-    expect(response).toContain('local window all of Fri 16 Oct');
-    expect(response).toContain('source date 2026\\-10\\-15–2026\\-10\\-17 \\(Europe/Berlin\\)');
-    expect(response.match(/All-day record/g)).toBeNull();
+    expect(response).toContain('local Fri 16 Oct 12:00 AM–3:00 PM');
+    expect(response).toContain('local Fri 16 Oct 12:00 AM–5:00 PM');
+    expect(response).toContain('local all of Fri 16 Oct');
+    expect(response).toContain('2026\\-10\\-15–2026\\-10\\-17 \\(Europe/Berlin\\)');
+    expect(response.match(/All-day record ·/g)).toBeNull();
     expect(response.match(/Open in Google Calendar/g)).toBeNull();
   });
 
@@ -352,8 +409,8 @@ describe('calendar day and practical briefing fidelity', () => {
     };
     const response = verifiedReadResponse(dstRequest, evidence([berlinDay], true, dstRequest));
 
-    expect(response).toContain('source date 2026\\-11\\-01 \\(Europe/Berlin\\)');
-    expect(response).toContain('local window Sun 1 Nov 12:00 AM–3:00 PM');
+    expect(response).toContain('2026\\-11\\-01 \\(Europe/Berlin\\)');
+    expect(response).toContain('local Sun 1 Nov 12:00 AM–3:00 PM');
     expect(response).toContain('event?eid=dst-berlin-day');
   });
 
@@ -387,7 +444,7 @@ describe('calendar day and practical briefing fidelity', () => {
 
     expect(response).toContain('- Ongoing: [Hotel stay]');
     expect(response).toContain('Sat 10 Oct 6:00 AM–Sat 17 Oct 2:00 AM');
-    expect(response).toContain('(blocks time; attendance accepted)');
+    expect(response).toContain('(Work; blocks time; attendance accepted)');
     expect(response).not.toContain('Timed appointments:');
     expect(response).not.toContain('Possible overlap: **Hotel stay**');
     expect(response).toContain('event?eid=stay');
@@ -414,6 +471,59 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain('source date 2026-10-16; calendar time zone unavailable');
     expect(response).toContain('coverage was incomplete');
     expect(response).not.toContain('Nothing on the calendar');
+  });
+
+  it('sanitizes source-date-only titles and only links validated calendar sources', () => {
+    const compactRequest = { ...request, compactCalendarBriefing: true };
+    const sourceDateOnly = {
+      eventId: 'unresolved-date',
+      calendar: 'Travel',
+      summary: 'Clinic\n\nConsultation',
+      start: '2026-10-16',
+      end: '2026-10-17',
+      allDay: true,
+      links: [
+        {
+          type: 'calendar',
+          label: 'Open event',
+          url: 'https://calendar.google.com/event?eid=doctor-visit',
+        },
+        {
+          type: 'calendar',
+          label: 'Manage booking',
+          url: 'https://hotel.example/manage?token=private',
+        },
+      ],
+    };
+    const response = verifiedReadResponse(
+      compactRequest,
+      evidence([sourceDateOnly], false, compactRequest),
+    );
+
+    expect(response).toContain(
+      '[Clinic Consultation](https://calendar.google.com/event?eid=doctor-visit)',
+    );
+    expect(response).not.toContain('Clinic\n');
+    expect(response).not.toContain('hotel.example');
+    expect(response).not.toContain('token=private');
+  });
+
+  it('keeps each all-day source date, zone, local intersection, status and event link in a compact row', () => {
+    const compactRequest = { ...request, compactCalendarBriefing: true };
+    const event = {
+      ...floating,
+      calendarTimeZone: 'Europe/Berlin',
+      blocksTime: true,
+      ownerResponse: 'accepted',
+    };
+    const response = verifiedReadResponse(compactRequest, evidence([event], true, compactRequest));
+    const row = response.split('\n').find((line) => line.includes('[Payday]')) ?? '';
+
+    expect(row).toContain('2026\\-10\\-16 \\(Europe/Berlin\\)');
+    expect(row).toContain('local');
+    expect(row).toContain('blocks time; attendance accepted');
+    expect(row).toContain('event?eid=pay');
+    expect(row.length).toBeLessThan(260);
   });
 
   it('does not infer lodging context from an unverified title or incomplete source', () => {

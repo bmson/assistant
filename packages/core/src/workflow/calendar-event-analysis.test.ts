@@ -150,7 +150,13 @@ describe('calendar weekday event analysis', () => {
           summary: 'Exactly 45 minutes',
           start: '2026-11-02T17:00:00.000Z',
           end: '2026-11-02T17:45:00.000Z',
-          links: [{ label: 'Open event', url: 'https://calendar.example/event/45' }],
+          links: [
+            { label: 'Hotel management', url: 'https://hotel.example/manage?token=booking-secret' },
+            {
+              label: 'Open event',
+              url: 'https://calendar.google.com/event?eid=exact-45&access_token=query-secret#token=fragment-secret',
+            },
+          ],
         }),
         event({
           eventId: 'short',
@@ -189,7 +195,11 @@ describe('calendar weekday event analysis', () => {
     expect(text).toContain(
       'Overnight appointment (Sunday, Nov 1, 2026 11:30 PM–Monday, Nov 2, 2026 1:00 AM)',
     );
-    expect(text).toContain('[Open event](https://calendar.example/event/45)');
+    expect(text).toContain('[Open event](https://calendar.google.com/event?eid=exact-45)');
+    expect(text).not.toContain('hotel.example');
+    expect(text).not.toContain('booking-secret');
+    expect(text).not.toContain('query-secret');
+    expect(text).not.toContain('fragment-secret');
     expect(text).not.toContain('Short meeting');
     expect(text).not.toContain('Cancelled');
     expect(text).not.toContain('Duplicate overnight event');

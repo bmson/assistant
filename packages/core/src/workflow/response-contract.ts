@@ -5,6 +5,7 @@ import {
   gradeAuditedOutput,
   repairPresentationDefects,
 } from '../model-router/audit-graders.js';
+import { billingAuditProjection, renderBillingAudit } from './billing-audit.js';
 import type { BriefingCalendarEvent } from './briefing.js';
 import { calendarEventAnalysisResponse } from './calendar-event-analysis.js';
 import {
@@ -13,6 +14,7 @@ import {
   calendarWindowMembership,
 } from './calendar-read-window.js';
 import { calendarRelationship, calendarRelationshipNote } from './calendar-relationship.js';
+import { safeCalendarSourceUrl, safeVideoMeetingUrl } from './calendar-source-link.js';
 import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
 import type { CompoundTripExtraction } from './compound-trip-extraction.js';
 import {
@@ -29,6 +31,7 @@ import {
 import { correctFlightWriteClaims } from './flight-write-contract.js';
 import { detectFutureWatchIntent, type FutureWatchIntent } from './future-watch-intent.js';
 import {
+  familyBirthdayReadProjection,
   type MemoryReadSelection,
   renderMemoryReadAnswer,
   validMemoryReadSelection,
@@ -1648,16 +1651,18 @@ function compactAllDaySourceDetail(
   event: Record<string, unknown>,
   request: PersonalReadRequest,
 ): string {
-  const sourceDate = calendarSourceDateLabel(event) || 'source date unavailable';
+  const sourceDate = (calendarSourceDateLabel(event) || 'source date unavailable')
+    .replace(/^source date /, '')
+    .replace('; calendar time zone unavailable', ' (calendar time zone unavailable)');
   const window = request.timeWindow;
   const interval = calendarSourceInterval(event);
   const start = window ? Date.parse(window.timeMin) : NaN;
   const end = window ? Date.parse(window.timeMax) : NaN;
   if (!interval || !Number.isFinite(start) || !Number.isFinite(end) || end <= start)
-    return `${sourceDate}; local extent unresolved`;
+    return `${sourceDate} · local extent unresolved`;
   const overlapStart = Math.max(interval.start, start);
   const overlapEnd = Math.min(interval.end, end);
-  if (overlapStart >= overlapEnd) return `${sourceDate}; outside the requested local window`;
+  if (overlapStart >= overlapEnd) return `${sourceDate} · outside local window`;
   const zone = request.timeZone ?? 'UTC';
   const startsAtMidnight = clockOnly(new Date(overlapStart).toISOString(), zone) === '00:00';
   const endsAtMidnight = clockOnly(new Date(overlapEnd).toISOString(), zone) === '00:00';
@@ -1668,7 +1673,7 @@ function compactAllDaySourceDetail(
     sameDay && startsAtMidnight && endsAtMidnight
       ? `all of ${shortDate(new Date(overlapStart).toISOString(), zone)}`
       : compactLocalRange(overlapStart, overlapEnd, zone);
-  return `${sourceDate}; local window ${localExtent}`;
+  return `${sourceDate} · local ${localExtent}`;
 }
 
 function compactEventStatus(event: Record<string, unknown>): string {
@@ -1693,14 +1698,10 @@ function compactEventTitleLink(title: string, url: string): string {
     .trim()
     .replace(/([\\`*_{}[\]()#+.!|>~-])/g, '\\$1');
   if (!url) return safeTitle;
-  try {
-    const parsed = new URL(url);
-    if (!['https:', 'http:'].includes(parsed.protocol) || parsed.username || parsed.password)
-      return safeTitle;
-    return `[${safeTitle}](${parsed.href.replaceAll('\\', '\\\\').replaceAll('(', '\\(').replaceAll(')', '\\)')})`;
-  } catch {
-    return safeTitle;
-  }
+  const safeUrl = safeCalendarSourceUrl(url);
+  return safeUrl
+    ? `[${safeTitle}](${safeUrl.replaceAll('\\', '\\\\').replaceAll('(', '\\(').replaceAll(')', '\\)')})`
+    : safeTitle;
 }
 
 function compactEventSpan(start: string, end: string, timeZone: string): string {
@@ -3753,7 +3754,6 @@ export function verifiedReadResponse(
         (event) => calendarWindowMembership(event, request) === 'confirmed',
       );
       const compactAllDayItems: string[] = [];
-      const compactAllDayDetails: string[] = [];
       const compactOngoingItems: string[] = [];
       const compactTimedItems: string[] = [];
       if (
@@ -3807,18 +3807,28 @@ export function verifiedReadResponse(
                 .map(record)
                 .filter((link): link is Record<string, unknown> => Boolean(link))
             : [];
+          const safeAgendaLinks = linkList.filter(
+            (link) =>
+              (stringField(link, 'type') === 'video'
+                ? safeVideoMeetingUrl(stringField(link, 'url'))
+                : safeCalendarSourceUrl(stringField(link, 'url'))) !== undefined,
+          );
           const bestLink =
-            linkList.find((link) => stringField(link, 'type') === 'video') ??
-            linkList.find((link) => stringField(link, 'type') !== 'calendar') ??
-            linkList[0];
+            safeAgendaLinks.find((link) => stringField(link, 'type') === 'video') ??
+            safeAgendaLinks.find((link) => stringField(link, 'type') !== 'calendar') ??
+            safeAgendaLinks[0];
           const bestUrl = bestLink ? stringField(bestLink, 'url') : '';
-          const eventLinks = bestUrl
-            ? `[${stringField(bestLink ?? {}, 'label') || 'Event link'}](${bestUrl})`
+          const safeBestUrl =
+            stringField(bestLink ?? {}, 'type') === 'video'
+              ? safeVideoMeetingUrl(bestUrl)
+              : safeCalendarSourceUrl(bestUrl);
+          const eventLinks = safeBestUrl
+            ? `[${stringField(bestLink ?? {}, 'label') || 'Event link'}](${safeBestUrl})`
             : '';
           const compactSourceLink =
-            linkList.find((link) => stringField(link, 'type') === 'calendar') ??
-            linkList.find((link) => stringField(link, 'type') !== 'video') ??
-            bestLink;
+            linkList.find(
+              (link) => safeCalendarSourceUrl(stringField(link, 'url')) !== undefined,
+            ) ?? undefined;
           const compactUrl = compactSourceLink ? stringField(compactSourceLink, 'url') : '';
           // Time first, in the shape the agenda answer uses, so the fallback
           // still reads like an answer rather than a dump of record fields.
@@ -3865,14 +3875,15 @@ export function verifiedReadResponse(
                 : '';
           if (request.compactCalendarBriefing) {
             const linkedTitle = compactEventTitleLink(summary, compactUrl);
-            const calendarLabel = calendar ? ` (${compactEventTitleLink(calendar, '')})` : '';
             const status = compactEventStatus(event);
+            const metadata = [calendar, status]
+              .filter(Boolean)
+              .map((value) => compactEventTitleLink(value, ''))
+              .join('; ');
+            const metadataLabel = metadata ? ` (${metadata})` : '';
             if (allDay) {
               compactAllDayItems.push(
-                `${linkedTitle}${calendarLabel}${status ? ` (${status})` : ''}`,
-              );
-              compactAllDayDetails.push(
-                `${compactEventTitleLink(summary, '')}: ${compactEventTitleLink(compactAllDaySourceDetail(event, request), '')}`,
+                `- ${linkedTitle}${metadataLabel} — ${compactEventTitleLink(compactAllDaySourceDetail(event, request), '')}`,
               );
             } else {
               const eventStart = Date.parse(rawStart);
@@ -3886,7 +3897,7 @@ export function verifiedReadResponse(
                 eventEnd > windowStart;
               if (ongoing) {
                 compactOngoingItems.push(
-                  `${linkedTitle}${calendarLabel} — ${compactEventSpan(rawStart, rawEnd, request.timeZone ?? 'UTC')}${status ? ` (${status})` : ''}`,
+                  `${linkedTitle}${metadataLabel} — ${compactEventSpan(rawStart, rawEnd, request.timeZone ?? 'UTC')}`,
                 );
               } else {
                 const when = spansDates
@@ -3899,7 +3910,7 @@ export function verifiedReadResponse(
                   ? ` — ${compactEventTitleLink(place.length > 100 ? `${place.slice(0, 99)}…` : place, '')}`
                   : '';
                 compactTimedItems.push(
-                  `- ${when || '(time unavailable)'} — ${linkedTitle}${calendarLabel}${compactPlace}${status ? ` (${status})` : ''}`,
+                  `- ${when || '(time unavailable)'} — ${linkedTitle}${metadataLabel}${compactPlace}`,
                 );
               }
             }
@@ -3912,9 +3923,9 @@ export function verifiedReadResponse(
       }
       if (request.compactCalendarBriefing) {
         if (compactAllDayItems.length > 0) {
-          lines.push(`- All day: ${compactAllDayItems.join('; ')}.`);
           lines.push(
-            `  Source dates and local-day intersections: ${compactAllDayDetails.join('; ')}.`,
+            'All-day records (source date and local intersection):',
+            ...compactAllDayItems,
           );
         }
         if (compactOngoingItems.length > 0)
@@ -3930,14 +3941,21 @@ export function verifiedReadResponse(
         for (const event of sourceDateEvents) {
           const links = Array.isArray(event.links) ? event.links.map(record).filter(Boolean) : [];
           const link =
-            links.find((item) => item && stringField(item, 'type') === 'calendar') ?? links[0];
-          const url = link ? stringField(link, 'url') : '';
+            links.find(
+              (item) =>
+                item &&
+                stringField(item, 'type') === 'calendar' &&
+                safeCalendarSourceUrl(stringField(item, 'url')) !== undefined,
+            ) ?? undefined;
+          const url = link ? (safeCalendarSourceUrl(stringField(link, 'url')) ?? '') : '';
           const summary = stringField(event, 'summary') || '(untitled event)';
-          const compactLink = url ? `[${summary}](${url})` : summary;
+          const compactLink = compactEventTitleLink(summary, url);
+          const safeSummary = compactEventTitleLink(summary, '');
+          const calendar = compactEventTitleLink(stringField(event, 'calendar'), '');
           lines.push(
             request.compactCalendarBriefing
-              ? `- ${compactLink}${stringField(event, 'calendar') ? ` (${stringField(event, 'calendar')})` : ''} — ${calendarSourceDateLabel(event) || 'date/time unresolved'}`
-              : `- ${summary} — ${calendarSourceDateLabel(event) || 'date/time unresolved'}${stringField(event, 'calendar') ? ` (${stringField(event, 'calendar')})` : ''}${url ? ` — [Source event](${url})` : ''}`,
+              ? `- ${compactLink}${calendar ? ` (${calendar})` : ''} — ${calendarSourceDateLabel(event) || 'date/time unresolved'}`
+              : `- ${safeSummary} — ${calendarSourceDateLabel(event) || 'date/time unresolved'}${calendar ? ` (${calendar})` : ''}${url ? ` — ${compactEventTitleLink('Source event', url)}` : ''}`,
           );
         }
       }
@@ -4190,6 +4208,25 @@ export function enforcePersonalReadResponse(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
 ): ResponseContractResult {
+  if (request.billingAuditIssue)
+    return {
+      text: request.billingAuditIssue,
+      blocked: true,
+      unsupported: ['inbox_read'],
+    };
+  if (request.billingAudit) {
+    const projection = billingAuditProjection(request, evidence);
+    return {
+      text: renderBillingAudit({
+        scope: request.billingAudit,
+        rows: projection.rows,
+        coverage: projection.coverage,
+        mailbox: projection.mailbox,
+      }),
+      blocked: !projection.coverage.complete,
+      unsupported: projection.coverage.complete ? [] : ['inbox_read'],
+    };
+  }
   if (request.sourceReads) {
     const result = explicitSourceResponse(request, evidence);
     const unsupported = explicitSourceGaps(request, evidence);
@@ -4279,6 +4316,29 @@ function enforcePersonalReadGrounding(
 ): ResponseContractResult | undefined {
   const request = opts?.readRequest;
   if (!request) return undefined;
+  if (request.billingAuditIssue)
+    return {
+      text: request.billingAuditIssue,
+      blocked: true,
+      unsupported: ['inbox_read'],
+      groundingFallback: ['billing audit paused until its bounded local-month scope is known'],
+    };
+  if (request.billingAudit) {
+    const projection = billingAuditProjection(request, evidence);
+    return {
+      text: renderBillingAudit({
+        scope: request.billingAudit,
+        rows: projection.rows,
+        coverage: projection.coverage,
+        mailbox: projection.mailbox,
+      }),
+      blocked: !projection.coverage.complete,
+      unsupported: projection.coverage.complete ? [] : ['inbox_read'],
+      groundingFallback: [
+        'billing classifications rendered from received-date-bounded complete Gmail message receipts',
+      ],
+    };
+  }
   if (request.temporalIssue || request.scopeIssue)
     return {
       text: request.temporalIssue ?? request.scopeIssue ?? '',
@@ -4306,6 +4366,20 @@ function enforcePersonalReadGrounding(
         : [],
       groundingFallback: [
         'combined private-source answer rendered from exact current-task quotes and explicit source coverage',
+      ],
+    };
+  }
+  if (request.familyBirthday) {
+    const result = familyBirthdayReadProjection(
+      opts?.memoryReadSelection ?? { version: 1, status: 'unavailable', selections: [] },
+      evidence,
+      opts?.requestText ?? request.memoryQuery ?? '',
+    );
+    return {
+      ...result,
+      unsupported: result.blocked ? ['memory'] : [],
+      groundingFallback: [
+        'family relationships and birthday dates checked against owner source evidence',
       ],
     };
   }

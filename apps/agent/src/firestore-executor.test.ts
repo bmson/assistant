@@ -6,6 +6,7 @@ import { taskFixture } from '@assistant/persistence/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InstallationStore } from '../../../packages/firestore/src/store.js';
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
+import { sourceReadReceipt } from '../../../packages/tools/src/source-read-receipt.js';
 import { firestoreExecutorSmoke } from '../../../scripts/firestore-executor-smoke.js';
 
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
@@ -130,90 +131,153 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect((await store.doc('tasks', current.id).get()).get('status')).toBe('done');
     });
 
-    it('reads a renewed request after a prior failed Firestore document call', async () => {
-      const url = 'Please read https://docs.google.com/document/d/doc-1234567890/edit';
-      const previous = taskFixture({
-        id: 'prior-doc-turn',
-        agentId: 'agent',
-        conversationId: 'chat',
-        reminderId: '',
-      });
-      previous.type = 'chat_turn';
-      previous.status = 'done';
-      previous.createdAt = new Date(Date.now() - 60_000);
-      previous.trigger = { payload: { text: url } };
-      const current = taskFixture({
-        id: 'doc-followup-turn',
-        agentId: 'agent',
-        conversationId: 'chat',
-        reminderId: '',
-      });
-      current.type = 'chat_turn';
-      current.trigger = { payload: { text: url } };
-      current.plan = {
-        action: 'reply',
-        reasoning: 'Answer the owner about the supplied document.',
-        steps: [],
-        missingInfo: [],
-      };
-      current.state = TaskStateSchema.parse({
-        contextWindow: [{ role: 'user', content: url }],
-      });
-      await store.doc('agents', 'agent').set({ id: 'agent', name: 'Synthetic owner' });
-      await store.doc('tasks', previous.id).set(previous);
-      await store.doc('toolCalls', 'prior-doc-read').set({
-        id: 'prior-doc-read',
-        createdAt: previous.createdAt,
-        status: 'failed',
-        taskId: previous.id,
-        startedAt: previous.createdAt,
-        step: 1,
-        toolName: 'docs.get',
-        args: { documentId: 'doc-1234567890' },
-        risk: 'low',
-        idempotencyKey: null,
-        result: null,
-        error: 'permission denied',
-        approvalId: null,
-        decision: null,
-        finishedAt: previous.createdAt,
-      });
-      await store.doc('tasks', current.id).set(current);
-      const step = vi.fn().mockResolvedValue({
-        ok: true,
-        modelId: 'fixture-model',
-        degraded: false,
-        text: 'I can help with that document.',
-        toolCalls: [],
-      });
-      deps.router = {
-        step,
-        embed: vi.fn().mockResolvedValue([new Array(1536).fill(0)]),
-      } as unknown as ExecutorDeps['router'];
-      const dispatch = vi.fn().mockResolvedValue({
-        kind: 'executed',
-        toolCallId: 'current-doc-read',
-        result: { title: 'Current version', content: 'Updated owner document' },
-      });
-      deps.dispatcher = {
-        toolDefs: () => [],
-        resultIsUntrusted: () => false,
-        dispatch,
-        executeApproved: vi.fn(),
-      } as unknown as ExecutorDeps['dispatcher'];
-
-      const result = await executeTask(deps, current.id);
-      expect(result.outcome, JSON.stringify(result)).toBe('done');
-      expect(step).toHaveBeenCalledOnce();
-      expect(dispatch).toHaveBeenCalledOnce();
-      expect(dispatch).toHaveBeenCalledWith(
-        expect.objectContaining({
-          task: expect.objectContaining({ id: current.id }),
+    it.each(['complete', 'partial', 'prior-task-only'] as const)(
+      'reads a renewed request after a prior failed Firestore document call (%s receipt)',
+      async (coverage) => {
+        const url = 'Please read https://docs.google.com/document/d/doc-1234567890/edit';
+        const previous = taskFixture({
+          id: 'prior-doc-turn',
+          agentId: 'agent',
+          conversationId: 'chat',
+          reminderId: '',
+        });
+        previous.type = 'chat_turn';
+        previous.status = 'done';
+        previous.createdAt = new Date(Date.now() - 60_000);
+        previous.trigger = { payload: { text: url } };
+        const current = taskFixture({
+          id: 'doc-followup-turn',
+          agentId: 'agent',
+          conversationId: 'chat',
+          reminderId: '',
+        });
+        current.type = 'chat_turn';
+        current.trigger = { payload: { text: url } };
+        current.plan = {
+          action: 'reply',
+          reasoning: 'Answer the owner about the supplied document.',
+          steps: [],
+          missingInfo: [],
+        };
+        current.state = TaskStateSchema.parse({
+          contextWindow: [{ role: 'user', content: url }],
+        });
+        await store.doc('agents', 'agent').set({ id: 'agent', name: 'Synthetic owner' });
+        await store.doc('tasks', previous.id).set(previous);
+        await store.doc('toolCalls', 'prior-doc-read').set({
+          id: 'prior-doc-read',
+          createdAt: previous.createdAt,
+          status: 'failed',
+          taskId: previous.id,
+          startedAt: previous.createdAt,
+          step: 1,
           toolName: 'docs.get',
           args: { documentId: 'doc-1234567890' },
-        }),
-      );
-    });
+          risk: 'low',
+          idempotencyKey: null,
+          result: null,
+          error: 'permission denied',
+          approvalId: null,
+          decision: null,
+          finishedAt: previous.createdAt,
+        });
+        await store.doc('tasks', current.id).set(current);
+        const step = vi.fn().mockResolvedValue({
+          ok: true,
+          modelId: 'fixture-model',
+          degraded: false,
+          text: 'I can help with that document.',
+          toolCalls: [],
+        });
+        deps.router = {
+          step,
+          embed: vi.fn().mockResolvedValue([new Array(1536).fill(0)]),
+        } as unknown as ExecutorDeps['router'];
+        const complete = coverage !== 'partial';
+        const text = complete
+          ? 'Updated owner document'
+          : 'Updated owner document. '.repeat(2500).slice(0, 50_000);
+        const total = complete ? text.length : text.length + 50;
+        const document = {
+          documentId: 'doc-1234567890',
+          title: 'Current version',
+          url: 'https://docs.google.com/document/d/doc-1234567890/edit',
+          text,
+          complete,
+          truncated: !complete,
+          structure: { complete, headings: [], bullets: [], tables: [] },
+          receipt: sourceReadReceipt({
+            version: 1,
+            source: { kind: 'google-doc', id: 'doc-1234567890', revision: 'document-revision-1' },
+            requested: { start: 0, limit: 50_000, scope: 'body' },
+            covered: { start: 0, end: text.length, count: text.length, total, unavailable: 0 },
+            complete,
+            losses: complete ? [] : ['character-budget'],
+            continuation: complete
+              ? null
+              : {
+                  tool: 'docs.get',
+                  input: {
+                    documentId: 'doc-1234567890',
+                    startOffset: text.length,
+                    maxChars: 50_000,
+                  },
+                },
+          }),
+        };
+        const dispatch = vi.fn(async () => {
+          // The real dispatcher records the executed result before returning it.
+          // A prior-task receipt must not satisfy the renewed request's read.
+          const sourceTask = coverage === 'prior-task-only' ? previous : current;
+          await store.doc('toolCalls', 'current-doc-read').set({
+            id: 'current-doc-read',
+            taskId: sourceTask.id,
+            createdAt: sourceTask.createdAt,
+            startedAt: sourceTask.createdAt,
+            finishedAt: sourceTask.createdAt,
+            step: 1,
+            toolName: 'docs.get',
+            args: { documentId: 'doc-1234567890' },
+            risk: 'low',
+            status: 'succeeded',
+            result: document,
+            error: null,
+            idempotencyKey: null,
+            approvalId: null,
+            decision: null,
+          });
+          return { kind: 'executed', toolCallId: 'current-doc-read', result: document };
+        });
+        deps.dispatcher = {
+          toolDefs: () => [],
+          resultIsUntrusted: () => false,
+          dispatch,
+          executeApproved: vi.fn(),
+        } as unknown as ExecutorDeps['dispatcher'];
+
+        const result = await executeTask(deps, current.id);
+        const expectedStatus = coverage === 'complete' ? 'done' : 'needs_attention';
+        expect(result.outcome, JSON.stringify(result)).toBe(expectedStatus);
+        expect((await store.doc('tasks', current.id).get()).get('status')).toBe(expectedStatus);
+        if (coverage !== 'complete')
+          expect(result.detail).toContain('couldn’t verify a complete current read');
+        const currentEvidence = await deps.persistence?.executionEvidence?.taskEvidence({
+          agentId: 'agent',
+          taskId: current.id,
+        });
+        expect(currentEvidence).toHaveLength(coverage === 'prior-task-only' ? 0 : 1);
+        expect((await store.doc('toolCalls', 'prior-doc-read').get()).get('status')).toBe('failed');
+        expect(step).toHaveBeenCalledOnce();
+        expect(dispatch).toHaveBeenCalledOnce();
+        expect(dispatch).toHaveBeenCalledWith(
+          expect.objectContaining({
+            task: expect.objectContaining({ id: current.id }),
+            toolName: 'docs.get',
+            args: { documentId: 'doc-1234567890' },
+          }),
+        );
+      },
+    );
 
     it('reuses the persisted message after a definitive delivery rejection', async () => {
       const task = await pendingFinalTask();
