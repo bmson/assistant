@@ -2731,6 +2731,30 @@ describe('bounded no-send email review', () => {
     expect(thread.messages.at(-1)?.text).toContain(repeated);
   });
 
+  it('retains quoted lines with different case or significant inner spacing', () => {
+    const thread = required(
+      emailReviewCompleteThread('thread-distinct-quote', 'owner@example.com', [
+        search('thread-distinct-quote'),
+        read('thread-distinct-quote', messages('thread-distinct-quote')),
+      ]),
+      'complete thread',
+    );
+    const [earlier, latest] = thread.messages;
+    if (!earlier || !latest) throw new Error('expected two source messages');
+    earlier.text =
+      'Use the case-sensitive identifier ApprovalCaseA.\nReference spacing remains part  one.';
+    latest.text =
+      'Please confirm the identifiers.\nOn the earlier message wrote:\n> Use the case-sensitive identifier approvalcasea.\n> Reference spacing remains part one.\n> Use the case-sensitive identifier ApprovalCaseA.';
+    const projected = JSON.parse(emailReviewPrompt([thread])) as {
+      threads: Array<{ messages: Array<{ text: string }> }>;
+    };
+    const latestText = projected.threads[0]?.messages.at(-1)?.text;
+    expect(latestText).toContain('> Use the case-sensitive identifier approvalcasea.');
+    expect(latestText).toContain('> Reference spacing remains part one.');
+    expect(latestText).not.toContain('> Use the case-sensitive identifier ApprovalCaseA.');
+    expect(latest.text).toContain('> Use the case-sensitive identifier ApprovalCaseA.');
+  });
+
   it('fits multiple large threads when excess context is exact quoted repetition without truncating source threads', () => {
     const repeatedLines = Array.from(
       { length: 300 },

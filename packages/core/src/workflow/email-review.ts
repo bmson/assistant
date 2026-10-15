@@ -917,11 +917,8 @@ export function emailReviewPendingAssessmentThreads<T extends { threadId: string
 }
 
 function emailReviewPromptLineKey(line: string): string {
-  return line
-    .replace(/^\s*>+\s?/, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLocaleLowerCase();
+  // Quote decoration is presentational; case and inner spacing may carry facts.
+  return line.replace(/^\s*>+\s?/, '');
 }
 
 /**
