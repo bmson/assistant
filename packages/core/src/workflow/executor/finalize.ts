@@ -48,6 +48,7 @@ import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-impo
 import { CARD_NOT_BUILT, requestedCardIntent } from '../card-intent.js';
 import { responseCardSteps } from '../card-steps.js';
 import type { CompoundTripExtraction } from '../compound-trip-extraction.js';
+import { selectExplicitSourceAnswer } from '../explicit-source-read.js';
 import { isGoalWorkEvidence } from '../goal-evidence.js';
 import {
   detectLiveLookups,
@@ -834,8 +835,16 @@ export async function stageModelFinalResponse(
       .join('\n'),
   ].join('\n');
   const classifiedRead = readContext ? readContext.readRequest : detectPersonalReadRequest(window);
+  const explicitSourceSelection = classifiedRead?.sourceReads
+    ? await selectExplicitSourceAnswer({
+        router: deps.router,
+        taskId: task.id,
+        request: classifiedRead,
+        evidence,
+      })
+    : undefined;
   const memoryReadSelection =
-    classifiedRead?.kind === 'memory'
+    !classifiedRead?.sourceReads && classifiedRead?.kind === 'memory'
       ? await selectMemoryReadAnswer({
           router: deps.router,
           taskId: task.id,
@@ -844,6 +853,7 @@ export async function stageModelFinalResponse(
         })
       : undefined;
   const contractOptions = {
+    ...(explicitSourceSelection ? { explicitSourceSelection } : {}),
     ...(memoryReadSelection ? { memoryReadSelection } : {}),
     requestText:
       task.trust === 'owner' && !isForwardedIngest(task) ? latestUserText(window) : undefined,
@@ -1094,6 +1104,7 @@ export async function stageModelFinalResponse(
   }
   if (
     !classifiedRead?.personCalendar &&
+    !classifiedRead?.sourceReads &&
     (!contractOptions.readRequest?.includeCalendarBriefing ||
       cardRequested ||
       Boolean(refreshCardId)) &&

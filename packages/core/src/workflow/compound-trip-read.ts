@@ -157,6 +157,29 @@ export function compoundTripThreadIdsToRead(
   request: PersonalReadRequest,
 ): string[] {
   const metadata = new Map<string, { subject: string; snippet: string; categories: Set<string> }>();
+  if (request.explicitSource === 'mail') {
+    return [
+      ...new Set(
+        evidence
+          .filter(
+            (row) =>
+              row.fromCurrentTask !== false &&
+              successful(row) &&
+              row.toolName === 'gmail.search' &&
+              object(row.args)?.query === request.mailQuery,
+          )
+          .flatMap((row) => {
+            const results = object(row.result)?.results;
+            return Array.isArray(results)
+              ? results.flatMap((raw) => {
+                  const id = text(object(raw)?.threadId, 100);
+                  return id ? [id] : [];
+                })
+              : [];
+          }),
+      ),
+    ].slice(0, 3);
+  }
   const calendarLodgingTitles = evidence.flatMap((row) => {
     if (
       row.fromCurrentTask === false ||
@@ -317,13 +340,24 @@ export function compoundTripThreadReadInputs(
   evidence: ReadonlyArray<ReadToolEvidence>,
   request: PersonalReadRequest,
 ): Array<Record<string, unknown>> {
-  if (!(request.compoundTripDiscovery || request.upcomingFlightDiscovery)) return [];
+  if (
+    !(
+      request.compoundTripDiscovery ||
+      request.upcomingFlightDiscovery ||
+      request.explicitSource === 'mail'
+    )
+  )
+    return [];
   const inputs: Array<Record<string, unknown>> = [];
   // Keep selection local to this module: read-intent imports the helper above,
   // so calling back into gmailThreadIdsToRead here would create a runtime cycle.
   const selectedThreadIds = compoundTripThreadIdsToRead(evidence, request).slice(
     0,
-    request.compoundTripDiscovery ? MAX_COMPOUND_TRIP_THREADS_TO_READ : 2,
+    request.compoundTripDiscovery
+      ? MAX_COMPOUND_TRIP_THREADS_TO_READ
+      : request.explicitSource === 'mail'
+        ? 3
+        : 2,
   );
   for (const threadId of selectedThreadIds) {
     const attempts = evidence.filter(
@@ -795,16 +829,16 @@ function validSearchPrefixRows(
 }
 
 /** Current-task, source-receipted complete threads from the validated search prefix. */
-export function compoundTripCompleteSourceThreads(
+/** Exact-query search receipts with a contiguous provider page chain. */
+export function boundedMailSearchPages(
   request: PersonalReadRequest,
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): ReadToolEvidence[] {
   const queries =
     request.mailQueries?.map((entry) => entry.query) ??
     (request.mailQuery ? [request.mailQuery] : []);
-  if (queries.length === 0) return [];
   const searches = currentGmailRows(request, evidence);
-  const searchPrefix = queries.flatMap((query) =>
+  return queries.flatMap((query) =>
     validSearchPrefixRows(
       searches.filter(
         (row) => text(object(row.args)?.query, 4096)?.toLowerCase() === query.toLowerCase(),
@@ -812,6 +846,13 @@ export function compoundTripCompleteSourceThreads(
       query,
     ),
   );
+}
+
+export function compoundTripCompleteSourceThreads(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): ReadToolEvidence[] {
+  const searchPrefix = boundedMailSearchPages(request, evidence);
   if (searchPrefix.length === 0) return [];
   const threads = currentGmailThreads(searchPrefix, evidence);
   const completeIds = completeThreadIds(threads);

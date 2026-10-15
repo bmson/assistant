@@ -17,6 +17,11 @@ import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
 import type { CompoundTripExtraction } from './compound-trip-extraction.js';
 import { compoundTripReadProjection, upcomingFlightReadProjection } from './compound-trip-read.js';
 import { createdDocumentVerification } from './document-verification.js';
+import {
+  type ExplicitSourceSelection,
+  explicitSourceCoverage,
+  explicitSourceResponse,
+} from './explicit-source-read.js';
 import { correctFlightWriteClaims } from './flight-write-contract.js';
 import { detectFutureWatchIntent, type FutureWatchIntent } from './future-watch-intent.js';
 import {
@@ -98,6 +103,7 @@ export interface ResponseContractResult {
 interface ResponseContractOptions {
   /** Runtime-selected exact historical quotes; revalidated against the current ledger. */
   memoryReadSelection?: MemoryReadSelection;
+  explicitSourceSelection?: ExplicitSourceSelection;
   requestText?: string;
   urlCorpus?: string;
   /** Deterministically detected from the latest owner turn. */
@@ -4154,10 +4160,31 @@ function coverageGapResponse(
   };
 }
 
+function explicitSourceGaps(
+  request: PersonalReadRequest,
+  evidence: ActionEvidence[],
+): ActionKind[] {
+  return explicitSourceCoverage(request, evidence)
+    .filter((row) => !row.complete)
+    .map(
+      (row): ActionKind =>
+        row.source === 'calendar'
+          ? 'calendar_read'
+          : row.source === 'mail'
+            ? 'inbox_read'
+            : 'memory',
+    );
+}
+
 export function enforcePersonalReadResponse(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
 ): ResponseContractResult {
+  if (request.sourceReads) {
+    const result = explicitSourceResponse(request, evidence);
+    const unsupported = explicitSourceGaps(request, evidence);
+    return { ...result, blocked: unsupported.length > 0, unsupported };
+  }
   if (request.personCalendar && !request.temporalIssue) {
     const result = personCalendarResponse(request, evidence);
     return { ...result, unsupported: result.blocked ? ['calendar_read'] : [] };
@@ -4255,6 +4282,20 @@ function enforcePersonalReadGrounding(
       unsupported: result.blocked ? ['calendar_read'] : [],
       groundingFallback: [
         'named-person calendar scope rendered from current exact-window source evidence',
+      ],
+    };
+  }
+  if (request.sourceReads) {
+    const result = explicitSourceResponse(request, evidence, opts?.explicitSourceSelection);
+    return {
+      ...result,
+      unsupported: result.blocked
+        ? explicitSourceGaps(request, evidence).length
+          ? explicitSourceGaps(request, evidence)
+          : ['memory']
+        : [],
+      groundingFallback: [
+        'combined private-source answer rendered from exact current-task quotes and explicit source coverage',
       ],
     };
   }

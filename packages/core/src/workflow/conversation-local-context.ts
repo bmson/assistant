@@ -1,14 +1,30 @@
 /** Shared, dependency-free boundary for work scoped to this conversation. */
 export function stripNegativePrivateWriteConstraints(text: string): string {
-  return text
-    .replace(
-      /\b(?:no|zero|without)\b[^.!?;,\n]*?\b(?:memories?|calendar|calendars|email|gmail|documents?|docs|drive)\s+(?:writes?|updates?|changes?|creates?|sends?)\b/giu,
-      '',
-    )
-    .replace(
-      /\b(?:no|zero|without)\b[^.!?;,\n]*?\b(?:writes?|writing|updates?|updating|changes?|changing|creates?|creating|sends?|sending)\b[^.!?;,\n]*?\b(?:memories?|calendar|calendars|email|gmail|documents?|docs|drive)\b/giu,
-      '',
-    );
+  return (
+    text
+      // Remove only retention operands inside a negative clause, including a
+      // chained "or save memory". Keep subsequent affirmative reads intact.
+      .replace(/\b(?:do not|don't|don’t|never|avoid)\b[^.!?;\n]*/giu, (clause) => {
+        const [negative, ...affirmative] = clause.split(
+          /(?=\b(?:but|however|instead|then)\s+(?:read|search|check|use|consult|retrieve)\b)/iu,
+        );
+        return [
+          negative?.replace(
+            /\b(?:save|store|write|update|add|retain|record)\s+(?:to\s+)?(?:my\s+)?memor(?:y|ies)\b/giu,
+            '',
+          ),
+          ...affirmative,
+        ].join('');
+      })
+      .replace(
+        /\b(?:no|zero|without)\b[^.!?;,\n]*?\b(?:memories?|calendar|calendars|email|gmail|documents?|docs|drive)\s+(?:writes?|updates?|changes?|creates?|sends?)\b/giu,
+        '',
+      )
+      .replace(
+        /\b(?:no|zero|without)\b[^.!?;,\n]*?\b(?:writes?|writing|updates?|updating|changes?|changing|creates?|creating|sends?|sending)\b[^.!?;,\n]*?\b(?:memories?|calendar|calendars|email|gmail|documents?|docs|drive)\b/giu,
+        '',
+      )
+  );
 }
 
 export function isConversationLocalContext(text: string): boolean {

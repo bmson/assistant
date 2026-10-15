@@ -70,6 +70,13 @@ export type TemporalIntentResolution =
 
 export interface PersonalReadRequest {
   kind: PersonalReadKind;
+  /** Explicit owner-requested private sources, scheduled fairly within the existing task cap. */
+  sourceReads?: PersonalReadRequest[];
+  explicitSource?: 'history' | 'mail' | 'calendar';
+  sourceReadText?: string;
+  travelHistory?: boolean;
+  /** Broad historical search boundary is the actual task's owner-clock instant. */
+  sourceReadBefore?: string;
   /** Literal named-person scope; calendar membership alone never proves attendance. */
   personCalendar?: { name: string };
   /** Deterministic review-only proposal requiring availability and event-list reads. */
@@ -1987,6 +1994,207 @@ function privateQueryTerms(text: string): string[] {
  * Identify private account lookups from the latest owner turn. Recent context
  * is used only for terse verification follow-ups such as "are you sure?".
  */
+/** Positive explicit source requests take precedence over exclusive recall routing. */
+function explicitPrivateSourceRequest(
+  text: string,
+  options: PersonalReadDetectionOptions,
+): PersonalReadRequest | undefined {
+  const positive = text.replace(
+    /\b(?:do not|don't|don’t|never|without|avoid)\b[^.!?;\n]*?(?=\b(?:but|however|instead|then)\s+(?:read|search|check|use|consult|retrieve)\b|[.!?;\n]|$)/giu,
+    '',
+  );
+  if (!/\b(?:check|search|read|use|using|from|consult|review|look|build|compare)\b/i.test(positive))
+    return undefined;
+  const history =
+    /\b(?:assistant history|(?:earlier|previous|past|prior) (?:chats?|conversations?)|conversation history)\b/i.test(
+      positive,
+    ) && !explicitlyProhibitsPrivateRead(text, 'memory');
+  // Existing trip discovery already binds both requested accounts and has a
+  // stronger itinerary/route contract. Preserve it unless history adds a source.
+  if (!history && (isCompoundTripDiscovery(text) || isUpcomingFlightDiscovery(text)))
+    return undefined;
+  const mail =
+    /\b(?:emails?|gmail|mailbox|inbox|travel mail)\b/i.test(positive) &&
+    !explicitlyProhibitsPrivateRead(text, 'email');
+  const calendar =
+    /\bcalendars?\b/i.test(positive) && !explicitlyProhibitsPrivateRead(text, 'calendar');
+  if (Number(history) + Number(mail) + Number(calendar) < 2) return undefined;
+  const travel =
+    /\b(?:travel history|countries?[^.!?]{0,60}visit|(?:when|where) did i (?:go|travel|visit)|completed visits?)\b/i.test(
+      positive,
+    );
+  const question = positive.split(/[?.!\n]/u)[0]?.trim() || positive;
+  const names =
+    question
+      .match(/\b[A-Z][\p{L}-]{2,}\b/gu)
+      ?.filter(
+        (word) =>
+          ![
+            'When',
+            'Where',
+            'What',
+            'Which',
+            'How',
+            'Check',
+            'Read',
+            'Search',
+            'Compare',
+            'Build',
+            'Use',
+            'Assistant',
+          ].includes(word),
+      ) ?? [];
+  // Names are literal owner terms. Broad travel requests search travel records,
+  // never a guessed country list or an inbox received-date proxy for travel.
+  const topic = names.length
+    ? names.slice(0, 3).join(' ')
+    : travel
+      ? 'travel'
+      : focusedMemoryTopic(question);
+  const children: PersonalReadRequest[] = [];
+  if (history)
+    children.push({
+      kind: 'memory',
+      explicitSource: 'history',
+      queryTerms: [],
+      memoryQuery: question,
+      conversationQuery: focusedMemoryTopic(question),
+      searchSavedMemory: /\b(?:saved memory|saved memories|saved facts)\b/i.test(positive),
+      memorySearchQuery: focusedMemoryTopic(question),
+      ...(namedHistoricalAnchor(text)
+        ? { conversationAnchorQuery: namedHistoricalAnchor(text) }
+        : {}),
+      firstToolName: 'conversations.search',
+      requiresThreadRead: false,
+    });
+  if (mail)
+    children.push({
+      kind: 'email',
+      explicitSource: 'mail',
+      queryTerms: [topic],
+      mailQuery: names.length
+        ? names
+            .slice(0, 3)
+            .map((name) => `"${name}"`)
+            .join(' ')
+        : travel
+          ? '{travel flight hotel booking itinerary trip}'
+          : topic,
+      firstToolName: 'gmail.search',
+      requiresThreadRead: true,
+    });
+  if (calendar) {
+    const child: PersonalReadRequest = {
+      kind: 'calendar',
+      explicitSource: 'calendar',
+      queryTerms: [topic],
+      firstToolName: 'calendar.search_events',
+      requiresThreadRead: false,
+      maxResults: 50,
+    };
+    try {
+      if (!options.timeZone) throw new Error('Missing owner clock');
+      new Intl.DateTimeFormat('en-US', { timeZone: options.timeZone }).format(
+        options.now ?? new Date(),
+      );
+      child.timeZone = options.timeZone;
+      if (hasExplicitTemporalPhrase(text)) {
+        const temporal = resolveTemporalIntent(text, 'calendar', false, options);
+        if (temporal.kind === 'resolved') {
+          child.timeWindow = temporal.intent.window;
+          child.temporalIntent = temporal.intent;
+        } else
+          child.temporalIssue =
+            temporal.kind === 'unsupported'
+              ? temporal.message
+              : 'What exact date range should I search in your calendars?';
+      } else if (travel) child.sourceReadBefore = (options.now ?? new Date()).toISOString();
+      else child.scopeIssue = 'What date range should I search in your calendars?';
+    } catch {
+      child.scopeIssue = 'I need your valid time zone to search the requested calendar scope.';
+    }
+    children.push(child);
+  }
+  return {
+    kind: 'memory',
+    sourceReads: children,
+    sourceReadText: text,
+    travelHistory: travel,
+    queryTerms: [],
+    firstToolName: children[0]?.firstToolName ?? 'conversations.search',
+    requiresThreadRead: false,
+  };
+}
+
+/** Current rows must match the runtime-owned source query and calendar scope. */
+export function explicitSourceEvidence(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): ReadToolEvidence[] {
+  return evidence.filter((row) => {
+    if (row.fromCurrentTask === false) return false;
+    const args = argsRecord(row);
+    if (request.explicitSource === 'history')
+      return (
+        matchesHistoricalMemorySearch(request, row) ||
+        (request.searchSavedMemory === true &&
+          row.toolName === 'memory.recall' &&
+          succeeded(row) &&
+          args?.query === request.memorySearchQuery &&
+          Array.isArray(objectRecord(row.result)?.memories))
+      );
+    if (request.explicitSource === 'mail') return matchingGmailSearch(row, request);
+    return (
+      row.toolName === 'calendar.search_events' &&
+      succeeded(row) &&
+      args?.query === request.queryTerms.join(' ') &&
+      !args?.calendarIds &&
+      args?.timeMin === request.timeWindow?.timeMin &&
+      args?.timeMax === (request.timeWindow?.timeMax ?? request.sourceReadBefore) &&
+      Array.isArray(objectRecord(row.result)?.events)
+    );
+  });
+}
+
+export function explicitCalendarPages(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): ReadToolEvidence[] {
+  const pages: ReadToolEvidence[] = [];
+  let token: unknown;
+  for (const row of explicitSourceEvidence(request, evidence)) {
+    if ((argsRecord(row)?.pageToken ?? undefined) !== token) continue;
+    pages.push(row);
+    token = objectRecord(row.result)?.nextPageToken;
+    if (!token || typeof token !== 'string' || token.length > 4096 || pages.length >= 3) break;
+  }
+  return pages;
+}
+
+function explicitSourceChild(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): PersonalReadRequest | undefined {
+  const children = request.sourceReads ?? [];
+  // No continuation or retry may starve another requested source's first read.
+  const unread = children.find((child) => {
+    if (child.temporalIssue || child.scopeIssue) return false;
+    const expected = groundReadToolInput(child, child.firstToolName, {}, []);
+    return !evidence.some((row) => {
+      const args = argsRecord(row);
+      return (
+        row.fromCurrentTask !== false &&
+        row.toolName === child.firstToolName &&
+        ['query', 'timeMin', 'timeMax', 'mode', 'pageToken'].every(
+          (key) => args?.[key] === expected[key],
+        )
+      );
+    });
+  });
+  if (unread) return unread;
+  return children.find((child) => nextRequiredReadTool(child, evidence));
+}
+
 export function detectPersonalReadRequest(
   messages: ReadonlyArray<ReadIntentMessage>,
   options: PersonalReadDetectionOptions = {},
@@ -2158,6 +2366,14 @@ function detectPersonalReadRequestInternal(
     (MUTATION_LEAD.test(latest) && !/\b(?:check|find|search|look|show)\b/i.test(latest))
   ) {
     return null;
+  }
+
+  const explicitSources = explicitPrivateSourceRequest(latest, options);
+  if (explicitSources) {
+    // Keep the exact owner request for source self-echo exclusion and synthesis;
+    // only intent detection uses the retention-constraint mask.
+    explicitSources.sourceReadText = readIntentText(messages[latestIndex]);
+    return explicitSources;
   }
 
   const recentContext = messages
@@ -3134,9 +3350,11 @@ function nextGmailSearchTarget(
   );
   const pageLimit = request.emailReview
     ? EMAIL_REVIEW_MAX_SEARCH_PAGES
-    : hasTypedTripRead(request)
+    : request.explicitSource === 'mail'
       ? 2
-      : MAX_GMAIL_SEARCH_PAGES;
+      : hasTypedTripRead(request)
+        ? 2
+        : MAX_GMAIL_SEARCH_PAGES;
   if (searches.length >= pageLimit) return undefined;
   if (searches.length === 0 && request.mailQuery) return { query: request.mailQuery };
   const latest = searches.at(-1);
@@ -3174,6 +3392,42 @@ export function nextRequiredReadTool(
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): string | undefined {
   if (request.temporalIssue || request.scopeIssue) return undefined;
+  if (request.sourceReads) {
+    const child = explicitSourceChild(request, evidence);
+    return child ? nextRequiredReadTool(child, evidence) : undefined;
+  }
+  if (request.explicitSource === 'calendar') {
+    const pages = explicitCalendarPages(request, evidence);
+    const token = objectRecord(pages.at(-1)?.result)?.nextPageToken;
+    if (!pages.length || (typeof token === 'string' && token && pages.length < 3)) {
+      const attempts = evidence.filter(
+        (row) =>
+          row.fromCurrentTask !== false &&
+          row.toolName === request.firstToolName &&
+          argsRecord(row)?.query === request.queryTerms.join(' ') &&
+          argsRecord(row)?.timeMin === request.timeWindow?.timeMin &&
+          argsRecord(row)?.timeMax === (request.timeWindow?.timeMax ?? request.sourceReadBefore) &&
+          (argsRecord(row)?.pageToken ?? undefined) === (pages.length ? token : undefined),
+      );
+      return attempts.length < 2 ? request.firstToolName : undefined;
+    }
+    return undefined;
+  }
+  if (request.explicitSource === 'mail') {
+    if (!explicitSourceEvidence(request, evidence).length)
+      return evidence.filter(
+        (row) =>
+          row.fromCurrentTask !== false &&
+          row.toolName === 'gmail.search' &&
+          argsRecord(row)?.query === request.mailQuery,
+      ).length < 2
+        ? 'gmail.search'
+        : undefined;
+    // Complete a bounded thread before spending steps on more search metadata.
+    if (compoundThreadReadInput(evidence, request)) return 'gmail.read_thread';
+    if (nextGmailSearchPage(request, evidence)) return 'gmail.search';
+    return undefined;
+  }
   if (request.emailReview) {
     const gmailSearchSucceeded = evidence.some((row) => matchingGmailSearch(row, request));
     if (!gmailSearchSucceeded)
@@ -3374,6 +3628,24 @@ export function groundReadToolInput(
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): Record<string, unknown> {
   if (request.temporalIssue || request.scopeIssue) return {};
+  if (request.sourceReads) {
+    const child = explicitSourceChild(request, evidence);
+    return child && nextRequiredReadTool(child, evidence) === toolName
+      ? groundReadToolInput(child, toolName, {}, evidence)
+      : {};
+  }
+  if (request.explicitSource === 'calendar' && toolName === request.firstToolName) {
+    const pages = explicitCalendarPages(request, evidence);
+    const token = objectRecord(pages.at(-1)?.result)?.nextPageToken;
+    return {
+      query: request.queryTerms.join(' '),
+      maxResults: 50,
+      ...(request.timeWindow
+        ? { timeMin: request.timeWindow.timeMin, timeMax: request.timeWindow.timeMax }
+        : { timeMax: request.sourceReadBefore }),
+      ...(typeof token === 'string' && token ? { pageToken: token } : {}),
+    };
+  }
   if (toolName === 'tools.read_result' && request.kind === 'memory')
     return conversationSearchResultContinuation(request, evidence) ?? {};
   if (toolName === 'conversations.search' && request.conversationQuery) {
@@ -3529,9 +3801,17 @@ export function buildReadToolInput(
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): Record<string, unknown> | null {
   if (request.temporalIssue || request.scopeIssue) return null;
+  if (request.sourceReads) {
+    const child = explicitSourceChild(request, evidence);
+    return child && nextRequiredReadTool(child, evidence) === toolName
+      ? buildReadToolInput(child, toolName, evidence)
+      : null;
+  }
   if (toolName === 'calendar.list_events' && !request.timeWindow) return null;
   if (toolName === 'calendar.search_events' && request.queryTerms.length === 0) return null;
   if (toolName === 'calendar.availability' && !request.timeWindow) return null;
+  if (toolName === 'gmail.read_thread' && request.explicitSource === 'mail')
+    return compoundThreadReadInput(evidence, request) ?? null;
   if (toolName === 'gmail.read_thread' && request.emailReview) {
     return (
       emailReviewNextThreadRead(request.emailReview.selectedThreadIds ?? [], evidence)?.input ??
