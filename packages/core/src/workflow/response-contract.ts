@@ -5,6 +5,7 @@ import {
   gradeAuditedOutput,
   repairPresentationDefects,
 } from '../model-router/audit-graders.js';
+import { billingAuditProjection, renderBillingAudit } from './billing-audit.js';
 import type { BriefingCalendarEvent } from './briefing.js';
 import { calendarEventAnalysisResponse } from './calendar-event-analysis.js';
 import {
@@ -4198,6 +4199,24 @@ export function enforcePersonalReadResponse(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
 ): ResponseContractResult {
+  if (request.billingAuditIssue)
+    return {
+      text: request.billingAuditIssue,
+      blocked: true,
+      unsupported: ['inbox_read'],
+    };
+  if (request.billingAudit) {
+    const projection = billingAuditProjection(request, evidence);
+    return {
+      text: renderBillingAudit({
+        scope: request.billingAudit,
+        rows: projection.rows,
+        coverage: projection.coverage,
+      }),
+      blocked: !projection.coverage.complete,
+      unsupported: projection.coverage.complete ? [] : ['inbox_read'],
+    };
+  }
   if (request.sourceReads) {
     const result = explicitSourceResponse(request, evidence);
     const unsupported = explicitSourceGaps(request, evidence);
@@ -4287,6 +4306,28 @@ function enforcePersonalReadGrounding(
 ): ResponseContractResult | undefined {
   const request = opts?.readRequest;
   if (!request) return undefined;
+  if (request.billingAuditIssue)
+    return {
+      text: request.billingAuditIssue,
+      blocked: true,
+      unsupported: ['inbox_read'],
+      groundingFallback: ['billing audit paused until its bounded local-month scope is known'],
+    };
+  if (request.billingAudit) {
+    const projection = billingAuditProjection(request, evidence);
+    return {
+      text: renderBillingAudit({
+        scope: request.billingAudit,
+        rows: projection.rows,
+        coverage: projection.coverage,
+      }),
+      blocked: !projection.coverage.complete,
+      unsupported: projection.coverage.complete ? [] : ['inbox_read'],
+      groundingFallback: [
+        'billing classifications rendered from received-date-bounded complete Gmail message receipts',
+      ],
+    };
+  }
   if (request.temporalIssue || request.scopeIssue)
     return {
       text: request.temporalIssue ?? request.scopeIssue ?? '',

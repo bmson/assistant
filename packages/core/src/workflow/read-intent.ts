@@ -7,6 +7,12 @@
 
 import { requestedSavedSkillInventory } from '../memory/saved-skill-inventory.js';
 import {
+  type BillingAuditScope,
+  isBillingAuditIntent,
+  requestedBillingAuditMonths,
+  resolveBillingAuditScope,
+} from './billing-audit.js';
+import {
   type CalendarEventAnalysisRequest,
   parseCalendarWeekdayCount,
   requestedCalendarEventAnalysis,
@@ -184,6 +190,9 @@ export interface PersonalReadRequest {
   includeCalendarBriefing?: boolean;
   /** Omit optional lodging and default next-step commentary when brevity is explicit. */
   compactCalendarBriefing?: boolean;
+  /** Bounded owner-local Gmail review of billing evidence. */
+  billingAudit?: BillingAuditScope;
+  billingAuditIssue?: string;
 }
 
 export interface PersonalReadDetectionOptions {
@@ -242,6 +251,7 @@ function explicitlyProhibitsPrivateRead(
   const firstOwnedSource = new RegExp(`\\b${sourceOwner}${allPrivateSurfaces}\\b`, 'i').exec(
     negatedClause,
   );
+  const unownedSourceMention = new RegExp(`\\b${accountSurface}\\b`, 'i').test(negatedClause);
   const listed = firstOwnedSource
     ? negatedClause
         .slice(firstOwnedSource.index + firstOwnedSource[0].length)
@@ -255,6 +265,7 @@ function explicitlyProhibitsPrivateRead(
   const memorySurface = String.raw`(?:(?:my|our|any|the|all)\s+)?(?:saved\s+)?(?:memor(?:y|ies)|(?:earlier|previous|prior|past)\s+(?:chats?|conversations?)|(?:conversation\s+)?history)\b`;
   return (
     direct.test(negatedClause) ||
+    unownedSourceMention ||
     listed ||
     without.test(text) ||
     (surface === 'memory' &&
@@ -445,6 +456,10 @@ const READ_THEN_MUTATION =
  */
 function readThenMutationText(text: string): string {
   return text
+    .replace(
+      /\b(?:no|zero|without)\b[^.!?;\n]{0,220}\b(?:writes?|changes?|updates?)\b[^.!?;\n]*/giu,
+      ' ',
+    )
     .replace(
       /\b(?:do\s+not|don['’]?t|never)\s+(?:add|archive|block|book|cancel|compose|create|delete|draft|edit|email|flag|forward|hold|invite|label|make|mark|move|prepare|remember|remind|reply|reschedule|save|schedule|send|update|write)\b[^.!?\n]*/gi,
       ' ',
@@ -2273,11 +2288,14 @@ function detectPersonalReadRequestInternal(
     }
   }
   if (latestIndex === -1) return null;
-  const latest = stripNegativePrivateWriteConstraints(readIntentText(messages[latestIndex]));
+  const originalLatest = readIntentText(messages[latestIndex]);
+  const latest = stripNegativePrivateWriteConstraints(originalLatest);
+  const readOnlyBillingIntent =
+    isBillingAuditIntent(latest) && !READ_THEN_MUTATION.test(readThenMutationText(originalLatest));
   if (requestedSavedSkillInventory(latest)) return null;
-  const calendarReadProhibited = explicitlyProhibitsPrivateRead(latest, 'calendar');
-  const emailReadProhibited = explicitlyProhibitsPrivateRead(latest, 'email');
-  const memoryReadProhibited = explicitlyProhibitsPrivateRead(latest, 'memory');
+  const calendarReadProhibited = explicitlyProhibitsPrivateRead(originalLatest, 'calendar');
+  const emailReadProhibited = explicitlyProhibitsPrivateRead(originalLatest, 'email');
+  const memoryReadProhibited = explicitlyProhibitsPrivateRead(originalLatest, 'memory');
   if (isConversationLocalContext(latest)) return null;
   const flightContinuation =
     clarificationDepth < 2 && !calendarReadProhibited && !emailReadProhibited
@@ -2419,11 +2437,38 @@ function detectPersonalReadRequestInternal(
   if (
     !latest ||
     /^\s*i\s+(?:read|checked|reviewed|looked|searched|scanned|opened)\b/i.test(latest) ||
-    READ_THEN_MUTATION.test(readThenMutationText(latest)) ||
+    (READ_THEN_MUTATION.test(readThenMutationText(latest)) && !readOnlyBillingIntent) ||
     EMAIL_COMMAND_LEAD.test(latest) ||
     (MUTATION_LEAD.test(latest) && !/\b(?:check|find|search|look|show)\b/i.test(latest))
   ) {
     return null;
+  }
+
+  if (isBillingAuditIntent(latest) && !emailReadProhibited) {
+    const billingMonths = requestedBillingAuditMonths(latest);
+    const scope =
+      billingMonths && options.timeZone
+        ? resolveBillingAuditScope(billingMonths, options.now ?? new Date(), options.timeZone)
+        : undefined;
+    const issue = scope
+      ? undefined
+      : !billingMonths
+        ? 'How many complete local months should I review?'
+        : !options.timeZone
+          ? 'What time zone should I use for the complete local-month boundary?'
+          : 'I could not resolve those complete local months in the owner time zone.';
+    const query = scope?.query ?? '';
+    return {
+      kind: 'email',
+      explicitSource: 'mail',
+      queryTerms: [],
+      firstToolName: 'gmail.search',
+      requiresThreadRead: true,
+      requiresExhaustiveMail: true,
+      mailQuery: query,
+      ...(issue ? { scopeIssue: issue, billingAuditIssue: issue } : {}),
+      ...(scope ? { billingAudit: scope } : {}),
+    };
   }
 
   const explicitSources = explicitPrivateSourceRequest(latest, options);
@@ -3312,9 +3357,11 @@ export function gmailThreadIdsToRead(
   if (request?.emailReview) return request.emailReview.selectedThreadIds ?? [];
   const limit = request?.compoundTripDiscovery
     ? MAX_COMPOUND_TRIP_THREADS_TO_READ
-    : request?.upcomingFlightDiscovery
-      ? 2
-      : MAX_GMAIL_THREADS_TO_READ;
+    : request?.billingAudit
+      ? 6
+      : request?.upcomingFlightDiscovery
+        ? 2
+        : MAX_GMAIL_THREADS_TO_READ;
   return gmailSearchThreadIds(evidence, request).slice(0, limit);
 }
 
@@ -3417,11 +3464,13 @@ function nextGmailSearchTarget(
   );
   const pageLimit = request.emailReview
     ? EMAIL_REVIEW_MAX_SEARCH_PAGES
-    : request.explicitSource === 'mail'
-      ? 2
-      : hasTypedTripRead(request)
+    : request.billingAudit
+      ? 3
+      : request.explicitSource === 'mail'
         ? 2
-        : MAX_GMAIL_SEARCH_PAGES;
+        : hasTypedTripRead(request)
+          ? 2
+          : MAX_GMAIL_SEARCH_PAGES;
   if (searches.length >= pageLimit) return undefined;
   if (searches.length === 0 && request.mailQuery) return { query: request.mailQuery };
   const latest = searches.at(-1);

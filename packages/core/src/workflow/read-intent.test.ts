@@ -21,6 +21,54 @@ const turn = (text: string, prior = '') => [
 ];
 
 describe('detectPersonalReadRequest', () => {
+  it('routes a subscription audit to bounded Gmail only and asks for a zone or month count before reading', () => {
+    const text =
+      'Audit recurring subscriptions evidenced in authorized billing messages over the last 3 complete local calendar months. Separate actual charges, trials, refunds, cancellation notices and uncertain recurring purchases. No login/account change/cancel/unsubscribe/purchase/hold/send/Gmail draft/document/calendar/memory writes.';
+    const request = detectPersonalReadRequest(turn(text), {
+      now: new Date('2026-10-15T12:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!request) throw new Error('Expected billing audit request');
+    expect(request).toMatchObject({
+      kind: 'email',
+      explicitSource: 'mail',
+      firstToolName: 'gmail.search',
+      billingAudit: {
+        months: 3,
+        timeZone: 'America/Los_Angeles',
+        startAt: '2026-07-01T07:00:00.000Z',
+        endAt: '2026-10-01T07:00:00.000Z',
+      },
+    });
+    expect(request?.mailQuery).toContain('after:2026/06/29');
+    expect(request?.mailQuery).toContain('before:2026/10/03');
+    expect(request?.sourceReads).toBeUndefined();
+    expect(request?.memoryQuery).toBeUndefined();
+    expect(request?.firstToolName).not.toMatch(/calendar/);
+    expect(nextRequiredReadTool(request, [])).toBe('gmail.search');
+    expect(buildReadToolInput(request, 'gmail.search', [])).toMatchObject({
+      query: request?.mailQuery,
+      maxResults: 20,
+    });
+    expect(
+      detectPersonalReadRequest(turn(text), { now: new Date('2026-10-15T12:00:00.000Z') }),
+    ).toMatchObject({ billingAuditIssue: expect.stringContaining('time zone') });
+    expect(
+      detectPersonalReadRequest(turn('Audit billing emails over the last 13 complete months.'), {
+        now: new Date('2026-10-15T12:00:00.000Z'),
+        timeZone: 'UTC',
+      }),
+    ).toMatchObject({ billingAuditIssue: expect.stringContaining('How many') });
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'Audit recurring subscriptions from billing emails over the last 3 months. Do not read Gmail.',
+        ),
+        { now: new Date('2026-10-15T12:00:00.000Z'), timeZone: 'UTC' },
+      ),
+    ).toBeNull();
+  });
+
   it('routes the compound next-trip request as bounded read-only discovery, not flight verification', () => {
     const requestText =
       'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';

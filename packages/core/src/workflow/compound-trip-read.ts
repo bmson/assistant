@@ -190,7 +190,7 @@ export function compoundTripThreadIdsToRead(
               : [];
           }),
       ),
-    ].slice(0, 3);
+    ].slice(0, request.billingAudit ? 6 : 3);
   }
   const calendarLodgingTitles = evidence.flatMap((row) => {
     if (
@@ -368,7 +368,9 @@ export function compoundTripThreadReadInputs(
     request.compoundTripDiscovery
       ? MAX_COMPOUND_TRIP_THREADS_TO_READ
       : request.explicitSource === 'mail'
-        ? 3
+        ? request.billingAudit
+          ? 6
+          : 3
         : 2,
   );
   for (const threadId of selectedThreadIds) {
@@ -815,13 +817,14 @@ function completeSearchQuery(rows: ReadonlyArray<ReadToolEvidence>, query: strin
 function validSearchPrefixRows(
   rows: ReadonlyArray<ReadToolEvidence>,
   query: string,
+  limit = 2,
 ): ReadToolEvidence[] {
   const validRows = rows.filter((row) => validSearchPage(row, query));
   const used = new Set<ReadToolEvidence>();
   const prefix: ReadToolEvidence[] = [];
   let cursor: string | undefined;
   const seen = new Set<string>();
-  for (let index = 0; index < 2; index += 1) {
+  for (let index = 0; index < limit; index += 1) {
     const key = cursor ?? '<first-page>';
     if (seen.has(key)) break;
     seen.add(key);
@@ -856,6 +859,7 @@ export function boundedMailSearchPages(
         (row) => text(object(row.args)?.query, 4096)?.toLowerCase() === query.toLowerCase(),
       ),
       query,
+      request.billingAudit ? 3 : 2,
     ),
   );
 }
