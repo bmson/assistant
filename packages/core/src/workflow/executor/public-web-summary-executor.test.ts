@@ -106,4 +106,84 @@ describe('public page summary through the allocated executor', () => {
       });
     },
   );
+
+  it.each(['failed', 'truncated'] as const)(
+    'does not mark an explicit page summary done when its %s fetch receipt is unusable',
+    async (kind) => {
+      const requestedUrl = url;
+      const fetchedUrl = requestedUrl;
+      const fixture: GoldenFixture = {
+        name: `public-page-fetch-${kind}`,
+        event: { source: 'chat', trust: 'owner', payload: { text: request } },
+        taskType: 'chat_turn',
+        pinOwnerRequest: true,
+        plan: {
+          action: 'workflow',
+          reasoning: 'Read the requested public page and summarize its transport options.',
+          steps: ['Read the page.', 'Summarize its transport options.'],
+          missingInfo: [],
+        },
+        script: [
+          { toolCalls: [{ toolName: 'web.fetch', input: { url: fetchedUrl } }] },
+          { text: summary },
+        ],
+        verification: { unavailable: true },
+        tools: {
+          'web.fetch': {
+            schema: z.object({ url: z.string() }),
+            execute: async () => ({
+              status: kind === 'failed' ? 503 : 200,
+              finalUrl: fetchedUrl,
+              text: source,
+              truncated: kind === 'truncated',
+            }),
+          },
+        },
+      };
+      const result = await runGoldenTask(db, agentId, fixture);
+      expect(result.toolNames).toContain('web.fetch');
+      expect(result.status).toBe('needs_attention');
+      expect(result.finalText).not.toContain('R10 links Central');
+      if (kind === 'truncated')
+        expect(result.finalText).toContain('couldn’t verify a complete current fetch');
+      const [check] = await db
+        .select()
+        .from(responseChecks)
+        .where(eq(responseChecks.taskId, result.taskId));
+      if (kind === 'truncated') expect(check).toMatchObject({ blocked: true, unsupportedCount: 1 });
+      else expect(check).toMatchObject({ blocked: false, unsupportedCount: 0 });
+    },
+  );
+
+  it('keeps a complete redirect-bound page read', async () => {
+    const requestedUrl = 'https://transit.example/redirect';
+    const redirectedRequest = request.replace(url, requestedUrl);
+    const redirectFixture: GoldenFixture = {
+      name: 'public-page-redirect-bound',
+      event: { source: 'chat', trust: 'owner', payload: { text: redirectedRequest } },
+      taskType: 'chat_turn',
+      pinOwnerRequest: true,
+      plan: {
+        action: 'workflow',
+        reasoning: 'Read the requested public page and summarize its transport options.',
+        steps: ['Read the page.', 'Summarize its transport options.'],
+        missingInfo: [],
+      },
+      script: [
+        { toolCalls: [{ toolName: 'web.fetch', input: { url: requestedUrl } }] },
+        { text: summary },
+      ],
+      verification: { unavailable: true },
+      tools: {
+        'web.fetch': {
+          schema: z.object({ url: z.string() }),
+          execute: async () => ({ status: 200, finalUrl: url, text: source, truncated: false }),
+        },
+      },
+    };
+    const redirected = await runGoldenTask(db, agentId, redirectFixture);
+    expect(redirected.status).toBe('done');
+    expect(redirected.finalText).toBe(summary);
+    expect(redirected.toolNames).toContain('web.fetch');
+  });
 });

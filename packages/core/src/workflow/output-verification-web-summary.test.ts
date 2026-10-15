@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildOutputVerificationPrompt,
   publicWebClaimFindings,
+  requestedPublicPageReceiptFindings,
   shortBulletFindings,
   verifyFinalOutput,
 } from './output-verification.js';
@@ -104,6 +105,166 @@ describe('source-grounded public page summary recovery', () => {
     expect(result.incomplete).not.toBe(true);
     expect(shortBulletFindings(request, result.text)).toEqual([]);
     expect(publicWebClaimFindings(result.text, evidence)).toEqual([]);
+  });
+
+  it('binds requested page identity through a safe redirect and accepts its final URL citation', async () => {
+    const requestedUrl = 'https://transit.example/redirect';
+    const redirectedRequest = request.replace(url, `${requestedUrl}.`);
+    const redirectEvidence = structuredClone(evidence);
+    const row = redirectEvidence[0];
+    if (!row) throw new Error('Missing source fixture');
+    row.args = { url: requestedUrl };
+    row.result.finalUrl = url;
+    const redirectSummary = summary;
+    const router = {
+      object: async () => ({
+        ok: true,
+        finishReason: 'stop',
+        object: { decision: 'publish', reasons: [] },
+      }),
+    };
+
+    expect(requestedPublicPageReceiptFindings(redirectedRequest, redirectEvidence)).toEqual([]);
+    const result = await verifyFinalOutput(router as never, {
+      taskId: 'redirected-source',
+      request: redirectedRequest,
+      draft: redirectSummary,
+      evidence: redirectEvidence,
+      critical: true,
+    });
+    expect(result.text).toBe(redirectSummary);
+    expect(result.incomplete).not.toBe(true);
+  });
+
+  it('requires a redirect-bound final URL when the owner requests a source link', async () => {
+    const requestedUrl = 'https://transit.example/redirect';
+    const redirectedRequest = request.replace(url, requestedUrl);
+    const redirectEvidence = structuredClone(evidence);
+    const row = redirectEvidence[0];
+    if (!row) throw new Error('Missing source fixture');
+    row.args = { url: requestedUrl };
+    row.result.finalUrl = url;
+    const noCitation = summary.replace(` [Source](${url})`, '');
+    let calls = 0;
+    const result = await verifyFinalOutput(
+      {
+        object: async () => {
+          calls += 1;
+          return {
+            ok: true,
+            finishReason: 'stop',
+            object: { decision: 'publish', reasons: [] },
+          };
+        },
+      } as never,
+      {
+        taskId: 'redirect-without-citation',
+        request: redirectedRequest,
+        draft: noCitation,
+        evidence: redirectEvidence,
+        critical: true,
+      },
+    );
+    expect(calls).toBe(2);
+    expect(result.incomplete).toBe(true);
+    expect(result.text).toContain(url);
+  });
+
+  it.each(['failed', 'stale', 'truncated', 'wrong-page', 'unsafe-final', 'empty-page'] as const)(
+    'fails closed for an explicit page request with a %s receipt, without spending a review call',
+    async (kind) => {
+      const rows = structuredClone(evidence);
+      const row = rows[0];
+      if (!row) throw new Error('Missing source fixture');
+      if (kind === 'failed') row.status = 'failed';
+      if (kind === 'stale') row.fromCurrentTask = false;
+      if (kind === 'truncated') row.result.truncated = true;
+      if (kind === 'wrong-page') row.args = { url: 'https://transit.example/another-page' };
+      if (kind === 'unsafe-final')
+        row.result.finalUrl = 'https://user:pass@transit.example/airport';
+      if (kind === 'empty-page') row.result.text = '  \n';
+      let calls = 0;
+      const result = await verifyFinalOutput(
+        {
+          object: async () => {
+            calls += 1;
+            return { ok: false };
+          },
+        } as never,
+        {
+          taskId: `missing-page-${kind}`,
+          request,
+          draft: summary,
+          evidence: rows,
+          critical: true,
+        },
+      );
+      expect(calls).toBe(0);
+      expect(result).toMatchObject({ incomplete: true, unavailable: false, attempted: false });
+      expect(result.text).toContain('couldn’t verify a complete current fetch');
+      expect(result.text).not.toContain('R10 links Central');
+    },
+  );
+
+  it('requires a distinct matching receipt for every explicitly requested page', async () => {
+    const secondUrl = 'https://transit.example/rail';
+    const multiPageRequest = `Read ${url} and ${secondUrl}, then summarize both pages.`;
+    const result = await verifyFinalOutput({ object: async () => ({ ok: false }) } as never, {
+      taskId: 'missing-one-page',
+      request: multiPageRequest,
+      draft: summary,
+      evidence,
+      critical: true,
+    });
+    expect(result).toMatchObject({ incomplete: true, attempted: false });
+    expect(result.text).not.toContain('R10 links Central');
+  });
+
+  it('does not require a page fetch for a web-search-only summary', async () => {
+    const searchRequest =
+      'Search the web for recent airport transport options and summarize them with source links.';
+    const searchEvidence = [
+      {
+        toolName: 'web.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { query: 'airport transport' },
+        result: { results: [{ title: 'Airport transport', url }] },
+      },
+    ];
+    const draft = `- Rail options vary by route. [Source](${url})`;
+    const result = await verifyFinalOutput(
+      {
+        object: async () => ({
+          ok: true,
+          finishReason: 'stop',
+          object: { decision: 'publish', reasons: [] },
+        }),
+      } as never,
+      {
+        taskId: 'search-only',
+        request: searchRequest,
+        draft,
+        evidence: searchEvidence,
+        critical: true,
+      },
+    );
+    expect(result.text).toBe(draft);
+    expect(result.incomplete).not.toBe(true);
+  });
+
+  it.each([
+    [
+      'quoted rewrite text',
+      `Rewrite this quoted sentence for clarity: “Read ${url} and summarize its contents.”`,
+    ],
+    ['explicit no-browse instruction', `Do not browse; explain how this URL is structured: ${url}`],
+    [
+      'search-results summary',
+      `Search the web for this URL and summarize the search results: ${url}`,
+    ],
+  ])('does not turn %s into a page-fetch requirement', (_name, nonReadRequest) => {
+    expect(requestedPublicPageReceiptFindings(nonReadRequest, [])).toEqual([]);
   });
 
   it.each([

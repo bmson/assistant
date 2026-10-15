@@ -68,7 +68,11 @@ import {
   taskState,
 } from '../machine.js';
 import { selectMemoryReadAnswer } from '../memory-read-answer.js';
-import { verifyFinalOutput } from '../output-verification.js';
+import {
+  requestedPublicPageFallback,
+  requestedPublicPageReceiptFindings,
+  verifyFinalOutput,
+} from '../output-verification.js';
 import { isConversationLocalContext, latestOwnerIntent } from '../owner-intent.js';
 import { PLANNER_VERSION } from '../planner.js';
 import { detectPersonalReadRequest, type PersonalReadRequest } from '../read-intent.js';
@@ -870,10 +874,15 @@ export async function stageModelFinalResponse(
     groundingCorpus: readContext?.groundingCorpus,
     liveCorpus: liveLookups.length > 0 ? liveLookupCorpus(rows) : undefined,
   };
+  const missingPublicPageReceipts = requestedPublicPageReceiptFindings(
+    latestUserText(window) ?? '',
+    evidence,
+  );
   // The named skill is advice, not calendar evidence. Rebind its exact content
   // to the durable receipt before using it to recover a practical briefing.
   let calendarSkillAdvice: string | undefined;
   if (
+    !missingPublicPageReceipts.length &&
     classifiedRead?.includeCalendarBriefing &&
     task.trust === 'owner' &&
     !isForwardedIngest(task)
@@ -911,7 +920,20 @@ export async function stageModelFinalResponse(
   // grounding recovery, or stripped links) are already the safest available
   // answer and must not be reworded by a discretionary model call.
   let initialCheck = enforceResponseContract(pending.text, evidence, contractOptions);
+  if (missingPublicPageReceipts.length) {
+    // A prose summary cannot substitute for fetching the exact public page the
+    // owner requested. Keep this narrow to explicit page URLs and preserve the
+    // gap as incomplete even though the optional reviewer is intentionally skipped.
+    initialCheck = {
+      ...initialCheck,
+      text: requestedPublicPageFallback(),
+      blocked: false,
+      unsupported: [],
+      groundingFallback: missingPublicPageReceipts,
+    };
+  }
   if (
+    !missingPublicPageReceipts.length &&
     classifiedRead?.includeCalendarBriefing &&
     !initialCheck.blocked &&
     (initialCheck.text.match(/^Next step:/gm)?.length ?? 0) > 1
@@ -926,6 +948,7 @@ export async function stageModelFinalResponse(
   }
 
   if (
+    !missingPublicPageReceipts.length &&
     calendarSkillAdvice &&
     classifiedRead?.includeCalendarBriefing &&
     !initialCheck.blocked &&
@@ -981,6 +1004,7 @@ export async function stageModelFinalResponse(
     }
   }
   const canReflect =
+    !missingPublicPageReceipts.length &&
     !initialCheck.blocked &&
     initialCheck.text === pending.text &&
     initialCheck.groundingFallback === undefined;
@@ -1002,7 +1026,7 @@ export async function stageModelFinalResponse(
         attempted: false,
         revised: false,
         unavailable: false,
-        incomplete: false,
+        incomplete: missingPublicPageReceipts.length > 0,
       };
   // A reviser is another generative surface: strip companion tags a second
   // time, then re-run the same authoritative response contract before publish.

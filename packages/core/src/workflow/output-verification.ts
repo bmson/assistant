@@ -208,6 +208,53 @@ export function shortBulletFindings(request: string, text: string): string[] {
   return findings;
 }
 
+function safePublicPageUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  let candidate = value.trim().replace(/[.,!?;:]+$/, '');
+  while (
+    candidate.endsWith(')') &&
+    (candidate.match(/\)/g)?.length ?? 0) > (candidate.match(/\(/g)?.length ?? 0)
+  )
+    candidate = candidate.slice(0, -1);
+  try {
+    const parsed = new URL(candidate);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password)
+      return undefined;
+    parsed.hash = '';
+    return parsed.href;
+  } catch {
+    return undefined;
+  }
+}
+
+function requestedPageUrls(request: string): string[] {
+  const urls = [...request.matchAll(/https?:\/\/[^\s<>]+/gi)]
+    .map((match) => safePublicPageUrl(match[0]))
+    .filter((url): url is string => Boolean(url));
+  if (!urls.length) return [];
+  const instruction = request
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`\n]*`/g, ' ')
+    .replace(/"[^"\n]*"|'[^'\n]*'|“[^”\n]*”|‘[^’\n]*’/g, ' ');
+  if (/\b(?:do not|don't|never)\s+(?:browse|fetch|open|visit|read)\b/i.test(instruction)) return [];
+  const directPageRead = /\b(?:read|fetch|open|visit|load)\b/i.test(instruction);
+  const pageSummary =
+    /\b(?:summari[sz](?:e|ing|ation)|review|analy[sz]e|inspect|extract)\b[^.!?\n]{0,80}\b(?:page|article|site|website|webpage|url|link|contents?|text|source)\b/i.test(
+      instruction,
+    ) ||
+    /\b(?:summari[sz]e|review|analy[sz]e|inspect|extract)\b[^.!?\n]{0,40}https?:\/\//i.test(
+      instruction,
+    ) ||
+    /\bwhat\s+does\b[^?\n]{0,100}\b(?:page|article|site|website|link|url)\b[^?\n]{0,60}\b(?:say|contain|cover|mean)\b/i.test(
+      instruction,
+    );
+  const searchResultsOnly =
+    /\bsearch(?:\s+the\s+web)?\b[^.!?\n]{0,100}\bresults?\b/i.test(instruction) &&
+    !/\b(?:page|article|site|website|webpage|contents?|text|source)\b/i.test(instruction);
+  const asksToReadPage = directPageRead || (pageSummary && !searchResultsOnly);
+  return asksToReadPage ? [...new Set(urls)] : [];
+}
+
 function successfulWebSources(evidence: readonly ActionEvidence[]) {
   return evidence.flatMap((row) => {
     const result =
@@ -220,14 +267,50 @@ function successfulWebSources(evidence: readonly ActionEvidence[]) {
       row.fromCurrentTask === false ||
       !result ||
       typeof result.text !== 'string' ||
+      !result.text.trim() ||
       result.truncated !== false ||
       typeof result.status !== 'number' ||
       result.status < 200 ||
       result.status >= 300
     )
       return [];
-    return [{ text: result.text, url: typeof result.finalUrl === 'string' ? result.finalUrl : '' }];
+    const args =
+      row.args && typeof row.args === 'object' && !Array.isArray(row.args)
+        ? (row.args as Record<string, unknown>)
+        : undefined;
+    return [
+      {
+        text: result.text,
+        url: typeof result.finalUrl === 'string' ? result.finalUrl : '',
+        requestedUrl: safePublicPageUrl(args?.url),
+      },
+    ];
   });
+}
+
+/** Each explicitly requested public page must have its own complete current fetch receipt. */
+export function requestedPublicPageReceiptFindings(
+  request: string,
+  evidence: readonly ActionEvidence[],
+): string[] {
+  const requested = requestedPageUrls(request);
+  if (!requested.length) return [];
+  const sources = successfulWebSources(evidence);
+  const missing = requested.filter(
+    (url) =>
+      !sources.some(
+        (source) => source.requestedUrl === url && Boolean(safePublicPageUrl(source.url)),
+      ),
+  );
+  return missing.length
+    ? [
+        `No complete current web.fetch receipt is bound to ${missing.length} requested public ${missing.length === 1 ? 'page' : 'pages'}.`,
+      ]
+    : [];
+}
+
+export function requestedPublicPageFallback(): string {
+  return 'I couldn’t verify a complete current fetch of the requested page, so I can’t safely summarize its contents.';
 }
 
 function sourceLink(url: string): string {
@@ -249,13 +332,20 @@ function requestedWebLinkFindings(
 ): string[] {
   if (!/\b(?:source|citation)\s+links?\b|\blink\s+to\s+(?:the\s+)?source\b/i.test(request))
     return [];
-  const requested: string[] = request.match(/https?:\/\/[^\s<>]+/g) ?? [];
-  const sources = successfulWebSources(evidence).filter((source) => requested.includes(source.url));
-  return sources.flatMap((source) =>
-    [...draft.matchAll(/\[[^\]\n]+\]\(<?([^\s<>)]*)>?\)/g)].some((match) => match[1] === source.url)
-      ? []
-      : ['The requested source link to a complete current fetched page is missing.'],
+  const requested = requestedPageUrls(request);
+  if (!requested.length) return [];
+  const sources = successfulWebSources(evidence).filter(
+    (source) => source.requestedUrl && requested.includes(source.requestedUrl),
   );
+  const links = [...draft.matchAll(/\[[^\]\n]+\]\(<?([^\s<>)]*)>?\)/g)]
+    .map((match) => safePublicPageUrl(match[1]))
+    .filter((url): url is string => Boolean(url));
+  return sources.flatMap((source) => {
+    const finalUrl = safePublicPageUrl(source.url);
+    return finalUrl && links.includes(finalUrl)
+      ? []
+      : ['The requested source link to a complete current fetched page is missing.'];
+  });
 }
 
 /** A deliberately bounded check for explicit route attributes, not a general
@@ -770,6 +860,8 @@ export async function verifyFinalOutput(
     }
     return `I couldn’t verify the summarized services’ frequencies, stops or required transfers from the retrieved evidence. I can’t safely publish those route details.${url ? ` [Source](${url})` : ''}`;
   };
+  if (requestedPublicPageReceiptFindings(input.request, input.evidence).length)
+    return result(requestedPublicPageFallback(), false, false, true);
   let attempted = false;
   let incompleteCorrectionPending = false;
   let unresolvedFormatPending = false;
