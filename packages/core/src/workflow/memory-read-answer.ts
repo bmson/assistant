@@ -71,7 +71,11 @@ function interleaveSourcePasses<T extends { key: string }>(
 }
 
 /** Source identity and speaker come from the current ledger, never the selector. */
-export function memoryReadSources(evidence: ActionEvidence[], excludeExactRequest?: string) {
+export function memoryReadSources(
+  evidence: ActionEvidence[],
+  excludeExactRequest?: string,
+  onUnassessed?: () => void,
+) {
   const sources: Array<{
     key: string;
     body: string;
@@ -96,6 +100,7 @@ export function memoryReadSources(evidence: ActionEvidence[], excludeExactReques
         const confirmed = fact.ownerConfirmed === true && fact.unconfirmed !== true;
         const inference = fact.source === 'dream' || fact.originTrust === 'assistant';
         const confidence = Number(fact.confidence);
+        if (text(fact.content).length > 4000) onUnassessed?.();
         append(
           {
             key: `memory:${text(fact.id)}`,
@@ -117,6 +122,7 @@ export function memoryReadSources(evidence: ActionEvidence[], excludeExactReques
         if (!match || !text(match.messageId) || !text(match.conversationId) || !text(match.text))
           continue;
         if (excluded && normalizedText(text(match.text)) === excluded) continue;
+        if (text(match.text).length > 4000) onUnassessed?.();
         append(
           {
             key: `message:${text(match.messageId)}`,
@@ -143,25 +149,33 @@ export function memoryReadSources(evidence: ActionEvidence[], excludeExactReques
   const ordered = [...new Map(sources.map((source) => [source.key, source])).values()].sort(
     (left, right) => memorySourcePriority(left) - memorySourcePriority(right),
   );
+  const assessed = (selected: typeof sources) => {
+    if (selected.length < ordered.length) onUnassessed?.();
+    return selected;
+  };
   if (excludeExactRequest && requiresOwnerAssistantContrast(excludeExactRequest)) {
     const owner = ordered.filter((source) => source.speaker === 'Recorded owner message');
     const assistant = ordered.filter(
       (source) => source.speaker === 'Earlier assistant claim (not verified fact)',
     );
-    return [
-      ...interleaveSourcePasses(owner, passByKey, 12),
-      ...interleaveSourcePasses(assistant, passByKey, 8),
-    ].sort((left, right) => memorySourcePriority(left) - memorySourcePriority(right));
+    return assessed(
+      [
+        ...interleaveSourcePasses(owner, passByKey, 12),
+        ...interleaveSourcePasses(assistant, passByKey, 8),
+      ].sort((left, right) => memorySourcePriority(left) - memorySourcePriority(right)),
+    );
   }
-  return [0, 1, 2, 3]
-    .flatMap((priority) =>
-      interleaveSourcePasses(
-        ordered.filter((source) => memorySourcePriority(source) === priority),
-        passByKey,
-        20,
-      ),
-    )
-    .slice(0, 20);
+  return assessed(
+    [0, 1, 2, 3]
+      .flatMap((priority) =>
+        interleaveSourcePasses(
+          ordered.filter((source) => memorySourcePriority(source) === priority),
+          passByKey,
+          20,
+        ),
+      )
+      .slice(0, 20),
+  );
 }
 
 function selectorVisibleSources(

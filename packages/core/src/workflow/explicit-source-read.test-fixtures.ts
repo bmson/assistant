@@ -34,25 +34,34 @@ export function searchResult(query: string, maxResults = 20, ids = ['thread-1'])
     },
   };
 }
-export function threadResult(body = 'Germany booking for 2025-10-10. Confirmation ABC-123.') {
+export function threadResult(
+  body = 'Germany booking for 2025-10-10. Confirmation ABC-123.',
+  additionalBodies: string[] = [],
+) {
+  const bodies = [body, ...additionalBodies];
   return {
     threadId: 'thread-1',
     complete: true,
     hasMore: false,
-    messages: [
-      {
-        messageId: 'mail-1',
-        subject: 'Synthetic booking',
-        text: body,
-        truncated: false,
-        sourceLength: body.length,
-      },
-    ],
+    messages: bodies.map((text, index) => ({
+      messageId: `mail-${index + 1}`,
+      subject: 'Synthetic booking',
+      text,
+      truncated: false,
+      sourceLength: text.length,
+    })),
     receipt: {
       version: 1,
       source: { kind: 'gmail-thread', id: 'thread-1' },
       requested: { start: 0, offset: 0, limit: 20, scope: 'thread-messages' },
-      covered: { start: 0, offset: 0, end: 1, count: 1, total: 1, unavailable: 0 },
+      covered: {
+        start: 0,
+        offset: 0,
+        end: bodies.length,
+        count: bodies.length,
+        total: bodies.length,
+        unavailable: 0,
+      },
       complete: true,
       losses: [],
       continuation: null,

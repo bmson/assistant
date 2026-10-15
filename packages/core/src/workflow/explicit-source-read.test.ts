@@ -48,6 +48,156 @@ const selected = {
 };
 
 describe('explicit private-source orchestration', () => {
+  it.each(['seventh-message', 'trimmed-content', 'source-limit'])(
+    'retains bounded mail input but exposes unassessed evidence: %s',
+    async (limit) => {
+      const read = request();
+      const rows = completedEvidence(read);
+      const row = rows.find((row) => row.toolName === 'gmail.read_thread');
+      if (!row) throw new Error('Missing full read');
+      const decisive =
+        'Confirmation ABC-123 was cancelled; the Germany leg is an airport-only connection.';
+      row.result =
+        limit === 'trimmed-content'
+          ? threadResult(
+              `${threadResult().messages[0]?.text ?? ''}${' context'.repeat(600)} ${decisive}`,
+            )
+          : threadResult(undefined, [
+              ...Array.from(
+                { length: limit === 'source-limit' ? 11 : 5 },
+                () => 'Confirmation ABC-123 booking copy.',
+              ),
+              decisive,
+            ]);
+      const router = {
+        object: vi.fn(async (..._args: unknown[]) => ({ ok: true, object: selected })),
+      };
+      const selection = await selectExplicitSourceAnswer({
+        router: router as never,
+        taskId: 'bounded-mail',
+        request: read,
+        evidence: rows,
+      });
+      const payload = JSON.parse(
+        (router.object.mock.calls[0]?.[1] as { prompt: string } | undefined)?.prompt ?? '{}',
+      );
+      const mail = payload.sources.filter((source: { key: string }) =>
+        source.key.startsWith('mail:'),
+      );
+      expect(mail.length).toBeLessThanOrEqual(6);
+      expect(mail.every((source: { body: string }) => source.body.length <= 4000)).toBe(true);
+      expect(JSON.stringify(payload)).not.toContain(decisive);
+      expect(
+        payload.coverage.find((row: { source: string }) => row.source === 'mail'),
+      ).toMatchObject({ complete: false, issue: expect.stringContaining('not assessed') });
+      expect(
+        payload.coverage
+          .filter((row: { source: string }) => row.source !== 'mail')
+          .every((row: { complete: boolean }) => row.complete),
+      ).toBe(true);
+      const projected = enforceResponseContract(
+        'Every record has been assessed; this is the complete all-time total.',
+        rows,
+        { readRequest: read, explicitSourceSelection: selection },
+      );
+      expect(projected.blocked).toBe(true);
+      expect(projected.text).toContain('mail: coverage incomplete');
+      expect(projected.text).toContain('not assessed');
+      expect(projected.text).not.toContain(decisive);
+      expect(projected.text).not.toContain('Every record has been assessed');
+      expect(projected.text).not.toContain('complete all-time total');
+      if (limit !== 'source-limit') {
+        expect(projected.text).toContain(
+          '[Synthetic booking](https://mail.google.com/mail/u/0/#all/thread-1)',
+        );
+        expect(projected.text).toContain('At least **1 supported country/territory name**');
+      }
+      expect(router.object).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('ignores clipped mail from another task or an invalid full-thread receipt', () => {
+    for (const invalid of ['other-task', 'bad-receipt']) {
+      const read = request();
+      const rows = completedEvidence(read);
+      const row = rows.find((row) => row.toolName === 'gmail.read_thread');
+      if (!row) throw new Error('Missing full read');
+      const result = threadResult('context '.repeat(700));
+      row.result = result;
+      if (invalid === 'other-task') row.fromCurrentTask = false;
+      else result.receipt.source.id = 'wrong-thread';
+      expect(explicitReadSources(read, rows).some((source) => source.key.startsWith('mail:'))).toBe(
+        false,
+      );
+      expect(
+        explicitSourceCoverage(read, rows).find((source) => source.source === 'mail'),
+      ).toMatchObject({ complete: false, issue: undefined });
+    }
+  });
+
+  it('retains per-source gaps for clipped calendar and history content', () => {
+    const read = request();
+    const rows = completedEvidence(read);
+    const calendar = rows.find((row) => row.toolName === 'calendar.search_events');
+    const history = rows.find((row) => row.toolName === 'conversations.search');
+    if (!calendar || !history) throw new Error('Missing source evidence');
+    const event = (calendar.result as { events: Array<{ description?: string }> }).events[0];
+    const match = (history.result as { matches: Array<{ text: string }> }).matches[0];
+    if (!event || !match) throw new Error('Missing source records');
+    event.description = 'context '.repeat(700);
+    match.text += ' context'.repeat(700);
+    const coverage = explicitSourceCoverage(read, rows);
+    expect(
+      coverage
+        .filter((source) => source.source !== 'mail')
+        .every((source) => !source.complete && source.issue?.includes('not assessed')),
+    ).toBe(true);
+    expect(coverage.find((source) => source.source === 'mail')?.complete).toBe(true);
+    expect(explicitReadSources(read, rows).every((source) => source.body.length <= 4000)).toBe(
+      true,
+    );
+  });
+
+  it.each([20, 21])(
+    'reports unassessed history at the shared or underlying record limit: %s',
+    (count) => {
+      const read = request();
+      const rows = completedEvidence(read);
+      const history = rows.find((row) => row.toolName === 'conversations.search');
+      if (!history) throw new Error('Missing history evidence');
+      history.result = {
+        matches: Array.from({ length: count }, (_, index) => {
+          const messageId = `owner-${index}`;
+          const text = `I visited Germany in ${2000 + index}.`;
+          return {
+            messageId,
+            conversationId: 'old-chat',
+            text,
+            role: 'user',
+            origin: 'owner',
+            speakerRevision: conversationMessageSpeakerRevision(messageId, text, 'user', 'owner'),
+          };
+        }),
+      };
+      const sources = explicitReadSources(read, rows);
+      expect(sources).toHaveLength(18);
+      expect(sources.some((source) => source.key.startsWith('mail:'))).toBe(true);
+      expect(sources.some((source) => source.key.startsWith('calendar:'))).toBe(true);
+      const coverage = explicitSourceCoverage(read, rows);
+      expect(coverage.find((source) => source.source === 'history')).toMatchObject({
+        complete: false,
+        issue: expect.stringContaining('not been assessed'),
+      });
+      expect(
+        coverage.filter((source) => source.source !== 'history').every((source) => source.complete),
+      ).toBe(true);
+      if (count > 20)
+        expect(coverage.find((source) => source.source === 'history')?.issue).toContain(
+          'some records or trimmed content were not assessed',
+        );
+    },
+  );
+
   it('preserves both explicit Germany sources instead of forcing saved memory', () => {
     const read = request(germany);
     expect(read.sourceReads?.map((child) => child.explicitSource)).toEqual(['mail', 'calendar']);

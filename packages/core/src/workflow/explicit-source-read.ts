@@ -72,6 +72,7 @@ export function explicitSourceCoverage(
   request: PersonalReadRequest,
   evidence: ReadonlyArray<ReadToolEvidence>,
 ) {
+  const assessment = assessExplicitReadSources(request, evidence);
   return (request.sourceReads ?? []).map((child) => {
     const rows = explicitSourceEvidence(child, evidence);
     const latest = object(rows.at(-1)?.result);
@@ -125,11 +126,15 @@ export function explicitSourceCoverage(
           ? `${child.timeWindow.timeMin} to ${child.timeWindow.timeMax} (${child.timeZone})`
           : `before ${child.sourceReadBefore ?? 'unresolved'}; bounded keyword search`
         : `query: ${child.conversationQuery ?? child.mailQuery ?? ''}`;
+    const issues = [
+      child.temporalIssue ?? child.scopeIssue,
+      ...(assessment.issues.get(child.explicitSource) ?? []),
+    ].filter(Boolean);
     return {
       source: child.explicitSource,
-      complete,
+      complete: complete && issues.length === 0,
       scope,
-      issue: child.temporalIssue ?? child.scopeIssue,
+      issue: issues.length ? issues.join(' ') : undefined,
       attempted: rows.length > 0,
     };
   });
@@ -139,8 +144,21 @@ export function explicitSourceCoverage(
 export function explicitReadSources(
   request: PersonalReadRequest,
   evidence: ReadonlyArray<ReadToolEvidence>,
-  includeOmitted = false,
 ) {
+  return assessExplicitReadSources(request, evidence).sources;
+}
+
+/** Omission metadata stays outside source bodies and uses the same coverage contract. */
+function assessExplicitReadSources(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+) {
+  const issues = new Map<PersonalReadRequest['explicitSource'], Set<string>>();
+  const unassessed = (source: PersonalReadRequest['explicitSource'], issue: string) => {
+    const notes = issues.get(source) ?? new Set<string>();
+    notes.add(issue);
+    issues.set(source, notes);
+  };
   const sources: Array<{ key: string; body: string; label: string; url?: string; owner: boolean }> =
     [];
   for (const child of request.sourceReads ?? []) {
@@ -150,6 +168,11 @@ export function explicitReadSources(
         ...memoryReadSources(
           rows.map((row) => ({ ...row, result: row.result })),
           request.sourceReadText,
+          () =>
+            unassessed(
+              'history',
+              'Retrieved history exceeded the bounded synthesis limits; some records or trimmed content were not assessed.',
+            ),
         ).map((row) => ({
           key: row.key,
           body: row.body,
@@ -164,21 +187,43 @@ export function explicitReadSources(
       );
     }
     if (child.explicitSource === 'mail') {
+      const messages = compoundTripSourceMessages(child, evidence);
+      const receivedIds = new Set(
+        compoundTripCompleteSourceThreads(child, evidence).flatMap((row) => {
+          const messages = object(row.result)?.messages;
+          return Array.isArray(messages)
+            ? messages.map((message) => string(object(message)?.messageId)).filter(Boolean)
+            : [];
+        }),
+      );
+      if (receivedIds.size > messages.length)
+        unassessed(
+          'mail',
+          'Retrieved mail exceeded the source assessment limits; some messages were not assessed.',
+        );
+      if (messages.length > 6)
+        unassessed(
+          'mail',
+          `${messages.length - 6} retrieved mail messages exceeded the six-message synthesis limit and were not assessed.`,
+        );
+      if (messages.slice(0, 6).some((row) => row.text.length > 4000))
+        unassessed(
+          'mail',
+          'Retrieved mail content exceeded the 4,000-character synthesis limit; trimmed content was not assessed.',
+        );
       sources.push(
-        ...compoundTripSourceMessages(child, evidence)
-          .slice(0, 6)
-          .map((row) => ({
-            key: `mail:${row.threadId}:${row.messageId}`,
-            body: row.text.slice(0, 4000),
-            label: row.subject || 'Booking email',
-            url: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(row.threadId)}`,
-            owner: false,
-          })),
+        ...messages.slice(0, 6).map((row) => ({
+          key: `mail:${row.threadId}:${row.messageId}`,
+          body: row.text.slice(0, 4000),
+          label: row.subject || 'Booking email',
+          url: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(row.threadId)}`,
+          owner: false,
+        })),
       );
     }
     if (child.explicitSource === 'calendar') {
       for (const row of explicitCalendarPages(child, evidence)) {
-        for (const raw of ((object(row.result)?.events as unknown[]) ?? []).slice(0, 50)) {
+        for (const [index, raw] of ((object(row.result)?.events as unknown[]) ?? []).entries()) {
           const event = object(raw);
           const id = string(event?.eventId);
           const calendarId = string(event?.calendarId);
@@ -203,19 +248,31 @@ export function explicitReadSources(
             (minimum && interval.end <= Date.parse(minimum))
           )
             continue;
+          if (index >= 50) {
+            unassessed(
+              'calendar',
+              'Retrieved calendar events exceeded the per-page synthesis limit and were not assessed.',
+            );
+            continue;
+          }
+          const body = [
+            string(event.summary),
+            calendarLocalLabel(event, interval, child.timeZone),
+            start,
+            end,
+            string(event.description),
+            string(event.location),
+          ]
+            .filter(Boolean)
+            .join('\n');
+          if (body.length > 4000)
+            unassessed(
+              'calendar',
+              'Retrieved calendar content exceeded the 4,000-character synthesis limit; trimmed content was not assessed.',
+            );
           sources.push({
             key: `calendar:${calendarId}:${id}`,
-            body: [
-              string(event.summary),
-              calendarLocalLabel(event, interval, child.timeZone),
-              start,
-              end,
-              string(event.description),
-              string(event.location),
-            ]
-              .filter(Boolean)
-              .join('\n')
-              .slice(0, 4000),
+            body: body.slice(0, 4000),
             label: `${string(event.calendar) ? `${string(event.calendar)} — ` : ''}${string(event.summary) || 'Calendar event'}`,
             url: calendarLink(event),
             owner: false,
@@ -232,7 +289,13 @@ export function explicitReadSources(
       conflicting.add(source.key);
     unique.set(source.key, source);
   }
-  if (includeOmitted) return [...unique.values()].filter((source) => !conflicting.has(source.key));
+  const family = (key: string) =>
+    key.startsWith('mail:') ? 'mail' : key.startsWith('calendar:') ? 'calendar' : 'history';
+  for (const key of conflicting)
+    unassessed(
+      family(key),
+      'Retrieved versions of a source conflict; that record was not assessed.',
+    );
   // Give every source family room within the model input cap.
   const buckets = ['message:', 'memory:', 'mail:', 'calendar:'].map((prefix) =>
     [...unique.values()].filter(
@@ -243,15 +306,28 @@ export function explicitReadSources(
   let chars = 0;
   while (buckets.some((bucket) => bucket.length) && selected.length < 18) {
     for (const bucket of buckets) {
+      if (selected.length >= 18) break;
       const source = bucket.shift();
       if (!source) continue;
       const size = JSON.stringify(source).length;
-      if (chars + size > 24_000) continue;
+      if (chars + size > 24_000) {
+        unassessed(
+          family(source.key),
+          'Some retrieved records exceeded the bounded synthesis input; they have not been assessed.',
+        );
+        continue;
+      }
       selected.push(source);
       chars += size;
     }
   }
-  return selected;
+  for (const bucket of buckets)
+    for (const source of bucket)
+      unassessed(
+        family(source.key),
+        'Some retrieved records exceeded the bounded synthesis input; they have not been assessed.',
+      );
+  return { sources: selected, issues };
 }
 
 // Standard region names come from the runtime's ICU data, never a task-specific
@@ -701,10 +777,6 @@ export function explicitSourceResponse(
     sourceList.some((source) => source.key.startsWith('calendar:') && !usedKeys.has(source.key))
   )
     gaps.push('Some events in the requested calendar window are absent from the review.');
-  if (explicitReadSources(request, evidence, true).length > sourceList.length)
-    gaps.push(
-      'Some retrieved records exceeded the bounded synthesis input; they have not been assessed.',
-    );
   if (
     valid &&
     request.travelCountryCount &&

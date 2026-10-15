@@ -16,7 +16,12 @@ import {
 } from '@assistant/persistence';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { countries, germany, resultFor } from '../explicit-source-read.test-fixtures.js';
+import {
+  countries,
+  germany,
+  resultFor,
+  threadResult,
+} from '../explicit-source-read.test-fixtures.js';
 import { taskState } from '../machine.js';
 import type { RunContext } from './phases.js';
 import { runStepLoop } from './step-loop.js';
@@ -45,6 +50,8 @@ describe('explicit source bundle through allocated PostgreSQL executor', () => {
     { name: 'Germany', prompt: germany, maxSteps: 6, failCalendar: false },
     { name: 'calendar failure', prompt: countries, maxSteps: 7, failCalendar: true },
     { name: 'step-bound gap', prompt: countries, maxSteps: 4, failCalendar: false },
+    { name: 'seventh-message', prompt: countries, maxSteps: 6, failCalendar: false },
+    { name: 'trimmed-content', prompt: countries, maxSteps: 6, failCalendar: false },
   ])(
     'persists fair source execution and honest terminal state: $name',
     async ({ name, prompt, maxSteps, failCalendar }) => {
@@ -156,7 +163,16 @@ describe('explicit source bundle through allocated PostgreSQL executor', () => {
                       },
                     ],
                   }
-                : resultFor(toolName, args);
+                : toolName === 'gmail.read_thread' && name === 'seventh-message'
+                  ? threadResult(undefined, [
+                      ...Array.from({ length: 5 }, () => 'Confirmation ABC-123 booking copy.'),
+                      'Confirmation ABC-123 was cancelled; only an airport connection remained.',
+                    ])
+                  : toolName === 'gmail.read_thread' && name === 'trimmed-content'
+                    ? threadResult(
+                        `${threadResult().messages[0]?.text ?? ''}${' context'.repeat(600)} Confirmation ABC-123 was cancelled; only an airport connection remained.`,
+                      )
+                    : resultFor(toolName, args);
             const [stored] = await db
               .insert(toolCalls)
               .values({
@@ -257,7 +273,9 @@ describe('explicit source bundle through allocated PostgreSQL executor', () => {
         steps: [],
         missingInfo: [],
       });
-      const incomplete = failCalendar || name === 'step-bound gap' || prompt === germany;
+      const synthesisLimited = name === 'seventh-message' || name === 'trimmed-content';
+      const incomplete =
+        failCalendar || name === 'step-bound gap' || prompt === germany || synthesisLimited;
       if (prompt === countries && !failCalendar && name !== 'step-bound gap') {
         const synthesis = router.object.mock.calls[0]?.[1] as { prompt: string } | undefined;
         const payload = JSON.parse(synthesis?.prompt ?? '{}');
@@ -300,6 +318,21 @@ describe('explicit source bundle through allocated PostgreSQL executor', () => {
       expect(answer).toContain('calendar:');
       if (failCalendar || name === 'step-bound gap')
         expect(answer).toContain('coverage incomplete');
+      if (synthesisLimited) {
+        expect(answer).toContain('mail: coverage incomplete');
+        expect(answer).toContain('not assessed');
+        expect(answer).toContain(
+          '[Synthetic booking](https://mail.google.com/mail/u/0/#all/thread-1)',
+        );
+        const payload = JSON.parse(
+          (router.object.mock.calls[0]?.[1] as { prompt: string } | undefined)?.prompt ?? '{}',
+        );
+        expect(JSON.stringify(payload)).not.toContain('only an airport connection remained');
+        expect(
+          payload.sources.filter((source: { key: string }) => source.key.startsWith('mail:'))
+            .length,
+        ).toBeLessThanOrEqual(6);
+      }
       if (prompt === germany) {
         expect(answer).toContain('I cannot confirm when you last completed this trip');
         expect(answer).not.toContain('country/territory');
