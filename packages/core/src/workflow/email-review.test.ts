@@ -1536,6 +1536,31 @@ describe('bounded no-send email review', () => {
     expect(answer).not.toContain('seven-day');
   });
 
+  it('does not claim complete-thread verification in a bounded latest-mail summary', () => {
+    const answer = formatEmailReviewAnswer(
+      [],
+      {
+        searchPages: 1,
+        uniqueThreads: 2,
+        searchComplete: true,
+        unavailableMetadata: 0,
+        selectedThreads: 1,
+        completeThreads: 0,
+        contextLimitedThreads: 1,
+        ownerOrChronologyExcluded: 0,
+        alreadyAnsweredThreads: 0,
+        notEligibleThreads: 0,
+        obviousNewslettersExcluded: 0,
+      },
+      false,
+      { query: 'in:inbox -from:me', requestedCount: 1, latestUnanswered: true },
+    );
+
+    expect(answer).toContain('I checked 0 of 1 selected inbox threads');
+    expect(answer).toContain('bounded by the available search pages and candidate pool');
+    expect(answer).not.toContain('checked against its complete thread');
+  });
+
   it('allows a bounded ten-ID reserve pool while keeping final answers capped at five', () => {
     const evidence = Array.from({ length: EMAIL_REVIEW_MAX_RANK_POOL }, (_, index) =>
       search(`request-${index}`),

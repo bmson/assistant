@@ -1757,7 +1757,7 @@ export function formatEmailReviewAnswer(
   const reviewRange = scope?.startAt && scope.endAt ? 'local-calendar-day' : 'day';
   const lines = [
     scope?.latestUnanswered
-      ? `I checked ${fullyChecked} of ${coverage.selectedThreads} selected inbox threads in newest-first order and prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'} for review. Each candidate was checked against its complete thread; this is bounded by the available search pages and candidate pool, so it cannot establish that no newer request exists beyond that coverage.`
+      ? `I checked ${fullyChecked} of ${coverage.selectedThreads} selected inbox threads in newest-first order and prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'} for review. This review is bounded by the available search pages and candidate pool, so it cannot establish that no newer request exists beyond that coverage.`
       : `I completed verified reply checks for ${fullyChecked} of ${coverage.selectedThreads} selected threads from a bounded ${scope?.windowDays ?? 7}-${reviewRange} mail scan and prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'} for review. Complete reads are not the same as completed assessments. This is a provisional prioritization of the scanned results, not a guarantee that these are the only or globally most important requests.`,
   ];
   if (drafts.length > 0)

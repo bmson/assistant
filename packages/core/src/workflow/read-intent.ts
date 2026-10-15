@@ -473,6 +473,14 @@ function directLatestUnansweredEmailIntent(text: string): boolean {
     /\b(?:if|whether|hypothetically|what if|should i|could i|would i)\b/i.test(text)
   )
     return false;
+  // A request to find mail that does not require a reply is the opposite of
+  // this lookup, even though it contains the same "need to reply" words.
+  if (
+    /\b(?:do not|don't|don’t|does not|doesn't|doesn’t|did not|didn't|didn’t)\s+need(?:s)?\s+(?:(?:me\s+)?to\s+)?reply\b|\bno need(?: for me)?\s+to\s+reply\b|\bneed(?:s)?\s+not\s+(?:(?:me\s+)?to\s+)?reply\b/i.test(
+      text,
+    )
+  )
+    return false;
   return (
     /\b(?:latest|newest|most recent)\b[^.!?\n]{0,100}\b(?:message|email|thread)\b/i.test(text) &&
     /\b(?:in|from)\s+(?:my|our)\s+(?:inbox|mailbox|email|mail)\b/i.test(text) &&

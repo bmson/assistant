@@ -519,6 +519,23 @@ describe('detectPersonalReadRequest', () => {
     });
   });
 
+  it('does not treat an explicitly non-required reply as an unanswered-message lookup', () => {
+    for (const text of [
+      "What's the latest message in my inbox that I don't need to reply to?",
+      'What is the latest email in my inbox that I do not need to reply to?',
+      'Show me the latest message in my inbox that needs no reply.',
+    ]) {
+      const request = detectPersonalReadRequest(turn(text));
+      expect(request?.emailReview?.latestUnanswered).not.toBe(true);
+    }
+
+    expect(
+      detectPersonalReadRequest(
+        turn("What's the latest message in my inbox that I still need to reply to?"),
+      )?.emailReview?.latestUnanswered,
+    ).toBe(true);
+  });
+
   it('does not route hypothetical or mixed-send latest-message requests as read-only reviews', () => {
     expect(
       detectPersonalReadRequest(
