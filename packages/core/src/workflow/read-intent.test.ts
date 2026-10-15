@@ -524,6 +524,9 @@ describe('detectPersonalReadRequest', () => {
       "What's the latest message in my inbox that I don't need to reply to?",
       'What is the latest email in my inbox that I do not need to reply to?',
       'Show me the latest message in my inbox that needs no reply.',
+      "What's the latest message in my inbox that doesn't need my reply?",
+      'What is the newest email in my inbox that does not need my response?',
+      'Show the latest message in my inbox that is not awaiting my reply.',
     ]) {
       const request = detectPersonalReadRequest(turn(text));
       expect(request?.emailReview?.latestUnanswered).not.toBe(true);
