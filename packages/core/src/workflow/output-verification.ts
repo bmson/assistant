@@ -227,7 +227,61 @@ function safePublicPageUrl(value: unknown): string | undefined {
   }
 }
 
-function requestedPageUrls(request: string): string[] {
+function nativeWorkspaceResourceId(raw: string): string | undefined {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:' || url.username || url.password || url.port) return undefined;
+    if (url.hostname === 'docs.google.com') {
+      const match =
+        /^\/(?:document|spreadsheets|presentation)\/d\/([A-Za-z0-9_-]{10,200})(?:\/|$)/.exec(
+          url.pathname,
+        );
+      return match?.[1];
+    }
+    if (url.hostname === 'drive.google.com') {
+      const pathMatch = /^\/file\/d\/([A-Za-z0-9_-]{10,200})(?:\/|$)/.exec(url.pathname);
+      if (pathMatch?.[1]) return pathMatch[1];
+      if (url.pathname === '/open') {
+        const id = url.searchParams.get('id');
+        return id && /^[A-Za-z0-9_-]{10,200}$/.test(id) ? id : undefined;
+      }
+    }
+  } catch {
+    /* Not a native Workspace resource URL. */
+  }
+  return undefined;
+}
+
+function hasCurrentNativeRead(resourceId: string, evidence: readonly ActionEvidence[]): boolean {
+  return evidence.some((row) => {
+    if (
+      row.status !== 'succeeded' ||
+      row.fromCurrentTask === false ||
+      !['docs.get', 'drive.read'].includes(row.toolName)
+    )
+      return false;
+    const args =
+      row.args && typeof row.args === 'object' && !Array.isArray(row.args)
+        ? (row.args as Record<string, unknown>)
+        : undefined;
+    const result =
+      row.result && typeof row.result === 'object' && !Array.isArray(row.result)
+        ? (row.result as Record<string, unknown>)
+        : undefined;
+    const requestedId = row.toolName === 'docs.get' ? args?.documentId : args?.fileId;
+    return (
+      requestedId === resourceId &&
+      result !== undefined &&
+      result.ok !== false &&
+      result.complete === true &&
+      result.truncated !== true &&
+      typeof result.text === 'string' &&
+      result.text.trim().length > 0
+    );
+  });
+}
+
+function requestedPageUrls(request: string, evidence: readonly ActionEvidence[]): string[] {
   const urls = [...request.matchAll(/https?:\/\/[^\s<>]+/gi)]
     .map((match) => safePublicPageUrl(match[0]))
     .filter((url): url is string => Boolean(url));
@@ -236,7 +290,8 @@ function requestedPageUrls(request: string): string[] {
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/`[^`\n]*`/g, ' ')
     .replace(/"[^"\n]*"|'[^'\n]*'|“[^”\n]*”|‘[^’\n]*’/g, ' ');
-  if (/\b(?:do not|don't|never)\s+(?:browse|fetch|open|visit|read)\b/i.test(instruction)) return [];
+  if (/\b(?:do not|don['’]t|never)\s+(?:browse|fetch|open|visit|read)\b/i.test(instruction))
+    return [];
   const directPageRead = /\b(?:read|fetch|open|visit|load)\b/i.test(instruction);
   const pageSummary =
     /\b(?:summari[sz](?:e|ing|ation)|review|analy[sz]e|inspect|extract)\b[^.!?\n]{0,80}\b(?:page|article|site|website|webpage|url|link|contents?|text|source)\b/i.test(
@@ -252,7 +307,14 @@ function requestedPageUrls(request: string): string[] {
     /\bsearch(?:\s+the\s+web)?\b[^.!?\n]{0,100}\bresults?\b/i.test(instruction) &&
     !/\b(?:page|article|site|website|webpage|contents?|text|source)\b/i.test(instruction);
   const asksToReadPage = directPageRead || (pageSummary && !searchResultsOnly);
-  return asksToReadPage ? [...new Set(urls)] : [];
+  return asksToReadPage
+    ? [...new Set(urls)].filter((url) => {
+        const resourceId = nativeWorkspaceResourceId(url);
+        // Native Workspace resources are covered only by their own successful,
+        // current, ID-bound read receipt. Public pages in the same request stay gated.
+        return !resourceId || !hasCurrentNativeRead(resourceId, evidence);
+      })
+    : [];
 }
 
 function successfulWebSources(evidence: readonly ActionEvidence[]) {
@@ -293,7 +355,7 @@ export function requestedPublicPageReceiptFindings(
   request: string,
   evidence: readonly ActionEvidence[],
 ): string[] {
-  const requested = requestedPageUrls(request);
+  const requested = requestedPageUrls(request, evidence);
   if (!requested.length) return [];
   const sources = successfulWebSources(evidence);
   const missing = requested.filter(
@@ -332,7 +394,7 @@ function requestedWebLinkFindings(
 ): string[] {
   if (!/\b(?:source|citation)\s+links?\b|\blink\s+to\s+(?:the\s+)?source\b/i.test(request))
     return [];
-  const requested = requestedPageUrls(request);
+  const requested = requestedPageUrls(request, evidence);
   if (!requested.length) return [];
   const sources = successfulWebSources(evidence).filter(
     (source) => source.requestedUrl && requested.includes(source.requestedUrl),

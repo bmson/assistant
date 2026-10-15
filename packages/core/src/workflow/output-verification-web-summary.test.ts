@@ -253,12 +253,55 @@ describe('source-grounded public page summary recovery', () => {
     expect(result.incomplete).not.toBe(true);
   });
 
+  it('accepts a current ID-bound native Google Doc read without demanding web.fetch', () => {
+    const documentUrl = 'https://docs.google.com/document/d/document123456/edit';
+    const nativeRead = [
+      {
+        toolName: 'docs.get',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { documentId: 'document123456' },
+        result: { text: 'The source document contains the reviewed policy.', complete: true },
+      },
+    ];
+    expect(
+      requestedPublicPageReceiptFindings(
+        `Read ${documentUrl} and summarize its contents.`,
+        nativeRead,
+      ),
+    ).toEqual([]);
+  });
+
+  it('keeps the public-page receipt requirement when a request mixes a native Doc and public page', () => {
+    const documentUrl = 'https://docs.google.com/document/d/document123456/edit';
+    const mixedRequest = `Read ${documentUrl} and ${url}, then summarize both sources.`;
+    const nativeRead = [
+      {
+        toolName: 'docs.get',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { documentId: 'document123456' },
+        result: { text: 'The source document contains the reviewed policy.', complete: true },
+      },
+    ];
+    expect(requestedPublicPageReceiptFindings(mixedRequest, nativeRead)).toEqual([
+      'No complete current web.fetch receipt is bound to 1 requested public page.',
+    ]);
+    expect(requestedPublicPageReceiptFindings(mixedRequest, [...nativeRead, ...evidence])).toEqual(
+      [],
+    );
+  });
+
   it.each([
     [
       'quoted rewrite text',
       `Rewrite this quoted sentence for clarity: “Read ${url} and summarize its contents.”`,
     ],
     ['explicit no-browse instruction', `Do not browse; explain how this URL is structured: ${url}`],
+    [
+      'curly-apostrophe no-browse instruction',
+      `Don’t browse; explain how this URL is structured: ${url}`,
+    ],
     [
       'search-results summary',
       `Search the web for this URL and summarize the search results: ${url}`,
