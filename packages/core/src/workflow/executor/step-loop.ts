@@ -1,4 +1,5 @@
 import {
+  createPostgresConversationSearchRepository,
   createPostgresExecutionContextRepository,
   createPostgresExecutionEvidenceRepository,
   createPostgresSkillLibraryRepository,
@@ -81,6 +82,10 @@ import {
   validEmailReviewSelection,
 } from '../email-review.js';
 import {
+  type ExplicitSourceSelection,
+  selectExplicitSourceAnswer,
+} from '../explicit-source-read.js';
+import {
   detectFutureWatchIntent,
   futureWatchRecoveryCallMatches,
   shouldAttemptFutureWatchRecovery,
@@ -155,6 +160,7 @@ import {
   isMissionSessionTask,
   isUnattendedGoalSession,
 } from './context-helpers.js';
+import { refreshConversationSearchEvidence } from './conversation-search-refresh.js';
 import {
   SCHEDULE_DIRECTIVE,
   stageFinalResponse,
@@ -2312,10 +2318,66 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               initialCandidateCount,
         );
       }
-      const checked = enforcePersonalReadResponse(
+      let checked = enforcePersonalReadResponse(
         readRequest,
         readToolEvidence.map((row) => ({ ...row, result: row.result })),
       );
+      if (restrictedChecklistResume && readRequest.sourceReads) {
+        // A correction/cancellation cannot enter the general finalizer, which
+        // also handles the original request's live reads and external effects.
+        // Synthesize only this revision-bound lookup, using the same history
+        // refresh and deterministic contract as ordinary source-bundle answers.
+        const boundIds = new Set(readToolEvidence.map((row) => row.id));
+        const durable = await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id });
+        const boundRows = durable.filter((row) => boundIds.has(row.id));
+        const refreshed = await refreshConversationSearchEvidence(boundRows, {
+          agentId: task.agentId,
+          ...(task.conversationId ? { currentConversationId: task.conversationId } : {}),
+          repository:
+            deps.persistence?.conversationSearch ?? createPostgresConversationSearchRepository(db),
+        });
+        const binding = JSON.stringify({
+          lane: rc.checklistCorrection ? 'correction' : 'cancellation',
+          ownerMessageId:
+            rc.checklistCorrection?.ownerMessageId ?? rc.checklistCancellation?.ownerMessageId,
+          revision:
+            rc.checklistCorrection?.revision ?? rc.checklistCancellation?.cancellationRevision,
+          outcomeId: correctionOutcomeId ?? cancellationOutcomeId,
+          request: readRequest,
+          evidenceIds: boundRows.map((row) => row.id).sort(),
+        });
+        const stored = state.plannerState.restrictedSourceRead;
+        const cached =
+          stored && typeof stored === 'object' && !Array.isArray(stored)
+            ? (stored as Record<string, unknown>)
+            : undefined;
+        let selection =
+          cached?.binding === binding && cached.completed === true
+            ? (cached.selection as ExplicitSourceSelection)
+            : undefined;
+        if (cached?.binding !== binding && state.step < task.maxSteps) {
+          // Consume an existing step and record intent before a paid model call.
+          // An interrupted attempt is never retried implicitly on resume.
+          state.step += 1;
+          state.plannerState.restrictedSourceRead = { binding, completed: false };
+          if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state)))
+            return LOST_LEASE;
+          selection = await selectExplicitSourceAnswer({
+            router,
+            taskId: task.id,
+            request: readRequest,
+            evidence: refreshed.rows,
+          });
+          state.plannerState.restrictedSourceRead = { binding, completed: true, selection };
+          if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state)))
+            return LOST_LEASE;
+        }
+        checked = enforceResponseContract(checked.text, refreshed.rows, {
+          readRequest,
+          requestText: readRequest.sourceReadText,
+          ...(selection ? { explicitSourceSelection: selection } : {}),
+        });
+      }
       if (rc.checklistCancellation) {
         const checklist = state.requestChecklist;
         const selectedOutcome = rc.checklistCancellation.activeOutcomes.find(
@@ -4218,10 +4280,17 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         ...readToolEvidence,
         compoundTripExtractionEvidence(compoundTripExtraction) as (typeof readToolEvidence)[number],
       ];
-    const checked = enforcePersonalReadResponse(
-      readRequest,
-      readToolEvidence.map((row) => ({ ...row, result: row.result })),
-    );
+    const checked =
+      restrictedChecklistResume && readRequest.sourceReads
+        ? enforceResponseContract(
+            '',
+            readToolEvidence.map((row) => ({ ...row, result: row.result })),
+            { readRequest, requestText: readRequest.sourceReadText },
+          )
+        : enforcePersonalReadResponse(
+            readRequest,
+            readToolEvidence.map((row) => ({ ...row, result: row.result })),
+          );
     rc.window.push({ role: 'assistant', content: checked.text } as ModelMessage);
     const needsAttention = personalReadNeedsAttention(readRequest, checked);
     return stageReadFinal({

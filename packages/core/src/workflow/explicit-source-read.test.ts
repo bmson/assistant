@@ -564,6 +564,13 @@ describe('explicit private-source orchestration', () => {
     expect(projection.text).not.toContain('cedar-event');
     expect(projection.text).not.toContain('country');
     expect(projection.blocked).toBe(false);
+    const reversed = structuredClone(synthesis);
+    const scheduled = reversed.claims?.[0];
+    if (!scheduled) throw new Error('fixture');
+    scheduled.text = 'Cedar review is not scheduled for 2026-10-16.';
+    const reversedProjection = explicitSourceResponse(read, rows, reversed);
+    expect(reversedProjection.blocked).toBe(true);
+    expect(reversedProjection.text).not.toContain('Cedar review is not scheduled');
     const noPlan = explicitSourceResponse(read, rows, {
       ...synthesis,
       claims: synthesis.claims?.filter((claim) => claim.kind !== 'suggestion'),
@@ -657,4 +664,33 @@ describe('explicit private-source orchestration', () => {
       expect(projection.text).toContain('could not reliably complete');
     },
   );
+  it('preserves a sourced negative assertion and rejects replacing it with a positive claim', () => {
+    const read = request('Compare Cedar from Assistant history and my emails.');
+    const rows = completedEvidence(read);
+    const mail = rows.find((row) => row.toolName === 'gmail.read_thread');
+    if (!mail) throw new Error('fixture');
+    const quote = 'Cedar review is not scheduled for 2026-10-16.';
+    mail.result = threadResult(quote);
+    const answer: ExplicitSourceSelection = {
+      status: 'complete',
+      addressed: ['summary'],
+      selections: [
+        {
+          sourceKey: 'mail:thread-1:mail-1',
+          quote,
+          classification: 'record',
+          country: null,
+          date: '2026-10-16',
+        },
+      ],
+      claims: [{ text: quote, evidence: [0] }],
+    };
+    expect(explicitSourceResponse(read, rows, answer).blocked).toBe(false);
+    const claim = answer.claims?.[0];
+    if (!claim) throw new Error('fixture');
+    claim.text = 'Cedar review is scheduled for 2026-10-16.';
+    const reversed = explicitSourceResponse(read, rows, answer);
+    expect(reversed.blocked).toBe(true);
+    expect(reversed.text).not.toContain('Cedar review is scheduled');
+  });
 });

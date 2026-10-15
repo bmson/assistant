@@ -472,11 +472,14 @@ function validClaim(
     return false;
   if (words(claim.text).some((word) => !framingWords.has(word) && !vocabulary.has(word)))
     return false;
-  if (
-    /\b(?:not|never|no|didn't|didn’t)\b/iu.test(quotes) &&
-    !/\b(?:not|never|no|didn't|didn’t)\b/iu.test(claim.text)
-  )
-    return false;
+  // Both dropping and inserting negation can reverse a source-local fact.
+  // Uncertainty framing remains available in the deterministic projection;
+  // an ambiguous generative paraphrase is left unresolved.
+  const negated = (value: string) =>
+    /\b(?:not|never|no|cannot|can't|can’t|didn't|didn’t|isn't|isn’t|wasn't|wasn’t|doesn't|doesn’t)\b/iu.test(
+      value,
+    );
+  if (negated(quotes) !== negated(claim.text)) return false;
   if (
     /\b(?:visited|went to|travelled to|traveled to|stayed in|attended)\b/iu.test(claim.text) &&
     !rows.every(
