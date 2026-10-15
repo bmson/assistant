@@ -2057,21 +2057,46 @@ function dedupeSameEventReplyDrafts(
   const datePattern =
     /\b(?:20\d{2}-\d{2}-\d{2}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?(?:[,]?\s+20\d{2})?|(?:0?[1-9]|1[0-2])\/(?:0?[1-9]|[12]\d|3[01])(?:\/20\d{2})?)\b/gi;
   const eventWords = /\b(?:meeting|event|party|program|gathering|session)\b/gi;
-  const eventTimeIn = (body: string): string => {
+  const eventTimeIn = (body: string): { value?: string; ambiguous: boolean } => {
     const normalize = (hour: string, minute: string | undefined, period: string) =>
       `${Number(hour) % 12 || 12}:${minute ?? '00'}${period.toUpperCase()}`;
-    const completeRange =
-      /\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\s*(?:-|–|to)\s*\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b/i.exec(
-        body,
-      );
-    if (completeRange?.[1] && completeRange[3])
-      return normalize(completeRange[1], completeRange[2], completeRange[3]);
-    const inheritedPeriodRange =
-      /\b(\d{1,2})(?::(\d{2}))?\s*(?:-|–|to)\s*\d{1,2}(?::\d{2})?\s*(AM|PM)\b/i.exec(body);
-    if (inheritedPeriodRange?.[1] && inheritedPeriodRange[3])
-      return normalize(inheritedPeriodRange[1], inheritedPeriodRange[2], inheritedPeriodRange[3]);
-    const single = /\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b/i.exec(body);
-    return single?.[1] && single[3] ? normalize(single[1], single[2], single[3]) : '';
+    const clock =
+      '(\\d{1,2})(?::(\\d{2}))?\\s*(AM|PM)?(?:\\s*(?:-|–|to)\\s*\\d{1,2}(?::\\d{2})?\\s*(AM|PM))?';
+    const startsAt = new RegExp(
+      `\\b(?:meeting|event|party|program|gathering|session)\\b[^.!?\\n]{0,140}?\\b(?:starts?(?:\\s+at)?|begins?(?:\\s+at)?|runs?\\s+from|scheduled\\s+(?:to\\s+begin|for)|from)\\s+${clock}\\b`,
+      'gi',
+    );
+    const eventTimes = [...body.matchAll(startsAt)].flatMap((match) => {
+      const period = match[3] ?? match[4];
+      return match[1] && period ? [normalize(match[1], match[2], period)] : [];
+    });
+    const distinctEventTimes = [...new Set(eventTimes)];
+    if (distinctEventTimes.length > 1) return { ambiguous: true };
+    if (distinctEventTimes.length === 1) return { value: distinctEventTimes[0], ambiguous: false };
+
+    // Some invitations put the event clock directly after its date instead of
+    // using an explicit "starts at" phrase. Accept that only when the date
+    // sentence has one clock and contains no RSVP/deadline wording.
+    const adjacentTimes: string[] = [];
+    for (const date of body.matchAll(datePattern)) {
+      if (!date[0] || date.index === undefined) continue;
+      const end = date.index + date[0].length;
+      const suffix = body.slice(end);
+      const sentenceEnd = suffix.search(/[.!?\n]/);
+      const sentence = sentenceEnd >= 0 ? suffix.slice(0, sentenceEnd) : suffix;
+      if (/\b(?:by|before|until|due|deadline|rsvp)\b/i.test(sentence)) continue;
+      const adjacent = new RegExp(`\\b(?:at|from)\\s+${clock}\\b`, 'i').exec(sentence);
+      const period = adjacent?.[3] ?? adjacent?.[4];
+      if (adjacent?.[1] && period) adjacentTimes.push(normalize(adjacent[1], adjacent[2], period));
+    }
+    const distinctAdjacentTimes = [...new Set(adjacentTimes)];
+    if (distinctAdjacentTimes.length > 1) return { ambiguous: true };
+    if ([...body.matchAll(/\b\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b/gi)].length > 1)
+      return { ambiguous: true };
+    return {
+      ...(distinctAdjacentTimes[0] ? { value: distinctAdjacentTimes[0] } : {}),
+      ambiguous: false,
+    };
   };
   const eventVenueIn = (body: string): string => {
     const labeled = /\b(?:venue|location)\s*[:=-]\s*([^.!?\n,]{2,60})/i.exec(body)?.[1];
@@ -2131,13 +2156,15 @@ function dedupeSameEventReplyDrafts(
       );
     const eventDate = eventDateIn(`${subject} ${body}`);
     const sender = latest ? singleEmail(latest.from) : '';
-    const eventTime = eventTimeIn(body);
+    const eventClock = eventTimeIn(body);
+    const eventTime = eventClock.value;
     const eventVenue = eventVenueIn(body);
     const duplicateBaseKey =
       sender &&
       subject &&
       subjectIdentityWords.length > 0 &&
       eventDate &&
+      !eventClock.ambiguous &&
       /\brsvp\b/i.test(`${subject} ${body}`)
         ? `${sender}|${subject}|${eventDate}`
         : item.thread.threadId;

@@ -753,6 +753,88 @@ describe('bounded no-send email review', () => {
     expect(rendered).toContain('prepared 2 reply drafts');
   });
 
+  it('deduplicates by the event clock rather than RSVP deadline clocks', () => {
+    const makeAssessed = (threadId: string, body: string) => {
+      const source = messages(threadId);
+      const latest = required(source.at(-1), 'latest message');
+      latest.subject = 'Reminder to RSVP for: PTA Meeting - October 21, 2026';
+      latest.text = body;
+      latest.sourceLength = body.length;
+      const thread = required(
+        emailReviewCompleteThread(threadId, 'owner@example.com', [
+          search(threadId),
+          read(threadId, source),
+        ]),
+        'complete thread',
+      );
+      const item = {
+        ...required(validAnswer(threadId).items[0], 'assessment'),
+        recipient: thread.recipient,
+        whyQuote: body,
+        deadline: {
+          messageId: thread.latestMessageId,
+          quote: body.match(/RSVP by [^.]+/)?.[0] ?? 'RSVP requested',
+        },
+        draftBody: 'Thanks for the reminder. Could you clarify the RSVP details for this event?',
+      };
+      return required(
+        validateEmailReviewAnswer({ items: [item] }, [thread])?.items[0],
+        'validated',
+      );
+    };
+    const rangeAndDeadlineFive = makeAssessed(
+      'pta-range-deadline-five',
+      'Please RSVP by 5:00 PM for the PTA meeting on October 21, 2026. The meeting at Cafetorium runs from 6:00–7:30 PM.',
+    );
+    const sameStartDeadlineSix = makeAssessed(
+      'pta-start-deadline-six',
+      'Please RSVP by 6:00 PM for the PTA meeting on October 21, 2026. The meeting at Cafetorium starts at 6:00 PM.',
+    );
+    const conflictingStart = makeAssessed(
+      'pta-start-seven',
+      'Please RSVP by 5:00 PM for the PTA meeting on October 21, 2026. The meeting at Cafetorium starts at 7:00 PM.',
+    );
+    const selected = [rangeAndDeadlineFive, sameStartDeadlineSix, conflictingStart];
+    const rendered = formatEmailReviewAnswer(selected, {
+      ...emailReviewCoverage(
+        selected.map((item) => item.thread.threadId),
+        selected.map((item) => item.thread),
+        selected.map((item) => search(item.thread.threadId)),
+      ),
+      searchComplete: true,
+    });
+
+    expect(
+      rendered.match(/### Reminder to RSVP for: PTA Meeting - October 21, 2026/g),
+    ).toHaveLength(2);
+    expect(rendered).toContain('runs from 6:00–7:30 PM');
+    expect(rendered).toContain('starts at 7:00 PM');
+    expect(rendered).toContain('Additional request in a duplicate reminder:');
+    expect(rendered).toContain('prepared 2 reply drafts');
+
+    const ambiguousSelected = [
+      makeAssessed(
+        'pta-ambiguous-five-six',
+        'Please RSVP by 5:00 PM for the PTA meeting on October 21, 2026. We will also discuss the 6:00 PM volunteer briefing and 7:00 PM fundraiser.',
+      ),
+      makeAssessed(
+        'pta-ambiguous-five-seven',
+        'Please RSVP by 5:00 PM for the PTA meeting on October 21, 2026. We will also discuss the 6:00 PM volunteer briefing and 8:00 PM fundraiser.',
+      ),
+    ];
+    const ambiguousRendered = formatEmailReviewAnswer(ambiguousSelected, {
+      ...emailReviewCoverage(
+        ambiguousSelected.map((item) => item.thread.threadId),
+        ambiguousSelected.map((item) => item.thread),
+        ambiguousSelected.map((item) => search(item.thread.threadId)),
+      ),
+      searchComplete: true,
+    });
+    expect(
+      ambiguousRendered.match(/### Reminder to RSVP for: PTA Meeting - October 21, 2026/g),
+    ).toHaveLength(2);
+  });
+
   it('recognizes a dated removal outcome as an explicit deadline', () => {
     const sourceMessages = messages('donation-deadline');
     const latest = required(sourceMessages.at(-1), 'latest message');
