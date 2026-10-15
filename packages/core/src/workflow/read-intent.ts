@@ -251,10 +251,15 @@ function privateReadProhibitionClauses(text: string): string[] {
     const maxEnd = Math.min(start + 180, nextPrefix, text.length);
     const remaining = text.slice(start, maxEnd);
     const sentenceEnd = remaining.search(/[.!?;\n]/u);
+    // A later retention/action prohibition is a separate instruction too.
+    // It must not turn its object (for example “new memories”) into this
+    // earlier lookup prohibition's object.
+    const nextInstruction = remaining.search(/\b(?:do\s+not|don['’]?t|never|without)\b/iu);
     const positiveStart = remaining.search(positiveRead);
     const end = Math.min(
       maxEnd,
       sentenceEnd < 0 ? maxEnd : start + sentenceEnd,
+      nextInstruction < 0 ? maxEnd : start + nextInstruction,
       positiveStart < 0 ? maxEnd : start + positiveStart,
     );
     return text.slice(start, end);

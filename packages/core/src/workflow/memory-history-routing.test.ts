@@ -228,6 +228,20 @@ describe('named historical exercises and retention constraints', () => {
     });
   });
 
+  it.each([
+    'What do my saved memories say about telescope preferences? Do not use email and do not save new memories.',
+    'What do my saved memories say about telescope preferences? Without using email and without saving new memories.',
+  ])(
+    'does not mistake a following retention constraint for a saved-memory read ban: %s',
+    (text) => {
+      expect(detectPersonalReadRequest(turn(text))).toMatchObject({
+        kind: 'memory',
+        firstToolName: 'memory.recall',
+        searchSavedMemory: true,
+      });
+    },
+  );
+
   it('preserves a saved-memory read after a same-sentence retention restriction', () => {
     const request = detectPersonalReadRequest(
       turn(
