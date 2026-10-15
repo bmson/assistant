@@ -521,7 +521,7 @@ describe('historical conversation read finalization', () => {
     expect(answer).toContain(
       `conversation ${conversationId}; message ${historicalMessages[1]?.id}`,
     );
-    expect(answer).toContain('historical records, not a fresh check');
+    expect(answer).toContain('not evidence of owner intent');
     expect(answer).not.toContain('The current verified departure time is 9:15 AM.');
     expect(answer).not.toContain('TEST-DO-NOT-REPEAT');
   });
