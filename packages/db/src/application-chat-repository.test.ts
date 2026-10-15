@@ -594,7 +594,8 @@ describe('PostgreSQL application chat persistence', () => {
     const agent = await repository.resolveAgent();
     const first = await repository.getOrCreatePrimaryConversation(agent.id);
     const second = await repository.getOrCreatePrimaryConversation(agent.id);
-    conversationIds.push(first.id);
+    // This is the allocator seed's shared primary conversation, not a fixture
+    // owned by this suite; do not add it to the cleanup set.
 
     expect(first.isPrimary).toBe(true);
     expect(first.archivedAt).toBeNull();
