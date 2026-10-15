@@ -561,7 +561,7 @@ describe('bounded billing mail audit', () => {
     });
     expect(unknownCurrencyOnly).not.toContain('Supported recurring amounts');
     expect(rendered).toContain('17 USD per month');
-    expect(rendered).toContain('Mail-stated merchant');
+    expect(rendered).toContain('Mail-stated billing details');
     expect(rendered).toContain('Owner Forwarder');
   });
 
@@ -798,7 +798,7 @@ describe('bounded billing mail audit', () => {
     });
     expect(rendered).toContain('Evidence clauses: 12 shown of 24 assessed.');
     expect(rendered).toContain('Additional assessed clauses not shown (12)');
-    expect(rendered).toContain('Mail-stated merchant');
+    expect(rendered).toContain('Mail-stated billing details');
     expect(rendered).toContain('Sender');
     expect(rendered).not.toContain('secret');
     expect(rendered).not.toContain('token=private');

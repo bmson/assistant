@@ -691,8 +691,7 @@ export function renderBillingAudit(input: {
     lines.push(
       '',
       `Evidence clauses: ${visibleRows.length} shown of ${rows.length} assessed.`,
-      '| Mail-stated merchant | Sender | Received | Evidence | Amount / cadence | Source |',
-      '|---|---|---|---|---|---|',
+      'Mail-stated billing details:',
     );
     for (const row of visibleRows) {
       const amount = formatAmount(row.amount);
@@ -700,7 +699,8 @@ export function renderBillingAudit(input: {
       const url = `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(row.message.threadId)}`;
       const label = conciseQuote(row.message.subject) || 'Message';
       lines.push(
-        `| ${escapeCell(row.merchant)} | ${escapeCell(senderFrom(row.message))} | ${row.receivedAt.slice(0, 10)} | mail-reported ${row.classification}: “${escapeCell(row.quote)}” | ${amount}${cadence ? ` / ${cadence}` : ''} | [${escapeCell(label)}](${url}) |`,
+        `- **${escapeCell(row.merchant)}** — mail-reported ${row.classification}; ${amount}${cadence ? ` / ${cadence}` : ''}. [${escapeCell(label)}](<${url}>)`,
+        `  Received ${row.receivedAt.slice(0, 10)} · Sender: ${escapeCell(senderFrom(row.message))}. Evidence: “${escapeCell(row.quote)}”`,
       );
     }
     const displayedIds = new Set(visibleRows.map((row) => row.message.messageId));

@@ -152,6 +152,7 @@ describe('weeklyCalendarPlan', () => {
           { start: first.start, end: first.end },
           { start: second.start, end: second.end },
           { start: '2026-10-14T17:00:00-07:00', end: '2026-10-14T20:30:00-07:00' },
+          { start: '2026-10-14T17:15:00-07:00', end: '2026-10-14T17:45:00-07:00' },
         ],
         pages: [
           {
@@ -172,6 +173,7 @@ describe('weeklyCalendarPlan', () => {
     expect(result.text).toContain(
       'Evening-heavy estimate: Wed, Oct 14, 3.5 checked busy hours after 5 PM',
     );
+    expect(result.text).toContain('unique occupied time; overlapping intervals count once');
     expect(result.text).toContain('Tight turnaround: School review ends Tue, Oct 13, 6:45 PM');
     expect(result.text).toContain(
       'Team practice starts Tue, Oct 13, 7:00 PM (15 min; attendance/travel unverified)',

@@ -1003,7 +1003,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       const hours = Math.round(stats.busyMs / 60_000 / 15) / 4;
       if (hours >= 3)
         eveningAssessments.push(
-          `Evening-heavy estimate: ${labelDay(day)}, ${hours} checked busy hours after 5 PM (3-hour heuristic)`,
+          `Evening-heavy estimate: ${labelDay(day)}, ${hours} checked busy hours after 5 PM (unique occupied time; overlapping intervals count once; 3-hour heuristic)`,
         );
       const scheduled = [...stats.events.values()]
         .map((event) => ({ event, interval: parseEventInterval(event) }))
