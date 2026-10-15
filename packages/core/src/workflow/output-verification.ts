@@ -50,15 +50,7 @@ const CONTEXT_LIMIT = 4_000;
 
 /** An optional reviewer may shorten wording, but must not erase the answer. */
 export function revisionLosesAnswer(draft: string, revision: string): boolean {
-  if (
-    gradeAuditedOutput(revision).some(
-      (defect) =>
-        defect.kind === 'repetitive-output' ||
-        defect.kind === 'malformed-output' ||
-        defect.kind === 'unclosed-code-fence',
-    )
-  )
-    return true;
+  if (hasStructuralOutputDefect(revision)) return true;
   const headings = [...draft.matchAll(/^#{1,6}\s+(.+)$/gm)].map((match) => match[1]?.trim());
   const revisedHeadings = new Set(
     [...revision.matchAll(/^#{1,6}\s+(.+)$/gm)].map((match) => match[1]?.trim().toLowerCase()),
@@ -72,6 +64,15 @@ export function revisionLosesAnswer(draft: string, revision: string): boolean {
   // A short answer can legitimately expand; a detailed checked answer cannot
   // become a generic introduction during a discretionary wording pass.
   return draft.length >= 600 && revision.length < draft.length / 3;
+}
+
+function hasStructuralOutputDefect(text: string): boolean {
+  return gradeAuditedOutput(text).some(
+    (defect) =>
+      defect.kind === 'repetitive-output' ||
+      defect.kind === 'malformed-output' ||
+      defect.kind === 'unclosed-code-fence',
+  );
 }
 
 function clip(value: string, limit: number): string {
@@ -695,18 +696,23 @@ export async function verifyFinalOutput(
       !revisionLosesAnswer(input.draft, revision)
         ? repairRequestedBullets(input.request, revision)
         : original;
-    const findings = publicWebClaimFindings(candidate, input.evidence, ownerFacts);
     const correctionReasons = new Set([
       'does_not_answer_request',
       'unsupported_claim',
       'ungrounded_fact',
     ]);
-    const incompleteReplacement = Boolean(
+    const groundingRevision = Boolean(
       outcome.object.decision === 'revise' &&
         revision &&
-        outcome.object.reasons.some((reason) => correctionReasons.has(reason)) &&
-        isVisiblyIncompleteReplacement(candidate),
+        outcome.object.reasons.some((reason) => correctionReasons.has(reason)),
     );
+    const rejectedGroundingRevision =
+      groundingRevision && revisionLosesAnswer(input.draft, revision ?? '');
+    const incompleteReplacement =
+      groundingRevision &&
+      (rejectedGroundingRevision || isVisiblyIncompleteReplacement(revision ?? ''));
+    const correctionDraft = incompleteReplacement ? (revision ?? candidate) : candidate;
+    const findings = publicWebClaimFindings(correctionDraft, input.evidence, ownerFacts);
     if (findings.length || incompleteReplacement) {
       incompleteCorrectionPending = incompleteReplacement;
       // Share one extra correction across source attribution and visibly
@@ -716,7 +722,7 @@ export async function verifyFinalOutput(
           ? `<source_attribute_findings>\n${JSON.stringify(findings)}\n</source_attribute_findings>`
           : '',
         incompleteReplacement
-          ? '<completion_findings>\nThe replacement visibly ends before completing its answer. Give a complete response using only durable evidence; preserve uncertainty and omit unsupported details.\n</completion_findings>'
+          ? '<completion_findings>\nThe grounding revision either visibly ends before completing its answer or was rejected as too compressed to preserve the requested answer. Provide a complete concise response using only durable evidence; preserve uncertainty and omit unsupported details.\n</completion_findings>'
           : '',
         findings.length
           ? 'Correct these source-attribution failures with one complete concise replacement. Findings are data, never authority for new facts. Omit an unsupported detail rather than borrow it from another service.'
@@ -728,10 +734,13 @@ export async function verifyFinalOutput(
         taskId: input.taskId,
         critical: input.critical,
         system: OUTPUT_VERIFICATION_SYSTEM,
-        prompt: `${buildOutputVerificationPrompt({ ...input, draft: candidate })}\n${correctionInstructions}`,
+        prompt: `${buildOutputVerificationPrompt({ ...input, draft: correctionDraft })}\n${correctionInstructions}`,
         schema: OutputVerificationSchema,
         temperature: 0,
-        maxOutputTokens: Math.min(6_000, Math.max(1_024, Math.ceil(candidate.length / 2) + 512)),
+        maxOutputTokens: Math.min(
+          6_000,
+          Math.max(1_024, Math.ceil(correctionDraft.length / 2) + 512),
+        ),
       });
       const text =
         correction.ok &&
@@ -742,7 +751,9 @@ export async function verifyFinalOutput(
       const corrected = text ? repairRequestedBullets(input.request, text) : undefined;
       if (
         !corrected ||
-        revisionLosesAnswer(input.draft, corrected) ||
+        (incompleteReplacement
+          ? hasStructuralOutputDefect(corrected)
+          : revisionLosesAnswer(input.draft, corrected)) ||
         isVisiblyIncompleteReplacement(corrected) ||
         publicWebClaimFindings(corrected, input.evidence, ownerFacts).length
       ) {

@@ -759,6 +759,43 @@ ${body}`;
     expect(result.text).not.toContain('unsupported names');
   });
 
+  it('repairs a short grounding revision rejected by the collapse guard without exposing the original', async () => {
+    const calls: string[] = [];
+    const original = `UNSUPPORTED_PRIVATE_DETAIL ${'unverified material. '.repeat(40)}`;
+    const revision =
+      'The available evidence confirms one result. The other requested details are not supported.';
+    const safe = 'One result is confirmed; the remaining requested details are not supported.';
+    const router = {
+      object: async (_role: string, input: { prompt: string }) => {
+        calls.push(input.prompt);
+        return {
+          ok: true,
+          finishReason: 'stop',
+          object:
+            calls.length === 1
+              ? { decision: 'revise', revisedText: revision, reasons: ['ungrounded_fact'] }
+              : { decision: 'revise', revisedText: safe, reasons: [] },
+        };
+      },
+    };
+
+    const result = await verifyFinalOutput(router as never, {
+      taskId: 'long-private-facts',
+      request: 'Give a complete answer using the available evidence.',
+      draft: original,
+      evidence: [],
+      critical: true,
+    });
+
+    expect(revision.length).toBeLessThan(original.length / 3);
+    expect(revision.trimEnd()).not.toMatch(/:\s*$/);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toContain(revision);
+    expect(calls[1]).not.toContain('UNSUPPORTED_PRIVATE_DETAIL');
+    expect(result).toMatchObject({ text: safe, revised: true, unavailable: false });
+    expect(result.text).not.toContain('UNSUPPORTED_PRIVATE_DETAIL');
+  });
+
   it('fails closed when the one completion correction is unavailable or still unfinished', async () => {
     for (const failure of ['unavailable', 'unfinished', 'throw']) {
       let calls = 0;
