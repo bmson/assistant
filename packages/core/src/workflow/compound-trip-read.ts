@@ -4002,9 +4002,11 @@ export function compoundTripReadProjection(
     const segment = candidate?.segment;
     if (!candidate || !segment) return [];
     const instant = sourceLocalInstant(segment);
-    const clockConflict =
-      instant !== undefined && Math.abs(instant - Date.parse(candidate.instant)) > 5 * 60_000;
-    if (!clockConflict && !candidate.calendarConflicts?.length) return [];
+    const calendarInstant = Date.parse(candidate.instant);
+    const comparableClocks = instant !== undefined && Number.isFinite(calendarInstant);
+    const clockConflict = comparableClocks && Math.abs(instant - calendarInstant) > 5 * 60_000;
+    const clockAgreement =
+      comparableClocks && instant === calendarInstant && !candidate.calendarConflicts?.length;
     const metadata = [
       candidate.calendarConflicts?.includes('flight-number')
         ? `flight ${candidate.flightNumber} vs ${segment.flightNumber}`
@@ -4020,7 +4022,7 @@ export function compoundTripReadProjection(
         : '',
     ].filter(Boolean);
     return [
-      `Calendar ${markdownText(text(candidate.event.summary, 120))}, start ${calendarField(candidate.event, 'start')}; booking ${segment.flightNumber}, ${segment.departureDate} ${segment.departureTime} (${segment.departureTimeZone ?? 'zone unknown'}). ${metadata.length ? `${metadata.map(markdownText).join('; ')}. ` : ''}${clockConflict ? 'Clocks differ after time-zone conversion. ' : ''}Verify which schedule is current.${calendarSource(candidate.event) ? ` [Calendar](${calendarSource(candidate.event)})` : ''}${mailLinks.get(segment.threadId) ? ` [Booking](${mailLinks.get(segment.threadId)})` : ''}`,
+      `Calendar ${markdownText(text(candidate.event.summary, 120))}, start ${calendarField(candidate.event, 'start')}; booking ${segment.flightNumber}, ${segment.departureDate} ${segment.departureTime} (${segment.departureTimeZone ?? 'zone unknown'}). ${metadata.length ? `${metadata.map(markdownText).join('; ')}. ` : ''}${clockConflict ? 'Clocks differ after time-zone conversion. ' : clockAgreement ? 'Departure clocks agree after time-zone conversion. ' : comparableClocks && metadata.length ? 'Clock comparison does not resolve conflicting itinerary metadata. ' : comparableClocks ? 'Departure clocks differ within the five-minute itinerary matching tolerance; verify the exact departure time. ' : 'Departure clock agreement remains unverified. '}Itinerary association; independent flight identity remains unverified.${clockConflict || metadata.length ? ' Verify which schedule is current.' : ''}${calendarSource(candidate.event) ? ` [Calendar](${calendarSource(candidate.event)})` : ''}${mailLinks.get(segment.threadId) ? ` [Booking](${mailLinks.get(segment.threadId)})` : ''}`,
     ];
   });
   const conciseSummary = flight?.segment
@@ -4170,9 +4172,17 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
       unknowns.add('Flight chronology conflicts; verify the itinerary before travel.');
     else if (/calendar.*(?:conflict|differ)|booking.*(?:conflict|differ)/i.test(gap)) {
       if (!view.calendarNotes.length) unknowns.add(gap);
-    } else if (/coverage|matching email threads?[^.]*unread|booking-email search/i.test(gap))
-      unknowns.add('Calendar/email coverage is incomplete.');
-    else if (/time.zone|source clock|chronological order/i.test(gap))
+    } else if (/coverage|matching email threads?[^.]*unread|booking-email search/i.test(gap)) {
+      if (!projection.calendarComplete) unknowns.add('Calendar coverage is incomplete.');
+      if (!projection.gmailSearchComplete || !projection.threadsComplete)
+        unknowns.add('Booking-email search or thread coverage is incomplete.');
+      if (
+        projection.calendarComplete &&
+        projection.gmailSearchComplete &&
+        projection.threadsComplete
+      )
+        unknowns.add(gap);
+    } else if (/time.zone|source clock|chronological order/i.test(gap))
       unknowns.add('Flight time zones and exact connection timing remain unverified.');
     else if (/connection|nonstop|connecting leg/i.test(gap))
       unknowns.add('Connection/nonstop completeness remains unverified.');

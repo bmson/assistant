@@ -4962,6 +4962,76 @@ describe('compound trip read projection', () => {
     expect(compoundTripReadProjection(read, evidence).flight).toBeUndefined();
   });
 
+  it('keeps agreeing calendar sources linked without promoting clock agreement into independent flight identity', () => {
+    const read = request();
+    const projection = compoundTripReadProjection(
+      read,
+      addEmptyCompletedMailQueries([
+        completeCalendarEvents([calendarFlight()]),
+        ...bookingEmailEvidence(),
+      ]),
+    );
+    const answer = renderCompoundTripReadResponse(projection);
+    expect(answer).toContain('[Calendar](https://www.google.com/calendar/event?eid=abc)');
+    expect(answer).toContain('Departure clocks agree after time-zone conversion');
+    expect(answer).toContain(
+      'Itinerary association; independent flight identity remains unverified',
+    );
+    expect(answer).not.toContain('You are attending');
+    expect(answer).not.toContain('Clocks differ');
+  });
+
+  it('does not present matching clock values as agreement when flight metadata conflicts', () => {
+    const read = request();
+    const event = { ...calendarFlight(), summary: 'Outbound flight LH 888 to Berlin' };
+    const projection = compoundTripReadProjection(read, [
+      completeCalendarEvents([event]),
+      ...bookingEmailEvidence(),
+    ]);
+    const answer = renderCompoundTripReadResponse(projection);
+    expect(answer).toContain('flight LH888 vs LH777');
+    expect(answer).toContain('Clock comparison does not resolve conflicting itinerary metadata');
+    expect(answer).not.toContain('clocks agree');
+    expect(answer).toContain('[Calendar](');
+    expect(projection.blocked).toBe(true);
+  });
+
+  it('does not call a small departure-clock discrepancy exact agreement', () => {
+    const read = request();
+    const event = { ...calendarFlight(), start: '2026-10-17T10:14:00+02:00' };
+    const projection = compoundTripReadProjection(read, [
+      completeCalendarEvents([event]),
+      ...bookingEmailEvidence(),
+    ]);
+    const answer = renderCompoundTripReadResponse(projection);
+    expect(answer).toContain(
+      'Departure clocks differ within the five-minute itinerary matching tolerance',
+    );
+    expect(answer).not.toContain('clocks agree');
+    expect(answer).toContain('10:14:00+02:00');
+  });
+
+  it('labels only mail coverage incomplete when the full calendar is checked', () => {
+    const read = request();
+    const mail = bookingEmailEvidence();
+    const result = mail[0]?.result as Record<string, unknown>;
+    const receipt = result.receipt as Record<string, unknown>;
+    result.complete = false;
+    receipt.complete = false;
+    receipt.losses = ['provider-page'];
+    const projection = compoundTripReadProjection(read, [
+      completeCalendarEvents([calendarFlight()]),
+      ...mail,
+    ]);
+    expect(projection.calendarComplete).toBe(true);
+    expect(projection.gmailSearchComplete).toBe(false);
+    const answer = renderCompoundTripReadResponse(projection);
+    expect(answer).toContain('Booking-email search or thread coverage is incomplete');
+    expect(answer).not.toContain('Calendar coverage is incomplete');
+    expect(answer).not.toContain('Calendar/email coverage');
+    expect(projection.blocked).toBe(true);
+  });
+
   it('reports an actual calendar-versus-booking time conflict only after both zones normalize', () => {
     const read = request();
     const calendar = completeCalendarEvents([
@@ -4971,6 +5041,7 @@ describe('compound trip read projection', () => {
     expect(projection.text).toContain('clocks conflict after time-zone conversion');
     const concise = renderCompoundTripReadResponse(projection);
     expect(concise).toContain('Clocks differ after time-zone conversion');
+    expect(concise).not.toContain('clocks agree');
     expect(concise).toContain('11:10:00+02:00');
     expect(concise).toContain('10:10');
     expect(concise).toContain('[Calendar](');
@@ -5722,6 +5793,27 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     );
     expect(answer).toContain('fixture-return-0');
     expect(answer).not.toContain('fixture-return-5');
+  });
+
+  it('keeps a source-linked itinerary association without claiming agreement for unlabeled booking zones', () => {
+    const { read, rows } = fixture();
+    const calendar = rows[0];
+    if (!calendar) throw new Error('Missing fixture calendar source');
+    const event = (calendar.result as { events: Array<Record<string, unknown>> }).events[0];
+    if (!event) throw new Error('Missing fixture calendar');
+    event.summary = 'CPH → BOS flight';
+    event.description = 'Egencia 123456789012';
+    const projection = compoundTripReadProjection(read, rows);
+    const answer = renderCompoundTripReadResponse(projection);
+    expect(answer).toContain(
+      '[Calendar](https://calendar.google.com/calendar/event?eid=fixture-return)',
+    );
+    expect(answer).toContain('Same itinerary reference');
+    expect(answer).toContain('clock difference cannot be verified without the booking time zone');
+    expect(answer).not.toContain('clocks agree');
+    expect(answer).not.toContain('Clocks differ after');
+    expect(projection.flight).toBeUndefined();
+    expect(projection.blocked).toBe(true);
   });
 
   it.each([true, false])(

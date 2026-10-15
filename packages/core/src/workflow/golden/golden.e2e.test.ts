@@ -759,18 +759,34 @@ describe('golden tasks', () => {
     expect(result.status).toBe('needs_attention');
     expect(result.extractCalls).toBe(1);
     expect(result.finalText).toContain(
-      `Dated outbound leg: LH777 SFO→FRA; departs ${departureDay} 10:10 Europe/Berlin; arrives ${departureDay} 11:45 Europe/Berlin`,
+      '| Leg | Departure | Arrival | Source |\n|---|---|---|---|\n|',
     );
     expect(result.finalText).toContain(
-      `Source-backed connected flight segments: LH777 SFO→FRA; departs ${departureDay} 10:10 Europe/Berlin; arrives ${departureDay} 11:45 Europe/Berlin; LH101 FRA→BER; departs ${departureDay} 12:30 Europe/Berlin; arrives ${departureDay} 13:20 Europe/Berlin`,
+      `| Outbound: LH777 SFO→FRA | ${departureDay} 10:10 (Europe/Berlin) | ${departureDay} 11:45 (Europe/Berlin) |`,
     );
-    expect(result.finalText).toContain('Separately sourced hotel candidate: Hotel Linden, Berlin');
-    expect(result.finalText).toContain('treated the connection as an inference');
-    expect(result.finalText).toContain('the clocks agree after time-zone conversion');
+    expect(result.finalText).toContain(
+      `| Outbound: LH101 FRA→BER | ${departureDay} 12:30 (Europe/Berlin) | ${departureDay} 13:20 (Europe/Berlin) |`,
+    );
+    expect(result.finalText).toContain(
+      'Hotel candidate (city/date match; separate booking): **Hotel Linden**',
+    );
+    expect(result.finalText).toContain(address);
+    expect(result.finalText).toContain(`${departureDay} to ${checkout}`);
+    expect(result.finalText).toContain(
+      'Flight–hotel association inferred from matching arrival/check-in date and city; separate bookings.',
+    );
+    expect(result.finalText).toContain('Departure clocks agree after time-zone conversion');
+    expect(result.finalText).toContain('independent flight identity remains unverified');
     expect(result.finalText).toContain('Booking-email search or thread coverage is incomplete');
-    expect(result.finalText).toContain('Dated outbound leg: LH777 SFO→FRA');
-    expect(result.finalText).toContain('source-reported fare EUR 4.90');
-    expect(result.finalText).toContain('source-reported fare EUR 62.00');
+    expect(result.finalText).not.toContain('Calendar coverage is incomplete');
+    expect(result.finalText).toContain(`Transfer candidate: **BER Airport → ${address}**`);
+    expect(result.finalText).toContain(
+      '| Option | Fare | Duration | Source |\n|---|---|---|---|\n|',
+    );
+    expect(result.finalText).toContain('| Public transport | EUR 4.90 | 35 minutes |');
+    expect(result.finalText).toContain('| Taxi | EUR 62.00 | 45 minutes |');
+    const visibleAnswer = result.finalText.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+    expect(visibleAnswer.split(/\s+/).length).toBeLessThanOrEqual(330);
     expect(result.finalText).toContain(
       'https://calendar.google.com/calendar/event?eid=golden-trip',
     );
