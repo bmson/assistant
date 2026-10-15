@@ -240,6 +240,53 @@ function bookingEmailEvidence(
   ] as ReadToolEvidence[];
 }
 
+function sameMessageCancellationReplacementEvidence() {
+  const read = request();
+  const evidence = [
+    completeCalendarEvents([
+      {
+        ...calendarFlight(),
+        summary: 'Outbound flight CD 456 to Berlin',
+        description: 'Arrival airport: BER. Booking reference: NEW-556',
+      },
+    ]),
+    ...bookingEmailEvidence(),
+  ];
+  const flightRead = evidence.find(
+    (row) =>
+      row.toolName === 'gmail.read_thread' &&
+      (row.args as Record<string, unknown> | undefined)?.threadId === 'flight-booking-thread',
+  );
+  const result = flightRead?.result as Record<string, unknown> | undefined;
+  const messages = result?.messages as Array<Record<string, unknown>> | undefined;
+  const flightMessage = messages?.[0];
+  if (!flightMessage) throw new Error('Expected complete flight booking source');
+  flightMessage.text = [
+    'Outbound flight',
+    'Flight number: AB 123',
+    'Departure date: 2026-10-16',
+    'Departure time: 10:10 Europe/Berlin',
+    'Arrival date: 2026-10-16',
+    'Arrival time: 13:10 Europe/Berlin',
+    'From: SFO',
+    'To: BER',
+    'Booking reference: OLD-123',
+    'Flight AB 123 (booking reference: OLD-123) has been cancelled.',
+    'Outbound flight',
+    'Flight number: CD 456',
+    'Departure date: 2026-10-17',
+    'Departure time: 10:10 Europe/Berlin',
+    'Arrival date: 2026-10-17',
+    'Arrival time: 13:10 Europe/Berlin',
+    'From: SFO',
+    'To: BER',
+    'Booking reference: NEW-556',
+    'Flight CD 456 (booking reference: NEW-556) is confirmed.',
+  ].join('\n');
+  flightMessage.sourceLength = String(flightMessage.text).length;
+  return { read, evidence, flightMessage };
+}
+
 function addEmptyCompletedMailQueries(
   evidence: ReadToolEvidence[],
   read = request(),
@@ -2151,6 +2198,63 @@ describe('compound trip read projection', () => {
     expect(projection.hotel).toBeUndefined();
   });
 
+  it('keeps a structured replacement leg after a different leg is cancelled in the same message', () => {
+    const { read, evidence, flightMessage } = sameMessageCancellationReplacementEvidence();
+    const quote = 'Flight CD 456 (booking reference: NEW-556) is confirmed.';
+    const extraction: CompoundTripExtraction = {
+      status: 'complete',
+      segments: [
+        {
+          threadId: 'flight-booking-thread',
+          messageId: String(flightMessage.messageId),
+          subject: String(flightMessage.subject),
+          bookingReference: 'NEW-556',
+          flightNumber: 'CD456',
+          departureDate: '2026-10-17',
+          departureTime: '10:10',
+          departureTimeZone: 'Europe/Berlin',
+          arrivalDate: '2026-10-17',
+          arrivalTime: '13:10',
+          arrivalTimeZone: 'Europe/Berlin',
+          originAirport: 'SFO',
+          destinationAirport: 'BER',
+          direction: 'outbound',
+          excerpt: quote,
+        },
+      ],
+      hotels: [],
+      rejectedFacts: 1,
+      sourceMessageIds: [String(flightMessage.messageId)],
+    };
+
+    const projection = compoundTripReadProjection(read, evidence, extraction);
+
+    expect(projection.flight?.segment).toMatchObject({
+      flightNumber: 'CD456',
+      bookingReference: 'NEW-556',
+      direction: 'outbound',
+    });
+  });
+
+  it('keeps a source-parsed replacement leg after a different leg is cancelled in the same message', () => {
+    const { read, evidence, flightMessage } = sameMessageCancellationReplacementEvidence();
+    const extraction: CompoundTripExtraction = {
+      status: 'complete',
+      segments: [],
+      hotels: [],
+      rejectedFacts: 1,
+      sourceMessageIds: [String(flightMessage.messageId)],
+    };
+
+    const projection = compoundTripReadProjection(read, evidence, extraction);
+
+    expect(projection.flight?.segment).toMatchObject({
+      flightNumber: 'CD456',
+      bookingReference: 'NEW-556',
+      direction: 'outbound',
+    });
+  });
+
   it('does not treat a cancellation warning or insurance notice as an invalidation', () => {
     const read = request();
     const evidence = [completeCalendarEvents([calendarFlight()]), ...bookingEmailEvidence()];
@@ -2165,7 +2269,7 @@ describe('compound trip read projection', () => {
     if (!flightMessage || typeof flightMessage.text !== 'string')
       throw new Error('Expected complete flight booking source');
     flightMessage.text +=
-      '\nYou cannot cancel this flight online; cancellation insurance is confirmed.';
+      '\nIf your flight has been cancelled, contact support. You cannot cancel this flight online; cancellation insurance is confirmed.';
     flightMessage.sourceLength = flightMessage.text.length;
     const extraction: CompoundTripExtraction = {
       status: 'complete',

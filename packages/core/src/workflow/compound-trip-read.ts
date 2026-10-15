@@ -1966,36 +1966,43 @@ function explicitBookingInvalidation(
 ): SourceBookingInvalidation | undefined {
   const body = message.text;
   const action =
-    '(?:has been|was|is now)\\s+(?:cancelled|canceled|voided|refunded|rejected|declined|denied)';
+    '(?:(?:has been|was|is now|is)\\s+)?(?:cancelled|canceled|voided|refunded|rejected|declined|denied)';
   const reverseAction = '(?:cancelled|canceled|voided|rejected|declined|denied)\\s+';
+  const statements = body
+    .split(/(?<=[.!?])\s+|\n/)
+    .filter((statement) => !/^\s*(?:if|when|unless|whether|in case|assuming)\b/i.test(statement));
+  const flightPattern = new RegExp(
+    `\\b(?:flight|airline itinerary)\\b[^.!?\\n]{0,60}\\b${action}\\b|\\b${reverseAction}(?:flight|airline itinerary)\\b|\\bflight\\s+(?:cancellation|rejection|denial)\\s+(?:is|was)\\s+confirmed\\b`,
+    'i',
+  );
+  const hotelPattern = new RegExp(
+    `\\b(?:hotel|room|lodging|accommodation)\\b[^.!?\\n]{0,60}\\b${action}\\b|\\b${reverseAction}(?:hotel|room|lodging|accommodation)\\b|\\b(?:hotel|room)\\s+(?:cancellation|rejection|denial)\\s+(?:is|was)\\s+confirmed\\b`,
+    'i',
+  );
   let kind: 'flight' | 'hotel' | undefined;
-  if (
-    new RegExp(
-      `\\b(?:flight|airline itinerary)\\b[^.!?\\n]{0,60}\\b${action}\\b|\\b${reverseAction}(?:flight|airline itinerary)\\b|\\bflight\\s+(?:cancellation|rejection|denial)\\s+(?:is|was)\\s+confirmed\\b`,
-      'i',
-    ).test(body)
-  )
-    kind = 'flight';
-  else if (
-    new RegExp(
-      `\\b(?:hotel|room|lodging|accommodation)\\b[^.!?\\n]{0,60}\\b${action}\\b|\\b${reverseAction}(?:hotel|room|lodging|accommodation)\\b|\\b(?:hotel|room)\\s+(?:cancellation|rejection|denial)\\s+(?:is|was)\\s+confirmed\\b`,
-      'i',
-    ).test(body)
-  )
-    kind = 'hotel';
+  let cancellationStatement = statements.find((statement) => flightPattern.test(statement));
+  if (cancellationStatement) kind = 'flight';
+  else {
+    cancellationStatement = statements.find((statement) => hotelPattern.test(statement));
+    if (cancellationStatement) kind = 'hotel';
+  }
   if (!kind) return undefined;
-  const hotelDetails =
-    kind === 'hotel' ? hotelNameAndCity(`${message.subject}\n${body}`) : undefined;
+  const identitySource = `${message.subject}\n${cancellationStatement ?? ''}`;
+  const hotelDetails = kind === 'hotel' ? hotelNameAndCity(identitySource) : undefined;
   return {
     threadId: message.threadId,
     messageId: message.messageId,
     order: message.order,
     kind,
-    ...(bookingReference(`${message.subject}\n${body}`)
-      ? { bookingReference: bookingReference(`${message.subject}\n${body}`) }
+    ...(bookingReference(identitySource)
+      ? { bookingReference: bookingReference(identitySource) }
       : {}),
-    ...(explicitFlightNumber(body) ? { flightNumber: explicitFlightNumber(body) } : {}),
-    dates: [...body.matchAll(/\b20\d{2}-\d{2}-\d{2}\b/g)].map((match) => match[0]),
+    ...(explicitFlightNumber(cancellationStatement ?? '')
+      ? { flightNumber: explicitFlightNumber(cancellationStatement ?? '') }
+      : {}),
+    dates: [...(cancellationStatement ?? '').matchAll(/\b20\d{2}-\d{2}-\d{2}\b/g)].map(
+      (match) => match[0],
+    ),
     ...(hotelDetails?.name ? { hotelName: normalizePlace(hotelDetails.name) } : {}),
   };
 }
@@ -2015,38 +2022,27 @@ function sourceFactInvalidated(
   if (sourceOrder === undefined) return false;
   return invalidations.some((invalidation) => {
     if (invalidation.threadId !== threadId || invalidation.kind !== kind) return false;
-    if (invalidation.messageId === messageId) return true;
-    if (invalidation.order < sourceOrder) return false;
-    if (
-      fact.bookingReference &&
-      invalidation.bookingReference &&
-      fact.bookingReference === invalidation.bookingReference
-    )
-      return true;
-    if (
-      kind === 'flight' &&
-      fact.flightNumber &&
-      invalidation.flightNumber &&
-      fact.flightNumber === invalidation.flightNumber &&
-      invalidation.dates.length > 0 &&
-      (fact.dates ?? []).some((date) => invalidation.dates.includes(date))
-    )
-      return true;
-    if (
-      kind === 'hotel' &&
-      fact.hotelName &&
-      invalidation.hotelName &&
-      normalizePlace(fact.hotelName) === invalidation.hotelName &&
-      invalidation.dates.length > 0 &&
-      (fact.dates ?? []).some((date) => invalidation.dates.includes(date))
-    )
-      return true;
+    const sameMessage = invalidation.messageId === messageId;
+    if (!sameMessage && invalidation.order < sourceOrder) return false;
     const hasIdentity = Boolean(
       invalidation.bookingReference ||
         invalidation.flightNumber ||
         invalidation.hotelName ||
         invalidation.dates.length,
     );
+    if (fact.bookingReference && invalidation.bookingReference)
+      return fact.bookingReference === invalidation.bookingReference;
+    if (kind === 'flight' && fact.flightNumber && invalidation.flightNumber) {
+      if (fact.flightNumber !== invalidation.flightNumber) return false;
+      if (!invalidation.dates.length) return sameMessage;
+      return (fact.dates ?? []).some((date) => invalidation.dates.includes(date));
+    }
+    if (kind === 'hotel' && fact.hotelName && invalidation.hotelName) {
+      if (normalizePlace(fact.hotelName) !== invalidation.hotelName) return false;
+      if (!invalidation.dates.length) return sameMessage;
+      return (fact.dates ?? []).some((date) => invalidation.dates.includes(date));
+    }
+    if (sameMessage) return allowAmbiguousFallback && !hasIdentity;
     return allowAmbiguousFallback && !hasIdentity;
   });
 }
@@ -2078,12 +2074,13 @@ function parseFlightSegments(
       const departure = timeField(block.excerpt, 'departure');
       const arrival = timeField(block.excerpt, 'arrival');
       if (!flightNumber || !departureDate || !departure) continue;
+      const segmentReference = bookingReference(block.excerpt) ?? messageReference;
       const fromTo = /\bfrom\s+([A-Z]{3})\s+(?:to|→|->)\s+([A-Z]{3})\b/i.exec(block.excerpt);
       segments.push({
         threadId: message.threadId,
         messageId: message.messageId,
         subject: message.subject,
-        ...(messageReference ? { bookingReference: messageReference } : {}),
+        ...(segmentReference ? { bookingReference: segmentReference } : {}),
         flightNumber,
         departureDate,
         departureTime: departure.time,

@@ -1203,12 +1203,22 @@ function sourceRsvpRoute(thread: EmailReviewThread): string | undefined {
   return undefined;
 }
 
-function sourceExplicitlyRequiresAlternateReplyRoute(thread: EmailReviewThread): boolean {
+function sourceExplicitlyRequiresAlternateReplyRoute(
+  thread: EmailReviewThread,
+  whyQuote: string,
+): boolean {
   const body = latestUnquotedBody(thread) ?? '';
-  return (
-    /\bdo not reply to (?:this|the) (?:email|message)\b/i.test(body) ||
-    (Boolean(sourceRsvpRoute(thread)) && !sourceAllowsEmailRsvp(thread))
-  );
+  if (/\bdo not reply to (?:this|the) (?:email|message)\b/i.test(body)) return true;
+  if (!sourceRsvpRoute(thread) || sourceAllowsEmailRsvp(thread)) return false;
+  return body.split(/(?<=[.!?])\s+/).some((sentence) => {
+    const containsQuote = sentence.includes(whyQuote) || whyQuote.includes(sentence.trim());
+    return (
+      containsQuote &&
+      /\brsvp\b/i.test(sentence) &&
+      /\b(?:link|button|form|parentsquare|platform|app)\b/i.test(sentence) &&
+      !/\b(?:send|share|provide|confirm|reply|respond)\b/i.test(sentence.replace(/\brsvp\b/gi, ''))
+    );
+  });
 }
 
 function isDirectReplyFallbackDraft(thread: EmailReviewThread, draft: string): boolean {
@@ -1232,7 +1242,7 @@ function completeDirectReplyAssessments(
         return actionDeadline
           ? { ...item, deadline: { messageId: thread.latestMessageId, quote: actionDeadline } }
           : item;
-      if (!sourceExplicitlyRequiresAlternateReplyRoute(thread)) return item;
+      if (!sourceExplicitlyRequiresAlternateReplyRoute(thread, item.whyQuote)) return item;
       const firstSentence = (latestUnquotedBody(thread) ?? '').split(/(?<=[.!?])\s+/)[0]?.trim();
       const whyQuote = quoteExistsInLatestUnquotedBody(thread, item.whyQuote)
         ? item.whyQuote

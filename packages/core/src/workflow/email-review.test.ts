@@ -168,7 +168,7 @@ describe('bounded no-send email review', () => {
     const sourceMessages = messages('nuanced-ask');
     const latest = required(sourceMessages.at(-1), 'latest message');
     latest.text =
-      'It would be helpful if you could send me the revised estimate when you get a chance.';
+      'RSVP using the form. It would be helpful if you could send me the revised estimate when you get a chance.';
     latest.sourceLength = latest.text.length;
     const thread = required(
       emailReviewCompleteThread('nuanced-ask', 'owner@example.com', [
@@ -180,7 +180,8 @@ describe('bounded no-send email review', () => {
     const answer = validAnswer('nuanced-ask');
     const item = required(answer.items[0], 'assessment');
     item.why = 'The sender would benefit from receiving the revised estimate.';
-    item.whyQuote = latest.text;
+    item.whyQuote =
+      'It would be helpful if you could send me the revised estimate when you get a chance.';
     Object.assign(item, { deadline: null });
     item.draftBody =
       'Could you share any details you would like reflected in the revised estimate?';
@@ -192,7 +193,7 @@ describe('bounded no-send email review', () => {
 
     expect(result.answer?.items[0]).toMatchObject({
       disposition: 'draft',
-      whyQuote: latest.text,
+      whyQuote: item.whyQuote,
       draftBody: item.draftBody,
     });
     expect(result.attempts).toBe(1);
