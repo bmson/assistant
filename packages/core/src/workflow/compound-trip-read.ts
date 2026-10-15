@@ -3858,6 +3858,20 @@ export function compoundTripReadProjection(
     flightSegments,
   );
   const bookedArrivalDate = bookedTransfer?.group.legs.at(-1)?.arrivalDate;
+  const selectedBookingStatesLocalClocks =
+    bookedTransfer &&
+    sourceMessages.some(
+      (message) =>
+        message.threadId === bookedTransfer.group.threadId &&
+        message.messageId === bookedTransfer.group.legs[0]?.messageId &&
+        message.text
+          .split(/\r?\n|(?<=[.!?])\s+/)
+          .some((line) =>
+            /^(?:all\s+)?(?:flight\s+)?(?:times|clocks)\s+(?:shown\s+)?(?:are\s+)?(?:in\s+)?local(?:\s+time)?[.!]?$/i.test(
+              line.trim(),
+            ),
+          ),
+    );
   const bookedItineraryLines = bookedTransfer
     ? [
         `The booked itinerary covers ${bookedTransfer.group.legs[0]?.departureDate} to ${bookedGroups.find((group) => group.threadId === bookedTransfer.group.threadId && group.direction === 'return')?.legs.at(-1)?.arrivalDate}. ${bookedArrivalDate && bookedArrivalDate < (request.timeWindow?.timeMin.slice(0, 10) ?? '') ? 'Its outbound arrival is already past; this is a current-trip booking, not a newly departing trip.' : 'This is a booking candidate; the next departure is not fully verified.'}`,
@@ -3872,7 +3886,7 @@ export function compoundTripReadProjection(
           calendarRows,
           mailLinks,
         ),
-        'The flight clocks above are source-stated local clocks. Their time zones and exact connection durations remain unverified; I have not converted them using the calendar’s offset.',
+        `The flight clocks above are source-stated${selectedBookingStatesLocalClocks ? ' local' : ''} clocks. Their time zones and exact connection durations remain unverified; I have not converted them using the calendar’s offset.`,
         `Airport-to-hotel comparison uses the booked arrival airport and this separately booked hotel’s matching city/check-in date. This association is an inference; flight and hotel have separate booking references.`,
       ]
     : [];

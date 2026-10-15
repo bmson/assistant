@@ -5610,6 +5610,8 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(final.text).toContain('direction inferred from the reversed route groups');
     expect(final.text).toContain('KL700 BOS→AMS');
     expect(final.text).toContain('KL703 AMS→BOS');
+    expect(final.text).toContain('source-stated clocks');
+    expect(final.text).not.toContain('source-stated local clocks');
     expect(final.text).toContain('Same-itinerary calendar comparison for CPH→BOS');
     expect(final.text).toContain('Calendar names Example Air');
     expect(final.text).toContain('cannot establish an instant-level clock conflict');
@@ -5623,6 +5625,31 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(final.text).not.toContain('Europe/Copenhagen');
     expect(final.blocked).toBe(true);
   });
+
+  it.each([true, false])(
+    'describes clocks as local only when their own booking explicitly states that: %s',
+    (local) => {
+      const { read, rows } = fixture();
+      const threadId = local ? 'flight-thread' : 'hotel-thread';
+      const source = rows.find(
+        (item) =>
+          item.toolName === 'gmail.read_thread' &&
+          (item.args as Record<string, unknown>).threadId === threadId,
+      );
+      if (!source) throw new Error('Missing fixture source');
+      const message = (source.result as { messages: Array<{ text: string; sourceLength: number }> })
+        .messages[0];
+      if (!message) throw new Error('Missing fixture');
+      message.text += '\r\nAll times are local.';
+      message.sourceLength = message.text.length;
+      const result = compoundTripReadProjection(read, rows);
+      expect(result.text.includes('source-stated local clocks')).toBe(local);
+      expect(result.text).toContain(
+        'Their time zones and exact connection durations remain unverified',
+      );
+      expect(result.flight).toBeUndefined();
+    },
+  );
 
   it('enriches a thin validated hotel extraction only from the same source message', () => {
     const { read, rows } = fixture();
