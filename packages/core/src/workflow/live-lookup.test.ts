@@ -175,7 +175,25 @@ describe('live lookup routing from home-screen regressions', () => {
         now: new Date('2026-10-15T08:11:00Z'),
         timeZone: 'America/Los_Angeles',
       }),
-    ).toMatchObject({ toolName: 'sports.scores', input: { league: 'mlb', date: '2026-10-14' } });
+    ).toEqual({ toolName: 'sports.scores', input: { league: 'mlb', date: '2026-10-14' } });
+  });
+
+  it.each([
+    ['What are the NBA scores today?', { league: 'nba', date: '2026-10-15' }],
+    ['What is the score in the Premier League game today?', { league: 'epl', date: '2026-10-15' }],
+    [
+      'What is the MLB SF Giants score today?',
+      { team: 'SF Giants', league: 'mlb', date: '2026-10-15' },
+    ],
+  ])('keeps league and team scope separate: %s', (request, input) => {
+    const lookup = detectLiveLookup([{ role: 'user', content: request }]);
+    if (!lookup) throw new Error('Expected sports lookup');
+    expect(
+      nextLiveLookup(lookup, [], {
+        now: new Date('2026-10-15T08:11:00Z'),
+        timeZone: 'America/Los_Angeles',
+      }),
+    ).toEqual({ toolName: 'sports.scores', input });
   });
 
   it.each([

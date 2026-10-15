@@ -88,13 +88,27 @@ function requestedSportsTeam(request: string): string | undefined {
   candidate = candidate
     .replace(/\b(?:today|tonight|tomorrow|yesterday|this|next|last)\b[\s\S]*$/i, '')
     .replace(
-      /^(?:(?:what(?:'s|\s+is|\s+was)|who(?:\s+won)?|which|any|is\s+there|did|does|can\s+you|could\s+you|tell\s+me|show\s+me|check|get|give\s+me|please)\s+)+/i,
+      /^(?:(?:what(?:['’]s|\s+(?:is|was|are|were))|who(?:\s+won)?|which|any|is\s+there|did|does|can\s+you|could\s+you|tell\s+me|show\s+me|check|get|give\s+me|please)\s+)+/i,
       '',
     )
     .replace(/^(?:(?:the|a|an|current|currently|latest|live|right\s+now)\s+)+/i, '')
     .replace(/\b(?:the|current|currently|latest|live|right\s+now)\b/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+
+  // A league-only question must not be narrowed to a nonexistent team named
+  // after that league. Keep an explicitly adjacent team without its league tag.
+  const league = leagueNamedIn(candidate);
+  if (league) {
+    const aliases = [...league.aliases, league.label, league.key]
+      .sort((left, right) => right.length - left.length)
+      .map((alias) => alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join('|');
+    if (new RegExp(`^(?:${aliases})$`, 'i').test(candidate)) return undefined;
+    candidate = candidate
+      .replace(new RegExp(`^(?:${aliases})\\s+|\\s+(?:in\\s+)?(?:${aliases})$`, 'gi'), '')
+      .trim();
+  }
 
   if (
     !candidate ||
