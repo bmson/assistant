@@ -212,8 +212,9 @@ describe('calendar day and practical briefing fidelity', () => {
     const rows = evidence([stay, timed, second], true, compactRequest);
     const response = verifiedReadResponse(compactRequest, rows);
 
-    expect(response).toContain('**09:00–10:00** — Project review');
-    expect(response).toContain('**09:50–10:30** — Planning hold');
+    expect(response).toContain('Timed appointments:');
+    expect(response).toContain('09:00–10:00 — [Project review]');
+    expect(response).toContain('09:50–10:30 — [Planning hold]');
     expect(response).toContain('(Work)');
     expect(response).toContain('event?eid=review');
     expect(response).toContain('event?eid=second');
@@ -221,6 +222,147 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain('Possible overlap: **Project review** and **Planning hold**');
     expect(response).not.toContain('Lodging context:');
     expect(response).not.toContain('Next step:');
+  });
+
+  it('groups all-day entries and keeps source zones and clipped local windows readable', () => {
+    const compactRequest = {
+      ...request,
+      compactCalendarBriefing: true,
+      timeWindow: {
+        label: 'tomorrow',
+        timeMin: '2026-10-16T07:00:00Z',
+        timeMax: '2026-10-17T07:00:00Z',
+      },
+    };
+    const berlin = {
+      eventId: 'berlin-day',
+      calendar: 'Personal',
+      summary: 'Payday',
+      start: '2026-10-16',
+      end: '2026-10-17',
+      allDay: true,
+      calendarTimeZone: 'Europe/Berlin',
+      links: link('berlin-day'),
+    };
+    const utc = {
+      ...berlin,
+      eventId: 'utc-day',
+      summary: 'Team offsite',
+      calendar: 'Work',
+      calendarTimeZone: 'UTC',
+      links: link('utc-day'),
+    };
+    const losAngeles = {
+      ...berlin,
+      eventId: 'la-day',
+      summary: 'Local holiday',
+      calendar: 'Family',
+      calendarTimeZone: 'America/Los_Angeles',
+      links: [],
+    };
+    const multiDay = {
+      ...berlin,
+      eventId: 'multi-day',
+      summary: 'Berlin festival',
+      calendar: 'Travel',
+      start: '2026-10-15',
+      end: '2026-10-18',
+      links: link('multi-day'),
+    };
+    const response = verifiedReadResponse(
+      compactRequest,
+      evidence([berlin, utc, losAngeles, multiDay], true, compactRequest),
+    );
+
+    expect(response).toContain('- All day: [Payday]');
+    expect(response).toContain('[Team offsite]');
+    expect(response).toContain('Local holiday (Family)');
+    expect(response).not.toContain('[Local holiday](');
+    expect(response).toContain('[Berlin festival]');
+    expect(response).toContain('event?eid=berlin-day');
+    expect(response).toContain('event?eid=utc-day');
+    expect(response).toContain('event?eid=multi-day');
+    expect(response).toContain('Europe/Berlin');
+    expect(response).toContain('UTC');
+    expect(response).toContain('America/Los_Angeles');
+    expect(response).toContain('local window Fri 16 Oct 12:00 AM–3:00 PM');
+    expect(response).toContain('local window Fri 16 Oct 12:00 AM–5:00 PM');
+    expect(response).toContain('local window all of Fri 16 Oct');
+    expect(response).toContain('source date 2026-10-15–2026-10-17 (Europe/Berlin)');
+    expect(response.match(/All-day record/g)).toBeNull();
+    expect(response.match(/Open in Google Calendar/g)).toBeNull();
+  });
+
+  it('computes compact source-day intersections across the local DST fallback day', () => {
+    const dstRequest = {
+      ...request,
+      compactCalendarBriefing: true,
+      timeWindow: {
+        label: 'Sunday, November 1',
+        timeMin: '2026-11-01T07:00:00Z',
+        timeMax: '2026-11-02T08:00:00Z',
+      },
+    };
+    const berlinDay = {
+      eventId: 'dst-berlin-day',
+      calendar: 'Travel',
+      summary: 'Berlin observance',
+      start: '2026-11-01',
+      end: '2026-11-02',
+      allDay: true,
+      calendarTimeZone: 'Europe/Berlin',
+      links: link('dst-berlin-day'),
+    };
+    const response = verifiedReadResponse(dstRequest, evidence([berlinDay], true, dstRequest));
+
+    expect(response).toContain('source date 2026-11-01 (Europe/Berlin)');
+    expect(response).toContain('local window Sun 1 Nov 12:00 AM–3:00 PM');
+    expect(response).toContain('event?eid=dst-berlin-day');
+  });
+
+  it('keeps an ongoing multi-day record distinct and preserves busy and attendance state', () => {
+    const compactRequest = { ...request, compactCalendarBriefing: true };
+    const stay = {
+      ...timed,
+      eventId: 'stay',
+      summary: 'Hotel stay',
+      start: '2026-10-10T06:00:00-07:00',
+      end: '2026-10-17T02:00:00-07:00',
+      blocksTime: true,
+      ownerResponse: 'accepted',
+      links: link('stay'),
+    };
+    const response = verifiedReadResponse(compactRequest, evidence([stay], true, compactRequest));
+
+    expect(response).toContain('- Ongoing: [Hotel stay]');
+    expect(response).toContain('Sat 10 Oct 6:00 AM–Sat 17 Oct 2:00 AM');
+    expect(response).toContain('(blocks time; attendance accepted)');
+    expect(response).not.toContain('Timed appointments:');
+    expect(response).not.toContain('Possible overlap: **Hotel stay**');
+    expect(response).toContain('event?eid=stay');
+  });
+
+  it('retains source-date-only reminders and explicit partial coverage in a compact view', () => {
+    const compactRequest = { ...request, compactCalendarBriefing: true };
+    const sourceDateOnly = {
+      eventId: 'outside-day',
+      calendar: 'Travel',
+      summary: 'Berlin day hold',
+      start: '2026-10-16',
+      end: '2026-10-17',
+      allDay: true,
+    };
+    const response = verifiedReadResponse(
+      compactRequest,
+      evidence([sourceDateOnly], false, compactRequest),
+    );
+
+    expect(response).toContain('Source-date-only entries (not confirmed for this local day)');
+    expect(response).toContain('Berlin day hold (Travel)');
+    expect(response).not.toContain('[Berlin day hold](');
+    expect(response).toContain('source date 2026-10-16; calendar time zone unavailable');
+    expect(response).toContain('coverage was incomplete');
+    expect(response).not.toContain('Nothing on the calendar');
   });
 
   it('does not infer lodging context from an unverified title or incomplete source', () => {
