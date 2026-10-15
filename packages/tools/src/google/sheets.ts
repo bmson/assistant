@@ -9,6 +9,7 @@ import {
   type GoogleEffectReceipt,
   PartialGoogleArtifactError,
 } from './effect-progress.js';
+import { verifyOwnerOnlyDriveSharing } from './sharing-verification.js';
 
 const SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
@@ -31,6 +32,7 @@ export interface SheetsToolDeps {
   client: GoogleClient;
   /** The sheet is created in the bot's Drive then shared with the owner. */
   ownerEmail: string;
+  botEmail?: string;
 }
 
 function register<S extends z.ZodType, Out>(
@@ -153,11 +155,18 @@ export function registerSheetsTools(registry: ToolRegistry, deps: SheetsToolDeps
           await shareWithOwner(deps.client, id, deps.ownerEmail);
           progress.stage = 'shared';
           await checkpointGoogleEffect(ctx, progress);
+          const sharingVerification = await verifyOwnerOnlyDriveSharing(
+            deps.client,
+            id,
+            deps.botEmail ?? '',
+            deps.ownerEmail,
+          );
           return {
             spreadsheetId: id,
             title: args.title,
             url: created.spreadsheetUrl ?? spreadsheetUrl(id),
             sharedWith: deps.ownerEmail,
+            sharingVerification,
           };
         } catch (error) {
           throw new PartialGoogleArtifactError({ ...progress }, error);

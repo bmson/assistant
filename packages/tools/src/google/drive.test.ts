@@ -27,6 +27,111 @@ const context = {
 } as unknown as ToolContext;
 
 describe('Drive attachment tools', () => {
+  it('checks exact titles across provider pages and verifies the ACL when requested', async () => {
+    const api = vi
+      .fn()
+      .mockResolvedValueOnce({
+        files: [{ id: 'other_123456789', name: 'Quarterly plan (copy)' }],
+        nextPageToken: 'next-page',
+      })
+      .mockResolvedValueOnce({
+        files: [
+          {
+            id: 'DocumentId12345',
+            name: 'Quarterly plan',
+            mimeType: 'application/vnd.google-apps.document',
+            webViewLink: 'https://docs.google.com/document/d/DocumentId12345/edit',
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        permissions: [
+          { type: 'user', emailAddress: 'bot@example.com' },
+          { type: 'user', emailAddress: 'owner@example.com' },
+        ],
+      });
+    const registry = registerDriveTools(new ToolRegistry(), {
+      client: { api, apiBytes: vi.fn() } as never,
+      workspace: {} as never,
+      botEmail: 'bot@example.com',
+      ownerEmail: 'owner@example.com',
+    });
+    const result = await tool(registry, 'drive.search').execute(
+      {
+        query: 'Quarterly plan',
+        exactTitle: 'Quarterly plan',
+        verifyOwnerOnly: true,
+      },
+      context,
+    );
+    expect(result).toEqual({
+      lookupMode: 'exact-title',
+      exactTitle: 'Quarterly plan',
+      coverage: 'complete',
+      files: [
+        expect.objectContaining({
+          fileId: 'DocumentId12345',
+          name: 'Quarterly plan',
+          url: 'https://docs.google.com/document/d/DocumentId12345/edit',
+        }),
+      ],
+      sharingVerification: 'verified_owner_only',
+    });
+    expect(api).toHaveBeenCalledTimes(3);
+    expect(new URL(String(api.mock.calls[0]?.[0])).searchParams.get('q')).toBe(
+      "trashed = false and name = 'Quarterly plan'",
+    );
+    expect(new URL(String(api.mock.calls[0]?.[0])).searchParams.get('corpora')).toBe('allDrives');
+    expect(String(api.mock.calls[1]?.[0])).toContain('pageToken=next-page');
+  });
+
+  it('marks a bounded search incomplete rather than treating an exhausted page budget as absence', async () => {
+    const api = vi.fn(async (url: string) => {
+      if (url.includes('/permissions?')) return { permissions: [] };
+      return { files: [], nextPageToken: 'more-pages' };
+    });
+    const registry = registerDriveTools(new ToolRegistry(), {
+      client: { api, apiBytes: vi.fn() } as never,
+      workspace: {} as never,
+    });
+    const result = (await tool(registry, 'drive.search').execute(
+      { query: 'Quarterly plan', exactTitle: 'Quarterly plan' },
+      context,
+    )) as { coverage: string; files: unknown[] };
+    expect(result).toMatchObject({ coverage: 'incomplete', files: [] });
+    expect(api).toHaveBeenCalledTimes(10);
+  });
+
+  it('preserves the provider incompleteSearch flag even when there is no next page token', async () => {
+    const registry = registerDriveTools(new ToolRegistry(), {
+      client: {
+        api: vi.fn().mockResolvedValue({ files: [], incompleteSearch: true }),
+        apiBytes: vi.fn(),
+      } as never,
+      workspace: {} as never,
+    });
+    const result = await tool(registry, 'drive.search').execute(
+      { query: 'Quarterly plan', exactTitle: 'Quarterly plan' },
+      context,
+    );
+    expect(result).toMatchObject({ coverage: 'incomplete', files: [] });
+  });
+
+  it('does not treat an exact-name result without a usable id as absence', async () => {
+    const registry = registerDriveTools(new ToolRegistry(), {
+      client: {
+        api: vi.fn().mockResolvedValue({ files: [{ name: 'Quarterly plan' }] }),
+        apiBytes: vi.fn(),
+      } as never,
+      workspace: {} as never,
+    });
+    const result = await tool(registry, 'drive.search').execute(
+      { query: 'Quarterly plan', exactTitle: 'Quarterly plan' },
+      context,
+    );
+    expect(result).toMatchObject({ coverage: 'incomplete', files: [] });
+  });
+
   it('stages a Google Doc as a Workspace PDF without uploading it anywhere', async () => {
     const api = vi.fn(async () => ({
       id: 'doc_1234567890',

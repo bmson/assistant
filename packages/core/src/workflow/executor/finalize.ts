@@ -38,7 +38,12 @@ import {
   requestedSavedSkillName,
 } from '../../memory/skills.js';
 import { truncateAtBoundary } from '../../owner-text.js';
-import { type ArtifactIntent, artifactExecutionFailure } from '../artifact-intent.js';
+import {
+  type ArtifactIntent,
+  artifactExecutionFailure,
+  artifactSharingVerificationFailure,
+  requestedConditionalArtifactIntent,
+} from '../artifact-intent.js';
 import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-import.js';
 import { CARD_NOT_BUILT, requestedCardIntent } from '../card-intent.js';
 import { responseCardSteps } from '../card-steps.js';
@@ -773,6 +778,20 @@ export async function stageModelFinalResponse(
       progress: explicitFailure.slice(0, 200),
       terminalStatus: 'failed',
       outcome: 'failed',
+    });
+  }
+  const conditionalArtifact = requestedConditionalArtifactIntent(latestUserText(window) ?? '');
+  const sharingFailure = conditionalArtifact
+    ? artifactSharingVerificationFailure(conditionalArtifact, rows)
+    : undefined;
+  if (sharingFailure) {
+    return stageFinalResponse(deps, task, state, window, {
+      ...pending,
+      text: sharingFailure,
+      progress: sharingFailure.slice(0, 200),
+      terminalStatus: 'needs_attention',
+      outcome: 'needs_attention',
+      contractNotice: true,
     });
   }
   // Corpus for the URL-provenance rule: every tool result (both scopes), the

@@ -3,7 +3,7 @@ import { ToolRegistry } from '../registry.js';
 import type { GoogleClient } from './client.js';
 import { buildSlideRequests, registerSlidesTools } from './slides.js';
 
-const DEPS = { ownerEmail: 'owner@example.com' };
+const DEPS = { botEmail: 'bot@example.com', ownerEmail: 'owner@example.com' };
 
 function toolsWith(api: ReturnType<typeof vi.fn>) {
   const registry = new ToolRegistry();
@@ -58,7 +58,13 @@ describe('Google Slides tools', () => {
         slides: [{ objectId: 'default-slide' }],
       })
       .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({});
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        permissions: [
+          { type: 'user', emailAddress: 'bot@example.com' },
+          { type: 'user', emailAddress: 'owner@example.com' },
+        ],
+      });
     const tool = toolsWith(api).get('slides.create')?.tool;
     const result = (await tool?.execute(
       { title: 'Briefing', slides: [{ title: 'Summary', body: 'Three points' }] },
@@ -71,6 +77,7 @@ describe('Google Slides tools', () => {
       url: 'https://docs.google.com/presentation/d/SLIDES-123_abc/edit',
       slideCount: 1,
       sharedWith: 'owner@example.com',
+      sharingVerification: 'verified_owner_only',
     });
     expect(api.mock.calls[1]?.[0]).toBe(
       'https://slides.googleapis.com/v1/presentations/SLIDES-123_abc:batchUpdate',

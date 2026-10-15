@@ -16,6 +16,7 @@ import {
   type GoogleEffectReceipt,
   PartialGoogleArtifactError,
 } from './effect-progress.js';
+import { verifyOwnerOnlyDriveSharing } from './sharing-verification.js';
 
 export { buildContentRequests, type DocsBatchRequest } from './docs-markdown.js';
 
@@ -331,11 +332,18 @@ export function registerDocsTools(registry: ToolRegistry, deps: DocsToolDeps): T
 
           progress.stage = 'shared';
           await checkpointGoogleEffect(ctx, progress);
+          const sharingVerification = await verifyOwnerOnlyDriveSharing(
+            deps.client,
+            id,
+            deps.botEmail,
+            deps.ownerEmail,
+          );
           return {
             documentId: id,
             title: args.title,
             url: docUrl(id),
             sharedWith: deps.ownerEmail,
+            sharingVerification,
             contentStructure,
           };
         } catch (error) {
