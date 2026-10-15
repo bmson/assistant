@@ -343,9 +343,16 @@ export function artifactSharingVerificationFailure(
   if (!row || !completed(row)) return undefined;
   const result = asRecord(row.result);
   if (result?.sharingVerification === 'verified_owner_only') return undefined;
+  const diagnostic = asRecord(result?.sharingVerificationDiagnostic);
   const detail =
     result?.sharingVerification === 'not_owner_only'
-      ? 'Google reports at least one other active permission.'
+      ? diagnostic?.reason === 'inherited_permission'
+        ? 'Google reported inherited Drive access, so owner-only visibility is not verified.'
+        : diagnostic?.reason === 'unexpected_principal'
+          ? 'Google reported an additional or unrecognized permission.'
+          : diagnostic?.reason === 'malformed_permission_entry'
+            ? 'Google returned a permission entry whose principal could not be recognized.'
+            : 'Google reported permission data that does not prove owner-only visibility.'
       : 'Google did not provide complete permission evidence.';
   const link =
     typeof result?.url === 'string' && /^https:\/\/(?:docs|drive)\.google\.com\//i.test(result.url)

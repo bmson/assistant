@@ -136,20 +136,34 @@ describe('private artifact requests', () => {
     );
     expect(intent).toBeDefined();
     if (!intent) return;
+    const unexpected = artifactSharingVerificationFailure(intent, [
+      {
+        toolName: 'docs.create',
+        status: 'succeeded',
+        result: {
+          documentId: 'BriefingDocId12345',
+          url: 'https://docs.google.com/document/d/BriefingDocId12345/edit',
+          sharedWith: 'owner@example.com',
+          sharingVerification: 'not_owner_only',
+        },
+      },
+    ]);
+    expect(unexpected).toContain('could not confirm that access is limited to you');
+    expect(unexpected).not.toContain('other active permission');
     expect(
       artifactSharingVerificationFailure(intent, [
         {
           toolName: 'docs.create',
           status: 'succeeded',
           result: {
-            documentId: 'BriefingDocId12345',
-            url: 'https://docs.google.com/document/d/BriefingDocId12345/edit',
-            sharedWith: 'owner@example.com',
             sharingVerification: 'not_owner_only',
+            sharingVerificationDiagnostic: {
+              reason: 'inherited_permission',
+            },
           },
         },
       ]),
-    ).toContain('could not confirm that access is limited to you');
+    ).toContain('inherited Drive access');
   });
 });
 

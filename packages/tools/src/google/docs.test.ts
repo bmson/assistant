@@ -223,6 +223,17 @@ describe('registerDocsTools', () => {
       url: string;
       sharedWith: string;
       sharingVerification: string;
+      sharingVerificationDiagnostic: {
+        status: string;
+        reason: string;
+        permissionCount: number;
+        pagesRead: number;
+        fullPageCompletion: boolean;
+        unexpectedPrincipal: boolean | null;
+        inheritedPermission: boolean | null;
+        missingExpectedPrincipal: boolean | null;
+        malformedPermissionEntry: boolean;
+      };
     };
 
     expect(result).toEqual({
@@ -231,6 +242,17 @@ describe('registerDocsTools', () => {
       url: 'https://docs.google.com/document/d/DOC-123_abc/edit',
       sharedWith: 'owner@example.com',
       sharingVerification: 'verified_owner_only',
+      sharingVerificationDiagnostic: {
+        status: 'verified_owner_only',
+        reason: 'verified',
+        permissionCount: 2,
+        pagesRead: 1,
+        fullPageCompletion: true,
+        unexpectedPrincipal: false,
+        inheritedPermission: false,
+        missingExpectedPrincipal: false,
+        malformedPermissionEntry: false,
+      },
       contentStructure: {
         complete: true,
         headings: [{ text: 'Plan', style: 'HEADING_1' }],
@@ -255,6 +277,40 @@ describe('registerDocsTools', () => {
       type: 'user',
       emailAddress: 'owner@example.com',
     });
+  });
+
+  it('retains a sanitized ACL failure diagnostic in the create result', async () => {
+    const api = vi
+      .fn()
+      .mockResolvedValueOnce({ documentId: 'DOC-123_abc' })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        permissions: [
+          { type: 'user', emailAddress: 'bot@example.com' },
+          { type: 'user', emailAddress: 'owner@example.com' },
+          { type: 'user', emailAddress: 'unexpected@example.com' },
+        ],
+      });
+    const tool = toolsWith(api).get('docs.create')?.tool;
+    const result = (await tool?.execute({ title: 'Plan', content: 'Notes' }, {} as never)) as {
+      sharingVerification: string;
+      sharingVerificationDiagnostic: unknown;
+    };
+
+    expect(result.sharingVerification).toBe('not_owner_only');
+    expect(result.sharingVerificationDiagnostic).toEqual({
+      status: 'not_owner_only',
+      reason: 'unexpected_principal',
+      permissionCount: 3,
+      pagesRead: 1,
+      fullPageCompletion: true,
+      unexpectedPrincipal: true,
+      inheritedPermission: false,
+      missingExpectedPrincipal: false,
+      malformedPermissionEntry: false,
+    });
+    expect(JSON.stringify(result.sharingVerificationDiagnostic)).not.toContain('@');
   });
 
   it('recovers collapsed block boundaries and creates real table cells in separate insert phases', async () => {
