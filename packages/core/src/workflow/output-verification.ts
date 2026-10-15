@@ -37,6 +37,8 @@ export type OutputVerificationResult = {
   revised: boolean;
   /** Optional verification was skipped or failed; known contradictions still fail closed. */
   unavailable: boolean;
+  /** A transparent fallback does not complete the requested answer. */
+  incomplete?: boolean;
 };
 
 type OutputVerifier = Pick<ModelRouter, 'object'>;
@@ -226,6 +228,34 @@ function successfulWebSources(evidence: readonly ActionEvidence[]) {
       return [];
     return [{ text: result.text, url: typeof result.finalUrl === 'string' ? result.finalUrl : '' }];
   });
+}
+
+function sourceLink(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password)
+      return ` [Source](<${parsed.href}>)`;
+  } catch {
+    /* No verified public source URL. */
+  }
+  return '';
+}
+
+/** A requested citation must remain joined to the complete current fetch. */
+function requestedWebLinkFindings(
+  request: string,
+  draft: string,
+  evidence: readonly ActionEvidence[],
+): string[] {
+  if (!/\b(?:source|citation)\s+links?\b|\blink\s+to\s+(?:the\s+)?source\b/i.test(request))
+    return [];
+  const requested: string[] = request.match(/https?:\/\/[^\s<>]+/g) ?? [];
+  const sources = successfulWebSources(evidence).filter((source) => requested.includes(source.url));
+  return sources.flatMap((source) =>
+    [...draft.matchAll(/\[[^\]\n]+\]\(<?([^\s<>)]*)>?\)/g)].some((match) => match[1] === source.url)
+      ? []
+      : ['The requested source link to a complete current fetched page is missing.'],
+  );
 }
 
 /** A deliberately bounded check for explicit route attributes, not a general
@@ -559,15 +589,10 @@ function webFetchEvidenceForVerifier(
   // A draft that names a service lets us send only its source passage. When
   // the draft itself is a refusal or generic summary, that selection is empty
   // and the verifier cannot recover the useful sections at the end of a long
-  // successful fetch. Include bounded late sections in that case so the
+  // successful fetch. Include bounded early and late sections in that case so the
   // verifier can distinguish a readable page from an actually missing detail.
   const selectedPassages = lateNamedPassage
-    ? (passages.length > 0
-        ? passages
-        : allNamedSourcePassages(sourceText).filter(
-            (passage) => passage.end > WEB_SOURCE_EXCERPT_LIMIT,
-          )
-      ).slice(0, 24)
+    ? (passages.length > 0 ? passages : allPassages).slice(0, 24)
     : [];
   let passageLimit = EVIDENCE_ITEM_LIMIT;
   let excerptLength = Math.min(
@@ -599,9 +624,7 @@ function webFetchEvidenceForVerifier(
               },
               sourcePassagesOmittedCount: Math.max(
                 0,
-                (passages.length ||
-                  allPassages.filter((passage) => passage.end > WEB_SOURCE_EXCERPT_LIMIT).length) -
-                  selectedPassages.length,
+                (passages.length || allPassages.length) - selectedPassages.length,
               ),
             }
           : {}),
@@ -727,7 +750,14 @@ export async function verifyFinalOutput(
     text: string,
     attempted: boolean,
     unavailable: boolean,
-  ): OutputVerificationResult => ({ text, attempted, revised: text !== input.draft, unavailable });
+    incomplete = false,
+  ): OutputVerificationResult => ({
+    text,
+    attempted,
+    revised: text !== input.draft,
+    unavailable,
+    ...(incomplete ? { incomplete: true } : {}),
+  });
   const limitation = () => {
     const source = successfulWebSources(input.evidence)[0];
     let url = '';
@@ -742,6 +772,7 @@ export async function verifyFinalOutput(
   };
   let attempted = false;
   let incompleteCorrectionPending = false;
+  let unresolvedFormatPending = false;
   try {
     const outcome = await router.object<OutputVerification>('rewrite', {
       taskId: input.taskId,
@@ -754,13 +785,12 @@ export async function verifyFinalOutput(
     });
     attempted = outcome.ok;
     if (!outcome.ok || outcome.finishReason === 'length') {
-      return result(
-        publicWebClaimFindings(original, input.evidence, ownerFacts).length
-          ? limitation()
-          : original,
-        outcome.ok,
-        true,
-      );
+      const contradicted = publicWebClaimFindings(original, input.evidence, ownerFacts).length > 0;
+      const incomplete =
+        contradicted ||
+        shortBulletFindings(input.request, original).length > 0 ||
+        requestedWebLinkFindings(input.request, original, input.evidence).length > 0;
+      return result(contradicted ? limitation() : original, outcome.ok, true, incomplete);
     }
     const revision = outcome.object.revisedText?.trim();
     let candidate =
@@ -786,9 +816,13 @@ export async function verifyFinalOutput(
       (rejectedGroundingRevision || isVisiblyIncompleteReplacement(revision ?? ''));
     const correctionDraft = incompleteReplacement ? (revision ?? candidate) : candidate;
     const findings = publicWebClaimFindings(correctionDraft, input.evidence, ownerFacts);
-    const formatFindings = shortBulletFindings(input.request, correctionDraft);
+    const formatFindings = [
+      ...shortBulletFindings(input.request, correctionDraft),
+      ...requestedWebLinkFindings(input.request, correctionDraft, input.evidence),
+    ];
     if (findings.length || incompleteReplacement || formatFindings.length) {
       incompleteCorrectionPending = incompleteReplacement;
+      unresolvedFormatPending = formatFindings.length > 0;
       // Share one extra correction across source attribution and visibly
       // incomplete revisions. A second failure never restores the original.
       const correctionInstructions = [
@@ -819,11 +853,13 @@ export async function verifyFinalOutput(
           Math.max(1_024, Math.ceil(correctionDraft.length / 2) + 512),
         ),
       });
+      // Publish approves the draft that this correction actually reviewed.
+      // It never approves the earlier rejected original or unsubmitted text.
       const text =
-        correction.ok &&
-        correction.finishReason !== 'length' &&
-        correction.object.decision === 'revise'
-          ? correction.object.revisedText?.trim()
+        correction.ok && correction.finishReason !== 'length'
+          ? correction.object.decision === 'publish'
+            ? correctionDraft
+            : correction.object.revisedText?.trim()
           : undefined;
       const corrected = text ? repairRequestedBullets(input.request, text) : undefined;
       if (
@@ -833,15 +869,39 @@ export async function verifyFinalOutput(
           : revisionLosesAnswer(input.draft, corrected)) ||
         isVisiblyIncompleteReplacement(corrected) ||
         shortBulletFindings(input.request, corrected).length ||
+        requestedWebLinkFindings(input.request, corrected, input.evidence).length ||
         publicWebClaimFindings(corrected, input.evidence, ownerFacts).length
       ) {
+        const source = successfulWebSources(input.evidence)[0];
+        // A formatting failure cannot establish a missing-source fact. Retain
+        // a usable checked answer only when neither reviewer nor deterministic
+        // source checks rejected its grounding; keep the unmet format visible.
+        const preserveAnswer =
+          (outcome.object.decision === 'publish' ||
+            (outcome.object.reasons.length > 0 &&
+              outcome.object.reasons.every((reason) => reason === 'clarity_or_format'))) &&
+          (!correction.ok ||
+            correction.object.reasons.every((reason) => reason === 'clarity_or_format')) &&
+          !findings.length &&
+          !hasStructuralOutputDefect(candidate) &&
+          !isVisiblyIncompleteReplacement(candidate);
         const safeFailure = findings.length
           ? limitation()
-          : 'I couldn’t produce a complete answer that I can support from the available evidence.';
-        return result(safeFailure, true, !correction.ok || correction.finishReason === 'length');
+          : preserveAnswer
+            ? `${candidate}\n\nI couldn’t complete the requested formatting.${source ? sourceLink(source.url) : ''}`
+            : source
+              ? `The page was retrieved, but I couldn’t complete a verified summary of its contents.${sourceLink(source.url)}`
+              : 'I couldn’t produce a complete answer that I can support from the available evidence.';
+        return result(
+          safeFailure,
+          true,
+          !correction.ok || correction.finishReason === 'length',
+          true,
+        );
       }
       candidate = corrected;
       incompleteCorrectionPending = false;
+      unresolvedFormatPending = false;
     }
     return result(candidate, true, false);
   } catch (error) {
@@ -851,12 +911,19 @@ export async function verifyFinalOutput(
     });
     return result(
       incompleteCorrectionPending
-        ? 'I couldn’t produce a complete answer that I can support from the available evidence.'
+        ? successfulWebSources(input.evidence)[0]
+          ? `The page was retrieved, but I couldn’t complete a verified summary of its contents.${sourceLink(successfulWebSources(input.evidence)[0]?.url ?? '')}`
+          : 'I couldn’t produce a complete answer that I can support from the available evidence.'
         : publicWebClaimFindings(original, input.evidence, ownerFacts).length
           ? limitation()
           : original,
       attempted,
       true,
+      incompleteCorrectionPending ||
+        unresolvedFormatPending ||
+        shortBulletFindings(input.request, original).length > 0 ||
+        requestedWebLinkFindings(input.request, original, input.evidence).length > 0 ||
+        publicWebClaimFindings(original, input.evidence, ownerFacts).length > 0,
     );
   }
 }

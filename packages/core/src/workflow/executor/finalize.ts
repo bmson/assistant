@@ -997,7 +997,13 @@ export async function stageModelFinalResponse(
             ? window.slice(0, Math.max(0, latestOwnerIndex))
             : undefined,
       })
-    : { text: initialCheck.text, attempted: false, revised: false, unavailable: false };
+    : {
+        text: initialCheck.text,
+        attempted: false,
+        revised: false,
+        unavailable: false,
+        incomplete: false,
+      };
   // A reviser is another generative surface: strip companion tags a second
   // time, then re-run the same authoritative response contract before publish.
   const reflectedText = stripCueTags(reflection.text).text;
@@ -1244,16 +1250,21 @@ export async function stageModelFinalResponse(
   // Stamp the contract verdict on pending; recordQualitySignals reads it from
   // the single funnel in finalizePendingResponse, so every terminal path — not
   // just this prose-model one — persists its verdict and loop-health counters.
-  pending.contractBlocked = checked.blocked || (rejectedRevision && reflectedCheck.blocked);
+  pending.contractBlocked =
+    checked.blocked ||
+    (rejectedRevision && reflectedCheck.blocked) ||
+    reflection.incomplete === true;
   pending.contractUnsupportedCount = Math.max(
     checked.unsupported.length,
     rejectedRevision ? reflectedCheck.unsupported.length : 0,
+    reflection.incomplete ? 1 : 0,
   );
   // A transparent replacement is a truthful reply, not proof the requested
   // work finished. Keep unresolved effects visible and re-queueable. Grounded
   // factual corrections with no missing effect may still complete normally.
   if (
     checked.qualityFallback ||
+    reflection.incomplete ||
     checked.unsupported.length > 0 ||
     (checked.blocked && contractOptions.readRequest)
   ) {
