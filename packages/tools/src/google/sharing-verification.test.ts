@@ -26,10 +26,11 @@ describe('verifyOwnerOnlyDriveSharing', () => {
     const permissionsUrl = new URL(String(client.api.mock.calls[0]?.[0]));
     expect(permissionsUrl.pathname).toBe('/drive/v3/files/DocumentId12345/permissions');
     expect(permissionsUrl.searchParams.get('fields')).toBe(
-      'nextPageToken,permissions(type,emailAddress,deleted,permissionDetails(inherited,inheritedFrom))',
+      'nextPageToken,permissions(type,emailAddress,deleted,view,permissionDetails(inherited,inheritedFrom))',
     );
     expect(permissionsUrl.searchParams.get('pageSize')).toBe('100');
     expect(permissionsUrl.searchParams.get('supportsAllDrives')).toBe('true');
+    expect(permissionsUrl.searchParams.get('includePermissionsForView')).toBe('published');
   });
 
   it.each([
@@ -94,6 +95,53 @@ describe('verifyOwnerOnlyDriveSharing', () => {
         'owner@example.com',
       ),
     ).resolves.toBe('not_owner_only');
+  });
+
+  it.each([
+    { type: 'anyone', role: 'reader', view: 'published' },
+    { type: 'group', emailAddress: 'team@example.com', role: 'reader', view: 'published' },
+    { type: 'user', emailAddress: 'unexpected@example.com', role: 'reader', view: 'published' },
+  ])('rejects published-view permissions: %j', async (publishedPermission) => {
+    await expect(
+      verifyOwnerOnlyDriveSharing(
+        {
+          api: vi.fn().mockResolvedValue({
+            permissions: [
+              { type: 'user', emailAddress: 'bot@example.com' },
+              { type: 'user', emailAddress: 'owner@example.com' },
+              publishedPermission,
+            ],
+          }),
+        } as never,
+        'DocumentId12345',
+        'bot@example.com',
+        'owner@example.com',
+      ),
+    ).resolves.toBe('not_owner_only');
+  });
+
+  it('does not treat a metadata-only view for an allowed principal as an extra audience', async () => {
+    const result = await verifyOwnerOnlyDriveSharingWithDiagnostic(
+      {
+        api: vi.fn().mockResolvedValue({
+          permissions: [
+            { type: 'user', emailAddress: 'bot@example.com' },
+            { type: 'user', emailAddress: 'owner@example.com', view: 'metadata' },
+          ],
+        }),
+      } as never,
+      'DocumentId12345',
+      'bot@example.com',
+      'owner@example.com',
+    );
+
+    expect(result).toMatchObject({
+      status: 'verified_owner_only',
+      reason: 'verified',
+      permissionCount: 2,
+      unexpectedPrincipal: false,
+      malformedPermissionEntry: false,
+    });
   });
 
   it('fails closed when identities or provider coverage are missing', async () => {
@@ -291,6 +339,29 @@ describe('privacy-safe owner-only diagnostics', () => {
       reason: 'malformed_permission_entry',
       fullPageCompletion: true,
       inheritedPermission: true,
+      malformedPermissionEntry: true,
+    });
+  });
+
+  it('fails closed on an unknown permission view', async () => {
+    const result = await verifyOwnerOnlyDriveSharingWithDiagnostic(
+      {
+        api: vi.fn().mockResolvedValue({
+          permissions: [
+            { type: 'user', emailAddress: 'bot@example.com', view: 'unrecognized' },
+            { type: 'user', emailAddress: 'owner@example.com' },
+          ],
+        }),
+      } as never,
+      'DocumentId12345',
+      'bot@example.com',
+      'owner@example.com',
+    );
+
+    expect(result).toMatchObject({
+      status: 'not_owner_only',
+      reason: 'malformed_permission_entry',
+      unexpectedPrincipal: true,
       malformedPermissionEntry: true,
     });
   });

@@ -34,6 +34,7 @@ interface DrivePermission {
   type?: unknown;
   emailAddress?: unknown;
   deleted?: unknown;
+  view?: unknown;
   permissionDetails?: unknown;
 }
 
@@ -122,10 +123,11 @@ export async function verifyOwnerOnlyDriveSharingWithDiagnostic(
       const url = new URL(`${DRIVE}/${encodeURIComponent(fileId)}/permissions`);
       url.searchParams.set(
         'fields',
-        'nextPageToken,permissions(type,emailAddress,deleted,permissionDetails(inherited,inheritedFrom))',
+        'nextPageToken,permissions(type,emailAddress,deleted,view,permissionDetails(inherited,inheritedFrom))',
       );
       url.searchParams.set('pageSize', '100');
       url.searchParams.set('supportsAllDrives', 'true');
+      url.searchParams.set('includePermissionsForView', 'published');
       if (pageToken) url.searchParams.set('pageToken', pageToken);
       const response: unknown = await client.api<unknown>(url.toString());
       pagesRead += 1;
@@ -181,6 +183,15 @@ export async function verifyOwnerOnlyDriveSharingWithDiagnostic(
     const inherited = inheritance.inherited;
     hasInheritedPermission ||= inherited;
     malformedPermissionEntry ||= inheritance.malformed;
+    if (
+      permission.view !== undefined &&
+      permission.view !== 'published' &&
+      permission.view !== 'metadata'
+    ) {
+      malformedPermissionEntry = true;
+      hasUnexpectedPrincipal = true;
+      continue;
+    }
     if (
       permission.type !== 'user' ||
       !email ||
