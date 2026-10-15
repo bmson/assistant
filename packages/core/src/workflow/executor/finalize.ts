@@ -1016,7 +1016,9 @@ export async function stageModelFinalResponse(
   // is deliberately not parsed here, so a fluent answer cannot invent a card.
   // A trip to "my 3pm" read a day and a half of calendar to find one event.
   // That read is the trip's first step, not an agenda the owner asked to see.
-  const tripOwnsCalendar = liveLookups.some((lookup) => lookup.destination === 'calendar');
+  const tripOwnsCalendar = liveLookups.some(
+    (lookup) => lookup.destination === 'calendar' || lookup.airportIntent,
+  );
   const specializedCards = responseCardsForFinal({
     evidence: tripOwnsCalendar
       ? evidence.filter((row) => row.toolName !== 'calendar.list_events')

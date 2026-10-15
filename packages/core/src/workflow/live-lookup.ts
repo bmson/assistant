@@ -22,6 +22,8 @@ export type LiveLookup = {
    * routes to the event's own location, arriving by its start.
    */
   destination?: 'calendar';
+  /** A generic airport trip needs itinerary evidence before naming an airport. */
+  airportIntent?: true;
 };
 
 /** The owner's clock, for lookups that resolve "my 3pm" or "my next meeting". */
@@ -93,6 +95,8 @@ const DIRECTIONS =
  */
 const MY_EVENT =
   /\bmy\s+(?:next\s+)?(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}:\d{2}|(?:[a-z'-]+\s+){0,2}(?:meeting|appointment|event|flight|reservation|call|dinner|lunch|interview|class|practice))\b/i;
+const FLIGHT_EVENT = /\b(?:flight|airline|itinerary|boarding)\b/i;
+const AIRPORT_PLACE = /\b(?:airport|airfield|terminal)\b/i;
 /** Event words that name a kind of thing, so the event must say it too. */
 const SPECIFIC_EVENT = /\b(?:flight|dinner|lunch|interview|class|practice)\b/i;
 /** "What's the Giants score?", "any Premier League results?", "make a live score card". */
@@ -109,6 +113,32 @@ function isSportsRequest(request: string, asks: boolean): boolean {
     return false;
   if (SPORTS_RESULT.test(request)) return true;
   return SPORTS_EVENT.test(request) && (SPORT_WORD.test(request) || !!leagueNamedIn(request));
+}
+
+/**
+ * A generic airport is not a route destination. A named airport or a place
+ * attached to it is already a usable destination and stays on the ordinary
+ * Maps path.
+ */
+function asksForGenericAirport(request: string): boolean {
+  const airport = /\bairports?\b/i.exec(request);
+  if (!airport) return false;
+  const before = request.slice(0, airport.index);
+  const prepositions = [...before.matchAll(/\b(?:to|at|in|near)\b/gi)];
+  const finalPreposition = prepositions.at(-1);
+  const namedPlace = finalPreposition
+    ? before.slice((finalPreposition.index ?? 0) + finalPreposition[0].length).trim()
+    : '';
+  if (
+    namedPlace &&
+    !/^(?:(?:the|a|an)(?:\s+(?:nearest|closest|local|international|domestic))?|nearest|closest|local|international|domestic)$/i.test(
+      namedPlace,
+    )
+  )
+    return false;
+  const after = request.slice(airport.index + airport[0].length);
+  if (/^\s+(?:in|at|near)\s+[\p{L}\d]/iu.test(after)) return false;
+  return true;
 }
 
 const CORRECTION =
@@ -154,10 +184,15 @@ export function detectLiveLookup(
   // Before the personal-read router, which reads "drive time" as Google
   // Drive. A trip to "my 3pm" reads the calendar as the first step of the trip
   // rather than as a lookup of its own, so the route is part of the answer.
-  if (DIRECTIONS.test(request))
-    return MY_EVENT.test(request)
-      ? { kind: 'directions', request, destination: 'calendar' }
-      : { kind: 'directions', request };
+  if (DIRECTIONS.test(request)) {
+    const airportIntent =
+      asksForGenericAirport(request) || (MY_EVENT.test(request) && /\bflight\b/i.test(request));
+    return airportIntent
+      ? { kind: 'directions', request, airportIntent: true }
+      : MY_EVENT.test(request)
+        ? { kind: 'directions', request, destination: 'calendar' }
+        : { kind: 'directions', request };
+  }
   if (requestedPageUrl(request)) return { kind: 'web', request };
   if (detectPersonalReadRequest(history)) return undefined;
   if (/\binvestigate\b[\s\S]*\b(?:team|club|company|match)\b/i.test(request))
@@ -502,6 +537,47 @@ function nextTripStep(
   };
 }
 
+function nextAirportStep(
+  lookup: LiveLookup,
+  rows: ActionEvidence[],
+  context: LookupContext,
+): { toolName: string; input?: Record<string, unknown> } | undefined {
+  const temporal = tripWindow(lookup, context);
+  if (temporal.kind !== 'resolved') return undefined;
+  if (rows.some((row) => row.toolName === 'calendar.list_events')) return undefined;
+  return {
+    toolName: 'calendar.list_events',
+    input: {
+      timeMin: temporal.intent.interval.start,
+      timeMax: temporal.intent.interval.endExclusive,
+      maxResults: 50,
+    },
+  };
+}
+
+function airportItineraryEvents(
+  lookup: LiveLookup,
+  rows: ActionEvidence[],
+  context: LookupContext,
+): TripEvent[] {
+  const temporal = tripWindow(lookup, context);
+  if (temporal.kind !== 'resolved') return [];
+  const start = Date.parse(temporal.intent.interval.start);
+  const end = Date.parse(temporal.intent.interval.endExclusive);
+  return calendarEvents(rows)
+    .filter((event) => {
+      const eventStart = Date.parse(event.start);
+      // A flight title only identifies a likely itinerary record. The airport
+      // candidate must come from the event's explicit location field.
+      if (!FLIGHT_EVENT.test(event.summary) || !AIRPORT_PLACE.test(event.location)) return false;
+      // A location that names a route or multiple places does not tell us which
+      // airport the owner needs to travel to.
+      if (/\b(?:from|to|via|and|or)\b|[;|/→]/i.test(event.location)) return false;
+      return Number.isFinite(eventStart) && eventStart >= start && eventStart < end;
+    })
+    .sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+}
+
 /** Search snippets are discovery, not a complete live-score or research read. */
 export function nextLiveLookup(
   lookup: LiveLookup,
@@ -509,6 +585,7 @@ export function nextLiveLookup(
   context?: LookupContext,
 ): { toolName: string; input?: Record<string, unknown> } | undefined {
   const rows = evidence.filter((row) => row.fromCurrentTask !== false);
+  if (lookup.airportIntent) return nextAirportStep(lookup, rows, context ?? DEFAULT_CONTEXT);
   if (lookup.destination === 'calendar') return nextTripStep(lookup, rows, context);
   if (lookup.kind === 'weather') {
     if (!rows.some((row) => row.toolName === 'weather.lookup'))
@@ -678,13 +755,16 @@ export function liveLookupDirective(
   const trip = lookups.some((lookup) => lookup.destination === 'calendar')
     ? "\nThe trip destination is an event on the owner's calendar. The runtime read the calendar, chose that event, and routed to its own location arriving by its start. Name the event, the travel time, and when to leave; never route to or suggest a different event."
     : '';
+  const airportTrip = lookups.some((lookup) => lookup.airportIntent)
+    ? '\nThis request concerns a trip to an airport. Check the requested calendar window before choosing one. A flight title or its scheduled start does not establish the airport to travel to or an airport-arrival deadline. Use an airport only when one matching flight event has a single explicit airport in its location. Do not route with an assumed airport, origin, or time; ask only for any details still missing.'
+    : '';
   const failed = (context.failures ?? []).map(
     ({ lookup }) =>
       `The ${lookup.kind} lookup for "${lookup.request}" failed. Say so for that part instead of answering it, and answer the other parts.`,
   );
   if (lookups.length === 1)
     return [
-      `This request needs fresh ${first.kind} evidence: ${first.request}\n${rules}${trip}${eventReminder}`,
+      `This request needs fresh ${first.kind} evidence: ${first.request}\n${rules}${trip}${airportTrip}${eventReminder}`,
       // Only a turn that also reads the calendar or mail gets this far with a
       // failed lookup; alone, the failure is the whole answer.
       ...failed,
@@ -698,7 +778,7 @@ export function liveLookupDirective(
     ...failed,
     rules,
   ];
-  return `${lines.join('\n')}${trip}${eventReminder}`;
+  return `${lines.join('\n')}${trip}${airportTrip}${eventReminder}`;
 }
 
 /**
@@ -830,6 +910,22 @@ export function liveLookupFailure(
   evidence: ActionEvidence[],
   context?: LookupContext,
 ): string | undefined {
+  if (lookup.airportIntent) {
+    const rows = evidence.filter((row) => row.fromCurrentTask !== false);
+    const calendarRead = rows.find(
+      (row) => row.toolName === 'calendar.list_events' && successfulLookup(row),
+    );
+    if (!calendarRead)
+      return "I couldn't read your calendar to check for a relevant flight, so I haven't chosen an airport. Tell me the airport, where you'll start, and the time you plan to leave, and I can estimate the route.";
+    if ((calendarRead.result as { complete?: unknown }).complete === false)
+      return "Calendar coverage is incomplete, so I can't safely choose an airport from your itinerary. Tell me the airport, where you'll start, and the time you plan to leave, and I can estimate the route.";
+    const candidates = airportItineraryEvents(lookup, rows, context ?? DEFAULT_CONTEXT);
+    if (candidates.length === 1)
+      return `Your calendar lists a flight at ${candidates[0]?.location}, but it doesn't tell me where you'll start or when you'll leave for the airport. Share those two details and I can estimate tomorrow's traffic and travel time.`;
+    return candidates.length > 1
+      ? "Your calendar has multiple flight entries with airport locations in that period, so I haven't chosen one. Which airport do you mean, where will you start, and what time do you plan to leave?"
+      : "I couldn't confirm a unique airport from a flight location on your calendar. Which airport do you mean, where will you start, and what time do you plan to leave?";
+  }
   if (lookup.destination === 'calendar') {
     const temporal = context ? tripWindow(lookup, context) : undefined;
     if (temporal?.kind === 'unsupported') return temporal.message;

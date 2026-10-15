@@ -478,11 +478,14 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   const liveLookups = detectedLookups.flatMap((lookup): LiveLookup[] =>
     lookup.kind === 'sports' && !available('sports.scores')
       ? [{ ...lookup, kind: 'web' }]
-      : lookup.kind === 'directions' &&
-          (!available('maps.directions') ||
-            (lookup.destination === 'calendar' && !available('calendar.list_events')))
-        ? []
-        : [lookup],
+      : lookup.airportIntent
+        ? [lookup]
+        : lookup.kind === 'directions' &&
+            (!available('maps.directions') ||
+              ((lookup.destination === 'calendar' || lookup.airportIntent) &&
+                !available('calendar.list_events')))
+          ? []
+          : [lookup],
   );
   const liveLookup = liveLookups.length > 0;
   const lookupContext = { now: readReferenceAt, timeZone: requestTimeZone };
@@ -490,7 +493,9 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // trip. The private-read router must not also claim it: its answer contract
   // checks every stated time against the calendar alone, and "leave by 2:40"
   // comes from the route.
-  const tripOwnsCalendar = liveLookups.some((lookup) => lookup.destination === 'calendar');
+  const tripOwnsCalendar = liveLookups.some(
+    (lookup) => lookup.destination === 'calendar' || lookup.airportIntent,
+  );
   const birthdaySaves =
     directOwner && !restrictedChecklistResume ? requestedBirthdaySaves(ownerWindow) : [];
   const situationRequest =
