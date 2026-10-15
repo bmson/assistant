@@ -718,6 +718,121 @@ ${body}`;
       expect(result.text).not.toMatch(/RB22|Spandau|163/);
     }
   });
+
+  it('completes a visibly unfinished grounding revision without restoring unsupported claims', async () => {
+    const calls: { prompt: string }[] = [];
+    const original =
+      'The records confirm several family dates, including unsupported names and dates.';
+    const safe =
+      'The available records confirm one date. They do not confirm the other requested dates.';
+    const router = {
+      object: async (_role: string, input: { prompt: string }) => {
+        calls.push(input);
+        return {
+          ok: true,
+          finishReason: 'stop',
+          object:
+            calls.length === 1
+              ? {
+                  decision: 'revise',
+                  revisedText:
+                    'The available records confirm one date, but the others remain uncertain:',
+                  reasons: ['unsupported_claim'],
+                }
+              : { decision: 'revise', revisedText: safe, reasons: [] },
+        };
+      },
+    };
+
+    const result = await verifyFinalOutput(router as never, {
+      taskId: 'private-facts',
+      request: 'Give the requested dates.',
+      draft: original,
+      evidence: [],
+      critical: true,
+    });
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.prompt).toContain('completion_findings');
+    expect(calls[1]?.prompt).toContain('Do not restore unsupported details');
+    expect(result).toMatchObject({ text: safe, revised: true, unavailable: false });
+    expect(result.text).not.toContain('unsupported names');
+  });
+
+  it('fails closed when the one completion correction is unavailable or still unfinished', async () => {
+    for (const failure of ['unavailable', 'unfinished', 'throw']) {
+      let calls = 0;
+      const original = 'The original draft contains details that the reviewer found unsupported.';
+      const router = {
+        object: async () => {
+          calls++;
+          if (calls === 1)
+            return {
+              ok: true,
+              finishReason: 'stop',
+              object: {
+                decision: 'revise',
+                revisedText: 'The supported evidence is limited, and the rest remains uncertain:',
+                reasons: ['ungrounded_fact'],
+              },
+            };
+          if (failure === 'throw') throw new Error('Correction unavailable');
+          return failure === 'unavailable'
+            ? { ok: false }
+            : {
+                ok: true,
+                finishReason: 'stop',
+                object: {
+                  decision: 'revise',
+                  revisedText: 'Only one supported result:',
+                  reasons: [],
+                },
+              };
+        },
+      };
+
+      const result = await verifyFinalOutput(router as never, {
+        taskId: 'private-facts',
+        request: 'Give the requested facts.',
+        draft: original,
+        evidence: [],
+        critical: true,
+      });
+
+      expect(calls).toBe(2);
+      expect(result.text).toContain('complete answer');
+      expect(result.text).not.toBe(original);
+    }
+  });
+
+  it('does not add a correction for a complete concise or heading-only revision', async () => {
+    for (const revision of ['# Findings', 'The verified result is one.']) {
+      let calls = 0;
+      const router = {
+        object: async () => {
+          calls++;
+          return {
+            ok: true,
+            finishReason: 'stop',
+            object: {
+              decision: 'revise',
+              revisedText: revision,
+              reasons: ['unsupported_claim'],
+            },
+          };
+        },
+      };
+      const result = await verifyFinalOutput(router as never, {
+        taskId: 'concise-output',
+        request: 'Return a concise result.',
+        draft: '# Findings\nThe original response included an unsupported detail.',
+        evidence: [],
+        critical: true,
+      });
+      expect(calls).toBe(1);
+      expect(result.text).toBe(revision);
+    }
+  });
 });
 
 describe('public service claim scope and attribute boundaries', () => {

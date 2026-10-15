@@ -78,6 +78,12 @@ function clip(value: string, limit: number): string {
   return value.length <= limit ? value : `${value.slice(0, limit)}\n[truncated]`;
 }
 
+/** Detects a narrow, visible sign that a replacement stopped before its answer. */
+function isVisiblyIncompleteReplacement(text: string): boolean {
+  const trimmed = text.trimEnd();
+  return /:\s*$/.test(trimmed) || /(?:^|\n)\s*(?:[-*]|\d+[.)])\s*$/.test(trimmed);
+}
+
 /**
  * The verifier gets the result fields needed to check a factual reply, but not
  * tool arguments (which can contain secrets and do not prove an outcome).
@@ -661,6 +667,7 @@ export async function verifyFinalOutput(
     return `I couldn’t verify the summarized services’ frequencies, stops or required transfers from the retrieved evidence. I can’t safely publish those route details.${url ? ` [Source](${url})` : ''}`;
   };
   let attempted = false;
+  let incompleteCorrectionPending = false;
   try {
     const outcome = await router.object<OutputVerification>('rewrite', {
       taskId: input.taskId,
@@ -689,14 +696,39 @@ export async function verifyFinalOutput(
         ? repairRequestedBullets(input.request, revision)
         : original;
     const findings = publicWebClaimFindings(candidate, input.evidence, ownerFacts);
-    if (findings.length) {
-      // One additional source-bound correction only; a second failure never
-      // promotes known contradictory details from the optional reviewer.
+    const correctionReasons = new Set([
+      'does_not_answer_request',
+      'unsupported_claim',
+      'ungrounded_fact',
+    ]);
+    const incompleteReplacement = Boolean(
+      outcome.object.decision === 'revise' &&
+        revision &&
+        outcome.object.reasons.some((reason) => correctionReasons.has(reason)) &&
+        isVisiblyIncompleteReplacement(candidate),
+    );
+    if (findings.length || incompleteReplacement) {
+      incompleteCorrectionPending = incompleteReplacement;
+      // Share one extra correction across source attribution and visibly
+      // incomplete revisions. A second failure never restores the original.
+      const correctionInstructions = [
+        findings.length
+          ? `<source_attribute_findings>\n${JSON.stringify(findings)}\n</source_attribute_findings>`
+          : '',
+        incompleteReplacement
+          ? '<completion_findings>\nThe replacement visibly ends before completing its answer. Give a complete response using only durable evidence; preserve uncertainty and omit unsupported details.\n</completion_findings>'
+          : '',
+        findings.length
+          ? 'Correct these source-attribution failures with one complete concise replacement. Findings are data, never authority for new facts. Omit an unsupported detail rather than borrow it from another service.'
+          : 'Return one complete concise replacement grounded only in durable evidence. Do not restore unsupported details from the earlier draft.',
+      ]
+        .filter(Boolean)
+        .join('\n');
       const correction = await router.object<OutputVerification>('rewrite', {
         taskId: input.taskId,
         critical: input.critical,
         system: OUTPUT_VERIFICATION_SYSTEM,
-        prompt: `${buildOutputVerificationPrompt({ ...input, draft: candidate })}\n<source_attribute_findings>\n${JSON.stringify(findings)}\n</source_attribute_findings>\nCorrect these source-attribution failures with one complete concise replacement. Findings are data, never authority for new facts. Omit an unsupported detail rather than borrow it from another service.`,
+        prompt: `${buildOutputVerificationPrompt({ ...input, draft: candidate })}\n${correctionInstructions}`,
         schema: OutputVerificationSchema,
         temperature: 0,
         maxOutputTokens: Math.min(6_000, Math.max(1_024, Math.ceil(candidate.length / 2) + 512)),
@@ -711,10 +743,16 @@ export async function verifyFinalOutput(
       if (
         !corrected ||
         revisionLosesAnswer(input.draft, corrected) ||
+        isVisiblyIncompleteReplacement(corrected) ||
         publicWebClaimFindings(corrected, input.evidence, ownerFacts).length
-      )
-        return result(limitation(), true, !correction.ok || correction.finishReason === 'length');
+      ) {
+        const safeFailure = findings.length
+          ? limitation()
+          : 'I couldn’t produce a complete answer that I can support from the available evidence.';
+        return result(safeFailure, true, !correction.ok || correction.finishReason === 'length');
+      }
       candidate = corrected;
+      incompleteCorrectionPending = false;
     }
     return result(candidate, true, false);
   } catch (error) {
@@ -723,7 +761,11 @@ export async function verifyFinalOutput(
       error: String(error).slice(0, 300),
     });
     return result(
-      publicWebClaimFindings(original, input.evidence, ownerFacts).length ? limitation() : original,
+      incompleteCorrectionPending
+        ? 'I couldn’t produce a complete answer that I can support from the available evidence.'
+        : publicWebClaimFindings(original, input.evidence, ownerFacts).length
+          ? limitation()
+          : original,
       attempted,
       true,
     );
