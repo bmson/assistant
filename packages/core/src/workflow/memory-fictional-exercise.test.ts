@@ -168,6 +168,12 @@ describe('source-backed fictional history', () => {
       validMemoryReadSelection({ ...result, selections: [ownerSelection] }, evidence, request),
     ).toBe(false);
     const rendered = renderMemoryReadAnswer(result, evidence, request);
+    expect(rendered.startsWith('The owner-authored passage records the original statement;')).toBe(
+      true,
+    );
+    expect(rendered).toContain('For this fictional exercise, the project is Nimbus');
+    expect(rendered).toContain('a sensible next step is to map public transport options');
+    expect(rendered).not.toContain('These are historical records, not a fresh check');
     expect(rendered).toContain('Earlier assistant claim (not verified fact)');
     expect(rendered).toContain('message assistant-nimbus');
     expect(rendered).toContain('message owner-nimbus');
@@ -188,8 +194,8 @@ describe('source-backed fictional history', () => {
     expect(result.selections).toEqual([ownerSelection, assistantSelection]);
     expect(validMemoryReadSelection(result, evidence, request)).toBe(true);
     const rendered = renderMemoryReadAnswer(result, evidence, request);
-    expect(rendered).toContain('what was recorded under each speaker');
-    expect(rendered).toContain('not proof of what the owner said');
+    expect(rendered).toContain('records the original statement');
+    expect(rendered).toContain('not evidence of owner intent');
     expect(rendered).toContain('Recorded owner message');
     expect(rendered).toContain('Earlier assistant claim (not verified fact)');
     expect(rendered).toContain('conversation exercise-chat; message owner-nimbus');

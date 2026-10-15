@@ -953,16 +953,18 @@ export function renderMemoryReadAnswer(
   const hasOwnerAndAssistant =
     chosen.some(({ source }) => source.speaker === 'Recorded owner message') &&
     chosen.some(({ source }) => source.speaker === 'Earlier assistant claim (not verified fact)');
+  const ownerAssistantContrast =
+    hasOwnerAndAssistant && requiresOwnerAssistantContrast(excludeExactRequest ?? '');
   return [
+    ...(ownerAssistantContrast
+      ? [
+          'The owner-authored passage records the original statement; the separate assistant-authored passage is an assistant claim or suggestion, not evidence of owner intent.',
+        ]
+      : []),
     ...(/\b(?:hypothetical|fictional)\b[^.!?\n]{0,100}\b(?:exercise|scenario)\b/i.test(
       excludeExactRequest ?? '',
     )
-      ? ['These passages concern the fictional exercise, not facts about you.']
-      : []),
-    ...(hasOwnerAndAssistant && requiresOwnerAssistantContrast(excludeExactRequest ?? '')
-      ? [
-          'These passages show what was recorded under each speaker. The assistant-authored passage is not proof of what the owner said, endorsed, or what is currently true.',
-        ]
+      ? ['These excerpts concern the fictional exercise, not facts about you.']
       : []),
     ...(selection.coverage === 'assistant_only'
       ? [
@@ -984,7 +986,11 @@ export function renderMemoryReadAnswer(
           'This answer uses the successful historical lookup; additional searches could not run, so coverage is limited to the returned sources.',
         ]
       : []),
-    'These are historical records, not a fresh check of your current calendar, inbox, or bookings.',
+    ...(!ownerAssistantContrast
+      ? [
+          'These are historical records, not a fresh check of your current calendar, inbox, or bookings.',
+        ]
+      : []),
   ].join('\n');
 }
 
