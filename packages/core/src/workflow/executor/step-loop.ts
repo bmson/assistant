@@ -352,7 +352,12 @@ function personalReadNeedsAttention(
     weeklyPlanAssessment?: { coverageComplete: boolean; slotCount: number };
   },
 ): boolean {
-  if (request.personCalendar || request.sourceReads || request.familyBirthday)
+  if (
+    request.personCalendar ||
+    request.sourceReads ||
+    request.familyBirthday ||
+    request.billingAuditCompanionGap
+  )
     return checked.blocked;
   if (request.upcomingFlightDiscovery && checked.blocked) return true;
   if (!request.weeklyCalendarPlan) return false;

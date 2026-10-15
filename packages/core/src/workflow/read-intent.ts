@@ -194,6 +194,8 @@ export interface PersonalReadRequest {
   /** Bounded owner-local Gmail review of billing evidence. */
   billingAudit?: BillingAuditScope;
   billingAuditIssue?: string;
+  /** Explicitly requested non-mail private-source reads not executed by the billing lane. */
+  billingAuditCompanionGap?: string;
 }
 
 export interface PersonalReadDetectionOptions {
@@ -2044,7 +2046,7 @@ function explicitPrivateSourceRequest(
   if (!history && (isCompoundTripDiscovery(text) || isUpcomingFlightDiscovery(text)))
     return undefined;
   const mail =
-    /\b(?:emails?|gmail|mailbox|inbox|travel mail|(?:authorized|my|our) messages)\b/i.test(
+    /\b(?:emails?|gmail|mailbox|inbox|travel mail|billing messages?|(?:authorized|my|our) messages)\b/i.test(
       positive,
     ) && !explicitlyProhibitsPrivateRead(text, 'email');
   const calendar =
@@ -2462,6 +2464,22 @@ function detectPersonalReadRequestInternal(
           ? 'What time zone should I use for the complete local-month boundary?'
           : 'I could not resolve those complete local months in the owner time zone.';
     const query = scope?.query ?? '';
+    const companionIntentText = latest.replace(
+      /\b(?:no|zero|without)\b[^.!?;\n]*(?:calendar|history|memories?)[^.!?;\n]*\b(?:writes?|writing|changes?|changing|updates?|updating|creates?|creating)\b/giu,
+      '',
+    );
+    const companionSources = [
+      ...(/\b(?:read|search|check|review|consult|look(?:\s+up|\s+at)?|use)\b[^.!?\n]{0,120}\b(?:earlier|previous|past)\s+(?:conversations?|chats?)\b|\b(?:read|search|check|review|consult|look(?:\s+up|\s+at)?|use)\b[^.!?\n]{0,80}\b(?:my|our)\s+(?:conversation\s+)?history\b/iu.test(
+        companionIntentText,
+      ) && !explicitlyProhibitsPrivateRead(companionIntentText, 'memory')
+        ? ['history']
+        : []),
+      ...(/\b(?:check|search|read|review|consult|look(?:\s+up|\s+at)?|use|compare)\b[^.!?\n]{0,100}\b(?:my|our)\s+(?:calendars?|schedule|agenda)\b/iu.test(
+        companionIntentText,
+      ) && !explicitlyProhibitsPrivateRead(companionIntentText, 'calendar')
+        ? ['calendar']
+        : []),
+    ];
     return {
       kind: 'email',
       explicitSource: 'mail',
@@ -2471,7 +2489,16 @@ function detectPersonalReadRequestInternal(
       requiresExhaustiveMail: true,
       mailQuery: query,
       ...(issue ? { scopeIssue: issue, billingAuditIssue: issue } : {}),
-      ...(scope ? { billingAudit: scope } : {}),
+      ...(scope
+        ? {
+            billingAudit: scope,
+            ...(companionSources.length
+              ? {
+                  billingAuditCompanionGap: `The requested ${[...new Set(companionSources)].join(' and ')} source check was not run; only the bounded billing mailbox was reviewed.`,
+                }
+              : {}),
+          }
+        : {}),
     };
   }
 

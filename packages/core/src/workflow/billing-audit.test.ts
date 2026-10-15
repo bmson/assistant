@@ -165,6 +165,66 @@ describe('bounded billing mail audit', () => {
     );
   });
 
+  it('reassembles receipt-validated message fragments before billing clause extraction', () => {
+    const valid = readEvidence(true, '2026-08-12T12:00:00Z');
+    const thread = valid.evidence[1];
+    if (!thread) throw new Error('Expected complete thread read');
+    const result = thread.result as Record<string, unknown>;
+    const receipt = result.receipt as Record<string, unknown>;
+    const original = (result.messages as Array<Record<string, unknown>>)[0];
+    if (!original || typeof original.text !== 'string') throw new Error('Expected source message');
+    const body = `${original.text} This subscription was a one-time exception and will not renew.`;
+    const split = Math.floor(original.text.length / 2);
+    const firstText = body.slice(0, split);
+    const secondText = body.slice(split);
+    const nextInput = {
+      threadId: 'thread-1',
+      startMessageIndex: 0,
+      startMessageOffset: split,
+      maxMessages: 20,
+      maxChars: 20_000,
+    };
+    thread.result = {
+      ...result,
+      complete: false,
+      hasMore: true,
+      messages: [{ ...original, text: firstText, sourceLength: body.length, truncated: true }],
+      continuation: { tool: 'gmail.read_thread', input: nextInput },
+      receipt: {
+        ...receipt,
+        complete: false,
+        losses: ['provider-page'],
+        continuation: { tool: 'gmail.read_thread', input: nextInput },
+      },
+    } as unknown as typeof thread.result;
+    const second = structuredClone(thread);
+    second.args = nextInput as unknown as typeof second.args;
+    second.result = {
+      ...result,
+      complete: true,
+      hasMore: false,
+      messages: [{ ...original, text: secondText, sourceLength: body.length, truncated: false }],
+      continuation: null,
+      receipt: {
+        ...receipt,
+        requested: { start: 0, offset: split, limit: 20, scope: 'thread-messages' },
+        covered: { start: 0, offset: split, end: 1, count: 1, total: 1, unavailable: 0 },
+        complete: true,
+        losses: [],
+        continuation: null,
+      },
+    } as unknown as typeof second.result;
+    const projection = billingAuditProjection(valid.request, [...valid.evidence, second]);
+    expect(projection.coverage.complete).toBe(true);
+    expect(projection.rows.map((row) => row.quote)).toEqual([
+      expect.stringContaining('Your card was charged $12.00'),
+      expect.stringContaining('one-time exception'),
+    ]);
+    expect(projection.rows.every((row) => row.receivedAt === '2026-08-12T12:00:00.000Z')).toBe(
+      true,
+    );
+  });
+
   it('routes billing-month wording without treating calendar months as a calendar read', () => {
     expect(isBillingAuditIntent(prompt)).toBe(true);
     expect(requestedBillingAuditMonths(prompt)).toBe(3);
@@ -204,6 +264,26 @@ describe('bounded billing mail audit', () => {
       kind: 'email',
       billingAuditIssue: expect.stringContaining('last 3 complete local calendar months'),
     });
+  });
+
+  it('keeps billing results but marks requested non-mail companions unassessed', () => {
+    const valid = readEvidence(true, '2026-08-12T12:00:00Z');
+    valid.request.billingAuditCompanionGap =
+      'The requested calendar source check was not run; only the bounded billing mailbox was reviewed.';
+    const scope = valid.request.billingAudit;
+    if (!scope) throw new Error('Expected bounded billing scope');
+    const projection = billingAuditProjection(valid.request, valid.evidence);
+    expect(projection.rows).toHaveLength(1);
+    expect(projection.coverage.complete).toBe(false);
+    expect(projection.coverage.issue).toContain('calendar source check was not run');
+    expect(
+      renderBillingAudit({
+        scope,
+        rows: projection.rows,
+        coverage: projection.coverage,
+        mailbox: projection.mailbox,
+      }),
+    ).toContain('only the bounded billing mailbox was reviewed');
   });
 
   it.each([
@@ -483,6 +563,65 @@ describe('bounded billing mail audit', () => {
     expect(rendered).toContain('17 USD per month');
     expect(rendered).toContain('Mail-stated merchant');
     expect(rendered).toContain('Owner Forwarder');
+  });
+
+  it('keeps negative and future charge notices uncertain without discarding valid completed charges', () => {
+    const rows = extractBillingAuditRows(
+      [
+        ...[
+          'You will not be charged USD 12.00 monthly.',
+          'You won’t be charged USD 12.00 monthly.',
+          'Your account has not yet been charged USD 12.00 monthly.',
+          'You will be charged USD 12.00 monthly next month.',
+        ].map((text, index) => ({
+          threadId: `negative-${index}`,
+          messageId: `negative-message-${index}`,
+          subject: 'Acme subscription payment notice',
+          receivedAt: `2026-08-${String(index + 1).padStart(2, '0')}T00:00:00Z`,
+          text,
+        })),
+        {
+          threadId: 'positive',
+          messageId: 'positive-message',
+          subject: 'Acme subscription payment receipt',
+          receivedAt: '2026-08-10T00:00:00Z',
+          text: 'Your card was charged USD 12.00 monthly.',
+        },
+      ],
+      resolvedScope(3, 'UTC'),
+    ).rows;
+    expect(rows.map((row) => row.classification)).toEqual([
+      'uncertain',
+      'uncertain',
+      'uncertain',
+      'uncertain',
+      'charge',
+    ]);
+    expect(rows.slice(0, 4).every((row) => !row.recurringEvidence)).toBe(true);
+    expect(rows[4]).toMatchObject({ classification: 'charge', recurringEvidence: true });
+  });
+
+  it('does not treat arbitrary subject labels as merchant names while preserving a provider name', () => {
+    const rows = extractBillingAuditRows(
+      [
+        {
+          threadId: 'label',
+          messageId: 'label-message',
+          subject: 'Important: Subscription payment receipt',
+          receivedAt: '2026-08-01T00:00:00Z',
+          text: 'Your card was charged USD 12.00.',
+        },
+        {
+          threadId: 'provider',
+          messageId: 'provider-message',
+          subject: 'Acme: Subscription payment receipt',
+          receivedAt: '2026-08-02T00:00:00Z',
+          text: 'Your card was charged USD 12.00.',
+        },
+      ],
+      resolvedScope(3, 'UTC'),
+    ).rows;
+    expect(rows.map((row) => row.merchant)).toEqual(['Merchant not stated', 'Acme']);
   });
 
   it('requires complete page-chain evidence and consistent connected-mailbox receipts', () => {

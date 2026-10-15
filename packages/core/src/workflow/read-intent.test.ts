@@ -69,6 +69,22 @@ describe('detectPersonalReadRequest', () => {
     ).toBeNull();
   });
 
+  it.each([
+    'Read my earlier conversations about subscriptions and audit recurring billing emails over the last 3 complete local calendar months.',
+    'Check my calendar for subscription events and audit recurring billing emails over the last 3 complete local calendar months.',
+  ])('keeps an explicitly requested companion source visible as unassessed: %s', (text) => {
+    const request = detectPersonalReadRequest(turn(text), {
+      now: new Date('2026-10-15T12:00:00Z'),
+      timeZone: 'UTC',
+    });
+    expect(request).toMatchObject({
+      kind: 'email',
+      billingAudit: expect.any(Object),
+      billingAuditCompanionGap: expect.stringMatching(/history|calendar/),
+    });
+    expect(request?.sourceReads).toBeUndefined();
+  });
+
   it('routes the compound next-trip request as bounded read-only discovery, not flight verification', () => {
     const requestText =
       'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';

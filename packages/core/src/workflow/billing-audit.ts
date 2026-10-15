@@ -257,7 +257,10 @@ function merchantFrom(message: BillingAuditMessage): string {
   const candidate = (fromSubject ?? '').trim();
   return /^(?:your|my|subscription|billing|payment|charge|receipt|invoice|trial|renewal|refund|cancellation|statement|account)$/i.test(
     candidate,
-  )
+  ) ||
+    /^(?:important|priority|high priority|urgent|notification|alert|update|reminder)$/i.test(
+      candidate,
+    )
     ? ''
     : candidate;
 }
@@ -274,13 +277,13 @@ function classification(text: string): BillingAuditRow['classification'] {
   // Do not turn a notice about a future charge into a historical payment.
   // It remains useful billing evidence, but is not proof that money moved.
   if (
-    /\b(?:will|shall|may|might|could)\s+(?:be\s+)?charged\b|\b(?:is due to be|is scheduled to be|is expected to be)\s+charged\b/i.test(
+    /\b(?:will|shall|may|might|could)\s+(?:not\s+)?(?:be\s+)?charged\b|\b(?:won['’]t|shan['’]t|can['’]t)\s+(?:be\s+)?charged\b|\b(?:is due to be|is scheduled to be|is expected to be)\s+charged\b/i.test(
       text,
     )
   )
     return 'uncertain';
   if (
-    /\b(?:not|never|no)\s+(?:(?:been\s+)?(?:charged|paid|processed|refunded|credited)|refund|payment|charge)\b|\b(?:is|are|was|were|has|have|had)\s+not\s+(?:been\s+)?(?:charged|paid|processed|refunded|credited)\b|\b(?:wasn['’]t|weren['’]t|isn['’]t|aren['’]t|hasn['’]t|haven['’]t|hadn['’]t)\s+(?:been\s+)?(?:charged|paid|processed|refunded|credited)\b|\b(?:pending|processing|failed|declined|unsuccessful|due|outstanding|requested|awaiting)\b/i.test(
+    /\b(?:not|never|no)\s+(?:(?:yet|currently|ever)\s+)*(?:(?:been\s+)?(?:charged|paid|processed|refunded|credited)|refund|payment|charge)\b|\b(?:is|are|was|were|has|have|had)\s+not\s+(?:(?:yet|currently|ever)\s+)*(?:been\s+)?(?:charged|paid|processed|refunded|credited)\b|\b(?:wasn['’]t|weren['’]t|isn['’]t|aren['’]t|hasn['’]t|haven['’]t|hadn['’]t|won['’]t|shan['’]t|can['’]t)\s+(?:(?:yet|currently)\s+)?(?:be\s+)?(?:charged|paid|processed|refunded|credited)\b|\b(?:pending|processing|failed|declined|unsuccessful|due|outstanding|requested|awaiting)\b/i.test(
       text,
     )
   )
@@ -534,25 +537,74 @@ export function billingAuditProjection(
     }),
   );
   const missingThreads = expectedIds.filter((id) => !completeIds.has(id));
-  const sourceMessages: BillingAuditMessage[] = [];
+  const fragments = new Map<
+    string,
+    {
+      threadId: string;
+      messageId: string;
+      order: number;
+      subject: string;
+      sender: string;
+      pages: Array<{ offset: number; text: string; receivedAt?: string }>;
+    }
+  >();
   for (const row of completeThreads) {
     const threadId = record(row.args)?.threadId;
     const rawMessages = record(row.result)?.messages;
     if (typeof threadId !== 'string' || !Array.isArray(rawMessages)) continue;
-    for (const raw of rawMessages) {
+    const start = Number.isInteger(record(row.args)?.startMessageIndex)
+      ? Number(record(row.args)?.startMessageIndex)
+      : 0;
+    const firstOffset = Number.isInteger(record(row.args)?.startMessageOffset)
+      ? Number(record(row.args)?.startMessageOffset)
+      : 0;
+    for (const [index, raw] of rawMessages.entries()) {
       const message = record(raw);
       if (!message || typeof message.messageId !== 'string' || typeof message.text !== 'string')
         continue;
-      sourceMessages.push({
+      const key = `${threadId}:${message.messageId}`;
+      const current = fragments.get(key) ?? {
         threadId,
         messageId: message.messageId,
+        order: start,
         subject: typeof message.subject === 'string' ? message.subject.slice(0, 240) : '',
+        sender: typeof message.from === 'string' ? message.from.slice(0, 160) : '',
+        pages: [],
+      };
+      const received = receivedAt(message);
+      current.order = Math.min(current.order, start + index);
+      if (!current.subject && typeof message.subject === 'string')
+        current.subject = message.subject.slice(0, 240);
+      if (!current.sender && typeof message.from === 'string')
+        current.sender = message.from.slice(0, 160);
+      current.pages.push({
+        offset: index === 0 ? firstOffset : 0,
         text: message.text,
-        ...(receivedAt(message) ? { receivedAt: receivedAt(message) } : {}),
-        ...(typeof message.from === 'string' ? { sender: message.from.slice(0, 160) } : {}),
+        ...(received ? { receivedAt: received } : {}),
       });
+      fragments.set(key, current);
     }
   }
+  const sourceMessages: BillingAuditMessage[] = [...fragments.values()]
+    .sort((left, right) => left.order - right.order)
+    .map((message) => {
+      const pages = message.pages.toSorted((left, right) => left.offset - right.offset);
+      const timestamps = new Set(
+        pages.flatMap((part) => (part.receivedAt ? [part.receivedAt] : [])),
+      );
+      const received =
+        pages.length > 0 && pages.every((part) => part.receivedAt) && timestamps.size === 1
+          ? pages[0]?.receivedAt
+          : undefined;
+      return {
+        threadId: message.threadId,
+        messageId: message.messageId,
+        subject: message.subject,
+        sender: message.sender,
+        text: pages.map((part) => part.text).join(''),
+        ...(received ? { receivedAt: received } : {}),
+      };
+    });
   const extracted = extractBillingAuditRows(sourceMessages, scope);
   const missingDate = extracted.missingReceivedAt > 0;
   const omissions: string[] = [];
@@ -584,12 +636,14 @@ export function billingAuditProjection(
     omissions.push(
       `${extracted.omittedClauses} additional billing statements in assessed messages exceeded the three-clause-per-message detail cap.`,
     );
+  if (request.billingAuditCompanionGap) omissions.push(request.billingAuditCompanionGap);
   return {
     rows: extracted.rows,
     mailbox,
     coverage: {
       complete:
         queryComplete &&
+        !request.billingAuditCompanionGap &&
         expectedIds.length <= 6 &&
         missingThreads.length === 0 &&
         !missingDate &&

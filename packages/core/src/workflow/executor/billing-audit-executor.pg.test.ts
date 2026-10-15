@@ -43,7 +43,7 @@ describe('billing audit through allocated PostgreSQL executor', () => {
     const conversationId = randomUUID();
     const taskId = randomUUID();
     const request =
-      'Audit recurring subscriptions evidenced in authorized billing messages over the last 3 complete local calendar months. Separate actual charges, trials, refunds, cancellation notices and uncertain recurring purchases; a receipt is not automatically a subscription, and cancellation mail does not prove no later charge. Give an evidence table with currency, period, supported recurring-cost estimate and confidence; identify two useful review decisions without cancelling. Use official terms only for identified services; show conversion assumptions instead of mixing currencies. Any cancellation-question template must stay in chat. No login/account change/cancel/unsubscribe/purchase/hold/send/Gmail draft/document/calendar/memory writes.';
+      'Audit recurring subscriptions evidenced in authorized billing messages over the last 3 complete local calendar months. Separate actual charges, trials, refunds, cancellation notices and uncertain recurring purchases; a receipt is not automatically a subscription, and cancellation mail does not prove no later charge. Give an evidence table with currency, period, supported recurring-cost estimate and confidence; identify two useful review decisions without cancelling. Use official terms only for identified services; show conversion assumptions instead of mixing currencies. Any cancellation-question template must stay in chat. Check my calendar this Friday for subscription conflicts. No login/account change/cancel/unsubscribe/purchase/hold/send/Gmail draft/document/calendar/memory writes.';
     await db.insert(conversations).values({
       id: conversationId,
       agentId,
@@ -209,7 +209,7 @@ describe('billing audit through allocated PostgreSQL executor', () => {
       steps: [],
       missingInfo: [],
     });
-    expect(result.outcome).toBe('done');
+    expect(result.outcome).toBe('needs_attention');
     expect(calls.map((call) => call.toolName)).toEqual(['gmail.search', 'gmail.read_thread']);
     expect(calls[0]?.args).toMatchObject({ query, maxResults: 20 });
     expect(calls[1]?.args).toMatchObject({ threadId: 'billing-thread' });
@@ -223,6 +223,8 @@ describe('billing audit through allocated PostgreSQL executor', () => {
     expect(assistantMessage?.text).toContain('configured owner mailbox: owner@example.test');
     expect(assistantMessage?.text).toContain('not every mailbox the owner may use');
     expect(assistantMessage?.text).toContain('12.00 USD per month');
+    expect(assistantMessage?.text).toContain('calendar source check was not run');
+    expect(assistantMessage?.text).toContain('only the bounded billing mailbox was reviewed');
     expect(assistantMessage?.text).toContain(
       'https://mail.google.com/mail/u/0/#all/billing-thread',
     );
