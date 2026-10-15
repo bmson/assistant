@@ -493,6 +493,12 @@ function airportCalendarCoverage(
     const result = page.result as Record<string, unknown> | null;
     if (!Array.isArray(result?.events)) return { complete: false, pages };
     pages.push(page);
+    const unavailable = result.unavailable;
+    const pageCoverageOkay =
+      result.calendarRosterComplete === true &&
+      result.paginationUnavailable !== true &&
+      (!Array.isArray(unavailable) || unavailable.length === 0);
+    if (!pageCoverageOkay) return { complete: false, pages };
     const token = result.nextPageToken;
     if (typeof token === 'string' && token.length > 0) {
       if (visited.has(token) || token === expectedToken) return { complete: false, pages };
@@ -501,12 +507,7 @@ function airportCalendarCoverage(
       if (index + 1 >= MAX_AIRPORT_CALENDAR_PAGES) return { complete: false, pages };
       continue;
     }
-    const unavailable = result.unavailable;
-    const complete =
-      result.complete === true &&
-      result.calendarRosterComplete === true &&
-      result.paginationUnavailable !== true &&
-      (!Array.isArray(unavailable) || unavailable.length === 0);
+    const complete = result.complete === true && pageCoverageOkay;
     return { complete, pages };
   }
   return { complete: false, pages };
@@ -773,7 +774,7 @@ function airportItineraryEvents(
       if (
         airportMentions.length !== 1 ||
         !/[\p{L}\d]{2}/u.test(placeName) ||
-        /[,;&/→]|\s[-–—]\s|\b(?:from|to|via|and|or)\b/i.test(event.location)
+        /[;&/→]|\s[-–—]\s|\b(?:from|to|via|and|or)\b/i.test(event.location)
       )
         return false;
       return Number.isFinite(eventStart) && eventStart >= start && eventStart < end;

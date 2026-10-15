@@ -1053,11 +1053,15 @@ describe('a trip to a generic airport', () => {
       const lookup = detectLiveLookup([{ role: 'user', content }]);
       expect(lookup?.airportIntent).toBe(true);
       if (!lookup) throw new Error('Expected airport lookup');
-      const result = nextLiveLookup(lookup, [calendar([returnFlight])], context);
+      const candidate = {
+        ...returnFlight,
+        location: 'San Francisco International Airport, San Francisco, CA 94128, USA',
+      };
+      const result = nextLiveLookup(lookup, [calendar([candidate])], context);
       expect(result?.toolName).toBe('maps.directions');
       expect(result?.input).toMatchObject({
         origin,
-        destination: 'Berlin Brandenburg Airport',
+        destination: candidate.location,
         departAt: '2026-10-16T15:00:00.000Z',
       });
       expect(result?.input).not.toHaveProperty('arriveBy');
@@ -1093,6 +1097,25 @@ describe('a trip to a generic airport', () => {
     const second = calendar([returnFlight], { pageToken: 'page-2' });
     const result = nextLiveLookup(lookup, [first, second], context);
     expect(result?.toolName).toBe('maps.directions');
+
+    for (const incompleteFirstPage of [
+      calendar([], { complete: false, calendarRosterComplete: false, nextPageToken: 'page-2' }),
+      calendar([], {
+        complete: false,
+        nextPageToken: 'page-2',
+        extra: { unavailable: ['Shared calendar'] },
+      }),
+      calendar([], {
+        complete: false,
+        nextPageToken: 'page-2',
+        extra: { paginationUnavailable: true },
+      }),
+    ]) {
+      expect(nextLiveLookup(lookup, [incompleteFirstPage, second], context)).toBeUndefined();
+      expect(liveLookupFailure(lookup, [incompleteFirstPage, second], context)).toMatch(
+        /coverage is incomplete/i,
+      );
+    }
 
     const wrongRange = {
       ...calendar([returnFlight]),
