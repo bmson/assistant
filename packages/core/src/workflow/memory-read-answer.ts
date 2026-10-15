@@ -98,6 +98,17 @@ function directSelectedContrastAnswer(
       return aliases.some((alias) => tokens.has(alias));
     });
   };
+  const hasPositiveTargetSuggestion = (quote: string) =>
+    quote
+      .split(/(?<=[.!?])\s+|[;\n]+/u)
+      .some(
+        (sentence) =>
+          hasTarget(sentence) &&
+          /\b(?:suggest\w*|recommend\w*|propos\w*|next step|map\w*)\b/iu.test(sentence) &&
+          !/\b(?:not|never|no|without|avoid|don['’]?t|cannot|can['’]?t|isn['’]?t)\b/iu.test(
+            sentence,
+          ),
+      );
   const owners = groups.filter((group) => group.speaker === 'Recorded owner message');
   const assistants = groups.filter(
     (group) => group.speaker === 'Earlier assistant claim (not verified fact)',
@@ -105,11 +116,11 @@ function directSelectedContrastAnswer(
   if (
     owners.length !== 1 ||
     assistants.length !== 1 ||
-    hasTarget(owners[0]?.quote ?? '') ||
-    !hasTarget(assistants[0]?.quote ?? '')
+    normalizedText(owners[0]?.quote ?? '').includes(normalizedText(target)) ||
+    !hasPositiveTargetSuggestion(assistants[0]?.quote ?? '')
   )
     return undefined;
-  return `In the selected passages, the owner-authored message does not mention “${target}”; the related suggestion appears in the separate assistant-authored message.`;
+  return `The selected owner quote contains no literal “${target}” wording; the selected assistant quote contains a positive suggestion using related wording. These passages identify the suggestion’s source but do not establish broader owner intent.`;
 }
 
 function memorySourcePriority(source: { speaker: string }): number {

@@ -195,7 +195,7 @@ describe('source-backed fictional history', () => {
     expect(validMemoryReadSelection(result, evidence, request)).toBe(true);
     const rendered = renderMemoryReadAnswer(result, evidence, request);
     expect(rendered).toContain(
-      'In the selected passages, the owner-authored message does not mention “public transport”; the related suggestion appears in the separate assistant-authored message.',
+      'The selected owner quote contains no literal “public transport” wording; the selected assistant quote contains a positive suggestion using related wording. These passages identify the suggestion’s source but do not establish broader owner intent.',
     );
 
     const sourceEvidence = evidence[0];
@@ -236,13 +236,70 @@ describe('source-backed fictional history', () => {
     };
     expect(validMemoryReadSelection(conflictSelection, conflictEvidence, request)).toBe(true);
     expect(renderMemoryReadAnswer(conflictSelection, conflictEvidence, request)).not.toContain(
-      'does not mention “public transport”',
+      'no literal “public transport” wording',
     );
     expect(rendered).toContain('Recorded owner message');
     expect(rendered).toContain('Earlier assistant claim (not verified fact)');
     expect(rendered).toContain('conversation exercise-chat; message owner-nimbus');
     expect(rendered).toContain('conversation exercise-chat; message assistant-nimbus');
     expect(rendered).not.toContain('These are facts about you');
+  });
+
+  it('does not describe a negated assistant statement as a positive suggestion', () => {
+    const request =
+      'Look back at the earlier hypothetical Nimbus exercise. Did I earmark its budget for public transport, or was that the Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step.';
+    const negativeSuggestion =
+      'For Nimbus, do not map public transport options; that is not the suggested next step.';
+    const negativeEvidence: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        result: {
+          matches: [
+            {
+              messageId: 'owner-nimbus',
+              conversationId: 'exercise-chat',
+              text: ownerBody,
+              role: 'user',
+              origin: 'owner',
+              speakerRevision: conversationMessageSpeakerRevision(
+                'owner-nimbus',
+                ownerBody,
+                'user',
+                'owner',
+              ),
+            },
+            {
+              messageId: 'assistant-nimbus',
+              conversationId: 'exercise-chat',
+              text: negativeSuggestion,
+              role: 'assistant',
+              origin: 'assistant',
+              speakerRevision: conversationMessageSpeakerRevision(
+                'assistant-nimbus',
+                negativeSuggestion,
+                'assistant',
+                'assistant',
+              ),
+            },
+          ],
+        },
+      },
+    ];
+    const selection = {
+      version: 1 as const,
+      status: 'complete' as const,
+      selections: [
+        ownerSelection,
+        { sourceKey: 'message:assistant-nimbus', quote: negativeSuggestion },
+      ],
+    };
+
+    expect(validMemoryReadSelection(selection, negativeEvidence, request)).toBe(true);
+    expect(renderMemoryReadAnswer(selection, negativeEvidence, request)).not.toContain(
+      'no literal “public transport” wording',
+    );
   });
 
   it('keeps consistent duplicate citations omitted by a successful selector', async () => {

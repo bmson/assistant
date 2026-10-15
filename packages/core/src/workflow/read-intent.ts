@@ -235,49 +235,69 @@ const MUTATING_OFFER =
   /\b(?:add|archive|book|cancel|create|delete|edit|forward|invite|move|reply|reschedule|save|schedule|send|submit|update)\b/i;
 const NEGATED_LOOKUP_VERB = String.raw`(?:look(?:\s+up)?|check|search|read|open|access|review|scan|inspect|consult|use|recall|retrieve)`;
 
+function positivePrivateReadText(text: string): string {
+  return text.replace(
+    /\b(?:do not|don't|don’t|never|without|avoid)\b[^.!?;\n]*?(?=\b(?:but|however|instead|then)\s+(?:read|search|check|use|consult|retrieve)\b|[.!?;\n]|$)/giu,
+    '',
+  );
+}
+
 function explicitlyProhibitsPrivateRead(
   text: string,
-  surface: 'calendar' | 'email' | 'memory',
+  surface: 'calendar' | 'email' | 'history' | 'memory',
 ): boolean {
   const accountSurface =
     surface === 'calendar'
       ? String.raw`(?:google\s+)?(?:calendars?|schedules?|agendas?)`
       : surface === 'email'
         ? `(?:gmail|e-?mails?|mail|inboxes|mailboxes|messages?|threads?)`
-        : String.raw`(?:memories|memory|saved\s+(?:facts?|memories)|what\s+you\s+know)`;
+        : surface === 'history'
+          ? String.raw`(?:(?:(?:earlier|previous|prior|past)\s+)?(?:owner\s+)?(?:chats?|conversations?)|conversation\s+history|history)`
+          : String.raw`(?:memories|memory|saved\s+(?:facts?|memories)|what\s+you\s+know)`;
   const sourceOwner = String.raw`(?:my|our)\s+(?:(?:real|actual|personal)\s+)?`;
-  const clause = String.raw`[^.!?\n]{0,180}`;
+  const clause = String.raw`[^.!?;\n]{0,180}`;
   const prefix = String.raw`\b(?:do\s+not|don['’]?t|never)\s+${NEGATED_LOOKUP_VERB}\b`;
-  const negatedClause = new RegExp(`${prefix}(${clause})`, 'i').exec(text)?.[1] ?? '';
-  const direct = new RegExp(`\\b${sourceOwner}${accountSurface}\\b`, 'i');
-  const allPrivateSurfaces = String.raw`(?:gmail|e-?mails?|mail|inboxes|mailboxes|messages?|threads?|(?:google\s+)?calendars?|schedules?|agendas?|memories|memory|saved\s+(?:facts?|memories)|what\s+you\s+know)`;
-  const firstOwnedSource = new RegExp(`\\b${sourceOwner}${allPrivateSurfaces}\\b`, 'i').exec(
-    negatedClause,
+  const negatedClauses = [...text.matchAll(new RegExp(`${prefix}(${clause})`, 'giu'))].map(
+    (match) =>
+      (match[1] ?? '').split(/\b(?:and|but)\s+(?=(?:do\s+not|don['’]?t|never)\b)/iu)[0] ?? '',
   );
-  const unownedSourceMention = new RegExp(`\\b${accountSurface}\\b`, 'i').test(negatedClause);
-  const listed = firstOwnedSource
-    ? negatedClause
-        .slice(firstOwnedSource.index + firstOwnedSource[0].length)
-        .split(/,|\b(?:and|or)\b/i)
-        .some((item) => new RegExp(`^\\s*(?:${sourceOwner})?${accountSurface}\\b`, 'i').test(item))
-    : false;
+  const direct = new RegExp(`\\b${sourceOwner}${accountSurface}\\b`, 'i');
+  const allPrivateSurfaces = String.raw`(?:gmail|e-?mails?|mail|inboxes|mailboxes|messages?|threads?|(?:google\s+)?calendars?|schedules?|agendas?|memories|memory|saved\s+(?:facts?|memories)|what\s+you\s+know|(?:(?:(?:earlier|previous|prior|past)\s+)?(?:owner\s+)?(?:chats?|conversations?)|conversation\s+history|history))`;
+  const ownedSource = new RegExp(`\\b${sourceOwner}${allPrivateSurfaces}\\b`, 'i');
+  const unownedSourceMention = new RegExp(`\\b${accountSurface}\\b`, 'i');
+  const listed = negatedClauses.some((negatedClause) => {
+    const firstOwnedSource = ownedSource.exec(negatedClause);
+    return firstOwnedSource
+      ? negatedClause
+          .slice(firstOwnedSource.index + firstOwnedSource[0].length)
+          .split(/,|\b(?:and|or)\b/i)
+          .some((item) =>
+            new RegExp(`^\\s*(?:${sourceOwner})?${accountSurface}\\b`, 'i').test(item),
+          )
+      : false;
+  });
   const without = new RegExp(
     String.raw`\bwithout\s+${NEGATED_LOOKUP_VERB}(?:ing)?\b${clause}\b${sourceOwner}${accountSurface}\b`,
     'i',
   );
-  const memorySurface = String.raw`(?:(?:my|our|any|the|all)\s+)?(?:saved\s+)?(?:memor(?:y|ies)|(?:earlier|previous|prior|past)\s+(?:chats?|conversations?)|(?:conversation\s+)?history)\b`;
+  const memorySurface = String.raw`(?:(?:my|our|any|the|all)\s+)?(?:saved\s+)?(?:memor(?:y|ies))\b`;
   return (
-    direct.test(negatedClause) ||
-    unownedSourceMention ||
+    negatedClauses.some((negatedClause) => direct.test(negatedClause)) ||
+    negatedClauses.some((negatedClause) => unownedSourceMention.test(negatedClause)) ||
     listed ||
     without.test(text) ||
     (surface === 'memory' &&
-      (new RegExp(`^\\s*${memorySurface}`, 'i').test(negatedClause) ||
+      (negatedClauses.some((negatedClause) =>
+        new RegExp(`^\\s*${memorySurface}`, 'i').test(negatedClause),
+      ) ||
         new RegExp(
           `\\bwithout\\s+(?:${NEGATED_LOOKUP_VERB}(?:ing)?|using|retrieving)\\s+${memorySurface}`,
           'i',
         ).test(text))) ||
-    (surface === 'calendar' && /^\s*(?:(?:any|the|all)\s+)?calendars?\b/i.test(negatedClause))
+    (surface === 'calendar' &&
+      negatedClauses.some((negatedClause) =>
+        /^\s*(?:(?:any|the|all)\s+)?calendars?\b/i.test(negatedClause),
+      ))
   );
 }
 
@@ -406,7 +426,7 @@ const KNOWLEDGE_GRAPH_SURFACE =
 const MEMORY_SURFACE =
   /\b(?:memor(?:y|ies)|remember(?:ed)?|saved facts?|what you know|knowledge about me)\b/i;
 const CONVERSATION_HISTORY_REQUEST =
-  /\b(?:earlier|previous|prior|past)\s+(?:owner\s+)?(?:conversations?|chats?)\b|\b(?:previously|before)\s+(?:told|said|mentioned)\s+you\b|\bwhat\s+(?:did|have)\s+i\s+(?:tell|say|mention)\s+you\b|\bwhat\s+did\s+i\s+say\s+about\b|\b(?:earlier|previous|prior|past)\s+(?:(?:hypothetical|fictional)\s+)?(?:[\p{L}\p{N}_-]+\s+){0,3}(?:exercise|scenario|discussion)\b/iu;
+  /\b(?:earlier|previous|prior|past)\s+(?:owner\s+)?(?:conversations?|chats?)\b|\b(?:previously|before)\s+(?:told|said|mentioned)\s+you\b|\bwhat\s+(?:did|have)\s+i\s+(?:tell|say|mention)\s+you\b|\bwhat\s+did\s+i\s+say\s+about\b|\b(?:earlier|previous|prior|past)\s+(?:(?:hypothetical|fictional)\s+)?(?:[\p{L}\p{N}_-]+\s+){0,3}(?:exercise|scenario|discussion)\b|\b(?:read|search|check|review|consult|look(?:\s+up|\s+at)?|use)\b[^.!?\n]{0,100}\b(?:(?:my|our|the)\s+)?conversation\s+history\b/iu;
 const AUTOBIOGRAPHICAL_READ =
   /\b(?:when|where)\s+did\s+i\b|\bhave\s+i\s+ever\b|\bdid\s+i\s+(?:attend|visit|see|go|meet|live|work|travel)\b/i;
 const AVAILABILITY_SURFACE =
@@ -2031,16 +2051,13 @@ function explicitPrivateSourceRequest(
   text: string,
   options: PersonalReadDetectionOptions,
 ): PersonalReadRequest | undefined {
-  const positive = text.replace(
-    /\b(?:do not|don't|don’t|never|without|avoid)\b[^.!?;\n]*?(?=\b(?:but|however|instead|then)\s+(?:read|search|check|use|consult|retrieve)\b|[.!?;\n]|$)/giu,
-    '',
-  );
+  const positive = positivePrivateReadText(text);
   if (!/\b(?:check|search|read|use|using|from|consult|review|look|build|compare)\b/i.test(positive))
     return undefined;
   const history =
     /\b(?:assistant history|(?:earlier|previous|past|prior) (?:chats?|conversations?)|conversation history)\b/i.test(
       positive,
-    ) && !explicitlyProhibitsPrivateRead(text, 'memory');
+    ) && !explicitlyProhibitsPrivateRead(text, 'history');
   // Existing trip discovery already binds both requested accounts and has a
   // stronger itinerary/route contract. Preserve it unless history adds a source.
   if (!history && (isCompoundTripDiscovery(text) || isUpcomingFlightDiscovery(text)))
@@ -2293,12 +2310,23 @@ function detectPersonalReadRequestInternal(
   if (latestIndex === -1) return null;
   const originalLatest = readIntentText(messages[latestIndex]);
   const latest = stripNegativePrivateWriteConstraints(originalLatest);
+  const positiveLatest = positivePrivateReadText(originalLatest);
   const readOnlyBillingIntent =
     isBillingAuditIntent(latest) && !READ_THEN_MUTATION.test(readThenMutationText(originalLatest));
   if (requestedSavedSkillInventory(latest)) return null;
   const calendarReadProhibited = explicitlyProhibitsPrivateRead(originalLatest, 'calendar');
   const emailReadProhibited = explicitlyProhibitsPrivateRead(originalLatest, 'email');
-  const memoryReadProhibited = explicitlyProhibitsPrivateRead(originalLatest, 'memory');
+  const savedMemoryReadProhibited = explicitlyProhibitsPrivateRead(originalLatest, 'memory');
+  const historyReadProhibited = explicitlyProhibitsPrivateRead(originalLatest, 'history');
+  const historyReadRequested = CONVERSATION_HISTORY_REQUEST.test(positiveLatest);
+  const explicitSavedMemoryReadRequested =
+    /\b(?:saved|long[- ]term|personal)\s+memor(?:y|ies)\b/i.test(positiveLatest) &&
+    READ_OR_QUESTION.test(positiveLatest);
+  const historyReadAllowed = historyReadRequested && !historyReadProhibited;
+  const savedMemoryReadAllowed = explicitSavedMemoryReadRequested && !savedMemoryReadProhibited;
+  const memoryReadProhibited =
+    (historyReadProhibited || savedMemoryReadProhibited) &&
+    !(historyReadAllowed || savedMemoryReadAllowed);
   if (isConversationLocalContext(latest)) return null;
   const flightContinuation =
     clarificationDepth < 2 && !calendarReadProhibited && !emailReadProhibited
@@ -2471,7 +2499,7 @@ function detectPersonalReadRequestInternal(
     const companionSources = [
       ...(/\b(?:read|search|check|review|consult|look(?:\s+up|\s+at)?|use)\b[^.!?\n]{0,120}\b(?:earlier|previous|past)\s+(?:conversations?|chats?)\b|\b(?:read|search|check|review|consult|look(?:\s+up|\s+at)?|use)\b[^.!?\n]{0,80}\b(?:my|our)\s+(?:conversation\s+)?history\b/iu.test(
         companionIntentText,
-      ) && !explicitlyProhibitsPrivateRead(companionIntentText, 'memory')
+      ) && !explicitlyProhibitsPrivateRead(companionIntentText, 'history')
         ? ['history']
         : []),
       ...(/\b(?:check|search|read|review|consult|look(?:\s+up|\s+at)?|use|compare)\b[^.!?\n]{0,100}\b(?:my|our)\s+(?:calendars?|schedule|agenda)\b/iu.test(
@@ -2586,10 +2614,10 @@ function detectPersonalReadRequestInternal(
     const kind: PersonalReadKind = graphRead ? 'knowledge_graph' : driveRead ? 'drive' : 'memory';
     const familyBirthday = kind === 'memory' ? requestedFamilyBirthdays(latest) : undefined;
     const conversationHistoryRequested =
-      kind === 'memory' &&
-      (CONVERSATION_HISTORY_REQUEST.test(latest) || familyBirthday !== undefined);
+      kind === 'memory' && (historyReadAllowed || familyBirthday !== undefined);
     const savedMemoryRequested =
       kind === 'memory' &&
+      !savedMemoryReadProhibited &&
       (!conversationHistoryRequested ||
         familyBirthday !== undefined ||
         /\b(?:saved|long[- ]term|personal)\s+memor(?:y|ies)\b/i.test(memoryLookupText(latest)));
