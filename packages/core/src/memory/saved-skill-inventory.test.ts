@@ -16,6 +16,11 @@ describe('saved skill inventory', () => {
       false,
     );
     expect(
+      requestedSavedSkillInventory(
+        'List my saved skills and can you apply the planning skill to tomorrow?',
+      ),
+    ).toBe(false);
+    expect(
       requestedSavedSkillInventory('List my saved skills, then delete the obsolete one.'),
     ).toBe(false);
     expect(requestedSavedSkillInventory('Apply my saved skill named "Calendar review".')).toBe(

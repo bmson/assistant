@@ -3,7 +3,7 @@ import type { WorkspaceSkillRecord } from '@assistant/persistence';
 const INVENTORY_INTENT =
   /(?:\b(?:what|which|list|show|tell\s+me\s+about)\b[\s\S]{0,100}\b(?:my\s+)?(?:saved|learned)\s+skills?\b|\b(?:my\s+)?(?:saved|learned)\s+skills?\b[\s\S]{0,80}\b(?:have|list|show|could\s+help|help)\b)/i;
 const POSITIVE_MUTATION =
-  /(?:^|[.!?;]\s*|\b(?:and|then)\s+)(?:please\s+)?(?:use|apply|follow|run|execute|edit|change|delete|remove|save|create)\b/i;
+  /(?:^|[.!?;]\s*|\b(?:and|then)\s+)(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?(?:use|apply|follow|run|execute|edit|change|delete|remove|save|create)\b/i;
 
 export type SavedSkillInventoryIntent =
   | { kind: 'all' }
