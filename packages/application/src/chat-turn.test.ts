@@ -1784,6 +1784,39 @@ describe('tool-less conversational reply', () => {
       false,
     );
   });
+
+  it('does not retrieve or surface unrelated history for a self-contained calculation', async () => {
+    const store = chatStore();
+    const scripted = scriptedRouter({
+      triage: { needsAction: false },
+      draft: '17 × 23 is 391.',
+    });
+    const response = await handleChatTurn(
+      send('What is 17 × 23? Give the result in one short sentence.'),
+      {
+        config: loadConfig({
+          OPENROUTER_API_KEY: 'test-key',
+          QUEUE_DRIVER: 'local',
+          CHAT_RECALL_ENABLED: 'true',
+          GRAPH_RAG_ENABLED: 'false',
+        }),
+        router: scripted.router,
+        chat: store.chat,
+        persistence: { tasks: {}, ownerContext: {} } as never,
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-recall')).toBeNull();
+    await response.text();
+    expect(stubs.getAmbientBlock).not.toHaveBeenCalled();
+    expect(stubs.getOwnerCard).not.toHaveBeenCalled();
+    const message = store.completions[0]?.messages[0];
+    expect(message?.parts.some((part) => (part as { type?: string }).type === 'recall')).toBe(
+      false,
+    );
+  });
+
   it('uses the shared owner-scoped decision projection without tools', async () => {
     const store = chatStore();
     const scripted = scriptedRouter({

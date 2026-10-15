@@ -6,11 +6,28 @@ import {
   explicitlyOptsOutOfRecall,
   extractOwnerIntent,
   isConversationLocalContext,
+  isSelfContainedCalculationRequest,
   isSelfContainedTextTransformation,
   latestOwnerIntent,
 } from './owner-intent.js';
 
 describe('owner intent provenance', () => {
+  it.each([
+    'What is 17 × 23? Give the result in one short sentence.',
+    'Calculate 1,250 divided by 5 and show the answer.',
+    'Compute 12.5 * 4.',
+  ])('does not retrieve unrelated history for a self-contained calculation: %s', (text) => {
+    expect(isSelfContainedCalculationRequest(text)).toBe(true);
+  });
+
+  it.each([
+    'What was the calculation we did earlier? What is 17 × 23?',
+    'Use the numbers from our earlier chat to calculate the total.',
+    'What is 17 × 23 in the example we discussed yesterday?',
+  ])('keeps historical context available for a calculation that asks for it: %s', (text) => {
+    expect(isSelfContainedCalculationRequest(text)).toBe(false);
+  });
+
   it('distinguishes current-conversation exercises from explicitly requested historical facts', () => {
     expect(
       isConversationLocalContext('For this fictional project exercise, acknowledge the details.'),

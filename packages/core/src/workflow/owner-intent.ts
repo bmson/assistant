@@ -4,7 +4,10 @@ import { detectFutureWatchIntent } from './future-watch-intent.js';
 import { detectLiveLookup } from './live-lookup.js';
 import { detectPersonalReadRequest } from './read-intent.js';
 
-export { isConversationLocalContext } from './conversation-local-context.js';
+export {
+  isConversationLocalContext,
+  isSelfContainedCalculationRequest,
+} from './conversation-local-context.js';
 
 export type OwnerIntentScope =
   | 'external_read'

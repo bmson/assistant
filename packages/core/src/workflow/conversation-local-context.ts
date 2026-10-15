@@ -59,3 +59,14 @@ export function isConversationLocalContext(text: string): boolean {
     )
   );
 }
+
+/** A complete numeric calculation needs no historical conversation context. */
+export function isSelfContainedCalculationRequest(text: string): boolean {
+  const number = String.raw`(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?`;
+  const operation = String.raw`(?:[+\-−×x*/÷]|plus|minus|times|multiplied\s+by|divided\s+by)`;
+  const expression = new RegExp(
+    String.raw`^(?:(?:what\s+is|calculate|compute|solve)\s+)?${number}\s*${operation}\s*${number}(?:\s*[.!?])?(?:\s+(?:and\s+)?(?:give|show|return|state|provide)\s+(?:me\s+)?(?:the\s+)?(?:result|answer)\b[^.!?\n]{0,100}[.!?]?)?$`,
+    'i',
+  );
+  return expression.test(text.trim());
+}

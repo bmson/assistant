@@ -36,6 +36,7 @@ import {
   explicitlyOptsOutOfRecall,
   extractOwnerIntent,
   isConversationLocalContext,
+  isSelfContainedCalculationRequest,
   isSelfContainedTextTransformation,
 } from '@assistant/core/workflow/owner-intent';
 import { detectPersonalReadRequest } from '@assistant/core/workflow/read-intent';
@@ -1280,6 +1281,7 @@ export async function handleChatTurn(
   const noHistoricalContext =
     explicitlyOptsOutOfRecall(userText) ||
     isConversationLocalContext(userText) ||
+    isSelfContainedCalculationRequest(userText) ||
     localTransformation;
   const recallPromise = (async (): Promise<{
     block?: string;
