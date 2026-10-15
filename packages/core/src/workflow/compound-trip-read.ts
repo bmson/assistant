@@ -2486,7 +2486,7 @@ function bookedCalendarDifferences(
       );
     }
   }
-  return lines.slice(0, 4);
+  return lines;
 }
 
 function sourceLocalBookingLines(
@@ -4113,8 +4113,16 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
   if (!groups.length && view.calendarObservations.length)
     lines.push(view.calendarObservations.join('\n\n'));
   for (const hotel of view.hotels.slice(0, 3)) {
+    const hotelLabel =
+      hotel.association === 'shared_reference'
+        ? 'Hotel booking (shared reference)'
+        : hotel.association === 'date_city_candidate'
+          ? 'Hotel candidate (city/date match; separate booking)'
+          : view.associationInferred
+            ? 'Hotel candidate (separate booking; transfer association inferred)'
+            : 'Unlinked hotel candidate';
     lines.push(
-      `Hotel: **${cell(hotel.hotelName ?? hotel.subject)}** — ${cell(hotel.address ?? 'address unverified')}${hotel.city && !hotel.address?.includes(hotel.city) ? `, ${cell(hotel.city)}` : ''}; ${hotel.checkIn ?? 'check-in unknown'} to ${hotel.checkOut ?? 'check-out unknown'}.${links.get(hotel.threadId) ? ` [Booking](${links.get(hotel.threadId)})` : ''}`,
+      `${hotelLabel}: **${cell(hotel.hotelName ?? hotel.subject)}** — ${cell(hotel.address ?? 'address unverified')}${hotel.city && !hotel.address?.includes(hotel.city) ? `, ${cell(hotel.city)}` : ''}; ${hotel.checkIn ?? 'check-in unknown'} to ${hotel.checkOut ?? 'check-out unknown'}.${links.get(hotel.threadId) ? ` [Booking](${links.get(hotel.threadId)})` : ''}`,
     );
   }
   if (!view.hotels.length) lines.push('Hotel: no verified linked stay; see gaps below.');
@@ -4124,7 +4132,13 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
     lines.push(
       'Flight–hotel association inferred from matching arrival/check-in date and city; separate bookings.',
     );
-  if (view.calendarNotes.length) lines.push(`Calendar vs booking: ${view.calendarNotes.join(' ')}`);
+  if (view.calendarNotes.length) {
+    const visibleCalendarNotes = view.calendarNotes.slice(0, 4);
+    const omittedCalendarNotes = view.calendarNotes.length - visibleCalendarNotes.length;
+    lines.push(
+      `Calendar vs booking: ${visibleCalendarNotes.join(' ')}${omittedCalendarNotes > 0 ? ` ${omittedCalendarNotes} additional calendar comparisons omitted from this brief; all were reviewed.` : ''}`,
+    );
+  }
   if (projection.routeOrigin && projection.routeDestination) {
     lines.push(
       `Transfer candidate: **${cell(projection.routeOrigin)} → ${cell(projection.routeDestination)}**.`,

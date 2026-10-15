@@ -2050,6 +2050,10 @@ function dedupeSameEventReplyDrafts(
   drafts: ReadonlyArray<ValidatedEmailReviewItem>,
 ): ValidatedEmailReviewItem[] {
   const unique = new Map<string, ValidatedEmailReviewItem>();
+  const eventClusters = new Map<
+    string,
+    Array<{ key: string; eventTime?: string; eventVenue?: string }>
+  >();
   const datePattern =
     /\b(?:20\d{2}-\d{2}-\d{2}|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?(?:[,]?\s+20\d{2})?|(?:0?[1-9]|1[0-2])\/(?:0?[1-9]|[12]\d|3[01])(?:\/20\d{2})?)\b/gi;
   const eventWords = /\b(?:meeting|event|party|program|gathering|session)\b/gi;
@@ -2137,20 +2141,38 @@ function dedupeSameEventReplyDrafts(
       /\brsvp\b/i.test(`${subject} ${body}`)
         ? `${sender}|${subject}|${eventDate}`
         : item.thread.threadId;
-    const previousCandidate = unique.get(duplicateBaseKey);
-    const previousBody = previousCandidate
-      ? (latestUnquotedBody(previousCandidate.thread) ?? '')
-      : '';
-    const previousTime = eventTimeIn(previousBody);
-    const previousVenue = eventVenueIn(previousBody);
-    const detailsConflict = Boolean(
-      previousCandidate &&
-        ((eventTime && previousTime && eventTime !== previousTime) ||
-          (eventVenue && previousVenue && eventVenue !== previousVenue)),
-    );
-    const duplicateKey = detailsConflict
-      ? `${duplicateBaseKey}|${item.thread.threadId}`
-      : duplicateBaseKey;
+    let duplicateKey = duplicateBaseKey;
+    if (duplicateBaseKey !== item.thread.threadId) {
+      const clusters = eventClusters.get(duplicateBaseKey) ?? [];
+      const compatible = clusters.filter(
+        (cluster) =>
+          !(eventTime && cluster.eventTime && eventTime !== cluster.eventTime) &&
+          !(eventVenue && cluster.eventVenue && eventVenue !== cluster.eventVenue),
+      );
+      let cluster = compatible.length === 1 ? compatible[0] : undefined;
+      if (!cluster) {
+        duplicateKey = `${duplicateBaseKey}|${item.thread.threadId}`;
+        let suffix = 1;
+        while (
+          unique.has(duplicateKey) ||
+          clusters.some((candidate) => candidate.key === duplicateKey)
+        ) {
+          duplicateKey = `${duplicateBaseKey}|${item.thread.threadId}|${suffix}`;
+          suffix += 1;
+        }
+        cluster = {
+          key: duplicateKey,
+          ...(eventTime ? { eventTime } : {}),
+          ...(eventVenue ? { eventVenue } : {}),
+        };
+        clusters.push(cluster);
+        eventClusters.set(duplicateBaseKey, clusters);
+      } else {
+        duplicateKey = cluster.key;
+        if (eventTime) cluster.eventTime = eventTime;
+        if (eventVenue) cluster.eventVenue = eventVenue;
+      }
+    }
     const previous = unique.get(duplicateKey);
     const latestTimestamp = Date.parse(latest?.date ?? '');
     const itemScore =

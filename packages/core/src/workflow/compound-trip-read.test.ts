@@ -5665,6 +5665,65 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(final.text.length).toBeGreaterThan(answer.length);
   });
 
+  it('labels a separately sourced, unlinked stay as a hotel candidate', () => {
+    const { read, rows } = fixture();
+    const hotelRow = rows.find(
+      (row) =>
+        row.toolName === 'gmail.read_thread' &&
+        (row.args as Record<string, unknown> | undefined)?.threadId === 'hotel-thread',
+    );
+    const result = hotelRow?.result as { messages?: Array<Record<string, unknown>> } | undefined;
+    const message = result?.messages?.[0];
+    if (!message || typeof message.text !== 'string') throw new Error('Missing hotel source');
+    const updatedText = message.text
+      .replace('Check-in: November 10, 2030', 'Check-in: November 11, 2030')
+      .replace('Check-out: November 17, 2030', 'Check-out: November 18, 2030');
+    message.text = updatedText;
+    message.sourceLength = updatedText.length;
+
+    const projection = compoundTripReadProjection(read, rows);
+    const answer = renderCompoundTripReadResponse(projection);
+
+    expect(projection.hotel).toBeUndefined();
+    expect(projection.presentation.hotels).toEqual([
+      expect.objectContaining({ association: 'unlinked', hotelName: 'Canal House' }),
+    ]);
+    expect(answer).toContain('Unlinked hotel candidate: **Canal House**');
+    expect(answer).toContain('2030-11-11 to 2030-11-18');
+    expect(answer).toContain('[Booking](https://mail.google.com/mail/u/0/#all/hotel-thread)');
+    expect(answer).not.toContain('\nHotel: **Canal House**');
+  });
+
+  it('retains all calendar comparison records internally and counts those omitted from the brief', () => {
+    const { read, rows } = fixture();
+    const calendarRow = rows.find((row) => row.toolName === 'calendar.list_events');
+    const result = calendarRow?.result as { events?: Array<Record<string, unknown>> } | undefined;
+    const original = result?.events?.[0];
+    if (!result || !original) throw new Error('Missing calendar flight');
+    result.events = Array.from({ length: 6 }, (_, index) => ({
+      ...original,
+      eventId: `fixture-return-${index}`,
+      summary: `CPH → BOS calendar copy ${index + 1} (Example Air)`,
+      links: [
+        {
+          type: 'calendar',
+          url: `https://calendar.google.com/calendar/event?eid=fixture-return-${index}`,
+        },
+      ],
+    }));
+
+    const projection = compoundTripReadProjection(read, rows);
+    const answer = renderCompoundTripReadResponse(projection);
+
+    expect(projection.presentation.calendarNotes).toHaveLength(6);
+    expect(projection.text.match(/Same-itinerary calendar comparison/g)).toHaveLength(6);
+    expect(answer).toContain(
+      '2 additional calendar comparisons omitted from this brief; all were reviewed.',
+    );
+    expect(answer).toContain('fixture-return-0');
+    expect(answer).not.toContain('fixture-return-5');
+  });
+
   it.each([true, false])(
     'describes clocks as local only when their own booking explicitly states that: %s',
     (local) => {
