@@ -51,13 +51,13 @@ describe('weeklyCalendarPlan', () => {
       timeZone: 'America/Los_Angeles',
       evidence: evidence() as never,
     });
-    expect(text).toContain('review-only plan for next week');
-    expect(text).toContain('I haven’t changed your calendar.');
-    expect(text.match(/\(90 minutes\)/g)).toHaveLength(3);
+    expect(text).toContain('Review-only plan for next week');
+    expect(text).toContain('no calendar changes made.');
+    expect(text.match(/\(90m\)/g)).toHaveLength(3);
     expect(text).toContain('15-minute break');
-    expect(text).toContain('assumed to be 9 AM–5 PM');
-    expect(text).toContain('| Focus slot | Break |');
-    expect(text.indexOf('| Focus slot | Break |')).toBeLessThan(text.indexOf('Assumptions:'));
+    expect(text).toContain('assumed 9 AM–5 PM');
+    expect(text).toContain('| Candidate | Break |');
+    expect(text.indexOf('| Candidate | Break |')).toBeLessThan(text.indexOf('Assumptions:'));
   });
 
   it('keeps incomplete coverage tentative and names unavailable calendars without claiming clear time', () => {
@@ -70,7 +70,7 @@ describe('weeklyCalendarPlan', () => {
         unavailable: ['Shared calendar'],
       }) as never,
     });
-    expect(text).toContain('Coverage:');
+    expect(text).toContain('Limits:');
     expect(text).toContain('Shared calendar');
     expect(text).toContain('not confirmed free');
     expect(text).not.toContain('no overlapping attended events');
@@ -179,7 +179,7 @@ describe('weeklyCalendarPlan', () => {
       'Team practice starts Tue, Oct 13, 7:00 PM (15 min; attendance/travel unverified)',
     );
     expect(result.text).toContain('attendance/travel unverified');
-    expect(result.text).toContain('assumed to be 9 AM–5 PM');
+    expect(result.text).toContain('assumed 9 AM–5 PM');
     expect(result.text).not.toContain('calendar changed');
   });
 
@@ -211,7 +211,7 @@ describe('weeklyCalendarPlan', () => {
         ],
       }) as never,
     });
-    expect(text).toContain('estimated 30-minute travel buffer');
+    expect(text).toContain('estimated 30-minute travel buffers');
     // 17:00–19:30 is 2.5 unique source hours, below the 3-hour evening heuristic.
     // The overlap and 19:30–20:00 estimated return buffer must not inflate it.
     expect(text).not.toContain('Evening-heavy estimate');
@@ -257,11 +257,11 @@ describe('weeklyCalendarPlan', () => {
         ],
       }) as never,
     });
-    expect(text).toContain('estimated 30-minute travel buffer');
-    expect(text).toContain('shared-calendar attendance is unconfirmed');
+    expect(text).toContain('estimated 30-minute travel buffers');
+    expect(text).toContain('some shared-event attendance is unconfirmed');
     expect(text).toContain('| Mon, Oct 12, 12:30 PM–2:00 PM');
     expect(text).not.toContain('| Mon, Oct 12, 12:00 PM–1:30 PM');
-    expect(text).toContain('not a route estimate');
+    expect(text).toContain('not route estimates');
   });
 
   it('adds the configured meeting gap to estimated travel around in-person events', () => {
@@ -312,8 +312,10 @@ describe('weeklyCalendarPlan', () => {
 
     expect(result.text).toContain('| Mon, Oct 12, 10:00 AM–11:00 AM');
     expect(result.text).not.toContain('| Mon, Oct 12, 9:45 AM–10:45 AM');
-    expect(result.text).toContain('15-minute breaks on both sides of meetings');
-    expect(result.text).toContain('30-minute travel buffer on each side');
+    expect(result.text).toContain('15-minute buffers before and after meetings');
+    expect(result.text).toContain(
+      '30-minute travel buffers before and after physical events without video',
+    );
   });
 
   it('keeps a nonblocking reminder out of busy-time and overlap claims', () => {
@@ -499,12 +501,14 @@ describe('weeklyCalendarPlan', () => {
     });
     expect(text).toContain('Possible overlap: Review and Shared hold');
     expect(text).not.toContain('Scheduling conflict: Review and Shared hold');
-    expect(text).toContain('Next step: confirm attendance for Shared hold.');
-    expect(text).toContain('choose one to reschedule');
-    expect(text).toContain('leave the calendar unchanged until attendance is clear');
+    expect(text).toContain('Attendance is unconfirmed for Shared hold.');
+    expect(text).toContain('Next: confirm attendance for Shared hold');
+    expect(text).toContain(
+      'ask the organizer for the lower-priority event whether a move is possible',
+    );
   });
 
-  it('recommends reviewing verified conflicts without choosing which event to move', () => {
+  it('offers concrete conditional choices for verified conflicts without choosing what to move', () => {
     const rows = evidence({
       pages: [
         {
@@ -521,6 +525,13 @@ describe('weeklyCalendarPlan', () => {
                 end: '2026-10-12T18:00:00Z',
                 ownerResponse: 'accepted',
                 blocksTime: true,
+                organizer: 'planner@example.test',
+                links: [
+                  {
+                    type: 'calendar',
+                    url: 'https://calendar.google.com/calendar/event?eid=planning',
+                  },
+                ],
               },
               {
                 eventId: 'b',
@@ -530,6 +541,13 @@ describe('weeklyCalendarPlan', () => {
                 end: '2026-10-12T18:30:00Z',
                 ownerResponse: 'accepted',
                 blocksTime: true,
+                organizer: 'host@example.test',
+                links: [
+                  {
+                    type: 'calendar',
+                    url: 'https://calendar.google.com/calendar/event?eid=appointment',
+                  },
+                ],
               },
             ],
             complete: true,
@@ -547,8 +565,15 @@ describe('weeklyCalendarPlan', () => {
     });
     expect(text).toContain('Scheduling conflict: Planning and Appointment');
     expect(text).toContain(
-      'Recommended change: choose which accepted event to reschedule after checking priorities (Planning and Appointment).',
+      'Choice: keep Planning and ask the listed organizer (host@example.test) whether Appointment can move, or keep Appointment and ask the listed organizer (planner@example.test) whether Planning can move.',
     );
+    expect(text).toContain('Both invites show accepted.');
+    expect(
+      text.match(/https:\/\/calendar\.google\.com\/calendar\/event\?eid=planning/g),
+    ).toHaveLength(1);
+    expect(
+      text.match(/https:\/\/calendar\.google\.com\/calendar\/event\?eid=appointment/g),
+    ).toHaveLength(1);
     expect(text).not.toContain('I found no overlapping attended events');
     expect(text).not.toContain('move Planning');
     expect(text).not.toContain('move Appointment');
@@ -702,7 +727,7 @@ describe('weeklyCalendarPlan', () => {
     });
 
     expect(result.slotCount).toBe(1);
-    expect(result.text).toContain('conditional lodging context; provider still reports busy');
+    expect(result.text).toContain('conditional slots assume lodging context');
     expect(result.text).not.toContain('Possible overlap: Hotel stay');
   });
 
@@ -799,7 +824,9 @@ describe('weeklyCalendarPlan', () => {
       evidence: rows as never,
     });
     expect(text).toContain('Possible overlap: Hotel stay and Planning meeting');
-    expect(text).toContain('estimated 30-minute travel buffer on each side');
+    expect(text).toContain(
+      'estimated 30-minute travel buffers before and after physical events without video',
+    );
   });
 
   it('recognizes a long stay from explicit lodging description when the property title is not generic', () => {
@@ -1311,16 +1338,16 @@ describe('requested focus-plan variations', () => {
     expect(result.slotCount).toBe(2);
     expect(result.coverageComplete).toBe(false);
     expect(result.text).toContain('Hotel stay in Berlin');
-    expect(result.text).toContain('provider still reports busy');
+    expect(result.text).toContain('feed still reports busy');
     expect(result.text).toContain('not confirmed free');
     expect(result.text).toContain('Unavailable free/busy or event coverage: Holidays');
-    expect(result.text).toContain('Focus candidates for review (not availability-cleared)');
-    expect(result.text).toContain('conditional lodging context; provider still reports busy');
-    expect(result.text.match(/\(60 minutes\)/g)).toHaveLength(2);
+    expect(result.text).toContain('Focus candidates (not availability-cleared)');
+    expect(result.text).toContain('conditional slots assume lodging context');
+    expect(result.text.match(/\(60m\)/g)).toHaveLength(2);
     expect(result.text).toContain('Tue, Oct 13, 10:15 AM');
     expect(result.text).toContain('Wed, Oct 14, 10:15 AM');
     expect(result.text).not.toContain('Tue, Oct 13, 9:00 AM');
-    expect(result.text).toContain('I haven’t changed your calendar');
+    expect(result.text).toContain('no calendar changes made');
   });
 
   it.each([
@@ -1392,10 +1419,10 @@ describe('requested focus-plan variations', () => {
     });
 
     expect(result.slotCount).toBe(1);
-    expect(result.text).toContain('Focus candidates for review (not availability-cleared)');
+    expect(result.text).toContain('Focus candidates (not availability-cleared)');
     expect(result.text).toContain('Tue, Oct 13, 10:15 AM');
     expect(result.text).not.toContain('Tue, Oct 13, 9:00 AM');
-    expect(result.text).toContain('provider still reports busy');
+    expect(result.text).toContain('feed still reports busy');
   });
 
   it('keeps the full provider interval blocking when an all-day event overlaps the stay', () => {
@@ -1424,7 +1451,7 @@ describe('requested focus-plan variations', () => {
 
     expect(result.slotCount).toBe(0);
     expect(result.text).toContain('I couldn’t identify suitable 60-minute blocks');
-    expect(result.text).not.toContain('Focus candidates for review (not availability-cleared)');
+    expect(result.text).not.toContain('Focus candidates (not availability-cleared)');
   });
 
   it.each([
@@ -1468,7 +1495,7 @@ describe('requested focus-plan variations', () => {
     });
 
     expect(result.slotCount).toBe(0);
-    expect(result.text).not.toContain('Focus candidates for review (not availability-cleared)');
+    expect(result.text).not.toContain('Focus candidates (not availability-cleared)');
   });
 
   it('finds review-only weekday candidates from the captured complete event roster while retaining the missing free/busy limit', () => {
@@ -1684,17 +1711,17 @@ describe('requested focus-plan variations', () => {
     expect(result.text).toContain(
       'Unavailable free/busy or event coverage: Holidays in United States',
     );
-    expect(result.text).toContain('provider still reports busy');
+    expect(result.text).toContain('feed still reports busy');
     expect(result.text).toContain('not confirmed free');
     expect(result.text).toContain('Wed, Oct 14');
-    expect(result.text.indexOf('| Focus slot | Break |')).toBeLessThan(
+    expect(result.text.indexOf('| Candidate | Break |')).toBeLessThan(
       result.text.indexOf('Possible overlap:'),
     );
-    expect(result.text.match(/^Coverage:/gm)).toHaveLength(1);
+    expect(result.text.match(/^Limits:/gm)).toHaveLength(1);
     expect(result.text.match(/^Assumptions:/gm)).toHaveLength(1);
     expect(result.text).toContain('Thu, Oct 15');
     expect(result.text).not.toMatch(/^- Fri, Oct 16,/m);
-    expect(result.text).toContain('I haven’t changed your calendar');
+    expect(result.text).toContain('no calendar changes made');
   });
 
   it('keeps a timed flight blocking candidates when it overlaps a lodging-explained busy window', () => {
@@ -1769,7 +1796,7 @@ describe('requested focus-plan variations', () => {
     expect(result.slotCount).toBe(0);
     expect(result.coverageComplete).toBe(true);
     expect(result.text).toContain('I couldn’t identify suitable 60-minute blocks');
-    expect(result.text).not.toContain('Focus candidates for review (not availability-cleared)');
+    expect(result.text).not.toContain('Focus candidates (not availability-cleared)');
     expect(withoutFlight.slotCount).toBe(1);
   });
 
@@ -1820,7 +1847,7 @@ describe('requested focus-plan variations', () => {
     });
 
     expect(result.slotCount).toBe(0);
-    expect(result.text).not.toContain('Focus candidates for review (not availability-cleared)');
+    expect(result.text).not.toContain('Focus candidates (not availability-cleared)');
     expect(result.text).toContain('I couldn’t identify suitable 60-minute blocks');
   });
 
@@ -1873,16 +1900,16 @@ describe('requested focus-plan variations', () => {
     });
     expect(answer.slotCount).toBe(2);
     expect(answer.coverageComplete).toBe(true);
-    expect(answer.text.match(/\(60 minutes\)/g)).toHaveLength(2);
+    expect(answer.text.match(/\(60m\)/g)).toHaveLength(2);
     expect(answer.text).toContain('the next 3 working days');
-    expect(answer.text).toContain('both sides of meetings');
+    expect(answer.text).toContain('before and after meetings');
     expect(answer.text).not.toContain('30-minute travel');
     expect(answer.text).not.toContain('Overloaded-day assessment');
     expect(answer.text).not.toContain('Overloaded-day estimate');
     expect(answer.text).not.toContain('Evening review');
     expect(answer.text).not.toContain('90 minutes');
     expect(answer.text).not.toMatch(/- Mon, Oct 12, (9|10):00 AM/);
-    expect(answer.text).toContain('I haven’t changed your calendar');
+    expect(answer.text).toContain('no calendar changes made');
   });
 
   it('bounds a dense conflict and source list while stating how many details were omitted', () => {
