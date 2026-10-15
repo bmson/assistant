@@ -13,7 +13,7 @@ import {
   calendarWindowMembership,
 } from './calendar-read-window.js';
 import { calendarRelationship, calendarRelationshipNote } from './calendar-relationship.js';
-import { safeCalendarSourceUrl } from './calendar-source-link.js';
+import { safeCalendarSourceUrl, safeVideoMeetingUrl } from './calendar-source-link.js';
 import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
 import type { CompoundTripExtraction } from './compound-trip-extraction.js';
 import {
@@ -3804,19 +3804,28 @@ export function verifiedReadResponse(
                 .map(record)
                 .filter((link): link is Record<string, unknown> => Boolean(link))
             : [];
-          const safeSourceLinks = linkList.filter(
-            (link) => safeCalendarSourceUrl(stringField(link, 'url')) !== undefined,
+          const safeAgendaLinks = linkList.filter(
+            (link) =>
+              (stringField(link, 'type') === 'video'
+                ? safeVideoMeetingUrl(stringField(link, 'url'))
+                : safeCalendarSourceUrl(stringField(link, 'url'))) !== undefined,
           );
           const bestLink =
-            safeSourceLinks.find((link) => stringField(link, 'type') === 'video') ??
-            safeSourceLinks.find((link) => stringField(link, 'type') !== 'calendar') ??
-            safeSourceLinks[0];
+            safeAgendaLinks.find((link) => stringField(link, 'type') === 'video') ??
+            safeAgendaLinks.find((link) => stringField(link, 'type') !== 'calendar') ??
+            safeAgendaLinks[0];
           const bestUrl = bestLink ? stringField(bestLink, 'url') : '';
-          const safeBestUrl = safeCalendarSourceUrl(bestUrl);
+          const safeBestUrl =
+            stringField(bestLink ?? {}, 'type') === 'video'
+              ? safeVideoMeetingUrl(bestUrl)
+              : safeCalendarSourceUrl(bestUrl);
           const eventLinks = safeBestUrl
             ? `[${stringField(bestLink ?? {}, 'label') || 'Event link'}](${safeBestUrl})`
             : '';
-          const compactSourceLink = safeSourceLinks[0];
+          const compactSourceLink =
+            linkList.find(
+              (link) => safeCalendarSourceUrl(stringField(link, 'url')) !== undefined,
+            ) ?? undefined;
           const compactUrl = compactSourceLink ? stringField(compactSourceLink, 'url') : '';
           // Time first, in the shape the agenda answer uses, so the fallback
           // still reads like an answer rather than a dump of record fields.

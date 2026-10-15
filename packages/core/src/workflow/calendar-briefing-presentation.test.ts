@@ -106,6 +106,29 @@ describe('calendar day and practical briefing fidelity', () => {
     }
   });
 
+  it('preserves a validated video meeting link in the standard agenda while dropping provider links', () => {
+    const event = {
+      ...timed,
+      links: [
+        {
+          type: 'calendar',
+          label: 'Manage booking',
+          url: 'https://hotel.example/manage?token=booking-secret',
+        },
+        {
+          type: 'video',
+          label: 'Join meeting',
+          url: 'https://zoom.us/j/12345?pwd=meeting-password',
+        },
+      ],
+    };
+    const response = verifiedReadResponse(request, evidence([event]));
+
+    expect(response).toContain('[Join meeting](https://zoom.us/j/12345?pwd=meeting-password)');
+    expect(response).not.toContain('hotel.example');
+    expect(response).not.toContain('booking-secret');
+  });
+
   it('keeps unknown-zone floating records dated and outside the confirmed local agenda/cards', () => {
     const rows = evidence([timed, floating]);
     const response = verifiedReadResponse(request, rows);

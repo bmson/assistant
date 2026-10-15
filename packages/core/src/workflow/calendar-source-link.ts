@@ -10,6 +10,7 @@ export function safeCalendarSourceUrl(raw: string): string | undefined {
       url.protocol !== 'https:' ||
       url.username !== '' ||
       url.password !== '' ||
+      url.port !== '' ||
       !isGoogleCalendarUrl(url)
     )
       return undefined;
@@ -24,6 +25,28 @@ export function safeCalendarSourceUrl(raw: string): string | undefined {
     if (eventId) url.searchParams.set('eid', eventId);
     else if (calendarId) url.searchParams.set('eventid', calendarId);
     url.hash = '';
+    return url.href;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Preserve the existing text affordance for known HTTPS meeting providers. */
+export function safeVideoMeetingUrl(raw: string): string | undefined {
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.toLowerCase();
+    const knownProvider = ['zoom.us', 'meet.google.com', 'teams.microsoft.com', 'webex.com'].some(
+      (domain) => host === domain || host.endsWith(`.${domain}`),
+    );
+    if (
+      url.protocol !== 'https:' ||
+      url.username !== '' ||
+      url.password !== '' ||
+      url.port !== '' ||
+      !knownProvider
+    )
+      return undefined;
     return url.href;
   } catch {
     return undefined;
