@@ -30,6 +30,7 @@ import type { ModelMessage } from 'ai';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
+import { sourceReadReceipt } from '../../../packages/tools/src/source-read-receipt.js';
 
 const DATABASE_URL =
   process.env.DATABASE_URL ?? 'postgres://assistant:assistant@localhost:5432/assistant';
@@ -1346,10 +1347,30 @@ describe('executor end-to-end (integration, scripted model)', () => {
           const requestedId = (args as { documentId: string }).documentId;
           documentExecutions.push(requestedId);
           expect(requestedId).toBe(allowedId);
+          const text = 'The permitted document says hello.';
           return {
             documentId: requestedId,
             title: 'Allowed document',
-            text: 'The permitted document says hello.',
+            url: `https://docs.google.com/document/d/${requestedId}/edit`,
+            text,
+            complete: true,
+            truncated: false,
+            structure: { complete: true, headings: [], bullets: [], tables: [] },
+            receipt: sourceReadReceipt({
+              version: 1,
+              source: { kind: 'google-doc', id: requestedId, revision: 'allowed-doc-rev-1' },
+              requested: { start: 0, limit: 50_000, scope: 'body' },
+              covered: {
+                start: 0,
+                end: text.length,
+                count: text.length,
+                total: text.length,
+                unavailable: 0,
+              },
+              complete: true,
+              losses: [],
+              continuation: null,
+            }),
           };
         },
       },
@@ -1459,6 +1480,16 @@ describe('executor end-to-end (integration, scripted model)', () => {
     expect(documentCalls[0]).toMatchObject({
       args: { documentId: allowedId },
       status: 'succeeded',
+      result: {
+        complete: true,
+        truncated: false,
+        receipt: {
+          source: { kind: 'google-doc', id: allowedId, revision: 'allowed-doc-rev-1' },
+          complete: true,
+          covered: { start: 0, count: 34, total: 34 },
+          losses: [],
+        },
+      },
     });
   });
 

@@ -430,10 +430,10 @@ function requestedPageTargets(request: string): string[] {
       });
     const noBrowse =
       /\b(?:do not|don['’]t|never)\s+browse\s*(?=[;,]|$)/i.test(clause) ||
-      /\b(?:do not|don['’]t|never)\s+browse\b[^.!?;\n]{0,80}\b(?:page|article|site|website|webpage|url|link|source|contents?)\b/i.test(
+      /\b(?:do not|don['’]t|never)\s+browse\b[^.!?;\n]{0,80}\b(?:page|article|site|website|webpage|document|doc|url|link|source|contents?)\b/i.test(
         clause,
       ) ||
-      /\b(?:do not|don['’]t|never)\s+(?:fetch|open|visit|read)\b[^.!?;\n]{0,80}\b(?:page|article|site|website|webpage|url|link|source|contents?)\b/i.test(
+      /\b(?:do not|don['’]t|never)\s+(?:fetch|open|visit|read)\b[^.!?;\n]{0,80}\b(?:page|article|site|website|webpage|document|doc|url|link|source|contents?)\b/i.test(
         clause,
       ) ||
       (() => {
@@ -448,7 +448,7 @@ function requestedPageTargets(request: string): string[] {
       /\b(?:do not|don['’]t|never)\s+(?:browse|read|fetch|open|visit|load)\s+(?:(?:the|this|that)\s+)?SOURCE_URL/i.test(
         clause,
       ) ||
-      /\b(?:do not|don['’]t|never)\s+(?:browse|read|fetch|open|visit|load)\b[^.!?;\n]{0,80}\b(?:page|article|site|website|webpage|url|link|source|contents?)\b/i.test(
+      /\b(?:do not|don['’]t|never)\s+(?:browse|read|fetch|open|visit|load)\b[^.!?;\n]{0,80}\b(?:page|article|site|website|webpage|document|doc|url|link|source|contents?)\b/i.test(
         clause,
       );
     if (noBrowse || negatedDirectPageRead) return [];

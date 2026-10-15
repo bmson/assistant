@@ -47,22 +47,28 @@ const summary = [
 ].join('\n');
 const verbose = `## Rail\n${'The rail service connects Central with Airport. '.repeat(35)}\n## Buses\n${'Some buses require a transfer. '.repeat(35)}\n[Source](${url})`;
 const documentId = 'document123456';
-function nativeDocPage(start: number, end: number, total: number, complete: boolean) {
+function nativeDocPage(
+  start: number,
+  end: number,
+  total: number,
+  complete: boolean,
+  id = documentId,
+) {
   return {
     toolName: 'docs.get',
     status: 'succeeded',
     fromCurrentTask: true,
-    args: { documentId, startOffset: start, maxChars: end - start },
+    args: { documentId: id, startOffset: start, maxChars: end - start },
     result: {
-      documentId,
+      documentId: id,
       title: 'Source document',
-      url: `https://docs.google.com/document/d/${documentId}/edit`,
+      url: `https://docs.google.com/document/d/${id}/edit`,
       text: 'x'.repeat(end - start),
       complete,
       truncated: !complete,
       receipt: {
         version: 1,
-        source: { kind: 'google-doc', id: documentId, revision: 'rev-1' },
+        source: { kind: 'google-doc', id, revision: 'rev-1' },
         requested: { start, limit: end - start, scope: 'body' },
         covered: { start, end, count: end - start, total, unavailable: 0 },
         complete,
@@ -343,6 +349,26 @@ describe('source-grounded public page summary recovery', () => {
       'No complete current web.fetch receipt is bound to 1 requested public page.',
     ]);
     expect(requestedPublicPageReceiptFindings(mixedRequest, [...nativeRead, ...evidence])).toEqual(
+      [],
+    );
+  });
+
+  it('excludes denied native documents without suppressing an explicitly allowed one', () => {
+    const deniedId = 'NoReadDoc123456';
+    const allowedId = 'AllowedDoc123456';
+    const deniedUrl = `https://docs.google.com/document/d/${deniedId}/edit`;
+    const allowedUrl = `https://docs.google.com/document/d/${allowedId}/edit`;
+    expect(
+      requestedPublicPageReceiptFindings(`Do not open this document: ${deniedUrl}.`, []),
+    ).toEqual([]);
+    const mixedRequest = `Do not open this document: ${deniedUrl}. Open this document: ${allowedUrl}.`;
+    expect(requestedPublicPageReceiptFindings(mixedRequest, [])).toEqual([
+      'No complete current native read receipt is bound to 1 requested Workspace document.',
+    ]);
+    expect(
+      requestedPublicPageReceiptFindings(mixedRequest, [nativeDocPage(0, 5, 5, true, allowedId)]),
+    ).toEqual([]);
+    expect(requestedPublicPageReceiptFindings(`Never open this doc: ${deniedUrl}.`, [])).toEqual(
       [],
     );
   });
