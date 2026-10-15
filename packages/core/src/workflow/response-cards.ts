@@ -1,5 +1,6 @@
 import { sameCalendarOccurrence } from '@assistant/persistence';
 import { calendarSourceDateLabel, calendarWindowMembership } from './calendar-read-window.js';
+import { safeCalendarSourceUrl } from './calendar-source-link.js';
 import type { LiveLookup } from './live-lookup.js';
 import type { PersonalReadRequest } from './read-intent.js';
 import { effectiveReminders } from './reminder-state.js';
@@ -137,8 +138,9 @@ function isSpecificCalendarLink(link: RecordValue | undefined): boolean {
   const url = string(link?.url);
   if (!url) return false;
   try {
-    const parsed = new URL(url);
-    if (!/^https?:$/.test(parsed.protocol)) return false;
+    const safeUrl = safeCalendarSourceUrl(url);
+    if (!safeUrl) return false;
+    const parsed = new URL(safeUrl);
     return (
       parsed.pathname.toLowerCase().includes('/event') ||
       parsed.search.toLowerCase().includes('eid=') ||
@@ -201,7 +203,10 @@ export function calendarResponseCards(
       const allDay = event.allDay === true || /^\d{4}-\d{2}-\d{2}$/.test(start);
       const links = Array.isArray(event.links) ? event.links.map(record).filter(Boolean) : [];
       const calendarLink = links.find(
-        (link) => string(link?.type) === 'calendar' && isSpecificCalendarLink(link),
+        (link) =>
+          string(link?.type) === 'calendar' &&
+          isSpecificCalendarLink(link) &&
+          safeCalendarSourceUrl(string(link?.url)) !== undefined,
       );
       const meetingLink = links.find(isVideoMeetingLink);
       const calendars = [...new Set(group.map((entry) => string(entry.calendar)).filter(Boolean))];
@@ -225,7 +230,10 @@ export function calendarResponseCards(
           : [],
         calendars,
         calendarLink: calendarLink
-          ? { label: string(calendarLink.label) || 'Open event', url: string(calendarLink.url) }
+          ? {
+              label: string(calendarLink.label) || 'Open event',
+              url: safeCalendarSourceUrl(string(calendarLink.url)) ?? '',
+            }
           : undefined,
         meetingLink: meetingLink
           ? {
@@ -236,7 +244,10 @@ export function calendarResponseCards(
         // Retain the established field for older clients, but never point an
         // event affordance at the meeting itself.
         link: calendarLink
-          ? { label: string(calendarLink.label) || 'Open event', url: string(calendarLink.url) }
+          ? {
+              label: string(calendarLink.label) || 'Open event',
+              url: safeCalendarSourceUrl(string(calendarLink.url)) ?? '',
+            }
           : undefined,
       };
     })
@@ -1284,10 +1295,10 @@ export function calendarWriteResponseCards(evidence: ActionEvidence[]): Response
           : strings(args?.attendees),
         calendars: [],
         calendarLink: isSpecificCalendarLink({ url: string(result.link) })
-          ? { label: 'Open event', url: string(result.link) }
+          ? { label: 'Open event', url: safeCalendarSourceUrl(string(result.link)) ?? '' }
           : undefined,
         link: isSpecificCalendarLink({ url: string(result.link) })
-          ? { label: 'Open event', url: string(result.link) }
+          ? { label: 'Open event', url: safeCalendarSourceUrl(string(result.link)) ?? '' }
           : undefined,
       },
     ];

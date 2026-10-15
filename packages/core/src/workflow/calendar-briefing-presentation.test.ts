@@ -73,6 +73,39 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain('Studio B, 12 Main Street');
   });
 
+  it('keeps official event IDs but omits credentialed hotel-management links in calendar briefs', () => {
+    const links = [
+      {
+        type: 'calendar',
+        label: 'Manage hotel booking',
+        url: 'https://hotel.example/manage?access_token=booking-secret#session=fragment-secret',
+      },
+      {
+        type: 'calendar',
+        label: 'Open calendar event',
+        url: 'https://calendar.google.com/event?eid=hotel-event&token=query-secret#code=fragment-secret',
+      },
+    ];
+    const event = { ...timed, summary: 'Hotel reservation', links };
+    const compact = { ...request, compactCalendarBriefing: true };
+
+    const compactResponse = verifiedReadResponse(compact, evidence([event], true, compact));
+    const standardResponse = verifiedReadResponse(request, evidence([event]));
+
+    expect(compactResponse).toContain(
+      '[Hotel reservation](https://calendar.google.com/event?eid=hotel-event)',
+    );
+    expect(standardResponse).toContain(
+      '[Open calendar event](https://calendar.google.com/event?eid=hotel-event)',
+    );
+    for (const response of [compactResponse, standardResponse]) {
+      expect(response).not.toContain('hotel.example');
+      expect(response).not.toContain('booking-secret');
+      expect(response).not.toContain('query-secret');
+      expect(response).not.toContain('fragment-secret');
+    }
+  });
+
   it('keeps unknown-zone floating records dated and outside the confirmed local agenda/cards', () => {
     const rows = evidence([timed, floating]);
     const response = verifiedReadResponse(request, rows);

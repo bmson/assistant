@@ -1,3 +1,5 @@
+import { safeCalendarSourceUrl } from './calendar-source-link.js';
+
 export interface CalendarEventAnalysisRequest {
   weekdayCount: number;
   minimumDurationMinutes?: number;
@@ -233,14 +235,13 @@ function isExplicitlyInPerson(event: Record<string, unknown>): boolean {
 
 function safeLink(event: Record<string, unknown>): string {
   const links = Array.isArray(event.links) ? event.links.map(record).filter(Boolean) : [];
-  const candidate = links.find((link) => /^https?:\/\//i.test(text(link?.url)));
-  const url = text(candidate?.url);
+  const candidate = links.find((link) => Boolean(safeCalendarSourceUrl(text(link?.url))));
+  const url = candidate ? safeCalendarSourceUrl(text(candidate.url)) : undefined;
   if (!url) return '';
   const label =
     text(candidate?.label).replaceAll('\\', '\\\\').replaceAll('[', '\\[').replaceAll(']', '\\]') ||
     'Source event';
-  const safeUrl = url.replaceAll('\\', '\\\\').replaceAll('(', '\\(').replaceAll(')', '\\)');
-  return `[${label}](${safeUrl})`;
+  return `[${label}](${url.replaceAll('\\', '\\\\').replaceAll('(', '\\(').replaceAll(')', '\\)')})`;
 }
 
 function clock(instant: number, timeZone: string): string {

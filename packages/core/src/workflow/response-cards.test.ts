@@ -695,6 +695,47 @@ describe('response cards', () => {
     ]);
   });
 
+  it('keeps an official calendar source link and excludes an event-provided booking URL', () => {
+    const result = calendarResponseCards([
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        result: {
+          events: [
+            {
+              eventId: 'hotel-event',
+              calendarId: 'travel',
+              calendar: 'Travel',
+              summary: 'Hotel reservation',
+              start: '2026-10-16T14:00:00-07:00',
+              end: '2026-10-16T15:00:00-07:00',
+              links: [
+                {
+                  type: 'calendar',
+                  label: 'Manage booking',
+                  url: 'https://hotel.example/manage/event?id=hotel-event&token=booking-secret',
+                },
+                {
+                  type: 'calendar',
+                  label: 'Open in Google Calendar',
+                  url: 'https://calendar.google.com/event?eid=hotel-event&token=query-secret#code=fragment-secret',
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ]);
+
+    expect(result[0]).toMatchObject({
+      calendarLink: { url: 'https://calendar.google.com/event?eid=hotel-event' },
+    });
+    expect(JSON.stringify(result)).not.toContain('hotel.example');
+    expect(JSON.stringify(result)).not.toContain('booking-secret');
+    expect(JSON.stringify(result)).not.toContain('query-secret');
+    expect(JSON.stringify(result)).not.toContain('fragment-secret');
+  });
+
   it('renders date-only calendar events as all-day and rejects generic links', () => {
     const result = calendarResponseCards([
       {
