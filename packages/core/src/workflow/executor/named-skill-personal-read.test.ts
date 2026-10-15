@@ -1,4 +1,8 @@
-import type { LearnedSkill, SkillContextRepository } from '@assistant/persistence';
+import type {
+  LearnedSkill,
+  SkillContextRepository,
+  SkillLibraryRepository,
+} from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
 import type { TaskState } from '../../events.js';
 import { TaskStateSchema } from '../../events.js';
@@ -29,7 +33,11 @@ const skill: LearnedSkill = {
   updatedAt: new Date('2026-10-01T00:00:00.000Z'),
 };
 
-async function runPersonalRead(request: string, foundSkill: LearnedSkill | null = skill) {
+async function runPersonalRead(
+  request: string,
+  foundSkill: LearnedSkill | null = skill,
+  skillLibrary?: SkillLibraryRepository,
+) {
   const rows: Array<Record<string, unknown>> = [];
   const findByName = vi.fn(async () => foundSkill);
   const recall = vi.fn(async () => []);
@@ -135,7 +143,7 @@ async function runPersonalRead(request: string, foundSkill: LearnedSkill | null 
       dispatch,
       executeApproved: vi.fn(),
     },
-    persistence: { tasks, executionEvidence: evidence, skills },
+    persistence: { tasks, executionEvidence: evidence, skills, skillLibrary },
   } as unknown as RunContext['deps'];
   const now = new Date('2026-10-13T12:00:00.000Z');
   const window = [{ role: 'user', content: request }];
@@ -189,6 +197,50 @@ async function runPersonalRead(request: string, foundSkill: LearnedSkill | null 
 }
 
 describe('named saved skill use during a personal read', () => {
+  it('answers a saved-skill inventory from metadata without applying a skill or querying calendar', async () => {
+    const list = vi.fn(async () => [
+      {
+        id: skill.id,
+        name: skill.name,
+        preconditions: skill.preconditions,
+        steps: skill.steps,
+        gotchas: skill.gotchas,
+        ownerAuthored: skill.ownerAuthored,
+        deprecated: skill.deprecated,
+        useCount: skill.useCount,
+        successCount: skill.successCount,
+        failureCount: skill.failureCount,
+        updatedAt: skill.updatedAt,
+      },
+    ]);
+    const library: SkillLibraryRepository = {
+      kind: 'skill-library-repository',
+      list,
+    };
+    const f = await runPersonalRead(
+      'What saved skills do I have that could help plan a busy day?',
+      skill,
+      library,
+    );
+
+    expect(list).toHaveBeenCalledWith('owner-1');
+    expect(f.skills.findByName).not.toHaveBeenCalled();
+    expect(f.skills.recall).not.toHaveBeenCalled();
+    expect(f.skills.bumpUse).not.toHaveBeenCalled();
+    expect(f.dispatch).not.toHaveBeenCalled();
+    expect(f.window.at(-1)?.content).toContain('Calendar review');
+    expect(f.window.at(-1)?.content).toContain('scheduling');
+    expect(f.window.at(-1)?.content).not.toContain(skill.steps);
+  });
+
+  it('reports the library unavailable instead of presenting an empty inventory', async () => {
+    const f = await runPersonalRead('What saved skills do I have that could help plan a busy day?');
+
+    expect(f.dispatch).not.toHaveBeenCalled();
+    expect(f.window.at(-1)?.content).toContain('cannot verify which skills are available');
+    expect(f.window.at(-1)?.content).not.toContain('could not find an active saved skill');
+  });
+
   it('retrieves the exact owner skill as advice without opening a write capability', async () => {
     const { skills, systems, router, dispatch, state } = await runPersonalRead(
       'What is on my calendar today? Apply my saved skill named "Calendar review".',

@@ -1,6 +1,7 @@
 import {
   createPostgresExecutionContextRepository,
   createPostgresExecutionEvidenceRepository,
+  createPostgresSkillLibraryRepository,
   suggestions,
 } from '@assistant/db';
 import type { ModelMessage } from 'ai';
@@ -16,6 +17,10 @@ import { listOpenCommitments, renderOpenCommitments } from '../../memory/commitm
 import { getOwnerCard } from '../../memory/consolidation.js';
 import { retrieveOwnerContext } from '../../memory/recall-context.js';
 import { recordRecallMetric } from '../../memory/recall-metrics.js';
+import {
+  renderRelevantSavedSkills,
+  requestedSavedSkillInventory,
+} from '../../memory/saved-skill-inventory.js';
 import {
   bumpSkillUse,
   findActiveSkillByExactName,
@@ -490,6 +495,36 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     directOwner && !restrictedChecklistResume ? requestedBirthdaySaves(ownerWindow) : [];
   const situationRequest =
     directOwner && !restrictedChecklistResume && isSituationRequest(ownerText);
+  const skillInventoryRequest =
+    directOwner && !restrictedChecklistResume && requestedSavedSkillInventory(ownerText);
+  if (skillInventoryRequest) {
+    let response =
+      'I could not access the saved-skill library for this request, so I cannot verify which skills are available.';
+    let libraryRead = false;
+    const skillLibrary =
+      deps.persistence?.skillLibrary ??
+      (deps.persistence?.driver === 'firestore'
+        ? undefined
+        : createPostgresSkillLibraryRepository(db));
+    if (skillLibrary) {
+      try {
+        response = renderRelevantSavedSkills(await skillLibrary.list(task.agentId));
+        libraryRead = true;
+      } catch {
+        response =
+          'I could not read the saved-skill library, so I cannot verify which skills are available.';
+      }
+    }
+    rc.window.push({ role: 'assistant', content: response } as ModelMessage);
+    return stageFinalResponse(deps, lease, state, rc.window, {
+      text: response,
+      progress: libraryRead
+        ? 'Read the saved-skill library metadata without applying a skill.'
+        : 'Could not verify the saved-skill library contents.',
+      terminalStatus: 'done',
+      outcome: 'done',
+    });
+  }
   // Private calendar/mail forcing belongs only to direct owner requests. Never
   // let third-party text or an assistant-generated child task trigger a search
   // of the owner's accounts or override its explicit action plan.

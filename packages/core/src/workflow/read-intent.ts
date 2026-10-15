@@ -5,6 +5,7 @@
  * model room to invent a plausible calendar or inbox answer.
  */
 
+import { requestedSavedSkillInventory } from '../memory/saved-skill-inventory.js';
 import {
   type CalendarEventAnalysisRequest,
   parseCalendarWeekdayCount,
@@ -1989,6 +1990,7 @@ function detectPersonalReadRequestInternal(
   }
   if (latestIndex === -1) return null;
   const latest = stripNegativePrivateWriteConstraints(readIntentText(messages[latestIndex]));
+  if (requestedSavedSkillInventory(latest)) return null;
   const calendarReadProhibited = explicitlyProhibitsPrivateRead(latest, 'calendar');
   const emailReadProhibited = explicitlyProhibitsPrivateRead(latest, 'email');
   const memoryReadProhibited = explicitlyProhibitsPrivateRead(latest, 'memory');

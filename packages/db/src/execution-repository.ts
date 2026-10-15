@@ -35,6 +35,7 @@ import { createPostgresOwnerContextRepository } from './owner-context-repository
 import { createPostgresRecallMetricsRepository } from './recall-metrics-repository.js';
 import { createPostgresRecallSurfacingRepository } from './recall-surfacing-repository.js';
 import { createPostgresSkillContextRepository } from './skill-context-repository.js';
+import { createPostgresSkillLibraryRepository } from './skill-library-repository.js';
 import { createPostgresSmsChannelRepository } from './sms-channel-repository.js';
 import { createPostgresTaskRepository } from './task-lifecycle-repository.js';
 import { createPostgresToolExecutionRepository } from './tool-execution-repository.js';
@@ -60,6 +61,7 @@ export function createPostgresExecutionPersistence(db: Db): ExecutionPersistence
     ownerContext: createPostgresOwnerContextRepository(db),
     ownerCardCompilation: createPostgresOwnerCardCompilationRepository(db),
     skills: createPostgresSkillContextRepository(db),
+    skillLibrary: createPostgresSkillLibraryRepository(db),
     history: createPostgresHistoryRecallRepository(db),
     graph: createPostgresGraphRecallRepository(db),
     graphSync: createPostgresKnowledgeGraphSyncRepository(db),

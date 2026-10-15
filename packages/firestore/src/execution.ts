@@ -61,6 +61,7 @@ import { FirestoreSelfMaintenanceRepository } from './self-maintenance.js';
 import { FirestoreSelfRepairRepository } from './self-repair.js';
 import { FirestoreSituationToolRepository } from './situation-tools.js';
 import { FirestoreSkillContextRepository } from './skill-context.js';
+import { FirestoreSkillLibraryRepository } from './skill-library.js';
 import { FirestoreSkillReflectionRepository } from './skill-reflection.js';
 import { FirestoreSmsChannelRepository } from './sms-channel.js';
 import type { InstallationStore } from './store.js';
@@ -103,6 +104,7 @@ export function createFirestoreExecutionPersistence(
     situationDecisionContext,
     ownerCardCompilation: new FirestoreOwnerCardCompilationRepository(store),
     skills: new FirestoreSkillContextRepository(store, capturedEmbeddingSpace),
+    skillLibrary: new FirestoreSkillLibraryRepository(store),
     history: new FirestoreHistoryRecallRepository(store, capturedEmbeddingSpace),
     graph: new FirestoreGraphRecallRepository(store, capturedEmbeddingSpace),
     graphSync: new FirestoreKnowledgeGraphSyncRepository(store),

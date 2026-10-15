@@ -641,6 +641,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         dimensions: 1536,
         revision: 'composer-cancellation-test-v1',
       });
+      expect(execution.skillLibrary?.kind).toBe('skill-library-repository');
       const executorRouter = {
         object: vi.fn(async () => {
           throw new Error('the retained checklist lookup must not call the planner');

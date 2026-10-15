@@ -1040,6 +1040,21 @@ describe('detectPersonalReadRequest', () => {
     },
   );
 
+  it('leaves saved-skill inventory questions out of the calendar read route', () => {
+    expect(
+      detectPersonalReadRequest(
+        turn('What saved skills do I have that could help plan a busy day?'),
+      ),
+    ).toBeNull();
+  });
+
+  it('still routes an ordinary busy-day availability request to the calendar', () => {
+    expect(
+      detectPersonalReadRequest(turn('Check my calendar availability for my busy day tomorrow.'))
+        ?.firstToolName,
+    ).toBe('calendar.availability');
+  });
+
   it('retains the original lookup on assent, but not when accepting a write or a different topic', () => {
     const history = [
       { role: 'user', content: 'Where are we staying?' },

@@ -77,6 +77,7 @@ export { createPostgresSecurityIncidentRepository } from './security-incident-re
 export { createPostgresSelfRepairRepository } from './self-repair-repository.js';
 export { createPostgresSettingsRepository } from './settings-repository.js';
 export { createPostgresSkillContextRepository } from './skill-context-repository.js';
+export { createPostgresSkillLibraryRepository } from './skill-library-repository.js';
 export { bumpSkillLibraryRevision, readSkillLibraryRevision } from './skill-library-revision.js';
 export { createPostgresSmsChannelRepository } from './sms-channel-repository.js';
 export * from './task-discovery-repository.js';
