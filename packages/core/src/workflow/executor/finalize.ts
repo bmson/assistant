@@ -874,7 +874,7 @@ export async function stageModelFinalResponse(
     groundingCorpus: readContext?.groundingCorpus,
     liveCorpus: liveLookups.length > 0 ? liveLookupCorpus(rows) : undefined,
   };
-  const missingPublicPageReceipts = requestedPublicPageReceiptFindings(
+  const missingRequestedPageReceipts = requestedPublicPageReceiptFindings(
     latestUserText(window) ?? '',
     evidence,
   );
@@ -882,7 +882,7 @@ export async function stageModelFinalResponse(
   // to the durable receipt before using it to recover a practical briefing.
   let calendarSkillAdvice: string | undefined;
   if (
-    !missingPublicPageReceipts.length &&
+    !missingRequestedPageReceipts.length &&
     classifiedRead?.includeCalendarBriefing &&
     task.trust === 'owner' &&
     !isForwardedIngest(task)
@@ -920,20 +920,20 @@ export async function stageModelFinalResponse(
   // grounding recovery, or stripped links) are already the safest available
   // answer and must not be reworded by a discretionary model call.
   let initialCheck = enforceResponseContract(pending.text, evidence, contractOptions);
-  if (missingPublicPageReceipts.length) {
-    // A prose summary cannot substitute for fetching the exact public page the
-    // owner requested. Keep this narrow to explicit page URLs and preserve the
-    // gap as incomplete even though the optional reviewer is intentionally skipped.
+  if (missingRequestedPageReceipts.length) {
+    // A prose summary cannot substitute for a complete read receipt bound to
+    // each explicitly requested public page or native Workspace document.
+    // Preserve the gap as incomplete even though the optional reviewer is skipped.
     initialCheck = {
       ...initialCheck,
       text: requestedPublicPageFallback(),
       blocked: false,
       unsupported: [],
-      groundingFallback: missingPublicPageReceipts,
+      groundingFallback: missingRequestedPageReceipts,
     };
   }
   if (
-    !missingPublicPageReceipts.length &&
+    !missingRequestedPageReceipts.length &&
     classifiedRead?.includeCalendarBriefing &&
     !initialCheck.blocked &&
     (initialCheck.text.match(/^Next step:/gm)?.length ?? 0) > 1
@@ -948,7 +948,7 @@ export async function stageModelFinalResponse(
   }
 
   if (
-    !missingPublicPageReceipts.length &&
+    !missingRequestedPageReceipts.length &&
     calendarSkillAdvice &&
     classifiedRead?.includeCalendarBriefing &&
     !initialCheck.blocked &&
@@ -1004,7 +1004,7 @@ export async function stageModelFinalResponse(
     }
   }
   const canReflect =
-    !missingPublicPageReceipts.length &&
+    !missingRequestedPageReceipts.length &&
     !initialCheck.blocked &&
     initialCheck.text === pending.text &&
     initialCheck.groundingFallback === undefined;
@@ -1026,7 +1026,7 @@ export async function stageModelFinalResponse(
         attempted: false,
         revised: false,
         unavailable: false,
-        incomplete: missingPublicPageReceipts.length > 0,
+        incomplete: missingRequestedPageReceipts.length > 0,
       };
   // A reviser is another generative surface: strip companion tags a second
   // time, then re-run the same authoritative response contract before publish.

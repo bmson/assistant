@@ -210,7 +210,7 @@ export function shortBulletFindings(request: string, text: string): string[] {
 
 function safePublicPageUrl(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
-  let candidate = value.trim().replace(/[.,!?;:]+$/, '');
+  let candidate = value.trim().replace(/[.,!?;:'"”’]+$/, '');
   while (
     candidate.endsWith(')') &&
     (candidate.match(/\)/g)?.length ?? 0) > (candidate.match(/\(/g)?.length ?? 0)
@@ -253,13 +253,13 @@ function nativeWorkspaceResourceId(raw: string): string | undefined {
 }
 
 function hasCurrentNativeRead(resourceId: string, evidence: readonly ActionEvidence[]): boolean {
-  return evidence.some((row) => {
+  const pages = evidence.flatMap((row) => {
     if (
       row.status !== 'succeeded' ||
       row.fromCurrentTask === false ||
       !['docs.get', 'drive.read'].includes(row.toolName)
     )
-      return false;
+      return [];
     const args =
       row.args && typeof row.args === 'object' && !Array.isArray(row.args)
         ? (row.args as Record<string, unknown>)
@@ -269,52 +269,165 @@ function hasCurrentNativeRead(resourceId: string, evidence: readonly ActionEvide
         ? (row.result as Record<string, unknown>)
         : undefined;
     const requestedId = row.toolName === 'docs.get' ? args?.documentId : args?.fileId;
-    return (
-      requestedId === resourceId &&
-      result !== undefined &&
-      result.ok !== false &&
-      result.complete === true &&
-      result.truncated !== true &&
-      typeof result.text === 'string' &&
-      result.text.trim().length > 0
-    );
+    const receipt =
+      result?.receipt && typeof result.receipt === 'object' && !Array.isArray(result.receipt)
+        ? (result.receipt as Record<string, unknown>)
+        : undefined;
+    const source =
+      receipt?.source && typeof receipt.source === 'object' && !Array.isArray(receipt.source)
+        ? (receipt.source as Record<string, unknown>)
+        : undefined;
+    const requested =
+      receipt?.requested &&
+      typeof receipt.requested === 'object' &&
+      !Array.isArray(receipt.requested)
+        ? (receipt.requested as Record<string, unknown>)
+        : undefined;
+    const covered =
+      receipt?.covered && typeof receipt.covered === 'object' && !Array.isArray(receipt.covered)
+        ? (receipt.covered as Record<string, unknown>)
+        : undefined;
+    if (
+      requestedId !== resourceId ||
+      !result ||
+      result.ok === false ||
+      typeof result.text !== 'string' ||
+      !result.text.trim() ||
+      receipt?.version !== 1 ||
+      source?.id !== resourceId ||
+      !['google-doc', 'google-drive-file'].includes(String(source.kind)) ||
+      typeof receipt.complete !== 'boolean' ||
+      receipt.complete !== (result.complete === true) ||
+      result.truncated !== (result.complete !== true) ||
+      !covered ||
+      typeof covered.start !== 'number' ||
+      typeof covered.end !== 'number' ||
+      typeof covered.total !== 'number' ||
+      typeof covered.count !== 'number' ||
+      covered.start < 0 ||
+      covered.end <= covered.start ||
+      covered.total <= 0 ||
+      covered.end > covered.total ||
+      covered.count !== covered.end - covered.start ||
+      result.text.length !== covered.count ||
+      (args?.startOffset ?? 0) !== covered.start ||
+      (requested?.start ?? 0) !== covered.start
+    )
+      return [];
+    return [
+      {
+        revision: source.revision,
+        start: covered.start,
+        end: covered.end,
+        total: covered.total,
+        complete: receipt.complete,
+        losses: receipt.losses,
+      },
+    ];
   });
+  for (const revision of new Set(pages.map((page) => page.revision))) {
+    const revisionPages = pages
+      .filter((page) => page.revision === revision)
+      .sort((left, right) => left.start - right.start);
+    if (revisionPages.length > 1 && (typeof revision !== 'string' || !revision)) continue;
+    let cursor = 0;
+    let total: number | undefined;
+    for (const page of revisionPages) {
+      if (page.start !== cursor || (total !== undefined && page.total !== total)) break;
+      total = page.total;
+      cursor = page.end;
+      if (
+        page.complete &&
+        page.end === page.total &&
+        Array.isArray(page.losses) &&
+        page.losses.length === 0
+      )
+        return true;
+      if (page.complete) break;
+    }
+  }
+  return false;
 }
 
-function requestedPageUrls(request: string, evidence: readonly ActionEvidence[]): string[] {
-  const urls = [...request.matchAll(/https?:\/\/[^\s<>]+/gi)]
-    .map((match) => safePublicPageUrl(match[0]))
-    .filter((url): url is string => Boolean(url));
-  if (!urls.length) return [];
-  const instruction = request
+function requestClause(text: string, start: number, end: number): string {
+  const prefix = text.slice(0, start);
+  const suffix = text.slice(end);
+  const startBoundaries = [
+    ...prefix.matchAll(/;|\n|\.(?=\s)|[!?](?=\s)|,\s*(?:but|however|instead)\b/gi),
+  ];
+  const endBoundary = /;|\n|\.(?=\s)|[!?](?=\s)|,\s*(?:but|however|instead)\b/i.exec(suffix);
+  const clauseStart = startBoundaries.at(-1)?.index ?? 0;
+  const clauseEnd = endBoundary ? end + endBoundary.index : text.length;
+  return text.slice(clauseStart, clauseEnd);
+}
+
+function requestedPageTargets(request: string): string[] {
+  const unquotedRequest = request
     .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/`[^`\n]*`/g, ' ')
-    .replace(/"[^"\n]*"|'[^'\n]*'|“[^”\n]*”|‘[^’\n]*’/g, ' ');
-  if (/\b(?:do not|don['’]t|never)\s+(?:browse|fetch|open|visit|read)\b/i.test(instruction))
-    return [];
-  const directPageRead = /\b(?:read|fetch|open|visit|load)\b/i.test(instruction);
-  const pageSummary =
-    /\b(?:summari[sz](?:e|ing|ation)|review|analy[sz]e|inspect|extract)\b[^.!?\n]{0,80}\b(?:page|article|site|website|webpage|url|link|contents?|text|source)\b/i.test(
-      instruction,
-    ) ||
-    /\b(?:summari[sz]e|review|analy[sz]e|inspect|extract)\b[^.!?\n]{0,40}https?:\/\//i.test(
-      instruction,
-    ) ||
-    /\bwhat\s+does\b[^?\n]{0,100}\b(?:page|article|site|website|link|url)\b[^?\n]{0,60}\b(?:say|contain|cover|mean)\b/i.test(
-      instruction,
-    );
-  const searchResultsOnly =
-    /\bsearch(?:\s+the\s+web)?\b[^.!?\n]{0,100}\bresults?\b/i.test(instruction) &&
-    !/\b(?:page|article|site|website|webpage|contents?|text|source)\b/i.test(instruction);
-  const asksToReadPage = directPageRead || (pageSummary && !searchResultsOnly);
-  return asksToReadPage
-    ? [...new Set(urls)].filter((url) => {
-        const resourceId = nativeWorkspaceResourceId(url);
-        // Native Workspace resources are covered only by their own successful,
-        // current, ID-bound read receipt. Public pages in the same request stay gated.
-        return !resourceId || !hasCurrentNativeRead(resourceId, evidence);
-      })
-    : [];
+    .replace(/`[^`\n]*`|"[^"\n]*"|'[^'\n]*'|“[^”\n]*”|‘[^’\n]*’/g, ' ');
+  if (/\b(?:do not|don['’]t|never)\s+browse\b/i.test(unquotedRequest)) return [];
+  const candidates = [...request.matchAll(/https?:\/\/[^\s<>]+/gi)].flatMap((match) => {
+    const raw = match[0];
+    const start = match.index ?? 0;
+    const url = safePublicPageUrl(raw);
+    if (!url) return [];
+    const quotedSuffix = /(["'”’])([.,!?;:]*)$/.exec(raw);
+    const closeQuote = quotedSuffix?.[1];
+    const quotePairs: Record<string, string> = { "'": "'", '"': '"', '“': '”', '‘': '’' };
+    const openQuote = Object.keys(quotePairs).find((quote) => quotePairs[quote] === closeQuote);
+    const openQuoteIndex = openQuote ? request.lastIndexOf(openQuote, start - 1) : -1;
+    const quotePrefix =
+      openQuoteIndex >= 0 ? request.slice(openQuoteIndex + 1, start).trim() : undefined;
+    const token =
+      openQuote && openQuoteIndex >= 0 && quotePrefix === ''
+        ? `${openQuote}SOURCE_URL${closeQuote}${quotedSuffix?.[2] ?? ''}`
+        : `${closeQuote ? `SOURCE_URL${closeQuote}${quotedSuffix?.[2] ?? ''}` : 'SOURCE_URL'}`;
+    let clause = requestClause(request, start, start + raw.length).replace(raw, token);
+    // A URL may itself be quoted as the target, while quoted instructions around
+    // other URLs remain examples or untrusted text and cannot authorize a fetch.
+    clause = clause
+      .replace(/```[\s\S]*?```|`[^`\n]*`/g, ' ')
+      .replace(/"([^"\n]*)"|'([^'\n]*)'|“([^”\n]*)”|‘([^’\n]*)’/g, (_quoted, ...args) => {
+        const offset = args.at(-2) as number;
+        const clauseText = args.at(-1) as string;
+        const content = String(args[0] ?? args[1] ?? args[2] ?? args[3] ?? '').trim();
+        const prefix = clauseText.slice(0, offset);
+        return content === 'SOURCE_URL' &&
+          /\b(?:read|fetch|open|visit|load)\s+(?:(?:the|this|that)\s+)?$/i.test(prefix)
+          ? 'SOURCE_URL'
+          : ' ';
+      });
+    const noBrowse =
+      /\b(?:do not|don['’]t|never)\s+(?:fetch|open|visit|read)\b[^.!?;\n]{0,80}\b(?:page|article|site|website|webpage|url|link|source|contents?)\b/i.test(
+        clause,
+      );
+    const negatedReadOfPage =
+      /\b(?:do not|don['’]t|never)\s+read\b[^.!?;\n]{0,60}\b(?:page|article|site|website|webpage|url|link|source|contents?)\b/i.test(
+        clause,
+      ) || /\b(?:do not|don['’]t|never)\s+read\s+SOURCE_URL\b/i.test(clause);
+    if (noBrowse || negatedReadOfPage) return [];
+    const directPageRead = /\b(?:read|fetch|open|visit|load)\b/i.test(clause);
+    const pageSummary =
+      /\b(?:summari[sz](?:e|ing|ation)|review|analy[sz]e|inspect|extract)\b[^.!?\n]{0,80}\b(?:page|article|site|website|webpage|url|link|contents?|text|source)\b/i.test(
+        clause,
+      ) ||
+      /\b(?:summari[sz]e|review|analy[sz]e|inspect|extract)\b[^.!?\n]{0,40}SOURCE_URL\b/i.test(
+        clause,
+      ) ||
+      /\bwhat\s+does\b[^?\n]{0,100}\b(?:page|article|site|website|link|url)\b[^?\n]{0,60}\b(?:say|contain|cover|mean)\b/i.test(
+        clause,
+      );
+    const searchResultsOnly =
+      /\bsearch(?:\s+the\s+web)?\b[^.!?\n]{0,100}\bresults?\b/i.test(clause) &&
+      !/\b(?:page|article|site|website|webpage|contents?|text|source)\b/i.test(clause);
+    if (!(directPageRead || (pageSummary && !searchResultsOnly))) return [];
+    return [url];
+  });
+  return [...new Set(candidates)];
+}
+
+function requestedPageUrls(request: string): string[] {
+  return requestedPageTargets(request).filter((url) => !nativeWorkspaceResourceId(url));
 }
 
 function successfulWebSources(evidence: readonly ActionEvidence[]) {
@@ -350,29 +463,42 @@ function successfulWebSources(evidence: readonly ActionEvidence[]) {
   });
 }
 
-/** Each explicitly requested public page must have its own complete current fetch receipt. */
+/** Each requested source must have its own current, complete, source-bound read receipt. */
 export function requestedPublicPageReceiptFindings(
   request: string,
   evidence: readonly ActionEvidence[],
 ): string[] {
-  const requested = requestedPageUrls(request, evidence);
-  if (!requested.length) return [];
+  const targets = requestedPageTargets(request);
+  if (!targets.length) return [];
+  const publicPages = targets.filter((url) => !nativeWorkspaceResourceId(url));
+  const nativeDocuments = targets.filter((url) => Boolean(nativeWorkspaceResourceId(url)));
+  const missingNative = nativeDocuments.filter((url) => {
+    const resourceId = nativeWorkspaceResourceId(url);
+    return resourceId ? !hasCurrentNativeRead(resourceId, evidence) : false;
+  });
   const sources = successfulWebSources(evidence);
-  const missing = requested.filter(
+  const missingPublic = publicPages.filter(
     (url) =>
       !sources.some(
         (source) => source.requestedUrl === url && Boolean(safePublicPageUrl(source.url)),
       ),
   );
-  return missing.length
-    ? [
-        `No complete current web.fetch receipt is bound to ${missing.length} requested public ${missing.length === 1 ? 'page' : 'pages'}.`,
-      ]
-    : [];
+  return [
+    ...(missingPublic.length
+      ? [
+          `No complete current web.fetch receipt is bound to ${missingPublic.length} requested public ${missingPublic.length === 1 ? 'page' : 'pages'}.`,
+        ]
+      : []),
+    ...(missingNative.length
+      ? [
+          `No complete current native read receipt is bound to ${missingNative.length} requested Workspace ${missingNative.length === 1 ? 'document' : 'documents'}.`,
+        ]
+      : []),
+  ];
 }
 
 export function requestedPublicPageFallback(): string {
-  return 'I couldn’t verify a complete current fetch of the requested page, so I can’t safely summarize its contents.';
+  return 'I couldn’t verify a complete current read of every requested page or document, so I can’t safely summarize its contents.';
 }
 
 function sourceLink(url: string): string {
@@ -394,7 +520,7 @@ function requestedWebLinkFindings(
 ): string[] {
   if (!/\b(?:source|citation)\s+links?\b|\blink\s+to\s+(?:the\s+)?source\b/i.test(request))
     return [];
-  const requested = requestedPageUrls(request, evidence);
+  const requested = requestedPageUrls(request);
   if (!requested.length) return [];
   const sources = successfulWebSources(evidence).filter(
     (source) => source.requestedUrl && requested.includes(source.requestedUrl),

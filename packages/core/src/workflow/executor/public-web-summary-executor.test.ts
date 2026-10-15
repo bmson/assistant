@@ -32,6 +32,32 @@ const summary = [
   `- B20 ends at Interchange; continue with R10. [Source](${url})`,
 ].join('\n');
 const verbose = `${'R10 connects Central with Airport. '.repeat(35)}\n${'B20 requires a transfer. '.repeat(35)}\n[Source](${url})`;
+const unrelatedNegativeReadRequest = `Do not read my emails, but read ${url} and summarize it.`;
+const nativeDocumentId = 'document123456';
+const nativeDocumentUrl = `https://docs.google.com/document/d/${nativeDocumentId}/edit`;
+
+function nativeDocReadPage(start: number, end: number, total: number, complete: boolean) {
+  return {
+    documentId: nativeDocumentId,
+    title: 'Source document',
+    url: nativeDocumentUrl,
+    text: 'x'.repeat(end - start),
+    complete,
+    truncated: !complete,
+    structure: { complete: false, headings: [], bullets: [], tables: [] },
+    receipt: {
+      version: 1,
+      source: { kind: 'google-doc', id: nativeDocumentId, revision: 'rev-1' },
+      requested: { start, limit: end - start, scope: 'body' },
+      covered: { start, end, count: end - start, total, unavailable: 0 },
+      complete,
+      losses: complete ? [] : ['character-budget'],
+      continuation: complete
+        ? null
+        : { tool: 'docs.get', input: { documentId: nativeDocumentId, startOffset: end } },
+    },
+  };
+}
 
 describe('public page summary through the allocated executor', () => {
   let db: Db;
@@ -145,7 +171,7 @@ describe('public page summary through the allocated executor', () => {
       expect(result.status).toBe('needs_attention');
       expect(result.finalText).not.toContain('R10 links Central');
       if (kind === 'truncated')
-        expect(result.finalText).toContain('couldn’t verify a complete current fetch');
+        expect(result.finalText).toContain('couldn’t verify a complete current read');
       const [check] = await db
         .select()
         .from(responseChecks)
@@ -154,6 +180,69 @@ describe('public page summary through the allocated executor', () => {
       else expect(check).toMatchObject({ blocked: false, unsupportedCount: 0 });
     },
   );
+
+  it('keeps an explicit public-page request incomplete despite an unrelated email-read prohibition', async () => {
+    const fixture: GoldenFixture = {
+      name: 'public-page-with-private-email-prohibition',
+      event: {
+        source: 'chat',
+        trust: 'owner',
+        payload: { text: unrelatedNegativeReadRequest },
+      },
+      taskType: 'chat_turn',
+      pinOwnerRequest: true,
+      // A mistaken reply route must not let the unrelated email prohibition
+      // disable the explicit public-page coverage gate.
+      plan: { action: 'reply', reasoning: 'Answer the request.', steps: [], missingInfo: [] },
+      script: [{ text: summary }],
+      verification: { unavailable: true },
+      tools: {},
+    };
+    const result = await runGoldenTask(db, agentId, fixture);
+    expect(result.toolNames).toEqual([]);
+    expect(result.status).toBe('needs_attention');
+    expect(result.finalText).toContain('couldn’t verify a complete current read');
+    expect(result.finalText).not.toContain('R10 links Central');
+  });
+
+  it('does not treat an incomplete current native read as a complete document read', async () => {
+    const fixture: GoldenFixture = {
+      name: 'native-document-tail-only-read',
+      event: {
+        source: 'chat',
+        trust: 'owner',
+        payload: { text: `Read ${nativeDocumentUrl} and summarize its contents.` },
+      },
+      taskType: 'chat_turn',
+      pinOwnerRequest: true,
+      plan: {
+        action: 'workflow',
+        reasoning: 'Read and summarize the shared document.',
+        steps: ['Summarize the document.'],
+        missingInfo: [],
+      },
+      script: [{ text: 'The shared document says the policy is complete.' }],
+      verification: { unavailable: true },
+      tools: {
+        'docs.get': {
+          schema: z.object({
+            documentId: z.string(),
+            startOffset: z.number().default(0),
+            maxChars: z.number().default(20_000),
+          }),
+          execute: async (value) => {
+            const args = value as { startOffset: number; maxChars: number };
+            return nativeDocReadPage(args.startOffset, args.startOffset + 4, 8, false);
+          },
+        },
+      },
+    };
+    const result = await runGoldenTask(db, agentId, fixture);
+    expect(result.toolNames).toContain('docs.get');
+    expect(result.status).toBe('needs_attention');
+    expect(result.finalText).toContain('couldn’t verify a complete current read');
+    expect(result.finalText).not.toContain('The shared document says the policy is complete.');
+  });
 
   it('keeps a complete redirect-bound page read', async () => {
     const requestedUrl = 'https://transit.example/redirect';

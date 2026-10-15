@@ -46,6 +46,34 @@ const summary = [
   `- **Transfer bus:** B20 ends at Interchange; continue to Airport with R10. [Source](${url})`,
 ].join('\n');
 const verbose = `## Rail\n${'The rail service connects Central with Airport. '.repeat(35)}\n## Buses\n${'Some buses require a transfer. '.repeat(35)}\n[Source](${url})`;
+const documentId = 'document123456';
+function nativeDocPage(start: number, end: number, total: number, complete: boolean) {
+  return {
+    toolName: 'docs.get',
+    status: 'succeeded',
+    fromCurrentTask: true,
+    args: { documentId, startOffset: start, maxChars: end - start },
+    result: {
+      documentId,
+      title: 'Source document',
+      url: `https://docs.google.com/document/d/${documentId}/edit`,
+      text: 'x'.repeat(end - start),
+      complete,
+      truncated: !complete,
+      receipt: {
+        version: 1,
+        source: { kind: 'google-doc', id: documentId, revision: 'rev-1' },
+        requested: { start, limit: end - start, scope: 'body' },
+        covered: { start, end, count: end - start, total, unavailable: 0 },
+        complete,
+        losses: complete ? [] : ['character-budget'],
+        continuation: complete
+          ? null
+          : { tool: 'docs.get', input: { documentId, startOffset: end, maxChars: end - start } },
+      },
+    },
+  };
+}
 
 describe('source-grounded public page summary recovery', () => {
   it('keeps early and late source units, offsets and omissions available for a generic refusal', () => {
@@ -201,7 +229,7 @@ describe('source-grounded public page summary recovery', () => {
       );
       expect(calls).toBe(0);
       expect(result).toMatchObject({ incomplete: true, unavailable: false, attempted: false });
-      expect(result.text).toContain('couldn’t verify a complete current fetch');
+      expect(result.text).toContain('couldn’t verify a complete current read');
       expect(result.text).not.toContain('R10 links Central');
     },
   );
@@ -254,16 +282,8 @@ describe('source-grounded public page summary recovery', () => {
   });
 
   it('accepts a current ID-bound native Google Doc read without demanding web.fetch', () => {
-    const documentUrl = 'https://docs.google.com/document/d/document123456/edit';
-    const nativeRead = [
-      {
-        toolName: 'docs.get',
-        status: 'succeeded',
-        fromCurrentTask: true,
-        args: { documentId: 'document123456' },
-        result: { text: 'The source document contains the reviewed policy.', complete: true },
-      },
-    ];
+    const documentUrl = `https://docs.google.com/document/d/${documentId}/edit`;
+    const nativeRead = [nativeDocPage(0, 5, 5, true)];
     expect(
       requestedPublicPageReceiptFindings(
         `Read ${documentUrl} and summarize its contents.`,
@@ -272,18 +292,42 @@ describe('source-grounded public page summary recovery', () => {
     ).toEqual([]);
   });
 
+  it('requires contiguous coverage from offset zero for paginated native document reads', () => {
+    const documentUrl = `https://docs.google.com/document/d/${documentId}/edit`;
+    const request = `Read ${documentUrl} and summarize its contents.`;
+    expect(requestedPublicPageReceiptFindings(request, [nativeDocPage(4, 8, 8, true)])).toEqual([
+      'No complete current native read receipt is bound to 1 requested Workspace document.',
+    ]);
+    expect(
+      requestedPublicPageReceiptFindings(request, [
+        nativeDocPage(0, 4, 8, false),
+        nativeDocPage(4, 8, 8, true),
+      ]),
+    ).toEqual([]);
+    expect(
+      requestedPublicPageReceiptFindings(request, [
+        nativeDocPage(0, 3, 8, false),
+        nativeDocPage(4, 8, 8, true),
+      ]),
+    ).toEqual([
+      'No complete current native read receipt is bound to 1 requested Workspace document.',
+    ]);
+    const changedRevisionTail = nativeDocPage(4, 8, 8, true);
+    changedRevisionTail.result.receipt.source.revision = 'rev-2';
+    expect(
+      requestedPublicPageReceiptFindings(request, [
+        nativeDocPage(0, 4, 8, false),
+        changedRevisionTail,
+      ]),
+    ).toEqual([
+      'No complete current native read receipt is bound to 1 requested Workspace document.',
+    ]);
+  });
+
   it('keeps the public-page receipt requirement when a request mixes a native Doc and public page', () => {
-    const documentUrl = 'https://docs.google.com/document/d/document123456/edit';
+    const documentUrl = `https://docs.google.com/document/d/${documentId}/edit`;
     const mixedRequest = `Read ${documentUrl} and ${url}, then summarize both sources.`;
-    const nativeRead = [
-      {
-        toolName: 'docs.get',
-        status: 'succeeded',
-        fromCurrentTask: true,
-        args: { documentId: 'document123456' },
-        result: { text: 'The source document contains the reviewed policy.', complete: true },
-      },
-    ];
+    const nativeRead = [nativeDocPage(0, 5, 5, true)];
     expect(requestedPublicPageReceiptFindings(mixedRequest, nativeRead)).toEqual([
       'No complete current web.fetch receipt is bound to 1 requested public page.',
     ]);
@@ -298,6 +342,7 @@ describe('source-grounded public page summary recovery', () => {
       `Rewrite this quoted sentence for clarity: “Read ${url} and summarize its contents.”`,
     ],
     ['explicit no-browse instruction', `Do not browse; explain how this URL is structured: ${url}`],
+    ['no-browse instruction with a summary request', `Don’t browse; summarize this page: ${url}`],
     [
       'curly-apostrophe no-browse instruction',
       `Don’t browse; explain how this URL is structured: ${url}`,
@@ -308,6 +353,29 @@ describe('source-grounded public page summary recovery', () => {
     ],
   ])('does not turn %s into a page-fetch requirement', (_name, nonReadRequest) => {
     expect(requestedPublicPageReceiptFindings(nonReadRequest, [])).toEqual([]);
+  });
+
+  it('keeps the public page gate when an unrelated private-source prohibition is present', () => {
+    expect(
+      requestedPublicPageReceiptFindings(
+        `Do not read my emails, but read ${url} and summarize it.`,
+        [],
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('associates URLs with their own clauses and permits an explicitly quoted URL target', () => {
+    const firstUrl = 'https://a.example/page';
+    const quotedExample = 'https://b.example/page';
+    expect(
+      requestedPublicPageReceiptFindings(
+        `Read ${firstUrl}; translate “Visit ${quotedExample}”.`,
+        [],
+      ),
+    ).toEqual(['No complete current web.fetch receipt is bound to 1 requested public page.']);
+    expect(requestedPublicPageReceiptFindings(`Read '${firstUrl}' and summarize it.`, [])).toEqual([
+      'No complete current web.fetch receipt is bound to 1 requested public page.',
+    ]);
   });
 
   it.each([
