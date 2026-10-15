@@ -304,4 +304,65 @@ describe('new artifact request action boundaries in the real executor', () => {
     expect(result.status).toBe('failed');
     expect(result.finalText).toContain('requested exact title was not used');
   });
+
+  it('blocks later model-proposed artifact writes after the checked creation succeeded', async () => {
+    const title = 'Conditional once-only QA';
+    const request = `Create a Google Doc titled "${title}" only if no file with that exact title exists; if one exists, do not duplicate it.`;
+    const create = vi.fn(async (args: unknown) => {
+      expect(args).toMatchObject({ title });
+      return {
+        documentId: 'OnceOnlyDocId12345',
+        title,
+        url: 'https://docs.google.com/document/d/OnceOnlyDocId12345/edit',
+        sharingVerification: 'verified_owner_only',
+      };
+    });
+    const createSheet = vi.fn();
+    const result = await runGoldenTask(db, agentId, {
+      name: 'conditional-doc-only-one-artifact-write',
+      event: { source: 'chat', trust: 'owner', payload: { text: request } },
+      taskType: 'adhoc',
+      script: [
+        { toolCalls: [{ toolName: 'docs.create', input: { title, content: '# Notes' } }] },
+        {
+          toolCalls: [
+            { toolName: 'docs.create', input: { title, content: '# Duplicate' } },
+            { toolName: 'sheets.create', input: { title, rows: [['unexpected']] } },
+          ],
+        },
+        {
+          text: 'Created the requested document. [Open it](https://docs.google.com/document/d/OnceOnlyDocId12345/edit)',
+        },
+      ],
+      tools: {
+        'drive.search': {
+          schema: z.object({
+            query: z.string(),
+            exactTitle: z.string().optional(),
+            verifyOwnerOnly: z.boolean().optional(),
+            maxResults: z.number().optional(),
+          }),
+          execute: async () => ({
+            lookupMode: 'exact-title',
+            exactTitle: title,
+            coverage: 'complete',
+            files: [],
+          }),
+        },
+        'docs.create': {
+          schema: z.object({ title: z.string(), content: z.string() }),
+          execute: create,
+        },
+        'sheets.create': {
+          schema: z.object({ title: z.string(), rows: z.array(z.array(z.string())) }),
+          execute: createSheet,
+        },
+      },
+    });
+
+    expect(result.toolNames).toEqual(['drive.search', 'docs.create']);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(createSheet).not.toHaveBeenCalled();
+    expect(result.finalText).toContain('OnceOnlyDocId12345');
+  });
 });
