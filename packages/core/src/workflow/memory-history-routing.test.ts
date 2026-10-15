@@ -99,6 +99,8 @@ describe('named historical exercises and retention constraints', () => {
     'For this fictional two-zone planning exercise, compare the supplied times. No memory writes.',
     'Audit the subscription list I supplied for duplicate charges; no memory writes.',
     'Review the fictional subscription scenario and tell me which plan is cheaper. Do not write anything to memory.',
+    'Audit my pasted subscription list and report duplicate charges. No login/account change/cancel/unsubscribe/purchase/hold/send/Gmail draft/document/calendar/memory writes.',
+    'Review these supplied times and report any overlap. No login/account change/cancel/unsubscribe/purchase/hold/send/Gmail draft/document/calendar writes and no writes to memory.',
   ])('does not treat a retention-only mention as a private read: %s', (text) => {
     expect(detectPersonalReadRequest(turn(text))).toBeNull();
   });
@@ -128,6 +130,19 @@ describe('named historical exercises and retention constraints', () => {
     const request = detectPersonalReadRequest(
       turn(
         'Do not save this to memory, but show what my saved memories say about telescope preferences.',
+      ),
+    );
+    expect(request).toMatchObject({
+      kind: 'memory',
+      firstToolName: 'memory.recall',
+      searchSavedMemory: true,
+    });
+  });
+
+  it('preserves a positive saved-memory request after a long action-prohibition list', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'No login/account change/cancel/unsubscribe/purchase/hold/send/Gmail draft/document/calendar/memory writes, but show what my saved memories say about budgeting.',
       ),
     );
     expect(request).toMatchObject({

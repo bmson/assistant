@@ -1,7 +1,19 @@
 /** Shared, dependency-free boundary for work scoped to this conversation. */
+export function stripNegativePrivateWriteConstraints(text: string): string {
+  return text
+    .replace(
+      /\b(?:no|zero|without)\b[^.!?;,\n]*?\b(?:memories?|calendar|calendars|email|gmail|documents?|docs|drive)\s+(?:writes?|updates?|changes?|creates?|sends?)\b/giu,
+      '',
+    )
+    .replace(
+      /\b(?:no|zero|without)\b[^.!?;,\n]*?\b(?:writes?|writing|updates?|updating|changes?|changing|creates?|creating|sends?|sending)\b[^.!?;,\n]*?\b(?:memories?|calendar|calendars|email|gmail|documents?|docs|drive)\b/giu,
+      '',
+    );
+}
+
 export function isConversationLocalContext(text: string): boolean {
   const withoutNegativeReadConstraints = text.replace(
-    /\b(?:do not|don't|don’t|never|without|avoid)\s+(?:search|read|look(?:\s+up)?|check|consult|use|retrieve|review|open|pull\s+up)\b[^.!?;,\n]{0,120}\b(?:memories?|history|past chats|old messages|older messages|previous conversations|old conversations|calendar|schedule|agenda|email|mail|inbox|messages?|threads?|drive)\b[^.!?;,\n]*/giu,
+    /\b(?:do not|don't|don’t|never|without|avoid)\s+(?:search|read|look(?:\s+up)?|check|consult|use|retrieve|review|open|pull\s+up)\b[^.!?;,\n]*\b(?:memories?|history|past chats|old messages|older messages|previous conversations|old conversations|calendar|schedule|agenda|email|mail|inbox|messages?|threads?|drive)\b/giu,
     '',
   );
   const explicitHistoricalRead =

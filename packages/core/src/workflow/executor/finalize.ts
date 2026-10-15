@@ -458,11 +458,11 @@ export function finalRecallSources(
 ): RecallSource[] | undefined {
   if (!sources?.length || pending.outcome !== 'clarify') return sources;
   const normalizedAnswer = normalizeRecallLabel(pending.text);
-  const referencedSource = sources.some((source) => {
+  const referencedSources = sources.filter((source) => {
     const label = normalizeRecallLabel(source.label);
     return label.length >= 8 && normalizedAnswer.includes(label);
   });
-  return referencedSource ? sources : undefined;
+  return referencedSources.length > 0 ? referencedSources : undefined;
 }
 
 function normalizeRecallLabel(value: string): string {

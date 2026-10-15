@@ -40,6 +40,23 @@ describe('final recall attribution', () => {
     ).toEqual([recalledCommitment]);
   });
 
+  it('attributes only the recalled sources explicitly referenced by a clarification', () => {
+    const unrelated = {
+      kind: 'commitment' as const,
+      date: '2026-11-02',
+      label: 'Submit reimbursement form',
+    };
+    expect(
+      finalRecallSources(
+        {
+          outcome: 'clarify',
+          text: 'The earlier note says “Renew apartment lease.” Do you mean this year?',
+        },
+        [recalledCommitment, unrelated],
+      ),
+    ).toEqual([recalledCommitment]);
+  });
+
   it('preserves recall attribution for non-clarification answers', () => {
     expect(
       finalRecallSources({ outcome: 'done', text: 'The answer is in the prior discussion.' }, [
