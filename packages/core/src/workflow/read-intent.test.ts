@@ -415,6 +415,88 @@ describe('detectPersonalReadRequest', () => {
     ).toMatchObject({ emailReview: { windowDays: 7, requestedCount: 5 } });
   });
 
+  it('routes paraphrased local-calendar email briefs with their exact period and requested count', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'From my connected inbox over the last 14 local calendar days, prepare an action brief of up to five outstanding reply requests. Read the full threads and include deadlines and draft replies, but do not send anything.',
+      ),
+      { now: new Date('2026-10-15T12:00:00.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    expect(request).toMatchObject({
+      kind: 'email',
+      mailQuery: 'after:2026/09/30 before:2026/10/18 -from:me',
+      emailReview: {
+        windowDays: 14,
+        requestedCount: 5,
+        startAt: '2026-10-02T07:00:00.000Z',
+        endAt: '2026-10-16T07:00:00.000Z',
+      },
+    });
+    if (!request) throw new Error('expected a typed inbox review request');
+    expect(buildReadToolInput(request, 'gmail.search', [])).toMatchObject({
+      query: 'after:2026/09/30 before:2026/10/18 -from:me',
+      maxResults: 100,
+    });
+    const searchPage: ReadToolEvidence = {
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      args: { query: request.mailQuery },
+      result: {
+        complete: false,
+        hasMore: true,
+        nextPageToken: 'local-days-next-page',
+      },
+    };
+    expect(nextRequiredReadTool(request, [searchPage])).toBe('gmail.search');
+    expect(buildReadToolInput(request, 'gmail.search', [searchPage])).toMatchObject({
+      query: request.mailQuery,
+      pageToken: 'local-days-next-page',
+    });
+  });
+
+  it('keeps exact local inbox boundaries across daylight-saving time', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'From my inbox over the past fourteen local calendar days, prepare an action brief of up to three outstanding reply requests and read the full threads.',
+      ),
+      { now: new Date('2026-11-03T12:00:00.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    expect(request).toMatchObject({
+      emailReview: {
+        windowDays: 14,
+        requestedCount: 3,
+        startAt: '2026-10-21T07:00:00.000Z',
+        endAt: '2026-11-04T08:00:00.000Z',
+      },
+    });
+  });
+
+  it('does not claim exact local-day or unsupported oversized review coverage', () => {
+    const missingZone = detectPersonalReadRequest(
+      turn(
+        'From my inbox over the last 14 local calendar days, prepare an action brief of up to five outstanding reply requests and read the full threads.',
+      ),
+    );
+    expect(missingZone?.scopeIssue).toMatch(/valid local time zone/i);
+    expect(missingZone && nextRequiredReadTool(missingZone, [])).toBeUndefined();
+
+    const tooManyDays = detectPersonalReadRequest(
+      turn(
+        'From my inbox over the last 45 days, prepare an action brief of up to five outstanding reply requests and read the full threads.',
+      ),
+    );
+    expect(tooManyDays?.scopeIssue).toMatch(/at most 30 days/i);
+    expect(tooManyDays && nextRequiredReadTool(tooManyDays, [])).toBeUndefined();
+
+    const tooManyItems = detectPersonalReadRequest(
+      turn(
+        'From my inbox over the last 14 days, prepare an action brief of up to eight outstanding reply requests and read the full threads.',
+      ),
+    );
+    expect(tooManyItems?.scopeIssue).toMatch(/at most five/i);
+    expect(tooManyItems && nextRequiredReadTool(tooManyItems, [])).toBeUndefined();
+  });
+
   it.each([
     'If I asked you to review my emails from the last seven days, find the five most important requests that still need my response, explain why each matters, identify deadlines, draft replies using the relevant thread context, and don’t send anything yet.',
     'Should I review my emails from the last seven days and draft replies to the five most important requests that need my response? Don’t send anything yet.',

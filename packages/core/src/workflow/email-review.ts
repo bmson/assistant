@@ -11,6 +11,13 @@ export const EMAIL_REVIEW_MAX_THREAD_CONTINUATIONS = 2;
 export const EMAIL_REVIEW_MAX_CONTEXT_CHARS = 50_000;
 export const EMAIL_REVIEW_MAX_RANK_CHARS = 40_000;
 
+export interface EmailReviewScope {
+  query?: string;
+  requestedCount?: number;
+  startAt?: string;
+  endAt?: string;
+}
+
 export const EmailReviewRankSchema = z
   .object({
     threadIds: z.array(z.string().min(3).max(128)).max(EMAIL_REVIEW_MAX_RANK_POOL),
@@ -125,6 +132,7 @@ function successful(row: EmailReviewEvidenceRow): boolean {
 
 export function emailReviewSearchRows(
   evidence: ReadonlyArray<EmailReviewEvidenceRow>,
+  scope?: EmailReviewScope,
 ): EmailReviewEvidenceRow[] {
   return evidence.filter((row) => {
     const args = object(row.args);
@@ -132,16 +140,17 @@ export function emailReviewSearchRows(
       successful(row) &&
       row.toolName === 'gmail.search' &&
       typeof args?.query === 'string' &&
-      args.query.trim().toLowerCase() === EMAIL_REVIEW_QUERY
+      args.query.trim().toLowerCase() === (scope?.query ?? EMAIL_REVIEW_QUERY).toLowerCase()
     );
   });
 }
 
 export function emailReviewSearchCandidates(
   evidence: ReadonlyArray<EmailReviewEvidenceRow>,
+  scope?: EmailReviewScope,
 ): EmailReviewCandidate[] {
   const byThread = new Map<string, EmailReviewCandidate>();
-  for (const row of emailReviewSearchRows(evidence)) {
+  for (const row of emailReviewSearchRows(evidence, scope)) {
     const results = object(row.result)?.results;
     if (!Array.isArray(results)) continue;
     for (const raw of results) {
@@ -155,6 +164,19 @@ export function emailReviewSearchCandidates(
         subject: string(item?.subject, 300),
         snippet: string(item?.snippet, 400),
       };
+      if (scope?.startAt || scope?.endAt) {
+        const candidateTime = Date.parse(candidate.date);
+        const hasExplicitZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(candidate.date);
+        const start = scope.startAt ? Date.parse(scope.startAt) : Number.NEGATIVE_INFINITY;
+        const end = scope.endAt ? Date.parse(scope.endAt) : Number.POSITIVE_INFINITY;
+        if (
+          !hasExplicitZone ||
+          !Number.isFinite(candidateTime) ||
+          candidateTime < start ||
+          candidateTime >= end
+        )
+          continue;
+      }
       const previous = byThread.get(threadId);
       const candidateTime = Date.parse(candidate.date);
       const previousTime = previous ? Date.parse(previous.date) : Number.NaN;
@@ -166,8 +188,11 @@ export function emailReviewSearchCandidates(
   return [...byThread.values()];
 }
 
-export function emailReviewCandidateIds(evidence: ReadonlyArray<EmailReviewEvidenceRow>): string[] {
-  return emailReviewSearchCandidates(evidence).map((candidate) => candidate.threadId);
+export function emailReviewCandidateIds(
+  evidence: ReadonlyArray<EmailReviewEvidenceRow>,
+  scope?: EmailReviewScope,
+): string[] {
+  return emailReviewSearchCandidates(evidence, scope).map((candidate) => candidate.threadId);
 }
 
 function obviousNewsletter(candidate: EmailReviewCandidate): boolean {
@@ -184,8 +209,11 @@ function obviousNewsletter(candidate: EmailReviewCandidate): boolean {
   return !explicitRequest;
 }
 
-function searchMailboxMismatch(evidence: ReadonlyArray<EmailReviewEvidenceRow>): boolean {
-  return emailReviewSearchRows(evidence).some((row) => {
+function searchMailboxMismatch(
+  evidence: ReadonlyArray<EmailReviewEvidenceRow>,
+  scope?: EmailReviewScope,
+): boolean {
+  return emailReviewSearchRows(evidence, scope).some((row) => {
     const result = object(row.result);
     const searched = singleEmail(string(result?.mailboxSearched, 300));
     const configured = singleEmail(string(result?.configuredOwnerMailbox, 300));
@@ -238,15 +266,25 @@ function compareMetadataCandidates(
   return left.threadId.localeCompare(right.threadId);
 }
 
-export function emailReviewRankPrompt(evidence: ReadonlyArray<EmailReviewEvidenceRow>): string {
-  return emailReviewRankContext(evidence).prompt;
+export function emailReviewRankPrompt(
+  evidence: ReadonlyArray<EmailReviewEvidenceRow>,
+  scope?: EmailReviewScope,
+): string {
+  return emailReviewRankContext(evidence, scope).prompt;
 }
 
-export function emailReviewRankContext(evidence: ReadonlyArray<EmailReviewEvidenceRow>): {
+export function emailReviewRankContext(
+  evidence: ReadonlyArray<EmailReviewEvidenceRow>,
+  scope?: EmailReviewScope,
+): {
   prompt: string;
   candidateIds: string[];
 } {
-  const all = emailReviewSearchCandidates(evidence)
+  const initialCount = Math.min(
+    EMAIL_REVIEW_MAX_CANDIDATES,
+    Math.max(1, scope?.requestedCount ?? EMAIL_REVIEW_MAX_CANDIDATES),
+  );
+  const all = emailReviewSearchCandidates(evidence, scope)
     .filter((candidate) => !obviousNewsletter(candidate))
     .sort(compareMetadataCandidates)
     .slice(0, EMAIL_REVIEW_MAX_RANK_CANDIDATES);
@@ -260,8 +298,7 @@ export function emailReviewRankContext(evidence: ReadonlyArray<EmailReviewEviden
       snippet: candidate.snippet.slice(0, 100),
     };
     const proposed = {
-      purpose:
-        'Rank up to ten recent email threads that may need the owner’s response. Prefer explicit outstanding requests over informational notices; metadata is provisional. The first five are the initial review set; later IDs are reserves used only when a complete verified read shows a thread is answered, does not need a reply, or could not be source-assessed reliably after the bounded validation attempts.',
+      purpose: `Rank up to ten email threads from the requested period that may need the owner’s response. Prefer explicit outstanding requests over informational notices; metadata is provisional. The first ${initialCount} are the initial review set; later IDs are reserves used only when a complete verified read shows a thread is answered, does not need a reply, or could not be source-assessed reliably after the bounded validation attempts.`,
       limit: EMAIL_REVIEW_MAX_RANK_POOL,
       candidates: [...candidates, compact],
       additionalMetadataCandidates: Math.max(0, all.length - candidates.length - 1),
@@ -271,8 +308,7 @@ export function emailReviewRankContext(evidence: ReadonlyArray<EmailReviewEviden
   }
   const additionalMetadataCandidates = Math.max(0, all.length - candidates.length);
   const prompt = JSON.stringify({
-    purpose:
-      'Rank up to ten recent email threads that may need the owner’s response. Prefer explicit outstanding requests over informational notices; metadata is provisional. The first five are the initial review set; later IDs are reserves used only when a complete verified read shows a thread is answered, does not need a reply, or could not be source-assessed reliably after the bounded validation attempts.',
+    purpose: `Rank up to ten email threads from the requested period that may need the owner’s response. Prefer explicit outstanding requests over informational notices; metadata is provisional. The first ${initialCount} are the initial review set; later IDs are reserves used only when a complete verified read shows a thread is answered, does not need a reply, or could not be source-assessed reliably after the bounded validation attempts.`,
     limit: EMAIL_REVIEW_MAX_RANK_POOL,
     candidates,
     additionalMetadataCandidates,
@@ -284,9 +320,10 @@ export function emailReviewRankContext(evidence: ReadonlyArray<EmailReviewEviden
 export function emailReviewRecentMetadataFallback(
   evidence: ReadonlyArray<EmailReviewEvidenceRow>,
   allowedCandidateIds: ReadonlyArray<string>,
+  scope?: EmailReviewScope,
 ): string[] {
   const allowed = new Set(allowedCandidateIds);
-  return emailReviewSearchCandidates(evidence)
+  return emailReviewSearchCandidates(evidence, scope)
     .filter((candidate) => allowed.has(candidate.threadId) && !obviousNewsletter(candidate))
     .sort(compareMetadataCandidates)
     .map((candidate) => candidate.threadId);
@@ -296,6 +333,7 @@ export function validEmailReviewSelection(
   ids: unknown,
   evidence: ReadonlyArray<EmailReviewEvidenceRow>,
   allowedCandidateIds?: ReadonlyArray<string>,
+  scope?: EmailReviewScope,
 ): ids is string[] {
   if (
     !Array.isArray(ids) ||
@@ -304,7 +342,7 @@ export function validEmailReviewSelection(
     new Set(ids).size !== ids.length
   )
     return false;
-  const candidates = new Set(emailReviewCandidateIds(evidence));
+  const candidates = new Set(emailReviewCandidateIds(evidence, scope));
   if (allowedCandidateIds) {
     const allowed = new Set(allowedCandidateIds);
     return ids.every((id) => candidates.has(id) && allowed.has(id));
@@ -317,10 +355,11 @@ export function emailReviewSelectionWithinAuthorizedPool(
   rankedThreadIds: ReadonlyArray<string> | undefined,
   verifiedExcludedThreadIds: ReadonlyArray<string>,
   sourceAssessmentFailedThreadIds: ReadonlyArray<string> = [],
+  requestedCount = EMAIL_REVIEW_MAX_CANDIDATES,
 ): boolean {
   const initialCount = rankedThreadIds
-    ? Math.min(EMAIL_REVIEW_MAX_CANDIDATES, rankedThreadIds.length)
-    : EMAIL_REVIEW_MAX_CANDIDATES;
+    ? Math.min(requestedCount, rankedThreadIds.length)
+    : requestedCount;
   const excluded = [...new Set(verifiedExcludedThreadIds)];
   const failed = [...new Set(sourceAssessmentFailedThreadIds)];
   if (failed.some((id) => excluded.includes(id))) return false;
@@ -340,13 +379,14 @@ export function revalidateEmailReviewSourceItems(
   selectedThreadIds: ReadonlyArray<string>,
   ownerMailbox: string,
   evidence: ReadonlyArray<EmailReviewEvidenceRow>,
+  scope?: EmailReviewScope,
 ): { items: ValidatedEmailReviewItem[]; noReplyThreadIds: string[] } | undefined {
   const parsed = EmailReviewAnswerSchema.safeParse({ items: value });
   if (!parsed.success) return undefined;
   const ids = parsed.data.items.map((item) => item.threadId);
   if (new Set(ids).size !== ids.length || ids.some((id) => !selectedThreadIds.includes(id)))
     return undefined;
-  const threads = ids.map((id) => emailReviewCompleteThread(id, ownerMailbox, evidence));
+  const threads = ids.map((id) => emailReviewCompleteThread(id, ownerMailbox, evidence, scope));
   if (threads.some((thread) => !thread)) return undefined;
   const validated = validateEmailReviewAnswer(
     { items: parsed.data.items },
@@ -366,6 +406,7 @@ export function revalidateEmailReviewAssessmentBatches(
   selectedThreadIds: ReadonlyArray<string>,
   ownerMailbox: string,
   evidence: ReadonlyArray<EmailReviewEvidenceRow>,
+  scope?: EmailReviewScope,
 ): { items: ValidatedEmailReviewItem[]; noReplyThreadIds: string[] } | undefined {
   if (value === undefined) return { items: [], noReplyThreadIds: [] };
   if (!Array.isArray(value) || value.length > EMAIL_REVIEW_MAX_RANK_POOL) return undefined;
@@ -377,6 +418,7 @@ export function revalidateEmailReviewAssessmentBatches(
       selectedThreadIds,
       ownerMailbox,
       evidence,
+      scope,
     );
     if (!checked) return undefined;
     for (const item of checked.items) {
@@ -500,8 +542,9 @@ function addressList(value: string): string[] {
 
 export function emailReviewOwnerMailbox(
   evidence: ReadonlyArray<EmailReviewEvidenceRow>,
+  scope?: EmailReviewScope,
 ): string | undefined {
-  const rows = emailReviewSearchRows(evidence);
+  const rows = emailReviewSearchRows(evidence, scope);
   if (rows.length === 0) return undefined;
   const configuredOwners = rows.map((row) =>
     singleEmail(string(object(row.result)?.configuredOwnerMailbox, 300)),
@@ -515,8 +558,9 @@ export function emailReviewThreadReadResult(
   threadId: string,
   ownerMailbox: string,
   evidence: ReadonlyArray<EmailReviewEvidenceRow>,
+  scope?: EmailReviewScope,
 ): EmailReviewThreadReadResult | undefined {
-  const searchCandidate = emailReviewSearchCandidates(evidence).find(
+  const searchCandidate = emailReviewSearchCandidates(evidence, scope).find(
     (candidate) => candidate.threadId === threadId,
   );
   const rows = evidence.filter(
@@ -749,8 +793,9 @@ export function emailReviewCompleteThread(
   threadId: string,
   ownerMailbox: string,
   evidence: ReadonlyArray<EmailReviewEvidenceRow>,
+  scope?: EmailReviewScope,
 ): EmailReviewThread | undefined {
-  const result = emailReviewThreadReadResult(threadId, ownerMailbox, evidence);
+  const result = emailReviewThreadReadResult(threadId, ownerMailbox, evidence, scope);
   return result?.kind === 'eligible' ? result.thread : undefined;
 }
 
@@ -758,10 +803,12 @@ export function emailReviewVerifiedAnsweredThreadIds(
   threadIds: ReadonlyArray<string>,
   ownerMailbox: string,
   evidence: ReadonlyArray<EmailReviewEvidenceRow>,
+  scope?: EmailReviewScope,
 ): string[] {
   return threadIds.filter(
     (threadId) =>
-      emailReviewThreadReadResult(threadId, ownerMailbox, evidence)?.kind === 'already_answered',
+      emailReviewThreadReadResult(threadId, ownerMailbox, evidence, scope)?.kind ===
+      'already_answered',
   );
 }
 
@@ -769,10 +816,11 @@ export function emailReviewVerifiedNotEligibleThreadIds(
   threadIds: ReadonlyArray<string>,
   ownerMailbox: string,
   evidence: ReadonlyArray<EmailReviewEvidenceRow>,
+  scope?: EmailReviewScope,
 ): string[] {
   return threadIds.filter(
     (threadId) =>
-      emailReviewThreadReadResult(threadId, ownerMailbox, evidence)?.kind === 'not_eligible',
+      emailReviewThreadReadResult(threadId, ownerMailbox, evidence, scope)?.kind === 'not_eligible',
   );
 }
 
@@ -786,8 +834,9 @@ export function emailReviewCoverage(
   backfillShortfall?: EmailReviewCoverage['backfillShortfall'],
   metadataFallback = false,
   unassessedCompleteThreads = 0,
+  scope?: EmailReviewScope,
 ): EmailReviewCoverage {
-  const searches = emailReviewSearchRows(evidence);
+  const searches = emailReviewSearchRows(evidence, scope);
   const lastSearch = object(searches.at(-1)?.result);
   const unavailableMetadata = searches.reduce((count, row) => {
     const unavailable = object(row.result)?.unavailable;
@@ -796,7 +845,7 @@ export function emailReviewCoverage(
   const selectedCompleted = new Set(eligibleThreads.map((thread) => thread.threadId));
   return {
     searchPages: searches.length,
-    uniqueThreads: emailReviewCandidateIds(evidence).length,
+    uniqueThreads: emailReviewCandidateIds(evidence, scope).length,
     searchComplete:
       searches.length > 0 &&
       lastSearch?.complete === true &&
@@ -817,9 +866,10 @@ export function emailReviewCoverage(
         contextLimitedThreads -
         unassessedCompleteThreads,
     ),
-    obviousNewslettersExcluded:
-      emailReviewSearchCandidates(evidence).filter(obviousNewsletter).length,
-    ...(searchMailboxMismatch(evidence) ? { searchMailboxMismatch: true } : {}),
+    obviousNewslettersExcluded: emailReviewSearchCandidates(evidence, scope).filter(
+      obviousNewsletter,
+    ).length,
+    ...(searchMailboxMismatch(evidence, scope) ? { searchMailboxMismatch: true } : {}),
     ...(unassessedCompleteThreads > 0 ? { unassessedCompleteThreads } : {}),
     ...(backfillShortfall ? { backfillShortfall } : {}),
     ...(metadataFallback ? { metadataFallback: true } : {}),

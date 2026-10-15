@@ -137,8 +137,11 @@ export interface PersonalReadRequest {
   compoundTripDiscovery?: boolean;
   /** Explicit no-send review of a bounded recent-email sample. */
   emailReview?: {
-    windowDays: 7;
-    requestedCount: 5;
+    windowDays: number;
+    requestedCount: number;
+    /** Exact user-local calendar-day interval when explicitly requested. */
+    startAt?: string;
+    endAt?: string;
     /** Runtime-selected read IDs, validated against this task's successful searches. */
     selectedThreadIds?: string[];
     /** Exact bounded metadata IDs shown to the structured ranker. */
@@ -416,39 +419,103 @@ function readThenMutationText(text: string): string {
     .replace(/\bmark\s+(?:anything\s+)?(?:as\s+)?(?:uncertain|uncertainty|unverified)\b/gi, ' ');
 }
 
-function directEmailReviewIntent(text: string): boolean {
+interface DirectEmailReviewIntent {
+  windowDays: number;
+  requestedCount: number;
+  localCalendarDays: boolean;
+  unsupportedScope?: string;
+}
+
+const EMAIL_REVIEW_NUMBER_WORDS: Record<string, number> = {
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+  thirteen: 13,
+  fourteen: 14,
+  fifteen: 15,
+  sixteen: 16,
+  seventeen: 17,
+  eighteen: 18,
+  nineteen: 19,
+  twenty: 20,
+};
+
+function emailReviewNumber(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const numeric = /^\d{1,2}$/.test(value) ? Number(value) : undefined;
+  return numeric ?? EMAIL_REVIEW_NUMBER_WORDS[value.toLowerCase()];
+}
+
+function directEmailReviewIntent(text: string): DirectEmailReviewIntent | undefined {
   if (
     text.length > 2_000 ||
     /^\s*>/m.test(text) ||
     /^\s*(?:from:|begin forwarded message|on .{1,160}wrote:)/im.test(text) ||
     /\b(?:if|whether|hypothetically|what if|should i|could i|would i)\b/i.test(text)
   )
-    return false;
-  const asksToReviewRecentMail =
-    /\b(?:review|look through|go through)\s+(?:my\s+)?(?:recent\s+)?emails?\b/i.test(text) &&
-    /\b(?:last|past)\s+(?:seven|7)\s+days?\b/i.test(text);
-  const asksForFiveReplyWorthyRequests =
-    /\b(?:find|identify|list)\s+(?:the\s+)?(?:five|5)\s+most\s+important\s+requests?\b/i.test(
+    return undefined;
+  const period =
+    /\b(?:last|past|over\s+(?:the\s+)?(?:last|past)|within\s+(?:the\s+)?(?:last|past))\s+(\d{1,2}|[a-z]+)\s+(?:(local|user[- ]local)\s+calendar\s+)?days?\b/i.exec(
       text,
-    ) && /\b(?:still\s+)?need\s+my\s+(?:response|reply)\b/i.test(text);
+    );
+  const windowDays = emailReviewNumber(period?.[1]) ?? 7;
+  const localCalendarDays = Boolean(period?.[2]);
+  const asksToReviewRecentMail =
+    /\b(?:review|look through|go through|scan|check|prepare|make|create|build)\b/i.test(text) &&
+    /\b(?:emails?|inbox|mailbox|mail)\b/i.test(text) &&
+    Boolean(period);
+  const asksForReplyWorthyRequests =
+    /\b(?:requests?|messages?|emails?)\b[^.!?\n]{0,100}\b(?:outstanding|need(?:s|ed)?\s+(?:my|a)\s+(?:reply|response)|(?:still\s+)?need(?:s)?\s+(?:me\s+to\s+)?reply|awaiting\s+(?:my|a)\s+(?:reply|response))\b/i.test(
+      text,
+    ) || /\b(?:outstanding|unanswered)\s+(?:reply\s+)?requests?\b/i.test(text);
+  const countMatch =
+    /\b(?:up\s+to|at\s+most|no\s+more\s+than|top)\s+(\d{1,2}|[a-z]+)\b/i.exec(text) ??
+    /\b(?:find|identify|list|prioritize)\s+(?:the\s+)?(\d{1,2}|[a-z]+)\s+(?:most\s+important\s+)?(?:outstanding\s+)?(?:reply\s+)?requests?\b/i.exec(
+      text,
+    );
+  const requestedCount = emailReviewNumber(countMatch?.[1]) ?? 5;
+  const actionBrief = /\baction\s+brief\b/i.test(text);
   const asksForContextualDrafts =
-    /\b(?:explain|say)\s+why\s+each\s+matters\b/i.test(text) &&
-    /\b(?:identify|include|note)\s+(?:any\s+)?deadlines?\b/i.test(text) &&
-    /\bdraft\s+repl(?:y|ies)\b/i.test(text) &&
-    /\b(?:using|with)\s+(?:the\s+)?relevant\s+thread\s+context\b/i.test(text);
+    /\b(?:draft|write)\s+(?:the\s+)?repl(?:y|ies)\b/i.test(text) &&
+    /\b(?:using|with|from)\s+(?:the\s+)?(?:full|relevant)?\s*thread\s+context\b/i.test(text);
   const explicitNoSend =
     /\b(?:don['’]?t|do\s+not)\s+send\s+anything\s+yet\b/i.test(text) &&
     !/\b(?:send|email|reply)\s+(?:it|them|those|the\s+drafts?)\b/i.test(text);
   const otherMutationText = text
+    .replace(/\b(?:prepare|make|create|build)\s+(?:an?\s+)?action\s+brief\b/gi, '')
     .replace(/\b(?:and\s+)?draft\s+repl(?:y|ies)\b/gi, '')
     .replace(/\b(?:don['’]?t|do\s+not)\s+send\s+anything\s+yet\b/gi, '');
-  return (
-    asksToReviewRecentMail &&
-    asksForFiveReplyWorthyRequests &&
-    asksForContextualDrafts &&
-    explicitNoSend &&
-    !READ_THEN_MUTATION.test(otherMutationText)
-  );
+  if (
+    !asksToReviewRecentMail ||
+    !asksForReplyWorthyRequests ||
+    !(actionBrief || (asksForContextualDrafts && explicitNoSend)) ||
+    READ_THEN_MUTATION.test(otherMutationText)
+  )
+    return undefined;
+  if (windowDays < 1 || windowDays > 30)
+    return {
+      windowDays,
+      requestedCount,
+      localCalendarDays,
+      unsupportedScope: 'Email review is bounded to at most 30 days at a time.',
+    };
+  if (requestedCount < 1 || requestedCount > 5)
+    return {
+      windowDays,
+      requestedCount,
+      localCalendarDays,
+      unsupportedScope: 'Email review can verify at most five reply requests at a time.',
+    };
+  return { windowDays, requestedCount, localCalendarDays };
 }
 
 const WEEKDAYS = [
@@ -564,6 +631,38 @@ function zonedMidnight(date: CivilDate, timeZone: string): string {
     guess = desired;
   }
   return new Date(guess).toISOString();
+}
+
+function emailReviewLocalCalendarScope(
+  days: number,
+  options: PersonalReadDetectionOptions,
+): { query: string; startAt: string; endAt: string } | undefined {
+  const timeZone = options.timeZone;
+  if (!timeZone) return undefined;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone }).format(options.now ?? new Date());
+  } catch {
+    return undefined;
+  }
+  const today = civilDateAt(options.now ?? new Date(), timeZone);
+  const start = addCivilDays(today, 1 - days);
+  const end = addCivilDays(today, 1);
+  const startAt = zonedMidnight(start, timeZone);
+  const endAt = zonedMidnight(end, timeZone);
+  if (!Number.isFinite(Date.parse(startAt)) || !Number.isFinite(Date.parse(endAt)))
+    return undefined;
+  const token = (date: CivilDate) =>
+    `${date.year.toString().padStart(4, '0')}/${date.month.toString().padStart(2, '0')}/${date.day.toString().padStart(2, '0')}`;
+  // Gmail's date operators use mailbox-local date boundaries. Search two days
+  // wider on either side, then enforce the owner's exact zone interval on the
+  // returned metadata before ranking or reading any thread.
+  const broadStart = addCivilDays(start, -2);
+  const broadEnd = addCivilDays(end, 2);
+  return {
+    query: `after:${token(broadStart)} before:${token(broadEnd)} -from:me`,
+    startAt,
+    endAt,
+  };
 }
 
 function timeWindow(
@@ -1923,14 +2022,31 @@ function detectPersonalReadRequestInternal(
       answerFocus: 'lodging',
     };
   }
-  if (!emailReadProhibited && directEmailReviewIntent(latest)) {
+  const emailReviewIntent = !emailReadProhibited ? directEmailReviewIntent(latest) : undefined;
+  if (emailReviewIntent) {
+    const localScope = emailReviewIntent.localCalendarDays
+      ? emailReviewLocalCalendarScope(emailReviewIntent.windowDays, options)
+      : undefined;
+    const scopeIssue =
+      emailReviewIntent.unsupportedScope ??
+      (emailReviewIntent.localCalendarDays && !localScope
+        ? 'I need a valid local time zone to calculate the exact calendar-day inbox boundary.'
+        : undefined);
+    const mailQuery = emailReviewIntent.localCalendarDays
+      ? (localScope?.query ?? EMAIL_REVIEW_QUERY)
+      : `newer_than:${emailReviewIntent.windowDays}d -from:me`;
     return {
       kind: 'email',
       queryTerms: [],
       firstToolName: 'gmail.search',
       requiresThreadRead: true,
-      mailQuery: EMAIL_REVIEW_QUERY,
-      emailReview: { windowDays: 7, requestedCount: 5 },
+      mailQuery,
+      ...(scopeIssue ? { scopeIssue } : {}),
+      emailReview: {
+        windowDays: emailReviewIntent.windowDays,
+        requestedCount: emailReviewIntent.requestedCount,
+        ...(localScope ? { startAt: localScope.startAt, endAt: localScope.endAt } : {}),
+      },
     };
   }
   if (

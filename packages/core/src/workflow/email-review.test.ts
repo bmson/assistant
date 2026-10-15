@@ -1411,6 +1411,45 @@ describe('bounded no-send email review', () => {
     expect(validEmailReviewSelection(['invented'], evidence)).toBe(false);
   });
 
+  it('filters local-calendar review metadata to the exact interval before ranking', () => {
+    const query = 'after:2026/09/30 before:2026/10/18 -from:me';
+    const scope = {
+      query,
+      requestedCount: 2,
+      startAt: '2026-10-02T07:00:00.000Z',
+      endAt: '2026-10-16T07:00:00.000Z',
+    };
+    const rowFor = (threadId: string, date: string): EmailReviewEvidenceRow => ({
+      ...search(threadId),
+      args: { query, maxResults: 100 },
+      result: {
+        ...((search(threadId).result as Record<string, unknown>) ?? {}),
+        results: [
+          {
+            threadId,
+            date,
+            from: 'sender@example.net',
+            subject: 'Could you confirm this?',
+            snippet: 'Please reply by Friday.',
+          },
+        ],
+      },
+    });
+    const evidence = [
+      rowFor('inside-start', '2026-10-02T07:00:00.000Z'),
+      rowFor('inside-end', '2026-10-16T06:59:59.999Z'),
+      rowFor('before-window', '2026-10-02T06:59:59.999Z'),
+      rowFor('at-exclusive-end', '2026-10-16T07:00:00.000Z'),
+      rowFor('unknown-date', 'not-a-date'),
+    ];
+
+    expect(emailReviewCandidateIds(evidence, scope)).toEqual(['inside-start', 'inside-end']);
+    expect(validEmailReviewSelection(['before-window'], evidence, undefined, scope)).toBe(false);
+    expect(emailReviewRankContext(evidence, scope).prompt).toContain(
+      'first 2 are the initial review set',
+    );
+  });
+
   it('allows a bounded ten-ID reserve pool while keeping final answers capped at five', () => {
     const evidence = Array.from({ length: EMAIL_REVIEW_MAX_RANK_POOL }, (_, index) =>
       search(`request-${index}`),
