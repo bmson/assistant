@@ -24,6 +24,7 @@ import {
   renderMemoryReadAnswer,
   validMemoryReadSelection,
 } from './memory-read-answer.js';
+import { personCalendarResponse } from './person-calendar.js';
 import { matchesHistoricalMemorySearch, type PersonalReadRequest } from './read-intent.js';
 import { effectiveReminders } from './reminder-state.js';
 import { isDurableSave, isMemoryWriteRequest, savedWorkSummary } from './saved-work.js';
@@ -3450,6 +3451,7 @@ export function verifiedReadResponse(
 ): string {
   if (request.temporalIssue || request.scopeIssue)
     return request.temporalIssue ?? request.scopeIssue ?? '';
+  if (request.personCalendar) return personCalendarResponse(request, evidence).text;
   if (request.calendarEventAnalysis) {
     const rows = matchingCalendarRows(request, currentSuccessfulEvidence(evidence));
     const events = uniqueRecords(
@@ -4152,6 +4154,10 @@ export function enforcePersonalReadResponse(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
 ): ResponseContractResult {
+  if (request.personCalendar && !request.temporalIssue) {
+    const result = personCalendarResponse(request, evidence);
+    return { ...result, unsupported: result.blocked ? ['calendar_read'] : [] };
+  }
   const weeklyInterval = request.weeklyCalendarPlan
     ? (request.temporalIntent?.interval ??
       (request.timeWindow
@@ -4238,6 +4244,16 @@ function enforcePersonalReadGrounding(
       blocked: true,
       unsupported: ['calendar_read'],
     };
+  if (request.personCalendar) {
+    const result = personCalendarResponse(request, evidence);
+    return {
+      ...result,
+      unsupported: result.blocked ? ['calendar_read'] : [],
+      groundingFallback: [
+        'named-person calendar scope rendered from current exact-window source evidence',
+      ],
+    };
+  }
   const gaps = requiredReadGaps(request, evidence, opts?.compoundTripExtraction);
   if (gaps.labels.length > 0) {
     if (request.upcomingFlightDiscovery)

@@ -1093,6 +1093,7 @@ export async function stageModelFinalResponse(
     }
   }
   if (
+    !classifiedRead?.personCalendar &&
     (!contractOptions.readRequest?.includeCalendarBriefing ||
       cardRequested ||
       Boolean(refreshCardId)) &&

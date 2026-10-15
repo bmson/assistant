@@ -34,6 +34,7 @@ import {
 } from './email-review.js';
 import { DEFAULT_TOOL_RESULT_CHAR_LIMIT, toolResultCharacterLimit } from './executor/util.js';
 import { detectFutureWatchIntent } from './future-watch-intent.js';
+import { requestedCalendarPerson } from './person-calendar.js';
 
 export type PersonalReadKind =
   | 'calendar'
@@ -69,6 +70,8 @@ export type TemporalIntentResolution =
 
 export interface PersonalReadRequest {
   kind: PersonalReadKind;
+  /** Literal named-person scope; calendar membership alone never proves attendance. */
+  personCalendar?: { name: string };
   /** Deterministic review-only proposal requiring availability and event-list reads. */
   weeklyCalendarPlan?: boolean;
   calendarPlanOptions?: CalendarPlanOptions;
@@ -235,7 +238,12 @@ function explicitlyProhibitsPrivateRead(
     String.raw`\bwithout\s+${NEGATED_LOOKUP_VERB}(?:ing)?\b${clause}\b${sourceOwner}${accountSurface}\b`,
     'i',
   );
-  return direct.test(negatedClause) || listed || without.test(text);
+  return (
+    direct.test(negatedClause) ||
+    listed ||
+    without.test(text) ||
+    (surface === 'calendar' && /^\s*(?:(?:any|the|all)\s+)?calendars?\b/i.test(negatedClause))
+  );
 }
 
 function explicitlyRequestsCalendarOverlapSummary(text: string): boolean {
@@ -2009,6 +2017,58 @@ function detectPersonalReadRequestInternal(
   // A future notification request needs an executable watch plan. Do not let
   // broad words such as "tell me when" force a read-only answer route.
   if (detectFutureWatchIntent(latest)) return null;
+  const person =
+    !calendarReadProhibited && !READ_THEN_MUTATION.test(readThenMutationText(latest))
+      ? requestedCalendarPerson(latest)
+      : undefined;
+  if (person) {
+    const request: PersonalReadRequest = {
+      kind: 'calendar',
+      personCalendar: { name: person },
+      queryTerms: [],
+      firstToolName: 'calendar.list_events',
+      requiresThreadRead: false,
+      maxResults: 50,
+      ...(options.timeZone ? { timeZone: options.timeZone } : {}),
+    };
+    // For a person's plans, "next weekend" means the next weekend that has
+    // not started. Resolve civil days in the validated owner zone, never UTC
+    // day arithmetic or a date chosen by the model.
+    let temporalText = latest;
+    try {
+      if (!options.timeZone) throw new Error('Owner time zone is missing');
+      // The legacy generic resolver can fall back to UTC. A person-scoped
+      // answer must validate the actual owner clock instead of taking that fallback.
+      new Intl.DateTimeFormat('en-US', { timeZone: options.timeZone }).format(
+        options.now ?? new Date(),
+      );
+      if (
+        options.timeZone &&
+        /\bnext weekend\b/i.test(latest) &&
+        civilWeekday(civilDateAt(options.now ?? new Date(), options.timeZone)) < 6 &&
+        civilWeekday(civilDateAt(options.now ?? new Date(), options.timeZone)) > 0
+      )
+        temporalText = latest.replace(/\bnext weekend\b/i, 'this weekend');
+      const temporal = hasExplicitTemporalPhrase(latest)
+        ? resolveTemporalIntent(temporalText, 'calendar', false, options)
+        : { kind: 'unresolved' as const };
+      if (temporal.kind === 'resolved') {
+        const window = {
+          ...temporal.intent.window,
+          label: /\bnext weekend\b/i.test(latest) ? 'next weekend' : temporal.intent.window.label,
+        };
+        request.timeWindow = window;
+        request.temporalIntent = { ...temporal.intent, window };
+      } else
+        request.temporalIssue =
+          temporal.kind === 'unsupported'
+            ? temporal.message
+            : `What dates and time zone should I use to check ${person}’s calendar?`;
+    } catch {
+      request.temporalIssue = `What dates and time zone should I use to check ${person}’s calendar?`;
+    }
+    return request;
+  }
   if (ACCEPT_LOOKUP.test(latest)) {
     const prior = messages.slice(Math.max(0, latestIndex - 8), latestIndex);
     const offer = readIntentText(prior.findLast((message) => message.role === 'assistant'));
@@ -3109,7 +3169,7 @@ export function nextRequiredReadTool(
       ? 'gmail.read_thread'
       : undefined;
   }
-  if (request.calendarEventAnalysis) {
+  if (request.calendarEventAnalysis || request.personCalendar) {
     const currentEvidence = evidence.filter((row) => row.fromCurrentTask !== false);
     const pages = calendarListPages(request, currentEvidence, 3);
     if (pages.length === 0) {
@@ -3307,6 +3367,15 @@ export function groundReadToolInput(
       : {};
   }
   if (toolName === 'calendar.list_events') {
+    if (request.personCalendar) {
+      const interval = calendarReadInterval(request);
+      const pageToken = calendarEventAnalysisNextPageToken(request, evidence, 3);
+      return {
+        ...(interval ? { timeMin: interval.start, timeMax: interval.endExclusive } : {}),
+        maxResults: 50,
+        ...(pageToken ? { pageToken } : {}),
+      };
+    }
     const { calendarIds: _ignored, ...unboundCalendarArgs } = input;
     const allCalendars =
       request.weeklyCalendarPlan || request.calendarEventAnalysis

@@ -106,7 +106,12 @@ interface RawEvent {
   };
   start?: { dateTime?: string; date?: string; timeZone?: string };
   end?: { dateTime?: string; date?: string };
-  attendees?: Array<{ email: string; responseStatus?: string; self?: boolean }>;
+  attendees?: Array<{
+    email: string;
+    displayName?: string;
+    responseStatus?: string;
+    self?: boolean;
+  }>;
 }
 
 function urlsIn(text: string): string[] {
@@ -378,6 +383,11 @@ function normalizeEvent(raw: RawEvent, calendar: CalendarEntry) {
       : '',
     allDay: Boolean(raw.start?.date && !raw.start.dateTime),
     attendees: (raw.attendees ?? []).map((a) => `${a.email} (${a.responseStatus ?? '?'})`),
+    attendeeDetails: (raw.attendees ?? []).map((attendee) => ({
+      email: attendee.email,
+      ...(attendee.displayName ? { displayName: attendee.displayName } : {}),
+      ...(attendee.responseStatus ? { responseStatus: attendee.responseStatus } : {}),
+    })),
     links,
   };
 }

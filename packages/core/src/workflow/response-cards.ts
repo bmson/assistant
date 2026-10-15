@@ -1362,6 +1362,7 @@ export function responseCardsForFinal(input: {
       input.readRequest?.includeCalendarBriefing ||
       input.readRequest?.weeklyCalendarPlan ||
       input.readRequest?.calendarEventAnalysis ||
+      input.readRequest?.personCalendar ||
       input.readRequest?.compoundTripDiscovery,
   );
   const explicitMailRead =

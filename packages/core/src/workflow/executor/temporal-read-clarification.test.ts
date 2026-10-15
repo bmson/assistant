@@ -154,6 +154,7 @@ async function runFlightContinuation(
     withRequestChecklist?: boolean;
     upcomingFlight?: boolean;
     weeklyCalendarPlan?: boolean;
+    personCalendar?: boolean;
     weeklyCalendarIncomplete?: boolean;
     weeklyBusy?: unknown[];
     modelIgnoresNoTools?: boolean;
@@ -202,7 +203,39 @@ async function runFlightContinuation(
   const dispatch = vi.fn(
     async ({ toolName, args }: { toolName: string; args: Record<string, unknown> }) => {
       let result: Record<string, unknown>;
-      if (toolName === 'calendar.availability' && options.weeklyCalendarPlan) {
+      if (toolName === 'calendar.list_events' && options.personCalendar) {
+        result = {
+          events: [
+            {
+              eventId: 'team-roster-entry',
+              calendarId: 'team',
+              calendar: 'Harbor United',
+              summary: 'Alex is on the roster',
+              start: '2026-10-10T19:00:00Z',
+              end: '2026-10-10T20:00:00Z',
+              attendees: [],
+            },
+            {
+              eventId: 'wrong-date-person-entry',
+              calendarId: 'owner',
+              calendar: 'Owner',
+              summary: 'Monday personal appointment',
+              start: '2026-10-12T19:00:00Z',
+              end: '2026-10-12T20:00:00Z',
+              attendeeDetails: [
+                { email: 'alex@example.test', displayName: 'Alex', responseStatus: 'accepted' },
+              ],
+            },
+          ],
+          calendarsResolved: [
+            { id: 'team', name: 'Harbor United' },
+            { id: 'owner', name: 'Owner' },
+          ],
+          complete: true,
+          calendarRosterComplete: true,
+          unavailable: [],
+        };
+      } else if (toolName === 'calendar.availability' && options.weeklyCalendarPlan) {
         result = {
           busy: options.weeklyBusy ?? [],
           complete: !options.weeklyCalendarIncomplete,
@@ -649,6 +682,28 @@ async function runFlightContinuation(
 }
 
 describe('unsupported temporal requests through the actual executor step loop', () => {
+  it('allocates a bounded named-person read and defeats model absence/roster claims in the real step loop', async () => {
+    const { state, result, dispatch } = await runFlightContinuation(
+      [],
+      'What is Alex doing next weekend?',
+      {
+        personCalendar: true,
+        modelFinalText: 'Alex is free next weekend, except for the Harbor United match.',
+      },
+    );
+    expect(dispatch.mock.calls.map(([call]) => call.toolName)).toEqual(['calendar.list_events']);
+    expect(dispatch.mock.calls[0]?.[0].args).toEqual({
+      timeMin: '2026-10-10T07:00:00.000Z',
+      timeMax: '2026-10-12T07:00:00.000Z',
+      maxResults: 50,
+    });
+    expect(state.pendingFinal?.text).toContain('couldn’t confirm Alex’s plans');
+    expect(state.pendingFinal?.text).toContain('Which calendar or email address');
+    expect(state.pendingFinal?.text).not.toContain('is free');
+    expect(state.pendingFinal?.text).not.toContain('Monday personal appointment');
+    expect(state.pendingFinal?.text).not.toContain('Alex is on the roster');
+    expect(result.outcome).toBe('done');
+  });
   it('finishes a checked read when the provider ignores the no-tool boundary', async () => {
     const request =
       'Review my calendar for next week and identify scheduling conflicts and overloaded days. Find three realistic 90-minute focus blocks during working hours, allowing time for travel and breaks. Recommend changes, but show me the plan before editing my calendar.';

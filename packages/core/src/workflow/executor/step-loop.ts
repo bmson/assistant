@@ -245,6 +245,11 @@ function renderPlan(plan: Plan): string {
 }
 
 function readLookupDirective(request: PersonalReadRequest): string {
+  if (request.personCalendar)
+    return [
+      `\nThis read-only calendar lookup concerns ${request.personCalendar.name}, not the owner's availability.`,
+      'Read all assistant-authorized calendars for the exact owner-clock window. Never infer attendance from a team calendar, roster name or event title. Only explicit attendee identity or a specifically named calendar can support a scoped report.',
+    ].join('\n');
   if (request.weeklyCalendarPlan) {
     return [
       '\nThis is a read-only weekly calendar review. Read free/busy and every event page for the exact owner-resolved week.',
@@ -288,6 +293,11 @@ function readLookupDirective(request: PersonalReadRequest): string {
  * one than a model told only to be careful.
  */
 function readAnswerDirective(request: PersonalReadRequest): string {
+  if (request.personCalendar)
+    return [
+      '\nThe named-person calendar reads have run. Answer only from the exact-window deterministic source summary.',
+      'Preserve personal-identity uncertainty, calendar-only scope and RSVP status. Neither an empty result nor owner free/busy proves this person is available.',
+    ].join('\n');
   if (request.weeklyCalendarPlan) {
     return [
       '\nThe required weekly calendar reads have run. Give a concise review-only plan from the deterministic source summary, with incomplete coverage and assumptions stated plainly.',
@@ -333,6 +343,7 @@ function personalReadNeedsAttention(
     weeklyPlanAssessment?: { coverageComplete: boolean; slotCount: number };
   },
 ): boolean {
+  if (request.personCalendar) return checked.blocked;
   if (request.upcomingFlightDiscovery && checked.blocked) return true;
   if (!request.weeklyCalendarPlan) return false;
   return (
