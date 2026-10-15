@@ -13,6 +13,32 @@ import {
 } from './live-lookup.js';
 
 describe('live lookup routing from home-screen regressions', () => {
+  it('keeps artifact privacy verification and readback out of public search', () => {
+    const request =
+      'Create one owner-private Google Doc titled "Fictional Workshop Brief", only if you can verify it will be accessible solely to my owner account. Use only these fictional facts: a workshop on 12 April 2030, budget US$120. Read it back and give the link. Do not share it.';
+    expect(detectLiveLookups([{ role: 'user', content: request }])).toEqual([]);
+  });
+  it.each([
+    'Create a private Google Doc titled "Budget notes" with my private draft. Look it up to verify access.',
+    'Create a private Google Doc titled "Budget notes" with my private draft. Search for that exact title first.',
+  ])('keeps ambiguous artifact lookup language authenticated: %s', (content) => {
+    expect(detectLiveLookups([{ role: 'user', content }])).toEqual([]);
+  });
+  it('preserves explicitly requested public research alongside artifact creation', () => {
+    expect(
+      detectLiveLookup([
+        {
+          role: 'user',
+          content: 'Search the web for official transit fares and create a Google Doc.',
+        },
+      ]),
+    ).toMatchObject({ kind: 'web' });
+  });
+  it('asks for a focused search query rather than repeatedly dispatching an over-limit request', () => {
+    const request = `Search the web for official transit fares. ${'Explain the current options and cite official sources. '.repeat(8)}`;
+    expect(request.length).toBeGreaterThan(256);
+    expect(nextLiveLookup({ kind: 'web', request }, [])).toEqual({ toolName: 'web.search' });
+  });
   it('leaves an explicit Google Doc read with the authenticated document reader', () => {
     expect(
       detectLiveLookup([

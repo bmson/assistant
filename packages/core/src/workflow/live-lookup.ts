@@ -1,5 +1,5 @@
 import { leagueNamedIn } from '../sports/leagues.js';
-import { requestedDocumentReadIntent } from './artifact-intent.js';
+import { requestedArtifactIntent, requestedDocumentReadIntent } from './artifact-intent.js';
 import {
   detectPersonalReadRequest,
   type ReadIntentMessage,
@@ -150,6 +150,11 @@ export function detectLiveLookup(
   // Before the generic web branch: "check the score" is a sports lookup, which
   // the scores tool answers directly instead of a search-then-fetch chain.
   if (isSportsRequest(request, asks)) return { kind: 'sports', request };
+  // Verifying an artifact's privacy or readback belongs to its authenticated
+  // tool flow. "Verify it" alone does not authorize searching the creation
+  // request (and its potentially private contents) on the public web.
+  if (requestedArtifactIntent(request) && !/\bsearch\s+(?:the\s+web|online)\b/i.test(request))
+    return undefined;
   if (SEARCH.test(request) || (asks && CURRENT.test(request) && PUBLIC_FACT.test(request))) {
     const previous = users.slice(-4, -1).findLast((text) => !CORRECTION.test(text));
     if (
@@ -537,7 +542,12 @@ export function nextLiveLookup(
   }
   const searches = rows.filter((row) => row.toolName === 'web.search');
   if (!searches.length && !rows.some((row) => row.toolName === 'web.fetch'))
-    return { toolName: 'web.search', input: { query: lookup.request, count: 5 } };
+    // Longer research requests need a focused model-generated query. Forcing
+    // an over-limit input repeats the same validation rejection every step.
+    return {
+      toolName: 'web.search',
+      ...(lookup.request.length <= 256 ? { input: { query: lookup.request, count: 5 } } : {}),
+    };
   if (rows.some((row) => row.toolName === 'web.fetch')) return undefined;
   for (const row of searches.filter(successfulLookup)) {
     const results = (row.result as { results?: Array<{ url?: string }> }).results;
