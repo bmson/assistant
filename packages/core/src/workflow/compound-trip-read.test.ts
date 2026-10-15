@@ -9,6 +9,7 @@ import {
   compoundTripThreadReadInputs,
   upcomingFlightReadProjection,
 } from './compound-trip-read.js';
+import { tripPrompt, tripSourceResult } from './compound-trip-source.test-fixtures.js';
 import {
   buildReadToolInput,
   detectPersonalReadRequest,
@@ -5537,5 +5538,191 @@ San Francisco (SFO-San Francisco Intl.)`;
     expect(compoundTripThreadIdsToRead(evidence, read)).not.toContain('shower');
     expect(compoundTripThreadIdsToRead(evidence, read)).not.toContain('spa');
     expect(compoundTripThreadIdsToRead(evidence, read)).not.toContain('newsletter');
+  });
+});
+
+describe('forwarded booked itinerary and rendered hotel source', () => {
+  function fixture() {
+    const read = detectPersonalReadRequest([{ role: 'user', content: tripPrompt }], {
+      now: new Date('2030-11-15T15:00:00Z'),
+      timeZone: 'America/New_York',
+    });
+    if (!read?.compoundTripDiscovery) throw new Error('Missing trip request');
+    const rows: ReadToolEvidence[] = [];
+    const add = (toolName: string, args: Record<string, unknown>) => {
+      const result = tripSourceResult(toolName, args);
+      rows.push({ toolName, args, result, status: 'succeeded', fromCurrentTask: true });
+    };
+    add('calendar.list_events', {
+      timeMin: read.timeWindow?.timeMin,
+      timeMax: read.timeWindow?.timeMax,
+      maxResults: 50,
+    });
+    for (const query of read.mailQueries?.map((entry) => entry.query) ?? [read.mailQuery])
+      add('gmail.search', { query, maxResults: 20 });
+    for (const threadId of ['flight-thread', 'hotel-thread'])
+      add('gmail.read_thread', {
+        threadId,
+        startMessageIndex: 0,
+        startMessageOffset: 0,
+        maxMessages: 20,
+        maxChars: 20000,
+      });
+    return { read, rows, add };
+  }
+
+  it('retains an actual booked stay and compares the inferred arrival route without inventing zones or next-flight identity', () => {
+    const { read, rows, add } = fixture();
+    const initial = compoundTripReadProjection(read, rows);
+    expect(initial.hotel).toMatchObject({
+      hotelName: 'Canal House',
+      address: 'Canal Street 42, Copenhagen',
+      city: 'Copenhagen',
+      checkIn: '2030-11-10',
+      checkOut: '2030-11-17',
+    });
+    expect(initial.routeOrigin).toBe('CPH Airport');
+    expect(initial.routeDestination).toBe('Canal Street 42, Copenhagen');
+    expect(initial.flight).toBeUndefined();
+    expect(initial.webQuery).toContain('Canal House');
+    add('maps.directions', { origin: initial.routeOrigin, destination: initial.routeDestination });
+    add('web.search', { query: initial.webQuery });
+    for (const url of ['https://transit.example/route', 'https://taxi.example/route'])
+      add('web.fetch', { url });
+    const final = compoundTripReadProjection(read, rows);
+    expect(final.comparison).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          mode: 'public transport',
+          fare: 'EUR 5',
+          duration: '40 minutes',
+          endpointMatched: true,
+        }),
+        expect.objectContaining({
+          mode: 'taxi',
+          fare: 'EUR 45',
+          duration: '30 minutes',
+          endpointMatched: true,
+        }),
+      ]),
+    );
+    expect(final.text).toContain('current-trip booking, not a newly departing trip');
+    expect(final.text).toContain('direction inferred from the reversed route groups');
+    expect(final.text).toContain('KL700 BOS→AMS');
+    expect(final.text).toContain('KL703 AMS→BOS');
+    expect(final.text).toContain('Same-itinerary calendar comparison for CPH→BOS');
+    expect(final.text).toContain('Calendar names Example Air');
+    expect(final.text).toContain('cannot establish an instant-level clock conflict');
+    expect(final.text).toContain(
+      'Their time zones and exact connection durations remain unverified',
+    );
+    expect(final.text).toContain(
+      '[Booking email](https://mail.google.com/mail/u/0/#all/hotel-thread)',
+    );
+    expect(final.text).not.toContain('did not identify a hotel');
+    expect(final.text).not.toContain('Europe/Copenhagen');
+    expect(final.blocked).toBe(true);
+  });
+
+  it('enriches a thin validated hotel extraction only from the same source message', () => {
+    const { read, rows } = fixture();
+    const extraction: CompoundTripExtraction = {
+      status: 'complete',
+      sourceMessageIds: ['flight-message', 'hotel-message'],
+      rejectedFacts: 0,
+      segments: [],
+      hotels: [
+        {
+          threadId: 'hotel-thread',
+          messageId: 'hotel-message',
+          sourceSubject: 'Hotel booked — Canal House',
+          checkIn: '2030-11-10',
+          checkOut: '2030-11-17',
+          quote: 'Check-in: November 10, 2030\nCheck-out: November 17, 2030',
+        },
+      ],
+    };
+    expect(compoundTripReadProjection(read, rows, extraction).hotel).toMatchObject({
+      hotelName: 'Canal House',
+      address: 'Canal Street 42, Copenhagen',
+    });
+    const hotel = extraction.hotels[0];
+    if (!hotel) throw new Error('Missing fixture hotel');
+    hotel.messageId = 'different-message';
+    // The independent source record may still stand on its own; it must not inherit the wrong message identity.
+    expect(compoundTripReadProjection(read, rows, extraction).hotel?.messageId).toBe(
+      'hotel-message',
+    );
+  });
+
+  it.each([
+    'second hotel',
+    'different city',
+    'wrong address repetition',
+    'broken connection',
+    'reversed dates',
+    'cancelled flight',
+    'incomplete hotel',
+  ])('does not enable a transfer from ambiguous or unsupported sources: %s', (failure) => {
+    const { read, rows } = fixture();
+    const hotel = rows.find(
+      (item) =>
+        item.toolName === 'gmail.read_thread' &&
+        (item.args as Record<string, unknown>)?.threadId === 'hotel-thread',
+    );
+    const flight = rows.find(
+      (item) =>
+        item.toolName === 'gmail.read_thread' &&
+        (item.args as Record<string, unknown>)?.threadId === 'flight-thread',
+    );
+    if (!hotel || !flight) throw new Error('Missing fixture');
+    const update = (source: ReadToolEvidence, replace: (body: string) => string) => {
+      const result = source.result as { messages: Array<{ text: string; sourceLength: number }> };
+      for (const message of result.messages) {
+        message.text = replace(message.text);
+        message.sourceLength = message.text.length;
+      }
+    };
+    if (failure === 'second hotel') {
+      const result = hotel.result as {
+        messages: Array<Record<string, unknown>>;
+        receipt: Record<string, unknown>;
+      };
+      const duplicate: Record<string, unknown> = {
+        ...result.messages[0],
+        messageId: 'another-hotel',
+      };
+      duplicate.text = String(duplicate.text).replaceAll('Canal House', 'Other House');
+      duplicate.sourceLength = String(duplicate.text).length;
+      result.messages.push(duplicate);
+      result.receipt.covered = { start: 0, offset: 0, end: 2, count: 2, total: 2, unavailable: 0 };
+    } else if (failure === 'different city')
+      update(hotel, (body) => body.replaceAll('Copenhagen', 'Elsewhere'));
+    else if (failure === 'wrong address repetition')
+      update(hotel, (body) => body.replace('Canal+Street+42', 'Other+Street+42'));
+    else if (failure === 'broken connection')
+      update(flight, (body) =>
+        body.replace(
+          'Amsterdam, Netherlands (AMS-Schiphol)\r\nARRIVAL\r\nNov 10',
+          'Elsewhere (XXX-Airport)\r\nARRIVAL\r\nNov 10',
+        ),
+      );
+    else if (failure === 'cancelled flight')
+      update(flight, (body) => `${body}\r\nThe flight is cancelled.`);
+    else if (failure === 'incomplete hotel') {
+      const result = hotel.result as Record<string, unknown>;
+      result.complete = false;
+      result.hasMore = true;
+      const receipt = result.receipt as Record<string, unknown>;
+      receipt.complete = false;
+      receipt.losses = ['coverage-unknown'];
+    } else
+      update(hotel, (body) =>
+        body.replace('Check-out: November 17, 2030', 'Check-out: November 9, 2030'),
+      );
+    const result = compoundTripReadProjection(read, rows);
+    expect(result.routeOrigin).toBeUndefined();
+    expect(result.webQuery).toBeUndefined();
+    expect(result.blocked).toBe(true);
   });
 });

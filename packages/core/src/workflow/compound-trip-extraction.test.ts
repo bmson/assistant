@@ -541,3 +541,90 @@ describe('bounded extraction outcome metadata', () => {
     expect(object).toHaveBeenCalledOnce();
   });
 });
+
+describe('canonical provider quote validation', () => {
+  it('retains source facts with ISO date fields and MIME newline-normalized quotes', async () => {
+    const body = `${flightQuote}\n${hotelQuote}`;
+    const facts = extractedFacts();
+    const first = facts.messages[0];
+    if (!first) throw new Error('Missing fixture');
+    const segment = first.segments[0];
+    const hotel = first.hotels[0];
+    if (!segment || !hotel) throw new Error('Missing facts');
+    segment.departureDate = '2026-10-22';
+    hotel.checkIn = '2026-10-22';
+    hotel.checkOut = '2026-10-24';
+    segment.quote = flightQuote.replace(', departing', ',\ndeparting');
+    const result = await extractCompoundTripBookings({
+      router: { object: vi.fn(async () => ({ ok: true, object: facts })) } as never,
+      taskId: 'canonical-provider-source',
+      request,
+      evidence: evidence(body.replace(', departing', ',\r\ndeparting')),
+    });
+    expect(result.rejectedFacts).toBe(0);
+    expect(result.segments[0]?.departureDate).toBe('2026-10-22');
+    expect(result.hotels[0]).toMatchObject({ checkIn: '2026-10-22', checkOut: '2026-10-24' });
+  });
+
+  it('does not accept an ISO field for a different source date or a rewritten quote', async () => {
+    const facts = extractedFacts();
+    const first = facts.messages[0];
+    if (!first?.segments[0] || !first.hotels[0]) throw new Error('Missing fixture');
+    first.segments[0].departureDate = '2026-10-23';
+    first.hotels[0].quote = hotelQuote.replace('Hotel Linden', 'Hotel Invented');
+    const result = await extractCompoundTripBookings({
+      router: { object: vi.fn(async () => ({ ok: true, object: facts })) } as never,
+      taskId: 'rewritten-provider-source',
+      request,
+      evidence: evidence(),
+    });
+    expect(result.segments).toEqual([]);
+    expect(result.hotels).toEqual([]);
+    expect(result.rejectedFacts).toBe(2);
+  });
+});
+
+it.each([
+  { clock: '13:45', count: 1 },
+  { clock: '01:45 AM', count: 0 },
+])(
+  'normalizes equivalent source clocks but preserves AM/PM polarity: $clock',
+  async ({ clock, count }) => {
+    const body = flightQuote.replace('21:10', '1:45 pm');
+    const facts = extractedFacts();
+    const first = facts.messages[0];
+    if (!first?.segments[0]) throw new Error('Missing fixture');
+    first.hotels = [];
+    first.segments[0].departureTime = clock;
+    first.segments[0].quote = body;
+    const result = await extractCompoundTripBookings({
+      router: { object: vi.fn(async () => ({ ok: true, object: facts })) } as never,
+      taskId: 'canonical-source-clock',
+      request,
+      evidence: evidence(body),
+    });
+    expect(result.segments).toHaveLength(count);
+  },
+);
+
+it('keeps a dated flight fact while refusing an unsupported direction label', async () => {
+  const body = flightQuote.replace('departing', 'scheduled for');
+  const facts = extractedFacts();
+  const first = facts.messages[0];
+  if (!first?.segments[0]) throw new Error('Missing fixture');
+  first.hotels = [];
+  first.segments[0].quote = body;
+  const result = await extractCompoundTripBookings({
+    router: { object: vi.fn(async () => ({ ok: true, object: facts })) } as never,
+    taskId: 'unsupported-direction',
+    request,
+    evidence: evidence(body),
+  });
+  expect(result.rejectedFacts).toBe(0);
+  expect(result.segments[0]).toMatchObject({
+    flightNumber: 'LH401',
+    departureDate: '2026-10-22',
+    departureTimeZone: 'Europe/Berlin',
+    direction: 'unknown',
+  });
+});
