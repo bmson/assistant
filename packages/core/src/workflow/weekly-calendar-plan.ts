@@ -1,5 +1,7 @@
+import type { BriefingCalendarEvent } from './briefing.js';
 import type { CalendarPlanOptions } from './calendar-plan-intent.js';
-import { calendarSourceInterval } from './calendar-read-window.js';
+import { calendarCivilBoundary, calendarSourceInterval } from './calendar-read-window.js';
+import { calendarRelationship } from './calendar-relationship.js';
 import type { ActionEvidence } from './response-contract.js';
 
 const SLOT_MS = 15 * 60_000;
@@ -50,6 +52,26 @@ function mergeIntervals(
     else merged.push({ ...interval });
   }
   return merged;
+}
+
+function subtractIntervals(
+  intervals: Array<{ start: number; end: number }>,
+  exclusions: Array<{ start: number; end: number }>,
+): Array<{ start: number; end: number }> {
+  return intervals.flatMap((interval) => {
+    let remaining = [{ ...interval }];
+    for (const exclusion of exclusions) {
+      remaining = remaining.flatMap((part) => {
+        if (!overlap(part, exclusion)) return [part];
+        return [
+          ...(part.start < exclusion.start ? [{ start: part.start, end: exclusion.start }] : []),
+          ...(exclusion.end < part.end ? [{ start: exclusion.end, end: part.end }] : []),
+        ];
+      });
+      if (remaining.length === 0) break;
+    }
+    return remaining;
+  });
 }
 
 function localParts(
@@ -142,6 +164,64 @@ function eventIdentity(event: PlainRecord): string {
     return `ical:${event.iCalUID}\0${occurrence}`;
   const stable = event.recurringEventId ?? event.eventId ?? event.summary ?? '';
   return `calendar:${String(event.calendarId ?? event.calendar ?? '')}\0${String(stable)}\0${occurrence}`;
+}
+
+function relationshipEvent(event: PlainRecord): BriefingCalendarEvent {
+  return {
+    summary: safeText(event.summary, 100),
+    start: typeof event.start === 'string' ? event.start : '',
+    end: typeof event.end === 'string' ? event.end : '',
+    calendar: safeText(event.calendar, 100),
+    allDay: event.allDay === true,
+    ...(typeof event.calendarId === 'string' ? { calendarId: event.calendarId } : {}),
+    ...(typeof event.eventId === 'string' ? { eventId: event.eventId } : {}),
+    ...(typeof event.iCalUID === 'string' ? { iCalUID: event.iCalUID } : {}),
+    ...(typeof event.recurringEventId === 'string'
+      ? { recurringEventId: event.recurringEventId }
+      : {}),
+    ...(typeof event.originalStartTime === 'string'
+      ? { originalStartTime: event.originalStartTime }
+      : {}),
+    ...(typeof event.status === 'string' ? { status: event.status } : {}),
+    ...(typeof event.blocksTime === 'boolean' ? { blocksTime: event.blocksTime } : {}),
+    ...(typeof event.ownerResponse === 'string' ? { ownerResponse: event.ownerResponse } : {}),
+    ...(typeof event.location === 'string' ? { location: event.location } : {}),
+    ...(typeof event.description === 'string' ? { description: event.description } : {}),
+  };
+}
+
+function planWorkingDays(
+  start: number,
+  end: number,
+  timeZone: string,
+  count: number | undefined,
+): Array<{ day: string; start: number; end: number }> | undefined {
+  if (!count) return undefined;
+  const localStart = localParts(start, timeZone)?.day;
+  if (!localStart) return [];
+  const cursor = new Date(`${localStart}T12:00:00.000Z`);
+  if (!Number.isFinite(cursor.getTime())) return [];
+  const days: Array<{ day: string; start: number; end: number }> = [];
+  for (let attempts = 0; attempts < 370 && days.length < count; attempts += 1) {
+    const day = cursor.toISOString().slice(0, 10);
+    const weekday = cursor.getUTCDay();
+    const next = new Date(cursor);
+    next.setUTCDate(next.getUTCDate() + 1);
+    const dayStart = calendarCivilBoundary(day, timeZone);
+    const dayEnd = calendarCivilBoundary(next.toISOString().slice(0, 10), timeZone);
+    if (
+      weekday !== 0 &&
+      weekday !== 6 &&
+      dayStart !== undefined &&
+      dayEnd !== undefined &&
+      dayStart < end &&
+      dayEnd > start
+    )
+      days.push({ day, start: Math.max(start, dayStart), end: Math.min(end, dayEnd) });
+    if (dayStart !== undefined && dayStart >= end) break;
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return days;
 }
 
 function attendance(event: PlainRecord): 'attending' | 'potential' | 'not-attending' {
@@ -494,6 +574,10 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     );
   }
   const timeZone = input.timeZone;
+  const selectedWorkingDays = planWorkingDays(start, end, timeZone, input.plan?.workingDays);
+  const selectedWorkingDayKeys = selectedWorkingDays
+    ? new Set(selectedWorkingDays.map(({ day }) => day))
+    : undefined;
 
   const availabilityRows = input.evidence.filter((row) => {
     const args = record(row.args);
@@ -697,6 +781,16 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const allDayEventBusy = allDayBusySources.map(({ interval }) => interval);
   if (unresolvedAllDayBlockingEvent) allDayEventBusy.push({ start, end });
   const busyMerged = mergeIntervals([...candidateBusy, ...eventBusy, ...allDayEventBusy]);
+  // All-day holds and identified multi-day lodging still block focus selection,
+  // but are not meeting workload. Subtract only the calendar-source spans we
+  // can identify; timed meetings are added back from their exact event spans.
+  const workloadBusyMerged = mergeIntervals([
+    ...subtractIntervals(
+      candidateBusy,
+      allDayBusySources.map(({ interval }) => interval),
+    ),
+    ...eventBusy,
+  ]);
   const potentialFocusIntervals: Array<{ start: number; end: number }> = [];
 
   const dayStats = new Map<
@@ -708,7 +802,14 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   >();
   for (let at = start; at + focusMs + breakMs <= end; at += SLOT_MS) {
     const parts = localParts(at, input.timeZone);
-    if (!parts || parts.weekday === 0 || parts.weekday === 6 || parts.hour < 9 || parts.hour >= 17)
+    if (
+      !parts ||
+      parts.weekday === 0 ||
+      parts.weekday === 6 ||
+      (selectedWorkingDayKeys && !selectedWorkingDayKeys.has(parts.day)) ||
+      parts.hour < 9 ||
+      parts.hour >= 17
+    )
       continue;
     const day = dayStats.get(parts.day) ?? { busyMs: 0, candidates: [] };
     dayStats.set(parts.day, day);
@@ -744,10 +845,20 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
 
   for (let at = start; at < end; at += SLOT_MS) {
     const parts = localParts(at, input.timeZone);
-    if (!parts || parts.weekday === 0 || parts.weekday === 6 || parts.hour < 9 || parts.hour >= 17)
+    if (
+      !parts ||
+      parts.weekday === 0 ||
+      parts.weekday === 6 ||
+      (selectedWorkingDayKeys && !selectedWorkingDayKeys.has(parts.day)) ||
+      parts.hour < 9 ||
+      parts.hour >= 17
+    )
       continue;
     const stats = dayStats.get(parts.day);
-    if (stats && busyMerged.some((interval) => interval.start < at + SLOT_MS && at < interval.end))
+    if (
+      stats &&
+      workloadBusyMerged.some((interval) => interval.start < at + SLOT_MS && at < interval.end)
+    )
       stats.busyMs += SLOT_MS;
   }
 
@@ -777,6 +888,8 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const conflictPairs: string[] = [];
   const confirmedConflictPairs: string[] = [];
   const possibleOverlapPairs: string[] = [];
+  const duplicateListingPairs: string[] = [];
+  const probableDuplicatePairs = new Set<string>();
   const potentialAttendanceEvents: string[] = [];
   const conflictEvents = uniqueEvents
     .filter((event) => attendance(event) !== 'not-attending' && event.allDay !== true)
@@ -803,11 +916,37 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         !overlap(left.interval, right.interval)
       )
         continue;
+      const pair = `${eventTitle(left.event)} and ${eventTitle(right.event)}`;
+      const overlappingInterval = {
+        start: Math.max(left.interval.start, right.interval.start, start),
+        end: Math.min(left.interval.end, right.interval.end, end),
+      };
+      if (
+        overlappingInterval.end <= overlappingInterval.start ||
+        (selectedWorkingDays &&
+          !selectedWorkingDays.some(
+            (day) => day.start < overlappingInterval.end && overlappingInterval.start < day.end,
+          ))
+      )
+        continue;
+      const relationship = calendarRelationship(
+        relationshipEvent(left.event),
+        relationshipEvent(right.event),
+      );
+      if (relationship === 'probable_duplicate') {
+        const pairKey = [eventIdentity(left.event), eventIdentity(right.event)].sort().join('\0');
+        if (!probableDuplicatePairs.has(pairKey)) {
+          probableDuplicatePairs.add(pairKey);
+          duplicateListingPairs.push(
+            `Possible duplicate listing: ${pair} at ${labelTime(overlappingInterval.start, input.timeZone)}; both source records are retained because matching occurrence identity is unverified. Sources: ${calendarSourceReference(left.event)}; ${calendarSourceReference(right.event)}.`,
+          );
+        }
+        continue;
+      }
       const verified = left.presence === 'attending' && right.presence === 'attending';
       const uncertainLongContext =
         (isExtendedContext(left.interval) && !isExtendedLodging(left.event, left.interval)) ||
         (isExtendedContext(right.interval) && !isExtendedLodging(right.event, right.interval));
-      const pair = `${eventTitle(left.event)} and ${eventTitle(right.event)}`;
       if (verified && !uncertainLongContext) confirmedConflictPairs.push(pair);
       else {
         possibleOverlapPairs.push(pair);
@@ -829,10 +968,17 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const eveningStats = new Map<string, { busyMs: number; events: Map<string, PlainRecord> }>();
   for (let at = start; at + SLOT_MS <= end; at += SLOT_MS) {
     const parts = localParts(at, timeZone);
-    if (!parts || parts.weekday === 0 || parts.weekday === 6 || parts.hour < 17) continue;
+    if (
+      !parts ||
+      parts.weekday === 0 ||
+      parts.weekday === 6 ||
+      (selectedWorkingDayKeys && !selectedWorkingDayKeys.has(parts.day)) ||
+      parts.hour < 17
+    )
+      continue;
     const slot = { start: at, end: at + SLOT_MS };
     const stats = eveningStats.get(parts.day) ?? { busyMs: 0, events: new Map() };
-    if (busyMerged.some((interval) => overlap(interval, slot))) stats.busyMs += SLOT_MS;
+    if (workloadBusyMerged.some((interval) => overlap(interval, slot))) stats.busyMs += SLOT_MS;
     for (const item of conflictEvents) {
       if (overlap(item.interval, slot)) stats.events.set(eventIdentity(item.event), item.event);
     }
@@ -921,13 +1067,17 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     );
   if (allDayBusySources.length > 0)
     lines.push(
-      `All-day busy holds included in the load estimates: ${allDayBusySources
+      `All-day holds that still block focus time (not counted as meeting workload): ${allDayBusySources
         .slice(0, 3)
         .map(
           ({ event, interval }) =>
             `${calendarSourceReference(event)} (${labelTime(interval.start, timeZone)}–${labelTime(interval.end, timeZone)})`,
         )
-        .join('; ')}. These records block time but do not establish continuous meeting attendance.`,
+        .join('; ')}. These records do not establish continuous meeting attendance.`,
+    );
+  if (explainedLodgingBusy.size > 0)
+    lines.push(
+      'Identified multi-day lodging is excluded from meeting workload estimates; any conditional focus candidate still depends on the provider’s busy interval being lodging context.',
     );
   if (!complete) {
     lines.push(
@@ -955,6 +1105,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     lines.push(
       'I included those location-based buffers conservatively where shared-calendar attendance is unconfirmed. Confirm attendance and actual travel time before relying on the plan.',
     );
+  if (duplicateListingPairs.length > 0) lines.push(...duplicateListingPairs.slice(0, 5));
   if (conflictPairs.length > 0) lines.push(...conflictPairs.slice(0, 5));
   if (conflictPairs.some((line) => line.startsWith('Scheduling conflict:')))
     lines.push(
@@ -964,8 +1115,12 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     lines.push(
       `Recommended next step: confirm attendance for ${attendanceCheck}. If both events are required in an overlap, choose one to reschedule; leave the calendar unchanged until attendance is clear.`,
     );
-  if (conflictPairs.length === 0 && complete)
+  if (conflictPairs.length === 0 && duplicateListingPairs.length === 0 && complete)
     lines.push('I found no overlapping attended events in the checked calendar data.');
+  if (conflictPairs.length === 0 && duplicateListingPairs.length > 0)
+    lines.push(
+      'Recommended next step: check whether the duplicate source records describe one occurrence before treating them as separate commitments.',
+    );
   if (overloads.length > 0) lines.push(...overloads.slice(0, 5));
   else if (!busyValid) lines.push('I could not assess overloaded days from usable free/busy data.');
   else

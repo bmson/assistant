@@ -1835,6 +1835,182 @@ describe('requested focus-plan variations', () => {
     expect(answer.text).not.toMatch(/- Mon, Oct 12, (9|10):00 AM/);
     expect(answer.text).toContain('I haven’t changed your calendar');
   });
+
+  it('limits a working-day plan to its selected weekdays and separates all-day load from meetings', () => {
+    const start = '2026-10-15T07:00:00.000Z'; // Thu 00:00 in Los Angeles
+    const end = '2026-10-20T07:00:00.000Z'; // Tue 00:00, exclusive
+    const allDayBusy = {
+      eventId: 'all-day-travel-hold',
+      calendarId: 'travel',
+      summary: 'Travel hold',
+      start: '2026-10-15',
+      end: '2026-10-16',
+      calendarTimeZone: 'America/Los_Angeles',
+      allDay: true,
+      ownerResponse: 'accepted',
+      blocksTime: true,
+    };
+    const sportsA = {
+      eventId: 'sports-a',
+      calendarId: 'sports-one',
+      summary: 'Alameda Soccer',
+      start: '2026-10-16T17:00:00Z',
+      end: '2026-10-16T18:00:00Z',
+      location: 'Field 1',
+      ownerResponse: 'accepted',
+      blocksTime: true,
+    };
+    const sportsB = {
+      ...sportsA,
+      eventId: 'sports-b',
+      calendarId: 'sports-two',
+    };
+    const mondayA = {
+      eventId: 'meeting-a',
+      calendarId: 'work-one',
+      summary: 'Project review',
+      start: '2026-10-19T16:00:00Z',
+      end: '2026-10-19T17:00:00Z',
+      ownerResponse: 'accepted',
+      blocksTime: true,
+    };
+    const mondayB = {
+      ...mondayA,
+      eventId: 'meeting-b',
+      calendarId: 'work-two',
+      summary: 'Budget review',
+    };
+    const weekendA = {
+      eventId: 'weekend-a',
+      calendarId: 'weekend-one',
+      summary: 'Weekend appointment',
+      start: '2026-10-17T17:00:00Z',
+      end: '2026-10-17T18:00:00Z',
+      ownerResponse: 'accepted',
+      blocksTime: true,
+    };
+    const weekendB = {
+      ...weekendA,
+      eventId: 'weekend-b',
+      calendarId: 'weekend-two',
+      summary: 'Weekend presentation',
+    };
+    const rows = evidence({
+      timeMin: start,
+      timeMax: end,
+      busy: [
+        {
+          start: '2026-10-15T07:00:00Z',
+          end: '2026-10-16T07:00:00Z',
+          calendar: 'Travel',
+        },
+      ],
+      pages: [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          args: { timeMin: start, timeMax: end, maxResults: 50 },
+          result: {
+            events: [allDayBusy, sportsA, sportsB, mondayA, mondayB, weekendA, weekendB],
+            complete: true,
+            calendarRosterComplete: true,
+            unavailable: [],
+          },
+        },
+      ],
+    });
+    const result = weeklyCalendarPlanResult({
+      timeMin: start,
+      timeMax: end,
+      timeZone: 'America/Los_Angeles',
+      evidence: rows as never,
+      plan: threeDayPlan,
+    });
+
+    expect(result.text).toContain('Possible duplicate listing: Alameda Soccer and Alameda Soccer');
+    expect(result.text).not.toContain('Scheduling conflict: Alameda Soccer');
+    expect(result.text).not.toContain('Possible overlap: Alameda Soccer');
+    expect(result.text).toContain('Scheduling conflict: Project review and Budget review');
+    expect(result.text).not.toContain('Sat, Oct 17');
+    expect(result.text).not.toContain('Sun, Oct 18');
+    expect(result.text).toContain(
+      'All-day holds that still block focus time (not counted as meeting workload)',
+    );
+    expect(result.text).not.toContain('Overloaded-day estimate: Thu, Oct 15');
+    expect(result.text).toContain('Travel hold');
+    expect(result.slotCount).toBe(2);
+  });
+
+  it('keeps working-day selection on local civil dates across a DST fallback weekend', () => {
+    const start = '2026-10-31T07:00:00.000Z'; // Sat 00:00 in Los Angeles
+    const end = '2026-11-04T08:00:00.000Z'; // Wed 00:00 after fallback, exclusive
+    const sundayA = {
+      eventId: 'sunday-a',
+      calendarId: 'sunday-one',
+      summary: 'Sunday appointment',
+      start: '2026-11-01T17:00:00Z',
+      end: '2026-11-01T18:00:00Z',
+      ownerResponse: 'accepted',
+      blocksTime: true,
+    };
+    const sundayB = {
+      ...sundayA,
+      eventId: 'sunday-b',
+      calendarId: 'sunday-two',
+      summary: 'Sunday review',
+    };
+    const mondayA = {
+      eventId: 'monday-a',
+      calendarId: 'monday-one',
+      summary: 'Monday review',
+      start: '2026-11-02T18:00:00Z',
+      end: '2026-11-02T19:00:00Z',
+      ownerResponse: 'accepted',
+      blocksTime: true,
+    };
+    const mondayB = {
+      ...mondayA,
+      eventId: 'monday-b',
+      calendarId: 'monday-two',
+      summary: 'Monday planning',
+    };
+    const rows = evidence({
+      timeMin: start,
+      timeMax: end,
+      pages: [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          args: { timeMin: start, timeMax: end, maxResults: 50 },
+          result: {
+            events: [sundayA, sundayB, mondayA, mondayB],
+            complete: true,
+            calendarRosterComplete: true,
+            unavailable: [],
+          },
+        },
+      ],
+    });
+    const result = weeklyCalendarPlanResult({
+      timeMin: start,
+      timeMax: end,
+      timeZone: 'America/Los_Angeles',
+      evidence: rows as never,
+      plan: {
+        focusMinutes: 60,
+        slotCount: 2,
+        breakMinutes: 15,
+        windowLabel: 'the next 2 working days',
+        workingDays: 2,
+      },
+    });
+
+    expect(result.text).not.toContain('Sunday');
+    expect(result.text).toContain('Scheduling conflict: Monday review and Monday planning');
+    expect(result.text).toContain('Mon, Nov 2');
+    expect(result.text).toContain('Tue, Nov 3');
+    expect(result.slotCount).toBe(2);
+  });
   it.each(['Online', 'https://zoom.us/j/123', 'Microsoft Teams', 'Google Meet', 'Virtual meeting'])(
     'does not invent physical travel buffers for %s',
     (location) => {

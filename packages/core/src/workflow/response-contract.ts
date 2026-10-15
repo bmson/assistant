@@ -1648,13 +1648,45 @@ function compactAllDaySourceDetail(
   const startsAtMidnight = clockOnly(new Date(overlapStart).toISOString(), zone) === '00:00';
   const endsAtMidnight = clockOnly(new Date(overlapEnd).toISOString(), zone) === '00:00';
   const sameDay =
-    shortDate(new Date(overlapStart).toISOString(), zone) ===
-    shortDate(new Date(overlapEnd - 1).toISOString(), zone);
+    eventLocalDay(new Date(overlapStart).toISOString(), zone) ===
+    eventLocalDay(new Date(overlapEnd - 1).toISOString(), zone);
   const localExtent =
     sameDay && startsAtMidnight && endsAtMidnight
       ? `all of ${shortDate(new Date(overlapStart).toISOString(), zone)}`
       : compactLocalRange(overlapStart, overlapEnd, zone);
   return `${sourceDate}; local window ${localExtent}`;
+}
+
+function compactEventStatus(event: Record<string, unknown>): string {
+  const attendance =
+    typeof event.ownerResponse === 'string' &&
+    /^(?:accepted|declined|tentative|needsAction)$/i.test(event.ownerResponse)
+      ? `attendance ${event.ownerResponse.toLowerCase()}`
+      : '';
+  const availability =
+    typeof event.blocksTime === 'boolean'
+      ? event.blocksTime
+        ? 'blocks time'
+        : 'does not block time'
+      : '';
+  return [availability, attendance].filter(Boolean).join('; ');
+}
+
+function compactEventTitleLink(title: string, url: string): string {
+  const safeTitle = title
+    .replace(/[\p{Cc}\u202a-\u202e\u2066-\u2069]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/([\\`*_{}[\]()#+.!|>~-])/g, '\\$1');
+  if (!url) return safeTitle;
+  try {
+    const parsed = new URL(url);
+    if (!['https:', 'http:'].includes(parsed.protocol) || parsed.username || parsed.password)
+      return safeTitle;
+    return `[${safeTitle}](${parsed.href.replaceAll('\\', '\\\\').replaceAll('(', '\\(').replaceAll(')', '\\)')})`;
+  } catch {
+    return safeTitle;
+  }
 }
 
 function compactEventSpan(start: string, end: string, timeZone: string): string {
@@ -3815,11 +3847,16 @@ export function verifiedReadResponse(
                   : ''
                 : '';
           if (request.compactCalendarBriefing) {
-            const linkedTitle = compactUrl ? `[${summary}](${compactUrl})` : summary;
-            const calendarLabel = calendar ? ` (${calendar})` : '';
+            const linkedTitle = compactEventTitleLink(summary, compactUrl);
+            const calendarLabel = calendar ? ` (${compactEventTitleLink(calendar, '')})` : '';
+            const status = compactEventStatus(event);
             if (allDay) {
-              compactAllDayItems.push(`${linkedTitle}${calendarLabel}`);
-              compactAllDayDetails.push(`${summary}: ${compactAllDaySourceDetail(event, request)}`);
+              compactAllDayItems.push(
+                `${linkedTitle}${calendarLabel}${status ? ` (${status})` : ''}`,
+              );
+              compactAllDayDetails.push(
+                `${compactEventTitleLink(summary, '')}: ${compactEventTitleLink(compactAllDaySourceDetail(event, request), '')}`,
+              );
             } else {
               const eventStart = Date.parse(rawStart);
               const eventEnd = Date.parse(rawEnd);
@@ -3830,18 +3867,6 @@ export function verifiedReadResponse(
                 Number.isFinite(windowStart) &&
                 eventStart < windowStart &&
                 eventEnd > windowStart;
-              const attendance =
-                typeof event.ownerResponse === 'string' &&
-                /^(?:accepted|declined|tentative|needsAction)$/i.test(event.ownerResponse)
-                  ? `attendance ${event.ownerResponse.toLowerCase()}`
-                  : '';
-              const availability =
-                typeof event.blocksTime === 'boolean'
-                  ? event.blocksTime
-                    ? 'blocks time'
-                    : 'does not block time'
-                  : '';
-              const status = [availability, attendance].filter(Boolean).join('; ');
               if (ongoing) {
                 compactOngoingItems.push(
                   `${linkedTitle}${calendarLabel} — ${compactEventSpan(rawStart, rawEnd, request.timeZone ?? 'UTC')}${status ? ` (${status})` : ''}`,

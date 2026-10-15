@@ -242,6 +242,8 @@ describe('calendar day and practical briefing fidelity', () => {
       end: '2026-10-17',
       allDay: true,
       calendarTimeZone: 'Europe/Berlin',
+      blocksTime: true,
+      ownerResponse: 'accepted',
       links: link('berlin-day'),
     };
     const utc = {
@@ -275,6 +277,7 @@ describe('calendar day and practical briefing fidelity', () => {
     );
 
     expect(response).toContain('- All day: [Payday]');
+    expect(response).toContain('(blocks time; attendance accepted)');
     expect(response).toContain('[Team offsite]');
     expect(response).toContain('Local holiday (Family)');
     expect(response).not.toContain('[Local holiday](');
@@ -288,9 +291,32 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain('local window Fri 16 Oct 12:00 AM–3:00 PM');
     expect(response).toContain('local window Fri 16 Oct 12:00 AM–5:00 PM');
     expect(response).toContain('local window all of Fri 16 Oct');
-    expect(response).toContain('source date 2026-10-15–2026-10-17 (Europe/Berlin)');
+    expect(response).toContain('source date 2026\\-10\\-15–2026\\-10\\-17 \\(Europe/Berlin\\)');
     expect(response.match(/All-day record/g)).toBeNull();
     expect(response.match(/Open in Google Calendar/g)).toBeNull();
+  });
+
+  it('escapes untrusted event titles before using them as compact source-link labels', () => {
+    const compactRequest = { ...request, compactCalendarBriefing: true };
+    const injectedTitle = {
+      ...floating,
+      eventId: 'injected-title',
+      summary: 'Danger ](javascript:alert(1))',
+      start: '2026-10-15',
+      end: '2026-10-16',
+      calendarTimeZone: 'America/Los_Angeles',
+      links: link('safe-event'),
+    };
+    const response = verifiedReadResponse(
+      compactRequest,
+      evidence([injectedTitle], true, compactRequest),
+    );
+
+    expect(response).toContain(
+      '[Danger \\]\\(javascript:alert\\(1\\)\\)](https://calendar.google.com/event?eid=safe-event)',
+    );
+    expect(response).not.toContain('](javascript:');
+    expect(response).toContain('event?eid=safe-event');
   });
 
   it('computes compact source-day intersections across the local DST fallback day', () => {
@@ -315,7 +341,7 @@ describe('calendar day and practical briefing fidelity', () => {
     };
     const response = verifiedReadResponse(dstRequest, evidence([berlinDay], true, dstRequest));
 
-    expect(response).toContain('source date 2026-11-01 (Europe/Berlin)');
+    expect(response).toContain('source date 2026\\-11\\-01 \\(Europe/Berlin\\)');
     expect(response).toContain('local window Sun 1 Nov 12:00 AM–3:00 PM');
     expect(response).toContain('event?eid=dst-berlin-day');
   });
