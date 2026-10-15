@@ -2255,6 +2255,64 @@ describe('compound trip read projection', () => {
     });
   });
 
+  it('does not let a shared PNR make cancellation of one flight invalidate another leg', () => {
+    const { read, evidence, flightMessage } = sameMessageCancellationReplacementEvidence();
+    if (typeof flightMessage.text !== 'string') throw new Error('Expected source flight message');
+    const sourceText = flightMessage.text;
+    const rewrittenText = sourceText
+      .replaceAll('OLD-123', 'SHARED-556')
+      .replaceAll('NEW-556', 'SHARED-556');
+    flightMessage.text = rewrittenText;
+    flightMessage.sourceLength = rewrittenText.length;
+    const calendarResult = evidence[0]?.result as Record<string, unknown> | undefined;
+    const calendarEvents = calendarResult?.events as Array<Record<string, unknown>> | undefined;
+    if (!calendarEvents?.[0]) throw new Error('Expected replacement flight calendar event');
+    calendarEvents[0].description = 'Arrival airport: BER. Booking reference: SHARED-556';
+    const extraction: CompoundTripExtraction = {
+      status: 'complete',
+      segments: [
+        {
+          threadId: 'flight-booking-thread',
+          messageId: String(flightMessage.messageId),
+          subject: String(flightMessage.subject),
+          bookingReference: 'SHARED-556',
+          flightNumber: 'CD456',
+          departureDate: '2026-10-17',
+          departureTime: '10:10',
+          departureTimeZone: 'Europe/Berlin',
+          arrivalDate: '2026-10-17',
+          arrivalTime: '13:10',
+          arrivalTimeZone: 'Europe/Berlin',
+          originAirport: 'SFO',
+          destinationAirport: 'BER',
+          direction: 'outbound',
+          excerpt: 'Flight CD 456 (booking reference: SHARED-556) is confirmed.',
+        },
+      ],
+      hotels: [],
+      rejectedFacts: 1,
+      sourceMessageIds: [String(flightMessage.messageId)],
+    };
+
+    const structuredProjection = compoundTripReadProjection(read, evidence, extraction);
+    expect(structuredProjection.flight?.segment).toMatchObject({
+      flightNumber: 'CD456',
+      bookingReference: 'SHARED-556',
+    });
+
+    const fallbackProjection = compoundTripReadProjection(read, evidence, {
+      status: 'complete',
+      segments: [],
+      hotels: [],
+      rejectedFacts: 0,
+      sourceMessageIds: [String(flightMessage.messageId)],
+    });
+    expect(fallbackProjection.flight?.segment).toMatchObject({
+      flightNumber: 'CD456',
+      bookingReference: 'SHARED-556',
+    });
+  });
+
   it('does not treat a cancellation warning or insurance notice as an invalidation', () => {
     const read = request();
     const evidence = [completeCalendarEvents([calendarFlight()]), ...bookingEmailEvidence()];
@@ -2269,7 +2327,7 @@ describe('compound trip read projection', () => {
     if (!flightMessage || typeof flightMessage.text !== 'string')
       throw new Error('Expected complete flight booking source');
     flightMessage.text +=
-      '\nIf your flight has been cancelled, contact support. You cannot cancel this flight online; cancellation insurance is confirmed.';
+      '\nIf your flight has been cancelled, contact support. You cannot cancel this flight online; cancellation insurance is confirmed. Your flight AB123 has not been cancelled. Your flight is not going to be cancelled.';
     flightMessage.sourceLength = flightMessage.text.length;
     const extraction: CompoundTripExtraction = {
       status: 'complete',

@@ -1970,7 +1970,13 @@ function explicitBookingInvalidation(
   const reverseAction = '(?:cancelled|canceled|voided|rejected|declined|denied)\\s+';
   const statements = body
     .split(/(?<=[.!?])\s+|\n/)
-    .filter((statement) => !/^\s*(?:if|when|unless|whether|in case|assuming)\b/i.test(statement));
+    .filter(
+      (statement) =>
+        !/^\s*(?:if|when|unless|whether|in case|assuming)\b/i.test(statement) &&
+        !/\b(?:not|never|no longer|not yet|isn't|wasn't|aren't|weren't|hasn't|haven't|hadn't)\s+(?:\w+\s+){0,4}(?:cancelled|canceled|voided|refunded|rejected|declined|denied)\b/i.test(
+          statement,
+        ),
+    );
   const flightPattern = new RegExp(
     `\\b(?:flight|airline itinerary)\\b[^.!?\\n]{0,60}\\b${action}\\b|\\b${reverseAction}(?:flight|airline itinerary)\\b|\\bflight\\s+(?:cancellation|rejection|denial)\\s+(?:is|was)\\s+confirmed\\b`,
     'i',
@@ -2030,6 +2036,16 @@ function sourceFactInvalidated(
         invalidation.hotelName ||
         invalidation.dates.length,
     );
+    // A PNR identifies a reservation, which may contain multiple flight legs.
+    // An explicit conflicting flight number is stronger evidence than a shared
+    // reservation reference and must not invalidate the other leg.
+    if (
+      kind === 'flight' &&
+      fact.flightNumber &&
+      invalidation.flightNumber &&
+      fact.flightNumber !== invalidation.flightNumber
+    )
+      return false;
     if (fact.bookingReference && invalidation.bookingReference)
       return fact.bookingReference === invalidation.bookingReference;
     if (kind === 'flight' && fact.flightNumber && invalidation.flightNumber) {
