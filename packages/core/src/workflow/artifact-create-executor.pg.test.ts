@@ -108,6 +108,7 @@ describe('new artifact request action boundaries in the real executor', () => {
           {
             fileId: 'ExistingDocId12345',
             name: title,
+            mimeType: 'application/vnd.google-apps.document',
             url: 'https://docs.google.com/document/d/ExistingDocId12345/edit',
           },
         ],

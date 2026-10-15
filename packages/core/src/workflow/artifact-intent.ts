@@ -109,7 +109,9 @@ export function conditionalArtifactPreflight(
         !file ||
         file.name !== intent.exactTitle ||
         typeof file.fileId !== 'string' ||
-        !/^[A-Za-z0-9_-]{10,200}$/.test(file.fileId),
+        !/^[A-Za-z0-9_-]{10,200}$/.test(file.fileId) ||
+        typeof file.mimeType !== 'string' ||
+        !file.mimeType,
     )
   ) {
     return {
@@ -120,6 +122,18 @@ export function conditionalArtifactPreflight(
   if (files.length > 1)
     return { status: 'blocked', reason: 'More than one accessible file has that exact title.' };
   if (files.length === 0) return { status: 'absent' };
+  const expectedMimeType =
+    intent.toolName === 'docs.create'
+      ? 'application/vnd.google-apps.document'
+      : intent.toolName === 'sheets.create'
+        ? 'application/vnd.google-apps.spreadsheet'
+        : 'application/vnd.google-apps.presentation';
+  if (files[0]?.mimeType !== expectedMimeType) {
+    return {
+      status: 'blocked',
+      reason: `A file has that exact title, but it is not the requested ${intent.label} type.`,
+    };
+  }
   if (intent.ownerOnly && result.sharingVerification !== 'verified_owner_only') {
     return {
       status: 'blocked',

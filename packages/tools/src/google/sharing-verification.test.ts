@@ -122,4 +122,23 @@ describe('verifyOwnerOnlyDriveSharing', () => {
     ).resolves.toBe('not_owner_only');
     expect(paged).toHaveBeenCalledTimes(2);
   });
+
+  it('fails closed when provider pagination repeats a token', async () => {
+    const api = vi.fn().mockResolvedValue({
+      permissions: [
+        { type: 'user', emailAddress: 'bot@example.com' },
+        { type: 'user', emailAddress: 'owner@example.com' },
+      ],
+      nextPageToken: 'same-page',
+    });
+    await expect(
+      verifyOwnerOnlyDriveSharing(
+        { api } as never,
+        'DocumentId12345',
+        'bot@example.com',
+        'owner@example.com',
+      ),
+    ).resolves.toBe('unverified');
+    expect(api).toHaveBeenCalledTimes(2);
+  });
 });

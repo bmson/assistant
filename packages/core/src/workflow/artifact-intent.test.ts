@@ -242,6 +242,7 @@ describe('conditional artifact creation safety', () => {
     const file = {
       fileId: 'DocumentId12345',
       name: 'Quarterly plan',
+      mimeType: 'application/vnd.google-apps.document',
       url: 'https://docs.google.com/document/d/DocumentId12345/edit',
     };
     const match = result([file], 'verified_owner_only');
@@ -261,6 +262,18 @@ describe('conditional artifact creation safety', () => {
     });
     expect(result([file], 'unverified')).toMatchObject({ status: 'blocked' });
     expect(result([{ ...file, name: 'Quarterly plan (1)' }], 'verified_owner_only')).toMatchObject({
+      status: 'blocked',
+    });
+    expect(
+      result(
+        [{ ...file, mimeType: 'application/vnd.google-apps.spreadsheet' }],
+        'verified_owner_only',
+      ),
+    ).toMatchObject({
+      status: 'blocked',
+      reason: expect.stringContaining('not the requested Google Doc type'),
+    });
+    expect(result([{ ...file, mimeType: undefined }], 'verified_owner_only')).toMatchObject({
       status: 'blocked',
     });
   });

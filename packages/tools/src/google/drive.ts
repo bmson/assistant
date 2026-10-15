@@ -149,9 +149,11 @@ export function registerDriveTools(registry: ToolRegistry, deps: DriveToolDeps):
             throw new Error('exact-title search query must match the supplied exact title');
           }
           let pageToken: string | undefined;
-          const matching: DriveFile[] = [];
+          const matching = new Map<string, DriveFile>();
+          const observedIds = new Map<string, { name: string; mimeType: string }>();
           let complete = false;
           let incompleteSearch = false;
+          const visitedTokens = new Set<string>();
           // A finite cap bounds provider work. Hitting it is explicitly
           // incomplete and can never authorize a conditional create.
           for (let page = 0; page < 10; page += 1) {
@@ -171,35 +173,78 @@ export function registerDriveTools(registry: ToolRegistry, deps: DriveToolDeps):
             );
             if (pageToken) url.searchParams.set('pageToken', pageToken);
             const result = await deps.client.api<{
-              files?: DriveFile[];
-              nextPageToken?: string;
-              incompleteSearch?: boolean;
+              files?: unknown;
+              nextPageToken?: unknown;
+              incompleteSearch?: unknown;
             }>(url.toString());
-            matching.push(...(result.files ?? []).filter((file) => file.name === exactTitle));
-            incompleteSearch ||= result.incompleteSearch === true;
-            pageToken = result.nextPageToken;
+            if (!result || typeof result !== 'object' || !Array.isArray(result.files)) {
+              incompleteSearch = true;
+              break;
+            }
+            if (
+              result.incompleteSearch !== undefined &&
+              typeof result.incompleteSearch !== 'boolean'
+            ) {
+              incompleteSearch = true;
+            } else {
+              incompleteSearch ||= result.incompleteSearch === true;
+            }
+            for (const item of result.files) {
+              if (!item || typeof item !== 'object' || Array.isArray(item)) {
+                incompleteSearch = true;
+                continue;
+              }
+              const file = item as DriveFile;
+              if (typeof file.name !== 'string') {
+                incompleteSearch = true;
+                continue;
+              }
+              if (file.name !== exactTitle) continue;
+              if (
+                typeof file.id !== 'string' ||
+                !/^[A-Za-z0-9_-]{10,200}$/.test(file.id) ||
+                typeof file.mimeType !== 'string' ||
+                !file.mimeType
+              ) {
+                incompleteSearch = true;
+                continue;
+              }
+              const prior = observedIds.get(file.id);
+              if (prior && (prior.name !== file.name || prior.mimeType !== file.mimeType)) {
+                incompleteSearch = true;
+                continue;
+              }
+              if (prior) continue;
+              observedIds.set(file.id, { name: file.name, mimeType: file.mimeType });
+              matching.set(file.id, file);
+            }
+            if (result.nextPageToken !== undefined) {
+              if (
+                typeof result.nextPageToken !== 'string' ||
+                !result.nextPageToken ||
+                visitedTokens.has(result.nextPageToken)
+              ) {
+                incompleteSearch = true;
+                break;
+              }
+              pageToken = result.nextPageToken;
+              visitedTokens.add(pageToken);
+            } else {
+              pageToken = undefined;
+            }
             if (!pageToken) {
               complete = !incompleteSearch;
               break;
             }
           }
-          const files = matching.flatMap((file) =>
-            file.id
-              ? [
-                  {
-                    fileId: file.id,
-                    name: file.name ?? '',
-                    mimeType: file.mimeType ?? '',
-                    modifiedTime: file.modifiedTime ?? null,
-                    size: file.size ?? null,
-                    url: file.webViewLink ?? null,
-                  },
-                ]
-              : [],
-          );
-          if (matching.some((file) => !file.id || !/^[A-Za-z0-9_-]{10,200}$/.test(file.id))) {
-            complete = false;
-          }
+          const files = [...matching.values()].map((file) => ({
+            fileId: file.id as string,
+            name: file.name as string,
+            mimeType: file.mimeType as string,
+            modifiedTime: file.modifiedTime ?? null,
+            size: file.size ?? null,
+            url: file.webViewLink ?? null,
+          }));
           let sharingVerification:
             | 'verified_owner_only'
             | 'not_owner_only'

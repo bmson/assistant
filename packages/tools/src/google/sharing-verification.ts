@@ -24,6 +24,7 @@ export async function verifyOwnerOnlyDriveSharing(
     }> = [];
     let pageToken: string | undefined;
     let complete = false;
+    const visitedTokens = new Set<string>();
     for (let page = 0; page < 10; page += 1) {
       const url = new URL(`${DRIVE}/${encodeURIComponent(fileId)}/permissions`);
       url.searchParams.set(
@@ -44,7 +45,19 @@ export async function verifyOwnerOnlyDriveSharing(
       }>(url.toString());
       if (!Array.isArray(response.permissions)) return 'unverified';
       permissions.push(...response.permissions);
-      pageToken = response.nextPageToken;
+      if (response.nextPageToken !== undefined) {
+        if (
+          typeof response.nextPageToken !== 'string' ||
+          !response.nextPageToken ||
+          visitedTokens.has(response.nextPageToken)
+        ) {
+          return 'unverified';
+        }
+        pageToken = response.nextPageToken;
+        visitedTokens.add(pageToken);
+      } else {
+        pageToken = undefined;
+      }
       if (!pageToken) {
         complete = true;
         break;
