@@ -99,10 +99,10 @@ describe('live lookup routing from home-screen regressions', () => {
   });
 
   it.each([
-    'What is the current score in the SF Giants game?',
-    'What was the Arsenal score yesterday?',
-    'Who won the Valur match last Saturday?',
-  ])('keeps team argument generation for an ordinary dated score question: %s', (request) => {
+    ['What is the current score in the SF Giants game?', 'SF Giants', '2026-10-15'],
+    ['What was the Arsenal score yesterday?', 'Arsenal', '2026-10-14'],
+    ['Who won the Valur match last Saturday?', 'Valur', '2026-10-10'],
+  ])('preserves the named team and owner-local date for %s', (request, team, date) => {
     const lookup = detectLiveLookup([{ role: 'user', content: request }]);
     expect(lookup?.kind).toBe('sports');
     if (!lookup) throw new Error('Expected a sports lookup');
@@ -111,6 +111,59 @@ describe('live lookup routing from home-screen regressions', () => {
         now: new Date('2026-10-15T08:11:00Z'),
         timeZone: 'America/Los_Angeles',
       }),
+    ).toEqual({ toolName: 'sports.scores', input: { team, date } });
+  });
+
+  it('extracts a multiword team from a natural score request without inferring its league', () => {
+    const lookup = detectLiveLookup([
+      { role: 'user', content: 'Can you check the New York Yankees score tonight?' },
+    ]);
+    if (!lookup) throw new Error('Expected a sports lookup');
+    expect(
+      nextLiveLookup(lookup, [], {
+        now: new Date('2026-10-15T08:11:00Z'),
+        timeZone: 'America/Los_Angeles',
+      }),
+    ).toEqual({
+      toolName: 'sports.scores',
+      input: { team: 'New York Yankees', date: '2026-10-15' },
+    });
+  });
+
+  it('extracts a team named after the score phrase', () => {
+    const lookup = detectLiveLookup([
+      { role: 'user', content: 'What is the score for the Los Angeles Lakers tonight?' },
+    ]);
+    if (!lookup) throw new Error('Expected a sports lookup');
+    expect(
+      nextLiveLookup(lookup, [], {
+        now: new Date('2026-10-15T08:11:00Z'),
+        timeZone: 'America/Los_Angeles',
+      }),
+    ).toEqual({
+      toolName: 'sports.scores',
+      input: { team: 'Los Angeles Lakers', date: '2026-10-15' },
+    });
+  });
+
+  it.each(['Do not check the SF Giants score.', "Don't look up the New York Yankees score."])(
+    'does not route an explicitly prohibited sports lookup: %s',
+    (request) => {
+      expect(detectLiveLookup([{ role: 'user', content: request }])).toBeUndefined();
+    },
+  );
+
+  it('does not infer a team from other tool evidence when the request names none', () => {
+    const lookup = detectLiveLookup([{ role: 'user', content: 'What is the current game score?' }]);
+    if (!lookup) throw new Error('Expected a sports lookup');
+    expect(
+      nextLiveLookup(lookup, [
+        {
+          toolName: 'web.search',
+          status: 'succeeded',
+          result: { results: [{ title: 'San Francisco Giants score' }] },
+        },
+      ]),
     ).toEqual({ toolName: 'sports.scores' });
   });
 
@@ -172,7 +225,10 @@ describe('live lookup routing from home-screen regressions', () => {
   });
   it('asks the scores tool first, then falls back to the web for an uncovered team', () => {
     const lookup = { kind: 'sports' as const, request: 'What was the Valur score?' };
-    expect(nextLiveLookup(lookup, [])).toEqual({ toolName: 'sports.scores' });
+    expect(nextLiveLookup(lookup, [])).toEqual({
+      toolName: 'sports.scores',
+      input: { team: 'Valur' },
+    });
     const answered = {
       toolName: 'sports.scores',
       status: 'succeeded' as const,
@@ -515,6 +571,7 @@ describe('several live lookups in one request', () => {
   it('runs each lookup in order until all are answered', () => {
     expect(nextLiveLookups([sports, directions], [])).toEqual({
       toolName: 'sports.scores',
+      input: { team: 'Giants' },
       lookup: sports,
     });
     expect(nextLiveLookups([sports, directions], [scores])).toEqual({
@@ -576,6 +633,7 @@ describe('several live lookups in one request', () => {
     const stale = { ...scores, fromCurrentTask: false };
     expect(nextLiveLookups([sports, directions], [stale])).toEqual({
       toolName: 'sports.scores',
+      input: { team: 'Giants' },
       lookup: sports,
     });
   });

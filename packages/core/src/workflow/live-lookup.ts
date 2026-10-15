@@ -62,8 +62,52 @@ const SPORT_WORD =
 const NOT_SPORTS =
   /\b(?:credit|test|exam|sat|act|gre|fico|risk|health|sleep|readiness|lighthouse|nps|quiz)\s+scores?\b|\bmy\b[^.?!]{0,40}\b(?:game|match|practice|score)\b/i;
 const SPORTS_IMPERATIVE = /\b(?:show|give|get|check|track|follow|create|make|build|render)\b/i;
+const SPORTS_LOOKUP_PROHIBITION =
+  /\b(?:do\s+not|don't|dont|never)\s+(?:(?:look\s+up|search(?:\s+the\s+web)?|check|fetch|get|show|tell\s+me)\b[^.?!]{0,60}\b(?:scores?|results?|game|match|fixture)\b|(?:search\s+)?(?:scores?|results?)\b)/i;
 const EVENT_REMINDER =
   /\b(?:remind me|(?:set|create|add|make|put|schedule) (?:me )?a reminder|reminder to)\b[\s\S]{0,80}\b(?:after|when|once|as soon as)\b[\s\S]{0,80}\b(?:game|match|fixture)\b/i;
+
+/**
+ * Extract only the team phrase the owner placed next to a score/game noun.
+ * The scores adapter validates the phrase against its covered team rosters;
+ * this parser does not infer a city, league, or team from outside the request.
+ */
+function requestedSportsTeam(request: string): string | undefined {
+  if (SPORTS_LOOKUP_PROHIBITION.test(request)) return undefined;
+  const explicit =
+    /\b(?:scores?|results?)\s+(?:in|for|of)\s+(?:the\s+)?([\p{L}\d][\p{L}\d.'’& -]{0,55}?)(?=\s+(?:game|match|fixture|today|tonight|tomorrow|yesterday)\b|[?.!,;]|$)/iu.exec(
+      request,
+    );
+  let candidate = explicit?.[1];
+  if (!candidate) {
+    const anchor = /\b(?:scoreline|scores?|results?|game|match|fixture)\b/i.exec(request);
+    if (!anchor) return undefined;
+    candidate = request.slice(0, anchor.index);
+  }
+
+  candidate = candidate
+    .replace(/\b(?:today|tonight|tomorrow|yesterday|this|next|last)\b[\s\S]*$/i, '')
+    .replace(
+      /^(?:(?:what(?:'s|\s+is|\s+was)|who(?:\s+won)?|which|any|is\s+there|did|does|can\s+you|could\s+you|tell\s+me|show\s+me|check|get|give\s+me|please)\s+)+/i,
+      '',
+    )
+    .replace(/^(?:(?:the|a|an|current|currently|latest|live|right\s+now)\s+)+/i, '')
+    .replace(/\b(?:the|current|currently|latest|live|right\s+now)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (
+    !candidate ||
+    candidate.length > 56 ||
+    candidate.split(' ').length > 5 ||
+    /\b(?:and|or|versus|vs|not|never|without|instead|score|scores|result|results|game|match|fixture)\b/i.test(
+      candidate,
+    ) ||
+    !/^[\p{L}\d][\p{L}\d.'’& -]*$/u.test(candidate)
+  )
+    return undefined;
+  return candidate;
+}
 
 function reminderSportsTeam(request: string): string | undefined {
   const match =
@@ -100,7 +144,7 @@ const FLIGHT_EVENT = /\b(?:flight|airline|itinerary|boarding)\b/i;
 const SPECIFIC_EVENT = /\b(?:flight|dinner|lunch|interview|class|practice)\b/i;
 /** "What's the Giants score?", "any Premier League results?", "make a live score card". */
 function isSportsRequest(request: string, asks: boolean): boolean {
-  if (NOT_SPORTS.test(request)) return false;
+  if (NOT_SPORTS.test(request) || SPORTS_LOOKUP_PROHIBITION.test(request)) return false;
   if (
     !asks &&
     !SPORTS_IMPERATIVE.test(request) &&
@@ -808,7 +852,8 @@ export function nextLiveLookup(
       // A date alone loses the team named in an ordinary score question, so
       // only force arguments when we also have a team or league identity.
       const league = lookup.reminderLeague ?? leagueNamedIn(lookup.request)?.key;
-      if (!lookup.reminderTeam && !league) return { toolName: 'sports.scores' };
+      const team = lookup.reminderTeam ?? requestedSportsTeam(lookup.request);
+      if (!team && !league) return { toolName: 'sports.scores' };
       const dateWindow = context
         ? resolveTimeWindow(lookup.request, 'calendar', false, context)
         : undefined;
@@ -822,10 +867,10 @@ export function nextLiveLookup(
         : undefined;
       return {
         toolName: 'sports.scores',
-        ...(lookup.reminderTeam || league
+        ...(team || league
           ? {
               input: {
-                ...(lookup.reminderTeam ? { team: lookup.reminderTeam } : {}),
+                ...(team ? { team } : {}),
                 ...(league ? { league } : {}),
                 ...(date ? { date } : {}),
               },
