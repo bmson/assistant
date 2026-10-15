@@ -70,7 +70,11 @@ import { selectMemoryReadAnswer } from '../memory-read-answer.js';
 import { verifyFinalOutput } from '../output-verification.js';
 import { isConversationLocalContext, latestOwnerIntent } from '../owner-intent.js';
 import { PLANNER_VERSION } from '../planner.js';
-import { detectPersonalReadRequest, type PersonalReadRequest } from '../read-intent.js';
+import {
+  detectPersonalReadRequest,
+  type PersonalReadRequest,
+  withCompanionLiveLookups,
+} from '../read-intent.js';
 import { requestChecklistHasUnfinished, requestChecklistSummary } from '../request-checklist.js';
 import { responseCardsForFinal } from '../response-cards.js';
 import {
@@ -834,7 +838,10 @@ export async function stageModelFinalResponse(
       .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
       .join('\n'),
   ].join('\n');
-  const classifiedRead = readContext ? readContext.readRequest : detectPersonalReadRequest(window);
+  const classifiedRead = withCompanionLiveLookups(
+    readContext ? readContext.readRequest : detectPersonalReadRequest(window),
+    liveLookups.length > 0,
+  );
   const explicitSourceSelection = classifiedRead?.sourceReads
     ? await selectExplicitSourceAnswer({
         router: deps.router,

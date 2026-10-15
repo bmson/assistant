@@ -5,6 +5,7 @@ import {
   type OutputVerification,
   publicWebClaimFindings,
   repairRequestedBullets,
+  shortBulletFindings,
   verifyFinalOutput,
 } from './output-verification.js';
 
@@ -538,6 +539,30 @@ ${body}`;
     expect(prompt.length).toBeLessThan(13_000);
   });
 
+  it('retains the nearby mode overview with exact offsets beside late service excerpts', () => {
+    const overview = 'The train station is underground. Bus stops are on the street level.\n';
+    const source = `${'Navigation. '.repeat(1000)}${overview}R10\n- Route: Central - Airport\n- Frequency: hourly`;
+    const prompt = buildOutputVerificationPrompt({
+      request,
+      draft: 'R10 runs hourly. All options use the underground station.',
+      evidence: [
+        {
+          toolName: 'web.fetch',
+          status: 'succeeded',
+          result: { status: 200, text: source, truncated: false },
+        },
+      ],
+    });
+    const durable = prompt.match(/<durable_evidence>\n([\s\S]*?)\n<\/durable_evidence>/)?.[1] ?? '';
+    const projected = JSON.parse(durable).source;
+    expect(projected.sourceOverview.text).toContain(overview.trim());
+    expect(
+      source.slice(projected.sourceOverview.startOffset, projected.sourceOverview.endOffset),
+    ).toBe(projected.sourceOverview.text);
+    expect(projected.sourcePassagesOmittedCount).toBeGreaterThanOrEqual(0);
+    expect(durable.length).toBeLessThanOrEqual(12_000);
+  });
+
   it('detects cross-service frequency, travel-time and origin borrowing plus omitted transfers', () => {
     const findings = publicWebClaimFindings(repairRequestedBullets(request, bad), evidence);
     expect(findings).toEqual(
@@ -658,6 +683,88 @@ ${body}`;
     expect(
       repairRequestedBullets(request, 'Costs: - **one** and - **two**, plus - **three**.'),
     ).toBe('Costs: - **one** and - **two**, plus - **three**.');
+    expect(
+      repairRequestedBullets(
+        request,
+        '- **Rail** — Direct.\n- **Metro** — Frequent.\n- **Bus** — Change here.[Source: Transit](https://transit.example/services)',
+      ),
+    ).toContain('Change here.\n\n[Source: Transit]');
+  });
+
+  it('checks shared destinations even when examples follow an abbreviation', () => {
+    expect(
+      publicWebClaimFindings(
+        'S9 and S85 connect to Berlin (e.g., Spandau, Charlottenburg, Alexanderplatz) every 20 minutes.',
+        evidence,
+      ),
+    ).toEqual(expect.arrayContaining([expect.stringContaining('S85: the shared origin/stop')]));
+    expect(
+      publicWebClaimFindings(
+        'S9 serves Spandau. S85 serves Frohnau. Both run every 20 minutes.',
+        evidence,
+      ),
+    ).toEqual([]);
+  });
+
+  it('keeps surface bus stops separate from an underground rail station', () => {
+    const rows = [
+      {
+        toolName: 'web.fetch',
+        status: 'succeeded',
+        result: {
+          status: 200,
+          truncated: false,
+          text: 'Rail and bus options. The train station is underground. Local bus stops are on the street level.\nR10\n- Route: Central - Airport\nB20\n- Route: Market - Airport',
+        },
+      },
+    ];
+    expect(
+      publicWebClaimFindings(
+        'Rail and buses are available, all serving the station underground.',
+        rows,
+      ),
+    ).toEqual(expect.arrayContaining([expect.stringContaining('separate surface bus stops')]));
+    expect(
+      publicWebClaimFindings(
+        'All trains use the underground station. Buses use street-level stops.',
+        rows,
+      ),
+    ).toEqual([]);
+  });
+
+  it('enforces a requested short overview with one shared bounded correction', async () => {
+    const verbose = ['Rail', 'Metro', 'Buses']
+      .map((name) => `- **${name}** — ${'Supported transport details '.repeat(24)}.`)
+      .join('\n');
+    const concise =
+      '- **Rail** — Direct services.\n- **Metro** — Frequent services.\n- **Buses** — Check the transfer.\n\n[Source](https://transit.example/services)';
+    expect(shortBulletFindings(request, verbose)).toHaveLength(3);
+    expect(shortBulletFindings(request, concise)).toEqual([]);
+    expect(shortBulletFindings('Give a detailed overview.', verbose)).toEqual([]);
+    const prompts: string[] = [];
+    const router = {
+      object: async (_role: string, input: { prompt: string }) => {
+        prompts.push(input.prompt);
+        return {
+          ok: true,
+          finishReason: 'stop',
+          object:
+            prompts.length === 1
+              ? { decision: 'publish', reasons: [] }
+              : { decision: 'revise', revisedText: concise, reasons: ['clarity_or_format'] },
+        };
+      },
+    };
+    const result = await verifyFinalOutput(router as never, {
+      taskId: 'short-overview',
+      request,
+      draft: verbose,
+      evidence: [],
+      critical: true,
+    });
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain('<format_findings>');
+    expect(result.text).toBe(concise);
   });
 
   it('performs one targeted correction when a reviewer publishes the same conflation', async () => {

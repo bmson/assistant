@@ -357,6 +357,20 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain('event?eid=dst-berlin-day');
   });
 
+  it('dates both ends of an overnight appointment in a compact single-day agenda', () => {
+    const compactRequest = { ...request, compactCalendarBriefing: true };
+    const flight = {
+      ...timed,
+      summary: 'Overnight flight',
+      start: '2026-10-15T21:10:00-07:00',
+      end: '2026-10-16T08:15:00-07:00',
+    };
+    const response = verifiedReadResponse(compactRequest, evidence([flight], true, compactRequest));
+    expect(response).toContain('Thu 15 Oct 9:10 PM–Fri 16 Oct 8:15 AM');
+    expect(response).not.toContain('21:10–08:15');
+    expect(response).toContain('[Overnight flight]');
+  });
+
   it('keeps an ongoing multi-day record distinct and preserves busy and attendance state', () => {
     const compactRequest = { ...request, compactCalendarBriefing: true };
     const stay = {

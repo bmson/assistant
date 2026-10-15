@@ -3880,12 +3880,11 @@ export function verifiedReadResponse(
                   `${linkedTitle}${calendarLabel} — ${compactEventSpan(rawStart, rawEnd, request.timeZone ?? 'UTC')}${status ? ` (${status})` : ''}`,
                 );
               } else {
-                const when = [
-                  datePrefix,
-                  clockStart ? `${clockStart}${clockEnd ? `–${clockEnd}` : ''}` : '',
-                ]
-                  .filter(Boolean)
-                  .join(' ');
+                const when = spansDates
+                  ? compactEventSpan(rawStart, rawEnd, request.timeZone ?? 'UTC')
+                  : [datePrefix, clockStart ? `${clockStart}${clockEnd ? `–${clockEnd}` : ''}` : '']
+                      .filter(Boolean)
+                      .join(' ');
                 const place = location.replace(/\s+/g, ' ').trim();
                 const compactPlace = place
                   ? ` — ${compactEventTitleLink(place.length > 100 ? `${place.slice(0, 99)}…` : place, '')}`
