@@ -1450,6 +1450,92 @@ describe('bounded no-send email review', () => {
     );
   });
 
+  it('preserves latest-first ordering instead of importance ranking for reply lookup', () => {
+    const query = 'in:inbox -from:me';
+    const scope = { query, requestedCount: 1, latestUnanswered: true };
+    const rowFor = (
+      threadId: string,
+      date: string,
+      subject: string,
+      snippet: string,
+    ): EmailReviewEvidenceRow => ({
+      ...search(threadId),
+      args: { query, maxResults: 100 },
+      result: {
+        ...((search(threadId).result as Record<string, unknown>) ?? {}),
+        results: [
+          {
+            threadId,
+            date,
+            from: 'sender@example.net',
+            subject,
+            snippet,
+          },
+        ],
+      },
+    });
+    const evidence = [
+      rowFor(
+        'older-important',
+        '2026-10-14T10:00:00Z',
+        'Please approve the proposal by tomorrow',
+        'This approval is important and needed today.',
+      ),
+      rowFor(
+        'newest-message',
+        '2026-10-15T10:00:00Z',
+        'Quick question',
+        'Could you let me know when you have a chance?',
+      ),
+    ];
+    const context = emailReviewRankContext(evidence, scope);
+    expect(context.candidateIds).toEqual(['newest-message', 'older-important']);
+    expect(emailReviewRecentMetadataFallback(evidence, context.candidateIds, scope)).toEqual([
+      'newest-message',
+      'older-important',
+    ]);
+    expect(
+      emailReviewSelectionWithinAuthorizedPool(
+        ['newest-message'],
+        context.candidateIds,
+        [],
+        ['newest-message'],
+        1,
+        true,
+      ),
+    ).toBe(true);
+    expect(
+      emailReviewSelectionWithinAuthorizedPool(
+        ['newest-message', 'older-important'],
+        context.candidateIds,
+        [],
+        ['newest-message'],
+        1,
+        true,
+      ),
+    ).toBe(false);
+    const answer = formatEmailReviewAnswer(
+      [],
+      {
+        searchPages: 1,
+        uniqueThreads: 2,
+        searchComplete: true,
+        unavailableMetadata: 0,
+        selectedThreads: 1,
+        completeThreads: 0,
+        contextLimitedThreads: 0,
+        ownerOrChronologyExcluded: 1,
+        alreadyAnsweredThreads: 0,
+        notEligibleThreads: 0,
+        obviousNewslettersExcluded: 0,
+      },
+      false,
+      scope,
+    );
+    expect(answer).toContain('newest-first order');
+    expect(answer).not.toContain('seven-day');
+  });
+
   it('allows a bounded ten-ID reserve pool while keeping final answers capped at five', () => {
     const evidence = Array.from({ length: EMAIL_REVIEW_MAX_RANK_POOL }, (_, index) =>
       search(`request-${index}`),

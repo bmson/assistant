@@ -137,8 +137,9 @@ export interface PersonalReadRequest {
   compoundTripDiscovery?: boolean;
   /** Explicit no-send review of a bounded recent-email sample. */
   emailReview?: {
-    windowDays: number;
+    windowDays?: number;
     requestedCount: number;
+    latestUnanswered?: boolean;
     /** Exact user-local calendar-day interval when explicitly requested. */
     startAt?: string;
     endAt?: string;
@@ -156,7 +157,7 @@ export interface PersonalReadRequest {
     notEligibleThreadIds?: string[];
     backfillShortfall?: 'rank_pool_exhausted' | 'step_budget';
     rankingFailed?: boolean;
-    rankingSource?: 'model' | 'recent_metadata_fallback';
+    rankingSource?: 'model' | 'recent_metadata_fallback' | 'latest_first';
     rankingFailureReason?: 'router_error' | 'invalid_result';
   };
   /** Include a bounded, source-backed overlap note when the owner asks for one. */
@@ -453,6 +454,24 @@ function emailReviewNumber(value: string | undefined): number | undefined {
   if (!value) return undefined;
   const numeric = /^\d{1,2}$/.test(value) ? Number(value) : undefined;
   return numeric ?? EMAIL_REVIEW_NUMBER_WORDS[value.toLowerCase()];
+}
+
+function directLatestUnansweredEmailIntent(text: string): boolean {
+  if (
+    text.length > 2_000 ||
+    /^\s*>/m.test(text) ||
+    /^\s*(?:from:|begin forwarded message|on .{1,160}wrote:)/im.test(text) ||
+    /\b(?:if|whether|hypothetically|what if|should i|could i|would i)\b/i.test(text)
+  )
+    return false;
+  return (
+    /\b(?:latest|newest|most recent)\b[^.!?\n]{0,100}\b(?:message|email|thread)\b/i.test(text) &&
+    /\b(?:in|from)\s+(?:my|our)\s+(?:inbox|mailbox|email|mail)\b/i.test(text) &&
+    /\b(?:still\s+)?need(?:s)?\s+(?:(?:me\s+)?to\s+)?reply\b|\bneed\s+my\s+(?:reply|response)\b|\bawaiting\s+(?:my\s+)?reply\b/i.test(
+      text,
+    ) &&
+    !READ_THEN_MUTATION.test(readThenMutationText(text))
+  );
 }
 
 function directEmailReviewIntent(text: string): DirectEmailReviewIntent | undefined {
@@ -2020,6 +2039,16 @@ function detectPersonalReadRequestInternal(
       requiresThreadRead: true,
       mailQuery: reference ?? '{hotel lodging "reservation confirmation" "booking confirmation"}',
       answerFocus: 'lodging',
+    };
+  }
+  if (!emailReadProhibited && directLatestUnansweredEmailIntent(latest)) {
+    return {
+      kind: 'email',
+      queryTerms: [],
+      firstToolName: 'gmail.search',
+      requiresThreadRead: true,
+      mailQuery: 'in:inbox -from:me',
+      emailReview: { requestedCount: 1, latestUnanswered: true },
     };
   }
   const emailReviewIntent = !emailReadProhibited ? directEmailReviewIntent(latest) : undefined;

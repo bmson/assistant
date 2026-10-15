@@ -13,9 +13,11 @@ export const EMAIL_REVIEW_MAX_RANK_CHARS = 40_000;
 
 export interface EmailReviewScope {
   query?: string;
+  windowDays?: number;
   requestedCount?: number;
   startAt?: string;
   endAt?: string;
+  latestUnanswered?: boolean;
 }
 
 export const EmailReviewRankSchema = z
@@ -177,6 +179,12 @@ export function emailReviewSearchCandidates(
         )
           continue;
       }
+      if (
+        scope?.latestUnanswered &&
+        (!Number.isFinite(Date.parse(candidate.date)) ||
+          !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(candidate.date))
+      )
+        continue;
       const previous = byThread.get(threadId);
       const candidateTime = Date.parse(candidate.date);
       const previousTime = previous ? Date.parse(previous.date) : Number.NaN;
@@ -285,8 +293,12 @@ export function emailReviewRankContext(
     Math.max(1, scope?.requestedCount ?? EMAIL_REVIEW_MAX_CANDIDATES),
   );
   const all = emailReviewSearchCandidates(evidence, scope)
-    .filter((candidate) => !obviousNewsletter(candidate))
-    .sort(compareMetadataCandidates)
+    .filter((candidate) => scope?.latestUnanswered || !obviousNewsletter(candidate))
+    .sort((left, right) =>
+      scope?.latestUnanswered
+        ? Date.parse(right.date) - Date.parse(left.date)
+        : compareMetadataCandidates(left, right),
+    )
     .slice(0, EMAIL_REVIEW_MAX_RANK_CANDIDATES);
   const candidates: EmailReviewCandidate[] = [];
   for (const candidate of all) {
@@ -324,8 +336,16 @@ export function emailReviewRecentMetadataFallback(
 ): string[] {
   const allowed = new Set(allowedCandidateIds);
   return emailReviewSearchCandidates(evidence, scope)
-    .filter((candidate) => allowed.has(candidate.threadId) && !obviousNewsletter(candidate))
-    .sort(compareMetadataCandidates)
+    .filter(
+      (candidate) =>
+        allowed.has(candidate.threadId) &&
+        (scope?.latestUnanswered || !obviousNewsletter(candidate)),
+    )
+    .sort((left, right) =>
+      scope?.latestUnanswered
+        ? Date.parse(right.date) - Date.parse(left.date)
+        : compareMetadataCandidates(left, right),
+    )
     .map((candidate) => candidate.threadId);
 }
 
@@ -356,6 +376,7 @@ export function emailReviewSelectionWithinAuthorizedPool(
   verifiedExcludedThreadIds: ReadonlyArray<string>,
   sourceAssessmentFailedThreadIds: ReadonlyArray<string> = [],
   requestedCount = EMAIL_REVIEW_MAX_CANDIDATES,
+  stopOnAssessmentFailure = false,
 ): boolean {
   const initialCount = rankedThreadIds
     ? Math.min(requestedCount, rankedThreadIds.length)
@@ -364,12 +385,14 @@ export function emailReviewSelectionWithinAuthorizedPool(
   const failed = [...new Set(sourceAssessmentFailedThreadIds)];
   if (failed.some((id) => excluded.includes(id))) return false;
   const replaceable = [...excluded, ...failed];
+  const authorizedReplacementCount =
+    excluded.length + (stopOnAssessmentFailure ? 0 : failed.length);
   return (
     selectedThreadIds.length <= EMAIL_REVIEW_MAX_RANK_POOL &&
     replaceable.every((id) => selectedThreadIds.includes(id)) &&
     (!rankedThreadIds || selectedThreadIds.every((id, index) => rankedThreadIds[index] === id)) &&
     selectedThreadIds.length <=
-      Math.min(EMAIL_REVIEW_MAX_RANK_POOL, initialCount + replaceable.length)
+      Math.min(EMAIL_REVIEW_MAX_RANK_POOL, initialCount + authorizedReplacementCount)
   );
 }
 
@@ -866,9 +889,9 @@ export function emailReviewCoverage(
         contextLimitedThreads -
         unassessedCompleteThreads,
     ),
-    obviousNewslettersExcluded: emailReviewSearchCandidates(evidence, scope).filter(
-      obviousNewsletter,
-    ).length,
+    obviousNewslettersExcluded: scope?.latestUnanswered
+      ? 0
+      : emailReviewSearchCandidates(evidence, scope).filter(obviousNewsletter).length,
     ...(searchMailboxMismatch(evidence, scope) ? { searchMailboxMismatch: true } : {}),
     ...(unassessedCompleteThreads > 0 ? { unassessedCompleteThreads } : {}),
     ...(backfillShortfall ? { backfillShortfall } : {}),
@@ -1717,6 +1740,7 @@ export function formatEmailReviewAnswer(
   items: ReadonlyArray<ValidatedEmailReviewItem>,
   coverage: EmailReviewCoverage,
   rankingFailed = false,
+  scope?: EmailReviewScope,
 ): string {
   const assessedThreads = items.length;
   const fullyChecked =
@@ -1730,8 +1754,11 @@ export function formatEmailReviewAnswer(
   const uncertainNoReplies = items.filter(
     (item) => item.disposition === 'no_reply' && item.deadlineNeedsReview,
   );
+  const reviewRange = scope?.startAt && scope.endAt ? 'local-calendar-day' : 'day';
   const lines = [
-    `I completed verified reply checks for ${fullyChecked} of ${coverage.selectedThreads} selected threads from a bounded seven-day mail scan and prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'} for review. Complete reads are not the same as completed assessments. This is a provisional prioritization of the scanned results, not a guarantee that these are the only or globally most important requests.`,
+    scope?.latestUnanswered
+      ? `I checked ${fullyChecked} of ${coverage.selectedThreads} selected inbox threads in newest-first order and prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'} for review. Each candidate was checked against its complete thread; this is bounded by the available search pages and candidate pool, so it cannot establish that no newer request exists beyond that coverage.`
+      : `I completed verified reply checks for ${fullyChecked} of ${coverage.selectedThreads} selected threads from a bounded ${scope?.windowDays ?? 7}-${reviewRange} mail scan and prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'} for review. Complete reads are not the same as completed assessments. This is a provisional prioritization of the scanned results, not a guarantee that these are the only or globally most important requests.`,
   ];
   if (drafts.length > 0)
     lines.push(
@@ -1850,7 +1877,11 @@ export function formatEmailReviewAnswer(
   }
   for (const item of drafts) {
     const { thread } = item;
-    lines.push(`### ${thread.subject}`);
+    lines.push(
+      scope?.latestUnanswered
+        ? `### Latest outstanding reply request — ${thread.subject}`
+        : `### ${thread.subject}`,
+    );
     lines.push(`Source sender: ${thread.recipient}`);
     const rsvpRoute = sourceRsvpRoute(thread);
     if (rsvpRoute) lines.push(`Response route: ${rsvpRoute}`);

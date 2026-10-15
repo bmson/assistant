@@ -471,6 +471,69 @@ describe('detectPersonalReadRequest', () => {
     });
   });
 
+  it('routes a latest unanswered inbox question to one newest-first full-thread check', () => {
+    const request = detectPersonalReadRequest(
+      turn("What's the latest message in my inbox that I still need to reply to?"),
+    );
+    expect(request).toMatchObject({
+      kind: 'email',
+      firstToolName: 'gmail.search',
+      requiresThreadRead: true,
+      mailQuery: 'in:inbox -from:me',
+      emailReview: { requestedCount: 1, latestUnanswered: true },
+    });
+    if (!request) throw new Error('expected a typed latest-reply lookup');
+    expect(nextRequiredReadTool(request, [])).toBe('gmail.search');
+    expect(buildReadToolInput(request, 'gmail.search', [])).toMatchObject({
+      query: 'in:inbox -from:me',
+      maxResults: 100,
+    });
+    const searchResult: ReadToolEvidence = {
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      args: { query: request.mailQuery },
+      result: {
+        complete: true,
+        hasMore: false,
+        mailboxSearched: 'assistant-bot@example.com',
+        configuredOwnerMailbox: 'owner@example.com',
+        results: [
+          {
+            threadId: 'newest-thread',
+            date: '2026-10-15T10:00:00Z',
+            subject: 'Quick question',
+            snippet: 'Could you let me know?',
+          },
+        ],
+      },
+    };
+    const review = request.emailReview;
+    if (!review) throw new Error('expected a typed latest-reply review');
+    const selectedRequest = {
+      ...request,
+      emailReview: { ...review, selectedThreadIds: ['newest-thread'] },
+    };
+    expect(nextRequiredReadTool(selectedRequest, [searchResult])).toBe('gmail.read_thread');
+    expect(buildReadToolInput(selectedRequest, 'gmail.read_thread', [searchResult])).toMatchObject({
+      threadId: 'newest-thread',
+    });
+  });
+
+  it('does not route hypothetical or mixed-send latest-message requests as read-only reviews', () => {
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'If I asked for the latest message in my inbox that I still need to reply to, what would you find?',
+        ),
+      ),
+    ).toBeNull();
+    expect(
+      detectPersonalReadRequest(
+        turn("What's the latest message in my inbox that I still need to reply to? Send it now."),
+      ),
+    ).toBeNull();
+  });
+
   it('does not claim exact local-day or unsupported oversized review coverage', () => {
     const missingZone = detectPersonalReadRequest(
       turn(
