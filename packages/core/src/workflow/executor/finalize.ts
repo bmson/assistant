@@ -839,7 +839,7 @@ export async function stageModelFinalResponse(
       .join('\n'),
   ].join('\n');
   const classifiedRead = withCompanionLiveLookups(
-    readContext ? readContext.readRequest : detectPersonalReadRequest(window),
+    readContext ? (readContext.readRequest ?? null) : detectPersonalReadRequest(window),
     liveLookups.length > 0,
   );
   const explicitSourceSelection = classifiedRead?.sourceReads
