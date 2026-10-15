@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { unlink } from 'node:fs/promises';
-import { getAgent } from '@assistant/core';
 import {
+  agents,
   commitments,
   contacts,
   conversations,
@@ -14,7 +14,7 @@ import {
   occasions,
   situationPacks,
 } from '@assistant/db';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { assertAllocatedTestTargetMarker } from '../test-target.js';
 import {
@@ -35,29 +35,38 @@ const target = assertAllocatedTestTargetMarker({
 });
 const db = createDb(databaseUrl, { max: 3 });
 const runIds: string[] = [];
+const ownedMessageIds: string[] = [];
 let agentId = '';
 let fixtureConversationId = '';
 let dbUp = false;
 
 describe('visual QA fixture run ownership and cleanup', () => {
   beforeAll(async () => {
-    const agent = await getAgent(db);
-    agentId = agent.id;
+    agentId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId,
+      name: 'Visual QA Fixture Agent',
+      email: `${agentId}@visual-qa.example.test`,
+      workspacePrefix: `visual-qa/${agentId}`,
+    });
     dbUp = true;
     fixtureConversationId = randomUUID();
     await db.insert(conversations).values({
       id: fixtureConversationId,
       agentId,
       channel: 'chat',
-      title: 'Fixture cleanup test conversation',
+      title: 'Fixture cleanup test primary',
       trust: 'owner',
+      isPrimary: true,
     });
   });
 
   afterAll(async () => {
     if (dbUp) {
-      await db.delete(messages).where(eq(messages.conversationId, fixtureConversationId));
+      if (ownedMessageIds.length)
+        await db.delete(messages).where(inArray(messages.id, ownedMessageIds));
       await db.delete(conversations).where(eq(conversations.id, fixtureConversationId));
+      await db.delete(agents).where(eq(agents.id, agentId));
     }
     for (const runId of runIds) {
       await Promise.all([
@@ -68,13 +77,14 @@ describe('visual QA fixture run ownership and cleanup', () => {
     await db.$client.end({ timeout: 5 });
   });
 
-  it('recovers a partial planned run by exact IDs and retains unrelated conversation history', async () => {
+  it('recovers a partial planned run by exact IDs and retains unrelated primary history', async () => {
     if (!dbUp) return;
     const runId = newVisualQaRunId();
     runIds.push(runId);
     const marker = `visual-qa:${runId}:qa-messages`;
     const fixtureMessageId = randomUUID();
     const unrelatedMessageId = randomUUID();
+    ownedMessageIds.push(fixtureMessageId, unrelatedMessageId);
     const [owner] = await db
       .select({ id: conversations.agentId })
       .from(conversations)
@@ -143,16 +153,17 @@ describe('visual QA fixture run ownership and cleanup', () => {
     ).toHaveLength(1);
     expect(
       await db
-        .select({ id: conversations.id })
+        .select({ id: conversations.id, isPrimary: conversations.isPrimary })
         .from(conversations)
         .where(eq(conversations.id, fixtureConversationId)),
-    ).toHaveLength(1);
+    ).toEqual([{ id: fixtureConversationId, isPrimary: true }]);
   });
 
   it('refuses a manifest ID whose row no longer has the run marker', async () => {
     const runId = newVisualQaRunId();
     runIds.push(runId);
     const fixtureMessageId = randomUUID();
+    ownedMessageIds.push(fixtureMessageId);
     const marker = `visual-qa:${runId}:qa-messages`;
     await writeVisualQaManifest({
       fixtureKind: 'qa-messages',
