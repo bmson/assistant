@@ -960,10 +960,30 @@ describe('a trip to a generic airport', () => {
     if (!lookup) throw new Error('Expected a generic airport lookup');
     return lookup;
   };
-  const calendar = (events: Array<Record<string, unknown>>, complete?: boolean) => ({
+  const range = {
+    timeMin: '2026-10-16T07:00:00.000Z',
+    timeMax: '2026-10-17T07:00:00.000Z',
+  };
+  const calendar = (
+    events: Array<Record<string, unknown>>,
+    options: {
+      complete?: boolean;
+      calendarRosterComplete?: boolean;
+      pageToken?: string;
+      nextPageToken?: string;
+      extra?: Record<string, unknown>;
+    } = {},
+  ) => ({
     toolName: 'calendar.list_events',
     status: 'succeeded' as const,
-    result: { events, ...(complete === undefined ? {} : { complete }) },
+    args: { ...range, ...(options.pageToken ? { pageToken: options.pageToken } : {}) },
+    result: {
+      events,
+      complete: options.complete ?? true,
+      calendarRosterComplete: options.calendarRosterComplete ?? true,
+      ...(options.nextPageToken ? { nextPageToken: options.nextPageToken } : {}),
+      ...options.extra,
+    },
   });
   const returnFlight = {
     summary: 'Return flight to Europe',
@@ -984,11 +1004,7 @@ describe('a trip to a generic airport', () => {
     });
     const read = calendar([returnFlight]);
     expect(nextLiveLookup(lookup, [read], context)).toBeUndefined();
-    expect(liveLookupFailure(lookup, [read], context)).toContain('Berlin Brandenburg Airport');
-    expect(liveLookupFailure(lookup, [read], context)).toMatch(
-      /where you'll start|when you'll leave/i,
-    );
-    expect(liveLookupFailure(lookup, [read], context)).not.toMatch(/arrive|security/i);
+    expect(liveLookupFailure(lookup, [read], context)).toBeUndefined();
   });
 
   it('does not select an airport from a flight title or from a multi-airport location', () => {
@@ -1000,18 +1016,129 @@ describe('a trip to a generic airport', () => {
     };
     for (const evidence of [calendar([titleOnly]), calendar([multiAirport])]) {
       const failure = liveLookupFailure(lookup, [evidence], context);
-      expect(failure).toMatch(/couldn't confirm a unique airport/i);
-      expect(failure).not.toMatch(/Berlin|San Francisco/);
+      expect(failure).toBeUndefined();
       expect(nextLiveLookup(lookup, [evidence], context)).toBeUndefined();
     }
   });
 
   it('fails closed when calendar coverage is incomplete or unavailable', () => {
     const lookup = airportLookup();
-    expect(liveLookupFailure(lookup, [calendar([returnFlight], false)], context)).toMatch(
-      /coverage is incomplete/i,
+    expect(
+      liveLookupFailure(lookup, [calendar([returnFlight], { complete: false })], context),
+    ).toMatch(/coverage is incomplete/i);
+    expect(liveLookupFailure(lookup, [], context)).toMatch(
+      /couldn't read the requested calendar window/i,
     );
-    expect(liveLookupFailure(lookup, [], context)).toMatch(/couldn't read your calendar/i);
+    expect(
+      liveLookupFailure(
+        lookup,
+        [calendar([returnFlight], { calendarRosterComplete: false })],
+        context,
+      ),
+    ).toMatch(/coverage is incomplete/i);
+    expect(
+      liveLookupFailure(
+        lookup,
+        [calendar([returnFlight], { extra: { paginationUnavailable: true } })],
+        context,
+      ),
+    ).toMatch(/coverage is incomplete/i);
+  });
+
+  it('routes only with a unique explicit airport and the owner supplied origin and departure time', () => {
+    for (const [content, origin] of [
+      ['How long to get to the airport tomorrow from home, leaving at 8am?', 'home'],
+      ["How long to get to the airport tomorrow? I'm at home, leaving at 8am.", 'home'],
+    ]) {
+      const lookup = detectLiveLookup([{ role: 'user', content }]);
+      expect(lookup?.airportIntent).toBe(true);
+      if (!lookup) throw new Error('Expected airport lookup');
+      const result = nextLiveLookup(lookup, [calendar([returnFlight])], context);
+      expect(result?.toolName).toBe('maps.directions');
+      expect(result?.input).toMatchObject({
+        origin,
+        destination: 'Berlin Brandenburg Airport',
+        departAt: '2026-10-16T15:00:00.000Z',
+      });
+      expect(result?.input).not.toHaveProperty('arriveBy');
+    }
+  });
+
+  it('carries details supplied after a clarification into the route request', () => {
+    const lookup = detectLiveLookup([
+      { role: 'user', content: request },
+      {
+        role: 'assistant',
+        content:
+          'Which airport are you going to, where will you start, and what time will you leave?',
+      },
+      { role: 'user', content: 'Home, 8am.' },
+    ]);
+    expect(lookup?.airportIntent).toBe(true);
+    if (!lookup) throw new Error('Expected continued airport lookup');
+    const result = nextLiveLookup(lookup, [calendar([returnFlight])], context);
+    expect(result?.toolName).toBe('maps.directions');
+    expect(result?.input).toMatchObject({ origin: 'Home', departAt: '2026-10-16T15:00:00.000Z' });
+  });
+
+  it('waits for every page and rejects partial, stale, wrong-range, or restricted-calendar evidence', () => {
+    const content = 'How long to get to the airport tomorrow from home, leaving at 8am?';
+    const lookup = detectLiveLookup([{ role: 'user', content }]);
+    if (!lookup) throw new Error('Expected airport lookup');
+    const first = calendar([], { complete: false, nextPageToken: 'page-2' });
+    expect(nextLiveLookup(lookup, [first], context)).toEqual({
+      toolName: 'calendar.list_events',
+      input: { ...range, maxResults: 50, pageToken: 'page-2' },
+    });
+    const second = calendar([returnFlight], { pageToken: 'page-2' });
+    const result = nextLiveLookup(lookup, [first, second], context);
+    expect(result?.toolName).toBe('maps.directions');
+
+    const wrongRange = {
+      ...calendar([returnFlight]),
+      args: { ...range, timeMin: '2026-10-15T07:00:00.000Z' },
+    };
+    const restricted = {
+      ...calendar([returnFlight]),
+      args: { ...range, calendarIds: ['primary'] },
+    };
+    const stale = { ...calendar([returnFlight]), fromCurrentTask: false };
+    for (const evidence of [wrongRange, restricted, stale]) {
+      expect(nextLiveLookup(lookup, [evidence], context)?.toolName).toBe('calendar.list_events');
+    }
+  });
+
+  it.each([
+    'How long to get to my airport tomorrow?',
+    'How long to get to our airport tomorrow?',
+    'How long to get to the airport tomorrow?',
+  ])('keeps generic possessive airport references in the guarded path: %s', (content) => {
+    expect(detectLiveLookup([{ role: 'user', content }])).toMatchObject({ airportIntent: true });
+  });
+
+  it('does not treat a terminal-only location or joined airport names as a unique route destination', () => {
+    const lookup = airportLookup();
+    for (const location of [
+      'Terminal 2',
+      'San Francisco Airport - Berlin Airport',
+      'SFO Airport & Berlin Airport',
+    ]) {
+      expect(
+        nextLiveLookup(lookup, [calendar([{ ...returnFlight, location }])], context),
+      ).toBeUndefined();
+    }
+    expect(
+      nextLiveLookup(
+        lookup,
+        [
+          calendar([
+            returnFlight,
+            { ...returnFlight, summary: 'Outbound flight', start: '2026-10-16T15:00:00Z' },
+          ]),
+        ],
+        context,
+      ),
+    ).toBeUndefined();
   });
 
   it.each([

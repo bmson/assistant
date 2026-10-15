@@ -96,7 +96,6 @@ const DIRECTIONS =
 const MY_EVENT =
   /\bmy\s+(?:next\s+)?(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}:\d{2}|(?:[a-z'-]+\s+){0,2}(?:meeting|appointment|event|flight|reservation|call|dinner|lunch|interview|class|practice))\b/i;
 const FLIGHT_EVENT = /\b(?:flight|airline|itinerary|boarding)\b/i;
-const AIRPORT_PLACE = /\b(?:airport|airfield|terminal)\b/i;
 /** Event words that name a kind of thing, so the event must say it too. */
 const SPECIFIC_EVENT = /\b(?:flight|dinner|lunch|interview|class|practice)\b/i;
 /** "What's the Giants score?", "any Premier League results?", "make a live score card". */
@@ -131,7 +130,7 @@ function asksForGenericAirport(request: string): boolean {
     : '';
   if (
     namedPlace &&
-    !/^(?:(?:the|a|an)(?:\s+(?:nearest|closest|local|international|domestic))?|nearest|closest|local|international|domestic)$/i.test(
+    !/^(?:(?:the|a|an|my|our)(?:\s+(?:nearest|closest|local|international|domestic))?|nearest|closest|local|international|domestic)$/i.test(
       namedPlace,
     )
   )
@@ -139,6 +138,50 @@ function asksForGenericAirport(request: string): boolean {
   const after = request.slice(airport.index + airport[0].length);
   if (/^\s+(?:in|at|near)\s+[\p{L}\d]/iu.test(after)) return false;
   return true;
+}
+
+function airportClarificationContinuation(
+  history: ReadonlyArray<ReadIntentMessage>,
+): string | undefined {
+  const lastUserIndex = history.findLastIndex((message) => message.role === 'user');
+  if (lastUserIndex <= 0) return undefined;
+  const latestUser = readIntentText(history[lastUserIndex] ?? { role: 'user', content: '' }).trim();
+  const assistant = history
+    .slice(0, lastUserIndex)
+    .findLast((message) => message.role === 'assistant');
+  const previousUser = history
+    .slice(0, lastUserIndex)
+    .findLast((message) => message.role === 'user');
+  if (!latestUser || !assistant || !previousUser) return undefined;
+  const assistantText = readIntentText(assistant);
+  const previousRequest = readIntentText(previousUser).trim();
+  const previousAirportRequest =
+    DIRECTIONS.test(previousRequest) &&
+    (asksForGenericAirport(previousRequest) ||
+      (MY_EVENT.test(previousRequest) && /\bflight\b/i.test(previousRequest)));
+  const asksForRouteDetails =
+    /\b(?:airport|flight)\b/i.test(assistantText) &&
+    /\b(?:where|origin|start|leave|departure|what time|which airport)\b/i.test(assistantText);
+  if (!previousAirportRequest || !asksForRouteDetails) return undefined;
+  const details = [latestUser];
+  const time = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b/i.exec(latestUser)?.[0];
+  const asksForOrigin = /\b(?:where|origin|start|starting point)\b/i.test(assistantText);
+  const asksForTime = /\b(?:time|leave|departure)\b/i.test(assistantText);
+  const hasDeparturePhrase =
+    /\b(?:leave|leaving|depart|departing|head\s+out|drive\s+out|start\s+driving)\b[^.?!\n]{0,32}?\b(?:at|around|about)?\s*\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b/i.test(
+      latestUser,
+    );
+  if (asksForTime && time && !hasDeparturePhrase) details.push(`Owner plans to leave at ${time}`);
+  if (asksForOrigin && !airportOrigin(latestUser)) {
+    const remainder = latestUser
+      .replace(time ?? '', '')
+      .replace(/\b(?:and|at|around|about)\b/gi, ' ')
+      .replace(/^[,;:\s]+|[,;:\s]+$/g, '')
+      .trim();
+    if (remainder && !/^(?:unknown|not sure|no|i don't know|idk)$/i.test(remainder))
+      details.push(`Owner origin: ${remainder}`);
+  }
+  return `${previousRequest}\nOwner's route details: ${details.join('; ')}`;
 }
 
 const CORRECTION =
@@ -172,6 +215,9 @@ export function detectLiveLookup(
   // their explicit URL as a public page would bypass that deterministic path.
   if (requestedDocumentReadIntent(request)) return undefined;
   if (/\b(?:password|passcode|wifi|wi-fi|API key)\b/i.test(request)) return undefined;
+  const airportContinuation = airportClarificationContinuation(history);
+  if (airportContinuation)
+    return { kind: 'directions', request: airportContinuation, airportIntent: true };
   const asks = QUESTION.test(request) || request.includes('?') || SEARCH.test(request);
   if (EVENT_REMINDER.test(request) && isSportsRequest(request, asks))
     return {
@@ -259,6 +305,7 @@ export function detectLiveLookup(
 const CLAUSE_BREAK = /[.?!;\n]+\s*|,?\s+(?:and(?:\s+also)?|also|plus|then|as well as)\s+/gi;
 /** More parts than this is a list to research, not a question to answer live. */
 const MAX_LOOKUPS = 4;
+const MAX_AIRPORT_CALENDAR_PAGES = 5;
 
 /**
  * Every live lookup a request asks for, in the order it asks.
@@ -403,6 +450,139 @@ function tripWindow(lookup: LiveLookup, context: LookupContext): TemporalIntentR
   return resolveTemporalIntent(lookup.request, 'calendar', false, context, 'trip');
 }
 
+type AirportCalendarCoverage = {
+  complete: boolean;
+  pages: ActionEvidence[];
+  nextPageToken?: string;
+};
+
+function airportCalendarCoverage(
+  lookup: LiveLookup,
+  rows: ActionEvidence[],
+  context: LookupContext,
+): AirportCalendarCoverage {
+  const temporal = tripWindow(lookup, context);
+  if (temporal.kind !== 'resolved') return { complete: false, pages: [] };
+  const { start, endExclusive } = temporal.intent.interval;
+  const matching = rows.filter((row) => {
+    if (row.toolName !== 'calendar.list_events' || row.fromCurrentTask === false) return false;
+    const args = row.args as Record<string, unknown> | null;
+    return (
+      args?.timeMin === start &&
+      args?.timeMax === endExclusive &&
+      (args?.calendarIds === undefined ||
+        (Array.isArray(args.calendarIds) && args.calendarIds.length === 0))
+    );
+  });
+  const tokenOf = (row: ActionEvidence) => {
+    const value = (row.args as Record<string, unknown> | null)?.pageToken;
+    return typeof value === 'string' && value.length > 0 ? value : undefined;
+  };
+  let expectedToken: string | undefined;
+  const visited = new Set<string>();
+  const pages: ActionEvidence[] = [];
+  for (let index = 0; index < MAX_AIRPORT_CALENDAR_PAGES; index += 1) {
+    const attempts = matching.filter((row) => tokenOf(row) === expectedToken);
+    const page = attempts.find(successfulLookup);
+    if (!page)
+      return {
+        complete: false,
+        pages,
+        ...(attempts.length < 2 ? { nextPageToken: expectedToken ?? '' } : {}),
+      };
+    const result = page.result as Record<string, unknown> | null;
+    if (!Array.isArray(result?.events)) return { complete: false, pages };
+    pages.push(page);
+    const token = result.nextPageToken;
+    if (typeof token === 'string' && token.length > 0) {
+      if (visited.has(token) || token === expectedToken) return { complete: false, pages };
+      visited.add(token);
+      expectedToken = token;
+      if (index + 1 >= MAX_AIRPORT_CALENDAR_PAGES) return { complete: false, pages };
+      continue;
+    }
+    const unavailable = result.unavailable;
+    const complete =
+      result.complete === true &&
+      result.calendarRosterComplete === true &&
+      result.paginationUnavailable !== true &&
+      (!Array.isArray(unavailable) || unavailable.length === 0);
+    return { complete, pages };
+  }
+  return { complete: false, pages };
+}
+
+function airportOrigin(request: string): string | undefined {
+  const match =
+    /\b(?:from|starting\s+(?:at|from)|origin\s*(?:is|:)|(?:i\s+am|i'm|we\s+are|we're|currently)\s+at)\s+([^,.;?!\n]+?)(?=\s+\b(?:leave|leaving|depart|departing|head\s+out|at|around|about)\b|[,.;?!\n]|$)/i.exec(
+      request,
+    );
+  const value = match?.[1]?.trim().replace(/\s+/g, ' ');
+  if (!value || /^(?:here|there|me|my current location|where i am)$/i.test(value)) return undefined;
+  return value;
+}
+
+function airportDepartureInstant(request: string, context: LookupContext): string | undefined {
+  const match =
+    /\b(?:leave|leaving|depart|departing|head\s+out|drive\s+out|start\s+driving)\b[^.?!\n]{0,32}?\b(?:at|around|about)?\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b/i.exec(
+      request,
+    );
+  if (!match) return undefined;
+  const hour = Number(match[1]);
+  const minute = Number(match[2] ?? 0);
+  const isPm = /^p/i.test(match[3] ?? '');
+  if (hour < 1 || hour > 12 || minute > 59) return undefined;
+  const temporal = tripWindow({ kind: 'directions', request }, context);
+  if (temporal.kind !== 'resolved') return undefined;
+  const day = new Intl.DateTimeFormat('en-CA', {
+    timeZone: context.timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(temporal.intent.interval.start));
+  const [year, month, date] = day.split('-').map(Number);
+  if (!year || !month || !date) return undefined;
+  const local = { year, month, date, hour: (hour % 12) + (isPm ? 12 : 0), minute };
+  const target = Date.UTC(local.year, local.month - 1, local.date, local.hour, local.minute);
+  const partsAt = (value: number) => {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: context.timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(new Date(value));
+    const read = (type: string) => Number(parts.find((part) => part.type === type)?.value);
+    return {
+      year: read('year'),
+      month: read('month'),
+      date: read('day'),
+      hour: read('hour'),
+      minute: read('minute'),
+    };
+  };
+  let instant = target;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const observed = partsAt(instant);
+    instant +=
+      target -
+      Date.UTC(observed.year, observed.month - 1, observed.date, observed.hour, observed.minute);
+  }
+  const localKey = (value: number) => {
+    const parts = partsAt(value);
+    return `${parts.year}-${parts.month}-${parts.date} ${parts.hour}:${parts.minute}`;
+  };
+  const expected = `${year}-${month}-${date} ${local.hour}:${local.minute}`;
+  if (localKey(instant) !== expected) return undefined;
+  // A repeated wall-clock time during a fall-back transition is ambiguous.
+  for (let offset = -180; offset <= 180; offset += 15) {
+    if (offset !== 0 && localKey(instant + offset * 60_000) === expected) return undefined;
+  }
+  return new Date(instant).toISOString();
+}
+
 export function tripEvent(
   lookup: LiveLookup,
   evidence: ActionEvidence[],
@@ -544,14 +724,26 @@ function nextAirportStep(
 ): { toolName: string; input?: Record<string, unknown> } | undefined {
   const temporal = tripWindow(lookup, context);
   if (temporal.kind !== 'resolved') return undefined;
-  if (rows.some((row) => row.toolName === 'calendar.list_events')) return undefined;
+  const coverage = airportCalendarCoverage(lookup, rows, context);
+  if (coverage.nextPageToken !== undefined)
+    return {
+      toolName: 'calendar.list_events',
+      input: {
+        timeMin: temporal.intent.interval.start,
+        timeMax: temporal.intent.interval.endExclusive,
+        maxResults: 50,
+        ...(coverage.nextPageToken ? { pageToken: coverage.nextPageToken } : {}),
+      },
+    };
+  if (!coverage.complete) return undefined;
+  const candidates = airportItineraryEvents(lookup, coverage.pages, context);
+  const origin = airportOrigin(lookup.request);
+  const departAt = airportDepartureInstant(lookup.request, context);
+  const candidate = candidates.length === 1 ? candidates[0] : undefined;
+  if (!candidate || !origin || !departAt) return undefined;
   return {
-    toolName: 'calendar.list_events',
-    input: {
-      timeMin: temporal.intent.interval.start,
-      timeMax: temporal.intent.interval.endExclusive,
-      maxResults: 50,
-    },
+    toolName: 'maps.directions',
+    input: { origin, destination: candidate.location, departAt },
   };
 }
 
@@ -569,10 +761,21 @@ function airportItineraryEvents(
       const eventStart = Date.parse(event.start);
       // A flight title only identifies a likely itinerary record. The airport
       // candidate must come from the event's explicit location field.
-      if (!FLIGHT_EVENT.test(event.summary) || !AIRPORT_PLACE.test(event.location)) return false;
-      // A location that names a route or multiple places does not tell us which
-      // airport the owner needs to travel to.
-      if (/\b(?:from|to|via|and|or)\b|[;|/→]/i.test(event.location)) return false;
+      if (!FLIGHT_EVENT.test(event.summary) || !/\b(?:airport|airfield)\b/i.test(event.location))
+        return false;
+      const airportMentions = event.location.match(/\b(?:airport|airfield)\b/gi) ?? [];
+      const placeName = event.location
+        .replace(/\b(?:airport|airfield)\b/gi, '')
+        .replace(/\([^)]+\)/g, '')
+        .trim();
+      // One explicit, named airport only. A terminal or a joined list of
+      // airport names is not enough to choose the route destination.
+      if (
+        airportMentions.length !== 1 ||
+        !/[\p{L}\d]{2}/u.test(placeName) ||
+        /[,;&/→]|\s[-–—]\s|\b(?:from|to|via|and|or)\b/i.test(event.location)
+      )
+        return false;
       return Number.isFinite(eventStart) && eventStart >= start && eventStart < end;
     })
     .sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
@@ -912,19 +1115,24 @@ export function liveLookupFailure(
 ): string | undefined {
   if (lookup.airportIntent) {
     const rows = evidence.filter((row) => row.fromCurrentTask !== false);
-    const calendarRead = rows.find(
-      (row) => row.toolName === 'calendar.list_events' && successfulLookup(row),
-    );
-    if (!calendarRead)
-      return "I couldn't read your calendar to check for a relevant flight, so I haven't chosen an airport. Tell me the airport, where you'll start, and the time you plan to leave, and I can estimate the route.";
-    if ((calendarRead.result as { complete?: unknown }).complete === false)
-      return "Calendar coverage is incomplete, so I can't safely choose an airport from your itinerary. Tell me the airport, where you'll start, and the time you plan to leave, and I can estimate the route.";
-    const candidates = airportItineraryEvents(lookup, rows, context ?? DEFAULT_CONTEXT);
-    if (candidates.length === 1)
-      return `Your calendar lists a flight at ${candidates[0]?.location}, but it doesn't tell me where you'll start or when you'll leave for the airport. Share those two details and I can estimate tomorrow's traffic and travel time.`;
-    return candidates.length > 1
-      ? "Your calendar has multiple flight entries with airport locations in that period, so I haven't chosen one. Which airport do you mean, where will you start, and what time do you plan to leave?"
-      : "I couldn't confirm a unique airport from a flight location on your calendar. Which airport do you mean, where will you start, and what time do you plan to leave?";
+    const lookupContext = context ?? DEFAULT_CONTEXT;
+    const temporal = tripWindow(lookup, lookupContext);
+    if (temporal.kind === 'unsupported') return temporal.message;
+    if (temporal.kind !== 'resolved' || hasMalformedIsoDate(lookup.request))
+      return 'The requested airport travel date is not valid, so I have not chosen an airport or estimated a route.';
+    const coverage = airportCalendarCoverage(lookup, rows, lookupContext);
+    if (coverage.pages.length === 0)
+      return "I couldn't read the requested calendar window, so I haven't verified an airport or estimated the route.";
+    if (!coverage.complete)
+      return "Calendar coverage is incomplete, so I haven't verified an airport or estimated the route.";
+    if (rows.some((row) => row.toolName === 'maps.directions'))
+      return rows.some((row) => row.toolName === 'maps.directions' && successfulLookup(row))
+        ? undefined
+        : "I couldn't get a route from Apple Maps using the confirmed airport, origin, and departure time, so I haven't estimated travel time.";
+    // A full read with missing or ambiguous route details is an ordinary
+    // clarification, not a failed provider lookup. The model is instructed to
+    // ask only for the fields that are still absent.
+    return undefined;
   }
   if (lookup.destination === 'calendar') {
     const temporal = context ? tripWindow(lookup, context) : undefined;

@@ -2741,6 +2741,13 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       state.step === 0 &&
       (isUnattendedGoalSession(task) || plan?.action === 'workflow');
 
+    const airportClarificationTurn =
+      liveLookups.some((lookup) => lookup.airportIntent) &&
+      !forcedLiveLookup &&
+      liveFailures.length === 0 &&
+      !readRequest &&
+      !mustAct;
+
     let stepResult: StepCallOutcome;
     if (resumingBatch && state.pendingToolBatch) {
       // A suspended batch is the source of truth. Replaying the model here
@@ -2909,26 +2916,28 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         system,
         messages: rc.window,
         tools: toolSet as never,
-        toolChoice: readAnswerTurn
-          ? 'none'
-          : conceptualNoTool || watchRecoveryHasPriorAttempt
+        toolChoice:
+          readAnswerTurn || airportClarificationTurn
             ? 'none'
-            : state.futureWatchRecoveryAttempts > 0 && futureWatchIntent && toolDefs.length > 0
-              ? {
-                  type: 'tool',
-                  toolName: futureWatchIntent.channel === 'email' ? 'watch.create' : 'watch.web',
-                }
-              : forcedConditionalLookup
-                ? { type: 'tool', toolName: 'drive.search' }
-                : forcedArtifact
-                  ? { type: 'tool', toolName: forcedArtifact.toolName }
-                  : forcedLiveLookup
-                    ? { type: 'tool', toolName: forcedLiveLookup.toolName }
-                    : forceSituationRead && toolDefs.some((tool) => tool.name === 'situations.read')
-                      ? { type: 'tool', toolName: 'situations.read' }
-                      : mustAct
-                        ? 'required'
-                        : undefined,
+            : conceptualNoTool || watchRecoveryHasPriorAttempt
+              ? 'none'
+              : state.futureWatchRecoveryAttempts > 0 && futureWatchIntent && toolDefs.length > 0
+                ? {
+                    type: 'tool',
+                    toolName: futureWatchIntent.channel === 'email' ? 'watch.create' : 'watch.web',
+                  }
+                : forcedConditionalLookup
+                  ? { type: 'tool', toolName: 'drive.search' }
+                  : forcedArtifact
+                    ? { type: 'tool', toolName: forcedArtifact.toolName }
+                    : forcedLiveLookup
+                      ? { type: 'tool', toolName: forcedLiveLookup.toolName }
+                      : forceSituationRead &&
+                          toolDefs.some((tool) => tool.name === 'situations.read')
+                        ? { type: 'tool', toolName: 'situations.read' }
+                        : mustAct
+                          ? 'required'
+                          : undefined,
         // The primary chat model has intermittently timed out when a named
         // artifact tool is mandatory. Use the role's configured
         // tool-capable fallback where appropriate.
@@ -2986,7 +2995,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     if (
       !resumingBatch &&
       stepResult.ok &&
-      (readAnswerTurn || conceptualNoTool) &&
+      (readAnswerTurn || conceptualNoTool || airportClarificationTurn) &&
       stepResult.toolCalls.length > 0
     ) {
       stepResult = { ...stepResult, toolCalls: [] };
