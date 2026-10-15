@@ -391,6 +391,25 @@ describe('source-grounded public page summary recovery', () => {
     );
   });
 
+  it('gates explicitly quoted URL targets for summary and review requests', () => {
+    expect(requestedPublicPageReceiptFindings(`Summarize '${url}'`, [])).toHaveLength(1);
+    expect(requestedPublicPageReceiptFindings(`Summarize '${url}'`, evidence)).toEqual([]);
+    expect(requestedPublicPageReceiptFindings(`Summarize this page: '${url}'`, [])).toHaveLength(1);
+    expect(requestedPublicPageReceiptFindings(`Review the contents of '${url}'`, [])).toHaveLength(
+      1,
+    );
+
+    const documentUrl = `https://docs.google.com/document/d/${documentId}/edit`;
+    expect(requestedPublicPageReceiptFindings(`Summarize '${documentUrl}'`, [])).toEqual([
+      'No complete current native read receipt is bound to 1 requested Workspace document.',
+    ]);
+    expect(
+      requestedPublicPageReceiptFindings(`Summarize this page: '${documentUrl}'`, [
+        nativeDocPage(0, 5, 5, true),
+      ]),
+    ).toEqual([]);
+  });
+
   it.each(['browse', 'open', 'fetch', 'visit', 'read', 'load'])(
     'does not require a fetch when the owner says not to %s that URL',
     (verb) => {

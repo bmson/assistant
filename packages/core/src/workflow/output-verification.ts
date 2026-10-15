@@ -418,8 +418,13 @@ function requestedPageTargets(request: string): string[] {
         const clauseText = args.at(-1) as string;
         const content = String(args[0] ?? args[1] ?? args[2] ?? args[3] ?? '').trim();
         const prefix = clauseText.slice(0, offset);
+        const quotedTargetIntent =
+          /\b(?:summari[sz]e|review|analy[sz]e|inspect|extract)\s+(?:(?:the|this|that)\s+)?(?:(?:page|article|site|website|webpage|url|link|source|contents?|text)(?:\s+of)?\s*:?\s*)?$/i.test(
+            prefix,
+          );
         return content === 'SOURCE_URL' &&
-          /\b(?:read|fetch|open|visit|load)\s+(?:(?:the|this|that)\s+)?$/i.test(prefix)
+          (/\b(?:read|fetch|open|visit|load)\s+(?:(?:the|this|that)\s+)?$/i.test(prefix) ||
+            quotedTargetIntent)
           ? 'SOURCE_URL'
           : ' ';
       });
