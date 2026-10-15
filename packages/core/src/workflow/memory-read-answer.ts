@@ -43,6 +43,75 @@ function normalizedText(value: string): string {
   return value.normalize('NFKC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase('en-US');
 }
 
+function selectedSourceGroups(
+  chosen: Array<{ item: MemoryReadSelection['selections'][number]; source: MemoryReadSource }>,
+) {
+  const groups: Array<{
+    quote: string;
+    speaker: string;
+    provenances: string[];
+  }> = [];
+  const byIdentity = new Map<string, (typeof groups)[number]>();
+  for (const { item, source } of chosen) {
+    // Only collapse verbatim repeats from the same speaker. Keep every distinct
+    // message citation, and never merge an owner statement with an assistant claim.
+    const identity = JSON.stringify([source.speaker, item.quote]);
+    const existing = byIdentity.get(identity);
+    if (existing) {
+      if (!existing.provenances.includes(source.provenance))
+        existing.provenances.push(source.provenance);
+      continue;
+    }
+    const group = {
+      quote: item.quote,
+      speaker: source.speaker,
+      provenances: [source.provenance],
+    };
+    byIdentity.set(identity, group);
+    groups.push(group);
+  }
+  return groups;
+}
+
+function directSelectedContrastAnswer(
+  request: string,
+  groups: ReturnType<typeof selectedSourceGroups>,
+): string | undefined {
+  // Make a direct, bounded statement only for an explicit owner-vs-assistant
+  // question whose queried destination appears in the selected assistant source
+  // and not in the selected owner source. This does not generalize absence beyond
+  // the exact passages being cited.
+  const targetMatch = request.match(
+    /\bdid\s+i\b[\s\S]{0,140}?\bfor\s+([^,?]+?),?\s+or\s+was\s+(?:that|it)\s+(?:an?\s+)?(?:the\s+)?assistant\s+(?:inference|suggestion)\b/iu,
+  );
+  const target = targetMatch?.[1]?.trim();
+  if (!target) return undefined;
+  const targetTokens = (normalizedText(target).match(/[\p{L}\p{N}]+/gu) ?? []).filter(
+    (token) => !new Set(['a', 'an', 'and', 'for', 'in', 'of', 'the', 'to']).has(token),
+  );
+  if (targetTokens.length === 0) return undefined;
+  const tokensIn = (value: string) => new Set(normalizedText(value).match(/[\p{L}\p{N}]+/gu) ?? []);
+  const hasTarget = (value: string) => {
+    const tokens = tokensIn(value);
+    return targetTokens.every((token) => {
+      const aliases = token === 'transport' ? ['transport', 'transit'] : [token];
+      return aliases.some((alias) => tokens.has(alias));
+    });
+  };
+  const owners = groups.filter((group) => group.speaker === 'Recorded owner message');
+  const assistants = groups.filter(
+    (group) => group.speaker === 'Earlier assistant claim (not verified fact)',
+  );
+  if (
+    owners.length !== 1 ||
+    assistants.length !== 1 ||
+    hasTarget(owners[0]?.quote ?? '') ||
+    !hasTarget(assistants[0]?.quote ?? '')
+  )
+    return undefined;
+  return `In the selected passages, the owner-authored message does not mention “${target}”; the related suggestion appears in the separate assistant-authored message.`;
+}
+
 function memorySourcePriority(source: { speaker: string }): number {
   if (source.speaker === 'Recorded owner message') return 0;
   if (source.speaker === 'Saved fact marked owner-confirmed') return 1;
@@ -1053,12 +1122,18 @@ export function renderMemoryReadAnswer(
     chosen.some(({ source }) => source.speaker === 'Earlier assistant claim (not verified fact)');
   const ownerAssistantContrast =
     hasOwnerAndAssistant && requiresOwnerAssistantContrast(excludeExactRequest ?? '');
+  const groups = selectedSourceGroups(chosen);
+  const directAnswer = ownerAssistantContrast
+    ? directSelectedContrastAnswer(excludeExactRequest ?? '', groups)
+    : undefined;
   return [
-    ...(ownerAssistantContrast
-      ? [
-          'The owner-authored passage records the original statement; the separate assistant-authored passage is an assistant claim or suggestion, not evidence of owner intent.',
-        ]
-      : []),
+    ...(directAnswer
+      ? [directAnswer]
+      : ownerAssistantContrast
+        ? [
+            'The owner-authored passage records the original statement; the separate assistant-authored passage is an assistant claim or suggestion, not evidence of owner intent.',
+          ]
+        : []),
     ...(/\b(?:hypothetical|fictional)\b[^.!?\n]{0,100}\b(?:exercise|scenario)\b/i.test(
       excludeExactRequest ?? '',
     )
@@ -1069,10 +1144,9 @@ export function renderMemoryReadAnswer(
           'Assistant records only: the bounded lookup did not return a validated owner-authored source for the correction. These records show what the assistant wrote, not the owner’s original words or a current fact.',
         ]
       : ['Relevant historical sources:']),
-    ...selection.selections.map((item) => {
-      const source = byKey.get(item.sourceKey);
-      if (!source) return '';
-      return `- **${source.speaker}:** “${item.quote.replace(/[\r\n]+/g, ' ')}”\n  Source: ${source.provenance}.`;
+    ...groups.map((group) => {
+      const provenanceLabel = group.provenances.length === 1 ? 'Source' : 'Sources';
+      return `- **${group.speaker}:** “${group.quote.replace(/[\r\n]+/g, ' ')}”\n  ${provenanceLabel}: ${group.provenances.join('; ')}.`;
     }),
     ...(evidence.some(
       (row) =>

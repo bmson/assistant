@@ -194,8 +194,50 @@ describe('source-backed fictional history', () => {
     expect(result.selections).toEqual([ownerSelection, assistantSelection]);
     expect(validMemoryReadSelection(result, evidence, request)).toBe(true);
     const rendered = renderMemoryReadAnswer(result, evidence, request);
-    expect(rendered).toContain('records the original statement');
-    expect(rendered).toContain('not evidence of owner intent');
+    expect(rendered).toContain(
+      'In the selected passages, the owner-authored message does not mention “public transport”; the related suggestion appears in the separate assistant-authored message.',
+    );
+
+    const sourceEvidence = evidence[0];
+    if (!sourceEvidence) throw new Error('Expected source evidence');
+    const sourceRows = (sourceEvidence.result as { matches: Array<Record<string, unknown>> })
+      .matches;
+    const ownerRow = sourceRows[0];
+    const assistantRow = sourceRows[1];
+    if (!ownerRow) throw new Error('Expected owner source row');
+    if (!assistantRow) throw new Error('Expected assistant source row');
+    const conflictingOwnerBody = `${ownerBody} I did not earmark the budget for public transport.`;
+    const conflictEvidence: ActionEvidence[] = [
+      {
+        ...sourceEvidence,
+        result: {
+          matches: [
+            {
+              ...ownerRow,
+              text: conflictingOwnerBody,
+              speakerRevision: conversationMessageSpeakerRevision(
+                String(ownerRow.messageId),
+                conflictingOwnerBody,
+                'user',
+                'owner',
+              ),
+            },
+            assistantRow,
+          ],
+        },
+      },
+    ];
+    const conflictSelection = {
+      ...result,
+      selections: [
+        { sourceKey: 'message:owner-nimbus', quote: conflictingOwnerBody },
+        assistantSelection,
+      ],
+    };
+    expect(validMemoryReadSelection(conflictSelection, conflictEvidence, request)).toBe(true);
+    expect(renderMemoryReadAnswer(conflictSelection, conflictEvidence, request)).not.toContain(
+      'does not mention “public transport”',
+    );
     expect(rendered).toContain('Recorded owner message');
     expect(rendered).toContain('Earlier assistant claim (not verified fact)');
     expect(rendered).toContain('conversation exercise-chat; message owner-nimbus');
@@ -240,6 +282,7 @@ describe('source-backed fictional history', () => {
     const rows = [
       makeOwner('owner-solstice-1', ownerText),
       makeOwner('owner-solstice-2', ownerText),
+      makeOwner('owner-solstice-3', ownerText),
       makeAssistant('assistant-solstice', assistantText),
     ];
     const request =
@@ -264,11 +307,14 @@ describe('source-backed fictional history', () => {
     expect(result.selections.map((selection) => selection.sourceKey)).toEqual([
       'message:owner-solstice-1',
       'message:owner-solstice-2',
+      'message:owner-solstice-3',
       'message:assistant-solstice',
     ]);
     const rendered = renderMemoryReadAnswer(result, search(rows), request);
+    expect(rendered.split(`“${ownerText}”`).length - 1).toBe(1);
     expect(rendered).toContain('message owner-solstice-1');
     expect(rendered).toContain('message owner-solstice-2');
+    expect(rendered).toContain('message owner-solstice-3');
     expect(rendered).toContain('message assistant-solstice');
   });
 
