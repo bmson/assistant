@@ -24,6 +24,7 @@ describe('owner intent provenance', () => {
     'What was the calculation we did earlier? What is 17 × 23?',
     'Use the numbers from our earlier chat to calculate the total.',
     'What is 17 × 23 in the example we discussed yesterday?',
+    'What is 17 × 23? Give the result using the method from our earlier chat.',
   ])('keeps historical context available for a calculation that asks for it: %s', (text) => {
     expect(isSelfContainedCalculationRequest(text)).toBe(false);
   });

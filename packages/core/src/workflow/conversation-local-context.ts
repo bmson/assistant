@@ -62,6 +62,13 @@ export function isConversationLocalContext(text: string): boolean {
 
 /** A complete numeric calculation needs no historical conversation context. */
 export function isSelfContainedCalculationRequest(text: string): boolean {
+  if (
+    /\b(?:earlier|previous|prior|past|last\s+(?:time|chat|conversation|answer|response)|history|memories?|conversation|chat|context|before|as\s+(?:we|you|I)\s+(?:said|mentioned|discussed|did)|as\s+discussed)\b/i.test(
+      text,
+    )
+  ) {
+    return false;
+  }
   const number = String.raw`(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?`;
   const operation = String.raw`(?:[+\-−×x*/÷]|plus|minus|times|multiplied\s+by|divided\s+by)`;
   const expression = new RegExp(
