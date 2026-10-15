@@ -15,7 +15,11 @@ import {
 import { calendarRelationship, calendarRelationshipNote } from './calendar-relationship.js';
 import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
 import type { CompoundTripExtraction } from './compound-trip-extraction.js';
-import { compoundTripReadProjection, upcomingFlightReadProjection } from './compound-trip-read.js';
+import {
+  compoundTripReadProjection,
+  renderCompoundTripReadResponse,
+  upcomingFlightReadProjection,
+} from './compound-trip-read.js';
 import { createdDocumentVerification } from './document-verification.js';
 import {
   type ExplicitSourceSelection,
@@ -3485,7 +3489,9 @@ export function verifiedReadResponse(
   if (request.upcomingFlightDiscovery)
     return upcomingFlightReadProjection(request, evidence, compoundTripExtraction).text;
   if (request.compoundTripDiscovery)
-    return compoundTripReadProjection(request, evidence, compoundTripExtraction).text;
+    return renderCompoundTripReadResponse(
+      compoundTripReadProjection(request, evidence, compoundTripExtraction),
+    );
   const current = currentSuccessfulEvidence(evidence);
   if (request.weeklyCalendarPlan) {
     const interval =
@@ -4128,7 +4134,9 @@ function coverageGapResponse(
 ): ResponseContractResult {
   if (request.compoundTripDiscovery) {
     return {
-      text: compoundTripReadProjection(request, evidence, compoundTripExtraction).text,
+      text: renderCompoundTripReadResponse(
+        compoundTripReadProjection(request, evidence, compoundTripExtraction),
+      ),
       blocked: true,
       unsupported: gaps.unsupported,
     };

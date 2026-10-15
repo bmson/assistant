@@ -7,6 +7,7 @@ import {
   compoundTripRoute,
   compoundTripThreadIdsToRead,
   compoundTripThreadReadInputs,
+  renderCompoundTripReadResponse,
   upcomingFlightReadProjection,
 } from './compound-trip-read.js';
 import { tripPrompt, tripSourceResult } from './compound-trip-source.test-fixtures.js';
@@ -666,6 +667,9 @@ describe('compound trip read projection', () => {
 
     const projection = compoundTripReadProjection(read, evidence);
     expect(projection.text).toContain('calendar record lists the route BER to SFO');
+    expect(renderCompoundTripReadResponse(projection)).toContain(
+      'calendar record lists the route BER to SFO',
+    );
     expect(projection.text).toContain('does not explicitly label the flight outbound or return');
     expect(projection.text).not.toContain('The calendar does not state its direction.');
   });
@@ -4965,6 +4969,11 @@ describe('compound trip read projection', () => {
     ]);
     const projection = compoundTripReadProjection(read, [calendar, ...bookingEmailEvidence()]);
     expect(projection.text).toContain('clocks conflict after time-zone conversion');
+    const concise = renderCompoundTripReadResponse(projection);
+    expect(concise).toContain('Clocks differ after time-zone conversion');
+    expect(concise).toContain('11:10:00+02:00');
+    expect(concise).toContain('10:10');
+    expect(concise).toContain('[Calendar](');
   });
 
   it('shows bounded calendar-only observations when coverage is partial without promoting them', () => {
@@ -5624,6 +5633,36 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(final.text).not.toContain('did not identify a hotel');
     expect(final.text).not.toContain('Europe/Copenhagen');
     expect(final.blocked).toBe(true);
+    const answer = renderCompoundTripReadResponse(final);
+    const visible = answer.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+    expect(visible.split(/\s+/).length).toBeLessThanOrEqual(330);
+    expect(answer.length).toBeLessThanOrEqual(3800);
+    expect(answer.startsWith('The booking is for a current trip')).toBe(true);
+    expect(answer).toContain('A new outbound trip is not verified');
+    expect(answer).toContain('| Leg | Departure | Arrival | Source |\n|---|---|---|---|\n|');
+    expect(answer).toContain('| Option | Fare | Duration | Source |\n|---|---|---|---|\n|');
+    for (const number of ['KL700', 'KL701', 'KL702', 'KL703']) expect(answer).toContain(number);
+    expect(answer).toContain('2030-11-10');
+    expect(answer).toContain('2030-11-17');
+    expect(answer).toContain('Canal House');
+    expect(answer).toContain('Canal Street 42');
+    expect(answer).toContain('zone unknown');
+    expect(answer).toContain('Direction inferred');
+    expect(answer).toContain('operated by KLM instead of Example Air');
+    expect(answer).toContain('clock difference cannot be verified');
+    expect(answer).toContain('| Public transport | EUR 5 | 40 minutes |');
+    expect(answer).toContain('| Taxi | EUR 45 | 30 minutes |');
+    for (const url of [
+      'https://transit.example/route',
+      'https://taxi.example/route',
+      'https://mail.google.com/mail/u/0/#all/hotel-thread',
+      'https://calendar.google.com/calendar/event?eid=fixture-return',
+    ])
+      expect(answer).toContain(url);
+    expect(answer).not.toContain('source-stated local');
+    expect(answer).not.toContain('Needs confirmation:');
+    expect(final.presentation.gaps.length).toBeGreaterThan(0);
+    expect(final.text.length).toBeGreaterThan(answer.length);
   });
 
   it.each([true, false])(
@@ -5644,6 +5683,9 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
       message.sourceLength = message.text.length;
       const result = compoundTripReadProjection(read, rows);
       expect(result.text.includes('source-stated local clocks')).toBe(local);
+      expect(
+        renderCompoundTripReadResponse(result).includes('explicitly labels its clocks local'),
+      ).toBe(local);
       expect(result.text).toContain(
         'Their time zones and exact connection durations remain unverified',
       );

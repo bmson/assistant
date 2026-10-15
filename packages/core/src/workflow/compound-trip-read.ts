@@ -120,7 +120,18 @@ export interface CompoundTripReadProjection {
   connectionSummary?: string;
   comparison: CompoundTripComparisonEvidence[];
   blocked: boolean;
+  /** Full diagnostic projection; required-read gates consume every gap below. */
   text: string;
+  presentation: {
+    summary: string;
+    groups: Array<{ label: string; inferred: boolean; legs: CompoundTripFlightSegment[] }>;
+    hotels: CompoundTripHotelCandidate[];
+    calendarNotes: string[];
+    calendarObservations: string[];
+    gaps: string[];
+    associationInferred: boolean;
+    localClocks: boolean;
+  };
 }
 
 export interface UpcomingFlightReadProjection {
@@ -2437,6 +2448,7 @@ function bookedCalendarDifferences(
   groups: ReadonlyArray<BookedRouteGroup>,
   calendarRows: ReadonlyArray<ReadToolEvidence>,
   links: ReadonlyMap<string, string>,
+  compact = false,
 ): string[] {
   const lines: string[] = [];
   for (const row of calendarRows) {
@@ -2463,6 +2475,12 @@ function bookedCalendarDifferences(
       ];
       const carrierDifference =
         carrier?.role === 'operating' && carriers.length === 1 && carrier.name !== carriers[0];
+      if (compact) {
+        lines.push(
+          `Calendar: ${markdownText(text(event.summary, 120))}, start ${markdownText(calendarField(event, 'start'))}; booking: ${group.legs.map((leg) => leg.originAirport).join('→')}→${group.destination}, ${first?.departureDate} ${first?.departureTime}${carrierDifference ? `, operated by ${markdownText(carriers[0] ?? '')} instead of ${markdownText(carrier.name)}` : ''}. Same itinerary reference; ${first?.departureTimeZone ? 'exact segment identity still needs checking' : 'clock difference cannot be verified without the booking time zone'}.${calendarSource(event) ? ` [Calendar](${calendarSource(event)})` : ''}${links.get(group.threadId) ? ` [Booking](${links.get(group.threadId)})` : ''}`,
+        );
+        continue;
+      }
       lines.push(
         `Same-itinerary calendar comparison for ${group.origin}→${group.destination}: Calendar records ${markdownText(text(event.summary, 160))}, start ${markdownText(calendarField(event, 'start'))}; the booking route group starts ${first?.departureDate} ${first?.departureTime} at ${group.origin}${carrierDifference ? ` and names ${markdownText(carriers[0] ?? '')} as operating carrier, while Calendar names ${markdownText(carrier.name)}` : ''}. ${first?.departureTimeZone ? 'This compares the route group, not an independently verified calendar-to-segment identity.' : 'The booking departure time zone is not stated, so I cannot establish an instant-level clock conflict or convert the calendar offset into a flight time zone.'}${calendarSource(event) ? ` [Calendar source](${calendarSource(event)})` : ''}${links.get(group.threadId) ? ` [Booking email](${links.get(group.threadId)})` : ''}.`,
       );
@@ -3948,6 +3966,70 @@ export function compoundTripReadProjection(
     ),
     ...gaps.map((gap) => `Needs confirmation: ${gap}`),
   ].filter(Boolean);
+  const sourceGroups = bookedGroups.filter(
+    (group) => group.threadId === bookedTransfer?.group.threadId,
+  );
+  const presentationGroups = flight?.segment
+    ? [
+        { label: 'Outbound', inferred: false, legs: [flight.segment, ...legs] },
+        ...(returnFlight?.segment
+          ? [{ label: 'Return', inferred: false, legs: [returnFlight.segment, ...returnLegs] }]
+          : []),
+      ]
+    : sourceGroups.length
+      ? sourceGroups.map((group) => ({
+          label: group.direction === 'outbound' ? 'Outbound' : 'Return',
+          inferred: true,
+          legs: group.legs,
+        }))
+      : currentTripReturn?.segment
+        ? [
+            {
+              label: 'Return',
+              inferred: false,
+              legs: [
+                currentTripReturn.segment,
+                ...connectionSegments(currentTripReturn.segment, flightSegments),
+              ],
+            },
+          ]
+        : [{ label: 'Candidate', inferred: false, legs: flightSegments }];
+  const bookingReturn = sourceGroups.find((group) => group.direction === 'return')?.legs[0]
+    ?.departureDate;
+  const currentBooking =
+    bookedArrivalDate && bookedArrivalDate < (request.timeWindow?.timeMin.slice(0, 10) ?? '');
+  const matchedCalendarNotes = [flight, returnFlight, currentTripReturn].flatMap((candidate) => {
+    const segment = candidate?.segment;
+    if (!candidate || !segment) return [];
+    const instant = sourceLocalInstant(segment);
+    const clockConflict =
+      instant !== undefined && Math.abs(instant - Date.parse(candidate.instant)) > 5 * 60_000;
+    if (!clockConflict && !candidate.calendarConflicts?.length) return [];
+    const metadata = [
+      candidate.calendarConflicts?.includes('flight-number')
+        ? `flight ${candidate.flightNumber} vs ${segment.flightNumber}`
+        : '',
+      candidate.calendarConflicts?.includes('carrier')
+        ? `carrier ${candidate.calendarCarrier} vs ${explicitCarrierLabel(segment.excerpt, segment.flightNumber) ?? 'different source carrier'}`
+        : '',
+      candidate.calendarConflicts?.includes('direction')
+        ? `direction ${candidate.calendarDirection} vs ${segment.direction}`
+        : '',
+      candidate.calendarConflicts?.includes('arrival-airport')
+        ? `arrival ${candidate.calendarReportedArrivalAirport} vs ${candidate.arrivalAirport}`
+        : '',
+    ].filter(Boolean);
+    return [
+      `Calendar ${markdownText(text(candidate.event.summary, 120))}, start ${calendarField(candidate.event, 'start')}; booking ${segment.flightNumber}, ${segment.departureDate} ${segment.departureTime} (${segment.departureTimeZone ?? 'zone unknown'}). ${metadata.length ? `${metadata.map(markdownText).join('; ')}. ` : ''}${clockConflict ? 'Clocks differ after time-zone conversion. ' : ''}Verify which schedule is current.${calendarSource(candidate.event) ? ` [Calendar](${calendarSource(candidate.event)})` : ''}${mailLinks.get(segment.threadId) ? ` [Booking](${mailLinks.get(segment.threadId)})` : ''}`,
+    ];
+  });
+  const conciseSummary = flight?.segment
+    ? `Next calendar-matched outbound: ${flight.segment.departureDate}${returnFlight?.segment ? `; return ${returnFlight.segment.departureDate}` : '; return not verified'}.`
+    : currentTripReturn?.segment || currentBooking
+      ? `The booking is for a current trip, with a return ${currentTripReturn?.segment?.departureDate ?? bookingReturn ?? 'date not verified'}. A new outbound trip is not verified.`
+      : bookedTransfer
+        ? `Booking candidate: ${bookedTransfer.group.legs[0]?.departureDate}–${bookingReturn}. I could not verify this as the next outbound trip.`
+        : 'I could not identify one verified next trip. These checked records remain candidates.';
   return {
     calendarRows,
     calendarComplete,
@@ -3980,6 +4062,18 @@ export function compoundTripReadProjection(
     webFetches,
     comparison,
     blocked: gaps.length > 0 || !webSearch,
+    presentation: {
+      summary: conciseSummary,
+      groups: presentationGroups,
+      hotels: hotel ? [hotel] : standaloneHotelObservations,
+      calendarNotes: sourceGroups.length
+        ? bookedCalendarDifferences(sourceGroups, calendarRows, mailLinks, true)
+        : matchedCalendarNotes,
+      calendarObservations: partialCalendarLines,
+      gaps,
+      associationInferred: Boolean(bookedTransfer || hotel?.association === 'date_city_candidate'),
+      localClocks: Boolean(selectedBookingStatesLocalClocks),
+    },
     text: [
       partialCalendarLines.length > 0 && !flight
         ? 'I checked the available trip sources. Here are limited calendar observations, not a verified itinerary:'
@@ -3988,6 +4082,100 @@ export function compoundTripReadProjection(
       'I did not book, change, or send anything.',
     ].join('\n\n'),
   };
+}
+
+/** Publish a compact view; the full typed ledger and all blocking gaps stay internal. */
+export function renderCompoundTripReadResponse(projection: CompoundTripReadProjection): string {
+  const view = projection.presentation;
+  const cell = (value: string) => markdownText(value).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+  const clock = (date: string | undefined, time: string | undefined, zone: string | undefined) =>
+    `${date ?? 'date unknown'} ${time ?? 'time unknown'} (${zone ?? 'zone unknown'})`;
+  const links = threadSourceLinks(projection.readThreads);
+  const lines = [view.summary];
+  const groups = view.groups.filter((group) => group.legs.length);
+  if (groups.length) {
+    const table = ['| Leg | Departure | Arrival | Source |', '|---|---|---|---|'];
+    for (const group of groups) {
+      for (const leg of group.legs) {
+        table.push(
+          `| ${cell(`${group.label}${group.inferred ? '*' : ''}: ${leg.flightNumber} ${leg.originAirport ?? '?'}→${leg.destinationAirport ?? '?'}`)} | ${cell(clock(leg.departureDate, leg.departureTime, leg.departureTimeZone))} | ${cell(clock(leg.arrivalDate, leg.arrivalTime, leg.arrivalTimeZone))} | ${links.get(leg.threadId) ? `[Booking](${links.get(leg.threadId)})` : 'link unavailable'} |`,
+        );
+      }
+    }
+    lines.push(table.join('\n'));
+    if (groups.some((group) => group.inferred))
+      lines.push('*Direction inferred from the reversed itinerary route groups.*');
+    if (view.localClocks)
+      lines.push(
+        'The selected booking explicitly labels its clocks local; time-zone offsets remain unverified.',
+      );
+  }
+  if (!groups.length && view.calendarObservations.length)
+    lines.push(view.calendarObservations.join('\n\n'));
+  for (const hotel of view.hotels.slice(0, 3)) {
+    lines.push(
+      `Hotel: **${cell(hotel.hotelName ?? hotel.subject)}** — ${cell(hotel.address ?? 'address unverified')}${hotel.city && !hotel.address?.includes(hotel.city) ? `, ${cell(hotel.city)}` : ''}; ${hotel.checkIn ?? 'check-in unknown'} to ${hotel.checkOut ?? 'check-out unknown'}.${links.get(hotel.threadId) ? ` [Booking](${links.get(hotel.threadId)})` : ''}`,
+    );
+  }
+  if (!view.hotels.length) lines.push('Hotel: no verified linked stay; see gaps below.');
+  if (view.hotels.length > 3)
+    lines.push(`${view.hotels.length - 3} additional hotel records remain unresolved.`);
+  if (view.associationInferred)
+    lines.push(
+      'Flight–hotel association inferred from matching arrival/check-in date and city; separate bookings.',
+    );
+  if (view.calendarNotes.length) lines.push(`Calendar vs booking: ${view.calendarNotes.join(' ')}`);
+  if (projection.routeOrigin && projection.routeDestination) {
+    lines.push(
+      `Transfer candidate: **${cell(projection.routeOrigin)} → ${cell(projection.routeDestination)}**.`,
+    );
+    const table = ['| Option | Fare | Duration | Source |', '|---|---|---|---|'];
+    for (const mode of ['public transport', 'taxi'] as const) {
+      const item = projection.comparison.find(
+        (entry) => entry.mode === mode && entry.endpointMatched,
+      );
+      table.push(
+        `| ${mode === 'taxi' ? 'Taxi' : 'Public transport'} | ${cell(item?.fare ?? 'unverified')} | ${cell(item?.duration ?? 'unverified')} | ${item ? `[Source](${item.url})` : 'no checked endpoint-matched source'} |`,
+      );
+    }
+    lines.push(table.join('\n'));
+    if (
+      projection.mapRoute &&
+      !projection.comparison.some((item) => item.mode === 'taxi' && item.duration)
+    ) {
+      const url = text(projection.mapRoute.mapsUrl, 1000);
+      lines.push(
+        `Driving estimate: ${routeDuration(projection.mapRoute)}; not a taxi quote.${safePublicSourceUrl(url) ? ` [Maps](${url})` : ''}`,
+      );
+    }
+  } else
+    lines.push('Airport-to-hotel comparison: endpoints or trip association remain unverified.');
+  const unknowns = new Set<string>();
+  for (const gap of view.gaps) {
+    if (/overlap or run in reverse|return leaves before/i.test(gap))
+      unknowns.add('Flight chronology conflicts; verify the itinerary before travel.');
+    else if (/calendar.*(?:conflict|differ)|booking.*(?:conflict|differ)/i.test(gap)) {
+      if (!view.calendarNotes.length) unknowns.add(gap);
+    } else if (/coverage|matching email threads?[^.]*unread|booking-email search/i.test(gap))
+      unknowns.add('Calendar/email coverage is incomplete.');
+    else if (/time.zone|source clock|chronological order/i.test(gap))
+      unknowns.add('Flight time zones and exact connection timing remain unverified.');
+    else if (/connection|nonstop|connecting leg/i.test(gap))
+      unknowns.add('Connection/nonstop completeness remains unverified.');
+    else if (/outbound|which flight is next|which leg is next|plausible flight/i.test(gap)) {
+      /* The answer-first summary carries next-trip uncertainty. */
+    } else if (/hotel|stay dates|lodging/i.test(gap))
+      unknowns.add('Hotel selection, stay details or flight association remain unverified.');
+    else if (
+      /driving route|public.transport|taxi|route comparison|route endpoints|source to inspect|source results/i.test(
+        gap,
+      )
+    )
+      unknowns.add('Transfer fares/times or endpoint-matched source coverage remain incomplete.');
+    else unknowns.add(gap);
+  }
+  if (unknowns.size) lines.push(`Unverified: ${[...unknowns].join(' ')}`);
+  return lines.join('\n\n');
 }
 
 /**

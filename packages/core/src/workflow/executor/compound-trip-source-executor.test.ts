@@ -185,13 +185,17 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
     expect(answer).toContain('Canal House');
     expect(answer).toContain('2030-11-10 to 2030-11-17');
     expect(answer).toContain('KL702 CPH→AMS');
-    expect(answer).toContain('direction inferred from the reversed route groups');
+    expect(answer).toContain('Direction inferred from the reversed itinerary route groups');
     expect(answer).toContain('EUR 5');
     expect(answer).toContain('EUR 45');
     expect(answer).toContain('https://transit.example/route');
     expect(answer).toContain('https://taxi.example/route');
     expect(answer).toContain('https://mail.google.com/mail/u/0/#all/hotel-thread');
-    expect(answer).toContain('time zones and exact connection durations remain unverified');
+    expect(answer).toContain('zone unknown');
+    expect(answer.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').split(/\s+/).length).toBeLessThanOrEqual(
+      330,
+    );
+    expect(answer).toContain('| Public transport | EUR 5 | 40 minutes |');
     expect(answer).not.toContain('No hotel booking was found');
     expect(answer).not.toContain('flights and zones are confirmed');
     expect(router.embed).not.toHaveBeenCalled();
