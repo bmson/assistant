@@ -73,6 +73,33 @@ describe('live lookup routing from home-screen regressions', () => {
   });
 
   it.each([
+    'What is the current score in the SF Giants game?',
+    'What was the Arsenal score yesterday?',
+    'Who won the Valur match last Saturday?',
+  ])('keeps team argument generation for an ordinary dated score question: %s', (request) => {
+    const lookup = detectLiveLookup([{ role: 'user', content: request }]);
+    expect(lookup?.kind).toBe('sports');
+    if (!lookup) throw new Error('Expected a sports lookup');
+    expect(
+      nextLiveLookup(lookup, [], {
+        now: new Date('2026-10-15T08:11:00Z'),
+        timeZone: 'America/Los_Angeles',
+      }),
+    ).toEqual({ toolName: 'sports.scores' });
+  });
+
+  it('retains a complete league identity with the owner-local date', () => {
+    const lookup = detectLiveLookup([{ role: 'user', content: 'Any MLB scores yesterday?' }]);
+    if (!lookup) throw new Error('Expected a sports lookup');
+    expect(
+      nextLiveLookup(lookup, [], {
+        now: new Date('2026-10-15T08:11:00Z'),
+        timeZone: 'America/Los_Angeles',
+      }),
+    ).toMatchObject({ toolName: 'sports.scores', input: { league: 'mlb', date: '2026-10-14' } });
+  });
+
+  it.each([
     'Who is the current president of Iceland',
     'Search the web',
     'Look it up, don’t think this is correct',

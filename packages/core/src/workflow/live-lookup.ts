@@ -496,6 +496,11 @@ export function nextLiveLookup(
   if (lookup.kind === 'sports') {
     const scores = rows.filter((row) => row.toolName === 'sports.scores');
     if (!scores.length) {
+      // A partial deterministic input bypasses model argument generation.
+      // A date alone loses the team named in an ordinary score question, so
+      // only force arguments when we also have a team or league identity.
+      const league = lookup.reminderLeague ?? leagueNamedIn(lookup.request)?.key;
+      if (!lookup.reminderTeam && !league) return { toolName: 'sports.scores' };
       const dateWindow = context
         ? resolveTimeWindow(lookup.request, 'calendar', false, context)
         : undefined;
@@ -509,11 +514,11 @@ export function nextLiveLookup(
         : undefined;
       return {
         toolName: 'sports.scores',
-        ...(lookup.reminderTeam || lookup.reminderLeague || date
+        ...(lookup.reminderTeam || league
           ? {
               input: {
                 ...(lookup.reminderTeam ? { team: lookup.reminderTeam } : {}),
-                ...(lookup.reminderLeague ? { league: lookup.reminderLeague } : {}),
+                ...(league ? { league } : {}),
                 ...(date ? { date } : {}),
               },
             }
