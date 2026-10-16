@@ -318,6 +318,11 @@ export function memoryReadSources(
         strongest === undefined
           ? []
           : pairs.filter((pair) => pair.score === strongest).flatMap((pair) => pair.sources);
+      const pairedKeys = new Set(pairedSources.map((source) => source.key));
+      // Do not silently let the fixed prompt budget choose among too many
+      // equally strong contexts. The selector cannot resolve that ambiguity
+      // from a truncated candidate set.
+      if (pairedKeys.size > 20) return assessed([]);
       const prioritized = new Map<string, MemoryReadSource>();
       for (const source of [...pairedSources, ...bounded]) {
         if (!prioritized.has(source.key) && prioritized.size < 20)
@@ -540,32 +545,68 @@ function comparisonEvidenceSegments(
   const sentences = source.body
     .split(/(?<=[.!?])\s+|[\n;]+/u)
     .map((sentence) => sentence.trim())
-    .filter((sentence) => {
-      if (!sentence || sentence.length > 800 || sentence.includes('?')) return false;
-      const matchingTerms = requestedTerms.filter((term) =>
-        matchesComparisonTerm(term, sentence),
-      ).length;
-      return matchingTerms >= minimum;
-    });
-  if (!sentences.length) return [];
-  const bodyWords: string[] =
-    source.body.toLocaleLowerCase('en-US').match(/[\p{L}\p{N}-]+/gu) ?? [];
-  const hasScope = bodyWords.includes(scope.toLocaleLowerCase('en-US'));
-  if (!hasScope) return [];
-  const scopeInSentence = sentences.filter((sentence) => {
-    const sentenceWords: string[] =
-      sentence.toLocaleLowerCase('en-US').match(/[\p{L}\p{N}-]+/gu) ?? [];
-    return sentenceWords.includes(scope.toLocaleLowerCase('en-US'));
-  });
-  // Some assistant messages state the project in a heading and put the
-  // suggestion in the next sentence or bullet. Keep the full short source
-  // message as the quote in that case, so the project anchor and suggestion
-  // remain visibly tied to one source identity.
-  return scopeInSentence.length
-    ? scopeInSentence
-    : source.body.length <= 800
-      ? [source.body.trim()]
-      : [];
+    .filter(Boolean);
+  const scopeLower = scope.toLocaleLowerCase('en-US');
+  const ignoredTopicNames = new Set([
+    'a',
+    'an',
+    'and',
+    'another',
+    'any',
+    'for',
+    'my',
+    'our',
+    'separate',
+    'the',
+    'this',
+    'your',
+  ]);
+  const topicNames = (sentence: string): string[] => {
+    const names = new Set<string>();
+    const patterns = [
+      /\b(?:project|exercise|scenario|initiative)\s+(?:(?:named|called)\s+)?([A-Z][\w-]{1,})/gu,
+      /\b([A-Z][\w-]{1,})\s+(?:project|exercise|scenario|initiative)\b/gu,
+      /\bfor\s+(?:the\s+)?(?:(?:separate|different|another|other)\s+)?([A-Z][\w-]{1,})/gu,
+    ];
+    for (const pattern of patterns) {
+      for (const match of sentence.matchAll(pattern)) {
+        const name = match[1];
+        if (name && !ignoredTopicNames.has(name.toLocaleLowerCase('en-US')))
+          names.add(name.toLocaleLowerCase('en-US'));
+      }
+    }
+    return [...names];
+  };
+  const hasScope = (sentence: string) => {
+    const words: string[] = sentence.toLocaleLowerCase('en-US').match(/[\p{L}\p{N}-]+/gu) ?? [];
+    return words.includes(scopeLower);
+  };
+  const hasRequestedTerms = (sentence: string) => {
+    if (!sentence || sentence.length > 800 || sentence.includes('?')) return false;
+    const matchingTerms = requestedTerms.filter((term) =>
+      matchesComparisonTerm(term, sentence),
+    ).length;
+    return matchingTerms >= minimum;
+  };
+  const excerpts: string[] = [];
+  for (const [index, sentence] of sentences.entries()) {
+    if (!hasRequestedTerms(sentence)) continue;
+    const names = topicNames(sentence);
+    if (names.some((name) => name !== scopeLower)) continue;
+    if (hasScope(sentence)) {
+      excerpts.push(sentence);
+      continue;
+    }
+
+    // Carry a named scope only from the immediately preceding sentence or
+    // bullet. A competing explicit project/exercise name blocks the carry.
+    const previous = sentences[index - 1];
+    if (!previous || !hasScope(previous)) continue;
+    if (topicNames(previous).some((name) => name !== scopeLower)) continue;
+    const excerpt = `${previous} ${sentence}`;
+    if (excerpt.length <= 800) excerpts.push(excerpt);
+  }
+  return [...new Set(excerpts)];
 }
 
 function comparisonValueSignature(sourceBody: string, scope: string): string {
@@ -622,8 +663,8 @@ function deterministicComparisonSelection(
   }
   const pairs: Array<{
     contextId: string;
-    owner: MemoryReadSource[];
-    assistant: MemoryReadSource[];
+    owner: Array<{ source: MemoryReadSource; excerpt: string; score: number }>;
+    assistant: Array<{ source: MemoryReadSource; excerpt: string; score: number }>;
     score: number;
   }> = [];
   for (const rows of byContext.values()) {
@@ -633,28 +674,27 @@ function deterministicComparisonSelection(
           (source) =>
             source.speaker === speaker &&
             source.body.length <= 800 &&
-            (speaker !== 'Recorded owner message' ||
-              hasDeclarativeComparisonEvidence(source, scope, requestedTerms)),
+            hasDeclarativeComparisonEvidence(source, scope, requestedTerms),
         )
-        .map((source) => ({
-          source,
-          score: requestedTerms.filter((term) => matchesComparisonTerm(term, source.body)).length,
-        }))
+        .flatMap((source) =>
+          comparisonEvidenceSegments(source, scope, requestedTerms).map((excerpt) => ({
+            source,
+            excerpt,
+            score: requestedTerms.filter((term) => matchesComparisonTerm(term, excerpt)).length,
+          })),
+        )
         .filter((candidate) => candidate.score >= Math.min(2, requestedTerms.length))
         .sort((left, right) => right.score - left.score);
       const bestScore = candidates[0]?.score;
       if (bestScore === undefined) return undefined;
       const best = candidates.filter((candidate) => candidate.score === bestScore);
       const signatures = new Set(
-        best.map((candidate) => comparisonValueSignature(candidate.source.body, scope)),
+        best.map((candidate) => comparisonValueSignature(candidate.excerpt, scope)),
       );
-      if (signatures.size > 1 || best.some((candidate) => candidate.source.body.length > 800))
-        return undefined;
+      if (signatures.size > 1) return undefined;
       return {
         sources: [
-          ...new Map(
-            best.map((candidate) => [candidate.source.key, candidate.source] as const),
-          ).values(),
+          ...new Map(best.map((candidate) => [candidate.source.key, candidate] as const)).values(),
         ],
         score: bestScore,
       };
@@ -684,7 +724,7 @@ function deterministicComparisonSelection(
   const signature = (pair: (typeof pairs)[number]) =>
     JSON.stringify(
       [pair.owner, pair.assistant].map((rows) =>
-        [...new Set(rows.map((source) => normalizedText(source.body)))].sort(),
+        [...new Set(rows.map((candidate) => normalizedText(candidate.excerpt)))].sort(),
       ),
     );
   if (new Set(tied.map(signature)).size !== 1) return undefined;
@@ -695,7 +735,7 @@ function deterministicComparisonSelection(
   return {
     version: 1,
     status: 'complete',
-    selections: selected.map((source) => ({ sourceKey: source.key, quote: source.body })),
+    selections: selected.map(({ source, excerpt }) => ({ sourceKey: source.key, quote: excerpt })),
   };
 }
 
@@ -1106,6 +1146,22 @@ export function validMemoryReadSelection(
     ]),
   );
   const sources = [...byKey.values()];
+  const comparisonValidated = validateSelectedComparison(
+    excludeExactRequest ?? '',
+    selection,
+    sources,
+  );
+  if (
+    comparisonValidated.status !== 'complete' ||
+    comparisonValidated.selections.length !== selection.selections.length ||
+    comparisonValidated.selections.some(
+      (item) =>
+        !selection.selections.some(
+          (selected) => selected.sourceKey === item.sourceKey && selected.quote === item.quote,
+        ),
+    )
+  )
+    return false;
   const seen = new Set<string>();
   const speakerCoverageValid =
     coversRequestedSpeakers(excludeExactRequest ?? '', selection.selections, sources) ||

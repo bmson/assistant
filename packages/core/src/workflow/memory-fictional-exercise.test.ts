@@ -48,7 +48,11 @@ const evidence: ActionEvidence[] = [
     },
   },
 ];
-const ownerSelection = { sourceKey: 'message:owner-nimbus', quote: ownerBody };
+const ownerSelection = {
+  sourceKey: 'message:owner-nimbus',
+  quote:
+    'For this fictional exercise, the project is Nimbus, the budget is €310, the deadline is Thursday, and we must avoid taxi travel.',
+};
 const assistantSelection = { sourceKey: 'message:assistant-nimbus', quote: assistantBody };
 
 describe('source-backed fictional history', () => {

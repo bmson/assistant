@@ -533,6 +533,84 @@ describe('exact historical source projection', () => {
     expect(answer).toContain('That wording appears in the assistant’s suggestion.');
     expect(object).toHaveBeenCalledTimes(2);
   });
+  it('does not carry an Aurora anchor into a separate Borealis suggestion in the same message', async () => {
+    const request =
+      'Look back at the earlier hypothetical Aurora exercise. Separate my original project budget from the Assistant’s suggested next step, citing the messages.';
+    const ownerText =
+      'For this hypothetical exercise, the Aurora project budget is $240 and must avoid taxi travel.';
+    const assistantText =
+      'For Aurora, the budget is $240. For the separate Borealis exercise, a next step is public transport.';
+    const owner = message('aurora-owner', ownerText, 'user', 'owner');
+    const assistant = message('borealis-assistant', assistantText, 'assistant', 'assistant');
+    const conversationEvidence: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: { matches: [owner, assistant] },
+      },
+    ];
+    const object = vi.fn(async () => ({ ok: true, object: { selections: [] } }));
+
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request,
+      evidence: conversationEvidence,
+    });
+
+    expect(result.selections).toEqual([]);
+    expect(validMemoryReadSelection(result, conversationEvidence, request)).toBe(false);
+    expect(
+      validMemoryReadSelection(
+        {
+          version: 1,
+          status: 'complete',
+          selections: [
+            { sourceKey: 'message:aurora-owner', quote: ownerText },
+            { sourceKey: 'message:borealis-assistant', quote: assistantText },
+          ],
+        },
+        conversationEvidence,
+        request,
+      ),
+    ).toBe(false);
+  });
+  it('fails closed and reports omitted contexts when equally strong pairs exceed the candidate cap', () => {
+    const request =
+      'Look back at the earlier hypothetical Aurora exercise. Separate my original project budget from the Assistant’s suggested next step, citing the messages.';
+    const matches = Array.from({ length: 14 }, (_, index) => {
+      const conversationId = `aurora-context-${index}`;
+      const owner = {
+        ...message(
+          `aurora-owner-${index}`,
+          'For Aurora, the project budget is $240.',
+          'user',
+          'owner',
+        ),
+        conversationId,
+      };
+      const assistant = {
+        ...message(
+          `aurora-assistant-${index}`,
+          'For Aurora, the next step is public transport.',
+          'assistant',
+          'assistant',
+        ),
+        conversationId,
+      };
+      return [owner, assistant];
+    }).flat();
+    const omitted = vi.fn();
+
+    const sources = memoryReadSources(
+      [{ toolName: 'conversations.search', status: 'succeeded', result: { matches } }],
+      request,
+      omitted,
+    );
+
+    expect(sources).toEqual([]);
+    expect(omitted).toHaveBeenCalledOnce();
+  });
   it('does not pair matching fictional facts across separate conversations', async () => {
     const request =
       'Look back at the earlier hypothetical Mosaic exercise. Did I earmark its project budget for public transport, or was that an Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step, citing the relevant conversation messages.';
