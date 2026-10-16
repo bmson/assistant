@@ -54,6 +54,7 @@ import {
   extractCompoundTripBookings,
 } from '../compound-trip-extraction.js';
 import {
+  compoundTripNextWebSearchQuery,
   compoundTripReadProjection,
   compoundTripThreadReadInputs,
   MAX_COMPOUND_TRIP_TOOL_CALLS,
@@ -3802,7 +3803,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           boundedForcedReadTool === tc.toolName &&
           (tc.toolName === 'web.search' || tc.toolName === 'web.fetch')
             ? (() => {
-                const query = compoundTripReadProjection(readRequest, readToolEvidence).webQuery;
+                const query =
+                  tc.toolName === 'web.search'
+                    ? compoundTripNextWebSearchQuery(readRequest, readToolEvidence)
+                    : compoundTripReadProjection(readRequest, readToolEvidence).webQuery;
                 if (!query) return undefined;
                 if (
                   tc.toolName === 'web.search' &&
