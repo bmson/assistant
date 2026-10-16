@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   conversations,
   createDb,
@@ -12,9 +12,15 @@ import {
 import { assertAllocatedTestTarget } from '@assistant/db/test-target';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { compoundTripRecoveryFetchTargets } from '../compound-trip-read.js';
 import { tripPrompt, tripSourceResult, tripTools } from '../compound-trip-source.test-fixtures.js';
 import { taskState } from '../machine.js';
-import { detectPersonalReadRequest } from '../read-intent.js';
+import {
+  buildReadToolInput,
+  detectPersonalReadRequest,
+  nextRequiredReadTool,
+  type ReadToolEvidence,
+} from '../read-intent.js';
 import type { RunContext } from './phases.js';
 import { authorizedCompoundTripFetchUrl, runStepLoop } from './step-loop.js';
 import type { ExecutorDeps } from './types.js';
@@ -77,6 +83,8 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
     'blocked hotel fallback',
     'all sources blocked',
     'alternate source search',
+    'recovery budget boundary',
+    'recovery budget resume',
     'focused flight',
     'unbound model fetch',
   ] as const)('retains source facts and bounded completion for %s', async (scenario) => {
@@ -284,6 +292,109 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
     } as unknown as ExecutorDeps;
     const state = taskState(lease);
     state.untrustedContext = true;
+    let preseededCallCount = 0;
+    const recoveryBoundary =
+      scenario === 'recovery budget boundary' || scenario === 'recovery budget resume';
+    if (recoveryBoundary) {
+      const read = detectPersonalReadRequest([{ role: 'user', content: request }], {
+        now: new Date('2030-11-15T15:00:00Z'),
+        timeZone: 'America/New_York',
+      });
+      if (!read?.compoundTripDiscovery) throw new Error('Expected bounded compound-trip read');
+      const seededEvidence: ReadToolEvidence[] = [];
+      let searchCount = 0;
+      for (let index = 0; index < 18; index += 1) {
+        const toolName = nextRequiredReadTool(read, seededEvidence);
+        if (!toolName || toolName === 'maps.directions') break;
+        if (toolName === 'web.fetch' && searchCount === 3) break;
+        const args = buildReadToolInput(read, toolName, seededEvidence);
+        if (!args) throw new Error(`No grounded input for ${toolName}`);
+        let status = 'succeeded';
+        let result: Record<string, unknown> | null;
+        let error: string | undefined;
+        if (toolName === 'web.search') {
+          searchCount += 1;
+          result =
+            searchCount < 3
+              ? {
+                  results: [
+                    {
+                      url: 'https://hotel.example/canal-house/map',
+                      title: 'Location: Canal House',
+                      snippet: 'Taxi and public transport directions.',
+                    },
+                    {
+                      url: 'https://fallback.example/airport-transfer',
+                      title: 'Airport taxi and public transport',
+                      snippet: 'Taxi and public transport from CPH Airport to Canal House.',
+                    },
+                  ],
+                }
+              : {
+                  results: [
+                    {
+                      url: 'https://moovit.example/transit-route',
+                      title: 'Airport transit directions',
+                      snippet: 'Public transport from CPH Airport to Canal House.',
+                    },
+                    {
+                      url: 'https://overview.example/hotel',
+                      title: 'Hotel information',
+                      snippet: 'Hotel overview and amenities.',
+                    },
+                    {
+                      url: 'https://forum.example/travel',
+                      title: 'Traveler discussion',
+                      snippet: 'Visitor discussion about Copenhagen.',
+                    },
+                  ],
+                };
+        } else if (toolName === 'web.fetch') {
+          status = 'failed';
+          result = null;
+          error = 'HTTP 403 CAPTCHA challenge';
+        } else result = tripSourceResult(toolName, args) as Record<string, unknown>;
+        seededEvidence.push({
+          toolName,
+          status,
+          fromCurrentTask: true,
+          args,
+          result,
+          ...(error ? { error } : {}),
+        });
+      }
+      const recoveryTargets = compoundTripRecoveryFetchTargets(read, seededEvidence);
+      expect(recoveryTargets).toEqual([
+        { mode: 'public transport', url: 'https://moovit.example/transit-route' },
+      ]);
+      await db.insert(toolCalls).values(
+        seededEvidence.map((row, index) => ({
+          taskId,
+          step: index + 1,
+          toolName: row.toolName,
+          args: row.args,
+          risk: 'autonomous' as const,
+          status: row.status as 'succeeded' | 'failed',
+          result: row.result,
+          error: row.error ?? null,
+        })),
+      );
+      preseededCallCount = seededEvidence.length;
+      // The seeded ledger reflects a recovery search emitted on the last
+      // available step. One case exercises a fresh grant, the other resumes
+      // from the checkpoint written by that grant.
+      state.step = 11;
+      if (scenario === 'recovery budget resume') {
+        const requestHash = createHash('sha256').update(request.trim()).digest('hex');
+        state.plannerState.compoundTripRecoveryStepBudget = {
+          version: 1,
+          originalMaxSteps: 12,
+          effectiveMaxSteps: 14,
+          requestHash,
+          sourceUrl: recoveryTargets[0]?.url,
+        };
+      }
+    }
     if (scenario === 'unbound model fetch')
       state.pendingToolBatch = {
         step: state.step,
@@ -330,11 +441,13 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
         ? 1
         : focused
           ? 0
-          : scenario === 'hotel directions'
+          : recoveryBoundary
             ? 1
-            : scenario === 'alternate source search'
-              ? 3
-              : 2;
+            : scenario === 'hotel directions'
+              ? 1
+              : scenario === 'alternate source search'
+                ? 3
+                : 2;
     if (scenario === 'unbound model fetch') {
       const fetchedUrls = calls
         .filter((call) => call.toolName === 'web.fetch')
@@ -342,6 +455,22 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
       expect(fetchedUrls).toEqual(['https://hotel.example/canal-house/map']);
       expect(state.pendingApprovals).toEqual([]);
       expect(state.pendingToolBatch).toBeNull();
+    } else if (recoveryBoundary) {
+      expect(calls.map((call) => call.toolName)).toEqual(['web.fetch', 'maps.directions']);
+      expect(calls[0]?.args.url).toBe('https://moovit.example/transit-route');
+      expect(state.plannerState.compoundTripRecoveryStepBudget).toMatchObject({
+        version: 1,
+        originalMaxSteps: 12,
+        effectiveMaxSteps: 14,
+      });
+      expect(lease.maxSteps).toBe(14);
+      expect(state.step).toBeLessThanOrEqual(14);
+      if (scenario === 'recovery budget resume') {
+        expect(state.plannerState.compoundTripRecoveryStepBudget).toMatchObject({
+          effectiveMaxSteps: 14,
+          sourceUrl: 'https://moovit.example/transit-route',
+        });
+      }
     } else {
       expect(calls.map((call) => call.toolName)).toEqual([
         'calendar.list_events',
@@ -373,6 +502,8 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
         .size,
     ).toBe(expectedFetches);
     expect(calls.length).toBeLessThanOrEqual(18);
+    if (!recoveryBoundary)
+      expect(state.plannerState.compoundTripRecoveryStepBudget).toBeUndefined();
     if (scenario === 'all sources blocked') {
       const searches = calls.filter((call) => call.toolName === 'web.search');
       expect(searches).toHaveLength(3);
@@ -414,6 +545,10 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
         expect(answer).not.toContain('EUR 5');
         expect(answer).not.toContain('EUR 45');
         expect(answer).toContain('complete endpoint-matched page is still needed');
+      } else if (recoveryBoundary) {
+        expect(answer).toContain('- **Public transport:** EUR 5; 40 minutes.');
+        expect(answer).not.toContain('EUR 45');
+        expect(answer).toContain('https://moovit.example/transit-route');
       } else {
         expect(answer).toContain('- **Public transport:** EUR 5; 40 minutes.');
         expect(answer).toContain('EUR 45');
@@ -436,7 +571,7 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
     expect(router.embed).not.toHaveBeenCalled();
     expect(router.object).toHaveBeenCalledTimes(1);
     expect(await db.select().from(toolCalls).where(eq(toolCalls.taskId, taskId))).toHaveLength(
-      calls.length,
+      preseededCallCount + calls.length,
     );
     expect((await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) }))?.budgetUsdLimit).toBe(
       '0.0500',

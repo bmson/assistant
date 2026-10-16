@@ -1682,15 +1682,14 @@ function compactEventStatus(event: Record<string, unknown>): string {
   const attendance =
     typeof event.ownerResponse === 'string' &&
     /^(?:accepted|declined|tentative|needsAction)$/i.test(event.ownerResponse)
-      ? `attendance ${event.ownerResponse.toLowerCase()}`
+      ? event.ownerResponse.toLowerCase()
       : '';
-  const availability =
-    typeof event.blocksTime === 'boolean'
-      ? event.blocksTime
-        ? 'blocks time'
-        : 'does not block time'
-      : '';
-  return [availability, attendance].filter(Boolean).join('; ');
+  const availability = event.blocksTime === false ? 'free' : '';
+  return [availability, attendance].filter(Boolean).join(' · ');
+}
+
+function compactLocationRequested(request: PersonalReadRequest): boolean {
+  return request.includeCalendarLocations === true;
 }
 
 function compactEventTitleLink(title: string, url: string): string {
@@ -1817,9 +1816,15 @@ function calendarOverlapSummary(
         ? `${shortDate(new Date(start).toISOString(), zone)} ${overlapClock(start, zone)}–${overlapClock(end, zone)}`
         : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
       notes.push(
-        `- ${bothAccepted ? 'Scheduling conflict' : 'Possible overlap'}: **${left.projected.summary}** and **${right.projected.summary}**, ${overlapLabel}.${request.includeCalendarBriefing ? '' : ` ${calendarRelationshipNote(relationship, bothAccepted ? 'confirmed' : 'unresolved')}`}`,
+        request.compactCalendarBriefing
+          ? `- ${bothAccepted ? 'Conflict' : 'Possible overlap'} ${overlapLabel}: ${left.projected.summary} + ${right.projected.summary}.`
+          : `- ${bothAccepted ? 'Scheduling conflict' : 'Possible overlap'}: **${left.projected.summary}** and **${right.projected.summary}**, ${overlapLabel}.${request.includeCalendarBriefing ? '' : ` ${calendarRelationshipNote(relationship, bothAccepted ? 'confirmed' : 'unresolved')}`}`,
       );
-      namedPairs.push(`**${left.projected.summary}** and **${right.projected.summary}**`);
+      namedPairs.push(
+        request.compactCalendarBriefing
+          ? `${bothAccepted ? 'Conflict' : 'Possible overlap'} ${overlapLabel}: ${left.projected.summary} + ${right.projected.summary}`
+          : `**${left.projected.summary}** and **${right.projected.summary}**`,
+      );
     }
   }
   if (notes.length === 0)
@@ -1836,11 +1841,15 @@ function calendarOverlapSummary(
     const shownAdditionalPairs = additionalPairs.slice(0, 3);
     const omitted = additionalPairs.length - shownAdditionalPairs.length;
     shown.push(
-      `- Additional overlapping pairs: ${shownAdditionalPairs.join('; ')}${omitted > 0 ? `; ${omitted.toLocaleString('en-US')} more not listed` : ''}.`,
+      `- Additional ${request.compactCalendarBriefing ? 'overlaps' : 'overlapping pairs'}: ${shownAdditionalPairs.join('; ')}${omitted > 0 ? `; ${omitted.toLocaleString('en-US')} more not listed` : ''}.`,
     );
   }
   if (request.includeCalendarBriefing)
-    shown.push('Overlapping entries do not establish that you must attend both.');
+    shown.push(
+      request.compactCalendarBriefing
+        ? 'Calendar overlap does not confirm attendance.'
+        : 'Overlapping entries do not establish that you must attend both.',
+    );
   return shown;
 }
 
@@ -3881,7 +3890,7 @@ export function verifiedReadResponse(
             const metadata = [calendar, status]
               .filter(Boolean)
               .map((value) => compactEventTitleLink(value, ''))
-              .join('; ');
+              .join(' · ');
             const metadataLabel = metadata ? ` (${metadata})` : '';
             if (allDay) {
               compactAllDayItems.push(
@@ -3907,7 +3916,9 @@ export function verifiedReadResponse(
                   : [datePrefix, clockStart ? `${clockStart}${clockEnd ? `–${clockEnd}` : ''}` : '']
                       .filter(Boolean)
                       .join(' ');
-                const place = location.replace(/\s+/g, ' ').trim();
+                const place = compactLocationRequested(request)
+                  ? location.replace(/\s+/g, ' ').trim()
+                  : '';
                 const compactPlace = place
                   ? ` — ${compactEventTitleLink(place.length > 100 ? `${place.slice(0, 99)}…` : place, '')}`
                   : '';
@@ -3933,6 +3944,15 @@ export function verifiedReadResponse(
         if (compactOngoingItems.length > 0)
           lines.push(`- Ongoing: ${compactOngoingItems.join('; ')}.`);
         if (compactTimedItems.length > 0) lines.push('Timed appointments:', ...compactTimedItems);
+        if (request.includeCalendarBriefing) {
+          const busyStays = agendaEvents.filter(
+            (event) => calendarLodgingContext(event, complete) && event.blocksTime === true,
+          );
+          if (busyStays.length > 0)
+            lines.push(
+              `${busyStays.length === 1 ? 'A lodging stay' : 'Lodging stays'} marked busy ${busyStays.length === 1 ? 'is' : 'are'} shown as context, not timed appointments.`,
+            );
+        }
       }
       if (sourceDateEvents.length > 0) {
         lines.push(

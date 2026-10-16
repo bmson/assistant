@@ -726,3 +726,180 @@ describe('source-grounded public page summary recovery', () => {
     },
   );
 });
+
+describe('public web cadence schedule qualifiers', () => {
+  const evidenceFor = (text: string) => [
+    {
+      toolName: 'web.fetch',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { url: 'https://transit.example/schedule' },
+      result: {
+        status: 200,
+        finalUrl: 'https://transit.example/schedule',
+        text,
+        truncated: false,
+      },
+    },
+  ];
+
+  it('requires the time window attached to a cadence while preserving wider service availability', () => {
+    const rows = evidenceFor('R7\n- Frequency: 24/7, from 4 a.m. to 1 a.m. every 15 minutes');
+    expect(publicWebClaimFindings('R7 runs every 15 minutes 24/7.', rows)).not.toEqual([]);
+    expect(publicWebClaimFindings('R7 runs every 15 minutes from 4 a.m. to 1 a.m.', rows)).toEqual(
+      [],
+    );
+    expect(publicWebClaimFindings('R7 provides 24/7 service.', rows)).toEqual([]);
+  });
+
+  it.each([
+    ['weekdays', 'weekdays every 15 minutes', 'R7 runs every 15 minutes.'],
+    ['weekends', 'weekends every 20 minutes', 'R7 runs every 20 minutes.'],
+    [
+      'a restricted time window',
+      'every 15 minutes from 6 a.m. to 11 p.m.',
+      'R7 runs every 15 minutes.',
+    ],
+  ])('rejects a summary that drops %s from its route frequency', (_label, frequency, summary) => {
+    const rows = evidenceFor(`R7\n- Frequency: ${frequency}`);
+    expect(publicWebClaimFindings(summary, rows)).not.toEqual([]);
+  });
+
+  it('accepts a supported day qualifier and does not copy another service time window', () => {
+    const qualified = evidenceFor('R7\n- Frequency: weekdays every 15 minutes');
+    expect(publicWebClaimFindings('R7 runs every 15 minutes on weekdays.', qualified)).toEqual([]);
+
+    const separateServices = evidenceFor(
+      'R7\n- Frequency: every 15 minutes\nR8\n- Frequency: every 15 minutes from 6 a.m. to 11 p.m.',
+    );
+    expect(
+      publicWebClaimFindings('R7 runs every 15 minutes from 6 a.m. to 11 p.m.', separateServices),
+    ).not.toEqual([]);
+
+    const reversedServices = evidenceFor(
+      'R7\n- Frequency: every 15 minutes from 6 a.m. to 11 p.m.\nR8\n- Frequency: every 15 minutes',
+    );
+    expect(
+      publicWebClaimFindings(
+        'R7 runs every 15 minutes; R8 runs every 15 minutes from 6 a.m. to 11 p.m.',
+        reversedServices,
+      ),
+    ).not.toEqual([]);
+  });
+
+  it('does not borrow a day limit from unrelated prose in the same paragraph', () => {
+    const rows = evidenceFor('R7\n- Frequency: weekdays every 15 minutes');
+    expect(
+      publicWebClaimFindings(
+        'R7 runs every 15 minutes; the terminal operates weekdays only.',
+        rows,
+      ),
+    ).not.toEqual([]);
+  });
+
+  it('checks every matching frequency line for a supported day-specific cadence', () => {
+    const rows = evidenceFor(
+      'R7\n- Frequency: weekdays every 15 minutes\n- Frequency: weekends every 15 minutes',
+    );
+    expect(publicWebClaimFindings('R7 runs every 15 minutes on weekends.', rows)).toEqual([]);
+    expect(publicWebClaimFindings('R7 runs every 15 minutes.', rows)).not.toEqual([]);
+  });
+
+  it('applies the time-window gate to equivalent worded cadences', () => {
+    const rows = evidenceFor('R7\n- Frequency: hourly from 6 a.m. to 11 p.m.');
+    expect(publicWebClaimFindings('R7 runs every 60 minutes.', rows)).not.toEqual([]);
+    expect(publicWebClaimFindings('R7 runs every 60 minutes from 6 a.m. to 11 p.m.', rows)).toEqual(
+      [],
+    );
+  });
+
+  it('preserves direction and exception conditions with a cadence', () => {
+    const rows = evidenceFor('R7\n- Frequency: northbound every 15 minutes except Sundays');
+    expect(publicWebClaimFindings('R7 runs every 15 minutes.', rows)).not.toEqual([]);
+    expect(
+      publicWebClaimFindings('R7 runs northbound every 15 minutes except Sundays.', rows),
+    ).toEqual([]);
+  });
+
+  it('keeps qualifiers attached to the matching cadence when a service has two schedules', () => {
+    const rows = evidenceFor(
+      'R7\n- Frequency: every 15 minutes from 4 a.m. to 1 a.m.; hourly from 1 a.m. to 4 a.m.',
+    );
+    expect(publicWebClaimFindings('R7 runs hourly.', rows)).not.toEqual([]);
+    expect(publicWebClaimFindings('R7 runs hourly from 1 a.m. to 4 a.m.', rows)).toEqual([]);
+    expect(publicWebClaimFindings('R7 runs every 15 minutes from 4 a.m. to 1 a.m.', rows)).toEqual(
+      [],
+    );
+  });
+
+  it('checks the combined-cadence acceptance path for its own time window', () => {
+    const rows = evidenceFor(
+      'R7\n- Frequency: hourly; until May 2027 both lines jointly run four services per hour from 4 a.m. to 1 a.m.',
+    );
+    expect(
+      publicWebClaimFindings('R7 runs jointly every 15 minutes until May 2027.', rows),
+    ).not.toEqual([]);
+    expect(
+      publicWebClaimFindings(
+        'R7 runs jointly every 15 minutes from 4 a.m. to 1 a.m. until May 2027.',
+        rows,
+      ),
+    ).toEqual([]);
+  });
+
+  it('checks qualifiers on a secondary parenthetical cadence', () => {
+    const rows = evidenceFor(
+      'R7\n- Frequency: hourly (jointly four services per hour with R8 from 4 a.m. to 1 a.m.)',
+    );
+    expect(publicWebClaimFindings('R7 runs jointly every 15 minutes.', rows)).not.toEqual([]);
+    expect(
+      publicWebClaimFindings('R7 runs jointly every 15 minutes from 4 a.m. to 1 a.m.', rows),
+    ).toEqual([]);
+  });
+
+  it('matches repeated cadences to the qualifier in the same clause', () => {
+    const rows = evidenceFor(
+      'R7\n- Frequency: every 15 minutes from 4 a.m. to 1 a.m.; every 15 minutes from 1 a.m. to 4 a.m.',
+    );
+    expect(publicWebClaimFindings('R7 runs every 15 minutes from 1 a.m. to 4 a.m.', rows)).toEqual(
+      [],
+    );
+  });
+
+  it('corrects an approved but overbroad cadence at the final-output boundary', async () => {
+    const rows = evidenceFor('R7\n- Frequency: 24/7, from 4 a.m. to 1 a.m. every 15 minutes');
+    let calls = 0;
+    const result = await verifyFinalOutput(
+      {
+        object: async () => {
+          calls += 1;
+          return calls === 1
+            ? { ok: true, finishReason: 'stop', object: { decision: 'publish', reasons: [] } }
+            : {
+                ok: true,
+                finishReason: 'stop',
+                object: {
+                  decision: 'revise',
+                  revisedText:
+                    'R7 runs every 15 minutes from 4 a.m. to 1 a.m.; service is available 24/7.',
+                  reasons: ['ungrounded_fact'],
+                },
+              };
+        },
+      } as never,
+      {
+        taskId: 'public-web-schedule-qualification',
+        request: 'Summarize the public schedule for R7.',
+        draft: 'R7 runs every 15 minutes 24/7.',
+        evidence: rows,
+        critical: true,
+      },
+    );
+
+    expect(calls).toBe(2);
+    expect(result.text).toContain('from 4 a.m. to 1 a.m.');
+    expect(result.text).toContain('service is available 24/7');
+    expect(result.incomplete).not.toBe(true);
+    expect(publicWebClaimFindings(result.text, rows)).toEqual([]);
+  });
+});

@@ -828,6 +828,39 @@ export function publicWebClaimFindings(
       .toLowerCase()
       .replace(/[–—]/g, '-')
       .replace(/\s+/g, ' ');
+  const normalizedSchedule = (text: string) =>
+    normalized(text)
+      .replace(/\ba\.\s*m\.?\b/g, 'am')
+      .replace(/\bp\.\s*m\.?\b/g, 'pm')
+      .replace(/\s*([,:;])\s*/g, '$1');
+  const scheduleQualifiersNearCadence = (text: string, cadenceIndex: number): string[] => {
+    // Inspect the cadence's local clause. Some pages state overall availability
+    // first (for example, "24/7, from 4 a.m. to 1 a.m. every 15 minutes"); the
+    // broad service-hours label must not qualify the narrower interval.
+    const clauseStart = Math.max(
+      text.lastIndexOf(';', cadenceIndex - 1),
+      text.lastIndexOf('\n', cadenceIndex - 1),
+    );
+    const nextBoundary = /[;\n]/g;
+    nextBoundary.lastIndex = cadenceIndex;
+    const boundary = nextBoundary.exec(text)?.index ?? text.length;
+    const clause = text.slice(clauseStart + 1, boundary);
+    const cadenceOffset = cadenceIndex - clauseStart - 1;
+    const before = clause.slice(0, cadenceOffset);
+    const after = clause.slice(cadenceOffset);
+    const nearby = `${before.slice(-100)} ${after.slice(0, 100)}`;
+    const qualifiers: string[] = [];
+    const patterns = [
+      /\b(?:weekdays?|weekends?|mondays?|tuesdays?|wednesdays?|thursdays?|fridays?|saturdays?|sundays?)\b/gi,
+      /\b(?:from\s+\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?\s+to\s+\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?|between\s+\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?\s+and\s+\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?)/gi,
+      /\b(?:northbound|southbound|eastbound|westbound|towards?\s+[\p{L}\d][\p{L}\d .'-]{0,35}|in\s+the\s+direction\s+of\s+[\p{L}\d][\p{L}\d .'-]{0,35})\b/giu,
+      /\b(?:only\s+(?:during|on|between|from)\s+[^,;.!\n]{1,60}|except\s+[^,;.!\n]{1,60}|during\s+[^,;.!\n]{1,60})/gi,
+    ];
+    for (const pattern of patterns)
+      for (const match of nearby.matchAll(pattern))
+        if (match[0]) qualifiers.push(normalizedSchedule(match[0]));
+    return [...new Set(qualifiers)];
+  };
   let comparedUnits = 0;
   const subjects = [...new Set(passages.map((passage) => passage.label))]
     .map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
@@ -866,9 +899,8 @@ export function publicWebClaimFindings(
         )) {
           const claim = normalized(frequency[0]);
           const supported = own.some((text) => {
-            const frequencyText = normalized(
-              (text.match(/(?:^|\n)\s*-?\s*Frequency:[^\n]*/gi) ?? []).join(' '),
-            );
+            const frequencyLines = [...text.matchAll(/(?:^|\n)\s*-?\s*Frequency:([^\n]*)/gi)];
+            const frequencyText = normalized(frequencyLines.map((match) => match[0]).join(' '));
             const jointPattern = /\([^()]*\bjoint(?:ly)?\b[^()]*\)/gi;
             const jointNotes = frequencyText.match(jointPattern) ?? [];
             const sections = frequencyText.replace(jointPattern, '').split(';');
@@ -903,10 +935,57 @@ export function publicWebClaimFindings(
             const primaryMatch =
               primary.includes(claim) ||
               (claim === 'every 60 minutes' && /\bhourly\b/.test(primary));
+            const claimQualifiers = scheduleQualifiersNearCadence(unit, frequency.index ?? 0);
+            const preservesScheduleQualifiers = (
+              sourceLine: RegExpMatchArray | undefined,
+              sourceCadence = frequency[0],
+            ) => {
+              if (!sourceLine?.[0]) return false;
+              const sourceText = sourceLine[0];
+              const equivalentCadence =
+                sourceCadence.toLowerCase() === 'hourly'
+                  ? 'every 60 minutes'
+                  : sourceCadence.toLowerCase() === 'every 60 minutes'
+                    ? 'hourly'
+                    : undefined;
+              const offsets = [sourceCadence, equivalentCadence]
+                .filter((value): value is string => Boolean(value))
+                .flatMap((value) => {
+                  const found: number[] = [];
+                  let offset = sourceText.toLowerCase().indexOf(value.toLowerCase());
+                  while (offset >= 0) {
+                    found.push(offset);
+                    offset = sourceText
+                      .toLowerCase()
+                      .indexOf(value.toLowerCase(), offset + value.length);
+                  }
+                  return found;
+                });
+              return offsets.some((sourceCadenceOffset) => {
+                const sourceQualifiers = scheduleQualifiersNearCadence(
+                  sourceText,
+                  sourceCadenceOffset,
+                );
+                return (
+                  sourceQualifiers.every((qualifier) =>
+                    normalizedSchedule(unit).includes(qualifier),
+                  ) && claimQualifiers.every((qualifier) => sourceQualifiers.includes(qualifier))
+                );
+              });
+            };
+            const sourceLines = frequencyLines.filter((line) => {
+              const lineText = normalized(line[0] ?? '');
+              return (
+                lineText.includes(claim) ||
+                (claim === 'hourly' && lineText.includes('every 60 minutes')) ||
+                (claim === 'every 60 minutes' && lineText.includes('hourly'))
+              );
+            });
             if (
               primaryMatch &&
               (!describesJointCadence || /\bjoint(?:ly)?\b/i.test(primary)) &&
-              preservesQualifiers(primary)
+              preservesQualifiers(primary) &&
+              sourceLines.some((line) => preservesScheduleQualifiers(line))
             )
               return true;
             const words: Record<string, number> = {
@@ -928,11 +1007,22 @@ export function publicWebClaimFindings(
             )?.[1];
             const count = statedCadence ? (words[statedCadence] ?? Number(statedCadence)) : 0;
             const minutes = claim.match(/^every (\d+) minutes$/)?.[1];
+            const combinedSourceLines = statedCadence
+              ? frequencyLines.filter((line) =>
+                  normalized(line[0] ?? '').includes(`${statedCadence} services per hour`),
+                )
+              : [];
             return (
               describesJointCadence &&
               count > 0 &&
               Number(minutes) === 60 / count &&
-              preservesQualifiers(combined)
+              preservesQualifiers(combined) &&
+              combinedSourceLines.some((line) =>
+                preservesScheduleQualifiers(
+                  line,
+                  statedCadence ? `${statedCadence} services per hour` : undefined,
+                ),
+              )
             );
           });
           if (!supported)
@@ -1220,7 +1310,7 @@ export const OUTPUT_VERIFICATION_SYSTEM = [
   'Publish only an answer that directly addresses the request, states external actions only when durable evidence supports them, traces private/tool-derived specifics to that evidence, and preserves uncertainty or coverage gaps. General knowledge and ordinary reasoning are allowed; do not invent a private result, source, date, identifier, or measurement.',
   'For current public facts, successful source content from this task is required. Search results discover sources; they do not prove every claim. HTTP error pages are failed reads even when the tool status says succeeded. A club homepage does not establish a specific youth team’s kit, formation, player numbers, strengths, or weaknesses. Separate verified facts from general suggestions; remove specifics absent from the evidence.',
   'When a response names multiple entities or routes, check each entity and each claimed attribute against its own source passage. Keep origins, destinations, times, prices, and other attributes attached to the item that states them; a shared stop or segment does not establish another route’s origin or full path. Do not infer facts from neighboring list items or merge separate entries. Preserve source headings and list-item boundaries when they distinguish entries.',
-  'For public web summaries, treat every named service or route entry as a separate evidence unit. A page introduction or category heading cannot spread a frequency, destination, stop, or service pattern across all entries. Keep direct-to-destination service distinct from a route that ends at an interchange and requires a transfer. Keep each frequency attached only to the service entry that states it: if one route is hourly and another is every 20 minutes, do not summarize both as every 20 minutes. You may combine routes only when the combined wording remains true for each one; otherwise preserve their qualifiers or give a broader fact that the source supports.',
+  'For public web summaries, treat every named service or route entry as a separate evidence unit. A page introduction or category heading cannot spread a frequency, destination, stop, or service pattern across all entries. Keep direct-to-destination service distinct from a route that ends at an interchange and requires a transfer. Keep each frequency attached only to the service entry that states it: if one route is hourly and another is every 20 minutes, do not summarize both as every 20 minutes. Preserve frequency-specific day, time-window, direction, date, and exception qualifiers. A broad service-availability label such as 24/7 does not mean that a stated cadence applies 24/7. You may combine routes only when the combined wording remains true for each one; otherwise preserve their qualifiers or give a broader fact that the source supports.',
   'Separately labelled sourcePassages are noncontiguous excerpts, not adjoining source text. Verify each named service against its own passage, including continuation or change-at qualifiers; do not call an interchange-only route a direct destination service or hide its required transfer inside a generic list. Omitted passage characters or omitted units do not prove missing attributes. For a short overview, give the few most useful verified options with their essential qualifiers rather than an exhaustive route catalogue.',
   'sourceCategoryPassages are separate category headings and introductions. Check category-level claims against their actual text; a matching heading alone is not evidence for a detail, and a category introduction cannot spread an attribute to every named service.',
   'Use conversation context only to resolve short follow-ups and the scope of the current request. Earlier assistant claims, offers, and card labels are not evidence. Never revive a superseded topic or turn an accepted lookup offer into permission for an external action.',

@@ -1466,6 +1466,63 @@ function completeDirectReplyAssessments(
   const items = parsed.data.items.map((item) => {
     const thread = byThread.get(item.threadId);
     if (!thread || item.latestMessageId !== thread.latestMessageId) return item;
+    const fallbackDraft = directReplyFallbackDraft(thread);
+    const fallbackWhyQuote = directReplyRequestQuote(thread);
+    const fallbackDeadlineQuote = directReplyDeadlineQuote(thread);
+    const existingDeadline =
+      item.deadline &&
+      quoteExists(thread, item.deadline.messageId, item.deadline.quote) &&
+      isSourceBackedDeadlineQuote(thread, item.deadline.messageId, item.deadline.quote)
+        ? item.deadline
+        : undefined;
+    // Preserve a complete, already-grounded recipient draft byte-for-byte.
+    // If only its deadline needs review, repair that field from an exact
+    // source quote or leave the answer intact for the bounded repair attempt.
+    const checkedItem = validateEmailReviewAnswer({ items: [item] }, [thread]);
+    if (checkedItem?.items[0]) {
+      if (checkedItem.deadlineGaps === 0) return item;
+      if (fallbackDeadlineQuote) {
+        const repairedDeadlineItem = {
+          ...item,
+          deadline: {
+            messageId: thread.latestMessageId,
+            quote: fallbackDeadlineQuote,
+          },
+        };
+        const repairedCheck = validateEmailReviewAnswer({ items: [repairedDeadlineItem] }, [
+          thread,
+        ]);
+        if (repairedCheck?.deadlineGaps === 0) return repairedDeadlineItem;
+      }
+      return item;
+    }
+    const sourceBackedChoiceFallback =
+      latestMessageNeedsReply(thread) &&
+      fallbackDraft &&
+      fallbackWhyQuote &&
+      sourceEstablishedConditionalAlternatives(thread, fallbackDraft)
+        ? {
+            threadId: thread.threadId,
+            latestMessageId: thread.latestMessageId,
+            disposition: 'draft' as const,
+            recipient: thread.recipient,
+            why: 'The latest message directly asks for an answer; these alternatives preserve your choice.',
+            whyMessageId: thread.latestMessageId,
+            whyQuote: fallbackWhyQuote,
+            deadline: existingDeadline
+              ? existingDeadline
+              : fallbackDeadlineQuote
+                ? {
+                    messageId: thread.latestMessageId,
+                    quote: fallbackDeadlineQuote,
+                  }
+                : null,
+            draftBody: fallbackDraft,
+            draftSourceMessageIds: [thread.latestMessageId],
+          }
+        : undefined;
+    if (sourceBackedChoiceFallback && item.disposition === 'no_reply')
+      return sourceBackedChoiceFallback;
     if (!latestMessageNeedsReply(thread)) {
       const actionDeadline = directActionDeadlineQuote(thread);
       if (item.disposition !== 'draft')
@@ -1502,6 +1559,11 @@ function completeDirectReplyAssessments(
         item.recipient?.toLowerCase() !== thread.recipient ||
         !draftClaimsStayInsideThread(thread, item.draftBody, item.draftSourceMessageIds))
     ) {
+      // A malformed model draft must not erase a safe source-derived option
+      // when the owner’s choice is unknown. Reuse only the exact fallback
+      // whose two labeled alternatives and wording pass the existing source
+      // gate; otherwise preserve the incomplete assessment for review.
+      if (sourceBackedChoiceFallback) return sourceBackedChoiceFallback;
       const sourceDeadlineQuote = directReplyDeadlineQuote(thread);
       if (
         item.disposition === 'draft' &&

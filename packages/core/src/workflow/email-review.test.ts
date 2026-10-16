@@ -1617,7 +1617,7 @@ describe('bounded no-send email review', () => {
     );
   });
 
-  it('repairs exact-source failures and keeps event dates out of response deadlines', async () => {
+  it('uses exact-source alternatives when an assessment fails and keeps event dates out of deadlines', async () => {
     const makeRequestThread = (threadId: string, sender: string, subject: string, text: string) => {
       const sourceMessages = messages(threadId, sender);
       const latest = required(sourceMessages.at(-1), 'latest source message');
@@ -1696,7 +1696,7 @@ describe('bounded no-send email review', () => {
       return { ok: true, value: calls.length === 1 ? invalid : valid };
     });
 
-    expect(result.attempts).toBe(2);
+    expect(result.attempts).toBe(1);
     expect(result.answer?.items.map((item) => item.disposition)).toEqual(['draft', 'draft']);
     expect(result.answer?.items.map((item) => item.deadlineQuote)).toEqual([
       undefined,
@@ -1704,6 +1704,7 @@ describe('bounded no-send email review', () => {
     ]);
     expect(result.answer?.items[0]?.draftBody).toContain('If you can help:');
     expect(result.answer?.items[1]?.draftBody).toContain('If you plan to attend:');
+    expect(result.issues).toEqual([]);
     for (const placeholder of [
       'Thanks for checking. [Choose one: available / unavailable].',
       'Thanks. [available / unavailable]',
@@ -1768,9 +1769,7 @@ describe('bounded no-send email review', () => {
     expect(parsedPrompt.threads[0]?.messages[0]?.promptRole).toBe('thread_context');
     expect(parsedPrompt.threads[0]?.messages[1]?.promptRole).toBe('latest_inbound');
     expect(parsedPrompt.threads[0]?.messages[1]?.text).toContain('Are you able to?');
-    expect(required(calls[1], 'repair model call').prompt).toContain(
-      'item_0:literal_why_quote_from_named_message',
-    );
+    expect(calls).toHaveLength(1);
   });
 
   it('rejects no_reply only for a clear unquoted direct ask, not a quoted or incidental RSVP mention', () => {
@@ -2474,6 +2473,167 @@ describe('bounded no-send email review', () => {
     expect(repaired.answer?.items[0]?.draftBody).toContain('If you cannot:');
     expect(repaired.ownerDecisionThreadIds).toEqual([]);
     expect(repaired.issues).toEqual([]);
+  });
+
+  it('replaces a rejected owner-choice draft only with the exact source-derived alternatives', async () => {
+    const sourceMessages = messages('rejected-owner-choice-draft');
+    const latest = required(sourceMessages.at(-1), 'latest message');
+    latest.text = 'Nobody has signed up for tomorrow. Are you able to? Thanks!';
+    latest.sourceLength = latest.text.length;
+    const thread = required(
+      emailReviewCompleteThread('rejected-owner-choice-draft', 'owner@example.com', [
+        search('rejected-owner-choice-draft'),
+        read('rejected-owner-choice-draft', sourceMessages),
+      ]),
+      'complete direct yes/no request',
+    );
+    const rejected = required(validAnswer(thread.threadId).items[0], 'assessment item');
+    rejected.whyQuote = 'A paraphrase instead of the exact request';
+    rejected.draftBody = 'I can help tomorrow [insert shift time].';
+
+    const result = await generateValidatedEmailReview([thread], async () => ({
+      ok: true,
+      value: { items: [rejected] },
+    }));
+
+    expect(result.attempts).toBe(1);
+    expect(result.answer?.items[0]).toMatchObject({
+      disposition: 'draft',
+      whyQuote: 'Are you able to?',
+      draftBody: expect.stringContaining('If you can help:'),
+    });
+    expect(result.answer?.items[0]?.draftBody).toContain('If you cannot:');
+    expect(result.answer?.items[0]?.draftBody).not.toContain('insert shift time');
+    expect(result.issues).toEqual([]);
+  });
+
+  it('preserves a valid specific owner reply and its older source-backed deadline', async () => {
+    const threadId = 'specific-owner-choice';
+    const sourceMessages = messages(threadId);
+    const deadlineMessage = required(sourceMessages[0], 'prior deadline message');
+    deadlineMessage.from = 'vendor@example.net';
+    deadlineMessage.text = 'Please confirm your attendance by October 18.';
+    deadlineMessage.sourceLength = deadlineMessage.text.length;
+    const ownerMessage = {
+      messageId: 'owner-choice-specific',
+      from: 'owner@example.com',
+      to: 'vendor@example.net',
+      date: '2026-10-10T12:00:00Z',
+      subject: 'Re: Event attendance',
+      text: 'I can attend the Saturday event.',
+      sourceLength: 'I can attend the Saturday event.'.length,
+      truncated: false,
+    };
+    sourceMessages.splice(1, 0, ownerMessage);
+    const latest = required(sourceMessages.at(-1), 'latest message');
+    latest.text =
+      'Please reply by October 18 to confirm whether you can attend the Saturday event.';
+    latest.sourceLength = latest.text.length;
+    const thread = required(
+      emailReviewCompleteThread(threadId, 'owner@example.com', [
+        search(threadId),
+        read(threadId, sourceMessages),
+      ]),
+      'complete attendance thread',
+    );
+    const specific = {
+      threadId,
+      latestMessageId: thread.latestMessageId,
+      disposition: 'draft' as const,
+      recipient: thread.recipient,
+      why: 'The sender asks you to confirm attendance.',
+      whyMessageId: thread.latestMessageId,
+      whyQuote: latest.text,
+      deadline: { messageId: deadlineMessage.messageId, quote: 'by October 18' },
+      draftBody: 'I can attend the Saturday event.',
+      draftSourceMessageIds: [ownerMessage.messageId, thread.latestMessageId],
+    };
+
+    expect(validateEmailReviewAnswer({ items: [specific] }, [thread])).toBeDefined();
+    const result = await generateValidatedEmailReview([thread], async () => ({
+      ok: true,
+      value: { items: [specific] },
+    }));
+
+    expect(result.sourceItems?.[0]).toEqual(specific);
+    expect(result.answer?.items[0]?.draftBody).toBe(specific.draftBody);
+    expect(result.answer?.items[0]?.deadlineQuote).toBe('by October 18');
+    expect(result.answer?.items[0]?.deadlineSourceDate).toBe(deadlineMessage.date);
+    expect(result.attempts).toBe(1);
+
+    const missingDeadline = { ...specific, deadline: null };
+    const repaired = await generateValidatedEmailReview([thread], async () => ({
+      ok: true,
+      value: { items: [missingDeadline] },
+    }));
+    expect(repaired.answer?.items[0]?.draftBody).toBe(specific.draftBody);
+    expect(repaired.answer?.items[0]?.whyQuote).toBe(specific.whyQuote);
+    expect(repaired.answer?.items[0]?.deadlineQuote).toBe('by October 18');
+    expect(repaired.answer?.items[0]?.deadlineSourceDate).toBe(latest.date);
+    expect(repaired.attempts).toBe(1);
+  });
+
+  it('keeps an older grounded deadline when an unsafe owner-choice draft needs fallback', async () => {
+    const threadId = 'fallback-with-prior-deadline';
+    const sourceMessages = messages(threadId);
+    const deadlineMessage = required(sourceMessages[0], 'prior deadline message');
+    deadlineMessage.from = 'vendor@example.net';
+    deadlineMessage.subject = 'Volunteer request';
+    deadlineMessage.text = 'Please reply by October 18 to let me know whether you can help.';
+    deadlineMessage.sourceLength = deadlineMessage.text.length;
+    const latest = required(sourceMessages.at(-1), 'latest message');
+    latest.subject = 'Re: Volunteer request';
+    latest.text = 'Could you help tomorrow? Please reply with your answer.';
+    latest.sourceLength = latest.text.length;
+    const thread = required(
+      emailReviewCompleteThread(threadId, 'owner@example.com', [
+        search(threadId),
+        read(threadId, sourceMessages),
+      ]),
+      'complete request with older deadline',
+    );
+    const rejected = {
+      ...required(validAnswer(threadId).items[0], 'assessment item'),
+      whyQuote: 'A paraphrase instead of the exact request',
+      deadline: { messageId: deadlineMessage.messageId, quote: 'by October 18' },
+      draftBody: 'I can help tomorrow [insert details].',
+    };
+
+    const result = await generateValidatedEmailReview([thread], async () => ({
+      ok: true,
+      value: { items: [rejected] },
+    }));
+
+    expect(result.answer?.items[0]?.deadlineQuote).toBe('by October 18');
+    expect(result.answer?.items[0]?.deadlineSourceDate).toBe(deadlineMessage.date);
+    expect(result.answer?.items[0]?.draftBody).toContain('If you can help:');
+    expect(result.answer?.items[0]?.draftBody).toContain('If you cannot:');
+    expect(result.issues).toEqual([]);
+  });
+
+  it('does not fabricate alternatives for a direct request without a bounded fallback', async () => {
+    const sourceMessages = messages('generic-answer-request');
+    const latest = required(sourceMessages.at(-1), 'latest message');
+    latest.text = 'Could you send me the revised document when you have a chance?';
+    latest.sourceLength = latest.text.length;
+    const thread = required(
+      emailReviewCompleteThread('generic-answer-request', 'owner@example.com', [
+        search('generic-answer-request'),
+        read('generic-answer-request', sourceMessages),
+      ]),
+      'complete document request',
+    );
+    const rejected = required(validAnswer(thread.threadId).items[0], 'assessment item');
+    rejected.whyQuote = 'A paraphrase instead of the exact request';
+
+    const result = await generateValidatedEmailReview([thread], async ({ repair }) => ({
+      ok: true,
+      value: repair ? { items: [] } : { items: [rejected] },
+    }));
+
+    expect(result.attempts).toBe(2);
+    expect(result.answer).toBeUndefined();
+    expect(result.issues).toContain('one_item_per_input_thread');
   });
 
   it('replaces a valid-shape generic RSVP acknowledgement with owner alternatives and source routing', async () => {
