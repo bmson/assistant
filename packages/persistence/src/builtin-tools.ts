@@ -73,6 +73,15 @@ export interface OccasionToolRepository {
   list(agentId: string): Promise<OccasionToolRow[]>;
 }
 
+/** Bounded, identity-scoped source used only for confirmed family birthday recall. */
+export interface BirthdayOccasionToolRepository {
+  listBirthdays(input: {
+    agentId: string;
+    contactIds: string[];
+    limit: number;
+  }): Promise<{ rows: OccasionToolRow[]; overflow: boolean }>;
+}
+
 export interface ContactLookupRow {
   name: string;
   emails: string[];

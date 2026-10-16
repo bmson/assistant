@@ -1,4 +1,5 @@
 import type {
+  BirthdayOccasionToolRepository,
   OccasionToolRepository,
   OccasionToolRow,
   OccasionToolSaveInput,
@@ -19,7 +20,9 @@ const OCCASION_SCAN_LIMIT = 5000;
  * owner's Profile occasions. A tool save keeps its own provenance, so an
  * untrusted session's date stays quarantined until the owner reviews it.
  */
-export class FirestoreOccasionToolRepository implements OccasionToolRepository {
+export class FirestoreOccasionToolRepository
+  implements OccasionToolRepository, BirthdayOccasionToolRepository
+{
   private readonly commands: FirestoreProfileOccasionCommandRepository;
 
   constructor(
@@ -129,5 +132,121 @@ export class FirestoreOccasionToolRepository implements OccasionToolRepository {
             },
           ];
     });
+  }
+
+  async listBirthdays({
+    agentId,
+    contactIds,
+    limit,
+  }: {
+    agentId: string;
+    contactIds: string[];
+    limit: number;
+  }): Promise<{ rows: OccasionToolRow[]; overflow: boolean }> {
+    this.owner(agentId);
+    if (contactIds.length === 0) return { rows: [], overflow: false };
+    if (
+      contactIds.length > 20 ||
+      new Set(contactIds).size !== contactIds.length ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 40
+    )
+      throw new Error('Birthday occasion read is outside its bound');
+
+    // Firestore `in` accepts at most 30 values. Keep this helper at 20 so it
+    // remains compatible with the same conservative bound as the tool input.
+    const birthdayPage = await this.store
+      .collection('occasions')
+      .where('agentId', '==', agentId)
+      .where('contactId', 'in', contactIds)
+      .where('kind', '==', 'birthday')
+      .where('recurrence', '==', 'annual')
+      .where('ownerConfirmed', '==', true)
+      .where('quarantined', '==', false)
+      .select(
+        'id',
+        'agentId',
+        'contactId',
+        'kind',
+        'label',
+        'month',
+        'day',
+        'year',
+        'recurrence',
+        'leadDays',
+        'originTrust',
+        'quarantined',
+        'ownerConfirmed',
+      )
+      .limit(limit + 1)
+      .get();
+    const overflow = birthdayPage.size > limit;
+    const occasionRows = birthdayPage.docs.slice(0, limit).map((doc) => {
+      const row = decodeRecord<Records['occasions']>(doc.data());
+      if (
+        typeof row.id !== 'string' ||
+        documentKey(row.id) !== doc.id ||
+        row.agentId !== agentId ||
+        typeof row.contactId !== 'string' ||
+        !contactIds.includes(row.contactId) ||
+        row.kind !== 'birthday' ||
+        row.recurrence !== 'annual' ||
+        row.ownerConfirmed !== true ||
+        row.quarantined !== false ||
+        !Number.isInteger(row.month) ||
+        !Number.isInteger(row.day) ||
+        (row.year !== null && !Number.isInteger(row.year))
+      )
+        throw new Error('Birthday occasion record is malformed');
+      return row;
+    });
+
+    // Resolve names only for the exact, bounded set of requested birthday
+    // records. Unrelated occasion/contact names are never read by this path.
+    const matchedContactIds = [...new Set(occasionRows.map((row) => row.contactId))];
+    const docs = await this.store.db.getAll(
+      ...matchedContactIds.map((id) => this.store.doc('contacts', id)),
+    );
+    const names = new Map<string, string>();
+    docs.forEach((doc, index) => {
+      const id = matchedContactIds[index];
+      if (!id || !doc.exists) return;
+      const contact = decodeRecord<Records['contacts'] & { agentId?: unknown }>(doc.data());
+      if (
+        contact.id === id &&
+        documentKey(id) === doc.id &&
+        typeof contact.name === 'string' &&
+        (contact.agentId === undefined || contact.agentId === agentId)
+      )
+        names.set(id, contact.name);
+    });
+
+    return {
+      rows: occasionRows.flatMap((row) => {
+        const contactName = names.get(row.contactId);
+        return contactName === undefined
+          ? []
+          : [
+              {
+                id: row.id,
+                contactId: row.contactId,
+                contactName,
+                kind: row.kind,
+                label: row.label,
+                month: row.month,
+                day: row.day,
+                year: row.year,
+                recurrence: row.recurrence,
+                leadDays: row.leadDays,
+                notes: '',
+                originTrust: row.originTrust,
+                quarantined: row.quarantined,
+                ownerConfirmed: row.ownerConfirmed,
+              },
+            ];
+      }),
+      overflow,
+    };
   }
 }

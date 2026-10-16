@@ -1,5 +1,8 @@
 import { selectUpcomingOccasions } from '@assistant/core/memory/occasions';
-import type { OccasionToolRepository } from '@assistant/persistence';
+import type {
+  BirthdayOccasionToolRepository,
+  OccasionToolRepository,
+} from '@assistant/persistence';
 import { z } from 'zod';
 import { register } from '../register.js';
 import type { ToolRegistry } from '../registry.js';
@@ -110,7 +113,7 @@ export function registerPortableOccasionTools(
 /** A bounded, notes-free read used only by identity-checked family birthday recall. */
 export function registerPortableBirthdayOccasionTool(
   registry: ToolRegistry,
-  occasions: Pick<OccasionToolRepository, 'list'>,
+  occasions: BirthdayOccasionToolRepository,
 ): ToolRegistry {
   register(
     registry,
@@ -126,7 +129,13 @@ export function registerPortableBirthdayOccasionTool(
       execute: async (args, ctx) => {
         const requested = new Set(args.contactIds);
         if (requested.size !== args.contactIds.length) return { birthdays: [], complete: false };
-        const birthdays = (await occasions.list(ctx.agentId))
+        if (requested.size === 0) return { birthdays: [], complete: true };
+        const bounded = await occasions.listBirthdays({
+          agentId: ctx.agentId,
+          contactIds: [...requested],
+          limit: MAX_BIRTHDAY_OCCASION_RESULTS,
+        });
+        const birthdays = bounded.rows
           .filter(
             (row) =>
               requested.has(row.contactId) &&
@@ -167,7 +176,7 @@ export function registerPortableBirthdayOccasionTool(
             ownerConfirmed: row.ownerConfirmed,
             quarantined: row.quarantined,
           }));
-        const complete = birthdays.length <= MAX_BIRTHDAY_OCCASION_RESULTS;
+        const complete = !bounded.overflow && birthdays.length <= MAX_BIRTHDAY_OCCASION_RESULTS;
         return {
           birthdays: birthdays.slice(0, MAX_BIRTHDAY_OCCASION_RESULTS),
           complete,
