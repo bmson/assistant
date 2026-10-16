@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   createPostgresConversationSearchRepository,
   createPostgresExecutionContextRepository,
@@ -187,6 +188,34 @@ const EMAIL_REVIEW_RESERVED_ASSESSMENT_STEPS = 2;
 const EMAIL_REVIEW_MAX_ASSESSMENT_PASSES = 3;
 const EMAIL_REVIEW_MULTI_THREAD_STEP_BONUS = 8;
 const EMAIL_REVIEW_MULTI_THREAD_STEP_CAP = 22;
+const EMAIL_REVIEW_STEP_BUDGET_STATE_KEY = 'emailReviewStepBudget';
+
+function persistedEmailReviewStepBudget(
+  value: unknown,
+  originalMaxSteps: number,
+  requestHash: string,
+): number | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const budget = value as Record<string, unknown>;
+  const expectedEffectiveMaxSteps = Math.max(
+    originalMaxSteps,
+    Math.min(
+      EMAIL_REVIEW_MULTI_THREAD_STEP_CAP,
+      originalMaxSteps + EMAIL_REVIEW_MULTI_THREAD_STEP_BONUS,
+    ),
+  );
+  if (
+    budget.version !== 1 ||
+    budget.originalMaxSteps !== originalMaxSteps ||
+    budget.requestHash !== requestHash ||
+    typeof budget.effectiveMaxSteps !== 'number' ||
+    !Number.isInteger(budget.effectiveMaxSteps) ||
+    budget.effectiveMaxSteps !== expectedEffectiveMaxSteps
+  ) {
+    return undefined;
+  }
+  return budget.effectiveMaxSteps;
+}
 
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
@@ -585,6 +614,42 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         })
       : null;
   if (readRequest?.emailReview) {
+    const originalMaxSteps = task.maxSteps;
+    const requestHash = createHash('sha256').update(ownerText.trim()).digest('hex');
+    const canExtendEmailReviewSteps =
+      !readRequest.scopeIssue &&
+      !readRequest.emailReview.latestUnanswered &&
+      readRequest.emailReview.requestedCount > 1 &&
+      originalMaxSteps >= 14;
+    const persistedStepBudget = canExtendEmailReviewSteps
+      ? persistedEmailReviewStepBudget(
+          state.plannerState[EMAIL_REVIEW_STEP_BUDGET_STATE_KEY],
+          originalMaxSteps,
+          requestHash,
+        )
+      : undefined;
+    if (persistedStepBudget !== undefined) task.maxSteps = persistedStepBudget;
+    else if (canExtendEmailReviewSteps) {
+      const effectiveMaxSteps = Math.max(
+        originalMaxSteps,
+        Math.min(
+          EMAIL_REVIEW_MULTI_THREAD_STEP_CAP,
+          originalMaxSteps + EMAIL_REVIEW_MULTI_THREAD_STEP_BONUS,
+        ),
+      );
+      if (effectiveMaxSteps > originalMaxSteps) {
+        task.maxSteps = effectiveMaxSteps;
+        state.plannerState[EMAIL_REVIEW_STEP_BUDGET_STATE_KEY] = {
+          version: 1,
+          originalMaxSteps,
+          effectiveMaxSteps,
+          requestHash,
+        };
+        // The loop may outlive this process. Persist the bounded email-only
+        // ceiling under the current lease before any work can consume it.
+        if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
+      }
+    }
     const persisted = state.plannerState.emailReview;
     if (persisted && typeof persisted === 'object' && !Array.isArray(persisted)) {
       const record = persisted as Record<string, unknown>;
@@ -649,24 +714,6 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           selectedThreadIds: [],
           rankingFailed: true,
         };
-    }
-    if (
-      !readRequest.scopeIssue &&
-      !readRequest.emailReview.latestUnanswered &&
-      readRequest.emailReview.requestedCount > 1 &&
-      task.maxSteps >= 14
-    ) {
-      // Explicit multi-request review needs room to read the bounded candidate
-      // set and, when the first structured assessment omits complete threads,
-      // make one finite repair pass. This is an email-only task budget, capped
-      // at 22 steps; it does not change global task or spend limits.
-      task.maxSteps = Math.max(
-        task.maxSteps,
-        Math.min(
-          EMAIL_REVIEW_MULTI_THREAD_STEP_CAP,
-          task.maxSteps + EMAIL_REVIEW_MULTI_THREAD_STEP_BONUS,
-        ),
-      );
     }
   }
   let compoundTripExtraction: CompoundTripExtraction | undefined;
