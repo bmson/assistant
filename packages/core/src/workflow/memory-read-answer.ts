@@ -609,12 +609,13 @@ function assistantComparisonEvidenceSegments(
     if (negatedComparisonSuggestion.test(sentence) || !comparisonSuggestionSignal.test(sentence))
       return false;
     const previous = sentences[index - 1];
-    const hasNearbyScope = [sentence, previous].some((candidate) => {
-      if (!candidate) return false;
-      const candidateWords: string[] =
-        candidate.toLocaleLowerCase('en-US').match(/[\p{L}\p{N}-]+/gu) ?? [];
-      return candidateWords.includes(scopeLower);
-    });
+    const sentenceWords: string[] =
+      sentence.toLocaleLowerCase('en-US').match(/[\p{L}\p{N}-]+/gu) ?? [];
+    const previousWords: string[] =
+      previous?.toLocaleLowerCase('en-US').match(/[\p{L}\p{N}-]+/gu) ?? [];
+    const hasNearbyScope =
+      sentenceWords.includes(scopeLower) ||
+      (previousWords.includes(scopeLower) && !unrelatedTopicTransition.test(previous ?? ''));
     if (unrelatedTopicTransition.test(sentence)) return false;
     const unambiguousShortMessage =
       source.body.length <= 320 &&
@@ -680,6 +681,7 @@ function comparisonEvidenceSegments(
     // bullet. A competing explicit project/exercise name blocks the carry.
     const previous = sentences[index - 1];
     if (!previous || !hasScope(previous)) continue;
+    if (unrelatedTopicTransition.test(previous)) continue;
     if (comparisonTopicNames(previous).some((name) => name !== scopeLower)) continue;
     const excerpt = `${previous} ${sentence}`;
     if (excerpt.length <= 800) excerpts.push(excerpt);
@@ -778,7 +780,11 @@ function deterministicComparisonSelection(
       if (bestScore === undefined) return undefined;
       const best = candidates.filter((candidate) => candidate.score === bestScore);
       const signatures = new Set(
-        best.map((candidate) => comparisonValueSignature(candidate.excerpt, scope)),
+        best.map((candidate) =>
+          assistantSpeaker
+            ? normalizedText(candidate.excerpt)
+            : comparisonValueSignature(candidate.excerpt, scope),
+        ),
       );
       if (signatures.size > 1) return undefined;
       return {
@@ -1012,7 +1018,12 @@ function validateSelectedComparison(
     const signatures = new Set(
       bestCandidates.map((candidate) => comparisonValueSignature(candidate.excerpt, scope)),
     );
-    if (signatures.size > 1) return incompleteComparisonSelection();
+    if (
+      signatures.size > 1 ||
+      (assistantSpeaker &&
+        new Set(bestCandidates.map((candidate) => normalizedText(candidate.excerpt))).size > 1)
+    )
+      return incompleteComparisonSelection();
     // Preserve the selector's bounded quote exactly; add exact relevant excerpts for ties it omitted.
     for (const candidate of bestCandidates) {
       const chosenQuote = chosenRows.find(({ source }) => source.key === candidate.source.key)?.item

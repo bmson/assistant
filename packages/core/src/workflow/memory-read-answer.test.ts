@@ -611,6 +611,46 @@ describe('exact historical source projection', () => {
     expect(result.selections).toEqual([]);
     expect(validMemoryReadSelection(result, conversationEvidence, request)).toBe(false);
   });
+  it('does not carry an explicitly unrelated prior sentence as the recommendation scope', async () => {
+    const request =
+      'For the earlier fictional Kestrel scenario, compare my original budget and travel constraint with the Assistant’s suggested next step.';
+    const ownerText =
+      'For the fictional Kestrel exercise, my original budget is $500 and my travel constraint is to avoid taxis.';
+    const assistantText =
+      'The Kestrel scenario is unrelated to this travel note. The best travel option is public transport.';
+    const conversationEvidence: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: {
+          matches: [
+            message('kestrel-owner', ownerText, 'user', 'owner'),
+            message('kestrel-unrelated-anchor-assistant', assistantText, 'assistant', 'assistant'),
+          ],
+        },
+      },
+    ];
+    const object = vi.fn(async () => ({
+      ok: true,
+      object: {
+        selections: [
+          { sourceKey: 'message:kestrel-owner', quote: ownerText },
+          { sourceKey: 'message:kestrel-unrelated-anchor-assistant', quote: assistantText },
+        ],
+      },
+    }));
+
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request,
+      evidence: conversationEvidence,
+    });
+
+    expect(result).toMatchObject({ status: 'unavailable', failureReason: 'incomplete_selection' });
+    expect(result.selections).toEqual([]);
+    expect(validMemoryReadSelection(result, conversationEvidence, request)).toBe(false);
+  });
   it.each([
     [
       'cross-project switch',
@@ -810,6 +850,48 @@ describe('exact historical source projection', () => {
         selections: [
           { sourceKey: 'message:owner-one', quote: ownerText },
           { sourceKey: 'message:assistant-one', quote: publicTransport },
+        ],
+      },
+    }));
+
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request,
+      evidence: conversationEvidence,
+    });
+
+    expect(result).toMatchObject({ status: 'unavailable', failureReason: 'incomplete_selection' });
+    expect(result.selections).toEqual([]);
+    expect(validMemoryReadSelection(result, conversationEvidence, request)).toBe(false);
+    expect(object).toHaveBeenCalledTimes(1);
+  });
+  it('fails closed on equally strong conflicting recommendations within one conversation', async () => {
+    const request =
+      'For the earlier fictional Kestrel scenario, compare my original budget and travel constraint with the Assistant’s suggested next step.';
+    const ownerText =
+      'For the fictional Kestrel exercise, my original budget is $500 and my travel constraint is to minimize cost.';
+    const publicTransport = 'For Kestrel, public transport is the best option for travel.';
+    const taxis = 'For Kestrel, taxis are the best option for travel.';
+    const conversationEvidence: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: {
+          matches: [
+            message('owner-one-chat', ownerText, 'user', 'owner'),
+            message('assistant-one-chat', publicTransport, 'assistant', 'assistant'),
+            message('assistant-conflicting-chat', taxis, 'assistant', 'assistant'),
+          ],
+        },
+      },
+    ];
+    const object = vi.fn(async () => ({
+      ok: true,
+      object: {
+        selections: [
+          { sourceKey: 'message:owner-one-chat', quote: ownerText },
+          { sourceKey: 'message:assistant-one-chat', quote: publicTransport },
         ],
       },
     }));
