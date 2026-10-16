@@ -110,6 +110,8 @@ export interface CompoundTripReadProjection {
   routeOrigin?: string;
   routeDestination?: string;
   webQuery?: string;
+  fallbackWebQuery?: string;
+  publicFetchTargets: Array<{ mode: 'public transport' | 'taxi'; url: string }>;
   mapRoute?: Record<string, unknown>;
   webSearch?: Record<string, unknown>;
   webFetches: Array<{
@@ -1750,7 +1752,7 @@ function extractedSegmentMatchesCurrentSource(
   }
   if (segment.bookingReference && !exactSourceToken(quote, segment.bookingReference)) return false;
   if (
-    (segment.direction === 'outbound' && !/\b(?:outbound|departing|departure)\b/i.test(quote)) ||
+    (segment.direction === 'outbound' && !/\boutbound\b/i.test(quote)) ||
     (segment.direction === 'return' && !/\b(?:return|inbound|homebound)\b/i.test(quote)) ||
     (segment.direction === 'connection' &&
       !/\b(?:connection|connecting|layover|transfer)\b/i.test(quote))
@@ -2401,7 +2403,8 @@ function mergeSourceTableSegments(
 
 interface BookedRouteGroup {
   threadId: string;
-  direction: 'outbound' | 'return';
+  order: 'first' | 'second';
+  direction: 'outbound' | 'return' | 'unknown';
   origin: string;
   destination: string;
   reference: string;
@@ -2409,7 +2412,7 @@ interface BookedRouteGroup {
   destinationCity: string;
 }
 
-/** Route order is an inference from two reversed, source-labeled itinerary groups. */
+/** Source order identifies route groups, never outbound/return direction. */
 function bookedRouteGroups(
   messages: ReadonlyArray<SourceThreadMessage>,
   validated: ReadonlyArray<CompoundTripFlightSegment>,
@@ -2470,7 +2473,18 @@ function bookedRouteGroups(
         return undefined;
       return {
         threadId: message.threadId,
-        direction: index === 0 ? ('outbound' as const) : ('return' as const),
+        order: index === 0 ? ('first' as const) : ('second' as const),
+        direction: (() => {
+          const preceding = body
+            .slice(Math.max(0, start - 100), start)
+            .trimEnd()
+            .split('\n')
+            .at(-1);
+          const explicit = /^(Outbound|Return)(?:\s+(?:flight|journey|itinerary))?\s*[:–-]?\s*$/i
+            .exec(preceding ?? '')?.[1]
+            ?.toLowerCase();
+          return explicit === 'outbound' || explicit === 'return' ? explicit : 'unknown';
+        })(),
         origin: header[1] ?? '',
         destination: header[2] ?? '',
         reference: header[3] ?? '',
@@ -2491,12 +2505,12 @@ function bookedHotelTransfer(
   const end = request.timeWindow?.timeMax.slice(0, 10);
   if (!request.compoundTripDiscovery || !day || !end) return undefined;
   const matches = groups
-    .filter((group) => group.direction === 'outbound')
+    .filter((group) => group.order === 'first')
     .flatMap((group) => {
       const returning = groups.find(
         (item) =>
           item.threadId === group.threadId &&
-          item.direction === 'return' &&
+          item.order === 'second' &&
           item.reference === group.reference,
       );
       const arrival = group.legs.at(-1)?.arrivalDate;
@@ -2616,7 +2630,7 @@ function sourceLocalBookingLines(
       observed.some((segment) => segment.threadId === message.threadId)
     )
       lines.push(
-        `The booked table groups ${routes[0]?.[1]}→${routes[0]?.[2]} before ${routes[1]?.[1]}→${routes[1]?.[2]}. A return is an inference from those reversed itinerary groups; the source does not explicitly label direction.`,
+        `The booked table lists ${routes[0]?.[1]}→${routes[0]?.[2]} before ${routes[1]?.[1]}→${routes[1]?.[2]}. Reversed routes do not establish outbound/return direction.`,
       );
   }
   for (const candidate of flightCandidates(request, calendarRows)) {
@@ -3247,19 +3261,53 @@ export function compoundTripFetchTargets(
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): Array<{ mode: 'public transport' | 'taxi'; url: string }> {
   const projection = compoundTripReadProjection(request, evidence);
-  const targets = projection.webSearch
-    ? compoundTripFetchTargetsFromResult(
-        { toolName: 'web.search', status: 'succeeded', result: projection.webSearch },
-        evidence,
-        projection.hotel,
-      )
-    : [];
   const completeModes = new Set(
     projection.comparison
       .filter((item) => item.endpointMatched && item.fare && item.duration)
       .map((item) => item.mode),
   );
-  return targets.filter((target) => !completeModes.has(target.mode));
+  return projection.publicFetchTargets.filter(
+    (target) =>
+      !completeModes.has(target.mode) &&
+      !evidence.some(
+        (row) =>
+          row.toolName === 'web.fetch' &&
+          row.fromCurrentTask !== false &&
+          object(row.args)?.url === target.url,
+      ),
+  );
+}
+
+/** One endpoint-specific alternate search, never an arbitrary model query. */
+export function compoundTripNextWebSearchQuery(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): string | undefined {
+  const projection = compoundTripReadProjection(request, evidence);
+  const attempted = (query: string) =>
+    evidence.some(
+      (row) =>
+        row.toolName === 'web.search' &&
+        row.fromCurrentTask !== false &&
+        object(row.args)?.query === query,
+    );
+  if (projection.webQuery && !attempted(projection.webQuery)) return projection.webQuery;
+  if (!projection.fallbackWebQuery || attempted(projection.fallbackWebQuery)) return undefined;
+  const pending = compoundTripFetchTargets(request, evidence).some(
+    (target) =>
+      !evidence.some(
+        (row) =>
+          row.toolName === 'web.fetch' &&
+          row.fromCurrentTask !== false &&
+          object(row.args)?.url === target.url,
+      ),
+  );
+  const complete = (['public transport', 'taxi'] as const).every((mode) =>
+    projection.comparison.some(
+      (item) => item.mode === mode && item.endpointMatched && item.fare && item.duration,
+    ),
+  );
+  return !pending && !complete ? projection.fallbackWebQuery : undefined;
 }
 
 export function compoundTripRoute(
@@ -3710,15 +3758,31 @@ export function compoundTripReadProjection(
     : '';
   const webQuery =
     route && comparisonFlight && hotel ? compoundTripWebQuery(comparisonFlight, hotel) : undefined;
-  const webSearch = webQuery
+  const primarySearch = webQuery
     ? evidence.find(
         (row) =>
           successful(row) && row.toolName === 'web.search' && object(row.args)?.query === webQuery,
       )
     : undefined;
-  const fetchTargets = webSearch
-    ? compoundTripFetchTargetsFromResult(webSearch, evidence, hotel)
+  const primaryHosts = primarySearch
+    ? searchRouteCandidates(primarySearch, hotel)
+        .slice(0, 2)
+        .map((item) => new URL(item.url).hostname)
     : [];
+  const fallbackWebQuery =
+    webQuery && hotel?.address
+      ? `${webQuery} "${hotel.address.replace(/["\r\n]/g, ' ')}" airport directions ${[...new Set(primaryHosts)].map((host) => `-site:${host}`).join(' ')}`.trim()
+      : undefined;
+  const alternateSearch = fallbackWebQuery
+    ? evidence.find(
+        (row) =>
+          successful(row) &&
+          row.toolName === 'web.search' &&
+          object(row.args)?.query === fallbackWebQuery,
+      )
+    : undefined;
+  const webSearch = primarySearch ?? alternateSearch;
+  const fetchTargets = plannedRouteFetchTargets(primarySearch, alternateSearch, evidence, hotel);
   const webFetches = fetchTargets.flatMap((target) => {
     const row = evidence.find(
       (item) =>
@@ -3728,8 +3792,8 @@ export function compoundTripReadProjection(
     );
     if (!row) return [];
     const comparison =
-      comparisonFlight && hotel && webSearch
-        ? comparisonFromPage(target.mode, row, webSearch, comparisonFlight, hotel)
+      comparisonFlight && hotel
+        ? comparisonFromPage(target.mode, row, target.search, comparisonFlight, hotel)
         : undefined;
     const endpointMatched = comparison?.endpointMatched === true;
     return [{ mode: target.mode, row, endpointMatched, ...(comparison ? { comparison } : {}) }];
@@ -3905,10 +3969,6 @@ export function compoundTripReadProjection(
         : 'The fully read booking thread contains no separately identified connecting leg, so I cannot confirm whether this flight is nonstop.',
     );
   }
-  if (route && !mapRoute)
-    gaps.push(
-      'I could not verify a driving route from the stated arrival airport to the hotel candidate.',
-    );
   if (mapRoute && hotel && !mapDestinationNamesHotel(object(mapRoute.result), hotel))
     gaps.push('The map destination place is not verified as the hotel entrance.');
   if (webQuery && !webSearch)
@@ -3998,12 +4058,12 @@ export function compoundTripReadProjection(
     );
   const bookedItineraryLines = bookedTransfer
     ? [
-        `The booked itinerary covers ${bookedTransfer.group.legs[0]?.departureDate} to ${bookedGroups.find((group) => group.threadId === bookedTransfer.group.threadId && group.direction === 'return')?.legs.at(-1)?.arrivalDate}. ${bookedArrivalDate && bookedArrivalDate < (request.timeWindow?.timeMin.slice(0, 10) ?? '') ? 'Its outbound arrival is already past; this is a current-trip booking, not a newly departing trip.' : 'This is a booking candidate; the next departure is not fully verified.'}`,
+        `The booked itinerary covers ${bookedTransfer.group.legs[0]?.departureDate} to ${bookedGroups.find((group) => group.threadId === bookedTransfer.group.threadId && group.order === 'second')?.legs.at(-1)?.arrivalDate}. ${bookedArrivalDate && bookedArrivalDate < (request.timeWindow?.timeMin.slice(0, 10) ?? '') ? 'Its first booked arrival date is already past; this is an existing booking, not proof of a newly departing trip.' : 'This is a booking candidate; the next departure is not fully verified.'}`,
         ...bookedGroups
           .filter((group) => group.threadId === bookedTransfer.group.threadId)
           .map(
             (group) =>
-              `${group.direction === 'outbound' ? 'Outbound' : 'Return'} itinerary group ${group.origin}→${group.destination} (direction inferred from the reversed route groups): ${group.legs.map(formatFlightSegment).join('; ')}. [Booking email](${mailLinks.get(group.threadId)}).`,
+              `Booked itinerary group ${group.origin}→${group.destination} (${group.direction === 'unknown' ? 'direction not explicitly stated' : `source labels ${group.direction}`}): ${group.legs.map(formatFlightSegment).join('; ')}. [Booking email](${mailLinks.get(group.threadId)}).`,
           ),
         ...bookedCalendarDifferences(
           bookedGroups.filter((group) => group.threadId === bookedTransfer.group.threadId),
@@ -4084,8 +4144,13 @@ export function compoundTripReadProjection(
       ]
     : sourceGroups.length
       ? sourceGroups.map((group) => ({
-          label: group.direction === 'outbound' ? 'Outbound' : 'Return',
-          inferred: true,
+          label:
+            group.direction === 'unknown'
+              ? 'Booked'
+              : group.direction === 'outbound'
+                ? 'Outbound'
+                : 'Return',
+          inferred: false,
           legs: group.legs,
         }))
       : currentTripReturn?.segment
@@ -4100,8 +4165,11 @@ export function compoundTripReadProjection(
             },
           ]
         : [{ label: 'Candidate', inferred: false, legs: flightSegments }];
-  const bookingReturn = sourceGroups.find((group) => group.direction === 'return')?.legs[0]
+  const bookingReturn = sourceGroups.find((group) => group.order === 'second')?.legs[0]
     ?.departureDate;
+  const bookingEnd = sourceGroups
+    .find((group) => group.order === 'second')
+    ?.legs.at(-1)?.arrivalDate;
   const currentBooking =
     bookedArrivalDate && bookedArrivalDate < (request.timeWindow?.timeMin.slice(0, 10) ?? '');
   const matchedCalendarNotes = [flight, returnFlight, currentTripReturn].flatMap((candidate) => {
@@ -4133,11 +4201,13 @@ export function compoundTripReadProjection(
   });
   const conciseSummary = flight?.segment
     ? `Next calendar-matched outbound: ${flight.segment.departureDate}${returnFlight?.segment ? `; return ${returnFlight.segment.departureDate}` : '; return not verified'}.`
-    : currentTripReturn?.segment || currentBooking
-      ? `The booking is for a current trip, with a return ${currentTripReturn?.segment?.departureDate ?? bookingReturn ?? 'date not verified'}. A new outbound trip is not verified.`
-      : bookedTransfer
-        ? `Booking candidate: ${bookedTransfer.group.legs[0]?.departureDate}–${bookingReturn}. I could not verify this as the next outbound trip.`
-        : 'I could not identify one verified next trip. These checked records remain candidates.';
+    : currentTripReturn?.segment
+      ? `Current-trip return booking: ${currentTripReturn.segment.departureDate}. A new outbound trip is not verified.`
+      : currentBooking
+        ? `Booked dates ${bookedTransfer?.group.legs[0]?.departureDate}–${bookingEnd ?? 'end unknown'}; later departure ${bookingReturn ?? 'unverified'}. A new outbound trip is not verified.`
+        : bookedTransfer
+          ? `Booking candidate: ${bookedTransfer.group.legs[0]?.departureDate}–${bookingReturn}. I could not verify this as the next outbound trip.`
+          : 'I could not identify one verified next trip. These checked records remain candidates.';
   return {
     calendarRows,
     calendarComplete,
@@ -4166,6 +4236,8 @@ export function compoundTripReadProjection(
     ...(connectionSummary ? { connectionSummary } : {}),
     ...(route ? { routeOrigin: route.origin, routeDestination: route.destination } : {}),
     ...(webQuery ? { webQuery } : {}),
+    ...(fallbackWebQuery ? { fallbackWebQuery } : {}),
+    publicFetchTargets: fetchTargets.map(({ mode, url }) => ({ mode, url })),
     ...(mapRoute ? { mapRoute: object(mapRoute.result) } : {}),
     ...(webSearch ? { webSearch: object(webSearch.result) } : {}),
     webFetches,
@@ -4210,8 +4282,10 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
       }
     }
     lines.push(legs.join('\n'));
-    if (groups.some((group) => group.inferred))
-      lines.push('*Direction inferred from the reversed itinerary route groups.*');
+    if (groups.some((group) => group.label === 'Booked'))
+      lines.push(
+        'Outbound/return direction is not explicitly stated for the unlabelled booked legs.',
+      );
     if (view.localClocks)
       lines.push(
         'The selected booking explicitly labels its clocks local; time-zone offsets remain unverified.',
@@ -4224,9 +4298,9 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
       hotel.association === 'shared_reference'
         ? 'Hotel booking (shared reference)'
         : hotel.association === 'date_city_candidate'
-          ? 'Hotel candidate (city/date match; separate booking)'
+          ? 'Hotel candidate (city/date association inferred; separate booking)'
           : view.associationInferred
-            ? 'Hotel candidate (separate booking; transfer association inferred)'
+            ? 'Hotel candidate (city/date association inferred; separate booking)'
             : 'Unlinked hotel candidate';
     lines.push(
       `${hotelLabel}: **${cell(hotel.hotelName ?? hotel.subject)}** — ${cell(hotel.address ?? 'address unverified')}${hotel.city && !hotel.address?.includes(hotel.city) ? `, ${cell(hotel.city)}` : ''}; ${hotel.checkIn ?? 'check-in unknown'} to ${hotel.checkOut ?? 'check-out unknown'}.${links.get(hotel.threadId) ? ` [Booking](${links.get(hotel.threadId)})` : ''}`,
@@ -4235,10 +4309,6 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
   if (!view.hotels.length) lines.push('Hotel: no verified linked stay; see gaps below.');
   if (view.hotels.length > 3)
     lines.push(`${view.hotels.length - 3} additional hotel records remain unresolved.`);
-  if (view.associationInferred)
-    lines.push(
-      'Flight–hotel association inferred from matching arrival/check-in date and city; separate bookings.',
-    );
   if (view.calendarNotes.length) {
     const visibleCalendarNotes = view.calendarNotes.slice(0, 4);
     const omittedCalendarNotes = view.calendarNotes.length - visibleCalendarNotes.length;
@@ -4248,7 +4318,7 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
   }
   if (projection.routeOrigin && projection.routeDestination) {
     lines.push(
-      `Transfer candidate: **${cell(projection.routeOrigin)} → ${cell(projection.routeDestination)}**.`,
+      `Transfer candidate: **${cell(projection.routeOrigin)} → ${cell(projection.hotel?.hotelName ?? projection.routeDestination)}**.`,
     );
     const options: string[] = [];
     for (const mode of ['public transport', 'taxi'] as const) {
@@ -4664,7 +4734,7 @@ export function upcomingFlightReadProjection(
     : [];
   const compactSummary = observedGroup
     ? [
-        `Observed booking candidate: **${observedGroup.legs.map((leg) => leg.originAirport).join('→')}→${observedGroup.destination}, ${observedGroup.legs[0]?.departureDate}** — likely ${observedGroup.direction} (inferred from reversed itinerary route groups). Its calendar match and whether it is the next flight remain unverified; booking order is not proof of travel.`,
+        `Observed booking candidate: **${observedGroup.legs.map((leg) => leg.originAirport).join('→')}→${observedGroup.destination}, ${observedGroup.legs[0]?.departureDate}**. ${observedGroup.direction === 'unknown' ? 'Outbound/return direction is not explicitly stated.' : `The booking explicitly labels this ${observedGroup.direction}.`} Calendar match and next-flight identity remain unverified; booking order is not proof of travel.`,
         observedGroup.legs
           .map((leg) => compactFlightLeg(leg, 'Booked leg', threadSourceLinks(trip.readThreads)))
           .join('\n'),
@@ -4758,13 +4828,18 @@ function safePublicSourceUrl(raw: string): boolean {
   }
 }
 
-function compoundTripFetchTargetsFromResult(
+interface RouteSourceCandidate {
+  url: string;
+  modes: Array<'public transport' | 'taxi'>;
+  hotelDirections: boolean;
+}
+
+function searchRouteCandidates(
   row: ReadToolEvidence,
-  evidence: ReadonlyArray<ReadToolEvidence> = [],
   hotel?: CompoundTripHotelCandidate,
-): Array<{ mode: 'public transport' | 'taxi'; url: string }> {
+): RouteSourceCandidate[] {
   const results = object(row.result)?.results;
-  if (!Array.isArray(results)) return [];
+  if (!successful(row) || !Array.isArray(results)) return [];
   const normalize = (value: string) =>
     value
       .toLowerCase()
@@ -4775,36 +4850,23 @@ function compoundTripFetchTargetsFromResult(
   const hotelWords = normalize(hotel?.hotelName ?? '')
     .split(' ')
     .filter(Boolean);
-  const fetched = evidence.filter(
-    (item) => item.toolName === 'web.fetch' && item.fromCurrentTask !== false,
-  );
-  const failedHosts = new Set(
-    fetched.flatMap((item) => {
-      const url = text(object(item.args)?.url, 1000);
-      if (!safePublicSourceUrl(url) || successful(item)) return [];
-      return [new URL(url).hostname];
-    }),
-  );
-  const candidates = results
+  const seen = new Set<string>();
+  return results
     .map(object)
-    .filter((result): result is Record<string, unknown> => Boolean(result))
+    .filter((item): item is Record<string, unknown> => Boolean(item))
     .flatMap((result) => {
       const url = text(result.url, 1000);
+      if (!safePublicSourceUrl(url) || seen.has(url)) return [];
+      seen.add(url);
       const title = text(result.title, 200);
-      const snippet = text(result.snippet, 400);
-      if (!safePublicSourceUrl(url)) return [];
-      if (failedHosts.has(new URL(url).hostname)) return [];
-      const description = `${title} ${snippet}`.toLowerCase();
-      // A location/directions page for the identified hotel is a discovery
-      // candidate for both modes, even when its snippet mentions only one.
-      // Its facts still require a complete read and endpoint-local evidence.
+      const description = `${title} ${text(result.snippet, 400)}`;
       const hotelDirections =
         hotelWords.length >= 2 &&
         hotelWords.every((word) => normalize(title).split(' ').includes(word)) &&
         /\b(?:location|directions|getting here|how to reach)\b|\/(?:map|location|directions)(?:[/?#]|$)/i.test(
           `${title} ${url}`,
         );
-      const modes: Array<'public transport' | 'taxi'> = [];
+      const modes: RouteSourceCandidate['modes'] = [];
       if (
         hotelDirections ||
         /\b(?:public transport|transit|metro|rail|train|bus|airport express)\b/i.test(description)
@@ -4814,24 +4876,45 @@ function compoundTripFetchTargetsFromResult(
         modes.push('taxi');
       return modes.length ? [{ url, modes, hotelDirections }] : [];
     })
-    .sort((left, right) => Number(right.hotelDirections) - Number(left.hotelDirections));
-  const resultUrls = new Set(results.map((item) => text(object(item)?.url, 1000)));
-  const attemptedUrls = new Set(
-    fetched.map((item) => text(object(item.args)?.url, 1000)).filter((url) => resultUrls.has(url)),
+    .sort((a, b) => Number(b.hotelDirections) - Number(a.hotelDirections));
+}
+
+/** Two initial pages, then at most one distinct alternate per missing mode.
+ * All attempts still consume the request's existing total tool/step budget.
+ */
+function plannedRouteFetchTargets(
+  primary: ReadToolEvidence | undefined,
+  alternate: ReadToolEvidence | undefined,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+  hotel?: CompoundTripHotelCandidate,
+): Array<{ mode: 'public transport' | 'taxi'; url: string; search: ReadToolEvidence }> {
+  const first = primary ? searchRouteCandidates(primary, hotel) : [];
+  const initial = first.slice(0, 2);
+  const fetched = evidence.filter(
+    (row) => row.toolName === 'web.fetch' && row.fromCurrentTask !== false,
   );
-  // Preserve the existing two-page ceiling. Failed pages consume their slot;
-  // a changed URL on a blocked host is not a retry strategy.
-  const selected = new Set<string>();
-  return candidates.flatMap((candidate) => {
-    if (
-      !attemptedUrls.has(candidate.url) &&
-      !selected.has(candidate.url) &&
-      attemptedUrls.size + selected.size >= 2
-    )
-      return [];
-    if (!attemptedUrls.has(candidate.url)) selected.add(candidate.url);
-    return candidate.modes.map((mode) => ({ mode, url: candidate.url }));
-  });
+  const attempted = (url: string) => fetched.some((row) => object(row.args)?.url === url);
+  const result = initial.flatMap((item) =>
+    item.modes.map((mode) => ({ mode, url: item.url, search: primary as ReadToolEvidence })),
+  );
+  if (!initial.every((item) => attempted(item.url))) return result;
+  const initialUrls = new Set(initial.map((item) => item.url));
+  // A changed path on an already tried host is not a new recovery source.
+  const initialHosts = new Set(initial.map((item) => new URL(item.url).hostname));
+  const alternatives = [
+    ...first.slice(2).map((item) => ({ ...item, search: primary as ReadToolEvidence })),
+    ...(alternate
+      ? searchRouteCandidates(alternate, hotel).map((item) => ({ ...item, search: alternate }))
+      : []),
+  ].filter((item) => !initialUrls.has(item.url) && !initialHosts.has(new URL(item.url).hostname));
+  for (const mode of ['public transport', 'taxi'] as const) {
+    // Once an alternate for this mode has run, even a failed/partial result
+    // is terminal for that lane. Never select another URL after that failure.
+    const previous = alternatives.find((item) => item.modes.includes(mode) && attempted(item.url));
+    const candidate = previous ?? alternatives.find((item) => item.modes.includes(mode));
+    if (candidate) result.push({ mode, url: candidate.url, search: candidate.search });
+  }
+  return result;
 }
 
 function durationFromQuote(quote: string): string | undefined {

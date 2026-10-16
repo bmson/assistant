@@ -41,6 +41,7 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
     'hotel directions',
     'blocked hotel fallback',
     'all sources blocked',
+    'alternate source search',
     'focused flight',
   ] as const)('retains source facts and bounded completion for %s', async (scenario) => {
     const agent = await db.query.agents.findFirst();
@@ -100,7 +101,29 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
       resultIsUntrusted: () => true,
       executeApproved: vi.fn(),
       dispatch: vi.fn(
-        async ({ toolName, args }: { toolName: string; args: Record<string, unknown> }) => {
+        async ({
+          toolName,
+          args,
+          ctx,
+        }: {
+          toolName: string;
+          args: Record<string, unknown>;
+          ctx: {
+            authorizedCompoundTripPublicRead?: {
+              taskId: string;
+              toolName: string;
+              query?: string;
+              url?: string;
+            };
+          };
+        }) => {
+          if (toolName === 'web.search' || toolName === 'web.fetch') {
+            expect(ctx.authorizedCompoundTripPublicRead).toMatchObject({
+              taskId,
+              toolName,
+              ...(toolName === 'web.search' ? { query: args.query } : { url: args.url }),
+            });
+          }
           calls.push({ toolName, args });
           let result = tripSourceResult(toolName, args);
           if (focused && toolName === 'gmail.search') {
@@ -131,23 +154,37 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
             ];
           }
           if (!focused && scenario !== 'separate pages' && toolName === 'web.search')
-            result = {
-              results: [
-                {
-                  url: 'https://hotel.example/canal-house/map',
-                  title: 'Location: Canal House',
-                  snippet: 'Taxi and public transport directions.',
-                },
-                {
-                  url: 'https://fallback.example/airport-transfer',
-                  title: 'Airport taxi and public transport',
-                  snippet: 'Taxi and public transport from CPH Airport to Canal House.',
-                },
-              ],
-            };
+            result =
+              scenario === 'alternate source search' &&
+              calls.filter((call) => call.toolName === 'web.search').length === 2
+                ? {
+                    results: [
+                      {
+                        url: 'https://official.example/location',
+                        title: 'Canal House directions',
+                        snippet: 'Taxi and public transport',
+                      },
+                    ],
+                  }
+                : {
+                    results: [
+                      {
+                        url: 'https://hotel.example/canal-house/map',
+                        title: 'Location: Canal House',
+                        snippet: 'Taxi and public transport directions.',
+                      },
+                      {
+                        url: 'https://fallback.example/airport-transfer',
+                        title: 'Airport taxi and public transport',
+                        snippet: 'Taxi and public transport from CPH Airport to Canal House.',
+                      },
+                    ],
+                  };
           if (!focused && scenario !== 'separate pages' && toolName === 'web.fetch') {
             const fail =
               scenario === 'all sources blocked' ||
+              (scenario === 'alternate source search' &&
+                !String(args.url).includes('official.example')) ||
               (scenario === 'blocked hotel fallback' && String(args.url).includes('hotel.example'));
             if (fail) {
               await db.insert(toolCalls).values({
@@ -236,15 +273,30 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
       missingInfo: [],
     });
     expect(result.outcome).toBe('needs_attention');
-    const expectedFetches = focused ? 0 : scenario === 'hotel directions' ? 1 : 2;
+    const expectedFetches = focused
+      ? 0
+      : scenario === 'hotel directions'
+        ? 1
+        : scenario === 'alternate source search'
+          ? 3
+          : 2;
     expect(calls.map((call) => call.toolName)).toEqual([
       'calendar.list_events',
       'gmail.search',
       ...(!focused ? ['gmail.search'] : []),
       'gmail.read_thread',
       'gmail.read_thread',
-      ...(!focused ? ['maps.directions', 'web.search'] : []),
-      ...Array.from({ length: expectedFetches }, () => 'web.fetch'),
+      ...(!focused ? ['web.search'] : []),
+      ...Array.from(
+        { length: scenario === 'alternate source search' ? 2 : expectedFetches },
+        () => 'web.fetch',
+      ),
+      ...(scenario === 'alternate source search'
+        ? ['web.search', 'web.fetch']
+        : scenario === 'all sources blocked'
+          ? ['web.search']
+          : []),
+      ...(!focused ? ['maps.directions'] : []),
     ]);
     if (!focused)
       expect(calls.find((call) => call.toolName === 'maps.directions')?.args).toMatchObject({
@@ -265,7 +317,7 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
     expect(answer).toContain('zone');
     expect(answer).not.toContain('|---|');
     if (focused) {
-      expect(answer).toContain('likely return (inferred from reversed itinerary route groups)');
+      expect(answer).toContain('Outbound/return direction is not explicitly stated');
       expect(answer).toContain('local; zone unspecified');
       expect(answer).toContain(
         '[Local-clock confirmation](https://mail.google.com/mail/u/0/#all/clock-thread)',
@@ -281,7 +333,7 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
     } else {
       expect(answer).toContain('Canal House');
       expect(answer).toContain('2030-11-10 to 2030-11-17');
-      expect(answer).toContain('Direction inferred from the reversed itinerary route groups');
+      expect(answer).toContain('Outbound/return direction is not explicitly stated');
       if (scenario === 'all sources blocked') {
         expect(answer).not.toContain('EUR 5');
         expect(answer).not.toContain('EUR 45');
@@ -292,9 +344,11 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
         expect(answer).toContain(
           scenario === 'separate pages'
             ? 'https://transit.example/route'
-            : scenario === 'hotel directions'
-              ? 'https://hotel.example/canal-house/map'
-              : 'https://fallback.example/airport-transfer',
+            : scenario === 'alternate source search'
+              ? 'https://official.example/location'
+              : scenario === 'hotel directions'
+                ? 'https://hotel.example/canal-house/map'
+                : 'https://fallback.example/airport-transfer',
         );
       }
       expect(

@@ -751,10 +751,10 @@ describe('golden tasks', () => {
       'gmail.search',
       'gmail.read_thread',
       'gmail.read_thread',
-      'maps.directions',
       'web.search',
       'web.fetch',
       'web.fetch',
+      'maps.directions',
     ]);
     expect(result.status).toBe('needs_attention');
     expect(result.extractCalls).toBe(1);
@@ -766,18 +766,16 @@ describe('golden tasks', () => {
       `- **Outbound LH101 FRA→BER:** ${departureDay} 12:30 (Europe/Berlin) → ${departureDay} 13:20 (Europe/Berlin).`,
     );
     expect(result.finalText).toContain(
-      'Hotel candidate (city/date match; separate booking): **Hotel Linden**',
+      'Hotel candidate (city/date association inferred; separate booking): **Hotel Linden**',
     );
     expect(result.finalText).toContain(address);
     expect(result.finalText).toContain(`${departureDay} to ${checkout}`);
-    expect(result.finalText).toContain(
-      'Flight–hotel association inferred from matching arrival/check-in date and city; separate bookings.',
-    );
+    expect(result.finalText).toContain('city/date association inferred; separate booking');
     expect(result.finalText).toContain('Departure clocks agree after time-zone conversion');
     expect(result.finalText).toContain('independent flight identity remains unverified');
     expect(result.finalText).toContain('Booking-email search or thread coverage is incomplete');
     expect(result.finalText).not.toContain('Calendar coverage is incomplete');
-    expect(result.finalText).toContain(`Transfer candidate: **BER Airport → ${address}**`);
+    expect(result.finalText).toContain(`Transfer candidate: **BER Airport → Hotel Linden**`);
     expect(result.finalText).toContain('- **Public transport:**');
     expect(result.finalText).toContain('- **Public transport:** EUR 4.90; 35 minutes.');
     expect(result.finalText).toContain('- **Taxi:** EUR 62.00; 45 minutes.');
