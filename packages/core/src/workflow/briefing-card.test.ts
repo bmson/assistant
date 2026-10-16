@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { agendaSection, briefingMarkdown, listSection, weatherSection } from './briefing-card.js';
 
 const timeZone = 'America/Los_Angeles';
 const now = new Date('2026-09-22T14:00:00Z'); // 07:00 local
 
 describe('agendaSection', () => {
+  afterEach(() => vi.useRealTimers());
   it.each(['Pacific/Kiritimati', 'Pacific/Tongatapu', 'Etc/GMT+12'])(
     'keeps an all-day civil date on its own day in %s',
     (zone) => {
@@ -123,6 +124,8 @@ describe('agendaSection', () => {
   });
 
   it('keeps a cross-day interval date-aware instead of showing only its start clock', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-16T12:00:00Z'));
     const section = agendaSection({
       events: [
         {
