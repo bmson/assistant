@@ -63,6 +63,29 @@ function fakeFetch(
   return { impl, calls };
 }
 
+function extendedForecastWeather(missingDate?: string) {
+  const dates = Array.from({ length: 16 }, (_, index) => {
+    const date = new Date(Date.UTC(2026, 9, 16 + index));
+    return date.toISOString().slice(0, 10);
+  }).filter((date) => date !== missingDate);
+  return {
+    timezone: 'America/Los_Angeles',
+    current: {
+      temperature_2m: 17.4,
+      weather_code: 3,
+      wind_speed_10m: 14,
+      relative_humidity_2m: 68,
+    },
+    daily: {
+      time: dates,
+      weather_code: dates.map(() => 0),
+      temperature_2m_max: dates.map((_, index) => 20 + index),
+      temperature_2m_min: dates.map((_, index) => 10 + index),
+      precipitation_probability_max: dates.map(() => 5),
+    },
+  };
+}
+
 /** Geocode calls only — the ladder's rungs, in order. */
 function geocodeQueries(calls: string[]): string[] {
   return calls
@@ -166,6 +189,85 @@ describe('lookupWeather', () => {
       fetchImpl: impl,
     });
     expect('forecast' in result && result.forecast).toHaveLength(1);
+  });
+
+  it.each([
+    [9, 10],
+    [15, 16],
+  ])(
+    'returns %i requested future days using %i provider calendar days',
+    async (days, providerDays) => {
+      const { impl, calls } = fakeFetch({ weather: extendedForecastWeather() });
+      const result = await lookupWeather({
+        db: UNUSED_DB,
+        agentId: 'agent-1',
+        place: 'San Francisco',
+        days,
+        fetchImpl: impl,
+      });
+
+      const forecastUrl = calls[1];
+      expect(forecastUrl).toBeDefined();
+      expect(new URL(forecastUrl ?? '').searchParams.get('forecast_days')).toBe(
+        String(providerDays),
+      );
+      expect('forecast' in result && result.forecast).toHaveLength(days);
+    },
+  );
+
+  it('fetches the bounded 16-day range for an explicit next-weekend date', async () => {
+    const { impl, calls } = fakeFetch({ weather: extendedForecastWeather() });
+    const result = await lookupWeather({
+      db: UNUSED_DB,
+      agentId: 'agent-1',
+      place: 'San Francisco',
+      days: 6,
+      date: '2026-10-24',
+      fetchImpl: impl,
+    });
+
+    const forecastUrl = calls[1];
+    expect(forecastUrl).toBeDefined();
+    expect(new URL(forecastUrl ?? '').searchParams.get('forecast_days')).toBe('16');
+    expect(result).toMatchObject({
+      target: {
+        date: '2026-10-24',
+        weekday: 'Sat',
+        day: { date: '2026-10-24', lowC: 18, highC: 28 },
+      },
+    });
+  });
+
+  it('reports a requested date beyond the returned horizon without substituting another day', async () => {
+    const { impl } = fakeFetch({ weather: extendedForecastWeather() });
+    const result = await lookupWeather({
+      db: UNUSED_DB,
+      agentId: 'agent-1',
+      place: 'San Francisco',
+      days: 6,
+      date: '2026-11-01',
+      fetchImpl: impl,
+    });
+
+    expect(result).toEqual({
+      error: 'the forecast covers 2026-10-17 through 2026-10-31; 2026-11-01 is outside it',
+    });
+  });
+
+  it('distinguishes a missing in-range forecast row from an out-of-range date', async () => {
+    const { impl } = fakeFetch({ weather: extendedForecastWeather('2026-10-24') });
+    const result = await lookupWeather({
+      db: UNUSED_DB,
+      agentId: 'agent-1',
+      place: 'San Francisco',
+      days: 6,
+      date: '2026-10-24',
+      fetchImpl: impl,
+    });
+
+    expect(result).toEqual({
+      error: 'the provider returned no daily or hourly forecast row for 2026-10-24',
+    });
   });
 
   it('reports an unfindable place instead of answering about the wrong one', async () => {
@@ -527,10 +629,10 @@ describe('weather.lookup registration', () => {
     expect(seen.every((signal) => signal?.aborted)).toBe(true);
   });
 
-  it('defaults to the current location and every day the provider has', () => {
-    // 6, not 7: today is reported as current conditions, so the forecast can
-    // only run tomorrow onward. Promising a 7th day would return one row short.
+  it('keeps the default at six future days and bounds explicit requests at fifteen', () => {
     const schema = registry.get('weather.lookup')?.tool.inputSchema;
     expect(schema?.parse({})).toEqual({ place: '', days: 6 });
+    expect(schema?.parse({ days: 15 })).toEqual({ place: '', days: 15 });
+    expect(() => schema?.parse({ days: 16 })).toThrow();
   });
 });

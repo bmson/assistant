@@ -293,6 +293,36 @@
       ]
     },
     {
+      "collectionGroup": "occasions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "agentId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "contactId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "kind",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "recurrence",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "ownerConfirmed",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "quarantined",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
       "collectionGroup": "knowledgeGraphEntities",
       "queryScope": "COLLECTION",
       "fields": [

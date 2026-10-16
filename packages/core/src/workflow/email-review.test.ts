@@ -466,7 +466,7 @@ describe('bounded no-send email review', () => {
     );
 
     expect(calls).toHaveLength(2);
-    expect(calls[1]).toMatchObject({ ids: threadIds.slice(1, 5), repair: true });
+    expect(calls[1]).toMatchObject({ ids: threadIds.slice(5), repair: false });
     expect(result.attempts).toBe(2);
     expect(result.answer?.items.map((item) => item.thread.threadId)).toEqual([threadIds[0]]);
     expect(result.sourceBatches?.flat().map((item) => item.threadId)).toEqual([threadIds[0]]);
@@ -478,6 +478,53 @@ describe('bounded no-send email review', () => {
       read('thread-incomplete', messages('thread-incomplete'), { complete: false }),
     ]);
     expect(incomplete).toBeUndefined();
+  });
+
+  it('assesses later batches before spending the bounded call budget repairing an invalid first batch', async () => {
+    const threadIds = Array.from({ length: 8 }, (_, index) => `thread-${index + 1}`);
+    const threads = threadIds.map((id) =>
+      required(
+        emailReviewCompleteThread(id, 'owner@example.com', [search(id), read(id, messages(id))]),
+        'complete thread',
+      ),
+    );
+    const calls: Array<{ ids: string[]; repair: boolean }> = [];
+    const result = await generateValidatedEmailReview(
+      threads,
+      async ({ prompt, repair }) => {
+        const jsonPrompt = prompt.split('\n\nThe previous assessment could not pass')[0];
+        const input = JSON.parse(jsonPrompt as string) as { threads: Array<{ threadId: string }> };
+        const ids = input.threads.map((thread) => thread.threadId);
+        calls.push({ ids, repair });
+        if (ids[0] === threadIds[0])
+          return {
+            ok: true,
+            value: {
+              items: ids.map((id) => ({
+                ...required(validAnswer(id).items[0], 'assessment'),
+                latestMessageId: 'wrong-latest-message',
+              })),
+            },
+          };
+        return {
+          ok: true,
+          value: { items: ids.map((id) => required(validAnswer(id).items[0], 'assessment')) },
+        };
+      },
+      3,
+    );
+
+    expect(calls).toEqual([
+      { ids: threadIds.slice(0, 5), repair: false },
+      { ids: threadIds.slice(5), repair: false },
+      { ids: threadIds.slice(0, 5), repair: true },
+    ]);
+    expect(result.attempts).toBe(3);
+    expect(result.answer?.items.map((item) => item.thread.threadId)).toEqual(threadIds.slice(5));
+    expect(result.sourceBatches?.map((batch) => batch.map((item) => item.threadId))).toEqual([
+      threadIds.slice(5),
+    ]);
+    expect(result.issues).toContain('assessment_model_call_limit_reached');
   });
 
   it('revalidates saved no-reply assessments against complete task-local threads before reserve use', () => {
@@ -1459,6 +1506,33 @@ describe('bounded no-send email review', () => {
     expect(formatted).not.toContain('connected-alias@example.net');
     expect(formatted).not.toContain('owner@example.com');
   });
+
+  it('does not imply that no reply is needed when complete requests could not be assessed', () => {
+    const thread = required(
+      emailReviewCompleteThread('unassessed-request', 'owner@example.com', [
+        search('unassessed-request'),
+        read('unassessed-request', messages('unassessed-request')),
+      ]),
+      'complete unanswered request',
+    );
+    const coverage = emailReviewCoverage(
+      [thread.threadId],
+      [thread],
+      [search(thread.threadId), read(thread.threadId, thread.messages)],
+      0,
+      [],
+      [],
+      undefined,
+      false,
+      1,
+    );
+    const text = formatEmailReviewAnswer([], coverage, false, { requestedCount: 5 });
+    expect(text).toContain('assessed 0 of 1 complete, eligible threads');
+    expect(text).toContain('The reply review is incomplete');
+    expect(text).toContain('could not reliably determine all requests needing your response');
+    expect(text).not.toContain('No reply-worthy request was confirmed');
+  });
+
   it('repairs a rejected owner commitment using the same complete source threads', async () => {
     const thread = required(
       emailReviewCompleteThread('thread-a', 'owner@example.com', [

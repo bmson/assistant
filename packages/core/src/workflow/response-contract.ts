@@ -871,7 +871,9 @@ function failureDetails(evidence: ActionEvidence[]): string[] {
           const cause = plainCause(item.error);
           const kind = toolKind(item.toolName);
           const step =
-            item.toolName === 'conversations.search' || item.toolName === 'memory.recall'
+            item.toolName === 'conversations.search' ||
+            item.toolName === 'conversations.context' ||
+            item.toolName === 'memory.recall'
               ? 'the history lookup'
               : kind
                 ? PLAIN_STEP[kind]

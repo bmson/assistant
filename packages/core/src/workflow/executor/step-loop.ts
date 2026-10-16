@@ -55,6 +55,7 @@ import {
   extractCompoundTripBookings,
 } from '../compound-trip-extraction.js';
 import {
+  compoundTripFetchTargets,
   compoundTripNextWebSearchQuery,
   compoundTripReadProjection,
   compoundTripThreadReadInputs,
@@ -116,7 +117,11 @@ import {
   renewTaskLease,
   sleepTask,
 } from '../machine.js';
-import { type MemoryReadSelection, selectMemoryReadAnswer } from '../memory-read-answer.js';
+import {
+  type MemoryReadSelection,
+  memoryContextAnchorRefs,
+  selectMemoryReadAnswer,
+} from '../memory-read-answer.js';
 import {
   isConversationLocalContext,
   isSelfContainedTextTransformation,
@@ -192,6 +197,28 @@ const EMAIL_REVIEW_MAX_ASSESSMENT_PASSES = 3;
 const EMAIL_REVIEW_MULTI_THREAD_STEP_BONUS = 8;
 const EMAIL_REVIEW_MULTI_THREAD_STEP_CAP = 22;
 const EMAIL_REVIEW_STEP_BUDGET_STATE_KEY = 'emailReviewStepBudget';
+
+function ownerSuppliedExactUrl(ownerText: string, candidate: string): boolean {
+  return (ownerText.match(/https?:\/\/[^\s<>"'`]+/gi) ?? []).some((raw) => {
+    const value = raw.replace(/[),.;!?]+$/g, '');
+    return value === candidate;
+  });
+}
+
+export function authorizedCompoundTripFetchUrl(input: {
+  request: PersonalReadRequest;
+  evidence: ReadonlyArray<ReadToolEvidence>;
+  ownerText: string;
+  url: string;
+}): boolean {
+  return (
+    input.request.compoundTripDiscovery === true &&
+    (ownerSuppliedExactUrl(input.ownerText, input.url) ||
+      compoundTripFetchTargets(input.request, input.evidence).some(
+        (target) => target.url === input.url,
+      ))
+  );
+}
 
 function persistedEmailReviewStepBudget(
   value: unknown,
@@ -1496,7 +1523,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       liveLookup ||
       futureWatchIntent !== null ||
       birthdaySaves.length > 0
-        ? await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id })
+        ? (await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id })).map((row) => ({
+            ...row,
+            fromCurrentTask: true,
+          }))
         : [];
     const correctionProjection = rc.checklistCorrection;
     const cancellationProjection = rc.checklistCancellation;
@@ -1769,6 +1799,29 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state)))
             return LOST_LEASE;
         }
+      }
+    }
+    if (readRequest && state.step + 1 < task.maxSteps) {
+      const contextToolAvailable =
+        !conceptualNoTool &&
+        !arrivalTask &&
+        !restrictedChecklistResume &&
+        dispatcher
+          .toolDefs(task.trust as Trust, { isMissionSession: isMissionSessionTask(task) })
+          .some((tool) => tool.name === 'conversations.context');
+      const historyRequests = [
+        ...(readRequest.kind === 'memory' && readRequest.conversationQuery ? [readRequest] : []),
+        ...(readRequest.sourceReads ?? []).filter(
+          (child) => child.kind === 'memory' && child.conversationQuery,
+        ),
+      ];
+      for (const historyRequest of historyRequests) {
+        if (!historyRequest.temporalIssue && !historyRequest.scopeIssue)
+          historyRequest.conversationContextAnchors = memoryContextAnchorRefs(
+            historyRequest.memoryQuery ?? ownerText,
+            readToolEvidence,
+            contextToolAvailable,
+          );
       }
     }
     const forcedReadTool =
@@ -2541,13 +2594,13 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
                 router,
                 taskId: task.id,
                 request: readRequest,
-                evidence: refreshed.rows,
+                evidence: refreshed.rows.map((row) => ({ ...row, fromCurrentTask: true })),
               })
             : await selectMemoryReadAnswer({
                 router,
                 taskId: task.id,
                 request: readRequest.memoryQuery ?? '',
-                evidence: refreshed.rows,
+                evidence: refreshed.rows.map((row) => ({ ...row, fromCurrentTask: true })),
               });
           state.plannerState.restrictedSourceRead = { binding, completed: true, selection };
           if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state)))
@@ -3718,6 +3771,36 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return false;
           return true;
         };
+        const tripFetchAuthorized =
+          readRequest?.compoundTripDiscovery &&
+          tc.toolName === 'web.fetch' &&
+          typeof tc.input.url === 'string' &&
+          authorizedCompoundTripFetchUrl({
+            request: readRequest,
+            evidence: readToolEvidence,
+            ownerText,
+            url: tc.input.url,
+          });
+        if (
+          task.type === 'chat_turn' &&
+          task.trust === 'owner' &&
+          ctx.trust === 'owner' &&
+          (task.trigger as { source?: string } | null)?.source === 'chat' &&
+          readRequest?.compoundTripDiscovery &&
+          tc.toolName === 'web.fetch' &&
+          !tripFetchAuthorized
+        ) {
+          replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, {
+            error:
+              'I did not fetch this URL because it is not a source-bound transfer result or an exact URL you supplied.',
+          });
+          journalCall.status = 'settled';
+          if (!(await updateCall({ status: 'settled' }))) return LOST_LEASE;
+          // Do not spend another model turn trying arbitrary URLs. The final
+          // response will be rendered from the bounded source projection.
+          readAnswerAttempted = true;
+          continue;
+        }
         if (
           conditionalArtifact &&
           ['docs.create', 'sheets.create', 'slides.create'].includes(tc.toolName)
@@ -3848,6 +3931,21 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               outcome: 'needs_attention',
               contractNotice: true,
             });
+          }
+        }
+        if (tc.toolName === 'conversations.context') {
+          const expected =
+            readRequest && boundedForcedReadTool === 'conversations.context'
+              ? buildReadToolInput(readRequest, 'conversations.context', readToolEvidence)
+              : null;
+          if (!expected || stableJson(tc.input) !== stableJson(expected)) {
+            replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, {
+              error:
+                'The conversation context read was not bound to an exact current-task search result.',
+            });
+            journalCall.status = 'settled';
+            if (!(await updateCall({ status: 'settled' }))) return LOST_LEASE;
+            continue;
           }
         }
         if (!(await renewTaskLease(deps.persistence?.tasks ?? db, lease))) return LOST_LEASE;

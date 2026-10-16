@@ -2970,6 +2970,42 @@ describe('ToolDispatcher (integration)', () => {
     expect(executions['test.cached']).toBe(1);
   });
 
+  it('keeps weather cache entries separate for different requested forecast horizons', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const name = 'test.weather-horizon.cached';
+    const registry = new ToolRegistry().register(
+      makeTool(name, {
+        inputSchema: z.object({ days: z.number().int().min(1).max(15) }),
+        cacheTtlSeconds: 60,
+        execute: async (args) => {
+          executions[name] = (executions[name] ?? 0) + 1;
+          return { days: (args as { days: number }).days };
+        },
+      }),
+    );
+    const dispatcher = new ToolDispatcher(db, registry);
+    const task = await makeTask('owner');
+    const dispatch = (step: number, days: number) =>
+      dispatcher.dispatch({
+        task,
+        step,
+        toolName: name,
+        args: { days },
+        ctx: ctxFor(task),
+        provenance,
+      });
+
+    const nineDays = await dispatch(1, 9);
+    const fifteenDays = await dispatch(2, 15);
+    const cachedNineDays = await dispatch(3, 9);
+
+    expect(nineDays.kind === 'executed' && nineDays.cached).toBe(false);
+    expect(fifteenDays.kind === 'executed' && fifteenDays.cached).toBe(false);
+    expect(cachedNineDays.kind === 'executed' && cachedNineDays.cached).toBe(true);
+    expect(cachedNineDays.kind === 'executed' && cachedNineDays.result).toEqual({ days: 9 });
+    expect(executions[name]).toBe(2);
+  });
+
   it('enforces rate limits on autonomous executions', async (ctx) => {
     if (!dbUp) return ctx.skip();
     await db

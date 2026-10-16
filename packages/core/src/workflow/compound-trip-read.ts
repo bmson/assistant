@@ -178,7 +178,10 @@ export function compoundTripThreadIdsToRead(
   evidence: ReadonlyArray<ReadToolEvidence>,
   request: PersonalReadRequest,
 ): string[] {
-  const metadata = new Map<string, { subject: string; snippet: string; categories: Set<string> }>();
+  const metadata = new Map<
+    string,
+    { subject: string; snippet: string; from: string; categories: Set<string> }
+  >();
   if (request.explicitSource === 'mail') {
     return [
       ...new Set(
@@ -246,6 +249,7 @@ export function compoundTripThreadIdsToRead(
       metadata.set(id, {
         subject: [prior?.subject, text(result?.subject, 240)].filter(Boolean).join(' '),
         snippet: [prior?.snippet, text(result?.snippet, 500)].filter(Boolean).join(' '),
+        from: [prior?.from, text(result?.from, 240)].filter(Boolean).join(' '),
         categories,
       });
     }
@@ -306,20 +310,38 @@ export function compoundTripThreadIdsToRead(
         ))
     );
   };
+  const directUpcomingFlightPurchase = (id: string) => {
+    if (!request.upcomingFlightDiscovery) return false;
+    const item = metadata.get(id);
+    if (!item) return false;
+    const { subject, snippet, from } = item;
+    const source = `${subject} ${snippet}`;
+    return (
+      /\b(?:purchase|payment)\b/i.test(subject) &&
+      /\b(?:flight|flights|airline|itinerary|boarding pass|e-?ticket|record locator)\b/i.test(
+        source,
+      ) &&
+      bookingSubjectCue(source) &&
+      /\b(?:airlines?|airways|aviation|flight|air\s+travel)\b/i.test(from) &&
+      !clearlyEditorialOrPromotional(subject, snippet)
+    );
+  };
   // A complete itinerary is more useful than a generic ancillary purchase.
   // Ranking still authorizes only reads; source bodies must verify every fact.
   const ranked = [...unique].sort((left, right) => {
     const score = (id: string) => {
       const subject = metadata.get(id)?.subject ?? '';
-      return /^(?:(?:fw|fwd|re)\s*:\s*)*flight\s*[-–—:]\s*booked\b/i.test(subject)
-        ? 4
-        : /\bconfirmation\s+code\b/i.test(subject)
-          ? 3
-          : matchesCalendarLodgingTitle(subject)
-            ? 2
-            : /\b(?:purchase|payment)\b/i.test(subject)
-              ? -1
-              : 0;
+      return directUpcomingFlightPurchase(id)
+        ? 5
+        : /^(?:(?:fw|fwd|re)\s*:\s*)*flight\s*[-–—:]\s*booked\b/i.test(subject)
+          ? 4
+          : /\bconfirmation\s+code\b/i.test(subject)
+            ? 3
+            : matchesCalendarLodgingTitle(subject)
+              ? 2
+              : /\b(?:purchase|payment)\b/i.test(subject)
+                ? -1
+                : 0;
     };
     return score(right) - score(left);
   });
@@ -338,7 +360,18 @@ export function compoundTripThreadIdsToRead(
       !clearlyEditorialOrPromotional(subject, item.snippet)
     );
   });
-  const priority = [first('flight')];
+  const isBookedFlight = (id: string) =>
+    /^(?:(?:fw|fwd|re)\s*:\s*)*flight\s*[-–—:]\s*booked\b/i.test(metadata.get(id)?.subject ?? '');
+  const bookedFlight = ranked.find(isBookedFlight);
+  const directFlightPurchase = ranked.find(directUpcomingFlightPurchase);
+  const flightOnlyDiversityPair =
+    request.upcomingFlightDiscovery &&
+    !request.compoundTripDiscovery &&
+    bookedFlight &&
+    directFlightPurchase
+      ? [bookedFlight, directFlightPurchase]
+      : undefined;
+  const priority = flightOnlyDiversityPair ? [...flightOnlyDiversityPair] : [first('flight')];
   if (request.compoundTripDiscovery) priority.push(first('lodging') ?? genericLodgingCandidate);
   const secondFlight = ranked.find((id) => sourceMatches(id, 'flight') && id !== priority[0]);
   if (secondFlight) priority.push(secondFlight);
@@ -3611,7 +3644,16 @@ export function compoundTripReadProjection(
     ? destinationCivilDate(flight)
     : currentTripReturn?.segment?.departureDate;
   const standaloneHotelObservations = hotels.filter((candidate) => {
+    // Keep an explicitly identified but undated property visible as an
+    // observation. Without a complete stay range it cannot be associated with
+    // the selected itinerary, used as a route destination, or searched as a
+    // transfer endpoint.
+    const incompleteUnlinkedObservation =
+      candidate.association === 'unlinked' &&
+      (!candidate.checkIn || !candidate.checkOut) &&
+      Boolean(candidate.hotelName || candidate.address);
     if (!tripHotelAnchorDate) return true;
+    if (incompleteUnlinkedObservation) return true;
     if (!candidate.checkIn || !candidate.checkOut) return false;
     if (!candidate.city) return false;
     const tripCity = flight?.destinationCity ?? calendarFlightOriginCity(currentTripReturn?.event);
@@ -3741,6 +3783,7 @@ export function compoundTripReadProjection(
   const route =
     flight &&
     hotel &&
+    hotel.association !== 'unlinked' &&
     !flight.calendarConflicts?.includes('arrival-airport') &&
     outboundChronology === 'valid' &&
     (!returnFlight || returnChronology === 'valid') &&
@@ -3776,9 +3819,17 @@ export function compoundTripReadProjection(
         .slice(0, 2)
         .map((item) => new URL(item.url).hostname)
     : [];
+  // Keep the named endpoints without requiring a particular street-address
+  // spelling. Comparisons still require both endpoints on the fetched page.
   const fallbackWebQuery =
-    webQuery && hotel?.address
-      ? `${webQuery} "${hotel.address.replace(/["\r\n]/g, ' ')}" airport directions ${[...new Set(primaryHosts)].map((host) => `-site:${host}`).join(' ')}`.trim()
+    webQuery && comparisonFlight?.arrivalAirport && hotel?.hotelName && hotel.city
+      ? [
+          ...[comparisonFlight.arrivalAirport, hotel.hotelName, hotel.city].map(
+            (value) => `"${value.replace(/["\r\n]/g, ' ').trim()}"`,
+          ),
+          'airport transfer public transport taxi directions',
+          ...[...new Set(primaryHosts)].map((host) => `-site:${host}`),
+        ].join(' ')
       : undefined;
   const alternateSearch = fallbackWebQuery
     ? evidence.find(
@@ -3938,7 +3989,9 @@ export function compoundTripReadProjection(
     );
   else if (!hotel && hotels.length > 0)
     gaps.push(
-      'I found a separately dated hotel reservation, but could not link it to the selected flight.',
+      hotels.some((candidate) => candidate.checkIn && candidate.checkOut)
+        ? 'I found a separately dated hotel reservation, but could not link it to the selected flight.'
+        : 'I found a hotel record, but its stay dates are incomplete or not verifiable; I could not link it to the trip.',
     );
   else if (!hotel && completeThreads.length > 0)
     gaps.push('I did not identify a hotel booking candidate in the complete email threads I read.');
@@ -4179,7 +4232,7 @@ export function compoundTripReadProjection(
           .filter((candidate) => candidate.association === 'unlinked')
           .map(
             (candidate) =>
-              `${candidate.checkIn && candidate.checkOut ? 'Dated hotel' : 'Hotel'} reservation observed separately from the selected flight: ${markdownText(candidate.hotelName || candidate.subject)}${candidate.city ? `, ${markdownText(candidate.city)}` : ''}${candidate.address ? ` — ${markdownText(candidate.address)}` : ''}${candidate.checkIn && candidate.checkOut ? ` (${candidate.checkIn} to ${candidate.checkOut})` : ''}${mailLinks.has(candidate.threadId) ? ` [Booking email](${mailLinks.get(candidate.threadId)})` : ''}. It is not linked to the selected flight.`,
+              `${candidate.checkIn && candidate.checkOut ? 'Dated hotel' : 'Hotel'} reservation observed separately from the selected flight: ${markdownText(candidate.hotelName || candidate.subject)}${candidate.city ? `, ${markdownText(candidate.city)}` : ''}${candidate.address ? ` — ${markdownText(candidate.address)}` : ''}${candidate.checkIn && candidate.checkOut ? ` (${candidate.checkIn} to ${candidate.checkOut})` : ''}${mailLinks.has(candidate.threadId) ? ` [Booking email](${mailLinks.get(candidate.threadId)})` : ''}. ${candidate.checkIn && candidate.checkOut ? 'It is not linked to the selected flight.' : 'The source does not provide a complete, verifiable stay range, so I cannot link it to a flight.'}`,
           )
       : [],
     calendarLodging && !calendarLodgingCoveredByEmail

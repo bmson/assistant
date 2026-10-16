@@ -59,6 +59,7 @@ const PORTABLE_TOOLS = [
   'code.execute',
   'contacts.lookup',
   'conversations.search',
+  'conversations.context',
   'docs.append',
   'docs.create',
   'docs.get',
@@ -87,6 +88,7 @@ const PORTABLE_TOOLS = [
   'memory.save',
   'mission.update',
   'occasions.list',
+  'occasions.list_birthdays',
   'occasions.save',
   'owner.notify',
   // Calls stage like jobs and keep their state in callSessions.

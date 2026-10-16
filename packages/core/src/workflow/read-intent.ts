@@ -5,6 +5,7 @@
  * model room to invent a plausible calendar or inbox answer.
  */
 
+import type { ConversationSearchSourceRef } from '@assistant/persistence';
 import { requestedSavedSkillInventory } from '../memory/saved-skill-inventory.js';
 import {
   type BillingAuditScope,
@@ -41,7 +42,11 @@ import {
   emailReviewNextThreadRead,
 } from './email-review.js';
 import { DEFAULT_TOOL_RESULT_CHAR_LIMIT, toolResultCharacterLimit } from './executor/util.js';
-import { type FamilyBirthdayRequest, requestedFamilyBirthdays } from './family-birthday.js';
+import {
+  type FamilyBirthdayRequest,
+  familyBirthdayContactIds,
+  requestedFamilyBirthdays,
+} from './family-birthday.js';
 import { detectFutureWatchIntent } from './future-watch-intent.js';
 import { requestedCalendarPerson } from './person-calendar.js';
 
@@ -111,6 +116,8 @@ export interface PersonalReadRequest {
   conversationAnchorQuery?: string;
   /** One topic-focused pass for an explicit owner-correction comparison. */
   conversationCorrectionQuery?: string;
+  /** Exact assistant search anchors eligible for one bounded same-chat context read. */
+  conversationContextAnchors?: ConversationSearchSourceRef[];
   /** Saved facts are searched only when the owner explicitly permits that source. */
   searchSavedMemory?: boolean;
   /** Focused semantic query for saved-memory retrieval, separate from the answer prompt. */
@@ -1798,6 +1805,15 @@ function conversationSearchResultContinuation(
       continue;
 
     const pending = nextResultPage(search, currentPages);
+    if (pending === false) continue;
+    if (pending) return pending;
+  }
+  const context = evidence.find(
+    (row) =>
+      row.fromCurrentTask === true && row.toolName === 'conversations.context' && succeeded(row),
+  );
+  if (context) {
+    const pending = nextResultPage(context, currentPages);
     if (pending === false) return undefined;
     if (pending) return pending;
   }
@@ -3749,6 +3765,29 @@ export function nextRequiredReadTool(
     if (conversationSearchResultContinuation(request, evidence)) return 'tools.read_result';
     if (nextHistoricalSearchQuery(request, evidence)) return 'conversations.search';
     if (nextSavedMemorySearchQuery(request, evidence)) return 'memory.recall';
+    if (
+      request.conversationContextAnchors?.length &&
+      !evidence.some(
+        (row) => row.fromCurrentTask !== false && row.toolName === 'conversations.context',
+      )
+    )
+      return 'conversations.context';
+    if (request.familyBirthday && request.searchSavedMemory) {
+      const reads = evidence.filter(
+        (row) => row.fromCurrentTask !== false && row.toolName === 'occasions.list_birthdays',
+      );
+      const completeRead = reads.some((row) => {
+        const result = objectRecord(row.result);
+        return (
+          succeeded(row) &&
+          Array.isArray(result?.birthdays) &&
+          result?.complete === true &&
+          result?.hasMore !== true &&
+          result?.truncated !== true
+        );
+      });
+      if (!completeRead && reads.length < 2) return 'occasions.list_birthdays';
+    }
     return undefined;
   }
   if (request.kind === 'drive' || request.kind === 'knowledge_graph') {
@@ -3848,6 +3887,8 @@ export function groundReadToolInput(
       ? groundReadToolInput(child, toolName, {}, evidence)
       : {};
   }
+  if (toolName === 'conversations.context')
+    return buildReadToolInput(request, toolName, evidence) ?? {};
   if (request.explicitSource === 'calendar' && toolName === request.firstToolName) {
     const pages = explicitCalendarPages(request, evidence);
     const token = objectRecord(pages.at(-1)?.result)?.nextPageToken;
@@ -3978,6 +4019,44 @@ export function groundReadToolInput(
       limit: 10,
     };
   }
+  if (
+    toolName === 'occasions.list_birthdays' &&
+    request.kind === 'memory' &&
+    request.familyBirthday &&
+    request.searchSavedMemory
+  ) {
+    const sources = evidence.flatMap((row) => {
+      if (row.fromCurrentTask === false || row.toolName !== 'memory.recall' || !succeeded(row))
+        return [];
+      const memories = objectRecord(row.result)?.memories;
+      if (!Array.isArray(memories)) return [];
+      return memories.flatMap((raw) => {
+        const fact = objectRecord(raw);
+        if (
+          !fact ||
+          typeof fact.id !== 'string' ||
+          fact.id.length === 0 ||
+          typeof fact.content !== 'string' ||
+          fact.content.length > 4000
+        )
+          return [];
+        return [
+          {
+            body: fact.content,
+            trusted:
+              fact.ownerConfirmed === true &&
+              fact.unconfirmed !== true &&
+              fact.quarantined !== true &&
+              !fact.supersededById,
+            ...(typeof fact.subjectContactId === 'string'
+              ? { subjectId: fact.subjectContactId }
+              : {}),
+          },
+        ];
+      });
+    });
+    return { contactIds: familyBirthdayContactIds(request.familyBirthday, sources) };
+  }
   if (toolName === 'memory.graph_snapshot') {
     return { query: request.queryTerms.join(' ') || 'owner', limit: 20 };
   }
@@ -4017,6 +4096,23 @@ export function buildReadToolInput(
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): Record<string, unknown> | null {
   if (request.temporalIssue || request.scopeIssue) return null;
+  if (toolName === 'conversations.context') {
+    if (request.sourceReads) {
+      const child = explicitSourceChild(request, evidence);
+      return child && nextRequiredReadTool(child, evidence) === toolName
+        ? buildReadToolInput(child, toolName, evidence)
+        : null;
+    }
+    if (
+      request.kind !== 'memory' ||
+      nextRequiredReadTool(request, evidence) !== toolName ||
+      !request.conversationContextAnchors ||
+      request.conversationContextAnchors.length < 1 ||
+      request.conversationContextAnchors.length > 2
+    )
+      return null;
+    return { anchors: request.conversationContextAnchors };
+  }
   if (request.sourceReads) {
     const child = explicitSourceChild(request, evidence);
     return child && nextRequiredReadTool(child, evidence) === toolName

@@ -1,4 +1,8 @@
-import { validConversationSpeaker } from '@assistant/persistence';
+import type { ConversationSearchSourceRef } from '@assistant/persistence';
+import {
+  conversationMessageSourceRevision,
+  validConversationSpeaker,
+} from '@assistant/persistence';
 import { z } from 'zod';
 import type { ModelRouter } from '../model-router/router.js';
 import {
@@ -7,7 +11,7 @@ import {
   familyBirthdayProjection,
   requestedFamilyBirthdays,
 } from './family-birthday.js';
-import { familyBirthdaySourceScope } from './read-intent.js';
+import { familyBirthdaySourceScope, type ReadToolEvidence } from './read-intent.js';
 import type { ActionEvidence } from './response-contract.js';
 
 const SelectionSchema = z.object({
@@ -165,9 +169,25 @@ type MemoryReadSource = {
   speaker: string;
   provenance: string;
   contextId?: string;
+  url?: string;
   ownerConfirmed?: boolean;
   subjectContactId?: string;
 };
+
+const birthdayMonths = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
 
 /** Source identity and speaker come from the current ledger, never the selector. */
 export function memoryReadSources(
@@ -237,6 +257,97 @@ export function memoryReadSources(
                   : 'Historical message (authorship not confirmed)',
             provenance: `conversation ${text(match.conversationId)}; message ${text(match.messageId)}${text(match.createdAt) ? `; ${text(match.createdAt).slice(0, 10)}` : ''}`,
             contextId: text(match.conversationId),
+          },
+          pass,
+        );
+      }
+    }
+    if (
+      row.toolName === 'conversations.context' &&
+      typeof excludeExactRequest === 'string' &&
+      requiresOwnerAssistantContrast(excludeExactRequest) &&
+      validConversationContextReceipt(row, result, evidence, excludeExactRequest)
+    ) {
+      for (const raw of result.matches as unknown[]) {
+        const match = record(raw);
+        if (
+          !match ||
+          !text(match.messageId) ||
+          !text(match.conversationId) ||
+          !text(match.text) ||
+          !text(match.sourceRevision) ||
+          !text(match.role) ||
+          !text(match.origin) ||
+          !text(match.speakerRevision) ||
+          conversationMessageSourceRevision(text(match.messageId), text(match.text)) !==
+            match.sourceRevision ||
+          !validConversationSpeaker(match)
+        )
+          continue;
+        if (excluded && normalizedText(text(match.text)) === excluded) continue;
+        if (text(match.text).length > 4000) onUnassessed?.();
+        const key = `message:${text(match.messageId)}`;
+        // The search receipt already carries the exact anchor body. Context
+        // contributes neighboring rows without duplicating anchor evidence.
+        if (sources.some((source) => source.key === key)) continue;
+        append(
+          {
+            key,
+            body: text(match.text).slice(0, 4000),
+            speaker:
+              match.role === 'user' && match.origin === 'owner'
+                ? 'Recorded owner message'
+                : match.role === 'assistant' && match.origin === 'assistant'
+                  ? 'Earlier assistant claim (not verified fact)'
+                  : 'Historical message (authorship not confirmed)',
+            provenance: `conversation ${text(match.conversationId)}; message ${text(match.messageId)}${text(match.createdAt) ? `; ${text(match.createdAt).slice(0, 10)}` : ''}`,
+            contextId: text(match.conversationId),
+          },
+          pass,
+        );
+      }
+    }
+    if (row.toolName === 'occasions.list_birthdays' && Array.isArray(result.birthdays)) {
+      for (const raw of result.birthdays) {
+        const birthday = record(raw);
+        if (
+          !birthday ||
+          !text(birthday.id) ||
+          !text(birthday.contactId) ||
+          !text(birthday.person) ||
+          text(birthday.person).length > 120 ||
+          birthday.kind !== 'birthday' ||
+          birthday.recurrence !== 'annual' ||
+          birthday.ownerConfirmed !== true ||
+          birthday.quarantined !== false ||
+          !Number.isInteger(birthday.month) ||
+          Number(birthday.month) < 1 ||
+          Number(birthday.month) > 12 ||
+          !Number.isInteger(birthday.day) ||
+          Number(birthday.day) < 1 ||
+          Number(birthday.day) > 31 ||
+          (birthday.year !== null &&
+            (!Number.isInteger(birthday.year) ||
+              Number(birthday.year) < 1000 ||
+              Number(birthday.year) > 9999))
+        )
+          continue;
+        const month = Number(birthday.month);
+        const day = Number(birthday.day);
+        const year = birthday.year === null ? undefined : Number(birthday.year);
+        const checked = new Date(Date.UTC(year ?? 2000, month - 1, day));
+        if (checked.getUTCMonth() !== month - 1 || checked.getUTCDate() !== day) continue;
+        const contactId = text(birthday.contactId);
+        const date = `${birthdayMonths[month - 1]} ${day}${year ? `, ${year}` : ''}`;
+        append(
+          {
+            key: `occasion:${text(birthday.id)}`,
+            body: `${text(birthday.person)}'s birthday is ${date}.`,
+            speaker: 'Saved birthday record marked owner-confirmed',
+            provenance: `saved occasion ${text(birthday.id)}`,
+            ownerConfirmed: true,
+            subjectContactId: contactId,
+            url: `/profile/people/${encodeURIComponent(contactId)}`,
           },
           pass,
         );
@@ -355,6 +466,229 @@ export function memoryReadSources(
   );
 }
 
+function sameConversationSourceRef(left: unknown, right: unknown): boolean {
+  const a = record(left);
+  const b = record(right);
+  return Boolean(
+    a &&
+      b &&
+      text(a.messageId) === text(b.messageId) &&
+      text(a.conversationId) === text(b.conversationId) &&
+      text(a.sourceRevision) === text(b.sourceRevision) &&
+      text(a.speakerRevision) === text(b.speakerRevision),
+  );
+}
+
+function validConversationContextReceipt(
+  row: ReadToolEvidence,
+  result: Record<string, unknown>,
+  evidence: ReadToolEvidence[],
+  requestText: string,
+): boolean {
+  if (row.fromCurrentTask !== true) return false;
+  const scope = explicitComparisonScope(requestText);
+  if (
+    !scope ||
+    !permitsCrossConversationComparison(requestText, scope) ||
+    !requiresOwnerAssistantContrast(requestText)
+  )
+    return false;
+  if (
+    result.mode !== 'context' ||
+    !Array.isArray(result.anchors) ||
+    result.anchors.length < 1 ||
+    result.anchors.length > 2 ||
+    !Array.isArray(result.matches) ||
+    result.matches.length > 10 ||
+    !result.window ||
+    typeof result.window !== 'object' ||
+    (result.window as Record<string, unknown>).before !== 3 ||
+    (result.window as Record<string, unknown>).after !== 1 ||
+    !(result.observationGeneration === null || typeof result.observationGeneration === 'string')
+  )
+    return false;
+  const args = record(row.args);
+  const requestedAnchors = args?.anchors;
+  if (!Array.isArray(requestedAnchors) || requestedAnchors.length !== result.anchors.length)
+    return false;
+  const identities = new Set<string>();
+  for (const [index, anchor] of result.anchors.entries()) {
+    const value = record(anchor);
+    if (
+      !value ||
+      !text(value.messageId) ||
+      !text(value.conversationId) ||
+      !text(value.sourceRevision) ||
+      !text(value.speakerRevision) ||
+      !sameConversationSourceRef(anchor, requestedAnchors[index])
+    )
+      return false;
+    const identity = `${text(value.conversationId)}\u0000${text(value.messageId)}`;
+    if (identities.has(identity)) return false;
+    identities.add(identity);
+    const foundInSearch = evidence.some((search) => {
+      if (
+        search.fromCurrentTask !== true ||
+        search.status !== 'succeeded' ||
+        search.toolName !== 'conversations.search'
+      )
+        return false;
+      const searchResult = record(search.result);
+      const searchArgs = record(search.args);
+      return (
+        typeof searchArgs?.query === 'string' &&
+        search.fromCurrentTask === true &&
+        searchArgs.query.toLocaleLowerCase('en-US').includes(scope.toLocaleLowerCase('en-US')) &&
+        Array.isArray(searchResult?.matches) &&
+        searchResult.matches.some((rawMatch) => {
+          const match = record(rawMatch);
+          return Boolean(
+            match &&
+              match.role === 'assistant' &&
+              match.origin === 'assistant' &&
+              validConversationSpeaker(match) &&
+              conversationMessageSourceRevision(text(match.messageId), text(match.text)) ===
+                match.sourceRevision &&
+              sameConversationSourceRef(anchor, match),
+          );
+        })
+      );
+    });
+    if (!foundInSearch) return false;
+  }
+  const allowedConversations = new Set(
+    result.anchors.flatMap((anchor) => {
+      const conversationId = text(record(anchor)?.conversationId);
+      return conversationId ? [conversationId] : [];
+    }),
+  );
+  const seenMatches = new Set<string>();
+  for (const raw of result.matches) {
+    const match = record(raw);
+    if (
+      !match ||
+      !text(match.messageId) ||
+      !text(match.conversationId) ||
+      !text(match.text) ||
+      !text(match.sourceRevision) ||
+      !text(match.role) ||
+      !text(match.origin) ||
+      !text(match.speakerRevision) ||
+      !allowedConversations.has(text(match.conversationId)) ||
+      conversationMessageSourceRevision(text(match.messageId), text(match.text)) !==
+        match.sourceRevision ||
+      !validConversationSpeaker(match)
+    )
+      return false;
+    const identity = `${text(match.conversationId)}\u0000${text(match.messageId)}`;
+    if (seenMatches.has(identity)) return false;
+    seenMatches.add(identity);
+  }
+  for (const anchor of result.anchors) {
+    const anchorRecord = record(anchor);
+    if (
+      !anchorRecord ||
+      !result.matches.some((raw) => {
+        const match = record(raw);
+        return Boolean(
+          match &&
+            match.role === 'assistant' &&
+            match.origin === 'assistant' &&
+            sameConversationSourceRef(anchorRecord, match),
+        );
+      })
+    )
+      return false;
+  }
+  return true;
+}
+
+/** Select up to two relevant assistant context anchors from exact task search receipts. */
+export function memoryContextAnchorRefs(
+  request: string,
+  evidence: ReadToolEvidence[],
+  contextToolAvailable = true,
+): ConversationSearchSourceRef[] {
+  if (!contextToolAvailable || !requiresOwnerAssistantContrast(request)) return [];
+  const scope = explicitComparisonScope(request);
+  const terms = comparisonTerms(request);
+  if (!scope || !terms || !permitsCrossConversationComparison(request, scope)) return [];
+  const currentSearchEvidence = evidence.flatMap((row) =>
+    row.fromCurrentTask === true &&
+    row.status === 'succeeded' &&
+    row.toolName === 'conversations.search' &&
+    row.result !== undefined
+      ? [{ ...row, result: row.result }]
+      : [],
+  );
+  const existingSources = selectorVisibleSources(memoryReadSources(currentSearchEvidence, request));
+  // Context is only a bounded recovery read for a missing side of the
+  // comparison. A complete exact pair already returned by search needs no
+  // additional capability or tool call.
+  if (deterministicComparisonSelection(request, existingSources)?.status === 'complete') return [];
+  const byContext = new Map<
+    string,
+    { ref: ConversationSearchSourceRef; score: number; order: number }
+  >();
+  let order = 0;
+  for (const row of evidence) {
+    if (
+      row.fromCurrentTask !== true ||
+      row.status !== 'succeeded' ||
+      row.toolName !== 'conversations.search'
+    )
+      continue;
+    const result = record(row.result);
+    if (result?.ok === false || result?.error || !Array.isArray(result?.matches)) continue;
+    for (const raw of result.matches) {
+      const match = record(raw);
+      const currentOrder = order++;
+      if (
+        !match ||
+        !text(match.messageId) ||
+        !text(match.conversationId) ||
+        !text(match.text) ||
+        !text(match.sourceRevision) ||
+        !text(match.speakerRevision) ||
+        match.role !== 'assistant' ||
+        match.origin !== 'assistant' ||
+        !validConversationSpeaker(match) ||
+        conversationMessageSourceRevision(text(match.messageId), text(match.text)) !==
+          match.sourceRevision
+      )
+        continue;
+      const source: MemoryReadSource = {
+        key: `message:${text(match.messageId)}`,
+        body: text(match.text),
+        speaker: 'Earlier assistant claim (not verified fact)',
+        provenance: '',
+        contextId: text(match.conversationId),
+      };
+      const excerpts = assistantComparisonEvidenceSegments(source, scope, terms.owner);
+      const score = Math.max(
+        -1,
+        ...excerpts.map((excerpt) =>
+          assistantComparisonEvidenceScore(excerpt, terms.owner, terms.assistant),
+        ),
+      );
+      if (score < 2) continue;
+      const ref: ConversationSearchSourceRef = {
+        messageId: text(match.messageId),
+        conversationId: text(match.conversationId),
+        sourceRevision: text(match.sourceRevision),
+        speakerRevision: text(match.speakerRevision),
+      };
+      const previous = byContext.get(ref.conversationId);
+      if (!previous || score > previous.score)
+        byContext.set(ref.conversationId, { ref, score, order: currentOrder });
+    }
+  }
+  return [...byContext.values()]
+    .sort((left, right) => right.score - left.score || left.order - right.order)
+    .slice(0, 2)
+    .map(({ ref }) => ref);
+}
+
 function selectorVisibleSources(
   sources: ReturnType<typeof memoryReadSources>,
 ): ReturnType<typeof memoryReadSources> {
@@ -471,6 +805,47 @@ function explicitComparisonScope(request: string): string | undefined {
     if (match?.[1]) return match[1];
   }
   return undefined;
+}
+
+function permitsCrossConversationComparison(request: string, scope: string): boolean {
+  const escapedScope = scope.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const fictionalScope = new RegExp(
+    `\\b(?:hypothetical|fictional)\\s+${escapedScope}\\s+(?:exercise|scenario)\\b|\\b(?:hypothetical|fictional)\\b[\\s\\S]{0,60}\\b(?:exercise|scenario)\\b[\\s\\S]{0,50}\\b(?:called|named)\\s+[“"']?${escapedScope}\\b`,
+    'iu',
+  ).test(request);
+  const deniesFictionalScope =
+    /\b(?:not|nonfictional|real|actual)\b[^.!?]{0,36}\b(?:fictional|hypothetical)\b/iu.test(
+      request,
+    ) ||
+    new RegExp(
+      `\\b(?:real|actual|factual|nonfictional)\\b[\\s\\S]{0,60}\\b${escapedScope}\\b|\\b${escapedScope}\\b[\\s\\S]{0,60}\\b(?:real|actual|factual|nonfictional)\\b`,
+      'iu',
+    ).test(request);
+  return (
+    fictionalScope &&
+    !deniesFictionalScope &&
+    /\b(?:compare|comparative|contrast|separat\w*|distinguish\w*)\b/iu.test(request)
+  );
+}
+
+function isDirectComparisonPassage(excerpt: string): boolean {
+  return (
+    !/["“”‘’]/u.test(excerpt) &&
+    !/^\s*(?:prompt|instruction|quoted (?:text|prompt)|the prompt says|the instruction says)\s*[:,-]/iu.test(
+      excerpt,
+    ) &&
+    !/^\s*(?:please\s+)?(?:say|tell|repeat|follow|ignore|pretend|imagine|suppose)\b/iu.test(excerpt)
+  );
+}
+
+function isNamedFictionalScopePassage(excerpt: string, scope: string): boolean {
+  const escapedScope = scope.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const sourceNamesScope = new RegExp(`\\b${escapedScope}\\b`, 'iu').test(excerpt);
+  const sourceMarksNamedExercise = new RegExp(
+    `\\b(?:fictional|hypothetical)\\b[\\s\\S]{0,60}\\b${escapedScope}\\b[\\s\\S]{0,60}\\b(?:exercise|scenario|project)\\b|\\b(?:fictional|hypothetical)\\b[\\s\\S]{0,40}\\b(?:exercise|scenario|project)\\b[\\s\\S]{0,60}\\b${escapedScope}\\b`,
+    'iu',
+  ).test(excerpt);
+  return sourceNamesScope && sourceMarksNamedExercise;
 }
 
 function comparisonTerms(request: string): { owner: string[]; assistant: string[] } | undefined {
@@ -717,9 +1092,10 @@ function comparisonValueSignature(sourceBody: string, scope: string): string {
 
 /**
  * Conservative recovery for an explicit owner/assistant comparison. It only
- * selects exact passages sharing a named scope and conversation. Repeated
- * passages are retained when their extracted value signature agrees; conflicting
- * or ambiguous source rows are left for the existing refusal path.
+ * prefers exact passages sharing a named scope and conversation. A narrowly
+ * scoped fictional comparison may use separate conversations only when each
+ * speaker's independently selected passage is uniquely strongest (or exactly
+ * repeated); this does not imply the passages were one exchange.
  */
 function deterministicComparisonSelection(
   request: string,
@@ -811,7 +1187,65 @@ function deterministicComparisonSelection(
     }
   }
   pairs.sort((left, right) => right.score - left.score);
-  if (!pairs.length) return undefined;
+  if (!pairs.length) {
+    if (!permitsCrossConversationComparison(request, scope)) return undefined;
+    const bestAcrossConversations = (speaker: string, requestedTerms: string[]) => {
+      const assistantSpeaker = speaker === 'Earlier assistant claim (not verified fact)';
+      const candidates = inScope
+        .filter(
+          (source) => source.contextId && source.body.length <= 800 && source.speaker === speaker,
+        )
+        .flatMap((source) =>
+          (assistantSpeaker
+            ? assistantComparisonEvidenceSegments(source, scope, terms.owner)
+            : comparisonEvidenceSegments(source, scope, requestedTerms)
+          ).map((excerpt) => ({
+            source,
+            excerpt,
+            score: assistantSpeaker
+              ? assistantComparisonEvidenceScore(excerpt, terms.owner, requestedTerms)
+              : requestedTerms.filter((term) => matchesComparisonTerm(term, excerpt)).length,
+          })),
+        )
+        .filter(
+          (candidate) =>
+            isDirectComparisonPassage(candidate.excerpt) &&
+            isNamedFictionalScopePassage(candidate.excerpt, scope) &&
+            candidate.score >= (assistantSpeaker ? 2 : Math.min(2, requestedTerms.length)),
+        );
+      const bestScore = Math.max(-1, ...candidates.map((candidate) => candidate.score));
+      const best = candidates.filter((candidate) => candidate.score === bestScore);
+      if (bestScore < 0 || best.length === 0) return undefined;
+      const allSignatures = new Set(
+        candidates.map((candidate) => normalizedText(candidate.excerpt)),
+      );
+      if (allSignatures.size !== 1) return undefined;
+      const signatures = new Set(best.map((candidate) => normalizedText(candidate.excerpt)));
+      if (signatures.size !== 1) return undefined;
+      return {
+        score: bestScore,
+        candidates: [
+          ...new Map(best.map((candidate) => [candidate.source.key, candidate] as const)).values(),
+        ],
+      };
+    };
+    const owner = bestAcrossConversations('Recorded owner message', terms.owner);
+    const assistant = bestAcrossConversations(
+      'Earlier assistant claim (not verified fact)',
+      terms.assistant,
+    );
+    if (!owner || !assistant || owner.score + assistant.score < 0) return undefined;
+    const selected = [...owner.candidates, ...assistant.candidates];
+    if (selected.length > 8) return undefined;
+    return {
+      version: 1,
+      status: 'complete',
+      selections: selected.map(({ source, excerpt }) => ({
+        sourceKey: source.key,
+        quote: excerpt,
+      })),
+    };
+  }
   const tied = pairs.filter((pair) => pair.score === pairs[0]?.score);
   // Repeated exercises may record the same exact owner/assistant pair in
   // several chats. One complete pair is sufficient only when all equally
@@ -949,12 +1383,24 @@ function validateSelectedComparison(
     ({ source }) => source.speaker === 'Earlier assistant claim (not verified fact)',
   );
   if (!selectedOwner.length || !selectedAssistant.length) return selection;
+  if ([...selectedOwner, ...selectedAssistant].some(({ source }) => !source.contextId))
+    return incompleteComparisonSelection();
   const contexts = new Set(
     [...selectedOwner, ...selectedAssistant]
       .map(({ source }) => source.contextId)
       .filter((context): context is string => typeof context === 'string'),
   );
-  if (contexts.size !== 1) return incompleteComparisonSelection();
+  if (contexts.size !== 1) {
+    if (!permitsCrossConversationComparison(request, scope)) return incompleteComparisonSelection();
+    const deterministic = deterministicComparisonSelection(request, sources);
+    if (deterministic?.status !== 'complete') return incompleteComparisonSelection();
+    const deterministicRows = new Set(
+      deterministic.selections.map((item) => `${item.sourceKey}\u0000${item.quote}`),
+    );
+    if (selected.some(({ item }) => !deterministicRows.has(`${item.sourceKey}\u0000${item.quote}`)))
+      return incompleteComparisonSelection();
+    return deterministic;
+  }
   const contextId = [...contexts][0];
   if (!contextId) return incompleteComparisonSelection();
 
@@ -1399,7 +1845,7 @@ export function familyBirthdayReadProjection(
   let omitted = false;
   const permittedTools = new Set<string>([
     ...(sourceScope.conversationHistory ? ['conversations.search'] : []),
-    ...(sourceScope.savedMemory ? ['memory.recall'] : []),
+    ...(sourceScope.savedMemory ? ['memory.recall', 'occasions.list_birthdays'] : []),
   ]);
   const scopedEvidence = evidence.filter((row) => permittedTools.has(row.toolName));
   const allSources = memoryReadSources(scopedEvidence, requestText, () => {
@@ -1415,7 +1861,16 @@ export function familyBirthdayReadProjection(
       row.status === 'succeeded' &&
       !result?.error &&
       result?.ok !== false &&
-      Array.isArray(result?.[row.toolName === 'conversations.search' ? 'matches' : 'memories']) &&
+      Array.isArray(
+        result?.[
+          row.toolName === 'conversations.search'
+            ? 'matches'
+            : row.toolName === 'occasions.list_birthdays'
+              ? 'birthdays'
+              : 'memories'
+        ],
+      ) &&
+      (row.toolName !== 'occasions.list_birthdays' || result?.complete === true) &&
       result?.hasMore !== true &&
       result?.complete !== false &&
       result?.truncated !== true
@@ -1449,7 +1904,9 @@ export function familyBirthdayReadProjection(
       body: source.body,
       trusted: source.speaker === 'Recorded owner message' || source.ownerConfirmed === true,
       subjectId: source.subjectContactId,
-      url: source.contextId ? `/chat/${encodeURIComponent(source.contextId)}` : '/profile/memories',
+      url: source.contextId
+        ? `/chat/${encodeURIComponent(source.contextId)}`
+        : (source.url ?? '/profile/memories'),
     })),
     incompleteCoverage: incompleteCoverage || !validEnvelope,
   });
@@ -1469,7 +1926,7 @@ export function renderMemoryReadAnswer(
     if (selection.failureReason === 'incomplete_selection') {
       const coverage = boundedMemoryCoverage(evidence);
       return requiresOwnerAssistantContrast(excludeExactRequest ?? '')
-        ? `${coverage} I could not reliably select both a directly relevant owner-authored correction and the separate earlier assistant record. Assistant-authored wording is not proof of what you said or a current fact.`
+        ? `${coverage} I could not reliably select both a directly relevant owner-authored statement and the separate earlier assistant record. Assistant-authored wording is not proof of what you said or a current fact.`
         : `${coverage} I found candidate owner-authored records, but could not reliably select a directly relevant passage. This does not establish that it was never discussed.`;
     }
     return 'I retrieved historical sources, but could not reliably select passages answering your question. I have not treated unrelated records or earlier assistant claims as established facts.';
@@ -1484,6 +1941,9 @@ export function renderMemoryReadAnswer(
     chosen.some(({ source }) => source.speaker === 'Earlier assistant claim (not verified fact)');
   const ownerAssistantContrast =
     hasOwnerAndAssistant && requiresOwnerAssistantContrast(excludeExactRequest ?? '');
+  const crossConversationContrast =
+    ownerAssistantContrast &&
+    new Set(chosen.map(({ source }) => source.contextId).filter(Boolean)).size > 1;
   const groups = selectedSourceGroups(chosen);
   const directAnswer = ownerAssistantContrast
     ? directSelectedContrastAnswer(excludeExactRequest ?? '', groups)
@@ -1496,6 +1956,11 @@ export function renderMemoryReadAnswer(
             'The owner-authored passage records the original statement; the separate assistant-authored passage is an assistant claim or suggestion, not evidence of owner intent.',
           ]
         : []),
+    ...(crossConversationContrast
+      ? [
+          'These records come from separate conversations. Their authorship is supported independently; this does not establish that the assistant was responding to the owner’s message.',
+        ]
+      : []),
     ...(/\b(?:hypothetical|fictional)\b[^.!?\n]{0,100}\b(?:exercise|scenario)\b/i.test(
       excludeExactRequest ?? '',
     )
@@ -1503,7 +1968,7 @@ export function renderMemoryReadAnswer(
       : []),
     ...(selection.coverage === 'assistant_only'
       ? [
-          'Assistant records only: the bounded lookup did not return a validated owner-authored source for the correction. These records show what the assistant wrote, not the owner’s original words or a current fact.',
+          'Assistant records only: the bounded lookup did not return a validated owner-authored statement. These records show what the assistant wrote, not the owner’s original words or a current fact.',
         ]
       : ['Relevant historical sources:']),
     ...groups.map((group) => {

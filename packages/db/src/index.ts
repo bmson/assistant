@@ -44,6 +44,7 @@ export { createPostgresModelRoutingRepository } from './model-routing-repository
 export { createPostgresNotificationOutboxRepository } from './notification-outbox-repository.js';
 export { createPostgresNotificationsConversationRepository } from './notifications-conversation-repository.js';
 export { createPostgresNudgePolicyRepository } from './nudge-policy-repository.js';
+export { createPostgresOccasionToolReadRepository } from './occasion-tool-read-repository.js';
 export { createPostgresOwnerCardCompilationRepository } from './owner-card-compilation-repository.js';
 export { lockPostgresOwnerChatAction } from './owner-chat-action-lock.js';
 export {

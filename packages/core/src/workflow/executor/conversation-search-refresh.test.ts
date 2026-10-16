@@ -97,6 +97,11 @@ function repository(unchangedSourceRefs: boolean[]): ConversationSearchRepositor
   return {
     semantic: vi.fn(async () => []),
     text: vi.fn(async () => []),
+    context: vi.fn(async () => ({ matches: [], observationGeneration: 'generation-2' })),
+    validateSources: vi.fn(async ({ sourceRefs }) => ({
+      unchangedSourceRefs: sourceRefs.map(() => true),
+      observationGeneration: 'generation-2',
+    })),
     refreshForResume: vi.fn(async () => ({
       unchangedSourceRefs,
       matches: [match],
@@ -104,6 +109,133 @@ function repository(unchangedSourceRefs: boolean[]): ConversationSearchRepositor
       observationGeneration: 'generation-2',
     })),
   };
+}
+
+function contextRow(messageId: string, text: string, role: 'user' | 'assistant') {
+  const origin = role === 'user' ? 'owner' : 'assistant';
+  return {
+    messageId,
+    conversationId: ids.conversation,
+    sourceRevision: conversationMessageSourceRevision(messageId, text),
+    speakerRevision: conversationMessageSpeakerRevision(messageId, text, role, origin),
+    role,
+    origin,
+    text,
+    createdAt: '2026-10-01T00:00:00.000Z',
+  };
+}
+
+function contextSnapshot(anchorId = '40000000-0000-4000-8000-000000000004') {
+  const anchor = contextRow(anchorId, 'The owner set a fictional Cobalt budget.', 'user');
+  const before = contextRow(
+    '40000000-0000-4000-8000-000000000005',
+    'Earlier message in the same exercise.',
+    'assistant',
+  );
+  const after = contextRow(
+    '40000000-0000-4000-8000-000000000006',
+    'The next message gives additional fictional exercise context.',
+    'user',
+  );
+  const anchorRef = {
+    messageId: anchor.messageId,
+    conversationId: anchor.conversationId,
+    sourceRevision: anchor.sourceRevision,
+    speakerRevision: anchor.speakerRevision,
+  };
+  return {
+    anchorRef,
+    refs: [before, anchor, after].map(
+      ({ messageId, conversationId, sourceRevision, speakerRevision }) => ({
+        messageId,
+        conversationId,
+        sourceRevision,
+        speakerRevision,
+      }),
+    ),
+    value: {
+      mode: 'context',
+      matches: [before, anchor, after],
+      anchors: [anchorRef],
+      window: { before: 3, after: 1 },
+      observationGeneration: 'generation-2',
+    },
+  };
+}
+
+function contextBudgetSnapshot(seed: number, count: number) {
+  const rows = Array.from({ length: count }, (_, index) => {
+    const number = String(seed * 100 + index + 1).padStart(12, '0');
+    const id = `50000000-0000-4000-8000-${number}`;
+    return contextRow(
+      id,
+      `Bounded context row ${seed}-${index}.`,
+      index % 2 ? 'assistant' : 'user',
+    );
+  });
+  const anchor = rows[0];
+  if (!anchor) throw new Error('Context budget fixture needs an anchor');
+  const anchorRef = {
+    messageId: anchor.messageId,
+    conversationId: anchor.conversationId,
+    sourceRevision: anchor.sourceRevision,
+    speakerRevision: anchor.speakerRevision,
+  };
+  return {
+    anchorRef,
+    refs: rows.map(({ messageId, conversationId, sourceRevision, speakerRevision }) => ({
+      messageId,
+      conversationId,
+      sourceRevision,
+      speakerRevision,
+    })),
+    value: {
+      mode: 'context',
+      matches: rows,
+      anchors: [anchorRef],
+      window: { before: 3, after: 1 },
+      observationGeneration: 'generation-2',
+    },
+  };
+}
+
+function contextWindow(
+  snapshot: {
+    anchorRef: {
+      messageId: string;
+      conversationId: string;
+      sourceRevision: string;
+      speakerRevision: string;
+    };
+    value: unknown;
+  } = contextSnapshot(),
+  toolCallId = 'context-1',
+): ModelMessage[] {
+  return [
+    {
+      role: 'assistant',
+      content: [
+        {
+          type: 'tool-call',
+          toolCallId,
+          toolName: 'conversations.context',
+          input: { anchors: [snapshot.anchorRef] },
+        },
+      ],
+    } as ModelMessage,
+    {
+      role: 'tool',
+      content: [
+        {
+          type: 'tool-result',
+          toolCallId,
+          toolName: 'conversations.context',
+          output: { type: 'json', value: snapshot.value },
+        },
+      ],
+    } as ModelMessage,
+    { role: 'assistant', content: 'I will answer from the cited bounded context.' },
+  ];
 }
 
 function searchResult(window: ModelMessage[], toolCallId: string): unknown {
@@ -115,6 +247,28 @@ function searchResult(window: ModelMessage[], toolCallId: string): unknown {
       if (
         part.type !== 'tool-result' ||
         part.toolName !== 'conversations.search' ||
+        part.toolCallId !== toolCallId
+      )
+        continue;
+      const output = part.output;
+      if (output && typeof output === 'object' && !Array.isArray(output)) {
+        const value = output as Record<string, unknown>;
+        if (value.type === 'json') return value.value;
+      }
+    }
+  }
+  return undefined;
+}
+
+function contextResult(window: ModelMessage[], toolCallId: string): unknown {
+  for (const message of window) {
+    if (message.role !== 'tool' || !Array.isArray(message.content)) continue;
+    for (const candidate of message.content) {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+      const part = candidate as Record<string, unknown>;
+      if (
+        part.type !== 'tool-result' ||
+        part.toolName !== 'conversations.context' ||
         part.toolCallId !== toolCallId
       )
         continue;
@@ -901,6 +1055,260 @@ describe('resumed conversations.search refresh', () => {
     });
   });
 
+  it('retains an exact bounded context snapshot only after one complete source validation', async () => {
+    const snapshot = contextSnapshot();
+    const window = contextWindow(snapshot);
+    const refresh = repository([]);
+
+    await expect(
+      refreshResumedConversationSearch(window, {
+        agentId: ids.task,
+        currentConversationId: ids.conversation,
+        repository: refresh,
+      }),
+    ).resolves.toEqual({
+      changed: true,
+      observationGeneration: 'generation-2',
+      invalidatedToolCallIds: [],
+    });
+    expect(refresh.validateSources).toHaveBeenCalledExactlyOnceWith({
+      agentId: ids.task,
+      currentConversationId: ids.conversation,
+      sourceRefs: snapshot.refs,
+    });
+    expect(contextResult(window, 'context-1')).toEqual(snapshot.value);
+    expect(JSON.stringify(window)).toContain(
+      'The next message gives additional fictional exercise context.',
+    );
+  });
+
+  it.each([
+    ['changed neighbor', [false, true, true]],
+    ['hidden neighbor', [true, true, false]],
+    ['erased anchor', [true, false, true]],
+  ] as const)(
+    'invalidates the whole context window when an anchor or neighbor is %s',
+    async (_reason, unchanged) => {
+      const window = contextWindow();
+      const refresh = repository([]);
+      refresh.validateSources = vi.fn(async () => ({
+        unchangedSourceRefs: [...unchanged],
+        observationGeneration: 'generation-2',
+      }));
+
+      const result = await refreshResumedConversationSearch(window, {
+        agentId: ids.task,
+        repository: refresh,
+      });
+
+      expect(result.invalidatedToolCallIds).toEqual(['context-1']);
+      expect(contextResult(window, 'context-1')).toMatchObject({
+        mode: 'unavailable',
+        matches: [],
+      });
+      expect(JSON.stringify(window)).not.toContain('The owner set a fictional Cobalt budget.');
+      expect(JSON.stringify(window)).not.toContain('I will answer from the cited bounded context.');
+    },
+  );
+
+  it('invalidates malformed context output and rejects an output anchor rebound to another source', async () => {
+    for (const corrupt of [
+      (value: Record<string, unknown>) => ({ ...value, extra: 'unexpected' }),
+      (value: Record<string, unknown>) => ({
+        ...value,
+        anchors: [
+          { ...(value.anchors as Record<string, unknown>[])[0], sourceRevision: 'f'.repeat(64) },
+        ],
+      }),
+      (value: Record<string, unknown>) => ({
+        ...value,
+        window: { before: 300, after: 1 },
+      }),
+    ]) {
+      const snapshot = contextSnapshot();
+      const corruptSnapshot = { ...snapshot, value: corrupt(snapshot.value) };
+      const window = contextWindow(corruptSnapshot);
+      const refresh = repository([]);
+
+      const result = await refreshResumedConversationSearch(window, {
+        agentId: ids.task,
+        repository: refresh,
+      });
+
+      expect(result.invalidatedToolCallIds).toEqual(['context-1']);
+      expect(refresh.validateSources).not.toHaveBeenCalled();
+      expect(contextResult(window, 'context-1')).toMatchObject({
+        mode: 'unavailable',
+        matches: [],
+      });
+    }
+  });
+
+  it('rejects a correctly revision-bound context neighbor from an unanchored conversation', async () => {
+    const snapshot = contextSnapshot();
+    const result = snapshot.value as { matches: Array<Record<string, unknown>> };
+    const foreign = contextRow(
+      '40000000-0000-4000-8000-000000000009',
+      'Valid neighboring source from another conversation.',
+      'assistant',
+    );
+    foreign.conversationId = '90000000-0000-4000-8000-000000000009';
+    result.matches.push(foreign);
+    const window = contextWindow(snapshot);
+    const refresh = repository([]);
+
+    const resumed = await refreshResumedConversationSearch(window, {
+      agentId: ids.task,
+      repository: refresh,
+    });
+
+    expect(resumed.invalidatedToolCallIds).toEqual(['context-1']);
+    expect(refresh.validateSources).not.toHaveBeenCalled();
+    expect(contextResult(window, 'context-1')).toMatchObject({ mode: 'unavailable', matches: [] });
+    expect(JSON.stringify(window)).not.toContain(
+      'Valid neighboring source from another conversation.',
+    );
+  });
+
+  it('invalidates duplicate context call IDs rather than binding ambiguous results', async () => {
+    const window = contextWindow();
+    const duplicateCall = window[0];
+    if (duplicateCall?.role !== 'assistant') throw new Error('Missing context call');
+    window.splice(1, 0, structuredClone(duplicateCall));
+    const refresh = repository([]);
+
+    const result = await refreshResumedConversationSearch(window, {
+      agentId: ids.task,
+      repository: refresh,
+    });
+
+    expect(result.invalidatedToolCallIds).toContain('context-1');
+    expect(refresh.validateSources).not.toHaveBeenCalled();
+    expect(JSON.stringify(window)).not.toContain('The owner set a fictional Cobalt budget.');
+    expect(JSON.stringify(window)).not.toContain('I will answer from the cited bounded context.');
+  });
+
+  it('invalidates a context snapshot when the privacy observation generation changed', async () => {
+    const window = contextWindow();
+    const refresh = repository([]);
+    refresh.validateSources = vi.fn(async ({ sourceRefs }) => ({
+      unchangedSourceRefs: sourceRefs.map(() => true),
+      observationGeneration: 'generation-after-erasure',
+    }));
+
+    const result = await refreshResumedConversationSearch(window, {
+      agentId: ids.task,
+      repository: refresh,
+    });
+
+    expect(result.invalidatedToolCallIds).toEqual(['context-1']);
+    expect(contextResult(window, 'context-1')).toMatchObject({ mode: 'unavailable', matches: [] });
+  });
+
+  it('accepts at most twenty returned source refs across resumed context calls', async () => {
+    const makeCalls = (counts: number[]) => {
+      const window: ModelMessage[] = [];
+      counts.forEach((count, index) => {
+        const snapshot = contextBudgetSnapshot(index + 1, count);
+        const callId = `context-budget-${index}`;
+        window.push(
+          {
+            role: 'assistant',
+            content: [
+              {
+                type: 'tool-call',
+                toolCallId: callId,
+                toolName: 'conversations.context',
+                input: { anchors: [snapshot.anchorRef] },
+              },
+            ],
+          } as ModelMessage,
+          {
+            role: 'tool',
+            content: [
+              {
+                type: 'tool-result',
+                toolCallId: callId,
+                toolName: 'conversations.context',
+                output: { type: 'json', value: snapshot.value },
+              },
+            ],
+          } as ModelMessage,
+        );
+      });
+      return window;
+    };
+
+    const allowedWindow = makeCalls([10, 10]);
+    const allowedRepository = repository([]);
+    const allowed = await refreshResumedConversationSearch(allowedWindow, {
+      agentId: ids.task,
+      repository: allowedRepository,
+    });
+    expect(allowed.invalidatedToolCallIds).toEqual([]);
+    expect(allowedRepository.validateSources).toHaveBeenCalledTimes(2);
+
+    const overWindow = makeCalls([7, 7, 7]);
+    const overRepository = repository([]);
+    const over = await refreshResumedConversationSearch(overWindow, {
+      agentId: ids.task,
+      repository: overRepository,
+    });
+    expect(over.invalidatedToolCallIds).toEqual([
+      'context-budget-0',
+      'context-budget-1',
+      'context-budget-2',
+    ]);
+    expect(overRepository.validateSources).not.toHaveBeenCalled();
+  });
+
+  it('revalidates durable context evidence and linked read_result bytes before verifier use', async () => {
+    const snapshot = contextSnapshot();
+    const contextId = '70000000-0000-4000-8000-000000000007';
+    const readId = '80000000-0000-4000-8000-000000000008';
+    const durableRows = [
+      {
+        id: contextId,
+        toolName: 'conversations.context',
+        status: 'succeeded',
+        args: { anchors: [snapshot.anchorRef] },
+        result: snapshot.value,
+        error: null,
+        step: 1,
+      },
+      {
+        id: readId,
+        toolName: 'tools.read_result',
+        status: 'succeeded',
+        args: { toolCallId: contextId, offset: 0 },
+        result: { text: 'PAGED PRIVATE CONTEXT BYTES' },
+        error: null,
+        step: 2,
+      },
+    ] as ExecutionEvidenceRecord[];
+    const refresh = repository([]);
+    refresh.validateSources = vi.fn(async ({ sourceRefs }) => ({
+      unchangedSourceRefs: sourceRefs.map(() => false),
+      observationGeneration: 'generation-2',
+    }));
+
+    const safe = await refreshConversationSearchEvidence(durableRows, {
+      agentId: ids.task,
+      repository: refresh,
+    });
+
+    expect(safe.invalidatedContextCallIds).toEqual(new Set([contextId]));
+    expect(safe.rows.find((row) => row.id === contextId)?.result).toMatchObject({
+      mode: 'unavailable',
+      matches: [],
+    });
+    expect(safe.rows.find((row) => row.id === readId)?.result).toMatchObject({
+      mode: 'unavailable',
+    });
+    expect(JSON.stringify(safe.rows)).not.toContain('The owner set a fictional Cobalt budget.');
+    expect(JSON.stringify(safe.rows)).not.toContain('PAGED PRIVATE CONTEXT BYTES');
+  });
+
   it('does nothing when a context has no completed conversation search call', async () => {
     const window: ModelMessage[] = [{ role: 'user', content: 'Ordinary owner request' }];
     const refresh = repository([]);
@@ -908,5 +1316,58 @@ describe('resumed conversations.search refresh', () => {
       refreshResumedConversationSearch(window, { agentId: ids.task, repository: refresh }),
     ).resolves.toEqual({ changed: false, observationGeneration: null, invalidatedToolCallIds: [] });
     expect(refresh.refreshForResume).not.toHaveBeenCalled();
+  });
+
+  it('scrubs orphaned context payloads and downstream read_result prose', async () => {
+    const snapshot = contextSnapshot();
+    const window: ModelMessage[] = [
+      {
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: 'orphan-context',
+            toolName: 'conversations.context',
+            output: { type: 'json', value: snapshot.value },
+          },
+        ],
+      } as ModelMessage,
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'read-orphan-context',
+            toolName: 'tools.read_result',
+            input: { toolCallId: 'orphan-context', offset: 0 },
+          },
+        ],
+      } as ModelMessage,
+      {
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: 'read-orphan-context',
+            toolName: 'tools.read_result',
+            output: { type: 'json', value: { text: 'ORPHAN PAGED CONTEXT BYTES' } },
+          },
+        ],
+      } as ModelMessage,
+      { role: 'assistant', content: 'The owner set a fictional Cobalt budget.' },
+    ];
+
+    const result = await refreshResumedConversationSearch(window, {
+      agentId: ids.task,
+      repository: repository([]),
+    });
+
+    const serialized = JSON.stringify(window);
+    expect(result.invalidatedToolCallIds).toEqual(['orphan-context']);
+    expect(serialized).not.toContain('The owner set a fictional Cobalt budget.');
+    expect(serialized).not.toContain('ORPHAN PAGED CONTEXT BYTES');
+    expect(serialized).not.toContain(
+      'The next message gives additional fictional exercise context.',
+    );
   });
 });

@@ -4,7 +4,10 @@ import type {
   Records,
   ToolExecutionRepository,
 } from '@assistant/persistence';
-import { conversationMessageSourceRevision } from '@assistant/persistence';
+import {
+  conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
+} from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
 import { ToolRegistry } from '../registry.js';
 import { registerBuiltinTools } from './index.js';
@@ -17,6 +20,57 @@ const SEARCH_CALL = randomUUID();
 const SOURCE = randomUUID();
 const BODY = `Current source: ${'safe text '.repeat(3_500)}`;
 const REVISION = conversationMessageSourceRevision(SOURCE, BODY);
+
+function contextMatch(messageId: string, text: string, role: 'user' | 'assistant') {
+  const origin = role === 'user' ? 'owner' : 'assistant';
+  return {
+    messageId,
+    conversationId: CONVERSATION,
+    sourceRevision: conversationMessageSourceRevision(messageId, text),
+    speakerRevision: conversationMessageSpeakerRevision(messageId, text, role, origin),
+    role,
+    origin,
+    text,
+    createdAt: '2026-10-01T10:00:00.000Z',
+  };
+}
+
+function storedContextCall(overrides: Record<string, unknown> = {}) {
+  const anchor = contextMatch('60000000-0000-4000-8000-000000000006', 'Anchor content.', 'user');
+  const before = contextMatch(
+    '60000000-0000-4000-8000-000000000007',
+    'Neighbor before.',
+    'assistant',
+  );
+  const after = contextMatch('60000000-0000-4000-8000-000000000008', 'Neighbor after.', 'user');
+  const ref = ({
+    messageId,
+    conversationId,
+    sourceRevision,
+    speakerRevision,
+  }: ReturnType<typeof contextMatch>) => ({
+    messageId,
+    conversationId,
+    sourceRevision,
+    speakerRevision,
+  });
+  const anchorRef = ref(anchor);
+  return {
+    id: SEARCH_CALL,
+    taskId: TASK,
+    toolName: 'conversations.context',
+    status: 'succeeded',
+    args: { anchors: [anchorRef] },
+    result: {
+      mode: 'context',
+      matches: [before, anchor, after],
+      anchors: [anchorRef],
+      window: { before: 3, after: 1 },
+      observationGeneration: 'generation-7',
+    },
+    ...overrides,
+  } as unknown as Records['toolCalls'];
+}
 
 function storedCall(overrides: Record<string, unknown> = {}) {
   return {
@@ -44,7 +98,7 @@ function storedCall(overrides: Record<string, unknown> = {}) {
 
 function harness(options: {
   call?: Records['toolCalls'] | null;
-  conversations?: Pick<ConversationSearchRepository, 'refreshForResume'>;
+  conversations?: Pick<ConversationSearchRepository, 'refreshForResume' | 'validateSources'>;
 }) {
   const load = vi.fn(async () =>
     options.call ? { toolCall: options.call, task: {} as Records['tasks'], approval: null } : null,
@@ -90,7 +144,16 @@ function freshRepository(unchanged = true) {
         ]
       : [],
   }));
-  return { semantic: vi.fn(async () => []), text: vi.fn(async () => []), refreshForResume };
+  return {
+    semantic: vi.fn(async () => []),
+    text: vi.fn(async () => []),
+    context: vi.fn(async () => ({ matches: [], observationGeneration: 'generation-7' })),
+    validateSources: vi.fn(async ({ sourceRefs }) => ({
+      unchangedSourceRefs: sourceRefs.map(() => true),
+      observationGeneration: 'generation-7',
+    })),
+    refreshForResume,
+  };
 }
 
 describe('read_result conversation-search privacy fence', () => {
@@ -131,6 +194,85 @@ describe('read_result conversation-search privacy fence', () => {
     expect(page).toMatchObject({ error: expect.stringContaining('changed') });
     expect(JSON.stringify(page)).not.toContain(BODY);
     expect(conversations.refreshForResume).toHaveBeenCalledTimes(1);
+  });
+
+  it('pages context output only after validating anchors and every neighbor together', async () => {
+    const conversations = freshRepository();
+    const { run } = harness({
+      call: storedContextCall(),
+      conversations,
+    });
+
+    const page = await run();
+
+    expect(conversations.validateSources).toHaveBeenCalledExactlyOnceWith({
+      agentId: AGENT,
+      currentConversationId: CONVERSATION,
+      sourceRefs: expect.arrayContaining([
+        expect.objectContaining({ messageId: '60000000-0000-4000-8000-000000000006' }),
+        expect.objectContaining({ messageId: '60000000-0000-4000-8000-000000000007' }),
+        expect.objectContaining({ messageId: '60000000-0000-4000-8000-000000000008' }),
+      ]),
+    });
+    expect(page.chunk).toContain('Neighbor before.');
+    expect(page.chunk).toContain('Anchor content.');
+    expect(page.chunk).toContain('Neighbor after.');
+  });
+
+  it('withholds a stored context snapshot when any neighbor changed or the privacy generation moved', async () => {
+    for (const validation of [
+      { unchangedSourceRefs: [true, false, true], observationGeneration: 'generation-7' },
+      { unchangedSourceRefs: [true, true, true], observationGeneration: 'generation-8' },
+    ]) {
+      const conversations = freshRepository();
+      conversations.validateSources = vi.fn(async () => validation);
+      const { run } = harness({ call: storedContextCall(), conversations });
+
+      const page = await run();
+
+      expect(page.error).toContain('stored conversation context changed');
+      expect(JSON.stringify(page)).not.toContain('Neighbor before.');
+      expect(JSON.stringify(page)).not.toContain('Anchor content.');
+      expect(JSON.stringify(page)).not.toContain('Neighbor after.');
+    }
+  });
+
+  it('fails closed on malformed context anchors without calling the repository validator', async () => {
+    const call = storedContextCall();
+    call.result = {
+      ...(call.result as Record<string, unknown>),
+      anchors: [],
+    } as Records['toolCalls']['result'];
+    const conversations = freshRepository();
+    const { run } = harness({ call, conversations });
+
+    const page = await run();
+
+    expect(page.error).toContain('stored conversation context is unavailable');
+    expect(JSON.stringify(page)).not.toContain('Neighbor before.');
+    expect(conversations.validateSources).not.toHaveBeenCalled();
+  });
+
+  it('rejects a validly revision-bound context row from another conversation before paging', async () => {
+    const call = storedContextCall();
+    const result = structuredClone(call.result) as Record<string, unknown>;
+    const matches = result.matches as Array<Record<string, unknown>>;
+    const foreign = contextMatch(
+      '60000000-0000-4000-8000-000000000009',
+      'Valid row from an unanchored conversation.',
+      'assistant',
+    );
+    foreign.conversationId = randomUUID();
+    matches.push(foreign);
+    call.result = result as Records['toolCalls']['result'];
+    const conversations = freshRepository();
+    const { run } = harness({ call, conversations });
+
+    const page = await run();
+
+    expect(page.error).toContain('stored conversation context is unavailable');
+    expect(JSON.stringify(page)).not.toContain('Valid row from an unanchored conversation.');
+    expect(conversations.validateSources).not.toHaveBeenCalled();
   });
 
   it('keeps normal paging for an unchanged oversized semantic result and validates the next page too', async () => {
@@ -357,7 +499,12 @@ describe('read_result conversation-search privacy fence', () => {
     const { run } = harness({
       call: call as Records['toolCalls'],
       ...(conversations
-        ? { conversations: conversations as Pick<ConversationSearchRepository, 'refreshForResume'> }
+        ? {
+            conversations: conversations as Pick<
+              ConversationSearchRepository,
+              'refreshForResume' | 'validateSources'
+            >,
+          }
         : {}),
     });
     const page = await run();

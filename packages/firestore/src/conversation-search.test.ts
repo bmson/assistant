@@ -1,6 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import {
   type ConversationSearchRepository,
   conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
   type EmbeddingSpace,
 } from '@assistant/persistence';
 import { FieldValue, Timestamp } from '@google-cloud/firestore';
@@ -18,6 +20,11 @@ const space: EmbeddingSpace = {
 };
 const vector = Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0));
 const spaceKey = embeddingSpaceKey(space);
+
+function contextFor(repository: ConversationSearchRepository) {
+  if (!repository.context) throw new Error('Conversation context is unavailable');
+  return repository.context.bind(repository);
+}
 
 function compareTimestamps(left: Timestamp, right: Timestamp): number {
   return left.seconds - right.seconds || left.nanoseconds - right.nanoseconds;
@@ -128,6 +135,403 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           limit: 5,
         }),
       ).rejects.toThrow('embedding space changed');
+    });
+
+    it('returns a revision-bound three-message window with deterministic time/id ordering', async () => {
+      const conversationId = randomUUID();
+      const ids = Array.from({ length: 6 }, () => randomUUID());
+      const times = [0, 1, 2, 3, 4, 5].map(
+        (minutes) => new Date(`2026-10-16T10:${String(minutes).padStart(2, '0')}:00.000Z`),
+      );
+      const source = [
+        ['owner initializer with Aurora exercise cue', 'user', 'owner'],
+        ['earlier user turn', 'user', 'owner'],
+        ['assistant setup note', 'assistant', 'assistant'],
+        ['assistant next step', 'assistant', 'assistant'],
+        ['later user turn', 'user', 'owner'],
+        ['later assistant turn', 'assistant', 'assistant'],
+      ] as const;
+      await store.doc('conversations', conversationId).set({
+        id: conversationId,
+        agentId: 'owner',
+        trust: 'owner',
+      });
+      for (const [index, id] of ids.entries()) {
+        const entry = source[index];
+        const createdAt = times[index];
+        if (!entry || !createdAt) throw new Error('Missing fixture row');
+        await store.doc('messages', id).set({
+          id,
+          conversationId,
+          role: entry[1],
+          origin: entry[2],
+          text: entry[0],
+          createdAt,
+        });
+      }
+      const hiddenNeighborId = randomUUID();
+      await store.doc('messages', hiddenNeighborId).set({
+        id: hiddenNeighborId,
+        conversationId,
+        role: 'assistant',
+        origin: 'assistant',
+        text: 'hidden neighbor omitted from context',
+        hiddenAt: new Date('2026-10-16T10:02:30.000Z'),
+        createdAt: new Date('2026-10-16T10:02:30.000Z'),
+      });
+      const anchorId = ids[3];
+      const anchor = source[3];
+      if (!anchorId || !anchor) throw new Error('Missing anchor fixture');
+      const repository = new FirestoreConversationSearchRepository(store, space);
+      const result = await contextFor(repository)({
+        agentId: 'owner',
+        anchors: [
+          {
+            messageId: anchorId,
+            conversationId,
+            sourceRevision: conversationMessageSourceRevision(anchorId, anchor[0]),
+            speakerRevision: conversationMessageSpeakerRevision(
+              anchorId,
+              anchor[0],
+              anchor[1],
+              anchor[2],
+            ),
+          },
+        ],
+      });
+      expect(result.matches.map((row) => row.text)).toEqual(
+        source.slice(0, 5).map((row) => row[0]),
+      );
+      expect(result.matches).toHaveLength(5);
+      expect(result.matches[0]?.role).toBe('user');
+      expect(result.matches[0]?.origin).toBe('owner');
+      expect(result.matches.every((row) => row.sourceRevision.length === 64)).toBe(true);
+      expect(result.matches.every((row) => row.speakerRevision?.length === 64)).toBe(true);
+      const firstContextId = ids[1];
+      const secondContextId = ids[4];
+      const firstContextSource = source[1];
+      const secondContextSource = source[4];
+      if (!firstContextId || !secondContextId || !firstContextSource || !secondContextSource)
+        throw new Error('Missing context fixtures');
+      const twoAnchors = await contextFor(repository)({
+        agentId: 'owner',
+        anchors: [
+          {
+            messageId: firstContextId,
+            conversationId,
+            sourceRevision: conversationMessageSourceRevision(
+              firstContextId,
+              firstContextSource[0],
+            ),
+            speakerRevision: conversationMessageSpeakerRevision(
+              firstContextId,
+              firstContextSource[0],
+              firstContextSource[1],
+              firstContextSource[2],
+            ),
+          },
+          {
+            messageId: secondContextId,
+            conversationId,
+            sourceRevision: conversationMessageSourceRevision(
+              secondContextId,
+              secondContextSource[0],
+            ),
+            speakerRevision: conversationMessageSpeakerRevision(
+              secondContextId,
+              secondContextSource[0],
+              secondContextSource[1],
+              secondContextSource[2],
+            ),
+          },
+        ],
+      });
+      expect(twoAnchors.matches.length).toBeLessThanOrEqual(10);
+      expect(twoAnchors.matches.map((row) => row.messageId)).toContain(firstContextId);
+      expect(twoAnchors.matches.map((row) => row.messageId)).toContain(secondContextId);
+
+      const tiedConversationId = randomUUID();
+      // UUID hex fields are case-insensitive by identity, but Firestore string
+      // ordering must stay deterministic and independent of host locale.
+      const tieLow = '00000000-0000-4000-8000-00000000000A';
+      const tieAnchor = '00000000-0000-4000-8000-00000000000B';
+      const tieHigh = '00000000-0000-4000-8000-00000000000a';
+      await store.doc('conversations', tiedConversationId).set({
+        id: tiedConversationId,
+        agentId: 'owner',
+        trust: 'owner',
+      });
+      for (const [id, text] of [
+        [tieLow, 'same-time prior'],
+        [tieAnchor, 'same-time anchor'],
+        [tieHigh, 'same-time next'],
+      ] as const) {
+        await store.doc('messages', id).set({
+          id,
+          conversationId: tiedConversationId,
+          role: 'assistant',
+          origin: 'assistant',
+          text,
+          createdAt: new Date('2026-10-16T10:00:00.000Z'),
+        });
+      }
+      const tieResult = await contextFor(repository)({
+        agentId: 'owner',
+        anchors: [
+          {
+            messageId: tieAnchor,
+            conversationId: tiedConversationId,
+            sourceRevision: conversationMessageSourceRevision(tieAnchor, 'same-time anchor'),
+            speakerRevision: conversationMessageSpeakerRevision(
+              tieAnchor,
+              'same-time anchor',
+              'assistant',
+              'assistant',
+            ),
+          },
+        ],
+      });
+      expect(tieResult.matches.map((row) => row.messageId)).toEqual([tieLow, tieAnchor, tieHigh]);
+
+      const nanosConversationId = randomUUID();
+      await store.doc('conversations', nanosConversationId).set({
+        id: nanosConversationId,
+        agentId: 'owner',
+        trust: 'owner',
+      });
+      const nanosRows = [
+        { id: '00000000-0000-4000-8000-000000000090', text: 'nanos previous one', nanos: 100_000 },
+        { id: '00000000-0000-4000-8000-000000000080', text: 'nanos previous two', nanos: 200_000 },
+        {
+          id: '00000000-0000-4000-8000-000000000070',
+          text: 'nanos previous three',
+          nanos: 300_000,
+        },
+        { id: '00000000-0000-4000-8000-000000000001', text: 'nanos anchor', nanos: 400_000 },
+        { id: '00000000-0000-4000-8000-000000000000', text: 'nanos following', nanos: 500_000 },
+      ] as const;
+      const nanosSeconds = Math.floor(Date.parse('2026-10-16T10:00:00.000Z') / 1000);
+      for (const row of nanosRows) {
+        await store.doc('messages', row.id).set({
+          id: row.id,
+          conversationId: nanosConversationId,
+          role: 'assistant',
+          origin: 'assistant',
+          text: row.text,
+          createdAt: new Timestamp(nanosSeconds, row.nanos),
+        });
+      }
+      const nanosAnchor = nanosRows[3];
+      const nanosResult = await contextFor(repository)({
+        agentId: 'owner',
+        anchors: [
+          {
+            messageId: nanosAnchor.id,
+            conversationId: nanosConversationId,
+            sourceRevision: conversationMessageSourceRevision(nanosAnchor.id, nanosAnchor.text),
+            speakerRevision: conversationMessageSpeakerRevision(
+              nanosAnchor.id,
+              nanosAnchor.text,
+              'assistant',
+              'assistant',
+            ),
+          },
+        ],
+      });
+      expect(
+        new Set(nanosRows.map((row) => new Date(nanosSeconds * 1000 + row.nanos / 1e6).getTime()))
+          .size,
+      ).toBe(1);
+      expect(nanosResult.matches.map((row) => row.messageId)).toEqual(
+        nanosRows.map((row) => row.id),
+      );
+    });
+
+    it('fails the whole context read for stale, hidden, foreign, duplicate, or out-of-bound anchors', async () => {
+      const conversationId = randomUUID();
+      const messageId = randomUUID();
+      await store
+        .doc('conversations', conversationId)
+        .set({ id: conversationId, agentId: 'owner' });
+      await store.doc('messages', messageId).set({
+        id: messageId,
+        conversationId,
+        role: 'assistant',
+        origin: 'assistant',
+        text: 'anchor body',
+        createdAt: new Date('2026-10-16T10:00:00.000Z'),
+      });
+      const ref = {
+        messageId,
+        conversationId,
+        sourceRevision: conversationMessageSourceRevision(messageId, 'anchor body'),
+        speakerRevision: conversationMessageSpeakerRevision(
+          messageId,
+          'anchor body',
+          'assistant',
+          'assistant',
+        ),
+      };
+      const repository = new FirestoreConversationSearchRepository(store, space);
+      await expect(
+        contextFor(repository)({
+          agentId: 'owner',
+          anchors: [{ ...ref, sourceRevision: '0'.repeat(64) }],
+        }),
+      ).rejects.toThrow('stale or unavailable');
+      await expect(
+        contextFor(repository)({
+          agentId: 'owner',
+          anchors: [{ ...ref, speakerRevision: '0'.repeat(64) }],
+        }),
+      ).rejects.toThrow('stale or unavailable');
+      await expect(
+        contextFor(repository)({
+          agentId: 'owner',
+          anchors: [{ ...ref, conversationId: randomUUID() }],
+        }),
+      ).rejects.toThrow('stale or unavailable');
+      await expect(
+        contextFor(repository)({ agentId: 'other-owner', anchors: [ref] }),
+      ).rejects.toThrow('stale or unavailable');
+      await expect(
+        contextFor(repository)({ agentId: 'owner', anchors: [ref, ref] }),
+      ).rejects.toThrow('Duplicate conversation context anchor');
+      await expect(contextFor(repository)({ agentId: 'owner', anchors: [] })).rejects.toThrow(
+        'one or two anchors',
+      );
+      await expect(
+        contextFor(repository)({
+          agentId: 'owner',
+          anchors: [ref, { ...ref, messageId: randomUUID() }, { ...ref, messageId: randomUUID() }],
+        }),
+      ).rejects.toThrow('one or two anchors');
+      await store.doc('messages', messageId).update({ text: 'body changed after search' });
+      await expect(contextFor(repository)({ agentId: 'owner', anchors: [ref] })).rejects.toThrow(
+        'stale or unavailable',
+      );
+      await store.doc('messages', messageId).update({ text: 'anchor body', origin: 'web' });
+      await expect(contextFor(repository)({ agentId: 'owner', anchors: [ref] })).rejects.toThrow(
+        'stale or unavailable',
+      );
+      await store.doc('messages', messageId).update({ hiddenAt: new Date() });
+      await expect(contextFor(repository)({ agentId: 'owner', anchors: [ref] })).rejects.toThrow(
+        'stale or unavailable',
+      );
+    });
+
+    it('fails closed when hidden or fixture rows exhaust the bounded neighbor scan', async () => {
+      const conversationId = randomUUID();
+      await store
+        .doc('conversations', conversationId)
+        .set({ id: conversationId, agentId: 'owner' });
+      const anchorId = randomUUID();
+      const anchorText = 'bounded scan anchor';
+      await store.doc('messages', anchorId).set({
+        id: anchorId,
+        conversationId,
+        role: 'assistant',
+        origin: 'assistant',
+        text: anchorText,
+        createdAt: new Date('2026-10-16T10:01:00.000Z'),
+      });
+      for (let index = 0; index < 20; index += 1) {
+        const id = randomUUID();
+        const createdAt = new Date(Date.parse('2026-10-16T10:00:00.000Z') + index);
+        await store.doc('messages', id).set({
+          id,
+          conversationId,
+          role: index % 2 ? 'assistant' : 'user',
+          origin: index % 2 ? 'assistant' : 'owner',
+          text: `bounded hidden fixture ${index}`,
+          ...(index < 10
+            ? { hiddenAt: createdAt }
+            : { channelMessageId: `visual-qa:context:${index}` }),
+          createdAt,
+        });
+      }
+      await expect(
+        contextFor(new FirestoreConversationSearchRepository(store, space))({
+          agentId: 'owner',
+          anchors: [
+            {
+              messageId: anchorId,
+              conversationId,
+              sourceRevision: conversationMessageSourceRevision(anchorId, anchorText),
+              speakerRevision: conversationMessageSpeakerRevision(
+                anchorId,
+                anchorText,
+                'assistant',
+                'assistant',
+              ),
+            },
+          ],
+        }),
+      ).rejects.toThrow('Conversation context bounded lookup unavailable');
+    });
+
+    it('fails closed when erasure changes during the anchor and neighbor read', async () => {
+      const conversationId = randomUUID();
+      const messageId = randomUUID();
+      await store
+        .doc('conversations', conversationId)
+        .set({ id: conversationId, agentId: 'owner' });
+      const originalDoc = store.doc.bind(store);
+      const fenceRef = originalDoc('privacyErasureJobs', 'owner');
+      await fenceRef.set({ agentId: 'owner', status: 'complete', generation: 'context-baseline' });
+      const baseline = await fenceRef.get();
+      if (!baseline.updateTime) throw new Error('Expected privacy fence update time');
+      const createdAt = new Date(baseline.updateTime.toMillis() + 1);
+      await store.doc('messages', messageId).set({
+        id: messageId,
+        conversationId,
+        role: 'user',
+        origin: 'owner',
+        text: 'context erasure race anchor',
+        createdAt,
+      });
+      const anchor = {
+        messageId,
+        conversationId,
+        sourceRevision: conversationMessageSourceRevision(messageId, 'context erasure race anchor'),
+        speakerRevision: conversationMessageSpeakerRevision(
+          messageId,
+          'context erasure race anchor',
+          'user',
+          'owner',
+        ),
+      };
+      let reads = 0;
+      Object.defineProperty(store, 'doc', {
+        configurable: true,
+        value: (collection: string, id: string) => {
+          const ref = originalDoc(collection, id);
+          if (collection !== 'privacyErasureJobs' || id !== 'owner') return ref;
+          return new Proxy(ref, {
+            get(target, property) {
+              if (property === 'get')
+                return async () => {
+                  reads += 1;
+                  if (reads === 2)
+                    await fenceRef.set({
+                      agentId: 'owner',
+                      status: 'complete',
+                      generation: 'context-race',
+                    });
+                  return target.get();
+                };
+              const value = Reflect.get(target, property, target);
+              return typeof value === 'function' ? value.bind(target) : value;
+            },
+          });
+        },
+      });
+      await expect(
+        contextFor(new FirestoreConversationSearchRepository(store, space))({
+          agentId: 'owner',
+          anchors: [anchor],
+        }),
+      ).rejects.toThrow('Privacy erasure changed during read');
     });
 
     it('diversifies owned semantic candidates before the public limit', async () => {

@@ -225,13 +225,17 @@ describe('revision-bound multi-source Activity answer through allocated PostgreS
       const calls: Array<{ toolName: string; args: Record<string, unknown> }> = [];
       const dispatcher = {
         toolDefs: () =>
-          ['conversations.search', 'gmail.search', 'gmail.read_thread', 'memory.recall'].map(
-            (name) => ({
-              name,
-              description: 'Synthetic read only',
-              inputSchema: {},
-            }),
-          ),
+          [
+            'conversations.search',
+            'gmail.search',
+            'gmail.read_thread',
+            'memory.recall',
+            'occasions.list_birthdays',
+          ].map((name) => ({
+            name,
+            description: 'Synthetic read only',
+            inputSchema: {},
+          })),
         resultIsUntrusted: () => true,
         executeApproved: vi.fn(),
         dispatch: vi.fn(
@@ -254,7 +258,9 @@ describe('revision-bound multi-source Activity answer through allocated PostgreS
                   ? searchResult(String(args.query), Number(args.maxResults))
                   : toolName === 'memory.recall'
                     ? { memories: [] }
-                    : threadResult('Cedar review date is 2026-10-20.');
+                    : toolName === 'occasions.list_birthdays'
+                      ? { birthdays: [], complete: true }
+                      : threadResult('Cedar review date is 2026-10-20.');
             const [stored] = await db
               .insert(toolCalls)
               .values({
@@ -386,21 +392,16 @@ describe('revision-bound multi-source Activity answer through allocated PostgreS
       expect(result).toMatchObject({ outcome: success ? 'done' : 'needs_attention' });
       expect(calls.map((row) => row.toolName)).toEqual(
         family
-          ? ['conversations.search', 'memory.recall']
+          ? ['conversations.search', 'memory.recall', 'occasions.list_birthdays']
           : ['conversations.search', 'gmail.search', 'gmail.read_thread'],
       );
       expect(state.requestChecklist?.items.find((item) => item.id === selectedId)?.status).toBe(
         success ? 'completed' : 'blocked',
       );
-      expect(calls.map((row) => row.toolName)).toEqual(
-        family
-          ? ['conversations.search', 'memory.recall']
-          : ['conversations.search', 'gmail.search', 'gmail.read_thread'],
-      );
       expect(router.object).toHaveBeenCalledTimes(1);
       expect(router.step).not.toHaveBeenCalled();
       expect(dispatcher.executeApproved).not.toHaveBeenCalled();
-      expect(state.step).toBe(family ? 3 : 4);
+      expect(state.step).toBe(4);
       expect(state.step).toBeLessThanOrEqual(lease.maxSteps);
       const persisted = await db.query.tasks.findFirst({ where: eq(tasks.id, taskId) });
       expect(persisted?.status).toBe(success ? 'done' : 'needs_attention');

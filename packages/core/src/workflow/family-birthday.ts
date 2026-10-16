@@ -148,7 +148,7 @@ function birthdayDate(raw: string) {
 }
 
 /** A source quote must be a complete declarative source sentence, not embedded speech/instructions. */
-function assertion(source: FamilyBirthdaySource, quote: string): string | undefined {
+function assertion(source: Pick<FamilyBirthdaySource, 'body' | 'trusted'>, quote: string) {
   if (
     !source.trusted ||
     !source.body.includes(quote) ||
@@ -172,6 +172,49 @@ function relationProof(sentence: string, person: string, relation: string) {
     `^${ownerPossessive}\\s+(?:(?:older|younger|half|step)[ -])?${role}\\s+(?:named\\s+)?${who}(?=$|['’,.!]|\\s+(?:was\\s+born|born|has\\s+(?:a\\s+)?birthday|is\\b))|^${who}\\s+is\\s+${ownerPossessive}\\s+(?:(?:older|younger|half|step)[ -])?${role}\\b`,
     'iu',
   ).test(sentence);
+}
+
+/**
+ * Only identity-bound, whole-sentence relationship facts may scope an occasion
+ * read. A contact's display name or address-book relationship label is not
+ * identity proof.
+ */
+export function familyBirthdayContactIds(
+  request: FamilyBirthdayRequest,
+  sources: Array<{ body: string; trusted: boolean; subjectId?: string }>,
+): string[] {
+  const role = request.allowedRelations.map(escapeRegex).join('|');
+  if (!role) return [];
+  const name = String.raw`([\p{Lu}][\p{L}\p{M}'’–-]*(?:\s+[\p{Lu}][\p{L}\p{M}'’–-]*){0,4})`;
+  const modifiers = '(?:(?:older|younger|half|step)[ -])?';
+  const before = new RegExp(
+    `^${ownerPossessive}\\s+${modifiers}(${role})\\s+(?:named\\s+)?${name}(?=$|['’]s?\\s+(?:was born|born|has\\s+(?:a\\s+)?birthday|is\\b)|[',.!])`,
+    'iu',
+  );
+  const after = new RegExp(
+    `^${name}\\s+is\\s+${ownerPossessive}\\s+${modifiers}(${role})\\b`,
+    'iu',
+  );
+  const ids = new Set<string>();
+  for (const source of sources) {
+    if (!source.trusted || !source.subjectId || source.body.length > 4000) continue;
+    for (const raw of source.body.split(/(?<=[.!?])\s+|[\n;]+/u)) {
+      const sentence = assertion(source, raw);
+      if (!sentence) continue;
+      const match = before.exec(sentence);
+      const reverse = match ? undefined : after.exec(sentence);
+      const relation = (match?.[1] ?? reverse?.[2] ?? '').toLowerCase();
+      const person = match?.[2] ?? reverse?.[1] ?? '';
+      if (
+        relation &&
+        request.allowedRelations.includes(relation) &&
+        (!request.person || normalize(request.person) === normalize(person)) &&
+        relationProof(sentence, person, relation)
+      )
+        ids.add(source.subjectId);
+    }
+  }
+  return [...ids].sort();
 }
 function dateProof(sentence: string, person: string, raw: string) {
   if (!birthdayDate(raw)) return false;

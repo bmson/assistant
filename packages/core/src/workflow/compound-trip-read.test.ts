@@ -1845,6 +1845,55 @@ describe('compound trip read projection', () => {
     expect(projection.text).toContain('did not include an explicit address');
   });
 
+  it('keeps a named hotel with yearless stay dates as an unlinked observation', () => {
+    const read = request();
+    const evidence = [
+      completeCalendarEvents([]),
+      ...bookingEmailEvidence({
+        hotelBody:
+          'Reservation confirmed: Hotel Linden, Berlin.\nCheck-in: October 17\nCheck-out: October 19\nAddress: Linienstraße 89, 10119 Berlin.',
+      }),
+    ];
+    const projection = compoundTripReadProjection(read, evidence);
+
+    expect(projection.presentation.hotels).toEqual([
+      expect.objectContaining({
+        hotelName: 'Hotel Linden',
+        city: 'Berlin',
+        association: 'unlinked',
+      }),
+    ]);
+    expect(projection.presentation.hotels[0]?.checkIn).toBeUndefined();
+    expect(projection.presentation.hotels[0]?.checkOut).toBeUndefined();
+    expect(projection.text).toContain('Hotel Linden, Berlin');
+    expect(projection.text).toContain('complete, verifiable stay range');
+    expect(projection.text).toContain('cannot link it to a flight');
+    expect(projection.hotel).toBeUndefined();
+    expect(compoundTripRoute(read, evidence)).toBeUndefined();
+    expect(compoundTripReadProjection(read, evidence).webQuery).toBeUndefined();
+    expect(compoundTripFetchTargets(read, evidence)).toEqual([]);
+  });
+
+  it('does not route to or search an unlinked hotel even when its city matches the flight', () => {
+    const read = request();
+    const evidence = [
+      completeCalendarEvents([calendarFlight()]),
+      ...bookingEmailEvidence({
+        hotelBody:
+          'Reservation confirmed: Hotel Linden, Berlin.\nCheck-in: October 17\nCheck-out: October 19\nAddress: Linienstraße 89, 10119 Berlin.',
+      }),
+    ];
+
+    const projection = compoundTripReadProjection(read, evidence);
+
+    expect(projection.flight).toBeDefined();
+    expect(projection.hotel?.association).toBe('unlinked');
+    expect(projection.routeOrigin).toBeUndefined();
+    expect(projection.routeDestination).toBeUndefined();
+    expect(projection.webQuery).toBeUndefined();
+    expect(compoundTripFetchTargets(read, evidence)).toEqual([]);
+  });
+
   it('does not associate or route a different-city or nonoverlapping hotel candidate', () => {
     const read = request();
     const evidence = [
@@ -5612,6 +5661,121 @@ San Francisco (SFO-San Francisco Intl.)`;
       'no explicit time-zone offset',
     );
   });
+  it('reads a direct upcoming-flight purchase within the existing two-thread flight-only cap', () => {
+    const read = detectPersonalReadRequest([{ role: 'user', content: 'What is my next flight?' }], {
+      now: new Date('2026-10-16T12:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!read?.upcomingFlightDiscovery || read.compoundTripDiscovery)
+      throw new Error('Expected flight-only discovery');
+    const evidence = [
+      row(
+        'gmail.search',
+        { query: read.mailQuery },
+        {
+          complete: false,
+          hasMore: true,
+          results: [
+            {
+              threadId: 'recent-flight-purchase',
+              from: 'Example Airways confirmations <tickets@example-air.invalid>',
+              subject: 'KLM purchase confirmation',
+              snippet: 'Confirmed ticket for flight KL702; itinerary details',
+            },
+            {
+              threadId: 'recent-flight-purchase',
+              from: 'Example Airways confirmations <tickets@example-air.invalid>',
+              subject: 'Your KLM purchase receipt',
+              snippet: 'Flight details and booking reference',
+            },
+            {
+              threadId: 'second-flight-purchase',
+              from: 'Example Airways confirmations <tickets@example-air.invalid>',
+              subject: 'Payment confirmation for flight',
+              snippet: 'Booking reference and itinerary details',
+            },
+            {
+              threadId: 'older-complete-itinerary',
+              subject: 'Flight - BOOKED - Berlin to San Francisco',
+              snippet: 'Confirmed itinerary and ticket details',
+            },
+            {
+              threadId: 'older-confirmation',
+              subject: 'Passenger flight confirmation code',
+              snippet: 'Airline confirmation for flight LH778',
+            },
+            {
+              threadId: 'unrelated-purchase',
+              subject: 'Thank you for your purchase',
+              snippet: 'Payment receipt for a hotel stay',
+            },
+            {
+              threadId: 'flight-newsletter',
+              subject: 'Weekly flight deals',
+              snippet: 'Itinerary tips and booking advice',
+            },
+          ],
+        },
+      ),
+    ];
+
+    const readInputs = compoundTripThreadReadInputs(evidence, read);
+    expect(readInputs.map((input) => input.threadId)).toEqual([
+      'older-complete-itinerary',
+      'recent-flight-purchase',
+    ]);
+    expect(readInputs).toHaveLength(2);
+    expect(new Set(readInputs.map((input) => input.threadId)).size).toBe(2);
+    expect(readInputs.map((input) => input.threadId)).not.toContain('unrelated-purchase');
+    expect(readInputs.map((input) => input.threadId)).not.toContain('second-flight-purchase');
+    expect(compoundTripThreadIdsToRead(evidence, read)).not.toContain('flight-newsletter');
+  });
+
+  it('reserves the second flight-only read for a supplier purchase when two booked itineraries rank first', () => {
+    const read = detectPersonalReadRequest([{ role: 'user', content: 'What is my next flight?' }], {
+      now: new Date('2026-10-16T12:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!read?.upcomingFlightDiscovery || read.compoundTripDiscovery)
+      throw new Error('Expected flight-only discovery');
+    const evidence = [
+      row(
+        'gmail.search',
+        { query: read.mailQuery },
+        {
+          complete: false,
+          hasMore: true,
+          results: [
+            {
+              threadId: 'booked-flight-one',
+              subject: 'Flight - BOOKED - Berlin to San Francisco',
+              snippet: 'Confirmed itinerary and ticket details',
+            },
+            {
+              threadId: 'booked-flight-two',
+              subject: 'Flight - BOOKED - San Francisco to Berlin',
+              snippet: 'Confirmed itinerary and ticket details',
+            },
+            {
+              threadId: 'direct-flight-purchase',
+              from: 'Example Airways confirmations <tickets@example-air.invalid>',
+              subject: 'KLM purchase confirmation',
+              snippet: 'Confirmed ticket for flight KL702; booking reference',
+            },
+          ],
+        },
+      ),
+    ];
+
+    const readInputs = compoundTripThreadReadInputs(evidence, read);
+    expect(readInputs.map((input) => input.threadId)).toEqual([
+      'booked-flight-one',
+      'direct-flight-purchase',
+    ]);
+    expect(readInputs).toHaveLength(2);
+    expect(readInputs.map((input) => input.threadId)).not.toContain('booked-flight-two');
+  });
+
   it('ranks complete itineraries and individual confirmations before generic purchases, shower and spa reads', () => {
     const { read, evidence } = sources();
     evidence[1] = row(
@@ -6045,7 +6209,7 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(projection.blocked).toBe(true); // Remaining itinerary/zone gates still apply.
   });
 
-  it('uses one bounded alternate search after two blocked hosts, then checks the actual alternate page for both modes', () => {
+  it('broadens one bounded alternate search after two blocked hosts while verifying both endpoints in the fetched page', () => {
     const { read, rows, search } = withTransferSearch();
     for (const url of [
       'https://blocked.example/airport/hotel',
@@ -6060,8 +6224,11 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
         error: 'HTTP403 challenge',
       });
     const query = compoundTripNextWebSearchQuery(read, rows);
-    expect(query).toContain('CPH');
-    expect(query).toContain('Canal Street 42, Copenhagen');
+    expect(query).toContain('"CPH"');
+    expect(query).toContain('"Canal House"');
+    expect(query).toContain('"Copenhagen"');
+    expect(query).not.toContain('Canal Street 42');
+    expect(query).not.toContain('official');
     expect(query).toContain('-site:blocked.example');
     expect(query).toContain('-site:hotel.example');
     expect(nextRequiredReadTool(read, rows)).toBe('web.search');
@@ -6115,7 +6282,14 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(nextRequiredReadTool(read, rows)).toBeUndefined();
     expect(rows.filter((item) => item.toolName === 'web.search')).toHaveLength(2);
     // A discovered but unjoined, stale, partial or failed page cannot supply the comparison.
-    for (const invalid of ['wrong-query', 'old-task', 'truncated', 'http-error'] as const) {
+    for (const invalid of [
+      'wrong-query',
+      'old-task',
+      'truncated',
+      'http-error',
+      'wrong-hotel',
+      'wrong-airport',
+    ] as const) {
       const clone = structuredClone(rows);
       const page = clone.at(-1);
       const alternate = clone.at(-2);
@@ -6127,7 +6301,28 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
       if (invalid === 'old-task') page.fromCurrentTask = false;
       if (invalid === 'truncated') (page.result as Record<string, unknown>).truncated = true;
       if (invalid === 'http-error') (page.result as Record<string, unknown>).status = 403;
-      expect(compoundTripReadProjection(read, clone).comparison).toEqual([]);
+      if (invalid === 'wrong-hotel')
+        (page.result as Record<string, unknown>).text = String(
+          (page.result as Record<string, unknown>).text,
+        ).replaceAll('Canal House', 'Different Hotel');
+      if (invalid === 'wrong-airport')
+        (page.result as Record<string, unknown>).text = String(
+          (page.result as Record<string, unknown>).text,
+        ).replaceAll('CPH Airport', 'SFO Airport');
+      const invalidProjection = compoundTripReadProjection(read, clone);
+      if (invalid === 'wrong-hotel' || invalid === 'wrong-airport') {
+        expect(invalidProjection.comparison).toHaveLength(2);
+        expect(invalidProjection.comparison).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ mode: 'public transport', endpointMatched: false }),
+            expect.objectContaining({ mode: 'taxi', endpointMatched: false }),
+          ]),
+        );
+        expect(invalidProjection.comparison.every((item) => !item.fare && !item.duration)).toBe(
+          true,
+        );
+        expect(invalidProjection.blocked).toBe(true);
+      } else expect(invalidProjection.comparison).toEqual([]);
     }
     fetched.status = 'failed';
     expect(compoundTripReadProjection(read, rows).comparison).toEqual([]);

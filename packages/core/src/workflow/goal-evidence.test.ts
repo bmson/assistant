@@ -12,9 +12,14 @@ describe('isGoalWorkEvidenceTool', () => {
     (toolName) => expect(isGoalWorkEvidenceTool(toolName)).toBe(true),
   );
 
-  it.each(['goals.update_progress', 'goals.list', 'workspace.list', 'browser.plan'])(
-    'does not let %s prove its own progress',
-    (toolName) => expect(isGoalWorkEvidenceTool(toolName)).toBe(false),
+  it.each([
+    'goals.update_progress',
+    'goals.list',
+    'workspace.list',
+    'browser.plan',
+    'conversations.context',
+  ])('does not let %s prove its own progress', (toolName) =>
+    expect(isGoalWorkEvidenceTool(toolName)).toBe(false),
   );
 
   it.each([

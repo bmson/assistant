@@ -183,8 +183,11 @@ export async function fetchWeather(
   lat: number,
   lng: number,
   fetchImpl: FetchLike = fetch,
-  opts: { hourly?: boolean; signal?: AbortSignal } = {},
+  opts: { hourly?: boolean; forecastDays?: number; signal?: AbortSignal } = {},
 ): Promise<WeatherNow | null> {
+  const forecastDays = opts.forecastDays ?? 7;
+  if (!Number.isInteger(forecastDays) || forecastDays < 7 || forecastDays > 16)
+    throw new RangeError('forecastDays must be an integer from 7 through 16');
   const url =
     `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}` +
     '&current=temperature_2m,weather_code,wind_speed_10m,relative_humidity_2m' +
@@ -192,7 +195,7 @@ export async function fetchWeather(
     (opts.hourly
       ? '&hourly=temperature_2m,apparent_temperature,weather_code,precipitation_probability,wind_speed_10m'
       : '') +
-    '&forecast_days=7&timezone=auto';
+    `&forecast_days=${forecastDays}&timezone=auto`;
   const res = await fetchImpl(url, { signal: mergeSignals(opts.signal, WEATHER_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`weather fetch failed: ${res.status}`);
   const data = (await res.json()) as {

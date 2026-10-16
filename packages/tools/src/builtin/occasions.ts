@@ -1,8 +1,13 @@
 import { selectUpcomingOccasions } from '@assistant/core/memory/occasions';
-import type { OccasionToolRepository } from '@assistant/persistence';
+import type {
+  BirthdayOccasionToolRepository,
+  OccasionToolRepository,
+} from '@assistant/persistence';
 import { z } from 'zod';
 import { register } from '../register.js';
 import type { ToolRegistry } from '../registry.js';
+
+const MAX_BIRTHDAY_OCCASION_RESULTS = 40;
 
 /** `occasions.save` and `occasions.list` over an occasion repository instead of SQL. */
 export function registerPortableOccasionTools(
@@ -97,6 +102,85 @@ export function registerPortableOccasionTools(
             daysUntil: o.daysUntil,
             notes: o.notes || undefined,
           })),
+        };
+      },
+    },
+    { confidentialRead: true },
+  );
+  return registry;
+}
+
+/** A bounded, notes-free read used only by identity-checked family birthday recall. */
+export function registerPortableBirthdayOccasionTool(
+  registry: ToolRegistry,
+  occasions: BirthdayOccasionToolRepository,
+): ToolRegistry {
+  register(
+    registry,
+    {
+      name: 'occasions.list_birthdays',
+      description:
+        'Read confirmed, recurring birthday dates only for the supplied contact IDs. This is a private fact lookup, not an upcoming-date list. Do not infer relationships from contact names.',
+      inputSchema: z.object({
+        contactIds: z.array(z.string().min(1).max(200)).max(20),
+      }),
+      risk: 'autonomous',
+      acceptsUntrustedInput: true,
+      execute: async (args, ctx) => {
+        const requested = new Set(args.contactIds);
+        if (requested.size !== args.contactIds.length) return { birthdays: [], complete: false };
+        if (requested.size === 0) return { birthdays: [], complete: true };
+        const bounded = await occasions.listBirthdays({
+          agentId: ctx.agentId,
+          contactIds: [...requested],
+          limit: MAX_BIRTHDAY_OCCASION_RESULTS,
+        });
+        const birthdays = bounded.rows
+          .filter(
+            (row) =>
+              requested.has(row.contactId) &&
+              row.kind === 'birthday' &&
+              row.recurrence === 'annual' &&
+              row.ownerConfirmed === true &&
+              row.quarantined === false &&
+              Number.isInteger(row.month) &&
+              row.month >= 1 &&
+              row.month <= 12 &&
+              Number.isInteger(row.day) &&
+              row.day >= 1 &&
+              row.day <= 31 &&
+              (row.year === null ||
+                (Number.isInteger(row.year) && row.year >= 1000 && row.year <= 9999)),
+          )
+          .filter((row) => {
+            const date = new Date(Date.UTC(row.year ?? 2000, row.month - 1, row.day));
+            return date.getUTCMonth() === row.month - 1 && date.getUTCDate() === row.day;
+          })
+          .sort(
+            (left, right) =>
+              left.contactId.localeCompare(right.contactId) ||
+              left.month - right.month ||
+              left.day - right.day ||
+              left.id.localeCompare(right.id),
+          )
+          .map((row) => ({
+            id: row.id,
+            contactId: row.contactId,
+            person: row.contactName,
+            kind: row.kind,
+            month: row.month,
+            day: row.day,
+            year: row.year,
+            recurrence: row.recurrence,
+            originTrust: row.originTrust,
+            ownerConfirmed: row.ownerConfirmed,
+            quarantined: row.quarantined,
+          }));
+        const complete = !bounded.overflow && birthdays.length <= MAX_BIRTHDAY_OCCASION_RESULTS;
+        return {
+          birthdays: birthdays.slice(0, MAX_BIRTHDAY_OCCASION_RESULTS),
+          complete,
+          ...(complete ? {} : { truncated: true }),
         };
       },
     },
