@@ -1185,7 +1185,9 @@ describe('weeklyCalendarPlan', () => {
                 eventId: 'safe',
                 summary: 'Planning [Q2] *review*',
                 start: '2026-10-12T18:00:00Z',
-                end: '2026-10-12T18:30:00Z',
+                end: '2026-10-12T20:00:00Z',
+                ownerResponse: 'accepted',
+                blocksTime: true,
                 links: [
                   { type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=abc' },
                 ],
@@ -1195,6 +1197,8 @@ describe('weeklyCalendarPlan', () => {
                 summary: 'Private',
                 start: '2026-10-12T19:00:00Z',
                 end: '2026-10-12T19:30:00Z',
+                ownerResponse: 'accepted',
+                blocksTime: true,
                 links: [{ type: 'calendar', url: 'https://example.test/event/secret' }],
               },
             ],
@@ -1211,6 +1215,7 @@ describe('weeklyCalendarPlan', () => {
       timeZone: 'America/Los_Angeles',
       evidence: rows as never,
     });
+    expect(text).toContain('Scheduling conflict:');
     expect(text).toContain(
       '[Planning \\[Q2\\] \\*review\\*](<https://calendar.google.com/calendar/event?eid=abc>)',
     );
@@ -1968,8 +1973,11 @@ describe('requested focus-plan variations', () => {
     expect(result.text.length).toBeLessThan(6_000);
     expect(result.text).toContain('additional overlaps or possible duplicate listings omitted');
     expect(result.text).toContain('all were included in the planning check');
-    expect(result.text).toContain('additional source links omitted from this brief');
-    expect(result.text).toContain('calendar.google.com/calendar/event?eid=event-1');
+    expect(result.text).not.toContain('Calendar sources:');
+    expect(result.text).not.toContain('additional source links omitted from this brief');
+    expect(result.text).toContain(
+      '[Meeting 1](<https://calendar.google.com/calendar/event?eid=event-1>)',
+    );
     expect(result.text).not.toContain('event-50');
   });
 

@@ -902,8 +902,6 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const conflictRecommendations: string[] = [];
   const duplicateListingPairs: string[] = [];
   const probableDuplicatePairs = new Set<string>();
-  const duplicateSourceUrlsByPair: string[][] = [];
-  const conflictSourceUrlsByPair: string[][] = [];
   const conflictEvents = uniqueEvents
     .filter((event) => attendance(event) !== 'not-attending' && event.allDay !== true)
     .map((event) => ({ event, interval: parseEventInterval(event), presence: attendance(event) }))
@@ -930,9 +928,6 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       )
         continue;
       const pair = `${eventTitle(left.event)} and ${eventTitle(right.event)}`;
-      const pairSourceUrls = [left.event, right.event]
-        .map(strictGoogleCalendarLink)
-        .filter((url): url is string => url !== undefined);
       const overlappingInterval = {
         start: Math.max(left.interval.start, right.interval.start, start),
         end: Math.min(left.interval.end, right.interval.end, end),
@@ -956,7 +951,6 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
           duplicateListingPairs.push(
             `Possible duplicate listing: ${pair} (${labelTime(overlappingInterval.start, input.timeZone)}); occurrence identity unverified. Sources: ${calendarSourceReference(left.event)}; ${calendarSourceReference(right.event)}.`,
           );
-          duplicateSourceUrlsByPair.push(pairSourceUrls);
         }
         continue;
       }
@@ -976,7 +970,6 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       conflictPairs.push(
         `${verified && !uncertainLongContext ? 'Scheduling conflict' : 'Possible overlap'}: ${pair} (${labelTime(Math.max(left.interval.start, right.interval.start), input.timeZone)}). ${overlapQualification} Sources: ${calendarSourceReference(left.event)}; ${calendarSourceReference(right.event)}.`,
       );
-      conflictSourceUrlsByPair.push(pairSourceUrls);
       if (verified && !uncertainLongContext) {
         conflictRecommendations.push(
           `Choice: keep ${eventTitle(left.event)} and ask ${organizerReference(right.event)} whether ${eventTitle(right.event)} can move, or keep ${eventTitle(right.event)} and ask ${organizerReference(left.event)} whether ${eventTitle(left.event)} can move.`,
@@ -1165,10 +1158,6 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const allConflictDetails = [...duplicateListingPairs, ...conflictPairs];
   const visibleDuplicateCount = Math.min(visibleConflictLimit, duplicateListingPairs.length);
   const visibleConflictCount = Math.max(0, visibleConflictLimit - visibleDuplicateCount);
-  const conflictSourceUrls = new Set([
-    ...duplicateSourceUrlsByPair.slice(0, visibleDuplicateCount).flat(),
-    ...conflictSourceUrlsByPair.slice(0, visibleConflictCount).flat(),
-  ]);
   if (allConflictDetails.length > 0) lines.push('Conflicts and review choices:');
   lines.push(...allConflictDetails.slice(0, visibleConflictLimit));
   lines.push(...conflictRecommendations.slice(0, visibleConflictCount));
@@ -1221,23 +1210,9 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     lines.push(
       `I found ${chosen.length} of ${requestedSlots} requested focus blocks; the remaining time did not fit without overlapping checked commitments and breaks.`,
     );
-  const sourceLinks = [
-    ...new Map(
-      uniqueEvents.flatMap((event) => {
-        const url = strictGoogleCalendarLink(event);
-        return url && !conflictSourceUrls.has(url)
-          ? [[url, calendarSourceReference(event)] as const]
-          : [];
-      }),
-    ).values(),
-  ];
-  if (sourceLinks.length > 0) {
-    const visibleSources = sourceLinks.slice(0, 5);
-    const omittedSources = sourceLinks.length - visibleSources.length;
-    lines.push(
-      `Calendar sources: ${visibleSources.join(' · ')}${omittedSources > 0 ? ` · ${omittedSources} additional source links omitted from this brief` : ''}`,
-    );
-  }
+  // Keep source links attached to the event details that need them (conflicts,
+  // all-day holds, and focus-window constraints). A second catalog of every
+  // event adds a long, repetitive URL block to a review-only focus plan.
   return result(lines.join('\n'), complete, chosen.length);
 }
 
