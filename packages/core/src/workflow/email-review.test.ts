@@ -1383,7 +1383,55 @@ describe('bounded no-send email review', () => {
     );
     expect(text).toContain('Reviewed 1 of 2 selected threads');
     expect(text).not.toContain('Completed verified reply checks');
-    expect(text).toContain('complete source reads: 2 of 2 selected threads');
+    expect(text).toContain('complete, eligible source reads: 2 of 2 selected threads');
+  });
+
+  it('keeps assessed, eligible, ineligible, incomplete, and unassessed counts distinct', () => {
+    const eligibleThreads = Array.from({ length: 8 }, (_, index) =>
+      required(
+        emailReviewCompleteThread(`eligible-${index}`, 'owner@example.com', [
+          search(`eligible-${index}`),
+          read(`eligible-${index}`, messages(`eligible-${index}`)),
+        ]),
+        'complete eligible thread',
+      ),
+    );
+    const first = required(eligibleThreads[0], 'first eligible thread');
+    const assessment = validateEmailReviewAnswer(validAnswer(first.threadId), [first]);
+    const evidence = eligibleThreads.flatMap((thread) => [
+      search(thread.threadId),
+      read(thread.threadId, thread.messages),
+    ]);
+    const coverage = emailReviewCoverage(
+      [
+        ...eligibleThreads.map((thread) => thread.threadId),
+        'ineligible-thread',
+        'incomplete-thread',
+      ],
+      eligibleThreads,
+      evidence,
+      0,
+      [],
+      ['ineligible-thread'],
+      undefined,
+      false,
+      7,
+    );
+    const text = formatEmailReviewAnswer(assessment?.items ?? [], coverage, false, {
+      requestedCount: 5,
+    });
+
+    expect(text).toContain(
+      'Reviewed 2 of 10 selected threads from a bounded 7-day mail scan; assessed 1 of 8 complete, eligible threads; prepared 1 reply draft (requested review count: 5).',
+    );
+    expect(text).toContain('complete, eligible source reads: 8 of 10 selected threads');
+    expect(text).toContain(
+      '1 selected thread was reviewed but did not meet the reply-draft criteria',
+    );
+    expect(text).toContain(
+      '1 selected thread lacked enough complete chronology or eligibility evidence to assess',
+    );
+    expect(text).toContain('7 selected threads could not be assessed reliably');
   });
 
   it('discloses mailbox mismatch and complete threads left unassessed without leaking addresses', () => {
@@ -2061,7 +2109,7 @@ describe('bounded no-send email review', () => {
 
     expect(answer).toContain('Reviewed 0 of 1 selected threads');
     expect(answer).toContain('bounded newest-first inbox scan');
-    expect(answer).toContain('complete source reads: 0 of 1 selected threads');
+    expect(answer).toContain('complete, eligible source reads: 0 of 1 selected threads');
     expect(answer).not.toContain('checked against its complete thread');
   });
 
@@ -3135,7 +3183,7 @@ describe('bounded no-send email review', () => {
       backfillShortfall: 'step_budget',
     });
     expect(text).toContain('reviewed but did not meet the reply-draft criteria');
-    expect(text).toContain('not used because eligibility could not be established');
+    expect(text).toContain('lacked enough complete chronology or eligibility evidence to assess');
     expect(text).toContain('step limit prevented another replacement-thread read');
     expect(text).not.toContain('no more threads to replace');
   });

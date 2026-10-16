@@ -919,8 +919,7 @@ export function emailReviewCoverage(
         selectedCompleted.size -
         new Set(alreadyAnsweredThreadIds).size -
         new Set(notEligibleThreadIds).size -
-        contextLimitedThreads -
-        unassessedCompleteThreads,
+        contextLimitedThreads,
     ),
     obviousNewslettersExcluded: scope?.latestUnanswered
       ? 0
@@ -2060,7 +2059,7 @@ export function formatEmailReviewAnswer(
     ? `a bounded newest-first inbox scan${scope.startAt && scope.endAt ? ' within the requested time window' : ''}`
     : `a bounded ${scope?.windowDays ?? 7}-${reviewRange} mail scan`;
   const lines = [
-    `Reviewed ${reviewedThreads} of ${coverage.selectedThreads} selected threads from ${scanDescription}; prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'}.`,
+    `Reviewed ${reviewedThreads} of ${coverage.selectedThreads} selected threads from ${scanDescription}; assessed ${assessedThreads} of ${coverage.completeThreads} complete, eligible threads; prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'}${scope?.requestedCount ? ` (requested review count: ${scope.requestedCount})` : ''}.`,
   ];
   if (drafts.length > 0)
     lines.push(
@@ -2110,11 +2109,11 @@ export function formatEmailReviewAnswer(
     coverage.completeThreads !== reviewedThreads
   )
     coverageNotes.push(
-      `complete source reads: ${coverage.completeThreads} of ${coverage.selectedThreads} selected threads`,
+      `complete, eligible source reads: ${coverage.completeThreads} of ${coverage.selectedThreads} selected threads`,
     );
   if (coverage.ownerOrChronologyExcluded > 0)
     coverageNotes.push(
-      `${coverage.ownerOrChronologyExcluded} selected ${coverage.ownerOrChronologyExcluded === 1 ? 'thread was' : 'threads were'} not used because eligibility could not be established`,
+      `${coverage.ownerOrChronologyExcluded} selected ${coverage.ownerOrChronologyExcluded === 1 ? 'thread lacked' : 'threads lacked'} enough complete chronology or eligibility evidence to assess`,
     );
   if (coverage.alreadyAnsweredThreads > 0)
     coverageNotes.push(
