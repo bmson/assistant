@@ -5407,7 +5407,10 @@ San Francisco (SFO-San Francisco Intl.)`;
     const projection = upcomingFlightReadProjection(read, evidence);
     expect(projection.flight).toBeUndefined();
     expect(projection.blocked).toBe(true);
-    expect(projection.text).toContain('LH778 BER→SFO:** 2026-10-17 6:00 AM (zone unknown)');
+    expect(projection.text).toContain('LH778 BER→SFO:** 2026-10-17 6:00 AM');
+    expect(projection.text).toContain(
+      'Booking times are local clock readings; exact time zones are unverified.',
+    );
     expect(projection.text).toContain('Outbound/return direction is not explicitly stated');
     expect(projection.text).toContain('booking order is not proof of travel');
     expect(projection.text).toContain(
@@ -5450,9 +5453,12 @@ San Francisco (SFO-San Francisco Intl.)`;
     const projection = upcomingFlightReadProjection(read, evidence, thinExtraction());
     expect(projection.text).toContain('LH778 BER→SFO:** 2026-10-17 06:00 AM');
     expect(projection.text).toContain('→ 2026-10-17 11:45 AM');
-    expect(projection.text.match(/Booked leg LH778/g)).toHaveLength(1);
+    expect(projection.text.match(/Booked route 2 LH778/g)).toHaveLength(1);
     expect(projection.flight).toBeUndefined();
-    expect(projection.text).toContain('zone unknown');
+    expect(projection.text).toContain(
+      'Booking times are local clock readings; exact time zones are unverified.',
+    );
+    expect(projection.text).not.toContain('(zone unknown)');
     expect(projection.text).toContain('Outbound/return direction is not explicitly stated');
     expect(compoundTripRoute(read, evidence)).toBeUndefined();
   });
@@ -5720,7 +5726,7 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(answer.length).toBeLessThanOrEqual(3800);
     expect(answer.startsWith('Booked dates')).toBe(true);
     expect(answer).toContain('A new outbound trip is not verified');
-    expect(answer).toContain('- **Booked KL700 BOS→AMS:**');
+    expect(answer).toContain('- **Booked route 1 KL700 BOS→AMS:**');
     expect(answer).not.toContain('|---|');
     expect(answer).toContain('- **Public transport:**');
     for (const number of ['KL700', 'KL701', 'KL702', 'KL703']) expect(answer).toContain(number);
@@ -5728,8 +5734,11 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(answer).toContain('2030-11-17');
     expect(answer).toContain('Canal House');
     expect(answer).toContain('Canal Street 42');
-    expect(answer).toContain('zone unknown');
-    expect(answer).toContain('Outbound/return direction is not explicitly stated');
+    expect(answer).toContain(
+      'Booking times are local clock readings; exact time zones are unverified.',
+    );
+    expect(answer).toContain('The booking lists route 1 before route 2; route 2 reverses route 1.');
+    expect(answer).toContain('The source does not label either route outbound or return.');
     expect(answer).not.toMatch(/Outbound \(inferred\)|Return \(inferred\)|likely return/);
     expect(answer).toContain(
       'calendar Example Air (operating carrier); booking KLM (operating carrier)',
@@ -5753,7 +5762,10 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
   it('reports source-labelled route roles only, never direction from reversed airport order', () => {
     const { read, rows } = fixture();
     const plain = compoundTripReadProjection(read, rows);
-    expect(plain.presentation.groups.map((group) => group.label)).toEqual(['Booked', 'Booked']);
+    expect(plain.presentation.groups.map((group) => group.label)).toEqual([
+      'Booked route 1',
+      'Booked route 2',
+    ]);
     const thread = rows.find(
       (item) =>
         item.toolName === 'gmail.read_thread' &&
@@ -5774,6 +5786,19 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(labelled.flight).toBeUndefined();
     expect(labelled.blocked).toBe(true);
     expect(labelled.sourceFlightSegments.every((leg) => !leg.departureTimeZone)).toBe(true);
+  });
+
+  it('keeps per-leg zone detail when source coverage mixes stated and unstated zones', () => {
+    const { read, rows } = fixture();
+    const projection = compoundTripReadProjection(read, rows);
+    const leg = projection.presentation.groups[0]?.legs[0];
+    if (!leg) throw new Error('Missing source-backed flight leg');
+    leg.departureTimeZone = 'Europe/Copenhagen';
+
+    const answer = renderCompoundTripReadResponse(projection);
+    expect(answer).toContain('(Europe/Copenhagen)');
+    expect(answer).toContain('(zone not stated)');
+    expect(answer).not.toContain('Booking clock times are shown as provided');
   });
 
   function withLocalClockEvidence() {
@@ -5831,7 +5856,10 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
         ?.departureClockSourceThreadId,
     ).toBeUndefined();
     const answer = renderCompoundTripReadResponse(projection);
-    expect(answer).toContain('2030-11-17 6:00 AM (local; zone unspecified)');
+    expect(answer).toContain('2030-11-17 6:00 AM → 2030-11-17 7:25 AM');
+    expect(answer).toContain(
+      'Booking times are local clock readings; exact time zones are unverified.',
+    );
     expect(answer).toContain(
       '[Local-clock confirmation](https://mail.google.com/mail/u/0/#all/clock-thread)',
     );

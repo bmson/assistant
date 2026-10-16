@@ -4217,7 +4217,7 @@ export function compoundTripReadProjection(
       ? sourceGroups.map((group) => ({
           label:
             group.direction === 'unknown'
-              ? 'Booked'
+              ? `Booked route ${group.order === 'first' ? '1' : '2'}`
               : group.direction === 'outbound'
                 ? 'Outbound'
                 : 'Return',
@@ -4345,18 +4345,28 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
   const lines = [view.summary];
   const groups = view.groups.filter((group) => group.legs.length);
   if (groups.length) {
+    const allFlightTimesHaveUnknownZones = groups
+      .flatMap((group) => group.legs)
+      .every((leg) => !leg.departureTimeZone && !leg.arrivalTimeZone);
+    if (allFlightTimesHaveUnknownZones)
+      lines.push('Booking times are local clock readings; exact time zones are unverified.');
     const legs: string[] = [];
     for (const group of groups) {
       for (const leg of group.legs) {
         legs.push(
-          compactFlightLeg(leg, `${group.label}${group.inferred ? ' (inferred)' : ''}`, links),
+          compactFlightLeg(
+            leg,
+            `${group.label}${group.inferred ? ' (inferred)' : ''}`,
+            links,
+            allFlightTimesHaveUnknownZones,
+          ),
         );
       }
     }
     lines.push(legs.join('\n'));
-    if (groups.some((group) => group.label === 'Booked'))
+    if (groups.some((group) => group.label.startsWith('Booked route ')))
       lines.push(
-        'Outbound/return direction is not explicitly stated for the unlabelled booked legs.',
+        'The booking lists route 1 before route 2; route 2 reverses route 1. The source does not label either route outbound or return.',
       );
     if (view.localClocks)
       lines.push(
@@ -4464,11 +4474,18 @@ function compactFlightLeg(
   leg: CompoundTripFlightSegment,
   label: string,
   links: Map<string, string>,
+  sharedUnknownZones = false,
 ): string {
   const localLink = leg.departureClockSourceThreadId
     ? links.get(leg.departureClockSourceThreadId)
     : undefined;
-  return `- **${markdownText(label)} ${markdownText(leg.flightNumber)} ${leg.originAirport ?? '?'}→${leg.destinationAirport ?? '?'}:** ${leg.departureDate} ${leg.departureTime} (${markdownText(leg.departureTimeZone ?? (localLink ? 'local; zone unspecified' : 'zone unknown'))}) → ${leg.arrivalDate ?? 'arrival date unknown'} ${leg.arrivalTime ?? 'time unknown'} (${markdownText(leg.arrivalTimeZone ?? 'zone unknown')}).${leg.sourceStatedLayover ? ` Booking-stated layover: ${markdownText(leg.sourceStatedLayover)}; timing unverified.` : ''}${links.get(leg.threadId) ? ` [Booking](${links.get(leg.threadId)})` : ''}${localLink && localLink !== links.get(leg.threadId) ? ` [Local-clock confirmation](${localLink})` : ''}`;
+  const departureZone = sharedUnknownZones
+    ? ''
+    : ` (${markdownText(leg.departureTimeZone ?? (localLink ? 'local; zone not stated' : 'zone not stated'))})`;
+  const arrivalZone = sharedUnknownZones
+    ? ''
+    : ` (${markdownText(leg.arrivalTimeZone ?? 'zone not stated')})`;
+  return `- **${markdownText(label)} ${markdownText(leg.flightNumber)} ${leg.originAirport ?? '?'}→${leg.destinationAirport ?? '?'}:** ${leg.departureDate} ${leg.departureTime}${departureZone} → ${leg.arrivalDate ?? 'arrival date unknown'} ${leg.arrivalTime ?? 'time unknown'}${arrivalZone}.${leg.sourceStatedLayover ? ` Booking-stated layover: ${markdownText(leg.sourceStatedLayover)}; timing unverified.` : ''}${links.get(leg.threadId) ? ` [Booking](${links.get(leg.threadId)})` : ''}${localLink && localLink !== links.get(leg.threadId) ? ` [Local-clock confirmation](${localLink})` : ''}`;
 }
 
 /**
@@ -4805,16 +4822,31 @@ export function upcomingFlightReadProjection(
       )
     : [];
   const compactSummary = observedGroup
-    ? [
-        `Observed booking candidate: **${observedGroup.legs.map((leg) => leg.originAirport).join('→')}→${observedGroup.destination}, ${observedGroup.legs[0]?.departureDate}**. ${observedGroup.direction === 'unknown' ? 'Outbound/return direction is not explicitly stated.' : `The booking explicitly labels this ${observedGroup.direction}.`} Calendar match and next-flight identity remain unverified; booking order is not proof of travel.`,
-        observedGroup.legs
-          .map((leg) => compactFlightLeg(leg, 'Booked leg', threadSourceLinks(trip.readThreads)))
-          .join('\n'),
-        ...observedCalendarNotes,
-        ...(observedCalendarNotes.length
-          ? []
-          : summary.filter((line) => line.startsWith('Next future calendar flight candidate:'))),
-      ]
+    ? (() => {
+        const allTimesHaveUnknownZones = observedGroup.legs.every(
+          (leg) => !leg.departureTimeZone && !leg.arrivalTimeZone,
+        );
+        return [
+          `Observed booking candidate: **${observedGroup.legs.map((leg) => leg.originAirport).join('→')}→${observedGroup.destination}, ${observedGroup.legs[0]?.departureDate}**. ${observedGroup.direction === 'unknown' ? 'Outbound/return direction is not explicitly stated.' : `The booking explicitly labels this ${observedGroup.direction}.`} Calendar match and next-flight identity remain unverified; booking order is not proof of travel.`,
+          ...(allTimesHaveUnknownZones
+            ? ['Booking times are local clock readings; exact time zones are unverified.']
+            : []),
+          observedGroup.legs
+            .map((leg) =>
+              compactFlightLeg(
+                leg,
+                `Booked route ${observedGroup.order === 'first' ? '1' : '2'}`,
+                threadSourceLinks(trip.readThreads),
+                allTimesHaveUnknownZones,
+              ),
+            )
+            .join('\n'),
+          ...observedCalendarNotes,
+          ...(observedCalendarNotes.length
+            ? []
+            : summary.filter((line) => line.startsWith('Next future calendar flight candidate:'))),
+        ];
+      })()
     : summary;
   return {
     calendarComplete: trip.calendarComplete,
