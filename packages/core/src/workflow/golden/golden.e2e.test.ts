@@ -1155,6 +1155,7 @@ describe('golden tasks', () => {
       assessmentGaps: 1,
       unassessedThreadIds: ['request-a'],
       ownerDecisionThreadIds: ['request-a'],
+      ownerDecisionFindings: [{ threadId: 'request-a', latestMessageId: 'request-a-latest' }],
     });
 
     const contextualCorrection = await runGoldenTask(db, agentId, {

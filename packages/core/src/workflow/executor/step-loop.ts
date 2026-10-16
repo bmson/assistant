@@ -81,6 +81,7 @@ import {
   emailReviewVerifiedNotEligibleThreadIds,
   formatEmailReviewAnswer,
   generateValidatedEmailReview,
+  mergeEmailReviewOwnerDecisionFindings,
   revalidateEmailReviewAssessmentBatches,
   validEmailReviewSelection,
 } from '../email-review.js';
@@ -2211,10 +2212,19 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               )
             : [],
         );
-        const priorOwnerDecisionIds =
+        const priorOwnerDecisionFindings =
           priorGeneration && typeof priorGeneration === 'object' && !Array.isArray(priorGeneration)
-            ? (priorGeneration as Record<string, unknown>).ownerDecisionThreadIds
+            ? (priorGeneration as Record<string, unknown>).ownerDecisionFindings
             : undefined;
+        const previouslyRequiredOwnerDecisionIds = new Set(
+          mergeEmailReviewOwnerDecisionFindings({
+            prior: priorOwnerDecisionFindings,
+            currentThreadIds: [],
+            resolvedThreadIds: [],
+            selectedThreadIds: selectedIds,
+            threads: bounded.threads,
+          }).map((finding) => finding.threadId),
+        );
         const alreadyAssessedIds = new Set(
           checkedAssessments.items.map((item) => item.thread.threadId),
         );
@@ -2271,15 +2281,8 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           previouslyUnassessed.size,
           reviewScope,
         );
-        const priorOwnerDecisionSet = new Set(
-          Array.isArray(priorOwnerDecisionIds)
-            ? priorOwnerDecisionIds.filter(
-                (id): id is string => typeof id === 'string' && selectedIds.includes(id),
-              )
-            : [],
-        );
         coverage.ownerDecisionRequiredThreads = bounded.threads
-          .filter((thread) => priorOwnerDecisionSet.has(thread.threadId))
+          .filter((thread) => previouslyRequiredOwnerDecisionIds.has(thread.threadId))
           .map((thread) => ({ threadId: thread.threadId, subject: thread.subject }));
         const rankedCandidateIds = readRequest.emailReview.rankedCandidateIds;
         coverage.rankedMetadataThreads = rankedCandidateIds?.length;
@@ -2361,6 +2364,13 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         const validated = generation.answer;
         const assessedItems = [...checkedAssessments.items, ...(validated?.items ?? [])];
         const assessmentGaps = bounded.threads.length - assessedItems.length;
+        const ownerDecisionFindings = mergeEmailReviewOwnerDecisionFindings({
+          prior: priorOwnerDecisionFindings,
+          currentThreadIds: generation.ownerDecisionThreadIds,
+          resolvedThreadIds: assessedItems.map((item) => item.thread.threadId),
+          selectedThreadIds: selectedIds,
+          threads: bounded.threads,
+        });
         const currentAssessmentPass = assessmentPasses + 1;
         const newlyAssessedIds = new Set(
           validated?.items.map((item) => item.thread.threadId) ?? [],
@@ -2380,16 +2390,19 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             ? assessmentGaps > 0
               ? 'partial'
               : 'validated'
-            : generation.ownerDecisionThreadIds.length > 0
+            : ownerDecisionFindings.length > 0
               ? 'partial'
               : 'unavailable',
           assessmentGaps,
           issues: generation.issues,
           unassessedThreadIds,
-          ownerDecisionThreadIds: generation.ownerDecisionThreadIds,
+          ownerDecisionThreadIds: ownerDecisionFindings.map((finding) => finding.threadId),
+          ownerDecisionFindings,
         };
         coverage.ownerDecisionRequiredThreads = bounded.threads
-          .filter((thread) => generation.ownerDecisionThreadIds.includes(thread.threadId))
+          .filter((thread) =>
+            ownerDecisionFindings.some((finding) => finding.threadId === thread.threadId),
+          )
           .map((thread) => ({ threadId: thread.threadId, subject: thread.subject }));
         coverage.unassessedCompleteThreads = assessmentGaps;
         if (generation.sourceItems?.length) {

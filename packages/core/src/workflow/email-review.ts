@@ -917,6 +917,60 @@ export function emailReviewPendingAssessmentThreads<T extends { threadId: string
   );
 }
 
+export interface EmailReviewOwnerDecisionFinding {
+  threadId: string;
+  latestMessageId: string;
+}
+
+/**
+ * Retain a source-validated owner-choice finding across bounded retries only
+ * while it still refers to the same selected thread revision. A validated
+ * replacement assessment clears the earlier finding.
+ */
+export function mergeEmailReviewOwnerDecisionFindings(input: {
+  prior: unknown;
+  currentThreadIds: ReadonlyArray<string>;
+  resolvedThreadIds: ReadonlyArray<string>;
+  selectedThreadIds: ReadonlyArray<string>;
+  threads: ReadonlyArray<EmailReviewThread>;
+}): EmailReviewOwnerDecisionFinding[] {
+  const selected = new Set(input.selectedThreadIds);
+  const resolved = new Set(input.resolvedThreadIds);
+  const byId = new Map(
+    input.threads
+      .filter((thread) => selected.has(thread.threadId))
+      .map((thread) => [thread.threadId, thread]),
+  );
+  const findings = new Map<string, EmailReviewOwnerDecisionFinding>();
+  if (Array.isArray(input.prior)) {
+    for (const value of input.prior) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const record = value as Record<string, unknown>;
+      if (typeof record.threadId !== 'string' || typeof record.latestMessageId !== 'string')
+        continue;
+      const thread = byId.get(record.threadId);
+      if (
+        thread &&
+        !resolved.has(thread.threadId) &&
+        thread.latestMessageId === record.latestMessageId
+      )
+        findings.set(thread.threadId, {
+          threadId: thread.threadId,
+          latestMessageId: thread.latestMessageId,
+        });
+    }
+  }
+  for (const threadId of input.currentThreadIds) {
+    const thread = byId.get(threadId);
+    if (thread && !resolved.has(threadId))
+      findings.set(threadId, { threadId, latestMessageId: thread.latestMessageId });
+  }
+  return input.threads.flatMap((thread) => {
+    const finding = findings.get(thread.threadId);
+    return finding ? [finding] : [];
+  });
+}
+
 export function emailReviewAssessmentStepReserve(input: {
   maxSteps: number;
   requestedCount: number;

@@ -21,6 +21,7 @@ import {
   emailReviewVerifiedNotEligibleThreadIds,
   formatEmailReviewAnswer,
   generateValidatedEmailReview,
+  mergeEmailReviewOwnerDecisionFindings,
   revalidateEmailReviewAssessmentBatches,
   validateEmailReviewAnswer,
   validEmailReviewSelection,
@@ -180,6 +181,54 @@ describe('bounded no-send email review', () => {
       }),
     ).toBe(1);
     expect(emailReviewAssessmentStepReserve({ maxSteps: 22, requestedCount: 1 })).toBe(1);
+  });
+
+  it('retains owner-choice findings only for the same unresolved selected thread revision', () => {
+    const threadId = 'owner-choice-thread';
+    const thread = emailReviewCompleteThread(threadId, 'owner@example.com', [
+      search(threadId),
+      read(threadId, messages(threadId)),
+    ]);
+    const completeThread = required(thread, 'complete owner-choice thread');
+    const selectedThreadIds = [threadId];
+    const firstFinding = mergeEmailReviewOwnerDecisionFindings({
+      prior: undefined,
+      currentThreadIds: [threadId],
+      resolvedThreadIds: [],
+      selectedThreadIds,
+      threads: [completeThread],
+    });
+    expect(firstFinding).toEqual([{ threadId, latestMessageId: `latest-${threadId}` }]);
+
+    expect(
+      mergeEmailReviewOwnerDecisionFindings({
+        prior: firstFinding,
+        currentThreadIds: [],
+        resolvedThreadIds: [],
+        selectedThreadIds,
+        threads: [completeThread],
+      }),
+    ).toEqual(firstFinding);
+
+    expect(
+      mergeEmailReviewOwnerDecisionFindings({
+        prior: firstFinding,
+        currentThreadIds: [],
+        resolvedThreadIds: [threadId],
+        selectedThreadIds,
+        threads: [completeThread],
+      }),
+    ).toEqual([]);
+
+    expect(
+      mergeEmailReviewOwnerDecisionFindings({
+        prior: firstFinding,
+        currentThreadIds: [],
+        resolvedThreadIds: [],
+        selectedThreadIds,
+        threads: [{ ...completeThread, latestMessageId: 'latest-revised' }],
+      }),
+    ).toEqual([]);
   });
 
   it('preserves a valid model-assessed nuanced reply request outside the positive ask heuristic', async () => {
