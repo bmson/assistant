@@ -6,6 +6,46 @@ import SwiftUI
 /// credentials, microphone, or provider inference is used. Attachments are
 /// review evidence, not pixel-perfect assertions or physical interaction QA.
 final class NativeVisualReviewTests: XCTestCase {
+    @MainActor
+    func testPartialAnswerNoticeFormatting() async throws {
+        let fixture = try NativeReviewFixture()
+        NativeReviewProtocol.install(fixture.responses)
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+                               session: URLSession(configuration: sessionConfig))
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "assistant.partial-answer-visual-review"))
+        defaults.removePersistentDomain(forName: "assistant.partial-answer-visual-review")
+        let model = AppModel(apiClient: client, defaults: defaults)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let message = ChatMessage(id: "partial-answer-fixture", role: .assistant, parts: [
+            .init(type: "text", text: """
+            The return date still needs confirmation.
+
+            - **Flight:** 17 October. [Booking](https://example.com/booking)
+            - **Transfer:** duration unverified. [Transport source](https://example.com/transport)
+
+            | Option | Checked detail |
+            | --- | --- |
+            | Train | Requires one change |
+            | Taxi | Fare unverified |
+            """),
+            .init(type: "notice", notice: "response-contract")
+        ])
+        let page = Page("partial-answer-notice", ScrollView {
+            MessageBubble(message: message, userPrompt: nil, isStreaming: false,
+                          openApprovals: {}, runForReal: nil, retry: nil, decideApproval: nil)
+                .padding(20)
+        })
+        for scheme in [ColorScheme.light, .dark] {
+            for size in [DynamicTypeSize.large, .accessibility3] {
+                try await capture(page, scheme: scheme, size: size, scene: scene, model: model)
+            }
+        }
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+    }
+
     func testConversationSmallTextPairsClearContrast() {
         func luminance(_ color: Color) -> Double {
             var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0

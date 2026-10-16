@@ -1,0 +1,27 @@
+{
+  "producer": "compactNoticePresentation at 4104c9ce138f2debe140ae676fa4272e6dbdd9c8; synthetic text only",
+  "short": {
+    "text": "The return date still needs confirmation.\n\n- **Flight:** 17 October. [Booking](https://example.com/booking)\n- **Transfer:** duration unverified.",
+    "presentation": {
+      "version": 1,
+      "headline": "Result not confirmed",
+      "summary": "The return date still needs confirmation.",
+      "detailLabel": "Verification details",
+      "diagnostics": [
+        "The return date still needs confirmation. - **Flight:** 17 October. [Booking](https://example.com/booking) - **Transfer:** duration unverified."
+      ]
+    }
+  },
+  "long": {
+    "text": "The return date still needs confirmation.\n\n- **Flight:** 17 October. [Booking](https://example.com/booking)\n- **Transfer:** duration unverified.\n\nA source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. ",
+    "presentation": {
+      "version": 1,
+      "headline": "Result not confirmed",
+      "summary": "The return date still needs confirmation.",
+      "detailLabel": "Verification details",
+      "diagnostics": [
+        "The return date still needs confirmation. - **Flight:** 17 October. [Booking](https://example.com/booking) - **Transfer:** duration unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A source is still unverified. A…"
+      ]
+    }
+  }
+}
