@@ -117,7 +117,7 @@ describe('family birthdays through the allocated PostgreSQL executor', () => {
       const calls: string[] = [];
       const dispatcher = {
         toolDefs: () =>
-          ['conversations.search', 'memory.recall'].map((name) => ({
+          ['conversations.search', 'memory.recall', 'occasions.list_birthdays'].map((name) => ({
             name,
             description: 'Synthetic read',
             inputSchema: {},
@@ -154,21 +154,23 @@ describe('family birthdays through the allocated PostgreSQL executor', () => {
                             },
                           ],
                   }
-                : {
-                    memories:
-                      variant === 'absent'
-                        ? [
-                            {
-                              id: randomUUID(),
-                              content: "Owner's birthday is June 12.",
-                              originTrust: 'assistant',
-                              ownerConfirmed: false,
-                              unconfirmed: true,
-                              confidence: 0.99,
-                            },
-                          ]
-                        : [],
-                  };
+                : toolName === 'memory.recall'
+                  ? {
+                      memories:
+                        variant === 'absent'
+                          ? [
+                              {
+                                id: randomUUID(),
+                                content: "Owner's birthday is June 12.",
+                                originTrust: 'assistant',
+                                ownerConfirmed: false,
+                                unconfirmed: true,
+                                confidence: 0.99,
+                              },
+                            ]
+                          : [],
+                    }
+                  : { birthdays: [], complete: true };
             const [stored] = await db
               .insert(toolCalls)
               .values({
@@ -260,10 +262,13 @@ describe('family birthdays through the allocated PostgreSQL executor', () => {
         expected,
       );
       expect(calls.slice(0, 2)).toEqual(['conversations.search', 'memory.recall']);
-      expect(calls.every((name) => ['conversations.search', 'memory.recall'].includes(name))).toBe(
-        true,
-      );
-      expect(calls.length).toBeLessThanOrEqual(3);
+      expect(calls).toContain('occasions.list_birthdays');
+      expect(
+        calls.every((name) =>
+          ['conversations.search', 'memory.recall', 'occasions.list_birthdays'].includes(name),
+        ),
+      ).toBe(true);
+      expect(calls.length).toBeLessThanOrEqual(variant === 'memory-failure' ? 4 : 3);
       expect(state.step).toBeLessThanOrEqual(lease.maxSteps);
       const persisted = await db.query.messages.findMany({ where: eq(messages.taskId, taskId) });
       const answer = persisted.find((message) => message.role === 'assistant')?.text ?? '';

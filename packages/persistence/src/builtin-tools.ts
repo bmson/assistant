@@ -61,6 +61,9 @@ export interface OccasionToolRow {
   recurrence: string;
   leadDays: number;
   notes: string;
+  originTrust: string;
+  quarantined: boolean;
+  ownerConfirmed: boolean;
 }
 
 /** Storage behind `occasions.save` and `occasions.list`. */

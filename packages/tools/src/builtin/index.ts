@@ -104,7 +104,10 @@ export interface BuiltinDeps {
 export { registerPortableContactLookupTool } from './contacts.js';
 export { registerPortableConversationSearchTool } from './conversation-search.js';
 export { registerPortableGraphSnapshotTool } from './graph-snapshot.js';
-export { registerPortableOccasionTools } from './occasions.js';
+export {
+  registerPortableBirthdayOccasionTool,
+  registerPortableOccasionTools,
+} from './occasions.js';
 export { registerPortableReadResultTool } from './read-result.js';
 export { registerSituationTools } from './situations.js';
 

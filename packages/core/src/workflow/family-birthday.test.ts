@@ -1,6 +1,10 @@
 import { conversationMessageSpeakerRevision } from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
-import { type FamilyBirthdayFact, requestedFamilyBirthdays } from './family-birthday.js';
+import {
+  type FamilyBirthdayFact,
+  familyBirthdayContactIds,
+  requestedFamilyBirthdays,
+} from './family-birthday.js';
 import {
   familyBirthdayReadProjection,
   type MemoryReadSelection,
@@ -25,7 +29,11 @@ function owner(text = statement, id = 'owner-1', role = 'user', origin = 'owner'
     speakerRevision: conversationMessageSpeakerRevision(id, text, role, origin),
   };
 }
-function evidence(matches = [owner()], memories: unknown[] = []): ActionEvidence[] {
+function evidence(
+  matches = [owner()],
+  memories: unknown[] = [],
+  birthdays: unknown[] = [],
+): ActionEvidence[] {
   return [
     {
       toolName: 'conversations.search',
@@ -34,6 +42,13 @@ function evidence(matches = [owner()], memories: unknown[] = []): ActionEvidence
       result: { matches },
     },
     { toolName: 'memory.recall', status: 'succeeded', fromCurrentTask: true, result: { memories } },
+    {
+      toolName: 'occasions.list_birthdays',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { contactIds: [] },
+      result: { birthdays, complete: true },
+    },
   ];
 }
 const fact: FamilyBirthdayFact = {
@@ -63,6 +78,47 @@ function saved(id: string, content: string, subjectContactId?: string) {
     ...(subjectContactId ? { subjectContactId } : {}),
   };
 }
+function confirmedSaved(id: string, content: string, subjectContactId: string) {
+  return {
+    id,
+    content,
+    source: 'profile',
+    originTrust: 'owner',
+    ownerConfirmed: true,
+    unconfirmed: false,
+    quarantined: false,
+    subjectContactId,
+  };
+}
+function birthdayRecord(
+  overrides: Partial<{
+    id: string;
+    contactId: string;
+    person: string;
+    kind: string;
+    month: number;
+    day: number;
+    year: number | null;
+    recurrence: string;
+    ownerConfirmed: boolean;
+    quarantined: boolean;
+  }> = {},
+) {
+  return {
+    id: 'occasion-1',
+    contactId: 'contact-a',
+    person: 'Alex',
+    kind: 'birthday',
+    month: 3,
+    day: 4,
+    year: null,
+    recurrence: 'annual',
+    originTrust: 'owner',
+    ownerConfirmed: true,
+    quarantined: false,
+    ...overrides,
+  };
+}
 
 describe('grounded family birthday recall', () => {
   it('routes a family read only to sources the owner authorized', () => {
@@ -85,7 +141,9 @@ describe('grounded family birthday recall', () => {
       args: buildReadToolInput(memoryOnly, 'memory.recall', []),
       result: { memories: [] },
     };
-    expect(nextRequiredReadTool(memoryOnly, [memoryRead as never])).toBeUndefined();
+    expect(nextRequiredReadTool(memoryOnly, [memoryRead as never])).toBe(
+      'occasions.list_birthdays',
+    );
 
     const historyOnlyText =
       'When is my sister Alex’s birthday? Do not read my saved memories; use previous conversations.';
@@ -197,6 +255,14 @@ describe('grounded family birthday recall', () => {
       args: buildReadToolInput(read, 'memory.recall', rows),
       result: { memories: [] },
     } as never);
+    expect(nextRequiredReadTool(read, rows)).toBe('occasions.list_birthdays');
+    rows.push({
+      toolName: 'occasions.list_birthdays',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: buildReadToolInput(read, 'occasions.list_birthdays', rows),
+      result: { birthdays: [], complete: true },
+    } as never);
     expect(nextRequiredReadTool(read, rows)).toBeUndefined();
   });
   it.each([
@@ -304,6 +370,125 @@ describe('grounded family birthday recall', () => {
         rows,
       ),
     ).toMatchObject({ blocked: false, text: expect.stringContaining('March 4') });
+  });
+  it('joins a confirmed annual occasion birthday to a confirmed sibling by contact identity', () => {
+    const relation = 'Alex is my sister.';
+    const date = "Alex's birthday is March 4.";
+    const result = project(
+      selection(
+        [{ ...fact, birthdaySelection: 1 }],
+        [
+          { sourceKey: 'memory:family-relation', quote: relation },
+          { sourceKey: 'occasion:occasion-1', quote: date },
+        ],
+      ),
+      evidence([], [confirmedSaved('family-relation', relation, 'contact-a')], [birthdayRecord()]),
+      "When is my sister's birthday?",
+    );
+    expect(result.blocked).toBe(false);
+    expect(result.text).toContain('**Alex** (sister): March 4.');
+    expect(result.text).toContain('/profile/people/contact-a');
+  });
+  it('does not join an occasion to a same-name sibling with a different or missing identity', () => {
+    const relation = 'Alex is my sister.';
+    const date = "Alex's birthday is March 4.";
+    for (const relationContactId of ['contact-a', undefined]) {
+      const result = project(
+        selection(
+          [{ ...fact, birthdaySelection: 1 }],
+          [
+            { sourceKey: 'memory:family-relation', quote: relation },
+            { sourceKey: 'occasion:occasion-1', quote: date },
+          ],
+        ),
+        evidence(
+          [],
+          [
+            relationContactId
+              ? confirmedSaved('family-relation', relation, relationContactId)
+              : saved('family-relation', relation),
+          ],
+          [birthdayRecord({ contactId: relationContactId ? 'contact-b' : 'contact-a' })],
+        ),
+        "When is my sister's birthday?",
+      );
+      expect(result.blocked).toBe(true);
+      expect(result.text).not.toContain('March 4');
+    }
+  });
+  it.each([
+    birthdayRecord({ kind: 'anniversary' }),
+    birthdayRecord({ recurrence: 'once' }),
+    birthdayRecord({ ownerConfirmed: false }),
+    birthdayRecord({ month: 2, day: 30 }),
+    birthdayRecord({ year: undefined as never }),
+  ])('fails closed for non-authoritative or invalid occasion date rows', (birthday) => {
+    const relation = 'Alex is my sister.';
+    const result = project(
+      selection(
+        [{ ...fact, birthdaySelection: 1 }],
+        [
+          { sourceKey: 'memory:family-relation', quote: relation },
+          { sourceKey: 'occasion:occasion-1', quote: "Alex's birthday is March 4." },
+        ],
+      ),
+      evidence([], [confirmedSaved('family-relation', relation, 'contact-a')], [birthday]),
+      "When is my sister's birthday?",
+    );
+    expect(result.blocked).toBe(true);
+    expect(result.text).not.toContain('March 4');
+  });
+  it('keeps a historical date mismatch visible as an identity conflict', () => {
+    const relation = 'Alex is my sister.';
+    const date = "Alex's birthday is April 5.";
+    const historyDate = "Alex's birthday is March 4.";
+    const result = project(
+      selection(
+        [{ ...fact, birthday: 'April 5', birthdaySelection: 1 }],
+        [
+          { sourceKey: 'memory:family-relation', quote: relation },
+          { sourceKey: 'occasion:occasion-1', quote: date },
+        ],
+      ),
+      evidence(
+        [owner(historyDate)],
+        [confirmedSaved('family-relation', relation, 'contact-a')],
+        [birthdayRecord({ month: 4, day: 5 })],
+      ),
+      "When is my sister's birthday?",
+    );
+    expect(result.blocked).toBe(true);
+    expect(result.text).toContain('April 5');
+    expect(result.text).toContain('identity could not be linked safely');
+  });
+  it('scopes occasion reads only to confirmed relation identities', () => {
+    const request = requestedFamilyBirthdays("When is my sister's birthday?");
+    if (!request) throw new Error('Missing birthday request');
+    expect(
+      familyBirthdayContactIds(request, [
+        { body: 'Alex is my sister.', trusted: true, subjectId: 'contact-a' },
+        { body: 'Morgan is my brother.', trusted: false, subjectId: 'contact-b' },
+        { body: 'Casey is my sister.', trusted: true },
+        { body: 'Alex is my friend.', trusted: true, subjectId: 'contact-c' },
+      ]),
+    ).toEqual(['contact-a']);
+  });
+  it('grounds the occasion tool arguments from current owner-confirmed sibling facts', () => {
+    const text = "When is my sister's birthday? Do not read previous chats; use my saved memories.";
+    const request = detectPersonalReadRequest([{ role: 'user', content: text }]);
+    if (!request) throw new Error('Missing birthday request');
+    const relation = confirmedSaved('relation', 'Alex is my sister.', 'contact-a');
+    const read = {
+      toolName: 'memory.recall',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: buildReadToolInput(request, 'memory.recall', []),
+      result: { memories: [relation] },
+    } as never;
+    expect(nextRequiredReadTool(request, [read])).toBe('occasions.list_birthdays');
+    expect(buildReadToolInput(request, 'occasions.list_birthdays', [read])).toEqual({
+      contactIds: ['contact-a'],
+    });
   });
   it.each([
     'assistant',

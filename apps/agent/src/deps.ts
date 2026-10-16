@@ -26,6 +26,7 @@ import {
   createPostgresConversationSearchRepository,
   createPostgresExecutionPersistence,
   createPostgresModelConnectionRepository,
+  createPostgresOccasionToolReadRepository,
   createPostgresSelfRepairRepository,
   type Db,
   tasks,
@@ -95,6 +96,7 @@ import type { BrowserJobLauncher } from '@assistant/tools/browser';
 import {
   registerAuditTools,
   registerBuiltinTools,
+  registerPortableBirthdayOccasionTool,
   registerPortableContactLookupTool,
   registerPortableConversationSearchTool,
   registerPortableGoalProgressTool,
@@ -868,10 +870,9 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
   });
   registerAuditTools(registry, new FirestoreAuditInvestigationRepository(store));
   if (persistence.selfRepair) registerSelfRepairTools(registry, persistence.selfRepair);
-  registerPortableOccasionTools(
-    registry,
-    new FirestoreOccasionToolRepository(store, config.FIRESTORE_AGENT_ID),
-  );
+  const occasions = new FirestoreOccasionToolRepository(store, config.FIRESTORE_AGENT_ID);
+  registerPortableOccasionTools(registry, occasions);
+  registerPortableBirthdayOccasionTool(registry, occasions);
   registerPortableContactLookupTool(
     registry,
     new FirestoreContactLookupRepository(store, config.FIRESTORE_AGENT_ID),
@@ -1006,34 +1007,37 @@ export function buildDeps(): AgentDeps {
   // workspace tools. Optional provider/worker modules are installed below, and
   // each registers its own tools — the composition root names none of them.
   const registry = registerMcpTools(
-    registerBuiltinTools(new ToolRegistry(), {
-      conversations: createPostgresConversationSearchRepository(db),
-      tasks: persistence.tasks,
-      memory: persistence.memory,
-      embed: async (texts) => {
-        const space = await router.embeddingSpace();
-        return router.embed(texts, { expectedSpace: space });
-      },
-      embedWithIdentity: async (texts) => {
-        const result = await router.embedWithIdentity(texts);
-        return { embeddings: result.embeddings, embeddingSpaceKey: result.spaceKey };
-      },
-      workspace,
-      notifyOwner: async (input) => {
-        const result = await outOfBandNotifier.notifyOwner(input);
-        if (!hasEffectiveNotificationDelivery(result))
-          throw new Error('No out-of-band notification provider acknowledged the ping');
-      },
-      supersede: (input) =>
-        supersedeContradictedFacts(
-          {
-            memory: persistence.memorySupersede,
-            router,
-            onRetired: () => compileOwnerCard(persistence.ownerCardCompilation, input.agentId),
-          },
-          input,
-        ),
-    }),
+    registerPortableBirthdayOccasionTool(
+      registerBuiltinTools(new ToolRegistry(), {
+        conversations: createPostgresConversationSearchRepository(db),
+        tasks: persistence.tasks,
+        memory: persistence.memory,
+        embed: async (texts) => {
+          const space = await router.embeddingSpace();
+          return router.embed(texts, { expectedSpace: space });
+        },
+        embedWithIdentity: async (texts) => {
+          const result = await router.embedWithIdentity(texts);
+          return { embeddings: result.embeddings, embeddingSpaceKey: result.spaceKey };
+        },
+        workspace,
+        notifyOwner: async (input) => {
+          const result = await outOfBandNotifier.notifyOwner(input);
+          if (!hasEffectiveNotificationDelivery(result))
+            throw new Error('No out-of-band notification provider acknowledged the ping');
+        },
+        supersede: (input) =>
+          supersedeContradictedFacts(
+            {
+              memory: persistence.memorySupersede,
+              router,
+              onRetired: () => compileOwnerCard(persistence.ownerCardCompilation, input.agentId),
+            },
+            input,
+          ),
+      }),
+      createPostgresOccasionToolReadRepository(db),
+    ),
   );
   registerAuditTools(registry, createPostgresAuditInvestigationRepository(db));
   registerSelfRepairTools(registry, createPostgresSelfRepairRepository(db));

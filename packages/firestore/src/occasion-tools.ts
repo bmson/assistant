@@ -123,6 +123,9 @@ export class FirestoreOccasionToolRepository implements OccasionToolRepository {
               recurrence: row.recurrence,
               leadDays: row.leadDays,
               notes: row.notes,
+              originTrust: row.originTrust,
+              quarantined: row.quarantined,
+              ownerConfirmed: row.ownerConfirmed,
             },
           ];
     });

@@ -41,7 +41,11 @@ import {
   emailReviewNextThreadRead,
 } from './email-review.js';
 import { DEFAULT_TOOL_RESULT_CHAR_LIMIT, toolResultCharacterLimit } from './executor/util.js';
-import { type FamilyBirthdayRequest, requestedFamilyBirthdays } from './family-birthday.js';
+import {
+  type FamilyBirthdayRequest,
+  familyBirthdayContactIds,
+  requestedFamilyBirthdays,
+} from './family-birthday.js';
 import { detectFutureWatchIntent } from './future-watch-intent.js';
 import { requestedCalendarPerson } from './person-calendar.js';
 
@@ -3749,6 +3753,22 @@ export function nextRequiredReadTool(
     if (conversationSearchResultContinuation(request, evidence)) return 'tools.read_result';
     if (nextHistoricalSearchQuery(request, evidence)) return 'conversations.search';
     if (nextSavedMemorySearchQuery(request, evidence)) return 'memory.recall';
+    if (request.familyBirthday && request.searchSavedMemory) {
+      const reads = evidence.filter(
+        (row) => row.fromCurrentTask !== false && row.toolName === 'occasions.list_birthdays',
+      );
+      const completeRead = reads.some((row) => {
+        const result = objectRecord(row.result);
+        return (
+          succeeded(row) &&
+          Array.isArray(result?.birthdays) &&
+          result?.complete === true &&
+          result?.hasMore !== true &&
+          result?.truncated !== true
+        );
+      });
+      if (!completeRead && reads.length < 2) return 'occasions.list_birthdays';
+    }
     return undefined;
   }
   if (request.kind === 'drive' || request.kind === 'knowledge_graph') {
@@ -3977,6 +3997,44 @@ export function groundReadToolInput(
         (request.queryTerms.join(' ') || 'owner history'),
       limit: 10,
     };
+  }
+  if (
+    toolName === 'occasions.list_birthdays' &&
+    request.kind === 'memory' &&
+    request.familyBirthday &&
+    request.searchSavedMemory
+  ) {
+    const sources = evidence.flatMap((row) => {
+      if (row.fromCurrentTask === false || row.toolName !== 'memory.recall' || !succeeded(row))
+        return [];
+      const memories = objectRecord(row.result)?.memories;
+      if (!Array.isArray(memories)) return [];
+      return memories.flatMap((raw) => {
+        const fact = objectRecord(raw);
+        if (
+          !fact ||
+          typeof fact.id !== 'string' ||
+          fact.id.length === 0 ||
+          typeof fact.content !== 'string' ||
+          fact.content.length > 4000
+        )
+          return [];
+        return [
+          {
+            body: fact.content,
+            trusted:
+              fact.ownerConfirmed === true &&
+              fact.unconfirmed !== true &&
+              fact.quarantined !== true &&
+              !fact.supersededById,
+            ...(typeof fact.subjectContactId === 'string'
+              ? { subjectId: fact.subjectContactId }
+              : {}),
+          },
+        ];
+      });
+    });
+    return { contactIds: familyBirthdayContactIds(request.familyBirthday, sources) };
   }
   if (toolName === 'memory.graph_snapshot') {
     return { query: request.queryTerms.join(' ') || 'owner', limit: 20 };

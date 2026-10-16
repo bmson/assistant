@@ -165,9 +165,25 @@ type MemoryReadSource = {
   speaker: string;
   provenance: string;
   contextId?: string;
+  url?: string;
   ownerConfirmed?: boolean;
   subjectContactId?: string;
 };
+
+const birthdayMonths = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
 
 /** Source identity and speaker come from the current ledger, never the selector. */
 export function memoryReadSources(
@@ -237,6 +253,52 @@ export function memoryReadSources(
                   : 'Historical message (authorship not confirmed)',
             provenance: `conversation ${text(match.conversationId)}; message ${text(match.messageId)}${text(match.createdAt) ? `; ${text(match.createdAt).slice(0, 10)}` : ''}`,
             contextId: text(match.conversationId),
+          },
+          pass,
+        );
+      }
+    }
+    if (row.toolName === 'occasions.list_birthdays' && Array.isArray(result.birthdays)) {
+      for (const raw of result.birthdays) {
+        const birthday = record(raw);
+        if (
+          !birthday ||
+          !text(birthday.id) ||
+          !text(birthday.contactId) ||
+          !text(birthday.person) ||
+          text(birthday.person).length > 120 ||
+          birthday.kind !== 'birthday' ||
+          birthday.recurrence !== 'annual' ||
+          birthday.ownerConfirmed !== true ||
+          birthday.quarantined !== false ||
+          !Number.isInteger(birthday.month) ||
+          Number(birthday.month) < 1 ||
+          Number(birthday.month) > 12 ||
+          !Number.isInteger(birthday.day) ||
+          Number(birthday.day) < 1 ||
+          Number(birthday.day) > 31 ||
+          (birthday.year !== null &&
+            (!Number.isInteger(birthday.year) ||
+              Number(birthday.year) < 1000 ||
+              Number(birthday.year) > 9999))
+        )
+          continue;
+        const month = Number(birthday.month);
+        const day = Number(birthday.day);
+        const year = birthday.year === null ? undefined : Number(birthday.year);
+        const checked = new Date(Date.UTC(year ?? 2000, month - 1, day));
+        if (checked.getUTCMonth() !== month - 1 || checked.getUTCDate() !== day) continue;
+        const contactId = text(birthday.contactId);
+        const date = `${birthdayMonths[month - 1]} ${day}${year ? `, ${year}` : ''}`;
+        append(
+          {
+            key: `occasion:${text(birthday.id)}`,
+            body: `${text(birthday.person)}'s birthday is ${date}.`,
+            speaker: 'Saved birthday record marked owner-confirmed',
+            provenance: `saved occasion ${text(birthday.id)}`,
+            ownerConfirmed: true,
+            subjectContactId: contactId,
+            url: `/profile/people/${encodeURIComponent(contactId)}`,
           },
           pass,
         );
@@ -1399,7 +1461,7 @@ export function familyBirthdayReadProjection(
   let omitted = false;
   const permittedTools = new Set<string>([
     ...(sourceScope.conversationHistory ? ['conversations.search'] : []),
-    ...(sourceScope.savedMemory ? ['memory.recall'] : []),
+    ...(sourceScope.savedMemory ? ['memory.recall', 'occasions.list_birthdays'] : []),
   ]);
   const scopedEvidence = evidence.filter((row) => permittedTools.has(row.toolName));
   const allSources = memoryReadSources(scopedEvidence, requestText, () => {
@@ -1415,7 +1477,16 @@ export function familyBirthdayReadProjection(
       row.status === 'succeeded' &&
       !result?.error &&
       result?.ok !== false &&
-      Array.isArray(result?.[row.toolName === 'conversations.search' ? 'matches' : 'memories']) &&
+      Array.isArray(
+        result?.[
+          row.toolName === 'conversations.search'
+            ? 'matches'
+            : row.toolName === 'occasions.list_birthdays'
+              ? 'birthdays'
+              : 'memories'
+        ],
+      ) &&
+      (row.toolName !== 'occasions.list_birthdays' || result?.complete === true) &&
       result?.hasMore !== true &&
       result?.complete !== false &&
       result?.truncated !== true
@@ -1449,7 +1520,9 @@ export function familyBirthdayReadProjection(
       body: source.body,
       trusted: source.speaker === 'Recorded owner message' || source.ownerConfirmed === true,
       subjectId: source.subjectContactId,
-      url: source.contextId ? `/chat/${encodeURIComponent(source.contextId)}` : '/profile/memories',
+      url: source.contextId
+        ? `/chat/${encodeURIComponent(source.contextId)}`
+        : (source.url ?? '/profile/memories'),
     })),
     incompleteCoverage: incompleteCoverage || !validEnvelope,
   });
