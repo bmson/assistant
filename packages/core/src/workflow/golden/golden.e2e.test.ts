@@ -812,7 +812,7 @@ describe('golden tasks', () => {
     ).toBe(true);
     expect(toolsSeen.find(({ toolName }) => toolName === 'maps.directions')?.args).toEqual({
       origin: 'BER Airport',
-      destination: address,
+      destination: `Hotel Linden, ${address}`,
       mode: 'driving',
     });
   }, 15_000); // Twelve dispatcher/tool rounds plus persistence; leave bounded parallel-CI headroom.
