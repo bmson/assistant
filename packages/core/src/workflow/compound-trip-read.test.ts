@@ -6161,6 +6161,11 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
               title: 'Public transport directions',
               snippet: 'Public transport and taxi from CPH Airport to Canal House.',
             },
+            {
+              url: 'https://fresh-b.example/route',
+              title: 'Public transport directions',
+              snippet: 'Public transport and taxi from CPH Airport to Canal House.',
+            },
           ],
         },
       ),
@@ -6184,6 +6189,14 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
         },
       ),
     );
+    expect(
+      compoundTripReadProjection(read, rows).publicFetchTargets.filter((target) =>
+        target.url.startsWith('https://fresh'),
+      ),
+    ).toEqual([
+      { mode: 'public transport', url: 'https://fresh.example/route' },
+      { mode: 'taxi', url: 'https://fresh.example/route' },
+    ]);
     expect(nextRequiredReadTool(read, rows)).toBeUndefined();
     expect(compoundTripReadProjection(read, rows).comparison).toEqual(
       expect.arrayContaining([
@@ -6202,6 +6215,9 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
       ]),
     );
     expect(compoundTripFetchTargets(read, rows)).toEqual([]);
+    expect(compoundTripReadProjection(read, rows).publicFetchTargets).not.toContainEqual(
+      expect.objectContaining({ url: 'https://fresh-b.example/route' }),
+    );
   });
 
   it.each(['failed', 'truncated', 'wrong endpoints', 'old-task'])(

@@ -3834,7 +3834,7 @@ export function compoundTripReadProjection(
     : undefined;
   const recoveryTargets =
     recoveryPlan && recoverySearch
-      ? recoveryRouteFetchTargets(recoverySearch, recoveryPlan.mode, hotel, evidence)
+      ? recoveryRouteFetchTargets(recoverySearch, recoveryPlan.mode, hotel, primaryFetchTargets)
       : [];
   const recoveryWebQuery = recoveryPlan?.query;
   const fetchTargets = [...primaryFetchTargets, ...recoveryTargets];
@@ -5066,28 +5066,19 @@ function recoveryRouteFetchTargets(
   search: ReadToolEvidence,
   mode: 'public transport' | 'taxi',
   hotel: CompoundTripHotelCandidate | undefined,
-  evidence: ReadonlyArray<ReadToolEvidence>,
+  primaryFetchTargets: ReadonlyArray<{ url: string }>,
 ): Array<{ mode: 'public transport' | 'taxi'; url: string; search: ReadToolEvidence }> {
   const attemptedHosts = new Set(
-    evidence.flatMap((row) => {
-      if (row.toolName !== 'web.fetch' || row.fromCurrentTask === false) return [];
-      const url = text(object(row.args)?.url, 1000);
-      return safePublicSourceUrl(url) ? [new URL(url).hostname] : [];
-    }),
+    primaryFetchTargets.flatMap((target) =>
+      safePublicSourceUrl(target.url) ? [new URL(target.url).hostname] : [],
+    ),
   );
   const candidates = searchRouteCandidates(search, hotel).filter((candidate) =>
     candidate.modes.includes(mode),
   );
-  const target =
-    candidates.find((candidate) => !attemptedHosts.has(new URL(candidate.url).hostname)) ??
-    candidates.find((candidate) =>
-      evidence.some(
-        (row) =>
-          row.toolName === 'web.fetch' &&
-          row.fromCurrentTask !== false &&
-          object(row.args)?.url === candidate.url,
-      ),
-    );
+  const target = candidates.find(
+    (candidate) => !attemptedHosts.has(new URL(candidate.url).hostname),
+  );
   return target
     ? target.modes.map((candidateMode) => ({
         mode: candidateMode,
