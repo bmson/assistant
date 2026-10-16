@@ -1073,6 +1073,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         const focusEnd = slot.start + focusMs;
         return `| ${labelTime(slot.start, timeZone)}–${formatClock(focusEnd)} (${focusMs / 60_000}m) | ${breakMs / 60_000}m |`;
       }),
+      '',
     );
   }
   if (conditionalStayNames.length > 0) {

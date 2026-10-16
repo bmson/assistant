@@ -75,7 +75,7 @@ describe('MessageMarkdown', () => {
     const html = renderToStaticMarkup(
       <MessageMarkdown
         text={
-          '| Route | Transfer detail |\n| --- | --- |\n| Central | Walk through the covered passage to the platform entrance |'
+          '| Candidate | Break |\n| --- | --- |\n| Monday afternoon for a two-hour focus block | 10m |\n| Tuesday morning for a two-hour focus block | 10m |\n| Thursday afternoon for a two-hour focus block | 10m |\nLimits: Free/busy coverage is incomplete.\nAssumptions: A two-hour block fits the request.\nCalendar sources: [Work calendar](https://calendar.google.com/calendar/event?eid=calendar-source)'
         }
       />,
     );
@@ -83,9 +83,37 @@ describe('MessageMarkdown', () => {
     expect(html).toContain('data-mobile-table-records="true"');
     expect(html).toContain('hidden sm:table');
     expect(html).toContain('sm:hidden');
-    expect(html).toMatch(
-      /<dl[^>]*>[\s\S]*?<div class="grid[^>]*><dt[^>]*>Transfer detail<\/dt><dd[^>]*>Walk through the covered passage to the platform entrance<\/dd><\/div>/,
+    expect(html.match(/<dl /g)).toHaveLength(3);
+    const table = /<table\b[\s\S]*?<\/table>/.exec(html)?.[0];
+    expect(table).toBeDefined();
+    expect(table).not.toContain('Limits:');
+    expect(table).not.toContain('Assumptions:');
+    expect(table).not.toContain('Calendar sources:');
+    expect(html.indexOf('</table>')).toBeLessThan(html.indexOf('Limits:'));
+    expect(html).toContain('href="https://calendar.google.com/calendar/event?eid=calendar-source"');
+  });
+
+  it('leaves fenced code and display math untouched', () => {
+    const html = renderToStaticMarkup(
+      <MessageMarkdown
+        text={
+          '```markdown\n| Candidate | Break |\n| --- | --- |\n| Monday focus block | 10m |\nLimits: literal code content\n```'
+        }
+      />,
     );
+
+    expect(html).toContain('| Monday focus block | 10m |\nLimits: literal code content');
+    expect(html).not.toContain('data-mobile-table-records="true"');
+
+    const mathHtml = renderToStaticMarkup(
+      <MessageMarkdown
+        text={
+          '| Candidate | Break |\n| --- | --- |\n| Monday afternoon for a two-hour focus block | 10m |\n$$\n\\text{Assumptions:} \\quad x = 1\n$$'
+        }
+      />,
+    );
+    expect(mathHtml).toContain('class="katex-display"');
+    expect(mathHtml).not.toContain('katex-error');
   });
 
   it('keeps short two-column and three-column tables in their existing layout', () => {

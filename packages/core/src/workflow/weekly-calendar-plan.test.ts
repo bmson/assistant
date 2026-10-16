@@ -1723,6 +1723,10 @@ describe('requested focus-plan variations', () => {
     expect(result.text.indexOf('| Candidate | Break |')).toBeLessThan(
       result.text.indexOf('Possible overlap:'),
     );
+    const resultLines = result.text.split('\n');
+    const finalTableRow = resultLines.findLastIndex((line) => /^\s*\|.*\|\s*$/.test(line));
+    expect(finalTableRow).toBeGreaterThan(-1);
+    expect(resultLines[finalTableRow + 1]).toBe('');
     expect(result.text.match(/^Limits:/gm)).toHaveLength(1);
     expect(result.text.match(/^Assumptions:/gm)).toHaveLength(1);
     expect(result.text).toContain('Thu, Oct 15');
