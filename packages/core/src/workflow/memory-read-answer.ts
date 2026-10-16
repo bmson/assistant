@@ -159,23 +159,25 @@ function interleaveSourcePasses<T extends { key: string }>(
   return selected;
 }
 
+type MemoryReadSource = {
+  key: string;
+  body: string;
+  speaker: string;
+  provenance: string;
+  contextId?: string;
+  ownerConfirmed?: boolean;
+  subjectContactId?: string;
+};
+
 /** Source identity and speaker come from the current ledger, never the selector. */
 export function memoryReadSources(
   evidence: ActionEvidence[],
   excludeExactRequest?: string,
   onUnassessed?: () => void,
-) {
-  const sources: Array<{
-    key: string;
-    body: string;
-    speaker: string;
-    provenance: string;
-    contextId?: string;
-    ownerConfirmed?: boolean;
-    subjectContactId?: string;
-  }> = [];
+): MemoryReadSource[] {
+  const sources: MemoryReadSource[] = [];
   const passByKey = new Map<string, number>();
-  const append = (source: (typeof sources)[number], pass: number) => {
+  const append = (source: MemoryReadSource, pass: number) => {
     sources.push(source);
     if (!passByKey.has(source.key)) passByKey.set(source.key, pass);
   };
@@ -253,12 +255,78 @@ export function memoryReadSources(
     const assistant = ordered.filter(
       (source) => source.speaker === 'Earlier assistant claim (not verified fact)',
     );
-    return assessed(
-      [
-        ...interleaveSourcePasses(owner, passByKey, 12),
-        ...interleaveSourcePasses(assistant, passByKey, 8),
-      ].sort((left, right) => memorySourcePriority(left) - memorySourcePriority(right)),
-    );
+    const bounded = [
+      ...interleaveSourcePasses(owner, passByKey, 12),
+      ...interleaveSourcePasses(assistant, passByKey, 8),
+    ].sort((left, right) => memorySourcePriority(left) - memorySourcePriority(right));
+
+    // A speaker-only cap can spend all eight assistant slots on similar
+    // conversations before the assistant passage that belongs with a selected
+    // owner passage. For named fictional exercises, reserve the strongest
+    // same-conversation pair first. Identity, authorship, and quotes still come
+    // exclusively from successful current-task search evidence.
+    const scope = explicitComparisonScope(excludeExactRequest);
+    const terms = comparisonTerms(excludeExactRequest);
+    if (scope && terms) {
+      const byContext = new Map<string, typeof ordered>();
+      for (const source of ordered) {
+        if (!source.contextId || source.body.length > 800) continue;
+        const rows = byContext.get(source.contextId) ?? [];
+        rows.push(source);
+        byContext.set(source.contextId, rows);
+      }
+      const bestRelevant = (rows: typeof ordered, speaker: string, requested: string[]) => {
+        const candidates = rows
+          .filter((source) => source.speaker === speaker)
+          .flatMap((source) =>
+            comparisonEvidenceSegments(source, scope, requested).map((excerpt) => ({
+              source,
+              score: requested.filter((term) => matchesComparisonTerm(term, excerpt)).length,
+            })),
+          )
+          .filter((candidate) => candidate.score >= Math.min(2, requested.length));
+        const score = Math.max(-1, ...candidates.map((candidate) => candidate.score));
+        return {
+          score,
+          sources: [
+            ...new Map(
+              candidates
+                .filter((candidate) => candidate.score === score)
+                .map(({ source }) => [source.key, source] as const),
+            ).values(),
+          ],
+        };
+      };
+      const pairs = [...byContext.values()]
+        .map((rows) => {
+          const ownerPair = bestRelevant(rows, 'Recorded owner message', terms.owner);
+          const assistantPair = bestRelevant(
+            rows,
+            'Earlier assistant claim (not verified fact)',
+            terms.assistant,
+          );
+          return {
+            score: ownerPair.score + assistantPair.score,
+            complete: ownerPair.score >= 0 && assistantPair.score >= 0,
+            sources: [...ownerPair.sources, ...assistantPair.sources],
+          };
+        })
+        .filter((pair) => pair.complete)
+        .sort((left, right) => right.score - left.score);
+      const strongest = pairs[0]?.score;
+      const pairedSources =
+        strongest === undefined
+          ? []
+          : pairs.filter((pair) => pair.score === strongest).flatMap((pair) => pair.sources);
+      const prioritized = new Map<string, MemoryReadSource>();
+      for (const source of [...pairedSources, ...bounded]) {
+        if (!prioritized.has(source.key) && prioritized.size < 20)
+          prioritized.set(source.key, source);
+      }
+      return assessed([...prioritized.values()]);
+    }
+
+    return assessed(bounded);
   }
   return assessed(
     [0, 1, 2, 3]
@@ -286,8 +354,6 @@ function selectorVisibleSources(
   }
   return bounded;
 }
-
-type MemoryReadSource = ReturnType<typeof memoryReadSources>[number];
 
 function requiresOwnerAssistantContrast(request: string): boolean {
   const asksToCompare =
@@ -471,18 +537,35 @@ function comparisonEvidenceSegments(
   requestedTerms: string[],
 ): string[] {
   const minimum = Math.min(2, requestedTerms.length);
-  return source.body
+  const sentences = source.body
     .split(/(?<=[.!?])\s+|[\n;]+/u)
     .map((sentence) => sentence.trim())
     .filter((sentence) => {
       if (!sentence || sentence.length > 800 || sentence.includes('?')) return false;
-      const words: string[] = sentence.toLocaleLowerCase('en-US').match(/[\p{L}\p{N}-]+/gu) ?? [];
-      if (!words.includes(scope.toLocaleLowerCase('en-US'))) return false;
       const matchingTerms = requestedTerms.filter((term) =>
         matchesComparisonTerm(term, sentence),
       ).length;
       return matchingTerms >= minimum;
     });
+  if (!sentences.length) return [];
+  const bodyWords: string[] =
+    source.body.toLocaleLowerCase('en-US').match(/[\p{L}\p{N}-]+/gu) ?? [];
+  const hasScope = bodyWords.includes(scope.toLocaleLowerCase('en-US'));
+  if (!hasScope) return [];
+  const scopeInSentence = sentences.filter((sentence) => {
+    const sentenceWords: string[] =
+      sentence.toLocaleLowerCase('en-US').match(/[\p{L}\p{N}-]+/gu) ?? [];
+    return sentenceWords.includes(scope.toLocaleLowerCase('en-US'));
+  });
+  // Some assistant messages state the project in a heading and put the
+  // suggestion in the next sentence or bullet. Keep the full short source
+  // message as the quote in that case, so the project anchor and suggestion
+  // remain visibly tied to one source identity.
+  return scopeInSentence.length
+    ? scopeInSentence
+    : source.body.length <= 800
+      ? [source.body.trim()]
+      : [];
 }
 
 function comparisonValueSignature(sourceBody: string, scope: string): string {
@@ -567,7 +650,14 @@ function deterministicComparisonSelection(
       );
       if (signatures.size > 1 || best.some((candidate) => candidate.source.body.length > 800))
         return undefined;
-      return { sources: best.map((candidate) => candidate.source), score: bestScore };
+      return {
+        sources: [
+          ...new Map(
+            best.map((candidate) => [candidate.source.key, candidate.source] as const),
+          ).values(),
+        ],
+        score: bestScore,
+      };
     };
     const owner = bestForSpeaker('Recorded owner message', terms.owner);
     const assistant = bestForSpeaker(

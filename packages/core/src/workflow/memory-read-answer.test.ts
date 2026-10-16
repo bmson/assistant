@@ -483,6 +483,91 @@ describe('exact historical source projection', () => {
     expect(answer).toContain('“My Berlin flight is actually at 13:45, not 09:15.”');
     expect(answer).toContain('“Your flight departs at 09:15.”');
   });
+  it('recovers an owner fact and assistant suggestion from a fictional exercise when selection is empty', async () => {
+    const request =
+      'Look back at the earlier hypothetical Mosaic exercise. Did I earmark its project budget for public transport, or was that an Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step, citing the relevant conversation messages. Keep the fictional exercise separate from my real plans, and do not save new memories.';
+    const ownerText =
+      'For this hypothetical exercise only, the project is named Mosaic, the budget is $500, and we must avoid taxi travel.';
+    const assistantText =
+      'Project Mosaic has a $500 budget and a rule to avoid taxi travel. Next step: map public transit options that fit the budget.';
+    const conversationEvidence: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: {
+          matches: [
+            ...Array.from({ length: 8 }, (_, index) =>
+              message(
+                `unrelated-assistant-${index}`,
+                `A next step for another exercise is to review option ${index}.`,
+                'assistant',
+                'assistant',
+              ),
+            ),
+            message('mosaic-owner', ownerText, 'user', 'owner'),
+            message('mosaic-assistant', assistantText, 'assistant', 'assistant'),
+          ],
+        },
+      },
+    ];
+    const object = vi.fn(async () => ({ ok: true, object: { selections: [] } }));
+
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request,
+      evidence: conversationEvidence,
+    });
+
+    expect(result.status).toBe('complete');
+    expect(result.selections.map((item) => item.sourceKey)).toEqual([
+      'message:mosaic-owner',
+      'message:mosaic-assistant',
+    ]);
+    expect(validMemoryReadSelection(result, conversationEvidence, request)).toBe(true);
+    const answer = renderMemoryReadAnswer(result, conversationEvidence, request);
+    expect(answer).toContain('Recorded owner message');
+    expect(answer).toContain('Earlier assistant claim (not verified fact)');
+    expect(answer).toContain('message mosaic-owner');
+    expect(answer).toContain('message mosaic-assistant');
+    expect(answer).toContain('That wording appears in the assistant’s suggestion.');
+    expect(object).toHaveBeenCalledTimes(2);
+  });
+  it('does not pair matching fictional facts across separate conversations', async () => {
+    const request =
+      'Look back at the earlier hypothetical Mosaic exercise. Did I earmark its project budget for public transport, or was that an Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step, citing the relevant conversation messages.';
+    const ownerText =
+      'For this hypothetical exercise only, the project is named Mosaic, the budget is $500, and we must avoid taxi travel.';
+    const assistantText =
+      'Project Mosaic has a $500 budget and a rule to avoid taxi travel. Next step: map public transit options that fit the budget.';
+    const owner = {
+      ...message('mosaic-owner-separate-chat', ownerText, 'user', 'owner'),
+      conversationId: 'owner-chat',
+    };
+    const assistant = {
+      ...message('mosaic-assistant-separate-chat', assistantText, 'assistant', 'assistant'),
+      conversationId: 'assistant-chat',
+    };
+    const conversationEvidence: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: { matches: [owner, assistant] },
+      },
+    ];
+    const object = vi.fn(async () => ({ ok: true, object: { selections: [] } }));
+
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request,
+      evidence: conversationEvidence,
+    });
+
+    expect(result).toMatchObject({ status: 'unavailable', failureReason: 'incomplete_selection' });
+    expect(validMemoryReadSelection(result, conversationEvidence, request)).toBe(false);
+    expect(object).toHaveBeenCalledTimes(2);
+  });
   it('reserves bounded evidence for both speakers when a long history search has many owner messages', () => {
     const matches = [
       ...Array.from({ length: 22 }, (_, index) =>
