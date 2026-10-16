@@ -607,11 +607,25 @@ function validConversationContextReceipt(
 export function memoryContextAnchorRefs(
   request: string,
   evidence: ReadToolEvidence[],
+  contextToolAvailable = true,
 ): ConversationSearchSourceRef[] {
-  if (!requiresOwnerAssistantContrast(request)) return [];
+  if (!contextToolAvailable || !requiresOwnerAssistantContrast(request)) return [];
   const scope = explicitComparisonScope(request);
   const terms = comparisonTerms(request);
   if (!scope || !terms || !permitsCrossConversationComparison(request, scope)) return [];
+  const currentSearchEvidence = evidence.flatMap((row) =>
+    row.fromCurrentTask === true &&
+    row.status === 'succeeded' &&
+    row.toolName === 'conversations.search' &&
+    row.result !== undefined
+      ? [{ ...row, result: row.result }]
+      : [],
+  );
+  const existingSources = selectorVisibleSources(memoryReadSources(currentSearchEvidence, request));
+  // Context is only a bounded recovery read for a missing side of the
+  // comparison. A complete exact pair already returned by search needs no
+  // additional capability or tool call.
+  if (deterministicComparisonSelection(request, existingSources)?.status === 'complete') return [];
   const byContext = new Map<
     string,
     { ref: ConversationSearchSourceRef; score: number; order: number }
@@ -1830,7 +1844,7 @@ export function familyBirthdayReadProjection(
   const sourceScope = familyBirthdaySourceScope(requestText);
   let omitted = false;
   const permittedTools = new Set<string>([
-    ...(sourceScope.conversationHistory ? ['conversations.search', 'conversations.context'] : []),
+    ...(sourceScope.conversationHistory ? ['conversations.search'] : []),
     ...(sourceScope.savedMemory ? ['memory.recall', 'occasions.list_birthdays'] : []),
   ]);
   const scopedEvidence = evidence.filter((row) => permittedTools.has(row.toolName));

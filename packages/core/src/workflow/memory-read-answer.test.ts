@@ -234,6 +234,37 @@ describe('exact historical source projection', () => {
       ]),
     ).toEqual([]);
   });
+  it('does not request context when current search already returned a complete comparison pair', () => {
+    const request =
+      "Compare the fictional Cobalt exercise: my original budget from the assistant's earlier recommendation.";
+    const rows: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { query: 'Cobalt' },
+        result: {
+          matches: [
+            message(
+              'cobalt-owner',
+              'My original budget for the fictional Cobalt exercise was $250.',
+              'user',
+              'owner',
+            ),
+            message(
+              'cobalt-assistant',
+              'For the fictional Cobalt exercise, I recommend a $400 budget.',
+              'assistant',
+              'assistant',
+            ),
+          ],
+        },
+      },
+    ];
+
+    expect(memoryContextAnchorRefs(request, rows)).toEqual([]);
+    expect(memoryContextAnchorRefs(request, rows, false)).toEqual([]);
+  });
   it('rejects invented quotes, changed source bodies, and duplicate selections', () => {
     const originalEvidence = evidence[0];
     const firstSelection = selection.selections[0];

@@ -30,9 +30,14 @@ const TEXT_PAGE_SIZE = 500;
 const TEXT_SCAN_LIMIT = 5000;
 const CONTEXT_PAGE_SIZE = 5;
 const CONTEXT_SCAN_LIMIT = 20;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REVISION = /^[a-f0-9]{64}$/;
 type ConversationContext = NonNullable<ConversationSearchRepository['context']>;
+
+/** Shared source-ID shape check for bounded context and resumable search refs. */
+export function validConversationSearchUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID.test(value);
+}
 
 function transactionFence(snapshot: DocumentSnapshot, agentId: string): Timestamp | null {
   if (!snapshot.exists) return null;
@@ -196,8 +201,8 @@ export class FirestoreConversationSearchRepository implements ConversationSearch
     if (new Set(ids).size !== ids.length) throw new Error('Duplicate conversation context anchor');
     for (const anchor of anchors) {
       if (
-        !UUID.test(anchor.messageId) ||
-        !UUID.test(anchor.conversationId) ||
+        !validConversationSearchUuid(anchor.messageId) ||
+        !validConversationSearchUuid(anchor.conversationId) ||
         !REVISION.test(anchor.sourceRevision) ||
         typeof anchor.speakerRevision !== 'string' ||
         !REVISION.test(anchor.speakerRevision)
@@ -356,10 +361,8 @@ export class FirestoreConversationSearchRepository implements ConversationSearch
     if (new Set(ids).size !== ids.length) throw new Error('Duplicate conversation source');
     for (const ref of input.sourceRefs) {
       if (
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref.messageId) ||
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-          ref.conversationId,
-        ) ||
+        !validConversationSearchUuid(ref.messageId) ||
+        !validConversationSearchUuid(ref.conversationId) ||
         !/^[a-f0-9]{64}$/.test(ref.sourceRevision) ||
         (ref.speakerRevision !== undefined && !/^[a-f0-9]{64}$/.test(ref.speakerRevision))
       )
@@ -406,10 +409,8 @@ export class FirestoreConversationSearchRepository implements ConversationSearch
     if (new Set(ids).size !== ids.length) throw new Error('Duplicate resumed conversation source');
     for (const ref of input.sourceRefs) {
       if (
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref.messageId) ||
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-          ref.conversationId,
-        ) ||
+        !validConversationSearchUuid(ref.messageId) ||
+        !validConversationSearchUuid(ref.conversationId) ||
         !/^[a-f0-9]{64}$/.test(ref.sourceRevision) ||
         (ref.speakerRevision !== undefined && !/^[a-f0-9]{64}$/.test(ref.speakerRevision))
       )

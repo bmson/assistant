@@ -1802,6 +1802,13 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       }
     }
     if (readRequest && state.step + 1 < task.maxSteps) {
+      const contextToolAvailable =
+        !conceptualNoTool &&
+        !arrivalTask &&
+        !restrictedChecklistResume &&
+        dispatcher
+          .toolDefs(task.trust as Trust, { isMissionSession: isMissionSessionTask(task) })
+          .some((tool) => tool.name === 'conversations.context');
       const historyRequests = [
         ...(readRequest.kind === 'memory' && readRequest.conversationQuery ? [readRequest] : []),
         ...(readRequest.sourceReads ?? []).filter(
@@ -1813,6 +1820,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           historyRequest.conversationContextAnchors = memoryContextAnchorRefs(
             historyRequest.memoryQuery ?? ownerText,
             readToolEvidence,
+            contextToolAvailable,
           );
       }
     }
