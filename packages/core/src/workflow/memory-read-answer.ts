@@ -535,6 +535,47 @@ function explicitComparisonScope(request: string): string | undefined {
   return undefined;
 }
 
+function permitsCrossConversationComparison(request: string, scope: string): boolean {
+  const escapedScope = scope.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const fictionalScope = new RegExp(
+    `\\b(?:hypothetical|fictional)\\s+${escapedScope}\\s+(?:exercise|scenario)\\b|\\b(?:hypothetical|fictional)\\b[\\s\\S]{0,60}\\b(?:exercise|scenario)\\b[\\s\\S]{0,50}\\b(?:called|named)\\s+[“"']?${escapedScope}\\b`,
+    'iu',
+  ).test(request);
+  const deniesFictionalScope =
+    /\b(?:not|nonfictional|real|actual)\b[^.!?]{0,36}\b(?:fictional|hypothetical)\b/iu.test(
+      request,
+    ) ||
+    new RegExp(
+      `\\b(?:real|actual|factual|nonfictional)\\b[\\s\\S]{0,60}\\b${escapedScope}\\b|\\b${escapedScope}\\b[\\s\\S]{0,60}\\b(?:real|actual|factual|nonfictional)\\b`,
+      'iu',
+    ).test(request);
+  return (
+    fictionalScope &&
+    !deniesFictionalScope &&
+    /\b(?:compare|comparative|contrast|separat\w*|distinguish\w*)\b/iu.test(request)
+  );
+}
+
+function isDirectComparisonPassage(excerpt: string): boolean {
+  return (
+    !/["“”‘’]/u.test(excerpt) &&
+    !/^\s*(?:prompt|instruction|quoted (?:text|prompt)|the prompt says|the instruction says)\s*[:,-]/iu.test(
+      excerpt,
+    ) &&
+    !/^\s*(?:please\s+)?(?:say|tell|repeat|follow|ignore|pretend|imagine|suppose)\b/iu.test(excerpt)
+  );
+}
+
+function isNamedFictionalScopePassage(excerpt: string, scope: string): boolean {
+  const escapedScope = scope.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const sourceNamesScope = new RegExp(`\\b${escapedScope}\\b`, 'iu').test(excerpt);
+  const sourceMarksNamedExercise = new RegExp(
+    `\\b(?:fictional|hypothetical)\\b[\\s\\S]{0,60}\\b${escapedScope}\\b[\\s\\S]{0,60}\\b(?:exercise|scenario|project)\\b|\\b(?:fictional|hypothetical)\\b[\\s\\S]{0,40}\\b(?:exercise|scenario|project)\\b[\\s\\S]{0,60}\\b${escapedScope}\\b`,
+    'iu',
+  ).test(excerpt);
+  return sourceNamesScope && sourceMarksNamedExercise;
+}
+
 function comparisonTerms(request: string): { owner: string[]; assistant: string[] } | undefined {
   const ownerMatch = request.match(
     /\b(?:my|owner(?:['’]s)?)\s+original\b([\s\S]{1,100}?)(?:\bfrom\b|\bwith\b|\band\s+(?:the\s+)?assistant\b|[.;?]|$)/iu,
@@ -779,9 +820,10 @@ function comparisonValueSignature(sourceBody: string, scope: string): string {
 
 /**
  * Conservative recovery for an explicit owner/assistant comparison. It only
- * selects exact passages sharing a named scope and conversation. Repeated
- * passages are retained when their extracted value signature agrees; conflicting
- * or ambiguous source rows are left for the existing refusal path.
+ * prefers exact passages sharing a named scope and conversation. A narrowly
+ * scoped fictional comparison may use separate conversations only when each
+ * speaker's independently selected passage is uniquely strongest (or exactly
+ * repeated); this does not imply the passages were one exchange.
  */
 function deterministicComparisonSelection(
   request: string,
@@ -873,7 +915,65 @@ function deterministicComparisonSelection(
     }
   }
   pairs.sort((left, right) => right.score - left.score);
-  if (!pairs.length) return undefined;
+  if (!pairs.length) {
+    if (!permitsCrossConversationComparison(request, scope)) return undefined;
+    const bestAcrossConversations = (speaker: string, requestedTerms: string[]) => {
+      const assistantSpeaker = speaker === 'Earlier assistant claim (not verified fact)';
+      const candidates = inScope
+        .filter(
+          (source) => source.contextId && source.body.length <= 800 && source.speaker === speaker,
+        )
+        .flatMap((source) =>
+          (assistantSpeaker
+            ? assistantComparisonEvidenceSegments(source, scope, terms.owner)
+            : comparisonEvidenceSegments(source, scope, requestedTerms)
+          ).map((excerpt) => ({
+            source,
+            excerpt,
+            score: assistantSpeaker
+              ? assistantComparisonEvidenceScore(excerpt, terms.owner, requestedTerms)
+              : requestedTerms.filter((term) => matchesComparisonTerm(term, excerpt)).length,
+          })),
+        )
+        .filter(
+          (candidate) =>
+            isDirectComparisonPassage(candidate.excerpt) &&
+            isNamedFictionalScopePassage(candidate.excerpt, scope) &&
+            candidate.score >= (assistantSpeaker ? 2 : Math.min(2, requestedTerms.length)),
+        );
+      const bestScore = Math.max(-1, ...candidates.map((candidate) => candidate.score));
+      const best = candidates.filter((candidate) => candidate.score === bestScore);
+      if (bestScore < 0 || best.length === 0) return undefined;
+      const allSignatures = new Set(
+        candidates.map((candidate) => normalizedText(candidate.excerpt)),
+      );
+      if (allSignatures.size !== 1) return undefined;
+      const signatures = new Set(best.map((candidate) => normalizedText(candidate.excerpt)));
+      if (signatures.size !== 1) return undefined;
+      return {
+        score: bestScore,
+        candidates: [
+          ...new Map(best.map((candidate) => [candidate.source.key, candidate] as const)).values(),
+        ],
+      };
+    };
+    const owner = bestAcrossConversations('Recorded owner message', terms.owner);
+    const assistant = bestAcrossConversations(
+      'Earlier assistant claim (not verified fact)',
+      terms.assistant,
+    );
+    if (!owner || !assistant || owner.score + assistant.score < 0) return undefined;
+    const selected = [...owner.candidates, ...assistant.candidates];
+    if (selected.length > 8) return undefined;
+    return {
+      version: 1,
+      status: 'complete',
+      selections: selected.map(({ source, excerpt }) => ({
+        sourceKey: source.key,
+        quote: excerpt,
+      })),
+    };
+  }
   const tied = pairs.filter((pair) => pair.score === pairs[0]?.score);
   // Repeated exercises may record the same exact owner/assistant pair in
   // several chats. One complete pair is sufficient only when all equally
@@ -1011,12 +1111,24 @@ function validateSelectedComparison(
     ({ source }) => source.speaker === 'Earlier assistant claim (not verified fact)',
   );
   if (!selectedOwner.length || !selectedAssistant.length) return selection;
+  if ([...selectedOwner, ...selectedAssistant].some(({ source }) => !source.contextId))
+    return incompleteComparisonSelection();
   const contexts = new Set(
     [...selectedOwner, ...selectedAssistant]
       .map(({ source }) => source.contextId)
       .filter((context): context is string => typeof context === 'string'),
   );
-  if (contexts.size !== 1) return incompleteComparisonSelection();
+  if (contexts.size !== 1) {
+    if (!permitsCrossConversationComparison(request, scope)) return incompleteComparisonSelection();
+    const deterministic = deterministicComparisonSelection(request, sources);
+    if (deterministic?.status !== 'complete') return incompleteComparisonSelection();
+    const deterministicRows = new Set(
+      deterministic.selections.map((item) => `${item.sourceKey}\u0000${item.quote}`),
+    );
+    if (selected.some(({ item }) => !deterministicRows.has(`${item.sourceKey}\u0000${item.quote}`)))
+      return incompleteComparisonSelection();
+    return deterministic;
+  }
   const contextId = [...contexts][0];
   if (!contextId) return incompleteComparisonSelection();
 
@@ -1557,6 +1669,9 @@ export function renderMemoryReadAnswer(
     chosen.some(({ source }) => source.speaker === 'Earlier assistant claim (not verified fact)');
   const ownerAssistantContrast =
     hasOwnerAndAssistant && requiresOwnerAssistantContrast(excludeExactRequest ?? '');
+  const crossConversationContrast =
+    ownerAssistantContrast &&
+    new Set(chosen.map(({ source }) => source.contextId).filter(Boolean)).size > 1;
   const groups = selectedSourceGroups(chosen);
   const directAnswer = ownerAssistantContrast
     ? directSelectedContrastAnswer(excludeExactRequest ?? '', groups)
@@ -1569,6 +1684,11 @@ export function renderMemoryReadAnswer(
             'The owner-authored passage records the original statement; the separate assistant-authored passage is an assistant claim or suggestion, not evidence of owner intent.',
           ]
         : []),
+    ...(crossConversationContrast
+      ? [
+          'These records come from separate conversations. Their authorship is supported independently; this does not establish that the assistant was responding to the owner’s message.',
+        ]
+      : []),
     ...(/\b(?:hypothetical|fictional)\b[^.!?\n]{0,100}\b(?:exercise|scenario)\b/i.test(
       excludeExactRequest ?? '',
     )

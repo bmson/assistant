@@ -56,6 +56,298 @@ const ownerSelection = {
 const assistantSelection = { sourceKey: 'message:assistant-nimbus', quote: assistantBody };
 
 describe('source-backed fictional history', () => {
+  const crossConversationRequest =
+    'For the earlier hypothetical Aurora exercise, compare my original budget and travel constraint with the Assistant’s suggested next step.';
+  const makeComparisonEvidence = (
+    rows: Array<{
+      id: string;
+      conversationId: string;
+      body: string;
+      role: 'user' | 'assistant';
+    }>,
+  ): ActionEvidence[] => [
+    {
+      toolName: 'conversations.search',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      result: {
+        matches: rows.map(({ id, conversationId, body, role }) => ({
+          messageId: id,
+          conversationId,
+          text: body,
+          role,
+          origin: role === 'user' ? 'owner' : 'assistant',
+          speakerRevision: conversationMessageSpeakerRevision(
+            id,
+            body,
+            role,
+            role === 'user' ? 'owner' : 'assistant',
+          ),
+        })),
+      },
+    },
+  ];
+
+  const selectWithEmptyModel = async (
+    request: string,
+    rows: Parameters<typeof makeComparisonEvidence>[0],
+  ) => {
+    const result = await selectMemoryReadAnswer({
+      router: {
+        object: vi.fn().mockResolvedValue({ ok: true, object: { selections: [] } }),
+      } as never,
+      taskId: 'cross-context-attribution',
+      request,
+      evidence: makeComparisonEvidence(rows),
+    });
+    return { result, evidence: makeComparisonEvidence(rows) };
+  };
+
+  it('compares independently matching fictional records across conversations without implying one exchange', async () => {
+    const owner =
+      'For the fictional Aurora exercise, my original budget was €310 and the travel constraint was to avoid taxis.';
+    const assistant =
+      'For the fictional Aurora exercise, the suggested next step was to map public transit options within the €310 travel limit.';
+    const rows = [
+      {
+        id: 'aurora-owner',
+        conversationId: 'aurora-owner-chat',
+        body: owner,
+        role: 'user' as const,
+      },
+      {
+        id: 'aurora-assistant',
+        conversationId: 'aurora-assistant-chat',
+        body: assistant,
+        role: 'assistant' as const,
+      },
+    ];
+    const comparisonEvidence = makeComparisonEvidence(rows);
+    const result = await selectMemoryReadAnswer({
+      router: {
+        object: vi.fn().mockResolvedValue({
+          ok: true,
+          object: {
+            selections: [
+              {
+                sourceKey: 'message:aurora-owner',
+                quote: owner,
+              },
+              {
+                sourceKey: 'message:aurora-assistant',
+                quote: assistant,
+              },
+            ],
+          },
+        }),
+      } as never,
+      taskId: 'cross-context-attribution',
+      request: crossConversationRequest,
+      evidence: comparisonEvidence,
+    });
+
+    expect(result.status).toBe('complete');
+    expect(result.selections.map(({ sourceKey }) => sourceKey)).toEqual([
+      'message:aurora-owner',
+      'message:aurora-assistant',
+    ]);
+    const rendered = renderMemoryReadAnswer(result, comparisonEvidence, crossConversationRequest);
+    expect(rendered).toContain('conversation aurora-owner-chat; message aurora-owner');
+    expect(rendered).toContain('conversation aurora-assistant-chat; message aurora-assistant');
+    expect(rendered).toContain('These records come from separate conversations');
+    expect(rendered).toContain('does not establish that the assistant was responding');
+  });
+
+  it('recovers matching fictional records across conversations after empty selection', async () => {
+    const rows = [
+      {
+        id: 'aurora-owner',
+        conversationId: 'aurora-owner-chat',
+        body: 'For the fictional Aurora exercise, my original budget was €310 and the travel constraint was to avoid taxis.',
+        role: 'user' as const,
+      },
+      {
+        id: 'aurora-assistant',
+        conversationId: 'aurora-assistant-chat',
+        body: 'For the fictional Aurora exercise, the suggested next step was to map public transit options within the €310 travel limit.',
+        role: 'assistant' as const,
+      },
+    ];
+    const { result } = await selectWithEmptyModel(crossConversationRequest, rows);
+
+    expect(result.status).toBe('complete');
+    expect(result.selections.map(({ sourceKey }) => sourceKey)).toEqual([
+      'message:aurora-owner',
+      'message:aurora-assistant',
+    ]);
+  });
+
+  it('quotes only the validated assistant recommendation, excluding a separate claim in that message', async () => {
+    const owner =
+      'For the fictional Aurora exercise, my original budget was €310 and the travel constraint was to avoid taxis.';
+    const validatedRecommendation =
+      'For the fictional Aurora exercise, the suggested next step was to map public transit options within the €310 travel limit.';
+    const assistant = `${validatedRecommendation} Separately, the suggested next step was to book taxis as another option.`;
+    const rows = [
+      {
+        id: 'aurora-owner',
+        conversationId: 'aurora-owner-chat',
+        body: owner,
+        role: 'user' as const,
+      },
+      {
+        id: 'aurora-assistant',
+        conversationId: 'aurora-assistant-chat',
+        body: assistant,
+        role: 'assistant' as const,
+      },
+    ];
+    const { result, evidence: comparisonEvidence } = await selectWithEmptyModel(
+      crossConversationRequest,
+      rows,
+    );
+    const assistantSelection = result.selections.find(
+      ({ sourceKey }) => sourceKey === 'message:aurora-assistant',
+    );
+
+    expect(result.status).toBe('complete');
+    expect(assistantSelection?.quote).toBe(validatedRecommendation);
+    const rendered = renderMemoryReadAnswer(result, comparisonEvidence, crossConversationRequest);
+    expect(rendered).toContain(validatedRecommendation);
+    expect(rendered).not.toContain('book taxis as another option');
+  });
+
+  it('rejects cross-conversation Aurora records with conflicting owner budgets', async () => {
+    const rows = [
+      {
+        id: 'aurora-owner-310',
+        conversationId: 'aurora-owner-310-chat',
+        body: 'For the fictional Aurora exercise, my original budget was €310 and the travel constraint was to avoid taxis.',
+        role: 'user' as const,
+      },
+      {
+        id: 'aurora-owner-410',
+        conversationId: 'aurora-owner-410-chat',
+        body: 'For the fictional Aurora exercise, my original budget was €410 and the travel constraint was to avoid taxis.',
+        role: 'user' as const,
+      },
+      {
+        id: 'aurora-owner-lower-score-conflict',
+        conversationId: 'aurora-owner-lower-score-chat',
+        body: 'For the fictional Aurora exercise, my original budget was €510 and we should use the travel route selected earlier.',
+        role: 'user' as const,
+      },
+      {
+        id: 'aurora-assistant',
+        conversationId: 'aurora-assistant-chat',
+        body: 'For the fictional Aurora exercise, the suggested next step was to map public transit options within the travel limit.',
+        role: 'assistant' as const,
+      },
+    ];
+    const { result } = await selectWithEmptyModel(crossConversationRequest, rows);
+
+    expect(result.status).toBe('unavailable');
+    expect(result.selections).toEqual([]);
+  });
+
+  it('rejects equally strong but conflicting assistant claims across conversations', async () => {
+    const rows = [
+      {
+        id: 'aurora-owner',
+        conversationId: 'aurora-owner-chat',
+        body: 'For the fictional Aurora exercise, my original budget was €310 and the travel constraint was to avoid taxis.',
+        role: 'user' as const,
+      },
+      {
+        id: 'aurora-assistant-transit',
+        conversationId: 'aurora-assistant-transit-chat',
+        body: 'For the fictional Aurora exercise, the suggested next step was to map public transit options.',
+        role: 'assistant' as const,
+      },
+      {
+        id: 'aurora-assistant-taxi',
+        conversationId: 'aurora-assistant-taxi-chat',
+        body: 'For the fictional Aurora exercise, the suggested next step was to book taxis.',
+        role: 'assistant' as const,
+      },
+    ];
+    const { result } = await selectWithEmptyModel(crossConversationRequest, rows);
+
+    expect(result.status).toBe('unavailable');
+    expect(result.selections).toEqual([]);
+  });
+
+  it('does not attribute a quoted or instructional prompt as the owner statement', async () => {
+    for (const [id, body] of [
+      [
+        'aurora-owner-quoted-prompt',
+        'Prompt: “For the fictional Aurora exercise, my original budget was €310 and the travel constraint was to avoid taxis.”',
+      ],
+      [
+        'aurora-owner-instruction-prompt',
+        'Please say: For the fictional Aurora exercise, my original budget was €310 and the travel constraint was to avoid taxis.',
+      ],
+    ] as const) {
+      const rows = [
+        { id, conversationId: 'aurora-owner-chat', body, role: 'user' as const },
+        {
+          id: 'aurora-assistant',
+          conversationId: 'aurora-assistant-chat',
+          body: 'For the fictional Aurora exercise, the suggested next step was to map public transit options within the travel limit.',
+          role: 'assistant' as const,
+        },
+      ];
+      const { result } = await selectWithEmptyModel(crossConversationRequest, rows);
+
+      expect(result.status).toBe('unavailable');
+      expect(result.selections).toEqual([]);
+    }
+  });
+
+  it('does not pair factual Aurora records across conversations without a fictional exercise scope', async () => {
+    const request =
+      'For the Aurora project, compare my original budget and travel constraint with the Assistant’s suggested next step.';
+    const rows = [
+      {
+        id: 'aurora-owner',
+        conversationId: 'aurora-owner-chat',
+        body: 'For the Aurora project, my original budget was €310 and the travel constraint was to avoid taxis.',
+        role: 'user' as const,
+      },
+      {
+        id: 'aurora-assistant',
+        conversationId: 'aurora-assistant-chat',
+        body: 'For Aurora, the suggested next step was to map public transit options within the travel limit.',
+        role: 'assistant' as const,
+      },
+    ];
+    const { result } = await selectWithEmptyModel(request, rows);
+
+    expect(result.status).toBe('unavailable');
+    expect(result.selections).toEqual([]);
+  });
+
+  it('does not label a factual assistant record fictional from the request alone', async () => {
+    const rows = [
+      {
+        id: 'aurora-owner-fictional',
+        conversationId: 'aurora-owner-chat',
+        body: 'For the fictional Aurora exercise, my original budget was €310 and the travel constraint was to avoid taxis.',
+        role: 'user' as const,
+      },
+      {
+        id: 'aurora-assistant-factual',
+        conversationId: 'aurora-assistant-chat',
+        body: 'For the Aurora project, the suggested next step was to map public transit options within the travel limit.',
+        role: 'assistant' as const,
+      },
+    ];
+    const { result } = await selectWithEmptyModel(crossConversationRequest, rows);
+
+    expect(result.status).toBe('unavailable');
+    expect(result.selections).toEqual([]);
+  });
+
   it('recovers a named fictional exercise from exact owner evidence after empty selector passes', async () => {
     const request =
       'Find the earlier hypothetical planning exercise called Nimbus in our past chats. Recall its project name, budget, deadline, and travel constraint, citing the conversation source. Clearly distinguish the fictional exercise from facts about me. Do not use email or calendar, and do not save new memories.';
@@ -670,41 +962,6 @@ describe('source-backed fictional history', () => {
         },
       },
     ];
-    const splitContextEvidence: ActionEvidence[] = [
-      {
-        ...searchEvidence,
-        result: {
-          matches: [
-            {
-              messageId: 'owner-split',
-              conversationId: 'owner-context',
-              text: ownerBody,
-              role: 'user',
-              origin: 'owner',
-              speakerRevision: conversationMessageSpeakerRevision(
-                'owner-split',
-                ownerBody,
-                'user',
-                'owner',
-              ),
-            },
-            {
-              messageId: 'assistant-split',
-              conversationId: 'assistant-context',
-              text: assistantBody,
-              role: 'assistant',
-              origin: 'assistant',
-              speakerRevision: conversationMessageSpeakerRevision(
-                'assistant-split',
-                assistantBody,
-                'assistant',
-                'assistant',
-              ),
-            },
-          ],
-        },
-      },
-    ];
     const noOwnerEvidence: ActionEvidence[] = [
       {
         ...searchEvidence,
@@ -732,12 +989,7 @@ describe('source-backed fictional history', () => {
         },
       },
     ];
-    for (const candidate of [
-      foreignOwnerEvidence,
-      splitContextEvidence,
-      noOwnerEvidence,
-      invalidOwnerEvidence,
-    ]) {
+    for (const candidate of [foreignOwnerEvidence, noOwnerEvidence, invalidOwnerEvidence]) {
       const object = vi.fn().mockRejectedValue(new Error('selector unavailable'));
       const result = await selectMemoryReadAnswer({
         router: { object } as never,
