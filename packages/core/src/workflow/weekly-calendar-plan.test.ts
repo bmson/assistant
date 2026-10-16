@@ -76,6 +76,91 @@ describe('weeklyCalendarPlan', () => {
     expect(text).not.toContain('no overlapping attended events');
   });
 
+  it('groups availability caveats, assumptions, and conflict actions without dropping event references', () => {
+    const allDay = {
+      eventId: 'hold',
+      calendarId: 'travel',
+      summary: 'Travel hold',
+      start: '2026-10-12',
+      end: '2026-10-13',
+      calendarTimeZone: 'America/Los_Angeles',
+      allDay: true,
+      blocksTime: true,
+      links: [{ type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=hold' }],
+    };
+    const events = [
+      {
+        eventId: 'review',
+        calendarId: 'work',
+        summary: 'Project review',
+        start: '2026-10-12T17:00:00Z',
+        end: '2026-10-12T18:00:00Z',
+        ownerResponse: 'accepted',
+        blocksTime: true,
+        links: [{ type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=review' }],
+      },
+      {
+        eventId: 'shared',
+        calendarId: 'family',
+        summary: 'Shared appointment',
+        start: '2026-10-12T17:30:00Z',
+        end: '2026-10-12T18:30:00Z',
+        blocksTime: true,
+        links: [{ type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=shared' }],
+      },
+      allDay,
+    ];
+    const text = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        availabilityComplete: false,
+        unavailable: ['Shared calendar'],
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin, timeMax, maxResults: 50 },
+            result: { events, complete: true, calendarRosterComplete: true, unavailable: [] },
+          },
+        ],
+      }) as never,
+    });
+    const lines = text.split('\n');
+
+    expect(lines).toContain('Availability notes:');
+    expect(
+      lines.some((line) =>
+        line.startsWith(
+          '- All-day holds that still block focus time (not counted as meeting workload):',
+        ),
+      ),
+    ).toBe(true);
+    expect(text).toContain('Travel hold');
+    expect(text).toContain('they do not establish continuous meeting attendance');
+    expect(lines).toContain('Limits:');
+    expect(
+      lines.some((line) => line.startsWith('- Unavailable free/busy or event coverage:')),
+    ).toBe(true);
+    expect(lines).toContain('Assumptions:');
+    expect(lines.some((line) => line.startsWith('- assumed 9 AM–5 PM'))).toBe(true);
+    expect(lines).toContain('Conflicts and review choices:');
+    expect(
+      lines.some((line) =>
+        line.startsWith('- Possible overlap: Project review and Shared appointment'),
+      ),
+    ).toBe(true);
+    expect(
+      lines.some((line) => line.startsWith('- Next: confirm attendance for Shared appointment')),
+    ).toBe(true);
+    expect(text).toContain(
+      'Sources: [Project review](<https://calendar.google.com/calendar/event?eid=review>); [Shared appointment](<https://calendar.google.com/calendar/event?eid=shared>).',
+    );
+    expect(text).toContain('not confirmed free');
+    expect(text).toContain('if attending, compare with Project review');
+  });
+
   it('uses readable local dates for overloaded days and states the missing-coverage limit once', () => {
     const text = weeklyCalendarPlan({
       timeMin,

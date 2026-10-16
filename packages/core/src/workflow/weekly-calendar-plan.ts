@@ -1055,6 +1055,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const conditionalStayNames = [...new Set(chosen.flatMap((slot) => slot.lodgingConditions))];
   const lines = [
     `Review-only plan for ${windowLabel} (${input.timeZone}); no calendar changes made.`,
+    '',
   ];
   const formatClock = (at: number) =>
     new Intl.DateTimeFormat('en-US', {
@@ -1076,6 +1077,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       '',
     );
   }
+  const availabilityNotes: string[] = [];
   if (conditionalStayNames.length > 0) {
     const conditionalStayNameSet = new Set(conditionalStayNames);
     const stayDetails = [
@@ -1096,7 +1098,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         }),
       ).values(),
     ];
-    lines.push(
+    availabilityNotes.push(
       `Availability caveat: the feed still reports busy across this window where it overlaps ${stayDetails.join(', ') || conditionalStayNames.join(', ')}; conditional slots assume lodging context, not a work hold.`,
     );
   }
@@ -1114,7 +1116,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   if (allDayBusySources.length > 0) {
     const shownAllDay = allDayBusySources.slice(0, 3);
     const omittedAllDay = allDayBusySources.length - shownAllDay.length;
-    lines.push(
+    availabilityNotes.push(
       `All-day holds that still block focus time (not counted as meeting workload): ${shownAllDay
         .map(
           ({ event, interval }) =>
@@ -1126,7 +1128,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     );
   }
   if (explainedLodgingBusy.size > 0)
-    lines.push(
+    availabilityNotes.push(
       'Multi-day lodging is excluded from meeting workload; conditional slots still rely on the feed’s busy interval being lodging context.',
     );
   if (!complete) {
@@ -1140,7 +1142,12 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       `${missing}; proposed times are tentative, not confirmed free. Confirm the missing calendars before relying on this review`,
     );
   }
-  if (coverageNotes.length > 0) lines.push(`Limits: ${coverageNotes.join('; ')}.`);
+  if (availabilityNotes.length > 0) {
+    lines.push('Availability notes:', ...availabilityNotes.map((note) => `- ${note}`), '');
+  }
+  if (coverageNotes.length > 0) {
+    lines.push('Limits:', ...coverageNotes.map((note) => `- ${note}.`), '');
+  }
   const assumptions = [
     `assumed 9 AM–5 PM work hours (not configured) and a ${breakMs / 60_000}-minute break after each focus block`,
   ];
@@ -1154,14 +1161,23 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     assumptions.push(
       'some shared-event attendance is unconfirmed; verify before relying on travel time',
     );
-  if (assumptions.length > 0) lines.push(`Assumptions: ${assumptions.join('; ')}.`);
+  if (assumptions.length > 0) {
+    lines.push('Assumptions:', ...assumptions.map((assumption) => `- ${assumption}.`), '');
+  }
   const visibleConflictLimit = 5;
   const allConflictDetails = [...duplicateListingPairs, ...conflictPairs];
   const visibleDuplicateCount = Math.min(visibleConflictLimit, duplicateListingPairs.length);
   const visibleConflictCount = Math.max(0, visibleConflictLimit - visibleDuplicateCount);
-  if (allConflictDetails.length > 0) lines.push('Conflicts and review choices:');
-  lines.push(...allConflictDetails.slice(0, visibleConflictLimit));
-  lines.push(...conflictRecommendations.slice(0, visibleConflictCount));
+  if (allConflictDetails.length > 0) {
+    lines.push(
+      'Conflicts and review choices:',
+      ...allConflictDetails.slice(0, visibleConflictLimit).map((detail) => `- ${detail}`),
+      ...conflictRecommendations
+        .slice(0, visibleConflictCount)
+        .map((recommendation) => `- ${recommendation}`),
+      '',
+    );
+  }
   if (allConflictDetails.length > visibleConflictLimit)
     lines.push(
       `${allConflictDetails.length - visibleConflictLimit} additional overlaps or possible duplicate listings omitted from this brief; all were included in the planning check.`,
