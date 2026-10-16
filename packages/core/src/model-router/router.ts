@@ -54,6 +54,7 @@ import {
   type ProviderOptions,
   type ProviderRequestProfile,
   type ProviderUsage,
+  providerAttemptReceiptFromError,
   providerErrorNodes,
   providerStatusCode,
   type ReasoningMode,
@@ -1349,6 +1350,10 @@ export class ModelRouter {
     }
   }
 
+  private providerFailureReceipt(modelId: string, error: unknown) {
+    return providerAttemptReceiptFromError(this.providerFor(modelId).kind, error);
+  }
+
   /**
    * Route and reserve a model call as one budget-aware decision. The routing
    * guard can only see money already spent; a large primary-model reservation
@@ -1773,6 +1778,7 @@ export class ModelRouter {
         this.persistence.costs,
         reservationId,
         'model provider attempt failed',
+        this.providerFailureReceipt(route.modelId, err),
       ).catch(() => {});
       await releaseReservation(this.persistence.costs, reservationId).catch(() => {});
       throw err;
@@ -1885,6 +1891,7 @@ export class ModelRouter {
               this.persistence.costs,
               reservationId,
               'stream provider attempt failed',
+              this.providerFailureReceipt(route.modelId, error),
             ).catch(() => {});
             await releaseReservation(this.persistence.costs, reservationId).catch(() => {});
             if (opts.onError) {
@@ -1894,7 +1901,7 @@ export class ModelRouter {
             }
           });
         },
-        onAbort: async () => {
+        onAbort: async (event: { reason?: unknown }) => {
           await terminalOnce(async () => {
             const error = new Error('model stream aborted');
             finishAttempt('failed', error);
@@ -1904,6 +1911,7 @@ export class ModelRouter {
               this.persistence.costs,
               reservationId,
               'stream provider attempt aborted',
+              this.providerFailureReceipt(route.modelId, event.reason),
             ).catch(() => {});
             await releaseReservation(this.persistence.costs, reservationId).catch(() => {});
             if (opts.onError) {
@@ -1922,6 +1930,7 @@ export class ModelRouter {
         this.persistence.costs,
         reservationId,
         'stream provider call failed',
+        this.providerFailureReceipt(route.modelId, err),
       ).catch(() => {});
       await releaseReservation(this.persistence.costs, reservationId).catch(() => {});
       throw err;
@@ -2182,6 +2191,7 @@ export class ModelRouter {
         this.persistence.costs,
         reservationId,
         'tool model attempt failed',
+        this.providerFailureReceipt(route.modelId, err),
       ).catch(() => {});
       await releaseReservation(this.persistence.costs, reservationId).catch(() => {});
       throw err;
@@ -2324,6 +2334,7 @@ export class ModelRouter {
             this.persistence.costs,
             reservationId,
             'structured model attempt failed',
+            this.providerFailureReceipt(route.modelId, err),
           ).catch(() => {});
           await releaseReservation(this.persistence.costs, reservationId).catch(() => {});
         }

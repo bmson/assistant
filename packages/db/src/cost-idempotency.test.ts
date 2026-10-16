@@ -218,6 +218,9 @@ describe('PostgreSQL idempotent cost events', () => {
     await repository.markAttemptUnknown(reservation.reservationId, 'injected timeout', {
       requestId: 'generation-late',
       endpoint: 'fixture-upstream',
+      providerRequestId: 'req-1727282430-aBcDeFgHiJkLmNoPqRsT',
+      providerGenerationId: 'gen-3bhGkxlo4XFrqiabUM7NDtwDzWwG',
+      providerReceiptSource: 'openrouter-error-response',
     });
     await db.update(tasks).set({ status: 'done' }).where(eq(tasks.id, taskId));
     const [reservationBeforeInvalid] = await db
@@ -230,6 +233,12 @@ describe('PostgreSQL idempotent cost events', () => {
       .where(eq(costEvents.reservationId, reservation.reservationId));
     const [taskBeforeInvalid] = await db.select().from(tasks).where(eq(tasks.id, taskId));
     const totalsBeforeInvalid = await repository.totals();
+    expect(reservationBeforeInvalid?.attemptMetadata).toMatchObject({
+      requestId: 'generation-late',
+      providerRequestId: 'req-1727282430-aBcDeFgHiJkLmNoPqRsT',
+      providerGenerationId: 'gen-3bhGkxlo4XFrqiabUM7NDtwDzWwG',
+      providerReceiptSource: 'openrouter-error-response',
+    });
     await expect(repository.reconcile(reservation.reservationId, { usd: 10_000 })).rejects.toThrow(
       'numeric(10,6)',
     );

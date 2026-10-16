@@ -2,6 +2,7 @@ import { createVertex } from '@ai-sdk/google-vertex';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { type Config, parseFirestoreEmbeddingSpace } from '@assistant/config';
+import type { ProviderAttemptReceipt } from '@assistant/persistence';
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import type { EmbeddingModel, JSONValue, LanguageModel } from 'ai';
 
@@ -123,6 +124,80 @@ export function providerErrorNodes(
     );
   }
   return nodes;
+}
+
+const OPENROUTER_REQUEST_ID = /^req-[0-9]{8,12}-[A-Za-z0-9]{8,64}$/;
+const OPENROUTER_GENERATION_ID = /^gen-[0-9A-Za-z-]{1,124}$/;
+const MAX_PROVIDER_ERROR_BODY_BYTES = 16 * 1024;
+
+/**
+ * Extract only identifiers explicitly returned by OpenRouter's HTTP error
+ * response. SDK response IDs are deliberately ignored because the SDK may
+ * synthesize them when no upstream generation ID exists.
+ */
+export function providerAttemptReceiptFromError(
+  provider: ModelProviderKind,
+  error: unknown,
+): ProviderAttemptReceipt | undefined {
+  if (provider !== 'openrouter') return undefined;
+
+  for (const { value } of providerErrorNodes(error)) {
+    if (!isProviderApiError(value)) continue;
+    const requestUrl = typeof value.url === 'string' ? value.url : undefined;
+    if (!isOpenRouterApiUrl(requestUrl)) continue;
+
+    const responseBody =
+      typeof value.responseBody === 'string' &&
+      value.responseBody.length <= MAX_PROVIDER_ERROR_BODY_BYTES &&
+      Buffer.byteLength(value.responseBody, 'utf8') <= MAX_PROVIDER_ERROR_BODY_BYTES
+        ? parseJsonRecord(value.responseBody)
+        : undefined;
+    const data = record(responseBody?.data);
+    const bodyRequestId =
+      nonemptyString(data?.request_id) ?? nonemptyString(responseBody?.request_id);
+    const bodyGenerationId = nonemptyString(data?.id) ?? nonemptyString(responseBody?.id);
+
+    const validBodyRequestId =
+      bodyRequestId && OPENROUTER_REQUEST_ID.test(bodyRequestId) ? bodyRequestId : undefined;
+    const providerRequestId = validBodyRequestId;
+    const providerGenerationId =
+      bodyGenerationId && OPENROUTER_GENERATION_ID.test(bodyGenerationId)
+        ? bodyGenerationId
+        : undefined;
+
+    if (!providerRequestId && !providerGenerationId) continue;
+    return {
+      ...(providerRequestId ? { providerRequestId } : {}),
+      ...(providerGenerationId ? { providerGenerationId } : {}),
+      providerReceiptSource: 'openrouter-error-response',
+    };
+  }
+  return undefined;
+}
+
+function isOpenRouterApiUrl(value: string | undefined): boolean {
+  if (!value || value.length > 512) return false;
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === 'https:' &&
+      url.hostname === 'openrouter.ai' &&
+      url.port === '' &&
+      url.username === '' &&
+      url.password === '' &&
+      ['/api/v1/chat/completions', '/api/v1/responses'].includes(url.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function parseJsonRecord(body: string): Record<string, unknown> | undefined {
+  try {
+    return record(JSON.parse(body));
+  } catch {
+    return undefined;
+  }
 }
 
 export function providerStatusCode(value: unknown): number | undefined {

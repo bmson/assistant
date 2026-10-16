@@ -8,6 +8,7 @@ import {
   microsToUsd,
   nextDailyReset,
   nextMonthlyReset,
+  type ProviderAttemptReceipt,
   storedLedgerUsdToMicros,
   storedTaskBudgetToMicros,
 } from '@assistant/persistence';
@@ -326,7 +327,7 @@ export async function markCostAttemptUnknown(
   db: Db,
   reservationId: string,
   reason: string,
-  providerReceipt?: { requestId?: string; endpoint?: string },
+  providerReceipt?: ProviderAttemptReceipt | { requestId?: string; endpoint?: string },
 ): Promise<void> {
   await db
     .update(costReservations)

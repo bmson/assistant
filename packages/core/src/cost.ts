@@ -11,6 +11,7 @@ import type {
   CostRepository,
   CostTotals,
   MaintenanceRepository,
+  ProviderAttemptReceipt,
   ReservationActual,
   ReserveCostInput,
   ReserveOutcome,
@@ -64,7 +65,7 @@ export function markCostAttemptUnknown(
   store: CostStore,
   id: string,
   reason: string,
-  providerReceipt?: { requestId?: string; endpoint?: string },
+  providerReceipt?: ProviderAttemptReceipt | { requestId?: string; endpoint?: string },
 ): Promise<void> {
   return costs(store).markAttemptUnknown(id, reason, providerReceipt);
 }

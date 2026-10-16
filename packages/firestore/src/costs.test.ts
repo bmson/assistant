@@ -253,6 +253,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
     expect(await costs.beginAttempt(reserved.reservationId, metadata)).toBe(false);
     await costs.markAttemptUnknown(reserved.reservationId, 'injected timeout', {
       requestId: 'generation-late',
+      providerRequestId: 'req-1727282430-aBcDeFgHiJkLmNoPqRsT',
+      providerGenerationId: 'gen-3bhGkxlo4XFrqiabUM7NDtwDzWwG',
+      providerReceiptSource: 'openrouter-error-response',
     });
     now = new Date(now.getTime() + 121 * 60_000);
     expect(await costs.releaseStale()).toBe(0);
@@ -261,6 +264,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
     const taskRef = store.doc('tasks', 'terminal-task');
     const taskHoldsRef = store.doc('taskBudgetHolds', 'terminal-task');
     const reservationBeforeInvalid = (await reservationRef.get()).data();
+    expect(reservationBeforeInvalid?.attemptMetadata).toMatchObject({
+      requestId: 'generation-late',
+      providerRequestId: 'req-1727282430-aBcDeFgHiJkLmNoPqRsT',
+      providerGenerationId: 'gen-3bhGkxlo4XFrqiabUM7NDtwDzWwG',
+      providerReceiptSource: 'openrouter-error-response',
+    });
     const taskBeforeInvalid = (await taskRef.get()).data();
     const taskHoldsBeforeInvalid = (await taskHoldsRef.get()).data();
     const eventsBeforeInvalid = await store

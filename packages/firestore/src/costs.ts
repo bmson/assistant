@@ -10,6 +10,7 @@ import {
   microsToUsd,
   nextUtcDailyReset,
   nextUtcMonthlyReset,
+  type ProviderAttemptReceipt,
   type ReservationActual,
   type ReserveCostInput,
   type ReserveOutcome,
@@ -220,7 +221,7 @@ export class FirestoreCostRepository implements CostRepository {
   async markAttemptUnknown(
     reservationId: string,
     reason: string,
-    providerReceipt?: { requestId?: string; endpoint?: string },
+    providerReceipt?: ProviderAttemptReceipt | { requestId?: string; endpoint?: string },
   ): Promise<void> {
     const ref = this.store.doc('costReservations', reservationId);
     await withEmulatorTransactionRetry(() =>

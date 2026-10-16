@@ -7,6 +7,7 @@ import {
   createOpenRouterModelProvider,
   type ModelProvider,
   normalizeOpenRouterUsage,
+  providerAttemptReceiptFromError,
   providerErrorNodes,
   providerStatusCode,
 } from './provider.js';
@@ -97,6 +98,107 @@ beforeEach(() => {
 });
 
 describe('injected model providers', () => {
+  it('extracts only allowlisted OpenRouter request and generation receipts from nested HTTP errors', () => {
+    const apiError = Object.assign(new Error('gateway failed'), {
+      name: 'AI_APICallError',
+      url: 'https://openrouter.ai/api/v1/chat/completions?token=must-not-persist',
+      responseBody: JSON.stringify({
+        data: {
+          request_id: 'req-1727282430-aBcDeFgHiJkLmNoPqRsT',
+          id: 'gen-3bhGkxlo4XFrqiabUM7NDtwDzWwG',
+        },
+      }),
+    });
+    const wrapped = Object.assign(new Error('retry wrapper'), { lastError: apiError });
+
+    expect(providerAttemptReceiptFromError('openrouter', wrapped)).toEqual({
+      providerRequestId: 'req-1727282430-aBcDeFgHiJkLmNoPqRsT',
+      providerGenerationId: 'gen-3bhGkxlo4XFrqiabUM7NDtwDzWwG',
+      providerReceiptSource: 'openrouter-error-response',
+    });
+    expect(JSON.stringify(providerAttemptReceiptFromError('openrouter', wrapped))).not.toContain(
+      'must-not-persist',
+    );
+  });
+
+  it.each([
+    ['short official generation ID', 'gen-abc123'],
+    ['hyphenated generation ID', 'gen-abc-123'],
+    ['maximum 128-character generation ID', `gen-${'a'.repeat(124)}`],
+  ])('accepts %s', (_label, generationId) => {
+    const apiError = Object.assign(new Error('gateway failed'), {
+      name: 'AI_APICallError',
+      url: 'https://openrouter.ai/api/v1/chat/completions',
+      responseBody: JSON.stringify({ data: { id: generationId } }),
+    });
+    expect(providerAttemptReceiptFromError('openrouter', apiError)).toMatchObject({
+      providerGenerationId: generationId,
+    });
+  });
+
+  it.each([
+    ['overlong generation ID', `gen-${'a'.repeat(125)}`],
+    ['whitespace in generation ID', 'gen-abc123 '],
+  ])('rejects %s', (_label, generationId) => {
+    const apiError = Object.assign(new Error('gateway failed'), {
+      name: 'AI_APICallError',
+      url: 'https://openrouter.ai/api/v1/chat/completions',
+      responseBody: JSON.stringify({ data: { id: generationId } }),
+    });
+    expect(providerAttemptReceiptFromError('openrouter', apiError)).toBeUndefined();
+  });
+
+  it('never treats a generation ID in the request_id field as a transport request ID', () => {
+    const apiError = Object.assign(new Error('gateway failed'), {
+      name: 'AI_APICallError',
+      url: 'https://openrouter.ai/api/v1/chat/completions',
+      responseBody: JSON.stringify({ data: { request_id: 'gen-abc123' } }),
+    });
+    expect(providerAttemptReceiptFromError('openrouter', apiError)).toBeUndefined();
+  });
+
+  it('rejects SDK response ids, malformed, oversized, and non-OpenRouter receipt sources', () => {
+    const sdkOnly = Object.assign(new Error('failed'), {
+      name: 'AI_APICallError',
+      url: 'https://openrouter.ai/api/v1/chat/completions',
+      response: { id: 'gen-3bhGkxlo4XFrqiabUM7NDtwDzWwG' },
+    });
+    const malformed = Object.assign(new Error('failed'), {
+      name: 'AI_APICallError',
+      url: 'https://openrouter.ai/api/v1/chat/completions',
+      responseHeaders: { 'x-request-id': 'req-1727282430-aBcDeFgHiJkLmNoPqRsT' },
+      responseBody: JSON.stringify({ request_id: 'sdk-generated-id', id: 'generated-response-id' }),
+    });
+    const wrongHost = Object.assign(new Error('failed'), {
+      name: 'AI_APICallError',
+      url: 'https://attacker.example/api/v1/chat/completions',
+      responseHeaders: { 'x-request-id': 'req-1727282430-aBcDeFgHiJkLmNoPqRsT' },
+    });
+    const responsesApiId = Object.assign(new Error('failed'), {
+      name: 'AI_APICallError',
+      url: 'https://openrouter.ai/api/v1/responses',
+      responseBody: JSON.stringify({ id: 'resp_abc123', status: 'failed' }),
+    });
+    const messagesApiBody = Object.assign(new Error('failed'), {
+      name: 'AI_APICallError',
+      url: 'https://openrouter.ai/api/v1/messages',
+      responseBody: JSON.stringify({ id: 'gen-abc123' }),
+    });
+    const oversized = Object.assign(new Error('failed'), {
+      name: 'AI_APICallError',
+      url: 'https://openrouter.ai/api/v1/chat/completions',
+      responseBody: `${JSON.stringify({ id: 'gen-3bhGkxlo4XFrqiabUM7NDtwDzWwG' })}${' '.repeat(16_384)}`,
+    });
+
+    expect(providerAttemptReceiptFromError('openrouter', sdkOnly)).toBeUndefined();
+    expect(providerAttemptReceiptFromError('openrouter', malformed)).toBeUndefined();
+    expect(providerAttemptReceiptFromError('openrouter', wrongHost)).toBeUndefined();
+    expect(providerAttemptReceiptFromError('openrouter', oversized)).toBeUndefined();
+    expect(providerAttemptReceiptFromError('vertex', wrongHost)).toBeUndefined();
+    expect(providerAttemptReceiptFromError('openrouter', responsesApiId)).toBeUndefined();
+    expect(providerAttemptReceiptFromError('openrouter', messagesApiBody)).toBeUndefined();
+  });
+
   it('walks nested SDK errors by object depth, bounds cycles, and normalizes status codes', () => {
     const unsupported = Object.assign(new Error('response format json_schema is not supported'), {
       name: 'AI_APICallError',

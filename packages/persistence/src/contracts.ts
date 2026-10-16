@@ -71,6 +71,15 @@ export interface CostAttemptMetadata {
   reasoning: 'enabled' | 'disabled' | 'unsupported' | 'unknown';
 }
 
+/** Allowlisted transport metadata from a provider error; never contains URL or request content. */
+export interface ProviderAttemptReceipt {
+  /** Provider transport request identity (not a billable generation identity). */
+  providerRequestId?: string;
+  /** OpenRouter generation identity, when explicitly returned by its response body. */
+  providerGenerationId?: string;
+  providerReceiptSource?: 'openrouter-error-response';
+}
+
 export interface CostRepository {
   readonly kind: 'cost-repository';
   getRate(key: string): Promise<{ unit: string; unitPriceUsd: number } | null>;
@@ -82,7 +91,7 @@ export interface CostRepository {
   markAttemptUnknown(
     reservationId: string,
     reason: string,
-    providerReceipt?: { requestId?: string; endpoint?: string },
+    providerReceipt?: ProviderAttemptReceipt | { requestId?: string; endpoint?: string },
   ): Promise<void>;
   record(input: CostEventInput): Promise<void>;
   reconcile(reservationId: string, actual: ReservationActual): Promise<void>;

@@ -65,6 +65,13 @@ function removedModelError() {
   );
 }
 
+function openRouterReceiptError(requestId: string, generationId: string) {
+  return Object.assign(capabilityError('response format json_schema is not supported'), {
+    url: 'https://openrouter.ai/api/v1/chat/completions',
+    responseBody: JSON.stringify({ request_id: requestId, data: { id: generationId } }),
+  });
+}
+
 function makeRouter() {
   const router = new ModelRouter({} as Db, 'test-key');
   const primary = {
@@ -217,6 +224,49 @@ describe('ModelRouter timeout retry', () => {
       ],
     });
     expect(stubs.generateText).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps nested provider receipts bound to their own primary and fallback reservations', async () => {
+    const { router } = makeRouter();
+    stubs.reserveCost
+      .mockResolvedValueOnce({ ok: true, reservationId: 'primary-reservation' })
+      .mockResolvedValueOnce({ ok: true, reservationId: 'fallback-reservation' });
+    const primaryError = openRouterReceiptError(
+      'req-1727282430-PrimaryRequestId01',
+      'gen-PrimaryGenerationId001',
+    );
+    const fallbackError = openRouterReceiptError(
+      'req-1727282431-FallbackRequestId01',
+      'gen-FallbackGenerationId01',
+    );
+    stubs.generateText.mockRejectedValueOnce(primaryError).mockRejectedValueOnce(fallbackError);
+
+    await expect(router.generate('reason', { prompt: 'Check tomorrow.' })).rejects.toBeInstanceOf(
+      ModelCallFallbackAttemptError,
+    );
+
+    expect(stubs.markCostAttemptUnknown).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ kind: 'cost-repository' }),
+      'primary-reservation',
+      'model provider attempt failed',
+      {
+        providerRequestId: 'req-1727282430-PrimaryRequestId01',
+        providerGenerationId: 'gen-PrimaryGenerationId001',
+        providerReceiptSource: 'openrouter-error-response',
+      },
+    );
+    expect(stubs.markCostAttemptUnknown).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ kind: 'cost-repository' }),
+      'fallback-reservation',
+      'model provider attempt failed',
+      {
+        providerRequestId: 'req-1727282431-FallbackRequestId01',
+        providerGenerationId: 'gen-FallbackGenerationId01',
+        providerReceiptSource: 'openrouter-error-response',
+      },
+    );
   });
 
   it('reserves reasoning headroom when a reasoning model must call a tool', async () => {

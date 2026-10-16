@@ -83,6 +83,39 @@ describe('ModelRouter streaming finalization', () => {
     expect(onError).toHaveBeenCalledWith(error);
   });
 
+  it('persists a supported streamed generation receipt when the stream aborts', async () => {
+    const { router } = makeRouter();
+    await router.stream('draft', { prompt: 'hello' });
+    const options = stubs.streamText.mock.calls[0]?.[0] as {
+      onAbort: (event: { reason?: unknown }) => Promise<void>;
+    };
+    const providerFailure = Object.assign(new Error('upstream aborted'), {
+      name: 'AI_APICallError',
+      url: 'https://openrouter.ai/api/v1/chat/completions',
+      responseBody: JSON.stringify({
+        request_id: 'req-1727282430-StreamRequestId01',
+        data: { id: 'gen-StreamGenerationId0001' },
+      }),
+    });
+
+    await options.onAbort({ reason: providerFailure });
+
+    expect(stubs.markCostAttemptUnknown).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'cost-repository' }),
+      'reservation-1',
+      'stream provider attempt aborted',
+      {
+        providerRequestId: 'req-1727282430-StreamRequestId01',
+        providerGenerationId: 'gen-StreamGenerationId0001',
+        providerReceiptSource: 'openrouter-error-response',
+      },
+    );
+    expect(stubs.releaseReservation).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'cost-repository' }),
+      'reservation-1',
+    );
+  });
+
   it('waits for durable completion and propagates persistence failures', async () => {
     const { router, meter } = makeRouter();
     const failure = new Error('database unavailable');
