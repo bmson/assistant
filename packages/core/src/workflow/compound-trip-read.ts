@@ -4,7 +4,9 @@ import type { CompoundTripExtraction, CompoundTripHotelFact } from './compound-t
 import type { PersonalReadRequest, ReadToolEvidence } from './read-intent.js';
 
 export const MAX_COMPOUND_CALENDAR_COVERAGE_PAGES = 3;
-export const MAX_COMPOUND_TRIP_TOOL_CALLS = 16;
+// Two calls are reserved for one endpoint-mode recovery search and its fetch
+// after the bounded primary and alternate route attempts fail.
+export const MAX_COMPOUND_TRIP_TOOL_CALLS = 18;
 export const MAX_COMPOUND_TRIP_THREADS_TO_READ = 6;
 const MAX_COMPOUND_CALENDAR_CURSOR_LENGTH = 2_000_000;
 
@@ -111,6 +113,7 @@ export interface CompoundTripReadProjection {
   routeDestination?: string;
   webQuery?: string;
   fallbackWebQuery?: string;
+  recoveryWebQuery?: string;
   publicFetchTargets: Array<{ mode: 'public transport' | 'taxi'; url: string }>;
   mapRoute?: Record<string, unknown>;
   webSearch?: Record<string, unknown>;
@@ -3292,22 +3295,26 @@ export function compoundTripNextWebSearchQuery(
         object(row.args)?.query === query,
     );
   if (projection.webQuery && !attempted(projection.webQuery)) return projection.webQuery;
-  if (!projection.fallbackWebQuery || attempted(projection.fallbackWebQuery)) return undefined;
-  const pending = compoundTripFetchTargets(request, evidence).some(
-    (target) =>
-      !evidence.some(
-        (row) =>
-          row.toolName === 'web.fetch' &&
-          row.fromCurrentTask !== false &&
-          object(row.args)?.url === target.url,
+  if (projection.fallbackWebQuery && !attempted(projection.fallbackWebQuery)) {
+    const pending = compoundTripFetchTargets(request, evidence).some(
+      (target) =>
+        !evidence.some(
+          (row) =>
+            row.toolName === 'web.fetch' &&
+            row.fromCurrentTask !== false &&
+            object(row.args)?.url === target.url,
+        ),
+    );
+    const complete = (['public transport', 'taxi'] as const).every((mode) =>
+      projection.comparison.some(
+        (item) => item.mode === mode && item.endpointMatched && item.fare && item.duration,
       ),
-  );
-  const complete = (['public transport', 'taxi'] as const).every((mode) =>
-    projection.comparison.some(
-      (item) => item.mode === mode && item.endpointMatched && item.fare && item.duration,
-    ),
-  );
-  return !pending && !complete ? projection.fallbackWebQuery : undefined;
+    );
+    if (!pending && !complete) return projection.fallbackWebQuery;
+  }
+  return projection.recoveryWebQuery && !attempted(projection.recoveryWebQuery)
+    ? projection.recoveryWebQuery
+    : undefined;
 }
 
 export function compoundTripRoute(
@@ -3782,8 +3789,13 @@ export function compoundTripReadProjection(
       )
     : undefined;
   const webSearch = primarySearch ?? alternateSearch;
-  const fetchTargets = plannedRouteFetchTargets(primarySearch, alternateSearch, evidence, hotel);
-  const webFetches = fetchTargets.flatMap((target) => {
+  const primaryFetchTargets = plannedRouteFetchTargets(
+    primarySearch,
+    alternateSearch,
+    evidence,
+    hotel,
+  );
+  const primaryWebFetches = primaryFetchTargets.flatMap((target) => {
     const row = evidence.find(
       (item) =>
         item.toolName === 'web.fetch' &&
@@ -3798,6 +3810,65 @@ export function compoundTripReadProjection(
     const endpointMatched = comparison?.endpointMatched === true;
     return [{ mode: target.mode, row, endpointMatched, ...(comparison ? { comparison } : {}) }];
   });
+  const primaryComparisons = primaryWebFetches.flatMap((item) =>
+    item.comparison ? [item.comparison] : [],
+  );
+  const recoveryPlan = compoundTripRecoveryPlan({
+    route,
+    flight: comparisonFlight,
+    hotel,
+    fallbackWebQuery,
+    alternateSearch,
+    evidence,
+    primaryFetchTargets,
+    primaryComparisons,
+  });
+  const recoverySearch = recoveryPlan
+    ? evidence.find(
+        (row) =>
+          successful(row) &&
+          row.toolName === 'web.search' &&
+          object(row.args)?.query === recoveryPlan.query &&
+          row.fromCurrentTask !== false,
+      )
+    : undefined;
+  const recoveryTargets =
+    recoveryPlan && recoverySearch
+      ? recoveryRouteFetchTargets(recoverySearch, recoveryPlan.mode, hotel, evidence)
+      : [];
+  const recoveryWebQuery = recoveryPlan?.query;
+  const fetchTargets = [...primaryFetchTargets, ...recoveryTargets];
+  const webFetches = [
+    ...primaryWebFetches,
+    ...recoveryTargets.flatMap((recoveryTarget) => {
+      const row = evidence.find(
+        (item) =>
+          item.toolName === 'web.fetch' &&
+          object(item.args)?.url === recoveryTarget.url &&
+          item.fromCurrentTask !== false,
+      );
+      if (!row) return [];
+      const comparison =
+        comparisonFlight && hotel
+          ? comparisonFromPage(
+              recoveryTarget.mode,
+              row,
+              recoverySearch as ReadToolEvidence,
+              comparisonFlight,
+              hotel,
+            )
+          : undefined;
+      const endpointMatched = comparison?.endpointMatched === true;
+      return [
+        {
+          mode: recoveryTarget.mode,
+          row,
+          endpointMatched,
+          ...(comparison ? { comparison } : {}),
+        },
+      ];
+    }),
+  ];
   const comparison = webFetches.flatMap((item) => (item.comparison ? [item.comparison] : []));
   const clockCandidate = flight ?? returnFlight ?? currentTripReturn;
   const timeInstant = clockCandidate?.segment
@@ -4237,6 +4308,7 @@ export function compoundTripReadProjection(
     ...(route ? { routeOrigin: route.origin, routeDestination: route.destination } : {}),
     ...(webQuery ? { webQuery } : {}),
     ...(fallbackWebQuery ? { fallbackWebQuery } : {}),
+    ...(recoveryWebQuery ? { recoveryWebQuery } : {}),
     publicFetchTargets: fetchTargets.map(({ mode, url }) => ({ mode, url })),
     ...(mapRoute ? { mapRoute: object(mapRoute.result) } : {}),
     ...(webSearch ? { webSearch: object(webSearch.result) } : {}),
@@ -4915,6 +4987,114 @@ function plannedRouteFetchTargets(
     if (candidate) result.push({ mode, url: candidate.url, search: candidate.search });
   }
   return result;
+}
+
+interface CompoundTripRecoveryPlan {
+  query: string;
+  mode: 'public transport' | 'taxi';
+}
+
+function compoundTripRecoveryPlan(input: {
+  route: { origin: string; destination: string } | undefined;
+  flight: Pick<CompoundTripFlightCandidate, 'arrivalAirport'> | undefined;
+  hotel: CompoundTripHotelCandidate | undefined;
+  fallbackWebQuery: string | undefined;
+  alternateSearch: ReadToolEvidence | undefined;
+  evidence: ReadonlyArray<ReadToolEvidence>;
+  primaryFetchTargets: Array<{
+    mode: 'public transport' | 'taxi';
+    url: string;
+    search: ReadToolEvidence;
+  }>;
+  primaryComparisons: CompoundTripComparisonEvidence[];
+}): CompoundTripRecoveryPlan | undefined {
+  const {
+    route,
+    flight,
+    hotel,
+    fallbackWebQuery,
+    alternateSearch,
+    evidence,
+    primaryFetchTargets,
+    primaryComparisons,
+  } = input;
+  if (!route || !flight?.arrivalAirport || !hotel?.hotelName || !hotel.city) return undefined;
+  if (!fallbackWebQuery || !alternateSearch || !successful(alternateSearch)) return undefined;
+  const fetched = evidence.filter(
+    (row) => row.toolName === 'web.fetch' && row.fromCurrentTask !== false,
+  );
+  const attempted = new Set(
+    fetched.map((row) => text(object(row.args)?.url, 1000)).filter(Boolean),
+  );
+  // Do not consume the recovery reserve while a previously discovered page is
+  // still eligible to fetch. A failed/blocked target counts as attempted.
+  if (primaryFetchTargets.some((target) => !attempted.has(target.url))) return undefined;
+  const mode = (['public transport', 'taxi'] as const).find(
+    (candidate) =>
+      !primaryComparisons.some(
+        (item) => item.mode === candidate && item.endpointMatched && item.fare && item.duration,
+      ),
+  );
+  if (!mode) return undefined;
+  const hosts = [
+    ...new Set(
+      primaryFetchTargets.flatMap((target) => {
+        if (!attempted.has(target.url) || !safePublicSourceUrl(target.url)) return [];
+        return [new URL(target.url).hostname];
+      }),
+    ),
+  ];
+  const exclusions = hosts.map((host) => `-site:${host}`).join(' ');
+  const quote = (value: string) => `"${value.replace(/["\r\n]/g, ' ').trim()}"`;
+  const modeTerms =
+    mode === 'public transport' ? 'public transport train bus fare duration' : 'taxi fare duration';
+  const query = [
+    quote(flight.arrivalAirport),
+    quote(hotel.hotelName),
+    quote(hotel.city),
+    modeTerms,
+    'airport route official',
+    exclusions,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+  return { query, mode };
+}
+
+function recoveryRouteFetchTargets(
+  search: ReadToolEvidence,
+  mode: 'public transport' | 'taxi',
+  hotel: CompoundTripHotelCandidate | undefined,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): Array<{ mode: 'public transport' | 'taxi'; url: string; search: ReadToolEvidence }> {
+  const attemptedHosts = new Set(
+    evidence.flatMap((row) => {
+      if (row.toolName !== 'web.fetch' || row.fromCurrentTask === false) return [];
+      const url = text(object(row.args)?.url, 1000);
+      return safePublicSourceUrl(url) ? [new URL(url).hostname] : [];
+    }),
+  );
+  const candidates = searchRouteCandidates(search, hotel).filter((candidate) =>
+    candidate.modes.includes(mode),
+  );
+  const target =
+    candidates.find((candidate) => !attemptedHosts.has(new URL(candidate.url).hostname)) ??
+    candidates.find((candidate) =>
+      evidence.some(
+        (row) =>
+          row.toolName === 'web.fetch' &&
+          row.fromCurrentTask !== false &&
+          object(row.args)?.url === candidate.url,
+      ),
+    );
+  return target
+    ? target.modes.map((candidateMode) => ({
+        mode: candidateMode,
+        url: target.url,
+        search,
+      }))
+    : [];
 }
 
 function durationFromQuote(quote: string): string | undefined {

@@ -6049,7 +6049,159 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     fetched.status = 'failed';
     expect(compoundTripReadProjection(read, rows).comparison).toEqual([]);
     expect(compoundTripFetchTargets(read, rows)).toEqual([]);
+    const recoveryQuery = compoundTripNextWebSearchQuery(read, rows);
+    expect(recoveryQuery).toContain('public transport');
+    expect(recoveryQuery).toContain('-site:official.example');
+    rows.push(
+      row(
+        'web.search',
+        { query: recoveryQuery },
+        {
+          results: [
+            {
+              url: 'https://blocked.example/another-path',
+              title: 'Public transport airport route',
+              snippet: 'Public transport from CPH Airport to Canal House.',
+            },
+          ],
+        },
+      ),
+    );
+    expect(compoundTripFetchTargets(read, rows)).toEqual([]);
     expect(compoundTripNextWebSearchQuery(read, rows)).toBeUndefined();
+  });
+
+  it('reserves one mode-specific search and one fresh-host fetch after exhausted route attempts', () => {
+    const { read, rows } = withTransferSearch();
+    for (const url of [
+      'https://blocked.example/airport/hotel',
+      'https://hotel.example/canal-house/map',
+    ])
+      rows.push({
+        toolName: 'web.fetch',
+        status: 'failed',
+        fromCurrentTask: true,
+        args: { url },
+        result: null,
+        error: 'HTTP 403 challenge',
+      });
+
+    const alternateQuery = compoundTripNextWebSearchQuery(read, rows);
+    expect(alternateQuery).toContain('-site:blocked.example');
+    expect(alternateQuery).toContain('-site:hotel.example');
+    rows.push(
+      row(
+        'web.search',
+        { query: alternateQuery },
+        {
+          results: [
+            {
+              url: 'https://fallback.example/airport-taxi',
+              title: 'Taxi airport transfer',
+              snippet: 'Taxi from airport to hotel.',
+            },
+          ],
+        },
+      ),
+    );
+    rows.push({
+      toolName: 'web.fetch',
+      status: 'failed',
+      fromCurrentTask: true,
+      args: { url: 'https://fallback.example/airport-taxi' },
+      result: null,
+      error: 'Challenge page',
+    });
+
+    // Bring this same-state scenario to the actual reservation boundary. The
+    // failed source calls still count toward the one-search/one-fetch budget.
+    let filler = 0;
+    const counted = () =>
+      rows.filter((item) =>
+        [
+          'calendar.list_events',
+          'gmail.search',
+          'gmail.read_thread',
+          'maps.directions',
+          'web.search',
+          'web.fetch',
+        ].includes(item.toolName),
+      ).length;
+    while (counted() < 16) {
+      const url = `https://budget-${filler}.example/unused`;
+      filler += 1;
+      rows.push({
+        toolName: 'web.fetch',
+        status: 'failed',
+        fromCurrentTask: true,
+        args: { url },
+        result: null,
+      });
+    }
+
+    const recoveryQuery = compoundTripNextWebSearchQuery(read, rows);
+    expect(recoveryQuery).toContain('public transport');
+    expect(recoveryQuery).toContain('-site:blocked.example');
+    expect(recoveryQuery).toContain('-site:hotel.example');
+    expect(recoveryQuery).toContain('-site:fallback.example');
+    expect(nextRequiredReadTool(read, rows)).toBe('web.search');
+    rows.push(
+      row(
+        'web.search',
+        { query: recoveryQuery },
+        {
+          results: [
+            {
+              url: 'https://blocked.example/another-path',
+              title: 'Public transport airport route',
+              snippet: 'Public transport from airport to Canal House.',
+            },
+            {
+              url: 'https://fresh.example/route',
+              title: 'Public transport directions',
+              snippet: 'Public transport and taxi from CPH Airport to Canal House.',
+            },
+          ],
+        },
+      ),
+    );
+
+    expect(compoundTripFetchTargets(read, rows)).toEqual([
+      { mode: 'public transport', url: 'https://fresh.example/route' },
+      { mode: 'taxi', url: 'https://fresh.example/route' },
+    ]);
+    expect(nextRequiredReadTool(read, rows)).toBe('web.fetch');
+    expect(buildReadToolInput(read, 'web.fetch', rows)).toEqual({
+      url: 'https://fresh.example/route',
+    });
+    rows.push(
+      row(
+        'web.fetch',
+        { url: 'https://fresh.example/route' },
+        {
+          finalUrl: 'https://fresh.example/route',
+          text: 'Public transport from CPH Airport to Canal House costs EUR 5 and takes 30 minutes.\n\nTaxi from CPH Airport to Canal House costs EUR 50 and takes 35 minutes.',
+        },
+      ),
+    );
+    expect(nextRequiredReadTool(read, rows)).toBeUndefined();
+    expect(compoundTripReadProjection(read, rows).comparison).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          mode: 'public transport',
+          endpointMatched: true,
+          fare: 'EUR 5',
+          duration: '30 minutes',
+        }),
+        expect.objectContaining({
+          mode: 'taxi',
+          endpointMatched: true,
+          fare: 'EUR 50',
+          duration: '35 minutes',
+        }),
+      ]),
+    );
+    expect(compoundTripFetchTargets(read, rows)).toEqual([]);
   });
 
   it.each(['failed', 'truncated', 'wrong endpoints', 'old-task'])(
