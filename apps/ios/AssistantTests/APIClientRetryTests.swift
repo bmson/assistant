@@ -3298,8 +3298,8 @@ final class APIClientRetryTests: XCTestCase {
     /// End one repeated fixture scope before the next one is primed. A late
     /// URLProtocol start carries the old scope ID and cannot consume the next
     /// iteration's global response queue.
-    private func cancelAndDrain(_ session: URLSession) async -> Bool {
-        session.invalidateAndCancel()
+    private func cancelAndDrain(_ session: URLSession, invalidate: Bool = true) async -> Bool {
+        if invalidate { session.invalidateAndCancel() }
         let deadline = ContinuousClock.now + .seconds(2)
         while ContinuousClock.now < deadline {
             let tasks = await withCheckedContinuation { continuation in
@@ -5454,7 +5454,9 @@ extension APIClientRetryTests {
                 XCTAssertNil(model.errorMessage, "An older success or failure cannot interrupt the new reply")
                 model.cancelSend()
                 StubURLProtocol.endTestCase(iterationID)
-                let didDrain = await cancelAndDrain(session)
+                // Cancellation can enqueue a later request through the retained client.
+                // Keep its session valid; the ended scope rejects those late requests.
+                let didDrain = await cancelAndDrain(session, invalidate: false)
                 XCTAssertTrue(didDrain, "The iteration's URLSession must drain before the next prime")
             }
         }
