@@ -276,15 +276,24 @@ export function memoryReadSources(
         byContext.set(source.contextId, rows);
       }
       const bestRelevant = (rows: typeof ordered, speaker: string, requested: string[]) => {
+        const assistantSpeaker = speaker === 'Earlier assistant claim (not verified fact)';
         const candidates = rows
           .filter((source) => source.speaker === speaker)
           .flatMap((source) =>
-            comparisonEvidenceSegments(source, scope, requested).map((excerpt) => ({
+            (assistantSpeaker
+              ? assistantComparisonEvidenceSegments(source, scope, terms.owner)
+              : comparisonEvidenceSegments(source, scope, requested)
+            ).map((excerpt) => ({
               source,
-              score: requested.filter((term) => matchesComparisonTerm(term, excerpt)).length,
+              score: assistantSpeaker
+                ? assistantComparisonEvidenceScore(excerpt, terms.owner, requested)
+                : requested.filter((term) => matchesComparisonTerm(term, excerpt)).length,
             })),
           )
-          .filter((candidate) => candidate.score >= Math.min(2, requested.length));
+          .filter(
+            (candidate) =>
+              candidate.score >= (assistantSpeaker ? 2 : Math.min(2, requested.length)),
+          );
         const score = Math.max(-1, ...candidates.map((candidate) => candidate.score));
         return {
           score,
@@ -466,7 +475,7 @@ function explicitComparisonScope(request: string): string | undefined {
 
 function comparisonTerms(request: string): { owner: string[]; assistant: string[] } | undefined {
   const ownerMatch = request.match(
-    /\b(?:my|owner(?:['’]s)?)\s+original\b([\s\S]{1,100}?)(?:\bfrom\b|\band\s+(?:the\s+)?assistant\b|[.;?]|$)/iu,
+    /\b(?:my|owner(?:['’]s)?)\s+original\b([\s\S]{1,100}?)(?:\bfrom\b|\bwith\b|\band\s+(?:the\s+)?assistant\b|[.;?]|$)/iu,
   );
   const assistantMatches = [...request.matchAll(/\bassistant(?:['’]s)?\b/giu)];
   const assistantMatch = assistantMatches.at(-1);
@@ -536,18 +545,8 @@ function hasDeclarativeComparisonEvidence(
   return comparisonEvidenceSegments(source, scope, requestedTerms).length > 0;
 }
 
-function comparisonEvidenceSegments(
-  source: MemoryReadSource,
-  scope: string,
-  requestedTerms: string[],
-): string[] {
-  const minimum = Math.min(2, requestedTerms.length);
-  const sentences = source.body
-    .split(/(?<=[.!?])\s+|[\n;]+/u)
-    .map((sentence) => sentence.trim())
-    .filter(Boolean);
-  const scopeLower = scope.toLocaleLowerCase('en-US');
-  const ignoredTopicNames = new Set([
+function comparisonTopicNames(sentence: string): string[] {
+  const ignored = new Set([
     'a',
     'an',
     'and',
@@ -561,22 +560,85 @@ function comparisonEvidenceSegments(
     'this',
     'your',
   ]);
-  const topicNames = (sentence: string): string[] => {
-    const names = new Set<string>();
-    const patterns = [
-      /\b(?:project|exercise|scenario|initiative)\s+(?:(?:named|called)\s+)?([A-Z][\w-]{1,})/gu,
-      /\b([A-Z][\w-]{1,})\s+(?:project|exercise|scenario|initiative)\b/gu,
-      /\bfor\s+(?:the\s+)?(?:(?:separate|different|another|other)\s+)?([A-Z][\w-]{1,})/gu,
-    ];
-    for (const pattern of patterns) {
-      for (const match of sentence.matchAll(pattern)) {
-        const name = match[1];
-        if (name && !ignoredTopicNames.has(name.toLocaleLowerCase('en-US')))
-          names.add(name.toLocaleLowerCase('en-US'));
-      }
+  const names = new Set<string>();
+  const patterns = [
+    /\b(?:project|exercise|scenario|initiative)\s+(?:(?:named|called)\s+)?([A-Z][\w-]{1,})/gu,
+    /\b([A-Z][\w-]{1,})\s+(?:project|exercise|scenario|initiative)\b/gu,
+    /\bfor\s+(?:the\s+)?(?:(?:separate|different|another|other)\s+)?([A-Z][\w-]{1,})/gu,
+  ];
+  for (const pattern of patterns) {
+    for (const match of sentence.matchAll(pattern)) {
+      const name = match[1]?.toLocaleLowerCase('en-US');
+      if (name && !ignored.has(name)) names.add(name);
     }
-    return [...names];
-  };
+  }
+  return [...names];
+}
+
+const comparisonSuggestionSignal =
+  /\b(?:suggest|recommend|next\s+step|consider|could|should|use|take|choose|try|option|prefer|best|better)\b/iu;
+const negatedComparisonSuggestion =
+  /\b(?:not|never|no|avoid|without|don['’]t|doesn['’]t|didn['’]t|wouldn['’]t|shouldn['’]t|can['’]t|cannot)\b.{0,48}\b(?:suggest|recommend|consider|use|take|choose|try|option|prefer|best|better)\b|\b(?:suggest|recommend|consider|use|take|choose|try|option|prefer|best|better)\b.{0,36}\b(?:not|never|avoid|without|don['’]t|doesn['’]t|didn['’]t|wouldn['’]t|shouldn['’]t|can['’]t|cannot)\b/iu;
+
+/**
+ * A same-thread assistant reply may name its project in one sentence and make
+ * the recommendation in another. Tie the passage to an eligible owner passage
+ * in that exact conversation, require a matching owner-topic term and a clear
+ * positive recommendation in one short sentence, and reject competing named
+ * projects anywhere in the bounded message.
+ */
+function assistantComparisonEvidenceSegments(
+  source: MemoryReadSource,
+  scope: string,
+  ownerTopicTerms: string[],
+): string[] {
+  if (source.body.length > 800) return [];
+  const scopeLower = scope.toLocaleLowerCase('en-US');
+  const words: string[] = source.body.toLocaleLowerCase('en-US').match(/[\p{L}\p{N}-]+/gu) ?? [];
+  if (!words.includes(scopeLower)) return [];
+  if (comparisonTopicNames(source.body).some((name) => name !== scopeLower)) return [];
+  const minimumTopicMatches = 1;
+  const sentences = source.body
+    .split(/(?<=[.!?])\s+|[\n;]+/u)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+  return sentences.filter((sentence) => {
+    if (sentence.length > 800 || sentence.includes('?')) return false;
+    if (negatedComparisonSuggestion.test(sentence) || !comparisonSuggestionSignal.test(sentence))
+      return false;
+    const topicMatches = ownerTopicTerms.filter((term) =>
+      matchesComparisonTerm(term, sentence),
+    ).length;
+    return topicMatches >= minimumTopicMatches;
+  });
+}
+
+function assistantComparisonEvidenceScore(
+  excerpt: string,
+  ownerTopicTerms: string[],
+  requestTerms: string[],
+): number {
+  const topicMatches = ownerTopicTerms.filter((term) =>
+    matchesComparisonTerm(term, excerpt),
+  ).length;
+  const requestMatches = requestTerms.filter((term) => matchesComparisonTerm(term, excerpt)).length;
+  // The excerpt was already required to contain an unnegated recommendation
+  // signal, so it can remain relevant when the request's generic phrasing does
+  // not appear literally in the assistant's own wording.
+  return topicMatches + Math.max(1, requestMatches);
+}
+
+function comparisonEvidenceSegments(
+  source: MemoryReadSource,
+  scope: string,
+  requestedTerms: string[],
+): string[] {
+  const minimum = Math.min(2, requestedTerms.length);
+  const sentences = source.body
+    .split(/(?<=[.!?])\s+|[\n;]+/u)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+  const scopeLower = scope.toLocaleLowerCase('en-US');
   const hasScope = (sentence: string) => {
     const words: string[] = sentence.toLocaleLowerCase('en-US').match(/[\p{L}\p{N}-]+/gu) ?? [];
     return words.includes(scopeLower);
@@ -591,7 +653,7 @@ function comparisonEvidenceSegments(
   const excerpts: string[] = [];
   for (const [index, sentence] of sentences.entries()) {
     if (!hasRequestedTerms(sentence)) continue;
-    const names = topicNames(sentence);
+    const names = comparisonTopicNames(sentence);
     if (names.some((name) => name !== scopeLower)) continue;
     if (hasScope(sentence)) {
       excerpts.push(sentence);
@@ -602,7 +664,7 @@ function comparisonEvidenceSegments(
     // bullet. A competing explicit project/exercise name blocks the carry.
     const previous = sentences[index - 1];
     if (!previous || !hasScope(previous)) continue;
-    if (topicNames(previous).some((name) => name !== scopeLower)) continue;
+    if (comparisonTopicNames(previous).some((name) => name !== scopeLower)) continue;
     const excerpt = `${previous} ${sentence}`;
     if (excerpt.length <= 800) excerpts.push(excerpt);
   }
@@ -669,21 +731,32 @@ function deterministicComparisonSelection(
   }> = [];
   for (const rows of byContext.values()) {
     const bestForSpeaker = (speaker: string, requestedTerms: string[]) => {
+      const assistantSpeaker = speaker === 'Earlier assistant claim (not verified fact)';
       const candidates = rows
         .filter(
           (source) =>
             source.speaker === speaker &&
             source.body.length <= 800 &&
-            hasDeclarativeComparisonEvidence(source, scope, requestedTerms),
+            (assistantSpeaker
+              ? assistantComparisonEvidenceSegments(source, scope, terms.owner).length > 0
+              : hasDeclarativeComparisonEvidence(source, scope, requestedTerms)),
         )
         .flatMap((source) =>
-          comparisonEvidenceSegments(source, scope, requestedTerms).map((excerpt) => ({
+          (assistantSpeaker
+            ? assistantComparisonEvidenceSegments(source, scope, terms.owner)
+            : comparisonEvidenceSegments(source, scope, requestedTerms)
+          ).map((excerpt) => ({
             source,
             excerpt,
-            score: requestedTerms.filter((term) => matchesComparisonTerm(term, excerpt)).length,
+            score: assistantSpeaker
+              ? assistantComparisonEvidenceScore(excerpt, terms.owner, requestedTerms)
+              : requestedTerms.filter((term) => matchesComparisonTerm(term, excerpt)).length,
           })),
         )
-        .filter((candidate) => candidate.score >= Math.min(2, requestedTerms.length))
+        .filter(
+          (candidate) =>
+            candidate.score >= (assistantSpeaker ? 2 : Math.min(2, requestedTerms.length)),
+        )
         .sort((left, right) => right.score - left.score);
       const bestScore = candidates[0]?.score;
       if (bestScore === undefined) return undefined;
@@ -735,7 +808,14 @@ function deterministicComparisonSelection(
   return {
     version: 1,
     status: 'complete',
-    selections: selected.map(({ source, excerpt }) => ({ sourceKey: source.key, quote: excerpt })),
+    selections: selected.map(({ source, excerpt }) => ({
+      sourceKey: source.key,
+      // Keep the scope anchor in the quoted assistant record. The validation
+      // above permits a shorter exact recommendation sentence when a selector
+      // chooses it, but deterministic recovery returns the bounded source.
+      quote:
+        source.speaker === 'Earlier assistant claim (not verified fact)' ? source.body : excerpt,
+    })),
   };
 }
 
@@ -866,16 +946,28 @@ function validateSelectedComparison(
     ['Recorded owner message', terms.owner, selectedOwner],
     ['Earlier assistant claim (not verified fact)', terms.assistant, selectedAssistant],
   ] as const) {
+    const assistantSpeaker = speaker === 'Earlier assistant claim (not verified fact)';
     const candidates = allInScope
       .filter((source) => source.speaker === speaker)
       .flatMap((source) =>
-        comparisonEvidenceSegments(source, scope, requestedTerms).map((excerpt) => ({
+        (assistantSpeaker
+          ? [
+              ...comparisonEvidenceSegments(source, scope, requestedTerms),
+              ...assistantComparisonEvidenceSegments(source, scope, terms.owner),
+            ]
+          : comparisonEvidenceSegments(source, scope, requestedTerms)
+        ).map((excerpt) => ({
           source,
           excerpt,
-          score: requestedTerms.filter((term) => matchesComparisonTerm(term, excerpt)).length,
+          score: assistantSpeaker
+            ? assistantComparisonEvidenceScore(excerpt, terms.owner, requestedTerms)
+            : requestedTerms.filter((term) => matchesComparisonTerm(term, excerpt)).length,
         })),
       )
-      .filter((candidate) => candidate.score >= Math.min(2, requestedTerms.length));
+      .filter(
+        (candidate) =>
+          candidate.score >= (assistantSpeaker ? 2 : Math.min(2, requestedTerms.length)),
+      );
     const bestScore = Math.max(-1, ...candidates.map((candidate) => candidate.score));
     const bestCandidates = candidates.filter((candidate) => candidate.score === bestScore);
     const bestKeys = new Set(bestCandidates.map((candidate) => candidate.source.key));
@@ -884,6 +976,14 @@ function validateSelectedComparison(
       bestCandidates.length === 0 ||
       chosenRows.some(({ item, source }) => {
         if (!bestKeys.has(source.key) || item.quote.length > 800) return true;
+        if (assistantSpeaker) {
+          const allowedQuotes = [
+            source.body,
+            ...comparisonEvidenceSegments(source, scope, requestedTerms),
+            ...assistantComparisonEvidenceSegments(source, scope, terms.owner),
+          ];
+          return !allowedQuotes.includes(item.quote);
+        }
         const quotedSource = { ...source, body: item.quote };
         return !comparisonEvidenceSegments(quotedSource, scope, requestedTerms).some(
           (excerpt) =>

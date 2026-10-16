@@ -533,6 +533,92 @@ describe('exact historical source projection', () => {
     expect(answer).toContain('That wording appears in the assistant’s suggestion.');
     expect(object).toHaveBeenCalledTimes(2);
   });
+  it('matches a same-thread recommendation by its topic when request wording is absent', async () => {
+    const request =
+      'For the earlier fictional Kestrel scenario, compare my original budget and travel constraint with the Assistant’s suggested next step.';
+    const ownerText =
+      'For the fictional Kestrel scenario, my original budget is $500 and my travel constraint is to avoid taxis.';
+    const assistantText =
+      'The Kestrel scenario remains under review. Two options were considered for the travel details. Public transport is the best option for travel.';
+    const conversationEvidence: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: {
+          matches: [
+            message('kestrel-owner', ownerText, 'user', 'owner'),
+            message('kestrel-assistant', assistantText, 'assistant', 'assistant'),
+          ],
+        },
+      },
+    ];
+    const object = vi.fn(async () => ({ ok: true, object: { selections: [] } }));
+
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request,
+      evidence: conversationEvidence,
+    });
+
+    expect(result.status).toBe('complete');
+    expect(result.selections.map((item) => item.sourceKey)).toEqual([
+      'message:kestrel-owner',
+      'message:kestrel-assistant',
+    ]);
+    expect(validMemoryReadSelection(result, conversationEvidence, request)).toBe(true);
+    expect(renderMemoryReadAnswer(result, conversationEvidence, request)).toContain(
+      'fictional exercise, not facts about you',
+    );
+  });
+  it.each([
+    [
+      'cross-project switch',
+      'For Kestrel, travel is relevant. For the separate Orion scenario, public transport is the best travel option.',
+    ],
+    [
+      'negated recommendation',
+      'For Kestrel, the travel option is not public transport; I would not recommend it.',
+    ],
+    [
+      'unrelated recommendation in the same thread',
+      'For Kestrel, travel is under review. The next step is to upgrade database configuration.',
+    ],
+  ])(
+    'does not select a %s as the same-thread assistant recommendation',
+    async (_case, assistantText) => {
+      const request =
+        'For the earlier fictional Kestrel scenario, compare my original budget and travel constraint with the Assistant’s suggested next step.';
+      const ownerText =
+        'For the fictional Kestrel scenario, my original budget is $500 and my travel constraint is to avoid taxis.';
+      const conversationEvidence: ActionEvidence[] = [
+        {
+          toolName: 'conversations.search',
+          status: 'succeeded',
+          result: {
+            matches: [
+              message('kestrel-owner', ownerText, 'user', 'owner'),
+              message('kestrel-assistant', assistantText, 'assistant', 'assistant'),
+            ],
+          },
+        },
+      ];
+      const result = await selectMemoryReadAnswer({
+        router: {
+          object: vi.fn().mockResolvedValue({ ok: true, object: { selections: [] } }),
+        } as never,
+        taskId: 'qa',
+        request,
+        evidence: conversationEvidence,
+      });
+
+      expect(result).toMatchObject({
+        status: 'unavailable',
+        failureReason: 'incomplete_selection',
+      });
+      expect(validMemoryReadSelection(result, conversationEvidence, request)).toBe(false);
+    },
+  );
   it('does not carry an Aurora anchor into a separate Borealis suggestion in the same message', async () => {
     const request =
       'Look back at the earlier hypothetical Aurora exercise. Separate my original project budget from the Assistant’s suggested next step, citing the messages.';
@@ -592,7 +678,7 @@ describe('exact historical source projection', () => {
       const assistant = {
         ...message(
           `aurora-assistant-${index}`,
-          'For Aurora, the next step is public transport.',
+          'For Aurora, the next step is to reduce the project budget by using public transport.',
           'assistant',
           'assistant',
         ),
