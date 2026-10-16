@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_TOOL_RESULT_CHAR_LIMIT } from './executor/util.js';
 import {
   buildReadToolInput,
   detectPersonalReadRequest,
@@ -72,6 +73,146 @@ describe('named historical exercises and retention constraints', () => {
     expect(rows[1]?.args).toMatchObject({ query: request.conversationFollowupQuery });
     expect(rows[1]?.args).not.toHaveProperty('mode');
     expect(nextRequiredReadTool(request, rows)).toBeUndefined();
+  });
+
+  it('binds one bounded context read to exact searched assistant anchors and never repeats it', () => {
+    const request = history(
+      "Review our earlier fictional Cobalt exercise. Compare my original budget from the assistant's earlier recommendation.",
+    );
+    const searches = finishSearches(request);
+    const anchors = [
+      {
+        messageId: 'assistant-1',
+        conversationId: 'chat-1',
+        sourceRevision: 'body-rev-1',
+        speakerRevision: 'speaker-rev-1',
+      },
+      {
+        messageId: 'assistant-2',
+        conversationId: 'chat-2',
+        sourceRevision: 'body-rev-2',
+        speakerRevision: 'speaker-rev-2',
+      },
+    ];
+    request.conversationContextAnchors = anchors;
+    expect(nextRequiredReadTool(request, searches)).toBe('conversations.context');
+    expect(buildReadToolInput(request, 'conversations.context', searches)).toEqual({ anchors });
+    expect(
+      groundReadToolInput(
+        request,
+        'conversations.context',
+        { anchors: [{ messageId: 'invented' }] },
+        searches,
+      ),
+    ).toEqual({ anchors });
+    const attempted = [
+      ...searches,
+      {
+        toolName: 'conversations.context',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { anchors },
+        result: {
+          mode: 'context',
+          anchors,
+          matches: [],
+          window: { before: 3, after: 1 },
+          observationGeneration: null,
+        },
+      },
+    ];
+    expect(nextRequiredReadTool(request, attempted)).toBeUndefined();
+    expect(buildReadToolInput(request, 'conversations.context', attempted)).toBeNull();
+  });
+
+  it('continues an oversized context receipt once without reopening the context tool', () => {
+    const request = history(
+      "Review our earlier fictional Cobalt exercise. Compare my original budget from the assistant's earlier recommendation.",
+    );
+    const anchors = [
+      {
+        messageId: 'assistant-1',
+        conversationId: 'chat-1',
+        sourceRevision: 'body-rev-1',
+        speakerRevision: 'speaker-rev-1',
+      },
+    ];
+    request.conversationContextAnchors = anchors;
+    const context = {
+      id: '56a09ec4-c495-4d96-966f-8e8e66476cef',
+      toolName: 'conversations.context',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { anchors },
+      result: {
+        mode: 'context',
+        anchors,
+        matches: [{ text: 'large context payload '.repeat(1_000) }],
+        window: { before: 3, after: 1 },
+        observationGeneration: 'generation-1',
+      },
+    };
+    const evidence = [...finishSearches(request), context];
+    expect(nextRequiredReadTool(request, evidence)).toBe('tools.read_result');
+    expect(buildReadToolInput(request, 'tools.read_result', evidence)).toMatchObject({
+      toolCallId: context.id,
+      offset: expect.any(Number),
+    });
+    expect(nextRequiredReadTool(request, [...evidence, { ...context, status: 'failed' }])).toBe(
+      'tools.read_result',
+    );
+  });
+
+  it('continues oversized context after an oversized search whose page attempts are exhausted', () => {
+    const request = history(
+      "Review our earlier fictional Cobalt exercise. Compare my original budget from the assistant's earlier recommendation.",
+    );
+    const anchors = [
+      {
+        messageId: 'assistant-1',
+        conversationId: 'chat-1',
+        sourceRevision: 'body-rev-1',
+        speakerRevision: 'speaker-rev-1',
+      },
+    ];
+    request.conversationContextAnchors = anchors;
+    const searchId = '56a09ec4-c495-4d96-966f-8e8e66476cef';
+    const contextId = '96a09ec4-c495-4d96-966f-8e8e66476cef';
+    const search = {
+      id: searchId,
+      toolName: 'conversations.search',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { query: request.conversationAnchorQuery, mode: 'text', limit: 20 },
+      result: { matches: [{ text: 'large search result '.repeat(1_000) }] },
+    };
+    const failedSearchPages = [0, 1].map(() => ({
+      toolName: 'tools.read_result',
+      status: 'failed',
+      fromCurrentTask: true,
+      args: { toolCallId: searchId, offset: DEFAULT_TOOL_RESULT_CHAR_LIMIT },
+      result: { error: 'fixture page failure' },
+    }));
+    const context = {
+      id: contextId,
+      toolName: 'conversations.context',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { anchors },
+      result: {
+        mode: 'context',
+        anchors,
+        matches: [{ text: 'large context result '.repeat(1_000) }],
+        window: { before: 3, after: 1 },
+        observationGeneration: 'generation-1',
+      },
+    };
+    const evidence = [search, ...failedSearchPages, context];
+    expect(nextRequiredReadTool(request, evidence)).toBe('tools.read_result');
+    expect(buildReadToolInput(request, 'tools.read_result', evidence)).toEqual({
+      toolCallId: contextId,
+      offset: DEFAULT_TOOL_RESULT_CHAR_LIMIT,
+    });
   });
 
   it.each([

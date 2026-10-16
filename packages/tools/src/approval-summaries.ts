@@ -58,6 +58,8 @@ export function approvalFallbackSummary(toolName: string, args: Record<string, u
       return `Recall saved information about ${quoted(args.query, 'this topic')}`;
     case 'conversations.search':
       return `Search earlier conversations for ${quoted(args.query, 'this topic')}`;
+    case 'conversations.context':
+      return 'Read the surrounding messages in your earlier conversation';
     case 'web.fetch':
       return `Open ${quoted(args.url, 'the requested public webpage')}`;
     case 'improvement.report':

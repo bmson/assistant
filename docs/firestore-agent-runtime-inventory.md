@@ -1,6 +1,6 @@
 # Firestore agent runtime inventory
 
-Updated 2026-09-26. This lists every capability the production agent (`apps/agent`) enables and records whether it runs with zero SQL access when `PERSISTENCE_DRIVER=firestore` selects the Firestore composition in `apps/agent/src/deps.ts`. **Production still runs on PostgreSQL.** This inventory covers the agent only. Web and mobile routes are tracked in `docs/firestore-web-route-inventory.md`.
+Updated 2026-10-16. This lists every capability the production agent (`apps/agent`) enables and records whether it runs with zero SQL access when `PERSISTENCE_DRIVER=firestore` selects the Firestore composition in `apps/agent/src/deps.ts`. The selected production driver must be verified from deployment and runtime evidence; adapter coverage alone does not establish a production cutover. This inventory covers the agent only. Web and mobile routes are tracked in `docs/firestore-web-route-inventory.md`.
 
 Production composition: `assistant.config.ts` composes 11 modules, and `infra/gcp/deploy.sh` defaults `ASSISTANT_MODULES=all`. The agent runs with `QUEUE_DRIVER=cloudtasks`, one Cloud Scheduler `/internal/sweep` job per minute, Gmail sync/watch scheduler jobs, and optional canary jobs. `packages/db/src/seed.ts` seeds 19 proactive schedules.
 
@@ -125,8 +125,10 @@ The Firestore composition registers `memory.save`, `memory.recall`, `task.schedu
 | `memory.graph_snapshot` | Ready: graph recall repository's verified seeds, filtered by embedding space |
 | `tools.read_result` | Ready: tool-execution `load`, scoped to the calling task and owner |
 | `occasions.save/list` | Ready: Profile occasion writer with tool provenance (untrusted saves stay quarantined); bounded owner scan for the list |
+| `occasions.list_birthdays` | Adapter implemented: bounded agent/contact-scoped reads of confirmed annual birthdays. Family recall separately requires a confirmed relationship to the exact contact identity; quarantined occasions are excluded. |
 | `contacts.lookup` | Ready: bounded contact scan, name and alias prefix match |
 | `conversations.search` | Ready: owned-conversation vector search in the configured space; bounded newest-first substring fallback |
+| `conversations.context` | Adapter implemented: up to two revision-bound search anchors, each with at most three preceding and one following messages. Ownership, visibility, speaker/body revisions, and the erasure fence apply to anchors and neighbors. This is a bounded context window, not a complete conversation read. |
 | `goals.list`, `goals.create`, `goals.update_progress`, `mission.update` | Ready (`firestore-goals-missions.test.ts`). `goals.create` also writes the work chat and automation that the PostgreSQL sweep's goal sync would create. |
 | `mcp.list_connections/list_tools/call` | Ready (`firestore-mcp.test.ts`) |
 | `situations.read/decisions/sources/change` | Ready: the situation pack read and command repositories the owner UI uses |

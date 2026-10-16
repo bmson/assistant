@@ -4,6 +4,7 @@ import {
 } from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  memoryContextAnchorRefs,
   memoryReadSources,
   renderMemoryReadAnswer,
   selectMemoryReadAnswer,
@@ -18,6 +19,7 @@ const message = (id: string, text: string, role: string, origin: string) => ({
   role,
   origin,
   speakerRevision: conversationMessageSpeakerRevision(id, text, role, origin),
+  sourceRevision: conversationMessageSourceRevision(id, text),
   createdAt: '2026-10-10T12:00:00.000Z',
 });
 const evidence: ActionEvidence[] = [
@@ -121,6 +123,116 @@ describe('exact historical source projection', () => {
       { toolName: 'conversations.search', status: 'succeeded', result: { matches: [row] } },
     ]);
     expect(sources[0]?.speaker).toBe('Historical message (authorship not confirmed)');
+  });
+  it('adds context neighbors only from a revision-bound receipt anchored in a current search', () => {
+    const assistant = message(
+      'context-assistant',
+      'For the fictional Cobalt exercise, use a $400 budget.',
+      'assistant',
+      'assistant',
+    );
+    const owner = message(
+      'context-owner',
+      'My original budget for the fictional Cobalt exercise was $250.',
+      'user',
+      'owner',
+    );
+    const anchor = {
+      messageId: assistant.messageId,
+      conversationId: assistant.conversationId,
+      sourceRevision: conversationMessageSourceRevision(assistant.messageId, assistant.text),
+      speakerRevision: assistant.speakerRevision,
+    };
+    const rows: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { query: 'Cobalt' },
+        result: { matches: [assistant] },
+      },
+      {
+        toolName: 'conversations.context',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { anchors: [anchor] },
+        result: {
+          mode: 'context',
+          anchors: [anchor],
+          matches: [owner, assistant],
+          window: { before: 3, after: 1 },
+          observationGeneration: 'generation-1',
+        },
+      },
+    ];
+    const request =
+      "Compare the fictional Cobalt exercise: my original budget from the assistant's earlier recommendation.";
+    expect(memoryReadSources(rows, request).map((source) => source.key)).toEqual([
+      'message:context-owner',
+      'message:context-assistant',
+    ]);
+    const forged = structuredClone(rows);
+    const context = forged[1];
+    if (!context?.result || typeof context.result !== 'object')
+      throw new Error('Missing context receipt');
+    const firstAnchor = (context.result as { anchors: Array<{ speakerRevision: string }> })
+      .anchors[0];
+    if (!firstAnchor) throw new Error('Missing context anchor');
+    firstAnchor.speakerRevision = 'stale';
+    expect(memoryReadSources(forged, request).map((source) => source.key)).toEqual([
+      'message:context-assistant',
+    ]);
+    const missingCurrentMarker = structuredClone(rows);
+    const historicalSearch = missingCurrentMarker[0];
+    if (!historicalSearch) throw new Error('Missing search receipt');
+    delete historicalSearch.fromCurrentTask;
+    expect(memoryReadSources(missingCurrentMarker, request).map((source) => source.key)).toEqual([
+      'message:context-assistant',
+    ]);
+    const unmarkedContext = structuredClone(rows);
+    const contextWithoutMarker = unmarkedContext[1];
+    if (!contextWithoutMarker) throw new Error('Missing context receipt');
+    delete contextWithoutMarker.fromCurrentTask;
+    expect(memoryReadSources(unmarkedContext, request).map((source) => source.key)).toEqual([
+      'message:context-assistant',
+    ]);
+  });
+  it('chooses exact context anchors from later relevant search results without hardcoded positions', () => {
+    const matches = Array.from({ length: 20 }, (_, index) => {
+      const id = `search-${index}`;
+      const body =
+        index === 12 || index === 14
+          ? `For the fictional Cobalt exercise, I recommend a $${index === 12 ? '400' : '350'} budget.`
+          : `Unrelated note ${index} about an ordinary meeting.`;
+      return {
+        ...message(id, body, 'assistant', 'assistant'),
+        conversationId: `chat-${index === 14 ? 14 : index === 12 ? 12 : 'other'}`,
+      };
+    });
+    const request =
+      "Compare the fictional Cobalt exercise: my original budget from the assistant's earlier recommendation.";
+    const refs = memoryContextAnchorRefs(request, [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: { query: 'Cobalt', limit: 20 },
+        result: { matches },
+      },
+    ]);
+    expect(refs.map((ref) => ref.messageId)).toEqual(['search-12', 'search-14']);
+    expect(refs.every((ref) => ref.speakerRevision && ref.sourceRevision)).toBe(true);
+    expect(memoryContextAnchorRefs(request, [])).toEqual([]);
+    expect(
+      memoryContextAnchorRefs('Compare real Cobalt project statements from my original budget.', [
+        {
+          toolName: 'conversations.search',
+          status: 'succeeded',
+          fromCurrentTask: true,
+          result: { matches },
+        },
+      ]),
+    ).toEqual([]);
   });
   it('rejects invented quotes, changed source bodies, and duplicate selections', () => {
     const originalEvidence = evidence[0];

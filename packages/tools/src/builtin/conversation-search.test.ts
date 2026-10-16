@@ -8,7 +8,13 @@ import {
   maintenanceCursors,
   messages,
 } from '@assistant/db';
-import type { ConversationSearchMatch, ConversationSearchRepository } from '@assistant/persistence';
+import {
+  type ConversationSearchMatch,
+  type ConversationSearchRepository,
+  type ConversationSearchSourceRef,
+  conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
+} from '@assistant/persistence';
 import { eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ToolRegistry } from '../registry.js';
@@ -26,10 +32,33 @@ const match: ConversationSearchMatch = {
   speakerRevision: 'c'.repeat(64),
 };
 const context = { agentId: 'owner-a', conversationId: 'current-owned-thread' } as ToolContext;
+const contextBody = 'The fictional exercise used the Cobalt travel budget.';
+const contextAnchor: ConversationSearchSourceRef = {
+  messageId: '78a2e9a0-13c6-4c3e-9b5a-0b72859a4581',
+  conversationId: '6c46bc97-0320-4c54-bbc8-9c838af4c520',
+  sourceRevision: conversationMessageSourceRevision(
+    '78a2e9a0-13c6-4c3e-9b5a-0b72859a4581',
+    contextBody,
+  ),
+  speakerRevision: conversationMessageSpeakerRevision(
+    '78a2e9a0-13c6-4c3e-9b5a-0b72859a4581',
+    contextBody,
+    'user',
+    'owner',
+  ),
+};
+const contextMatch: ConversationSearchMatch = {
+  ...contextAnchor,
+  text: contextBody,
+  role: 'user',
+  origin: 'owner',
+  createdAt: new Date('2026-10-16T12:00:00.000Z'),
+};
 function fixture() {
   const repository = {
     text: vi.fn(async () => [match]),
     semantic: vi.fn(async () => [{ ...match, similarity: 0.95 }]),
+    context: vi.fn(async () => ({ matches: [contextMatch], observationGeneration: 'erase-gen-1' })),
     refreshForResume: vi.fn(),
   } satisfies ConversationSearchRepository;
   const embed = vi.fn(async () => ({ embeddings: [[1, 0]], embeddingSpaceKey: 'a'.repeat(64) }));
@@ -38,8 +67,17 @@ function fixture() {
     embed,
   });
   const entry = registry.get('conversations.search');
+  const contextEntry = registry.get('conversations.context');
   if (!entry) throw new Error('Missing conversation search tool');
-  return { repository, embed, registry, ...entry };
+  if (!contextEntry) throw new Error('Missing conversation context tool');
+  return {
+    repository,
+    embed,
+    registry,
+    ...entry,
+    contextTool: contextEntry.tool,
+    contextFlags: contextEntry.flags,
+  };
 }
 
 describe('portable conversation search literal mode and semantic compatibility', () => {
@@ -71,6 +109,107 @@ describe('portable conversation search literal mode and semantic compatibility',
     );
     expect(f.registry.toolsForTask('known')).toEqual([]);
     expect(f.registry.toolsForTask('unknown')).toEqual([]);
+  });
+
+  it('registers a bounded context read with exact authenticated source anchors', async () => {
+    const f = fixture();
+    expect(f.contextFlags).toMatchObject({
+      confidentialRead: true,
+      returnsUntrustedContent: true,
+    });
+    expect(f.registry.toolsForTask('owner').map((tool) => tool.name)).toContain(
+      'conversations.context',
+    );
+    expect(f.registry.toolsForTask('known')).toEqual([]);
+    const args = f.contextTool.inputSchema.parse({ anchors: [contextAnchor] });
+
+    await expect(f.contextTool.execute(args, context)).resolves.toEqual({
+      mode: 'context',
+      matches: [contextMatch],
+      anchors: [contextAnchor],
+      window: { before: 3, after: 1 },
+      observationGeneration: 'erase-gen-1',
+    });
+    expect(f.repository.context).toHaveBeenCalledExactlyOnceWith({
+      agentId: 'owner-a',
+      currentConversationId: 'current-owned-thread',
+      anchors: [contextAnchor],
+    });
+  });
+
+  it('requires 1–2 distinct complete anchors with speaker revisions and no extra input fields', () => {
+    const f = fixture();
+    for (const input of [
+      { anchors: [] },
+      { anchors: [(({ speakerRevision: _revision, ...rest }) => rest)(contextAnchor)] },
+      { anchors: [contextAnchor, contextAnchor, contextAnchor] },
+      { anchors: [contextAnchor], query: 'broaden the read' },
+    ])
+      expect(f.contextTool.inputSchema.safeParse(input).success).toBe(false);
+  });
+
+  it('fails closed if a context result omits an exact anchor or exceeds ten matches', async () => {
+    const f = fixture();
+    const args = f.contextTool.inputSchema.parse({ anchors: [contextAnchor] });
+    f.repository.context.mockResolvedValueOnce({
+      matches: [],
+      observationGeneration: 'erase-gen-1',
+    });
+    await expect(f.contextTool.execute(args, context)).rejects.toThrow(/exact anchor/u);
+    f.repository.context.mockResolvedValueOnce({
+      matches: Array.from({ length: 11 }, (_, index) => ({
+        ...contextMatch,
+        messageId: `${index}`,
+      })) as ConversationSearchMatch[],
+      observationGeneration: 'erase-gen-1',
+    });
+    await expect(f.contextTool.execute(args, context)).rejects.toThrow(/malformed evidence/u);
+  });
+
+  it('fails closed when the optional context capability is unavailable', async () => {
+    const f = fixture();
+    (f.repository as Partial<typeof f.repository>).context = undefined;
+    const args = f.contextTool.inputSchema.parse({ anchors: [contextAnchor] });
+    await expect(f.contextTool.execute(args, context)).rejects.toThrow(/unavailable/u);
+  });
+
+  it('rejects a context row whose speaker revision does not bind its role and origin', async () => {
+    const f = fixture();
+    f.repository.context.mockResolvedValueOnce({
+      matches: [{ ...contextMatch, speakerRevision: 'f'.repeat(64) }],
+      observationGeneration: 'erase-gen-1',
+    });
+    const args = f.contextTool.inputSchema.parse({ anchors: [contextAnchor] });
+    await expect(f.contextTool.execute(args, context)).rejects.toThrow(/malformed evidence/u);
+  });
+
+  it('rejects a validly hashed context row from a conversation outside the anchors', async () => {
+    const f = fixture();
+    const foreignId = randomUUID();
+    const foreignText = 'A validly hashed row from another conversation.';
+    f.repository.context.mockResolvedValueOnce({
+      matches: [
+        contextMatch,
+        {
+          messageId: foreignId,
+          conversationId: randomUUID(),
+          text: foreignText,
+          role: 'user',
+          origin: 'owner',
+          createdAt: new Date('2026-10-16T12:01:00.000Z'),
+          sourceRevision: conversationMessageSourceRevision(foreignId, foreignText),
+          speakerRevision: conversationMessageSpeakerRevision(
+            foreignId,
+            foreignText,
+            'user',
+            'owner',
+          ),
+        },
+      ],
+      observationGeneration: 'erase-gen-1',
+    });
+    const args = f.contextTool.inputSchema.parse({ anchors: [contextAnchor] });
+    await expect(f.contextTool.execute(args, context)).rejects.toThrow(/malformed evidence/u);
   });
 
   it.each([undefined, 'semantic'])(

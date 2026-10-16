@@ -1,4 +1,8 @@
-import { validConversationSpeaker } from '@assistant/persistence';
+import type { ConversationSearchSourceRef } from '@assistant/persistence';
+import {
+  conversationMessageSourceRevision,
+  validConversationSpeaker,
+} from '@assistant/persistence';
 import { z } from 'zod';
 import type { ModelRouter } from '../model-router/router.js';
 import {
@@ -7,7 +11,7 @@ import {
   familyBirthdayProjection,
   requestedFamilyBirthdays,
 } from './family-birthday.js';
-import { familyBirthdaySourceScope } from './read-intent.js';
+import { familyBirthdaySourceScope, type ReadToolEvidence } from './read-intent.js';
 import type { ActionEvidence } from './response-contract.js';
 
 const SelectionSchema = z.object({
@@ -258,6 +262,51 @@ export function memoryReadSources(
         );
       }
     }
+    if (
+      row.toolName === 'conversations.context' &&
+      typeof excludeExactRequest === 'string' &&
+      requiresOwnerAssistantContrast(excludeExactRequest) &&
+      validConversationContextReceipt(row, result, evidence, excludeExactRequest)
+    ) {
+      for (const raw of result.matches as unknown[]) {
+        const match = record(raw);
+        if (
+          !match ||
+          !text(match.messageId) ||
+          !text(match.conversationId) ||
+          !text(match.text) ||
+          !text(match.sourceRevision) ||
+          !text(match.role) ||
+          !text(match.origin) ||
+          !text(match.speakerRevision) ||
+          conversationMessageSourceRevision(text(match.messageId), text(match.text)) !==
+            match.sourceRevision ||
+          !validConversationSpeaker(match)
+        )
+          continue;
+        if (excluded && normalizedText(text(match.text)) === excluded) continue;
+        if (text(match.text).length > 4000) onUnassessed?.();
+        const key = `message:${text(match.messageId)}`;
+        // The search receipt already carries the exact anchor body. Context
+        // contributes neighboring rows without duplicating anchor evidence.
+        if (sources.some((source) => source.key === key)) continue;
+        append(
+          {
+            key,
+            body: text(match.text).slice(0, 4000),
+            speaker:
+              match.role === 'user' && match.origin === 'owner'
+                ? 'Recorded owner message'
+                : match.role === 'assistant' && match.origin === 'assistant'
+                  ? 'Earlier assistant claim (not verified fact)'
+                  : 'Historical message (authorship not confirmed)',
+            provenance: `conversation ${text(match.conversationId)}; message ${text(match.messageId)}${text(match.createdAt) ? `; ${text(match.createdAt).slice(0, 10)}` : ''}`,
+            contextId: text(match.conversationId),
+          },
+          pass,
+        );
+      }
+    }
     if (row.toolName === 'occasions.list_birthdays' && Array.isArray(result.birthdays)) {
       for (const raw of result.birthdays) {
         const birthday = record(raw);
@@ -415,6 +464,215 @@ export function memoryReadSources(
       )
       .slice(0, 20),
   );
+}
+
+function sameConversationSourceRef(left: unknown, right: unknown): boolean {
+  const a = record(left);
+  const b = record(right);
+  return Boolean(
+    a &&
+      b &&
+      text(a.messageId) === text(b.messageId) &&
+      text(a.conversationId) === text(b.conversationId) &&
+      text(a.sourceRevision) === text(b.sourceRevision) &&
+      text(a.speakerRevision) === text(b.speakerRevision),
+  );
+}
+
+function validConversationContextReceipt(
+  row: ReadToolEvidence,
+  result: Record<string, unknown>,
+  evidence: ReadToolEvidence[],
+  requestText: string,
+): boolean {
+  if (row.fromCurrentTask !== true) return false;
+  const scope = explicitComparisonScope(requestText);
+  if (
+    !scope ||
+    !permitsCrossConversationComparison(requestText, scope) ||
+    !requiresOwnerAssistantContrast(requestText)
+  )
+    return false;
+  if (
+    result.mode !== 'context' ||
+    !Array.isArray(result.anchors) ||
+    result.anchors.length < 1 ||
+    result.anchors.length > 2 ||
+    !Array.isArray(result.matches) ||
+    result.matches.length > 10 ||
+    !result.window ||
+    typeof result.window !== 'object' ||
+    (result.window as Record<string, unknown>).before !== 3 ||
+    (result.window as Record<string, unknown>).after !== 1 ||
+    !(result.observationGeneration === null || typeof result.observationGeneration === 'string')
+  )
+    return false;
+  const args = record(row.args);
+  const requestedAnchors = args?.anchors;
+  if (!Array.isArray(requestedAnchors) || requestedAnchors.length !== result.anchors.length)
+    return false;
+  const identities = new Set<string>();
+  for (const [index, anchor] of result.anchors.entries()) {
+    const value = record(anchor);
+    if (
+      !value ||
+      !text(value.messageId) ||
+      !text(value.conversationId) ||
+      !text(value.sourceRevision) ||
+      !text(value.speakerRevision) ||
+      !sameConversationSourceRef(anchor, requestedAnchors[index])
+    )
+      return false;
+    const identity = `${text(value.conversationId)}\u0000${text(value.messageId)}`;
+    if (identities.has(identity)) return false;
+    identities.add(identity);
+    const foundInSearch = evidence.some((search) => {
+      if (
+        search.fromCurrentTask !== true ||
+        search.status !== 'succeeded' ||
+        search.toolName !== 'conversations.search'
+      )
+        return false;
+      const searchResult = record(search.result);
+      const searchArgs = record(search.args);
+      return (
+        typeof searchArgs?.query === 'string' &&
+        search.fromCurrentTask === true &&
+        searchArgs.query.toLocaleLowerCase('en-US').includes(scope.toLocaleLowerCase('en-US')) &&
+        Array.isArray(searchResult?.matches) &&
+        searchResult.matches.some((rawMatch) => {
+          const match = record(rawMatch);
+          return Boolean(
+            match &&
+              match.role === 'assistant' &&
+              match.origin === 'assistant' &&
+              validConversationSpeaker(match) &&
+              conversationMessageSourceRevision(text(match.messageId), text(match.text)) ===
+                match.sourceRevision &&
+              sameConversationSourceRef(anchor, match),
+          );
+        })
+      );
+    });
+    if (!foundInSearch) return false;
+  }
+  const allowedConversations = new Set(
+    result.anchors.flatMap((anchor) => {
+      const conversationId = text(record(anchor)?.conversationId);
+      return conversationId ? [conversationId] : [];
+    }),
+  );
+  const seenMatches = new Set<string>();
+  for (const raw of result.matches) {
+    const match = record(raw);
+    if (
+      !match ||
+      !text(match.messageId) ||
+      !text(match.conversationId) ||
+      !text(match.text) ||
+      !text(match.sourceRevision) ||
+      !text(match.role) ||
+      !text(match.origin) ||
+      !text(match.speakerRevision) ||
+      !allowedConversations.has(text(match.conversationId)) ||
+      conversationMessageSourceRevision(text(match.messageId), text(match.text)) !==
+        match.sourceRevision ||
+      !validConversationSpeaker(match)
+    )
+      return false;
+    const identity = `${text(match.conversationId)}\u0000${text(match.messageId)}`;
+    if (seenMatches.has(identity)) return false;
+    seenMatches.add(identity);
+  }
+  for (const anchor of result.anchors) {
+    const anchorRecord = record(anchor);
+    if (
+      !anchorRecord ||
+      !result.matches.some((raw) => {
+        const match = record(raw);
+        return Boolean(
+          match &&
+            match.role === 'assistant' &&
+            match.origin === 'assistant' &&
+            sameConversationSourceRef(anchorRecord, match),
+        );
+      })
+    )
+      return false;
+  }
+  return true;
+}
+
+/** Select up to two relevant assistant context anchors from exact task search receipts. */
+export function memoryContextAnchorRefs(
+  request: string,
+  evidence: ReadToolEvidence[],
+): ConversationSearchSourceRef[] {
+  if (!requiresOwnerAssistantContrast(request)) return [];
+  const scope = explicitComparisonScope(request);
+  const terms = comparisonTerms(request);
+  if (!scope || !terms || !permitsCrossConversationComparison(request, scope)) return [];
+  const byContext = new Map<
+    string,
+    { ref: ConversationSearchSourceRef; score: number; order: number }
+  >();
+  let order = 0;
+  for (const row of evidence) {
+    if (
+      row.fromCurrentTask !== true ||
+      row.status !== 'succeeded' ||
+      row.toolName !== 'conversations.search'
+    )
+      continue;
+    const result = record(row.result);
+    if (result?.ok === false || result?.error || !Array.isArray(result?.matches)) continue;
+    for (const raw of result.matches) {
+      const match = record(raw);
+      const currentOrder = order++;
+      if (
+        !match ||
+        !text(match.messageId) ||
+        !text(match.conversationId) ||
+        !text(match.text) ||
+        !text(match.sourceRevision) ||
+        !text(match.speakerRevision) ||
+        match.role !== 'assistant' ||
+        match.origin !== 'assistant' ||
+        !validConversationSpeaker(match) ||
+        conversationMessageSourceRevision(text(match.messageId), text(match.text)) !==
+          match.sourceRevision
+      )
+        continue;
+      const source: MemoryReadSource = {
+        key: `message:${text(match.messageId)}`,
+        body: text(match.text),
+        speaker: 'Earlier assistant claim (not verified fact)',
+        provenance: '',
+        contextId: text(match.conversationId),
+      };
+      const excerpts = assistantComparisonEvidenceSegments(source, scope, terms.owner);
+      const score = Math.max(
+        -1,
+        ...excerpts.map((excerpt) =>
+          assistantComparisonEvidenceScore(excerpt, terms.owner, terms.assistant),
+        ),
+      );
+      if (score < 2) continue;
+      const ref: ConversationSearchSourceRef = {
+        messageId: text(match.messageId),
+        conversationId: text(match.conversationId),
+        sourceRevision: text(match.sourceRevision),
+        speakerRevision: text(match.speakerRevision),
+      };
+      const previous = byContext.get(ref.conversationId);
+      if (!previous || score > previous.score)
+        byContext.set(ref.conversationId, { ref, score, order: currentOrder });
+    }
+  }
+  return [...byContext.values()]
+    .sort((left, right) => right.score - left.score || left.order - right.order)
+    .slice(0, 2)
+    .map(({ ref }) => ref);
 }
 
 function selectorVisibleSources(
@@ -1572,7 +1830,7 @@ export function familyBirthdayReadProjection(
   const sourceScope = familyBirthdaySourceScope(requestText);
   let omitted = false;
   const permittedTools = new Set<string>([
-    ...(sourceScope.conversationHistory ? ['conversations.search'] : []),
+    ...(sourceScope.conversationHistory ? ['conversations.search', 'conversations.context'] : []),
     ...(sourceScope.savedMemory ? ['memory.recall', 'occasions.list_birthdays'] : []),
   ]);
   const scopedEvidence = evidence.filter((row) => permittedTools.has(row.toolName));
@@ -1654,7 +1912,7 @@ export function renderMemoryReadAnswer(
     if (selection.failureReason === 'incomplete_selection') {
       const coverage = boundedMemoryCoverage(evidence);
       return requiresOwnerAssistantContrast(excludeExactRequest ?? '')
-        ? `${coverage} I could not reliably select both a directly relevant owner-authored correction and the separate earlier assistant record. Assistant-authored wording is not proof of what you said or a current fact.`
+        ? `${coverage} I could not reliably select both a directly relevant owner-authored statement and the separate earlier assistant record. Assistant-authored wording is not proof of what you said or a current fact.`
         : `${coverage} I found candidate owner-authored records, but could not reliably select a directly relevant passage. This does not establish that it was never discussed.`;
     }
     return 'I retrieved historical sources, but could not reliably select passages answering your question. I have not treated unrelated records or earlier assistant claims as established facts.';
@@ -1696,7 +1954,7 @@ export function renderMemoryReadAnswer(
       : []),
     ...(selection.coverage === 'assistant_only'
       ? [
-          'Assistant records only: the bounded lookup did not return a validated owner-authored source for the correction. These records show what the assistant wrote, not the owner’s original words or a current fact.',
+          'Assistant records only: the bounded lookup did not return a validated owner-authored statement. These records show what the assistant wrote, not the owner’s original words or a current fact.',
         ]
       : ['Relevant historical sources:']),
     ...groups.map((group) => {

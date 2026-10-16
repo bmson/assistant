@@ -6,19 +6,31 @@ import type {
 } from '@assistant/persistence';
 import {
   conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
   validConversationSpeaker,
 } from '@assistant/persistence';
 import type { ModelMessage } from 'ai';
 
 const MAX_SEARCH_CALLS = 3;
+const MAX_CONTEXT_CALLS = 3;
+const MAX_CONTEXT_SOURCE_REFS = 20;
 const MAX_SEARCH_CONTEXT_BYTES = 48_000;
+const MAX_CONTEXT_CONTEXT_BYTES = 160_000;
 const MAX_MATCHES = 20;
 const MAX_SEARCH_TEXT_BYTES = 128_000;
 const MAX_SEARCH_RESULT_JSON_BYTES = 1_000_000;
+const MAX_CONTEXT_TEXT_BYTES = 32_000;
+const MAX_CONTEXT_RESULT_JSON_BYTES = 48_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REVISION = /^[a-f0-9]{64}$/;
 
 type SearchCall = {
+  message: ModelMessage;
+  toolCallId: string;
+  input: unknown;
+};
+
+type ContextCall = {
   message: ModelMessage;
   toolCallId: string;
   input: unknown;
@@ -57,6 +69,23 @@ function collectCalls(window: ModelMessage[]): SearchCall[] {
   return calls;
 }
 
+function collectContextCalls(window: ModelMessage[]): ContextCall[] {
+  const calls: ContextCall[] = [];
+  for (const message of window) {
+    if (message.role !== 'assistant') continue;
+    for (const candidate of messageParts(message) ?? []) {
+      const part = record(candidate);
+      if (
+        part?.type === 'tool-call' &&
+        part.toolName === 'conversations.context' &&
+        typeof part.toolCallId === 'string'
+      )
+        calls.push({ message, toolCallId: part.toolCallId, input: part.input });
+    }
+  }
+  return calls;
+}
+
 function findResult(window: ModelMessage[], toolCallId: string): SearchResult {
   let found: SearchResult | null = null;
   for (const message of window) {
@@ -66,6 +95,27 @@ function findResult(window: ModelMessage[], toolCallId: string): SearchResult {
       if (
         part?.type !== 'tool-result' ||
         part.toolName !== 'conversations.search' ||
+        part.toolCallId !== toolCallId
+      )
+        continue;
+      const output = record(part.output);
+      const value = output?.type === 'json' ? output.value : undefined;
+      if (found) return { message: null, toolCallId, value: undefined };
+      found = { message, toolCallId, value };
+    }
+  }
+  return found ?? { message: null, toolCallId, value: undefined };
+}
+
+function findContextResult(window: ModelMessage[], toolCallId: string): SearchResult {
+  let found: SearchResult | null = null;
+  for (const message of window) {
+    if (message.role !== 'tool') continue;
+    for (const candidate of messageParts(message) ?? []) {
+      const part = record(candidate);
+      if (
+        part?.type !== 'tool-result' ||
+        part.toolName !== 'conversations.context' ||
         part.toolCallId !== toolCallId
       )
         continue;
@@ -115,6 +165,43 @@ function orphanSearchResults(
   return found;
 }
 
+function orphanContextResults(
+  window: ModelMessage[],
+  callIds: Set<string>,
+): Array<{
+  message: ModelMessage;
+  index: number;
+  part: Record<string, unknown>;
+  value: unknown;
+  toolCallId: string | null;
+}> {
+  const found: Array<{
+    message: ModelMessage;
+    index: number;
+    part: Record<string, unknown>;
+    value: unknown;
+    toolCallId: string | null;
+  }> = [];
+  window.forEach((message, index) => {
+    if (message.role !== 'tool') return;
+    for (const candidate of messageParts(message) ?? []) {
+      const part = record(candidate);
+      if (part?.type !== 'tool-result' || part.toolName !== 'conversations.context') continue;
+      const toolCallId = typeof part.toolCallId === 'string' ? part.toolCallId : null;
+      if (toolCallId !== null && callIds.has(toolCallId)) continue;
+      const output = record(part.output);
+      found.push({
+        message,
+        index,
+        part,
+        value: output?.type === 'json' ? output.value : undefined,
+        toolCallId,
+      });
+    }
+  });
+  return found;
+}
+
 function relatedReadResultBytes(window: ModelMessage[]): number {
   let total = 0;
   for (const message of window) {
@@ -142,6 +229,186 @@ function queryInput(input: unknown): { query: string; limit: number } | null {
   if (!Number.isInteger(limit) || (limit as number) < 1 || (limit as number) > MAX_MATCHES)
     return null;
   return { query: value.query, limit: limit as number };
+}
+
+function strictKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === allowed.length && keys.every((key) => allowed.includes(key));
+}
+
+function contextAnchorRefs(input: unknown): ConversationSearchSourceRef[] | null {
+  const value = record(input);
+  if (!value || !strictKeys(value, ['anchors']) || !Array.isArray(value.anchors)) return null;
+  if (value.anchors.length < 1 || value.anchors.length > 2) return null;
+  const refs: ConversationSearchSourceRef[] = [];
+  const seen = new Set<string>();
+  for (const item of value.anchors) {
+    const anchor = record(item);
+    if (
+      !anchor ||
+      !strictKeys(anchor, ['messageId', 'conversationId', 'sourceRevision', 'speakerRevision']) ||
+      typeof anchor.messageId !== 'string' ||
+      !UUID.test(anchor.messageId) ||
+      typeof anchor.conversationId !== 'string' ||
+      !UUID.test(anchor.conversationId) ||
+      typeof anchor.sourceRevision !== 'string' ||
+      !REVISION.test(anchor.sourceRevision) ||
+      typeof anchor.speakerRevision !== 'string' ||
+      !REVISION.test(anchor.speakerRevision) ||
+      seen.has(anchor.messageId)
+    )
+      return null;
+    seen.add(anchor.messageId);
+    refs.push({
+      messageId: anchor.messageId,
+      conversationId: anchor.conversationId,
+      sourceRevision: anchor.sourceRevision,
+      speakerRevision: anchor.speakerRevision,
+    });
+  }
+  return refs;
+}
+
+type ParsedContextSnapshot = {
+  refs: ConversationSearchSourceRef[];
+  anchorRefs: ConversationSearchSourceRef[];
+  observationGeneration: string | null;
+};
+
+function parseContextSnapshot(input: unknown, output: unknown): ParsedContextSnapshot | null {
+  const anchorRefs = contextAnchorRefs(input);
+  const result = record(output);
+  const serialized = JSON.stringify(output);
+  if (
+    !anchorRefs ||
+    !result ||
+    typeof serialized !== 'string' ||
+    Buffer.byteLength(serialized) > MAX_CONTEXT_RESULT_JSON_BYTES ||
+    !strictKeys(result, ['mode', 'matches', 'anchors', 'window', 'observationGeneration']) ||
+    result.mode !== 'context' ||
+    !Array.isArray(result.matches) ||
+    result.matches.length < anchorRefs.length ||
+    result.matches.length > 10 ||
+    !Array.isArray(result.anchors) ||
+    (result.observationGeneration !== null &&
+      (typeof result.observationGeneration !== 'string' ||
+        result.observationGeneration.length > 200))
+  )
+    return null;
+  const window = record(result.window);
+  if (
+    !window ||
+    !strictKeys(window, ['before', 'after']) ||
+    window.before !== 3 ||
+    window.after !== 1
+  )
+    return null;
+
+  const outputAnchors: ConversationSearchSourceRef[] = [];
+  for (const item of result.anchors) {
+    const anchor = record(item);
+    if (
+      !anchor ||
+      !strictKeys(anchor, ['messageId', 'conversationId', 'sourceRevision', 'speakerRevision']) ||
+      typeof anchor.messageId !== 'string' ||
+      !UUID.test(anchor.messageId) ||
+      typeof anchor.conversationId !== 'string' ||
+      !UUID.test(anchor.conversationId) ||
+      typeof anchor.sourceRevision !== 'string' ||
+      !REVISION.test(anchor.sourceRevision) ||
+      typeof anchor.speakerRevision !== 'string' ||
+      !REVISION.test(anchor.speakerRevision)
+    )
+      return null;
+    outputAnchors.push({
+      messageId: anchor.messageId,
+      conversationId: anchor.conversationId,
+      sourceRevision: anchor.sourceRevision,
+      speakerRevision: anchor.speakerRevision,
+    });
+  }
+  if (
+    outputAnchors.length !== anchorRefs.length ||
+    outputAnchors.some((ref, index) => {
+      const expected = anchorRefs[index];
+      return (
+        !expected ||
+        ref.messageId !== expected.messageId ||
+        ref.conversationId !== expected.conversationId ||
+        ref.sourceRevision !== expected.sourceRevision ||
+        ref.speakerRevision !== expected.speakerRevision
+      );
+    })
+  )
+    return null;
+
+  const refs: ConversationSearchSourceRef[] = [];
+  const seen = new Set<string>();
+  const anchorConversationIds = new Set(anchorRefs.map((anchor) => anchor.conversationId));
+  let textBytes = 0;
+  for (const item of result.matches) {
+    const match = record(item);
+    if (
+      !match ||
+      !strictKeys(match, [
+        'messageId',
+        'conversationId',
+        'sourceRevision',
+        'speakerRevision',
+        'role',
+        'origin',
+        'text',
+        'createdAt',
+      ]) ||
+      typeof match.messageId !== 'string' ||
+      !UUID.test(match.messageId) ||
+      typeof match.conversationId !== 'string' ||
+      !UUID.test(match.conversationId) ||
+      !anchorConversationIds.has(match.conversationId) ||
+      typeof match.sourceRevision !== 'string' ||
+      !REVISION.test(match.sourceRevision) ||
+      typeof match.speakerRevision !== 'string' ||
+      !REVISION.test(match.speakerRevision) ||
+      typeof match.role !== 'string' ||
+      typeof match.origin !== 'string' ||
+      typeof match.text !== 'string' ||
+      (typeof match.createdAt !== 'string' && !(match.createdAt instanceof Date)) ||
+      (typeof match.createdAt === 'string' &&
+        (!Number.isFinite(Date.parse(match.createdAt)) ||
+          new Date(match.createdAt).toISOString() !== match.createdAt)) ||
+      (match.createdAt instanceof Date && !Number.isFinite(match.createdAt.getTime())) ||
+      !validConversationSpeaker(match) ||
+      conversationMessageSourceRevision(match.messageId, match.text) !== match.sourceRevision ||
+      conversationMessageSpeakerRevision(match.messageId, match.text, match.role, match.origin) !==
+        match.speakerRevision ||
+      seen.has(match.messageId)
+    )
+      return null;
+    textBytes += Buffer.byteLength(match.text);
+    if (textBytes > MAX_CONTEXT_TEXT_BYTES) return null;
+    seen.add(match.messageId);
+    refs.push({
+      messageId: match.messageId,
+      conversationId: match.conversationId,
+      sourceRevision: match.sourceRevision,
+      speakerRevision: match.speakerRevision,
+    });
+  }
+  for (const anchor of anchorRefs) {
+    const match = refs.find((ref) => ref.messageId === anchor.messageId);
+    if (
+      !match ||
+      match.conversationId !== anchor.conversationId ||
+      match.sourceRevision !== anchor.sourceRevision ||
+      match.speakerRevision !== anchor.speakerRevision
+    )
+      return null;
+  }
+  return {
+    refs,
+    anchorRefs,
+    observationGeneration: result.observationGeneration as string | null,
+  };
 }
 
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
@@ -329,6 +596,53 @@ function replaceSearchResult(window: ModelMessage[], call: SearchCall, result: u
   return callIndex + 1;
 }
 
+function replaceContextResult(window: ModelMessage[], call: ContextCall, result: unknown): number {
+  let retained = false;
+  let firstResultIndex = -1;
+  for (let messageIndex = 0; messageIndex < window.length; messageIndex += 1) {
+    const message = window[messageIndex];
+    if (message?.role !== 'tool') continue;
+    const content = messageParts(message);
+    if (!content) continue;
+    const next = content.flatMap((candidate) => {
+      const part = record(candidate);
+      if (
+        part?.type === 'tool-result' &&
+        part.toolName === 'conversations.context' &&
+        part.toolCallId === call.toolCallId
+      ) {
+        if (retained) return [];
+        retained = true;
+        firstResultIndex = messageIndex;
+        return [{ ...part, output: { type: 'json', value: jsonValue(result) } }];
+      }
+      return [candidate];
+    });
+    if (next.length === 0) {
+      window.splice(messageIndex, 1);
+      messageIndex -= 1;
+    } else if (next.length !== content.length) {
+      message.content = next as never;
+    } else if (next !== content) {
+      message.content = next as never;
+    }
+  }
+  if (retained) return firstResultIndex;
+  const callIndex = window.indexOf(call.message);
+  window.splice(callIndex + 1, 0, {
+    role: 'tool',
+    content: [
+      {
+        type: 'tool-result',
+        toolCallId: call.toolCallId,
+        toolName: 'conversations.context',
+        output: { type: 'json', value: jsonValue(result) },
+      },
+    ],
+  } as ModelMessage);
+  return callIndex + 1;
+}
+
 function scrubAssistantTextAfter(window: ModelMessage[], index: number): void {
   for (let i = window.length - 1; i > index; i -= 1) {
     const message = window[i];
@@ -364,12 +678,26 @@ export async function refreshResumedConversationSearch(
   invalidatedToolCallIds: string[];
 }> {
   const calls = collectCalls(window);
+  const contextCalls = collectContextCalls(window);
   const callIds = new Set(calls.map((call) => call.toolCallId));
+  const contextCallIds = new Set(contextCalls.map((call) => call.toolCallId));
+  const contextCallIdCounts = new Map<string, number>();
+  for (const call of contextCalls)
+    contextCallIdCounts.set(call.toolCallId, (contextCallIdCounts.get(call.toolCallId) ?? 0) + 1);
+  const duplicateContextCallIds = new Set(
+    [...contextCallIdCounts].filter(([, count]) => count > 1).map(([id]) => id),
+  );
   const orphans = orphanSearchResults(window, callIds);
-  if (calls.length === 0 && orphans.length === 0)
+  const contextOrphans = orphanContextResults(window, contextCallIds);
+  if (
+    calls.length === 0 &&
+    contextCalls.length === 0 &&
+    orphans.length === 0 &&
+    contextOrphans.length === 0
+  )
     return { changed: false, observationGeneration: null, invalidatedToolCallIds: [] };
 
-  const contextBytes = calls.reduce(
+  const searchContextBytes = calls.reduce(
     (total, call) => {
       const result = findResult(window, call.toolCallId);
       return (
@@ -381,8 +709,36 @@ export async function refreshResumedConversationSearch(
     relatedReadResultBytes(window) +
       orphans.reduce((total, orphan) => total + Buffer.byteLength(JSON.stringify(orphan.part)), 0),
   );
-  const overBound = calls.length > MAX_SEARCH_CALLS || contextBytes > MAX_SEARCH_CONTEXT_BYTES;
+  const overBound =
+    calls.length > MAX_SEARCH_CALLS || searchContextBytes > MAX_SEARCH_CONTEXT_BYTES;
+  const contextSnapshots = contextCalls.map((call) =>
+    parseContextSnapshot(call.input, findContextResult(window, call.toolCallId).value),
+  );
+  const contextSourceRefCount = contextSnapshots.reduce(
+    (total, snapshot) => total + (snapshot?.refs.length ?? MAX_CONTEXT_SOURCE_REFS + 1),
+    0,
+  );
+  const contextReadBytes = contextCalls.reduce(
+    (total, call) => {
+      const result = findContextResult(window, call.toolCallId);
+      return (
+        total +
+        Buffer.byteLength(JSON.stringify(call.input ?? null)) +
+        Buffer.byteLength(JSON.stringify(result.value ?? null))
+      );
+    },
+    contextOrphans.reduce(
+      (total, orphan) => total + Buffer.byteLength(JSON.stringify(orphan.part)),
+      0,
+    ),
+  );
+  const contextOverBound =
+    contextCalls.length > MAX_CONTEXT_CALLS ||
+    contextSourceRefCount > MAX_CONTEXT_SOURCE_REFS ||
+    contextReadBytes > MAX_CONTEXT_CONTEXT_BYTES ||
+    duplicateContextCallIds.size > 0;
   const results: Array<{ call: SearchCall; value: unknown; invalidated: boolean }> = [];
+  const contextResults: Array<{ call: ContextCall; value: unknown; invalidated: boolean }> = [];
   let observationGeneration: string | null = null;
   let observationGenerationSeen = false;
   let generationMismatch = false;
@@ -508,6 +864,82 @@ export async function refreshResumedConversationSearch(
     }
   }
 
+  for (const [index, call] of contextCalls.entries()) {
+    const stored = findContextResult(window, call.toolCallId);
+    const snapshot = contextSnapshots[index];
+    const invalidated = contextOverBound || !stored.message || !snapshot;
+    if (!snapshot || !stored.message || !input.repository?.validateSources || contextOverBound) {
+      contextResults.push({
+        call,
+        value: {
+          mode: 'unavailable',
+          matches: [],
+          anchors: [],
+          window: { before: 3, after: 1 },
+          observationGeneration: null,
+          note: 'Conversation context could not be validated after resume.',
+        },
+        invalidated: true,
+      });
+      continue;
+    }
+    try {
+      const validated = await input.repository.validateSources({
+        agentId: input.agentId,
+        ...(input.currentConversationId
+          ? { currentConversationId: input.currentConversationId }
+          : {}),
+        sourceRefs: snapshot.refs,
+      });
+      if (
+        !validated ||
+        !Array.isArray(validated.unchangedSourceRefs) ||
+        validated.unchangedSourceRefs.length !== snapshot.refs.length ||
+        validated.unchangedSourceRefs.some((unchanged) => unchanged !== true) ||
+        (validated.observationGeneration !== null &&
+          (typeof validated.observationGeneration !== 'string' ||
+            validated.observationGeneration.length > 200))
+      )
+        throw new Error('Conversation context source changed');
+      if (observationGenerationSeen && observationGeneration !== validated.observationGeneration) {
+        generationMismatch = true;
+        contextResults.push({
+          call,
+          value: {
+            mode: 'unavailable',
+            matches: [],
+            anchors: [],
+            window: { before: 3, after: 1 },
+            observationGeneration: null,
+            note: 'Conversation context could not be validated after resume.',
+          },
+          invalidated: true,
+        });
+        continue;
+      }
+      if (!observationGenerationSeen) {
+        observationGeneration = validated.observationGeneration;
+        observationGenerationSeen = true;
+      }
+      if (snapshot.observationGeneration !== validated.observationGeneration)
+        throw new Error('Conversation context observation generation changed');
+      contextResults.push({ call, value: stored.value, invalidated });
+    } catch {
+      contextResults.push({
+        call,
+        value: {
+          mode: 'unavailable',
+          matches: [],
+          anchors: [],
+          window: { before: 3, after: 1 },
+          observationGeneration: null,
+          note: 'Conversation context could not be validated after resume.',
+        },
+        invalidated: true,
+      });
+    }
+  }
+
   if (calls.length > MAX_SEARCH_CALLS) {
     for (const call of calls.slice(MAX_SEARCH_CALLS))
       results.push({
@@ -531,6 +963,17 @@ export async function refreshResumedConversationSearch(
       };
       item.invalidated = true;
     }
+    for (const item of contextResults) {
+      item.value = {
+        mode: 'unavailable',
+        matches: [],
+        anchors: [],
+        window: { before: 3, after: 1 },
+        observationGeneration: null,
+        note: 'Conversation context could not be validated after resume.',
+      };
+      item.invalidated = true;
+    }
   }
 
   let earliestInvalidatedResult = Number.POSITIVE_INFINITY;
@@ -541,6 +984,18 @@ export async function refreshResumedConversationSearch(
     if (!item.invalidated) continue;
     invalidatedToolCallIds.add(item.call.toolCallId);
     const result = findResult(window, item.call.toolCallId);
+    const durableCallId = durableCallIdFromTruncation(result.value);
+    if (durableCallId) invalidatedDurableCallIds.add(durableCallId);
+    else parentIdentityUnknown = true;
+    const index = result.message
+      ? window.indexOf(result.message)
+      : window.indexOf(item.call.message);
+    earliestInvalidatedResult = Math.min(earliestInvalidatedResult, index);
+  }
+  for (const item of contextResults) {
+    if (!item.invalidated) continue;
+    invalidatedToolCallIds.add(item.call.toolCallId);
+    const result = findContextResult(window, item.call.toolCallId);
     const durableCallId = durableCallIdFromTruncation(result.value);
     if (durableCallId) invalidatedDurableCallIds.add(durableCallId);
     else parentIdentityUnknown = true;
@@ -560,8 +1015,9 @@ export async function refreshResumedConversationSearch(
   }
 
   for (const item of results) replaceSearchResult(window, item.call, item.value);
+  for (const item of contextResults) replaceContextResult(window, item.call, item.value);
 
-  for (const orphan of orphans) {
+  for (const orphan of [...orphans, ...contextOrphans]) {
     if (orphan.toolCallId !== null) invalidatedToolCallIds.add(orphan.toolCallId);
     const durableCallId = durableCallIdFromTruncation(orphan.value);
     if (durableCallId) invalidatedDurableCallIds.add(durableCallId);
@@ -576,7 +1032,7 @@ export async function refreshResumedConversationSearch(
       },
     };
   }
-  if (orphans.length > 0) {
+  if (orphans.length > 0 || contextOrphans.length > 0) {
     scrubReadResultParts(
       window,
       earliestInvalidatedResult,
@@ -600,17 +1056,28 @@ export async function refreshConversationSearchEvidence(
     currentConversationId?: string;
     repository?: ConversationSearchRepository;
   },
-): Promise<{ rows: ExecutionEvidenceRecord[]; invalidatedSearchCallIds: Set<string> }> {
+): Promise<{
+  rows: ExecutionEvidenceRecord[];
+  invalidatedSearchCallIds: Set<string>;
+  invalidatedContextCallIds: Set<string>;
+}> {
   const next = rows.map((row) => ({ ...row }));
   const searchRows = next.filter((row) => row.toolName === 'conversations.search');
-  if (searchRows.length === 0) return { rows: next, invalidatedSearchCallIds: new Set() };
+  const contextRows = next.filter((row) => row.toolName === 'conversations.context');
+  if (searchRows.length === 0 && contextRows.length === 0)
+    return {
+      rows: next,
+      invalidatedSearchCallIds: new Set(),
+      invalidatedContextCallIds: new Set(),
+    };
   const idBySyntheticCall = new Map<string, string>();
-  const callParts = searchRows.map((row) => {
+  const sourceRows = [...searchRows, ...contextRows];
+  const callParts = sourceRows.map((row) => {
     const syntheticId = `evidence-${row.id}`;
     idBySyntheticCall.set(syntheticId, row.id);
     return { type: 'tool-call', toolCallId: syntheticId, toolName: row.toolName, input: row.args };
   });
-  const resultParts = searchRows.map((row) => ({
+  const resultParts = sourceRows.map((row) => ({
     type: 'tool-result',
     toolCallId: `evidence-${row.id}`,
     toolName: row.toolName,
@@ -636,30 +1103,52 @@ export async function refreshConversationSearchEvidence(
         refreshedResults.set(part.toolCallId, output?.type === 'json' ? output.value : null);
     }
   }
-  for (const row of searchRows) {
+  for (const row of sourceRows) {
     const syntheticId = `evidence-${row.id}`;
-    row.result = refreshedResults.get(syntheticId) ?? {
-      mode: 'unavailable',
-      matches: [],
-      note: 'Conversation history could not be refreshed.',
-    };
+    if (refreshedResults.has(syntheticId)) row.result = refreshedResults.get(syntheticId);
+    else
+      row.result =
+        row.toolName === 'conversations.context'
+          ? {
+              mode: 'unavailable',
+              matches: [],
+              anchors: [],
+              window: { before: 3, after: 1 },
+              observationGeneration: null,
+              note: 'Conversation context could not be validated after resume.',
+            }
+          : {
+              mode: 'unavailable',
+              matches: [],
+              note: 'Conversation history could not be refreshed.',
+            };
   }
-  const invalidated = new Set(
+  const invalidatedSynthetic = new Set(
     refreshed.invalidatedToolCallIds
       .map((callId) => idBySyntheticCall.get(callId))
       .filter((id): id is string => id !== undefined),
   );
-  if (invalidated.size > 0) {
+  const invalidatedSearch = new Set(
+    searchRows.map((row) => row.id).filter((id) => invalidatedSynthetic.has(id)),
+  );
+  const invalidatedContext = new Set(
+    contextRows.map((row) => row.id).filter((id) => invalidatedSynthetic.has(id)),
+  );
+  if (invalidatedSynthetic.size > 0) {
     for (const row of next) {
       if (row.toolName !== 'tools.read_result') continue;
       const args = record(row.args);
       const parentId = args?.toolCallId;
-      if (typeof parentId !== 'string' || invalidated.has(parentId))
+      if (typeof parentId !== 'string' || invalidatedSynthetic.has(parentId))
         row.result = {
           mode: 'unavailable',
           note: 'The source result is no longer available in this resumed context.',
         };
     }
   }
-  return { rows: next, invalidatedSearchCallIds: invalidated };
+  return {
+    rows: next,
+    invalidatedSearchCallIds: invalidatedSearch,
+    invalidatedContextCallIds: invalidatedContext,
+  };
 }

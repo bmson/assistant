@@ -2,6 +2,7 @@ import {
   type ConversationSearchRepository,
   type ConversationSearchSourceRef,
   conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
   type Records,
   type ToolExecutionRepository,
   validConversationSpeaker,
@@ -20,6 +21,8 @@ const SEARCH_LIMIT = 20;
 // room for JSON escaping and the bounded match metadata under this ceiling.
 const MAX_SEARCH_TEXT_BYTES = 128 * 1024;
 const MAX_SEARCH_RESULT_BYTES = 1024 * 1024;
+const MAX_CONTEXT_TEXT_BYTES = 32_000;
+const MAX_CONTEXT_RESULT_BYTES = 48_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REVISION = /^[a-f0-9]{64}$/;
 const SEARCH_ARGS = z
@@ -39,6 +42,10 @@ function record(value: unknown): Record<string, unknown> | null {
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+function hasExactKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).length === allowed.length && hasOnlyKeys(value, allowed);
 }
 
 function boundedString(value: unknown, maxBytes: number): value is string {
@@ -202,11 +209,168 @@ function validRefreshResult(
   );
 }
 
+function contextSourceRefs(
+  call: StoredToolCall,
+): { refs: ConversationSearchSourceRef[]; generation: string | null } | null {
+  if (call.status !== 'succeeded') return null;
+  const serializedResult = JSON.stringify(call.result ?? null);
+  if (Buffer.byteLength(serializedResult, 'utf8') > MAX_CONTEXT_RESULT_BYTES) return null;
+  const args = record(call.args);
+  const inputAnchors = args?.anchors;
+  const result = record(call.result);
+  if (
+    !args ||
+    !hasExactKeys(args, ['anchors']) ||
+    !Array.isArray(inputAnchors) ||
+    inputAnchors.length < 1 ||
+    inputAnchors.length > 2 ||
+    !result ||
+    !hasExactKeys(result, ['mode', 'matches', 'anchors', 'window', 'observationGeneration']) ||
+    result.mode !== 'context' ||
+    !Array.isArray(result.matches) ||
+    result.matches.length < inputAnchors.length ||
+    result.matches.length > 10 ||
+    !Array.isArray(result.anchors) ||
+    (result.observationGeneration !== null &&
+      (typeof result.observationGeneration !== 'string' ||
+        result.observationGeneration.length > 200))
+  )
+    return null;
+  const window = record(result.window);
+  if (
+    !window ||
+    !hasExactKeys(window, ['before', 'after']) ||
+    window.before !== 3 ||
+    window.after !== 1
+  )
+    return null;
+
+  const refsFrom = (values: unknown[]): ConversationSearchSourceRef[] | null => {
+    const refs: ConversationSearchSourceRef[] = [];
+    const seen = new Set<string>();
+    for (const candidate of values) {
+      const ref = record(candidate);
+      if (
+        !ref ||
+        !hasExactKeys(ref, ['messageId', 'conversationId', 'sourceRevision', 'speakerRevision']) ||
+        typeof ref.messageId !== 'string' ||
+        !UUID.test(ref.messageId) ||
+        typeof ref.conversationId !== 'string' ||
+        !UUID.test(ref.conversationId) ||
+        typeof ref.sourceRevision !== 'string' ||
+        !REVISION.test(ref.sourceRevision) ||
+        typeof ref.speakerRevision !== 'string' ||
+        !REVISION.test(ref.speakerRevision) ||
+        seen.has(ref.messageId)
+      )
+        return null;
+      seen.add(ref.messageId);
+      refs.push({
+        messageId: ref.messageId,
+        conversationId: ref.conversationId,
+        sourceRevision: ref.sourceRevision,
+        speakerRevision: ref.speakerRevision,
+      });
+    }
+    return refs;
+  };
+  const anchors = refsFrom(inputAnchors);
+  const resultAnchors = refsFrom(result.anchors);
+  if (
+    !anchors ||
+    !resultAnchors ||
+    anchors.length !== resultAnchors.length ||
+    anchors.some((anchor, index) => {
+      const returned = resultAnchors[index];
+      return (
+        !returned ||
+        anchor.messageId !== returned.messageId ||
+        anchor.conversationId !== returned.conversationId ||
+        anchor.sourceRevision !== returned.sourceRevision ||
+        anchor.speakerRevision !== returned.speakerRevision
+      );
+    })
+  )
+    return null;
+
+  const refs: ConversationSearchSourceRef[] = [];
+  const seen = new Set<string>();
+  const anchorConversationIds = new Set(anchors.map((anchor) => anchor.conversationId));
+  let totalTextBytes = 0;
+  for (const candidate of result.matches) {
+    const match = record(candidate);
+    if (
+      !match ||
+      !hasExactKeys(match, [
+        'messageId',
+        'conversationId',
+        'sourceRevision',
+        'speakerRevision',
+        'role',
+        'origin',
+        'text',
+        'createdAt',
+      ]) ||
+      !validConversationSpeaker(match) ||
+      typeof match.messageId !== 'string' ||
+      !UUID.test(match.messageId) ||
+      typeof match.conversationId !== 'string' ||
+      !UUID.test(match.conversationId) ||
+      !anchorConversationIds.has(match.conversationId) ||
+      typeof match.sourceRevision !== 'string' ||
+      !REVISION.test(match.sourceRevision) ||
+      typeof match.speakerRevision !== 'string' ||
+      !REVISION.test(match.speakerRevision) ||
+      typeof match.messageId !== 'string' ||
+      typeof match.text !== 'string' ||
+      typeof match.role !== 'string' ||
+      typeof match.origin !== 'string' ||
+      conversationMessageSpeakerRevision(match.messageId, match.text, match.role, match.origin) !==
+        match.speakerRevision ||
+      !boundedString(match.text, MAX_CONTEXT_TEXT_BYTES)
+    )
+      return null;
+    totalTextBytes += Buffer.byteLength(match.text, 'utf8');
+    const validDate =
+      match.createdAt instanceof Date
+        ? Number.isFinite(match.createdAt.getTime())
+        : canonicalISODate(match.createdAt);
+    if (
+      totalTextBytes > MAX_CONTEXT_TEXT_BYTES ||
+      !validDate ||
+      conversationMessageSourceRevision(match.messageId, match.text) !== match.sourceRevision ||
+      seen.has(match.messageId)
+    )
+      return null;
+    seen.add(match.messageId);
+    refs.push({
+      messageId: match.messageId,
+      conversationId: match.conversationId,
+      sourceRevision: match.sourceRevision,
+      speakerRevision: match.speakerRevision,
+    });
+  }
+  if (
+    anchors.some((anchor) => {
+      const match = refs.find((ref) => ref.messageId === anchor.messageId);
+      return (
+        !match ||
+        match.conversationId !== anchor.conversationId ||
+        match.sourceRevision !== anchor.sourceRevision ||
+        match.speakerRevision !== anchor.speakerRevision
+      );
+    })
+  )
+    return null;
+  return { refs, generation: result.observationGeneration as string | null };
+}
+
 /**
  * Page a stored result only after revalidating the typed source references of
- * conversation-search results. A changed, hidden, erased, malformed, or
- * unbound historical search is unavailable as a whole; callers can run a new
- * search. Other effect receipts retain their existing read-only paging path.
+ * conversation-search and bounded conversation-context results. A changed,
+ * hidden, erased, malformed, or unbound historical read is unavailable as a
+ * whole; callers can run a new search and context read. Other effect receipts
+ * retain their existing read-only paging path.
  */
 export async function pageStoredToolResult(input: {
   call: StoredToolCall;
@@ -214,8 +378,42 @@ export async function pageStoredToolResult(input: {
   offset: number;
   agentId: string;
   currentConversationId?: string;
-  conversations?: Pick<ConversationSearchRepository, 'refreshForResume'>;
+  conversations?: Pick<ConversationSearchRepository, 'refreshForResume' | 'validateSources'>;
 }): Promise<Record<string, unknown>> {
+  if (input.call.toolName === 'conversations.context') {
+    const parsed = contextSourceRefs(input.call);
+    if (!parsed || !input.conversations?.validateSources) {
+      return {
+        error:
+          'This stored conversation context is unavailable. Run a fresh conversations.search and conversations.context before using it.',
+      };
+    }
+    try {
+      const validated = await input.conversations.validateSources({
+        agentId: input.agentId,
+        ...(input.currentConversationId
+          ? { currentConversationId: input.currentConversationId }
+          : {}),
+        sourceRefs: parsed.refs,
+      });
+      if (
+        !validated ||
+        !Array.isArray(validated.unchangedSourceRefs) ||
+        validated.unchangedSourceRefs.length !== parsed.refs.length ||
+        validated.unchangedSourceRefs.some((unchanged) => unchanged !== true) ||
+        validated.observationGeneration !== parsed.generation
+      )
+        return {
+          error:
+            'This stored conversation context changed. Run a fresh conversations.search and conversations.context before using it.',
+        };
+    } catch {
+      return {
+        error:
+          'This stored conversation context is unavailable. Run a fresh conversations.search and conversations.context before using it.',
+      };
+    }
+  }
   if (input.call.toolName === 'conversations.search') {
     const parsed = searchSourceRefs(input.call);
     if (!parsed || !input.conversations) {
@@ -255,7 +453,8 @@ export async function pageStoredToolResult(input: {
 
   const json = JSON.stringify(input.call.result ?? null);
   if (
-    input.call.toolName === 'conversations.search' &&
+    (input.call.toolName === 'conversations.search' ||
+      input.call.toolName === 'conversations.context') &&
     Buffer.byteLength(json, 'utf8') > MAX_SEARCH_RESULT_BYTES
   ) {
     return {
@@ -277,7 +476,7 @@ export function registerPortableReadResultTool(
   registry: ToolRegistry,
   deps: {
     toolExecution: Pick<ToolExecutionRepository, 'load'>;
-    conversations?: Pick<ConversationSearchRepository, 'refreshForResume'>;
+    conversations?: Pick<ConversationSearchRepository, 'refreshForResume' | 'validateSources'>;
   },
 ): ToolRegistry {
   register(

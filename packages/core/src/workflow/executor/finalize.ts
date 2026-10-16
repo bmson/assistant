@@ -745,7 +745,10 @@ export async function stageModelFinalResponse(
   const safeById = new Map(safeEvidence.rows.map((row) => [row.id, row]));
   const rows = rawRows.map((row) => safeById.get(row.id) ?? row);
   const priorRows = rawPriorRows.map((row) => safeById.get(row.id) ?? row);
-  const evidence: ActionEvidence[] = [...actionEvidence(priorRows, false), ...actionEvidence(rows)];
+  const evidence: ActionEvidence[] = [
+    ...actionEvidence(priorRows, false),
+    ...actionEvidence(rows, true),
+  ];
   // owner.notify already persisted this scheduled reminder. Reuse its exact
   // delivered text so a paraphrase or "Done" cannot create a second message.
   if (task.type === 'scheduled' && rows.length === 1) {
@@ -810,7 +813,7 @@ export async function stageModelFinalResponse(
     // the gap is named under it rather than replacing the whole reply.
     const mixedRead = readContext?.readRequest;
     const cards = responseCardsForFinal({
-      evidence: actionEvidence(rows),
+      evidence: actionEvidence(rows, true),
       readRequest: mixedRead,
       requestText: latestUserText(window),
       lookupOrder: liveLookups.map((lookup) => lookup.kind),

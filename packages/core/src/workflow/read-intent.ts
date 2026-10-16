@@ -5,6 +5,7 @@
  * model room to invent a plausible calendar or inbox answer.
  */
 
+import type { ConversationSearchSourceRef } from '@assistant/persistence';
 import { requestedSavedSkillInventory } from '../memory/saved-skill-inventory.js';
 import {
   type BillingAuditScope,
@@ -115,6 +116,8 @@ export interface PersonalReadRequest {
   conversationAnchorQuery?: string;
   /** One topic-focused pass for an explicit owner-correction comparison. */
   conversationCorrectionQuery?: string;
+  /** Exact assistant search anchors eligible for one bounded same-chat context read. */
+  conversationContextAnchors?: ConversationSearchSourceRef[];
   /** Saved facts are searched only when the owner explicitly permits that source. */
   searchSavedMemory?: boolean;
   /** Focused semantic query for saved-memory retrieval, separate from the answer prompt. */
@@ -1802,6 +1805,15 @@ function conversationSearchResultContinuation(
       continue;
 
     const pending = nextResultPage(search, currentPages);
+    if (pending === false) continue;
+    if (pending) return pending;
+  }
+  const context = evidence.find(
+    (row) =>
+      row.fromCurrentTask === true && row.toolName === 'conversations.context' && succeeded(row),
+  );
+  if (context) {
+    const pending = nextResultPage(context, currentPages);
     if (pending === false) return undefined;
     if (pending) return pending;
   }
@@ -3753,6 +3765,13 @@ export function nextRequiredReadTool(
     if (conversationSearchResultContinuation(request, evidence)) return 'tools.read_result';
     if (nextHistoricalSearchQuery(request, evidence)) return 'conversations.search';
     if (nextSavedMemorySearchQuery(request, evidence)) return 'memory.recall';
+    if (
+      request.conversationContextAnchors?.length &&
+      !evidence.some(
+        (row) => row.fromCurrentTask !== false && row.toolName === 'conversations.context',
+      )
+    )
+      return 'conversations.context';
     if (request.familyBirthday && request.searchSavedMemory) {
       const reads = evidence.filter(
         (row) => row.fromCurrentTask !== false && row.toolName === 'occasions.list_birthdays',
@@ -3868,6 +3887,8 @@ export function groundReadToolInput(
       ? groundReadToolInput(child, toolName, {}, evidence)
       : {};
   }
+  if (toolName === 'conversations.context')
+    return buildReadToolInput(request, toolName, evidence) ?? {};
   if (request.explicitSource === 'calendar' && toolName === request.firstToolName) {
     const pages = explicitCalendarPages(request, evidence);
     const token = objectRecord(pages.at(-1)?.result)?.nextPageToken;
@@ -4075,6 +4096,23 @@ export function buildReadToolInput(
   evidence: ReadonlyArray<ReadToolEvidence>,
 ): Record<string, unknown> | null {
   if (request.temporalIssue || request.scopeIssue) return null;
+  if (toolName === 'conversations.context') {
+    if (request.sourceReads) {
+      const child = explicitSourceChild(request, evidence);
+      return child && nextRequiredReadTool(child, evidence) === toolName
+        ? buildReadToolInput(child, toolName, evidence)
+        : null;
+    }
+    if (
+      request.kind !== 'memory' ||
+      nextRequiredReadTool(request, evidence) !== toolName ||
+      !request.conversationContextAnchors ||
+      request.conversationContextAnchors.length < 1 ||
+      request.conversationContextAnchors.length > 2
+    )
+      return null;
+    return { anchors: request.conversationContextAnchors };
+  }
   if (request.sourceReads) {
     const child = explicitSourceChild(request, evidence);
     return child && nextRequiredReadTool(child, evidence) === toolName

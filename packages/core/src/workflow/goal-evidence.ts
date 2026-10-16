@@ -5,6 +5,7 @@
 const GOAL_BOOKKEEPING_TOOLS = new Set([
   'browser.plan',
   'conversations.search',
+  'conversations.context',
   'goals.list',
   'goals.update_progress',
   'memory.recall',

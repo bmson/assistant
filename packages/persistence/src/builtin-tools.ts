@@ -127,6 +127,16 @@ export interface ConversationSearchRefreshResult {
 }
 
 export interface ConversationSearchRepository {
+  /** Read bounded neighboring messages around 1–2 exact, revision-bound search anchors. */
+  context?(input: {
+    agentId: string;
+    /** Authenticated current task conversation; only this thread bypasses an erase cutoff. */
+    currentConversationId?: string;
+    anchors: ConversationSearchSourceRef[];
+  }): Promise<{
+    matches: ConversationSearchMatch[];
+    observationGeneration: string | null;
+  }>;
   /** Validate exact stored search source identities without rerunning a query. */
   validateSources?(input: {
     agentId: string;

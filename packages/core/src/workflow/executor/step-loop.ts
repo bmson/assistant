@@ -117,7 +117,11 @@ import {
   renewTaskLease,
   sleepTask,
 } from '../machine.js';
-import { type MemoryReadSelection, selectMemoryReadAnswer } from '../memory-read-answer.js';
+import {
+  type MemoryReadSelection,
+  memoryContextAnchorRefs,
+  selectMemoryReadAnswer,
+} from '../memory-read-answer.js';
 import {
   isConversationLocalContext,
   isSelfContainedTextTransformation,
@@ -1519,7 +1523,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       liveLookup ||
       futureWatchIntent !== null ||
       birthdaySaves.length > 0
-        ? await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id })
+        ? (await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id })).map((row) => ({
+            ...row,
+            fromCurrentTask: true,
+          }))
         : [];
     const correctionProjection = rc.checklistCorrection;
     const cancellationProjection = rc.checklistCancellation;
@@ -1792,6 +1799,21 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state)))
             return LOST_LEASE;
         }
+      }
+    }
+    if (readRequest && state.step + 1 < task.maxSteps) {
+      const historyRequests = [
+        ...(readRequest.kind === 'memory' && readRequest.conversationQuery ? [readRequest] : []),
+        ...(readRequest.sourceReads ?? []).filter(
+          (child) => child.kind === 'memory' && child.conversationQuery,
+        ),
+      ];
+      for (const historyRequest of historyRequests) {
+        if (!historyRequest.temporalIssue && !historyRequest.scopeIssue)
+          historyRequest.conversationContextAnchors = memoryContextAnchorRefs(
+            historyRequest.memoryQuery ?? ownerText,
+            readToolEvidence,
+          );
       }
     }
     const forcedReadTool =
@@ -2564,13 +2586,13 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
                 router,
                 taskId: task.id,
                 request: readRequest,
-                evidence: refreshed.rows,
+                evidence: refreshed.rows.map((row) => ({ ...row, fromCurrentTask: true })),
               })
             : await selectMemoryReadAnswer({
                 router,
                 taskId: task.id,
                 request: readRequest.memoryQuery ?? '',
-                evidence: refreshed.rows,
+                evidence: refreshed.rows.map((row) => ({ ...row, fromCurrentTask: true })),
               });
           state.plannerState.restrictedSourceRead = { binding, completed: true, selection };
           if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state)))
@@ -3901,6 +3923,21 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               outcome: 'needs_attention',
               contractNotice: true,
             });
+          }
+        }
+        if (tc.toolName === 'conversations.context') {
+          const expected =
+            readRequest && boundedForcedReadTool === 'conversations.context'
+              ? buildReadToolInput(readRequest, 'conversations.context', readToolEvidence)
+              : null;
+          if (!expected || stableJson(tc.input) !== stableJson(expected)) {
+            replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, {
+              error:
+                'The conversation context read was not bound to an exact current-task search result.',
+            });
+            journalCall.status = 'settled';
+            if (!(await updateCall({ status: 'settled' }))) return LOST_LEASE;
+            continue;
           }
         }
         if (!(await renewTaskLease(deps.persistence?.tasks ?? db, lease))) return LOST_LEASE;
