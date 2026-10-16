@@ -4496,20 +4496,12 @@ function mapHotelDestination(hotel: CompoundTripHotelCandidate): string {
   const name = text(hotel.hotelName, 80) || text(hotel.subject, 80);
   const address = text(hotel.address, 200);
   const city = text(hotel.city, 80);
-  const normalizedAddress = normalizePlace(address);
-  const parts = [
-    name,
-    address,
-    ...(city && !normalizedAddress.includes(normalizePlace(city)) ? [city] : []),
-  ].filter(Boolean);
-  let destination = '';
-  for (const part of parts) {
-    const separator = destination ? ', ' : '';
-    const remaining = 200 - destination.length - separator.length;
-    if (remaining <= 0) break;
-    destination += `${separator}${part.slice(0, remaining).trimEnd()}`;
-  }
-  return destination;
+  const destination = [name, address].filter(Boolean).join(', ').slice(0, 200).trimEnd();
+  const addressStart = name ? name.length + 2 : 0;
+  const visibleAddress = destination.slice(addressStart);
+  if (!city || normalizePlace(visibleAddress).includes(normalizePlace(city))) return destination;
+  const suffix = `${destination ? ', ' : ''}${city}`;
+  return `${destination.slice(0, 200 - suffix.length).trimEnd()}${suffix}`;
 }
 
 function compactFlightLeg(

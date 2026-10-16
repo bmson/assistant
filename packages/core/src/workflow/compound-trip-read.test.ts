@@ -1804,6 +1804,27 @@ describe('compound trip read projection', () => {
     expect(projection.text).not.toContain('Calendar observations —');
   });
 
+  it('keeps the hotel city in a bounded map destination when a long address is truncated', () => {
+    const read = request();
+    const address = `123 ${'Long Avenue '.repeat(16)}Berlin`;
+    expect(address.length).toBeGreaterThan(190);
+    expect(address.length).toBeLessThanOrEqual(240);
+    const evidence = [
+      completeCalendarEvents([calendarFlight()]),
+      ...bookingEmailEvidence({
+        hotelBody: `Reservation confirmed: Hotel Linden, Berlin.\nDates: October 17–19, 2026.\nAddress: ${address}.\nBooking reference: HOTEL-55123`,
+      }),
+    ];
+    const route = compoundTripRoute(read, evidence);
+    expect(route?.destination.length).toBeLessThanOrEqual(200);
+    expect(route?.destination).toContain('Hotel Linden');
+    expect(route?.destination).toContain('Berlin');
+    expect(buildReadToolInput(read, 'maps.directions', evidence)).toEqual({
+      ...route,
+      mode: 'driving',
+    });
+  });
+
   it('accepts common stay-date summaries but does not infer a street address or route from a city alone', () => {
     const read = request();
     const evidence = [
