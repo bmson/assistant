@@ -4349,7 +4349,11 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
       .flatMap((group) => group.legs)
       .every((leg) => !leg.departureTimeZone && !leg.arrivalTimeZone);
     if (allFlightTimesHaveUnknownZones)
-      lines.push('Booking times are local clock readings; exact time zones are unverified.');
+      lines.push(
+        view.localClocks
+          ? 'The selected booking explicitly labels its clocks local; time-zone offsets remain unverified.'
+          : 'Time zones are not stated; times are shown as recorded.',
+      );
     const legs: string[] = [];
     for (const group of groups) {
       for (const leg of group.legs) {
@@ -4364,11 +4368,29 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
       }
     }
     lines.push(legs.join('\n'));
-    if (groups.some((group) => group.label.startsWith('Booked route ')))
+    const routeOne = groups.find((group) => group.label === 'Booked route 1');
+    const routeTwo = groups.find((group) => group.label === 'Booked route 2');
+    const firstLeg = routeOne?.legs[0];
+    const firstLastLeg = routeOne?.legs.at(-1);
+    const secondLeg = routeTwo?.legs[0];
+    const secondLastLeg = routeTwo?.legs.at(-1);
+    const reversedRoutes = Boolean(
+      routeOne &&
+        routeTwo &&
+        firstLeg?.originAirport &&
+        firstLastLeg?.destinationAirport &&
+        secondLeg?.originAirport &&
+        secondLastLeg?.destinationAirport &&
+        firstLeg.originAirport === secondLastLeg.destinationAirport &&
+        firstLastLeg.destinationAirport === secondLeg.originAirport,
+    );
+    if (routeOne || routeTwo)
       lines.push(
-        'The booking lists route 1 before route 2; route 2 reverses route 1. The source does not label either route outbound or return.',
+        reversedRoutes
+          ? 'The booking lists route 1 before route 2; route 2 reverses route 1. The source does not label either route outbound or return.'
+          : 'The source does not explicitly label the booked route direction as outbound or return.',
       );
-    if (view.localClocks)
+    if (view.localClocks && !allFlightTimesHaveUnknownZones)
       lines.push(
         'The selected booking explicitly labels its clocks local; time-zone offsets remain unverified.',
       );
@@ -4479,9 +4501,10 @@ function compactFlightLeg(
   const localLink = leg.departureClockSourceThreadId
     ? links.get(leg.departureClockSourceThreadId)
     : undefined;
-  const departureZone = sharedUnknownZones
-    ? ''
-    : ` (${markdownText(leg.departureTimeZone ?? (localLink ? 'local; zone not stated' : 'zone not stated'))})`;
+  const departureZone =
+    sharedUnknownZones && !localLink
+      ? ''
+      : ` (${markdownText(leg.departureTimeZone ?? (localLink ? 'local; zone not stated' : 'zone not stated'))})`;
   const arrivalZone = sharedUnknownZones
     ? ''
     : ` (${markdownText(leg.arrivalTimeZone ?? 'zone not stated')})`;
@@ -4829,7 +4852,11 @@ export function upcomingFlightReadProjection(
         return [
           `Observed booking candidate: **${observedGroup.legs.map((leg) => leg.originAirport).join('→')}→${observedGroup.destination}, ${observedGroup.legs[0]?.departureDate}**. ${observedGroup.direction === 'unknown' ? 'Outbound/return direction is not explicitly stated.' : `The booking explicitly labels this ${observedGroup.direction}.`} Calendar match and next-flight identity remain unverified; booking order is not proof of travel.`,
           ...(allTimesHaveUnknownZones
-            ? ['Booking times are local clock readings; exact time zones are unverified.']
+            ? [
+                trip.presentation.localClocks
+                  ? 'The selected booking explicitly labels its clocks local; time-zone offsets remain unverified.'
+                  : 'Time zones are not stated; times are shown as recorded.',
+              ]
             : []),
           observedGroup.legs
             .map((leg) =>
