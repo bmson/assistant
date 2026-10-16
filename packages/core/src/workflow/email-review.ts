@@ -2254,9 +2254,12 @@ export function formatEmailReviewAnswer(
     lines.push(
       coverage.ownerDecisionRequiredThreads?.length
         ? 'A recipient-ready reply could not be prepared for the threads flagged above without adding an answer on your behalf.'
-        : uncertainNoReplies.length > 0
-          ? 'No reply-worthy request was confirmed in the threads reviewed; check the possible deadlines above before relying on that result.'
-          : 'No reply-worthy request was confirmed in the threads reviewed.',
+        : assessedThreads < coverage.completeThreads ||
+            (coverage.unassessedCompleteThreads ?? 0) > 0
+          ? `The reply review is incomplete; I could not reliably determine all requests needing your response.${uncertainNoReplies.length > 0 ? ' Check the possible deadlines above.' : ''}`
+          : uncertainNoReplies.length > 0
+            ? 'No reply-worthy request was confirmed in the threads reviewed; check the possible deadlines above before relying on that result.'
+            : 'No reply-worthy request was confirmed in the threads reviewed.',
     );
   }
   for (const item of drafts) {

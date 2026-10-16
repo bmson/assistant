@@ -1506,6 +1506,33 @@ describe('bounded no-send email review', () => {
     expect(formatted).not.toContain('connected-alias@example.net');
     expect(formatted).not.toContain('owner@example.com');
   });
+
+  it('does not imply that no reply is needed when complete requests could not be assessed', () => {
+    const thread = required(
+      emailReviewCompleteThread('unassessed-request', 'owner@example.com', [
+        search('unassessed-request'),
+        read('unassessed-request', messages('unassessed-request')),
+      ]),
+      'complete unanswered request',
+    );
+    const coverage = emailReviewCoverage(
+      [thread.threadId],
+      [thread],
+      [search(thread.threadId), read(thread.threadId, thread.messages)],
+      0,
+      [],
+      [],
+      undefined,
+      false,
+      1,
+    );
+    const text = formatEmailReviewAnswer([], coverage, false, { requestedCount: 5 });
+    expect(text).toContain('assessed 0 of 1 complete, eligible threads');
+    expect(text).toContain('The reply review is incomplete');
+    expect(text).toContain('could not reliably determine all requests needing your response');
+    expect(text).not.toContain('No reply-worthy request was confirmed');
+  });
+
   it('repairs a rejected owner commitment using the same complete source threads', async () => {
     const thread = required(
       emailReviewCompleteThread('thread-a', 'owner@example.com', [

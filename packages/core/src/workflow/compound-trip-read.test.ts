@@ -5661,6 +5661,121 @@ San Francisco (SFO-San Francisco Intl.)`;
       'no explicit time-zone offset',
     );
   });
+  it('reads a direct upcoming-flight purchase within the existing two-thread flight-only cap', () => {
+    const read = detectPersonalReadRequest([{ role: 'user', content: 'What is my next flight?' }], {
+      now: new Date('2026-10-16T12:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!read?.upcomingFlightDiscovery || read.compoundTripDiscovery)
+      throw new Error('Expected flight-only discovery');
+    const evidence = [
+      row(
+        'gmail.search',
+        { query: read.mailQuery },
+        {
+          complete: false,
+          hasMore: true,
+          results: [
+            {
+              threadId: 'recent-flight-purchase',
+              from: 'Example Airways confirmations <tickets@example-air.invalid>',
+              subject: 'KLM purchase confirmation',
+              snippet: 'Confirmed ticket for flight KL702; itinerary details',
+            },
+            {
+              threadId: 'recent-flight-purchase',
+              from: 'Example Airways confirmations <tickets@example-air.invalid>',
+              subject: 'Your KLM purchase receipt',
+              snippet: 'Flight details and booking reference',
+            },
+            {
+              threadId: 'second-flight-purchase',
+              from: 'Example Airways confirmations <tickets@example-air.invalid>',
+              subject: 'Payment confirmation for flight',
+              snippet: 'Booking reference and itinerary details',
+            },
+            {
+              threadId: 'older-complete-itinerary',
+              subject: 'Flight - BOOKED - Berlin to San Francisco',
+              snippet: 'Confirmed itinerary and ticket details',
+            },
+            {
+              threadId: 'older-confirmation',
+              subject: 'Passenger flight confirmation code',
+              snippet: 'Airline confirmation for flight LH778',
+            },
+            {
+              threadId: 'unrelated-purchase',
+              subject: 'Thank you for your purchase',
+              snippet: 'Payment receipt for a hotel stay',
+            },
+            {
+              threadId: 'flight-newsletter',
+              subject: 'Weekly flight deals',
+              snippet: 'Itinerary tips and booking advice',
+            },
+          ],
+        },
+      ),
+    ];
+
+    const readInputs = compoundTripThreadReadInputs(evidence, read);
+    expect(readInputs.map((input) => input.threadId)).toEqual([
+      'older-complete-itinerary',
+      'recent-flight-purchase',
+    ]);
+    expect(readInputs).toHaveLength(2);
+    expect(new Set(readInputs.map((input) => input.threadId)).size).toBe(2);
+    expect(readInputs.map((input) => input.threadId)).not.toContain('unrelated-purchase');
+    expect(readInputs.map((input) => input.threadId)).not.toContain('second-flight-purchase');
+    expect(compoundTripThreadIdsToRead(evidence, read)).not.toContain('flight-newsletter');
+  });
+
+  it('reserves the second flight-only read for a supplier purchase when two booked itineraries rank first', () => {
+    const read = detectPersonalReadRequest([{ role: 'user', content: 'What is my next flight?' }], {
+      now: new Date('2026-10-16T12:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!read?.upcomingFlightDiscovery || read.compoundTripDiscovery)
+      throw new Error('Expected flight-only discovery');
+    const evidence = [
+      row(
+        'gmail.search',
+        { query: read.mailQuery },
+        {
+          complete: false,
+          hasMore: true,
+          results: [
+            {
+              threadId: 'booked-flight-one',
+              subject: 'Flight - BOOKED - Berlin to San Francisco',
+              snippet: 'Confirmed itinerary and ticket details',
+            },
+            {
+              threadId: 'booked-flight-two',
+              subject: 'Flight - BOOKED - San Francisco to Berlin',
+              snippet: 'Confirmed itinerary and ticket details',
+            },
+            {
+              threadId: 'direct-flight-purchase',
+              from: 'Example Airways confirmations <tickets@example-air.invalid>',
+              subject: 'KLM purchase confirmation',
+              snippet: 'Confirmed ticket for flight KL702; booking reference',
+            },
+          ],
+        },
+      ),
+    ];
+
+    const readInputs = compoundTripThreadReadInputs(evidence, read);
+    expect(readInputs.map((input) => input.threadId)).toEqual([
+      'booked-flight-one',
+      'direct-flight-purchase',
+    ]);
+    expect(readInputs).toHaveLength(2);
+    expect(readInputs.map((input) => input.threadId)).not.toContain('booked-flight-two');
+  });
+
   it('ranks complete itineraries and individual confirmations before generic purchases, shower and spa reads', () => {
     const { read, evidence } = sources();
     evidence[1] = row(

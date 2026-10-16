@@ -178,7 +178,10 @@ export function compoundTripThreadIdsToRead(
   evidence: ReadonlyArray<ReadToolEvidence>,
   request: PersonalReadRequest,
 ): string[] {
-  const metadata = new Map<string, { subject: string; snippet: string; categories: Set<string> }>();
+  const metadata = new Map<
+    string,
+    { subject: string; snippet: string; from: string; categories: Set<string> }
+  >();
   if (request.explicitSource === 'mail') {
     return [
       ...new Set(
@@ -246,6 +249,7 @@ export function compoundTripThreadIdsToRead(
       metadata.set(id, {
         subject: [prior?.subject, text(result?.subject, 240)].filter(Boolean).join(' '),
         snippet: [prior?.snippet, text(result?.snippet, 500)].filter(Boolean).join(' '),
+        from: [prior?.from, text(result?.from, 240)].filter(Boolean).join(' '),
         categories,
       });
     }
@@ -306,20 +310,38 @@ export function compoundTripThreadIdsToRead(
         ))
     );
   };
+  const directUpcomingFlightPurchase = (id: string) => {
+    if (!request.upcomingFlightDiscovery) return false;
+    const item = metadata.get(id);
+    if (!item) return false;
+    const { subject, snippet, from } = item;
+    const source = `${subject} ${snippet}`;
+    return (
+      /\b(?:purchase|payment)\b/i.test(subject) &&
+      /\b(?:flight|flights|airline|itinerary|boarding pass|e-?ticket|record locator)\b/i.test(
+        source,
+      ) &&
+      bookingSubjectCue(source) &&
+      /\b(?:airlines?|airways|aviation|flight|air\s+travel)\b/i.test(from) &&
+      !clearlyEditorialOrPromotional(subject, snippet)
+    );
+  };
   // A complete itinerary is more useful than a generic ancillary purchase.
   // Ranking still authorizes only reads; source bodies must verify every fact.
   const ranked = [...unique].sort((left, right) => {
     const score = (id: string) => {
       const subject = metadata.get(id)?.subject ?? '';
-      return /^(?:(?:fw|fwd|re)\s*:\s*)*flight\s*[-–—:]\s*booked\b/i.test(subject)
-        ? 4
-        : /\bconfirmation\s+code\b/i.test(subject)
-          ? 3
-          : matchesCalendarLodgingTitle(subject)
-            ? 2
-            : /\b(?:purchase|payment)\b/i.test(subject)
-              ? -1
-              : 0;
+      return directUpcomingFlightPurchase(id)
+        ? 5
+        : /^(?:(?:fw|fwd|re)\s*:\s*)*flight\s*[-–—:]\s*booked\b/i.test(subject)
+          ? 4
+          : /\bconfirmation\s+code\b/i.test(subject)
+            ? 3
+            : matchesCalendarLodgingTitle(subject)
+              ? 2
+              : /\b(?:purchase|payment)\b/i.test(subject)
+                ? -1
+                : 0;
     };
     return score(right) - score(left);
   });
@@ -338,7 +360,18 @@ export function compoundTripThreadIdsToRead(
       !clearlyEditorialOrPromotional(subject, item.snippet)
     );
   });
-  const priority = [first('flight')];
+  const isBookedFlight = (id: string) =>
+    /^(?:(?:fw|fwd|re)\s*:\s*)*flight\s*[-–—:]\s*booked\b/i.test(metadata.get(id)?.subject ?? '');
+  const bookedFlight = ranked.find(isBookedFlight);
+  const directFlightPurchase = ranked.find(directUpcomingFlightPurchase);
+  const flightOnlyDiversityPair =
+    request.upcomingFlightDiscovery &&
+    !request.compoundTripDiscovery &&
+    bookedFlight &&
+    directFlightPurchase
+      ? [bookedFlight, directFlightPurchase]
+      : undefined;
+  const priority = flightOnlyDiversityPair ? [...flightOnlyDiversityPair] : [first('flight')];
   if (request.compoundTripDiscovery) priority.push(first('lodging') ?? genericLodgingCandidate);
   const secondFlight = ranked.find((id) => sourceMatches(id, 'flight') && id !== priority[0]);
   if (secondFlight) priority.push(secondFlight);
