@@ -152,13 +152,15 @@ describe('weeklyCalendarPlan', () => {
       ),
     ).toBe(true);
     expect(
-      lines.some((line) => line.startsWith('- Next: confirm attendance for Shared appointment')),
+      lines.some((line) =>
+        line.trimStart().startsWith('- Next: confirm that attendance; if you will attend both'),
+      ),
     ).toBe(true);
     expect(text).toContain(
       'Sources: [Project review](<https://calendar.google.com/calendar/event?eid=review>); [Shared appointment](<https://calendar.google.com/calendar/event?eid=shared>).',
     );
     expect(text).toContain('not confirmed free');
-    expect(text).toContain('if attending, compare with Project review');
+    expect(text).not.toContain('compare with Project review');
   });
 
   it('uses readable local dates for overloaded days and states the missing-coverage limit once', () => {
@@ -587,14 +589,72 @@ describe('weeklyCalendarPlan', () => {
     expect(text).toContain('Possible overlap: Review and Shared hold');
     expect(text).not.toContain('Scheduling conflict: Review and Shared hold');
     expect(text).toContain('Attendance is unconfirmed for Shared hold.');
-    expect(text).toContain('Next: confirm attendance for Shared hold');
     expect(text).toContain(
-      'if attending, compare with Review, choose which event you would like to move, and ask its organizer whether a move is possible',
+      'Next: confirm that attendance; if you will attend both, choose which to keep and ask the other organizer whether it can move.',
     );
     expect(text).not.toContain('lower-priority');
   });
 
-  it('offers concrete conditional choices for verified conflicts without choosing what to move', () => {
+  it('states when both overlapping attendances are unconfirmed and keeps the action beside that pair', () => {
+    const rows = evidence({
+      pages: [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          args: { timeMin, timeMax, maxResults: 50 },
+          result: {
+            events: [
+              {
+                eventId: 'a',
+                calendarId: 'work',
+                summary: 'Planning review',
+                start: '2026-10-12T17:00:00Z',
+                end: '2026-10-12T18:00:00Z',
+                blocksTime: true,
+                links: [
+                  { type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=a' },
+                ],
+              },
+              {
+                eventId: 'b',
+                calendarId: 'shared',
+                summary: 'Family appointment',
+                start: '2026-10-12T17:30:00Z',
+                end: '2026-10-12T18:30:00Z',
+                blocksTime: true,
+                links: [
+                  { type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=b' },
+                ],
+              },
+            ],
+            complete: true,
+            calendarRosterComplete: true,
+            unavailable: [],
+          },
+        },
+      ],
+    });
+    const text = weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: rows as never,
+    });
+    const conflictSection =
+      text.split('Conflicts and review choices:\n')[1]?.split('\n\n')[0] ?? '';
+
+    expect(conflictSection).toContain('Possible overlap: Planning review and Family appointment');
+    expect(conflictSection).toContain('Attendance for both is unconfirmed.');
+    expect(conflictSection).toContain(
+      'Next: confirm attendance for both; if you will attend both, choose which to keep and ask the other organizer whether it can move.',
+    );
+    expect(conflictSection).toContain('https://calendar.google.com/calendar/event?eid=a');
+    expect(conflictSection).toContain('https://calendar.google.com/calendar/event?eid=b');
+    expect(conflictSection.split('Next:')[1]).not.toContain('Planning review');
+    expect(conflictSection.split('Next:')[1]).not.toContain('Family appointment');
+  });
+
+  it('offers a clear conditional choice for verified conflicts without repeating event names', () => {
     const rows = evidence({
       pages: [
         {
@@ -651,7 +711,7 @@ describe('weeklyCalendarPlan', () => {
     });
     expect(text).toContain('Scheduling conflict: Planning and Appointment');
     expect(text).toContain(
-      'Choice: keep Planning and ask the listed organizer (host@example.test) whether Appointment can move, or keep Appointment and ask the listed organizer (planner@example.test) whether Planning can move.',
+      'Next: choose which invite to keep and ask the other organizer whether it can move.',
     );
     expect(text).toContain('Both invites show accepted.');
     expect(
@@ -2162,6 +2222,7 @@ describe('requested focus-plan variations', () => {
     });
 
     expect(result.text).toContain('Possible duplicate listing: Alameda Soccer and Alameda Soccer');
+    expect(result.text).toContain('Next: verify whether these entries are one occurrence.');
     expect(result.text).not.toContain('Scheduling conflict: Alameda Soccer');
     expect(result.text).not.toContain('Possible overlap: Alameda Soccer');
     expect(result.text).toContain('Scheduling conflict: Project review and Budget review');
