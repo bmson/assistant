@@ -55,6 +55,7 @@ import {
   extractCompoundTripBookings,
 } from '../compound-trip-extraction.js';
 import {
+  compoundTripFetchTargets,
   compoundTripNextWebSearchQuery,
   compoundTripReadProjection,
   compoundTripThreadReadInputs,
@@ -192,6 +193,28 @@ const EMAIL_REVIEW_MAX_ASSESSMENT_PASSES = 3;
 const EMAIL_REVIEW_MULTI_THREAD_STEP_BONUS = 8;
 const EMAIL_REVIEW_MULTI_THREAD_STEP_CAP = 22;
 const EMAIL_REVIEW_STEP_BUDGET_STATE_KEY = 'emailReviewStepBudget';
+
+function ownerSuppliedExactUrl(ownerText: string, candidate: string): boolean {
+  return (ownerText.match(/https?:\/\/[^\s<>"'`]+/gi) ?? []).some((raw) => {
+    const value = raw.replace(/[),.;!?]+$/g, '');
+    return value === candidate;
+  });
+}
+
+export function authorizedCompoundTripFetchUrl(input: {
+  request: PersonalReadRequest;
+  evidence: ReadonlyArray<ReadToolEvidence>;
+  ownerText: string;
+  url: string;
+}): boolean {
+  return (
+    input.request.compoundTripDiscovery === true &&
+    (ownerSuppliedExactUrl(input.ownerText, input.url) ||
+      compoundTripFetchTargets(input.request, input.evidence).some(
+        (target) => target.url === input.url,
+      ))
+  );
+}
 
 function persistedEmailReviewStepBudget(
   value: unknown,
@@ -3718,6 +3741,36 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return false;
           return true;
         };
+        const tripFetchAuthorized =
+          readRequest?.compoundTripDiscovery &&
+          tc.toolName === 'web.fetch' &&
+          typeof tc.input.url === 'string' &&
+          authorizedCompoundTripFetchUrl({
+            request: readRequest,
+            evidence: readToolEvidence,
+            ownerText,
+            url: tc.input.url,
+          });
+        if (
+          task.type === 'chat_turn' &&
+          task.trust === 'owner' &&
+          ctx.trust === 'owner' &&
+          (task.trigger as { source?: string } | null)?.source === 'chat' &&
+          readRequest?.compoundTripDiscovery &&
+          tc.toolName === 'web.fetch' &&
+          !tripFetchAuthorized
+        ) {
+          replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, {
+            error:
+              'I did not fetch this URL because it is not a source-bound transfer result or an exact URL you supplied.',
+          });
+          journalCall.status = 'settled';
+          if (!(await updateCall({ status: 'settled' }))) return LOST_LEASE;
+          // Do not spend another model turn trying arbitrary URLs. The final
+          // response will be rendered from the bounded source projection.
+          readAnswerAttempted = true;
+          continue;
+        }
         if (
           conditionalArtifact &&
           ['docs.create', 'sheets.create', 'slides.create'].includes(tc.toolName)

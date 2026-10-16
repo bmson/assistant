@@ -161,6 +161,124 @@ function namedSourcePassages(source: string, draft: string) {
   );
 }
 
+/**
+ * Build a small, conservative fallback for transport pages whose model-written
+ * summary merged attributes across named services. It uses only service IDs
+ * grouped by the page's own category headings and their individual frequency
+ * lines. If the page does not expose three clear groups, the caller keeps the
+ * ordinary incomplete response.
+ */
+function groundedTransportBullets(
+  request: string,
+  evidence: readonly ActionEvidence[],
+): string | undefined {
+  const count = request.match(/\b(?:three|3)\s+(?:(?:short|concise|brief)\s+)?bullets?\b/i);
+  if (!count || !/\b(?:public transport|public transit|transport options?)\b/i.test(request))
+    return undefined;
+  // This formatter can answer a short transport summary, not adjacent trip
+  // planning or comparison deliverables. Leave those for the normal grounded
+  // response path rather than letting three bullets imply the whole request is
+  // complete.
+  if (
+    /\b(?:hotel|taxi|cab|flight|booking|itinerary|connection|departure|arrival time|fare|parking|rental car|train station transfer)\b/i.test(
+      request.replace(/\bdo not use\b[^.!?\n]*/gi, ''),
+    )
+  )
+    return undefined;
+  const targets = requestedPageUrls(request);
+  if (targets.length !== 1) return undefined;
+  const source = successfulWebSources(evidence).find((item) => item.requestedUrl === targets[0]);
+  if (!source) return undefined;
+
+  const passages = allSourcePassages(source.text);
+  const services = passages.filter((passage) => passage.kind === 'service');
+  const groups = passages.flatMap((passage) => {
+    if (passage.kind !== 'category') return [];
+    const match = /\(([^()]{1,180})\)\s*$/.exec(passage.label);
+    if (!match?.[1]) return [];
+    const ids = match[1].split(',').map((value) => value.trim());
+    if (ids.length < 2 || ids.some((id) => !/^[A-Z]{1,8}\d{0,4}[A-Z]?$/u.test(id))) return [];
+    const title = passage.label.slice(0, match.index).trim();
+    if (
+      !title ||
+      title.length > 60 ||
+      /[[\]_*`<>]/u.test(title) ||
+      [...title].some((character) => character.charCodeAt(0) < 32)
+    )
+      return [];
+    return [{ passage, ids, title }];
+  });
+  const normalizedTitles = groups.map((group) => group.title.toLocaleLowerCase());
+  const normalizedIds = groups.flatMap((group) => group.ids.map((id) => id.toLocaleLowerCase()));
+  if (
+    new Set(normalizedTitles).size !== normalizedTitles.length ||
+    new Set(normalizedIds).size !== normalizedIds.length
+  )
+    return undefined;
+  const candidates = groups.flatMap((group, index) => {
+    const nextStart = groups[index + 1]?.passage.start ?? source.text.length;
+    const firstService = services
+      .filter((item) => item.start > group.passage.start && item.start < nextStart)
+      .sort((left, right) => left.start - right.start)[0];
+    if (!firstService) return [];
+    const firstServiceStart = firstService.start;
+    const categoryIntro = source.text.slice(group.passage.start, firstServiceStart);
+    const qualifiedSchedule =
+      /\b(?:weekends?|weekdays?|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|except|only|subject\s+to|until|jointly|surcharge|seasonal|temporar(?:y|ily))\b/i;
+    if (qualifiedSchedule.test(categoryIntro)) return [];
+    const facts = group.ids.flatMap((id) => {
+      const matches = services.filter(
+        (item) => item.label === id && item.start > group.passage.start && item.start < nextStart,
+      );
+      if (matches.length !== 1) return [];
+      const service = matches[0];
+      if (!service) return [];
+      const lines = decodeSourceEntities(service.text)
+        .split(/\r?\n/u)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      // Accept only a service heading followed by one route and one cadence.
+      // Extra prose or fields may carry exceptions we cannot safely compress.
+      if (
+        lines.length !== 3 ||
+        lines[0] !== id ||
+        !/^-\s*Route:\s*\S/u.test(lines[1] ?? '') ||
+        !/^-\s*Frequency:\s*\S/u.test(lines[2] ?? '') ||
+        qualifiedSchedule.test(service.text)
+      )
+        return [];
+      const line = /^\s*-\s*Frequency:\s*([^\r\n]+)$/im.exec(service.text)?.[1];
+      if (!line) return [];
+      const frequency = decodeSourceEntities(line).replace(/\s+/g, ' ').trim();
+      // Keep only simple, complete cadences. Surcharges, date-limited joint
+      // schedules, directional exceptions, and other qualifiers need a richer
+      // renderer and therefore do not enter this fallback.
+      if (
+        !/^(?:hourly(?:\s+\(from\s+[\p{L}\d. ]+\s+to\s+[\p{L}\d. ]+\))?|every\s+\d+(?:\s*[-–]\s*\d+)?\s+minutes?)$/iu.test(
+          frequency,
+        )
+      )
+        return [];
+      return [`${id}: ${frequency}`];
+    });
+    if (facts.length < 2) return [];
+    return [`- **${group.title}:** ${facts.slice(0, 2).join('; ')}.`];
+  });
+  if (candidates.length < 3) return undefined;
+  const finalUrl = safePublicPageUrl(source.url);
+  if (!finalUrl) return undefined;
+  const bullets = candidates.slice(0, 3);
+  const last = bullets.at(-1);
+  if (!last) return undefined;
+  bullets[bullets.length - 1] = `${last.slice(0, -1)}. [Source](${finalUrl})`;
+  const summary = bullets.join('\n');
+  return shortBulletFindings(request, summary).length ||
+    requestedWebLinkFindings(request, summary, evidence).length ||
+    publicWebClaimFindings(summary, evidence).length
+    ? undefined
+    : summary;
+}
+
 /** Whitespace-only repair for an exact, explicit bullet count and bold labels.
  * Do not interpret arbitrary inline hyphens, code, or mismatched marker counts.
  */
@@ -1180,11 +1298,19 @@ export async function verifyFinalOutput(
     attempted = outcome.ok;
     if (!outcome.ok || outcome.finishReason === 'length') {
       const contradicted = publicWebClaimFindings(original, input.evidence, ownerFacts).length > 0;
+      const transportFallback = contradicted
+        ? groundedTransportBullets(input.request, input.evidence)
+        : undefined;
       const incomplete =
         contradicted ||
         shortBulletFindings(input.request, original).length > 0 ||
         requestedWebLinkFindings(input.request, original, input.evidence).length > 0;
-      return result(contradicted ? limitation() : original, outcome.ok, true, incomplete);
+      return result(
+        transportFallback ?? (contradicted ? limitation() : original),
+        outcome.ok,
+        true,
+        incomplete && !transportFallback,
+      );
     }
     const revision = outcome.object.revisedText?.trim();
     let candidate =
@@ -1288,18 +1414,23 @@ export async function verifyFinalOutput(
           !findings.length &&
           !hasStructuralOutputDefect(candidate) &&
           !isVisiblyIncompleteReplacement(candidate);
-        const safeFailure = findings.length
-          ? limitation()
-          : preserveAnswer
-            ? `${candidate}\n\nI couldn’t complete the requested formatting.${source ? sourceLink(source.url) : ''}`
-            : source
-              ? `The page was retrieved, but I couldn’t complete a verified summary of its contents.${sourceLink(source.url)}`
-              : 'I couldn’t produce a complete answer that I can support from the available evidence.';
+        const transportFallback = findings.length
+          ? groundedTransportBullets(input.request, input.evidence)
+          : undefined;
+        const safeFailure =
+          transportFallback ??
+          (findings.length
+            ? limitation()
+            : preserveAnswer
+              ? `${candidate}\n\nI couldn’t complete the requested formatting.${source ? sourceLink(source.url) : ''}`
+              : source
+                ? `The page was retrieved, but I couldn’t complete a verified summary of its contents.${sourceLink(source.url)}`
+                : 'I couldn’t produce a complete answer that I can support from the available evidence.');
         return result(
           safeFailure,
           true,
           !correction.ok || correction.finishReason === 'length',
-          true,
+          !transportFallback,
         );
       }
       candidate = corrected;

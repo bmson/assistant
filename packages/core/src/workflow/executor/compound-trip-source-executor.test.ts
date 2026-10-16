@@ -14,8 +14,9 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { tripPrompt, tripSourceResult, tripTools } from '../compound-trip-source.test-fixtures.js';
 import { taskState } from '../machine.js';
+import { detectPersonalReadRequest } from '../read-intent.js';
 import type { RunContext } from './phases.js';
-import { runStepLoop } from './step-loop.js';
+import { authorizedCompoundTripFetchUrl, runStepLoop } from './step-loop.js';
 import type { ExecutorDeps } from './types.js';
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -36,6 +37,40 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
     await (db as unknown as { $client: { end(): Promise<void> } }).$client.end();
   });
 
+  it('rejects model-invented trip URLs unless they are source-bound or owner-supplied verbatim', () => {
+    const request = detectPersonalReadRequest([{ role: 'user', content: tripPrompt }], {
+      now: new Date('2030-11-15T15:00:00Z'),
+      timeZone: 'America/New_York',
+    });
+    if (!request?.compoundTripDiscovery) throw new Error('Expected compound-trip read intent');
+    const inventedUrl = 'https://maps.example/route?destination=unverified';
+
+    expect(
+      authorizedCompoundTripFetchUrl({
+        request,
+        evidence: [],
+        ownerText: tripPrompt,
+        url: inventedUrl,
+      }),
+    ).toBe(false);
+    expect(
+      authorizedCompoundTripFetchUrl({
+        request,
+        evidence: [],
+        ownerText: `${tripPrompt} Please fetch ${inventedUrl}`,
+        url: inventedUrl,
+      }),
+    ).toBe(true);
+    expect(
+      authorizedCompoundTripFetchUrl({
+        request,
+        evidence: [],
+        ownerText: `${tripPrompt} Please fetch ${inventedUrl}`,
+        url: 'https://maps.example/route?destination=other',
+      }),
+    ).toBe(false);
+  });
+
   it.each([
     'separate pages',
     'hotel directions',
@@ -43,6 +78,7 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
     'all sources blocked',
     'alternate source search',
     'focused flight',
+    'unbound model fetch',
   ] as const)('retains source facts and bounded completion for %s', async (scenario) => {
     const agent = await db.query.agents.findFirst();
     if (!agent) throw new Error('Allocator fixture agent missing');
@@ -126,6 +162,9 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
           }
           calls.push({ toolName, args });
           let result = tripSourceResult(toolName, args);
+          if (scenario === 'unbound model fetch' && toolName === 'web.search') {
+            result = { results: [] };
+          }
           if (focused && toolName === 'gmail.search') {
             const search = result as {
               results: Array<Record<string, unknown>>;
@@ -245,6 +284,19 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
     } as unknown as ExecutorDeps;
     const state = taskState(lease);
     state.untrustedContext = true;
+    if (scenario === 'unbound model fetch')
+      state.pendingToolBatch = {
+        step: state.step,
+        modelId: 'scripted/model',
+        calls: [
+          {
+            toolCallId: `invented-fetch-${taskId}`,
+            toolName: 'web.fetch',
+            input: { url: 'https://maps.example/route?destination=unverified' },
+            status: 'queued',
+          },
+        ],
+      };
     const window = [{ role: 'user' as const, content: request }];
     const context = {
       deps,
@@ -273,31 +325,43 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
       missingInfo: [],
     });
     expect(result.outcome).toBe('needs_attention');
-    const expectedFetches = focused
-      ? 0
-      : scenario === 'hotel directions'
+    const expectedFetches =
+      scenario === 'unbound model fetch'
         ? 1
-        : scenario === 'alternate source search'
-          ? 3
-          : 2;
-    expect(calls.map((call) => call.toolName)).toEqual([
-      'calendar.list_events',
-      'gmail.search',
-      ...(!focused ? ['gmail.search'] : []),
-      'gmail.read_thread',
-      'gmail.read_thread',
-      ...(!focused ? ['web.search'] : []),
-      ...Array.from(
-        { length: scenario === 'alternate source search' ? 2 : expectedFetches },
-        () => 'web.fetch',
-      ),
-      ...(scenario === 'alternate source search'
-        ? ['web.search', 'web.fetch']
-        : scenario === 'all sources blocked'
-          ? ['web.search', 'web.search']
-          : []),
-      ...(!focused ? ['maps.directions'] : []),
-    ]);
+        : focused
+          ? 0
+          : scenario === 'hotel directions'
+            ? 1
+            : scenario === 'alternate source search'
+              ? 3
+              : 2;
+    if (scenario === 'unbound model fetch') {
+      const fetchedUrls = calls
+        .filter((call) => call.toolName === 'web.fetch')
+        .map((call) => call.args.url);
+      expect(fetchedUrls).toEqual(['https://hotel.example/canal-house/map']);
+      expect(state.pendingApprovals).toEqual([]);
+      expect(state.pendingToolBatch).toBeNull();
+    } else {
+      expect(calls.map((call) => call.toolName)).toEqual([
+        'calendar.list_events',
+        'gmail.search',
+        ...(!focused ? ['gmail.search'] : []),
+        'gmail.read_thread',
+        'gmail.read_thread',
+        ...(!focused ? ['web.search'] : []),
+        ...Array.from(
+          { length: scenario === 'alternate source search' ? 2 : expectedFetches },
+          () => 'web.fetch',
+        ),
+        ...(scenario === 'alternate source search'
+          ? ['web.search', 'web.fetch']
+          : scenario === 'all sources blocked'
+            ? ['web.search', 'web.search']
+            : []),
+        ...(!focused ? ['maps.directions'] : []),
+      ]);
+    }
     if (!focused)
       expect(calls.find((call) => call.toolName === 'maps.directions')?.args).toMatchObject({
         origin: 'CPH Airport',
@@ -322,7 +386,11 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
     expect(answer).toContain('2030-11-17');
     expect(answer).toContain('zone');
     expect(answer).not.toContain('|---|');
-    if (focused) {
+    if (scenario === 'unbound model fetch') {
+      expect(answer).not.toContain('maps.example');
+      expect(answer).toContain('Hotel');
+      expect(answer).toContain('unverified');
+    } else if (focused) {
       expect(answer).toContain('Outbound/return direction is not explicitly stated');
       expect(answer).toContain('local; zone not stated');
       expect(answer).toContain(

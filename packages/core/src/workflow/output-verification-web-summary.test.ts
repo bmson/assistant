@@ -45,6 +45,91 @@ const summary = [
   '- **Direct bus:** B10 connects South with the airport every 20 minutes.',
   `- **Transfer bus:** B20 ends at Interchange; continue to Airport with R10. [Source](${url})`,
 ].join('\n');
+const recoveryUrl = 'https://transit.example/recovery';
+const recoverySource = [
+  'Rail services (R10, R20)',
+  'R10',
+  '- Route: Central - Airport',
+  '- Frequency: hourly (from 6 a.m. to 11 p.m.)',
+  'R20',
+  '- Route: West - Airport',
+  '- Frequency: every 30 minutes',
+  'Urban rail (M1, M2)',
+  'M1',
+  '- Route: North - Airport',
+  '- Frequency: every 15 minutes',
+  'M2',
+  '- Route: South - Airport',
+  '- Frequency: every 15 minutes',
+  'Express buses (B10, B20)',
+  'B10',
+  '- Route: East - Airport',
+  '- Frequency: every 5 minutes',
+  'B20',
+  '- Route: Central - Airport',
+  '- Frequency: hourly',
+].join('\n');
+const recoveryRequest = `Read ${recoveryUrl} and summarize the public transport options in three short bullets with a source link.`;
+const recoveryEvidence = [
+  {
+    toolName: 'web.fetch',
+    status: 'succeeded',
+    fromCurrentTask: true,
+    args: { url: recoveryUrl },
+    result: {
+      status: 200,
+      finalUrl: recoveryUrl,
+      text: recoverySource,
+      truncated: false,
+    },
+  },
+];
+const conflatedSummary = [
+  '- **Rail:** R10 and R20 both run every 30 minutes from Central to the airport.',
+  '- **Urban rail:** M1 and M2 both run every 15 minutes from North to the airport.',
+  `- **Buses:** B10 and B20 both run every 5 minutes from East to the airport. [Source](${recoveryUrl})`,
+].join('\n');
+async function runTransportFallback(
+  options: {
+    request?: string;
+    evidence?: typeof recoveryEvidence;
+    initialUnavailable?: boolean;
+  } = {},
+) {
+  const request = options.request ?? recoveryRequest;
+  const evidence = options.evidence ?? recoveryEvidence;
+  let calls = 0;
+  return verifyFinalOutput(
+    {
+      object: async () => {
+        calls += 1;
+        if (options.initialUnavailable) return { ok: false };
+        return calls === 1
+          ? {
+              ok: true,
+              finishReason: 'stop',
+              object: { decision: 'publish', reasons: [] },
+            }
+          : {
+              ok: true,
+              finishReason: 'stop',
+              object: {
+                decision: 'revise',
+                revisedText: conflatedSummary,
+                reasons: ['ungrounded_fact'],
+              },
+            };
+      },
+    } as never,
+    {
+      taskId: 'category-bound-summary',
+      request,
+      draft: conflatedSummary,
+      evidence,
+      critical: true,
+    },
+  );
+}
 const verbose = `## Rail\n${'The rail service connects Central with Airport. '.repeat(35)}\n## Buses\n${'Some buses require a transfer. '.repeat(35)}\n[Source](${url})`;
 const documentId = 'document123456';
 function nativeDocPage(
@@ -82,6 +167,87 @@ function nativeDocPage(
 }
 
 describe('source-grounded public page summary recovery', () => {
+  it('rebuilds three short transport bullets from category-bound service frequencies after a bad combined draft', async () => {
+    expect(publicWebClaimFindings(conflatedSummary, recoveryEvidence).length).toBeGreaterThan(0);
+    const result = await runTransportFallback();
+
+    expect(result).toMatchObject({ attempted: true, revised: true, unavailable: false });
+    expect(result.incomplete).not.toBe(true);
+    expect(result.text.split('\n')).toHaveLength(3);
+    expect(result.text).toContain('R10: hourly (from 6 a.m. to 11 p.m.); R20: every 30 minutes');
+    expect(result.text).toContain('M1: every 15 minutes; M2: every 15 minutes');
+    expect(result.text).toContain('B10: every 5 minutes; B20: hourly');
+    expect(result.text).toContain(`[Source](${recoveryUrl})`);
+    expect(shortBulletFindings(recoveryRequest, result.text)).toEqual([]);
+    expect(requestedPublicPageReceiptFindings(recoveryRequest, recoveryEvidence)).toEqual([]);
+    expect(publicWebClaimFindings(result.text, recoveryEvidence)).toEqual([]);
+  });
+
+  it('uses complete grounded fallback after verifier unavailability without marking the answer incomplete', async () => {
+    const result = await runTransportFallback({ initialUnavailable: true });
+    expect(result).toMatchObject({ attempted: false, revised: true, unavailable: true });
+    expect(result.incomplete).not.toBe(true);
+    expect(result.text.split('\n')).toHaveLength(3);
+    expect(publicWebClaimFindings(result.text, recoveryEvidence)).toEqual([]);
+  });
+
+  it.each([
+    ['missing requested source', (rows: typeof recoveryEvidence) => rows.slice(0, 0)],
+    [
+      'unrelated requested source',
+      (rows: typeof recoveryEvidence) =>
+        rows.map((row) => ({ ...row, args: { url: 'https://transit.example/unrelated' } })),
+    ],
+    [
+      'truncated source',
+      (rows: typeof recoveryEvidence) =>
+        rows.map((row) => ({ ...row, result: { ...row.result, truncated: true } })),
+    ],
+  ])('does not recover a summary from a %s', async (_label, mutate) => {
+    const evidence = mutate(structuredClone(recoveryEvidence));
+    const result = await runTransportFallback({ evidence });
+    expect(result).toMatchObject({ incomplete: true });
+    expect(result.text).not.toContain('R10: hourly');
+  });
+
+  it.each([
+    [
+      'duplicate categories',
+      recoverySource.replace('Urban rail (M1, M2)', 'Rail services (M1, M2)'),
+    ],
+    [
+      'duplicate service identifiers',
+      recoverySource.replace('Urban rail (M1, M2)', 'Urban rail (R10, M2)'),
+    ],
+    [
+      'a weekend qualifier outside the cadence line',
+      recoverySource.replace('M1\n- Route:', 'M1\n- Schedule note: only on weekends\n- Route:'),
+    ],
+    [
+      'a date limit outside the cadence line',
+      recoverySource.replace(
+        'B10\n- Route:',
+        'B10\n- Schedule note: only until October 2026\n- Route:',
+      ),
+    ],
+  ])('fails closed when the page has %s', async (_label, sourceText) => {
+    const evidence = structuredClone(recoveryEvidence);
+    const row = evidence[0];
+    if (!row) throw new Error('Missing source fixture');
+    row.result.text = sourceText;
+    const result = await runTransportFallback({ evidence });
+    expect(result).toMatchObject({ incomplete: true });
+    expect(result.text).not.toContain('R10: hourly');
+  });
+
+  it('does not declare a multi-outcome trip request complete with transport bullets alone', async () => {
+    const result = await runTransportFallback({
+      request: `Plan my hotel transfer by taxi too. ${recoveryRequest}`,
+    });
+    expect(result).toMatchObject({ incomplete: true });
+    expect(result.text).not.toContain('R10: hourly');
+  });
+
   it('keeps early and late source units, offsets and omissions available for a generic refusal', () => {
     const prompt = buildOutputVerificationPrompt({
       request,

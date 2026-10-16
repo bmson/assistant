@@ -3611,7 +3611,16 @@ export function compoundTripReadProjection(
     ? destinationCivilDate(flight)
     : currentTripReturn?.segment?.departureDate;
   const standaloneHotelObservations = hotels.filter((candidate) => {
+    // Keep an explicitly identified but undated property visible as an
+    // observation. Without a complete stay range it cannot be associated with
+    // the selected itinerary, used as a route destination, or searched as a
+    // transfer endpoint.
+    const incompleteUnlinkedObservation =
+      candidate.association === 'unlinked' &&
+      (!candidate.checkIn || !candidate.checkOut) &&
+      Boolean(candidate.hotelName || candidate.address);
     if (!tripHotelAnchorDate) return true;
+    if (incompleteUnlinkedObservation) return true;
     if (!candidate.checkIn || !candidate.checkOut) return false;
     if (!candidate.city) return false;
     const tripCity = flight?.destinationCity ?? calendarFlightOriginCity(currentTripReturn?.event);
@@ -3741,6 +3750,7 @@ export function compoundTripReadProjection(
   const route =
     flight &&
     hotel &&
+    hotel.association !== 'unlinked' &&
     !flight.calendarConflicts?.includes('arrival-airport') &&
     outboundChronology === 'valid' &&
     (!returnFlight || returnChronology === 'valid') &&
@@ -3938,7 +3948,9 @@ export function compoundTripReadProjection(
     );
   else if (!hotel && hotels.length > 0)
     gaps.push(
-      'I found a separately dated hotel reservation, but could not link it to the selected flight.',
+      hotels.some((candidate) => candidate.checkIn && candidate.checkOut)
+        ? 'I found a separately dated hotel reservation, but could not link it to the selected flight.'
+        : 'I found a hotel record, but its stay dates are incomplete or not verifiable; I could not link it to the trip.',
     );
   else if (!hotel && completeThreads.length > 0)
     gaps.push('I did not identify a hotel booking candidate in the complete email threads I read.');
@@ -4179,7 +4191,7 @@ export function compoundTripReadProjection(
           .filter((candidate) => candidate.association === 'unlinked')
           .map(
             (candidate) =>
-              `${candidate.checkIn && candidate.checkOut ? 'Dated hotel' : 'Hotel'} reservation observed separately from the selected flight: ${markdownText(candidate.hotelName || candidate.subject)}${candidate.city ? `, ${markdownText(candidate.city)}` : ''}${candidate.address ? ` — ${markdownText(candidate.address)}` : ''}${candidate.checkIn && candidate.checkOut ? ` (${candidate.checkIn} to ${candidate.checkOut})` : ''}${mailLinks.has(candidate.threadId) ? ` [Booking email](${mailLinks.get(candidate.threadId)})` : ''}. It is not linked to the selected flight.`,
+              `${candidate.checkIn && candidate.checkOut ? 'Dated hotel' : 'Hotel'} reservation observed separately from the selected flight: ${markdownText(candidate.hotelName || candidate.subject)}${candidate.city ? `, ${markdownText(candidate.city)}` : ''}${candidate.address ? ` — ${markdownText(candidate.address)}` : ''}${candidate.checkIn && candidate.checkOut ? ` (${candidate.checkIn} to ${candidate.checkOut})` : ''}${mailLinks.has(candidate.threadId) ? ` [Booking email](${mailLinks.get(candidate.threadId)})` : ''}. ${candidate.checkIn && candidate.checkOut ? 'It is not linked to the selected flight.' : 'The source does not provide a complete, verifiable stay range, so I cannot link it to a flight.'}`,
           )
       : [],
     calendarLodging && !calendarLodgingCoveredByEmail

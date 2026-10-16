@@ -1845,6 +1845,55 @@ describe('compound trip read projection', () => {
     expect(projection.text).toContain('did not include an explicit address');
   });
 
+  it('keeps a named hotel with yearless stay dates as an unlinked observation', () => {
+    const read = request();
+    const evidence = [
+      completeCalendarEvents([]),
+      ...bookingEmailEvidence({
+        hotelBody:
+          'Reservation confirmed: Hotel Linden, Berlin.\nCheck-in: October 17\nCheck-out: October 19\nAddress: Linienstraße 89, 10119 Berlin.',
+      }),
+    ];
+    const projection = compoundTripReadProjection(read, evidence);
+
+    expect(projection.presentation.hotels).toEqual([
+      expect.objectContaining({
+        hotelName: 'Hotel Linden',
+        city: 'Berlin',
+        association: 'unlinked',
+      }),
+    ]);
+    expect(projection.presentation.hotels[0]?.checkIn).toBeUndefined();
+    expect(projection.presentation.hotels[0]?.checkOut).toBeUndefined();
+    expect(projection.text).toContain('Hotel Linden, Berlin');
+    expect(projection.text).toContain('complete, verifiable stay range');
+    expect(projection.text).toContain('cannot link it to a flight');
+    expect(projection.hotel).toBeUndefined();
+    expect(compoundTripRoute(read, evidence)).toBeUndefined();
+    expect(compoundTripReadProjection(read, evidence).webQuery).toBeUndefined();
+    expect(compoundTripFetchTargets(read, evidence)).toEqual([]);
+  });
+
+  it('does not route to or search an unlinked hotel even when its city matches the flight', () => {
+    const read = request();
+    const evidence = [
+      completeCalendarEvents([calendarFlight()]),
+      ...bookingEmailEvidence({
+        hotelBody:
+          'Reservation confirmed: Hotel Linden, Berlin.\nCheck-in: October 17\nCheck-out: October 19\nAddress: Linienstraße 89, 10119 Berlin.',
+      }),
+    ];
+
+    const projection = compoundTripReadProjection(read, evidence);
+
+    expect(projection.flight).toBeDefined();
+    expect(projection.hotel?.association).toBe('unlinked');
+    expect(projection.routeOrigin).toBeUndefined();
+    expect(projection.routeDestination).toBeUndefined();
+    expect(projection.webQuery).toBeUndefined();
+    expect(compoundTripFetchTargets(read, evidence)).toEqual([]);
+  });
+
   it('does not associate or route a different-city or nonoverlapping hotel candidate', () => {
     const read = request();
     const evidence = [
