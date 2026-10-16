@@ -108,8 +108,8 @@ function exactIdentifier(label: string): RegExp {
   return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'u');
 }
 
-function allNamedSourcePassages(source: string) {
-  const headings: { label?: string; offset: number }[] = [];
+function allSourcePassages(source: string) {
+  const headings: { label?: string; category?: string; offset: number }[] = [];
   const identifier = '(?:[A-Z]{1,8}\\d{0,4}[A-Z]?|\\d{2,4})';
   for (const match of source.matchAll(/^([^\r\n]+)$/gm)) {
     const title = decodeSourceEntities(match[1] ?? '').trim();
@@ -119,21 +119,40 @@ function allNamedSourcePassages(source: string) {
       new RegExp(`^(${identifier})\\s+\\([^()]{1,120}\\)$`).exec(title)?.[1];
     // Named categories and common end sections delimit a service passage too;
     // they are not themselves service IDs or attributed to a neighboring route.
-    const boundary =
+    const category =
       !/^[-*]/.test(title) &&
       (/^[^()]{2,100}\([^()]*[,/][^()]*\)$/.test(title) ||
-        /^(?:Frequently asked questions|FAQ|Related (?:information|links)|More information)$/i.test(
+        /^(?:[\p{L}\d][^.!?:\n]{0,70}\s)?(?:trains|buses|transport|services|routes)(?:\s+[^.!?:\n]{1,70})?$/iu.test(
           title,
         ));
-    if (label || boundary) headings.push({ ...(label ? { label } : {}), offset: match.index });
+    const endSection =
+      /^(?:Frequently asked questions|FAQ|Related (?:information|links)|More information)$/i.test(
+        title,
+      );
+    if (label || category || endSection)
+      headings.push({
+        ...(label ? { label } : category ? { category: title } : {}),
+        offset: match.index,
+      });
   }
   return headings.flatMap((heading, index) => {
-    if (!heading.label) return [];
+    const label = heading.label ?? heading.category;
+    if (!label) return [];
     const end = headings[index + 1]?.offset ?? source.length;
     return [
-      { label: heading.label, start: heading.offset, end, text: source.slice(heading.offset, end) },
+      {
+        label,
+        kind: heading.label ? ('service' as const) : ('category' as const),
+        start: heading.offset,
+        end,
+        text: source.slice(heading.offset, end),
+      },
     ];
   });
+}
+
+function allNamedSourcePassages(source: string) {
+  return allSourcePassages(source).filter((passage) => passage.kind === 'service');
 }
 
 function namedSourcePassages(source: string, draft: string) {
@@ -695,8 +714,10 @@ export function publicWebClaimFindings(
   const subjects = [...new Set(passages.map((passage) => passage.label))]
     .map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
     .join('|');
+  // A supplemental "with R10 running ..." clause has its own explicit
+  // subject; its attributes do not apply to an earlier list of services.
   const units = new RegExp(
-    `;\\s*|,\\s*(?:while|whereas|but)\\s+|(?<=[.!?])\\s+(?=[A-Z*])${subjects ? `|\\s+(?:and|while|whereas|but)\\s+(?=(?:the\\s+)?(?:${subjects})\\s+(?:go(?:es)?|runs?|serves?|connects?|departs?|stops?|travels?|leaves?|reaches?)\\b)` : ''}`,
+    `;\\s*|,\\s*(?:while|whereas|but)\\s+|(?<=[.!?])\\s+(?=[A-Z*])${subjects ? `|,\\s*with\\s+(?=(?:the\\s+)?(?:\\*{1,2})?(?:${subjects})(?:\\*{1,2})?\\s+(?:running|serving|connecting|departing|stopping|travelling|traveling|leaving|reaching|runs?|serves?|connects?|departs?)\\b)|\\s+(?:and|while|whereas|but)\\s+(?=(?:the\\s+)?(?:${subjects})\\s+(?:go(?:es)?|runs?|serves?|connects?|departs?|stops?|travels?|leaves?|reaches?)\\b)` : ''}`,
     'u',
   );
   for (const topic of claims.split(/\n\s*-\s+|\n{2,}|\n\s*(?=#{1,6}\s)/).slice(0, 48)) {
@@ -904,24 +925,54 @@ function webFetchEvidenceForVerifier(
     error: typeof row.error === 'string' ? row.error.slice(0, 300) : row.error,
   };
 
-  const passages = namedSourcePassages(sourceText, draft);
-  const allPassages = allNamedSourcePassages(sourceText);
-  const firstService = allPassages[0]?.start ?? 0;
+  const sourceUnits = allSourcePassages(sourceText);
+  const allPassages = sourceUnits.filter((passage) => passage.kind === 'service');
+  const passages = allPassages.filter((passage) => exactIdentifier(passage.label).test(draft));
+  // Category-level claims need their own introductions, even when the draft
+  // names some services but not the service below that category. Relevance
+  // orders excerpts only; a matching heading never establishes the claim.
+  const keywords = (text: string) =>
+    new Set(
+      (
+        decodeSourceEntities(text)
+          .toLowerCase()
+          .match(/\p{L}{3,}/gu) ?? []
+      ).map((word) => (word === 'buses' || word === 'bus' ? 'bus' : word.replace(/s$/, ''))),
+    );
+  const draftKeywords = keywords(draft);
+  const categoryPassages = sourceUnits
+    .filter((passage) => passage.kind === 'category')
+    .map((passage) => ({
+      passage,
+      relevance: [...keywords(passage.label)].filter((word) => draftKeywords.has(word)).length,
+    }))
+    .sort((a, b) => b.relevance - a.relevance || a.passage.start - b.passage.start)
+    .map(({ passage }) => passage);
+  // All-caps navigation labels can resemble service IDs. Anchor the overview
+  // at an actual attributed entry when available, not at the page's menu.
+  const attributedPassages = allPassages.filter((passage) =>
+    /(?:^|\n)\s*[-*]?\s*(?:Route|Frequency|Travel time|Journey time):/i.test(passage.text),
+  );
+  const firstService = (attributedPassages[0] ?? allPassages[0])?.start ?? 0;
   const overviewStart = Math.max(0, firstService - 1600);
   const overview = sourceText.slice(overviewStart, firstService);
   // Prefix-only clipping used to hide transfer qualifiers late in a long
   // transport page. Include separately labelled, offset-bound source units
   // for named services; never present noncontiguous excerpts as one passage.
-  const lateNamedPassage = allNamedSourcePassages(sourceText).some(
-    (passage) => passage.end > WEB_SOURCE_EXCERPT_LIMIT,
-  );
+  const lateNamedPassage = sourceUnits.some((passage) => passage.end > WEB_SOURCE_EXCERPT_LIMIT);
   // A draft that names a service lets us send only its source passage. When
   // the draft itself is a refusal or generic summary, that selection is empty
   // and the verifier cannot recover the useful sections at the end of a long
   // successful fetch. Include bounded early and late sections in that case so the
   // verifier can distinguish a readable page from an actually missing detail.
+  const candidatePassages = passages.length
+    ? passages
+    : attributedPassages.length
+      ? attributedPassages
+      : allPassages;
+  const selectedCategories = lateNamedPassage ? categoryPassages.slice(0, 8) : [];
   const selectedPassages = lateNamedPassage
-    ? (passages.length > 0 ? passages : allPassages).slice(0, 24)
+    ? candidatePassages.slice(0, 24 - selectedCategories.length)
     : [];
   let passageLimit = EVIDENCE_ITEM_LIMIT;
   let excerptLength = Math.min(
@@ -946,6 +997,17 @@ function webFetchEvidenceForVerifier(
                 text: passage.text.slice(0, passageLimit),
                 omittedChars: Math.max(0, passage.text.length - passageLimit),
               })),
+              sourceCategoryPassages: selectedCategories.map((passage) => ({
+                label: passage.label,
+                startOffset: passage.start,
+                endOffset: Math.min(passage.end, passage.start + passageLimit),
+                text: passage.text.slice(0, passageLimit),
+                omittedChars: Math.max(0, passage.text.length - passageLimit),
+              })),
+              sourceCategoryPassagesOmittedCount: Math.max(
+                0,
+                categoryPassages.length - selectedCategories.length,
+              ),
               sourceOverview: {
                 startOffset: overviewStart,
                 endOffset: firstService,
@@ -953,7 +1015,7 @@ function webFetchEvidenceForVerifier(
               },
               sourcePassagesOmittedCount: Math.max(
                 0,
-                (passages.length || allPassages.length) - selectedPassages.length,
+                candidatePassages.length - selectedPassages.length,
               ),
             }
           : {}),
@@ -961,7 +1023,7 @@ function webFetchEvidenceForVerifier(
     });
     if (rendered.length <= available) return rendered;
     if (excerptLength > 0) excerptLength = Math.max(0, Math.floor(excerptLength * 0.75));
-    else if (selectedPassages.length && passageLimit > 80)
+    else if ((selectedPassages.length || selectedCategories.length) && passageLimit > 80)
       passageLimit = Math.max(80, Math.floor(passageLimit * 0.75));
     else break;
   }
@@ -1042,6 +1104,7 @@ export const OUTPUT_VERIFICATION_SYSTEM = [
   'When a response names multiple entities or routes, check each entity and each claimed attribute against its own source passage. Keep origins, destinations, times, prices, and other attributes attached to the item that states them; a shared stop or segment does not establish another route’s origin or full path. Do not infer facts from neighboring list items or merge separate entries. Preserve source headings and list-item boundaries when they distinguish entries.',
   'For public web summaries, treat every named service or route entry as a separate evidence unit. A page introduction or category heading cannot spread a frequency, destination, stop, or service pattern across all entries. Keep direct-to-destination service distinct from a route that ends at an interchange and requires a transfer. Keep each frequency attached only to the service entry that states it: if one route is hourly and another is every 20 minutes, do not summarize both as every 20 minutes. You may combine routes only when the combined wording remains true for each one; otherwise preserve their qualifiers or give a broader fact that the source supports.',
   'Separately labelled sourcePassages are noncontiguous excerpts, not adjoining source text. Verify each named service against its own passage, including continuation or change-at qualifiers; do not call an interchange-only route a direct destination service or hide its required transfer inside a generic list. Omitted passage characters or omitted units do not prove missing attributes. For a short overview, give the few most useful verified options with their essential qualifiers rather than an exhaustive route catalogue.',
+  'sourceCategoryPassages are separate category headings and introductions. Check category-level claims against their actual text; a matching heading alone is not evidence for a detail, and a category introduction cannot spread an attribute to every named service.',
   'Use conversation context only to resolve short follow-ups and the scope of the current request. Earlier assistant claims, offers, and card labels are not evidence. Never revive a superseded topic or turn an accepted lookup offer into permission for an external action.',
   'Check each requested outcome separately: distinguish completed work, partial results, pending approval, and failed or unattempted work. A lookup is not a save, a draft is not a send, an interview is not an application receipt, and a nearby event is not a hotel booking. Do not replace the answer with a promise or ask permission for a lookup that already ran.',
   'Emoji are not decoration or status markers. If the owner did not explicitly request an emoji, any emoji in the proposed response is a defect: return decision "revise" with a complete emoji-free replacement. Never add emoji in a revision.',

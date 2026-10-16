@@ -137,6 +137,34 @@ function extractedFacts(overrides: Record<string, unknown> = {}) {
 }
 
 describe('compound trip source extraction', () => {
+  it.each(['departing', 'DEPARTURE', 'outbound'])(
+    'requires an explicit direction label, not the generic %s clock heading',
+    async (label) => {
+      const quote = flightQuote.replace('departing', label);
+      const facts = extractedFacts();
+      const segment = facts.messages[0]?.segments[0];
+      if (!segment) throw new Error('Missing segment fixture');
+      segment.quote = quote;
+      const object = vi.fn().mockResolvedValue({ ok: true, object: facts });
+      const result = await extractCompoundTripBookings({
+        router: { object } as never,
+        taskId: 'direction',
+        request,
+        evidence: evidence(`${quote}\n${hotelQuote}`),
+      });
+      expect(result.segments).toHaveLength(1);
+      expect(result.segments[0]).toMatchObject({
+        direction: label === 'outbound' ? 'outbound' : 'unknown',
+        flightNumber: 'LH401',
+        departureDate: '2026-10-22',
+        departureTime: '21:10',
+        departureTimeZone: 'Europe/Berlin',
+        excerpt: quote,
+      });
+      expect(object).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('uses one capped structured extraction and validates facts against exact message quotes', async () => {
     const object = vi.fn().mockResolvedValue({
       ok: true,
@@ -262,7 +290,9 @@ describe('compound trip source extraction', () => {
     expect(projection.blocked).toBe(true);
     expect(projection.text).toContain('Booking-email search or thread coverage is incomplete');
     expect(projection.text).not.toContain('fully verified complete trip');
-    expect(projection.text).toContain('Future booking candidate, not matched to a calendar flight');
+    expect(projection.text).toContain(
+      'Booking email observation — not a verified next-flight match',
+    );
     expect(projection.text).toContain('[Booking email]');
   });
 

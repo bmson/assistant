@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createDb, type Db, messages, tasks, toolCalls } from '@assistant/db';
 import { assertAllocatedTestTarget } from '@assistant/db/test-target';
 import { eq, inArray } from 'drizzle-orm';
@@ -284,6 +285,295 @@ describe('executor email review composition', () => {
       assessmentGaps: 1,
       unassessedThreadIds: [reserveIds[2]],
     });
+  });
+
+  it('uses the reserved retry pass for a complete availability request omitted from the first assessment', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const availabilityId = rankedIds[2] as string;
+    const availabilityQuote =
+      'Could you send me your updated availability for interview scheduling? If you have time windows in mind, please include them.';
+    const availabilityDraft = {
+      ...answerItem(availabilityId, 'draft'),
+      why: 'The sender needs your availability to coordinate an interview.',
+      whyQuote: availabilityQuote,
+      draftBody:
+        'Thanks for reaching out about interview scheduling. Could you share the time windows you have in mind?',
+    };
+    const initialAssessment = {
+      items: [
+        answerItem(rankedIds[0] as string, 'no_reply'),
+        answerItem(rankedIds[1] as string, 'no_reply'),
+      ],
+    };
+    const readIds: string[] = [];
+    const fixture: GoldenFixture = {
+      name: 'email-review-reserved-pass-recovers-unassessed-availability',
+      event: { source: 'chat', trust: 'owner', payload: { text: request } },
+      taskType: 'chat_turn',
+      pinOwnerRequest: true,
+      plan: {
+        action: 'workflow',
+        reasoning: 'review recent email requests and prepare source-grounded drafts',
+        steps: ['read email threads', 'assess reply requests', 'prepare the review'],
+        missingInfo: [],
+      },
+      maxSteps: 14,
+      script: [{ text: 'The review is ready.' }],
+      objects: [
+        { role: 'reason', value: { threadIds: rankedIds } },
+        { role: 'reason', value: initialAssessment },
+        { role: 'reason', value: { items: [] } },
+        { role: 'reason', value: { items: [availabilityDraft] } },
+        { role: 'reason', value: { items: [] } },
+      ],
+      tools: {
+        'gmail.search': {
+          schema: z.object({
+            query: z.string(),
+            maxResults: z.number().optional(),
+            pageToken: z.string().optional(),
+          }),
+          execute: async () => ({
+            query: 'newer_than:7d -from:me',
+            mailboxSearched: 'owner@example.com',
+            configuredOwnerMailbox: 'owner@example.com',
+            complete: true,
+            hasMore: false,
+            unavailable: [],
+            results: rankedIds.map((threadId, index) => ({
+              threadId,
+              messageId: `search-${threadId}`,
+              from: 'sender@example.net',
+              to: 'owner@example.com',
+              date: `2026-10-12T${String(15 - index).padStart(2, '0')}:00:00Z`,
+              subject: `Request ${threadId}`,
+              snippet: `Could you confirm request ${threadId}?`,
+            })),
+          }),
+        },
+        'gmail.read_thread': {
+          schema: z.object({
+            threadId: z.string(),
+            startMessageIndex: z.number().optional(),
+            startMessageOffset: z.number().optional(),
+            maxMessages: z.number().optional(),
+            maxChars: z.number().optional(),
+          }),
+          execute: async (input) => {
+            const { threadId, startMessageIndex = 0 } = input as {
+              threadId: string;
+              startMessageIndex?: number;
+            };
+            readIds.push(threadId);
+            const text =
+              threadId === availabilityId
+                ? availabilityQuote
+                : initialAssessment.items.some((item) => item.threadId === threadId)
+                  ? `The update for ${threadId} is for your records.`
+                  : `Could you confirm request ${threadId}?`;
+            const result = page(threadId, text);
+            result.receipt.requested.start = startMessageIndex;
+            result.receipt.covered.start = startMessageIndex;
+            result.receipt.covered.end = startMessageIndex + 1;
+            return result;
+          },
+        },
+      },
+    };
+    const result = await runGoldenTask(db, agentId, fixture);
+    taskIds.push(result.taskId);
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
+    if (task?.conversationId) conversationIds.push(task.conversationId);
+
+    const state = TaskStateSchema.parse(task?.state);
+    expect(result.stepCount).toBeLessThanOrEqual(22);
+    expect(readIds).toContain(availabilityId);
+    expect(result.toolNames).not.toContain('gmail.send');
+    expect(result.finalText).toContain('Could you share the time windows you have in mind?');
+    expect(result.finalText).toContain('could not be assessed reliably');
+    expect(result.status).toBe('needs_attention');
+    expect(state.plannerState.emailReviewGeneration).toMatchObject({
+      assessmentPasses: 2,
+      status: 'partial',
+    });
+    expect(
+      (state.plannerState.emailReviewGeneration as { assessmentPasses?: number }).assessmentPasses,
+    ).toBeLessThanOrEqual(3);
+    expect(state.plannerState.emailReviewStepBudget).toEqual({
+      version: 1,
+      originalMaxSteps: 14,
+      effectiveMaxSteps: 22,
+      requestHash: createHash('sha256').update(request.trim()).digest('hex'),
+    });
+    expect(task?.maxSteps).toBe(14);
+    expect(state.plannerState.emailReviewAssessmentBatches).toEqual(
+      expect.arrayContaining([
+        expect.arrayContaining([expect.objectContaining({ threadId: availabilityId })]),
+      ]),
+    );
+  });
+
+  it('restores the checkpointed email review ceiling after a worker resumes', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const fixture: GoldenFixture = {
+      name: 'email-review-resume-restores-bounded-step-ceiling',
+      event: { source: 'chat', trust: 'owner', payload: { text: request } },
+      taskType: 'chat_turn',
+      pinOwnerRequest: true,
+      plan: {
+        action: 'workflow',
+        reasoning: 'review recent email requests and prepare source-grounded drafts',
+        steps: ['search inbox', 'read relevant threads', 'prepare the review'],
+        missingInfo: [],
+      },
+      maxSteps: 14,
+      initialStep: 15,
+      initialPlannerState: {
+        emailReviewStepBudget: {
+          version: 1,
+          originalMaxSteps: 14,
+          effectiveMaxSteps: 22,
+          requestHash: createHash('sha256').update(request.trim()).digest('hex'),
+        },
+      },
+      script: [{ text: 'No reply-worthy requests were found in the verified search.' }],
+      objects: [{ role: 'reason', value: { threadIds: [] } }],
+      tools: {
+        'gmail.search': {
+          schema: z.object({
+            query: z.string(),
+            maxResults: z.number().optional(),
+            pageToken: z.string().optional(),
+          }),
+          execute: async () => ({
+            query: 'newer_than:7d -from:me',
+            mailboxSearched: 'owner@example.com',
+            configuredOwnerMailbox: 'owner@example.com',
+            complete: true,
+            hasMore: false,
+            unavailable: [],
+            results: [],
+          }),
+        },
+      },
+    };
+    const result = await runGoldenTask(db, agentId, fixture);
+    taskIds.push(result.taskId);
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
+    if (task?.conversationId) conversationIds.push(task.conversationId);
+    const state = TaskStateSchema.parse(task?.state);
+
+    expect(result.toolNames).toContain('gmail.search');
+    expect(result.stepCount).toBeGreaterThan(15);
+    expect(result.stepCount).toBeLessThanOrEqual(22);
+    expect(task?.maxSteps).toBe(14);
+    expect(state.plannerState.emailReviewStepBudget).toEqual({
+      version: 1,
+      originalMaxSteps: 14,
+      effectiveMaxSteps: 22,
+      requestHash: createHash('sha256').update(request.trim()).digest('hex'),
+    });
+  });
+
+  it('preserves an explicitly smaller task step ceiling', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const fixture: GoldenFixture = {
+      name: 'email-review-preserves-custom-small-step-ceiling',
+      event: { source: 'chat', trust: 'owner', payload: { text: request } },
+      taskType: 'chat_turn',
+      pinOwnerRequest: true,
+      plan: {
+        action: 'workflow',
+        reasoning: 'review recent email requests and prepare source-grounded drafts',
+        steps: ['search inbox', 'read relevant threads', 'prepare the review'],
+        missingInfo: [],
+      },
+      maxSteps: 13,
+      initialStep: 13,
+      script: [{ text: 'The review remains bounded by its configured step limit.' }],
+      objects: [{ role: 'reason', value: { threadIds: [] } }],
+      tools: {
+        'gmail.search': {
+          schema: z.object({
+            query: z.string(),
+            maxResults: z.number().optional(),
+            pageToken: z.string().optional(),
+          }),
+          execute: async () => ({
+            query: 'newer_than:7d -from:me',
+            mailboxSearched: 'owner@example.com',
+            configuredOwnerMailbox: 'owner@example.com',
+            complete: true,
+            hasMore: false,
+            unavailable: [],
+            results: [],
+          }),
+        },
+      },
+    };
+    const result = await runGoldenTask(db, agentId, fixture);
+    taskIds.push(result.taskId);
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
+    if (task?.conversationId) conversationIds.push(task.conversationId);
+    const state = TaskStateSchema.parse(task?.state);
+
+    expect(task?.maxSteps).toBe(13);
+    expect(state.plannerState.emailReviewStepBudget).toBeUndefined();
+    expect(result.toolNames).not.toContain('gmail.search');
+  });
+
+  it('does not restore an email step ceiling from a different owner request', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const latestRequest = 'What is the latest message in my inbox that I still need to reply to?';
+    const fixture: GoldenFixture = {
+      name: 'email-review-does-not-reuse-ceiling-for-different-request',
+      event: { source: 'chat', trust: 'owner', payload: { text: latestRequest } },
+      taskType: 'chat_turn',
+      pinOwnerRequest: true,
+      plan: {
+        action: 'workflow',
+        reasoning: 'find and verify the latest unanswered email',
+        steps: ['search inbox', 'read latest thread'],
+        missingInfo: [],
+      },
+      maxSteps: 14,
+      initialStep: 15,
+      initialPlannerState: {
+        emailReviewStepBudget: {
+          version: 1,
+          originalMaxSteps: 14,
+          effectiveMaxSteps: 22,
+          requestHash: createHash('sha256').update(request.trim()).digest('hex'),
+        },
+      },
+      script: [{ text: 'The latest message could not be verified within this task limit.' }],
+      objects: [{ role: 'reason', value: { threadIds: [] } }],
+      tools: {
+        'gmail.search': {
+          schema: z.object({
+            query: z.string(),
+            maxResults: z.number().optional(),
+            pageToken: z.string().optional(),
+          }),
+          execute: async () => ({
+            query: 'in:inbox -from:me',
+            mailboxSearched: 'owner@example.com',
+            configuredOwnerMailbox: 'owner@example.com',
+            complete: true,
+            hasMore: false,
+            unavailable: [],
+            results: [],
+          }),
+        },
+      },
+    };
+    const result = await runGoldenTask(db, agentId, fixture);
+    taskIds.push(result.taskId);
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
+    if (task?.conversationId) conversationIds.push(task.conversationId);
+
+    expect(task?.maxSteps).toBe(14);
+    expect(result.toolNames).not.toContain('gmail.search');
   });
 
   it('assesses five requested threads when large context is mostly exact quoted repetition', async (ctx) => {

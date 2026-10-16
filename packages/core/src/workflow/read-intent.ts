@@ -22,6 +22,7 @@ import { type CalendarPlanOptions, requestedCalendarPlanOptions } from './calend
 import { requestedCardIntent } from './card-intent.js';
 import {
   compoundTripFetchTargets,
+  compoundTripNextWebSearchQuery,
   compoundTripReadProjection,
   compoundTripRoute,
   compoundTripThreadIdsToRead,
@@ -3794,19 +3795,7 @@ export function nextRequiredReadTool(
     if (!request.compoundTripDiscovery) return undefined;
 
     const route = compoundTripRoute(request, currentEvidence);
-    if (route && !evidence.some((row) => matchingCompoundMapRoute(row, route)))
-      return 'maps.directions';
-    const projection = compoundTripReadProjection(request, currentEvidence);
-    if (
-      projection.webQuery &&
-      !evidence.some(
-        (row) =>
-          row.toolName === 'web.search' &&
-          objectRecord(row.args)?.query === projection.webQuery &&
-          row.fromCurrentTask !== false,
-      )
-    )
-      return 'web.search';
+    if (compoundTripNextWebSearchQuery(request, currentEvidence)) return 'web.search';
     for (const target of compoundTripFetchTargets(request, currentEvidence)) {
       if (
         !evidence.some(
@@ -3818,6 +3807,10 @@ export function nextRequiredReadTool(
       )
         return 'web.fetch';
     }
+    // A driving estimate is optional context, not the requested transit/taxi
+    // comparison. Do not spend its slot before bounded source recovery.
+    if (route && !evidence.some((row) => matchingCompoundMapRoute(row, route)))
+      return 'maps.directions';
     return undefined;
   }
   const calendarSucceeded = evidence.some((row) => matchingCalendarRead(row, request));
@@ -3937,8 +3930,8 @@ export function groundReadToolInput(
     return route ? { ...route, mode: 'driving' } : {};
   }
   if (request.compoundTripDiscovery && toolName === 'web.search') {
-    const projection = compoundTripReadProjection(request, evidence);
-    return projection.webQuery ? { query: projection.webQuery, count: 5 } : {};
+    const query = compoundTripNextWebSearchQuery(request, evidence);
+    return query ? { query, count: 5 } : {};
   }
   if (request.compoundTripDiscovery && toolName === 'web.fetch') {
     const projection = compoundTripReadProjection(request, evidence);
@@ -3970,8 +3963,8 @@ export function groundReadToolInput(
     return route ? { ...route, mode: 'driving' } : {};
   }
   if (request.compoundTripDiscovery && toolName === 'web.search') {
-    const projection = compoundTripReadProjection(request, evidence);
-    return projection.webQuery ? { query: projection.webQuery, count: 5 } : {};
+    const query = compoundTripNextWebSearchQuery(request, evidence);
+    return query ? { query, count: 5 } : {};
   }
   if (toolName === 'drive.search') {
     return { query: request.queryTerms.join(' ') || 'recent', maxResults: 20 };
@@ -4057,7 +4050,7 @@ export function buildReadToolInput(
   if (
     request.compoundTripDiscovery &&
     toolName === 'web.search' &&
-    !compoundTripReadProjection(request, evidence).webQuery
+    !compoundTripNextWebSearchQuery(request, evidence)
   )
     return null;
   if (

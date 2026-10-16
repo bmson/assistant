@@ -223,15 +223,23 @@ export function NoticeCard({
   const { tone, icon, label } = NOTICE_PRESENTATION[kind];
   const headline = presentation?.headline ?? label;
   const summary = presentation?.summary ?? text;
-  const diagnostics = presentation?.diagnostics ?? [];
+  // Contract diagnostics are a flattened, possibly clipped copy of this same
+  // answer. Its complete text is already visible above, as on the native client.
+  const diagnostics = kind === 'response-contract' ? [] : (presentation?.diagnostics ?? []);
   return (
     <DecisionCard tone={tone} icon={icon} label={label}>
       <h3 className="text-base leading-6 font-semibold tracking-[-0.015em] text-strong">
         {headline}
       </h3>
-      <p className="mt-1 max-w-[68ch] break-words text-sm leading-5 text-muted [overflow-wrap:anywhere]">
-        {summary}
-      </p>
+      {kind === 'response-contract' ? (
+        <div className="mt-1 max-w-[68ch] text-sm text-strong">
+          <MessageMarkdown text={text} />
+        </div>
+      ) : (
+        <p className="mt-1 max-w-[68ch] break-words text-sm leading-5 text-muted [overflow-wrap:anywhere]">
+          {summary}
+        </p>
+      )}
       {presentation?.facts?.length ? (
         <dl className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5">
           {presentation.facts.map((fact, index) => (
@@ -246,27 +254,20 @@ export function NoticeCard({
         </dl>
       ) : null}
       {actions ? <div className="mt-3 flex flex-wrap items-center gap-2">{actions}</div> : null}
-      {diagnostics.length > 0 || kind === 'response-contract' ? (
+      {diagnostics.length > 0 ? (
         <details className="mt-3 border-t border-edge/60 pt-2.5">
           <summary className="disclosure flex cursor-pointer select-none items-center gap-2 text-xs font-medium text-muted">
             {presentation?.detailLabel ?? 'Details'}
           </summary>
           <div className="mt-2 max-h-72 overflow-auto rounded-xl bg-sunken/55 px-3 py-2.5 text-xs leading-5 text-muted">
-            {diagnostics.length > 0 ? (
-              diagnostics.map((item, index) => (
-                <p
-                  key={`${index.toString()}-${item.slice(0, 20)}`}
-                  className="break-words [overflow-wrap:anywhere]"
-                >
-                  {item}
-                </p>
-              ))
-            ) : (
-              <p>
-                The assistant only reports actions backed by completed tool results. Nothing was
-                sent or changed outside this chat.
+            {diagnostics.map((item, index) => (
+              <p
+                key={`${index.toString()}-${item.slice(0, 20)}`}
+                className="break-words [overflow-wrap:anywhere]"
+              >
+                {item}
               </p>
-            )}
+            ))}
           </div>
         </details>
       ) : null}

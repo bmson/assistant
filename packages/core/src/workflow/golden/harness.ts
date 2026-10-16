@@ -30,6 +30,9 @@ export interface GoldenFixture {
   plan?: Plan;
   /** Bound a scenario to prove the owner-visible result when work runs out of steps. */
   maxSteps?: number;
+  /** Seed durable executor state for a bounded resume regression. */
+  initialPlannerState?: Record<string, unknown>;
+  initialStep?: number;
   /** Resume a budget-parked task once after moving its runAfter into the past. */
   resumeAfterBudget?: boolean;
   /** Mutate durable owner context after the first execution parks, before an optional resume. */
@@ -260,9 +263,16 @@ export async function runGoldenTask(
     ...(fixture.plan ? { plan: fixture.plan } : {}),
     ...(fixture.maxSteps ? { maxSteps: fixture.maxSteps } : {}),
   });
-  if (fixture.initialRequestChecklist) {
+  if (
+    fixture.initialRequestChecklist ||
+    fixture.initialPlannerState ||
+    fixture.initialStep !== undefined
+  ) {
     const state = TaskStateSchema.parse(task.state);
-    state.requestChecklist = fixture.initialRequestChecklist;
+    if (fixture.initialRequestChecklist) state.requestChecklist = fixture.initialRequestChecklist;
+    if (fixture.initialPlannerState)
+      state.plannerState = { ...state.plannerState, ...fixture.initialPlannerState };
+    if (fixture.initialStep !== undefined) state.step = fixture.initialStep;
     await db.update(tasks).set({ state }).where(eq(tasks.id, task.id));
   }
   if (fixture.pinOwnerRequest && task.conversationId) {

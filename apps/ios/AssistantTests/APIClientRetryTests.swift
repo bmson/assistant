@@ -3298,8 +3298,8 @@ final class APIClientRetryTests: XCTestCase {
     /// End one repeated fixture scope before the next one is primed. A late
     /// URLProtocol start carries the old scope ID and cannot consume the next
     /// iteration's global response queue.
-    private func cancelAndDrain(_ session: URLSession) async -> Bool {
-        session.invalidateAndCancel()
+    private func cancelAndDrain(_ session: URLSession, invalidate: Bool = true) async -> Bool {
+        if invalidate { session.invalidateAndCancel() }
         let deadline = ContinuousClock.now + .seconds(2)
         while ContinuousClock.now < deadline {
             let tasks = await withCheckedContinuation { continuation in
@@ -5395,16 +5395,56 @@ extension APIClientRetryTests {
     func testAReplyStartedDuringConversationOpeningOrCreationKeepsItsThread() async throws {
         for action in ["open", "create"] {
             for status in [200, 500] {
-                let model = try await notificationModel()
+                let iterationID = "\(testCaseID)-reply-opening-\(action)-\(status)-\(UUID().uuidString)"
+                StubURLProtocol.beginTestCase(iterationID)
+                let (client, session) = makeClient(requestScopeID: iterationID)
+                let model = AppModel(apiClient: client)
+                model.scenePhaseDidChange(.background)
+                StubURLProtocol.primeBootstrap(try notificationBootstrap())
+                await model.refreshAll(reportFailure: false)
+                XCTAssertNotNil(model.bootstrap)
+
                 let body = status == 500 ? Data(#"{"error":"Request failed"}"#.utf8)
                     : action == "create" ? Data("{\"conversationId\":\"\(notificationSideID)\"}".utf8)
                     : try JSONEncoder().encode(notificationConversation(notificationSideID))
-                StubURLProtocol.prime([.delayed(after: 0.05, status: status, body: body), .stream(body: Data())])
+                let oldPath = action == "open"
+                    ? "/api/mobile/v1/chats/\(notificationSideID)"
+                    : "/api/mobile/v1/chats"
+                let chatPath = "/api/mobile/v1/chat"
+                StubURLProtocol.prime([], paths: [
+                    oldPath: [.held(status: status, body: body)],
+                    chatPath: [.stream(body: Data())],
+                ])
                 let opening = Task {
                     action == "open" ? await model.openConversation(id: notificationSideID) : await model.createConversation()
                 }
-                while StubURLProtocol.attempts.isEmpty { await Task.yield() }
+                let heldDeadline = ContinuousClock.now + .seconds(2)
+                while !StubURLProtocol.isHoldingResponse(path: oldPath), ContinuousClock.now < heldDeadline {
+                    await Task.yield()
+                }
+                XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: oldPath), "The older navigation request must be held before the reply starts")
+
                 model.send("Keep this reply in the original conversation")
+                let streamDeadline = ContinuousClock.now + .seconds(2)
+                var readyStream: (operationID: String, authorization: String)?
+                while readyStream == nil, ContinuousClock.now < streamDeadline {
+                    for request in StubURLProtocol.requests where request.1.path == chatPath {
+                        let payload = try? JSONSerialization.jsonObject(with: request.3) as? [String: Any]
+                        let operationID = payload?["clientOperationId"] as? String
+                        let authorization = request.2.first(where: { $0.key.caseInsensitiveCompare("authorization") == .orderedSame })?.value
+                        if let operationID, let authorization,
+                           StubURLProtocol.isStreamReady(operationId: operationID, authorization: authorization) {
+                            readyStream = (operationID, authorization)
+                            break
+                        }
+                    }
+                    if readyStream == nil { await Task.yield() }
+                }
+                XCTAssertNotNil(readyStream, "The new chat stream must be active before releasing the older request")
+                XCTAssertTrue(StubURLProtocol.requests.contains(where: { $0.1.path == oldPath && $0.0 == (action == "open" ? "GET" : "POST") }))
+                XCTAssertTrue(StubURLProtocol.requests.contains(where: { $0.1.path == chatPath && $0.0 == "POST" }), "The stream outcome must route to the chat endpoint")
+
+                StubURLProtocol.releaseHeldResponse(path: oldPath)
                 let opened = await opening.value
                 XCTAssertFalse(opened)
                 XCTAssertTrue(model.isSending)
@@ -5413,6 +5453,11 @@ extension APIClientRetryTests {
                 XCTAssertTrue(model.messages.contains(where: { $0.role == .user && $0.text == "Keep this reply in the original conversation" }))
                 XCTAssertNil(model.errorMessage, "An older success or failure cannot interrupt the new reply")
                 model.cancelSend()
+                StubURLProtocol.endTestCase(iterationID)
+                // Cancellation can enqueue a later request through the retained client.
+                // Keep its session valid; the ended scope rejects those late requests.
+                let didDrain = await cancelAndDrain(session, invalidate: false)
+                XCTAssertTrue(didDrain, "The iteration's URLSession must drain before the next prime")
             }
         }
     }

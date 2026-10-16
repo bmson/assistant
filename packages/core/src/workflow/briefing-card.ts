@@ -87,7 +87,7 @@ function eventKey(event: BriefingCalendarEvent): string {
   return event.eventId ?? `${event.calendar}|${event.start}|${event.summary}`;
 }
 
-function eventTime(event: BriefingCalendarEvent, timeZone: string): string {
+function eventTime(event: BriefingCalendarEvent, timeZone: string, now: Date): string {
   if (event.allDay) return 'All day';
   const start = ownerTime(event.start, timeZone);
   if (!event.end) return start;
@@ -97,7 +97,7 @@ function eventTime(event: BriefingCalendarEvent, timeZone: string): string {
     ownerDate(event.end, timeZone, new Date(event.start));
   return sameDay
     ? `${start} – ${ownerTime(event.end, timeZone)}`
-    : ownerEventWhen({ start: event.start, end: event.end }, timeZone);
+    : ownerEventWhen({ start: event.start, end: event.end }, timeZone, now);
 }
 
 /**
@@ -187,7 +187,7 @@ export function agendaSection(input: {
       const flag = conflicting.has(key) ? 'conflict' : note ? 'salient' : undefined;
       return {
         day: eventDay(event, input.timeZone, input.now),
-        time: eventTime(event, input.timeZone),
+        time: eventTime(event, input.timeZone, input.now),
         title: tidy(event.summary) || 'Untitled event',
         ...(location ? { location } : {}),
         ...(flag ? { flag } : {}),

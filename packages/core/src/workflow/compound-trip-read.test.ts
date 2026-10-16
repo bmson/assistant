@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { CompoundTripExtraction } from './compound-trip-extraction.js';
 import {
   compoundTripFetchTargets,
+  compoundTripNextWebSearchQuery,
   compoundTripReadProjection,
   compoundTripRoute,
   compoundTripThreadIdsToRead,
@@ -5407,9 +5408,7 @@ San Francisco (SFO-San Francisco Intl.)`;
     expect(projection.flight).toBeUndefined();
     expect(projection.blocked).toBe(true);
     expect(projection.text).toContain('LH778 BER→SFO:** 2026-10-17 6:00 AM (zone unknown)');
-    expect(projection.text).toContain(
-      'likely return (inferred from reversed itinerary route groups)',
-    );
+    expect(projection.text).toContain('Outbound/return direction is not explicitly stated');
     expect(projection.text).toContain('booking order is not proof of travel');
     expect(projection.text).toContain(
       'Unresolved carrier difference under the same itinerary reference',
@@ -5454,9 +5453,7 @@ San Francisco (SFO-San Francisco Intl.)`;
     expect(projection.text.match(/Booked leg LH778/g)).toHaveLength(1);
     expect(projection.flight).toBeUndefined();
     expect(projection.text).toContain('zone unknown');
-    expect(projection.text).toContain(
-      'likely return (inferred from reversed itinerary route groups)',
-    );
+    expect(projection.text).toContain('Outbound/return direction is not explicitly stated');
     expect(compoundTripRoute(read, evidence)).toBeUndefined();
   });
   it('never fills a thin extraction with another thread’s table fields even when message and leg keys match', () => {
@@ -5699,8 +5696,8 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
         }),
       ]),
     );
-    expect(final.text).toContain('current-trip booking, not a newly departing trip');
-    expect(final.text).toContain('direction inferred from the reversed route groups');
+    expect(final.text).toContain('existing booking, not proof of a newly departing trip');
+    expect(final.text).toContain('direction not explicitly stated');
     expect(final.text).toContain('KL700 BOS→AMS');
     expect(final.text).toContain('KL703 AMS→BOS');
     expect(final.text).toContain('source-stated clocks');
@@ -5721,9 +5718,9 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     const visible = answer.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
     expect(visible.split(/\s+/).length).toBeLessThanOrEqual(330);
     expect(answer.length).toBeLessThanOrEqual(3800);
-    expect(answer.startsWith('The booking is for a current trip')).toBe(true);
+    expect(answer.startsWith('Booked dates')).toBe(true);
     expect(answer).toContain('A new outbound trip is not verified');
-    expect(answer).toContain('- **Outbound (inferred) KL700 BOS→AMS:**');
+    expect(answer).toContain('- **Booked KL700 BOS→AMS:**');
     expect(answer).not.toContain('|---|');
     expect(answer).toContain('- **Public transport:**');
     for (const number of ['KL700', 'KL701', 'KL702', 'KL703']) expect(answer).toContain(number);
@@ -5732,7 +5729,8 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(answer).toContain('Canal House');
     expect(answer).toContain('Canal Street 42');
     expect(answer).toContain('zone unknown');
-    expect(answer).toContain('Direction inferred');
+    expect(answer).toContain('Outbound/return direction is not explicitly stated');
+    expect(answer).not.toMatch(/Outbound \(inferred\)|Return \(inferred\)|likely return/);
     expect(answer).toContain(
       'calendar Example Air (operating carrier); booking KLM (operating carrier)',
     );
@@ -5750,6 +5748,32 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(answer).not.toContain('Needs confirmation:');
     expect(final.presentation.gaps.length).toBeGreaterThan(0);
     expect(final.text.length).toBeGreaterThan(answer.length);
+  });
+
+  it('reports source-labelled route roles only, never direction from reversed airport order', () => {
+    const { read, rows } = fixture();
+    const plain = compoundTripReadProjection(read, rows);
+    expect(plain.presentation.groups.map((group) => group.label)).toEqual(['Booked', 'Booked']);
+    const thread = rows.find(
+      (item) =>
+        item.toolName === 'gmail.read_thread' &&
+        (item.args as Record<string, unknown>)?.threadId === 'flight-thread',
+    );
+    const result = thread?.result as { messages: Array<{ text: string; sourceLength: number }> };
+    const message = result.messages[0];
+    if (!message) throw new Error('Missing booking fixture');
+    message.text = message.text
+      .replace('[image: Flight] BOS', 'Outbound\r\n[image: Flight] BOS')
+      .replace('[image: Flight] CPH', 'Return\r\n[image: Flight] CPH');
+    message.sourceLength = message.text.length;
+    const labelled = compoundTripReadProjection(read, rows);
+    expect(labelled.presentation.groups.map((group) => group.label)).toEqual([
+      'Outbound',
+      'Return',
+    ]);
+    expect(labelled.flight).toBeUndefined();
+    expect(labelled.blocked).toBe(true);
+    expect(labelled.sourceFlightSegments.every((leg) => !leg.departureTimeZone)).toBe(true);
   });
 
   function withLocalClockEvidence() {
@@ -5936,6 +5960,96 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
       '- **Taxi:** EUR 50; 30–40 minutes.',
     );
     expect(projection.blocked).toBe(true); // Remaining itinerary/zone gates still apply.
+  });
+
+  it('uses one bounded alternate search after two blocked hosts, then checks the actual alternate page for both modes', () => {
+    const { read, rows, search } = withTransferSearch();
+    for (const url of [
+      'https://blocked.example/airport/hotel',
+      'https://hotel.example/canal-house/map',
+    ])
+      rows.push({
+        toolName: 'web.fetch',
+        status: 'failed',
+        fromCurrentTask: true,
+        args: { url },
+        result: null,
+        error: 'HTTP403 challenge',
+      });
+    const query = compoundTripNextWebSearchQuery(read, rows);
+    expect(query).toContain('CPH');
+    expect(query).toContain('Canal Street 42, Copenhagen');
+    expect(query).toContain('-site:blocked.example');
+    expect(query).toContain('-site:hotel.example');
+    expect(nextRequiredReadTool(read, rows)).toBe('web.search');
+    expect(buildReadToolInput(read, 'web.search', rows)).toEqual({ query, count: 5 });
+    rows.push(
+      row(
+        'web.search',
+        { query },
+        {
+          results: [
+            {
+              url: 'https://official.example/directions',
+              title: 'Canal House directions',
+              snippet: 'Airport taxi and public transport',
+            },
+          ],
+        },
+      ),
+    );
+    expect(compoundTripNextWebSearchQuery(read, rows)).toBeUndefined();
+    expect(compoundTripFetchTargets(read, rows)).toEqual([
+      { mode: 'public transport', url: 'https://official.example/directions' },
+      { mode: 'taxi', url: 'https://official.example/directions' },
+    ]);
+    const fetched = row(
+      'web.fetch',
+      { url: 'https://official.example/directions' },
+      {
+        finalUrl: 'https://official.example/directions',
+        text: 'Public transport from CPH Airport to Canal House costs EUR 5 and takes 30 minutes.\n\nTaxi from CPH Airport to Canal House costs around EUR 50 and takes 30–40 minutes.',
+      },
+    );
+    rows.push(fetched);
+    const final = compoundTripReadProjection(read, rows);
+    expect(final.comparison).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          mode: 'public transport',
+          fare: 'EUR 5',
+          duration: '30 minutes',
+          url: 'https://official.example/directions',
+        }),
+        expect.objectContaining({
+          mode: 'taxi',
+          fare: 'about EUR 50',
+          duration: '30–40 minutes',
+          url: 'https://official.example/directions',
+        }),
+      ]),
+    );
+    expect(nextRequiredReadTool(read, rows)).toBeUndefined();
+    expect(rows.filter((item) => item.toolName === 'web.search')).toHaveLength(2);
+    // A discovered but unjoined, stale, partial or failed page cannot supply the comparison.
+    for (const invalid of ['wrong-query', 'old-task', 'truncated', 'http-error'] as const) {
+      const clone = structuredClone(rows);
+      const page = clone.at(-1);
+      const alternate = clone.at(-2);
+      if (!page || !alternate) throw new Error('Missing fetched fixture');
+      if (invalid === 'wrong-query')
+        (alternate.args as Record<string, unknown>).query = String(
+          (search.args as Record<string, unknown>)?.query,
+        );
+      if (invalid === 'old-task') page.fromCurrentTask = false;
+      if (invalid === 'truncated') (page.result as Record<string, unknown>).truncated = true;
+      if (invalid === 'http-error') (page.result as Record<string, unknown>).status = 403;
+      expect(compoundTripReadProjection(read, clone).comparison).toEqual([]);
+    }
+    fetched.status = 'failed';
+    expect(compoundTripReadProjection(read, rows).comparison).toEqual([]);
+    expect(compoundTripFetchTargets(read, rows)).toEqual([]);
+    expect(compoundTripNextWebSearchQuery(read, rows)).toBeUndefined();
   });
 
   it.each(['failed', 'truncated', 'wrong endpoints', 'old-task'])(

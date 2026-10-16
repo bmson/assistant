@@ -5,6 +5,7 @@ import {
   EMAIL_REVIEW_MAX_RANK_POOL,
   EMAIL_REVIEW_QUERY,
   type EmailReviewEvidenceRow,
+  emailReviewAssessmentStepReserve,
   emailReviewCandidateIds,
   emailReviewCompleteThread,
   emailReviewCoverage,
@@ -20,6 +21,7 @@ import {
   emailReviewVerifiedNotEligibleThreadIds,
   formatEmailReviewAnswer,
   generateValidatedEmailReview,
+  mergeEmailReviewOwnerDecisionFindings,
   revalidateEmailReviewAssessmentBatches,
   validateEmailReviewAnswer,
   validEmailReviewSelection,
@@ -165,6 +167,70 @@ function required<T>(value: T | undefined, label: string): T {
 }
 
 describe('bounded no-send email review', () => {
+  it('reserves a retry assessment step only for eligible multi-thread reviews', () => {
+    expect(emailReviewAssessmentStepReserve({ maxSteps: 12, requestedCount: 5 })).toBe(1);
+    expect(emailReviewAssessmentStepReserve({ maxSteps: 14, requestedCount: 5 })).toBe(2);
+    expect(
+      emailReviewAssessmentStepReserve({ maxSteps: 22, requestedCount: 5, latestUnanswered: true }),
+    ).toBe(1);
+    expect(
+      emailReviewAssessmentStepReserve({
+        maxSteps: 22,
+        requestedCount: 5,
+        scopeIssue: 'Unsupported requested window.',
+      }),
+    ).toBe(1);
+    expect(emailReviewAssessmentStepReserve({ maxSteps: 22, requestedCount: 1 })).toBe(1);
+  });
+
+  it('retains owner-choice findings only for the same unresolved selected thread revision', () => {
+    const threadId = 'owner-choice-thread';
+    const thread = emailReviewCompleteThread(threadId, 'owner@example.com', [
+      search(threadId),
+      read(threadId, messages(threadId)),
+    ]);
+    const completeThread = required(thread, 'complete owner-choice thread');
+    const selectedThreadIds = [threadId];
+    const firstFinding = mergeEmailReviewOwnerDecisionFindings({
+      prior: undefined,
+      currentThreadIds: [threadId],
+      resolvedThreadIds: [],
+      selectedThreadIds,
+      threads: [completeThread],
+    });
+    expect(firstFinding).toEqual([{ threadId, latestMessageId: `latest-${threadId}` }]);
+
+    expect(
+      mergeEmailReviewOwnerDecisionFindings({
+        prior: firstFinding,
+        currentThreadIds: [],
+        resolvedThreadIds: [],
+        selectedThreadIds,
+        threads: [completeThread],
+      }),
+    ).toEqual(firstFinding);
+
+    expect(
+      mergeEmailReviewOwnerDecisionFindings({
+        prior: firstFinding,
+        currentThreadIds: [],
+        resolvedThreadIds: [threadId],
+        selectedThreadIds,
+        threads: [completeThread],
+      }),
+    ).toEqual([]);
+
+    expect(
+      mergeEmailReviewOwnerDecisionFindings({
+        prior: firstFinding,
+        currentThreadIds: [],
+        resolvedThreadIds: [],
+        selectedThreadIds,
+        threads: [{ ...completeThread, latestMessageId: 'latest-revised' }],
+      }),
+    ).toEqual([]);
+  });
+
   it('preserves a valid model-assessed nuanced reply request outside the positive ask heuristic', async () => {
     const sourceMessages = messages('nuanced-ask');
     const latest = required(sourceMessages.at(-1), 'latest message');
@@ -209,6 +275,40 @@ describe('bounded no-send email review', () => {
     expect(
       emailReviewPendingAssessmentThreads(threads, ['already-validated'], ['rejected-once']),
     ).toEqual([{ threadId: 'newly-read', marker: 'assess' }]);
+  });
+
+  it('retries prior unassessed threads only when the executor grants its bounded retry pass', () => {
+    const threads = Array.from({ length: 10 }, (_, index) => ({
+      threadId: `thread-${index + 1}`,
+    }));
+    const validated = ['thread-1', 'thread-2'];
+    const previouslyUnassessed = [
+      'thread-3',
+      'thread-4',
+      'thread-5',
+      'thread-6',
+      'thread-7',
+      'thread-8',
+    ];
+    expect(
+      emailReviewPendingAssessmentThreads(threads, validated, previouslyUnassessed).map(
+        (thread) => thread.threadId,
+      ),
+    ).toEqual(['thread-9', 'thread-10']);
+    expect(
+      emailReviewPendingAssessmentThreads(threads, validated, previouslyUnassessed, true).map(
+        (thread) => thread.threadId,
+      ),
+    ).toEqual([
+      'thread-3',
+      'thread-4',
+      'thread-5',
+      'thread-6',
+      'thread-7',
+      'thread-8',
+      'thread-9',
+      'thread-10',
+    ]);
   });
 
   it('names ranking-context omissions within scanned metadata', () => {

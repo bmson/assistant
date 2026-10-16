@@ -1003,6 +1003,227 @@ ${body}`;
   });
 });
 
+describe('public overview evidence and explicit subject boundaries', () => {
+  // Synthetic source structure: navigation, mode overviews, individual services,
+  // then a different mode's transfer advice. No captured private/page text.
+  const url = 'https://transit.example/public-options';
+  const overview = 'Trains use the underground station. Buses use surface stops.';
+  const source = [
+    'MENU',
+    'Navigation item. '.repeat(750),
+    overview,
+    'Rail services (R10, R20)',
+    'R10',
+    '- Route: Central - Airport',
+    '- Frequency: every 15 minutes',
+    'R20',
+    '- Route: West - Airport',
+    '- Frequency: hourly',
+    'Express buses (B12, B13)',
+    'B12',
+    '- Route: City - Airport',
+    '- Frequency: every 5–10 minutes',
+    'B13',
+    '- Route: City - Airport',
+    '- Frequency: every 20 minutes',
+    'Intercity services (IC)',
+    '- Route: North - Airport - South',
+    '- Frequency: several times daily',
+    'Local buses to Airport',
+    'Passengers reaching Junction must change to a train to reach the airport.',
+    '731',
+    '- Route: Town - Junction',
+    '- Frequency: hourly',
+    '- Continue to the airport with R10.',
+  ].join('\n');
+  const evidence = [
+    {
+      toolName: 'web.fetch',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { url },
+      result: { status: 200, truncated: false, finalUrl: url, text: source },
+    },
+  ];
+  const request = `Read ${url} and summarize the options in three short bullets with a source link. Do not use my email, calendar, or memories.`;
+  const answer = `- **Rail** — R10 links Central with the airport; R20 serves West.
+- **Buses** — B12 and B13 serve the airport, with B12 running every 5–10 minutes.
+- **Intercity** — IC connects North with the airport. Some local buses require a change at Junction.
+
+[Source](${url})`;
+
+  it('binds a with-clause frequency only to its explicit service subject', () => {
+    expect(publicWebClaimFindings(answer, evidence)).toEqual([]);
+    expect(
+      publicWebClaimFindings(answer.replace('with B12 running', 'with B13 running'), evidence),
+    ).toContain(
+      'B13: the shared frequency “every 5–10 minutes” is not stated by its own Frequency passage.',
+    );
+    expect(publicWebClaimFindings('B12 and B13 run every 5–10 minutes.', evidence)).not.toEqual([]);
+  });
+
+  it('does not attach the following mode overview to an earlier direct service', () => {
+    expect(publicWebClaimFindings('IC serves the airport.', evidence)).toEqual([]);
+    expect(publicWebClaimFindings('731 serves the airport.', evidence)).toContain(
+      '731: its source requires a continuation or change; the airport summary omitted that qualifier.',
+    );
+  });
+
+  it('selects the nearby useful overview rather than an all-caps navigation label', () => {
+    const prompt = buildOutputVerificationPrompt({ request, draft: answer, evidence });
+    const durable = prompt.match(/<durable_evidence>\n([\s\S]*?)\n<\/durable_evidence>/)?.[1];
+    const projection = JSON.parse(durable ?? '{}').source;
+    expect(projection.sourceOverview.text).toContain(overview);
+    expect(
+      source.slice(projection.sourceOverview.startOffset, projection.sourceOverview.endOffset),
+    ).toBe(projection.sourceOverview.text);
+    expect(projection.sourceTruncated).toBe(false);
+    expect(durable?.length).toBeLessThanOrEqual(12_000);
+    for (const passage of projection.sourcePassages)
+      expect(source.slice(passage.startOffset, passage.endOffset)).toBe(passage.text);
+  });
+
+  it('includes the late category support for a claim that does not name its route ID', () => {
+    const prompt = buildOutputVerificationPrompt({ request, draft: answer, evidence });
+    const durable = prompt.match(/<durable_evidence>\n([\s\S]*?)\n<\/durable_evidence>/)?.[1];
+    const projection = JSON.parse(durable ?? '{}').source;
+    const category = projection.sourceCategoryPassages?.find(
+      (passage: { label: string }) => passage.label === 'Local buses to Airport',
+    );
+    expect(category?.text).toContain(
+      'Passengers reaching Junction must change to a train to reach the airport.',
+    );
+    expect(source.slice(category.startOffset, category.endOffset)).toBe(category.text);
+    expect(category.omittedChars).toBe(0);
+    expect(durable?.length).toBeLessThanOrEqual(12_000);
+    // Every nontrivial clause in this fixture has its own actual projected
+    // evidence. Merely checking that some source slices are valid is insufficient.
+    const byLabel = new Map<string, string>(
+      projection.sourcePassages.map((passage: { label: string; text: string }) => [
+        passage.label,
+        passage.text,
+      ]),
+    );
+    expect(byLabel.get('R10')).toContain('Central - Airport');
+    expect(byLabel.get('R20')).toContain('West - Airport');
+    expect(byLabel.get('B12')).toContain('Frequency: every 5–10 minutes');
+    expect(byLabel.get('B13')).toContain('City - Airport');
+    expect(byLabel.get('IC')).toContain('North - Airport - South');
+    expect(
+      projection.sourcePassages.length + projection.sourceCategoryPassages.length,
+    ).toBeLessThanOrEqual(24);
+  });
+
+  it('retains late category support even when neither source nor draft names a service ID', () => {
+    const source = `${'Navigation item. '.repeat(750)}\nNeighborhood buses
+Passengers reaching Junction must change to a train.
+Regional trains
+Trains serve the central station.`;
+    const prompt = buildOutputVerificationPrompt({
+      request,
+      draft: 'Neighborhood bus passengers must change at Junction.',
+      evidence: evidence.map((row) => ({ ...row, result: { ...row.result, text: source } })),
+    });
+    const durable = prompt.match(/<durable_evidence>\n([\s\S]*?)\n<\/durable_evidence>/)?.[1];
+    const projection = JSON.parse(durable ?? '{}').source;
+    expect(projection.sourcePassages).toEqual([]);
+    const category = projection.sourceCategoryPassages.find(
+      (passage: { label: string }) => passage.label === 'Neighborhood buses',
+    );
+    expect(category.text).toContain('Passengers reaching Junction must change to a train.');
+    expect(source.slice(category.startOffset, category.endOffset)).toBe(category.text);
+  });
+
+  it('prioritizes the claimed category within the existing byte and source-unit caps', () => {
+    const source = [
+      ...Array.from(
+        { length: 20 },
+        (_, index) => `District ${index} buses\n${'Unrelated source text. '.repeat(200)}`,
+      ),
+      'Harbor local buses',
+      'A change is required at Junction.',
+    ].join('\n');
+    const prompt = buildOutputVerificationPrompt({
+      request,
+      draft: 'Harbor local buses require a change at Junction.',
+      evidence: evidence.map((row) => ({ ...row, result: { ...row.result, text: source } })),
+    });
+    const durable = prompt.match(/<durable_evidence>\n([\s\S]*?)\n<\/durable_evidence>/)?.[1];
+    const projection = JSON.parse(durable ?? '{}').source;
+    expect(projection.sourceCategoryPassages[0].label).toBe('Harbor local buses');
+    expect(projection.sourceCategoryPassages[0].text).toContain(
+      'A change is required at Junction.',
+    );
+    expect(projection.sourceCategoryPassagesOmittedCount).toBe(13);
+    expect(projection.sourceCategoryPassages.length).toBe(8);
+    expect(
+      projection.sourcePassages.length + projection.sourceCategoryPassages.length,
+    ).toBeLessThanOrEqual(24);
+    expect(durable?.length).toBeLessThanOrEqual(12_000);
+    for (const passage of projection.sourceCategoryPassages)
+      expect(source.slice(passage.startOffset, passage.endOffset)).toBe(passage.text);
+  });
+
+  it('gives the reviewer category evidence to correct an unsupported generic claim', async () => {
+    const unsupported = answer.replace(
+      'Some local buses require a change at Junction.',
+      'All local buses run nonstop to the airport.',
+    );
+    const result = await verifyFinalOutput(
+      {
+        object: async (_role: string, input: { prompt: string }) => {
+          expect(input.prompt).toContain(
+            'Passengers reaching Junction must change to a train to reach the airport.',
+          );
+          return {
+            ok: true,
+            object: { decision: 'revise', revisedText: answer, reasons: ['unsupported_claim'] },
+          };
+        },
+      } as never,
+      { taskId: 'category-correction', request, draft: unsupported, evidence, critical: true },
+    );
+    expect(result).toEqual({ text: answer, attempted: true, revised: true, unavailable: false });
+    expect(result.text).not.toContain('nonstop');
+  });
+
+  it('publishes the supported compact summary without spending a correction on false joins', async () => {
+    let calls = 0;
+    const result = await verifyFinalOutput(
+      {
+        object: async (_role: string, input: { prompt: string }) => {
+          calls++;
+          expect(input.prompt).toContain(
+            'Passengers reaching Junction must change to a train to reach the airport.',
+          );
+          return { ok: true, object: { decision: 'publish', reasons: [] } };
+        },
+      } as never,
+      { taskId: 'public-overview', request, draft: answer, evidence, critical: true },
+    );
+    expect(calls).toBe(1);
+    expect(result).toEqual({ text: answer, attempted: true, revised: false, unavailable: false });
+    expect(shortBulletFindings(request, result.text)).toEqual([]);
+  });
+
+  it('still blocks a wrong shared cadence after the bounded correction', async () => {
+    const bad = answer.replace('with B12 running', 'with B13 running');
+    let calls = 0;
+    const result = await verifyFinalOutput(
+      {
+        object: async () => {
+          calls++;
+          return { ok: true, object: { decision: 'publish', reasons: [] } };
+        },
+      } as never,
+      { taskId: 'public-overview-bad', request, draft: bad, evidence, critical: true },
+    );
+    expect(calls).toBe(2);
+    expect(result.incomplete).toBe(true);
+    expect(result.text).not.toContain('B13');
+  });
+});
+
 describe('public service claim scope and attribute boundaries', () => {
   const evidence = (text: string) => [
     {

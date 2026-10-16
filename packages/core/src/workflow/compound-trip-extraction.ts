@@ -215,7 +215,7 @@ function validatedSegment(
   if (Math.max(dateAt, numberAt, timeAt) - Math.min(dateAt, numberAt, timeAt) > 600)
     return undefined;
   const direction =
-    (facts.role === 'outbound' && /\b(?:outbound|departing|departure)\b/i.test(quote)) ||
+    (facts.role === 'outbound' && /\boutbound\b/i.test(quote)) ||
     (facts.role === 'return' && /\b(?:return|inbound|homebound)\b/i.test(quote)) ||
     (facts.role === 'connection' && /\b(?:connection|connecting|layover|transfer)\b/i.test(quote))
       ? facts.role

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   createPostgresConversationSearchRepository,
   createPostgresExecutionContextRepository,
@@ -54,6 +55,7 @@ import {
   extractCompoundTripBookings,
 } from '../compound-trip-extraction.js';
 import {
+  compoundTripNextWebSearchQuery,
   compoundTripReadProjection,
   compoundTripThreadReadInputs,
   MAX_COMPOUND_TRIP_TOOL_CALLS,
@@ -66,6 +68,7 @@ import {
   EmailReviewAnswerSchema,
   EmailReviewRankSchema,
   type EmailReviewScope,
+  emailReviewAssessmentStepReserve,
   emailReviewCandidateIds,
   emailReviewCompleteThread,
   emailReviewCoverage,
@@ -78,6 +81,7 @@ import {
   emailReviewVerifiedNotEligibleThreadIds,
   formatEmailReviewAnswer,
   generateValidatedEmailReview,
+  mergeEmailReviewOwnerDecisionFindings,
   revalidateEmailReviewAssessmentBatches,
   validEmailReviewSelection,
 } from '../email-review.js';
@@ -181,6 +185,39 @@ import { roleForTask } from './role.js';
 import { canCompleteSilently } from './silent-completion.js';
 import { type ExecuteResult, LOST_LEASE } from './types.js';
 import { compact, latestUserText, replaceToolResultMessage } from './util.js';
+
+const EMAIL_REVIEW_DEFAULT_ASSESSMENT_RESERVE = 1;
+const EMAIL_REVIEW_MAX_ASSESSMENT_PASSES = 3;
+const EMAIL_REVIEW_MULTI_THREAD_STEP_BONUS = 8;
+const EMAIL_REVIEW_MULTI_THREAD_STEP_CAP = 22;
+const EMAIL_REVIEW_STEP_BUDGET_STATE_KEY = 'emailReviewStepBudget';
+
+function persistedEmailReviewStepBudget(
+  value: unknown,
+  originalMaxSteps: number,
+  requestHash: string,
+): number | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const budget = value as Record<string, unknown>;
+  const expectedEffectiveMaxSteps = Math.max(
+    originalMaxSteps,
+    Math.min(
+      EMAIL_REVIEW_MULTI_THREAD_STEP_CAP,
+      originalMaxSteps + EMAIL_REVIEW_MULTI_THREAD_STEP_BONUS,
+    ),
+  );
+  if (
+    budget.version !== 1 ||
+    budget.originalMaxSteps !== originalMaxSteps ||
+    budget.requestHash !== requestHash ||
+    typeof budget.effectiveMaxSteps !== 'number' ||
+    !Number.isInteger(budget.effectiveMaxSteps) ||
+    budget.effectiveMaxSteps !== expectedEffectiveMaxSteps
+  ) {
+    return undefined;
+  }
+  return budget.effectiveMaxSteps;
+}
 
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
@@ -578,7 +615,47 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           timeZone: requestTimeZone,
         })
       : null;
+  let assessmentStepReserve: 1 | 2 = EMAIL_REVIEW_DEFAULT_ASSESSMENT_RESERVE;
   if (readRequest?.emailReview) {
+    const originalMaxSteps = task.maxSteps;
+    const requestHash = createHash('sha256').update(ownerText.trim()).digest('hex');
+    const emailReviewAssessmentReserve = emailReviewAssessmentStepReserve({
+      maxSteps: originalMaxSteps,
+      requestedCount: readRequest.emailReview.requestedCount,
+      latestUnanswered: readRequest.emailReview.latestUnanswered,
+      scopeIssue: readRequest.scopeIssue,
+    });
+    const canExtendEmailReviewSteps = emailReviewAssessmentReserve === 2;
+    if (canExtendEmailReviewSteps) assessmentStepReserve = emailReviewAssessmentReserve;
+    const persistedStepBudget = canExtendEmailReviewSteps
+      ? persistedEmailReviewStepBudget(
+          state.plannerState[EMAIL_REVIEW_STEP_BUDGET_STATE_KEY],
+          originalMaxSteps,
+          requestHash,
+        )
+      : undefined;
+    if (persistedStepBudget !== undefined) task.maxSteps = persistedStepBudget;
+    else if (canExtendEmailReviewSteps) {
+      const effectiveMaxSteps = Math.max(
+        originalMaxSteps,
+        Math.min(
+          EMAIL_REVIEW_MULTI_THREAD_STEP_CAP,
+          originalMaxSteps + EMAIL_REVIEW_MULTI_THREAD_STEP_BONUS,
+        ),
+      );
+      if (effectiveMaxSteps > originalMaxSteps) {
+        task.maxSteps = effectiveMaxSteps;
+        state.plannerState[EMAIL_REVIEW_STEP_BUDGET_STATE_KEY] = {
+          version: 1,
+          originalMaxSteps,
+          effectiveMaxSteps,
+          requestHash,
+        };
+        // The loop may outlive this process. Persist the bounded email-only
+        // ceiling under the current lease before any work can consume it.
+        if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
+      }
+    }
     const persisted = state.plannerState.emailReview;
     if (persisted && typeof persisted === 'object' && !Array.isArray(persisted)) {
       const record = persisted as Record<string, unknown>;
@@ -1635,7 +1712,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         const selectionTargetCount = Math.min(EMAIL_REVIEW_MAX_RANK_POOL, desiredCount);
         const missing = Math.max(0, selectionTargetCount - selectedIds.length);
         const nextRankedIds = rankedIds.filter((id) => !selectedIds.includes(id));
-        const remainingReadSlots = Math.max(0, task.maxSteps - state.step - 1);
+        const remainingReadSlots = Math.max(0, task.maxSteps - state.step - assessmentStepReserve);
         const addCount = Math.min(missing, nextRankedIds.length, remainingReadSlots);
         const nextSelectedIds = [...selectedIds, ...nextRankedIds.slice(0, addCount)];
         let backfillShortfall: typeof review.backfillShortfall;
@@ -1687,11 +1764,15 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       !mustRecordGoalProgress && readRequest
         ? nextRequiredReadTool(readRequest, readToolEvidence)
         : undefined;
+    const forcedReadBudgetExceeded =
+      readRequest?.emailReview && forcedReadTool === 'gmail.read_thread'
+        ? state.step + 1 + assessmentStepReserve > task.maxSteps
+        : state.step + 1 >= task.maxSteps;
     const boundedForcedReadTool =
       !resumingBatch &&
       (readRequest?.sourceReads ||
         (forcedReadTool === 'gmail.read_thread' && readRequest?.emailReview)) &&
-      state.step + 1 >= task.maxSteps
+      forcedReadBudgetExceeded
         ? undefined
         : forcedReadTool;
     if (correctionProjection && resumingBatch && state.pendingToolBatch) {
@@ -1911,7 +1992,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         if (selected === undefined && successfulSearches.length > 0) {
           if (candidates.length === 0) {
             if (!(await persistReview({ ...review, selectedThreadIds: [] }))) return LOST_LEASE;
-          } else if (state.step + 2 > task.maxSteps) {
+          } else if (state.step + 1 + assessmentStepReserve > task.maxSteps) {
             if (
               !(await persistReview({
                 ...review,
@@ -2110,6 +2191,20 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           priorGeneration && typeof priorGeneration === 'object' && !Array.isArray(priorGeneration)
             ? (priorGeneration as Record<string, unknown>).unassessedThreadIds
             : undefined;
+        const priorAssessmentPasses =
+          priorGeneration && typeof priorGeneration === 'object' && !Array.isArray(priorGeneration)
+            ? (priorGeneration as Record<string, unknown>).assessmentPasses
+            : undefined;
+        const hasPriorUnassessedThreads =
+          Array.isArray(priorUnassessedIds) && priorUnassessedIds.length > 0;
+        const assessmentPasses =
+          typeof priorAssessmentPasses === 'number' &&
+          Number.isInteger(priorAssessmentPasses) &&
+          priorAssessmentPasses >= 0
+            ? priorAssessmentPasses
+            : hasPriorUnassessedThreads
+              ? 1
+              : 0;
         const previouslyUnassessed = new Set(
           Array.isArray(priorUnassessedIds)
             ? priorUnassessedIds.filter(
@@ -2117,10 +2212,19 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               )
             : [],
         );
-        const priorOwnerDecisionIds =
+        const priorOwnerDecisionFindings =
           priorGeneration && typeof priorGeneration === 'object' && !Array.isArray(priorGeneration)
-            ? (priorGeneration as Record<string, unknown>).ownerDecisionThreadIds
+            ? (priorGeneration as Record<string, unknown>).ownerDecisionFindings
             : undefined;
+        const previouslyRequiredOwnerDecisionIds = new Set(
+          mergeEmailReviewOwnerDecisionFindings({
+            prior: priorOwnerDecisionFindings,
+            currentThreadIds: [],
+            resolvedThreadIds: [],
+            selectedThreadIds: selectedIds,
+            threads: bounded.threads,
+          }).map((finding) => finding.threadId),
+        );
         const alreadyAssessedIds = new Set(
           checkedAssessments.items.map((item) => item.thread.threadId),
         );
@@ -2128,6 +2232,9 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           bounded.threads,
           [...alreadyAssessedIds],
           [...previouslyUnassessed],
+          assessmentPasses === 1 &&
+            assessmentPasses < EMAIL_REVIEW_MAX_ASSESSMENT_PASSES &&
+            state.step < task.maxSteps,
         );
         const rankedThreadIds = readRequest.emailReview.rankedThreadIds;
         const initialCandidateCount = rankedThreadIds
@@ -2174,15 +2281,8 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           previouslyUnassessed.size,
           reviewScope,
         );
-        const priorOwnerDecisionSet = new Set(
-          Array.isArray(priorOwnerDecisionIds)
-            ? priorOwnerDecisionIds.filter(
-                (id): id is string => typeof id === 'string' && selectedIds.includes(id),
-              )
-            : [],
-        );
         coverage.ownerDecisionRequiredThreads = bounded.threads
-          .filter((thread) => priorOwnerDecisionSet.has(thread.threadId))
+          .filter((thread) => previouslyRequiredOwnerDecisionIds.has(thread.threadId))
           .map((thread) => ({ threadId: thread.threadId, subject: thread.subject }));
         const rankedCandidateIds = readRequest.emailReview.rankedCandidateIds;
         coverage.rankedMetadataThreads = rankedCandidateIds?.length;
@@ -2264,12 +2364,20 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         const validated = generation.answer;
         const assessedItems = [...checkedAssessments.items, ...(validated?.items ?? [])];
         const assessmentGaps = bounded.threads.length - assessedItems.length;
+        const ownerDecisionFindings = mergeEmailReviewOwnerDecisionFindings({
+          prior: priorOwnerDecisionFindings,
+          currentThreadIds: generation.ownerDecisionThreadIds,
+          resolvedThreadIds: assessedItems.map((item) => item.thread.threadId),
+          selectedThreadIds: selectedIds,
+          threads: bounded.threads,
+        });
+        const currentAssessmentPass = assessmentPasses + 1;
         const newlyAssessedIds = new Set(
           validated?.items.map((item) => item.thread.threadId) ?? [],
         );
         const unassessedThreadIds = [
           ...new Set([
-            ...previouslyUnassessed,
+            ...[...previouslyUnassessed].filter((id) => !newlyAssessedIds.has(id)),
             ...threadsToAssess
               .filter((thread) => !newlyAssessedIds.has(thread.threadId))
               .map((thread) => thread.threadId),
@@ -2277,20 +2385,24 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         ];
         state.plannerState.emailReviewGeneration = {
           attempts: generation.attempts,
+          assessmentPasses: currentAssessmentPass,
           status: validated
             ? assessmentGaps > 0
               ? 'partial'
               : 'validated'
-            : generation.ownerDecisionThreadIds.length > 0
+            : ownerDecisionFindings.length > 0
               ? 'partial'
               : 'unavailable',
           assessmentGaps,
           issues: generation.issues,
           unassessedThreadIds,
-          ownerDecisionThreadIds: generation.ownerDecisionThreadIds,
+          ownerDecisionThreadIds: ownerDecisionFindings.map((finding) => finding.threadId),
+          ownerDecisionFindings,
         };
         coverage.ownerDecisionRequiredThreads = bounded.threads
-          .filter((thread) => generation.ownerDecisionThreadIds.includes(thread.threadId))
+          .filter((thread) =>
+            ownerDecisionFindings.some((finding) => finding.threadId === thread.threadId),
+          )
           .map((thread) => ({ threadId: thread.threadId, subject: thread.subject }));
         coverage.unassessedCompleteThreads = assessmentGaps;
         if (generation.sourceItems?.length) {
@@ -2308,11 +2420,21 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           ) ?? [];
         // Re-enter with the checkpointed source items. This revalidates the
         // exclusion before choosing a reserve and recomputes any shortfall.
-        if (newlyExcluded.length > 0) continue;
+        if (
+          newlyExcluded.length > 0 &&
+          currentAssessmentPass < EMAIL_REVIEW_MAX_ASSESSMENT_PASSES &&
+          state.step < task.maxSteps
+        )
+          continue;
         // A structured answer may be valid for only a subset of the supplied
         // threads. Re-enter with the checkpointed subset so the next bounded
         // call contains only the threads that remain unassessed.
-        if (assessmentGaps > 0 && state.step < task.maxSteps) continue;
+        if (
+          assessmentGaps > 0 &&
+          currentAssessmentPass < EMAIL_REVIEW_MAX_ASSESSMENT_PASSES &&
+          state.step < task.maxSteps
+        )
+          continue;
         const finalText = formatEmailReviewAnswer(assessedItems, coverage, false, reviewScope);
         rc.window.push({ role: 'assistant', content: finalText } as ModelMessage);
         return stageEmailReviewResponse(
@@ -3742,7 +3864,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           boundedForcedReadTool === tc.toolName &&
           (tc.toolName === 'web.search' || tc.toolName === 'web.fetch')
             ? (() => {
-                const query = compoundTripReadProjection(readRequest, readToolEvidence).webQuery;
+                const query =
+                  tc.toolName === 'web.search'
+                    ? compoundTripNextWebSearchQuery(readRequest, readToolEvidence)
+                    : compoundTripReadProjection(readRequest, readToolEvidence).webQuery;
                 if (!query) return undefined;
                 if (
                   tc.toolName === 'web.search' &&

@@ -855,11 +855,26 @@ struct MessageBubble: View {
             Text(kind == .responseContract ? presentation.headline : (compact?.headline ?? presentation.headline))
                 .font(.body.weight(.semibold))
                 .foregroundStyle(AssistantTheme.ink(for: colorScheme))
-            Text(presentation.summary)
-                .font(.subheadline)
-                .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                .lineLimit(kind == .responseContract ? nil : 2)
-                .fixedSize(horizontal: false, vertical: true)
+            if kind == .responseContract {
+                // A checked partial answer still contains the assistant's
+                // lists and source links. Preserve the warning around it,
+                // while using the same renderer as a complete answer.
+                AssistantMarkdownView(
+                    source: text,
+                    baseFontSize: messageFontSize,
+                    ink: AssistantTheme.ink(for: colorScheme),
+                    mutedInk: AssistantTheme.inkMuted(for: colorScheme),
+                    codeSurface: AssistantTheme.sunken(for: colorScheme),
+                    accent: AssistantTheme.accent(for: colorScheme)
+                )
+                .textSelection(.enabled)
+            } else {
+                Text(presentation.summary)
+                    .font(.subheadline)
+                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let facts = compact?.facts?.prefix(3), !facts.isEmpty {
                 AssistantFlowLayout(spacing: 8) {
                     ForEach(Array(facts.enumerated()), id: \.offset) { _, fact in
