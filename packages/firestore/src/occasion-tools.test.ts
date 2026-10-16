@@ -1,6 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { FirestoreOccasionToolRepository } from './occasion-tools.js';
 import { documentKey, type InstallationStore } from './store.js';
+import { disposeStore, emulatorStore } from './test-store.js';
 
 type Row = Record<string, unknown>;
 
@@ -66,6 +68,7 @@ function fakeStore(occasionRows: Row[], contacts: Row[]) {
     doc: vi.fn((collection: string, id: string) => ({ collection, id })),
     db: {
       getAll: vi.fn(async (...refs: Array<{ collection: string; id: string }>) => {
+        if (refs.length === 0) throw new Error('getAll requires at least one document reference');
         contactReads.push(...refs.map((ref) => ref.id));
         return refs.map((ref) => {
           const contact = contacts.find((row) => row.id === ref.id);
@@ -167,4 +170,69 @@ describe('Firestore bounded birthday occasion reads', () => {
     expect(storeFixture.queryCount()).toBe(0);
     expect(storeFixture.store.db.getAll).not.toHaveBeenCalled();
   });
+
+  it('does not call getAll with zero references when a nonempty identity has no birthdays', async () => {
+    const storeFixture = fakeStore([], []);
+    const repository = new FirestoreOccasionToolRepository(storeFixture.store, 'owner-a');
+
+    await expect(
+      repository.listBirthdays({ agentId: 'owner-a', contactIds: ['contact-a'], limit: 40 }),
+    ).resolves.toEqual({ rows: [], overflow: false });
+    expect(storeFixture.queryCount()).toBe(1);
+    expect(storeFixture.store.db.getAll).not.toHaveBeenCalled();
+  });
 });
+
+describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
+  'Firestore birthday occasion query against the SDK',
+  () => {
+    it('executes the indexed query and returns empty for a nonempty unmatched identity', async () => {
+      const store = emulatorStore();
+      const agentId = randomUUID();
+      const contactId = randomUUID();
+      const occasionId = randomUUID();
+      await store.doc('contacts', contactId).set({ id: contactId, agentId, name: 'SDK birthday' });
+      await store.doc('occasions', occasionId).set({
+        id: occasionId,
+        agentId,
+        contactId,
+        kind: 'birthday',
+        label: '',
+        month: 5,
+        day: 6,
+        year: null,
+        recurrence: 'annual',
+        leadDays: 7,
+        notes: 'not selected by the query',
+        originTrust: 'owner',
+        quarantined: false,
+        ownerConfirmed: true,
+      });
+
+      try {
+        const repository = new FirestoreOccasionToolRepository(store, agentId);
+        await expect(
+          repository.listBirthdays({ agentId, contactIds: [contactId], limit: 40 }),
+        ).resolves.toMatchObject({
+          overflow: false,
+          rows: [
+            {
+              id: occasionId,
+              contactId,
+              contactName: 'SDK birthday',
+              kind: 'birthday',
+              month: 5,
+              day: 6,
+              notes: '',
+            },
+          ],
+        });
+        await expect(
+          repository.listBirthdays({ agentId, contactIds: [randomUUID()], limit: 40 }),
+        ).resolves.toEqual({ rows: [], overflow: false });
+      } finally {
+        await disposeStore(store);
+      }
+    });
+  },
+);

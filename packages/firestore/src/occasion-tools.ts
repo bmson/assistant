@@ -205,6 +205,7 @@ export class FirestoreOccasionToolRepository
     // Resolve names only for the exact, bounded set of requested birthday
     // records. Unrelated occasion/contact names are never read by this path.
     const matchedContactIds = [...new Set(occasionRows.map((row) => row.contactId))];
+    if (matchedContactIds.length === 0) return { rows: [], overflow };
     const docs = await this.store.db.getAll(
       ...matchedContactIds.map((id) => this.store.doc('contacts', id)),
     );
