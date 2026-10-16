@@ -2059,7 +2059,7 @@ export function formatEmailReviewAnswer(
     ? `a bounded newest-first inbox scan${scope.startAt && scope.endAt ? ' within the requested time window' : ''}`
     : `a bounded ${scope?.windowDays ?? 7}-${reviewRange} mail scan`;
   const lines = [
-    `Reviewed ${reviewedThreads} of ${coverage.selectedThreads} selected threads from ${scanDescription}; assessed ${assessedThreads} of ${coverage.completeThreads} complete, eligible threads; prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'}${scope?.requestedCount ? ` (requested review count: ${scope.requestedCount})` : ''}.`,
+    `Reviewed ${reviewedThreads} of ${coverage.selectedThreads} selected threads from ${scanDescription}; assessed ${assessedThreads} of ${coverage.completeThreads} complete, eligible threads; prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'}${scope?.requestedCount ? ` (you asked for ${scope.requestedCount})` : ''}.`,
   ];
   if (drafts.length > 0)
     lines.push(

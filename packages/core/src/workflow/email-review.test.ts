@@ -1422,7 +1422,7 @@ describe('bounded no-send email review', () => {
     });
 
     expect(text).toContain(
-      'Reviewed 2 of 10 selected threads from a bounded 7-day mail scan; assessed 1 of 8 complete, eligible threads; prepared 1 reply draft (requested review count: 5).',
+      'Reviewed 2 of 10 selected threads from a bounded 7-day mail scan; assessed 1 of 8 complete, eligible threads; prepared 1 reply draft (you asked for 5).',
     );
     expect(text).toContain('complete, eligible source reads: 8 of 10 selected threads');
     expect(text).toContain(
