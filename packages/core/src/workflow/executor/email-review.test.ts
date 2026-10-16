@@ -399,10 +399,8 @@ describe('executor email review composition', () => {
     expect(state.plannerState.emailReviewGeneration).toMatchObject({
       assessmentPasses: 2,
       status: 'partial',
+      modelCalls: EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS,
     });
-    expect(
-      (state.plannerState.emailReviewGeneration as { modelCalls?: number }).modelCalls,
-    ).toBeLessThanOrEqual(EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS);
     expect(
       (state.plannerState.emailReviewAssessmentBatches as unknown[][]).every(
         (batch) => batch.length <= EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE,
