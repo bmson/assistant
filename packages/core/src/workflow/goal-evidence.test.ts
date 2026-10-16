@@ -18,9 +18,8 @@ describe('isGoalWorkEvidenceTool', () => {
     'workspace.list',
     'browser.plan',
     'conversations.context',
-  ])(
-    'does not let %s prove its own progress',
-    (toolName) => expect(isGoalWorkEvidenceTool(toolName)).toBe(false),
+  ])('does not let %s prove its own progress', (toolName) =>
+    expect(isGoalWorkEvidenceTool(toolName)).toBe(false),
   );
 
   it.each([
