@@ -6,6 +6,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { getAgent } from '../../chat.js';
 import { TaskStateSchema } from '../../events.js';
+import {
+  EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE,
+  EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS,
+} from '../email-review.js';
 import { type GoldenFixture, runGoldenTask } from '../golden/harness.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -396,6 +400,14 @@ describe('executor email review composition', () => {
       assessmentPasses: 2,
       status: 'partial',
     });
+    expect(
+      (state.plannerState.emailReviewGeneration as { modelCalls?: number }).modelCalls,
+    ).toBeLessThanOrEqual(EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS);
+    expect(
+      (state.plannerState.emailReviewAssessmentBatches as unknown[][]).every(
+        (batch) => batch.length <= EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE,
+      ),
+    ).toBe(true);
     expect(
       (state.plannerState.emailReviewGeneration as { assessmentPasses?: number }).assessmentPasses,
     ).toBeLessThanOrEqual(3);
