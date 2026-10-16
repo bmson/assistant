@@ -365,6 +365,16 @@ function readAnswerDirective(request: PersonalReadRequest): string {
       'Lead with the answer, then concise source-backed details. Do not substitute an unrelated agenda or ask permission to perform a lookup that already ran. Do not claim any booking, application, save, or reminder was created by this read-only task.',
     ].join('\n');
   }
+  if (request.kind === 'calendar' && request.compactCalendarBriefing) {
+    return [
+      '\nThe requested calendar lookup is complete. Keep this calendar briefing compact and follow the length and format the owner asked for.',
+      'Represent every returned event, using only its title, owner-local date and time, calendar name when useful, and source link when available. Omit unrequested addresses, descriptions, attendees, and booking details.',
+      request.includeCalendarOverlapSummary
+        ? 'Add only concise overlap facts supported by the checked events; do not imply that an overlap proves both events require attendance.'
+        : 'Do not add an overlap analysis unless the owner asked for one.',
+      'State incomplete calendar coverage plainly and do not invent or silently omit events.',
+    ].join('\n');
+  }
   if (request.kind === 'drive' || request.kind === 'memory' || request.kind === 'knowledge_graph') {
     return [
       '\nThe required private lookup has run. Write the answer now with no more tool calls.',
