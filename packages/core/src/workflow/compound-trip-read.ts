@@ -3819,9 +3819,17 @@ export function compoundTripReadProjection(
         .slice(0, 2)
         .map((item) => new URL(item.url).hostname)
     : [];
+  // Keep the named endpoints without requiring a particular street-address
+  // spelling. Comparisons still require both endpoints on the fetched page.
   const fallbackWebQuery =
-    webQuery && hotel?.address
-      ? `${webQuery} "${hotel.address.replace(/["\r\n]/g, ' ')}" airport directions ${[...new Set(primaryHosts)].map((host) => `-site:${host}`).join(' ')}`.trim()
+    webQuery && comparisonFlight?.arrivalAirport && hotel?.hotelName && hotel.city
+      ? [
+          ...[comparisonFlight.arrivalAirport, hotel.hotelName, hotel.city].map(
+            (value) => `"${value.replace(/["\r\n]/g, ' ').trim()}"`,
+          ),
+          'airport transfer public transport taxi directions',
+          ...[...new Set(primaryHosts)].map((host) => `-site:${host}`),
+        ].join(' ')
       : undefined;
   const alternateSearch = fallbackWebQuery
     ? evidence.find(

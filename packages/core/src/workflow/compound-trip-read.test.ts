@@ -6209,7 +6209,7 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(projection.blocked).toBe(true); // Remaining itinerary/zone gates still apply.
   });
 
-  it('uses one bounded alternate search after two blocked hosts, then checks the actual alternate page for both modes', () => {
+  it('broadens one bounded alternate search after two blocked hosts while verifying both endpoints in the fetched page', () => {
     const { read, rows, search } = withTransferSearch();
     for (const url of [
       'https://blocked.example/airport/hotel',
@@ -6224,8 +6224,11 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
         error: 'HTTP403 challenge',
       });
     const query = compoundTripNextWebSearchQuery(read, rows);
-    expect(query).toContain('CPH');
-    expect(query).toContain('Canal Street 42, Copenhagen');
+    expect(query).toContain('"CPH"');
+    expect(query).toContain('"Canal House"');
+    expect(query).toContain('"Copenhagen"');
+    expect(query).not.toContain('Canal Street 42');
+    expect(query).not.toContain('official');
     expect(query).toContain('-site:blocked.example');
     expect(query).toContain('-site:hotel.example');
     expect(nextRequiredReadTool(read, rows)).toBe('web.search');
@@ -6279,7 +6282,14 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(nextRequiredReadTool(read, rows)).toBeUndefined();
     expect(rows.filter((item) => item.toolName === 'web.search')).toHaveLength(2);
     // A discovered but unjoined, stale, partial or failed page cannot supply the comparison.
-    for (const invalid of ['wrong-query', 'old-task', 'truncated', 'http-error'] as const) {
+    for (const invalid of [
+      'wrong-query',
+      'old-task',
+      'truncated',
+      'http-error',
+      'wrong-hotel',
+      'wrong-airport',
+    ] as const) {
       const clone = structuredClone(rows);
       const page = clone.at(-1);
       const alternate = clone.at(-2);
@@ -6291,7 +6301,28 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
       if (invalid === 'old-task') page.fromCurrentTask = false;
       if (invalid === 'truncated') (page.result as Record<string, unknown>).truncated = true;
       if (invalid === 'http-error') (page.result as Record<string, unknown>).status = 403;
-      expect(compoundTripReadProjection(read, clone).comparison).toEqual([]);
+      if (invalid === 'wrong-hotel')
+        (page.result as Record<string, unknown>).text = String(
+          (page.result as Record<string, unknown>).text,
+        ).replaceAll('Canal House', 'Different Hotel');
+      if (invalid === 'wrong-airport')
+        (page.result as Record<string, unknown>).text = String(
+          (page.result as Record<string, unknown>).text,
+        ).replaceAll('CPH Airport', 'SFO Airport');
+      const invalidProjection = compoundTripReadProjection(read, clone);
+      if (invalid === 'wrong-hotel' || invalid === 'wrong-airport') {
+        expect(invalidProjection.comparison).toHaveLength(2);
+        expect(invalidProjection.comparison).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ mode: 'public transport', endpointMatched: false }),
+            expect.objectContaining({ mode: 'taxi', endpointMatched: false }),
+          ]),
+        );
+        expect(invalidProjection.comparison.every((item) => !item.fare && !item.duration)).toBe(
+          true,
+        );
+        expect(invalidProjection.blocked).toBe(true);
+      } else expect(invalidProjection.comparison).toEqual([]);
     }
     fetched.status = 'failed';
     expect(compoundTripReadProjection(read, rows).comparison).toEqual([]);
