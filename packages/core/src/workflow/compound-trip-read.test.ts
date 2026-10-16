@@ -1762,7 +1762,7 @@ describe('compound trip read projection', () => {
         'maps.directions',
         {
           origin: 'BER Airport',
-          destination: 'Linienstraße 89, 10119 Berlin',
+          destination: 'Hotel Linden, Linienstraße 89, 10119 Berlin',
           mode: 'driving',
         },
         { durationSeconds: 1500 },
@@ -1771,7 +1771,12 @@ describe('compound trip read projection', () => {
     const route = compoundTripRoute(read, evidence);
     expect(route).toEqual({
       origin: 'BER Airport',
-      destination: 'Linienstraße 89, 10119 Berlin',
+      destination: 'Hotel Linden, Linienstraße 89, 10119 Berlin',
+    });
+    expect(route?.destination.length).toBeLessThanOrEqual(200);
+    expect(buildReadToolInput(read, 'maps.directions', evidence)).toEqual({
+      ...route,
+      mode: 'driving',
     });
 
     const webQuery = compoundTripReadProjection(read, evidence).webQuery;
@@ -2048,7 +2053,7 @@ describe('compound trip read projection', () => {
       association: 'date_city_candidate',
     });
     expect(projection.routeOrigin).toBe('BER Airport');
-    expect(projection.routeDestination).toBe('Linienstraße 89, 10119 Berlin');
+    expect(projection.routeDestination).toBe('Hotel Linden, Linienstraße 89, 10119 Berlin');
     expect(projection.webQuery).toContain('Hotel Linden');
     expect(projection.blocked).toBe(true);
   });
@@ -3357,7 +3362,7 @@ describe('compound trip read projection', () => {
     });
     expect(validProjection.connectionSummary).toContain('LH101 FRA→BER');
     expect(validProjection.routeOrigin).toBe('BER Airport');
-    expect(validProjection.routeDestination).toBe(hotel.address);
+    expect(validProjection.routeDestination).toBe('Hotel Linden, 5 Alexanderplatz, 10178 Berlin');
     const unknownChronology = compoundTripReadProjection(read, validEvidence, {
       status: 'complete',
       segments: [outbound, { ...validConnection, arrivalTimeZone: undefined }],
@@ -4173,7 +4178,11 @@ describe('compound trip read projection', () => {
       ...bookingEmailEvidence(),
       row(
         'maps.directions',
-        { origin: 'JFK Airport', destination: 'Linienstraße 89, 10119 Berlin', mode: 'driving' },
+        {
+          origin: 'JFK Airport',
+          destination: 'Hotel Linden, Linienstraße 89, 10119 Berlin',
+          mode: 'driving',
+        },
         { durationSeconds: 1500 },
       ),
     ];
@@ -5674,7 +5683,13 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
       checkOut: '2030-11-17',
     });
     expect(initial.routeOrigin).toBe('CPH Airport');
-    expect(initial.routeDestination).toBe('Canal Street 42, Copenhagen');
+    expect(initial.routeDestination).toBe('Canal House, Canal Street 42, Copenhagen');
+    expect(initial.routeDestination?.length).toBeLessThanOrEqual(200);
+    expect(buildReadToolInput(read, 'maps.directions', rows)).toEqual({
+      origin: initial.routeOrigin,
+      destination: initial.routeDestination,
+      mode: 'driving',
+    });
     expect(initial.flight).toBeUndefined();
     expect(initial.webQuery).toContain('Canal House');
     add('maps.directions', { origin: initial.routeOrigin, destination: initial.routeDestination });

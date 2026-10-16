@@ -3749,7 +3749,7 @@ export function compoundTripReadProjection(
       : bookedTransfer?.hotel.address
         ? {
             origin: `${bookedTransfer.group.destination} Airport`,
-            destination: bookedTransfer.hotel.address,
+            destination: mapHotelDestination(bookedTransfer.hotel),
           }
         : undefined;
   const comparisonFlight =
@@ -4492,6 +4492,26 @@ function mapDestinationNamesHotel(
   return name.length >= 5 && label === name;
 }
 
+function mapHotelDestination(hotel: CompoundTripHotelCandidate): string {
+  const name = text(hotel.hotelName, 80) || text(hotel.subject, 80);
+  const address = text(hotel.address, 200);
+  const city = text(hotel.city, 80);
+  const normalizedAddress = normalizePlace(address);
+  const parts = [
+    name,
+    address,
+    ...(city && !normalizedAddress.includes(normalizePlace(city)) ? [city] : []),
+  ].filter(Boolean);
+  let destination = '';
+  for (const part of parts) {
+    const separator = destination ? ', ' : '';
+    const remaining = 200 - destination.length - separator.length;
+    if (remaining <= 0) break;
+    destination += `${separator}${part.slice(0, remaining).trimEnd()}`;
+  }
+  return destination;
+}
+
 function compactFlightLeg(
   leg: CompoundTripFlightSegment,
   label: string,
@@ -4918,7 +4938,10 @@ function compoundTripRouteFromCandidates(
     (hotel.association !== 'date_city_candidate' && hotel.association !== 'shared_reference')
   )
     return undefined;
-  return { origin: `${flight.arrivalAirport} Airport`, destination: hotel.address };
+  return {
+    origin: `${flight.arrivalAirport} Airport`,
+    destination: mapHotelDestination(hotel),
+  };
 }
 
 function dedupeHotels(candidates: CompoundTripHotelCandidate[]): CompoundTripHotelCandidate[] {
