@@ -182,6 +182,11 @@ import { canCompleteSilently } from './silent-completion.js';
 import { type ExecuteResult, LOST_LEASE } from './types.js';
 import { compact, latestUserText, replaceToolResultMessage } from './util.js';
 
+const EMAIL_REVIEW_RESERVED_ASSESSMENT_STEPS = 2;
+const EMAIL_REVIEW_MAX_ASSESSMENT_PASSES = 3;
+const EMAIL_REVIEW_MULTI_THREAD_STEP_BONUS = 8;
+const EMAIL_REVIEW_MULTI_THREAD_STEP_CAP = 22;
+
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
   if (value && typeof value === 'object') {
@@ -643,6 +648,24 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           selectedThreadIds: [],
           rankingFailed: true,
         };
+    }
+    if (
+      !readRequest.scopeIssue &&
+      !readRequest.emailReview.latestUnanswered &&
+      readRequest.emailReview.requestedCount > 1 &&
+      task.maxSteps >= 14
+    ) {
+      // Explicit multi-request review needs room to read the bounded candidate
+      // set and, when the first structured assessment omits complete threads,
+      // make one finite repair pass. This is an email-only task budget, capped
+      // at 22 steps; it does not change global task or spend limits.
+      task.maxSteps = Math.max(
+        task.maxSteps,
+        Math.min(
+          EMAIL_REVIEW_MULTI_THREAD_STEP_CAP,
+          task.maxSteps + EMAIL_REVIEW_MULTI_THREAD_STEP_BONUS,
+        ),
+      );
     }
   }
   let compoundTripExtraction: CompoundTripExtraction | undefined;
@@ -1635,7 +1658,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         const selectionTargetCount = Math.min(EMAIL_REVIEW_MAX_RANK_POOL, desiredCount);
         const missing = Math.max(0, selectionTargetCount - selectedIds.length);
         const nextRankedIds = rankedIds.filter((id) => !selectedIds.includes(id));
-        const remainingReadSlots = Math.max(0, task.maxSteps - state.step - 1);
+        const remainingReadSlots = Math.max(
+          0,
+          task.maxSteps - state.step - EMAIL_REVIEW_RESERVED_ASSESSMENT_STEPS,
+        );
         const addCount = Math.min(missing, nextRankedIds.length, remainingReadSlots);
         const nextSelectedIds = [...selectedIds, ...nextRankedIds.slice(0, addCount)];
         let backfillShortfall: typeof review.backfillShortfall;
@@ -1687,11 +1713,16 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       !mustRecordGoalProgress && readRequest
         ? nextRequiredReadTool(readRequest, readToolEvidence)
         : undefined;
+    const forcedReadWouldConsumeEmailReviewReserve =
+      readRequest?.emailReview !== undefined &&
+      forcedReadTool === 'gmail.read_thread' &&
+      state.step + 1 + EMAIL_REVIEW_RESERVED_ASSESSMENT_STEPS > task.maxSteps;
     const boundedForcedReadTool =
       !resumingBatch &&
       (readRequest?.sourceReads ||
         (forcedReadTool === 'gmail.read_thread' && readRequest?.emailReview)) &&
-      state.step + 1 >= task.maxSteps
+      (forcedReadWouldConsumeEmailReviewReserve ||
+        (forcedReadTool !== 'gmail.read_thread' && state.step + 1 >= task.maxSteps))
         ? undefined
         : forcedReadTool;
     if (correctionProjection && resumingBatch && state.pendingToolBatch) {
@@ -1911,7 +1942,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         if (selected === undefined && successfulSearches.length > 0) {
           if (candidates.length === 0) {
             if (!(await persistReview({ ...review, selectedThreadIds: [] }))) return LOST_LEASE;
-          } else if (state.step + 2 > task.maxSteps) {
+          } else if (state.step + 1 + EMAIL_REVIEW_RESERVED_ASSESSMENT_STEPS > task.maxSteps) {
             if (
               !(await persistReview({
                 ...review,
@@ -2110,6 +2141,20 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           priorGeneration && typeof priorGeneration === 'object' && !Array.isArray(priorGeneration)
             ? (priorGeneration as Record<string, unknown>).unassessedThreadIds
             : undefined;
+        const priorAssessmentPasses =
+          priorGeneration && typeof priorGeneration === 'object' && !Array.isArray(priorGeneration)
+            ? (priorGeneration as Record<string, unknown>).assessmentPasses
+            : undefined;
+        const hasPriorUnassessedThreads =
+          Array.isArray(priorUnassessedIds) && priorUnassessedIds.length > 0;
+        const assessmentPasses =
+          typeof priorAssessmentPasses === 'number' &&
+          Number.isInteger(priorAssessmentPasses) &&
+          priorAssessmentPasses >= 0
+            ? priorAssessmentPasses
+            : hasPriorUnassessedThreads
+              ? 1
+              : 0;
         const previouslyUnassessed = new Set(
           Array.isArray(priorUnassessedIds)
             ? priorUnassessedIds.filter(
@@ -2128,6 +2173,9 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           bounded.threads,
           [...alreadyAssessedIds],
           [...previouslyUnassessed],
+          assessmentPasses === 1 &&
+            assessmentPasses < EMAIL_REVIEW_MAX_ASSESSMENT_PASSES &&
+            state.step < task.maxSteps,
         );
         const rankedThreadIds = readRequest.emailReview.rankedThreadIds;
         const initialCandidateCount = rankedThreadIds
@@ -2264,12 +2312,13 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         const validated = generation.answer;
         const assessedItems = [...checkedAssessments.items, ...(validated?.items ?? [])];
         const assessmentGaps = bounded.threads.length - assessedItems.length;
+        const currentAssessmentPass = assessmentPasses + 1;
         const newlyAssessedIds = new Set(
           validated?.items.map((item) => item.thread.threadId) ?? [],
         );
         const unassessedThreadIds = [
           ...new Set([
-            ...previouslyUnassessed,
+            ...[...previouslyUnassessed].filter((id) => !newlyAssessedIds.has(id)),
             ...threadsToAssess
               .filter((thread) => !newlyAssessedIds.has(thread.threadId))
               .map((thread) => thread.threadId),
@@ -2277,6 +2326,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         ];
         state.plannerState.emailReviewGeneration = {
           attempts: generation.attempts,
+          assessmentPasses: currentAssessmentPass,
           status: validated
             ? assessmentGaps > 0
               ? 'partial'
@@ -2308,11 +2358,21 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           ) ?? [];
         // Re-enter with the checkpointed source items. This revalidates the
         // exclusion before choosing a reserve and recomputes any shortfall.
-        if (newlyExcluded.length > 0) continue;
+        if (
+          newlyExcluded.length > 0 &&
+          currentAssessmentPass < EMAIL_REVIEW_MAX_ASSESSMENT_PASSES &&
+          state.step < task.maxSteps
+        )
+          continue;
         // A structured answer may be valid for only a subset of the supplied
         // threads. Re-enter with the checkpointed subset so the next bounded
         // call contains only the threads that remain unassessed.
-        if (assessmentGaps > 0 && state.step < task.maxSteps) continue;
+        if (
+          assessmentGaps > 0 &&
+          currentAssessmentPass < EMAIL_REVIEW_MAX_ASSESSMENT_PASSES &&
+          state.step < task.maxSteps
+        )
+          continue;
         const finalText = formatEmailReviewAnswer(assessedItems, coverage, false, reviewScope);
         rc.window.push({ role: 'assistant', content: finalText } as ModelMessage);
         return stageEmailReviewResponse(

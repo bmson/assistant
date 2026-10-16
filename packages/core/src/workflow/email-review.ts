@@ -908,9 +908,10 @@ export function emailReviewPendingAssessmentThreads<T extends { threadId: string
   threads: ReadonlyArray<T>,
   validatedThreadIds: ReadonlyArray<string>,
   previouslyUnassessedThreadIds: ReadonlyArray<string>,
+  allowOneBoundedRetry = false,
 ): T[] {
   const complete = new Set(validatedThreadIds);
-  const stopped = new Set(previouslyUnassessedThreadIds);
+  const stopped = new Set(allowOneBoundedRetry ? [] : previouslyUnassessedThreadIds);
   return threads.filter(
     (thread) => !complete.has(thread.threadId) && !stopped.has(thread.threadId),
   );

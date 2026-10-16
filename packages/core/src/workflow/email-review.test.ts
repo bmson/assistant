@@ -211,6 +211,40 @@ describe('bounded no-send email review', () => {
     ).toEqual([{ threadId: 'newly-read', marker: 'assess' }]);
   });
 
+  it('retries prior unassessed threads only when the executor grants its bounded retry pass', () => {
+    const threads = Array.from({ length: 10 }, (_, index) => ({
+      threadId: `thread-${index + 1}`,
+    }));
+    const validated = ['thread-1', 'thread-2'];
+    const previouslyUnassessed = [
+      'thread-3',
+      'thread-4',
+      'thread-5',
+      'thread-6',
+      'thread-7',
+      'thread-8',
+    ];
+    expect(
+      emailReviewPendingAssessmentThreads(threads, validated, previouslyUnassessed).map(
+        (thread) => thread.threadId,
+      ),
+    ).toEqual(['thread-9', 'thread-10']);
+    expect(
+      emailReviewPendingAssessmentThreads(threads, validated, previouslyUnassessed, true).map(
+        (thread) => thread.threadId,
+      ),
+    ).toEqual([
+      'thread-3',
+      'thread-4',
+      'thread-5',
+      'thread-6',
+      'thread-7',
+      'thread-8',
+      'thread-9',
+      'thread-10',
+    ]);
+  });
+
   it('names ranking-context omissions within scanned metadata', () => {
     const coverage = emailReviewCoverage([], [], [search('thread-a'), search('thread-b')]);
     coverage.rankedMetadataThreads = 1;
