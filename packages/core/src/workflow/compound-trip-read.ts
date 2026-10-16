@@ -5130,18 +5130,19 @@ function sourceLocalDateTimeInstant(
     return localAsUtc - offset * 60_000;
   }
   if (!validTimeZone(zone)) return undefined;
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: zone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  });
   const candidates: number[] = [];
   for (let offset = -14 * 60; offset <= 14 * 60; offset += 15) {
     const instant = localAsUtc - offset * 60_000;
-    const parts = new Intl.DateTimeFormat('en-CA', {
-      timeZone: zone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      hourCycle: 'h23',
-    }).formatToParts(instant);
+    const parts = formatter.formatToParts(instant);
     const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
     if (
       value.year === date.slice(0, 4) &&
