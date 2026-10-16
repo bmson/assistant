@@ -374,7 +374,13 @@ export async function lookupWeather(
   // Only pay for hourly rows when the question is actually about a time.
   const wantsTarget =
     input.date !== undefined || input.timeOfDay !== undefined || input.startHour !== undefined;
-  const weather = await fetchWeather(lat, lng, fetchImpl, { hourly: wantsTarget });
+  // Explicit local dates can fall beyond the ordinary seven-day response.
+  // Open-Meteo supports up to 16 calendar days including today; leave ambient
+  // and untargeted reads on the smaller default payload.
+  const weather = await fetchWeather(lat, lng, fetchImpl, {
+    hourly: wantsTarget,
+    ...(input.date ? { forecastDays: 16 } : days > 6 ? { forecastDays: days + 1 } : {}),
+  });
   if (!weather) return { error: `no weather reading is available for ${place} right now` };
 
   const result = toLookupResult(place, !named, weather, days);
@@ -389,11 +395,19 @@ export async function lookupWeather(
   if (!date) return withPlace;
   const covered = weather.hourly?.map((hour) => hour.date) ?? [];
   const known = new Set([...covered, ...weather.forecast.map((entry) => entry.date)]);
-  if (input.date && known.size > 0 && !known.has(input.date)) {
+  if (input.date && !known.has(input.date)) {
     const dates = [...known].sort();
-    return {
-      error: `the forecast covers ${dates[0]} through ${dates[dates.length - 1]}; ${input.date} is outside it`,
-    };
+    if (dates.length === 0)
+      return { error: `no daily or hourly forecast was returned for ${input.date}` };
+    const firstDate = dates[0];
+    const lastDate = dates.at(-1);
+    if (!firstDate || !lastDate)
+      return { error: `no daily or hourly forecast was returned for ${input.date}` };
+    if (input.date < firstDate || input.date > lastDate)
+      return {
+        error: `the forecast covers ${firstDate} through ${lastDate}; ${input.date} is outside it`,
+      };
+    return { error: `the provider returned no daily or hourly forecast row for ${input.date}` };
   }
   return {
     ...withPlace,
@@ -420,7 +434,7 @@ export function registerWeatherTool(
     {
       name: 'weather.lookup',
       description:
-        'Current conditions, the coming days, and — when you ask for a date or a time — the weather at that hour. Give `place` for anywhere named ("San Francisco", "Tokyo"); omit it only for where the owner is right now. This source knows towns, cities and regions, NOT venues, parks or street addresses: a full location string works because the tool falls back to the town inside it and tells you it did, but a bare venue name ("Crocker Amazon Soccer Fields") does not resolve — pass the town it is in. If this returns a not-found error, call again with the town rather than telling the owner to check a weather service. Use this for any weather question the ambient "right now" block does not already answer — another town, or a day past today.',
+        'Current conditions, the coming days, and — when you ask for a date or a time — the weather at that hour. A specific date or requested multi-day forecast can use up to 16 calendar days including today; farther dates are generally less certain, and missing days are never filled in. A date outside the returned range has no forecast here. Give `place` for anywhere named ("San Francisco", "Tokyo"); omit it only for where the owner is right now. This source knows towns, cities and regions, NOT venues, parks or street addresses: a full location string works because the tool falls back to the town inside it and tells you it did, but a bare venue name ("Crocker Amazon Soccer Fields") does not resolve — pass the town it is in. If this returns a not-found error, call again with the town rather than telling the owner to check a weather service. Use this for any weather question the ambient "right now" block does not already answer — another town, or a day past today.',
       inputSchema: z.object({
         place: z
           .string()
@@ -432,15 +446,18 @@ export function registerWeatherTool(
           .describe(
             "Town, city, or region — or a full location string, whose town will be used. Leave empty to use the owner's current location.",
           ),
-        // Six, not seven: the provider is asked for 7 days and today is
-        // reported as current conditions, so tomorrow onward is all there is.
+        // Six by default preserves the usual seven-calendar-day provider
+        // request (today plus six future days). Longer explicit requests may
+        // use the provider's 16-day maximum including today.
         days: z
           .number()
           .int()
           .min(1)
-          .max(6)
+          .max(15)
           .default(6)
-          .describe('How many days of forecast to return, starting tomorrow (up to 6).'),
+          .describe(
+            'How many forecast days to return, starting tomorrow (up to 15; requests beyond six use the provider range up to 16 calendar days including today).',
+          ),
         // None of these carry a default: a default would make every weather
         // question fetch hourly data it does not need, and would change the
         // cached-result key for calls that mean the same thing.

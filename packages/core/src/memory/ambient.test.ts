@@ -55,13 +55,30 @@ function fakeForecastFetch() {
 }
 
 describe('ambient — weather fetch (pure)', () => {
-  it('requests supported daily variables; time is a returned coordinate, not a variable', async () => {
+  it('keeps the ambient forecast at seven days and requests supported daily variables', async () => {
     await fetchWeather(64, -22, async (url) => {
-      const daily = new URL(String(url)).searchParams.get('daily')?.split(',');
+      const parsed = new URL(String(url));
+      const daily = parsed.searchParams.get('daily')?.split(',');
+      expect(parsed.searchParams.get('forecast_days')).toBe('7');
       expect(daily).not.toContain('time');
       expect(daily).toContain('temperature_2m_max');
       return fakeForecastFetch()(String(url));
     });
+  });
+
+  it('supports the documented 16-day horizon only when explicitly requested', async () => {
+    await fetchWeather(
+      64,
+      -22,
+      async (url) => {
+        expect(new URL(String(url)).searchParams.get('forecast_days')).toBe('16');
+        return fakeForecastFetch()(String(url));
+      },
+      { forecastDays: 16 },
+    );
+    await expect(fetchWeather(64, -22, fakeForecastFetch(), { forecastDays: 17 })).rejects.toThrow(
+      'forecastDays must be an integer from 7 through 16',
+    );
   });
   it('parses current + daily and rounds', async () => {
     const w = await fetchWeather(64, -22, fakeWeatherFetch(3, 40));
