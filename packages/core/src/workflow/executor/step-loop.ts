@@ -68,6 +68,7 @@ import {
   EmailReviewAnswerSchema,
   EmailReviewRankSchema,
   type EmailReviewScope,
+  emailReviewAssessmentStepReserve,
   emailReviewCandidateIds,
   emailReviewCompleteThread,
   emailReviewCoverage,
@@ -184,7 +185,7 @@ import { canCompleteSilently } from './silent-completion.js';
 import { type ExecuteResult, LOST_LEASE } from './types.js';
 import { compact, latestUserText, replaceToolResultMessage } from './util.js';
 
-const EMAIL_REVIEW_RESERVED_ASSESSMENT_STEPS = 2;
+const EMAIL_REVIEW_DEFAULT_ASSESSMENT_RESERVE = 1;
 const EMAIL_REVIEW_MAX_ASSESSMENT_PASSES = 3;
 const EMAIL_REVIEW_MULTI_THREAD_STEP_BONUS = 8;
 const EMAIL_REVIEW_MULTI_THREAD_STEP_CAP = 22;
@@ -613,14 +614,18 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           timeZone: requestTimeZone,
         })
       : null;
+  let assessmentStepReserve: 1 | 2 = EMAIL_REVIEW_DEFAULT_ASSESSMENT_RESERVE;
   if (readRequest?.emailReview) {
     const originalMaxSteps = task.maxSteps;
     const requestHash = createHash('sha256').update(ownerText.trim()).digest('hex');
-    const canExtendEmailReviewSteps =
-      !readRequest.scopeIssue &&
-      !readRequest.emailReview.latestUnanswered &&
-      readRequest.emailReview.requestedCount > 1 &&
-      originalMaxSteps >= 14;
+    const emailReviewAssessmentReserve = emailReviewAssessmentStepReserve({
+      maxSteps: originalMaxSteps,
+      requestedCount: readRequest.emailReview.requestedCount,
+      latestUnanswered: readRequest.emailReview.latestUnanswered,
+      scopeIssue: readRequest.scopeIssue,
+    });
+    const canExtendEmailReviewSteps = emailReviewAssessmentReserve === 2;
+    if (canExtendEmailReviewSteps) assessmentStepReserve = emailReviewAssessmentReserve;
     const persistedStepBudget = canExtendEmailReviewSteps
       ? persistedEmailReviewStepBudget(
           state.plannerState[EMAIL_REVIEW_STEP_BUDGET_STATE_KEY],
@@ -1706,10 +1711,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         const selectionTargetCount = Math.min(EMAIL_REVIEW_MAX_RANK_POOL, desiredCount);
         const missing = Math.max(0, selectionTargetCount - selectedIds.length);
         const nextRankedIds = rankedIds.filter((id) => !selectedIds.includes(id));
-        const remainingReadSlots = Math.max(
-          0,
-          task.maxSteps - state.step - EMAIL_REVIEW_RESERVED_ASSESSMENT_STEPS,
-        );
+        const remainingReadSlots = Math.max(0, task.maxSteps - state.step - assessmentStepReserve);
         const addCount = Math.min(missing, nextRankedIds.length, remainingReadSlots);
         const nextSelectedIds = [...selectedIds, ...nextRankedIds.slice(0, addCount)];
         let backfillShortfall: typeof review.backfillShortfall;
@@ -1764,7 +1766,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     const forcedReadWouldConsumeEmailReviewReserve =
       readRequest?.emailReview !== undefined &&
       forcedReadTool === 'gmail.read_thread' &&
-      state.step + 1 + EMAIL_REVIEW_RESERVED_ASSESSMENT_STEPS > task.maxSteps;
+      state.step + 1 + assessmentStepReserve > task.maxSteps;
     const boundedForcedReadTool =
       !resumingBatch &&
       (readRequest?.sourceReads ||
@@ -1990,7 +1992,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         if (selected === undefined && successfulSearches.length > 0) {
           if (candidates.length === 0) {
             if (!(await persistReview({ ...review, selectedThreadIds: [] }))) return LOST_LEASE;
-          } else if (state.step + 1 + EMAIL_REVIEW_RESERVED_ASSESSMENT_STEPS > task.maxSteps) {
+          } else if (state.step + 1 + assessmentStepReserve > task.maxSteps) {
             if (
               !(await persistReview({
                 ...review,

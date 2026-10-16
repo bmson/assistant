@@ -5,6 +5,7 @@ import {
   EMAIL_REVIEW_MAX_RANK_POOL,
   EMAIL_REVIEW_QUERY,
   type EmailReviewEvidenceRow,
+  emailReviewAssessmentStepReserve,
   emailReviewCandidateIds,
   emailReviewCompleteThread,
   emailReviewCoverage,
@@ -165,6 +166,22 @@ function required<T>(value: T | undefined, label: string): T {
 }
 
 describe('bounded no-send email review', () => {
+  it('reserves a retry assessment step only for eligible multi-thread reviews', () => {
+    expect(emailReviewAssessmentStepReserve({ maxSteps: 12, requestedCount: 5 })).toBe(1);
+    expect(emailReviewAssessmentStepReserve({ maxSteps: 14, requestedCount: 5 })).toBe(2);
+    expect(
+      emailReviewAssessmentStepReserve({ maxSteps: 22, requestedCount: 5, latestUnanswered: true }),
+    ).toBe(1);
+    expect(
+      emailReviewAssessmentStepReserve({
+        maxSteps: 22,
+        requestedCount: 5,
+        scopeIssue: 'Unsupported requested window.',
+      }),
+    ).toBe(1);
+    expect(emailReviewAssessmentStepReserve({ maxSteps: 22, requestedCount: 1 })).toBe(1);
+  });
+
   it('preserves a valid model-assessed nuanced reply request outside the positive ask heuristic', async () => {
     const sourceMessages = messages('nuanced-ask');
     const latest = required(sourceMessages.at(-1), 'latest message');

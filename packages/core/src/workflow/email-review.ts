@@ -917,6 +917,20 @@ export function emailReviewPendingAssessmentThreads<T extends { threadId: string
   );
 }
 
+export function emailReviewAssessmentStepReserve(input: {
+  maxSteps: number;
+  requestedCount: number;
+  latestUnanswered?: boolean;
+  scopeIssue?: string;
+}): 1 | 2 {
+  return input.maxSteps >= 14 &&
+    input.requestedCount > 1 &&
+    !input.latestUnanswered &&
+    !input.scopeIssue
+    ? 2
+    : 1;
+}
+
 function emailReviewPromptLineKey(line: string): string {
   // Quote decoration is presentational; case and inner spacing may carry facts.
   return line.replace(/^\s*>+\s?/, '');
