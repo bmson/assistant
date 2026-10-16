@@ -3958,7 +3958,8 @@ describe('golden tasks', () => {
 - **Intercity** — IC connects North with the airport. Some local buses require a change.
 
 [Source](${url})`;
-    const source = `R10
+    const source = `${'Navigation item. '.repeat(750)}
+R10
 - Route: Central - Airport
 - Frequency: every 15 minutes
 Express buses (B12, B13)

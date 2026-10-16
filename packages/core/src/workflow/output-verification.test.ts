@@ -1083,12 +1083,119 @@ describe('public overview evidence and explicit subject boundaries', () => {
       expect(source.slice(passage.startOffset, passage.endOffset)).toBe(passage.text);
   });
 
+  it('includes the late category support for a claim that does not name its route ID', () => {
+    const prompt = buildOutputVerificationPrompt({ request, draft: answer, evidence });
+    const durable = prompt.match(/<durable_evidence>\n([\s\S]*?)\n<\/durable_evidence>/)?.[1];
+    const projection = JSON.parse(durable ?? '{}').source;
+    const category = projection.sourceCategoryPassages?.find(
+      (passage: { label: string }) => passage.label === 'Local buses to Airport',
+    );
+    expect(category?.text).toContain(
+      'Passengers reaching Junction must change to a train to reach the airport.',
+    );
+    expect(source.slice(category.startOffset, category.endOffset)).toBe(category.text);
+    expect(category.omittedChars).toBe(0);
+    expect(durable?.length).toBeLessThanOrEqual(12_000);
+    // Every nontrivial clause in this fixture has its own actual projected
+    // evidence. Merely checking that some source slices are valid is insufficient.
+    const byLabel = new Map<string, string>(
+      projection.sourcePassages.map((passage: { label: string; text: string }) => [
+        passage.label,
+        passage.text,
+      ]),
+    );
+    expect(byLabel.get('R10')).toContain('Central - Airport');
+    expect(byLabel.get('R20')).toContain('West - Airport');
+    expect(byLabel.get('B12')).toContain('Frequency: every 5–10 minutes');
+    expect(byLabel.get('B13')).toContain('City - Airport');
+    expect(byLabel.get('IC')).toContain('North - Airport - South');
+    expect(
+      projection.sourcePassages.length + projection.sourceCategoryPassages.length,
+    ).toBeLessThanOrEqual(24);
+  });
+
+  it('retains late category support even when neither source nor draft names a service ID', () => {
+    const source = `${'Navigation item. '.repeat(750)}\nNeighborhood buses
+Passengers reaching Junction must change to a train.
+Regional trains
+Trains serve the central station.`;
+    const prompt = buildOutputVerificationPrompt({
+      request,
+      draft: 'Neighborhood bus passengers must change at Junction.',
+      evidence: evidence.map((row) => ({ ...row, result: { ...row.result, text: source } })),
+    });
+    const durable = prompt.match(/<durable_evidence>\n([\s\S]*?)\n<\/durable_evidence>/)?.[1];
+    const projection = JSON.parse(durable ?? '{}').source;
+    expect(projection.sourcePassages).toEqual([]);
+    const category = projection.sourceCategoryPassages.find(
+      (passage: { label: string }) => passage.label === 'Neighborhood buses',
+    );
+    expect(category.text).toContain('Passengers reaching Junction must change to a train.');
+    expect(source.slice(category.startOffset, category.endOffset)).toBe(category.text);
+  });
+
+  it('prioritizes the claimed category within the existing byte and source-unit caps', () => {
+    const source = [
+      ...Array.from(
+        { length: 20 },
+        (_, index) => `District ${index} buses\n${'Unrelated source text. '.repeat(200)}`,
+      ),
+      'Harbor local buses',
+      'A change is required at Junction.',
+    ].join('\n');
+    const prompt = buildOutputVerificationPrompt({
+      request,
+      draft: 'Harbor local buses require a change at Junction.',
+      evidence: evidence.map((row) => ({ ...row, result: { ...row.result, text: source } })),
+    });
+    const durable = prompt.match(/<durable_evidence>\n([\s\S]*?)\n<\/durable_evidence>/)?.[1];
+    const projection = JSON.parse(durable ?? '{}').source;
+    expect(projection.sourceCategoryPassages[0].label).toBe('Harbor local buses');
+    expect(projection.sourceCategoryPassages[0].text).toContain(
+      'A change is required at Junction.',
+    );
+    expect(projection.sourceCategoryPassagesOmittedCount).toBe(13);
+    expect(projection.sourceCategoryPassages.length).toBe(8);
+    expect(
+      projection.sourcePassages.length + projection.sourceCategoryPassages.length,
+    ).toBeLessThanOrEqual(24);
+    expect(durable?.length).toBeLessThanOrEqual(12_000);
+    for (const passage of projection.sourceCategoryPassages)
+      expect(source.slice(passage.startOffset, passage.endOffset)).toBe(passage.text);
+  });
+
+  it('gives the reviewer category evidence to correct an unsupported generic claim', async () => {
+    const unsupported = answer.replace(
+      'Some local buses require a change at Junction.',
+      'All local buses run nonstop to the airport.',
+    );
+    const result = await verifyFinalOutput(
+      {
+        object: async (_role: string, input: { prompt: string }) => {
+          expect(input.prompt).toContain(
+            'Passengers reaching Junction must change to a train to reach the airport.',
+          );
+          return {
+            ok: true,
+            object: { decision: 'revise', revisedText: answer, reasons: ['unsupported_claim'] },
+          };
+        },
+      } as never,
+      { taskId: 'category-correction', request, draft: unsupported, evidence, critical: true },
+    );
+    expect(result).toEqual({ text: answer, attempted: true, revised: true, unavailable: false });
+    expect(result.text).not.toContain('nonstop');
+  });
+
   it('publishes the supported compact summary without spending a correction on false joins', async () => {
     let calls = 0;
     const result = await verifyFinalOutput(
       {
-        object: async () => {
+        object: async (_role: string, input: { prompt: string }) => {
           calls++;
+          expect(input.prompt).toContain(
+            'Passengers reaching Junction must change to a train to reach the airport.',
+          );
           return { ok: true, object: { decision: 'publish', reasons: [] } };
         },
       } as never,
