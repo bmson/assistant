@@ -7,6 +7,7 @@ import type { ModelRouter, StepCallOutcome } from '../../model-router/router.js'
 import type { DispatcherPort, ExecutorDeps } from '../executor.js';
 import { executeTask } from '../executor.js';
 import { enqueueTask } from '../machine.js';
+import { OutputVerificationSchema } from '../output-verification.js';
 import type { RequestChecklist } from '../request-checklist-schema.js';
 
 /**
@@ -132,7 +133,7 @@ class ScriptedRouter {
     };
   }
 
-  async object<T>(role: string, options?: { system?: string }): Promise<unknown> {
+  async object<T>(role: string, options?: { system?: string; schema?: unknown }): Promise<unknown> {
     if (role === 'extract') this.extractionCallCount += 1;
     if (role === 'extract' && this.compoundTripExtraction !== undefined) {
       return {
@@ -144,6 +145,21 @@ class ScriptedRouter {
       };
     }
     this.objectRoles.push(role);
+    if (role === 'reason' && options?.schema === OutputVerificationSchema) {
+      if ('unavailable' in this.verification) {
+        return {
+          ok: false,
+          decision: { mode: 'park', reason: 'golden verifier unavailable' },
+        };
+      }
+      return {
+        ok: true,
+        modelId: 'golden/reason',
+        degraded: false,
+        object: { reasons: [], ...this.verification } as T,
+        finishReason: 'stop',
+      };
+    }
     const scripted = this.objects[this.objectIndex];
     if (scripted?.role === role) {
       this.objectIndex += 1;

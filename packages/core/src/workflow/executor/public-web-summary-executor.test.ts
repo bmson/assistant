@@ -104,8 +104,13 @@ describe('public page summary through the allocated executor', () => {
       };
       const result = await runGoldenTask(db, agentId, fixture);
       expect(result.toolNames).toEqual(['web.fetch']);
-      // Two verifier passes plus the existing checklist review.
-      expect(result.objectRoles.filter((role) => role === 'rewrite')).toHaveLength(3);
+      // Only the attribution failure changes the correction call to reasoning.
+      expect(result.objectRoles.filter((role) => role === 'rewrite')).toHaveLength(
+        kind === 'unsupported' ? 2 : 3,
+      );
+      expect(result.objectRoles.filter((role) => role === 'reason')).toHaveLength(
+        kind === 'unsupported' ? 1 : 0,
+      );
       const [check] = await db
         .select()
         .from(responseChecks)
