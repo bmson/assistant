@@ -35,7 +35,6 @@ describe.skipIf(!localEmulator)('Firestore agent process in Cloud Tasks mode', (
       trust: 'assistant',
       trigger: { source: 'internal', payload: { kind: 'application_confirmation' } },
     });
-    const port = 20000 + Math.floor(Math.random() * 30000);
     const entry = fileURLToPath(new URL('./index.ts', import.meta.url));
     child = spawn(process.execPath, ['--import', 'tsx', entry], {
       cwd: process.cwd(),
@@ -63,8 +62,11 @@ describe.skipIf(!localEmulator)('Firestore agent process in Cloud Tasks mode', (
         VERTEX_LOCATION: 'us-central1',
         CANARY_ENABLED: 'false',
         LOCATION_PING_SECRET: '',
-        AGENT_PORT: String(port),
-        PORT: String(port),
+        // Let the OS choose an available port instead of racing other test
+        // processes for a random port in a shared range. The agent logs the
+        // bound port once its listener is ready.
+        AGENT_PORT: '8787',
+        PORT: '0',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -76,14 +78,20 @@ describe.skipIf(!localEmulator)('Firestore agent process in Cloud Tasks mode', (
     });
 
     let ready: Response | null = null;
+    let port: number | undefined;
     for (let attempt = 0; attempt < 80; attempt += 1) {
       if (child.exitCode !== null) throw new Error(`agent exited before ready: ${output}`);
-      ready = await fetch(`http://127.0.0.1:${port}/ready`).catch(() => null);
+      const listeningPort = output.match(/agent service listening on :(\d+)/)?.[1];
+      if (listeningPort) {
+        port = Number(listeningPort);
+        ready = await fetch(`http://127.0.0.1:${port}/ready`).catch(() => null);
+      }
       if (ready) break;
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
     expect(ready?.status, output).toBe(200);
     expect(await ready?.json()).toMatchObject({ ready: true, database: 'firestore' });
+    if (!port) throw new Error(`agent did not report a valid listener port: ${output}`);
 
     // Cloud Tasks deliveries must carry a Google-signed token for this agent.
     const unsigned = await fetch(`http://127.0.0.1:${port}/internal/tasks/execute`, {

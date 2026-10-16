@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   boundEmailReviewThreads,
+  EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE,
+  EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS,
   EMAIL_REVIEW_MAX_RANK_CANDIDATES,
   EMAIL_REVIEW_MAX_RANK_POOL,
   EMAIL_REVIEW_QUERY,
   type EmailReviewEvidenceRow,
+  emailReviewAssessmentModelCallBudget,
   emailReviewAssessmentStepReserve,
   emailReviewCandidateIds,
   emailReviewCompleteThread,
@@ -183,6 +186,27 @@ describe('bounded no-send email review', () => {
     expect(emailReviewAssessmentStepReserve({ maxSteps: 22, requestedCount: 1 })).toBe(1);
   });
 
+  it('keeps the structured-assessment call budget cumulative across resumed passes', () => {
+    expect(emailReviewAssessmentModelCallBudget(undefined, 0)).toEqual({
+      used: 0,
+      remaining: EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS,
+    });
+    expect(emailReviewAssessmentModelCallBudget(2, 1)).toEqual({
+      used: 2,
+      remaining: EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS - 2,
+    });
+    expect(emailReviewAssessmentModelCallBudget(undefined, 1)).toEqual({
+      used: EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS,
+      remaining: 0,
+    });
+    expect(
+      emailReviewAssessmentModelCallBudget(EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS + 1, 0),
+    ).toEqual({
+      used: EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS,
+      remaining: 0,
+    });
+  });
+
   it('retains owner-choice findings only for the same unresolved selected thread revision', () => {
     const threadId = 'owner-choice-thread';
     const thread = emailReviewCompleteThread(threadId, 'owner@example.com', [
@@ -317,6 +341,143 @@ describe('bounded no-send email review', () => {
     expect(formatEmailReviewAnswer([], coverage)).toContain(
       'ranking context included 1 of 2 scanned non-newsletter threads; the others were not ranked',
     );
+  });
+
+  it('states that heuristic fallback is not an exhaustive importance ranking', () => {
+    const coverage = emailReviewCoverage([], [], [search('thread-a'), search('thread-b')]);
+    coverage.metadataFallback = true;
+    coverage.rankedMetadataThreads = 115;
+    coverage.backfillShortfall = 'rank_pool_exhausted';
+    const text = formatEmailReviewAnswer([], coverage);
+    expect(text).toContain('automated ranking was unavailable');
+    expect(text).toContain('heuristic request cues and recent metadata');
+    expect(text).toContain('this is not a complete importance ranking');
+    expect(text).toContain('ranked candidate pool had no replacement threads');
+  });
+
+  it('keeps metadata fallback to the bounded rank pool when a large scan cannot be ranked', () => {
+    const results = Array.from({ length: 115 }, (_, index) => ({
+      threadId: `candidate-${String(index).padStart(3, '0')}`,
+      messageId: `message-${index}`,
+      from: 'sender@example.net',
+      to: 'owner@example.com',
+      date: new Date(Date.UTC(2026, 9, 15, 0, index)).toISOString(),
+      subject: `Request ${index}`,
+      snippet: `Could you confirm request ${index}?`,
+    }));
+    const evidence = [search('candidate-search', { results })];
+    const rankingContext = emailReviewRankContext(evidence);
+    const fallback = emailReviewRecentMetadataFallback(evidence, rankingContext.candidateIds).slice(
+      0,
+      EMAIL_REVIEW_MAX_RANK_POOL,
+    );
+    const coverage = emailReviewCoverage(
+      fallback,
+      [],
+      evidence,
+      0,
+      [],
+      [],
+      'rank_pool_exhausted',
+      true,
+    );
+    coverage.rankedMetadataThreads = rankingContext.candidateIds.length;
+
+    expect(rankingContext.candidateIds).toHaveLength(115);
+    expect(fallback).toHaveLength(EMAIL_REVIEW_MAX_RANK_POOL);
+    expect(formatEmailReviewAnswer([], coverage)).toContain(
+      'this is not a complete importance ranking',
+    );
+  });
+
+  it('assesses eight threads in ordered small batches and retries only missing items', async () => {
+    const threadIds = Array.from({ length: 8 }, (_, index) => `thread-${index + 1}`);
+    const evidence = threadIds.flatMap((id) => [search(id), read(id, messages(id))]);
+    const threads = threadIds.map((id) =>
+      required(
+        emailReviewCompleteThread(id, 'owner@example.com', [search(id), read(id, messages(id))]),
+        'complete thread',
+      ),
+    );
+    const calls: Array<{ ids: string[]; repair: boolean }> = [];
+    const result = await generateValidatedEmailReview(threads, async ({ prompt, repair }) => {
+      const jsonPrompt = prompt.split('\n\nThe previous assessment could not pass')[0];
+      const input = JSON.parse(jsonPrompt as string) as { threads: Array<{ threadId: string }> };
+      const ids = input.threads.map((thread) => thread.threadId);
+      calls.push({ ids, repair });
+      return {
+        ok: true,
+        value: {
+          items: (repair ? ids : ids.slice(0, 1)).map((id) =>
+            required(validAnswer(id).items[0], 'source-grounded assessment'),
+          ),
+        },
+      };
+    });
+
+    expect(calls.filter((call) => !call.repair).map((call) => call.ids)).toEqual([
+      threadIds.slice(0, EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE),
+      threadIds.slice(EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE),
+    ]);
+    expect(calls.filter((call) => call.repair).map((call) => call.ids)).toEqual([
+      threadIds.slice(1, EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE),
+      threadIds.slice(EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE + 1),
+    ]);
+    expect(result.attempts).toBe(4);
+    expect(result.attempts).toBeLessThanOrEqual(EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS);
+    expect(result.answer?.items.map((item) => item.thread.threadId)).toEqual(threadIds);
+    expect(result.sourceBatches?.map((batch) => batch.length)).toEqual([5, 3]);
+    expect(
+      revalidateEmailReviewAssessmentBatches(
+        result.sourceBatches,
+        threadIds,
+        'owner@example.com',
+        evidence,
+      )?.items.map((item) => item.thread.threadId),
+    ).toEqual(threadIds);
+  });
+
+  it('preserves partial validated work and enforces a cumulative assessment call budget', async () => {
+    const threadIds = Array.from({ length: 8 }, (_, index) => `thread-${index + 1}`);
+    const threads = threadIds.map((id) =>
+      required(
+        emailReviewCompleteThread(id, 'owner@example.com', [search(id), read(id, messages(id))]),
+        'complete thread',
+      ),
+    );
+    const calls: Array<{ ids: string[]; repair: boolean }> = [];
+    const result = await generateValidatedEmailReview(
+      threads,
+      async ({ prompt, repair }) => {
+        const jsonPrompt = prompt.split('\n\nThe previous assessment could not pass')[0];
+        const input = JSON.parse(jsonPrompt as string) as { threads: Array<{ threadId: string }> };
+        const ids = input.threads.map((thread) => thread.threadId);
+        calls.push({ ids, repair });
+        return calls.length === 1
+          ? {
+              ok: true,
+              value: {
+                items: [required(validAnswer(ids[0] as string).items[0], 'valid partial item')],
+              },
+            }
+          : { ok: false };
+      },
+      2,
+    );
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toMatchObject({ ids: threadIds.slice(1, 5), repair: true });
+    expect(result.attempts).toBe(2);
+    expect(result.answer?.items.map((item) => item.thread.threadId)).toEqual([threadIds[0]]);
+    expect(result.sourceBatches?.flat().map((item) => item.threadId)).toEqual([threadIds[0]]);
+    expect(result.issues).toContain('generation_unavailable');
+    expect(result.issues).toContain('assessment_model_call_limit_reached');
+
+    const incomplete = emailReviewCompleteThread('thread-incomplete', 'owner@example.com', [
+      search('thread-incomplete'),
+      read('thread-incomplete', messages('thread-incomplete'), { complete: false }),
+    ]);
+    expect(incomplete).toBeUndefined();
   });
 
   it('revalidates saved no-reply assessments against complete task-local threads before reserve use', () => {
@@ -1222,7 +1383,55 @@ describe('bounded no-send email review', () => {
     );
     expect(text).toContain('Reviewed 1 of 2 selected threads');
     expect(text).not.toContain('Completed verified reply checks');
-    expect(text).toContain('complete source reads: 2 of 2 selected threads');
+    expect(text).toContain('complete, eligible source reads: 2 of 2 selected threads');
+  });
+
+  it('keeps assessed, eligible, ineligible, incomplete, and unassessed counts distinct', () => {
+    const eligibleThreads = Array.from({ length: 8 }, (_, index) =>
+      required(
+        emailReviewCompleteThread(`eligible-${index}`, 'owner@example.com', [
+          search(`eligible-${index}`),
+          read(`eligible-${index}`, messages(`eligible-${index}`)),
+        ]),
+        'complete eligible thread',
+      ),
+    );
+    const first = required(eligibleThreads[0], 'first eligible thread');
+    const assessment = validateEmailReviewAnswer(validAnswer(first.threadId), [first]);
+    const evidence = eligibleThreads.flatMap((thread) => [
+      search(thread.threadId),
+      read(thread.threadId, thread.messages),
+    ]);
+    const coverage = emailReviewCoverage(
+      [
+        ...eligibleThreads.map((thread) => thread.threadId),
+        'ineligible-thread',
+        'incomplete-thread',
+      ],
+      eligibleThreads,
+      evidence,
+      0,
+      [],
+      ['ineligible-thread'],
+      undefined,
+      false,
+      7,
+    );
+    const text = formatEmailReviewAnswer(assessment?.items ?? [], coverage, false, {
+      requestedCount: 5,
+    });
+
+    expect(text).toContain(
+      'Reviewed 2 of 10 selected threads from a bounded 7-day mail scan; assessed 1 of 8 complete, eligible threads; prepared 1 reply draft (you asked for 5).',
+    );
+    expect(text).toContain('complete, eligible source reads: 8 of 10 selected threads');
+    expect(text).toContain(
+      '1 selected thread was reviewed but did not meet the reply-draft criteria',
+    );
+    expect(text).toContain(
+      '1 selected thread lacked enough complete chronology or eligibility evidence to assess',
+    );
+    expect(text).toContain('7 selected threads could not be assessed reliably');
   });
 
   it('discloses mailbox mismatch and complete threads left unassessed without leaking addresses', () => {
@@ -1900,7 +2109,7 @@ describe('bounded no-send email review', () => {
 
     expect(answer).toContain('Reviewed 0 of 1 selected threads');
     expect(answer).toContain('bounded newest-first inbox scan');
-    expect(answer).toContain('complete source reads: 0 of 1 selected threads');
+    expect(answer).toContain('complete, eligible source reads: 0 of 1 selected threads');
     expect(answer).not.toContain('checked against its complete thread');
   });
 
@@ -2974,7 +3183,7 @@ describe('bounded no-send email review', () => {
       backfillShortfall: 'step_budget',
     });
     expect(text).toContain('reviewed but did not meet the reply-draft criteria');
-    expect(text).toContain('not used because eligibility could not be established');
+    expect(text).toContain('lacked enough complete chronology or eligibility evidence to assess');
     expect(text).toContain('step limit prevented another replacement-thread read');
     expect(text).not.toContain('no more threads to replace');
   });

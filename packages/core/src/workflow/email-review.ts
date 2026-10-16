@@ -4,12 +4,40 @@ export const EMAIL_REVIEW_QUERY = 'newer_than:7d -from:me';
 export const EMAIL_REVIEW_MAX_CANDIDATES = 5;
 export const EMAIL_REVIEW_MAX_RANK_POOL = 10;
 export const EMAIL_REVIEW_MAX_RANK_CANDIDATES = 120;
+// Keep each structured assessment within the response schema's item limit.
+// With ten selected threads, two batches and one repair per batch cap provider
+// calls at four while preserving exact per-thread validation.
+export const EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE = EMAIL_REVIEW_MAX_CANDIDATES;
+export const EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS = 4;
 // Reserve steps for a second complete-thread assessment when the first set
 // contains verified non-requests. Metadata beyond this bound remains uncovered.
 export const EMAIL_REVIEW_MAX_SEARCH_PAGES = 3;
 export const EMAIL_REVIEW_MAX_THREAD_CONTINUATIONS = 2;
 export const EMAIL_REVIEW_MAX_CONTEXT_CHARS = 50_000;
 export const EMAIL_REVIEW_MAX_RANK_CHARS = 40_000;
+
+export function emailReviewAssessmentModelCallBudget(
+  storedCalls: unknown,
+  priorPasses: number,
+): { used: number; remaining: number } {
+  if (
+    typeof storedCalls === 'number' &&
+    Number.isInteger(storedCalls) &&
+    storedCalls >= 0 &&
+    storedCalls <= EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS
+  )
+    return {
+      used: storedCalls,
+      remaining: EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS - storedCalls,
+    };
+  // Missing legacy counters are only safe to default before any pass has run.
+  if (storedCalls === undefined && priorPasses === 0)
+    return { used: 0, remaining: EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS };
+  return {
+    used: EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS,
+    remaining: 0,
+  };
+}
 
 export interface EmailReviewScope {
   query?: string;
@@ -891,8 +919,7 @@ export function emailReviewCoverage(
         selectedCompleted.size -
         new Set(alreadyAnsweredThreadIds).size -
         new Set(notEligibleThreadIds).size -
-        contextLimitedThreads -
-        unassessedCompleteThreads,
+        contextLimitedThreads,
     ),
     obviousNewslettersExcluded: scope?.latestUnanswered
       ? 0
@@ -1702,6 +1729,81 @@ export async function generateValidatedEmailReview(
     prompt: string;
     repair: boolean;
   }) => Promise<{ ok: boolean; value?: unknown }>,
+  maxModelCalls = EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS,
+): Promise<{
+  answer?: ValidatedEmailReviewAnswer;
+  sourceItems?: EmailReviewSourceItem[];
+  sourceBatches?: EmailReviewSourceItem[][];
+  ownerDecisionThreadIds: string[];
+  attempts: number;
+  issues: string[];
+}> {
+  if (threads.length > EMAIL_REVIEW_MAX_RANK_POOL) {
+    return {
+      ownerDecisionThreadIds: [],
+      attempts: 0,
+      issues: ['assessment_thread_limit_exceeded'],
+    };
+  }
+
+  const accepted = new Map<
+    string,
+    { source: EmailReviewSourceItem; validated: ValidatedEmailReviewItem }
+  >();
+  const ownerDecisionThreadIds = new Set<string>();
+  const issues = new Set<string>();
+  const sourceBatches: EmailReviewSourceItem[][] = [];
+  const maxCalls = Number.isFinite(maxModelCalls)
+    ? Math.max(0, Math.min(EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS, Math.trunc(maxModelCalls)))
+    : 0;
+  let attempts = 0;
+  const batchCount = Math.ceil(threads.length / EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE);
+  for (let batchIndex = 0; batchIndex < batchCount; batchIndex += 1) {
+    const batch = threads.slice(
+      batchIndex * EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE,
+      (batchIndex + 1) * EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE,
+    );
+    const remainingCalls = maxCalls - attempts;
+    if (remainingCalls <= 0) {
+      issues.add('assessment_model_call_limit_reached');
+      break;
+    }
+    const result = await generateValidatedEmailReviewBatch(
+      batch,
+      generate,
+      Math.min(2, remainingCalls),
+    );
+    attempts += result.attempts;
+    if (result.sourceItems?.length) sourceBatches.push(result.sourceItems);
+    const sourceByThread = new Map(
+      (result.sourceItems ?? []).map((source) => [source.threadId, source] as const),
+    );
+    for (const item of result.answer?.items ?? []) {
+      const source = sourceByThread.get(item.thread.threadId);
+      if (source)
+        accepted.set(item.thread.threadId, {
+          source,
+          validated: item,
+        });
+    }
+    for (const threadId of result.ownerDecisionThreadIds) ownerDecisionThreadIds.add(threadId);
+    for (const issue of result.issues) issues.add(issue);
+  }
+
+  return {
+    ...acceptedResult(threads, accepted, attempts, [...issues]),
+    ...(sourceBatches.length ? { sourceBatches } : {}),
+    ownerDecisionThreadIds: [...ownerDecisionThreadIds],
+  };
+}
+
+async function generateValidatedEmailReviewBatch(
+  threads: ReadonlyArray<EmailReviewThread>,
+  generate: (input: {
+    prompt: string;
+    repair: boolean;
+  }) => Promise<{ ok: boolean; value?: unknown }>,
+  maxAttempts: number,
 ): Promise<{
   answer?: ValidatedEmailReviewAnswer;
   sourceItems?: EmailReviewSourceItem[];
@@ -1716,7 +1818,8 @@ export async function generateValidatedEmailReview(
     { source: EmailReviewSourceItem; validated: ValidatedEmailReviewItem }
   >();
   const ownerDecisionThreadIds = new Set<string>();
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  let attempts = 0;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const pendingThreads = threads.filter((thread) => {
       const prior = accepted.get(thread.threadId)?.validated;
       return !prior || prior.deadlineNeedsReview;
@@ -1725,6 +1828,7 @@ export async function generateValidatedEmailReview(
     const attemptPrompt = attempt === 0 ? prompt : emailReviewPrompt(pendingThreads);
     let outcome: { ok: boolean; value?: unknown };
     try {
+      attempts += 1;
       outcome = await generate({
         repair: attempt > 0,
         prompt:
@@ -1768,7 +1872,7 @@ export async function generateValidatedEmailReview(
         if (thread) ownerDecisionThreadIds.delete(thread.threadId);
       }
       return {
-        ...acceptedResult(threads, accepted, attempt + 1, []),
+        ...acceptedResult(threads, accepted, attempts, []),
         ownerDecisionThreadIds: [...ownerDecisionThreadIds],
       };
     }
@@ -1791,7 +1895,7 @@ export async function generateValidatedEmailReview(
     }
   }
   return {
-    ...acceptedResult(threads, accepted, 2, issues),
+    ...acceptedResult(threads, accepted, attempts, issues),
     ownerDecisionThreadIds: [...ownerDecisionThreadIds],
   };
 }
@@ -1955,7 +2059,7 @@ export function formatEmailReviewAnswer(
     ? `a bounded newest-first inbox scan${scope.startAt && scope.endAt ? ' within the requested time window' : ''}`
     : `a bounded ${scope?.windowDays ?? 7}-${reviewRange} mail scan`;
   const lines = [
-    `Reviewed ${reviewedThreads} of ${coverage.selectedThreads} selected threads from ${scanDescription}; prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'}.`,
+    `Reviewed ${reviewedThreads} of ${coverage.selectedThreads} selected threads from ${scanDescription}; assessed ${assessedThreads} of ${coverage.completeThreads} complete, eligible threads; prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'}${scope?.requestedCount ? ` (you asked for ${scope.requestedCount})` : ''}.`,
   ];
   if (drafts.length > 0)
     lines.push(
@@ -2005,11 +2109,11 @@ export function formatEmailReviewAnswer(
     coverage.completeThreads !== reviewedThreads
   )
     coverageNotes.push(
-      `complete source reads: ${coverage.completeThreads} of ${coverage.selectedThreads} selected threads`,
+      `complete, eligible source reads: ${coverage.completeThreads} of ${coverage.selectedThreads} selected threads`,
     );
   if (coverage.ownerOrChronologyExcluded > 0)
     coverageNotes.push(
-      `${coverage.ownerOrChronologyExcluded} selected ${coverage.ownerOrChronologyExcluded === 1 ? 'thread was' : 'threads were'} not used because eligibility could not be established`,
+      `${coverage.ownerOrChronologyExcluded} selected ${coverage.ownerOrChronologyExcluded === 1 ? 'thread lacked' : 'threads lacked'} enough complete chronology or eligibility evidence to assess`,
     );
   if (coverage.alreadyAnsweredThreads > 0)
     coverageNotes.push(
@@ -2068,7 +2172,7 @@ export function formatEmailReviewAnswer(
   }
   if (coverage.metadataFallback)
     coverageNotes.push(
-      'automated ranking was unavailable, so explicit request cues were prioritized ahead of automated notices',
+      'automated ranking was unavailable; heuristic request cues and recent metadata selected these candidates, so this is not a complete importance ranking',
     );
   if (drafts.length < rawDraftCount)
     coverageNotes.push(

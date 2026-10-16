@@ -294,21 +294,27 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
       ...(scenario === 'alternate source search'
         ? ['web.search', 'web.fetch']
         : scenario === 'all sources blocked'
-          ? ['web.search']
+          ? ['web.search', 'web.search']
           : []),
       ...(!focused ? ['maps.directions'] : []),
     ]);
     if (!focused)
       expect(calls.find((call) => call.toolName === 'maps.directions')?.args).toMatchObject({
         origin: 'CPH Airport',
-        destination: 'Canal Street 42, Copenhagen',
+        destination: 'Canal House, Canal Street 42, Copenhagen',
       });
     expect(calls.filter((call) => call.toolName === 'web.fetch')).toHaveLength(expectedFetches);
     expect(
       new Set(calls.filter((call) => call.toolName === 'web.fetch').map((call) => call.args.url))
         .size,
     ).toBe(expectedFetches);
-    expect(calls.length).toBeLessThanOrEqual(16);
+    expect(calls.length).toBeLessThanOrEqual(18);
+    if (scenario === 'all sources blocked') {
+      const searches = calls.filter((call) => call.toolName === 'web.search');
+      expect(searches).toHaveLength(3);
+      expect(searches.at(-1)?.args.query).toContain('"Canal House"');
+      expect(searches.at(-1)?.args.query).toContain('public transport train bus fare duration');
+    }
     expect(state.step).toBeLessThanOrEqual(lease.maxSteps);
     const persisted = await db.query.messages.findMany({ where: eq(messages.taskId, taskId) });
     const answer = persisted.find((row) => row.role === 'assistant')?.text ?? '';
@@ -318,7 +324,7 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
     expect(answer).not.toContain('|---|');
     if (focused) {
       expect(answer).toContain('Outbound/return direction is not explicitly stated');
-      expect(answer).toContain('local; zone unspecified');
+      expect(answer).toContain('local; zone not stated');
       expect(answer).toContain(
         '[Local-clock confirmation](https://mail.google.com/mail/u/0/#all/clock-thread)',
       );
@@ -333,7 +339,9 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
     } else {
       expect(answer).toContain('Canal House');
       expect(answer).toContain('2030-11-10 to 2030-11-17');
-      expect(answer).toContain('Outbound/return direction is not explicitly stated');
+      expect(answer).toContain(
+        'The booking lists route 1 before route 2; route 2 reverses route 1. The source does not label either route outbound or return.',
+      );
       if (scenario === 'all sources blocked') {
         expect(answer).not.toContain('EUR 5');
         expect(answer).not.toContain('EUR 45');

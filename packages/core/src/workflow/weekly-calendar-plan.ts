@@ -514,11 +514,6 @@ function calendarSourceReference(event: PlainRecord): string {
   return url ? `[${title}](<${url}>)` : `**${title}**`;
 }
 
-function organizerReference(event: PlainRecord): string {
-  const organizer = safeText(event.organizer, 100);
-  return organizer ? `the listed organizer (${organizer})` : 'the event organizer';
-}
-
 export interface WeeklyCalendarPlanInput {
   timeMin: string;
   timeMax: string;
@@ -899,11 +894,8 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   chosen.sort((a, b) => a.start - b.start);
 
   const conflictPairs: string[] = [];
-  const conflictRecommendations: string[] = [];
   const duplicateListingPairs: string[] = [];
   const probableDuplicatePairs = new Set<string>();
-  const duplicateSourceUrlsByPair: string[][] = [];
-  const conflictSourceUrlsByPair: string[][] = [];
   const conflictEvents = uniqueEvents
     .filter((event) => attendance(event) !== 'not-attending' && event.allDay !== true)
     .map((event) => ({ event, interval: parseEventInterval(event), presence: attendance(event) }))
@@ -930,9 +922,6 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       )
         continue;
       const pair = `${eventTitle(left.event)} and ${eventTitle(right.event)}`;
-      const pairSourceUrls = [left.event, right.event]
-        .map(strictGoogleCalendarLink)
-        .filter((url): url is string => url !== undefined);
       const overlappingInterval = {
         start: Math.max(left.interval.start, right.interval.start, start),
         end: Math.min(left.interval.end, right.interval.end, end),
@@ -954,9 +943,8 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         if (!probableDuplicatePairs.has(pairKey)) {
           probableDuplicatePairs.add(pairKey);
           duplicateListingPairs.push(
-            `Possible duplicate listing: ${pair} (${labelTime(overlappingInterval.start, input.timeZone)}); occurrence identity unverified. Sources: ${calendarSourceReference(left.event)}; ${calendarSourceReference(right.event)}.`,
+            `Possible duplicate listing: ${pair} (${labelTime(overlappingInterval.start, input.timeZone)}); occurrence identity unverified. Sources: ${calendarSourceReference(left.event)}; ${calendarSourceReference(right.event)}.\n  - Next: verify whether these entries are one occurrence.`,
           );
-          duplicateSourceUrlsByPair.push(pairSourceUrls);
         }
         continue;
       }
@@ -964,35 +952,28 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       const uncertainLongContext =
         (isExtendedContext(left.interval) && !isExtendedLodging(left.event, left.interval)) ||
         (isExtendedContext(right.interval) && !isExtendedLodging(right.event, right.interval));
-      const uncertainEvents = [left, right]
-        .filter((item) => item.presence === 'potential')
-        .map((item) => eventTitle(item.event));
+      const uncertain = [left, right].filter((item) => item.presence === 'potential');
       const overlapQualification =
         verified && uncertainLongContext
           ? 'Both invites show accepted, but a long event span may not represent simultaneous attendance.'
           : verified
             ? 'Both invites show accepted.'
-            : `Attendance is unconfirmed for ${uncertainEvents.join(' and ')}.`;
-      conflictPairs.push(
-        `${verified && !uncertainLongContext ? 'Scheduling conflict' : 'Possible overlap'}: ${pair} (${labelTime(Math.max(left.interval.start, right.interval.start), input.timeZone)}). ${overlapQualification} Sources: ${calendarSourceReference(left.event)}; ${calendarSourceReference(right.event)}.`,
-      );
-      conflictSourceUrlsByPair.push(pairSourceUrls);
+            : uncertain.length === 2
+              ? 'Attendance for both is unconfirmed.'
+              : `Attendance is unconfirmed for ${eventTitle(uncertain[0]?.event ?? right.event)}.`;
+      let nextStep: string;
       if (verified && !uncertainLongContext) {
-        conflictRecommendations.push(
-          `Choice: keep ${eventTitle(left.event)} and ask ${organizerReference(right.event)} whether ${eventTitle(right.event)} can move, or keep ${eventTitle(right.event)} and ask ${organizerReference(left.event)} whether ${eventTitle(left.event)} can move.`,
-        );
-      } else if (uncertainLongContext && uncertainEvents.length === 0) {
-        conflictRecommendations.push(
-          `Next: verify the actual occurrence times for ${eventTitle(left.event)} and ${eventTitle(right.event)} before treating this long-span overlap as a conflict.`,
-        );
+        nextStep =
+          'Next: choose which invite to keep and ask the other organizer whether it can move.';
+      } else if (uncertainLongContext && uncertain.length === 0) {
+        nextStep =
+          'Next: verify the actual occurrence times for both invites before treating this long-span overlap as a conflict.';
       } else {
-        const confirmed = [left, right]
-          .filter((item) => item.presence === 'attending')
-          .map((item) => eventTitle(item.event));
-        conflictRecommendations.push(
-          `Next: confirm attendance for ${uncertainEvents.join(' and ')}${confirmed.length ? `; if attending, compare with ${confirmed.join(' and ')}, choose which event you would like to move, and ask its organizer whether a move is possible` : '; if attending both, choose which to keep and ask the other organizer whether a move is possible'}.`,
-        );
+        nextStep = `Next: confirm ${uncertain.length === 2 ? 'attendance for both' : 'that attendance'}; if you will attend both, choose which to keep and ask the other organizer whether it can move.`;
       }
+      conflictPairs.push(
+        `${verified && !uncertainLongContext ? 'Scheduling conflict' : 'Possible overlap'}: ${pair} (${labelTime(Math.max(left.interval.start, right.interval.start), input.timeZone)}). ${overlapQualification} Sources: ${calendarSourceReference(left.event)}; ${calendarSourceReference(right.event)}.\n  - ${nextStep}`,
+      );
     }
   }
 
@@ -1062,6 +1043,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const conditionalStayNames = [...new Set(chosen.flatMap((slot) => slot.lodgingConditions))];
   const lines = [
     `Review-only plan for ${windowLabel} (${input.timeZone}); no calendar changes made.`,
+    '',
   ];
   const formatClock = (at: number) =>
     new Intl.DateTimeFormat('en-US', {
@@ -1080,8 +1062,10 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         const focusEnd = slot.start + focusMs;
         return `| ${labelTime(slot.start, timeZone)}–${formatClock(focusEnd)} (${focusMs / 60_000}m) | ${breakMs / 60_000}m |`;
       }),
+      '',
     );
   }
+  const availabilityNotes: string[] = [];
   if (conditionalStayNames.length > 0) {
     const conditionalStayNameSet = new Set(conditionalStayNames);
     const stayDetails = [
@@ -1102,7 +1086,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         }),
       ).values(),
     ];
-    lines.push(
+    availabilityNotes.push(
       `Availability caveat: the feed still reports busy across this window where it overlaps ${stayDetails.join(', ') || conditionalStayNames.join(', ')}; conditional slots assume lodging context, not a work hold.`,
     );
   }
@@ -1120,7 +1104,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   if (allDayBusySources.length > 0) {
     const shownAllDay = allDayBusySources.slice(0, 3);
     const omittedAllDay = allDayBusySources.length - shownAllDay.length;
-    lines.push(
+    availabilityNotes.push(
       `All-day holds that still block focus time (not counted as meeting workload): ${shownAllDay
         .map(
           ({ event, interval }) =>
@@ -1132,7 +1116,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     );
   }
   if (explainedLodgingBusy.size > 0)
-    lines.push(
+    availabilityNotes.push(
       'Multi-day lodging is excluded from meeting workload; conditional slots still rely on the feed’s busy interval being lodging context.',
     );
   if (!complete) {
@@ -1146,7 +1130,12 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       `${missing}; proposed times are tentative, not confirmed free. Confirm the missing calendars before relying on this review`,
     );
   }
-  if (coverageNotes.length > 0) lines.push(`Limits: ${coverageNotes.join('; ')}.`);
+  if (availabilityNotes.length > 0) {
+    lines.push('Availability notes:', ...availabilityNotes.map((note) => `- ${note}`), '');
+  }
+  if (coverageNotes.length > 0) {
+    lines.push('Limits:', ...coverageNotes.map((note) => `- ${note}.`), '');
+  }
   const assumptions = [
     `assumed 9 AM–5 PM work hours (not configured) and a ${breakMs / 60_000}-minute break after each focus block`,
   ];
@@ -1160,41 +1149,44 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     assumptions.push(
       'some shared-event attendance is unconfirmed; verify before relying on travel time',
     );
-  if (assumptions.length > 0) lines.push(`Assumptions: ${assumptions.join('; ')}.`);
+  if (assumptions.length > 0) {
+    lines.push('Assumptions:', ...assumptions.map((assumption) => `- ${assumption}.`), '');
+  }
   const visibleConflictLimit = 5;
   const allConflictDetails = [...duplicateListingPairs, ...conflictPairs];
-  const visibleDuplicateCount = Math.min(visibleConflictLimit, duplicateListingPairs.length);
-  const visibleConflictCount = Math.max(0, visibleConflictLimit - visibleDuplicateCount);
-  const conflictSourceUrls = new Set([
-    ...duplicateSourceUrlsByPair.slice(0, visibleDuplicateCount).flat(),
-    ...conflictSourceUrlsByPair.slice(0, visibleConflictCount).flat(),
-  ]);
-  if (allConflictDetails.length > 0) lines.push('Conflicts and review choices:');
-  lines.push(...allConflictDetails.slice(0, visibleConflictLimit));
-  lines.push(...conflictRecommendations.slice(0, visibleConflictCount));
+  if (allConflictDetails.length > 0) {
+    lines.push(
+      'Conflicts and review choices:',
+      ...allConflictDetails.slice(0, visibleConflictLimit).map((detail) => `- ${detail}`),
+      '',
+    );
+  }
   if (allConflictDetails.length > visibleConflictLimit)
     lines.push(
       `${allConflictDetails.length - visibleConflictLimit} additional overlaps or possible duplicate listings omitted from this brief; all were included in the planning check.`,
     );
   if (conflictPairs.length === 0 && duplicateListingPairs.length === 0 && complete)
     lines.push('Conflicts: none found in checked calendar data.');
-  if (conflictPairs.length === 0 && duplicateListingPairs.length > 0)
-    lines.push('Next step: verify whether duplicate source records are one occurrence.');
   const includeWorkloadAssessment = input.plan?.includeWorkloadAssessment ?? true;
   if (includeWorkloadAssessment) {
-    if (overloads.length > 0) lines.push(`Overloaded-day estimate: ${overloads.join('; ')}.`);
+    const workloadNotes: string[] = [];
+    if (overloads.length > 0)
+      workloadNotes.push(`Overloaded-day estimate: ${overloads.join('; ')}.`);
     else if (!busyValid)
-      lines.push('I could not assess overloaded days from usable free/busy data.');
+      workloadNotes.push('I could not assess overloaded days from usable free/busy data.');
     else
-      lines.push(
+      workloadNotes.push(
         `Overloaded-day assessment: No checked working day reaches the 6-hour busy-time threshold inside the assumed 9–5 day.${complete ? ' This is a planning heuristic.' : ' This applies only to the checked data; missing coverage could change this assessment.'}`,
       );
     if (eveningAssessments.length > 0)
-      lines.push(`Evening review: ${eveningAssessments.join(' · ')}`);
+      workloadNotes.push(`Evening review: ${eveningAssessments.join(' · ')}`);
     if (overloads.length > 0)
-      lines.push(
+      workloadNotes.push(
         'Recommended change: consider moving flexible work from an overloaded day to a lighter day after checking your priorities.',
       );
+    if (workloadNotes.length > 0) {
+      lines.push('Workload review:', ...workloadNotes.map((note) => `- ${note}`), '');
+    }
   }
   if (chosen.length === 0) {
     const constrainingEvents = [
@@ -1221,23 +1213,9 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     lines.push(
       `I found ${chosen.length} of ${requestedSlots} requested focus blocks; the remaining time did not fit without overlapping checked commitments and breaks.`,
     );
-  const sourceLinks = [
-    ...new Map(
-      uniqueEvents.flatMap((event) => {
-        const url = strictGoogleCalendarLink(event);
-        return url && !conflictSourceUrls.has(url)
-          ? [[url, calendarSourceReference(event)] as const]
-          : [];
-      }),
-    ).values(),
-  ];
-  if (sourceLinks.length > 0) {
-    const visibleSources = sourceLinks.slice(0, 5);
-    const omittedSources = sourceLinks.length - visibleSources.length;
-    lines.push(
-      `Calendar sources: ${visibleSources.join(' · ')}${omittedSources > 0 ? ` · ${omittedSources} additional source links omitted from this brief` : ''}`,
-    );
-  }
+  // Keep source links attached to the event details that need them (conflicts,
+  // all-day holds, and focus-window constraints). A second catalog of every
+  // event adds a long, repetitive URL block to a review-only focus plan.
   return result(lines.join('\n'), complete, chosen.length);
 }
 

@@ -1762,7 +1762,7 @@ describe('compound trip read projection', () => {
         'maps.directions',
         {
           origin: 'BER Airport',
-          destination: 'Linienstraße 89, 10119 Berlin',
+          destination: 'Hotel Linden, Linienstraße 89, 10119 Berlin',
           mode: 'driving',
         },
         { durationSeconds: 1500 },
@@ -1771,7 +1771,12 @@ describe('compound trip read projection', () => {
     const route = compoundTripRoute(read, evidence);
     expect(route).toEqual({
       origin: 'BER Airport',
-      destination: 'Linienstraße 89, 10119 Berlin',
+      destination: 'Hotel Linden, Linienstraße 89, 10119 Berlin',
+    });
+    expect(route?.destination.length).toBeLessThanOrEqual(200);
+    expect(buildReadToolInput(read, 'maps.directions', evidence)).toEqual({
+      ...route,
+      mode: 'driving',
     });
 
     const webQuery = compoundTripReadProjection(read, evidence).webQuery;
@@ -1797,6 +1802,27 @@ describe('compound trip read projection', () => {
     expect(projection.text).toContain('not a taxi quote');
     expect(projection.blocked).toBe(true);
     expect(projection.text).not.toContain('Calendar observations —');
+  });
+
+  it('keeps the hotel city in a bounded map destination when a long address is truncated', () => {
+    const read = request();
+    const address = `123 ${'Long Avenue '.repeat(16)}Berlin`;
+    expect(address.length).toBeGreaterThan(190);
+    expect(address.length).toBeLessThanOrEqual(240);
+    const evidence = [
+      completeCalendarEvents([calendarFlight()]),
+      ...bookingEmailEvidence({
+        hotelBody: `Reservation confirmed: Hotel Linden, Berlin.\nDates: October 17–19, 2026.\nAddress: ${address}.\nBooking reference: HOTEL-55123`,
+      }),
+    ];
+    const route = compoundTripRoute(read, evidence);
+    expect(route?.destination.length).toBeLessThanOrEqual(200);
+    expect(route?.destination).toContain('Hotel Linden');
+    expect(route?.destination).toContain('Berlin');
+    expect(buildReadToolInput(read, 'maps.directions', evidence)).toEqual({
+      ...route,
+      mode: 'driving',
+    });
   });
 
   it('accepts common stay-date summaries but does not infer a street address or route from a city alone', () => {
@@ -2048,7 +2074,7 @@ describe('compound trip read projection', () => {
       association: 'date_city_candidate',
     });
     expect(projection.routeOrigin).toBe('BER Airport');
-    expect(projection.routeDestination).toBe('Linienstraße 89, 10119 Berlin');
+    expect(projection.routeDestination).toBe('Hotel Linden, Linienstraße 89, 10119 Berlin');
     expect(projection.webQuery).toContain('Hotel Linden');
     expect(projection.blocked).toBe(true);
   });
@@ -3357,7 +3383,7 @@ describe('compound trip read projection', () => {
     });
     expect(validProjection.connectionSummary).toContain('LH101 FRA→BER');
     expect(validProjection.routeOrigin).toBe('BER Airport');
-    expect(validProjection.routeDestination).toBe(hotel.address);
+    expect(validProjection.routeDestination).toBe('Hotel Linden, 5 Alexanderplatz, 10178 Berlin');
     const unknownChronology = compoundTripReadProjection(read, validEvidence, {
       status: 'complete',
       segments: [outbound, { ...validConnection, arrivalTimeZone: undefined }],
@@ -4173,7 +4199,11 @@ describe('compound trip read projection', () => {
       ...bookingEmailEvidence(),
       row(
         'maps.directions',
-        { origin: 'JFK Airport', destination: 'Linienstraße 89, 10119 Berlin', mode: 'driving' },
+        {
+          origin: 'JFK Airport',
+          destination: 'Hotel Linden, Linienstraße 89, 10119 Berlin',
+          mode: 'driving',
+        },
         { durationSeconds: 1500 },
       ),
     ];
@@ -5407,7 +5437,8 @@ San Francisco (SFO-San Francisco Intl.)`;
     const projection = upcomingFlightReadProjection(read, evidence);
     expect(projection.flight).toBeUndefined();
     expect(projection.blocked).toBe(true);
-    expect(projection.text).toContain('LH778 BER→SFO:** 2026-10-17 6:00 AM (zone unknown)');
+    expect(projection.text).toContain('LH778 BER→SFO:** 2026-10-17 6:00 AM');
+    expect(projection.text).toContain('Time zones are not stated; times are shown as recorded.');
     expect(projection.text).toContain('Outbound/return direction is not explicitly stated');
     expect(projection.text).toContain('booking order is not proof of travel');
     expect(projection.text).toContain(
@@ -5450,9 +5481,10 @@ San Francisco (SFO-San Francisco Intl.)`;
     const projection = upcomingFlightReadProjection(read, evidence, thinExtraction());
     expect(projection.text).toContain('LH778 BER→SFO:** 2026-10-17 06:00 AM');
     expect(projection.text).toContain('→ 2026-10-17 11:45 AM');
-    expect(projection.text.match(/Booked leg LH778/g)).toHaveLength(1);
+    expect(projection.text.match(/Booked route 2 LH778/g)).toHaveLength(1);
     expect(projection.flight).toBeUndefined();
-    expect(projection.text).toContain('zone unknown');
+    expect(projection.text).toContain('Time zones are not stated; times are shown as recorded.');
+    expect(projection.text).not.toContain('(zone unknown)');
     expect(projection.text).toContain('Outbound/return direction is not explicitly stated');
     expect(compoundTripRoute(read, evidence)).toBeUndefined();
   });
@@ -5672,7 +5704,13 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
       checkOut: '2030-11-17',
     });
     expect(initial.routeOrigin).toBe('CPH Airport');
-    expect(initial.routeDestination).toBe('Canal Street 42, Copenhagen');
+    expect(initial.routeDestination).toBe('Canal House, Canal Street 42, Copenhagen');
+    expect(initial.routeDestination?.length).toBeLessThanOrEqual(200);
+    expect(buildReadToolInput(read, 'maps.directions', rows)).toEqual({
+      origin: initial.routeOrigin,
+      destination: initial.routeDestination,
+      mode: 'driving',
+    });
     expect(initial.flight).toBeUndefined();
     expect(initial.webQuery).toContain('Canal House');
     add('maps.directions', { origin: initial.routeOrigin, destination: initial.routeDestination });
@@ -5720,7 +5758,7 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(answer.length).toBeLessThanOrEqual(3800);
     expect(answer.startsWith('Booked dates')).toBe(true);
     expect(answer).toContain('A new outbound trip is not verified');
-    expect(answer).toContain('- **Booked KL700 BOS→AMS:**');
+    expect(answer).toContain('- **Booked route 1 KL700 BOS→AMS:**');
     expect(answer).not.toContain('|---|');
     expect(answer).toContain('- **Public transport:**');
     for (const number of ['KL700', 'KL701', 'KL702', 'KL703']) expect(answer).toContain(number);
@@ -5728,8 +5766,9 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(answer).toContain('2030-11-17');
     expect(answer).toContain('Canal House');
     expect(answer).toContain('Canal Street 42');
-    expect(answer).toContain('zone unknown');
-    expect(answer).toContain('Outbound/return direction is not explicitly stated');
+    expect(answer).toContain('Time zones are not stated; times are shown as recorded.');
+    expect(answer).toContain('The booking lists route 1 before route 2; route 2 reverses route 1.');
+    expect(answer).toContain('The source does not label either route outbound or return.');
     expect(answer).not.toMatch(/Outbound \(inferred\)|Return \(inferred\)|likely return/);
     expect(answer).toContain(
       'calendar Example Air (operating carrier); booking KLM (operating carrier)',
@@ -5753,7 +5792,10 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
   it('reports source-labelled route roles only, never direction from reversed airport order', () => {
     const { read, rows } = fixture();
     const plain = compoundTripReadProjection(read, rows);
-    expect(plain.presentation.groups.map((group) => group.label)).toEqual(['Booked', 'Booked']);
+    expect(plain.presentation.groups.map((group) => group.label)).toEqual([
+      'Booked route 1',
+      'Booked route 2',
+    ]);
     const thread = rows.find(
       (item) =>
         item.toolName === 'gmail.read_thread' &&
@@ -5774,6 +5816,45 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(labelled.flight).toBeUndefined();
     expect(labelled.blocked).toBe(true);
     expect(labelled.sourceFlightSegments.every((leg) => !leg.departureTimeZone)).toBe(true);
+  });
+
+  it('claims a reversed route pair only when both booked groups prove the reversed endpoints', () => {
+    const { read, rows } = fixture();
+    const projection = compoundTripReadProjection(read, rows);
+    expect(renderCompoundTripReadResponse(projection)).toContain('route 2 reverses route 1');
+
+    projection.presentation.groups = projection.presentation.groups.slice(0, 1);
+    const singleRoute = renderCompoundTripReadResponse(projection);
+    expect(singleRoute).not.toContain('route 2 reverses route 1');
+    expect(singleRoute).toContain(
+      'The source does not explicitly label the booked route direction as outbound or return.',
+    );
+
+    const twoRoutes = compoundTripReadProjection(read, rows);
+    const routeTwo = twoRoutes.presentation.groups.find(
+      (group) => group.label === 'Booked route 2',
+    );
+    const routeTwoFirstLeg = routeTwo?.legs[0];
+    if (!routeTwoFirstLeg) throw new Error('Missing second booked route');
+    routeTwoFirstLeg.originAirport = 'XXX';
+    const nonReversed = renderCompoundTripReadResponse(twoRoutes);
+    expect(nonReversed).not.toContain('route 2 reverses route 1');
+    expect(nonReversed).toContain(
+      'The source does not explicitly label the booked route direction as outbound or return.',
+    );
+  });
+
+  it('keeps per-leg zone detail when source coverage mixes stated and unstated zones', () => {
+    const { read, rows } = fixture();
+    const projection = compoundTripReadProjection(read, rows);
+    const leg = projection.presentation.groups[0]?.legs[0];
+    if (!leg) throw new Error('Missing source-backed flight leg');
+    leg.departureTimeZone = 'Europe/Copenhagen';
+
+    const answer = renderCompoundTripReadResponse(projection);
+    expect(answer).toContain('(Europe/Copenhagen)');
+    expect(answer).toContain('(zone not stated)');
+    expect(answer).not.toContain('Time zones are not stated; times are shown as recorded.');
   });
 
   function withLocalClockEvidence() {
@@ -5831,7 +5912,9 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
         ?.departureClockSourceThreadId,
     ).toBeUndefined();
     const answer = renderCompoundTripReadResponse(projection);
-    expect(answer).toContain('2030-11-17 6:00 AM (local; zone unspecified)');
+    expect(answer).toContain('2030-11-17 6:00 AM (local; zone not stated) → 2030-11-17 7:25 AM');
+    expect(answer).toContain('Time zones are not stated; times are shown as recorded.');
+    expect(answer).toContain('local; zone not stated');
     expect(answer).toContain(
       '[Local-clock confirmation](https://mail.google.com/mail/u/0/#all/clock-thread)',
     );
@@ -6049,7 +6132,175 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     fetched.status = 'failed';
     expect(compoundTripReadProjection(read, rows).comparison).toEqual([]);
     expect(compoundTripFetchTargets(read, rows)).toEqual([]);
+    const recoveryQuery = compoundTripNextWebSearchQuery(read, rows);
+    expect(recoveryQuery).toContain('public transport');
+    expect(recoveryQuery).toContain('-site:official.example');
+    rows.push(
+      row(
+        'web.search',
+        { query: recoveryQuery },
+        {
+          results: [
+            {
+              url: 'https://blocked.example/another-path',
+              title: 'Public transport airport route',
+              snippet: 'Public transport from CPH Airport to Canal House.',
+            },
+          ],
+        },
+      ),
+    );
+    expect(compoundTripFetchTargets(read, rows)).toEqual([]);
     expect(compoundTripNextWebSearchQuery(read, rows)).toBeUndefined();
+  });
+
+  it('reserves one mode-specific search and one fresh-host fetch after exhausted route attempts', () => {
+    const { read, rows } = withTransferSearch();
+    for (const url of [
+      'https://blocked.example/airport/hotel',
+      'https://hotel.example/canal-house/map',
+    ])
+      rows.push({
+        toolName: 'web.fetch',
+        status: 'failed',
+        fromCurrentTask: true,
+        args: { url },
+        result: null,
+        error: 'HTTP 403 challenge',
+      });
+
+    const alternateQuery = compoundTripNextWebSearchQuery(read, rows);
+    expect(alternateQuery).toContain('-site:blocked.example');
+    expect(alternateQuery).toContain('-site:hotel.example');
+    rows.push(
+      row(
+        'web.search',
+        { query: alternateQuery },
+        {
+          results: [
+            {
+              url: 'https://fallback.example/airport-taxi',
+              title: 'Taxi airport transfer',
+              snippet: 'Taxi from airport to hotel.',
+            },
+          ],
+        },
+      ),
+    );
+    rows.push({
+      toolName: 'web.fetch',
+      status: 'failed',
+      fromCurrentTask: true,
+      args: { url: 'https://fallback.example/airport-taxi' },
+      result: null,
+      error: 'Challenge page',
+    });
+
+    // Bring this same-state scenario to the actual reservation boundary. The
+    // failed source calls still count toward the one-search/one-fetch budget.
+    let filler = 0;
+    const counted = () =>
+      rows.filter((item) =>
+        [
+          'calendar.list_events',
+          'gmail.search',
+          'gmail.read_thread',
+          'maps.directions',
+          'web.search',
+          'web.fetch',
+        ].includes(item.toolName),
+      ).length;
+    while (counted() < 16) {
+      const url = `https://budget-${filler}.example/unused`;
+      filler += 1;
+      rows.push({
+        toolName: 'web.fetch',
+        status: 'failed',
+        fromCurrentTask: true,
+        args: { url },
+        result: null,
+      });
+    }
+
+    const recoveryQuery = compoundTripNextWebSearchQuery(read, rows);
+    expect(recoveryQuery).toContain('public transport');
+    expect(recoveryQuery).toContain('-site:blocked.example');
+    expect(recoveryQuery).toContain('-site:hotel.example');
+    expect(recoveryQuery).toContain('-site:fallback.example');
+    expect(nextRequiredReadTool(read, rows)).toBe('web.search');
+    rows.push(
+      row(
+        'web.search',
+        { query: recoveryQuery },
+        {
+          results: [
+            {
+              url: 'https://blocked.example/another-path',
+              title: 'Public transport airport route',
+              snippet: 'Public transport from airport to Canal House.',
+            },
+            {
+              url: 'https://fresh.example/route',
+              title: 'Public transport directions',
+              snippet: 'Public transport and taxi from CPH Airport to Canal House.',
+            },
+            {
+              url: 'https://fresh-b.example/route',
+              title: 'Public transport directions',
+              snippet: 'Public transport and taxi from CPH Airport to Canal House.',
+            },
+          ],
+        },
+      ),
+    );
+
+    expect(compoundTripFetchTargets(read, rows)).toEqual([
+      { mode: 'public transport', url: 'https://fresh.example/route' },
+      { mode: 'taxi', url: 'https://fresh.example/route' },
+    ]);
+    expect(nextRequiredReadTool(read, rows)).toBe('web.fetch');
+    expect(buildReadToolInput(read, 'web.fetch', rows)).toEqual({
+      url: 'https://fresh.example/route',
+    });
+    rows.push(
+      row(
+        'web.fetch',
+        { url: 'https://fresh.example/route' },
+        {
+          finalUrl: 'https://fresh.example/route',
+          text: 'Public transport from CPH Airport to Canal House costs EUR 5 and takes 30 minutes.\n\nTaxi from CPH Airport to Canal House costs EUR 50 and takes 35 minutes.',
+        },
+      ),
+    );
+    expect(
+      compoundTripReadProjection(read, rows).publicFetchTargets.filter((target) =>
+        target.url.startsWith('https://fresh'),
+      ),
+    ).toEqual([
+      { mode: 'public transport', url: 'https://fresh.example/route' },
+      { mode: 'taxi', url: 'https://fresh.example/route' },
+    ]);
+    expect(nextRequiredReadTool(read, rows)).toBeUndefined();
+    expect(compoundTripReadProjection(read, rows).comparison).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          mode: 'public transport',
+          endpointMatched: true,
+          fare: 'EUR 5',
+          duration: '30 minutes',
+        }),
+        expect.objectContaining({
+          mode: 'taxi',
+          endpointMatched: true,
+          fare: 'EUR 50',
+          duration: '35 minutes',
+        }),
+      ]),
+    );
+    expect(compoundTripFetchTargets(read, rows)).toEqual([]);
+    expect(compoundTripReadProjection(read, rows).publicFetchTargets).not.toContainEqual(
+      expect.objectContaining({ url: 'https://fresh-b.example/route' }),
+    );
   });
 
   it.each(['failed', 'truncated', 'wrong endpoints', 'old-task'])(

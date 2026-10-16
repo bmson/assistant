@@ -258,6 +258,40 @@ describe('named saved skill use during a personal read', () => {
     expect(JSON.stringify(state.skillRetrievalReceipts)).not.toContain(skill.steps);
   });
 
+  it('keeps a concise calendar-answer directive while preserving event and source coverage', async () => {
+    const f = await runPersonalRead(
+      'Review my calendar tomorrow and give me a short practical briefing with source links. Note any overlaps.',
+      null,
+      undefined,
+      [
+        {
+          id: 'event-one',
+          summary: 'First event',
+          start: '2026-10-14T09:00:00-07:00',
+          end: '2026-10-14T10:00:00-07:00',
+          location: 'Unrequested address',
+          description: 'Unrequested details',
+        },
+        {
+          id: 'event-two',
+          summary: 'Second event',
+          start: '2026-10-14T09:30:00-07:00',
+          end: '2026-10-14T10:30:00-07:00',
+        },
+      ],
+    );
+
+    const answerSystem = f.systems.join('\n');
+    expect(answerSystem).toContain('Keep this calendar briefing compact');
+    expect(answerSystem).toContain('Represent every returned event');
+    expect(answerSystem).toContain('source link when available');
+    expect(answerSystem).toContain(
+      'Omit unrequested addresses, descriptions, attendees, and booking details',
+    );
+    expect(answerSystem).toContain('concise overlap facts supported by the checked events');
+    expect(f.dispatch.mock.calls.map(([call]) => call.toolName)).toEqual(['calendar.list_events']);
+  });
+
   it.each([
     'valid advice',
     'literal replacement token advice',

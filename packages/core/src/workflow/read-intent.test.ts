@@ -119,7 +119,7 @@ describe('detectPersonalReadRequest', () => {
     expect(request?.mailQuery).not.toContain('hotel');
   });
 
-  it('caps compound trip calls at sixteen and never resumes from other-task search or calendar receipts', () => {
+  it('caps compound trip calls at eighteen and never resumes from other-task search or calendar receipts', () => {
     const requestText =
       'Find my next trip from my booking emails and calendar. Confirm the flight dates, departure times and time zones, connections, and hotel. Check for conflicting information. Then plan how to get from the destination airport to my hotel, comparing public transport and taxi. Give me a short itinerary with source links, and clearly mark anything you cannot verify.';
     const request = detectPersonalReadRequest([{ role: 'user', content: requestText }], {
@@ -127,13 +127,15 @@ describe('detectPersonalReadRequest', () => {
       timeZone: 'America/Los_Angeles',
     });
     if (!request) throw new Error('Expected read request');
-    const capped: ReadToolEvidence[] = Array.from({ length: 16 }, (_, index) => ({
+    const capped: ReadToolEvidence[] = Array.from({ length: 18 }, (_, index) => ({
       toolName: index % 2 ? 'web.fetch' : 'gmail.search',
       status: 'failed',
       args: {},
       fromCurrentTask: true,
     }));
     expect(nextRequiredReadTool(request, capped)).toBeUndefined();
+
+    expect(nextRequiredReadTool(request, capped.slice(0, 16))).toBe('calendar.list_events');
 
     const previousTask = Array.from({ length: 16 }, (_, index) => ({
       ...capped[index],

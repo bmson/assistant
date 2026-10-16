@@ -4,7 +4,9 @@ import type { CompoundTripExtraction, CompoundTripHotelFact } from './compound-t
 import type { PersonalReadRequest, ReadToolEvidence } from './read-intent.js';
 
 export const MAX_COMPOUND_CALENDAR_COVERAGE_PAGES = 3;
-export const MAX_COMPOUND_TRIP_TOOL_CALLS = 16;
+// The limit adds room for one endpoint-mode recovery search and fetch when
+// primary discovery and alternate route attempts use no more than 16 calls.
+export const MAX_COMPOUND_TRIP_TOOL_CALLS = 18;
 export const MAX_COMPOUND_TRIP_THREADS_TO_READ = 6;
 const MAX_COMPOUND_CALENDAR_CURSOR_LENGTH = 2_000_000;
 
@@ -111,6 +113,7 @@ export interface CompoundTripReadProjection {
   routeDestination?: string;
   webQuery?: string;
   fallbackWebQuery?: string;
+  recoveryWebQuery?: string;
   publicFetchTargets: Array<{ mode: 'public transport' | 'taxi'; url: string }>;
   mapRoute?: Record<string, unknown>;
   webSearch?: Record<string, unknown>;
@@ -3292,22 +3295,26 @@ export function compoundTripNextWebSearchQuery(
         object(row.args)?.query === query,
     );
   if (projection.webQuery && !attempted(projection.webQuery)) return projection.webQuery;
-  if (!projection.fallbackWebQuery || attempted(projection.fallbackWebQuery)) return undefined;
-  const pending = compoundTripFetchTargets(request, evidence).some(
-    (target) =>
-      !evidence.some(
-        (row) =>
-          row.toolName === 'web.fetch' &&
-          row.fromCurrentTask !== false &&
-          object(row.args)?.url === target.url,
+  if (projection.fallbackWebQuery && !attempted(projection.fallbackWebQuery)) {
+    const pending = compoundTripFetchTargets(request, evidence).some(
+      (target) =>
+        !evidence.some(
+          (row) =>
+            row.toolName === 'web.fetch' &&
+            row.fromCurrentTask !== false &&
+            object(row.args)?.url === target.url,
+        ),
+    );
+    const complete = (['public transport', 'taxi'] as const).every((mode) =>
+      projection.comparison.some(
+        (item) => item.mode === mode && item.endpointMatched && item.fare && item.duration,
       ),
-  );
-  const complete = (['public transport', 'taxi'] as const).every((mode) =>
-    projection.comparison.some(
-      (item) => item.mode === mode && item.endpointMatched && item.fare && item.duration,
-    ),
-  );
-  return !pending && !complete ? projection.fallbackWebQuery : undefined;
+    );
+    if (!pending && !complete) return projection.fallbackWebQuery;
+  }
+  return projection.recoveryWebQuery && !attempted(projection.recoveryWebQuery)
+    ? projection.recoveryWebQuery
+    : undefined;
 }
 
 export function compoundTripRoute(
@@ -3742,7 +3749,7 @@ export function compoundTripReadProjection(
       : bookedTransfer?.hotel.address
         ? {
             origin: `${bookedTransfer.group.destination} Airport`,
-            destination: bookedTransfer.hotel.address,
+            destination: mapHotelDestination(bookedTransfer.hotel),
           }
         : undefined;
   const comparisonFlight =
@@ -3782,8 +3789,13 @@ export function compoundTripReadProjection(
       )
     : undefined;
   const webSearch = primarySearch ?? alternateSearch;
-  const fetchTargets = plannedRouteFetchTargets(primarySearch, alternateSearch, evidence, hotel);
-  const webFetches = fetchTargets.flatMap((target) => {
+  const primaryFetchTargets = plannedRouteFetchTargets(
+    primarySearch,
+    alternateSearch,
+    evidence,
+    hotel,
+  );
+  const primaryWebFetches = primaryFetchTargets.flatMap((target) => {
     const row = evidence.find(
       (item) =>
         item.toolName === 'web.fetch' &&
@@ -3798,6 +3810,65 @@ export function compoundTripReadProjection(
     const endpointMatched = comparison?.endpointMatched === true;
     return [{ mode: target.mode, row, endpointMatched, ...(comparison ? { comparison } : {}) }];
   });
+  const primaryComparisons = primaryWebFetches.flatMap((item) =>
+    item.comparison ? [item.comparison] : [],
+  );
+  const recoveryPlan = compoundTripRecoveryPlan({
+    route,
+    flight: comparisonFlight,
+    hotel,
+    fallbackWebQuery,
+    alternateSearch,
+    evidence,
+    primaryFetchTargets,
+    primaryComparisons,
+  });
+  const recoverySearch = recoveryPlan
+    ? evidence.find(
+        (row) =>
+          successful(row) &&
+          row.toolName === 'web.search' &&
+          object(row.args)?.query === recoveryPlan.query &&
+          row.fromCurrentTask !== false,
+      )
+    : undefined;
+  const recoveryTargets =
+    recoveryPlan && recoverySearch
+      ? recoveryRouteFetchTargets(recoverySearch, recoveryPlan.mode, hotel, primaryFetchTargets)
+      : [];
+  const recoveryWebQuery = recoveryPlan?.query;
+  const fetchTargets = [...primaryFetchTargets, ...recoveryTargets];
+  const webFetches = [
+    ...primaryWebFetches,
+    ...recoveryTargets.flatMap((recoveryTarget) => {
+      const row = evidence.find(
+        (item) =>
+          item.toolName === 'web.fetch' &&
+          object(item.args)?.url === recoveryTarget.url &&
+          item.fromCurrentTask !== false,
+      );
+      if (!row) return [];
+      const comparison =
+        comparisonFlight && hotel
+          ? comparisonFromPage(
+              recoveryTarget.mode,
+              row,
+              recoverySearch as ReadToolEvidence,
+              comparisonFlight,
+              hotel,
+            )
+          : undefined;
+      const endpointMatched = comparison?.endpointMatched === true;
+      return [
+        {
+          mode: recoveryTarget.mode,
+          row,
+          endpointMatched,
+          ...(comparison ? { comparison } : {}),
+        },
+      ];
+    }),
+  ];
   const comparison = webFetches.flatMap((item) => (item.comparison ? [item.comparison] : []));
   const clockCandidate = flight ?? returnFlight ?? currentTripReturn;
   const timeInstant = clockCandidate?.segment
@@ -4146,7 +4217,7 @@ export function compoundTripReadProjection(
       ? sourceGroups.map((group) => ({
           label:
             group.direction === 'unknown'
-              ? 'Booked'
+              ? `Booked route ${group.order === 'first' ? '1' : '2'}`
               : group.direction === 'outbound'
                 ? 'Outbound'
                 : 'Return',
@@ -4237,6 +4308,7 @@ export function compoundTripReadProjection(
     ...(route ? { routeOrigin: route.origin, routeDestination: route.destination } : {}),
     ...(webQuery ? { webQuery } : {}),
     ...(fallbackWebQuery ? { fallbackWebQuery } : {}),
+    ...(recoveryWebQuery ? { recoveryWebQuery } : {}),
     publicFetchTargets: fetchTargets.map(({ mode, url }) => ({ mode, url })),
     ...(mapRoute ? { mapRoute: object(mapRoute.result) } : {}),
     ...(webSearch ? { webSearch: object(webSearch.result) } : {}),
@@ -4273,20 +4345,52 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
   const lines = [view.summary];
   const groups = view.groups.filter((group) => group.legs.length);
   if (groups.length) {
+    const allFlightTimesHaveUnknownZones = groups
+      .flatMap((group) => group.legs)
+      .every((leg) => !leg.departureTimeZone && !leg.arrivalTimeZone);
+    if (allFlightTimesHaveUnknownZones)
+      lines.push(
+        view.localClocks
+          ? 'The selected booking explicitly labels its clocks local; time-zone offsets remain unverified.'
+          : 'Time zones are not stated; times are shown as recorded.',
+      );
     const legs: string[] = [];
     for (const group of groups) {
       for (const leg of group.legs) {
         legs.push(
-          compactFlightLeg(leg, `${group.label}${group.inferred ? ' (inferred)' : ''}`, links),
+          compactFlightLeg(
+            leg,
+            `${group.label}${group.inferred ? ' (inferred)' : ''}`,
+            links,
+            allFlightTimesHaveUnknownZones,
+          ),
         );
       }
     }
     lines.push(legs.join('\n'));
-    if (groups.some((group) => group.label === 'Booked'))
+    const routeOne = groups.find((group) => group.label === 'Booked route 1');
+    const routeTwo = groups.find((group) => group.label === 'Booked route 2');
+    const firstLeg = routeOne?.legs[0];
+    const firstLastLeg = routeOne?.legs.at(-1);
+    const secondLeg = routeTwo?.legs[0];
+    const secondLastLeg = routeTwo?.legs.at(-1);
+    const reversedRoutes = Boolean(
+      routeOne &&
+        routeTwo &&
+        firstLeg?.originAirport &&
+        firstLastLeg?.destinationAirport &&
+        secondLeg?.originAirport &&
+        secondLastLeg?.destinationAirport &&
+        firstLeg.originAirport === secondLastLeg.destinationAirport &&
+        firstLastLeg.destinationAirport === secondLeg.originAirport,
+    );
+    if (routeOne || routeTwo)
       lines.push(
-        'Outbound/return direction is not explicitly stated for the unlabelled booked legs.',
+        reversedRoutes
+          ? 'The booking lists route 1 before route 2; route 2 reverses route 1. The source does not label either route outbound or return.'
+          : 'The source does not explicitly label the booked route direction as outbound or return.',
       );
-    if (view.localClocks)
+    if (view.localClocks && !allFlightTimesHaveUnknownZones)
       lines.push(
         'The selected booking explicitly labels its clocks local; time-zone offsets remain unverified.',
       );
@@ -4388,15 +4492,35 @@ function mapDestinationNamesHotel(
   return name.length >= 5 && label === name;
 }
 
+function mapHotelDestination(hotel: CompoundTripHotelCandidate): string {
+  const name = text(hotel.hotelName, 80) || text(hotel.subject, 80);
+  const address = text(hotel.address, 200);
+  const city = text(hotel.city, 80);
+  const destination = [name, address].filter(Boolean).join(', ').slice(0, 200).trimEnd();
+  const addressStart = name ? name.length + 2 : 0;
+  const visibleAddress = destination.slice(addressStart);
+  if (!city || normalizePlace(visibleAddress).includes(normalizePlace(city))) return destination;
+  const suffix = `${destination ? ', ' : ''}${city}`;
+  return `${destination.slice(0, 200 - suffix.length).trimEnd()}${suffix}`;
+}
+
 function compactFlightLeg(
   leg: CompoundTripFlightSegment,
   label: string,
   links: Map<string, string>,
+  sharedUnknownZones = false,
 ): string {
   const localLink = leg.departureClockSourceThreadId
     ? links.get(leg.departureClockSourceThreadId)
     : undefined;
-  return `- **${markdownText(label)} ${markdownText(leg.flightNumber)} ${leg.originAirport ?? '?'}→${leg.destinationAirport ?? '?'}:** ${leg.departureDate} ${leg.departureTime} (${markdownText(leg.departureTimeZone ?? (localLink ? 'local; zone unspecified' : 'zone unknown'))}) → ${leg.arrivalDate ?? 'arrival date unknown'} ${leg.arrivalTime ?? 'time unknown'} (${markdownText(leg.arrivalTimeZone ?? 'zone unknown')}).${leg.sourceStatedLayover ? ` Booking-stated layover: ${markdownText(leg.sourceStatedLayover)}; timing unverified.` : ''}${links.get(leg.threadId) ? ` [Booking](${links.get(leg.threadId)})` : ''}${localLink && localLink !== links.get(leg.threadId) ? ` [Local-clock confirmation](${localLink})` : ''}`;
+  const departureZone =
+    sharedUnknownZones && !localLink
+      ? ''
+      : ` (${markdownText(leg.departureTimeZone ?? (localLink ? 'local; zone not stated' : 'zone not stated'))})`;
+  const arrivalZone = sharedUnknownZones
+    ? ''
+    : ` (${markdownText(leg.arrivalTimeZone ?? 'zone not stated')})`;
+  return `- **${markdownText(label)} ${markdownText(leg.flightNumber)} ${leg.originAirport ?? '?'}→${leg.destinationAirport ?? '?'}:** ${leg.departureDate} ${leg.departureTime}${departureZone} → ${leg.arrivalDate ?? 'arrival date unknown'} ${leg.arrivalTime ?? 'time unknown'}${arrivalZone}.${leg.sourceStatedLayover ? ` Booking-stated layover: ${markdownText(leg.sourceStatedLayover)}; timing unverified.` : ''}${links.get(leg.threadId) ? ` [Booking](${links.get(leg.threadId)})` : ''}${localLink && localLink !== links.get(leg.threadId) ? ` [Local-clock confirmation](${localLink})` : ''}`;
 }
 
 /**
@@ -4733,16 +4857,35 @@ export function upcomingFlightReadProjection(
       )
     : [];
   const compactSummary = observedGroup
-    ? [
-        `Observed booking candidate: **${observedGroup.legs.map((leg) => leg.originAirport).join('→')}→${observedGroup.destination}, ${observedGroup.legs[0]?.departureDate}**. ${observedGroup.direction === 'unknown' ? 'Outbound/return direction is not explicitly stated.' : `The booking explicitly labels this ${observedGroup.direction}.`} Calendar match and next-flight identity remain unverified; booking order is not proof of travel.`,
-        observedGroup.legs
-          .map((leg) => compactFlightLeg(leg, 'Booked leg', threadSourceLinks(trip.readThreads)))
-          .join('\n'),
-        ...observedCalendarNotes,
-        ...(observedCalendarNotes.length
-          ? []
-          : summary.filter((line) => line.startsWith('Next future calendar flight candidate:'))),
-      ]
+    ? (() => {
+        const allTimesHaveUnknownZones = observedGroup.legs.every(
+          (leg) => !leg.departureTimeZone && !leg.arrivalTimeZone,
+        );
+        return [
+          `Observed booking candidate: **${observedGroup.legs.map((leg) => leg.originAirport).join('→')}→${observedGroup.destination}, ${observedGroup.legs[0]?.departureDate}**. ${observedGroup.direction === 'unknown' ? 'Outbound/return direction is not explicitly stated.' : `The booking explicitly labels this ${observedGroup.direction}.`} Calendar match and next-flight identity remain unverified; booking order is not proof of travel.`,
+          ...(allTimesHaveUnknownZones
+            ? [
+                trip.presentation.localClocks
+                  ? 'The selected booking explicitly labels its clocks local; time-zone offsets remain unverified.'
+                  : 'Time zones are not stated; times are shown as recorded.',
+              ]
+            : []),
+          observedGroup.legs
+            .map((leg) =>
+              compactFlightLeg(
+                leg,
+                `Booked route ${observedGroup.order === 'first' ? '1' : '2'}`,
+                threadSourceLinks(trip.readThreads),
+                allTimesHaveUnknownZones,
+              ),
+            )
+            .join('\n'),
+          ...observedCalendarNotes,
+          ...(observedCalendarNotes.length
+            ? []
+            : summary.filter((line) => line.startsWith('Next future calendar flight candidate:'))),
+        ];
+      })()
     : summary;
   return {
     calendarComplete: trip.calendarComplete,
@@ -4787,7 +4930,10 @@ function compoundTripRouteFromCandidates(
     (hotel.association !== 'date_city_candidate' && hotel.association !== 'shared_reference')
   )
     return undefined;
-  return { origin: `${flight.arrivalAirport} Airport`, destination: hotel.address };
+  return {
+    origin: `${flight.arrivalAirport} Airport`,
+    destination: mapHotelDestination(hotel),
+  };
 }
 
 function dedupeHotels(candidates: CompoundTripHotelCandidate[]): CompoundTripHotelCandidate[] {
@@ -4915,6 +5061,105 @@ function plannedRouteFetchTargets(
     if (candidate) result.push({ mode, url: candidate.url, search: candidate.search });
   }
   return result;
+}
+
+interface CompoundTripRecoveryPlan {
+  query: string;
+  mode: 'public transport' | 'taxi';
+}
+
+function compoundTripRecoveryPlan(input: {
+  route: { origin: string; destination: string } | undefined;
+  flight: Pick<CompoundTripFlightCandidate, 'arrivalAirport'> | undefined;
+  hotel: CompoundTripHotelCandidate | undefined;
+  fallbackWebQuery: string | undefined;
+  alternateSearch: ReadToolEvidence | undefined;
+  evidence: ReadonlyArray<ReadToolEvidence>;
+  primaryFetchTargets: Array<{
+    mode: 'public transport' | 'taxi';
+    url: string;
+    search: ReadToolEvidence;
+  }>;
+  primaryComparisons: CompoundTripComparisonEvidence[];
+}): CompoundTripRecoveryPlan | undefined {
+  const {
+    route,
+    flight,
+    hotel,
+    fallbackWebQuery,
+    alternateSearch,
+    evidence,
+    primaryFetchTargets,
+    primaryComparisons,
+  } = input;
+  if (!route || !flight?.arrivalAirport || !hotel?.hotelName || !hotel.city) return undefined;
+  if (!fallbackWebQuery || !alternateSearch || !successful(alternateSearch)) return undefined;
+  const fetched = evidence.filter(
+    (row) => row.toolName === 'web.fetch' && row.fromCurrentTask !== false,
+  );
+  const attempted = new Set(
+    fetched.map((row) => text(object(row.args)?.url, 1000)).filter(Boolean),
+  );
+  // Do not consume the recovery reserve while a previously discovered page is
+  // still eligible to fetch. A failed/blocked target counts as attempted.
+  if (primaryFetchTargets.some((target) => !attempted.has(target.url))) return undefined;
+  const mode = (['public transport', 'taxi'] as const).find(
+    (candidate) =>
+      !primaryComparisons.some(
+        (item) => item.mode === candidate && item.endpointMatched && item.fare && item.duration,
+      ),
+  );
+  if (!mode) return undefined;
+  const hosts = [
+    ...new Set(
+      primaryFetchTargets.flatMap((target) => {
+        if (!attempted.has(target.url) || !safePublicSourceUrl(target.url)) return [];
+        return [new URL(target.url).hostname];
+      }),
+    ),
+  ];
+  const exclusions = hosts.map((host) => `-site:${host}`).join(' ');
+  const quote = (value: string) => `"${value.replace(/["\r\n]/g, ' ').trim()}"`;
+  const modeTerms =
+    mode === 'public transport' ? 'public transport train bus fare duration' : 'taxi fare duration';
+  const query = [
+    quote(flight.arrivalAirport),
+    quote(hotel.hotelName),
+    quote(hotel.city),
+    modeTerms,
+    'airport route official',
+    exclusions,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+  return { query, mode };
+}
+
+function recoveryRouteFetchTargets(
+  search: ReadToolEvidence,
+  mode: 'public transport' | 'taxi',
+  hotel: CompoundTripHotelCandidate | undefined,
+  primaryFetchTargets: ReadonlyArray<{ url: string }>,
+): Array<{ mode: 'public transport' | 'taxi'; url: string; search: ReadToolEvidence }> {
+  const attemptedHosts = new Set(
+    primaryFetchTargets.flatMap((target) =>
+      safePublicSourceUrl(target.url) ? [new URL(target.url).hostname] : [],
+    ),
+  );
+  const candidates = searchRouteCandidates(search, hotel).filter((candidate) =>
+    candidate.modes.includes(mode),
+  );
+  const target = candidates.find(
+    (candidate) => !attemptedHosts.has(new URL(candidate.url).hostname),
+  );
+  return target
+    ? target.modes.map((candidateMode) => ({
+        mode: candidateMode,
+        url: target.url,
+        search,
+      }))
+    : [];
 }
 
 function durationFromQuote(quote: string): string | undefined {

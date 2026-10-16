@@ -1167,11 +1167,11 @@ describe('compound trip thread-read journaling', () => {
     expect(complete.checkpointReadBatchAfterDispatchCounts).toContain(3);
     expect(new Set(completeReadIds).size).toBe(6);
 
-    // Eight earlier bounded trip-tool attempts plus calendar and two searches
-    // leave five of the six selected messages inside the hard 16-call ceiling.
+    // Ten earlier bounded trip-tool attempts plus calendar and two searches
+    // leave five of the six selected messages inside the hard 18-call ceiling.
     const nearLimit = await runFlightContinuation([], request, {
       compoundTripReadBatch: true,
-      priorTripToolFailures: 8,
+      priorTripToolFailures: 10,
     });
     const nearLimitReadIds = nearLimit.dispatch.mock.calls
       .filter(([call]) => call.toolName === 'gmail.read_thread')
@@ -1191,6 +1191,6 @@ describe('compound trip thread-read journaling', () => {
 
     expect(nearLimitReadIds).toEqual(completeReadIds.slice(0, 5));
     expect(nearLimit.checkpointReadBatchSizes).toContain(5);
-    expect(currentTripToolRows).toHaveLength(16);
+    expect(currentTripToolRows).toHaveLength(18);
   });
 });

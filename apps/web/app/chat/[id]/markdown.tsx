@@ -99,6 +99,88 @@ function tableCells(children: ReactNode): ReactNode[][] {
   );
 }
 
+const CALENDAR_SECTION_PROSE =
+  /^(?:Availability caveat:|All-day holds that still block focus time\b|Multi-day lodging is excluded from meeting workload\b|Limits:|Assumptions:|Conflicts and review choices:|Conflicts:|Possible overlap:|Scheduling conflict:|Evening-heavy estimate:|Tight turnaround:|Overloaded-day estimate:|Overloaded-day assessment:|Recommended change:|Checked events overlapping possible focus windows include\b|I couldn’t identify suitable\b|I did not suggest focus times\b|I found \d+ of \d+ requested focus blocks\b|Calendar sources:)/iu;
+const PIPE_ROW = /^\s{0,3}\|.*\|\s*$/;
+const PIPE_SEPARATOR = /^\s{0,3}\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
+
+function updateInlineCodeDelimiter(line: string, activeDelimiter: number | null): number | null {
+  const matches = line.matchAll(/`+/g);
+  let active = activeDelimiter;
+  for (const match of matches) {
+    const index = match.index ?? 0;
+    let backslashes = 0;
+    for (let previous = index - 1; previous >= 0 && line[previous] === '\\'; previous--)
+      backslashes++;
+    if (backslashes % 2 !== 0) continue;
+    const delimiterLength = match[0].length;
+    if (active === delimiterLength) active = null;
+    else if (active === null) active = delimiterLength;
+  }
+  return active;
+}
+
+function separateCalendarSectionProseFromPipeTables(markdown: string): string {
+  const lines = markdown.split('\n');
+  const output: string[] = [];
+  let fence: { character: string; length: number } | undefined;
+  let displayMath = false;
+  let inlineCodeDelimiter: number | null = null;
+  let inPipeTable = false;
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index] ?? '';
+    const fenceMatch = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
+    if (fenceMatch?.[1]) {
+      const character = fenceMatch[1][0] ?? '';
+      if (!fence) fence = { character, length: fenceMatch[1].length };
+      else if (fence.character === character && fenceMatch[1].length >= fence.length)
+        fence = undefined;
+      inPipeTable = false;
+      output.push(line);
+      continue;
+    }
+    if (fence) {
+      output.push(line);
+      continue;
+    }
+    if (/^\s{0,3}\$\$\s*$/.test(line)) {
+      displayMath = !displayMath;
+      inPipeTable = false;
+      output.push(line);
+      continue;
+    }
+    if (displayMath) {
+      output.push(line);
+      continue;
+    }
+
+    if (inPipeTable && inlineCodeDelimiter === null && CALENDAR_SECTION_PROSE.test(line.trim())) {
+      if (output.at(-1)?.trim()) output.push('');
+      inPipeTable = false;
+    }
+    output.push(line);
+
+    if (!inPipeTable && inlineCodeDelimiter === null && PIPE_ROW.test(line)) {
+      const separator = lines[index + 1] ?? '';
+      const firstDataRow = lines[index + 2] ?? '';
+      if (PIPE_SEPARATOR.test(separator) && PIPE_ROW.test(firstDataRow)) inPipeTable = true;
+    } else if (inPipeTable && !line.trim()) {
+      inPipeTable = false;
+    }
+    inlineCodeDelimiter = updateInlineCodeDelimiter(line, inlineCodeDelimiter);
+  }
+  return output.join('\n');
+}
+
+function plainTextLength(value: ReactNode): number {
+  if (typeof value === 'string' || typeof value === 'number') return String(value).trim().length;
+  if (Array.isArray(value))
+    return value.reduce((length, child) => length + plainTextLength(child), 0);
+  if (isValidElement<{ children?: ReactNode }>(value)) return plainTextLength(value.props.children);
+  return 0;
+}
+
 const quoteClassName =
   'my-3 flex max-w-[72ch] items-start gap-2.5 rounded-xl border border-edge bg-sunken/55 px-3 py-2.5 text-strong first:mt-0 last:mb-0';
 
@@ -277,7 +359,10 @@ const components: Components = {
   table: ({ node: _node, children, ...props }) => {
     const rows = tableCells(children);
     const headers = rows[0] ?? [];
-    const useMobileRecords = headers.length > 3;
+    const useMobileRecords =
+      headers.length > 3 ||
+      (headers.length === 2 &&
+        rows.slice(1).some((row) => row.some((cell) => plainTextLength(cell) >= 32)));
     return (
       <div className="my-3 max-w-full overscroll-x-contain overflow-x-auto rounded-xl border border-edge first:mt-0 last:mb-0">
         <table
@@ -341,7 +426,7 @@ export const MessageMarkdown = memo(function MessageMarkdown({ text }: { text: s
         rehypePlugins={rehypePlugins}
         components={components}
       >
-        {reflowParagraphs(text)}
+        {separateCalendarSectionProseFromPipeTables(reflowParagraphs(text))}
       </ReactMarkdown>
     </div>
   );
