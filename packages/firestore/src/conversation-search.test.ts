@@ -476,13 +476,19 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       await store
         .doc('conversations', conversationId)
         .set({ id: conversationId, agentId: 'owner' });
+      const originalDoc = store.doc.bind(store);
+      const fenceRef = originalDoc('privacyErasureJobs', 'owner');
+      await fenceRef.set({ agentId: 'owner', status: 'complete', generation: 'context-baseline' });
+      const baseline = await fenceRef.get();
+      if (!baseline.updateTime) throw new Error('Expected privacy fence update time');
+      const createdAt = new Date(baseline.updateTime.toMillis() + 1);
       await store.doc('messages', messageId).set({
         id: messageId,
         conversationId,
         role: 'user',
         origin: 'owner',
         text: 'context erasure race anchor',
-        createdAt: new Date('2026-10-16T10:00:00.000Z'),
+        createdAt,
       });
       const anchor = {
         messageId,
@@ -495,9 +501,6 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           'owner',
         ),
       };
-      const originalDoc = store.doc.bind(store);
-      const fenceRef = originalDoc('privacyErasureJobs', 'owner');
-      await fenceRef.set({ agentId: 'owner', status: 'complete', generation: 'context-baseline' });
       let reads = 0;
       Object.defineProperty(store, 'doc', {
         configurable: true,
