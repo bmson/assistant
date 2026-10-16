@@ -263,13 +263,13 @@ export async function runGoldenTask(
     ...(fixture.plan ? { plan: fixture.plan } : {}),
     ...(fixture.maxSteps ? { maxSteps: fixture.maxSteps } : {}),
   });
-  if (fixture.initialRequestChecklist) {
+  if (
+    fixture.initialRequestChecklist ||
+    fixture.initialPlannerState ||
+    fixture.initialStep !== undefined
+  ) {
     const state = TaskStateSchema.parse(task.state);
-    state.requestChecklist = fixture.initialRequestChecklist;
-    await db.update(tasks).set({ state }).where(eq(tasks.id, task.id));
-  }
-  if (fixture.initialPlannerState || fixture.initialStep !== undefined) {
-    const state = TaskStateSchema.parse(task.state);
+    if (fixture.initialRequestChecklist) state.requestChecklist = fixture.initialRequestChecklist;
     if (fixture.initialPlannerState)
       state.plannerState = { ...state.plannerState, ...fixture.initialPlannerState };
     if (fixture.initialStep !== undefined) state.step = fixture.initialStep;
