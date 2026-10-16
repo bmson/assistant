@@ -3950,6 +3950,72 @@ describe('golden tasks', () => {
     });
   });
 
+  it('publishes independently attributed public transport from the current complete fetch', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const url = 'https://transit.example/options';
+    const answer = `- **Rail** — R10 links Central with the airport.
+- **Buses** — B12 and B13 serve the airport, with B12 running every 5–10 minutes.
+- **Intercity** — IC connects North with the airport. Some local buses require a change.
+
+[Source](${url})`;
+    const source = `R10
+- Route: Central - Airport
+- Frequency: every 15 minutes
+Express buses (B12, B13)
+B12
+- Route: City - Airport
+- Frequency: every 5–10 minutes
+B13
+- Route: City - Airport
+- Frequency: every 20 minutes
+Intercity services (IC)
+- Route: North - Airport - South
+Local buses to Airport
+Passengers reaching Junction must change to a train to reach the airport.
+731
+- Route: Town - Junction
+- Continue to the airport with R10.`;
+    const result = await runGoldenTask(db, agentId, {
+      name: 'public-transport-local-attribution',
+      event: {
+        source: 'chat',
+        trust: 'owner',
+        payload: {
+          text: `Read ${url} and summarize the public transport options in three short bullets with a source link. Do not use my email, calendar, or memories.`,
+        },
+      },
+      taskType: 'chat_turn',
+      plan: workflowPlan,
+      pinOwnerRequest: true,
+      script: [{ text: answer }],
+      verification: { decision: 'publish', reasons: [] },
+      tools: {
+        'web.fetch': {
+          schema: z.object({ url: z.string() }),
+          execute: async (args) => {
+            expect(args).toEqual({ url });
+            return { status: 200, finalUrl: url, truncated: false, text: source };
+          },
+        },
+      },
+    });
+    createdTaskIds.push(result.taskId);
+    expect(result.toolNames).toEqual(['web.fetch']);
+    expect(result.finalText).toBe(answer);
+    expect(result.status).toBe('done');
+    const [check] = await db
+      .select()
+      .from(responseChecks)
+      .where(eq(responseChecks.taskId, result.taskId));
+    expect(check).toMatchObject({
+      blocked: false,
+      unsupportedCount: 0,
+      outputVerificationAttempted: true,
+      outputVerificationRevised: false,
+      outputVerificationUnavailable: false,
+    });
+  });
+
   it('delivers the checked draft and records a verifier outage without failing the owner response', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const fixture: GoldenFixture = {

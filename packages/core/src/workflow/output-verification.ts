@@ -122,6 +122,9 @@ function allNamedSourcePassages(source: string) {
     const boundary =
       !/^[-*]/.test(title) &&
       (/^[^()]{2,100}\([^()]*[,/][^()]*\)$/.test(title) ||
+        /^(?:[\p{L}\d][^.!?:\n]{0,70}\s)?(?:trains|buses|transport|services|routes)(?:\s+[^.!?:\n]{1,70})?$/iu.test(
+          title,
+        ) ||
         /^(?:Frequently asked questions|FAQ|Related (?:information|links)|More information)$/i.test(
           title,
         ));
@@ -695,8 +698,10 @@ export function publicWebClaimFindings(
   const subjects = [...new Set(passages.map((passage) => passage.label))]
     .map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
     .join('|');
+  // A supplemental "with R10 running ..." clause has its own explicit
+  // subject; its attributes do not apply to an earlier list of services.
   const units = new RegExp(
-    `;\\s*|,\\s*(?:while|whereas|but)\\s+|(?<=[.!?])\\s+(?=[A-Z*])${subjects ? `|\\s+(?:and|while|whereas|but)\\s+(?=(?:the\\s+)?(?:${subjects})\\s+(?:go(?:es)?|runs?|serves?|connects?|departs?|stops?|travels?|leaves?|reaches?)\\b)` : ''}`,
+    `;\\s*|,\\s*(?:while|whereas|but)\\s+|(?<=[.!?])\\s+(?=[A-Z*])${subjects ? `|,\\s*with\\s+(?=(?:the\\s+)?(?:\\*{1,2})?(?:${subjects})(?:\\*{1,2})?\\s+(?:running|serving|connecting|departing|stopping|travelling|traveling|leaving|reaching|runs?|serves?|connects?|departs?)\\b)|\\s+(?:and|while|whereas|but)\\s+(?=(?:the\\s+)?(?:${subjects})\\s+(?:go(?:es)?|runs?|serves?|connects?|departs?|stops?|travels?|leaves?|reaches?)\\b)` : ''}`,
     'u',
   );
   for (const topic of claims.split(/\n\s*-\s+|\n{2,}|\n\s*(?=#{1,6}\s)/).slice(0, 48)) {
@@ -906,7 +911,12 @@ function webFetchEvidenceForVerifier(
 
   const passages = namedSourcePassages(sourceText, draft);
   const allPassages = allNamedSourcePassages(sourceText);
-  const firstService = allPassages[0]?.start ?? 0;
+  // All-caps navigation labels can resemble service IDs. Anchor the overview
+  // at an actual attributed entry when available, not at the page's menu.
+  const attributedPassages = allPassages.filter((passage) =>
+    /(?:^|\n)\s*[-*]?\s*(?:Route|Frequency|Travel time|Journey time):/i.test(passage.text),
+  );
+  const firstService = (attributedPassages[0] ?? allPassages[0])?.start ?? 0;
   const overviewStart = Math.max(0, firstService - 1600);
   const overview = sourceText.slice(overviewStart, firstService);
   // Prefix-only clipping used to hide transfer qualifiers late in a long
@@ -920,9 +930,12 @@ function webFetchEvidenceForVerifier(
   // and the verifier cannot recover the useful sections at the end of a long
   // successful fetch. Include bounded early and late sections in that case so the
   // verifier can distinguish a readable page from an actually missing detail.
-  const selectedPassages = lateNamedPassage
-    ? (passages.length > 0 ? passages : allPassages).slice(0, 24)
-    : [];
+  const candidatePassages = passages.length
+    ? passages
+    : attributedPassages.length
+      ? attributedPassages
+      : allPassages;
+  const selectedPassages = lateNamedPassage ? candidatePassages.slice(0, 24) : [];
   let passageLimit = EVIDENCE_ITEM_LIMIT;
   let excerptLength = Math.min(
     lateNamedPassage ? 2_000 : WEB_SOURCE_EXCERPT_LIMIT,
@@ -953,7 +966,7 @@ function webFetchEvidenceForVerifier(
               },
               sourcePassagesOmittedCount: Math.max(
                 0,
-                (passages.length || allPassages.length) - selectedPassages.length,
+                candidatePassages.length - selectedPassages.length,
               ),
             }
           : {}),
