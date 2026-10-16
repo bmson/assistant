@@ -1763,16 +1763,15 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       !mustRecordGoalProgress && readRequest
         ? nextRequiredReadTool(readRequest, readToolEvidence)
         : undefined;
-    const forcedReadWouldConsumeEmailReviewReserve =
-      readRequest?.emailReview !== undefined &&
-      forcedReadTool === 'gmail.read_thread' &&
-      state.step + 1 + assessmentStepReserve > task.maxSteps;
+    const forcedReadBudgetExceeded =
+      readRequest?.emailReview && forcedReadTool === 'gmail.read_thread'
+        ? state.step + 1 + assessmentStepReserve > task.maxSteps
+        : state.step + 1 >= task.maxSteps;
     const boundedForcedReadTool =
       !resumingBatch &&
       (readRequest?.sourceReads ||
         (forcedReadTool === 'gmail.read_thread' && readRequest?.emailReview)) &&
-      (forcedReadWouldConsumeEmailReviewReserve ||
-        (forcedReadTool !== 'gmail.read_thread' && state.step + 1 >= task.maxSteps))
+      forcedReadBudgetExceeded
         ? undefined
         : forcedReadTool;
     if (correctionProjection && resumingBatch && state.pendingToolBatch) {
