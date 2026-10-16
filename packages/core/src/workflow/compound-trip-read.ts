@@ -4,8 +4,8 @@ import type { CompoundTripExtraction, CompoundTripHotelFact } from './compound-t
 import type { PersonalReadRequest, ReadToolEvidence } from './read-intent.js';
 
 export const MAX_COMPOUND_CALENDAR_COVERAGE_PAGES = 3;
-// Two calls are reserved for one endpoint-mode recovery search and its fetch
-// after the bounded primary and alternate route attempts fail.
+// The limit adds room for one endpoint-mode recovery search and fetch when
+// primary discovery and alternate route attempts use no more than 16 calls.
 export const MAX_COMPOUND_TRIP_TOOL_CALLS = 18;
 export const MAX_COMPOUND_TRIP_THREADS_TO_READ = 6;
 const MAX_COMPOUND_CALENDAR_CURSOR_LENGTH = 2_000_000;
