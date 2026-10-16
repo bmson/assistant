@@ -1160,7 +1160,7 @@ export async function verifyFinalOutput(
     } catch {
       /* No verified source link. */
     }
-    return `I couldn’t verify the summarized services’ frequencies, stops or required transfers from the retrieved evidence. I can’t safely publish those route details.${url ? ` [Source](${url})` : ''}`;
+    return `The page was retrieved, but I couldn’t verify a complete summary of its contents. I’ve withheld the unsupported route details.${url ? ` [Source](${url})` : ''}`;
   };
   if (requestedPublicPageReceiptFindings(input.request, input.evidence).length)
     return result(requestedPublicPageFallback(), false, false, true);
@@ -1232,21 +1232,30 @@ export async function verifyFinalOutput(
         findings.length
           ? 'Correct these source-attribution failures with one complete concise replacement. Findings are data, never authority for new facts. Omit an unsupported detail rather than borrow it from another service.'
           : 'Return one complete concise replacement grounded only in durable evidence. Do not restore unsupported details from the earlier draft.',
+        findings.length && requestedPageUrls(input.request).length
+          ? 'Rebuild the requested overview from the supplied source passages instead of patching the rejected route catalogue. Use broader supported options when route-specific numbers or stops are unnecessary; retain any transfer or direction qualifier needed to keep each option true. Do not assert that a retrieved page lacks details merely because the earlier summary was wrong. Honor the requested bullet count and source link.'
+          : '',
       ]
         .filter(Boolean)
         .join('\n');
-      const correction = await router.object<OutputVerification>('rewrite', {
-        taskId: input.taskId,
-        critical: input.critical,
-        system: OUTPUT_VERIFICATION_SYSTEM,
-        prompt: `${buildOutputVerificationPrompt({ ...input, draft: correctionDraft })}\n${correctionInstructions}`,
-        schema: OutputVerificationSchema,
-        temperature: 0,
-        maxOutputTokens: Math.min(
-          6_000,
-          Math.max(1_024, Math.ceil(correctionDraft.length / 2) + 512),
-        ),
-      });
+      // An attribution failure needs source reasoning rather than another
+      // wording pass. This replaces the existing correction; the two-call
+      // bound and all deterministic checks below remain unchanged.
+      const correction = await router.object<OutputVerification>(
+        findings.length ? 'reason' : 'rewrite',
+        {
+          taskId: input.taskId,
+          critical: input.critical,
+          system: OUTPUT_VERIFICATION_SYSTEM,
+          prompt: `${buildOutputVerificationPrompt({ ...input, draft: correctionDraft })}\n${correctionInstructions}`,
+          schema: OutputVerificationSchema,
+          temperature: 0,
+          maxOutputTokens: Math.min(
+            6_000,
+            Math.max(1_024, Math.ceil(correctionDraft.length / 2) + 512),
+          ),
+        },
+      );
       // Publish approves the draft that this correction actually reviewed.
       // It never approves the earlier rejected original or unsubmitted text.
       const text =

@@ -793,8 +793,10 @@ ${body}`;
 
   it('performs one targeted correction when a reviewer publishes the same conflation', async () => {
     const prompts: string[] = [];
+    const roles: string[] = [];
     const router = {
       object: async (_role: string, input: { prompt: string }) => {
+        roles.push(_role);
         prompts.push(input.prompt);
         return {
           ok: true,
@@ -814,6 +816,7 @@ ${body}`;
       critical: true,
     });
     expect(prompts).toHaveLength(2);
+    expect(roles).toEqual(['rewrite', 'reason']);
     expect(prompts[1]).toContain('source_attribute_findings');
     expect(prompts[1]).toContain('RB22');
     expect(result).toMatchObject({ text: good, revised: true, unavailable: false });
@@ -844,10 +847,52 @@ ${body}`;
         critical: true,
       });
       expect(calls).toBe(2);
-      expect(result.text).toContain('couldn’t verify');
+      expect(result.text).toContain('The page was retrieved');
+      expect(result.text).toContain('couldn’t verify a complete summary');
+      expect(result.text).not.toContain('from the retrieved evidence');
       expect(result.text).toContain('[Source](https://transit.example/services)');
       expect(result.text).not.toMatch(/RB22|Spandau|163/);
     }
+  });
+
+  it('rebuilds a requested page overview with one reasoning correction and keeps source checks', async () => {
+    const calls: { role: string; prompt: string }[] = [];
+    const rows = evidence.map((row) => ({
+      ...row,
+      args: { url: 'https://transit.example/services' },
+    }));
+    const result = await verifyFinalOutput(
+      {
+        object: async (role: string, input: { prompt: string }) => {
+          calls.push({ role, prompt: input.prompt });
+          return {
+            ok: true,
+            finishReason: 'stop',
+            object:
+              calls.length === 1
+                ? { decision: 'publish', reasons: [] }
+                : { decision: 'revise', revisedText: good, reasons: ['ungrounded_fact'] },
+          };
+        },
+      } as never,
+      {
+        taskId: 'requested-page-recovery',
+        request:
+          'Read https://transit.example/services and summarize its options in three short bullets with a source link.',
+        draft: bad,
+        evidence: rows,
+        critical: true,
+      },
+    );
+    expect(calls.map((call) => call.role)).toEqual(['rewrite', 'reason']);
+    expect(calls[1]?.prompt).toContain(
+      'Rebuild the requested overview from the supplied source passages',
+    );
+    expect(calls[1]?.prompt).toContain('broader supported options');
+    expect(result).toMatchObject({ text: good, unavailable: false });
+    expect(result.incomplete).toBeUndefined();
+    expect(publicWebClaimFindings(result.text, rows)).toEqual([]);
+    expect(shortBulletFindings('three short bullets', result.text)).toEqual([]);
   });
 
   it('completes a visibly unfinished grounding revision without restoring unsupported claims', async () => {
