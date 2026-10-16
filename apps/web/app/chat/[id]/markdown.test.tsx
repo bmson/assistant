@@ -68,6 +68,38 @@ describe('MessageMarkdown', () => {
     expect(html).toContain('[font-variant-numeric:tabular-nums]');
     expect(html).toContain('align-top');
     expect(html).toContain('Receipts');
+    expect(html).not.toContain('data-mobile-table-records="true"');
+  });
+
+  it('uses label-value records for long two-column content without changing the desktop table', () => {
+    const html = renderToStaticMarkup(
+      <MessageMarkdown
+        text={
+          '| Route | Transfer detail |\n| --- | --- |\n| Central | Walk through the covered passage to the platform entrance |'
+        }
+      />,
+    );
+
+    expect(html).toContain('data-mobile-table-records="true"');
+    expect(html).toContain('hidden sm:table');
+    expect(html).toContain('sm:hidden');
+    expect(html).toMatch(
+      /<dl[^>]*>[\s\S]*?<div class="grid[^>]*><dt[^>]*>Transfer detail<\/dt><dd[^>]*>Walk through the covered passage to the platform entrance<\/dd><\/div>/,
+    );
+  });
+
+  it('keeps short two-column and three-column tables in their existing layout', () => {
+    const short = renderToStaticMarkup(
+      <MessageMarkdown text={'| Item | Count |\n| --- | ---: |\n| Bags | 2 |'} />,
+    );
+    const threeColumns = renderToStaticMarkup(
+      <MessageMarkdown text={'| Day | Item | Count |\n| --- | --- | ---: |\n| Mon | Bags | 2 |'} />,
+    );
+
+    expect(short).not.toContain('data-mobile-table-records="true"');
+    expect(threeColumns).not.toContain('data-mobile-table-records="true"');
+    expect(threeColumns).toContain('<table');
+    expect(threeColumns).not.toContain('hidden sm:table');
   });
 
   it('offers label-value records for wide tables on phones', () => {

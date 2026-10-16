@@ -99,6 +99,14 @@ function tableCells(children: ReactNode): ReactNode[][] {
   );
 }
 
+function plainTextLength(value: ReactNode): number {
+  if (typeof value === 'string' || typeof value === 'number') return String(value).trim().length;
+  if (Array.isArray(value))
+    return value.reduce((length, child) => length + plainTextLength(child), 0);
+  if (isValidElement<{ children?: ReactNode }>(value)) return plainTextLength(value.props.children);
+  return 0;
+}
+
 const quoteClassName =
   'my-3 flex max-w-[72ch] items-start gap-2.5 rounded-xl border border-edge bg-sunken/55 px-3 py-2.5 text-strong first:mt-0 last:mb-0';
 
@@ -277,7 +285,10 @@ const components: Components = {
   table: ({ node: _node, children, ...props }) => {
     const rows = tableCells(children);
     const headers = rows[0] ?? [];
-    const useMobileRecords = headers.length > 3;
+    const useMobileRecords =
+      headers.length > 3 ||
+      (headers.length === 2 &&
+        rows.slice(1).some((row) => row.some((cell) => plainTextLength(cell) >= 32)));
     return (
       <div className="my-3 max-w-full overscroll-x-contain overflow-x-auto rounded-xl border border-edge first:mt-0 last:mb-0">
         <table
