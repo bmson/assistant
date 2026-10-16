@@ -571,6 +571,46 @@ describe('exact historical source projection', () => {
       'fictional exercise, not facts about you',
     );
   });
+  it('does not carry a project anchor into an explicitly unrelated recommendation', async () => {
+    const request =
+      'For the earlier fictional Kestrel scenario, compare my original budget and travel constraint with the Assistant’s suggested next step.';
+    const ownerText =
+      'For the fictional Kestrel exercise, my original budget is $500 and my travel constraint is to avoid taxis.';
+    const assistantText =
+      'The Kestrel scenario remains under review. Separately, in an unrelated travel note, the next step is public transport.';
+    const conversationEvidence: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: {
+          matches: [
+            message('kestrel-owner', ownerText, 'user', 'owner'),
+            message('kestrel-unrelated-assistant', assistantText, 'assistant', 'assistant'),
+          ],
+        },
+      },
+    ];
+    const object = vi.fn(async () => ({
+      ok: true,
+      object: {
+        selections: [
+          { sourceKey: 'message:kestrel-owner', quote: ownerText },
+          { sourceKey: 'message:kestrel-unrelated-assistant', quote: assistantText },
+        ],
+      },
+    }));
+
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request,
+      evidence: conversationEvidence,
+    });
+
+    expect(result).toMatchObject({ status: 'unavailable', failureReason: 'incomplete_selection' });
+    expect(result.selections).toEqual([]);
+    expect(validMemoryReadSelection(result, conversationEvidence, request)).toBe(false);
+  });
   it.each([
     [
       'cross-project switch',
@@ -731,6 +771,60 @@ describe('exact historical source projection', () => {
     expect(result).toMatchObject({ status: 'unavailable', failureReason: 'incomplete_selection' });
     expect(validMemoryReadSelection(result, conversationEvidence, request)).toBe(false);
     expect(object).toHaveBeenCalledTimes(2);
+  });
+  it('fails closed when the model chooses one of equally strong conflicting conversations', async () => {
+    const request =
+      'For the earlier fictional Kestrel scenario, compare my original budget and travel constraint with the Assistant’s suggested next step.';
+    const ownerText =
+      'For the fictional Kestrel exercise, my original budget is $500 and my travel constraint is to avoid taxis.';
+    const publicTransport = 'For Kestrel, public transport is the best option for travel.';
+    const taxis = 'For Kestrel, taxis are the best option for travel.';
+    const ownerChatOne = {
+      ...message('owner-one', ownerText, 'user', 'owner'),
+      conversationId: 'kestrel-chat-one',
+    };
+    const assistantChatOne = {
+      ...message('assistant-one', publicTransport, 'assistant', 'assistant'),
+      conversationId: 'kestrel-chat-one',
+    };
+    const ownerChatTwo = {
+      ...message('owner-two', ownerText, 'user', 'owner'),
+      conversationId: 'kestrel-chat-two',
+    };
+    const assistantChatTwo = {
+      ...message('assistant-two', taxis, 'assistant', 'assistant'),
+      conversationId: 'kestrel-chat-two',
+    };
+    const conversationEvidence: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: {
+          matches: [ownerChatOne, assistantChatOne, ownerChatTwo, assistantChatTwo],
+        },
+      },
+    ];
+    const object = vi.fn(async () => ({
+      ok: true,
+      object: {
+        selections: [
+          { sourceKey: 'message:owner-one', quote: ownerText },
+          { sourceKey: 'message:assistant-one', quote: publicTransport },
+        ],
+      },
+    }));
+
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request,
+      evidence: conversationEvidence,
+    });
+
+    expect(result).toMatchObject({ status: 'unavailable', failureReason: 'incomplete_selection' });
+    expect(result.selections).toEqual([]);
+    expect(validMemoryReadSelection(result, conversationEvidence, request)).toBe(false);
+    expect(object).toHaveBeenCalledTimes(1);
   });
   it('reserves bounded evidence for both speakers when a long history search has many owner messages', () => {
     const matches = [
