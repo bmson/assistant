@@ -122,13 +122,18 @@ describe('historical recall through the real executor after budget-rejected foll
       expect(result.finalText).toContain('€310');
       expect(result.finalText).toContain('Thursday');
       expect(result.finalText).toContain('avoid taxi travel');
-      expect(result.finalText).toContain(`conversation ${sourceChat.id}`);
+      const ownerSource = sourceRows.find((row) => row.role === 'user');
+      const assistantSource = sourceRows.find((row) => row.role === 'assistant');
+      if (!ownerSource || !assistantSource) throw new Error('Missing persisted source message');
+      expect(result.finalText).toContain(`/chat/${sourceChat.id}#message-${ownerSource.id}`);
       expect(result.finalText).toContain('fictional exercise, not facts about you');
       expect(result.finalText).toContain('coverage is limited to the returned sources');
       expect(result.finalText).not.toContain('No matching saved memories');
       expect(result.finalText).not.toContain('BudgetReservationError');
-      if (text === requests[1])
+      if (text === requests[1]) {
         expect(result.finalText).toContain('Earlier assistant claim (not verified fact)');
+        expect(result.finalText).toContain(`/chat/${sourceChat.id}#message-${assistantSource.id}`);
+      }
       const [persisted] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
       expect(persisted?.status).toBe('done');
     },

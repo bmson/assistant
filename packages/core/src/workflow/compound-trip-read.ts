@@ -5240,7 +5240,7 @@ export function upcomingFlightReadProjection(
     text: [
       ...(noVerifiedFuture
         ? [
-            `No future flight could be verified as of ${checkedDay ?? 'the request time'}. These dated bookings do not establish a later departure.`,
+            `No future flight could be verified as of ${checkedDay ?? 'the request time'}. ${sourceGroups.length ? 'These dated bookings do not establish a later departure.' : 'The checked sources do not establish a future departure.'}`,
           ]
         : []),
       compactSummary.length > 0
@@ -5254,17 +5254,11 @@ export function upcomingFlightReadProjection(
       ...(noVerifiedFuture
         ? [
             `Limits: ${gaps
-              .filter((gap) => !/could not identify a dated future flight candidate/i.test(gap))
               .map((gap) =>
-                gap
-                  .replace(
-                    'Calendar search coverage is incomplete, so an earlier flight may be missing.',
-                    'Calendar coverage is incomplete.',
-                  )
-                  .replace(
-                    'Some matching email threads remain unread or incomplete; search pages completed, so they were not counted as read booking evidence.',
-                    'Some matching email threads remain unread or incomplete.',
-                  ),
+                gap.replace(
+                  'Some matching email threads remain unread or incomplete; search pages completed, so they were not counted as read booking evidence.',
+                  'Some matching email threads remain unread or incomplete.',
+                ),
               )
               .join(' ')}`,
           ]

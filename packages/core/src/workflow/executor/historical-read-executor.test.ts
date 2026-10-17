@@ -760,12 +760,8 @@ describe('historical conversation read finalization', () => {
     expect(observedQueries).toEqual(expectedQueries);
     expect(answer).toContain(`Recorded owner message:** “${ownerCorrection}”`);
     expect(answer).toContain(`Earlier assistant claim (not verified fact):** “${assistantClaim}”`);
-    expect(answer).toContain(
-      `conversation ${conversationId}; message ${historicalMessages[0]?.id}`,
-    );
-    expect(answer).toContain(
-      `conversation ${conversationId}; message ${historicalMessages[1]?.id}`,
-    );
+    expect(answer).toContain(`/chat/${conversationId}#message-${historicalMessages[0]?.id}`);
+    expect(answer).toContain(`/chat/${conversationId}#message-${historicalMessages[1]?.id}`);
     expect(answer).toContain('not evidence of owner intent');
     expect(answer).not.toContain('The current verified departure time is 9:15 AM.');
     expect(answer).not.toContain('TEST-DO-NOT-REPEAT');
@@ -1063,12 +1059,8 @@ describe('historical conversation read finalization', () => {
     expect(sourceConversations).toHaveBeenCalledTimes(2);
     expect(answer).toContain(`Recorded owner message:** “${ownerCorrection}”`);
     expect(answer).toContain(`Earlier assistant claim (not verified fact):** “${assistantClaim}”`);
-    expect(answer).toContain(
-      `conversation ${conversationId}; message ${historicalMessages[0]?.id}`,
-    );
-    expect(answer).toContain(
-      `conversation ${conversationId}; message ${historicalMessages[1]?.id}`,
-    );
+    expect(answer).toContain(`/chat/${conversationId}#message-${historicalMessages[0]?.id}`);
+    expect(answer).toContain(`/chat/${conversationId}#message-${historicalMessages[1]?.id}`);
     expect(answer).toContain('fictional exercise');
     expect(answer).not.toContain('TEST-DO-NOT-REPEAT');
   });

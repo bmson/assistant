@@ -392,6 +392,9 @@ function groundedTransportBullets(
   const overviewUrl = safePublicPageUrl(source.url);
   if (
     overviewUrl &&
+    !/\b(?:frequency|frequencies|how often|how long|timetable|fare|fares|cost|price)\b|\b(?:all|every)\s+(?:route|service|option)|\b(?:first|last)\s+(?:train|bus|departure)\b/i.test(
+      request,
+    ) &&
     rail.length &&
     express.length === 1 &&
     otherBuses.length &&
@@ -404,7 +407,7 @@ function groundedTransportBullets(
     const overview = [
       `- **Rail:** ${railNames.join(', ')}.`,
       `- **Express buses:** ${expressGroup?.entries.join(', ')}.`,
-      `- **Local and night buses:** Check individual routes for transfers and operating limits. [Source](${overviewUrl})`,
+      `- **Other buses:** ${otherBuses.map((group) => group.title).join(', ')}. Check individual routes for transfers and operating limits. [Source](${overviewUrl})`,
     ].join('\n');
     if (
       !shortBulletFindings(request, overview).length &&

@@ -390,7 +390,7 @@ describe('source-grounded public page summary recovery', () => {
     expect(publicWebClaimFindings(result.text, coverageEvidence)).toEqual([]);
   });
 
-  it('groups every option from multiple source sections into exactly three short bullets', async () => {
+  it('summarizes the source modes in three short bullets without a route catalogue', async () => {
     const result = await runTransportFallback({
       request: multiCategoryRequest,
       evidence: multiCategoryEvidence,
@@ -399,39 +399,37 @@ describe('source-grounded public page summary recovery', () => {
     });
     expect(result.incomplete).not.toBe(true);
     expect(result.text.split('\n')).toHaveLength(3);
-    for (const id of [
-      'FEX',
-      'RE20',
-      'RB22',
-      'RB24',
-      'RB32',
-      'S9',
-      'S85',
-      'X7',
-      'X71',
-      'BER2',
-      'IC',
-      '163',
-      '263',
-      '735',
-      '736',
-      'N7',
+    for (const category of [
+      'Regional trains',
+      'S-Bahn trains',
+      'long-distance transport',
+      'Express buses',
+      'Buses City - Airport',
+      'Buses nearby - Airport',
+      'Night buses',
     ])
-      expect(result.text).toContain(id);
-    expect(result.text).toContain('Airport Express (FEX)');
-    expect(result.text).toContain('BER2 (subject to surcharge)');
-    expect(result.text).toContain('Buses City - Airport');
-    expect(result.text).toContain('Lines ending at Station require L1/L2 transfer.');
-    expect(result.text).toContain('N7: at weekends, only between City and Airport.');
-    expect(result.text).not.toContain('N7: weekends only');
-    expect(result.text).toContain('weekday rush-hour express supplement; this direction only.');
+      expect(result.text).toContain(category);
+    expect(result.text).toContain('X7, X71, BER2 (subject to surcharge)');
+    expect(result.text).toContain('Check individual routes for transfers and operating limits');
     expect(result.text).toContain(`[Source](${multiCategoryUrl})`);
     expect(result.text).not.toContain('every 5 minutes');
+    expect(result.text).not.toContain('N7: weekends only');
     expect(shortBulletFindings(multiCategoryRequest, result.text)).toEqual([]);
     expect(requestedPublicPageReceiptFindings(multiCategoryRequest, multiCategoryEvidence)).toEqual(
       [],
     );
     expect(publicWebClaimFindings(result.text, multiCategoryEvidence)).toEqual([]);
+  });
+
+  it('does not replace an explicit every-route request with a mode overview', async () => {
+    const result = await runTransportFallback({
+      request: `Read ${multiCategoryUrl} and summarize every route and its operating restrictions in three short bullets with a source link.`,
+      evidence: multiCategoryEvidence,
+      draft: multiCategoryBadSummary,
+      correction: multiCategoryBadSummary,
+    });
+    expect(result.incomplete).toBe(true);
+    expect(result.text).not.toContain('**Other buses:**');
   });
 
   it('does not use the complete-coverage fallback for a fetch bound to a different URL', async () => {

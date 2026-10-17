@@ -87,14 +87,14 @@ describe('successful historical evidence after a later budget failure', () => {
     expect(answer.text).toBe(renderMemoryReadAnswer(selection, evidence, requestText));
     expect(answer.text).toContain('€310');
     expect(answer.text).toContain('avoid taxi travel');
-    expect(answer.text).toContain('conversation nimbus-source-chat; message owner-source');
+    expect(answer.text).toContain('/chat/nimbus-source-chat#message-owner-source');
     expect(answer.text).toContain('fictional exercise, not facts about you');
     expect(answer.text).not.toContain('No matching saved memories');
     expect(answer.text).not.toContain('BudgetReservationError');
     expect(answer.text).toContain('coverage is limited to the returned sources');
     if (requestText === prompts[1]) {
       expect(answer.text).toContain('Earlier assistant claim (not verified fact)');
-      expect(answer.text).toContain('message assistant-source');
+      expect(answer.text).toContain('/chat/nimbus-source-chat#message-assistant-source');
     }
   });
 
