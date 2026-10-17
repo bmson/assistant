@@ -420,6 +420,22 @@ describe('chat needs-action triage', () => {
     ).toBe(true);
     expect(scripted.object).not.toHaveBeenCalled();
   });
+  it('preserves an additional owner action alongside a code-repair complaint', async () => {
+    const store = chatStore();
+    const scripted = scriptedRouter({ triage: { needsAction: true }, draft: 'unused' });
+    const report = vi.fn(async () => ({ id: 'repair', status: 'reported' }));
+    await handleChatTurn(
+      send("That didn't work. Please investigate the code. Also remind me to call Sam tomorrow."),
+      {
+        config: { ...config(), SELF_REPAIR_ENABLED: true },
+        router: scripted.router,
+        chat: store.chat,
+        persistence: { selfRepair: { report }, tasks: {}, ownerContext: {} } as never,
+      },
+    );
+    expect(report).toHaveBeenCalledOnce();
+    expect(stubs.queueAdmission).toHaveBeenCalledOnce();
+  });
   it('routes a uniquely selected internal cancellation through durable persistence without model work', async () => {
     const store = chatStore({
       composerCancellationResult: {
