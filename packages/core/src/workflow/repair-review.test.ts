@@ -26,6 +26,7 @@ it('does not approve an unavailable, malformed, or budget-blocked review', async
   for (const result of [
     { ok: false },
     { ok: true, modelId: 'reviewer', object: { approved: true, findings: [] } },
+    { ok: true, modelId: 'reviewer', object: { approved: true, summary: '...', findings: [] } },
   ]) {
     const object = vi.fn(async () => result);
     expect(
