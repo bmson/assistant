@@ -46,6 +46,11 @@ const requiredChecks = [
 const OUTPUT = '/workspace/outputs/repair.json';
 class RepairRequestUncertain extends Error {}
 
+export type RepairPatchReviewer = (candidate: {
+  commitSha: string;
+  files: Array<{ filename: string; patch: string }>;
+}) => Promise<{ approved: boolean; modelId: string; summary: string } | null>;
+
 /** No application, publishing, or API credential is placed in the generated-code environment. */
 export function createHostedRepairWorker(input: {
   apiKey: string;
@@ -55,6 +60,7 @@ export function createHostedRepairWorker(input: {
   effort: 'low' | 'medium' | 'high';
   allowExecutor: boolean;
   deploymentUrl?: string;
+  reviewPatch?: RepairPatchReviewer;
   fetch?: typeof fetch;
   now?: () => Date;
 }): RepairWorker {
@@ -299,7 +305,75 @@ export function createHostedRepairWorker(input: {
         };
       return { status: 'testing' as const, patch };
     }
+    // CI establishes executable checks; a separate model reviews the actual
+    // GitHub diff. Never promote an unreviewed or subsequently changed commit.
+    let review = issue.data.hostedReview;
+    if (review?.commitSha !== pr.head.sha) {
+      if (!input.reviewPatch || !issue.data.hostedSourceSha)
+        return {
+          status: 'failed' as const,
+          patch: {
+            ...patch,
+            lastError: 'Independent code review is not configured for this repair.',
+          },
+        };
+      const comparison = z
+        .object({
+          files: z
+            .array(z.object({ filename: z.string(), patch: z.string() }))
+            .min(1)
+            .max(20),
+        })
+        .parse(await github(`/compare/${sha.parse(issue.data.hostedSourceSha)}...${pr.head.sha}`));
+      if (
+        comparison.files.length !== files.length ||
+        comparison.files.some((f) => !files.some((p) => p.filename === f.filename)) ||
+        comparison.files.reduce((n, f) => n + Buffer.byteLength(f.patch) + 1024, 0) > 100000
+      )
+        throw new Error('Independent review requires the complete bounded published diff');
+      const result = await input.reviewPatch({ commitSha: pr.head.sha, files: comparison.files });
+      if (!result) {
+        const expired =
+          now().getTime() - new Date(patch.hostedPublishedAt ?? '').getTime() > 60 * 60000;
+        return {
+          status: expired ? ('failed' as const) : ('testing' as const),
+          patch: {
+            ...patch,
+            lastError: expired
+              ? 'Independent code review did not finish within one hour.'
+              : 'Independent code review is waiting for model availability or budget.',
+          },
+        };
+      }
+      review = {
+        commitSha: pr.head.sha,
+        approved: result.approved,
+        modelId: result.modelId.slice(0, 160),
+        summary: result.summary.slice(0, 2000),
+        reviewedAt: now().toISOString(),
+      };
+    }
+    patch.hostedReview = review;
+    if (!review.approved)
+      return {
+        status: 'failed' as const,
+        patch: {
+          ...patch,
+          lastError:
+            'Independent code review found issues. Review the draft PR before requesting another attempt.',
+        },
+      };
     if (pr.draft) {
+      const latest = pullSchema.parse(await github(`/pulls/${pr.number}`));
+      if (latest.head.sha !== pr.head.sha || latest.state !== 'open')
+        return {
+          status: 'failed' as const,
+          patch: {
+            ...patch,
+            lastError:
+              'Repair PR changed during independent review. Review the current commit before promotion.',
+          },
+        };
       const ready = z
         .object({
           errors: z.array(z.unknown()).optional(),
@@ -476,6 +550,7 @@ export function createHostedRepairWorker(input: {
         targetPaths: issue.data.targetPaths,
         reproduction: issue.data.reproduction,
         acceptance: issue.data.acceptance,
+        repositoryEvidence: issue.data.repositoryEvidence,
       };
       const exporter = `import base64,json,pathlib,subprocess\np=pathlib.Path('/workspace/repo')\ndef git(*a): return subprocess.check_output(['git','-C',str(p),*a])\nassert git('rev-parse','HEAD').decode().strip() == '${source}'\nr=json.loads(pathlib.Path('/workspace/result.json').read_text())\npaths=set(git('diff','--name-only','--no-renames','${source}','-z').decode().split('\\0')+git('ls-files','--others','--exclude-standard','-z').decode().split('\\0'))- {''}\nchanges=[]\nfor path in sorted(paths):\n f=p/path\n assert not f.is_symlink()\n changes.append({'path':path,'content':base64.b64encode(f.read_bytes()).decode() if f.exists() else None,'mode':'100755' if f.exists() and f.stat().st_mode & 0o111 else '100644'})\npathlib.Path('/workspace/outputs').mkdir(exist_ok=True)\npathlib.Path('${OUTPUT}').write_text(json.dumps({'baseSha':'${source}','reproduced':r['reproduced'],'regressionTest':r['regressionTest'],'changes':changes}))\n`;
       const created = z.object({ id: sessionId }).parse(

@@ -35,6 +35,15 @@ export function isRepairFeedback(text: string): boolean {
     )
   )
     return false;
+  // Owners often name the broken feature instead of referring to it as "that".
+  // Keep this anchored to a direct complaint about the assistant or its UI;
+  // unrelated third-party failures and hypothetical examples are not reports.
+  if (
+    /(?:^|[.!?\n]\s*)(?:(?:no|actually|wait|sorry|hey|please)[,:]?\s+)?(?:the |your |this |my )?(?:app|assistant|improvements?(?: section| page)?|(?:save|send|refresh|merge|upload) button|(?:calendar|reminders?|chat|voice|search|cards?|notifications?)(?: feature| section| page)?)\s+(?:(?:still|just)\s+)?(?:doesn't|does not|don't|do not|didn't|did not|won't|will not|can't|cannot)\s+(?:work|save|send|update|load|open|respond|refresh|show|arrive|deliver)\b|(?:^|[.!?\n]\s*)(?:the |your |this |my )?(?:app|assistant|improvements?(?: section| page)?|(?:save|send|refresh|merge|upload) button|calendar|reminders?|chat|voice|search|cards?|notifications?)\s+(?:(?:isn't|aren't|is not|are not)\s+working|(?:is|are|keeps?)\s+(?:not working|broken|stuck|crashing|failing|freezing))\b/i.test(
+      ownerText,
+    )
+  )
+    return true;
   return /(?:^|[.!?\n]\s*)(?:(?:no|actually|wait|sorry|hey|please)[,:]?\s+)?(?:you (?:were|are|got (?:it|that)) (?:wrong|incorrect)|(?:that|this|it)(?:'s| (?:was|is)) (?:wrong|incorrect)|you (?:made (?:that|this|it) up|invented (?:that|this|it))|(?:that|this|it) (?:didn't|did not|hasn't|has not|wasn't|was not) (?:work|succeed|save|send|update|change|create|schedule|book|cancel|arrive|deliver)|i (?:don't|do not|can't|cannot) see (?:the |any )?(?:change|update|event|reminder|booking)|(?:why|how come) (?:didn't|did not|doesn't|does not) (?:that|this|it|the .{1,40}) (?:work|succeed|save|send|update)|(?:(?:can|could|would) you (?:please )?)?fix (?:this|that|the) (?:bug|issue|failure)|report (?:a |this |that )?(?:bug|issue))\b/i.test(
     ownerText,
   );
@@ -59,6 +68,11 @@ export async function reportRepair(
   });
 }
 export { repairPathBlocked } from '@assistant/persistence';
+
+export type RepairRepositoryReader = (
+  agentId: string,
+  paths: string[],
+) => Promise<NonNullable<RepairIssue['data']['repositoryEvidence']>>;
 
 const MAX_AUTOMATIC_PRE_DISPATCH_RETRIES = 3;
 const PRE_DISPATCH_BACKOFF_MS = [60_000, 5 * 60_000, 15 * 60_000] as const;
@@ -211,6 +225,7 @@ export interface RepairCycleDeps {
   dailyLimit: number;
   notify: (issue: RepairIssue, text: string) => Promise<void>;
   heartbeat?: () => Promise<void>;
+  readRepository?: RepairRepositoryReader;
   diagnostics?: { persistenceDriver: string; modules: string[]; calendarReaderAvailable: boolean };
 }
 /** One bounded tick. Dispatch uncertainty is reconciled by branch/run identity, never blindly retried. */
@@ -497,6 +512,12 @@ export async function runRepairCycle(
     }
     const usage = await readAccounting();
     const accounting = usage.accounting ?? null;
+    const repositoryEvidence = deps.readRepository
+      ? await deps
+          .readRepository(agentId, data.targetPaths)
+          .catch(() => ({ source: 'unavailable' as const, files: [] }))
+      : undefined;
+    await deps.heartbeat?.();
     const attempt = safeRouterAttempt(
       undefined,
       'success',
@@ -510,6 +531,7 @@ export async function runRepairCycle(
       'fixing',
       {
         ...data,
+        repositoryEvidence,
         routerAttempts: [...(issue.data.routerAttempts ?? []), attempt].slice(-12),
         modelAccounting: accounting ?? undefined,
         accountedInvestigationTaskIds: usage.accountedTaskIds,
