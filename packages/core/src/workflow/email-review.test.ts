@@ -2552,6 +2552,100 @@ describe('bounded no-send email review', () => {
     expect(result.issues).toEqual([]);
   });
 
+  it('supplies only the exact accepted conditional draft and round-trips it through validation and rendering', () => {
+    const source = messages('prompt-accepted-alternatives');
+    const latest = required(source.at(-1), 'latest');
+    latest.text = 'Nobody has signed up for tomorrow. Are you able to help? Thanks!';
+    latest.sourceLength = latest.text.length;
+    const thread = required(
+      emailReviewCompleteThread('prompt-accepted-alternatives', 'owner@example.com', [
+        search('prompt-accepted-alternatives'),
+        read('prompt-accepted-alternatives', source),
+      ]),
+      'complete direct request',
+    );
+    const prompt = JSON.parse(emailReviewPrompt([thread])) as {
+      threads: Array<{ acceptedConditionalDraft: string | null }>;
+    };
+    const acceptedConditionalDraft = prompt.threads[0]?.acceptedConditionalDraft;
+    expect(acceptedConditionalDraft).toBeTruthy();
+
+    const item = {
+      ...required(validAnswer(thread.threadId).items[0], 'assessment item'),
+      whyQuote: 'Are you able to help?',
+      deadline: null,
+      draftBody: acceptedConditionalDraft,
+      draftSourceMessageIds: [thread.latestMessageId],
+    };
+    const checked = validateEmailReviewAnswer({ items: [item] }, [thread]);
+    expect(checked?.items[0]?.draftBody).toBe(acceptedConditionalDraft);
+    const rendered = formatEmailReviewAnswer(
+      checked?.items ?? [],
+      emailReviewCoverage([thread.threadId], [thread], [search(thread.threadId)]),
+    );
+    expect(rendered).toContain(
+      '**Draft alternatives — choose one and remove the other before sending:**',
+    );
+    expect(rendered).toContain(acceptedConditionalDraft);
+  });
+
+  it('does not supply conditional text for unsupported choices, alternate routes, or non-requests', () => {
+    const makeThread = (threadId: string, latestText: string) => {
+      const source = messages(threadId);
+      const latest = required(source.at(-1), 'latest');
+      latest.text = latestText;
+      latest.sourceLength = latest.text.length;
+      return required(
+        emailReviewCompleteThread(threadId, 'owner@example.com', [
+          search(threadId),
+          read(threadId, source),
+        ]),
+        'complete thread',
+      );
+    };
+    const threads = [
+      makeThread(
+        'prompt-unsupported-choice',
+        'Could you send me the revised document when you have a chance?',
+      ),
+      makeThread(
+        'prompt-alternate-route',
+        'Please RSVP using the ParentSquare button for the event.',
+      ),
+      makeThread('prompt-no-reply', 'For your records, the office will be closed Monday.'),
+    ];
+    const prompt = JSON.parse(emailReviewPrompt(threads)) as {
+      threads: Array<{ threadId: string; acceptedConditionalDraft: string | null }>;
+    };
+    expect(prompt.threads.map((thread) => thread.acceptedConditionalDraft)).toEqual([
+      null,
+      null,
+      null,
+    ]);
+  });
+
+  it('counts the supplied conditional draft toward the existing prompt context limit', () => {
+    const source = messages('bounded-conditional-template');
+    const latest = required(source.at(-1), 'latest');
+    latest.text = `${'x'.repeat(49_800)}\nAre you able to help?`;
+    latest.sourceLength = latest.text.length;
+    const thread = required(
+      emailReviewCompleteThread('bounded-conditional-template', 'owner@example.com', [
+        search('bounded-conditional-template'),
+        read('bounded-conditional-template', source),
+      ]),
+      'complete direct request',
+    );
+
+    const bounded = boundEmailReviewThreads([thread]);
+    const prompt = JSON.parse(emailReviewPrompt([thread])) as {
+      threads: Array<{ acceptedConditionalDraft: string | null }>;
+    };
+
+    expect(bounded.omittedThreadIds).toContain(thread.threadId);
+    expect(prompt.threads).toEqual([]);
+  });
+
   it('preserves a valid specific owner reply and its older source-backed deadline', async () => {
     const threadId = 'specific-owner-choice';
     const sourceMessages = messages(threadId);
