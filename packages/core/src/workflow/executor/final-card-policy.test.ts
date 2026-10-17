@@ -40,4 +40,28 @@ describe('final evidence card composition policy', () => {
       }),
     ).toBe(false);
   });
+
+  it('preserves historical attribution prose instead of automatically replacing it with a card', () => {
+    expect(
+      shouldGenerateFinalEvidenceCard({
+        ...defaultInput,
+        memoryRead: true,
+        answerCardPreferred: true,
+      }),
+    ).toBe(false);
+  });
+
+  it('still permits an explicitly requested or source-validated refresh of a memory card', () => {
+    expect(
+      shouldGenerateFinalEvidenceCard({ ...defaultInput, memoryRead: true, cardRequested: true }),
+    ).toBe(true);
+    expect(
+      shouldGenerateFinalEvidenceCard({
+        ...defaultInput,
+        memoryRead: true,
+        refreshCardId: 'card-1',
+        refreshEvidenceAvailable: true,
+      }),
+    ).toBe(true);
+  });
 });

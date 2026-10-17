@@ -8,10 +8,14 @@ export function shouldGenerateFinalEvidenceCard(input: {
   blocked: boolean;
   enabled: boolean;
   weeklyCalendarPlan: boolean;
+  memoryRead?: boolean;
 }): boolean {
   return (
     !input.scoreboard &&
     !input.weeklyCalendarPlan &&
+    // Historical recall needs its checked attribution and uncertainty prose.
+    // A source-grounded card does not prove that it preserves those distinctions.
+    !(input.memoryRead && !input.cardRequested && !input.refreshCardId) &&
     (Boolean(input.refreshCardId) ||
       input.cardRequested ||
       input.answerCardPreferred ||

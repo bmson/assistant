@@ -472,6 +472,16 @@ export function validateGroundedCard(
   if (!blocks.length) return null;
   // The same for the phone's own actions: one that cannot work is dropped.
   const actions = card.actions.filter((action) => usableAction(action, facts));
+  // A complete-looking layout is not enough if the composer left one of its
+  // grounded facts out of the visible composition. Lookup cards can replace
+  // the reply on both clients, so retain the prose by rejecting that card.
+  const renderedFactIds = new Set(blocks.flatMap(blockFactIds));
+  for (const action of actions) {
+    if (action.factId) renderedFactIds.add(action.factId);
+    for (const id of [action.startFact, action.endFact, action.locationFact])
+      if (id) renderedFactIds.add(id);
+  }
+  if (card.facts.some((fact) => !renderedFactIds.has(fact.id))) return null;
   // A section can retain its outer slot while its invalid children change.
   // Equal top-level counts do not mean the original nested tree is safe.
   return { ...card, blocks, actions };

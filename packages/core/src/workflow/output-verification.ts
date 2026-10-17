@@ -161,12 +161,73 @@ function namedSourcePassages(source: string, draft: string) {
   );
 }
 
+/** Extract only explicit availability/operation restrictions, never cadence. */
+function operationalRestrictions(text: string): string[] {
+  return text
+    .split(/\r?\n/u)
+    .slice(1)
+    .map((rawLine) => {
+      const line = decodeSourceEntities(rawLine).replace(/\s+/gu, ' ').trim();
+      if (!line) return undefined;
+      if (/^[-*]?\s*frequency:/i.test(line)) {
+        const clause = line.replace(/^[-*]?\s*frequency:\s*/i, '');
+        // A temporary joint-frequency note changes cadence, not whether either
+        // named service operates. It is intentionally omitted from a catalogue.
+        if (/jointly\s+(?:operate|run)[^.]*\bfrequency\b/i.test(clause)) return undefined;
+        return clause
+          .match(
+            /\b(?:weekdays?|weekends?|holidays?|except\s+(?:holidays?|Sunday|Sundays|Saturday|Saturdays)|until\s+[A-Z][a-z]+\s+\d{4})\b(?:[^,;)]{0,35})?/gi,
+          )
+          ?.join('; ');
+      }
+      const content = line.replace(/^[-*]?\s*(?:note|please note|schedule note):\s*/i, '');
+      if (/^[-*]?\s*(?:route|travel time|journey time|fare|timetable):/i.test(line))
+        return undefined;
+      // A temporary joint-frequency note changes cadence, not whether either
+      // named service operates. It is intentionally omitted from a catalogue.
+      if (/jointly\s+(?:operate|run)[^.]*\bfrequency\b/i.test(content)) return undefined;
+      return /\b(?:weekdays?|weekends?|holidays?|except|suspended|cancelled|canceled|temporar(?:y|ily)|only runs?|runs only|only on (?:weekdays?|weekends?)|until\s+[A-Z][a-z]+\s+\d{4}|change (?:here|there)|continue to|direction only|rush hour)\b/i.test(
+        content,
+      )
+        ? content
+        : undefined;
+    })
+    .filter((line): line is string => Boolean(line));
+}
+
+function compactOperationalRestriction(text: string, serviceId?: string): string {
+  const transfer =
+    /bus that only goes to\s+['“‘]?(.+?)['”’]?, please change (?:there|here) to (?:the )?S-Bahn lines\s+([\w/]+) to get to\s+['“‘]?(.+?)['”’]/i.exec(
+      text,
+    );
+  if (transfer) {
+    const stop = transfer[1]
+      ?.replace(/\s*\([^)]*\)/g, '')
+      .replace(/\s+(?:station|stop|Bhf\.)$/i, '');
+    return `Lines ending at ${stop} require ${transfer[2]} transfer.`;
+  }
+  const serviceTransfer = /^[-*]?\s*continue to\s+(.+?) with S-Bahn lines\s+([\w/]+)$/i.exec(text);
+  if (serviceTransfer) return `Transfer to ${serviceTransfer[2]} for ${serviceTransfer[1]}.`;
+  const weekend =
+    /at weekends, the\s+([\p{L}\d]+) only runs between\s+(.+?)\.?(?:\s*\(.*)?$/iu.exec(text);
+  if (weekend) return `${weekend[1]}: at weekends, only between ${weekend[2]}.`;
+  if (
+    serviceId &&
+    /supplements the service on weekdays during rush hour/i.test(text) &&
+    /in this direction only/i.test(text)
+  )
+    return `weekday rush-hour express supplement; this direction only.`;
+  return text;
+}
+
 /**
  * Build a small, conservative fallback for transport pages whose model-written
  * summary merged attributes across named services. It uses only service IDs
- * grouped by the page's own category headings and their individual frequency
- * lines. If the page does not expose three clear groups, the caller keeps the
- * ordinary incomplete response.
+ * grouped by the page's own category headings. It names source-listed services
+ * and preserves safe source headings and explicit operational restrictions,
+ * without compressing route details or cadences. If every listed option and
+ * material restriction cannot fit in three clear bullets, the caller keeps
+ * the ordinary incomplete response.
  */
 function groundedTransportBullets(
   request: string,
@@ -191,83 +252,153 @@ function groundedTransportBullets(
   if (!source) return undefined;
 
   const passages = allSourcePassages(source.text);
-  const services = passages.filter((passage) => passage.kind === 'service');
-  const groups = passages.flatMap((passage) => {
-    if (passage.kind !== 'category') return [];
-    const match = /\(([^()]{1,180})\)\s*$/.exec(passage.label);
-    if (!match?.[1]) return [];
-    const ids = match[1].split(',').map((value) => value.trim());
-    if (ids.length < 2 || ids.some((id) => !/^[A-Z]{1,8}\d{0,4}[A-Z]?$/u.test(id))) return [];
-    const title = passage.label.slice(0, match.index).trim();
+  const endSectionTitle =
+    /^(?:Frequently asked questions|FAQ|Related (?:information|links)|More information)$/i;
+  const endSection = [...source.text.matchAll(/^([^\r\n]+)$/gm)].find((match) =>
+    endSectionTitle.test(decodeSourceEntities(match[1] ?? '').trim()),
+  );
+  const contentEnd = endSection?.index ?? source.text.length;
+  const categoryHeadings =
+    /^(?:[\p{L}\d][^.!?:\n]{0,70}\s)?(?:trains|buses|transport|services|routes)(?:\s+[^.!?:\n]{1,70})?$/iu;
+  const categoryPassages = [
+    ...passages
+      .filter((passage) => passage.kind === 'category' && passage.start < contentEnd)
+      .map(({ label, start }) => ({ label, start })),
+    ...[...source.text.matchAll(/^([^\r\n]+)$/gm)].flatMap((match) => {
+      const label = decodeSourceEntities(match[1] ?? '').trim();
+      if (match.index >= contentEnd || !categoryHeadings.test(label)) return [];
+      return [{ label, start: match.index }];
+    }),
+  ]
+    .filter(
+      (passage, index, all) =>
+        all.findIndex((candidate) => candidate.start === passage.start) === index,
+    )
+    .sort((left, right) => left.start - right.start);
+  const isEnumeratedCategory = (label: string) => {
+    const contents = /\(([^()]{1,180})\)\s*$/.exec(label)?.[1];
+    return Boolean(
+      contents
+        ?.split(',')
+        .map((id) => id.trim())
+        .every((id) => /^[A-Z]{1,8}\d{0,4}[A-Z]?$/u.test(id)),
+    );
+  };
+  // Intro/navigation headings can resemble categories and may mention
+  // unrelated service IDs. Start at the first explicit category roster when
+  // the source provides one; otherwise rely on named headings throughout.
+  const contentStart =
+    categoryPassages.find((passage) => isEnumeratedCategory(passage.label))?.start ?? 0;
+  const sourceCategories = categoryPassages.filter((passage) => passage.start >= contentStart);
+  const services = passages.filter(
+    (passage) =>
+      passage.kind === 'service' && passage.start >= contentStart && passage.start < contentEnd,
+  );
+  let invalidGroup = false;
+  const groups = sourceCategories.flatMap((passage, index) => {
+    const nextStart = sourceCategories[index + 1]?.start ?? contentEnd;
+    const scopedServices = services.filter(
+      (item) => item.start > passage.start && item.start < nextStart,
+    );
+    const parenthetical = /\(([^()]{1,180})\)\s*$/.exec(passage.label);
+    const listedIds = parenthetical?.[1]?.split(',').map((value) => value.trim());
+    const validListedIds = Boolean(listedIds?.every((id) => /^[A-Z]{1,8}\d{0,4}[A-Z]?$/u.test(id)));
+    if (
+      validListedIds &&
+      listedIds &&
+      new Set(listedIds.map((id) => id.toLocaleLowerCase())).size !== listedIds.length
+    ) {
+      invalidGroup = true;
+      return [];
+    }
+    const serviceIds = scopedServices.map((item) => item.label);
+    if (new Set(serviceIds.map((id) => id.toLocaleLowerCase())).size !== serviceIds.length) {
+      invalidGroup = true;
+      return [];
+    }
+    const ids = [...new Set([...(validListedIds ? (listedIds ?? []) : []), ...serviceIds])];
+    // A few page headings only introduce a section; retain only categories
+    // that name options in the heading itself or contain named services.
+    if (!ids.length) return [];
+    const title =
+      parenthetical && validListedIds
+        ? passage.label.slice(0, parenthetical.index).trim()
+        : passage.label.trim();
     if (
       !title ||
-      title.length > 60 ||
+      title.length > 70 ||
       /[[\]_*`<>]/u.test(title) ||
       [...title].some((character) => character.charCodeAt(0) < 32)
-    )
+    ) {
+      invalidGroup = true;
       return [];
-    return [{ passage, ids, title }];
-  });
-  const normalizedTitles = groups.map((group) => group.title.toLocaleLowerCase());
-  const normalizedIds = groups.flatMap((group) => group.ids.map((id) => id.toLocaleLowerCase()));
-  if (
-    new Set(normalizedTitles).size !== normalizedTitles.length ||
-    new Set(normalizedIds).size !== normalizedIds.length
-  )
-    return undefined;
-  const candidates = groups.flatMap((group, index) => {
-    const nextStart = groups[index + 1]?.passage.start ?? source.text.length;
-    const firstService = services
-      .filter((item) => item.start > group.passage.start && item.start < nextStart)
-      .sort((left, right) => left.start - right.start)[0];
-    if (!firstService) return [];
-    const firstServiceStart = firstService.start;
-    const categoryIntro = source.text.slice(group.passage.start, firstServiceStart);
-    const qualifiedSchedule =
-      /\b(?:weekends?|weekdays?|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|except|only|subject\s+to|until|jointly|surcharge|seasonal|temporar(?:y|ily))\b/i;
-    if (qualifiedSchedule.test(categoryIntro)) return [];
-    const facts = group.ids.flatMap((id) => {
-      const matches = services.filter(
-        (item) => item.label === id && item.start > group.passage.start && item.start < nextStart,
-      );
-      if (matches.length !== 1) return [];
-      const service = matches[0];
-      if (!service) return [];
-      const lines = decodeSourceEntities(service.text)
-        .split(/\r?\n/u)
-        .map((line) => line.trim())
-        .filter(Boolean);
-      // Accept only a service heading followed by one route and one cadence.
-      // Extra prose or fields may carry exceptions we cannot safely compress.
-      if (
-        lines.length !== 3 ||
-        lines[0] !== id ||
-        !/^-\s*Route:\s*\S/u.test(lines[1] ?? '') ||
-        !/^-\s*Frequency:\s*\S/u.test(lines[2] ?? '') ||
-        qualifiedSchedule.test(service.text)
-      )
-        return [];
-      const line = /^\s*-\s*Frequency:\s*([^\r\n]+)$/im.exec(service.text)?.[1];
-      if (!line) return [];
-      const frequency = decodeSourceEntities(line).replace(/\s+/g, ' ').trim();
-      // Keep only simple, complete cadences. Surcharges, date-limited joint
-      // schedules, directional exceptions, and other qualifiers need a richer
-      // renderer and therefore do not enter this fallback.
-      if (
-        !/^(?:hourly(?:\s+\(from\s+[\p{L}\d. ]+\s+to\s+[\p{L}\d. ]+\))?|every\s+\d+(?:\s*[-–]\s*\d+)?\s+minutes?)$/iu.test(
-          frequency,
+    }
+    const categoryIntroEnd = scopedServices[0]?.start ?? nextStart;
+    const categoryRestrictions = operationalRestrictions(
+      source.text.slice(passage.start, categoryIntroEnd),
+    ).map((condition) => compactOperationalRestriction(condition));
+    const entries = ids.map((id) => {
+      const service = scopedServices.find((item) => item.label === id);
+      if (!service) return id;
+      const heading = decodeSourceEntities(service.text.split(/\r?\n/u)[0] ?? '')
+        .replace(/\s+/gu, ' ')
+        .trim();
+      // The passage parser has already checked that this complete source
+      // heading contains the exact identifier. Preserve its source name and
+      // any parenthetical condition only when it has a narrow safe shape.
+      const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const namedService = new RegExp(`^[^()]{2,100}\\(\\s*${escapedId}\\s*\\)$`, 'u');
+      const describedId = new RegExp(`^${escapedId}\\s*\\([^()]{1,100}\\)$`, 'u');
+      const safeHeading =
+        !/[[\]_*`<>]/u.test(heading) &&
+        ![...heading].some((character) => character.charCodeAt(0) < 32);
+      const restrictions = operationalRestrictions(service.text);
+      const condition = [
+        ...new Set(restrictions.map((item) => compactOperationalRestriction(item, id))),
+      ]
+        .filter(
+          (item) =>
+            !(
+              categoryRestrictions.some((restriction) => /require .*transfer/i.test(restriction)) &&
+              /^transfer to /i.test(item)
+            ),
         )
-      )
-        return [];
-      return [`${id}: ${frequency}`];
+        .join('; ');
+      const serviceName =
+        heading.length <= 130 &&
+        safeHeading &&
+        (namedService.test(heading) || describedId.test(heading))
+          ? heading
+          : id;
+      // Category restrictions are appended once to its heading below. Service
+      // restrictions stay attached to the exact ID whose passage states them.
+      return condition ? `${serviceName} (${condition})` : serviceName;
     });
-    if (facts.length < 2) return [];
-    return [`- **${group.title}:** ${facts.slice(0, 2).join('; ')}.`];
+    return [{ title, entries, ids, categoryRestrictions }];
   });
-  if (candidates.length < 3) return undefined;
+  if (invalidGroup || groups.length < 3) return undefined;
+  const representedIds = new Set(groups.flatMap((group) => group.ids));
+  if (services.some((service) => !representedIds.has(service.label))) return undefined;
+  const normalizedTitles = groups.map((group) => group.title.toLocaleLowerCase());
+  if (new Set(normalizedTitles).size !== normalizedTitles.length) return undefined;
+  const bullets: string[] = [];
+  let groupOffset = 0;
+  for (let bulletIndex = 0; bulletIndex < 3; bulletIndex += 1) {
+    const remainingGroups = groups.length - groupOffset;
+    const remainingBullets = 3 - bulletIndex;
+    const groupCount = Math.ceil(remainingGroups / remainingBullets);
+    const bucket = groups.slice(groupOffset, groupOffset + groupCount);
+    groupOffset += bucket.length;
+    const [first, ...rest] = bucket;
+    if (!first) return undefined;
+    const renderGroup = (group: (typeof bucket)[number]) =>
+      `**${group.title}:** ${group.entries.join(', ')}${group.categoryRestrictions.length ? ` (${group.categoryRestrictions.join('; ')})` : ''}`;
+    bullets.push(
+      `- ${renderGroup(first)}${rest.map((group) => `; ${renderGroup(group)}`).join('')}.`,
+    );
+  }
   const finalUrl = safePublicPageUrl(source.url);
   if (!finalUrl) return undefined;
-  const bullets = candidates.slice(0, 3);
   const last = bullets.at(-1);
   if (!last) return undefined;
   bullets[bullets.length - 1] = `${last.slice(0, -1)}. [Source](${finalUrl})`;

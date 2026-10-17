@@ -89,11 +89,145 @@ const conflatedSummary = [
   '- **Urban rail:** M1 and M2 both run every 15 minutes from North to the airport.',
   `- **Buses:** B10 and B20 both run every 5 minutes from East to the airport. [Source](${recoveryUrl})`,
 ].join('\n');
+const coverageUrl = 'https://transit.example/options';
+const coverageSource = [
+  'Intercity trains (Q1, Q2, Q3, Q4)',
+  'Q1',
+  '- Route: North - Central',
+  '- Frequency: hourly',
+  'Q2',
+  '- Route: West - Central',
+  '- Frequency: every 20 minutes',
+  'Q3',
+  '- Route: East - Central',
+  '- Frequency: jointly every 30 minutes with Q4, weekdays only',
+  '- Note: schedules are coordinated with Q4',
+  'Q4',
+  '- Route: South - Central',
+  '- Frequency: until September 2027, except holidays',
+  'City rail (L1, L2)',
+  'L1',
+  '- Route: North - Airport',
+  '- Frequency: weekdays every 10 minutes',
+  'L2',
+  '- Route: South - Airport',
+  '- Frequency: every 25 minutes, except Sunday',
+  'Shuttle buses (S1, S2)',
+  'S1',
+  '- Route: East - Airport',
+  '- Frequency: hourly',
+  '- Fare: surcharge applies',
+  'S2',
+  '- Route: West - Airport',
+  '- Frequency: every 15 minutes',
+].join('\n');
+const coverageEvidence = [
+  {
+    toolName: 'web.fetch',
+    status: 'succeeded',
+    fromCurrentTask: true,
+    args: { url: coverageUrl },
+    result: { status: 200, finalUrl: coverageUrl, text: coverageSource, truncated: false },
+  },
+];
+const coverageRequest = `Read ${coverageUrl} and summarize the public transport options in three short bullets with a source link.`;
+const coverageConflatedSummary = [
+  '- **Intercity trains:** Q1, Q2, Q3, and Q4 all run every 15 minutes.',
+  '- **City rail:** L1 and L2 both run every 5 minutes.',
+  `- **Shuttle buses:** S1 and S2 both run hourly. [Source](${coverageUrl})`,
+].join('\n');
+const multiCategorySource = [
+  'Regional trains (FEX, RE20, RB22, RB24, RB32)',
+  'Airport Express (FEX)',
+  '- Route: North - Airport',
+  '- Frequency: every 10 minutes, jointly until December 2027',
+  'RE20',
+  '- Route: West - Airport',
+  '- Frequency: hourly',
+  'RB22',
+  '- Route: East - Airport',
+  '- Frequency: hourly',
+  'RB24',
+  '- Route: South - Airport',
+  '- Frequency: hourly',
+  'RB32',
+  '- Route: Central - Airport',
+  '- Frequency: hourly',
+  'S-Bahn trains (S9, S85)',
+  'S9',
+  '- Route: City - Airport',
+  '- Frequency: every 20 minutes',
+  'S85',
+  '- Route: City - Airport',
+  '- Frequency: every 20 minutes',
+  'Express buses (X7, X71, BER2)',
+  'X7',
+  '- Route: City - Airport',
+  '- Frequency: every 10 minutes',
+  'X71',
+  '- Route: City - Airport',
+  '- Frequency: every 20 minutes',
+  'BER2 (subject to surcharge)',
+  '- Route: Town - Airport',
+  '- Frequency: 16 times daily',
+  '- Ticket: sold on the bus',
+  'Long-distance transport (IC)',
+  'Intercity route (IC)',
+  '- Route: Other city - Airport',
+  '- Frequency: several times daily',
+  'Buses City - Airport',
+  "If you are travelling by bus that only goes to 'Station', please change there to S-Bahn lines L1/L2 to get to 'Airport'.",
+  '163',
+  '- Route: City - Station',
+  '- Frequency: every 20 minutes',
+  '- Continue to Airport with S-Bahn lines L1/L2',
+  '263',
+  '- Route: City - Airport',
+  '- Frequency: hourly',
+  'Buses nearby - Airport',
+  '735',
+  '- Route: Nearby town - Airport',
+  '- Frequency: hourly',
+  '736',
+  '- Route: Nearby town - Airport',
+  '- Frequency: hourly',
+  'Night buses',
+  'N7',
+  '- Route: City - Airport',
+  '- Frequency: every 30 minutes',
+  '- Note: At weekends, the N7 only runs between City and Airport.',
+  'N7X',
+  '- Route: City - Airport',
+  '- Note: The N7X supplements the service on weekdays during rush hour as an express bus in this direction only.',
+].join('\n');
+const multiCategoryUrl = 'https://transit.example/production-shaped';
+const multiCategoryEvidence = [
+  {
+    toolName: 'web.fetch',
+    status: 'succeeded',
+    fromCurrentTask: true,
+    args: { url: multiCategoryUrl },
+    result: {
+      status: 200,
+      finalUrl: multiCategoryUrl,
+      text: multiCategorySource,
+      truncated: false,
+    },
+  },
+];
+const multiCategoryRequest = `Read ${multiCategoryUrl} and summarize the public transport options in three short bullets with a source link.`;
+const multiCategoryBadSummary = [
+  '- **Rail:** FEX, RE20, RB22, RB24, and RB32 all run every 5 minutes.',
+  '- **Buses:** X7, X71, and BER2 all run every 5 minutes.',
+  `- **Other:** IC and all city buses run hourly. [Source](${multiCategoryUrl})`,
+].join('\n');
 async function runTransportFallback(
   options: {
     request?: string;
     evidence?: typeof recoveryEvidence;
     initialUnavailable?: boolean;
+    draft?: string;
+    correction?: string;
   } = {},
 ) {
   const request = options.request ?? recoveryRequest;
@@ -115,7 +249,7 @@ async function runTransportFallback(
               finishReason: 'stop',
               object: {
                 decision: 'revise',
-                revisedText: conflatedSummary,
+                revisedText: options.correction ?? conflatedSummary,
                 reasons: ['ungrounded_fact'],
               },
             };
@@ -124,7 +258,7 @@ async function runTransportFallback(
     {
       taskId: 'category-bound-summary',
       request,
-      draft: conflatedSummary,
+      draft: options.draft ?? conflatedSummary,
       evidence,
       critical: true,
     },
@@ -210,9 +344,10 @@ describe('source-grounded public page summary recovery', () => {
     expect(result).toMatchObject({ attempted: true, revised: true, unavailable: false });
     expect(result.incomplete).not.toBe(true);
     expect(result.text.split('\n')).toHaveLength(3);
-    expect(result.text).toContain('R10: hourly (from 6 a.m. to 11 p.m.); R20: every 30 minutes');
-    expect(result.text).toContain('M1: every 15 minutes; M2: every 15 minutes');
-    expect(result.text).toContain('B10: every 5 minutes; B20: hourly');
+    expect(result.text).toContain('R10, R20');
+    expect(result.text).toContain('M1, M2');
+    expect(result.text).toContain('B10, B20');
+    expect(result.text).not.toContain('every 15 minutes');
     expect(result.text).toContain(`[Source](${recoveryUrl})`);
     expect(shortBulletFindings(recoveryRequest, result.text)).toEqual([]);
     expect(requestedPublicPageReceiptFindings(recoveryRequest, recoveryEvidence)).toEqual([]);
@@ -225,13 +360,93 @@ describe('source-grounded public page summary recovery', () => {
     expect(result).toMatchObject({ attempted: true, revised: true, unavailable: false });
     expect(result.incomplete).not.toBe(true);
     expect(result.text.split('\n')).toHaveLength(3);
-    expect(result.text).toContain('R10: hourly (from 6 a.m. to 11 p.m.); R20: every 30 minutes');
-    expect(result.text).toContain('M1: every 15 minutes; M2: every 15 minutes');
-    expect(result.text).toContain('B10: every 5 minutes; B20: hourly');
+    expect(result.text).toContain('R10, R20');
+    expect(result.text).toContain('M1, M2');
+    expect(result.text).toContain('B10, B20');
     expect(result.text).toContain(`[Source](${recoveryUrl})`);
     expect(shortBulletFindings(recoveryRequest, result.text)).toEqual([]);
     expect(requestedPublicPageReceiptFindings(recoveryRequest, recoveryEvidence)).toEqual([]);
     expect(publicWebClaimFindings(result.text, recoveryEvidence)).toEqual([]);
+  });
+
+  it('fails closed when material service windows cannot fit the requested short bullets', async () => {
+    expect(
+      publicWebClaimFindings(coverageConflatedSummary, coverageEvidence).length,
+    ).toBeGreaterThan(0);
+    const result = await runTransportFallback({
+      request: coverageRequest,
+      evidence: coverageEvidence,
+      draft: coverageConflatedSummary,
+      correction: coverageConflatedSummary,
+    });
+
+    expect(result).toMatchObject({ attempted: true, revised: true, unavailable: false });
+    expect(result).toMatchObject({ incomplete: true });
+    expect(result.text).not.toContain('Q1, Q2, Q3, Q4');
+    expect(result.text).not.toContain('L1, L2');
+    expect(result.text).not.toContain('Q1');
+    expect(result.text).toContain(`[Source](${coverageUrl})`);
+    expect(requestedPublicPageReceiptFindings(coverageRequest, coverageEvidence)).toEqual([]);
+    expect(publicWebClaimFindings(result.text, coverageEvidence)).toEqual([]);
+  });
+
+  it('groups every option from multiple source sections into exactly three short bullets', async () => {
+    const result = await runTransportFallback({
+      request: multiCategoryRequest,
+      evidence: multiCategoryEvidence,
+      draft: multiCategoryBadSummary,
+      correction: multiCategoryBadSummary,
+    });
+    expect(result.incomplete).not.toBe(true);
+    expect(result.text.split('\n')).toHaveLength(3);
+    for (const id of [
+      'FEX',
+      'RE20',
+      'RB22',
+      'RB24',
+      'RB32',
+      'S9',
+      'S85',
+      'X7',
+      'X71',
+      'BER2',
+      'IC',
+      '163',
+      '263',
+      '735',
+      '736',
+      'N7',
+    ])
+      expect(result.text).toContain(id);
+    expect(result.text).toContain('Airport Express (FEX)');
+    expect(result.text).toContain('BER2 (subject to surcharge)');
+    expect(result.text).toContain('Buses City - Airport');
+    expect(result.text).toContain('Lines ending at Station require L1/L2 transfer.');
+    expect(result.text).toContain('N7: at weekends, only between City and Airport.');
+    expect(result.text).not.toContain('N7: weekends only');
+    expect(result.text).toContain('weekday rush-hour express supplement; this direction only.');
+    expect(result.text).toContain(`[Source](${multiCategoryUrl})`);
+    expect(result.text).not.toContain('every 5 minutes');
+    expect(shortBulletFindings(multiCategoryRequest, result.text)).toEqual([]);
+    expect(requestedPublicPageReceiptFindings(multiCategoryRequest, multiCategoryEvidence)).toEqual(
+      [],
+    );
+    expect(publicWebClaimFindings(result.text, multiCategoryEvidence)).toEqual([]);
+  });
+
+  it('does not use the complete-coverage fallback for a fetch bound to a different URL', async () => {
+    const evidence = structuredClone(coverageEvidence);
+    const row = evidence[0];
+    if (!row) throw new Error('Missing source fixture');
+    row.args.url = 'https://transit.example/other-options';
+    const result = await runTransportFallback({
+      request: coverageRequest,
+      evidence,
+      draft: coverageConflatedSummary,
+      correction: coverageConflatedSummary,
+    });
+    expect(result).toMatchObject({ incomplete: true });
+    expect(result.text).not.toContain('Q1, Q2');
   });
 
   it('uses complete grounded fallback after verifier unavailability without marking the answer incomplete', async () => {
@@ -268,18 +483,7 @@ describe('source-grounded public page summary recovery', () => {
     ],
     [
       'duplicate service identifiers',
-      recoverySource.replace('Urban rail (M1, M2)', 'Urban rail (R10, M2)'),
-    ],
-    [
-      'a weekend qualifier outside the cadence line',
-      recoverySource.replace('M1\n- Route:', 'M1\n- Schedule note: only on weekends\n- Route:'),
-    ],
-    [
-      'a date limit outside the cadence line',
-      recoverySource.replace(
-        'B10\n- Route:',
-        'B10\n- Schedule note: only until October 2026\n- Route:',
-      ),
+      recoverySource.replace('Urban rail (M1, M2)', 'Urban rail (M1, M1)'),
     ],
   ])('fails closed when the page has %s', async (_label, sourceText) => {
     const evidence = structuredClone(recoveryEvidence);
@@ -288,7 +492,48 @@ describe('source-grounded public page summary recovery', () => {
     row.result.text = sourceText;
     const result = await runTransportFallback({ evidence });
     expect(result).toMatchObject({ incomplete: true });
-    expect(result.text).not.toContain('R10: hourly');
+    expect(result.text).not.toContain('R10, R20');
+  });
+
+  it('keeps material availability restrictions attached when omitting cadence', async () => {
+    const evidence = structuredClone(recoveryEvidence);
+    const row = evidence[0];
+    if (!row) throw new Error('Missing source fixture');
+    row.result.text = recoverySource
+      .replace('M1\n- Route:', 'M1\n- Schedule note: only on weekends\n- Route:')
+      .replace('B10\n- Route:', 'B10\n- Schedule note: only until October 2026\n- Route:');
+    const result = await runTransportFallback({ evidence });
+    expect(result.incomplete).not.toBe(true);
+    expect(result.text).toContain('M1');
+    expect(result.text).toContain('B10');
+    expect(result.text).toContain('only on weekends');
+    expect(result.text).toContain('only until October 2026');
+    expect(result.text).not.toContain('every 15 minutes');
+    expect(result.text).not.toContain('every 5 minutes');
+    expect(publicWebClaimFindings(result.text, evidence)).toEqual([]);
+  });
+
+  it('preserves category-introduction restrictions and service-specific suspensions', async () => {
+    const evidence = structuredClone(recoveryEvidence);
+    const row = evidence[0];
+    if (!row) throw new Error('Missing source fixture');
+    row.result.text = recoverySource
+      .replace('Urban rail (M1, M2)', 'Urban rail (M1, M2)')
+      .replace('M1\n- Route:', 'M1\n- Note: Suspended on public holidays.\n- Route:')
+      .replace(
+        'Express buses (B10, B20)',
+        'Express buses (B10, B20)\nThese buses operate only on weekdays.',
+      )
+      .replace(
+        'B10\n- Route:',
+        'B10\n- Note: Service temporarily suspended until October 2026.\n- Route:',
+      );
+    const result = await runTransportFallback({ evidence });
+    expect(result.incomplete).not.toBe(true);
+    expect(result.text).toContain('only on weekdays');
+    expect(result.text).toContain('Suspended on public holidays.');
+    expect(result.text).toContain('Service temporarily suspended until October 2026.');
+    expect(publicWebClaimFindings(result.text, evidence)).toEqual([]);
   });
 
   it('does not declare a multi-outcome trip request complete with transport bullets alone', async () => {
@@ -296,7 +541,7 @@ describe('source-grounded public page summary recovery', () => {
       request: `Plan my hotel transfer by taxi too. ${recoveryRequest}`,
     });
     expect(result).toMatchObject({ incomplete: true });
-    expect(result.text).not.toContain('R10: hourly');
+    expect(result.text).not.toContain('R10, R20');
   });
 
   it('keeps early and late source units, offsets and omissions available for a generic refusal', () => {
