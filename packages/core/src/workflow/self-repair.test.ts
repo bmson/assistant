@@ -56,6 +56,8 @@ describe('owner correction detection', () => {
     'The printer does not work.',
     'The app is working well.',
     'The app is broken; do not investigate this.',
+    "That didn't work. Don't investigate the code.",
+    'The app is broken. Do not open a PR.',
   ])('does not treat quoted examples or discussion as authorization: %s', (text) =>
     expect(isRepairFeedback(text)).toBe(false),
   );

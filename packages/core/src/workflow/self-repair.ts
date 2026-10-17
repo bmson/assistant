@@ -30,7 +30,7 @@ export function isRepairFeedback(text: string): boolean {
     .replace(/`[^`\n]*`|"[^"\n]*"|“[^”\n]*”/g, ' ')
     .replace(/[’‘]/g, "'");
   if (
-    /\b(?:don't|do not|never|no need to)\s+(?:(?:file|open|create) (?:an? |any |this )?(?:bug|issue|report)|report (?:it|this|that|a bug|an issue)|investigate (?:it|this|that))\b/i.test(
+    /\b(?:don't|do not|never|no need to)\s+(?:(?:file|open|create) (?:an? |any |this )?(?:bug|issue|report|PR|pull request)|report (?:it|this|that|a bug|an issue)|investigate (?:it|this|that|(?:the )?(?:code|codebase|repository|app|bug|issue)))\b/i.test(
       ownerText,
     )
   )
