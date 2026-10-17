@@ -381,6 +381,64 @@ function groundedTransportBullets(
   if (services.some((service) => !representedIds.has(service.label))) return undefined;
   const normalizedTitles = groups.map((group) => group.title.toLocaleLowerCase());
   if (new Set(normalizedTitles).size !== normalizedTitles.length) return undefined;
+  // A mode overview need not reproduce every route. Avoid turning a short
+  // summary into a catalogue, while leaving route-specific claims with their
+  // full source restrictions in the detailed rendering below.
+  const rail = groups.filter((group) => /\btrains\b|^long.distance transport$/i.test(group.title));
+  const express = groups.filter((group) => /^express buses$/i.test(group.title));
+  const otherBuses = groups.filter(
+    (group) => /\bbuses\b/i.test(group.title) && !express.includes(group),
+  );
+  const overviewUrl = safePublicPageUrl(source.url);
+  if (
+    overviewUrl &&
+    !/\b(?:frequency|frequencies|how often|how long|timetable|fare|fares|cost|price)\b|\b(?:all|every)\s+(?:route|service|option)|\b(?:first|last)\s+(?:train|bus|departure)\b/i.test(
+      request,
+    ) &&
+    rail.length &&
+    express.length === 1 &&
+    otherBuses.length &&
+    rail.length + express.length + otherBuses.length === groups.length
+  ) {
+    const expressGroup = express[0];
+    const railNames = rail.map(
+      (group) =>
+        `${group.title.replace(/^long.distance transport$/i, 'long-distance transport')} (${group.ids.slice(0, 2).join(', ')}${group.ids.length > 2 ? ' and others' : ''})`,
+    );
+    const localRoute = otherBuses
+      .filter((group) => !/\bnight\b/i.test(group.title))
+      .map((group) => /^Buses\s+([^\n]{2,50}?)\s+-\s+([^\n]{2,50})$/i.exec(group.title))
+      .find((match) => match?.[1] && match[2]);
+    const localSummary = localRoute
+      ? `Local buses connect ${localRoute[1]}${otherBuses.some((group) => /\b(?:nearby|surrounding)\b/i.test(group.title)) ? ' and the surrounding area' : ''} with ${localRoute[2]}.`
+      : 'Additional bus routes are listed.';
+    const otherBusSummary = [
+      localSummary,
+      otherBuses.some((group) =>
+        [...group.categoryRestrictions, ...group.entries].some((entry) =>
+          /\btransfer\b/i.test(entry),
+        ),
+      )
+        ? 'Some require a transfer.'
+        : '',
+      otherBuses.some((group) => /\bnight\b/i.test(group.title))
+        ? 'Night routes are also listed.'
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    const overview = [
+      `- **Rail:** ${railNames.join(', ')}.`,
+      `- **Express buses:** ${expressGroup?.entries.join(', ')}.`,
+      `- **Other buses:** ${otherBusSummary} [Source](${overviewUrl})`,
+    ].join('\n');
+    if (
+      !shortBulletFindings(request, overview).length &&
+      !requestedWebLinkFindings(request, overview, evidence).length &&
+      !publicWebClaimFindings(overview, evidence).length
+    )
+      return overview;
+  }
   const bullets: string[] = [];
   let groupOffset = 0;
   for (let bulletIndex = 0; bulletIndex < 3; bulletIndex += 1) {
@@ -468,9 +526,9 @@ export function shortBulletFindings(request: string, text: string): string[] {
       (bullet[1] ?? '')
         .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
         .match(/[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*/gu) ?? [];
-    if (words.length > 45)
+    if (words.length > 30)
       findings.push(
-        `Bullet ${index + 1} has ${words.length} words; shorten it to at most 45 words without dropping essential qualifiers.`,
+        `Bullet ${index + 1} has ${words.length} words; shorten it to at most 30 words without dropping essential qualifiers.`,
       );
   }
   return findings;

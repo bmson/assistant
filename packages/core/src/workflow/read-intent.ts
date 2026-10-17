@@ -31,6 +31,7 @@ import {
   MAX_COMPOUND_CALENDAR_COVERAGE_PAGES,
   MAX_COMPOUND_TRIP_THREADS_TO_READ,
   MAX_COMPOUND_TRIP_TOOL_CALLS,
+  MAX_UPCOMING_FLIGHT_THREADS_TO_READ,
 } from './compound-trip-read.js';
 import {
   isConversationLocalContext,
@@ -3161,7 +3162,7 @@ export function gmailSearchThreadIds(
     }
   }
   const unique = [...new Set(ids)];
-  if (request?.compoundTripDiscovery) {
+  if (request?.compoundTripDiscovery || request?.upcomingFlightDiscovery) {
     return compoundTripThreadIdsToRead(evidence, request);
   }
   if (
@@ -3491,7 +3492,7 @@ export function gmailThreadIdsToRead(
     : request?.billingAudit
       ? 6
       : request?.upcomingFlightDiscovery
-        ? 2
+        ? MAX_UPCOMING_FLIGHT_THREADS_TO_READ
         : MAX_GMAIL_THREADS_TO_READ;
   return gmailSearchThreadIds(evidence, request).slice(0, limit);
 }

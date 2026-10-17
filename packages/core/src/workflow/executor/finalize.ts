@@ -114,6 +114,8 @@ function savedSkillCalendarFallbackStep(
   evidence: ActionEvidence[],
 ): string | undefined {
   const projection = verifiedReadResponse(request, evidence);
+  if (/^- Arrival guidance:/m.test(projection))
+    return 'If attending, use the earlier arrival time noted above; confirm that both calendar records describe the same event.';
   if (/^\s*-\s*(?:Possible overlap|Scheduling conflict|Conflict)(?::|\s)/m.test(projection))
     return 'Check whether you need to attend both.';
 
@@ -1057,7 +1059,9 @@ export async function stageModelFinalResponse(
         maxOutputTokens: 256,
       });
       if (advice.ok && advice.finishReason !== 'length') {
-        const nextStep = advice.object.nextStep?.trim();
+        const nextStep = /^- Arrival guidance:/m.test(initialCheck.text)
+          ? savedSkillCalendarFallbackStep(classifiedRead, evidence)
+          : advice.object.nextStep?.trim();
         if (
           nextStep &&
           nextStep.length <= 360 &&

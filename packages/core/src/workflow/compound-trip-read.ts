@@ -8,6 +8,7 @@ export const MAX_COMPOUND_CALENDAR_COVERAGE_PAGES = 3;
 // primary discovery and alternate route attempts use no more than 16 calls.
 export const MAX_COMPOUND_TRIP_TOOL_CALLS = 18;
 export const MAX_COMPOUND_TRIP_THREADS_TO_READ = 6;
+export const MAX_UPCOMING_FLIGHT_THREADS_TO_READ = 3;
 const MAX_COMPOUND_CALENDAR_CURSOR_LENGTH = 2_000_000;
 
 function compoundCalendarCursor(value: unknown): string | undefined | null {
@@ -286,6 +287,12 @@ export function compoundTripThreadIdsToRead(
     const source = `${subject} ${snippet}`;
     if (clearlyEditorialOrPromotional(subject, snippet)) return false;
     if (kind === 'flight') {
+      if (
+        request.upcomingFlightDiscovery &&
+        /\b(?:hotels?|accommodation|lodging|airbnb|guesthouse|resort)\b/i.test(subject) &&
+        !/\b(?:flight|airline|boarding pass|e-?ticket)\b/i.test(subject)
+      )
+        return false;
       const booking =
         /\b(?:booked|reserved|confirmation|confirmed|reservation|ticket|e-?ticket|itinerary|record locator|booking\s+(?:details|reference|receipt|number|confirmation))\b/i.test(
           source,
@@ -337,13 +344,23 @@ export function compoundTripThreadIdsToRead(
         ? 5
         : /^(?:(?:fw|fwd|re)\s*:\s*)*flight\s*[-–—:]\s*booked\b/i.test(subject)
           ? 4
-          : /\bconfirmation\s+code\b/i.test(subject)
-            ? 3
-            : matchesCalendarLodgingTitle(subject)
-              ? 2
-              : /\b(?:purchase|payment)\b/i.test(subject)
-                ? -1
-                : 0;
+          : sourceMatches(id, 'lodging') &&
+              /\b(?:hotels?[^.!?]{0,80}confirmation|confirmation[^.!?]{0,80}hotels?)\b/i.test(
+                subject,
+              ) &&
+              !/\b(?:check out|your itinerary|added.{0,30}itinerary)\b/i.test(
+                `${subject} ${metadata.get(id)?.snippet ?? ''}`,
+              )
+            ? 3.5
+            : /\bconfirmation\s+code\b/i.test(subject)
+              ? 3
+              : /^(?:(?:fw|fwd|re)\s*:\s*)+flight\s*[-–—:]\s*\S/i.test(subject)
+                ? 2.5
+                : matchesCalendarLodgingTitle(subject)
+                  ? 2
+                  : /\b(?:purchase|payment)\b/i.test(subject)
+                    ? -1
+                    : 0;
     };
     return score(right) - score(left);
   });
@@ -374,6 +391,15 @@ export function compoundTripThreadIdsToRead(
       ? [bookedFlight, directFlightPurchase]
       : undefined;
   const priority = flightOnlyDiversityPair ? [...flightOnlyDiversityPair] : [first('flight')];
+  if (flightOnlyDiversityPair) {
+    const clockConfirmation = ranked.find(
+      (id) =>
+        !priority.includes(id) &&
+        sourceMatches(id, 'flight') &&
+        /\bconfirmation\s+code\b/i.test(metadata.get(id)?.subject ?? ''),
+    );
+    if (clockConfirmation) priority.push(clockConfirmation);
+  }
   if (request.compoundTripDiscovery) priority.push(first('lodging') ?? genericLodgingCandidate);
   const secondFlight = ranked.find((id) => sourceMatches(id, 'flight') && id !== priority[0]);
   if (secondFlight) priority.push(secondFlight);
@@ -384,12 +410,20 @@ export function compoundTripThreadIdsToRead(
       // Read a small, distinct sample from the complete category results before
       // reporting all searched mail as covered; the thread content remains the
       // only source of verified booking facts.
-      ...unique.filter((id) => {
+      ...ranked.filter((id) => {
         const item = metadata.get(id);
+        if (request.upcomingFlightDiscovery && !sourceMatches(id, 'flight')) return false;
         return !clearlyEditorialOrPromotional(item?.subject ?? '', item?.snippet ?? '');
       }),
     ]),
-  ].slice(0, MAX_COMPOUND_TRIP_THREADS_TO_READ);
+  ].slice(
+    0,
+    request.upcomingFlightDiscovery
+      ? new Set(priority.filter(Boolean)).size >= 3
+        ? MAX_UPCOMING_FLIGHT_THREADS_TO_READ
+        : 2
+      : MAX_COMPOUND_TRIP_THREADS_TO_READ,
+  );
 }
 
 /** Runtime-grounded bounded batch of current-task trip thread reads. */
@@ -416,7 +450,7 @@ export function compoundTripThreadReadInputs(
         ? request.billingAudit
           ? 6
           : 3
-        : 2,
+        : MAX_UPCOMING_FLIGHT_THREADS_TO_READ,
   );
   for (const threadId of selectedThreadIds) {
     const attempts = evidence.filter(
@@ -2850,12 +2884,12 @@ function hotelCandidates(
     )
       continue;
     const rendered = renderedBookedHotel(body);
-    const address = rendered.address ?? hotelAddress(body);
     const { name: parsedName, city: parsedCity } = hotelNameAndCity(source);
     const hotelName =
       /\bhotel\s+(?:name|property)\s*:\s*([^\n\r]{2,160})/i.exec(body)?.[1]?.trim() ??
       rendered.name ??
       parsedName;
+    const address = rendered.address ?? hotelAddress(body, hotelName);
     const city =
       /\b(?:hotel\s+)?city\s*:\s*([^\n\r]{2,100})/i.exec(body)?.[1]?.trim() ??
       rendered.city ??
@@ -3041,27 +3075,53 @@ function renderedBookedHotel(body: string): { name?: string; address?: string; c
   }
 }
 
-function hotelAddress(body: string): string | undefined {
-  const labelled = /\b(?:hotel\s+)?address\s*:\s*([^\n\r]{8,240})/i
-    .exec(body)?.[1]
-    ?.trim()
-    .replace(/[.,;:]\s*$/, '');
-  if (labelled && /\d/.test(labelled)) return labelled;
-  const line = body
+function hotelAddress(body: string, hotelName?: string): string | undefined {
+  const lines = body
     .split(/\r?\n/)
     .map((part) => part.trim())
-    .find(
-      (part) =>
-        (/^\d{1,6}\s+[\p{L}0-9.' -]{3,100}(?:,\s*[^\n]{2,100})?$/u.test(part) ||
-          /^[\p{L}][\p{L}0-9.' -]{2,80}\s+\d{1,6}(?:,\s*[^\n]{2,100})?$/u.test(part)) &&
-        /\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|platz|strasse|straße|gasse|boulevard|blvd\.?|lane|ln\.?|way|square)\b/i.test(
-          part,
-        ),
+    .filter(Boolean);
+  for (const [index, part] of lines.entries()) {
+    const labelled = /\b(hotel\s+)?address\s*:\s*([^\n\r]{8,240})/i.exec(part);
+    const address = labelled?.[2];
+    if (!labelled || !address || !/\d/.test(address)) continue;
+    const context = lines.slice(Math.max(0, index - 8), index + 1).join('\n');
+    const propertyIndex = hotelName
+      ? context.toLowerCase().lastIndexOf(hotelName.toLowerCase())
+      : -1;
+    const corporateIndex = Math.max(
+      context.search(/\b(?:corporate|registered office|headquarters|copyright)\b/i),
+      context.search(/\b(?:expedia|hotels\.com|booking\.com)\b/i),
     );
+    if ((labelled[1] || propertyIndex >= 0) && corporateIndex <= propertyIndex)
+      return address.trim().replace(/[.,;:]\s*$/, '');
+  }
+  // A bare street in a reservation message may be the booking company's
+  // corporate footer. Require local property context before using it as a
+  // destination; an unknown address is preferable to a false hotel endpoint.
+  const line = lines.find(
+    (part, index) =>
+      Boolean(
+        hotelName &&
+          lines
+            .slice(Math.max(0, index - 2), index)
+            .some((previous) => previous.toLowerCase().includes(hotelName.toLowerCase())),
+      ) &&
+      (/^\d{1,6}\s+[\p{L}0-9.' -]{3,100}(?:,\s*[^\n]{2,100})?$/u.test(part) ||
+        /^[\p{L}][\p{L}0-9.' -]{2,80}\s+\d{1,6}(?:,\s*[^\n]{2,100})?$/u.test(part)) &&
+      /\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|platz|strasse|straße|gasse|boulevard|blvd\.?|lane|ln\.?|way|square)\b/i.test(
+        part,
+      ),
+  );
   return line?.replace(/[.,;:]\s*$/, '').slice(0, 240);
 }
 
 function hotelNameAndCity(source: string): { name?: string; city?: string } {
+  const accommodation =
+    /\b(?:your accommodations|hotel details|property details|your hotel):\s*\r?\n\s*([^\r\n]{2,140}\bHotel),\s*([^,\r\n:]{2,80})(?:,\s*[A-Z]{2})?\s*:\s*https?:\/\//i.exec(
+      source,
+    );
+  if (accommodation?.[1] && accommodation[2])
+    return { name: accommodation[1].trim(), city: accommodation[2].trim() };
   const patterns = [
     /\b(?:reservation|booking)\s+(?:confirmed|confirmation|details)\s*:\s*(?:hotel\s+)?([^\n,.;]{2,100}),\s*([^\n,.;]{2,80})/i,
     /\b(?:reservation|booking)\s+(?:confirmed|confirmation|details)?\s*(?:for|at)\s+(?:hotel\s+)?([^\n,.;]{2,100}),\s*([^\n,.;]{2,80})/i,
@@ -4487,15 +4547,20 @@ export function compoundTripReadProjection(
       `Calendar ${markdownText(text(candidate.event.summary, 120))}, start ${calendarField(candidate.event, 'start')}; booking ${segment.flightNumber}, ${segment.departureDate} ${segment.departureTime} (${segment.departureTimeZone ?? 'zone unknown'}). ${metadata.length ? `${metadata.map(markdownText).join('; ')}. ` : ''}${clockConflict ? 'Clocks differ after time-zone conversion. ' : clockAgreement ? 'Departure clocks agree after time-zone conversion. ' : comparableClocks && metadata.length ? 'Clock comparison does not resolve conflicting itinerary metadata. ' : comparableClocks ? 'Departure clocks differ within the five-minute itinerary matching tolerance; verify the exact departure time. ' : 'Departure clock agreement remains unverified. '}Itinerary association; independent flight identity remains unverified.${clockConflict || metadata.length ? ' Verify which schedule is current.' : ''}${calendarSource(candidate.event) ? ` [Calendar](${calendarSource(candidate.event)})` : ''}${mailLinks.get(segment.threadId) ? ` [Booking](${mailLinks.get(segment.threadId)})` : ''}`,
     ];
   });
-  const conciseSummary = flight?.segment
-    ? `Next calendar-matched outbound: ${flight.segment.departureDate}${returnFlight?.segment ? `; return ${returnFlight.segment.departureDate}` : '; return not verified'}.`
-    : currentTripReturn?.segment
-      ? `Current-trip return booking: ${currentTripReturn.segment.departureDate}. A new outbound trip is not verified.`
-      : currentBooking
-        ? `Booked dates ${bookingStart ?? 'start unknown'}–${bookingEnd ?? 'end unknown'}; later departure ${bookingReturn ?? 'unverified'}. A new outbound trip is not verified.`
-        : bookedTransfer
-          ? `Booking candidate: ${bookedTransfer.group.legs[0]?.departureDate}–${bookingReturn}. I could not verify this as the next outbound trip.`
-          : 'I could not identify one verified next trip. These checked records remain candidates.';
+  const checkedDay = requestCivilDate(request, request.timeWindow?.timeMin);
+  const noLaterBookedDate =
+    !flight && !currentTripReturn && checkedDay && bookingEnd && bookingEnd <= checkedDay;
+  const conciseSummary = noLaterBookedDate
+    ? `No later trip verified. The checked booking dates end ${bookingEnd}, on or before the requested local day (${checkedDay}). A same-day clock without a verified time zone does not establish a future departure.`
+    : flight?.segment
+      ? `Next calendar-matched outbound: ${flight.segment.departureDate}${returnFlight?.segment ? `; return ${returnFlight.segment.departureDate}` : '; return not verified'}.`
+      : currentTripReturn?.segment
+        ? `Current-trip return booking: ${currentTripReturn.segment.departureDate}. A new outbound trip is not verified.`
+        : currentBooking
+          ? `Booked dates ${bookingStart ?? 'start unknown'}–${bookingEnd ?? 'end unknown'}; later departure ${bookingReturn ?? 'unverified'}. A new outbound trip is not verified.`
+          : bookedTransfer
+            ? `Booking candidate: ${bookedTransfer.group.legs[0]?.departureDate}–${bookingReturn}. I could not verify this as the next outbound trip.`
+            : 'I could not identify one verified next trip. These checked records remain candidates.';
   return {
     calendarRows,
     calendarComplete,
@@ -4562,7 +4627,16 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
   const links = threadSourceLinks(projection.readThreads);
   const lines = [view.summary];
   const groups = view.groups.filter((group) => group.legs.length);
-  if (groups.length) {
+  if (view.summary.startsWith('No later trip verified.')) {
+    for (const group of groups) {
+      const first = group.legs[0];
+      const last = group.legs.at(-1);
+      if (first && last)
+        lines.push(
+          `- Checked booking: ${group.legs.map((leg) => cell(leg.originAirport ?? 'origin unverified')).join('→')}→${cell(last.destinationAirport ?? 'destination unverified')}, ${first.departureDate}–${last.arrivalDate ?? last.departureDate}.${links.get(first.threadId) ? ` [Booking](${links.get(first.threadId)})` : ''}`,
+        );
+    }
+  } else if (groups.length) {
     const allFlightTimesHaveUnknownZones = groups
       .flatMap((group) => group.legs)
       .every((leg) => !leg.departureTimeZone && !leg.arrivalTimeZone);
@@ -4703,6 +4777,10 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
     else unknowns.add(gap);
   }
   if (unknowns.size) lines.push(`Unverified: ${[...unknowns].join(' ')}`);
+  if (!projection.flight && projection.blocked)
+    lines.push(
+      'Next: confirm which later flight and hotel booking to investigate. A destination and linked stay are needed for a useful public transport/taxi comparison.',
+    );
   return lines.join('\n\n');
 }
 
@@ -5081,37 +5159,58 @@ export function upcomingFlightReadProjection(
         true,
       )
     : [];
-  const compactSummary = observedGroup
-    ? (() => {
-        const allTimesHaveUnknownZones = observedGroup.legs.every(
-          (leg) => !leg.departureTimeZone && !leg.arrivalTimeZone,
-        );
-        return [
-          `Observed booking candidate: **${observedGroup.legs.map((leg) => leg.originAirport).join('→')}→${observedGroup.destination}, ${observedGroup.legs[0]?.departureDate}**. ${observedGroup.direction === 'unknown' ? 'Outbound/return direction is not explicitly stated.' : `The booking explicitly labels this ${observedGroup.direction}.`} Calendar match and next-flight identity remain unverified; booking order is not proof of travel.`,
-          ...(allTimesHaveUnknownZones
-            ? [
-                trip.presentation.localClocks
-                  ? 'The selected booking explicitly labels its clocks local; time-zone offsets remain unverified.'
-                  : 'Time zones are not stated; times are shown as recorded.',
-              ]
-            : []),
-          observedGroup.legs
-            .map((leg) =>
-              compactFlightLeg(
-                leg,
-                `Booked route ${observedGroup.order === 'first' ? '1' : '2'}`,
-                threadSourceLinks(trip.readThreads),
-                allTimesHaveUnknownZones,
-              ),
-            )
-            .join('\n'),
-          ...observedCalendarNotes,
-          ...(observedCalendarNotes.length
-            ? []
-            : summary.filter((line) => line.startsWith('Next future calendar flight candidate:'))),
-        ];
-      })()
-    : summary;
+  const checkedDay = requestCivilDate(request, request.timeWindow?.timeMin);
+  const noVerifiedFuture = !selectedFlight && !unmatchedBookingCandidate && !observedGroup;
+  const onlyEarlierDates =
+    noVerifiedFuture &&
+    checkedDay &&
+    sourceGroups.length > 0 &&
+    sourceGroups.every((group) => group.legs.every((leg) => leg.departureDate <= checkedDay));
+  const latestDatedGroup = onlyEarlierDates
+    ? [...sourceGroups].sort((left, right) =>
+        (right.legs[0]?.departureDate ?? '').localeCompare(left.legs[0]?.departureDate ?? ''),
+      )[0]
+    : undefined;
+  const datedSourceLink = latestDatedGroup
+    ? threadSourceLinks(trip.readThreads).get(latestDatedGroup.threadId)
+    : undefined;
+  const compactSummary = latestDatedGroup
+    ? [
+        `Checked dated booking: ${latestDatedGroup.legs.map((leg) => `${leg.flightNumber} ${leg.originAirport}→${leg.destinationAirport}, ${leg.departureDate} ${leg.departureTime} (${leg.departureTimeZone ?? 'zone not stated'})`).join('; ')}. Direction and future-departure identity remain unverified.${datedSourceLink ? ` [Booking email](${datedSourceLink})` : ''}`,
+      ]
+    : observedGroup
+      ? (() => {
+          const allTimesHaveUnknownZones = observedGroup.legs.every(
+            (leg) => !leg.departureTimeZone && !leg.arrivalTimeZone,
+          );
+          return [
+            `Observed booking candidate: **${observedGroup.legs.map((leg) => leg.originAirport).join('→')}→${observedGroup.destination}, ${observedGroup.legs[0]?.departureDate}**. ${observedGroup.direction === 'unknown' ? 'Outbound/return direction is not explicitly stated.' : `The booking explicitly labels this ${observedGroup.direction}.`} Calendar match and next-flight identity remain unverified; booking order is not proof of travel.`,
+            ...(allTimesHaveUnknownZones
+              ? [
+                  trip.presentation.localClocks
+                    ? 'The selected booking explicitly labels its clocks local; time-zone offsets remain unverified.'
+                    : 'Time zones are not stated; times are shown as recorded.',
+                ]
+              : []),
+            observedGroup.legs
+              .map((leg) =>
+                compactFlightLeg(
+                  leg,
+                  `Booked route ${observedGroup.order === 'first' ? '1' : '2'}`,
+                  threadSourceLinks(trip.readThreads),
+                  allTimesHaveUnknownZones,
+                ),
+              )
+              .join('\n'),
+            ...observedCalendarNotes,
+            ...(observedCalendarNotes.length
+              ? []
+              : summary.filter((line) =>
+                  line.startsWith('Next future calendar flight candidate:'),
+                )),
+          ];
+        })()
+      : summary;
   // An already-started calendar event cannot identify the next future flight,
   // but its booking-reference conflict remains relevant evidence for the owner.
   const otherCalendarNotes = !selectedFlight
@@ -5139,6 +5238,11 @@ export function upcomingFlightReadProjection(
     unmatchedBookingSegments: unmatchedBookingCandidate ? [unmatchedBookingCandidate] : [],
     blocked: gaps.length > 0 || calendarCandidate !== undefined,
     text: [
+      ...(noVerifiedFuture
+        ? [
+            `No future flight could be verified as of ${checkedDay ?? 'the request time'}. ${sourceGroups.length ? 'These dated bookings do not establish a later departure.' : 'The checked sources do not establish a future departure.'}`,
+          ]
+        : []),
       compactSummary.length > 0
         ? compactSummary.join('\n\n')
         : 'I could not verify a dated flight from the checked sources.',
@@ -5147,7 +5251,23 @@ export function upcomingFlightReadProjection(
             `Calendar vs booking (next-flight identity unverified): ${otherCalendarNotes.slice(0, 4).join(' ')}${otherCalendarNotes.length > 4 ? ` ${otherCalendarNotes.length - 4} additional comparisons omitted from this brief.` : ''}`,
           ]
         : []),
-      ...gaps.map((gap) => `Needs confirmation: ${gap}`),
+      ...(noVerifiedFuture
+        ? [
+            `Limits: ${gaps
+              .map((gap) =>
+                gap.replace(
+                  'Some matching email threads remain unread or incomplete; search pages completed, so they were not counted as read booking evidence.',
+                  'Some matching email threads remain unread or incomplete.',
+                ),
+              )
+              .join(' ')}`,
+          ]
+        : gaps.map((gap) => `Needs confirmation: ${gap}`)),
+      ...(!selectedFlight && !unmatchedBookingCandidate
+        ? [
+            'Next: provide the later booking confirmation, or confirm which dated itinerary you mean; the flight time zone and next-flight identity still need evidence.',
+          ]
+        : []),
     ].join('\n\n'),
   };
 }

@@ -6,4 +6,5 @@ export {
   runQuestion,
   summarizeQuestions,
 } from './harness.js';
+export { OPEN_ENDED_SCENARIOS } from './open-ended-corpus.js';
 export { ASSISTANT_SCENARIOS } from './scenario-corpus.js';

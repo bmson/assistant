@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { QUESTION_CASES } from './corpus.js';
 import { evaluateQuestion, type QuestionResult } from './harness.js';
+import { OPEN_ENDED_SCENARIOS } from './open-ended-corpus.js';
 import { ASSISTANT_SCENARIOS } from './scenario-corpus.js';
 
 function result(id: string, overrides: Partial<QuestionResult> = {}): QuestionResult {
@@ -29,6 +30,20 @@ function grade(id: string, overrides: Partial<QuestionResult>) {
 }
 
 describe('scenario assertions reject plausible but incorrect outcomes without a database', () => {
+  it('rejects actions and approvals in hypothetical open-ended sessions even with plausible prose', () => {
+    const fixture = OPEN_ENDED_SCENARIOS.find((item) => item.id === 'proactive-decision-needed');
+    if (!fixture) throw new Error('Missing open-ended scenario');
+    const failures = evaluateQuestion(
+      fixture,
+      result(fixture.id, {
+        answer: 'Please choose which Alex. I have kept the invitation unsent.',
+        approvals: 1,
+        toolCalls: [{ name: 'sms.send', status: 'succeeded', args: {}, result: { sent: true } }],
+      }),
+    );
+    expect(failures).toContain('execution: unexpected tool use');
+    expect(failures.some((failure) => failure.includes('approvals:'))).toBe(true);
+  });
   it('rejects cancellation prose even over a successful no-op ledger call', () => {
     const failures = grade('reminder-not-found-does-not-claim-cancelled', {
       answer: 'I cancelled the sunglasses reminder.',

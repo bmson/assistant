@@ -319,6 +319,15 @@ describe('runDueSchedules goal wiring (integration)', () => {
       // (with a future next_run_at); then make only that row due.
       await runDueSchedules(db, timezone);
       const name = goalScheduleName(goalId);
+      // The standing schedule already exists; the next session must use the
+      // latest verified progress and revised priority, not its old template.
+      await db
+        .update(goals)
+        .set({
+          progress: 'Compared two cities; accessibility details remain unverified.',
+          nextAction: 'Prioritize accessible venues in Berlin for six people.',
+        })
+        .where(eq(goals.id, goalId));
       await db
         .update(schedules)
         .set({ nextRunAt: new Date(Date.now() - 60e3) })
@@ -337,6 +346,14 @@ describe('runDueSchedules goal wiring (integration)', () => {
       const [spawned] = await db.select().from(tasks).where(eq(tasks.id, spawnedId));
       expect(spawned?.status).toBe('pending');
       expect(spawned?.goalId).toBe(goalId);
+      const trigger = spawned?.trigger as { payload?: { instruction?: string } } | null;
+      expect(trigger?.payload?.instruction).toContain(
+        'Compared two cities; accessibility details remain unverified.',
+      );
+      expect(trigger?.payload?.instruction).toContain(
+        'Prioritize accessible venues in Berlin for six people.',
+      );
+      expect(trigger?.payload?.instruction).not.toContain(`${GOAL_BLOCKED_PREFIX} which cities?`);
     } finally {
       await restore();
     }

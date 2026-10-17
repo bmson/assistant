@@ -152,8 +152,8 @@ describe('source-backed fictional history', () => {
       'message:aurora-assistant',
     ]);
     const rendered = renderMemoryReadAnswer(result, comparisonEvidence, crossConversationRequest);
-    expect(rendered).toContain('conversation aurora-owner-chat; message aurora-owner');
-    expect(rendered).toContain('conversation aurora-assistant-chat; message aurora-assistant');
+    expect(rendered).toContain('/chat/aurora-owner-chat#message-aurora-owner');
+    expect(rendered).toContain('/chat/aurora-assistant-chat#message-aurora-assistant');
     expect(rendered).toContain('These records come from separate conversations');
     expect(rendered).toContain('does not establish that the assistant was responding');
   });
@@ -374,7 +374,7 @@ describe('source-backed fictional history', () => {
     expect(rendered).toContain('€310');
     expect(rendered).toContain('Thursday');
     expect(rendered).toContain('avoid taxi travel');
-    expect(rendered).toContain('conversation exercise-chat; message owner-nimbus');
+    expect(rendered).toContain('/chat/exercise-chat#message-owner-nimbus');
     expect(rendered).not.toContain('public transport options');
   });
 
@@ -437,7 +437,7 @@ describe('source-backed fictional history', () => {
     const rendered = renderMemoryReadAnswer(result, evidence, request);
     expect(rendered).toContain('fictional exercise, not facts about you');
     expect(rendered).toContain('€310');
-    expect(rendered).toContain('conversation exercise-chat; message owner-nimbus');
+    expect(rendered).toContain('/chat/exercise-chat#message-owner-nimbus');
     expect(rendered).not.toContain('saved your');
   });
 
@@ -471,8 +471,8 @@ describe('source-backed fictional history', () => {
     expect(rendered).toContain('a sensible next step is to map public transport options');
     expect(rendered).not.toContain('These are historical records, not a fresh check');
     expect(rendered).toContain('Earlier assistant claim (not verified fact)');
-    expect(rendered).toContain('message assistant-nimbus');
-    expect(rendered).toContain('message owner-nimbus');
+    expect(rendered).toContain('/chat/exercise-chat#message-assistant-nimbus');
+    expect(rendered).toContain('/chat/exercise-chat#message-owner-nimbus');
   });
 
   it('uses exact source passages for the budget-versus-transit answer when selection fails', async () => {
@@ -536,8 +536,8 @@ describe('source-backed fictional history', () => {
     );
     expect(rendered).toContain('Recorded owner message');
     expect(rendered).toContain('Earlier assistant claim (not verified fact)');
-    expect(rendered).toContain('conversation exercise-chat; message owner-nimbus');
-    expect(rendered).toContain('conversation exercise-chat; message assistant-nimbus');
+    expect(rendered).toContain('/chat/exercise-chat#message-owner-nimbus');
+    expect(rendered).toContain('/chat/exercise-chat#message-assistant-nimbus');
     expect(rendered).not.toContain('These are facts about you');
   });
 
@@ -665,10 +665,10 @@ describe('source-backed fictional history', () => {
     ]);
     const rendered = renderMemoryReadAnswer(result, search(rows), request);
     expect(rendered.split(`“${ownerText}”`).length - 1).toBe(1);
-    expect(rendered).toContain('message owner-solstice-1');
-    expect(rendered).toContain('message owner-solstice-2');
-    expect(rendered).toContain('message owner-solstice-3');
-    expect(rendered).toContain('message assistant-solstice');
+    expect(rendered).toContain('/chat/solstice-chat#message-owner-solstice-1');
+    expect(rendered).toContain('/chat/solstice-chat#message-owner-solstice-2');
+    expect(rendered).toContain('/chat/solstice-chat#message-owner-solstice-3');
+    expect(rendered).toContain('/chat/solstice-chat#message-assistant-solstice');
   });
 
   it('preserves a successful bounded quote from a longer source record', async () => {

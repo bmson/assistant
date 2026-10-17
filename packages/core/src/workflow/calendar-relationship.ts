@@ -2,6 +2,52 @@ import type { BriefingCalendarEvent } from './briefing.js';
 
 export type CalendarRelationship = 'probable_duplicate' | 'compatible_time_roles' | 'unresolved';
 
+/** Advisory only: independently reconcile a source's explicit early-arrival rule. */
+export function calendarArrivalLead(
+  left: BriefingCalendarEvent,
+  right: BriefingCalendarEvent,
+): number | undefined {
+  if (!left.calendarId || !right.calendarId || left.calendarId === right.calendarId) return;
+  const earlier = Date.parse(left.start) < Date.parse(right.start) ? left : right;
+  const later = earlier === left ? right : left;
+  const minutes = Number(
+    /\barrival:\s*(\d{1,2})\s+minutes?\s+(?:in advance|early|before)/i.exec(
+      later.description ?? '',
+    )?.[1],
+  );
+  if (
+    !minutes ||
+    minutes > 90 ||
+    Date.parse(later.start) - Date.parse(earlier.start) !== minutes * 60_000 ||
+    Date.parse(left.end) !== Date.parse(right.end)
+  )
+    return;
+  const street = (event: BriefingCalendarEvent) =>
+    normalized(/\b\d{1,6}(?:-\d{1,6})?\s+[^,\n]+/u.exec(event.location ?? '')?.[0] ?? '');
+  if (!street(left) || street(left) !== street(right)) return;
+  const clock = /\((\d{1,2}):(\d{2})\s*(am|pm)\)/i.exec(earlier.summary);
+  const start = /T(\d{2}):(\d{2}).*[+-]\d{2}:\d{2}$/.exec(later.start);
+  if (
+    !clock ||
+    !start ||
+    (Number(clock[1]) % 12) + (clock[3]?.toLowerCase() === 'pm' ? 12 : 0) !== Number(start[1]) ||
+    Number(clock[2]) !== Number(start[2])
+  )
+    return;
+  const words = new Set(
+    normalized(earlier.summary)
+      .split(' ')
+      .filter((word) => word.length >= 5),
+  );
+  if (
+    !normalized(later.summary)
+      .split(' ')
+      .some((word) => words.has(word))
+  )
+    return;
+  return minutes;
+}
+
 function normalized(value: string): string {
   return value
     .normalize('NFKC')

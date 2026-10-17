@@ -75,6 +75,7 @@ import {
   emailReviewCandidateIds,
   emailReviewCompleteThread,
   emailReviewCoverage,
+  emailReviewOwnerDecisionSummary,
   emailReviewOwnerMailbox,
   emailReviewPendingAssessmentThreads,
   emailReviewRankContext,
@@ -2434,7 +2435,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         );
         coverage.ownerDecisionRequiredThreads = bounded.threads
           .filter((thread) => previouslyRequiredOwnerDecisionIds.has(thread.threadId))
-          .map((thread) => ({ threadId: thread.threadId, subject: thread.subject }));
+          .map(emailReviewOwnerDecisionSummary);
         const rankedCandidateIds = readRequest.emailReview.rankedCandidateIds;
         coverage.rankedMetadataThreads = rankedCandidateIds?.length;
         const nonNewsletterCandidates = Math.max(
@@ -2574,7 +2575,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           .filter((thread) =>
             ownerDecisionFindings.some((finding) => finding.threadId === thread.threadId),
           )
-          .map((thread) => ({ threadId: thread.threadId, subject: thread.subject }));
+          .map(emailReviewOwnerDecisionSummary);
         coverage.unassessedCompleteThreads = assessmentGaps;
         if (generation.sourceBatches?.length || generation.sourceItems?.length) {
           const existing = state.plannerState.emailReviewAssessmentBatches;

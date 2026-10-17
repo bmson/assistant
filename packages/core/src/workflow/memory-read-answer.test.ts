@@ -80,7 +80,8 @@ describe('exact historical source projection', () => {
     expect(text).toContain('Recorded owner message');
     expect(text).toContain('Earlier assistant claim (not verified fact)');
     expect(text).toContain('13:45');
-    expect(text).toContain('message owner-correction');
+    expect(text).toContain('](/chat/historic-chat#message-owner-correction)');
+    expect(text).not.toContain('message owner-correction');
     expect(text).toContain('not a fresh check');
     expect(text).not.toContain('job applications');
   });
@@ -113,8 +114,9 @@ describe('exact historical source projection', () => {
     expect(rendered.split(`“${shared}”`).length - 1).toBe(2);
     expect(rendered).toContain('Recorded owner message');
     expect(rendered).toContain('Earlier assistant claim (not verified fact)');
-    expect(rendered).toContain('message owner-shared');
-    expect(rendered).toContain('message assistant-shared');
+    expect(rendered).toContain('](/chat/');
+    expect(rendered).not.toContain('message owner-shared');
+    expect(rendered).toContain('#message-assistant-shared)');
   });
   it('does not promote legacy or forged speaker metadata to owner authorship', () => {
     const row = message('legacy', 'The UI is minimal.', 'user', 'owner');
@@ -671,8 +673,8 @@ describe('exact historical source projection', () => {
     const answer = renderMemoryReadAnswer(result, conversationEvidence, request);
     expect(answer).toContain('Recorded owner message');
     expect(answer).toContain('Earlier assistant claim (not verified fact)');
-    expect(answer).toContain('message mosaic-owner');
-    expect(answer).toContain('message mosaic-assistant');
+    expect(answer).toContain('#message-mosaic-owner)');
+    expect(answer).toContain('#message-mosaic-assistant)');
     expect(answer).toContain('That wording appears in the assistant’s suggestion.');
     expect(object).toHaveBeenCalledTimes(2);
   });
