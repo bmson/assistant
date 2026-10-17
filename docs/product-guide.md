@@ -69,13 +69,13 @@ The app targets iOS 26. It uses native text interaction, supports accessibility 
 
 ### Web
 
-The browser is currently an **owner administration console**. `/` lands on `/settings`; the proxy exposes Settings and Audit, with Security, Setup, and Sign in in passkey mode. The 27 retained product/legacy page implementations (including `/chat`, Activity, Goals and Memory) redirect browser GET/HEAD requests to Settings and reject their page mutations. Everyday conversation and work are available through the native iPhone client and authenticated mobile APIs. The page descriptions below document the native experience and retained component behavior; they do not imply those browser routes are reachable. See the current [web audit](audits/web-experience-2026-10-02.md).
+The current source supports the signed-in owner's continuing chat and an administration console in the browser. `/chat` opens the primary conversation; `/chat/all` lists conversations, and `/chat/[id]` opens an individual conversation. The main navigation also exposes Settings and Audit, with Security, Setup, and Sign in in passkey mode. Other retained product/legacy pages still redirect to Settings or reject page mutations. Chat pages and their actions require the configured owner session. Everyday conversation and work are also available through the native iPhone client and authenticated mobile APIs. See the dated [web audit](audits/web-experience-2026-10-02.md) for deployment and browser-acceptance status.
 
 Sources: [iOS shell](../apps/ios/Assistant/Views/ChatView.swift), [iOS root](../apps/ios/Assistant/Views/RootView.swift), [web entry](../apps/web/app/page.tsx), [route policy](../apps/web/proxy.ts), [web Settings](../apps/web/app/settings/page.tsx).
 
 ## Chat
 
-**Retained web implementation (currently redirected):** `/chat`, `/chat/[id]`. **iOS:** Chat.
+**Browser and iOS:** Chat.
 
 The main page supports a continuing exchange with a composer at the bottom, streamed answers, work status, and inline decisions. The primary conversation is selected through a persistent primary flag; opening `/chat` does not create a fresh chat each time. Explicit side chats remain available through Chats.
 

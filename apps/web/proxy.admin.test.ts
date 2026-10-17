@@ -31,12 +31,22 @@ describe.each(['firestore', 'postgres'])('mobile administration in %s mode', (dr
       }
     }
   });
-  it('retires browser app pages and preserves the administration pages', () => {
+  it('admits only owner chat routes and preserves other retired-page boundaries', () => {
     config.PERSISTENCE_DRIVER = driver;
+    for (const path of ['/chat', '/chat/all', `/chat/${randomUUID()}`]) {
+      for (const method of ['GET', 'HEAD', 'POST']) {
+        const response = proxy(new NextRequest(`https://assistant.test${path}`, { method }));
+        expect(response.status).toBe(200);
+        expect(response.headers.get('x-middleware-next')).toBe('1');
+      }
+      expect(
+        proxy(new NextRequest(`https://assistant.test${path}`, { method: 'DELETE' })).status,
+      ).toBe(410);
+    }
     for (const path of [
       '/',
-      '/chat',
-      `/chat/${randomUUID()}`,
+      '/chat/not-a-conversation-id',
+      '/chat/123e4567-e89b-12d3-a456-426614174000/extra',
       '/profile',
       '/tasks',
       '/documents',
@@ -76,7 +86,7 @@ describe.each(['firestore', 'postgres'])('mobile administration in %s mode', (dr
     expect(proxy(new NextRequest('https://assistant.test/api/auth/session')).status).toBe(200);
   });
 
-  it('requires a local development opt-in for retained chat pages', () => {
+  it('does not let local preview settings open other retired product routes', () => {
     const request = (path: string, method = 'GET', host = 'localhost') =>
       new NextRequest(`http://${host}${path}`, { method });
     const configure = (options: {
@@ -94,7 +104,7 @@ describe.each(['firestore', 'postgres'])('mobile administration in %s mode', (dr
       vi.stubEnv('NODE_ENV', options.nodeEnv ?? 'development');
       try {
         return proxy(
-          request(options.path ?? '/chat', options.method ?? 'GET', options.host ?? 'localhost'),
+          request(options.path ?? '/tasks', options.method ?? 'GET', options.host ?? 'localhost'),
         );
       } finally {
         vi.unstubAllEnvs();
@@ -114,21 +124,9 @@ describe.each(['firestore', 'postgres'])('mobile administration in %s mode', (dr
     expect(configure({ enabled: true, authUrl: 'http://user:secret@localhost:3000' }).status).toBe(
       307,
     );
+    expect(configure({ enabled: true, path: '/chat/not-a-conversation-id' }).status).toBe(307);
 
-    for (const path of ['/chat', '/chat/all', `/chat/${randomUUID()}`]) {
-      for (const method of ['GET', 'HEAD', 'POST']) {
-        const response = configure({ enabled: true, path, method, host: '127.0.0.1:3000' });
-        expect(response.status).toBe(200);
-        expect(response.headers.get('x-middleware-next')).toBe('1');
-      }
-    }
-    const ipv6 = configure({ enabled: true, host: '[::1]:3000' });
-    expect(ipv6.status).toBe(200);
-    expect(configure({ enabled: true, authUrl: 'https://[::1]:3000' }).status).toBe(200);
-    expect(configure({ enabled: true, path: '/tasks' }).status).toBe(307);
-    expect(configure({ enabled: true, path: '/chat', method: 'DELETE' }).status).toBe(410);
-
-    // The local browser switch does not change native or API adapter gates.
+    // The preview setting does not broaden unrelated product routes or API gates.
     config.PERSISTENCE_DRIVER = 'firestore';
     config.WEB_APP_PREVIEW_ENABLED = false;
     vi.stubEnv('NODE_ENV', 'development');
