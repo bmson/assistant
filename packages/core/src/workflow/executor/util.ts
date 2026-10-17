@@ -114,7 +114,19 @@ export function replaceToolResultMessage(
       window[index] = { ...message, content } as ModelMessage;
     }
   }
-  window.push(toolResultMessage(toolCallId, toolName, value, options));
+  // A resumed batch can acquire new recall or owner messages before its last
+  // tool settles. Providers require every result before the next system/user
+  // turn, so restore it beside its original call rather than at the live tail.
+  // This also repairs an older checkpoint with a displaced provisional result.
+  const callIndex = window.findLastIndex(
+    (message) =>
+      message.role === 'assistant' &&
+      Array.isArray(message.content) &&
+      message.content.some((part) => part.type === 'tool-call' && part.toolCallId === toolCallId),
+  );
+  let resultIndex = callIndex >= 0 ? callIndex + 1 : window.length;
+  while (window[resultIndex]?.role === 'tool') resultIndex += 1;
+  window.splice(resultIndex, 0, toolResultMessage(toolCallId, toolName, value, options));
 }
 
 /**
