@@ -334,6 +334,68 @@ function calendarFlight(): Record<string, unknown> {
 }
 
 describe('compound trip read projection', () => {
+  it('uses the requester civil date when the UTC read window starts on the next date', () => {
+    const base = request();
+    if (!base.timeWindow) throw new Error('Expected a bounded trip window');
+    const read = {
+      ...base,
+      timeWindow: {
+        ...base.timeWindow,
+        timeMin: '2026-10-17T01:00:00.000Z',
+        timeMax: '2027-10-17T01:00:00.000Z',
+      },
+    };
+    const flightQuery = read.mailQueries?.find((query) => query.category === 'flight')?.query;
+    const lodgingQuery = read.mailQueries?.find((query) => query.category === 'lodging')?.query;
+    if (!flightQuery || !lodgingQuery) throw new Error('Expected both search categories');
+    const flight = {
+      eventId: 'cross-midnight-flight',
+      summary: 'Outbound flight AB 123',
+      description: 'Booking reference: CROSS-123. Arrival airport: LAX.',
+      location: 'SFO → LAX',
+      start: '2026-10-17T02:00:00.000Z',
+      timeZone: 'America/Los_Angeles',
+      status: 'confirmed',
+    };
+    const evidence = [
+      completeCalendarEvents([flight], read),
+      row(
+        'gmail.search',
+        { query: flightQuery },
+        {
+          complete: true,
+          hasMore: false,
+          results: [{ threadId: 'cross-midnight-booking', subject: 'Flight booking confirmation' }],
+        },
+      ),
+      row('gmail.search', { query: lodgingQuery }, { complete: true, hasMore: false, results: [] }),
+      row(
+        'gmail.read_thread',
+        { threadId: 'cross-midnight-booking' },
+        {
+          complete: true,
+          messages: [
+            {
+              messageId: 'cross-midnight-message',
+              subject: 'Flight booking confirmation AB 123',
+              text: 'Outbound\nFlight number: AB 123\nDeparture date: 2026-10-16\nDeparture time: 7:00 PM America/Los_Angeles\nArrival date: 2026-10-16\nArrival time: 9:00 PM America/Los_Angeles\nFrom: SFO\nTo: LAX\nBooking reference: CROSS-123',
+            },
+          ],
+        },
+      ),
+    ];
+
+    const projection = upcomingFlightReadProjection(read, evidence);
+    expect(projection.flight?.segment).toMatchObject({
+      flightNumber: 'AB123',
+      departureDate: '2026-10-16',
+      departureTimeZone: 'America/Los_Angeles',
+    });
+    expect(projection.calendarComplete).toBe(true);
+    expect(projection.gmailSearchComplete).toBe(true);
+    expect(projection.threadsComplete).toBe(true);
+  });
+
   it('selects only the real flight and hotel from paginated results dominated by newsletters', () => {
     const read = request();
     const flightQuery = read.mailQueries?.find((query) => query.category === 'flight')?.query;
@@ -763,7 +825,7 @@ describe('compound trip read projection', () => {
     expect(projection.gmailSearchComplete).toBe(false);
     expect(projection.calendarPrefixCompleteThroughCandidate).toBe(false);
     expect(projection.blocked).toBe(true);
-    expect(projection.text).toContain('Booking-email search or reads were incomplete');
+    expect(projection.text).toContain('Booking-email search pages were incomplete');
   });
 
   it('does not count a selected but partially read thread as completed coverage', () => {
@@ -3086,13 +3148,38 @@ describe('compound trip read projection', () => {
     );
 
     expect(searchProjection.gmailSearchComplete).toBe(false);
-    expect(searchProjection.text).toContain(
-      'Booking-email search or thread coverage is incomplete',
-    );
+    expect(searchProjection.text).toContain('Booking-email search pages are incomplete');
     expect(threadProjection.threadsComplete).toBe(false);
-    expect(threadProjection.text).toContain(
-      'Booking-email search or thread coverage is incomplete',
-    );
+    expect(threadProjection.text).toContain('matching email thread remains unread or incomplete');
+  });
+
+  it('separates completed Gmail query pages from unread matching threads', () => {
+    const read = request();
+    const flightQuery = read.mailQueries?.find((query) => query.category === 'flight')?.query;
+    const lodgingQuery = read.mailQueries?.find((query) => query.category === 'lodging')?.query;
+    if (!flightQuery || !lodgingQuery) throw new Error('Expected both search categories');
+    const projection = compoundTripReadProjection(read, [
+      completeCalendarEvents([]),
+      row(
+        'gmail.search',
+        { query: flightQuery },
+        {
+          complete: true,
+          hasMore: false,
+          results: [
+            { threadId: 'read-flight', subject: 'Flight booking confirmation' },
+            { threadId: 'unread-match', subject: 'Flight booking details' },
+          ],
+        },
+      ),
+      row('gmail.search', { query: lodgingQuery }, { complete: true, hasMore: false, results: [] }),
+      row('gmail.read_thread', { threadId: 'read-flight' }, { complete: true, messages: [] }),
+    ]);
+
+    expect(projection.gmailSearchComplete).toBe(true);
+    expect(projection.threadsComplete).toBe(false);
+    expect(projection.text).toContain('the search pages completed');
+    expect(projection.text).toContain('Unread snippets were not treated as read booking evidence.');
   });
 
   it('rejects a search page whose continuation receipt does not match the returned token', () => {
@@ -5120,7 +5207,7 @@ describe('compound trip read projection', () => {
     expect(projection.calendarComplete).toBe(true);
     expect(projection.gmailSearchComplete).toBe(false);
     const answer = renderCompoundTripReadResponse(projection);
-    expect(answer).toContain('Booking-email search or thread coverage is incomplete');
+    expect(answer).toContain('Booking-email search pages are incomplete');
     expect(answer).not.toContain('Calendar coverage is incomplete');
     expect(answer).not.toContain('Calendar/email coverage');
     expect(projection.blocked).toBe(true);
@@ -5831,7 +5918,7 @@ San Francisco (SFO-San Francisco Intl.)`;
 describe('forwarded booked itinerary and rendered hotel source', () => {
   function fixture() {
     const read = detectPersonalReadRequest([{ role: 'user', content: tripPrompt }], {
-      now: new Date('2030-11-15T15:00:00Z'),
+      now: new Date('2030-11-08T15:00:00Z'),
       timeZone: 'America/New_York',
     });
     if (!read?.compoundTripDiscovery) throw new Error('Missing trip request');
@@ -5899,7 +5986,7 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
         }),
       ]),
     );
-    expect(final.text).toContain('existing booking, not proof of a newly departing trip');
+    expect(final.text).toContain('This is a booking candidate; the next departure is not fully verified.');
     expect(final.text).toContain('direction not explicitly stated');
     expect(final.text).toContain('KL700 BOS→AMS');
     expect(final.text).toContain('KL703 AMS→BOS');
@@ -5921,8 +6008,8 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     const visible = answer.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
     expect(visible.split(/\s+/).length).toBeLessThanOrEqual(330);
     expect(answer.length).toBeLessThanOrEqual(3800);
-    expect(answer.startsWith('Booked dates')).toBe(true);
-    expect(answer).toContain('A new outbound trip is not verified');
+    expect(answer.startsWith('Booking candidate:')).toBe(true);
+    expect(answer).toContain('I could not verify this as the next outbound trip');
     expect(answer).toContain('- **Booked route 1 KL700 BOS→AMS:**');
     expect(answer).not.toContain('|---|');
     expect(answer).toContain('- **Public transport:**');
@@ -5952,6 +6039,43 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(answer).not.toContain('Needs confirmation:');
     expect(final.presentation.gaps.length).toBeGreaterThan(0);
     expect(final.text.length).toBeGreaterThan(answer.length);
+  });
+
+  it('does not plan a new airport-to-hotel route from a booking whose arrival is already past', () => {
+    const { rows } = fixture();
+    const pastRequest = detectPersonalReadRequest([{ role: 'user', content: tripPrompt }], {
+      now: new Date('2030-11-15T15:00:00Z'),
+      timeZone: 'America/New_York',
+    });
+    if (!pastRequest?.compoundTripDiscovery) throw new Error('Missing trip request');
+    const pastRows = rows.map((row) =>
+      row.toolName === 'calendar.list_events'
+        ? {
+            ...row,
+            args: {
+              ...(row.args as Record<string, unknown>),
+              timeMin: pastRequest.timeWindow?.timeMin,
+              timeMax: pastRequest.timeWindow?.timeMax,
+            },
+          }
+        : row,
+    );
+    const projection = compoundTripReadProjection(pastRequest, pastRows);
+
+    expect(projection.flight).toBeUndefined();
+    expect(projection.routeOrigin).toBeUndefined();
+    expect(projection.webQuery).toBeUndefined();
+    expect(projection.text).toContain('Canal House');
+    expect(projection.text).not.toContain('Airport-to-hotel comparison uses');
+    expect(projection.presentation.groups.map((group) => group.label)).toEqual([
+      'Booked route 1',
+      'Booked route 2',
+    ]);
+    const answer = renderCompoundTripReadResponse(projection);
+    expect(answer).toContain('A new outbound trip is not verified');
+    expect(answer).toContain('Calendar vs booking:');
+    expect(answer).toContain('Unresolved carrier difference');
+    expect(answer).not.toContain('Transfer candidate:');
   });
 
   it('reports source-labelled route roles only, never direction from reversed airport order', () => {

@@ -1251,8 +1251,8 @@ function nextOutboundFlight(
   currentTripReturn?: CompoundTripFlightCandidate;
   ambiguous: boolean;
 } {
-  const startDate = request.timeWindow?.timeMin.slice(0, 10) ?? '';
-  const endDate = request.timeWindow?.timeMax.slice(0, 10) ?? '';
+  const startDate = requestCivilDate(request, request.timeWindow?.timeMin) ?? '';
+  const endDate = requestCivilDate(request, request.timeWindow?.timeMax) ?? '';
   const startInstant = Date.parse(request.timeWindow?.timeMin ?? '');
   const matchSegment = (
     segment: CompoundTripFlightSegment,
@@ -2556,8 +2556,8 @@ function bookedHotelTransfer(
   groups: ReadonlyArray<BookedRouteGroup>,
   hotels: ReadonlyArray<CompoundTripHotelCandidate>,
 ): { group: BookedRouteGroup; hotel: CompoundTripHotelCandidate } | undefined {
-  const day = request.timeWindow?.timeMin.slice(0, 10);
-  const end = request.timeWindow?.timeMax.slice(0, 10);
+  const day = requestCivilDate(request, request.timeWindow?.timeMin);
+  const end = requestCivilDate(request, request.timeWindow?.timeMax);
   if (!request.compoundTripDiscovery || !day || !end) return undefined;
   const matches = groups
     .filter((group) => group.order === 'first')
@@ -2570,7 +2570,16 @@ function bookedHotelTransfer(
       );
       const arrival = group.legs.at(-1)?.arrivalDate;
       const departure = returning?.legs[0]?.departureDate;
-      if (!arrival || !departure || departure < day || arrival >= end || arrival > departure)
+      // A past arrival can still be part of the current return-side booking.
+      // Its hotel-city match does not authorize a new airport-to-hotel plan.
+      if (
+        !arrival ||
+        !departure ||
+        arrival <= day ||
+        departure < day ||
+        arrival >= end ||
+        arrival > departure
+      )
         return [];
       return hotels
         .filter(
@@ -2658,7 +2667,7 @@ function sourceLocalBookingLines(
 ): string[] {
   const links = threadSourceLinks(threads);
   const tableSources = threadMessages(threads).flatMap(parseEgenciaTableSegments);
-  const day = request.timeWindow?.timeMin.slice(0, 10);
+  const day = requestCivilDate(request, request.timeWindow?.timeMin);
   const observed = segments.filter(
     (segment) =>
       (segment.direction === 'unknown' || !segment.departureTimeZone) &&
@@ -3097,6 +3106,21 @@ function sourceCivilDate(event: Record<string, unknown>): string | undefined {
   }
   const localDate = raw.slice(0, 10);
   return validDate(localDate) ? localDate : undefined;
+}
+
+/** Return a request-boundary date in the requester's civil time zone. */
+function requestCivilDate(
+  request: PersonalReadRequest,
+  instantValue: string | undefined,
+): string | undefined {
+  if (!instantValue) return undefined;
+  const timeZone = text(request.timeZone, 120);
+  if (timeZone) {
+    if (!validTimeZone(timeZone)) return undefined;
+    return civilDateInTimeZone(instantValue, timeZone);
+  }
+  const instant = new Date(instantValue);
+  return Number.isFinite(instant.getTime()) ? instant.toISOString().slice(0, 10) : undefined;
 }
 
 function civilDateInTimeZone(instantValue: string, timeZone: string): string | undefined {
@@ -3676,6 +3700,27 @@ export function compoundTripReadProjection(
   );
   const bookedGroups = bookedRouteGroups(sourceMessages, flightSegments);
   const bookedTransfer = !flight ? bookedHotelTransfer(request, bookedGroups, hotels) : undefined;
+  // Preserve fully validated route groups as ordered source observations even
+  // when they cannot support a future transfer plan or semantic direction.
+  const sourceGroupPairs = bookedGroups.flatMap((group) => {
+    if (group.order !== 'first') return [];
+    const second = bookedGroups.find(
+      (candidate) =>
+        candidate.threadId === group.threadId &&
+        candidate.reference === group.reference &&
+        candidate.order === 'second',
+    );
+    return second ? [[group, second] as const] : [];
+  });
+  const sourceGroups = bookedTransfer
+    ? bookedGroups.filter(
+        (group) =>
+          group.threadId === bookedTransfer.group.threadId &&
+          group.reference === bookedTransfer.group.reference,
+      )
+    : sourceGroupPairs.length === 1 && sourceGroupPairs[0]
+      ? [sourceGroupPairs[0][0], sourceGroupPairs[0][1]]
+      : [];
   const tripHotelAnchorDate = flight
     ? destinationCivilDate(flight)
     : currentTripReturn?.segment?.departureDate;
@@ -3985,11 +4030,11 @@ export function compoundTripReadProjection(
   const gaps: string[] = [];
   if (!calendarComplete)
     gaps.push('Calendar coverage is incomplete, so I cannot establish which flight is next.');
-  if (!gmailSearchComplete || !allThreadsRead)
-    gaps.push('Booking-email search or thread coverage is incomplete.');
-  if (unreadThreadCount > 0)
+  if (!gmailSearchComplete)
+    gaps.push('Booking-email search pages are incomplete, so additional matching threads may be missing.');
+  if (!allThreadsRead)
     gaps.push(
-      `${unreadThreadCount} matching email thread${unreadThreadCount === 1 ? ' remains' : 's remain'} unread or incomplete.`,
+      `${unreadThreadCount} matching email thread${unreadThreadCount === 1 ? ' remains' : 's remain'} unread or incomplete${gmailSearchComplete ? '; the search pages completed' : '; search-page coverage is also incomplete'}. Unread snippets were not treated as read booking evidence.`,
     );
   if (selectedFlight.ambiguous)
     gaps.push(
@@ -4205,7 +4250,9 @@ export function compoundTripReadProjection(
     calendarRows,
     flightSegments,
   );
-  const bookedArrivalDate = bookedTransfer?.group.legs.at(-1)?.arrivalDate;
+  const bookedArrivalDate =
+    bookedTransfer?.group.legs.at(-1)?.arrivalDate ??
+    sourceGroups.find((group) => group.order === 'first')?.legs.at(-1)?.arrivalDate;
   const selectedBookingStatesLocalClocks =
     bookedTransfer &&
     sourceMessages.some(
@@ -4222,7 +4269,7 @@ export function compoundTripReadProjection(
     );
   const bookedItineraryLines = bookedTransfer
     ? [
-        `The booked itinerary covers ${bookedTransfer.group.legs[0]?.departureDate} to ${bookedGroups.find((group) => group.threadId === bookedTransfer.group.threadId && group.order === 'second')?.legs.at(-1)?.arrivalDate}. ${bookedArrivalDate && bookedArrivalDate < (request.timeWindow?.timeMin.slice(0, 10) ?? '') ? 'Its first booked arrival date is already past; this is an existing booking, not proof of a newly departing trip.' : 'This is a booking candidate; the next departure is not fully verified.'}`,
+        `The booked itinerary covers ${bookedTransfer.group.legs[0]?.departureDate} to ${bookedGroups.find((group) => group.threadId === bookedTransfer.group.threadId && group.order === 'second')?.legs.at(-1)?.arrivalDate}. ${bookedArrivalDate && bookedArrivalDate < (requestCivilDate(request, request.timeWindow?.timeMin) ?? '') ? 'Its first booked arrival date is already past; this is an existing booking, not proof of a newly departing trip.' : 'This is a booking candidate; the next departure is not fully verified.'}`,
         ...bookedGroups
           .filter((group) => group.threadId === bookedTransfer.group.threadId)
           .map(
@@ -4296,9 +4343,6 @@ export function compoundTripReadProjection(
     ),
     ...gaps.map((gap) => `Needs confirmation: ${gap}`),
   ].filter(Boolean);
-  const sourceGroups = bookedGroups.filter(
-    (group) => group.threadId === bookedTransfer?.group.threadId,
-  );
   const presentationGroups = flight?.segment
     ? [
         { label: 'Outbound', inferred: false, legs: [flight.segment, ...legs] },
@@ -4335,7 +4379,8 @@ export function compoundTripReadProjection(
     .find((group) => group.order === 'second')
     ?.legs.at(-1)?.arrivalDate;
   const currentBooking =
-    bookedArrivalDate && bookedArrivalDate < (request.timeWindow?.timeMin.slice(0, 10) ?? '');
+    bookedArrivalDate &&
+    bookedArrivalDate < (requestCivilDate(request, request.timeWindow?.timeMin) ?? '');
   const matchedCalendarNotes = [flight, returnFlight, currentTripReturn].flatMap((candidate) => {
     const segment = candidate?.segment;
     if (!candidate || !segment) return [];
@@ -4547,8 +4592,12 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
       if (!view.calendarNotes.length) unknowns.add(gap);
     } else if (/coverage|matching email threads?[^.]*unread|booking-email search/i.test(gap)) {
       if (!projection.calendarComplete) unknowns.add('Calendar coverage is incomplete.');
-      if (!projection.gmailSearchComplete || !projection.threadsComplete)
-        unknowns.add('Booking-email search or thread coverage is incomplete.');
+      if (!projection.gmailSearchComplete)
+        unknowns.add('Booking-email search pages are incomplete.');
+      if (!projection.threadsComplete)
+        unknowns.add(
+          `Matching email threads remain unread or incomplete${projection.gmailSearchComplete ? '; search pages completed' : '; search-page coverage is also incomplete'}.`,
+        );
       if (
         projection.calendarComplete &&
         projection.gmailSearchComplete &&
@@ -4791,9 +4840,11 @@ export function upcomingFlightReadProjection(
     gaps.push(
       'An earlier calendar flight candidate has no explicit time-zone offset, so I could not establish whether it precedes this flight.',
     );
-  if (!trip.gmailSearchComplete || !trip.threadsComplete)
+  if (!trip.gmailSearchComplete)
+    gaps.push('Booking-email search pages were incomplete, so a matching booking may be missing.');
+  if (!trip.threadsComplete)
     gaps.push(
-      'Booking-email search or reads were incomplete, so a matching booking may be missing.',
+      `Some matching email threads remain unread or incomplete${trip.gmailSearchComplete ? '; search pages completed' : '; search-page coverage is also incomplete'}, so they were not counted as read booking evidence.`,
     );
   if (matchedFlightAmbiguous || calendarCandidateAmbiguous)
     gaps.push(

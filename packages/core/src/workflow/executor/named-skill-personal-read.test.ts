@@ -529,16 +529,16 @@ describe('named saved skill use during a personal read', () => {
     );
     expect(final).toContain('Calendar briefing for tomorrow (local time):');
     expect(final).toContain('Wed 14 Oct (America/Los_Angeles)');
-    expect(final).toContain('08:15–09:00');
+    expect(final).toContain('8:15 AM–9:00 AM');
     expect(final).toContain('Strategy review');
-    expect(final).toContain('09:20–11:30');
+    expect(final).toContain('9:20 AM–11:30 AM');
     expect(final).toContain('Partner briefing');
-    expect(final).toContain('10:05–11:25');
+    expect(final).toContain('10:05 AM–11:25 AM');
     expect(final).toContain('Terminal C');
     expect(final).toContain('North Hall');
     expect(final).toContain('South Hall');
     expect(final).toContain(
-      'Possible overlap Wed 14 Oct 10:05 AM–11:25 AM: Strategy review + Partner briefing.',
+      'Possible overlap **Wed 14 Oct 10:05 AM–11:25 AM**: Strategy review + Partner briefing.',
     );
     expect(final).toContain('Calendar overlap does not confirm attendance.');
     expect(final).toContain(

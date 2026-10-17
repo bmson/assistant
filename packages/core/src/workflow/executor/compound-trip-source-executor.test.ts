@@ -45,7 +45,7 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
 
   it('rejects model-invented trip URLs unless they are source-bound or owner-supplied verbatim', () => {
     const request = detectPersonalReadRequest([{ role: 'user', content: tripPrompt }], {
-      now: new Date('2030-11-15T15:00:00Z'),
+      now: new Date('2030-11-08T15:00:00Z'),
       timeZone: 'America/New_York',
     });
     if (!request?.compoundTripDiscovery) throw new Error('Expected compound-trip read intent');
@@ -111,7 +111,7 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
       type: 'chat_turn',
       status: 'pending',
       trust: 'owner',
-      createdAt: new Date('2030-11-15T15:00:00Z'),
+      createdAt: new Date('2030-11-08T15:00:00Z'),
       maxSteps: 12,
       budgetUsdLimit: '0.0500',
       trigger: {
@@ -297,7 +297,7 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
       scenario === 'recovery budget boundary' || scenario === 'recovery budget resume';
     if (recoveryBoundary) {
       const read = detectPersonalReadRequest([{ role: 'user', content: request }], {
-        now: new Date('2030-11-15T15:00:00Z'),
+        now: new Date('2030-11-08T15:00:00Z'),
         timeZone: 'America/New_York',
       });
       if (!read?.compoundTripDiscovery) throw new Error('Expected bounded compound-trip read');
@@ -424,7 +424,7 @@ describe('forwarded itinerary through allocated PostgreSQL executor', () => {
         trust: 'owner',
         tainted: false,
         db,
-        now: () => new Date('2030-11-15T15:00:00Z'),
+        now: () => new Date('2030-11-08T15:00:00Z'),
         signal: new AbortController().signal,
         log: vi.fn(async () => {}),
       },

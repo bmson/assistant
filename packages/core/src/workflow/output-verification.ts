@@ -1504,9 +1504,11 @@ export async function verifyFinalOutput(
           !findings.length &&
           !hasStructuralOutputDefect(candidate) &&
           !isVisiblyIncompleteReplacement(candidate);
-        const transportFallback = findings.length
-          ? groundedTransportBullets(input.request, input.evidence)
-          : undefined;
+        // A model correction can remove the original claim finding yet still
+        // fail a later deterministic check such as the requested source link.
+        // This formatter has its own complete-source, format, link, and claim
+        // gates, so allow it to recover any failed explicit transport summary.
+        const transportFallback = groundedTransportBullets(input.request, input.evidence);
         const safeFailure =
           transportFallback ??
           (findings.length

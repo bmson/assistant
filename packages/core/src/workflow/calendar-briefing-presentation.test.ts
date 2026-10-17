@@ -72,7 +72,7 @@ describe('calendar day and practical briefing fidelity', () => {
       evidence([{ ...timed, location: 'Studio B, 12 Main Street' }], true, compact),
     );
     expect(response).toContain('[Project review](https://calendar.google.com/event?eid=review)');
-    expect(response).toContain('09:00–10:00');
+    expect(response).toContain('**9:00 AM–10:00 AM**');
     expect(response).toContain('Studio B, 12 Main Street');
   });
 
@@ -176,7 +176,7 @@ describe('calendar day and practical briefing fidelity', () => {
     const response = verifiedReadResponse(compact, evidence([accepted, second], true, compact));
 
     expect(response).toContain(
-      'Conflict Thu 15 Oct 9:30 AM–10:00 AM: Project review + Planning hold.',
+      'Conflict **Thu 15 Oct 9:30 AM–10:00 AM**: Project review + Planning hold.',
     );
   });
 
@@ -389,14 +389,14 @@ describe('calendar day and practical briefing fidelity', () => {
     const response = verifiedReadResponse(compactRequest, rows);
 
     expect(response).toContain('Timed appointments:');
-    expect(response).toContain('09:00–10:00 — [Project review]');
-    expect(response).toContain('09:50–10:30 — [Planning hold]');
+    expect(response).toContain('**9:00 AM–10:00 AM** — [Project review]');
+    expect(response).toContain('**9:50 AM–10:30 AM** — [Planning hold]');
     expect(response).toContain('(Work)');
     expect(response).toContain('event?eid=review');
     expect(response).toContain('event?eid=second');
     expect(response).toContain('event?eid=stay');
     expect(response).toContain(
-      'Possible overlap Thu 15 Oct 9:50 AM–10:00 AM: Project review + Planning hold.',
+      'Possible overlap **Thu 15 Oct 9:50 AM–10:00 AM**: Project review + Planning hold.',
     );
     expect(response).toContain('Calendar overlap does not confirm attendance.');
     expect(response).not.toContain('Next:');
@@ -557,12 +557,64 @@ describe('calendar day and practical briefing fidelity', () => {
     };
     const response = verifiedReadResponse(compactRequest, evidence([stay], true, compactRequest));
 
-    expect(response).toContain('- Ongoing: [Hotel stay]');
-    expect(response).toContain('Sat 10 Oct 6:00 AM–Sat 17 Oct 2:00 AM');
+    expect(response).toContain('Ongoing context (full interval):');
+    expect(response).toContain(
+      '- [Hotel stay](https://calendar.google.com/event?eid=stay) (Work · accepted) — **Sat 10 Oct 6:00 AM through Sat 17 Oct 2:00 AM**',
+    );
     expect(response).toContain('(Work · accepted)');
     expect(response).not.toContain('Timed appointments:');
     expect(response).not.toContain('Possible overlap: **Hotel stay**');
     expect(response).toContain('event?eid=stay');
+  });
+
+  it('shows a lodging and flight busy-interval overlap as calendar context, never an attendance conflict', () => {
+    const compactRequest = {
+      ...request,
+      compactCalendarBriefing: true,
+      timeWindow: {
+        label: 'tomorrow',
+        timeMin: '2026-10-17T07:00:00Z',
+        timeMax: '2026-10-18T07:00:00Z',
+      },
+    };
+    const stay = {
+      ...timed,
+      eventId: 'stay',
+      summary: 'Hotel stay',
+      calendar: 'Travel',
+      description: 'Hotel stay. Check-in: Oct 10. Check-out: Oct 17.',
+      start: '2026-10-10T06:00:00-07:00',
+      end: '2026-10-17T02:00:00-07:00',
+      blocksTime: true,
+      links: link('stay'),
+    };
+    const flight = {
+      ...timed,
+      eventId: 'flight',
+      summary: 'BER → SFO flight',
+      calendar: 'Travel',
+      start: '2026-10-16T21:10:00-07:00',
+      end: '2026-10-17T08:15:00-07:00',
+      links: link('flight'),
+    };
+    const response = verifiedReadResponse(
+      compactRequest,
+      evidence([stay, flight], true, compactRequest),
+    );
+
+    expect(response).toContain('Ongoing context (full interval):');
+    expect(response).toContain('Sat 10 Oct 6:00 AM through Sat 17 Oct 2:00 AM');
+    expect(response).toContain('Fri 16 Oct 9:10 PM through Sat 17 Oct 8:15 AM');
+    expect(response).toContain(
+      'Travel context overlap **Sat 17 Oct 12:00 AM–2:00 AM**: Hotel stay + BER → SFO flight (busy stay block).',
+    );
+    expect(response).toContain('Calendar overlap does not confirm attendance.');
+    expect(response).not.toMatch(
+      /^\s*-\s*(?:Possible overlap|Scheduling conflict|Conflict)(?::|\s)/m,
+    );
+    expect(response).not.toContain('Check whether you need to attend both.');
+    expect(response).toContain('event?eid=stay');
+    expect(response).toContain('event?eid=flight');
   });
 
   it('retains source-date-only reminders and explicit partial coverage in a compact view', () => {
