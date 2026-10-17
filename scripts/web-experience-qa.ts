@@ -59,7 +59,7 @@ import { SetupClient } from './app/setup/setup-client';
 import { MobileTokenPanel } from './app/settings/mobile-token';
 import { InvestigationBrief } from './app/audit/[id]/investigation-brief';
 import RouteError from './app/error';
-const nav = document.querySelector('nav[aria-label="Administration"]');
+const nav = document.querySelector('nav[aria-label="Main navigation"]');
 if (nav) { const passkey = nav.textContent.includes('Security'); const host = document.createElement('div'); nav.replaceWith(host); createRoot(host).render(<AdminNavigation passkey={passkey} />); }
 for (const host of document.querySelectorAll('[data-qa-client]')) {
 const name = host.dataset.qaClient;
