@@ -6,6 +6,8 @@ The worker opens a feature branch, adds a regression test, checks the patch, and
 
 Direct feedback includes named UI complaints such as “The save button doesn't work,” “The Improvements section is broken,” and “Chat is stuck.” Quoted examples, hypothetical discussion, unrelated third-party failures, and an explicit request not to investigate remain excluded. This is bounded English detection, rather than a general intent classifier.
 
+When a complaint explicitly asks to investigate or fix repository code, chat acknowledges the saved Code fixes report directly. It does not also send that same request to the ordinary planner to search the owner's file workspace. An existing report returns its actual status; acknowledging it does not authorize another coding attempt.
+
 Before coding dispatch, the agent checks its owner's ready GitHub MCP connection at `https://api.githubcopilot.com/mcp/` and uses only `get_file_contents` against `GITHUB_REPO`. It reads at most three permitted diagnosis paths, or repository documentation when the path is unknown, and retains bounded source excerpts as untrusted coding context. Neither the original complaint nor private audit is sent to GitHub MCP. Disabled connections, read errors, and invented paths produce unavailable evidence; they do not establish a repository defect. The coding sandbox still checks the immutable source checkout. MCP is used for source inspection; publication retains the dedicated repository publisher credential and patch fences.
 
 ## OpenAI-hosted coding (replacement for the private Actions worker)

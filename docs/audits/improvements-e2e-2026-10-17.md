@@ -17,6 +17,7 @@ The initial repair overview contained 19 failed, 19 blocked, five dismissed and 
 | Automatic coding | The minute sweep investigated and dispatched a real hosted session. Publication refused the returned patch because it included duplicate or protected paths. No PR was created. Cleanup completed. |
 | Submit an actual chat complaint | A synthetic complaint about missing model-routing proposal details was automatically captured as issue `a498a36e-6a45-5d89-a0dc-a5ed82e1ed5b`, in conversation `1bb3fe48-7360-4225-8e0b-8c1f6b802959`. |
 | Run the new complaint | The authenticated Run now action was accepted. Investigation then blocked on the installation's model budget. |
+| Ordinary chat handling of the same complaint | The separate chat task looked for repository paths in the owner's file workspace, then stopped. Its actual recorded spend was $0.092453. Explicit code-repair complaints now receive the tracked repair receipt directly, preventing that duplicate planner path. |
 | Read repository source through the actual saved MCP connection | The new reader successfully fetched `packages/application/src/workspace-improvements.ts` and `apps/web/lib/server.ts` from `bmson/assistant`. Source excerpts were bounded to 4,000 characters per file. This used the implementation in this branch from a local verification harness, rather than a deployed agent revision. |
 
 The old Gmail suggestion was stale: the current source already bounds long query receipt identifiers. Its earlier production telemetry remains real evidence of the historical failure. The test must not manufacture a new Gmail fix merely to obtain a PR.
@@ -26,6 +27,7 @@ The shared production daily cap was $4. At the second budget snapshot, actual sp
 ## Changes prepared
 
 - Recognize direct complaints naming the app or common UI features while excluding quoted, hypothetical, unrelated and opted-out text.
+- Hand explicit code-repair complaints to the durable Improvements report without also running an ordinary file-workspace task. Repeated requests show the actual existing report status.
 - Supply bounded source inspection through the owner's ready GitHub MCP connection before coding dispatch. Reads target the configured repository; original feedback and private audits are not sent to MCP.
 - Require independent review of the exact published GitHub diff through the installation's configured reasoning model, after executable CI and before draft promotion.
 - Preserve the model identity, verdict, summary and reviewed commit. Recheck the PR head after model review; unavailable review keeps the draft pending and rejected review keeps it out of the ready queue.
