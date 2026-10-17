@@ -352,9 +352,7 @@ describe('named saved skill use during a personal read', () => {
         },
       };
       const projection = verifiedReadResponse(readRequest, f.rows as never);
-      expect(projection).toContain(
-        'Overlapping entries do not establish that you must attend both.',
-      );
+      expect(projection).toContain('Calendar overlap does not confirm attendance.');
       expect(projection).not.toContain('Next step:');
       f.router.object.mockClear();
       f.router.object.mockImplementation(async () => {
@@ -388,7 +386,7 @@ describe('named saved skill use during a personal read', () => {
       );
 
       const final = f.state.pendingFinal?.text ?? '';
-      expect(final).toContain('Overlapping entries do not establish that you must attend both.');
+      expect(final).toContain('Calendar overlap does not confirm attendance.');
       expect(final).toContain('Next step:');
       expect(final).toContain('attend both');
       expect(final).not.toContain('I moved');
@@ -539,8 +537,10 @@ describe('named saved skill use during a personal read', () => {
     expect(final).toContain('Terminal C');
     expect(final).toContain('North Hall');
     expect(final).toContain('South Hall');
-    expect(final).toContain('Possible overlap: **Strategy review** and **Partner briefing**');
-    expect(final).toContain('Overlapping entries do not establish that you must attend both.');
+    expect(final).toContain(
+      'Possible overlap Wed 14 Oct 10:05 AM–11:25 AM: Strategy review + Partner briefing.',
+    );
+    expect(final).toContain('Calendar overlap does not confirm attendance.');
     expect(final).toContain(
       '[Flight arrival](https://calendar.google.com/event?eid=fixture-flight)',
     );

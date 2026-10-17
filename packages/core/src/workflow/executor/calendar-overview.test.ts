@@ -142,9 +142,8 @@ describe('executor calendar overview presentation', () => {
     expect(result.finalText).toContain('Timed appointments:');
     expect(result.finalText).toContain('[Project review]');
     expect(result.finalText).toContain('[Planning hold]');
-    expect(result.finalText).toContain(
-      'Possible overlap: **Project review** and **Planning hold**',
-    );
+    expect(result.finalText).toMatch(/Possible overlap .*: Project review \+ Planning hold\./);
+    expect(result.finalText).toContain('Calendar overlap does not confirm attendance.');
     expect(result.finalText).toContain('event?eid=overview-review');
     expect(result.finalText).toContain('event?eid=overview-hold');
     expect(result.finalText).not.toContain('Next step:');

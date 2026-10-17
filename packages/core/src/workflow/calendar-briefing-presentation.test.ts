@@ -103,6 +103,54 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response.length).toBeLessThan(2200);
   });
 
+  it('keeps short venue values by default while dropping a full postal-style address', () => {
+    const compact = { ...request, compactCalendarBriefing: true };
+    const events = [
+      { ...timed, eventId: 'zoom', summary: 'Video call', location: 'Zoom', links: link('zoom') },
+      {
+        ...timed,
+        eventId: 'street-venue',
+        summary: 'Clinic visit',
+        location: 'Laugavegur 12',
+        links: link('street-venue'),
+      },
+      {
+        ...timed,
+        eventId: 'postal-address',
+        summary: 'Office visit',
+        location: '123 Example Street, Example City, CA 90000, United States',
+        links: link('postal-address'),
+      },
+      {
+        ...timed,
+        eventId: 'long-unpunctuated-address',
+        summary: 'Building visit',
+        location: '123456 Example Avenue Suite 8 long road direction postal 90000 United States',
+        links: link('long-unpunctuated-address'),
+      },
+    ];
+    const response = verifiedReadResponse(compact, evidence(events, true, compact));
+
+    expect(response).toContain(
+      '[Video call](https://calendar.google.com/event?eid=zoom) (Work) — Zoom',
+    );
+    expect(response).toContain(
+      '[Clinic visit](https://calendar.google.com/event?eid=street-venue) (Work) — Laugavegur 12',
+    );
+    expect(response).not.toContain('Example Street');
+    expect(response).not.toContain('Example Avenue');
+  });
+
+  it('caps a long location only when the request explicitly asks for it', () => {
+    const compact = { ...request, includeCalendarLocations: true, compactCalendarBriefing: true };
+    const location = `Venue ${'A'.repeat(110)}`;
+    const event = { ...timed, location };
+    const response = verifiedReadResponse(compact, evidence([event], true, compact));
+
+    expect(response).toContain(`${location.slice(0, 99)}…`);
+    expect(response).not.toContain(location);
+  });
+
   it('keeps explicitly requested venue details in the compact agenda', () => {
     const compact = { ...request, includeCalendarLocations: true, compactCalendarBriefing: true };
     const event = {

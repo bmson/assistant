@@ -1692,6 +1692,17 @@ function compactLocationRequested(request: PersonalReadRequest): boolean {
   return request.includeCalendarLocations === true;
 }
 
+function compactLocationForAgenda(location: string, explicitlyRequested: boolean): string {
+  const place = location.replace(/\s+/g, ' ').trim();
+  if (!place) return '';
+  // Preserve concise venue labels and short locations such as "Laugavegur 12".
+  // Full postal-style addresses stay out of a brief unless the owner asked for
+  // locations; never derive or rewrite a venue from the address text.
+  const hasMultipleAddressComponents = place.split(',').length - 1 >= 2;
+  if (!explicitlyRequested && (place.length > 60 || hasMultipleAddressComponents)) return '';
+  return place.length > 100 ? `${place.slice(0, 99)}…` : place;
+}
+
 function compactEventTitleLink(title: string, url: string): string {
   const safeTitle = title
     .replace(/[\p{Cc}\u202a-\u202e\u2066-\u2069]/gu, ' ')
@@ -3916,12 +3927,8 @@ export function verifiedReadResponse(
                   : [datePrefix, clockStart ? `${clockStart}${clockEnd ? `–${clockEnd}` : ''}` : '']
                       .filter(Boolean)
                       .join(' ');
-                const place = compactLocationRequested(request)
-                  ? location.replace(/\s+/g, ' ').trim()
-                  : '';
-                const compactPlace = place
-                  ? ` — ${compactEventTitleLink(place.length > 100 ? `${place.slice(0, 99)}…` : place, '')}`
-                  : '';
+                const place = compactLocationForAgenda(location, compactLocationRequested(request));
+                const compactPlace = place ? ` — ${compactEventTitleLink(place, '')}` : '';
                 compactTimedItems.push(
                   `- ${when || '(time unavailable)'} — ${linkedTitle}${metadataLabel}${compactPlace}`,
                 );

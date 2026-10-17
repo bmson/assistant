@@ -114,7 +114,7 @@ function savedSkillCalendarFallbackStep(
   evidence: ActionEvidence[],
 ): string | undefined {
   const projection = verifiedReadResponse(request, evidence);
-  if (/^\s*-\s*(?:Possible overlap|Scheduling conflict):/m.test(projection))
+  if (/^\s*-\s*(?:Possible overlap|Scheduling conflict|Conflict)(?::|\s)/m.test(projection))
     return 'Check whether you need to attend both.';
 
   const completeProjection = verifiedReadResponse(
