@@ -137,7 +137,15 @@ function safeRouterAttempt(
           },
         }
       : modelId
-        ? { modelId: modelId.slice(0, 160), failureKind: degraded ? 'fallback_success' : 'success' }
+        ? {
+            modelId: modelId.slice(0, 160),
+            failureKind:
+              classification === 'success'
+                ? degraded
+                  ? 'fallback_success'
+                  : 'success'
+                : 'unusable_output',
+          }
         : {}),
     providerAttempts,
     observedModelCalls: accounting?.observedModelCalls ?? null,
@@ -479,20 +487,42 @@ export async function runRepairCycle(
     }
     const data = diagnosis.object;
     const canInvestigate = ['bug', 'feature', 'unknown', 'answer'].includes(data.category);
-    if (
-      !canInvestigate ||
-      !usableRepairText(data.diagnosis) ||
-      !usableRepairText(data.reproduction) ||
-      !usableRepairText(data.acceptance)
-    ) {
+    if (canInvestigate && defectiveRepairBrief(data)) {
+      const usage = await readAccounting();
+      const accounting = usage.accounting ?? null;
+      await deps.repository.update(
+        issue,
+        'blocked',
+        {
+          routerAttempts: [
+            ...(issue.data.routerAttempts ?? []),
+            safeRouterAttempt(
+              undefined,
+              'unknown',
+              now,
+              accounting,
+              diagnosis.modelId,
+              diagnosis.degraded,
+            ),
+          ].slice(-12),
+          modelAccounting: accounting ?? undefined,
+          accountedInvestigationTaskIds: usage.accountedTaskIds,
+          lastError:
+            'The investigation model did not produce a usable technical brief. No coding run was dispatched.',
+          ownerActionRequired:
+            'Retry the investigation after checking the configured reasoning models. The original report has been preserved.',
+        },
+        now,
+      );
+      return count;
+    }
+    if (!canInvestigate) {
       await deps.repository.update(
         issue,
         'blocked',
         {
           ...data,
-          lastError: canInvestigate
-            ? 'More details are needed: describe the steps and expected behavior, then report again with a related task.'
-            : `This is a ${data.category} issue. Review the diagnosis for the next step.`,
+          lastError: `This is a ${data.category} issue. Review the diagnosis for the next step.`,
         },
         now,
       );

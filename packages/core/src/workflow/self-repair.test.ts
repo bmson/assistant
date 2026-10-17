@@ -398,7 +398,9 @@ describe('issue-to-PR flow', () => {
       await runRepairCycle(deps, 'owner', 'task', now);
       expect(rows.get(issue.id)?.status).toBe('blocked');
       expect(deps.worker?.dispatch).not.toHaveBeenCalled();
-      expect(rows.get(issue.id)?.data.lastError).toContain('More details');
+      expect(rows.get(issue.id)?.data.lastError).toContain('model did not produce a usable');
+      expect(rows.get(issue.id)?.data.summary).toBe(issue.data.summary);
+      expect(rows.get(issue.id)?.data.routerAttempts?.at(-1)?.classification).toBe('unknown');
     },
   );
   it('lets the repository worker investigate an actionable unknown cause without guessed paths', async () => {
@@ -468,6 +470,33 @@ describe('issue-to-PR flow', () => {
       expect(rows.get(issue.id)?.status).toBe('fixing');
     },
   );
+  it('preserves the report and records unusable output when both configured models return placeholders', async () => {
+    const { deps, object, rows, issue } = setup();
+    object.mockResolvedValue({
+      ok: true,
+      modelId: 'synthetic-fallback',
+      degraded: true,
+      object: {
+        category: 'answer',
+        diagnosis: '...',
+        targetPaths: [],
+        reproduction: '{',
+        acceptance: '...',
+      },
+    } as never);
+    expect(await runRepairCycle(deps, 'owner', 'task', now)).toBe(0);
+    const result = rows.get(issue.id)!;
+    expect(result.status).toBe('blocked');
+    expect(result.data.summary).toBe(issue.data.summary);
+    expect(result.data.lastError).toContain('model did not produce a usable technical brief');
+    expect(result.data.ownerActionRequired).toContain('reasoning models');
+    expect(result.data.routerAttempts?.at(-1)).toMatchObject({
+      classification: 'unknown',
+      modelId: 'synthetic-fallback',
+      failureKind: 'unusable_output',
+    });
+    expect(deps.worker?.dispatch).not.toHaveBeenCalled();
+  });
   it('bounds triage and delegates timeout fallback to ModelRouter', async () => {
     const { deps, object, rows, issue } = setup();
     const deadline = vi.spyOn(AbortSignal, 'timeout');
