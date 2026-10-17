@@ -773,7 +773,8 @@ describe('golden tasks', () => {
     expect(result.finalText).toContain('city/date association inferred; separate booking');
     expect(result.finalText).toContain('Departure clocks agree after time-zone conversion');
     expect(result.finalText).toContain('independent flight identity remains unverified');
-    expect(result.finalText).toContain('Booking-email search or thread coverage is incomplete');
+    expect(result.finalText).toContain('Booking-email search pages are incomplete.');
+    expect(result.finalText).toContain('Matching email threads remain unread or incomplete');
     expect(result.finalText).not.toContain('Calendar coverage is incomplete');
     expect(result.finalText).toContain(`Transfer candidate: **BER Airport → Hotel Linden**`);
     expect(result.finalText).toContain('- **Public transport:**');
@@ -3367,8 +3368,8 @@ describe('golden tasks', () => {
     createdTaskIds.push(result.taskId);
 
     expect(result.toolNames).toEqual(['calendar.list_events']);
-    expect(result.finalText).toContain('09:30–10:15 — Linear interview prep');
-    expect(result.finalText).toContain('13:00–14:00 — Dentist');
+    expect(result.finalText).toContain('**9:30 AM–10:15 AM** — Linear interview prep');
+    expect(result.finalText).toContain('**1:00 PM–2:00 PM** — Dentist');
     expect(result.finalText).toContain('Zoom');
     expect(result.finalText).toContain('Laugavegur 12');
     expect(result.finalText).toContain('No unresolved overlaps between timed calendar entries');
@@ -3440,7 +3441,7 @@ describe('golden tasks', () => {
     expect(result.toolNames).toEqual(['calendar.list_events']);
     expect(result.status).toBe('done');
     expect(result.finalText).toContain('Design review');
-    expect(result.finalText).toContain('16:00–16:30');
+    expect(result.finalText).toContain('**4:00 PM–4:30 PM**');
     expect(result.finalText).not.toMatch(/let me read|let me check|email results/i);
   });
 
