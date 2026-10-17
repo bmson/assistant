@@ -176,6 +176,8 @@ describe('ModelRouter.route (integration)', () => {
         const router = new ModelRouter(scoped, 'unused');
         const selected = await router.route('reason', { taskId: task.id });
         expect(selected.ok && selected.modelId).toBe('moonshotai/kimi-k3');
+        const draft = await router.route('draft', { taskId: task.id });
+        expect(draft.ok && draft.modelId).toBe('moonshotai/kimi-k3');
         const planned = await router.route('plan', { taskId: task.id });
         expect(planned.ok && planned.modelId).toBe('deepseek/deepseek-v4-pro-0813');
         const fallback = await router.route('reason', { taskId: task.id, forceFallback: true });

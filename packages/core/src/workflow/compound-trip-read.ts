@@ -2674,12 +2674,54 @@ function sourceLocalBookingLines(
       (!day || segment.departureDate >= day),
   );
   if (observed.length === 0) return [];
-  const lines = observed
-    .slice(0, 4)
-    .map(
-      (segment) =>
-        `Booking email observation — not a verified next-flight match: ${formatFlightSegment(segment)}; direction ${segment.direction === 'unknown' ? 'not explicitly stated' : `source labels ${segment.direction}`}${links.has(segment.threadId) ? ` [Booking email](${links.get(segment.threadId)})` : ''}.`,
+  const messages = threadMessages(threads);
+  const formatObservedLeg = (segment: CompoundTripFlightSegment) => {
+    const clockLink = segment.departureClockSourceThreadId
+      ? links.get(segment.departureClockSourceThreadId)
+      : undefined;
+    const bookingLink = links.get(segment.threadId);
+    return `${formatFlightSegment(segment)}${clockLink && clockLink !== bookingLink ? ` [Local-clock confirmation](${clockLink})` : ''}`;
+  };
+  const grouped = new Set<CompoundTripFlightSegment>();
+  const lines: string[] = [];
+  let renderedObservations = 0;
+  for (const group of bookedRouteGroups(messages, segments)) {
+    const legs = group.legs.flatMap((leg) => {
+      const item = observed.find(
+        (candidate) =>
+          candidate.threadId === leg.threadId &&
+          candidate.messageId === leg.messageId &&
+          candidate.flightNumber === leg.flightNumber &&
+          candidate.departureDate === leg.departureDate &&
+          candidate.departureTime === leg.departureTime,
+      );
+      return item ? [item] : [];
+    });
+    if (legs.length < 2 || legs.length !== group.legs.length) continue;
+    const shown = legs.slice(0, 4 - renderedObservations);
+    if (shown.length < 2) continue;
+    legs.forEach((leg) => {
+      grouped.add(leg);
+    });
+    renderedObservations += shown.length;
+    const direction = shown.every((leg) => leg.direction === 'unknown')
+      ? 'direction not explicitly stated'
+      : `source directions: ${[...new Set(shown.map((leg) => leg.direction))].join(', ')}`;
+    const timeZone = shown.some((leg) => !leg.departureTimeZone)
+      ? 'departure time zone not stated'
+      : 'departure times carry source time zones';
+    lines.push(
+      `Booking email observation — ${group.origin}→${group.destination} itinerary${shown.length < legs.length ? ` (first ${shown.length} of ${legs.length} legs shown)` : ''}, not a verified next-flight match: ${shown.map(formatObservedLeg).join('; ')}; ${direction}; ${timeZone}${links.has(group.threadId) ? ` [Booking email](${links.get(group.threadId)})` : ''}.`,
     );
+  }
+  for (const segment of observed
+    .filter((item) => !grouped.has(item))
+    .slice(0, 4 - renderedObservations)) {
+    lines.push(
+      `Booking email observation — not a verified next-flight match: ${formatObservedLeg(segment)}; direction ${segment.direction === 'unknown' ? 'not explicitly stated' : `source labels ${segment.direction}`}${links.has(segment.threadId) ? ` [Booking email](${links.get(segment.threadId)})` : ''}.`,
+    );
+    renderedObservations += 1;
+  }
   for (const message of threadMessages(threads)) {
     const routes = [
       ...message.text.matchAll(
@@ -2709,6 +2751,17 @@ function sourceLocalBookingLines(
     const calendarCarrier = carrierRoleLabel(
       `${text(candidate.event.summary, 240)}\n${text(candidate.event.description, 1200)}`,
     );
+    const carrierWarnings = new Map<
+      string,
+      {
+        exact: boolean;
+        bookings: Map<
+          string,
+          { name: string; role: 'operating' | 'marketing' | 'unspecified'; flights: Set<string> }
+        >;
+      }
+    >();
+    if (!calendarCarrier) continue;
     for (const segment of sameReference.slice(0, 4)) {
       const tables = tableSources.filter(
         (table) => sameSourceTableLeg(table, segment) && compatibleTableFields(segment, table),
@@ -2730,8 +2783,29 @@ function sourceLocalBookingLines(
         Math.abs(Date.parse(candidate.instant) - bookedInstant) <= 5 * 60_000;
       const comparableRoles =
         calendarCarrier.role !== 'unspecified' && calendarCarrier.role === bookingCarrier.role;
+      const exact = exactLeg && comparableRoles;
+      const key = `${calendarCarrier.name}|${calendarCarrier.role}|${exact}`;
+      const warning = carrierWarnings.get(key) ?? { exact, bookings: new Map() };
+      const bookingKey = `${bookingCarrier.name}|${bookingCarrier.role}`;
+      const booking = warning.bookings.get(bookingKey) ?? {
+        name: bookingCarrier.name,
+        role: bookingCarrier.role,
+        flights: new Set<string>(),
+      };
+      booking.flights.add(
+        `${segment.flightNumber} ${segment.originAirport ?? 'origin not stated'}→${segment.destinationAirport ?? 'destination not stated'}`,
+      );
+      warning.bookings.set(bookingKey, booking);
+      carrierWarnings.set(key, warning);
+    }
+    for (const warning of carrierWarnings.values()) {
+      const { exact } = warning;
+      const bookingDescriptions = [...warning.bookings.values()].map(
+        (booking) =>
+          `${markdownText(booking.name)} (${carrierRoleDescription(booking.role)}) for ${[...booking.flights].join(', ')}`,
+      );
       lines.push(
-        `${exactLeg && comparableRoles ? 'Source conflict for the same dated flight leg' : 'Unresolved carrier difference under the same itinerary reference'}: calendar names ${markdownText(calendarCarrier.name)} (${carrierRoleDescription(calendarCarrier.role)}); booking email names ${markdownText(bookingCarrier.name)} (${carrierRoleDescription(bookingCarrier.role)}) for ${segment.flightNumber} ${segment.originAirport ?? 'origin not stated'}→${segment.destinationAirport ?? 'destination not stated'}.${exactLeg && comparableRoles ? '' : ' Comparable carrier roles and the exact calendar-to-leg match are not both established; these may be different legs or a codeshare.'}`,
+        `${exact ? 'Source conflict for the same dated flight leg' : 'Unresolved carrier difference under the same itinerary reference'}: calendar names ${markdownText(calendarCarrier.name)} (${carrierRoleDescription(calendarCarrier.role)}); booking email names ${bookingDescriptions.join('; ')}.${exact ? '' : ' Comparable carrier roles and the exact calendar-to-leg match are not both established; these may be different legs or a codeshare.'}`,
       );
     }
   }

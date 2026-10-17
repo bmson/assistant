@@ -730,7 +730,7 @@ describe('detectPersonalReadRequest', () => {
     ).toBeUndefined();
   });
 
-  it('routes a bounded next-working-days focus plan to calendar availability only', () => {
+  it('routes a bounded next-working-days focus plan after Friday morning to calendar availability only', () => {
     const request = detectPersonalReadRequest(
       turn(
         'Review my calendar for the next 3 working days. Find 2 90-minute focus blocks during working hours, with 15-minute breaks around meetings. Show a compact table and do not edit anything.',
@@ -751,13 +751,41 @@ describe('detectPersonalReadRequest', () => {
       },
       firstToolName: 'calendar.availability',
       timeWindow: {
-        timeMin: '2026-10-09T07:00:00.000Z',
-        timeMax: '2026-10-14T07:00:00.000Z',
+        timeMin: '2026-10-12T07:00:00.000Z',
+        timeMax: '2026-10-15T07:00:00.000Z',
         label: 'the next 3 working days',
       },
     });
     expect(request?.mailQuery).toBeUndefined();
     expect(request?.firstToolName).not.toBe('gmail.search');
+  });
+
+  it('starts a next-working-days focus plan on the next future weekday after Friday evening', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Look at my calendar for the next three working days. Suggest two 60-minute focus slots between 09:00 and 17:00, leave 15-minute breaks around meetings, and explain any limits in the availability check. Show the plan for review without creating events.',
+      ),
+      { now: new Date('2026-10-17T01:30:00.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    expect(request?.timeWindow).toMatchObject({
+      timeMin: '2026-10-19T07:00:00.000Z',
+      timeMax: '2026-10-22T07:00:00.000Z',
+      label: 'the next 3 working days',
+    });
+  });
+
+  it('skips the weekend when the next-working-days focus request arrives Saturday', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Review my calendar for the next 3 working days. Find 2 90-minute focus blocks during working hours, with 15-minute breaks around meetings. Show a compact table and do not edit anything.',
+      ),
+      { now: new Date('2026-10-17T18:00:00.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    expect(request?.timeWindow).toMatchObject({
+      timeMin: '2026-10-19T07:00:00.000Z',
+      timeMax: '2026-10-22T07:00:00.000Z',
+      label: 'the next 3 working days',
+    });
   });
 
   it('requires mailbox source reads for a requested reservation card while keeping other actions separate', () => {

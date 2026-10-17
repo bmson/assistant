@@ -206,10 +206,10 @@ describe('executor email review composition', () => {
       script: [{ text: 'The review is ready.' }],
       objects: [
         { role: 'reason', value: { threadIds: rankedIds } },
-        { role: 'reason', value: initialAssessment },
-        { role: 'reason', value: reserveAssessment },
-        { role: 'reason', value: failedAssessmentRepair },
-        { role: 'reason', value: replacementAssessment },
+        { role: 'draft', value: initialAssessment },
+        { role: 'draft', value: reserveAssessment },
+        { role: 'draft', value: failedAssessmentRepair },
+        { role: 'draft', value: replacementAssessment },
       ],
       tools: {
         'gmail.search': {
@@ -268,6 +268,8 @@ describe('executor email review composition', () => {
     if (task?.conversationId) conversationIds.push(task.conversationId);
 
     expect(readIds).toEqual(rankedIds.slice(0, 9));
+    expect(result.objectRoles[0]).toBe('reason');
+    expect(result.objectRoles.filter((role) => role === 'draft')).toHaveLength(4);
     expect(result.toolNames).toContain('gmail.read_thread');
     expect(result.toolNames).not.toContain('gmail.send');
     expect(result.finalText).toContain(
@@ -325,10 +327,10 @@ describe('executor email review composition', () => {
       script: [{ text: 'The review is ready.' }],
       objects: [
         { role: 'reason', value: { threadIds: rankedIds } },
-        { role: 'reason', value: initialAssessment },
-        { role: 'reason', value: { items: [] } },
-        { role: 'reason', value: { items: [availabilityDraft] } },
-        { role: 'reason', value: { items: [] } },
+        { role: 'draft', value: initialAssessment },
+        { role: 'draft', value: { items: [] } },
+        { role: 'draft', value: { items: [availabilityDraft] } },
+        { role: 'draft', value: { items: [] } },
       ],
       tools: {
         'gmail.search': {
@@ -610,7 +612,7 @@ describe('executor email review composition', () => {
       script: [{ text: 'The review is ready.' }],
       objects: [
         { role: 'reason', value: { threadIds: rankedIds } },
-        { role: 'reason', value: { items: initialIds.map((id) => answerItem(id, 'draft')) } },
+        { role: 'draft', value: { items: initialIds.map((id) => answerItem(id, 'draft')) } },
       ],
       tools: {
         'gmail.search': {

@@ -5592,6 +5592,192 @@ San Francisco (SFO-San Francisco Intl.)`;
     expect(projection.text).not.toContain('Europe/Berlin');
     expect(compoundTripRoute(read, evidence)).toBeUndefined();
   });
+  function bookedFixture(body?: string) {
+    const read = detectPersonalReadRequest([{ role: 'user', content: focusedPrompt }], {
+      now: new Date('2030-11-08T15:00:00Z'),
+      timeZone: 'America/New_York',
+    });
+    if (!read?.upcomingFlightDiscovery) throw new Error('Expected focused flight intent');
+    const calendarArgs = {
+      timeMin: read.timeWindow?.timeMin,
+      timeMax: read.timeWindow?.timeMax,
+      maxResults: 50,
+    };
+    const query = read.mailQuery;
+    const threadArgs = {
+      threadId: 'flight-thread',
+      startMessageIndex: 0,
+      startMessageOffset: 0,
+      maxMessages: 20,
+      maxChars: 20000,
+    };
+    const threadResult = tripSourceResult('gmail.read_thread', threadArgs) as {
+      messages: Array<Record<string, unknown>>;
+      [key: string]: unknown;
+    };
+    const original = threadResult.messages[0];
+    if (!original || typeof original.text !== 'string') throw new Error('Missing booked table');
+    const text = body ?? original.text;
+    const evidence = [
+      row(
+        'calendar.list_events',
+        calendarArgs,
+        tripSourceResult('calendar.list_events', calendarArgs),
+      ),
+      row(
+        'gmail.search',
+        { query, maxResults: 20 },
+        tripSourceResult('gmail.search', { query, maxResults: 20 }),
+      ),
+      row('gmail.read_thread', threadArgs, {
+        ...threadResult,
+        messages: [{ ...original, text, sourceLength: text.length }],
+      }),
+    ];
+    return { read, evidence };
+  }
+  it('groups only source-validated route groups and shared carrier caveats without inferring direction', () => {
+    const { read, evidence } = bookedFixture();
+    const projection = upcomingFlightReadProjection(read, evidence);
+    const bookingObservations =
+      projection.text.match(/Booking email observation — [A-Z]{3}→[A-Z]{3} itinerary/g) ?? [];
+    const carrierWarnings =
+      projection.text.match(/Unresolved carrier difference under the same itinerary reference/g) ??
+      [];
+
+    expect(bookingObservations).toHaveLength(2);
+    expect(
+      projection.text.match(/Booking email observation — not a verified next-flight match/g),
+    ).toBeNull();
+    expect(projection.text).toContain('KL702 CPH→AMS');
+    expect(projection.text).toContain('KL703 AMS→BOS');
+    expect(projection.text).toContain('direction not explicitly stated');
+    expect(projection.text).toContain('departure time zone not stated');
+    expect(projection.text).toContain('https://mail.google.com/mail/u/0/#all/flight-thread');
+    expect(carrierWarnings).toHaveLength(1);
+    expect(projection.flight).toBeUndefined();
+    expect(projection.blocked).toBe(true);
+    expect(projection.text).not.toContain('Next matched outbound flight');
+    expect(projection.text).not.toContain('Next matched future return flight');
+
+    const { read: disconnectedRead, evidence: originalEvidence } = bookedFixture();
+    const sourceRow = originalEvidence.find((item) => item.toolName === 'gmail.read_thread');
+    if (!sourceRow) throw new Error('Missing source thread');
+    const source = (sourceRow.result as { messages: Array<{ text: string }> }).messages[0]?.text;
+    if (!source) throw new Error('Missing source table');
+    const disconnected = source.replace(
+      'Nov 17, 2030 at 9:50 am\r\nAmsterdam, Netherlands (AMS-Schiphol)',
+      'Nov 17, 2030 at 9:50 am\r\nParis, France (CDG-Charles de Gaulle)',
+    );
+    const { evidence: disconnectedEvidence } = bookedFixture(disconnected);
+    const disconnectedProjection = upcomingFlightReadProjection(
+      disconnectedRead,
+      disconnectedEvidence,
+    );
+    expect(disconnectedProjection.text).not.toContain(
+      'Booking email observation — BOS→CPH itinerary',
+    );
+    expect(disconnectedProjection.text).not.toContain(
+      'Booking email observation — CPH→BOS itinerary',
+    );
+    expect(
+      disconnectedProjection.text.match(
+        /Booking email observation — not a verified next-flight match/g,
+      ),
+    ).toHaveLength(4);
+    expect(disconnectedProjection.flight).toBeUndefined();
+    expect(disconnectedProjection.blocked).toBe(true);
+  });
+  it('keeps matched local-clock confirmation links on grouped source legs', () => {
+    const { read, evidence } = bookedFixture();
+    const query = read.mailQuery;
+    const searchIndex = evidence.findIndex(
+      (item) =>
+        item.toolName === 'gmail.search' && (item.args as { query?: string }).query === query,
+    );
+    if (!query || searchIndex < 0) throw new Error('Missing flight search');
+    evidence[searchIndex] = row(
+      'gmail.search',
+      { query, maxResults: 20 },
+      {
+        results: [
+          { threadId: 'flight-thread', subject: 'Flight booked' },
+          { threadId: 'clock-thread', subject: 'KLM 702 local departure confirmation' },
+        ],
+        complete: true,
+        hasMore: false,
+      },
+    );
+    evidence.push(
+      row(
+        'gmail.read_thread',
+        { threadId: 'clock-thread' },
+        {
+          complete: true,
+          hasMore: false,
+          messages: [
+            {
+              messageId: 'clock-message',
+              subject:
+                'Passenger - KLM 702 - departs 6:00 AM local time - Confirmation code: ZXCV12',
+              text: 'Itinerary number: 123456789012\nKLM 702\nScheduled Departure\nNov 17, 2030, 6:00 am, Copenhagen (CPH-Airport)\nArrives\nNov 17, 2030, 7:25 am, Amsterdam (AMS-Schiphol)',
+            },
+          ],
+        },
+      ),
+    );
+
+    const projection = upcomingFlightReadProjection(read, evidence);
+
+    expect(projection.text).toContain('KL702 CPH→AMS');
+    expect(projection.text).toContain('local (time zone not stated)');
+    expect(projection.text).toContain(
+      '[Local-clock confirmation](https://mail.google.com/mail/u/0/#all/clock-thread)',
+    );
+    expect(projection.text).toContain(
+      '[Booking email](https://mail.google.com/mail/u/0/#all/flight-thread)',
+    );
+    expect(projection.flight).toBeUndefined();
+    expect(projection.blocked).toBe(true);
+  });
+  it('caps grouped source observations at four legs and labels a truncated route group', () => {
+    const { evidence } = bookedFixture();
+    const sourceRow = evidence.find((item) => item.toolName === 'gmail.read_thread');
+    if (!sourceRow) throw new Error('Missing source thread');
+    const original = (
+      sourceRow.result as {
+        messages: Array<{ text: string }>;
+      }
+    ).messages[0]?.text;
+    if (!original) throw new Error('Missing source table');
+    const cities: Record<string, string> = {
+      CPH: 'Copenhagen, Denmark (CPH-Airport)',
+      AMS: 'Amsterdam, Netherlands (AMS-Schiphol)',
+      CDG: 'Paris, France (CDG-Charles de Gaulle)',
+      JFK: 'New York, United States (JFK-Kennedy)',
+      ORD: 'Chicago, United States (ORD-O Hare)',
+      BOS: 'Boston, United States (BOS-Logan)',
+    };
+    const route = ['CPH', 'AMS', 'CDG', 'JFK', 'ORD', 'BOS'];
+    const extraLegs = route.slice(0, -1).map((origin, index) => {
+      const destination = route[index + 1] ?? 'BOS';
+      const hour = 6 + index * 2;
+      const clock = (value: number) => `${value % 12 || 12}:00 ${value < 12 ? 'am' : 'pm'}`;
+      return `KLM KL${720 + index}\nOperated by KLM\nDEPARTURE\nNov 17, 2030 at ${clock(hour)}\n${cities[origin]}\nARRIVAL\nNov 17, 2030 at ${clock(hour + 1)}\n${cities[destination]}`;
+    });
+    const longTable = original.replace(
+      /\[image: Flight\] CPH to BOS #123456789012[\s\S]*$/,
+      `[image: Flight] CPH to BOS #123456789012\nNovember 17, 2030\nBooked\n${extraLegs.join('\n')}`,
+    );
+    const { read: longRead, evidence: longEvidence } = bookedFixture(longTable);
+    const projection = upcomingFlightReadProjection(longRead, longEvidence);
+
+    expect(projection.text.match(/departs 2030-11-17/g)).toHaveLength(2);
+    expect(projection.text).toContain('first 2 of 5 legs shown');
+    expect(projection.text).not.toContain('KL722');
+    expect(projection.flight).toBeUndefined();
+    expect(projection.blocked).toBe(true);
+  });
   const thinQuote = 'LH LH778\nOperated by Lufthansa\nDEPARTURE\nOct 17, 2026 at 6:00 am';
   function thinExtraction(threadId = 'egencia-table', excerpt = thinQuote): CompoundTripExtraction {
     return {
