@@ -47,6 +47,10 @@ export function proxy(request: NextRequest) {
     hasLocalChatPreview(request, runtimeConfig.AUTH_URL, runtimeConfig.WEB_APP_PREVIEW_ENABLED) &&
     chatPage &&
     ['GET', 'HEAD', 'POST'].includes(request.method);
+  // Browser chat is an owner surface. The page and every action/API still
+  // enforce the owner session; this narrow route exception only lets those
+  // existing checks run in production.
+  const ownerChatPage = chatPage && ['GET', 'HEAD', 'POST'].includes(request.method);
   if (runtimeConfig.RESTORE_REHEARSAL) {
     const readOnlyRequest = request.method === 'GET' || request.method === 'HEAD';
     const staticAsset =
@@ -70,8 +74,8 @@ export function proxy(request: NextRequest) {
       { status: 503 },
     );
   }
-  // Browser access is an owner administration console. Native APIs retain
-  // their existing persistence and authentication boundaries below.
+  // Browser chat and administration pages are owner surfaces. Native APIs
+  // retain their existing persistence and authentication boundaries below.
   const adminPage = ['/settings', '/security', '/signin', '/setup'].includes(path);
   const auditApi = /^\/api\/audit\/[0-9a-f-]{36}$/i.test(path);
   if (auditApi)
@@ -93,7 +97,7 @@ export function proxy(request: NextRequest) {
   // persistence mode, including the isolated shipping-image smoke check.
   if (asset && ['GET', 'HEAD'].includes(request.method)) return NextResponse.next();
   if (!path.startsWith('/api/') && !path.startsWith('/_next/') && !asset) {
-    if (path === '/' || (!adminPage && !auditPage && !localChatPage)) {
+    if (path === '/' || (!adminPage && !auditPage && !localChatPage && !ownerChatPage)) {
       if (request.method === 'GET' || request.method === 'HEAD') {
         return NextResponse.redirect(new URL('/settings', request.url));
       }

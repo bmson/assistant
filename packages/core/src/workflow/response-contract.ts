@@ -1595,6 +1595,19 @@ function overlapClock(value: number, timeZone?: string): string {
   }
 }
 
+/** Compact agendas use one readable 12-hour clock style for rows and overlaps. */
+function compactClock(value: number, timeZone?: string): string {
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: timeZone ?? 'UTC',
+      hour: 'numeric',
+      minute: '2-digit',
+    }).format(new Date(value));
+  } catch {
+    return new Date(value).toISOString();
+  }
+}
+
 function calendarAllDayWindowLabel(
   event: Record<string, unknown>,
   request: PersonalReadRequest,
@@ -1645,7 +1658,7 @@ function compactLocalRange(start: number, end: number, timeZone: string): string
   const endIso = new Date(end).toISOString();
   const startDate = shortDate(startIso, timeZone);
   const endDate = shortDate(endIso, timeZone);
-  return `${startDate} ${overlapClock(start, timeZone)}–${endDate === startDate ? '' : `${endDate} `}${overlapClock(end, timeZone)}`;
+  return `${startDate} ${compactClock(start, timeZone)}–${endDate === startDate ? '' : `${endDate} `}${compactClock(end, timeZone)}`;
 }
 
 /** Preserve source civil dates and the actual local-day intersection compactly. */
@@ -1764,10 +1777,10 @@ function calendarOverlapSummary(
     if (
       event.allDay === true ||
       (/^\d{4}-\d{2}-\d{2}$/.test(rawStart) && /^\d{4}-\d{2}-\d{2}$/.test(rawEnd)) ||
-      !interval ||
-      explicitStayContext
+      !interval
     )
       return [];
+    if (explicitStayContext && !request.compactCalendarBriefing) return [];
     const projected: BriefingCalendarEvent = {
       summary: stringField(event, 'summary') || '(untitled event)',
       start: stringField(event, 'start'),
@@ -1792,7 +1805,7 @@ function calendarOverlapSummary(
         ? { description: stringField(event, 'description') }
         : {}),
     };
-    return [{ event, projected, interval }];
+    return [{ event, projected, interval, explicitStayContext }];
   });
   const requestedStart = request.timeWindow ? Date.parse(request.timeWindow.timeMin) : undefined;
   const requestedEnd = request.timeWindow ? Date.parse(request.timeWindow.timeMax) : undefined;
@@ -1805,6 +1818,7 @@ function calendarOverlapSummary(
       ? { start: requestedStart, end: requestedEnd }
       : undefined;
   const notes: string[] = [];
+  const travelContextNotes: string[] = [];
   const namedPairs: string[] = [];
   for (let index = 0; index < candidates.length; index += 1) {
     const left = candidates[index];
@@ -1813,6 +1827,31 @@ function calendarOverlapSummary(
       const start = Math.max(left.interval.start, right.interval.start, window?.start ?? -Infinity);
       const end = Math.min(left.interval.end, right.interval.end, window?.end ?? Infinity);
       if (start >= end) continue;
+      const contextOverlap = left.explicitStayContext || right.explicitStayContext;
+      // A verified lodging stay can overlap a travel block in the calendar,
+      // but that is useful context rather than evidence of physical attendance
+      // or a scheduling conflict. Keep the event pair visible with that label.
+      if (contextOverlap) {
+        const stay = left.explicitStayContext ? left : right;
+        const other = left.explicitStayContext ? right : left;
+        const otherSource = [
+          stringField(other.event, 'summary'),
+          stringField(other.event, 'description'),
+          stringField(other.event, 'location'),
+        ]
+          .filter(Boolean)
+          .join(' ');
+        if (!FLIGHT_SOURCE.test(otherSource)) continue;
+        const sameDay =
+          eventLocalDay(new Date(start).toISOString(), zone) ===
+          eventLocalDay(new Date(end).toISOString(), zone);
+        const overlapLabel = sameDay
+          ? `${shortDate(new Date(start).toISOString(), zone)} ${compactClock(start, zone)}–${compactClock(end, zone)}`
+          : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
+        const note = `- Travel context overlap **${overlapLabel}**: ${stay.projected.summary} + ${other.projected.summary} (busy stay block).`;
+        travelContextNotes.push(note);
+        continue;
+      }
       const relationship = calendarRelationship(left.projected, right.projected);
       // Matching arrival/start records and exact duplicate candidates are
       // retained in the agenda, but do not imply a scheduling conflict.
@@ -1824,11 +1863,11 @@ function calendarOverlapSummary(
         eventLocalDay(new Date(start).toISOString(), zone) ===
         eventLocalDay(new Date(end).toISOString(), zone);
       const overlapLabel = sameDay
-        ? `${shortDate(new Date(start).toISOString(), zone)} ${overlapClock(start, zone)}–${overlapClock(end, zone)}`
+        ? `${shortDate(new Date(start).toISOString(), zone)} ${request.compactCalendarBriefing ? compactClock(start, zone) : overlapClock(start, zone)}–${request.compactCalendarBriefing ? compactClock(end, zone) : overlapClock(end, zone)}`
         : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
       notes.push(
         request.compactCalendarBriefing
-          ? `- ${bothAccepted ? 'Conflict' : 'Possible overlap'} ${overlapLabel}: ${left.projected.summary} + ${right.projected.summary}.`
+          ? `- ${bothAccepted ? 'Conflict' : 'Possible overlap'} **${overlapLabel}**: ${left.projected.summary} + ${right.projected.summary}.`
           : `- ${bothAccepted ? 'Scheduling conflict' : 'Possible overlap'}: **${left.projected.summary}** and **${right.projected.summary}**, ${overlapLabel}.${request.includeCalendarBriefing ? '' : ` ${calendarRelationshipNote(relationship, bothAccepted ? 'confirmed' : 'unresolved')}`}`,
       );
       namedPairs.push(
@@ -1838,7 +1877,7 @@ function calendarOverlapSummary(
       );
     }
   }
-  if (notes.length === 0)
+  if (notes.length === 0 && travelContextNotes.length === 0)
     return [
       complete
         ? 'No unresolved overlaps between timed calendar entries were found in the checked results.'
@@ -1855,13 +1894,14 @@ function calendarOverlapSummary(
       `- Additional ${request.compactCalendarBriefing ? 'overlaps' : 'overlapping pairs'}: ${shownAdditionalPairs.join('; ')}${omitted > 0 ? `; ${omitted.toLocaleString('en-US')} more not listed` : ''}.`,
     );
   }
-  if (request.includeCalendarBriefing)
-    shown.push(
+  const result = [...shown, ...travelContextNotes.slice(0, 3)];
+  if (request.includeCalendarBriefing && result.length > 0)
+    result.push(
       request.compactCalendarBriefing
         ? 'Calendar overlap does not confirm attendance.'
         : 'Overlapping entries do not establish that you must attend both.',
     );
-  return shown;
+  return result;
 }
 
 /** Does the searched window cover more than one local day? The end is exclusive. */
@@ -3919,18 +3959,23 @@ export function verifiedReadResponse(
                 eventEnd > windowStart;
               if (ongoing) {
                 compactOngoingItems.push(
-                  `${linkedTitle}${metadataLabel} — ${compactEventSpan(rawStart, rawEnd, request.timeZone ?? 'UTC')}`,
+                  `- ${linkedTitle}${metadataLabel} — **${compactEventSpan(rawStart, rawEnd, request.timeZone ?? 'UTC').replace('–', ' through ')}**`,
                 );
               } else {
                 const when = spansDates
                   ? compactEventSpan(rawStart, rawEnd, request.timeZone ?? 'UTC')
-                  : [datePrefix, clockStart ? `${clockStart}${clockEnd ? `–${clockEnd}` : ''}` : '']
+                  : [
+                      datePrefix,
+                      clockStart
+                        ? `${compactClock(Date.parse(rawStart), request.timeZone ?? 'UTC')}${clockEnd ? `–${compactClock(Date.parse(rawEnd), request.timeZone ?? 'UTC')}` : ''}`
+                        : '',
+                    ]
                       .filter(Boolean)
                       .join(' ');
                 const place = compactLocationForAgenda(location, compactLocationRequested(request));
                 const compactPlace = place ? ` — ${compactEventTitleLink(place, '')}` : '';
                 compactTimedItems.push(
-                  `- ${when || '(time unavailable)'} — ${linkedTitle}${metadataLabel}${compactPlace}`,
+                  `- **${when || '(time unavailable)'}** — ${linkedTitle}${metadataLabel}${compactPlace}`,
                 );
               }
             }
@@ -3949,7 +3994,7 @@ export function verifiedReadResponse(
           );
         }
         if (compactOngoingItems.length > 0)
-          lines.push(`- Ongoing: ${compactOngoingItems.join('; ')}.`);
+          lines.push('Ongoing context (full interval):', ...compactOngoingItems);
         if (compactTimedItems.length > 0) lines.push('Timed appointments:', ...compactTimedItems);
         if (request.includeCalendarBriefing) {
           const busyStays = agendaEvents.filter(

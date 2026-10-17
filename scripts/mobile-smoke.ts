@@ -1,7 +1,7 @@
 import { chromium } from 'playwright';
 
-// The browser is the mobile app's administration console. Run this against
-// the loopback-only, owner-authenticated preview prepared by CI.
+// Run this against an owner-authenticated browser session. The smoke opens chat
+// and history but never submits a message or calls a model/provider.
 const baseUrl = (process.env.SMOKE_BASE_URL ?? 'http://localhost:3000').replace(/\/$/, '');
 const browserPath = process.env.SMOKE_BROWSER_PATH;
 const browser = await chromium.launch({
@@ -25,9 +25,9 @@ try {
     await page.waitForURL(`${baseUrl}/settings`);
     await page.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
     await page.getByRole('heading', { name: 'Mobile app connection', exact: true }).waitFor();
-    for (const name of ['Settings', 'Audit trail']) {
+    for (const name of ['Chat', 'Settings', 'Audit trail']) {
       const link = page
-        .getByRole('navigation', { name: 'Administration' })
+        .getByRole('navigation', { name: 'Main navigation' })
         .getByRole('link', { name, exact: true });
       const bounds = await link.boundingBox();
       if (!bounds || bounds.height < 44) throw new Error(`${name} needs a 44px touch target`);
@@ -36,7 +36,7 @@ try {
     if (viewportMeta?.includes('user-scalable=no'))
       throw new Error('Browser zoom must remain available');
     await page
-      .getByRole('navigation', { name: 'Administration' })
+      .getByRole('navigation', { name: 'Main navigation' })
       .getByRole('link', { name: 'Audit trail' })
       .click();
     await page.getByRole('heading', { name: 'Audit trail', exact: true }).waitFor();
@@ -56,10 +56,24 @@ try {
       () => document.documentElement.scrollWidth > window.innerWidth,
     );
     if (overflowing) throw new Error(`Audit trail overflows at ${viewport.width}px`);
-    await page.goto(`${baseUrl}/chat`, { waitUntil: 'domcontentloaded' });
-    await page.waitForURL(`${baseUrl}/settings`);
+
+    await page
+      .getByRole('navigation', { name: 'Main navigation' })
+      .getByRole('link', { name: 'Chat', exact: true })
+      .click();
+    await page.waitForURL((url) => url.origin === baseUrl && url.pathname === '/chat');
+    await page.getByRole('log', { name: 'Conversation' }).waitFor();
+    await page.getByRole('combobox', { name: 'Message' }).waitFor();
+
+    await page.goto(`${baseUrl}/chat/all`, { waitUntil: 'domcontentloaded' });
+    await page.waitForURL((url) => url.origin === baseUrl && url.pathname === '/chat/all');
+    await page.getByRole('heading', { name: 'All chats', exact: true }).waitFor();
+    const chatOverflowing = await page.evaluate(
+      () => document.documentElement.scrollWidth > window.innerWidth,
+    );
+    if (chatOverflowing) throw new Error(`Chat history overflows at ${viewport.width}px`);
   }
-  for (const path of ['/chat/all', '/people', '/profile', '/tasks', '/documents']) {
+  for (const path of ['/people', '/profile', '/tasks', '/documents']) {
     const result = await context.request.get(`${baseUrl}${path}`, { maxRedirects: 0 });
     const location = result.headers().location;
     const destination = location ? new URL(location, baseUrl).href : '';
@@ -72,7 +86,7 @@ try {
   if (!health.ok()) throw new Error('Backend health check failed');
   if (failures.length) throw new Error(failures.join('\n'));
   console.log(
-    'Settings, mobile access, audit filters, retired routes, and browser zoom passed at three viewport sizes.',
+    'Owner chat, chat history, Settings, mobile access, audit filters, retired routes, and browser zoom passed at three viewport sizes.',
   );
 } finally {
   await browser.close();

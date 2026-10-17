@@ -1103,14 +1103,19 @@ function calendarPlanWindow(
       )
     );
   }
-  const start = civilDateAt(now, timeZone);
-  let cursor = start;
+  // “Next N working days” follows the future-only convention of the general
+  // “next N weekdays” resolver: begin tomorrow, then skip weekend dates.
+  let cursor = addCivilDays(civilDateAt(now, timeZone), 1);
+  let firstWorkingDay = cursor;
   let weekdays = 0;
   while (weekdays < plan.workingDays) {
-    if (civilWeekday(cursor) !== 0 && civilWeekday(cursor) !== 6) weekdays += 1;
+    if (civilWeekday(cursor) !== 0 && civilWeekday(cursor) !== 6) {
+      if (weekdays === 0) firstWorkingDay = cursor;
+      weekdays += 1;
+    }
     if (weekdays < plan.workingDays) cursor = addCivilDays(cursor, 1);
   }
-  return timeWindow(start, addCivilDays(cursor, 1), plan.windowLabel, timeZone);
+  return timeWindow(firstWorkingDay, addCivilDays(cursor, 1), plan.windowLabel, timeZone);
 }
 
 function hasExplicitTemporalPhrase(text: string): boolean {

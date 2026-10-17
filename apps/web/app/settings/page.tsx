@@ -21,10 +21,7 @@ export default async function SettingsPage() {
   const token = authMode === 'passkey' ? '' : await getMobileAccessToken();
   return (
     <PageShell size="reading" className="grid gap-8">
-      <PageHeader
-        title="Settings"
-        intro="Connect the mobile app, then manage your assistant from your phone."
-      />
+      <PageHeader title="Settings" intro="Connect your iPhone and manage your assistant account." />
       {authMode === 'passkey' ? (
         <>
           <SecurityClient serverUrl={serverUrl} mode="pairing" />

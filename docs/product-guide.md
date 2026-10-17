@@ -69,13 +69,13 @@ The app targets iOS 26. It uses native text interaction, supports accessibility 
 
 ### Web
 
-The browser is currently an **owner administration console**. `/` lands on `/settings`; the proxy exposes Settings and Audit, with Security, Setup, and Sign in in passkey mode. The 27 retained product/legacy page implementations (including `/chat`, Activity, Goals and Memory) redirect browser GET/HEAD requests to Settings and reject their page mutations. Everyday conversation and work are available through the native iPhone client and authenticated mobile APIs. The page descriptions below document the native experience and retained component behavior; they do not imply those browser routes are reachable. See the current [web audit](audits/web-experience-2026-10-02.md).
+The current source supports the signed-in owner's continuing chat and an administration console in the browser. `/chat` opens the primary conversation; `/chat/all` lists conversations, and `/chat/[id]` opens an individual conversation. The main navigation also exposes Settings and Audit, with Security, Setup, and Sign in in passkey mode. Other retained product/legacy pages still redirect to Settings or reject page mutations. Chat pages and their actions require the configured owner session. Everyday conversation and work are also available through the native iPhone client and authenticated mobile APIs. See the dated [web audit](audits/web-experience-2026-10-02.md) for deployment and browser-acceptance status.
 
 Sources: [iOS shell](../apps/ios/Assistant/Views/ChatView.swift), [iOS root](../apps/ios/Assistant/Views/RootView.swift), [web entry](../apps/web/app/page.tsx), [route policy](../apps/web/proxy.ts), [web Settings](../apps/web/app/settings/page.tsx).
 
 ## Chat
 
-**Retained web implementation (currently redirected):** `/chat`, `/chat/[id]`. **iOS:** Chat.
+**Browser and iOS:** Chat.
 
 The main page supports a continuing exchange with a composer at the bottom, streamed answers, work status, and inline decisions. The primary conversation is selected through a persistent primary flag; opening `/chat` does not create a fresh chat each time. Explicit side chats remain available through Chats.
 
@@ -153,7 +153,7 @@ Sources: [Approvals page](../apps/web/app/approvals/page.tsx), [approval card](.
 
 ## Chats
 
-**Retained web implementation (currently redirected):** `/chat/all`. **iOS:** Chats.
+**Web:** `/chat` opens the primary conversation; `/chat/all` lists current and archived conversations; `/chat/[id]` opens a conversation. These browser pages and their actions require the configured owner session. **iOS:** Chats.
 
 Chats lists the primary conversation and separate conversations, including goal work and Notifications. The owner can open a chat, create a side chat, and manage archived conversations. The primary conversation cannot be archived through the ordinary archive action.
 
@@ -478,14 +478,14 @@ Sources: [setup](../apps/web/app/setup/page.tsx), [sign in](../apps/web/app/sign
 
 ## Complete web page inventory
 
-This register includes all 34 `page.tsx` files under `apps/web/app` at review time. Bracketed paths are dynamic route patterns. **Only the six console routes marked reachable are currently exposed (three are passkey-only); 27 are retained/dormant and the landing route redirects.** API routes, actions, loading states, and shared components are not independent pages.
+This register includes all 34 `page.tsx` files under `apps/web/app` at review time. Bracketed paths are dynamic route patterns. The current source exposes six owner console routes (three are passkey-only) and three owner-authenticated chat routes; 24 retained pages remain dormant, and the landing route redirects. API routes, actions, loading states, and shared components are not independent pages.
 
 | Route | Responsibility | Documentation above | Current browser access |
 | --- | --- | --- | --- |
 | `/` | Redirect to Settings | Application navigation | Redirect to Settings |
-| `/chat` | Stable primary chat | Chat | Dormant; redirect to Settings |
-| `/chat/[id]` | Specific conversation | Chat | Dormant; redirect to Settings |
-| `/chat/all` | Current/archived chat directory | Chats | Dormant; redirect to Settings |
+| `/chat` | Stable primary chat | Chat | Reachable; owner authenticated |
+| `/chat/[id]` | Specific conversation | Chat | Reachable; owner authenticated |
+| `/chat/all` | Current/archived chat directory | Chats | Reachable; owner authenticated |
 | `/tasks` | Activity list | Activity | Dormant; redirect to Settings |
 | `/tasks/[id]` | Work details and controls | Activity details | Dormant; redirect to Settings |
 | `/goals` | Goal list and editors | Goals | Dormant; redirect to Settings |

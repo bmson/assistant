@@ -4,16 +4,17 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { focusRing } from '@/lib/ui';
 
-/** Browser navigation follows the owner console's actual reachable surfaces. */
+/** Browser navigation follows the owner's reachable chat and console surfaces. */
 export function AdminNavigation({ passkey }: { passkey: boolean }) {
   const pathname = usePathname();
   const links = [
+    { href: '/chat', label: 'Chat' },
     { href: '/settings', label: 'Settings' },
     ...(passkey ? [{ href: '/security', label: 'Security' }] : []),
     { href: '/audit', label: 'Audit trail' },
   ];
   return (
-    <nav aria-label="Administration" className="flex min-w-0 flex-wrap items-center gap-1">
+    <nav aria-label="Main navigation" className="flex min-w-0 flex-wrap items-center gap-1">
       {links.map(({ href, label }) => {
         const active = pathname === href || pathname.startsWith(`${href}/`);
         return (

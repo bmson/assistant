@@ -1039,7 +1039,7 @@ describe('flight clarification through the actual executor step loop', () => {
       'gmail.search',
     ]);
     expect(state.pendingFinal?.text).toContain(
-      'Booking-email search or reads were incomplete, so a matching booking may be missing.',
+      'Booking-email search pages were incomplete, so a matching booking may be missing.',
     );
     expect(state.pendingFinal?.text).toContain(
       'Next future calendar flight candidate: Flight to Lisbon; calendar date 2026-11-12',
@@ -1097,7 +1097,7 @@ describe('flight clarification through the actual executor step loop', () => {
       'Calendar search coverage is incomplete, so an earlier flight may be missing.',
     );
     expect(state.pendingFinal?.text).toContain(
-      'Booking-email search or reads were incomplete, so a matching booking may be missing.',
+      'Some matching email threads remain unread or incomplete; search pages completed, so they were not counted as read booking evidence.',
     );
     expect(state.pendingFinal?.text).not.toMatch(/hotel|route details|ground transport/i);
   });

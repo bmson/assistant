@@ -2548,74 +2548,76 @@ describe('exact-ID event-list recovery of missing free/busy', () => {
     expect(result.text).toContain('usable free/busy intervals were unavailable');
   });
 
-  it('never recovers from labels alone, an altered window, partial roster/pages or malformed source semantics', () => {
-    const mutations: Array<(rows: ReturnType<typeof recoveryEvidence>) => void> = [
-      (rows) => {
-        delete (rows[0].result as Record<string, unknown>).calendarCoverage;
-      },
-      (rows) => {
-        (rows[0].result as Record<string, unknown>).coverageWindow = {
-          timeMin: '2026-10-11T07:00:00.000Z',
-          timeMax,
-        };
-      },
-      (rows) => {
-        (rows[0].result as Record<string, unknown>).calendarRosterComplete = false;
-      },
-      (rows) => {
-        (rows[0].result as Record<string, unknown>).calendarCoverage = [
-          { calendarId: 'shared-id', name: 'Shared', status: 'malformed' },
-        ];
-      },
-      (rows) => {
-        (rows[1].result as Record<string, unknown>).complete = false;
-      },
-      (rows) => {
-        (rows[1].result as Record<string, unknown>).nextPageToken = 'remaining';
-      },
-      (rows) => {
-        (rows[1].result as Record<string, unknown>).calendarsSearchedIds = ['another-id'];
-      },
-      (rows) => {
-        (rows[1].result as Record<string, unknown>).calendarsResolved = [
-          { id: 'another-id', name: 'Shared' },
-        ];
-      },
-      (rows) => {
-        (rows[1].result as Record<string, unknown>).events = [
-          {
-            calendarId: 'shared-id',
-            start: '2026-10-13',
-            end: '2026-10-14',
-            allDay: true,
-            blocksTime: true,
-          },
-        ];
-      },
-      (rows) => {
-        (rows[1].result as Record<string, unknown>).events = [
-          {
-            calendarId: 'shared-id',
-            start: '2026-10-13T09:00:00',
-            end: '2026-10-13T10:00:00',
-            blocksTime: true,
-          },
-        ];
-      },
-      (rows) => {
-        (rows[1].result as Record<string, unknown>).events = [
-          { calendarId: 'shared-id', start: '2026-10-13T09:00:00Z', end: '2026-10-13T10:00:00Z' },
-        ];
-      },
-      (rows) => {
-        (rows[0].result as Record<string, unknown>).busy = [{ start: 'broken', end: 'broken' }];
-      },
-    ];
-    for (const mutate of mutations) {
+  const mutations: Array<(rows: ReturnType<typeof recoveryEvidence>) => void> = [
+    (rows) => {
+      delete (rows[0].result as Record<string, unknown>).calendarCoverage;
+    },
+    (rows) => {
+      (rows[0].result as Record<string, unknown>).coverageWindow = {
+        timeMin: '2026-10-11T07:00:00.000Z',
+        timeMax,
+      };
+    },
+    (rows) => {
+      (rows[0].result as Record<string, unknown>).calendarRosterComplete = false;
+    },
+    (rows) => {
+      (rows[0].result as Record<string, unknown>).calendarCoverage = [
+        { calendarId: 'shared-id', name: 'Shared', status: 'malformed' },
+      ];
+    },
+    (rows) => {
+      (rows[1].result as Record<string, unknown>).complete = false;
+    },
+    (rows) => {
+      (rows[1].result as Record<string, unknown>).nextPageToken = 'remaining';
+    },
+    (rows) => {
+      (rows[1].result as Record<string, unknown>).calendarsSearchedIds = ['another-id'];
+    },
+    (rows) => {
+      (rows[1].result as Record<string, unknown>).calendarsResolved = [
+        { id: 'another-id', name: 'Shared' },
+      ];
+    },
+    (rows) => {
+      (rows[1].result as Record<string, unknown>).events = [
+        {
+          calendarId: 'shared-id',
+          start: '2026-10-13',
+          end: '2026-10-14',
+          allDay: true,
+          blocksTime: true,
+        },
+      ];
+    },
+    (rows) => {
+      (rows[1].result as Record<string, unknown>).events = [
+        {
+          calendarId: 'shared-id',
+          start: '2026-10-13T09:00:00',
+          end: '2026-10-13T10:00:00',
+          blocksTime: true,
+        },
+      ];
+    },
+    (rows) => {
+      (rows[1].result as Record<string, unknown>).events = [
+        { calendarId: 'shared-id', start: '2026-10-13T09:00:00Z', end: '2026-10-13T10:00:00Z' },
+      ];
+    },
+    (rows) => {
+      (rows[0].result as Record<string, unknown>).busy = [{ start: 'broken', end: 'broken' }];
+    },
+  ];
+  it.each(mutations.map((mutate, index) => ({ mutate, index })))(
+    'never recovers from incomplete or malformed source semantics (case $index)',
+    ({ mutate }) => {
       const rows = recoveryEvidence();
       mutate(rows);
-      expect(project(rows).coverageComplete).toBe(false);
-      expect(project(rows).text).not.toContain('event-list fallback');
-    }
-  });
+      const result = project(rows);
+      expect(result.coverageComplete).toBe(false);
+      expect(result.text).not.toContain('event-list fallback');
+    },
+  );
 });

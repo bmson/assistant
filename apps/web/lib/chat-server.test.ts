@@ -234,9 +234,23 @@ describe.skipIf(!localEmulator)('Firestore web chat routes with PostgreSQL offli
     expect(proxy(request('/api/shell/status')).status).toBe(200);
     expect(proxy(request('/cards')).status).toBe(307);
     expect(proxy(request('/cards', 'POST')).status).toBe(410);
-    expect(proxy(request('/chat')).status).toBe(307);
-    expect(proxy(request(`/chat/${randomUUID()}`)).status).toBe(307);
-    expect(proxy(request('/chat/all')).status).toBe(307);
+    for (const path of ['/chat', `/chat/${randomUUID()}`, '/chat/all']) {
+      for (const method of ['GET', 'HEAD', 'POST']) {
+        const response = proxy(request(path, method));
+        expect(response.status).toBe(200);
+        expect(response.headers.get('x-middleware-next')).toBe('1');
+      }
+    }
+    for (const path of [
+      '/chat/not-a-conversation-id',
+      `/chat/${randomUUID()}/extra`,
+      '/chat/all/extra',
+    ]) {
+      const response = proxy(request(path));
+      expect(response.status).toBe(307);
+      expect(response.headers.get('location')).toBe('http://localhost/settings');
+      expect(proxy(request(path, 'POST')).status).toBe(410);
+    }
     expect(proxy(request('/tasks')).status).toBe(307);
     expect(proxy(request('/api/mobile/v1/chats', 'POST')).status).toBe(200);
     expect(proxy(request('/api/chat', 'POST')).status).toBe(200);

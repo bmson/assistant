@@ -167,6 +167,57 @@ function nativeDocPage(
 }
 
 describe('source-grounded public page summary recovery', () => {
+  it('uses the guarded fallback when a correction fixes claims but still misses the requested citation', async () => {
+    const prompts: string[] = [];
+    const correctedButUnlinked = [
+      '- **Rail:** R10 runs hourly (from 6 a.m. to 11 p.m.); R20 runs every 30 minutes.',
+      '- **Urban rail:** M1 and M2 each run every 15 minutes.',
+      '- **Buses:** B10 runs every 5 minutes; B20 runs hourly.',
+    ].join('\n');
+    const router = {
+      object: async (_role: string, input: { prompt: string }) => {
+        prompts.push(input.prompt);
+        return prompts.length === 1
+          ? {
+              ok: true,
+              finishReason: 'stop',
+              object: {
+                decision: 'revise',
+                revisedText: correctedButUnlinked,
+                reasons: ['ungrounded_fact'],
+              },
+            }
+          : {
+              ok: true,
+              finishReason: 'stop',
+              object: {
+                decision: 'revise',
+                revisedText: correctedButUnlinked,
+                reasons: ['clarity_or_format'],
+              },
+            };
+      },
+    };
+    const result = await verifyFinalOutput(router as never, {
+      taskId: 'missing-citation-recovery',
+      request: recoveryRequest,
+      draft: conflatedSummary,
+      evidence: recoveryEvidence,
+      critical: true,
+    });
+
+    expect(prompts).toHaveLength(2);
+    expect(result).toMatchObject({ attempted: true, revised: true, unavailable: false });
+    expect(result.incomplete).not.toBe(true);
+    expect(result.text.split('\n')).toHaveLength(3);
+    expect(result.text).toContain('R10: hourly (from 6 a.m. to 11 p.m.); R20: every 30 minutes');
+    expect(result.text).toContain('M1: every 15 minutes; M2: every 15 minutes');
+    expect(result.text).toContain('B10: every 5 minutes; B20: hourly');
+    expect(result.text).toContain(`[Source](${recoveryUrl})`);
+    expect(shortBulletFindings(recoveryRequest, result.text)).toEqual([]);
+    expect(requestedPublicPageReceiptFindings(recoveryRequest, recoveryEvidence)).toEqual([]);
+    expect(publicWebClaimFindings(result.text, recoveryEvidence)).toEqual([]);
+  });
   it('rebuilds three short transport bullets from category-bound service frequencies after a bad combined draft', async () => {
     expect(publicWebClaimFindings(conflatedSummary, recoveryEvidence).length).toBeGreaterThan(0);
     const result = await runTransportFallback();
