@@ -4031,7 +4031,9 @@ export function compoundTripReadProjection(
   if (!calendarComplete)
     gaps.push('Calendar coverage is incomplete, so I cannot establish which flight is next.');
   if (!gmailSearchComplete)
-    gaps.push('Booking-email search pages are incomplete, so additional matching threads may be missing.');
+    gaps.push(
+      'Booking-email search pages are incomplete, so additional matching threads may be missing.',
+    );
   if (!allThreadsRead)
     gaps.push(
       `${unreadThreadCount} matching email thread${unreadThreadCount === 1 ? ' remains' : 's remain'} unread or incomplete${gmailSearchComplete ? '; the search pages completed' : '; search-page coverage is also incomplete'}. Unread snippets were not treated as read booking evidence.`,

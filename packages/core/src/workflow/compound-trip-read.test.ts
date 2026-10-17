@@ -5986,7 +5986,9 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
         }),
       ]),
     );
-    expect(final.text).toContain('This is a booking candidate; the next departure is not fully verified.');
+    expect(final.text).toContain(
+      'This is a booking candidate; the next departure is not fully verified.',
+    );
     expect(final.text).toContain('direction not explicitly stated');
     expect(final.text).toContain('KL700 BOS→AMS');
     expect(final.text).toContain('KL703 AMS→BOS');
