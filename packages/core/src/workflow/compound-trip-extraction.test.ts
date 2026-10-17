@@ -288,7 +288,8 @@ describe('compound trip source extraction', () => {
     expect(projection.gmailSearchComplete).toBe(false);
     expect(projection.threadsComplete).toBe(false);
     expect(projection.blocked).toBe(true);
-    expect(projection.text).toContain('Booking-email search or thread coverage is incomplete');
+    expect(projection.text).toContain('Booking-email search pages are incomplete');
+    expect(projection.text).toContain('4 matching email threads remain unread or incomplete');
     expect(projection.text).not.toContain('fully verified complete trip');
     expect(projection.text).toContain(
       'Booking email observation — not a verified next-flight match',
