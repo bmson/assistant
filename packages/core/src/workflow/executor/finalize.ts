@@ -114,7 +114,7 @@ function savedSkillCalendarFallbackStep(
   evidence: ActionEvidence[],
 ): string | undefined {
   const projection = verifiedReadResponse(request, evidence);
-  if (/^\s*-\s*(?:Possible overlap|Scheduling conflict):/m.test(projection))
+  if (/^\s*-\s*(?:Possible overlap|Scheduling conflict|Conflict)(?::|\s)/m.test(projection))
     return 'Check whether you need to attend both.';
 
   const completeProjection = verifiedReadResponse(
@@ -878,7 +878,45 @@ export async function stageModelFinalResponse(
       .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
       .join('\n'),
   ].join('\n');
-  const classifiedRead = readContext ? readContext.readRequest : detectPersonalReadRequest(window);
+  const detectedRead = () =>
+    detectPersonalReadRequest(window, {
+      now: task.createdAt,
+      ...(state.requestTimeZone ? { timeZone: state.requestTimeZone } : {}),
+    });
+  let classifiedRead = readContext ? readContext.readRequest : detectedRead();
+  if (
+    readContext &&
+    !readContext.readRequest &&
+    task.trust === 'owner' &&
+    !isForwardedIngest(task)
+  ) {
+    const intent = latestOwnerIntent(window, {
+      trust: 'owner',
+      trigger: task.trigger,
+      clarificationContinuation: state.clarificationContinuation,
+    });
+    const requestedSkill = requestedSavedSkillName(
+      intent.ownerAuthoredText,
+      latestUserText(window),
+    );
+    const currentCalendarRead = evidence.some(
+      (row) =>
+        row.fromCurrentTask === true &&
+        row.status === 'succeeded' &&
+        /^calendar\.(?:list_events|search_events)$/.test(row.toolName),
+    );
+    // Some skill-driven turns have an authorized calendar read in their tool
+    // ledger but carry no classified read request into finalization. Recover
+    // the request only for an explicit saved-skill request, with private-read
+    // scope and successful current-task calendar evidence. The ordinary read
+    // classifier still determines the exact range, timezone and briefing
+    // shape; the model cannot supply or broaden those details here.
+    if (requestedSkill && intent.authorizedScopes.includes('private_read') && currentCalendarRead) {
+      const recovered = detectedRead();
+      if (recovered?.kind === 'calendar' && recovered.includeCalendarBriefing)
+        classifiedRead = recovered;
+    }
+  }
   const explicitSourceSelection = classifiedRead?.sourceReads
     ? await selectExplicitSourceAnswer({
         router: deps.router,

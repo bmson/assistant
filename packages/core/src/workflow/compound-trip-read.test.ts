@@ -5,6 +5,7 @@ import {
   compoundTripFetchTargets,
   compoundTripNextWebSearchQuery,
   compoundTripReadProjection,
+  compoundTripRecoveryFetchTargets,
   compoundTripRoute,
   compoundTripThreadIdsToRead,
   compoundTripThreadReadInputs,
@@ -6253,6 +6254,7 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
       { mode: 'public transport', url: 'https://official.example/directions' },
       { mode: 'taxi', url: 'https://official.example/directions' },
     ]);
+    expect(compoundTripRecoveryFetchTargets(read, rows)).toEqual([]);
     const fetched = row(
       'web.fetch',
       { url: 'https://official.example/directions' },
@@ -6281,6 +6283,7 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     );
     expect(nextRequiredReadTool(read, rows)).toBeUndefined();
     expect(rows.filter((item) => item.toolName === 'web.search')).toHaveLength(2);
+    expect(compoundTripRecoveryFetchTargets(read, rows)).toEqual([]);
     // A discovered but unjoined, stale, partial or failed page cannot supply the comparison.
     for (const invalid of [
       'wrong-query',
@@ -6382,6 +6385,7 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
         },
       ),
     );
+    expect(compoundTripRecoveryFetchTargets(read, rows)).toEqual([]);
     rows.push({
       toolName: 'web.fetch',
       status: 'failed',
@@ -6390,6 +6394,7 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
       result: null,
       error: 'Challenge page',
     });
+    expect(compoundTripRecoveryFetchTargets(read, rows)).toEqual([]);
 
     // Bring this same-state scenario to the actual reservation boundary. The
     // failed source calls still count toward the one-search/one-fetch budget.
@@ -6447,6 +6452,26 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
           ],
         },
       ),
+    );
+
+    expect(compoundTripRecoveryFetchTargets(read, rows)).toEqual([
+      { mode: 'taxi', url: 'https://fresh.example/route' },
+    ]);
+    const blockedRecoveryRows = structuredClone(rows);
+    blockedRecoveryRows.push({
+      toolName: 'web.fetch',
+      status: 'succeeded',
+      fromCurrentTask: true,
+      args: { url: 'https://fresh.example/route' },
+      result: {
+        status: 403,
+        truncated: false,
+        finalUrl: 'https://fresh.example/route',
+        text: 'Access denied. Complete the CAPTCHA challenge.',
+      },
+    });
+    expect(compoundTripReadProjection(read, blockedRecoveryRows).text).toContain(
+      'The taxi page was blocked by an access check (HTTP 403); its fare and duration remain unverified.',
     );
 
     expect(compoundTripFetchTargets(read, rows)).toEqual([

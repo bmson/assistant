@@ -115,6 +115,8 @@ export interface CompoundTripReadProjection {
   fallbackWebQuery?: string;
   recoveryWebQuery?: string;
   publicFetchTargets: Array<{ mode: 'public transport' | 'taxi'; url: string }>;
+  /** Recovery results that are authorized and still need a page read. */
+  recoveryFetchTargets: Array<{ mode: 'public transport' | 'taxi'; url: string }>;
   mapRoute?: Record<string, unknown>;
   webSearch?: Record<string, unknown>;
   webFetches: Array<{
@@ -494,6 +496,23 @@ function successful(row: ReadToolEvidence): boolean {
   if (row.fromCurrentTask === false || row.status !== 'succeeded') return false;
   const result = object(row.result);
   return result?.ok !== false && !(typeof result?.status === 'number' && result.status >= 400);
+}
+
+function blockedWebSourceGap(mode: 'public transport' | 'taxi', row: ReadToolEvidence): string {
+  const result = object(row.result);
+  const status = typeof result?.status === 'number' ? result.status : undefined;
+  const failure = `${row.error ?? ''} ${text(result?.text, 2000)}`;
+  const challenged =
+    status === 401 ||
+    status === 403 ||
+    /captcha|access denied|robot check|verify (?:that )?you are human|(?:security )?challenge(?: page)?|bot detection/i.test(
+      failure,
+    );
+  if (challenged)
+    return `The ${mode} page was blocked by an access check${status ? ` (HTTP ${status})` : ''}; its fare and duration remain unverified.`;
+  if (status && status >= 400)
+    return `The ${mode} page returned HTTP ${status}; its fare and duration remain unverified.`;
+  return `I could not inspect the ${mode} source; its fare and duration remain unverified.`;
 }
 
 function hasExactRange(row: ReadToolEvidence, request: PersonalReadRequest): boolean {
@@ -3314,6 +3333,23 @@ export function compoundTripFetchTargets(
   );
 }
 
+/** Only new URLs from the bounded alternate search can justify recovery work. */
+export function compoundTripRecoveryFetchTargets(
+  request: PersonalReadRequest,
+  evidence: ReadonlyArray<ReadToolEvidence>,
+): Array<{ mode: 'public transport' | 'taxi'; url: string }> {
+  const pending = compoundTripReadProjection(request, evidence).recoveryFetchTargets.filter(
+    (target) =>
+      !evidence.some(
+        (row) =>
+          row.fromCurrentTask !== false &&
+          row.toolName === 'web.fetch' &&
+          object(row.args)?.url === target.url,
+      ),
+  );
+  return [...new Map(pending.map((target) => [target.url, target])).values()];
+}
+
 /** One endpoint-specific alternate search, never an arbitrary model query. */
 export function compoundTripNextWebSearchQuery(
   request: PersonalReadRequest,
@@ -4114,7 +4150,11 @@ export function compoundTripReadProjection(
       (item) => item.mode === target.mode && object(item.row.args)?.url === target.url,
     );
     if (!fetched || !successful(fetched.row))
-      gaps.push(`I could not inspect the ${target.mode} source.`);
+      gaps.push(
+        fetched
+          ? blockedWebSourceGap(target.mode, fetched.row)
+          : `I found a ${target.mode} source but could not fetch its page, so its route fare and duration remain unverified.`,
+      );
     else if (!fetched.endpointMatched)
       gaps.push(`The ${target.mode} page did not establish both route endpoints.`);
   }
@@ -4363,6 +4403,7 @@ export function compoundTripReadProjection(
     ...(fallbackWebQuery ? { fallbackWebQuery } : {}),
     ...(recoveryWebQuery ? { recoveryWebQuery } : {}),
     publicFetchTargets: fetchTargets.map(({ mode, url }) => ({ mode, url })),
+    recoveryFetchTargets: recoveryTargets.map(({ mode, url }) => ({ mode, url })),
     ...(mapRoute ? { mapRoute: object(mapRoute.result) } : {}),
     ...(webSearch ? { webSearch: object(webSearch.result) } : {}),
     webFetches,

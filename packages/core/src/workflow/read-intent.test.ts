@@ -1103,6 +1103,30 @@ describe('detectPersonalReadRequest', () => {
     });
   });
 
+  it.each(['and include venue names', 'with locations', 'with addresses', 'with venues'])(
+    'adds location details to compact calendar reads only when explicitly requested: %s',
+    (locationRequest) => {
+      const options = {
+        now: new Date('2026-10-13T18:08:55.000Z'),
+        timeZone: 'America/Los_Angeles',
+      };
+      const compact = detectPersonalReadRequest(
+        turn('What is on my calendar tomorrow? Give me a short practical briefing.'),
+        options,
+      );
+      const withLocations = detectPersonalReadRequest(
+        turn(
+          `What is on my calendar tomorrow? Give me a short practical briefing ${locationRequest}.`,
+        ),
+        options,
+      );
+
+      expect(compact?.includeCalendarLocations).toBeUndefined();
+      expect(withLocations?.includeCalendarLocations).toBe(true);
+      expect(withLocations?.queryTerms).toEqual([]);
+    },
+  );
+
   it('keeps explicit detail, event-specific, statistics, weekly-plan, and overlap-exclusion intents distinct', () => {
     const detail = detectPersonalReadRequest(
       turn('Show my calendar tomorrow as a full detailed list of every event.'),

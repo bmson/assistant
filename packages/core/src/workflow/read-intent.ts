@@ -199,6 +199,8 @@ export interface PersonalReadRequest {
   includeCalendarBriefing?: boolean;
   /** Omit optional lodging and default next-step commentary when brevity is explicit. */
   compactCalendarBriefing?: boolean;
+  /** Preserve venue details in a compact agenda only when the owner requested them. */
+  includeCalendarLocations?: boolean;
   /** Bounded owner-local Gmail review of billing evidence. */
   billingAudit?: BillingAuditScope;
   billingAuditIssue?: string;
@@ -2911,6 +2913,8 @@ function detectPersonalReadRequestInternal(
   const includeCalendarOverlapSummary =
     !explicitlyExcludesCalendarOverlapSummary(latest) &&
     (explicitlyRequestsCalendarOverlapSummary(latest) || Boolean(calendarBriefing));
+  const includeCalendarLocations =
+    calendarBriefing && /\b(?:where|locations?|addresses?|venues?|places?)\b/i.test(latest);
 
   const request: PersonalReadRequest = {
     kind,
@@ -2929,6 +2933,7 @@ function detectPersonalReadRequestInternal(
         (verification || /\b(?:when|where|what time|details?|what does|what did)\b/i.test(latest))),
     ...(calendarBriefing ? { includeCalendarBriefing: true } : {}),
     ...(compactCalendarBriefing ? { compactCalendarBriefing: true } : {}),
+    ...(includeCalendarLocations ? { includeCalendarLocations: true } : {}),
     ...(includeCalendarOverlapSummary ? { includeCalendarOverlapSummary: true } : {}),
   };
   if (weeklyCalendarPlan && calendarPlanOptions) {

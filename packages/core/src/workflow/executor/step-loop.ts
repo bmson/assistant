@@ -58,6 +58,7 @@ import {
   compoundTripFetchTargets,
   compoundTripNextWebSearchQuery,
   compoundTripReadProjection,
+  compoundTripRecoveryFetchTargets,
   compoundTripThreadReadInputs,
   MAX_COMPOUND_TRIP_TOOL_CALLS,
 } from '../compound-trip-read.js';
@@ -197,6 +198,8 @@ const EMAIL_REVIEW_MAX_ASSESSMENT_PASSES = 3;
 const EMAIL_REVIEW_MULTI_THREAD_STEP_BONUS = 8;
 const EMAIL_REVIEW_MULTI_THREAD_STEP_CAP = 22;
 const EMAIL_REVIEW_STEP_BUDGET_STATE_KEY = 'emailReviewStepBudget';
+const COMPOUND_TRIP_RECOVERY_STEP_BUDGET_STATE_KEY = 'compoundTripRecoveryStepBudget';
+const COMPOUND_TRIP_RECOVERY_STEP_BONUS = 2;
 
 function ownerSuppliedExactUrl(ownerText: string, candidate: string): boolean {
   return (ownerText.match(/https?:\/\/[^\s<>"'`]+/gi) ?? []).some((raw) => {
@@ -245,6 +248,23 @@ function persistedEmailReviewStepBudget(
     return undefined;
   }
   return budget.effectiveMaxSteps;
+}
+
+function persistedCompoundTripRecoveryStepBudget(
+  value: unknown,
+  originalMaxSteps: number,
+  requestHash: string,
+): number | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const budget = value as Record<string, unknown>;
+  if (
+    budget.version !== 1 ||
+    budget.originalMaxSteps !== originalMaxSteps ||
+    budget.requestHash !== requestHash ||
+    budget.effectiveMaxSteps !== originalMaxSteps + COMPOUND_TRIP_RECOVERY_STEP_BONUS
+  )
+    return undefined;
+  return budget.effectiveMaxSteps as number;
 }
 
 function stableJson(value: unknown): string {
@@ -1138,7 +1158,16 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // goals.update_progress with a conservative summary built from the durable
   // tool ledger. Measured from the entry step so a retry after a real database
   // failure gets exactly one fresh persistence attempt instead of none.
-  const bookkeepingStepCap = Math.max(task.maxSteps, state.step) + 1;
+  if (readRequest?.compoundTripDiscovery) {
+    const requestHash = createHash('sha256').update(ownerText.trim()).digest('hex');
+    const recoveryBudget = persistedCompoundTripRecoveryStepBudget(
+      state.plannerState[COMPOUND_TRIP_RECOVERY_STEP_BUDGET_STATE_KEY],
+      task.maxSteps,
+      requestHash,
+    );
+    if (recoveryBudget !== undefined) task.maxSteps = recoveryBudget;
+  }
+  let bookkeepingStepCap = Math.max(task.maxSteps, state.step) + 1;
   const cancellationHeadIsCurrent = async (): Promise<boolean> => {
     const checklist = state.requestChecklist;
     const audit = checklist?.cancellationAudit;
@@ -1828,6 +1857,49 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       !mustRecordGoalProgress && readRequest
         ? nextRequiredReadTool(readRequest, readToolEvidence)
         : undefined;
+    if (
+      readRequest?.compoundTripDiscovery &&
+      forcedReadTool === 'web.fetch' &&
+      state.step + 1 >= task.maxSteps
+    ) {
+      const recoveryFetchTargets = compoundTripRecoveryFetchTargets(readRequest, readToolEvidence);
+      const currentTripReadCalls = readToolEvidence.filter(
+        (row) =>
+          row.fromCurrentTask !== false &&
+          [
+            'calendar.list_events',
+            'gmail.search',
+            'gmail.read_thread',
+            'maps.directions',
+            'web.search',
+            'web.fetch',
+          ].includes(row.toolName),
+      ).length;
+      // A recovery search can reveal a source that has not been read yet. If
+      // it lands at the step boundary, persist one versioned, request-bound
+      // allowance for that single new page plus the final answer. The normal
+      // 18-call trip ledger, URL authorization, approval, and cost checks still
+      // apply; this cannot extend ordinary reads or repeated recovery.
+      if (
+        recoveryFetchTargets.length === 1 &&
+        currentTripReadCalls < MAX_COMPOUND_TRIP_TOOL_CALLS &&
+        state.plannerState[COMPOUND_TRIP_RECOVERY_STEP_BUDGET_STATE_KEY] === undefined
+      ) {
+        const originalMaxSteps = task.maxSteps;
+        const effectiveMaxSteps = originalMaxSteps + COMPOUND_TRIP_RECOVERY_STEP_BONUS;
+        const requestHash = createHash('sha256').update(ownerText.trim()).digest('hex');
+        task.maxSteps = effectiveMaxSteps;
+        bookkeepingStepCap = Math.max(task.maxSteps, state.step) + 1;
+        state.plannerState[COMPOUND_TRIP_RECOVERY_STEP_BUDGET_STATE_KEY] = {
+          version: 1,
+          originalMaxSteps,
+          effectiveMaxSteps,
+          requestHash,
+          sourceUrl: recoveryFetchTargets[0]?.url,
+        };
+        if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
+      }
+    }
     const forcedReadBudgetExceeded =
       readRequest?.emailReview && forcedReadTool === 'gmail.read_thread'
         ? state.step + 1 + assessmentStepReserve > task.maxSteps

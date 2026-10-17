@@ -50,7 +50,10 @@ const evidence = (
   {
     toolName: 'calendar.list_events',
     status: 'succeeded',
-    args: readRequest.timeWindow,
+    args: {
+      ...readRequest.timeWindow,
+      ...(readRequest.queryTerms.length > 0 ? { query: readRequest.queryTerms.join(' ') } : {}),
+    },
     result: {
       events,
       complete,
@@ -62,8 +65,8 @@ const evidence = (
 ];
 
 describe('calendar day and practical briefing fidelity', () => {
-  it('keeps a useful source location beside the linked timed appointment in compact overviews', () => {
-    const compact = { ...request, compactCalendarBriefing: true };
+  it('keeps a source location in compact overviews when the request asks where', () => {
+    const compact = { ...request, includeCalendarLocations: true, compactCalendarBriefing: true };
     const response = verifiedReadResponse(
       compact,
       evidence([{ ...timed, location: 'Studio B, 12 Main Street' }], true, compact),
@@ -71,6 +74,110 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain('[Project review](https://calendar.google.com/event?eid=review)');
     expect(response).toContain('09:00–10:00');
     expect(response).toContain('Studio B, 12 Main Street');
+  });
+
+  it('keeps compact day briefs concise without losing linked calendar facts', () => {
+    const compact = { ...request, compactCalendarBriefing: true };
+    const events = Array.from({ length: 6 }, (_, index) => ({
+      ...timed,
+      eventId: `brief-${index}`,
+      summary: `Appointment ${index + 1}`,
+      start: '2026-10-15T09:00:00-07:00',
+      end: '2026-10-15T09:30:00-07:00',
+      location: `Suite ${index + 1}, 123 Example Street, Example City, CA 90000, United States`,
+      blocksTime: true,
+      ownerResponse: 'accepted',
+      links: link(`brief-${index}`),
+    }));
+    const response = verifiedReadResponse(compact, evidence(events, true, compact));
+
+    for (const event of events) {
+      expect(response).toContain(`event?eid=${event.eventId}`);
+      expect(response).toContain(event.summary);
+    }
+    expect(response).toContain('Work · accepted');
+    expect(response).toContain('Conflict');
+    expect(response).not.toContain('Next:');
+    expect(response).not.toContain('Example Street');
+    expect(response).not.toContain('blocks time; attendance accepted');
+    expect(response.length).toBeLessThan(2200);
+  });
+
+  it('keeps short venue values by default while dropping a full postal-style address', () => {
+    const compact = { ...request, compactCalendarBriefing: true };
+    const events = [
+      { ...timed, eventId: 'zoom', summary: 'Video call', location: 'Zoom', links: link('zoom') },
+      {
+        ...timed,
+        eventId: 'street-venue',
+        summary: 'Clinic visit',
+        location: 'Laugavegur 12',
+        links: link('street-venue'),
+      },
+      {
+        ...timed,
+        eventId: 'postal-address',
+        summary: 'Office visit',
+        location: '123 Example Street, Example City, CA 90000, United States',
+        links: link('postal-address'),
+      },
+      {
+        ...timed,
+        eventId: 'long-unpunctuated-address',
+        summary: 'Building visit',
+        location: '123456 Example Avenue Suite 8 long road direction postal 90000 United States',
+        links: link('long-unpunctuated-address'),
+      },
+    ];
+    const response = verifiedReadResponse(compact, evidence(events, true, compact));
+
+    expect(response).toContain(
+      '[Video call](https://calendar.google.com/event?eid=zoom) (Work) — Zoom',
+    );
+    expect(response).toContain(
+      '[Clinic visit](https://calendar.google.com/event?eid=street-venue) (Work) — Laugavegur 12',
+    );
+    expect(response).not.toContain('Example Street');
+    expect(response).not.toContain('Example Avenue');
+  });
+
+  it('caps a long location only when the request explicitly asks for it', () => {
+    const compact = { ...request, includeCalendarLocations: true, compactCalendarBriefing: true };
+    const location = `Venue ${'A'.repeat(110)}`;
+    const event = { ...timed, location };
+    const response = verifiedReadResponse(compact, evidence([event], true, compact));
+
+    expect(response).toContain(`${location.slice(0, 99)}…`);
+    expect(response).not.toContain(location);
+  });
+
+  it('keeps explicitly requested venue details in the compact agenda', () => {
+    const compact = { ...request, includeCalendarLocations: true, compactCalendarBriefing: true };
+    const event = {
+      ...timed,
+      location: 'Studio B, 12 Main Street, Example City, CA 90000, United States',
+    };
+    const response = verifiedReadResponse(compact, evidence([event], true, compact));
+
+    expect(response).toContain('Studio B, 12 Main Street, Example City, CA 90000, United States');
+  });
+
+  it('labels accepted overlapping appointments as conflicts in compact briefings', () => {
+    const compact = { ...request, compactCalendarBriefing: true };
+    const accepted = { ...timed, ownerResponse: 'accepted' };
+    const second = {
+      ...accepted,
+      eventId: 'accepted-second',
+      summary: 'Planning hold',
+      start: '2026-10-15T09:30:00-07:00',
+      end: '2026-10-15T10:30:00-07:00',
+      links: link('accepted-second'),
+    };
+    const response = verifiedReadResponse(compact, evidence([accepted, second], true, compact));
+
+    expect(response).toContain(
+      'Conflict Thu 15 Oct 9:30 AM–10:00 AM: Project review + Planning hold.',
+    );
   });
 
   it('keeps official event IDs but omits credentialed hotel-management links in calendar briefs', () => {
@@ -214,6 +321,7 @@ describe('calendar day and practical briefing fidelity', () => {
       description: 'Check-in: Oct 10. Check-out: Oct 17.',
       start: '2026-10-10T06:00:00-07:00',
       end: '2026-10-17T02:00:00-07:00',
+      blocksTime: true,
     };
     const response = verifiedReadResponse(request, evidence([stay, timed]));
     expect(response).toContain('**Ongoing through Sat 17 Oct 02:00** — Hotel stay');
@@ -266,6 +374,7 @@ describe('calendar day and practical briefing fidelity', () => {
       description: 'Check-in: Oct 10. Check-out: Oct 17.',
       start: '2026-10-10T06:00:00-07:00',
       end: '2026-10-17T02:00:00-07:00',
+      blocksTime: true,
       links: link('stay'),
     };
     const second = {
@@ -286,9 +395,15 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain('event?eid=review');
     expect(response).toContain('event?eid=second');
     expect(response).toContain('event?eid=stay');
-    expect(response).toContain('Possible overlap: **Project review** and **Planning hold**');
+    expect(response).toContain(
+      'Possible overlap Thu 15 Oct 9:50 AM–10:00 AM: Project review + Planning hold.',
+    );
+    expect(response).toContain('Calendar overlap does not confirm attendance.');
+    expect(response).not.toContain('Next:');
     expect(response).not.toContain('Lodging context:');
-    expect(response).not.toContain('Next step:');
+    expect(response).toContain(
+      'A lodging stay marked busy is shown as context, not timed appointments.',
+    );
   });
 
   it('groups all-day entries and keeps source zones and clipped local windows readable', () => {
@@ -345,9 +460,9 @@ describe('calendar day and practical briefing fidelity', () => {
 
     expect(response).toContain('All-day records (source date and local intersection):');
     expect(response).toContain('- [Payday]');
-    expect(response).toContain('(Personal; blocks time; attendance accepted)');
+    expect(response).toContain('(Personal · accepted)');
     expect(response).toContain('[Team offsite]');
-    expect(response).toContain('Local holiday (Family; blocks time; attendance accepted)');
+    expect(response).toContain('Local holiday (Family · accepted)');
     expect(response).not.toContain('[Local holiday](');
     expect(response).toContain('[Berlin festival]');
     expect(response).toContain('event?eid=berlin-day');
@@ -444,7 +559,7 @@ describe('calendar day and practical briefing fidelity', () => {
 
     expect(response).toContain('- Ongoing: [Hotel stay]');
     expect(response).toContain('Sat 10 Oct 6:00 AM–Sat 17 Oct 2:00 AM');
-    expect(response).toContain('(Work; blocks time; attendance accepted)');
+    expect(response).toContain('(Work · accepted)');
     expect(response).not.toContain('Timed appointments:');
     expect(response).not.toContain('Possible overlap: **Hotel stay**');
     expect(response).toContain('event?eid=stay');
@@ -521,7 +636,8 @@ describe('calendar day and practical briefing fidelity', () => {
 
     expect(row).toContain('2026\\-10\\-16 \\(Europe/Berlin\\)');
     expect(row).toContain('local');
-    expect(row).toContain('blocks time; attendance accepted');
+    expect(row).toContain('accepted');
+    expect(row).not.toContain('busy');
     expect(row).toContain('event?eid=pay');
     expect(row.length).toBeLessThan(260);
   });

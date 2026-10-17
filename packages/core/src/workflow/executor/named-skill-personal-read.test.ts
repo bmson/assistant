@@ -352,9 +352,7 @@ describe('named saved skill use during a personal read', () => {
         },
       };
       const projection = verifiedReadResponse(readRequest, f.rows as never);
-      expect(projection).toContain(
-        'Overlapping entries do not establish that you must attend both.',
-      );
+      expect(projection).toContain('Calendar overlap does not confirm attendance.');
       expect(projection).not.toContain('Next step:');
       f.router.object.mockClear();
       f.router.object.mockImplementation(async () => {
@@ -388,7 +386,7 @@ describe('named saved skill use during a personal read', () => {
       );
 
       const final = f.state.pendingFinal?.text ?? '';
-      expect(final).toContain('Overlapping entries do not establish that you must attend both.');
+      expect(final).toContain('Calendar overlap does not confirm attendance.');
       expect(final).toContain('Next step:');
       expect(final).toContain('attend both');
       expect(final).not.toContain('I moved');
@@ -436,6 +434,158 @@ describe('named saved skill use during a personal read', () => {
 
     expect(f.state.pendingFinal?.text).not.toContain('Next step:');
     expect(f.skills.findByName).not.toHaveBeenCalled();
+  });
+
+  it('recovers the authorized calendar brief when a saved-skill turn has no carried read request', async () => {
+    const actionSkill: LearnedSkill = {
+      ...skill,
+      name: 'Clear task planning',
+      steps: 'Check the local calendar times and overlaps, then end with one useful next action.',
+    };
+    const request =
+      'Use my saved skill "Clear task planning" to review my calendar tomorrow, including my flight arrival, meetings, and overlaps. Give me a concise practical briefing with dates, local times, venues, and source links. Do not change anything.';
+    const events = [
+      {
+        id: 'fixture-flight',
+        eventId: 'fixture-flight',
+        calendarId: 'travel',
+        calendar: 'Travel',
+        summary: 'Flight arrival',
+        start: '2026-10-14T08:15:00-07:00',
+        end: '2026-10-14T09:00:00-07:00',
+        location: 'Terminal C',
+        links: [
+          {
+            type: 'calendar',
+            label: 'Flight details',
+            url: 'https://calendar.google.com/event?eid=fixture-flight',
+          },
+        ],
+      },
+      {
+        id: 'fixture-review',
+        eventId: 'fixture-review',
+        calendarId: 'work',
+        calendar: 'Work',
+        summary: 'Strategy review',
+        start: '2026-10-14T09:20:00-07:00',
+        end: '2026-10-14T11:30:00-07:00',
+        location: 'North Hall',
+        links: [
+          {
+            type: 'calendar',
+            label: 'Review event',
+            url: 'https://calendar.google.com/event?eid=fixture-review',
+          },
+        ],
+      },
+      {
+        id: 'fixture-briefing',
+        eventId: 'fixture-briefing',
+        calendarId: 'shared',
+        calendar: 'Shared',
+        summary: 'Partner briefing',
+        start: '2026-10-14T10:05:00-07:00',
+        end: '2026-10-14T11:25:00-07:00',
+        location: 'South Hall',
+        links: [
+          {
+            type: 'calendar',
+            label: 'Briefing event',
+            url: 'https://calendar.google.com/event?eid=fixture-briefing',
+          },
+        ],
+      },
+    ];
+    const f = await runPersonalRead(request, actionSkill, undefined, events);
+    f.router.object.mockClear();
+    f.router.object.mockImplementation(
+      async () =>
+        ({
+          ok: true,
+          object: { nextStep: 'Check whether you need to attend both.' },
+          finishReason: 'stop',
+        }) as never,
+    );
+
+    await stageModelFinalResponse(
+      f.deps as unknown as import('./types.js').ExecutorDeps,
+      f.task as never,
+      f.state,
+      f.window as never,
+      {
+        text: 'Flight arrival is at 1:15 AM. Strategy review starts at 10:05 AM; the events are back-to-back and you must attend both.',
+        progress: 'Calendar checked.',
+        terminalStatus: 'done',
+        outcome: 'done',
+      },
+      undefined,
+      { readRequest: null },
+    );
+
+    const final = f.state.pendingFinal?.text ?? '';
+    expect(final).toContain(
+      'Saved skill “Clear task planning” was retrieved as planning guidance.',
+    );
+    expect(final).toContain('Calendar briefing for tomorrow (local time):');
+    expect(final).toContain('Wed 14 Oct (America/Los_Angeles)');
+    expect(final).toContain('08:15–09:00');
+    expect(final).toContain('Strategy review');
+    expect(final).toContain('09:20–11:30');
+    expect(final).toContain('Partner briefing');
+    expect(final).toContain('10:05–11:25');
+    expect(final).toContain('Terminal C');
+    expect(final).toContain('North Hall');
+    expect(final).toContain('South Hall');
+    expect(final).toContain(
+      'Possible overlap Wed 14 Oct 10:05 AM–11:25 AM: Strategy review + Partner briefing.',
+    );
+    expect(final).toContain('Calendar overlap does not confirm attendance.');
+    expect(final).toContain(
+      '[Flight arrival](https://calendar.google.com/event?eid=fixture-flight)',
+    );
+    expect(final).not.toContain('1:15 AM');
+    expect(final).not.toContain('back-to-back');
+    expect(final).toContain('Next step: Check whether you need to attend both.');
+    expect(final.match(/^Next step:/gm)).toHaveLength(1);
+    expect(f.router.object).toHaveBeenCalledOnce();
+    expect(f.router.object.mock.calls[0]?.[1]).toMatchObject({
+      prompt: expect.stringContaining(actionSkill.steps),
+    });
+  });
+
+  it('does not recover a saved-skill calendar brief without current-task calendar evidence', async () => {
+    const request =
+      'Use my saved skill "Calendar review" to review my calendar tomorrow and give me a practical briefing.';
+    const f = await runPersonalRead(request);
+    f.router.object.mockClear();
+    const executionEvidence = f.deps.persistence?.executionEvidence;
+    if (!executionEvidence)
+      throw new Error('The personal-read fixture requires execution evidence.');
+    vi.mocked(executionEvidence.taskEvidence).mockResolvedValue([]);
+
+    await stageModelFinalResponse(
+      f.deps as unknown as import('./types.js').ExecutorDeps,
+      f.task as never,
+      f.state,
+      f.window as never,
+      {
+        text: 'No current calendar result is available.',
+        progress: 'Read not verified.',
+        terminalStatus: 'done',
+        outcome: 'done',
+      },
+      undefined,
+      { readRequest: null },
+    );
+
+    expect(f.state.pendingFinal?.text).not.toContain('Calendar briefing for tomorrow');
+    expect(f.state.pendingFinal?.text).toContain('No current calendar result is available.');
+    expect(
+      f.router.object.mock.calls.some(([, args]) =>
+        (args.prompt as string).includes('Calendar briefing for tomorrow'),
+      ),
+    ).toBe(false);
   });
 
   it.each([
