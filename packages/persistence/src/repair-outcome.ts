@@ -96,6 +96,15 @@ export function repairOutcome(issue: RepairIssue, failureStage?: RepairStage): R
   // contain secrets; hiding those must not hide a confirmed sandbox failure.
   if (
     issue.status === 'failed' &&
+    issue.data.lastError ===
+      "GitHub publishing permission denied. Check the repair publisher token's repository write access."
+  ) {
+    message = 'GitHub did not permit the repair to publish code.';
+    nextStep =
+      'Grant the repair publisher Contents and Pull requests write access to the configured repository, then retry in Improvements.';
+  }
+  if (
+    issue.status === 'failed' &&
     issue.data.lastError === 'Hosted sandbox setup failed. No coding result was published.'
   ) {
     message = 'The coding sandbox could not start. No code was published.';

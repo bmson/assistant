@@ -48,6 +48,7 @@ function harness() {
     downloadFailure: false,
     wrongTurn: false,
     invalidLegacyCredential: false,
+    publisherDenied: false,
     result: {
       baseSha: source,
       reproduced: true,
@@ -183,7 +184,10 @@ function harness() {
       });
     if (u.includes('/git/commits/') && init?.method === 'GET')
       return Response.json({ tree: { sha: 'c'.repeat(40) } });
-    if (u.endsWith('/git/blobs')) return Response.json({ sha: 'd'.repeat(40) });
+    if (u.endsWith('/git/blobs'))
+      return state.publisherDenied
+        ? new Response('PRIVATE PROVIDER RESPONSE', { status: 403 })
+        : Response.json({ sha: 'd'.repeat(40) });
     if (u.endsWith('/git/trees')) return Response.json({ sha: 'e'.repeat(40) });
     if (u.endsWith('/git/commits')) return Response.json({ sha: commit });
     if (u.includes('/git/ref/heads/')) return new Response(null, { status: 404 });
@@ -323,6 +327,14 @@ it('starts a detached hosted turn pinned to public source, without credentials o
   ])
     expect(String(create?.init?.body)).not.toContain(privateText);
   expect(h.calls.some((c) => c.url.includes('/actions/'))).toBe(false);
+});
+it('refuses a read-only publisher before starting a paid coding session', async () => {
+  const h = harness();
+  h.state.publisherDenied = true;
+  await expect(h.worker.dispatch(issue)).rejects.toThrow('GitHub publishing permission denied');
+  expect(h.calls.some((c) => c.url.startsWith('https://api.openai.com/'))).toBe(false);
+  const probe = h.calls.find((c) => c.url.endsWith('/git/blobs'));
+  expect(JSON.parse(String(probe?.init?.body))).toEqual({ content: '', encoding: 'utf-8' });
 });
 it('dispatches, reconciles and checks deployment when the legacy GitHub credential is invalid', async () => {
   const h = harness();
