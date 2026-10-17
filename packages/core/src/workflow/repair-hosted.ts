@@ -363,17 +363,17 @@ export function createHostedRepairWorker(input: {
             'Independent code review found issues. Review the draft PR before requesting another attempt.',
         },
       };
-    if (pr.draft) {
-      const latest = pullSchema.parse(await github(`/pulls/${pr.number}`));
-      if (latest.head.sha !== pr.head.sha || latest.state !== 'open')
-        return {
-          status: 'failed' as const,
-          patch: {
-            ...patch,
-            lastError:
-              'Repair PR changed during independent review. Review the current commit before promotion.',
-          },
-        };
+    const latest = pullSchema.parse(await github(`/pulls/${pr.number}`));
+    if (latest.head.sha !== pr.head.sha || latest.state !== 'open')
+      return {
+        status: 'failed' as const,
+        patch: {
+          ...patch,
+          lastError:
+            'Repair PR changed during independent review. Review the current commit before promotion.',
+        },
+      };
+    if (latest.draft) {
       const ready = z
         .object({
           errors: z.array(z.unknown()).optional(),

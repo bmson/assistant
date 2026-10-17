@@ -288,16 +288,17 @@ it('does not accept a review of a different commit', async () => {
   expect(h.reviewPatch).toHaveBeenCalledOnce();
   expect(h.state.ready).toBe(false);
 });
-it('does not promote a PR whose head changes while independent review is running', async () => {
+it.each([true, false])('rejects a changed head during review (draft=%s)', async (draft) => {
   const h = harness();
   h.state.pr = true;
   h.state.checks = true;
+  h.state.ready = !draft;
   h.state.changedHeadOnRefresh = true;
   expect(await h.worker.inspect(issue)).toMatchObject({
     status: 'failed',
     patch: { lastError: expect.stringContaining('changed during independent review') },
   });
-  expect(h.state.ready).toBe(false);
+  expect(h.calls.some((call) => call.url.endsWith('/graphql'))).toBe(false);
 });
 it('starts a detached hosted turn pinned to public source, without credentials or owner data in its sandbox', async () => {
   const h = harness();

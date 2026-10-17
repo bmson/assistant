@@ -4,7 +4,11 @@ import type { RepairPatchReviewer } from './repair-hosted.js';
 
 const Review = z.object({
   approved: z.boolean(),
-  summary: z.string().min(1).max(1500),
+  summary: z
+    .string()
+    .min(1)
+    .max(1500)
+    .refine((text) => (text.match(/\p{L}/gu)?.length ?? 0) >= 3),
   findings: z.array(z.string().min(1).max(300)).max(10),
 });
 
