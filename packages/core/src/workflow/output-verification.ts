@@ -401,13 +401,36 @@ function groundedTransportBullets(
     rail.length + express.length + otherBuses.length === groups.length
   ) {
     const expressGroup = express[0];
-    const railNames = rail.map((group) =>
-      group.title.replace(/^long.distance transport$/i, 'long-distance transport'),
+    const railNames = rail.map(
+      (group) =>
+        `${group.title.replace(/^long.distance transport$/i, 'long-distance transport')} (${group.ids.slice(0, 2).join(', ')}${group.ids.length > 2 ? ' and others' : ''})`,
     );
+    const localRoute = otherBuses
+      .filter((group) => !/\bnight\b/i.test(group.title))
+      .map((group) => /^Buses\s+([^\n]{2,50}?)\s+-\s+([^\n]{2,50})$/i.exec(group.title))
+      .find((match) => match?.[1] && match[2]);
+    const localSummary = localRoute
+      ? `Local buses connect ${localRoute[1]}${otherBuses.some((group) => /\b(?:nearby|surrounding)\b/i.test(group.title)) ? ' and the surrounding area' : ''} with ${localRoute[2]}.`
+      : 'Additional bus routes are listed.';
+    const otherBusSummary = [
+      localSummary,
+      otherBuses.some((group) =>
+        [...group.categoryRestrictions, ...group.entries].some((entry) =>
+          /\btransfer\b/i.test(entry),
+        ),
+      )
+        ? 'Some require a transfer.'
+        : '',
+      otherBuses.some((group) => /\bnight\b/i.test(group.title))
+        ? 'Night routes are also listed.'
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
     const overview = [
       `- **Rail:** ${railNames.join(', ')}.`,
       `- **Express buses:** ${expressGroup?.entries.join(', ')}.`,
-      `- **Other buses:** ${otherBuses.map((group) => group.title).join(', ')}. Check individual routes for transfers and operating limits. [Source](${overviewUrl})`,
+      `- **Other buses:** ${otherBusSummary} [Source](${overviewUrl})`,
     ].join('\n');
     if (
       !shortBulletFindings(request, overview).length &&

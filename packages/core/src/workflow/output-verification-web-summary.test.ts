@@ -404,13 +404,14 @@ describe('source-grounded public page summary recovery', () => {
       'S-Bahn trains',
       'long-distance transport',
       'Express buses',
-      'Buses City - Airport',
-      'Buses nearby - Airport',
-      'Night buses',
     ])
       expect(result.text).toContain(category);
     expect(result.text).toContain('X7, X71, BER2 (subject to surcharge)');
-    expect(result.text).toContain('Check individual routes for transfers and operating limits');
+    expect(result.text).toContain(
+      'Local buses connect City and the surrounding area with Airport.',
+    );
+    expect(result.text).toContain('Some require a transfer.');
+    expect(result.text).toContain('Night routes are also listed.');
     expect(result.text).toContain(`[Source](${multiCategoryUrl})`);
     expect(result.text).not.toContain('every 5 minutes');
     expect(result.text).not.toContain('N7: weekends only');

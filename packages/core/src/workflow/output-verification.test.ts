@@ -1458,7 +1458,8 @@ describe('concise transport recovery', () => {
     expect(result.text.split('\n')).toHaveLength(3);
     expect(result.text).toContain('**Rail:**');
     expect(result.text).toContain('BER2 (subject to surcharge)');
-    expect(result.text).toContain('transfers and operating limits');
+    expect(result.text).toContain('Additional bus routes are listed.');
+    expect(result.text).toContain('Night routes are also listed.');
     expect(result.text).not.toContain('RB22, RB24');
     expect(result.text).not.toContain('3 minutes');
     expect(shortBulletFindings('three short bullets', result.text)).toEqual([]);
