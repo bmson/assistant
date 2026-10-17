@@ -92,5 +92,33 @@ export function repairOutcome(issue: RepairIssue, failureStage?: RepairStage): R
     message = issue.data.lastError ?? 'The investigation is blocked pending an owner action.';
     nextStep = issue.data.ownerActionRequired;
   }
+  // Only known internal outcomes are exposed. Arbitrary provider errors may
+  // contain secrets; hiding those must not hide a confirmed sandbox failure.
+  if (
+    issue.status === 'failed' &&
+    issue.data.lastError === 'Hosted sandbox setup failed. No coding result was published.'
+  ) {
+    message = 'The coding sandbox could not start. No code was published.';
+    nextStep = 'Check the coding provider setup before retrying this report.';
+  }
+  if (
+    issue.status === 'failed' &&
+    issue.data.lastError === 'Hosted result contains duplicate or protected paths'
+  ) {
+    message = 'The proposed patch included duplicate or protected files. No PR was published.';
+    nextStep = 'This change needs owner-led source review before another coding attempt.';
+  }
+  if (issue.status === 'failed' && issue.data.hostedReview?.approved === false) {
+    stage = 'pr_review';
+    message = 'Independent code review found issues in the proposed change.';
+    nextStep = 'Review the draft PR and the saved code review before requesting another attempt.';
+  }
+  if (
+    issue.status === 'pr_open' &&
+    issue.data.hostedReview?.approved &&
+    issue.data.hostedReview.commitSha === issue.data.hostedCommitSha
+  )
+    message =
+      'The proposed change passed repository checks and independent code review. It is ready for your PR review and has not been merged.';
   return { version: 1, status: issue.status, stage, message, nextStep };
 }

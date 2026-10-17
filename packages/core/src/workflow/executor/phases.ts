@@ -387,6 +387,7 @@ export async function runCodeJobPhase(
         calendarReader: deps.calendarReader,
         calendarEventReader: deps.calendarEventReader,
         emailThreadReader: deps.emailThreadReader,
+        repairRepositoryReader: deps.repairRepositoryReader,
         calendarCancellationEnabled:
           job === 'briefing.compose' &&
           deps.dispatcher

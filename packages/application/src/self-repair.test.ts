@@ -42,6 +42,26 @@ it('does not expose untrusted executable links', () => {
   expect(projectRepairIssue(issue)).toMatchObject({ prUrl: null, runUrl: null });
 });
 
+it('makes the saved independent review readable in existing native diagnosis views', () => {
+  const reviewed = {
+    ...issue,
+    data: {
+      ...issue.data,
+      diagnosis: 'Original diagnosis.',
+      hostedReview: {
+        commitSha: 'b'.repeat(40),
+        approved: false,
+        modelId: 'reason-model',
+        summary: 'Missing boundary coverage.',
+        reviewedAt: new Date().toISOString(),
+      },
+    },
+  };
+  expect(projectRepairIssue(reviewed).diagnosis).toContain(
+    'Independent code review (reason-model): Missing boundary coverage.',
+  );
+});
+
 it('retries join the back of the queue and clear the previous investigation', async () => {
   const old = {
     ...issue,

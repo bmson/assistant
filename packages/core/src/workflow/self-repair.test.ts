@@ -31,6 +31,13 @@ describe('owner correction detection', () => {
     'Report a bug in reminders.',
     'Thanks for checking. That did not work.',
     'Why did not the reminder send?',
+    "The save button doesn't work.",
+    "Improvements isn't working.",
+    'The Improvements section is broken.',
+    'The app keeps crashing when I open Improvements.',
+    "My reminders don't arrive.",
+    'Chat is stuck.',
+    'Your assistant does not respond.',
   ])('records direct owner feedback: %s', (text) => expect(isRepairFeedback(text)).toBe(true));
   it.each([
     'Explain how to report a bug.',
@@ -43,6 +50,12 @@ describe('owner correction detection', () => {
     'That saved correctly.',
     "That's wrong, don't report it.",
     "That didn't save; please don't open an issue.",
+    'Explain why the save button does not work in this example.',
+    'If the app is broken, what should I do?',
+    'My coworker says the app is broken.',
+    'The printer does not work.',
+    'The app is working well.',
+    'The app is broken; do not investigate this.',
   ])('does not treat quoted examples or discussion as authorization: %s', (text) =>
     expect(isRepairFeedback(text)).toBe(false),
   );
@@ -311,6 +324,20 @@ describe('issue-to-PR flow', () => {
     expect(rows.get(issue.id)?.status).toBe('fixing');
     expect(deps.worker?.dispatch).toHaveBeenCalledWith(
       expect.objectContaining({ status: 'fixing' }),
+    );
+  });
+  it('carries real repository-read evidence into the durable coding attempt', async () => {
+    const { deps, rows, issue } = setup();
+    const evidence = {
+      source: 'github_mcp' as const,
+      connectionId: 'github',
+      files: [{ path: 'apps/web/example.ts', excerpt: 'synthetic source' }],
+    };
+    deps.readRepository = vi.fn(async () => evidence);
+    await runRepairCycle(deps, 'owner', 'task', now);
+    expect(rows.get(issue.id)?.data.repositoryEvidence).toEqual(evidence);
+    expect(deps.worker?.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ repositoryEvidence: evidence }) }),
     );
   });
   it.each(['provider', 'configuration'])(

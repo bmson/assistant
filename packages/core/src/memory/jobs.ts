@@ -35,8 +35,9 @@ import { runAssistantHealthMonitor } from '../workflow/health-monitor.js';
 import { runSelfImprove } from '../workflow/improve.js';
 import { createGitHubRepairWorker } from '../workflow/repair-github.js';
 import { createHostedRepairWorker } from '../workflow/repair-hosted.js';
+import { createRepairPatchReviewer } from '../workflow/repair-review.js';
 import { runSelfMaintenance } from '../workflow/self-maintenance.js';
-import { runRepairCycle } from '../workflow/self-repair.js';
+import { type RepairRepositoryReader, runRepairCycle } from '../workflow/self-repair.js';
 import { runWatchSuggest } from '../workflow/watch-suggest.js';
 import { refreshAmbientSnapshot } from './ambient.js';
 import { extractCommitments, maintainCommitments } from './commitments.js';
@@ -261,6 +262,7 @@ export async function runCodeJob(
     /** Firestore-backed import lifecycle selected by the Firestore agent composition. */
     importJobRepository?: ImportJobRepository;
     heartbeat?: () => Promise<void>;
+    repairRepositoryReader?: RepairRepositoryReader;
     /**
      * Supplied by the composition root: returns a completion summary when the
      * module owning this job is not installed. A job queued before its module
@@ -785,6 +787,7 @@ export async function runCodeJob(
               effort: config.SELF_REPAIR_REASONING_EFFORT,
               allowExecutor: config.SELF_REPAIR_ALLOW_EXECUTOR,
               deploymentUrl: config.SELF_REPAIR_DEPLOYMENT_URL,
+              reviewPatch: createRepairPatchReviewer(deps.router, task.id, deps.heartbeat),
             })
           : undefined;
       const selectedWorker = config.SELF_REPAIR_PROVIDER === 'github' ? legacyWorker : hostedWorker;
@@ -810,6 +813,7 @@ export async function runCodeJob(
           enabled: config.SELF_REPAIR_ENABLED,
           allowExecutor: config.SELF_REPAIR_ALLOW_EXECUTOR,
           dailyLimit: config.SELF_REPAIR_DAILY_LIMIT,
+          readRepository: deps.repairRepositoryReader,
           diagnostics: {
             persistenceDriver: config.PERSISTENCE_DRIVER,
             modules: config.ASSISTANT_MODULES,

@@ -29,6 +29,7 @@ const issue: RepairIssue = {
     workerProvider: 'openai_hosted',
     hostedSessionId: 'sess_test',
     hostedTurnId: 'turn_test',
+    hostedSourceSha: source,
   },
 };
 function harness() {
@@ -38,6 +39,7 @@ function harness() {
     session: 'idle',
     pr: false,
     ready: false,
+    changedHeadOnRefresh: false,
     checks: false,
     failedCheck: false,
     failedDuplicate: false,
@@ -143,6 +145,11 @@ function harness() {
     if (u.includes('/files?'))
       return Response.json(state.result.changes.map((c) => ({ filename: c.path })));
     if (u.includes('/pulls?')) return Response.json(state.pr ? [pr()] : []);
+    if (u.endsWith('/pulls/123')) {
+      const latest = pr();
+      if (state.changedHeadOnRefresh) latest.head.sha = 'f'.repeat(40);
+      return Response.json(latest);
+    }
     if (u.includes('/check-runs?'))
       return Response.json({
         total_count: 5,
@@ -193,6 +200,14 @@ function harness() {
     }
     throw new Error(`Unexpected test endpoint: ${u}`);
   });
+  const reviewPatch = vi.fn(
+    async () =>
+      ({
+        approved: true,
+        modelId: 'independent-model',
+        summary: 'No actionable defects found.',
+      }) as { approved: boolean; modelId: string; summary: string } | null,
+  );
   const worker = createHostedRepairWorker({
     apiKey: 'coding-key',
     publisherToken: 'publish-token',
@@ -203,9 +218,87 @@ function harness() {
     deploymentUrl: 'https://assistant.example',
     now: () => new Date(state.now),
     fetch: fetch as typeof globalThis.fetch,
+    reviewPatch,
   });
-  return { worker, calls, state };
+  return { worker, calls, state, reviewPatch };
 }
+it('keeps the draft when an independent reviewer rejects the exact commit', async () => {
+  const h = harness();
+  h.state.pr = true;
+  h.state.checks = true;
+  h.reviewPatch.mockResolvedValue({
+    approved: false,
+    modelId: 'reviewer',
+    summary: 'Missing boundary coverage.',
+  });
+  expect(await h.worker.inspect(issue)).toMatchObject({
+    status: 'failed',
+    patch: { hostedReview: { approved: false, commitSha: commit } },
+  });
+  expect(h.reviewPatch).toHaveBeenCalledWith({ commitSha: commit, files: expect.any(Array) });
+  expect(h.state.ready).toBe(false);
+});
+it('waits without promoting when independent review is unavailable', async () => {
+  const h = harness();
+  h.state.pr = true;
+  h.state.checks = true;
+  h.reviewPatch.mockResolvedValue(null);
+  expect(await h.worker.inspect(issue)).toMatchObject({ status: 'testing' });
+  expect(h.state.ready).toBe(false);
+});
+it('reuses a durable review only for the same commit', async () => {
+  const h = harness();
+  h.state.pr = true;
+  h.state.checks = true;
+  const reviewed = {
+    ...issue,
+    data: {
+      ...issue.data,
+      hostedReview: {
+        commitSha: commit,
+        approved: true,
+        modelId: 'reviewer',
+        summary: 'Reviewed',
+        reviewedAt: stamp,
+      },
+    },
+  };
+  expect(await h.worker.inspect(reviewed)).toMatchObject({ status: 'pr_open' });
+  expect(h.reviewPatch).not.toHaveBeenCalled();
+});
+it('does not accept a review of a different commit', async () => {
+  const h = harness();
+  h.state.pr = true;
+  h.state.checks = true;
+  h.reviewPatch.mockResolvedValue(null);
+  const reviewed = {
+    ...issue,
+    data: {
+      ...issue.data,
+      hostedReview: {
+        commitSha: source,
+        approved: true,
+        modelId: 'reviewer',
+        summary: 'Old review',
+        reviewedAt: stamp,
+      },
+    },
+  };
+  expect(await h.worker.inspect(reviewed)).toMatchObject({ status: 'testing' });
+  expect(h.reviewPatch).toHaveBeenCalledOnce();
+  expect(h.state.ready).toBe(false);
+});
+it('does not promote a PR whose head changes while independent review is running', async () => {
+  const h = harness();
+  h.state.pr = true;
+  h.state.checks = true;
+  h.state.changedHeadOnRefresh = true;
+  expect(await h.worker.inspect(issue)).toMatchObject({
+    status: 'failed',
+    patch: { lastError: expect.stringContaining('changed during independent review') },
+  });
+  expect(h.state.ready).toBe(false);
+});
 it('starts a detached hosted turn pinned to public source, without credentials or owner data in its sandbox', async () => {
   const h = harness();
   expect(await h.worker.dispatch(issue)).toMatchObject({
