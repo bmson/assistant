@@ -116,6 +116,10 @@ export function createHostedRepairWorker(input: {
     const response = await request(origin, path, method, body);
     if (!response.ok) {
       // Never store provider response bodies: they can echo a diagnostic brief or credentials.
+      if (origin === 'github' && method !== 'GET' && [401, 403].includes(response.status))
+        throw new RepairDispatchRejected(
+          "GitHub publishing permission denied. Check the repair publisher token's repository write access.",
+        );
       const error = `Self-repair ${origin} request failed (${response.status})`;
       if ([400, 401, 403, 404, 422].includes(response.status))
         throw new RepairDispatchRejected(error);
@@ -541,6 +545,10 @@ export function createHostedRepairWorker(input: {
         throw new RepairDispatchRejected(
           'Hosted source checkout currently requires a public repository',
         );
+      // Repository `permissions.push` describes the account, not a fine-grained
+      // token's grant. Verify Contents write before paying for a coding run.
+      // An unreferenced empty Git blob changes no branch, file or pull request.
+      await github('/git/blobs', 'POST', { content: '', encoding: 'utf-8' });
       const source = z
         .object({ sha })
         .parse(await github(`/commits/${encodeURIComponent(repo.default_branch)}`)).sha;

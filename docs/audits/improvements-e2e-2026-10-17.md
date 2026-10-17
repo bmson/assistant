@@ -1,6 +1,6 @@
 # Improvements workflow: live verification, October 17, 2026
 
-Status: **end-to-end acceptance remains open**. A live complaint was discovered and a real coding session ran, but the tested app workflow has not yet produced a pull request. Do not substitute the implementation PR for an autonomous worker PR.
+Historical checkpoint at **23:51 UTC**: end-to-end acceptance remained open. A live complaint was discovered and a real coding session ran, but publication exposed a missing GitHub permission. Subsequent results, worker PR links, final checks and restored settings are tracked in the [implementation PR's live-verification section](https://github.com/bmson/assistant/pull/594). Do not substitute the implementation PR for a worker-created repair PR.
 
 ## Live installation
 
@@ -22,7 +22,19 @@ The initial repair overview contained 19 failed, 19 blocked, five dismissed and 
 
 The old Gmail suggestion was stale: the current source already bounds long query receipt identifiers. Its earlier production telemetry remains real evidence of the historical failure. The test must not manufacture a new Gmail fix merely to obtain a PR.
 
-The shared production daily cap was $4. At the second budget snapshot, actual spend was $2.315308 and reservations were $1.679534, leaving $0.005158 unreserved. The cap was not changed; an optional request to raise it to $10 was sent to the owner. Existing model-budget and protected-path boundaries were retained.
+The shared production daily cap was $4. At the second budget snapshot, actual spend was $2.315308 and reservations were $1.679534, leaving $0.005158 unreserved. The owner explicitly authorized a temporary increase to $10, applied through the authenticated costs API at 23:33 UTC. Restore the original $4 cap after verification. Existing model-budget and protected-path boundaries were retained.
+
+The next production investigation returned placeholder text (`...` and `{`) instead of a usable brief. This is a model-output failure, rather than a missing owner description. The candidate now records the failure and its available accounting, preserves the original report, and directs recovery toward the configured models. It also rejects placeholder patch-review summaries.
+
+A local candidate verification task (`96528a4e-32db-4ca2-8953-6eaea2a3ebb8`) then retried the actual captured report through the real Firestore repositories and ModelRouter. An operator selected the already enabled Kimi K2.6 model for that call; the existing GPT-OSS fallback produced the usable brief. The durable model ledger records `openai/gpt-oss-120b`, 1,156 input tokens, 474 output tokens, and $0.000120 for the successful call. Global reasoning-role settings were not changed. The task used a normal owner-scoped lease and $0.75 task budget; model validation, shared budgets, report claims and protected-file gates remained active.
+
+That candidate cycle recorded real GitHub MCP source reads of both requested files and dispatched hosted session `sess_0a41674af0350bd3006ad406ebaf50819692ca2e4b5bde1970`, pinned to source commit `7bf7408429fe62e502d5aa45fe33e19a472f9f71`. The coding model remained the installation's `gpt-6.1-sol`. This is candidate execution against live services; the candidate implementation has not been released to the ordinary production agent.
+
+The completed coding attempt reached publication but GitHub rejected blob creation with HTTP 403, `Resource not accessible by personal access token`, requiring `contents=write`. The dedicated publisher could read the repository and its account-level `permissions.push` was true; neither established that the token could publish. Its rate limit was healthy. The candidate now checks Contents write with an unreferenced empty blob before starting a paid coding session, and exposes a fixed, credential-free permission explanation. The token also needs Pull requests write. The owner was asked to update the existing token restricted to `bmson/assistant`; no broad CLI credential was copied into production.
+
+The connected GitHub MCP successfully created a verification blob. A second candidate attempt used a local publication bridge to those existing MCP tools while retaining the hosted worker's patch validation, immutable source, complete comparison, draft PR and CI/review gates. This is explicitly an operator-assisted rehearsal; it does not establish that the production publisher credential is fixed. The automatic repair schedule was temporarily paused through the normal settings API during this isolated attempt and must be restored along with the daily cap. Second session: `sess_0ddd9d1e3432a9ee006ad4096a7ff88197ace384bb4b378cdc`.
+
+The normal `runSelfImprove` review also ran against actual owner-scoped reliability signals under task `74c7565e-f350-4ddb-a56c-b10f7ed46978`. It found seven patterns and created three new advisory proposals, verified through the normal paginated Improvements API: `26694beb-2a09-588c-956b-c5216c57194c`, `2bf7febc-ac48-5bb1-b05e-40532113b670`, and `d8fe1df0-bc6a-5016-bbe5-861e5f347082`. No settings were applied. The broad workspace endpoint returned 503 during this check; the paginated Improvements section was available. Browser verification was unavailable because the app URL was blocked in the in-app browser and the native desktop was locked. API and durable-ledger observations must not be represented as visual verification.
 
 ## Changes prepared
 
@@ -35,6 +47,6 @@ The shared production daily cap was $4. At the second budget snapshot, actual sp
 
 These changes require merge and release before the normal production agent uses them. They do not automatically merge or deploy a repair.
 
-## Remaining acceptance
+## Acceptance criteria after this checkpoint
 
 Resume the captured model-routing complaint once budget permits. Observe source inspection, a hosted patch with a meaningful test, a draft PR against `bmson/assistant`, successful required CI on that exact commit, independent model review, draft promotion and the Improvements review suggestion. Record the actual worker PR URL and exact commit before declaring the workflow complete. The owner retains the merge decision.
