@@ -5592,6 +5592,35 @@ San Francisco (SFO-San Francisco Intl.)`;
     expect(projection.text).not.toContain('Europe/Berlin');
     expect(compoundTripRoute(read, evidence)).toBeUndefined();
   });
+  it('retains a booking-reference discrepancy after the calendar departure has passed', () => {
+    const { evidence } = sources();
+    const read = detectPersonalReadRequest([{ role: 'user', content: focusedPrompt }], {
+      now: new Date('2026-10-17T04:36:00Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!read?.upcomingFlightDiscovery) throw new Error('Expected focused flight intent');
+    const currentEvidence = evidence.map((item) =>
+      item.toolName === 'calendar.list_events'
+        ? {
+            ...item,
+            args: { timeMin: read.timeWindow?.timeMin, timeMax: read.timeWindow?.timeMax },
+          }
+        : item,
+    );
+    const projection = upcomingFlightReadProjection(read, currentEvidence);
+    expect(projection.flight).toBeUndefined();
+    expect(projection.calendarCandidate).toBeUndefined();
+    expect(projection.blocked).toBe(true);
+    expect(projection.text).toContain('Calendar vs booking (next-flight identity unverified)');
+    expect(projection.text).toContain('Unresolved carrier difference under the same itinerary');
+    expect(projection.text).toContain('United');
+    expect(projection.text).toContain('Lufthansa');
+    expect(projection.text).toContain('2026-10-16T21:10:00-07:00');
+    expect(projection.text).toContain('https://mail.google.com/mail/u/0/#all/egencia-table');
+    expect(projection.text).not.toContain('Next matched');
+    expect(projection.text).not.toContain('Next future calendar flight candidate');
+  });
+
   function bookedFixture(body?: string) {
     const read = detectPersonalReadRequest([{ role: 'user', content: focusedPrompt }], {
       now: new Date('2030-11-08T15:00:00Z'),
@@ -6264,6 +6293,45 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(answer).toContain('Calendar vs booking:');
     expect(answer).toContain('Unresolved carrier difference');
     expect(answer).not.toContain('Transfer candidate:');
+    expect(answer).toContain('2030-11-10 to 2030-11-17');
+    expect(answer).toContain(
+      'I found a separately dated hotel reservation, but could not link it to the selected flight.',
+    );
+    expect(answer).not.toContain('stay details or flight association remain unverified');
+  });
+
+  it('keeps booked dates when a past arrival cannot supply a new transfer candidate', () => {
+    const { rows } = fixture();
+    const pastRequest = detectPersonalReadRequest([{ role: 'user', content: tripPrompt }], {
+      now: new Date('2030-11-15T15:00:00Z'),
+      timeZone: 'America/New_York',
+    });
+    if (!pastRequest?.compoundTripDiscovery) throw new Error('Missing trip request');
+    const pastRows = rows.map((row) =>
+      row.toolName === 'calendar.list_events'
+        ? {
+            ...row,
+            args: {
+              ...(row.args as Record<string, unknown>),
+              timeMin: pastRequest.timeWindow?.timeMin,
+              timeMax: pastRequest.timeWindow?.timeMax,
+            },
+            result: { ...(row.result as Record<string, unknown>), events: [] },
+          }
+        : row,
+    );
+    const projection = compoundTripReadProjection(pastRequest, pastRows);
+    expect(projection.flight).toBeUndefined();
+    expect(projection.currentTripReturn).toBeUndefined();
+    expect(projection.routeOrigin).toBeUndefined();
+    expect(projection.webQuery).toBeUndefined();
+    for (const text of [
+      projection.presentation.summary,
+      renderCompoundTripReadResponse(projection),
+    ]) {
+      expect(text).toContain('Booked dates 2030-11-09–2030-11-17; later departure 2030-11-17.');
+      expect(text).not.toContain('undefined');
+    }
   });
 
   it('reports source-labelled route roles only, never direction from reversed airport order', () => {

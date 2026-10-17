@@ -64,6 +64,60 @@ describe('GenerativeCardSpecV1', () => {
     ).toBeNull();
   });
 
+  it('rejects a grounded fact the visible card composition omits', () => {
+    const incomplete = GenerativeCardSpecV1Schema.parse({
+      ...movieCard,
+      facts: [
+        ...movieCard.facts,
+        { id: 'budget', label: 'Budget', value: '€240', source: 'SOURCE_MESSAGE' },
+      ],
+    });
+    expect(
+      validateGroundedCard(
+        incomplete,
+        'Cinema email: Dune: Part Two is booked for 7:30 PM. Ticket code MV-4829-AX. Budget €240.',
+      ),
+    ).toBeNull();
+  });
+
+  it('checks fact coverage after removing an unrenderable block', () => {
+    const incomplete = GenerativeCardSpecV1Schema.parse({
+      ...movieCard,
+      facts: [
+        ...movieCard.facts,
+        { id: 'deadline', label: 'Deadline', value: 'Friday', source: 'SOURCE_MESSAGE' },
+      ],
+      blocks: [
+        ...movieCard.blocks,
+        { type: 'countdown', dateFact: 'deadline', labelFact: 'Deadline' },
+      ],
+    });
+    // Friday is grounded, but it cannot render as a zoned countdown and has no
+    // other visible representation after that block is removed.
+    expect(
+      validateGroundedCard(
+        incomplete,
+        'Cinema email: Dune: Part Two is booked for 7:30 PM. Ticket code MV-4829-AX. Deadline Friday.',
+      ),
+    ).toBeNull();
+  });
+
+  it('accepts facts represented by a rendered block or a valid visible action', () => {
+    const complete = GenerativeCardSpecV1Schema.parse({
+      ...movieCard,
+      facts: [
+        { id: 'movie', label: 'Movie', value: 'Dune: Part Two', source: 'SOURCE_MESSAGE' },
+        { id: 'time', label: 'Showtime', value: '7:30 PM', source: 'SOURCE_MESSAGE' },
+        { id: 'venue', label: 'Venue', value: 'Harbor Cinema', source: 'SOURCE_MESSAGE' },
+      ],
+      blocks: [{ type: 'hero', titleFact: 'movie', subtitleFact: 'time' }],
+      actions: [{ id: 'directions', type: 'directions', label: 'Directions', factId: 'venue' }],
+    });
+    expect(validateGroundedCard(complete, 'Dune: Part Two at 7:30 PM, Harbor Cinema.')).toEqual(
+      complete,
+    );
+  });
+
   it('rejects a figure cut out of the middle of a range', () => {
     const sharpened = GenerativeCardSpecV1Schema.parse({
       ...movieCard,
@@ -276,13 +330,14 @@ describe('the layout vocabulary', () => {
   it('retains sanitation inside a section even when the outer block count is unchanged', () => {
     const parsed = GenerativeCardSpecV1Schema.parse({
       ...flightCard,
+      facts: flightFacts.filter((fact) => ['gate', 'seat', 'board'].includes(fact.id)),
       blocks: [
         {
           type: 'section',
           title: 'Before boarding',
           blocks: [
             { type: 'countdown', dateFact: 'board' },
-            { type: 'metrics', factIds: ['gate', 'seat'] },
+            { type: 'metrics', factIds: ['gate', 'seat', 'board'] },
           ],
         },
       ],
@@ -291,7 +346,7 @@ describe('the layout vocabulary', () => {
       {
         type: 'section',
         title: 'Before boarding',
-        blocks: [{ type: 'metrics', factIds: ['gate', 'seat'] }],
+        blocks: [{ type: 'metrics', factIds: ['gate', 'seat', 'board'] }],
       },
     ]);
   });
@@ -331,13 +386,14 @@ describe('the layout vocabulary', () => {
   it('drops a countdown to a time with no zone and keeps the rest of the card', () => {
     const parsed = GenerativeCardSpecV1Schema.parse({
       ...flightCard,
+      facts: flightFacts.filter((fact) => ['gate', 'seat', 'board'].includes(fact.id)),
       blocks: [
         { type: 'countdown', dateFact: 'board' },
-        { type: 'metrics', factIds: ['gate', 'seat'] },
+        { type: 'metrics', factIds: ['gate', 'seat', 'board'] },
       ],
     });
     expect(validateGroundedCard(parsed, flightEvidence)?.blocks).toEqual([
-      { type: 'metrics', factIds: ['gate', 'seat'] },
+      { type: 'metrics', factIds: ['gate', 'seat', 'board'] },
     ]);
   });
 
@@ -370,7 +426,7 @@ describe('the layout vocabulary', () => {
           { id: 'pct', label: 'Battery', value: '76%', source: 'x' },
           { id: 'over', label: 'Upload', value: '140%', source: 'x' },
         ],
-        blocks: [block, { type: 'metrics', factIds: ['done', 'total'] }],
+        blocks: [block, { type: 'metrics', factIds: ['done', 'total', 'pct', 'over'] }],
       });
     const kept = (block: object) => validateGroundedCard(card(block), corpus)?.blocks.length;
     expect(kept({ type: 'progress', valueFact: 'done', totalFact: 'total' })).toBe(2);
@@ -393,7 +449,13 @@ describe('actions the phone performs', () => {
   const withActions = (actions: object[]) =>
     GenerativeCardSpecV1Schema.parse({
       ...flightCard,
-      blocks: [{ type: 'metrics', factIds: ['gate', 'seat'] }],
+      facts: flightFacts.filter((fact) =>
+        ['from', 'dep', 'board', 'gate', 'seat'].includes(fact.id),
+      ),
+      blocks: [
+        { type: 'metrics', factIds: ['gate', 'seat', 'board'] },
+        { type: 'facts', factIds: ['from', 'dep'] },
+      ],
       actions,
     });
 
@@ -419,13 +481,15 @@ describe('actions the phone performs', () => {
     ]);
     const validated = validateGroundedCard(card, flightEvidence);
     expect(validated?.actions).toEqual([]);
-    expect(validated?.blocks).toHaveLength(1);
+    expect(validated?.blocks).toHaveLength(2);
   });
 
   it('never routes to a secret, and still refuses an invented reference', () => {
     const secret = GenerativeCardSpecV1Schema.parse({
       ...withActions([{ id: 'go', type: 'directions', label: 'Directions', factId: 'from' }]),
-      facts: flightFacts.map((fact) => (fact.id === 'from' ? { ...fact, sensitive: true } : fact)),
+      facts: flightFacts
+        .filter((fact) => ['from', 'dep', 'board', 'gate', 'seat'].includes(fact.id))
+        .map((fact) => (fact.id === 'from' ? { ...fact, sensitive: true } : fact)),
     });
     expect(validateGroundedCard(secret, flightEvidence)?.actions).toEqual([]);
     const dangling = withActions([

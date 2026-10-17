@@ -145,14 +145,18 @@ export function realtimeCostUsd(usage: RealtimeUsage, rates: ResolvedVoiceModel[
     usage.outputTextTokens * rates.textOutputPerMTok;
   const transcription =
     (usage.transcriptionInputAudioMilliseconds * (rates.transcriptionUsdPerMinute ?? 0)) / 60_000;
-  return (modelTokens + transcription) / 1_000_000;
+  // Token rates are quoted per million tokens; transcription is already USD.
+  return modelTokens / 1_000_000 + transcription;
 }
 
 /**
  * A deliberately high per-minute estimate for the budget hold. Realtime APIs
  * re-bill the whole conversation on every turn, so input grows with call
- * length; 6k input and 1.5k output tokens a minute covers a busy call.
+ * length; 6k input and 1.5k output tokens a minute covers a busy call. Add
+ * separately priced transcription at its frozen per-minute rate.
  */
 export function realtimeEstimatePerMinuteUsd(rates: ResolvedVoiceModel['rates']): number {
-  return (6_000 * rates.audioInputPerMTok + 1_500 * rates.audioOutputPerMTok) / 1_000_000;
+  const modelEstimate =
+    (6_000 * rates.audioInputPerMTok + 1_500 * rates.audioOutputPerMTok) / 1_000_000;
+  return modelEstimate + (rates.transcriptionUsdPerMinute ?? 0);
 }

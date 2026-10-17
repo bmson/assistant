@@ -412,7 +412,11 @@ beforeEach(() => {
   core.reserveCost.mockResolvedValue({ ok: true, reservationId: 'res-1' });
 });
 
-function dialDeps(calls: CallSessionRepository, dialer: VoiceDialer) {
+function dialDeps(
+  calls: CallSessionRepository,
+  dialer: VoiceDialer,
+  voiceRates: ResolvedVoiceModel['rates'] = rates,
+) {
   return {
     config: {
       PUBLIC_URL: 'https://agent.example.run.app',
@@ -426,11 +430,11 @@ function dialDeps(calls: CallSessionRepository, dialer: VoiceDialer) {
     ownerId: async () => 'agent-1',
     voiceModel: async () => ({
       id: 'openai:gpt-realtime-2.1',
-      route: voiceRoute,
+      route: { ...voiceRoute, rates: voiceRates },
       resolved: {
         provider: {} as never,
         model: 'gpt-realtime-2.1',
-        rates,
+        rates: voiceRates,
       } satisfies ResolvedVoiceModel,
     }),
   };
@@ -457,12 +461,19 @@ describe('placing a call', () => {
   it('holds the worst-case cost, records the session, and dials with the fixed disclosure', async () => {
     const calls = memoryCalls();
     const dialer = fakeDialer();
-    const result = await startCall(dialDeps(calls, dialer), toolInput());
+    const ratesWithTranscription = {
+      ...rates,
+      transcriptionModel: 'gpt-live-transcribe',
+      transcriptionUsdPerMinute: 0.017,
+    };
+    const result = await startCall(dialDeps(calls, dialer, ratesWithTranscription), toolInput());
     expect(result).toEqual({ callSid: `CA${'a'.repeat(32)}` });
 
     // 8 minutes (the installation cap beats the brief's 10) of line + model.
     const reservation = core.reserveCost.mock.calls[0]?.[1] as { estimatedUsd: number } | undefined;
-    expect(reservation?.estimatedUsd).toBeCloseTo(8 * (0.014 + (6000 * 32 + 1500 * 64) / 1e6));
+    expect(reservation?.estimatedUsd).toBeCloseTo(
+      8 * (0.014 + (6000 * 32 + 1500 * 64) / 1e6 + 0.017),
+    );
 
     const session = calls.rows.get('11111111-1111-4111-8111-111111111111');
     expect(session).toMatchObject({

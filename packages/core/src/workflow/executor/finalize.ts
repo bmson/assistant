@@ -1268,6 +1268,7 @@ export async function stageModelFinalResponse(
       blocked: checked.blocked,
       enabled: loadConfig().GENERATIVE_CARDS_ENABLED,
       weeklyCalendarPlan: Boolean(contractOptions.readRequest?.weeklyCalendarPlan),
+      memoryRead: classifiedRead?.kind === 'memory',
     })
   ) {
     const sourceText = refreshCardId

@@ -190,7 +190,6 @@ describe('historical conversation read finalization', () => {
       {
         selections: [{ sourceKey: `message:${historicalMessages[0]?.id}`, quote: ownerCorrection }],
       },
-      { decision: 'publish' },
     ];
     const selectorPrompts: string[] = [];
     const router = {
@@ -245,17 +244,21 @@ describe('historical conversation read finalization', () => {
     expect(selectorPrompts[0]).toContain(assistantClaim);
     expect(dispatch).not.toHaveBeenCalled();
     expect(router.step).not.toHaveBeenCalled();
-    expect(router.object).toHaveBeenCalledTimes(2);
+    expect(router.object).toHaveBeenCalledTimes(1);
 
     const persisted = await db.query.messages.findMany({
       where: eq(messages.taskId, currentTaskId),
       orderBy: (table, { asc }) => [asc(table.createdAt)],
     });
-    const finalText = persisted.find((message) => message.role === 'assistant')?.text ?? '';
+    const finalMessage = persisted.find((message) => message.role === 'assistant');
+    const finalText = finalMessage?.text ?? '';
     expect(finalText).toContain(ownerCorrection);
     expect(finalText).toContain('Recorded owner message');
     expect(finalText).not.toContain(assistantClaim);
     expect(finalText).not.toContain('TEST-DO-NOT-REPEAT');
+    expect(finalMessage?.parts).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'data-card' })]),
+    );
 
     const [completed] = await db
       .select({ status: tasks.status })
@@ -426,7 +429,6 @@ describe('historical conversation read finalization', () => {
           { sourceKey: `message:${historicalMessages[1]?.id}`, quote: assistantClaim },
         ],
       },
-      { decision: 'publish' },
     ];
     const selectorPrompts: string[] = [];
     const router = {
@@ -484,17 +486,21 @@ describe('historical conversation read finalization', () => {
     expect(selectorPrompts[0]).toContain(`message:${historicalMessages[0]?.id}`);
     expect(dispatch).not.toHaveBeenCalled();
     expect(router.step).not.toHaveBeenCalled();
-    expect(router.object).toHaveBeenCalledTimes(2);
+    expect(router.object).toHaveBeenCalledTimes(1);
 
     const persisted = await db.query.messages.findMany({
       where: eq(messages.taskId, currentTaskId),
       orderBy: (table, { asc }) => [asc(table.createdAt)],
     });
-    const finalText = persisted.find((message) => message.role === 'assistant')?.text ?? '';
+    const finalMessage = persisted.find((message) => message.role === 'assistant');
+    const finalText = finalMessage?.text ?? '';
     expect(finalText).toContain(ownerCorrection);
     expect(finalText).toContain('Recorded owner message');
     expect(finalText).toContain(assistantClaim);
     expect(finalText).not.toContain('TEST-DO-NOT-REPEAT');
+    expect(finalMessage?.parts).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'data-card' })]),
+    );
 
     const [completed] = await db
       .select({ status: tasks.status })

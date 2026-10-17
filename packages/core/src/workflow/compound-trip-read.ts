@@ -4454,6 +4454,9 @@ export function compoundTripReadProjection(
   const bookingEnd = sourceGroups
     .find((group) => group.order === 'second')
     ?.legs.at(-1)?.arrivalDate;
+  const bookingStart =
+    sourceGroups.find((group) => group.order === 'first')?.legs[0]?.departureDate ??
+    bookedTransfer?.group.legs[0]?.departureDate;
   const currentBooking =
     bookedArrivalDate &&
     bookedArrivalDate < (requestCivilDate(request, request.timeWindow?.timeMin) ?? '');
@@ -4489,7 +4492,7 @@ export function compoundTripReadProjection(
     : currentTripReturn?.segment
       ? `Current-trip return booking: ${currentTripReturn.segment.departureDate}. A new outbound trip is not verified.`
       : currentBooking
-        ? `Booked dates ${bookedTransfer?.group.legs[0]?.departureDate}–${bookingEnd ?? 'end unknown'}; later departure ${bookingReturn ?? 'unverified'}. A new outbound trip is not verified.`
+        ? `Booked dates ${bookingStart ?? 'start unknown'}–${bookingEnd ?? 'end unknown'}; later departure ${bookingReturn ?? 'unverified'}. A new outbound trip is not verified.`
         : bookedTransfer
           ? `Booking candidate: ${bookedTransfer.group.legs[0]?.departureDate}–${bookingReturn}. I could not verify this as the next outbound trip.`
           : 'I could not identify one verified next trip. These checked records remain candidates.';
@@ -4688,8 +4691,9 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
       /* The answer-first summary carries next-trip uncertainty. */
     } else if (/map destination/i.test(gap))
       unknowns.add('Map destination is not verified as the hotel entrance.');
-    else if (/hotel|stay dates|lodging/i.test(gap))
-      unknowns.add('Hotel selection, stay details or flight association remain unverified.');
+    // Preserve the actual missing field or association. A separately verified
+    // stay must not become an unknown reservation merely because no flight links it.
+    else if (/hotel|stay dates|lodging/i.test(gap)) unknowns.add(gap);
     else if (
       /driving route|public.transport|taxi|route comparison|route endpoints|source to inspect|source results/i.test(
         gap,
@@ -5108,6 +5112,20 @@ export function upcomingFlightReadProjection(
         ];
       })()
     : summary;
+  // An already-started calendar event cannot identify the next future flight,
+  // but its booking-reference conflict remains relevant evidence for the owner.
+  const otherCalendarNotes = !selectedFlight
+    ? [
+        ...new Set(
+          bookedCalendarDifferences(
+            sourceGroups,
+            trip.calendarRows,
+            threadSourceLinks(trip.readThreads),
+            true,
+          ).filter((note) => !observedCalendarNotes.includes(note)),
+        ),
+      ]
+    : [];
   return {
     calendarComplete: trip.calendarComplete,
     calendarPrefixCompleteThroughCandidate,
@@ -5124,6 +5142,11 @@ export function upcomingFlightReadProjection(
       compactSummary.length > 0
         ? compactSummary.join('\n\n')
         : 'I could not verify a dated flight from the checked sources.',
+      ...(otherCalendarNotes.length
+        ? [
+            `Calendar vs booking (next-flight identity unverified): ${otherCalendarNotes.slice(0, 4).join(' ')}${otherCalendarNotes.length > 4 ? ` ${otherCalendarNotes.length - 4} additional comparisons omitted from this brief.` : ''}`,
+          ]
+        : []),
       ...gaps.map((gap) => `Needs confirmation: ${gap}`),
     ].join('\n\n'),
   };
