@@ -151,6 +151,137 @@ const BACKGROUND_OBJECTS = 'mission|task|watch(?:er|es)?|monitor(?:ing)?|tracker
 
 const FIRST_PERSON_PREFIX = String.raw`\b(?:i|we|the assistant)(?:['’]ve\s+|\s+(?:(?:have|has|had|just|already|successfully|now|am|are|was|were)\s+)*)`;
 
+type ClaimActor = 'assistant' | 'source';
+
+/** Only explicit actors relax a completion guard; times and instruments do not. */
+function explicitClaimActor(value: string): ClaimActor | undefined {
+  const actor = value.trim();
+  const members = actor.split(/,\s*(?:and\s+)?|\s+(?:and|&|(?:together\s+|along\s+)?with)\s+/i);
+  if (members.length > 1) {
+    const actors = members.map(explicitClaimActor);
+    if (actors.includes('assistant')) return 'assistant';
+    return actors.every((entry) => entry === 'source') ? 'source' : undefined;
+  }
+  if (/^(?:i|we|me|us|(?:(?:the|your|my|our|this) )?assistant)$/i.test(actor)) return 'assistant';
+  if (/^(?:he|she|they|him|her|them|you)$/i.test(actor)) return 'source';
+  if (
+    /^(?:the|your|their|her|his) (?:[a-z]+\s+){0,2}(?:manager|colleague|sender|organizer|owner|provider|team|company|airline)$/i.test(
+      actor,
+    )
+  )
+    return 'source';
+  // Capitalized names are intentionally narrow: unknown lower-case phrases
+  // still need evidence, and temporal/instrument phrases never establish actors.
+  if (
+    /^(?:today|tomorrow|yesterday|noon|midnight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december|email|mail|sms|phone)\b/i.test(
+      actor,
+    ) ||
+    /^(?:the|a|an|this|that|these|those|my|our|your|his|her|their|its)\b/i.test(actor)
+  )
+    return undefined;
+  return /^[\p{Lu}][\p{L}\p{N}'’-]*(?:\s+[\p{Lu}][\p{L}\p{N}'’-]*){0,3}$/u.test(actor)
+    ? 'source'
+    : undefined;
+}
+
+function passiveClaimActor(after: string): ClaimActor | undefined {
+  const agent = /^\s+by\s+([^.!?;:\n]+)/i.exec(after)?.[1];
+  if (!agent) return undefined;
+  return explicitClaimActor(agent.split(/\s+(?:for|at|to|on|using|after|before|in)\s+/i)[0] ?? '');
+}
+
+function sourcePossession(before: string): boolean {
+  if (/\b(?:assistant|my|our)['’]s\s*$/i.test(before)) return false;
+  return /\b(?:his|her|their|its|[\p{L}]+['’]s)\s*$/iu.test(before);
+}
+
+const COMPLETED_CLAUSE_VERB = '[a-z]+ed|sent|wrote|read|made|found|put|set|went';
+const ASSISTANT_AGENCY = new RegExp(
+  String.raw`\b(?:i|we|(?:(?:the|your|my|our|this)\s+)?assistant)(?:['’]ve\s+|\s+(?:(?:have|has|had|just|already|also|now|successfully)\s+)*)(?:${COMPLETED_CLAUSE_VERB})\b`,
+  'i',
+);
+
+function hasUnattributedPassiveAction(text: string): boolean {
+  const passive = new RegExp(
+    String.raw`\b(?:${COMPLETED_CLAUSE_VERB})\b[^.!?;\n]{0,40}?\s+by\b`,
+    'gi',
+  );
+  // Consume only through the by-marker so an earlier source action cannot
+  // swallow a second "shared by me" (or an unresolved actor) in the same line.
+  const actions = [...text.matchAll(passive)];
+  return actions.some((match, index) => {
+    const next = actions[index + 1];
+    const tail = text.slice(match.index + match[0].length, next?.index);
+    const agent = next ? tail.replace(/[,\s]*(?:\b(?:and|but|then|also)\s*)*$/i, '') : tail;
+    return passiveClaimActor(` by${agent}`) !== 'source';
+  });
+}
+
+function completedClauseSubject(clause: string): string | undefined {
+  return new RegExp(
+    String.raw`^\s*(?:[-*•]\s*)?(.{1,80}?)\s+(?:(?:has|have|had|just|already|also|now|successfully)\s+)*(?:${COMPLETED_CLAUSE_VERB})\b`,
+    'i',
+  ).exec(clause)?.[1];
+}
+
+function completedClauseActor(clause: string): ClaimActor | undefined {
+  const subject = completedClauseSubject(clause);
+  // Object pronouns can be passive agents ("by her"), but cannot establish an
+  // active subject in "her configured bot ..."; configured is an adjective.
+  if (subject && /^(?:him|her|them)$/i.test(subject)) return undefined;
+  return subject ? explicitClaimActor(subject) : undefined;
+}
+
+function crossesClaimActor(text: string): boolean {
+  return text
+    .split(/,\s*|\b(?:and|but|then|also)\s+/i)
+    .slice(1)
+    .some((clause) => completedClauseActor(clause) !== undefined);
+}
+
+function inheritedSourceActor(text: string, match: RegExpMatchArray): boolean {
+  // A sentence/semicolon/newline starts a new implicit assistant recap. Only
+  // conjunctions and commas can inherit the preceding explicit source actor.
+  if (/^[.!?;:—\n]/.test(match[0])) return false;
+  const prefix =
+    text
+      .slice(0, match.index)
+      .split(/[.!?;:—\n]/)
+      .at(-1) ?? '';
+  if (/\b(?:i|we|assistant)\b/i.test(prefix)) return false;
+  // An explicit later subject starts its own scope, including subjects we do
+  // not recognize. Never lend Mira's actor to "the bot reviewed ... and sent".
+  if (
+    prefix
+      .split(/,\s*|\b(?:and|but|then|also)\s+/i)
+      .slice(1)
+      .some((clause) => {
+        const subject = completedClauseSubject(clause);
+        return subject !== undefined && completedClauseActor(clause) !== 'source';
+      })
+  )
+    return false;
+  return completedClauseActor(prefix) === 'source';
+}
+
+function sourceStatusClaim(text: string, match: RegExpMatchArray): boolean {
+  const before = text.slice(Math.max(0, (match.index ?? 0) - 80), match.index);
+  const after = text.slice((match.index ?? 0) + match[0].length);
+  const actor = passiveClaimActor(after);
+  // Neither explicit source attribution nor possession can hide a separate
+  // assistant mutation, including a subsequent "I updated it" claim.
+  if (ASSISTANT_AGENCY.test(text) || hasUnattributedPassiveAction(text)) return false;
+  // Agency outranks possession: "her document was created by me" is still an
+  // assistant action, including when the assistant is one of several actors.
+  // An unresolved by-agent (for example "by me today") cannot fall back to
+  // possession and silently erase the actor explicitly supplied by the claim.
+  if (/^\s+by\b/i.test(after)) return actor === 'source';
+  // Possession alone cannot resolve relative or later pronoun-based writes:
+  // "her document is ready; I updated it" still needs an action receipt. Keep
+  // this exemption narrow rather than guessing what the assistant acted on.
+  return sourcePossession(before);
+}
+
 /**
  * Detect a completed external action while keeping the object connected to
  * its verb. Looking only for "I sent" plus a later "document" caused an
@@ -176,15 +307,15 @@ function completedActionClaim(
   const clauseStart = String.raw`(?:(?:^|\n)\s*(?:[-*•]\s*)?|[.!?;:—]\s*|,\s*(?:(?:and|then|also|but)\s+)?|\b(?:and|then|also|but)\s+)`;
   const leadIn = String.raw`(?:(?:just|already|now|successfully|then)\s+)*`;
   const actionBeforeObject = new RegExp(
-    String.raw`${clauseStart}${leadIn}${action}\b[^.\n]{0,44}\b${article}${object}\b`,
-    'im',
+    String.raw`${clauseStart}${leadIn}${action}\b[^.!?;\n]{0,44}?\b${article}${object}\b`,
+    'gim',
   );
   const firstPersonAction = new RegExp(
-    String.raw`${FIRST_PERSON_PREFIX}(?!(?:not|never)\b)${action}\b[^.\n]{0,80}\b${object}\b`,
-    'i',
+    String.raw`${FIRST_PERSON_PREFIX}(?!(?:not|never)\b)${action}\b[^.!?;\n]{0,80}?\b${object}\b`,
+    'gi',
   );
   const objectStatus = new RegExp(
-    String.raw`\b${article}${object}\b[^.\n]{0,70}\b(?:has|have|was|were|is|are)\s+(?:been\s+)?${status}\b`,
+    String.raw`\b${article}${object}\b(?:(?!\b${object}\b)[^.!?;\n]){0,70}?\b(?:has|have|was|were|is|are)\s+(?:been\s+)?${status}\b`,
     'i',
   );
   const terseObjectStatus = new RegExp(
@@ -192,20 +323,14 @@ function completedActionClaim(
     'im',
   );
   const assistantObjectStatus = [...text.matchAll(new RegExp(objectStatus.source, 'gi'))].some(
-    (match) => {
-      const before = text.slice(Math.max(0, (match.index ?? 0) - 80), match.index);
-      const after = text.slice((match.index ?? 0) + match[0].length);
-      // Explicit source actors do not claim the assistant performed the work.
-      return (
-        !/\b(?:his|her|their|its|[\p{L}]+['’]s)\s*$/iu.test(before) &&
-        !/^\s+by\s+(?!me\b|us\b|the assistant\b)\S+/i.test(after)
-      );
-    },
+    (match) => !sourceStatusClaim(text, match),
   );
 
   return (
-    actionBeforeObject.test(text) ||
-    firstPersonAction.test(text) ||
+    [...text.matchAll(actionBeforeObject)].some(
+      (match) => !inheritedSourceActor(text, match) && !crossesClaimActor(match[0]),
+    ) ||
+    [...text.matchAll(firstPersonAction)].some((match) => !crossesClaimActor(match[0])) ||
     assistantObjectStatus ||
     terseObjectStatus.test(text)
   );
@@ -251,8 +376,13 @@ const progressClaim =
   /\b\d+\s+(?:target\s+)?(?:companies|applications|outreach(?:\s+messages)?|drafts)\s+(?:identified|logged|added|ready|submitted|sent|completed)\b/i;
 const statusNarrative =
   /\b(?:tracker|company list|applications?|outreach|drafts?|target companies)\b[^.\n]{0,80}\b(?:active|live|ready|complete|completed|updated|added|logged|researching|submitted|sent)\b/i;
-const artifactStatus =
-  /\b(?:spreadsheet|sheet|document|doc|deck|slides|file|tracker)\b[^.\n]{0,40}\b(?:ready|live|active|updated|available|shared)\b/i;
+function artifactStatusClaim(text: string, objects: string): boolean {
+  const pattern = new RegExp(
+    String.raw`\b(?:${objects})\b(?:(?!\b(?:${objects})\b)[^.!?;\n]){0,40}?\b(?:ready|live|active|updated|available|shared)\b`,
+    'gi',
+  );
+  return [...text.matchAll(pattern)].some((match) => !sourceStatusClaim(text, match));
+}
 const countedTracker =
   /\b(?:tracker|company list|spreadsheet|sheet)\b[^.\n]{0,70}\b(?:now\s+)?(?:has|have)\s+\d+\b/i;
 // Passive outbound: the subject is the recipient rather than the message, so
@@ -260,7 +390,7 @@ const countedTracker =
 // "they were notified"). Requires the "(has|have|was|were) been <verb>" form so
 // it does not fire on ordinary prose.
 const passiveOutbound =
-  /\b(?:has|have|was|were)\s+been\s+(?:contacted|emailed|texted|messaged|notified|pinged|reached\s+out\s+to)\b/i;
+  /\b(?:has|have|was|were)\s+been\s+(?:contacted|emailed|texted|messaged|notified|pinged|reached\s+out\s+to)\b/gi;
 // An explicit negative status is not a claim that this turn completed an
 // outbound effect. Remove only the negated clause before checking positive
 // completion claims, so another affirmative clause remains evidence-gated.
@@ -721,7 +851,7 @@ function claimedKinds(text: string): ActionKind[] {
       'created|shared|uploaded|downloaded|saved|deleted|updated|published|generated|prepared|exported|added|ready|live|active|available',
     ) ||
     googleArtifactMutationClaim(text, GOOGLE_ARTIFACT_URL.workspace) ||
-    (/\b(?:document|doc|file)\b/.test(lower) && artifactStatus.test(text))
+    artifactStatusClaim(text, 'document|doc|file')
   ) {
     kinds.add('workspace');
   }
@@ -733,7 +863,7 @@ function claimedKinds(text: string): ActionKind[] {
       'created|shared|uploaded|downloaded|saved|deleted|updated|published|generated|prepared|exported|added|ready|live|active|available',
     ) ||
     googleArtifactMutationClaim(text, GOOGLE_ARTIFACT_URL.spreadsheet) ||
-    (/\b(?:spreadsheet|sheet)\b/.test(lower) && artifactStatus.test(text)) ||
+    artifactStatusClaim(text, 'spreadsheet|sheet') ||
     countedTracker.test(text)
   ) {
     kinds.add('spreadsheet');
@@ -746,7 +876,7 @@ function claimedKinds(text: string): ActionKind[] {
       'created|shared|uploaded|downloaded|saved|deleted|updated|published|generated|prepared|exported|added|ready|live|active|available',
     ) ||
     googleArtifactMutationClaim(text, GOOGLE_ARTIFACT_URL.presentation) ||
-    (/\b(?:deck|slides|presentation)\b/.test(lower) && artifactStatus.test(text))
+    artifactStatusClaim(text, 'deck|slides|presentation')
   ) {
     kinds.add('presentation');
   }
@@ -764,7 +894,10 @@ function claimedKinds(text: string): ActionKind[] {
       outboundClaimText,
       'sent|delivered|contacted|emailed|texted|messaged|called|replied|forwarded|reached out to|notified|pinged',
     ) ||
-    passiveOutbound.test(outboundClaimText)
+    [...outboundClaimText.matchAll(passiveOutbound)].some(
+      (match) =>
+        passiveClaimActor(outboundClaimText.slice(match.index + match[0].length)) !== 'source',
+    )
   ) {
     kinds.add('outbound');
   }
