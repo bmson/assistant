@@ -1414,3 +1414,53 @@ describe('independent and combined service cadence qualifiers', () => {
     ).toEqual([]);
   });
 });
+
+describe('concise transport recovery', () => {
+  it('summarizes modes without expanding every route or borrowing cadences', async () => {
+    const url = 'https://transit.example/options';
+    const source = [
+      'Regional trains (FEX, RE20, RB22, RB24, RB32)',
+      'FEX',
+      '- Frequency: every 15 minutes',
+      'RE20',
+      '- Frequency: hourly',
+      'S-Bahn trains (S9, S85)',
+      'S9',
+      '- Frequency: every 20 minutes',
+      'Long-distance transport (IC)',
+      'IC',
+      '- Frequency: every two hours',
+      'Express buses (X7, X71, BER2)',
+      'BER2 (subject to surcharge)',
+      '- Frequency: hourly',
+      'Local buses (163, 164, 171, 263, 743, 744)',
+      '163',
+      '- Continue to the airport with S9.',
+      'Night buses (N7, N7X, N36, N60)',
+      'N7',
+      '- Note: weekends only.',
+    ].join('\n');
+    const result = await verifyFinalOutput({ object: async () => ({ ok: false }) } as never, {
+      taskId: 'compact-mode-summary',
+      request: `Read ${url} and summarize the public transport options in three short bullets with a source link.`,
+      draft: 'FEX and RE20 both run every 3 minutes.',
+      evidence: [
+        {
+          toolName: 'web.fetch',
+          status: 'succeeded',
+          args: { url },
+          result: { status: 200, finalUrl: url, text: source, truncated: false },
+        },
+      ],
+      critical: true,
+    });
+    expect(result.incomplete).toBeUndefined();
+    expect(result.text.split('\n')).toHaveLength(3);
+    expect(result.text).toContain('**Rail:**');
+    expect(result.text).toContain('BER2 (subject to surcharge)');
+    expect(result.text).toContain('transfers and operating limits');
+    expect(result.text).not.toContain('RB22, RB24');
+    expect(result.text).not.toContain('3 minutes');
+    expect(shortBulletFindings('three short bullets', result.text)).toEqual([]);
+  });
+});

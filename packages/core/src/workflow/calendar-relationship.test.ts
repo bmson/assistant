@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { type BriefingCalendarEvent, findConflicts } from './briefing.js';
 import { agendaSection } from './briefing-card.js';
-import { calendarRelationship, calendarRelationshipNote } from './calendar-relationship.js';
+import {
+  calendarArrivalLead,
+  calendarRelationship,
+  calendarRelationshipNote,
+} from './calendar-relationship.js';
 
 const arrival: BriefingCalendarEvent = {
   calendarId: 'family',
@@ -25,6 +29,36 @@ const kickoff: BriefingCalendarEvent = {
   start: '2026-10-07T19:00:00Z',
 };
 describe('advisory calendar relationships', () => {
+  it('reconciles an explicit arrival offset only with a matching street, end and title clock', () => {
+    const early = {
+      ...arrival,
+      summary: 'Albion v Riverside (5:10PM)',
+      location: 'Arena, 100 Example Road, Example City',
+      start: '2026-10-18T23:25:00Z',
+      end: '2026-10-19T01:30:00Z',
+    };
+    const game = {
+      ...kickoff,
+      summary: 'Riverside United Boys',
+      location: 'Arena\n100 Example Road, Example City',
+      description: 'Arrival: 45 minutes in advance',
+      start: '2026-10-18T17:10:00-07:00',
+      end: '2026-10-18T18:30:00-07:00',
+    };
+    expect(calendarArrivalLead(early, game)).toBe(45);
+    for (const changed of [
+      { ...game, description: '' },
+      { ...game, location: '100 Different Road' },
+      { ...game, end: '2026-10-18T19:00:00-07:00' },
+      { ...game, summary: 'Other Teams' },
+      { ...game, calendarId: early.calendarId },
+    ])
+      expect(calendarArrivalLead(early, changed)).toBeUndefined();
+    expect(
+      calendarArrivalLead({ ...early, summary: 'Albion v Riverside (6:10PM)' }, game),
+    ).toBeUndefined();
+    expect(calendarRelationship(early, game)).toBe('unresolved');
+  });
   it('retains arrival and kickoff sources/times with an explicit venue alias statement', () => {
     expect(calendarRelationship(arrival, kickoff)).toBe('compatible_time_roles');
     const conflicts = findConflicts([arrival, kickoff]);

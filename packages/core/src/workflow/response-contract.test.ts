@@ -602,6 +602,57 @@ describe('response execution contract', () => {
     );
   });
 
+  it('composes source-backed early arrival guidance without merging differently titled calendar records', () => {
+    const request = detectPersonalReadRequest(
+      [
+        {
+          role: 'user',
+          content:
+            'What is on my calendar tomorrow? Give me a short practical briefing, including overlaps.',
+        },
+      ],
+      { now: new Date('2026-10-13T18:00:00Z'), timeZone: 'America/Los_Angeles' },
+    );
+    if (!request?.timeWindow) throw new Error('Expected a calendar window');
+    const response = verifiedReadResponse(request, [
+      {
+        toolName: 'calendar.list_events',
+        status: 'succeeded',
+        args: { timeMin: request.timeWindow.timeMin, timeMax: request.timeWindow.timeMax },
+        result: {
+          complete: true,
+          calendarsSearched: ['Family', 'Team'],
+          events: [
+            {
+              calendarId: 'family',
+              eventId: 'arrival-record',
+              calendar: 'Family',
+              summary: 'United v Pacifica (5:10PM)',
+              location: 'Central Field, 1400-1598 Example Drive, City',
+              start: '2026-10-14T16:25:00-07:00',
+              end: '2026-10-14T18:30:00-07:00',
+            },
+            {
+              calendarId: 'team',
+              eventId: 'match-record',
+              calendar: 'Team',
+              summary: 'Team Soccer - Pacifica United',
+              location: '1400-1598 Example Drive, City',
+              description: 'Arrival: 45 minutes in advance',
+              start: '2026-10-14T17:10:00-07:00',
+              end: '2026-10-14T18:30:00-07:00',
+            },
+          ],
+        },
+      },
+    ]);
+    expect(response).toContain('4:25 PM arrival for 5:10 PM start');
+    expect(response).toContain('matching identity is unconfirmed');
+    expect(response).toContain('Family');
+    expect(response).toContain('Team');
+    expect(response).not.toContain('Possible overlap: **United');
+  });
+
   it('clips cross-boundary overlap times to the requested local day', () => {
     const request = {
       kind: 'calendar' as const,

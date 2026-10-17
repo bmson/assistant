@@ -31,6 +31,8 @@ export interface QuestionCase {
   memory?: boolean;
   plan?: 'reply' | 'workflow' | 'clarify';
   missingInfo?: string[];
+  /** Behavioral checks cannot grade open-ended quality; an independent reviewer must use these criteria. */
+  independentRubric?: string[];
   /** Override only inside the rolled-back transaction, never the real owner profile. */
   timeZone?: string;
   at?: string;

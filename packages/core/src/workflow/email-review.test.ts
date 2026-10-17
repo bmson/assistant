@@ -13,6 +13,7 @@ import {
   emailReviewCompleteThread,
   emailReviewCoverage,
   emailReviewNextThreadRead,
+  emailReviewOwnerDecisionSummary,
   emailReviewOwnerMailbox,
   emailReviewPendingAssessmentThreads,
   emailReviewPrompt,
@@ -170,6 +171,96 @@ function required<T>(value: T | undefined, label: string): T {
 }
 
 describe('bounded no-send email review', () => {
+  it('keeps qualification choices, conditional training timing, stakes and source contact in a no-send review', async () => {
+    const id = 'qualification-choice';
+    const source = messages(id);
+    const body =
+      'Are you already a STAR Referee and can we put you down as one for the team? If not please let us know if you are willing to help by becoming one. If a team has no referee the game may be forfeited and the club must pay a fine of $400. Make sure you are done before your Field Training Session. Send proof via email to coach@example.net';
+    source[1] = { ...required(source[1], 'latest'), text: body, sourceLength: body.length };
+    const thread = required(
+      emailReviewCompleteThread(id, 'owner@example.com', [search(id), read(id, source)]),
+      'thread',
+    );
+    const answer = {
+      items: [
+        {
+          ...required(validAnswer(id).items[0], 'answer'),
+          disposition: 'no_reply',
+          recipient: null,
+          draftBody: null,
+          draftSourceMessageIds: [],
+          whyQuote: 'Are you already a STAR Referee and can we put you down as one for the team?',
+          deadline: null,
+        },
+      ],
+    };
+    const result = await generateValidatedEmailReview([thread], async () => ({
+      ok: true,
+      value: answer,
+    }));
+    const item = required(result.answer?.items[0], 'validated draft');
+    expect(item.draftBody).toContain('already a STAR Referee');
+    expect(item.draftBody).toContain('not yet a STAR Referee');
+    expect(item.draftBody).toContain('If you cannot help:');
+    expect(item.deadlineQuote).toBeUndefined();
+    expect(item.deadlineNeedsReview).toBeUndefined();
+    const summary = emailReviewOwnerDecisionSummary(thread);
+    expect(summary.contextQuote).toContain('$400');
+    expect(summary.contactQuote).toContain('coach@example.net');
+    expect(summary.prerequisiteQuote).toBe(
+      'Make sure you are done before your Field Training Session',
+    );
+    const rendered = formatEmailReviewAnswer(
+      [item],
+      emailReviewCoverage([id], [thread], [search(id), read(id, source)]),
+      false,
+    );
+    expect(rendered).toContain('Activity prerequisite:');
+    expect(rendered).not.toContain('Deadline: “before your');
+  });
+
+  it('does not dismiss a wrapped indirect availability request as no-reply', async () => {
+    const id = 'indirect-availability';
+    const source = messages(id);
+    source[1] = {
+      ...required(source[1], 'latest message'),
+      text: 'If you are back we would love to get your updated availability* here\n<https://schedule.example/owner> and we will set up the interviews.',
+      sourceLength: 160,
+    };
+    source[1].sourceLength = source[1].text.length;
+    const thread = required(
+      emailReviewCompleteThread(id, 'owner@example.com', [search(id), read(id, source)]),
+      'thread',
+    );
+    const rejected = {
+      items: [
+        {
+          ...required(validAnswer(id).items[0], 'answer item'),
+          disposition: 'no_reply',
+          recipient: null,
+          draftBody: null,
+          draftSourceMessageIds: [],
+          whyQuote: 'we would love to get your updated availability* here',
+          deadline: null,
+        },
+      ],
+    };
+    expect(emailReviewValidationIssues(rejected, [thread])).toContain(
+      'item_0:direct_latest_request_requires_review_draft',
+    );
+    const result = await generateValidatedEmailReview([thread], async () => ({
+      ok: true,
+      value: rejected,
+    }));
+    expect(result.answer?.items ?? []).toHaveLength(0);
+    expect(result.ownerDecisionThreadIds).toContain(id);
+    expect(emailReviewOwnerDecisionSummary(thread)).toMatchObject({
+      requestQuote: 'we would love to get your updated availability* here',
+      actionUrl: 'https://schedule.example/owner',
+      decisionPrompt: expect.stringContaining('Which times and time zone'),
+    });
+    expect(emailReviewOwnerDecisionSummary(thread).deadlineQuote).toBeUndefined();
+  });
   it('reserves a retry assessment step only for eligible multi-thread reviews', () => {
     expect(emailReviewAssessmentStepReserve({ maxSteps: 12, requestedCount: 5 })).toBe(1);
     expect(emailReviewAssessmentStepReserve({ maxSteps: 14, requestedCount: 5 })).toBe(2);

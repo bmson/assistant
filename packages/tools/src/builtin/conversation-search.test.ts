@@ -54,7 +54,7 @@ const contextMatch: ConversationSearchMatch = {
   origin: 'owner',
   createdAt: new Date('2026-10-16T12:00:00.000Z'),
 };
-function fixture() {
+function fixture(webUrl?: string) {
   const repository = {
     text: vi.fn(async () => [match]),
     semantic: vi.fn(async () => [{ ...match, similarity: 0.95 }]),
@@ -65,6 +65,7 @@ function fixture() {
   const registry = registerPortableConversationSearchTool(new ToolRegistry(), {
     conversations: repository,
     embed,
+    webUrl,
   });
   const entry = registry.get('conversations.search');
   const contextEntry = registry.get('conversations.context');
@@ -81,6 +82,42 @@ function fixture() {
 }
 
 describe('portable conversation search literal mode and semantic compatibility', () => {
+  it('adds configured web links without replacing source identity or trusting a repository URL', async () => {
+    const f = fixture('https://assistant.example');
+    const result = await f.tool.execute(
+      f.tool.inputSchema.parse({ query: 'Cobalt', mode: 'text', limit: 12 }),
+      context,
+    );
+    expect(result).toEqual({
+      mode: 'text',
+      matches: [
+        {
+          ...match,
+          sourceUrl: `https://assistant.example/chat/${match.conversationId}#message-${match.messageId}`,
+        },
+      ],
+    });
+    const contextResult = await f.contextTool.execute(
+      f.contextTool.inputSchema.parse({ anchors: [contextAnchor] }),
+      context,
+    );
+    expect(contextResult).toMatchObject({
+      matches: [
+        {
+          ...contextMatch,
+          sourceUrl: `https://assistant.example/chat/${contextMatch.conversationId}#message-${contextMatch.messageId}`,
+        },
+      ],
+    });
+    const invalid = fixture('javascript:alert(1)');
+    expect(
+      await invalid.tool.execute(
+        invalid.tool.inputSchema.parse({ query: 'Cobalt', mode: 'text' }),
+        context,
+      ),
+    ).toEqual({ mode: 'text', matches: [match] });
+  });
+
   it('runs explicit text search without embeddings, preserving exact source and authenticated scope', async () => {
     const f = fixture();
     const args = f.tool.inputSchema.parse({

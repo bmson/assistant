@@ -1624,7 +1624,7 @@ describe('compound trip read projection', () => {
     expect(projection.calendarCandidate).toBeUndefined();
     expect(projection.flight).toBeUndefined();
     expect(projection.text).not.toContain('Flight to Berlin');
-    expect(projection.text).toContain('could not identify a dated future flight candidate');
+    expect(projection.text).toContain('No future flight could be verified');
   });
 
   it('does not choose between calendar flight candidates with the same departure instant', () => {
@@ -5964,7 +5964,7 @@ San Francisco (SFO-San Francisco Intl.)`;
       'no explicit time-zone offset',
     );
   });
-  it('reads a direct upcoming-flight purchase within the existing two-thread flight-only cap', () => {
+  it('keeps a supplier purchase and a confirmation inside the three-thread flight-only cap', () => {
     const read = detectPersonalReadRequest([{ role: 'user', content: 'What is my next flight?' }], {
       now: new Date('2026-10-16T12:00:00.000Z'),
       timeZone: 'America/Los_Angeles',
@@ -6026,9 +6026,10 @@ San Francisco (SFO-San Francisco Intl.)`;
     expect(readInputs.map((input) => input.threadId)).toEqual([
       'older-complete-itinerary',
       'recent-flight-purchase',
+      'older-confirmation',
     ]);
-    expect(readInputs).toHaveLength(2);
-    expect(new Set(readInputs.map((input) => input.threadId)).size).toBe(2);
+    expect(readInputs).toHaveLength(3);
+    expect(new Set(readInputs.map((input) => input.threadId)).size).toBe(3);
     expect(readInputs.map((input) => input.threadId)).not.toContain('unrelated-purchase');
     expect(readInputs.map((input) => input.threadId)).not.toContain('second-flight-purchase');
     expect(compoundTripThreadIdsToRead(evidence, read)).not.toContain('flight-newsletter');
@@ -7252,4 +7253,44 @@ describe('forwarded booked itinerary and rendered hotel source', () => {
     expect(result.webQuery).toBeUndefined();
     expect(result.blocked).toBe(true);
   });
+});
+
+describe('trip source recovery quality', () => {
+  it.each(['', 'Address: '])(
+    'does not turn a booking-company footer street into a hotel destination (%s)',
+    (label) => {
+      const read = request();
+      const source = bookingEmailEvidence({
+        hotelBody: `Reservation confirmed: Hotel Linden, Berlin.\nDates: October 17–19, 2026.\nGuest information follows.\nReservation terms apply.\nContact your booking company for help.\nCopyright Example Travel Company\n${label}6011 Example Avenue, Bellevue`,
+      });
+      const result = compoundTripReadProjection(read, [
+        completeCalendarEvents([calendarFlight()]),
+        ...source,
+      ]);
+      expect(result.hotel?.hotelName).toBe('Hotel Linden');
+      expect(result.hotel?.address).toBeUndefined();
+      expect(result.routeDestination ?? '').not.toContain('Bellevue');
+      expect(renderCompoundTripReadResponse(result)).not.toContain('6011 Example');
+    },
+  );
+});
+
+it('keeps a named accommodation observation while refusing an unrelated corporate address', () => {
+  const read = request();
+  const sources = bookingEmailEvidence({
+    hotelBody:
+      'Safety for the neighborhood around your accommodations:\n\nGarden House, a Sample Hotel, Example City, CA: https://itinerary.example/record\nNighttime Safety Score: 32 / 100\nTravel company contact information\nCorporate offices\n6011 Example Avenue, Bellevue',
+  });
+  const result = compoundTripReadProjection(read, [completeCalendarEvents([]), ...sources]);
+  const hotel = result.presentation.hotels.find((candidate) =>
+    candidate.hotelName?.includes('Garden House'),
+  );
+  expect(hotel).toMatchObject({
+    hotelName: 'Garden House, a Sample Hotel',
+    city: 'Example City',
+    association: 'unlinked',
+  });
+  expect(hotel?.address).toBeUndefined();
+  expect(hotel?.checkIn).toBeUndefined();
+  expect(result.routeDestination).toBeUndefined();
 });

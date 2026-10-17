@@ -24,8 +24,22 @@ export function registerPortableConversationSearchTool(
       embeddingSpaceKey: string;
     }>;
     conversations: ConversationSearchRepository;
+    webUrl?: string;
   },
 ): ToolRegistry {
+  const sourceLink = <T extends { conversationId: string; messageId: string }>(match: T) => {
+    if (!deps.webUrl) return match;
+    try {
+      const url = new URL(
+        `/chat/${encodeURIComponent(match.conversationId)}#message-${encodeURIComponent(match.messageId)}`,
+        deps.webUrl,
+      );
+      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) return match;
+      return { ...match, sourceUrl: url.href };
+    } catch {
+      return match;
+    }
+  };
   register(
     registry,
     {
@@ -46,7 +60,7 @@ export function registerPortableConversationSearchTool(
             limit: args.limit,
             ...(ctx.conversationId ? { currentConversationId: ctx.conversationId } : {}),
           });
-          return { matches, mode: 'text' };
+          return { matches: matches.map(sourceLink), mode: 'text' };
         }
         const result = await deps.embed([args.query]);
         if (result.embeddings.length !== 1)
@@ -62,14 +76,14 @@ export function registerPortableConversationSearchTool(
           limit: args.limit,
           ...(ctx.conversationId ? { currentConversationId: ctx.conversationId } : {}),
         });
-        if (semantic.length > 0) return { matches: semantic, mode: 'semantic' };
+        if (semantic.length > 0) return { matches: semantic.map(sourceLink), mode: 'semantic' };
         const text = await deps.conversations.text({
           agentId: ctx.agentId,
           query: args.query,
           limit: args.limit,
           ...(ctx.conversationId ? { currentConversationId: ctx.conversationId } : {}),
         });
-        return { matches: text, mode: 'text' };
+        return { matches: text.map(sourceLink), mode: 'text' };
       },
     },
     { confidentialRead: true, returnsUntrustedContent: true },
@@ -184,7 +198,7 @@ export function registerPortableConversationSearchTool(
         }
         const output = {
           mode: 'context',
-          matches: result.matches,
+          matches: result.matches.map(sourceLink),
           anchors,
           window: { before: 3, after: 1 },
           observationGeneration: result.observationGeneration,

@@ -58,19 +58,22 @@ function selectedSourceGroups(
   }> = [];
   const byIdentity = new Map<string, (typeof groups)[number]>();
   for (const { item, source } of chosen) {
+    const sourceDate = /; (\d{4}-\d{2}-\d{2})$/.exec(source.provenance)?.[1];
+    const citation = source.contextId
+      ? `[Conversation${sourceDate ? ` · ${sourceDate}` : ''}](${source.url ?? `/chat/${encodeURIComponent(source.contextId)}#message-${encodeURIComponent(source.key.slice('message:'.length))}`})`
+      : source.provenance;
     // Only collapse verbatim repeats from the same speaker. Keep every distinct
     // message citation, and never merge an owner statement with an assistant claim.
     const identity = JSON.stringify([source.speaker, item.quote]);
     const existing = byIdentity.get(identity);
     if (existing) {
-      if (!existing.provenances.includes(source.provenance))
-        existing.provenances.push(source.provenance);
+      if (!existing.provenances.includes(citation)) existing.provenances.push(citation);
       continue;
     }
     const group = {
       quote: item.quote,
       speaker: source.speaker,
-      provenances: [source.provenance],
+      provenances: [citation],
     };
     byIdentity.set(identity, group);
     groups.push(group);
@@ -174,6 +177,23 @@ type MemoryReadSource = {
   subjectContactId?: string;
 };
 
+function conversationSourceUrl(match: Record<string, unknown>): string | undefined {
+  const path = `/chat/${encodeURIComponent(text(match.conversationId))}`;
+  const hash = `#message-${encodeURIComponent(text(match.messageId))}`;
+  try {
+    const url = new URL(text(match.sourceUrl));
+    return ['https:', 'http:'].includes(url.protocol) &&
+      !url.username &&
+      !url.password &&
+      url.pathname === path &&
+      url.hash === hash
+      ? url.href
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const birthdayMonths = [
   'January',
   'February',
@@ -257,6 +277,7 @@ export function memoryReadSources(
                   : 'Historical message (authorship not confirmed)',
             provenance: `conversation ${text(match.conversationId)}; message ${text(match.messageId)}${text(match.createdAt) ? `; ${text(match.createdAt).slice(0, 10)}` : ''}`,
             contextId: text(match.conversationId),
+            url: conversationSourceUrl(match),
           },
           pass,
         );
@@ -302,6 +323,7 @@ export function memoryReadSources(
                   : 'Historical message (authorship not confirmed)',
             provenance: `conversation ${text(match.conversationId)}; message ${text(match.messageId)}${text(match.createdAt) ? `; ${text(match.createdAt).slice(0, 10)}` : ''}`,
             contextId: text(match.conversationId),
+            url: conversationSourceUrl(match),
           },
           pass,
         );

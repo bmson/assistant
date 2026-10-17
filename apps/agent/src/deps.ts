@@ -878,6 +878,7 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
     new FirestoreContactLookupRepository(store, config.FIRESTORE_AGENT_ID),
   );
   registerPortableConversationSearchTool(registry, {
+    webUrl: config.WEB_URL || undefined,
     embed: async (texts) => ({
       embeddings: await recordEmbed(texts),
       embeddingSpaceKey: embeddingSpaceIdentityKey(embeddingSpace),

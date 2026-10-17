@@ -11,6 +11,7 @@ import {
   APPLICATION_CASES,
   ASSISTANT_SCENARIOS,
   assertReplayDatabaseUrl,
+  OPEN_ENDED_SCENARIOS,
   QUESTION_CASES,
   type QuestionResult,
   runQuestion,
@@ -34,7 +35,7 @@ const { values } = parseArgs({
 });
 if (values.help) {
   console.log(
-    'pnpm eval:questions [--suite audit|assistant|all] [--live --model-config <snapshot.json>] [--cases id,id] [--budget 5] [--output <directory>] [--database <loopback _test URL>]\nDefaults to scripted audit replay. The assistant suite exercises interaction, approval and recovery scenarios. Live mode uses the existing OpenRouter credential and captured production model roles. All external tools are intercepted; all task state rolls back.',
+    'pnpm eval:questions [--suite audit|assistant|open-ended|all] [--live --model-config <snapshot.json>] [--cases id,id] [--budget 5] [--output <directory>] [--database <loopback _test URL>]\nDefaults to scripted audit replay. The assistant suite exercises interaction, approval and recovery scenarios. The open-ended suite requires --live and independent quality scoring; automated checks alone do not establish quality. Live mode uses the existing OpenRouter credential and captured production model roles. All external tools are intercepted; all task state rolls back.',
   );
   process.exit(0);
 }
@@ -46,14 +47,18 @@ const databaseUrl = target.databaseUrl;
 const maxSpend = Number(values.budget);
 if (!Number.isFinite(maxSpend) || maxSpend < 0.1 || maxSpend > 20)
   throw new Error('--budget must be $0.10–$20');
-if (!['audit', 'assistant', 'all'].includes(values.suite ?? ''))
-  throw new Error('--suite must be audit, assistant or all');
+if (!['audit', 'assistant', 'open-ended', 'all'].includes(values.suite ?? ''))
+  throw new Error('--suite must be audit, assistant, open-ended or all');
+if (values.suite === 'open-ended' && !values.live)
+  throw new Error('The open-ended suite requires --live; scripted answers do not measure quality');
 const corpus =
-  values.suite === 'assistant'
-    ? ASSISTANT_SCENARIOS
-    : values.suite === 'all'
-      ? [...QUESTION_CASES, ...ASSISTANT_SCENARIOS]
-      : QUESTION_CASES;
+  values.suite === 'open-ended'
+    ? OPEN_ENDED_SCENARIOS
+    : values.suite === 'assistant'
+      ? ASSISTANT_SCENARIOS
+      : values.suite === 'all'
+        ? [...QUESTION_CASES, ...ASSISTANT_SCENARIOS]
+        : QUESTION_CASES;
 const ids = values.cases?.split(',');
 if (ids?.some((id) => !corpus.some((fixture) => fixture.id === id)))
   throw new Error('--cases contains an unknown case ID');
@@ -241,7 +246,7 @@ try {
       mode: 0o600,
     });
     console.log(
-      `${result.failures.length ? 'FAIL' : 'PASS'} ${fixture.id} ${(result.elapsedMs / 1000).toFixed(1)}s $${result.costUsd.toFixed(4)} (${result.approvals} approvals)`,
+      `${result.failures.length ? 'FAIL' : fixture.independentRubric ? 'CHECKS_PASS_QUALITY_PENDING' : 'PASS'} ${fixture.id} ${(result.elapsedMs / 1000).toFixed(1)}s $${result.costUsd.toFixed(4)} (${result.approvals} approvals)`,
     );
   }
 } finally {
@@ -261,6 +266,16 @@ const summary = {
   commit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
   workingTreeDirty: !!execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim(),
   corpusSha256: createHash('sha256').update(JSON.stringify(corpus)).digest('hex'),
+  independentQualityReview: fixtures.some((fixture) => fixture.independentRubric)
+    ? {
+        status: 'pending',
+        scope:
+          'Automated checks cover effects and completion only. No open-ended quality pass is issued.',
+        cases: fixtures
+          .filter((fixture) => fixture.independentRubric)
+          .map((fixture) => ({ id: fixture.id, rubric: fixture.independentRubric })),
+      }
+    : undefined,
   configCapturedAt: snapshot?.capturedAt ?? null,
   executedRecords: [...new Set(results.flatMap((result) => result.records))].sort((a, b) => a - b),
   applicationCoverage: APPLICATION_CASES,
@@ -277,7 +292,7 @@ await writeFile(`${outputDir}/summary.json`, JSON.stringify(summary, null, 2), {
 const rows = results
   .map(
     (result) =>
-      `| ${result.id} | ${result.failures.length ? 'FAIL' : 'PASS'} | ${(result.elapsedMs / 1000).toFixed(1)}s | $${result.costUsd.toFixed(4)} | ${result.approvals} | ${result.failures.join('; ').replaceAll('|', '\\|')} |`,
+      `| ${result.id} | ${result.failures.length ? 'FAIL' : summary.independentQualityReview ? 'Checks pass; quality pending' : 'PASS'} | ${(result.elapsedMs / 1000).toFixed(1)}s | $${result.costUsd.toFixed(4)} | ${result.approvals} | ${result.failures.join('; ').replaceAll('|', '\\|')} |`,
   )
   .join('\n');
 await writeFile(

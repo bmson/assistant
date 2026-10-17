@@ -381,6 +381,38 @@ function groundedTransportBullets(
   if (services.some((service) => !representedIds.has(service.label))) return undefined;
   const normalizedTitles = groups.map((group) => group.title.toLocaleLowerCase());
   if (new Set(normalizedTitles).size !== normalizedTitles.length) return undefined;
+  // A mode overview need not reproduce every route. Avoid turning a short
+  // summary into a catalogue, while leaving route-specific claims with their
+  // full source restrictions in the detailed rendering below.
+  const rail = groups.filter((group) => /\btrains\b|^long.distance transport$/i.test(group.title));
+  const express = groups.filter((group) => /^express buses$/i.test(group.title));
+  const otherBuses = groups.filter(
+    (group) => /\bbuses\b/i.test(group.title) && !express.includes(group),
+  );
+  const overviewUrl = safePublicPageUrl(source.url);
+  if (
+    overviewUrl &&
+    rail.length &&
+    express.length === 1 &&
+    otherBuses.length &&
+    rail.length + express.length + otherBuses.length === groups.length
+  ) {
+    const expressGroup = express[0];
+    const railNames = rail.map((group) =>
+      group.title.replace(/^long.distance transport$/i, 'long-distance transport'),
+    );
+    const overview = [
+      `- **Rail:** ${railNames.join(', ')}.`,
+      `- **Express buses:** ${expressGroup?.entries.join(', ')}.`,
+      `- **Local and night buses:** Check individual routes for transfers and operating limits. [Source](${overviewUrl})`,
+    ].join('\n');
+    if (
+      !shortBulletFindings(request, overview).length &&
+      !requestedWebLinkFindings(request, overview, evidence).length &&
+      !publicWebClaimFindings(overview, evidence).length
+    )
+      return overview;
+  }
   const bullets: string[] = [];
   let groupOffset = 0;
   for (let bulletIndex = 0; bulletIndex < 3; bulletIndex += 1) {
@@ -468,9 +500,9 @@ export function shortBulletFindings(request: string, text: string): string[] {
       (bullet[1] ?? '')
         .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
         .match(/[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*/gu) ?? [];
-    if (words.length > 45)
+    if (words.length > 30)
       findings.push(
-        `Bullet ${index + 1} has ${words.length} words; shorten it to at most 45 words without dropping essential qualifiers.`,
+        `Bullet ${index + 1} has ${words.length} words; shorten it to at most 30 words without dropping essential qualifiers.`,
       );
   }
   return findings;

@@ -213,6 +213,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   const startsRun = previousRole !== message.role;
   return (
     <div
+      id={`message-${message.id}`}
       className={`flex min-w-0 flex-col gap-2 first:mt-0 ${startsRun ? 'mt-7' : 'mt-2'} ${
         isNew ? 'motion-safe:animate-[message-in_220ms_ease-out]' : ''
       }`}

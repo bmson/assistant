@@ -13,7 +13,11 @@ import {
   calendarSourceInterval,
   calendarWindowMembership,
 } from './calendar-read-window.js';
-import { calendarRelationship, calendarRelationshipNote } from './calendar-relationship.js';
+import {
+  calendarArrivalLead,
+  calendarRelationship,
+  calendarRelationshipNote,
+} from './calendar-relationship.js';
 import { safeCalendarSourceUrl, safeVideoMeetingUrl } from './calendar-source-link.js';
 import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
 import type { CompoundTripExtraction } from './compound-trip-extraction.js';
@@ -1819,6 +1823,7 @@ function calendarOverlapSummary(
       : undefined;
   const notes: string[] = [];
   const travelContextNotes: string[] = [];
+  const arrivalNotes: string[] = [];
   const namedPairs: string[] = [];
   for (let index = 0; index < candidates.length; index += 1) {
     const left = candidates[index];
@@ -1852,6 +1857,15 @@ function calendarOverlapSummary(
         travelContextNotes.push(note);
         continue;
       }
+      const arrivalLead = calendarArrivalLead(left.projected, right.projected);
+      if (arrivalLead !== undefined) {
+        const earlier = left.interval.start < right.interval.start ? left : right;
+        const later = earlier === left ? right : left;
+        arrivalNotes.push(
+          `- Arrival guidance: **${compactClock(earlier.interval.start, zone)} arrival for ${compactClock(later.interval.start, zone)} start** — ${later.projected.summary} requests arrival ${arrivalLead} minutes early. The overlapping records may describe one event; both sources are retained and matching identity is unconfirmed.`,
+        );
+        continue;
+      }
       const relationship = calendarRelationship(left.projected, right.projected);
       // Matching arrival/start records and exact duplicate candidates are
       // retained in the agenda, but do not imply a scheduling conflict.
@@ -1877,7 +1891,7 @@ function calendarOverlapSummary(
       );
     }
   }
-  if (notes.length === 0 && travelContextNotes.length === 0)
+  if (notes.length === 0 && travelContextNotes.length === 0 && arrivalNotes.length === 0)
     return [
       complete
         ? 'No unresolved overlaps between timed calendar entries were found in the checked results.'
@@ -1894,7 +1908,7 @@ function calendarOverlapSummary(
       `- Additional ${request.compactCalendarBriefing ? 'overlaps' : 'overlapping pairs'}: ${shownAdditionalPairs.join('; ')}${omitted > 0 ? `; ${omitted.toLocaleString('en-US')} more not listed` : ''}.`,
     );
   }
-  const result = [...shown, ...travelContextNotes.slice(0, 3)];
+  const result = [...shown, ...arrivalNotes.slice(0, 3), ...travelContextNotes.slice(0, 3)];
   if (request.includeCalendarBriefing && result.length > 0)
     result.push(
       request.compactCalendarBriefing

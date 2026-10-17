@@ -142,7 +142,17 @@ export interface EmailReviewCoverage {
   metadataFallback?: boolean;
   searchMailboxMismatch?: boolean;
   unassessedCompleteThreads?: number;
-  ownerDecisionRequiredThreads?: Array<{ threadId: string; subject: string }>;
+  ownerDecisionRequiredThreads?: Array<{
+    threadId: string;
+    subject: string;
+    requestQuote?: string;
+    contextQuote?: string;
+    deadlineQuote?: string;
+    prerequisiteQuote?: string;
+    contactQuote?: string;
+    actionUrl?: string;
+    decisionPrompt?: string;
+  }>;
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -1258,7 +1268,7 @@ function latestMessageNeedsReply(thread: EmailReviewThread): boolean {
     !addressList(latest.to).includes(thread.ownerMailbox)
   )
     return false;
-  const currentBody = latestUnquotedBody(thread) ?? '';
+  const currentBody = (latestUnquotedBody(thread) ?? '').replace(/\s+/g, ' ');
   if (/\bdo not reply to (?:this|the) (?:email|message)\b/i.test(currentBody)) return false;
   const imperativeAvailabilityAsk =
     /\bplease\s+(?:send|share|provide)\s+(?:(?:me|us)\s+)?your\s+(?:availability|schedule)\b/i.test(
@@ -1298,6 +1308,12 @@ function latestMessageNeedsReply(thread: EmailReviewThread): boolean {
     (/\bare you able to\s*\??/i.test(currentBody) &&
       /\b(?:volunteer|sign(?:ed|ing)? up|help|attend|join)\b/i.test(currentBody)) ||
     imperativeAvailabilityAsk ||
+    /\b(?:we|i)\s+(?:would\s+)?(?:love|like|need|want)\s+(?:to\s+(?:get|receive|have)\s+)?your\s+(?:(?:updated|current)\s+)?(?:availability|schedule)\b/i.test(
+      currentBody,
+    ) ||
+    /\bdo you mind\s+(?:providing|sharing|sending)\s+(?:some\s+)?(?:(?:updated|current)\s+)?availability\b/i.test(
+      currentBody,
+    ) ||
     imperativeChoiceReply ||
     imperativeChoiceConfirmation ||
     imperativeReplyWithDeadline ||
@@ -1309,6 +1325,7 @@ function latestMessageNeedsReply(thread: EmailReviewThread): boolean {
 function directReplyRequestQuote(thread: EmailReviewThread): string | undefined {
   const body = latestUnquotedBody(thread) ?? '';
   const patterns = [
+    /\b(?:we|i)\s+(?:would\s+)?(?:love|like|need|want)\s+to\s+(?:get|receive|have)\s+your\s+(?:(?:updated|current)\s+)?(?:availability|schedule)[^.!?\n]{0,100}/i,
     /\b(?:are you|would you|could you|can you)\b[^.!?\n]{0,220}[.!?]?/i,
     /\bplease\s+(?:reply|respond|confirm|approve|review|sign|submit|rsvp|send|share|provide|sign up|volunteer)\b[^.!?\n]{0,220}[.!?]?/i,
     /\bplease let (?:me|us) know\b[^.!?\n]{0,220}[.!?]?/i,
@@ -1330,6 +1347,14 @@ function directReplyDeadlineQuote(thread: EmailReviewThread): string | undefined
     )?.[0];
   if (explicit) return explicit;
   return undefined;
+}
+
+/** A prerequisite for an activity is distinct from a deadline to reply. */
+function directPrerequisiteQuote(thread: EmailReviewThread): string | undefined {
+  const body = latestUnquotedBody(thread) ?? '';
+  return /\b(?:make sure|required|must|need to)\b[^.!?\n]{0,160}\bbefore\s+(?:your|the)\s+[^.!?\n]{2,60}(?:session|appointment|meeting|event)\b/i
+    .exec(body)?.[0]
+    ?.trim();
 }
 
 /** Keep a complete, source-quoted action deadline visible even when no email reply is requested. */
@@ -1354,6 +1379,17 @@ function directActionDeadlineQuote(thread: EmailReviewThread): string | undefine
 
 function directReplyFallbackDraft(thread: EmailReviewThread): string | undefined {
   const body = latestUnquotedBody(thread) ?? '';
+  const qualification =
+    /\bare you already a(?:n)?\s+([^?!\n]{2,60}?)\s+and can we (?:put|list) you\b/i
+      .exec(body)?.[1]
+      ?.trim();
+  if (qualification && /\b(?:willing to help|willing to train|becoming one)\b/i.test(body))
+    return [
+      `If you already have the qualification: “Thanks for checking. I’m already a ${qualification}, and you may list me.”`,
+      `If you are not qualified yet but want to train: “I’m not yet a ${qualification}, but I’m willing to train. Thanks for sharing the training information.”`,
+      'If you cannot help: “Thanks for asking. I’m not available to help.”',
+      'Owner decision required: choose the accurate option, remove the others, and confirm the recipient before sending.',
+    ].join('\n\n');
   const timing = /\b(?:today|tomorrow|tonight)\b/i.exec(body)?.[0];
   const participationAsk =
     /\b(?:are you|could you|would you|can you)\s+(?:(?:be\s+)?(?:able|available|willing|interested)\s+to\s+)?(?:volunteer|sign(?:ed|ing)? up|help|attend|join)\b/i.test(
@@ -1361,7 +1397,7 @@ function directReplyFallbackDraft(thread: EmailReviewThread): string | undefined
     ) ||
     (/\bare you able to\s*\??/i.test(body) &&
       /\b(?:volunteer|sign(?:ed|ing)? up|help|attend|join)\b/i.test(body)) ||
-    /\bplease\s+(?:let me know|confirm)\s+(?:whether|if) you\b[^.!?\n]{0,100}\b(?:can|could|will|are)\b[^.!?\n]{0,60}\b(?:attend|join|help|volunteer|available)\b/i.test(
+    /\bplease\s+(?:let (?:me|us) know|confirm)\s+(?:whether|if) you\b[^.!?\n]{0,100}\b(?:can|could|will|are)\b[^.!?\n]{0,60}\b(?:attend|join|help|volunteer|available)\b/i.test(
       body,
     );
   if (participationAsk) {
@@ -1474,6 +1510,57 @@ function sourceExplicitlyRequiresAlternateReplyRoute(
 
 function isDirectReplyFallbackDraft(thread: EmailReviewThread, draft: string): boolean {
   return directReplyFallbackDraft(thread) === draft;
+}
+
+/** Retain useful source facts when a safe reply still needs an owner decision. */
+export function emailReviewOwnerDecisionSummary(thread: EmailReviewThread) {
+  const body = latestUnquotedBody(thread) ?? '';
+  const requestQuote = directReplyRequestQuote(thread);
+  const deadlineQuote = directReplyDeadlineQuote(thread);
+  const prerequisiteQuote = directPrerequisiteQuote(thread);
+  const contextQuote = body
+    .split(/(?<=[.!?])\s+/)
+    .find(
+      (sentence) =>
+        sentence.length <= 400 &&
+        /\b(?:fine|forfeit(?:ed)?|cancel(?:led|ed)?|reschedul\w*)\b/i.test(sentence),
+    )
+    ?.trim();
+  const availability = /\bavailability\b/i.test(body);
+  const contactQuote = body
+    .split(/\r?\n|(?<=[.!?])\s+/)
+    .find(
+      (line) =>
+        line.length <= 320 &&
+        /\b(?:send|email|contact)\b/i.test(line) &&
+        /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(line),
+    )
+    ?.trim();
+  const candidateUrl = availability
+    ? /\bavailability\b[\s\S]{0,120}?(https:\/\/[^\s<>]+)/i.exec(body)?.[1]
+    : undefined;
+  let actionUrl: string | undefined;
+  if (candidateUrl) {
+    try {
+      const parsed = new URL(candidateUrl);
+      if (!parsed.username && !parsed.password) actionUrl = parsed.href;
+    } catch {
+      /* Keep malformed source links out of the action brief. */
+    }
+  }
+  return {
+    threadId: thread.threadId,
+    subject: thread.subject,
+    ...(requestQuote ? { requestQuote } : {}),
+    ...(contextQuote ? { contextQuote } : {}),
+    ...(deadlineQuote ? { deadlineQuote } : {}),
+    ...(prerequisiteQuote ? { prerequisiteQuote } : {}),
+    ...(contactQuote ? { contactQuote } : {}),
+    ...(actionUrl ? { actionUrl } : {}),
+    decisionPrompt: availability
+      ? 'Which times and time zone can you offer? Use the source’s availability link if provided.'
+      : 'Confirm the answer you want to give before a reply is prepared.',
+  };
 }
 
 function draftRequiresOwnerDecision(thread: EmailReviewThread, draft: string): boolean {
@@ -2386,7 +2473,7 @@ export function formatEmailReviewAnswer(
     );
   if (coverage.unassessedCompleteThreads && coverage.unassessedCompleteThreads > 0)
     coverageNotes.push(
-      `${coverage.unassessedCompleteThreads} selected ${coverage.unassessedCompleteThreads === 1 ? 'thread could' : 'threads could'} not be assessed reliably within the bounded checks; no draft was prepared`,
+      `${coverage.unassessedCompleteThreads} selected ${coverage.unassessedCompleteThreads === 1 ? 'thread could' : 'threads could'} not be assessed reliably within the bounded checks; no draft was prepared for the unassessed ${coverage.unassessedCompleteThreads === 1 ? 'thread listed above' : 'threads listed above'}`,
     );
   if (coverage.ownerDecisionRequiredThreads?.length) {
     lines.push(
@@ -2399,6 +2486,17 @@ export function formatEmailReviewAnswer(
         .slice(0, 160)
         .replace(/[\\`*_{}[\]()<>#+\-=|!]/g, '\\$&');
       lines.push(`**${subject}** — needs your answer before a reply can be drafted.`);
+      if (item.requestQuote) lines.push(`Source asks: “${item.requestQuote}”`);
+      if (item.contextQuote) lines.push(`Source context: “${item.contextQuote}”`);
+      if (item.prerequisiteQuote) lines.push(`Activity prerequisite: “${item.prerequisiteQuote}”`);
+      lines.push(
+        item.deadlineQuote
+          ? `Source timing: “${item.deadlineQuote}”`
+          : 'No explicit reply deadline was verified.',
+      );
+      if (item.decisionPrompt) lines.push(`Next: ${item.decisionPrompt}`);
+      if (item.actionUrl) lines.push(`[Source availability form](${item.actionUrl})`);
+      if (item.contactQuote) lines.push(`Source contact instructions: “${item.contactQuote}”`);
       if (/^[A-Za-z0-9_-]{3,128}$/.test(item.threadId))
         lines.push(
           `[Open the source thread](https://mail.google.com/mail/u/0/#all/${item.threadId})`,
@@ -2437,6 +2535,14 @@ export function formatEmailReviewAnswer(
         : `### ${thread.subject}`,
     );
     lines.push(`Source sender: ${thread.recipient}`);
+    const sourceSummary = emailReviewOwnerDecisionSummary(thread);
+    if (sourceSummary.contextQuote) lines.push(`Source context: “${sourceSummary.contextQuote}”`);
+    if (sourceSummary.contactQuote)
+      lines.push(`Source contact instructions: “${sourceSummary.contactQuote}”`);
+    if (/^(?:no[-_.]?reply|do[-_.]?not[-_.]?reply)@/i.test(thread.recipient))
+      lines.push(
+        'The source sender is a no-reply address; confirm the source’s contact instructions before using a draft.',
+      );
     const rsvpRoute = sourceRsvpRoute(thread);
     if (rsvpRoute) lines.push(`Response route: ${rsvpRoute}`);
     lines.push(
@@ -2450,6 +2556,8 @@ export function formatEmailReviewAnswer(
         : 'Why it matters: This may be a reply request; confirm the quoted text before sending.',
     );
     lines.push(`Source request: “${item.whyQuote}”`);
+    const prerequisiteQuote = directPrerequisiteQuote(thread);
+    if (prerequisiteQuote) lines.push(`Activity prerequisite: “${prerequisiteQuote}”`);
     for (const duplicate of item.duplicateRequestDetails ?? []) {
       lines.push(
         `Additional request in a duplicate reminder: “${duplicate.whyQuote}”${
@@ -2462,23 +2570,28 @@ export function formatEmailReviewAnswer(
         );
     }
     lines.push(
-      item.deadlineNeedsReview
-        ? item.unverifiedDeadlineQuote
-          ? `Possible deadline to verify: “${item.unverifiedDeadlineQuote}”`
-          : 'A deadline could not be verified against the thread, so please check the source before relying on one.'
-        : item.deadlineQuote
-          ? `Deadline: “${item.deadlineQuote}”${
-              /\b(?:today|tomorrow|tonight)\b/i.test(item.deadlineQuote) && item.deadlineSourceDate
-                ? ` (source message dated ${item.deadlineSourceDate}; wording is relative)`
-                : ''
-            }`
-          : 'Deadline: none identified.',
+      prerequisiteQuote && !item.deadlineQuote
+        ? 'No explicit reply deadline was verified; the activity prerequisite above is separate.'
+        : item.deadlineNeedsReview
+          ? item.unverifiedDeadlineQuote
+            ? `Possible deadline to verify: “${item.unverifiedDeadlineQuote}”`
+            : 'A deadline could not be verified against the thread, so please check the source before relying on one.'
+          : item.deadlineQuote
+            ? `Deadline: “${item.deadlineQuote}”${
+                /\b(?:today|tomorrow|tonight)\b/i.test(item.deadlineQuote) &&
+                item.deadlineSourceDate
+                  ? ` (source message dated ${item.deadlineSourceDate}; wording is relative)`
+                  : ''
+              }`
+            : 'Deadline: none identified.',
     );
     const draftBody = item.draftBody as string;
     lines.push(
       isDirectReplyFallbackDraft(thread, draftBody)
-        ? draftBody.includes('If you can help:') || draftBody.includes('If you plan to attend:')
-          ? '**Draft alternatives — choose one and remove the other before sending:**'
+        ? sourceEstablishedConditionalAlternatives(thread, draftBody)
+          ? draftBody.split(/\r?\n/).filter((line) => /^If /i.test(line)).length > 2
+            ? '**Draft alternatives — choose the accurate option and remove the others before sending:**'
+            : '**Draft alternatives — choose one and remove the other before sending:**'
           : '**Draft incomplete — owner decision required before sending:**'
         : '**Draft:**',
     );
