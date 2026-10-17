@@ -1053,6 +1053,9 @@ export async function handleChatTurn(
         reported &&
         /\b(?:fix|repair|investigate|debug|propose|request)\b[^.!?\n]{0,160}\b(?:code|codebase|repository|github|pull request|PR)\b|\b(?:create|open|make)\b[^.!?\n]{0,100}\b(?:pull request|PR)\b/i.test(
           userText,
+        ) &&
+        !/\b(?:also|then|and)\s+(?:please\s+)?(?:send|schedule|book|remind|email|text|call|check|find|summarize|show)\b|[.!?]\s*(?:what|when|where|who|how|can you|could you|please (?:send|schedule|book|remind|email|text|call|check|find|summarize|show))\b/i.test(
+          userText,
         )
       ) {
         const responseText =
