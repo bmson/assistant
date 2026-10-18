@@ -131,13 +131,20 @@ function hasExplicitOwnerAllocation(quote: string, target: string): boolean {
   if (!pattern || !isDirectComparisonPassage(quote) || quote.includes('?')) return false;
   return quote.split(/(?<=[.!?])\s+|[;\n]+/u).some((sentence) => {
     const normalized = normalizedText(sentence);
-    const allocation = new RegExp(
-      `\\b(?:budget|funds?|money|earmark\\w*|allocat\\w*)\\b[^.!?;\\n]{0,60}\\b(?:for|to|on)\\s+(?:the\\s+)?${pattern}\\b`,
-      'u',
-    ).exec(normalized);
+    const amount = String.raw`(?:[€$£]\s*)?\d+(?:[.,]\d+)?(?:\s*(?:usd|eur|gbp|dollars?|euros?|pounds?))?`;
+    // Require the allocation relationship itself, not a budget amount followed
+    // somewhere later by an independent travel preference or request.
+    const allocationPatterns = [
+      `\\b(?:budget|funds?|money)\\s*(?:(?:is|was|of)\\s*|:\\s*)${amount}\\s+(?:for|allocated to|earmarked for|set aside for)\\s+(?:the\\s+)?${pattern}\\b`,
+      `\\b(?:budget|funds?|money)\\s+for\\s+(?:the\\s+)?${pattern}\\s*(?:(?:is|was)\\s*|:\\s*)${amount}\\b`,
+      `\\b(?:i|we)\\s+(?:(?:have|had)\\s+)?(?:earmarked|allocated|budgeted|set aside)\\s+(?:${amount}|(?:the|my|our)\\s+(?:project\\s+)?budget)\\s+(?:for|to)\\s+(?:the\\s+)?${pattern}\\b`,
+    ];
+    const allocation = allocationPatterns
+      .map((candidate) => new RegExp(candidate, 'u').exec(normalized))
+      .find((candidate) => candidate !== null);
     if (!allocation) return false;
     if (
-      /\b(?:assistant|inference|suggest\w*|recommend\w*|might|could|would|whether|if|unless|pending|proposed|tentative)\b/iu.test(
+      /\b(?:assistant|inference|suggest\w*|recommend\w*|might|could|would|whether|if|unless|pending|proposed|tentative|maybe|perhaps)\b/iu.test(
         normalized,
       )
     )

@@ -430,6 +430,8 @@ describe('exact historical source projection', () => {
     'For the hypothetical Harbor exercise, my original budget is not for public transport and my travel constraint is no taxis.',
     'For the hypothetical Harbor exercise, my original budget is $600 for public transport, which was an Assistant inference, and my travel constraint is no taxis.',
     'For the hypothetical Harbor exercise, was my original budget $600 for public transport and my travel constraint no taxis?',
+    'For the hypothetical Harbor exercise, my original budget is $600 and my travel constraint is to look for public transport instead of taxis.',
+    'For the hypothetical Harbor exercise, my original budget is $600 and my travel constraint is to use a route for public transport.',
   ])(
     'does not turn negated, reported or questioned allocation into owner intent: %s',
     async (ownerText) => {
