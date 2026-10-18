@@ -130,6 +130,17 @@ variable "agent_image_digest" {
   }
 }
 
+variable "release_sha" {
+  description = "Verified full source commit SHA embedded in both runtime services; required only when enabling runtime."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.release_sha == null || can(regex("^[0-9a-f]{40}$", var.release_sha))
+    error_message = "release_sha must be a lowercase full commit SHA."
+  }
+}
+
 variable "firestore_agent_id" {
   description = "ID of an already seeded owner agent document. Required only for the Firestore runtime."
   type        = string

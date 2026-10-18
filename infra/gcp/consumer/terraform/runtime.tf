@@ -27,21 +27,28 @@ locals {
   internal_invoker = local.runtime_enabled && local.cloud_tasks ? { current = true } : {}
 
   runtime_common_env = {
-    ASSISTANT_MODULES         = "minimal"
-    ASSISTANT_WORKSPACE_ID    = var.installation_id
-    FIRESTORE_DATABASE_ID     = var.firestore_database_id
-    FIRESTORE_AGENT_ID        = var.firestore_agent_id
-    FIRESTORE_EMBEDDING_SPACE = jsonencode(var.firestore_embedding_space)
-    GCP_PROJECT               = var.project_id
-    GCP_LOCATION              = var.region
-    PERSISTENCE_DRIVER        = "firestore"
-    QUEUE_DRIVER              = local.cloud_tasks ? "cloudtasks" : "local"
-    LLM_PROVIDER              = "vertex"
-    VERTEX_PROJECT            = var.project_id
-    VERTEX_LOCATION           = coalesce(var.vertex_location, var.region)
-    CANARY_ENABLED            = "false"
-    AUTH_DEV_BYPASS           = "false"
-    AUTH_LOCALHOST_BYPASS     = "false"
+    ASSISTANT_MODULES                 = "minimal"
+    ASSISTANT_WORKSPACE_ID            = var.installation_id
+    FIRESTORE_DATABASE_ID             = var.firestore_database_id
+    FIRESTORE_AGENT_ID                = var.firestore_agent_id
+    FIRESTORE_EMBEDDING_SPACE         = jsonencode(var.firestore_embedding_space)
+    GCP_PROJECT                       = var.project_id
+    GCP_LOCATION                      = var.region
+    PERSISTENCE_DRIVER                = "firestore"
+    ASSISTANT_RELEASE_SCHEMA_DRIVER   = "firestore"
+    ASSISTANT_RELEASE_SCHEMA_MIN      = "1"
+    ASSISTANT_RELEASE_SCHEMA_MAX      = "1"
+    ASSISTANT_RELEASE_SCHEMA_VERSION  = "1"
+    ASSISTANT_RELEASE_SHA             = var.release_sha
+    MOBILE_API_TOKEN_SECRET_NAME      = ""
+    MOBILE_API_TOKEN_ROTATION_ENABLED = "false"
+    QUEUE_DRIVER                      = local.cloud_tasks ? "cloudtasks" : "local"
+    LLM_PROVIDER                      = "vertex"
+    VERTEX_PROJECT                    = var.project_id
+    VERTEX_LOCATION                   = coalesce(var.vertex_location, var.region)
+    CANARY_ENABLED                    = "false"
+    AUTH_DEV_BYPASS                   = "false"
+    AUTH_LOCALHOST_BYPASS             = "false"
   }
 
   # Both services enqueue with an OIDC identity that only the agent accepts.
@@ -53,15 +60,21 @@ locals {
   } : {}
 
   web_env = merge(local.runtime_common_env, local.dispatch_env, {
-    OWNER_EMAIL     = var.owner_email
-    OWNER_AUTH_MODE = var.owner_auth_mode
-    AUTH_URL        = local.web_auth_url
-    AUTH_TRUST_HOST = "true"
+    ASSISTANT_RELEASE_API_CONTRACT  = "1"
+    ASSISTANT_RELEASE_AGENT_API_MIN = "1"
+    ASSISTANT_RELEASE_AGENT_API_MAX = "1"
+    OWNER_EMAIL                     = var.owner_email
+    OWNER_AUTH_MODE                 = var.owner_auth_mode
+    AUTH_URL                        = local.web_auth_url
+    AUTH_TRUST_HOST                 = "true"
   })
 
   agent_env = merge(local.runtime_common_env, local.dispatch_env, {
-    FILES_DRIVER     = "gcs"
-    WORKSPACE_BUCKET = google_storage_bucket.assets.name
+    ASSISTANT_RELEASE_API_CONTRACT = "1"
+    ASSISTANT_RELEASE_WEB_API_MIN  = "1"
+    ASSISTANT_RELEASE_WEB_API_MAX  = "1"
+    FILES_DRIVER                   = "gcs"
+    WORKSPACE_BUCKET               = google_storage_bucket.assets.name
     }, local.cloud_tasks ? {
     AGENT_URL  = local.deterministic_agent_url
     PUBLIC_URL = local.deterministic_agent_url
@@ -103,6 +116,10 @@ resource "terraform_data" "runtime_input_guard" {
   for_each = local.runtime_requested ? { current = true } : {}
 
   lifecycle {
+    precondition {
+      condition     = can(regex("^[0-9a-f]{40}$", var.release_sha))
+      error_message = "Runtime requires the verified full source commit SHA of both images."
+    }
     precondition {
       condition     = local.runtime_enabled
       error_message = "Provide both web_image_digest and agent_image_digest to opt in to the runtime."
@@ -221,8 +238,15 @@ resource "google_cloud_run_v2_service" "agent" {
   # Keep IAM invocation mandatory; only the dedicated web identity is granted it.
   ingress              = "INGRESS_TRAFFIC_ALL"
   invoker_iam_disabled = false
-  deletion_protection  = true
-  labels               = local.runtime_labels
+  # Cloud Run IAM and the application independently verify the same signed
+  # route-bound token in Authorization. Register only the two callback routes;
+  # accepting the service URL at IAM does not make it valid for either route.
+  custom_audiences = local.cloud_tasks ? [
+    "${local.deterministic_agent_url}/internal/tasks/execute",
+    "${local.deterministic_agent_url}/internal/sweep",
+  ] : []
+  deletion_protection = true
+  labels              = local.runtime_labels
 
   # The local poller needs one always-CPU instance. Cloud Tasks dispatch lets
   # the agent scale to zero between callbacks.

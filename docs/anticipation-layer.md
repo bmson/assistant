@@ -26,14 +26,15 @@ fires the `morning-brief` schedule early on the first app-open of the day
 (`maybeFireWakeBrief` in `packages/core/src/workflow/schedules.ts`, triggered
 by `POST /api/mobile/v1/activity/foreground`). A seeded `tomorrow-check`
 schedule (19:30) looks one day ahead for calendar surprises and dated email
-obligations. And a background location ping can arm the arrival hook
-(`packages/core/src/proactive/arrival.ts`) — somewhere genuinely new, at most
-one nudge per place per day and one per 12 hours overall — from either ingest
-path (the app's `POST /api/mobile/v1/location` or the HMAC'd
-`POST /webhooks/location` an iOS Shortcut calls); the nudge now reaches the
-phone, via `owner.notify`'s `ping` flag. All of it obeys the same rule as the
-briefing: proactive work surfaces to the owner (a notice), and anything
-outward still goes through the approval spine.
+obligations. Background location collection remains paused. A separate, opt-in
+**Generic arrival nudges** setting uses foreground pings only: after a confirmed
+three-minute stop at a new place, it can create one generic owner-day task. The
+task contains an opaque owner-scoped ping reference that expires after five
+minutes, and delivery uses a fixed location-free message without model calls or
+location tools. Expired work is cancelled and terminal tasks clear the reference.
+Current-location answers explicitly requested by the owner remain available.
+Other proactive work surfaces to the owner as a notice, and anything outward
+still goes through the approval spine.
 
 **Shipped since (the during-the-day layer).** The three daily touchpoints were
 all built to self-silence, and together they could leave the assistant mute for
@@ -102,8 +103,8 @@ alignment) or as automated, `email_ingest` stays empty, and the importance
 alerts, briefing highlights and proposed dates all silently never happen.
 
 **The nudge policy (shipped).** Every out-of-band ping carries an urgency:
-`ambient` (a briefing, a watch hit, an arrival nudge — things the owner did
-not just ask for) or `interrupt` (an approval waiting, a stall in requested
+`ambient` (a briefing or a watch hit — things the owner did not just ask for;
+generic arrival nudges use the bounded foreground flow) or `interrupt` (an approval waiting, a stall in requested
 work). Ambient pings pass through quiet hours and a daily cap
 (`notification_prefs` + the `proactive_pings` ledger;
 `packages/core/src/proactive/nudge-policy.ts`), enforced at one choke point on

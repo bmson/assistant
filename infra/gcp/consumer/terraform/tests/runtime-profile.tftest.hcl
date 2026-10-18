@@ -17,6 +17,7 @@ override_resource {
 }
 
 variables {
+  release_sha             = "0123456789abcdef0123456789abcdef01234567"
   project_id              = "consumer-test-project"
   region                  = "us-west1"
   installation_id         = "assistant-test"
@@ -43,6 +44,9 @@ variables {
 
 run "foundation_without_images_has_no_runtime_resources" {
   command = plan
+  variables {
+    release_sha = null
+  }
 
   assert {
     condition = (
@@ -75,6 +79,14 @@ run "digest_pinned_private_runtime_uses_minimal_firestore_profile" {
       google_cloud_run_v2_service.agent["current"].template[0].containers[0].image == "us-west1-docker.pkg.dev/consumer-test-project/assistant-test/agent@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     )
     error_message = "Both services must use immutable digests from the customer repository."
+  }
+  assert {
+    condition = alltrue([for service in [google_cloud_run_v2_service.web["current"], google_cloud_run_v2_service.agent["current"]] : (
+      one([for env in service.template[0].containers[0].env : env.value if env.name == "ASSISTANT_RELEASE_SHA"]) == var.release_sha &&
+      one([for env in service.template[0].containers[0].env : env.value if env.name == "ASSISTANT_RELEASE_SCHEMA_DRIVER"]) == "firestore" &&
+      one([for env in service.template[0].containers[0].env : env.value if env.name == "ASSISTANT_RELEASE_API_CONTRACT"]) == "1"
+    )])
+    error_message = "Both services must identify the verified source, Firestore schema, and API contract for readiness checks."
   }
   assert {
     condition = (
@@ -126,6 +138,24 @@ run "digest_pinned_private_runtime_uses_minimal_firestore_profile" {
     )
     error_message = "A legacy runtime without a mobile token version must keep the binding absent."
   }
+}
+
+run "runtime_without_release_provenance_is_rejected" {
+  command = plan
+  variables {
+    release_sha        = null
+    web_image_digest   = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    agent_image_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+  expect_failures = [terraform_data.runtime_input_guard["current"]]
+}
+
+run "malformed_release_provenance_is_rejected" {
+  command = plan
+  variables {
+    release_sha = "unverified-release"
+  }
+  expect_failures = [var.release_sha]
 }
 
 run "optional_numbered_mobile_token_is_web_only" {

@@ -4,13 +4,22 @@ This runbook is the owner-executed acceptance test for the customer-owned instal
 
 The repository tests cover this flow with mocked Terraform providers, a fake `gcloud` runner, and the Firestore emulator. **None of it has run against a real fresh account yet.** Real Google Cloud behaviour is established only by working through this runbook.
 
-## 0. What you need
+## 0. Available client and prerequisites
+
+This pilot uses the native iOS app for conversations, Calls, Costs, approvals and task controls. Browser pages are the owner administration console for claim, sign-in, security and settings. Product routes are disabled by policy; `/chat` is not an onboarding destination.
+
+Before provisioning, obtain an accessible, published native app build compatible with the pinned server release. Record the actual distribution link, app version/build and supported iOS version. Install and launch it on the pilot device. A source checkout or a successful build is not app distribution. If an eligible new owner cannot obtain that build, stop the pilot before cloud provisioning and record the distribution blocker. This runbook does not supply or certify a distribution link.
+
+The installed app must support server URL/device-key pairing. Do not reuse an existing owner, server connection or credential for this fresh-account pilot.
+
+## Prerequisites
 
 | Item | Notes |
 | --- | --- |
 | A new Google account | Use a personal account that has never owned a Cloud project, so the pilot proves the first-run path. |
 | A payment method | Google requires a billing account. Creating one is a Google-controlled step, and its time is measured separately. |
 | A shell with `gcloud`, Node.js 22+, pnpm 10+, Terraform ≥ 1.6 (CI uses 1.14.5), and Docker with Buildx | Cloud Shell has all of these except possibly a recent pnpm (`corepack enable`). A local machine also works. The "Open in Cloud Shell" button has **not** been proven (plan P0), so start Cloud Shell yourself and clone the repository. |
+| An iPhone with the published native app | Record the distribution URL, exact version/build and supported OS; availability is a prerequisite. |
 | A device that supports passkeys | Any current iPhone, Mac, Android phone, or Windows Hello machine. A second device or a hardware key is needed to test the second passkey. |
 | About 60–90 minutes | Most of it is waiting on image builds and Firestore index builds. |
 
@@ -44,8 +53,10 @@ Choose a region where Cloud Run, Firestore, and the Vertex models you select are
 
 ## 2. Pin the release
 
+Verify that the release repository is accessible to the new customer and contains the exact supplied commit before proceeding. The command below specifies the canonical repository; availability is an acceptance check, not an assertion that a clone was executed.
+
 ```sh
-git clone https://github.com/bmson/aibot.git assistant && cd assistant
+git clone https://github.com/bmson/assistant.git assistant && cd assistant
 git checkout <RELEASE_COMMIT>          # an exact 40-character SHA, never a branch
 pnpm install --frozen-lockfile
 git archive --format=tar.gz --output=../assistant-source.tar.gz HEAD
@@ -118,24 +129,31 @@ pnpm consumer:install $ARGS $RUNTIME --issue-owner-claim --apply
 1. Copy `ownerClaim.setupUrl`. It works once and expires after 24 hours. Open it on the device that will hold the first passkey.
 2. Select **Create passkey** and approve with Face ID, Touch ID, or the screen lock.
 3. **Save the recovery code** somewhere offline. The page shows it only once.
-4. You land in chat, signed in. Record `t_claim` (from `--apply` in step 4 until now, hands-on time only).
+4. The claim completes in the owner administration console. Open **/security → Create device key**. Copy the new key once through a private channel and enter it with `ownerAccess.authOrigin` in the installed app’s **Connection** screen. The app stores the key in its Keychain.
+5. Confirm that the native app loads this new installation, then record pairing success and its version/build. Keep the recovery code separate from the device key. Record `t_claim` and pairing hands-on time separately from provisioning/build waits.
 
 Negative checks:
 - Open the same link again. Expect "invalid, expired, or already used".
-- Open `/chat` in a private window. Expect a redirect to `/signin`.
+- Open `/security` in a private window. Expect owner sign-in.
+- Open `/chat` after sign-in. Expect the configured product-route denial; the conversation is in the native app.
+- Pair using an incorrect or revoked device key. Expect authentication failure without loading owner data, then use the valid new key.
+- Deny local permissions requested by the app. Basic authenticated text conversation must remain usable; record the exact denied capability and its explanation.
 - Open `/api/auth/signin`. Expect 404.
 
 ## 7. First conversation and final verification
 
-1. Send a message such as "Hi, what can you do?" and wait for a reply. The reply comes from Vertex through the service identity; no API key is involved.
-2. Verify:
+1. In the paired native app, send a message such as "Hi, what can you do?" and wait for a reply. Record the owner conversation/task identity, provider result and installed version/build. A health response, synthetic provider probe or unrelated older conversation does not satisfy this step. The reply uses Vertex through the customer service identity.
+2. Confirm Calls, Costs and pending approval/task controls open in the native app’s **More** menu or conversation; setup instructions must not send the owner to blocked browser product routes.
+3. Verify:
 
 ```sh
-pnpm consumer:install $ARGS $RUNTIME --verify          # report only
-pnpm consumer:install $ARGS $RUNTIME --verify --apply  # records "ready" when every check passes
+pnpm consumer:install $ARGS $RUNTIME --verify --native-app-version <VERSION_BUILD> --native-pairing-confirmed
+pnpm consumer:install $ARGS $RUNTIME --verify --native-app-version <VERSION_BUILD> --native-pairing-confirmed --apply
 ```
 
 Expected checks, all `ok: true`:
+- `native-app-installed` (operator confirms the actual version/build; distribution is not machine-verified)
+- `native-pairing` (operator confirms authenticated loading on that app)
 - `cloud-run-revisions`
 - `owner-access`
 - `health <run.app URL>` (serves the release commit)
@@ -156,7 +174,8 @@ Mark each as pass or fail in the evidence table.
 | Offline recovery | In a private window, open **/signin → Lost your passkey?**, enter the recovery code, and create a passkey. A new recovery code is shown, and the old one no longer works. |
 | Cloud-owner recovery | `pnpm consumer:owner-claim --project $PROJECT --installation $INSTALL --database assistant-$INSTALL --url <authOrigin> --recover --apply`. Open the link and register a passkey. Every other session is signed out. |
 | Last passkey guard | Remove passkeys until one is left. The last one cannot be removed. |
-| iPhone | **/security → Create device key**, then enter the server URL and key in the app's **Connection** screen. Load chat. Revoke the key and confirm the app gets 401 within about 30 seconds. |
+| Native pairing and revocation | Pair as in step 6, load the new owner conversation, revoke that device key in **/security**, and verify the app rejects further owner requests. Record the observed time; then create a fresh key and pair again. |
+| Native feature handoff | Open Calls, Costs, approvals and task controls in the app. Record unavailable controls as failures rather than following blocked browser links. |
 | Memory | Tell the assistant a fact, then ask about it in a new chat. |
 | Idle cost | Leave the installation idle for 24 hours, then read **Billing → Reports**, filtered to the project. |
 | No publisher dependency | In the Cloud Run revision environment, check there is no `DATABASE_URL` and no `OPENROUTER_API_KEY`, and that no secret references a publisher project. |
@@ -192,7 +211,7 @@ pnpm consumer:update --state $DIR/installation-state.json --state-bucket $PROJEC
 pnpm consumer:update ... --apply
 ```
 
-Run the three printed `next` commands in order: foundation, build and deploy, then `--verify --apply`. Chat history, passkeys, and the recovery code must all survive.
+Run the printed `next` commands in order: build and deploy the selected release with the same runtime configuration, then `--verify --native-app-version <VERSION_BUILD> --native-pairing-confirmed --apply`. Release rebase preserves the provisioned runtime; do not apply the foundation-only profile over running services. Native chat history, passkeys, and the recovery code must all survive.
 
 To roll back, check out the old commit and run `consumer:update` with the old archive. Then deploy with `--images $DIR/image-manifest-<old sha>.json` instead of `--build-images`.
 
@@ -226,12 +245,15 @@ The project itself is never deleted. Delete it yourself, or unlink billing, when
 
 | Field | Value |
 | --- | --- |
-| Release commit / archive digest | |
+| Release commit / archive digest and successful fresh clone | |
+| Published app distribution link / installed version/build / iOS version | |
+| Claim / saved recovery / authenticated native pairing / first conversation-task identity | |
 | Account, project ID, region | |
 | `t_billing` (account creation to billing linked) | |
 | Provisioning wall time (step 4), including index wait | |
 | Image build and deploy wall time (step 5) | |
-| Hands-on time from step 3 to first reply (target: under 10 minutes once billing is ready) | |
+| Hands-on time from step 3 to first native reply (target: under 10 minutes once billing and app availability are ready) | |
+| App distribution/install, claim and pairing hands-on times separately | |
 | Verification result (paste the `checks`) | |
 | Acceptance checks, pass/fail each | |
 | Drills, pass/fail each | |

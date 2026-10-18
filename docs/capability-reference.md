@@ -78,7 +78,7 @@ Specific application-confirmation tools support a narrower workflow: freeze an a
 
 ### Proactive information and suggestions
 
-The briefing, Pulse, look-ahead, curiosity, arrivals, and health jobs can deliver meaningful owner information. Quiet conditions should produce no unnecessary message. Stable source identity, claims, pacing, quiet hours, and ambient caps keep independent producers from repeatedly asking the same thing.
+The briefing, Pulse, look-ahead, curiosity, and health jobs can deliver meaningful owner information. Optional generic arrival nudges use foreground observations, an expiring opaque reference and a fixed location-free message; background location collection remains paused. Quiet conditions should produce no unnecessary message. Stable source identity, claims, pacing, quiet hours, and ambient caps keep independent producers from repeatedly asking the same thing.
 
 A suggestion can be accepted, dismissed, or snoozed. Acceptance starts ordinary governed work and preserves external-source taint. A notification is delivery, not an action mandate. Current notification preferences and configured channels determine whether information stays in-app or also interrupts the owner.
 

@@ -34,13 +34,30 @@ mail, calendar and conversations.
   Appropriate for a single-owner installation reviewing its own assistant; think
   twice where the mailbox carries anyone else's correspondence.
 
-Redaction is pattern-based and conservative. It removes the identifiers that
-make a leaked row harmful; it is not a promise of anonymity, because free text
-can always name a person.
+Redaction is pattern-based and conservative. It is not a promise of anonymity:
+free text can still identify a person, and dates, times, amounts, and scores
+remain visible. `full` capture stores private text verbatim.
 
-Retention is enforced by the ordinary maintenance sweep. Nothing reads this
-table back into a prompt — it is review telemetry, never an input to the
-assistant's own reasoning.
+Retention is enforced by the ordinary maintenance sweep. The local `pnpm
+audit:llm` report is read-only and makes no model call. Model-assisted
+investigations are a separate path: **Copy investigation request** asks the
+assistant to use `audit.read` and, when needed, `audit.read_field`. Those tools
+can return captured system prompts, inputs, outputs, tool arguments/results,
+task messages, approvals, and bounded diagnostic state to the assistant's
+configured model provider as conversation/tool context. Use them only when that
+provider use is acceptable for the selected capture mode and task data. The
+tools are unavailable to externally triggered tasks, return untrusted evidence,
+and enforce owner-task scoping; they do not
+retry work or mutate the investigated task.
+
+Credential-like keys and runtime resume tokens are excluded by the investigation
+projection, with additional pattern scrubbing of serialized and free-text
+fields. This is a source-minimizing projection, not a guarantee that arbitrary
+private text or third-party personal information is removed. `audit.read_field`
+returns at most 12,000 characters per request; it cannot recover data truncated
+when originally captured. Off mode does not provide captured prompt/answer text,
+but the audit investigation may still return other stored task, tool, approval,
+message, and diagnostic records.
 
 ## What gets captured
 

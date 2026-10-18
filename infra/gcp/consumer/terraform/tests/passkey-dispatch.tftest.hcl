@@ -25,6 +25,7 @@ override_resource {
 }
 
 variables {
+  release_sha             = "0123456789abcdef0123456789abcdef01234567"
   project_id              = "consumer-test-project"
   region                  = "us-west1"
   installation_id         = "pilot"
@@ -153,9 +154,13 @@ run "cloud_tasks_dispatch_is_least_privilege_and_scales_to_zero" {
       google_cloud_scheduler_job.sweep["current"].http_target[0].uri == "https://pilot-agent-123456789012.us-west1.run.app/internal/sweep" &&
       google_cloud_scheduler_job.sweep["current"].http_target[0].oidc_token[0].audience == "https://pilot-agent-123456789012.us-west1.run.app/internal/sweep" &&
       google_cloud_scheduler_job.sweep["current"].http_target[0].oidc_token[0].service_account_email == "pilot-invoker@consumer-test-project.iam.gserviceaccount.com" &&
-      google_cloud_scheduler_job.sweep["current"].schedule == "* * * * *"
+      google_cloud_scheduler_job.sweep["current"].schedule == "* * * * *" &&
+      toset(google_cloud_run_v2_service.agent["current"].custom_audiences) == toset([
+        "https://pilot-agent-123456789012.us-west1.run.app/internal/tasks/execute",
+        "https://pilot-agent-123456789012.us-west1.run.app/internal/sweep",
+      ])
     )
-    error_message = "The sweep must call the exact route with a route-bound OIDC audience."
+    error_message = "Both callback routes must have explicit Cloud Run custom audiences matching the route-bound application validator."
   }
   assert {
     condition = (

@@ -1,5 +1,7 @@
 # Firestore web and mobile route inventory
 
+> Historical source inventory, last updated 2026-09-26. Route totals and classifications below are retained as a dated snapshot, not a current route-drift check or production receipt. Reconcile against `apps/web/app` and the proxy before relying on an individual row. See the [runtime support matrix](runtime-support-matrix.md) and [cutover checklist](firestore-cutover-checklist.md).
+
 Reflects `apps/web` on the `claude/firestore-final-docs` branch (2026-09-26), which contains every port. It answers one question for every page, route handler, and Server Action: with `PERSISTENCE_DRIVER=firestore` and no `DATABASE_URL`, does it work without SQL? Production still runs on PostgreSQL; nothing here changes that composition.
 
 How the Firestore composition is gated:

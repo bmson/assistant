@@ -1,5 +1,10 @@
 # Optional modules
 
+This is a capability guide, not a deployment receipt. Current driver, queue, auth, provider, and
+activation boundaries are summarized in the [runtime support matrix](runtime-support-matrix.md).
+The effective module list comes from `ASSISTANT_MODULES` and the installed module composition;
+repository defaults do not identify a deployed installation.
+
 The base assistant is always installed: chat, memory, contacts, occasions, goals, missions,
 approvals, schedules, cost controls, and workspace access.
 

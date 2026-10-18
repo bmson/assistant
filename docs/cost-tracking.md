@@ -28,8 +28,10 @@ Every model-router ledger entry records its connection, model and available requ
 
 - `provider_reported`: the provider returned an explicit nonnegative USD cost, including an authoritative zero.
 - `token_rate`: complete usage multiplied by configured model prices. This remains an estimate (cache discounts, tiers, negotiated rates and special modalities can differ).
-- `preflight_estimate`: a successful response lacked complete usage and a reported cost; the preflight amount protects the budget but is not described as a verified charge.
-- `unknown`: old or other entries without sufficient provenance. Historical costs are not retroactively declared verified.
+- `preflight_estimate`: a preflight estimate used by explicitly estimated operation types. It is not a verified provider charge.
+- `unknown`: a dispatched model or embedding attempt whose provider amount and complete token usage are missing, or whose metering write failed. Its positive reservation remains in the held budget total until a late actual is reconciled; it is never recorded as zero or automatically released.
+
+Before the provider call, the reservation records a privacy-minimized attempt digest, model/provider/role, and input/output estimate. Provider generation IDs and endpoint labels are retained when available, so a late receipt can settle the same reservation once even after the originating task has ended. Provider receipts and cloud invoice exports remain separate accounting views. Stale, undispatched reservations may be released; stale dispatched reservations move to `unknown` and keep their hold.
 
 New models automatically use the same metering path, including custom gateway identities. Live voice model usage is explicitly marked as a rate-based estimate. Connected providers without a billing connector show their coverage gap instead of a made-up bill. Direct OpenAI and arbitrary compatible gateways currently have usage tracking, not account billing imports. Vertex uses the Google Cloud export, subject to project coverage. Adding a billing API requires a provider-specific adapter; there is no universal model billing endpoint.
 
@@ -43,4 +45,6 @@ Covered Vertex connections are marked as included in Google Cloud, without a sec
 
 Billing is read on demand and durably cached for one hour, shared by web and iOS, in the installation's existing tool cache. Snapshots are keyed by period, configuration and connection credentials (hashed, never stored in plaintext). Transport/auth/query errors retain the previous successful snapshot with a stale status; unsuccessful refreshes retry after five minutes. A prior month's snapshot cannot masquerade as the new month's spend. Cache records expire after seven days; this is a current-month dashboard, not a historical invoice archive. The billing export remains the historical source of truth.
 
-PostgreSQL needs migration `0080_cost_evidence.sql`; Firestore accepts the new evidence object and interprets absent evidence as unknown. Billing snapshots do not create operation-ledger entries or change budget counters. This prevents overlapping billing sources from double-counting usage or unexpectedly pausing work.
+PostgreSQL cost attempt reconciliation needs migration `0104_milky_masque.sql`; Firestore stores the same attempt state in its existing cost reservation documents. Billing snapshots do not create operation-ledger entries or change budget counters. This prevents overlapping billing sources from double-counting usage or unexpectedly pausing work.
+
+The router currently withholds explicit prompt-cache hints because the provider cache contract does not let it bind retention to owner, policy, source and model revision. Provider-managed automatic caching may still occur where a provider enables it; measured cache economics and cross-scope behavior are not claimed.

@@ -2,7 +2,7 @@
 
 Assistant is a server-hosted agent system with a native iOS client and a web owner console, durable workflow execution, owner-controlled memory, and optional service integrations. Its architecture separates presentation, application use cases, business policy, persistence contracts, provider tools, and process composition. The model proposes language and actions; authenticated application commands, tool policy, durable records, and provider evidence determine what actually happens.
 
-This reference explains runtime flows, data responsibilities, technology choices, and the architectural decisions recoverable from the current code and design notes. Reviewed **October 2–3, 2026**. It describes source, defaults, and intended boundaries, not an independently verified production deployment. See [the product guide](product-guide.md), [capability reference](capability-reference.md), and [gap register](product-gaps.md) for the experience and availability limits.
+This reference explains runtime flows, data responsibilities, technology choices, and the architectural decisions recoverable from the current code and design notes. Reviewed **October 2–3, 2026**. It describes source, defaults, and intended boundaries, not an independently verified production deployment. See the [runtime support matrix](runtime-support-matrix.md) for the source profile and its limits, plus [the product guide](product-guide.md), [capability reference](capability-reference.md), and [gap register](product-gaps.md) for the experience and availability limits.
 
 ## Runtime structure
 
