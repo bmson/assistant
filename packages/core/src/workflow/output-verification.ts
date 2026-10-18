@@ -1735,18 +1735,19 @@ export async function verifyFinalOutput(
       const corrected = text ? repairRequestedBullets(input.request, text) : undefined;
       const rejectedReasoningCorrection =
         reasoningReview && correction.ok && reasoningReviewFindings(correction.object).length > 0;
-      // A second revise verdict must actually repair the rejected replacement;
-      // replaying it cannot resolve the completion finding that triggered this call.
-      const unchangedRejectedReplacement =
+      // Original size/headings alone do not make an identical answer defective.
+      // Withhold it only if this review still reports a substantive unresolved
+      // reason; format reasons have their own deterministic checks below.
+      const unchangedUnresolvedReplacement =
         reasoningReview &&
         incompleteReplacement &&
         correction.ok &&
-        correction.object.decision === 'revise' &&
-        corrected === repairRequestedBullets(input.request, correctionDraft);
+        corrected === repairRequestedBullets(input.request, correctionDraft) &&
+        correction.object.reasons.some((reason) => reason !== 'clarity_or_format');
       if (
         !corrected ||
         rejectedReasoningCorrection ||
-        unchangedRejectedReplacement ||
+        unchangedUnresolvedReplacement ||
         // Known completion/format repairs may legitimately remove bad details
         // and headings. Discretionary wording must still preserve the answer.
         (incompleteReplacement || formatFindings.length

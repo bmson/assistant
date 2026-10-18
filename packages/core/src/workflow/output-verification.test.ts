@@ -1192,6 +1192,114 @@ ${body}`;
     },
   );
 
+  it.each(['publish', 'revise'] as const)(
+    'accepts an identical complete short grounding repair with a clean second %s audit',
+    async (decision) => {
+      const original = `UNSUPPORTED_PRIVATE_DETAIL ${'unverified material. '.repeat(40)}`;
+      const repaired =
+        'One result is confirmed; the remaining requested details are not supported.';
+      let calls = 0;
+      const result = await verifyFinalOutput(
+        {
+          object: async () => ({
+            ok: true,
+            object: {
+              decision: ++calls === 1 ? 'revise' : decision,
+              revisedText: repaired,
+              reasons: calls === 1 ? ['ungrounded_fact'] : [],
+              checks: passingReasoningChecks,
+            },
+          }),
+        } as never,
+        {
+          taskId: 'identical-grounding-repair',
+          request: 'Give the complete answer supported by the available evidence.',
+          draft: original,
+          evidence: [],
+          critical: true,
+          reasoningReview: true,
+        },
+      );
+      expect(repaired.length).toBeLessThan(original.length / 3);
+      expect(calls).toBe(2);
+      expect(result).toMatchObject({ text: repaired, revised: true, unavailable: false });
+      expect(result.incomplete).toBeUndefined();
+    },
+  );
+
+  it.each(
+    [
+      'does_not_answer_request',
+      'unsupported_claim',
+      'ungrounded_fact',
+      'missing_uncertainty',
+      'unsafe_instruction',
+    ].flatMap((reason) => ['publish', 'revise'].map((decision) => ({ reason, decision }))),
+  )(
+    'withholds an unchanged second $decision candidate that still reports $reason',
+    async ({ reason, decision }) => {
+      const repaired =
+        'One result is confirmed; the remaining requested details are not supported.';
+      let calls = 0;
+      const result = await verifyFinalOutput(
+        {
+          object: async () => ({
+            ok: true,
+            object: {
+              decision: ++calls === 1 ? 'revise' : decision,
+              revisedText: repaired,
+              reasons: calls === 1 ? ['ungrounded_fact'] : [reason],
+              checks: passingReasoningChecks,
+            },
+          }),
+        } as never,
+        {
+          taskId: 'unchanged-unresolved-repair',
+          request: 'Give the complete answer supported by the available evidence.',
+          draft: `UNSUPPORTED_PRIVATE_DETAIL ${'unverified material. '.repeat(40)}`,
+          evidence: [],
+          critical: true,
+          reasoningReview: true,
+        },
+      );
+      expect(calls).toBe(2);
+      expect(result.incomplete).toBe(true);
+      expect(result.text).not.toBe(repaired);
+      expect(result.text).not.toContain('UNSUPPORTED_PRIVATE_DETAIL');
+    },
+  );
+
+  it.each(['```text\nOnly one result is supported.', 'Only one result is supported:'])(
+    'withholds an identical structurally unfinished correction despite a clean audit: %s',
+    async (repaired) => {
+      let calls = 0;
+      const result = await verifyFinalOutput(
+        {
+          object: async () => ({
+            ok: true,
+            object: {
+              decision: 'revise',
+              revisedText: repaired,
+              reasons: ++calls === 1 ? ['ungrounded_fact'] : [],
+              checks: passingReasoningChecks,
+            },
+          }),
+        } as never,
+        {
+          taskId: 'unchanged-structural-repair',
+          request: 'Give the complete answer supported by the available evidence.',
+          draft: `UNSUPPORTED_PRIVATE_DETAIL ${'unverified material. '.repeat(40)}`,
+          evidence: [],
+          critical: true,
+          reasoningReview: true,
+        },
+      );
+      expect(calls).toBe(2);
+      expect(result.incomplete).toBe(true);
+      expect(result.text).not.toBe(repaired);
+    },
+  );
+
   it.each(['long draft', 'changed headings'])(
     'accepts a fully audited explicit short-format repair of a %s',
     async (kind) => {
