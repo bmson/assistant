@@ -1066,6 +1066,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   if (
     !restrictedChecklistResume &&
     !localTransformation &&
+    !isConversationLocalContext(ownerText) &&
     privilegedTask &&
     !state.untrustedContext &&
     task.conversationId
@@ -1095,7 +1096,8 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // exactly the path that needs it. The dispatcher's taint-approval gate still
   // holds every outward action, so surfacing a procedure changes how well the
   // task is done, not what it is allowed to do. Fetched once and reused across
-  // loop iterations — the library is task-stable.
+  // loop iterations — the library is task-stable. Supplied-only reasoning and
+  // simulations still exclude stored procedures along with other account context.
   let skillsBlock: string | undefined;
   let explicitlyRequestedSkillRetrieved = false;
   const explicitlyRequestedSkillName = readRequest
@@ -1126,7 +1128,12 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       console.error('named skill lookup failed — continuing without it', err);
     }
   }
-  if (!restrictedChecklistResume && privilegedTask && !readRequest) {
+  if (
+    !restrictedChecklistResume &&
+    !isConversationLocalContext(ownerText) &&
+    privilegedTask &&
+    !readRequest
+  ) {
     const lastUser = [...rc.window].reverse().find((m) => m.role === 'user');
     const skillQuery = [
       plan?.reasoning,

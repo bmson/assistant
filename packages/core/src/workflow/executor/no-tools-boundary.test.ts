@@ -1,9 +1,11 @@
 import { createDb, type Db, messages, tasks, toolCalls } from '@assistant/db';
 import { assertAllocatedTestTarget } from '@assistant/db/test-target';
 import { eq, inArray } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { getAgent } from '../../chat.js';
+import * as commitmentMemory from '../../memory/commitments.js';
+import * as skillMemory from '../../memory/skills.js';
 import { runGoldenTask } from '../golden/harness.js';
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -15,6 +17,12 @@ assertAllocatedTestTarget({
 });
 
 describe('explicit no-tool owner boundary through the executor', () => {
+  const commitmentReads = vi.spyOn(commitmentMemory, 'listOpenCommitments');
+  const skillReads = vi.spyOn(skillMemory, 'recallSkills');
+  beforeEach(() => {
+    commitmentReads.mockClear();
+    skillReads.mockClear();
+  });
   let db: Db;
   let agentId: string;
   const taskIds: string[] = [];
@@ -24,6 +32,8 @@ describe('explicit no-tool owner boundary through the executor', () => {
     agentId = (await getAgent(db)).id;
   });
   afterAll(async () => {
+    commitmentReads.mockRestore();
+    skillReads.mockRestore();
     if (taskIds.length) {
       const rows = await db
         .select({ conversationId: tasks.conversationId })
@@ -80,6 +90,8 @@ describe('explicit no-tool owner boundary through the executor', () => {
     });
     taskIds.push(result.taskId);
     expect(executions).toBe(0);
+    expect(commitmentReads).not.toHaveBeenCalled();
+    expect(skillReads).not.toHaveBeenCalled();
     expect(result.toolNames).toEqual([]);
     expect(result.finalText).toBe(
       'Stay quiet. Another update is justified only by new material information or an owner decision.',
