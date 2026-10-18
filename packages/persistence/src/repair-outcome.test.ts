@@ -21,6 +21,32 @@ function issue(status: RepairIssue['status']): RepairIssue {
   };
 }
 describe('deterministic repair outcomes', () => {
+  it('explains a confirmed publisher permission failure with the required repository grants', () => {
+    const failed = issue('failed');
+    failed.data.lastError =
+      "GitHub publishing permission denied. Check the repair publisher token's repository write access.";
+    expect(repairOutcome(failed)).toMatchObject({
+      message: 'GitHub did not permit the repair to publish code.',
+      nextStep: expect.stringContaining('Contents and Pull requests write access'),
+    });
+  });
+  it('explains a known sandbox setup failure without exposing arbitrary provider errors', () => {
+    const failed = issue('failed');
+    failed.data.lastError = 'Hosted sandbox setup failed. No coding result was published.';
+    expect(repairOutcome(failed)).toMatchObject({
+      message: 'The coding sandbox could not start. No code was published.',
+    });
+    failed.data.lastError = 'provider timeout sk-proj-SECRETSECRET';
+    expect(JSON.stringify(repairOutcome(failed))).not.toContain('SECRET');
+  });
+  it('explains a rejected protected patch without suggesting that coding is still running', () => {
+    const failed = issue('failed');
+    failed.data.lastError = 'Hosted result contains duplicate or protected paths';
+    expect(repairOutcome(failed)).toMatchObject({
+      message: 'The proposed patch included duplicate or protected files. No PR was published.',
+      nextStep: expect.stringContaining('owner-led'),
+    });
+  });
   it.each([
     ['investigating', 'investigation'],
     ['fixing', 'coding_dispatch'],

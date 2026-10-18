@@ -1041,7 +1041,7 @@ export async function handleChatTurn(
       dependencies.persistence?.selfRepair ??
       (dependencies.db ? createPostgresSelfRepairRepository(dependencies.db) : null);
     if (repairs) {
-      await reportRepair(repairs, agent.id, {
+      const reported = await reportRepair(repairs, agent.id, {
         source: 'feedback',
         key: original?.taskId ?? persistedUser.id,
         sourceTaskId: original?.taskId ?? undefined,
@@ -1049,6 +1049,33 @@ export async function handleChatTurn(
         title: 'Owner reported incorrect assistant behavior',
         summary: userText,
       }).catch((err) => console.error('Could not capture improvement feedback', err));
+      // Explicit repository repairs belong to the dedicated investigation
+      // queue. Sending the same complaint to the ordinary planner can make it
+      // search the owner's file workspace and duplicate paid work.
+      if (
+        reported &&
+        /\b(?:fix|repair|investigate|debug|propose|request)\b[^.!?\n]{0,160}\b(?:code|codebase|repository|github|pull request|PR)\b|\b(?:create|open|make)\b[^.!?\n]{0,100}\b(?:pull request|PR)\b/i.test(
+          userText,
+        ) &&
+        !/\b(?:also|then|and)\s+(?:please\s+)?(?:send|schedule|book|remind|email|text|call|check|find|summarize|show)\b|[.!?]\s*(?:what|when|where|who|how|can you|could you|please (?:send|schedule|book|remind|email|text|call|check|find|summarize|show))\b/i.test(
+          userText,
+        )
+      ) {
+        const responseText =
+          reported.status === 'reported'
+            ? 'I recorded this in Improvements under Code fixes. The investigation is queued; you can follow its progress there. No code has changed yet.'
+            : `This already has a report in Improvements under Code fixes (status: ${reported.status.replaceAll('_', ' ')}). Review its progress there; no new coding attempt was started.`;
+        await finishApplicationChatTask(chat, agent.id, admittedTask, {
+          status: 'done',
+          responseText,
+        });
+        return acceptedStreamResponse(admittedTask.id, {
+          'x-conversation-id': conversation.id,
+          'x-async-task': admittedTask.id,
+          'x-message-cursor': messageCursor,
+          'x-owner-message-id': persistedUser.id,
+        });
+      }
     }
   }
   if (isApprovalReply(userText)) {

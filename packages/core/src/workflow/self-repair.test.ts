@@ -31,6 +31,13 @@ describe('owner correction detection', () => {
     'Report a bug in reminders.',
     'Thanks for checking. That did not work.',
     'Why did not the reminder send?',
+    "The save button doesn't work.",
+    "Improvements isn't working.",
+    'The Improvements section is broken.',
+    'The app keeps crashing when I open Improvements.',
+    "My reminders don't arrive.",
+    'Chat is stuck.',
+    'Your assistant does not respond.',
   ])('records direct owner feedback: %s', (text) => expect(isRepairFeedback(text)).toBe(true));
   it.each([
     'Explain how to report a bug.',
@@ -43,6 +50,14 @@ describe('owner correction detection', () => {
     'That saved correctly.',
     "That's wrong, don't report it.",
     "That didn't save; please don't open an issue.",
+    'Explain why the save button does not work in this example.',
+    'If the app is broken, what should I do?',
+    'My coworker says the app is broken.',
+    'The printer does not work.',
+    'The app is working well.',
+    'The app is broken; do not investigate this.',
+    "That didn't work. Don't investigate the code.",
+    'The app is broken. Do not open a PR.',
   ])('does not treat quoted examples or discussion as authorization: %s', (text) =>
     expect(isRepairFeedback(text)).toBe(false),
   );
@@ -313,6 +328,20 @@ describe('issue-to-PR flow', () => {
       expect.objectContaining({ status: 'fixing' }),
     );
   });
+  it('carries real repository-read evidence into the durable coding attempt', async () => {
+    const { deps, rows, issue } = setup();
+    const evidence = {
+      source: 'github_mcp' as const,
+      connectionId: 'github',
+      files: [{ path: 'apps/web/example.ts', excerpt: 'synthetic source' }],
+    };
+    deps.readRepository = vi.fn(async () => evidence);
+    await runRepairCycle(deps, 'owner', 'task', now);
+    expect(rows.get(issue.id)?.data.repositoryEvidence).toEqual(evidence);
+    expect(deps.worker?.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ repositoryEvidence: evidence }) }),
+    );
+  });
   it.each(['provider', 'configuration'])(
     'keeps %s diagnoses out of the coding runner',
     async (category) => {
@@ -369,7 +398,9 @@ describe('issue-to-PR flow', () => {
       await runRepairCycle(deps, 'owner', 'task', now);
       expect(rows.get(issue.id)?.status).toBe('blocked');
       expect(deps.worker?.dispatch).not.toHaveBeenCalled();
-      expect(rows.get(issue.id)?.data.lastError).toContain('More details');
+      expect(rows.get(issue.id)?.data.lastError).toContain('model did not produce a usable');
+      expect(rows.get(issue.id)?.data.summary).toBe(issue.data.summary);
+      expect(rows.get(issue.id)?.data.routerAttempts?.at(-1)?.classification).toBe('unknown');
     },
   );
   it('lets the repository worker investigate an actionable unknown cause without guessed paths', async () => {
@@ -439,6 +470,33 @@ describe('issue-to-PR flow', () => {
       expect(rows.get(issue.id)?.status).toBe('fixing');
     },
   );
+  it('preserves the report and records unusable output when both configured models return placeholders', async () => {
+    const { deps, object, rows, issue } = setup();
+    object.mockResolvedValue({
+      ok: true,
+      modelId: 'synthetic-fallback',
+      degraded: true,
+      object: {
+        category: 'answer',
+        diagnosis: '...',
+        targetPaths: [],
+        reproduction: '{',
+        acceptance: '...',
+      },
+    } as never);
+    expect(await runRepairCycle(deps, 'owner', 'task', now)).toBe(0);
+    const result = rows.get(issue.id)!;
+    expect(result.status).toBe('blocked');
+    expect(result.data.summary).toBe(issue.data.summary);
+    expect(result.data.lastError).toContain('model did not produce a usable technical brief');
+    expect(result.data.ownerActionRequired).toContain('reasoning models');
+    expect(result.data.routerAttempts?.at(-1)).toMatchObject({
+      classification: 'unknown',
+      modelId: 'synthetic-fallback',
+      failureKind: 'unusable_output',
+    });
+    expect(deps.worker?.dispatch).not.toHaveBeenCalled();
+  });
   it('bounds triage and delegates timeout fallback to ModelRouter', async () => {
     const { deps, object, rows, issue } = setup();
     const deadline = vi.spyOn(AbortSignal, 'timeout');
