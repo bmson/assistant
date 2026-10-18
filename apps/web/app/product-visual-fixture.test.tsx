@@ -377,6 +377,7 @@ vi.mock('@assistant/application/commitments', () => ({
 }));
 vi.mock('@assistant/application', async () => ({
   ...(await vi.importActual('@assistant/core/memory/predicate-vocabulary')),
+  ...(await vi.importActual('../../../packages/application/src/workspace-improvements')),
   asGraphEntityKind: (value: string) => value || undefined,
   visibleWorkspaceCapabilityModules: (modules: unknown[]) => modules,
   getKnowledgeGraphOverview: async () => data().graph,
