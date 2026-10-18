@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   assembleKnowledgeMapSnapshot,
   knowledgeMapFilters,
+  legacyKnowledgeMapDisplayPolicy,
   MAP_OVERVIEW_EDGE_LIMIT,
 } from './knowledge-workspace-queries.js';
 
@@ -107,5 +108,32 @@ describe('complete graph overview', () => {
     expect(graph.edges.some((edge) => edge.id === 'old')).toBe(true);
     expect(graph.edges).toHaveLength(MAP_OVERVIEW_EDGE_LIMIT);
     expect(graph.truncated).toBe(true);
+  });
+});
+
+describe('legacy map evidence policy', () => {
+  const policy = legacyKnowledgeMapDisplayPolicy();
+  const claim = {
+    sourceContent: 'Anna lives in Oslo.',
+    subjectLabel: 'Anna',
+    predicate: 'lives_in',
+    objectLabel: 'Oslo',
+    evidenceQuote: 'Anna lives in Oslo',
+  };
+  it('accepts a directly quoted positive claim without generating an assertion', () => {
+    expect(policy.minimumExtractionVersion).toBe(2);
+    expect(policy.isGrounded(claim)).toBe(true);
+  });
+  it.each([
+    ['negation', 'Anna does not live in Oslo.', 'Anna does not live in Oslo'],
+    ['uncertainty', 'Anna might live in Oslo.', 'Anna might live in Oslo'],
+    ['reported claim', 'Someone said Anna lives in Oslo.', 'Anna lives in Oslo'],
+    ['invented quote', 'Anna visits Bergen.', 'Anna lives in Oslo'],
+  ])('rejects %s', (_, sourceContent, evidenceQuote) => {
+    expect(policy.isGrounded({ ...claim, sourceContent, evidenceQuote })).toBe(false);
+  });
+  it('does not reverse direction or substitute a preferred label for literal evidence', () => {
+    expect(policy.isGrounded({ ...claim, subjectLabel: 'Oslo', objectLabel: 'Anna' })).toBe(false);
+    expect(policy.isGrounded({ ...claim, subjectLabel: 'Annabelle' })).toBe(false);
   });
 });

@@ -107,6 +107,7 @@ describe.skipIf(!emulator)('Firestore knowledge workspace reads', () => {
       objectEntityId,
       sourceMemoryId,
       predicate: 'lives_in',
+      assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
       confidence: '0.9',
       reviewStatus: 'unreviewed',
       reviewedAt: null,

@@ -1,4 +1,8 @@
-import { knowledgeGraphCurationCommands, knowledgeWorkspaceQueries } from '@assistant/application';
+import {
+  knowledgeGraphCurationCommands,
+  knowledgeWorkspaceQueries,
+  legacyKnowledgeMapDisplayPolicy,
+} from '@assistant/application';
 import { profileLibraryQueries } from '@assistant/application/profile';
 import {
   loadConfig,
@@ -34,6 +38,7 @@ export function getFirestoreKnowledgeWorkspace() {
       store,
       agentId,
       parseFirestoreEmbeddingSpace(loadConfig().FIRESTORE_EMBEDDING_SPACE),
+      legacyKnowledgeMapDisplayPolicy(),
     ),
   );
 }
