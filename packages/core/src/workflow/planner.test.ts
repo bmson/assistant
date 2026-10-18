@@ -162,6 +162,9 @@ describe('ambiguous recipient after retrieved owner context', () => {
 describe('conceptual intent gate', () => {
   it.each([
     'How long is a 45 minute meeting?',
+    'Simulate a background check only; do not use tools. A fictional assistant has no new source information. Should it interrupt again? State the decision.',
+    'Do not use any tools. What should a fictional assistant do when my calendar changes?',
+    'Without using tools, explain a hypothetical follow-up.',
     'Prepare interview questions',
     'Please give me some interview preparation questions',
   ])('keeps self-contained prompts out of private-source tools: %s', (text) => {

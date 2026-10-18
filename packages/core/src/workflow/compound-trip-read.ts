@@ -73,6 +73,8 @@ export interface CompoundTripHotelCandidate {
   city?: string;
   checkIn?: string;
   checkOut?: string;
+  /** Literal stay labels without a verified year; never used for trip matching. */
+  stayDateLabels?: { checkIn: string; checkOut: string };
   bookingReference?: string;
   sourceExcerpt: string;
   association: 'shared_reference' | 'date_city_candidate' | 'unlinked';
@@ -341,9 +343,9 @@ export function compoundTripThreadIdsToRead(
     const score = (id: string) => {
       const subject = metadata.get(id)?.subject ?? '';
       return directUpcomingFlightPurchase(id)
-        ? 5
+        ? 1
         : /^(?:(?:fw|fwd|re)\s*:\s*)*flight\s*[-–—:]\s*booked\b/i.test(subject)
-          ? 4
+          ? 6
           : sourceMatches(id, 'lodging') &&
               /\b(?:hotels?[^.!?]{0,80}confirmation|confirmation[^.!?]{0,80}hotels?)\b/i.test(
                 subject,
@@ -353,7 +355,7 @@ export function compoundTripThreadIdsToRead(
               )
             ? 3.5
             : /\bconfirmation\s+code\b/i.test(subject)
-              ? 3
+              ? 5
               : /^(?:(?:fw|fwd|re)\s*:\s*)+flight\s*[-–—:]\s*\S/i.test(subject)
                 ? 2.5
                 : matchesCalendarLodgingTitle(subject)
@@ -388,7 +390,17 @@ export function compoundTripThreadIdsToRead(
     !request.compoundTripDiscovery &&
     bookedFlight &&
     directFlightPurchase
-      ? [bookedFlight, directFlightPurchase]
+      ? [
+          bookedFlight,
+          ...ranked
+            .filter(
+              (id) =>
+                sourceMatches(id, 'flight') &&
+                /\bconfirmation\s+code\b/i.test(metadata.get(id)?.subject ?? ''),
+            )
+            .slice(0, 2),
+          directFlightPurchase,
+        ]
       : undefined;
   const priority = flightOnlyDiversityPair ? [...flightOnlyDiversityPair] : [first('flight')];
   if (flightOnlyDiversityPair) {
@@ -2884,15 +2896,18 @@ function hotelCandidates(
     )
       continue;
     const rendered = renderedBookedHotel(body);
+    const property = renderedPropertyBooking(body);
     const { name: parsedName, city: parsedCity } = hotelNameAndCity(source);
     const hotelName =
       /\bhotel\s+(?:name|property)\s*:\s*([^\n\r]{2,160})/i.exec(body)?.[1]?.trim() ??
       rendered.name ??
+      property.name ??
       parsedName;
-    const address = rendered.address ?? hotelAddress(body, hotelName);
+    const address = rendered.address ?? property.address ?? hotelAddress(body, hotelName);
     const city =
       /\b(?:hotel\s+)?city\s*:\s*([^\n\r]{2,100})/i.exec(body)?.[1]?.trim() ??
       rendered.city ??
+      property.city ??
       parsedCity;
     const { checkIn, checkOut } = hotelStayDates(body);
     const reference =
@@ -2925,6 +2940,7 @@ function hotelCandidates(
       ...(city ? { city: city.slice(0, 100) } : {}),
       ...(checkIn ? { checkIn } : {}),
       ...(checkOut ? { checkOut } : {}),
+      ...(property.stayDateLabels ? { stayDateLabels: property.stayDateLabels } : {}),
       ...(reference ? { bookingReference: reference } : {}),
       sourceExcerpt: source.slice(0, 500),
       association: sharedReference
@@ -3036,6 +3052,56 @@ function calendarFlightOriginCity(event: Record<string, unknown> | undefined): s
     .exec(source)?.[1]
     ?.trim();
   return from ? from.slice(0, 80) : undefined;
+}
+
+/** Read the property section of a rendered confirmation, excluding its corporate footer. */
+function renderedPropertyBooking(body: string): {
+  name?: string;
+  address?: string;
+  city?: string;
+  stayDateLabels?: { checkIn: string; checkOut: string };
+} {
+  if (!/\byour hotel is confirmed\b|\bthank you for your reservation\b/i.test(body)) return {};
+  const content = body
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .filter((line) => !/^\s*(?:<https?:\/\/|https?:\/\/|\[image:)/i.test(line))
+    .join('\n');
+  const names = [
+    ...content.matchAll(/(?:^|\n)([\p{L}][^\n<>]{1,140}\b(?:Hotel|Inn|Resort|Lodge))\s*\n/giu),
+  ];
+  const candidates = names.flatMap((match) => {
+    const name = match[1]?.trim();
+    if (!name || match.index === undefined) return [];
+    const block =
+      content
+        .slice(match.index + match[0].length, match.index + match[0].length + 1800)
+        .split(
+          /\n\s*(?:Important Information|Price details|Terms and conditions|Copyright|Expedia,? Inc|Registered office|Corporate offices|Travel company contact information|Privacy)\b/i,
+        )[0] ?? '';
+    const checkIn =
+      /(?:^|\n)Check-in\s*\n(?:[^\n]*\n){0,4}?\s*((?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+)?(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:,?\s+20\d{2})?)\b/i
+        .exec(block)?.[1]
+        ?.trim();
+    const checkOut =
+      /(?:^|\n)Check-out\s*\n(?:[^\n]*\n){0,4}?\s*((?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+)?(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:,?\s+20\d{2})?)\b/i
+        .exec(block)?.[1]
+        ?.trim();
+    const street =
+      /(?:^|\n)(\d{1,6} [^\n,]{3,100}\b(?:Street|St|Road|Rd|Avenue|Ave|Boulevard|Blvd|Lane|Ln|Way)\b[^\n,]*),\s*([^\n,]{2,80}),([^\n]{2,100})/i.exec(
+        block,
+      );
+    if (!checkIn || !checkOut || !street?.[1] || !street[2] || !street[3]) return [];
+    return [
+      {
+        name,
+        address: `${street[1].trim()}, ${street[2].trim()},${street[3]}`.trim(),
+        city: street[2].trim(),
+        stayDateLabels: { checkIn, checkOut },
+      },
+    ];
+  });
+  return candidates.length === 1 ? (candidates[0] ?? {}) : {};
 }
 
 /** Recover adjacent rendered property/address text only when the Maps address repeats it. */
@@ -4633,7 +4699,7 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
       const last = group.legs.at(-1);
       if (first && last)
         lines.push(
-          `- Checked booking: ${group.legs.map((leg) => cell(leg.originAirport ?? 'origin unverified')).join('→')}→${cell(last.destinationAirport ?? 'destination unverified')}, ${first.departureDate}–${last.arrivalDate ?? last.departureDate}.${links.get(first.threadId) ? ` [Booking](${links.get(first.threadId)})` : ''}`,
+          `- Checked booking: ${group.legs.map((leg) => cell(leg.originAirport ?? 'origin unverified')).join('→')}→${cell(last.destinationAirport ?? 'destination unverified')}, ${first.departureDate}–${last.arrivalDate ?? last.departureDate}. Departures: ${group.legs.map((leg) => `${cell(leg.flightNumber)} ${leg.departureDate} ${cell(leg.departureTime)} (${cell(leg.departureTimeZone ?? 'time zone unverified')})${leg.sourceStatedLayover ? `; connection ${cell(leg.sourceStatedLayover)}` : ''}`).join('; ')}.${links.get(first.threadId) ? ` [Booking](${links.get(first.threadId)})` : ''}`,
         );
     }
   } else if (groups.length) {
@@ -4699,7 +4765,7 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
             ? 'Hotel candidate (city/date association inferred; separate booking)'
             : 'Unlinked hotel candidate';
     lines.push(
-      `${hotelLabel}: **${cell(hotel.hotelName ?? hotel.subject)}** — ${cell(hotel.address ?? 'address unverified')}${hotel.city && !hotel.address?.includes(hotel.city) ? `, ${cell(hotel.city)}` : ''}; ${hotel.checkIn ?? 'check-in unknown'} to ${hotel.checkOut ?? 'check-out unknown'}.${links.get(hotel.threadId) ? ` [Booking](${links.get(hotel.threadId)})` : ''}`,
+      `${hotelLabel}: **${cell(hotel.hotelName ?? hotel.subject)}** — ${cell(hotel.address ?? 'address unverified')}${hotel.city && !hotel.address?.includes(hotel.city) ? `, ${cell(hotel.city)}` : ''}; ${hotel.checkIn ?? (hotel.stayDateLabels ? `${cell(hotel.stayDateLabels.checkIn)} (year unverified)` : 'check-in unknown')} to ${hotel.checkOut ?? (hotel.stayDateLabels ? `${cell(hotel.stayDateLabels.checkOut)} (year unverified)` : 'check-out unknown')}.${links.get(hotel.threadId) ? ` [Booking](${links.get(hotel.threadId)})` : ''}`,
     );
   }
   if (!view.hotels.length) lines.push('Hotel: no verified linked stay; see gaps below.');
@@ -5176,7 +5242,7 @@ export function upcomingFlightReadProjection(
     : undefined;
   const compactSummary = latestDatedGroup
     ? [
-        `Checked dated booking: ${latestDatedGroup.legs.map((leg) => `${leg.flightNumber} ${leg.originAirport}→${leg.destinationAirport}, ${leg.departureDate} ${leg.departureTime} (${leg.departureTimeZone ?? 'zone not stated'})`).join('; ')}. Direction and future-departure identity remain unverified.${datedSourceLink ? ` [Booking email](${datedSourceLink})` : ''}`,
+        `Checked dated booking: ${latestDatedGroup.legs.map((leg) => `${leg.flightNumber} ${leg.originAirport}→${leg.destinationAirport}, ${leg.departureDate} ${leg.departureTime} (${leg.departureTimeZone ?? 'zone not stated'})`).join('; ')}. This checked dated route is not verified as the next future departure.${datedSourceLink ? ` [Booking email](${datedSourceLink})` : ''}`,
       ]
     : observedGroup
       ? (() => {

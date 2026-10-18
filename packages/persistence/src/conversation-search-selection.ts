@@ -63,3 +63,29 @@ export function selectConversationSearchMatches<T extends ConversationSearchMatc
     (left, right) => (rank.get(left.messageId) ?? 0) - (rank.get(right.messageId) ?? 0),
   );
 }
+
+/** Presentation metadata only: the link must identify this exact source message. */
+export function validatedConversationSourceUrl(match: Record<string, unknown>): string | undefined {
+  if (
+    typeof match.sourceUrl !== 'string' ||
+    match.sourceUrl.length > 2048 ||
+    typeof match.conversationId !== 'string' ||
+    !match.conversationId ||
+    typeof match.messageId !== 'string' ||
+    !match.messageId
+  )
+    return undefined;
+  try {
+    const url = new URL(match.sourceUrl);
+    return ['https:', 'http:'].includes(url.protocol) &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      url.pathname === `/chat/${encodeURIComponent(match.conversationId)}` &&
+      url.hash === `#message-${encodeURIComponent(match.messageId)}`
+      ? url.href
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}

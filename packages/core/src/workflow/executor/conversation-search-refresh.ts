@@ -7,6 +7,7 @@ import type {
 import {
   conversationMessageSourceRevision,
   conversationMessageSpeakerRevision,
+  validatedConversationSourceUrl,
   validConversationSpeaker,
 } from '@assistant/persistence';
 import type { ModelMessage } from 'ai';
@@ -359,7 +360,9 @@ function parseContextSnapshot(input: unknown, output: unknown): ParsedContextSna
         'origin',
         'text',
         'createdAt',
+        ...(match.sourceUrl !== undefined ? ['sourceUrl'] : []),
       ]) ||
+      (match.sourceUrl !== undefined && !validatedConversationSourceUrl(match)) ||
       typeof match.messageId !== 'string' ||
       !UUID.test(match.messageId) ||
       typeof match.conversationId !== 'string' ||
@@ -412,10 +415,11 @@ function parseContextSnapshot(input: unknown, output: unknown): ParsedContextSna
 }
 
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
-  const optional = ['role', 'origin', 'speakerRevision'];
+  const optional = ['role', 'origin', 'speakerRevision', 'sourceUrl'];
   const keys = Object.keys(value);
   return (
     validConversationSpeaker(value) &&
+    (value.sourceUrl === undefined || Boolean(validatedConversationSourceUrl(value))) &&
     keys.every((key) => allowed.includes(key) || optional.includes(key)) &&
     allowed.every((key) => key in value)
   );
@@ -845,6 +849,20 @@ export async function refreshResumedConversationSearch(
               ? { speakerRevision: match.speakerRevision, role: match.role, origin: match.origin }
               : {}),
             conversationId: match.conversationId,
+            ...(() => {
+              const priorMatches = record(stored.value)?.matches;
+              const prior = Array.isArray(priorMatches)
+                ? priorMatches
+                    .map(record)
+                    .find(
+                      (item) =>
+                        item?.messageId === match.messageId &&
+                        item?.conversationId === match.conversationId,
+                    )
+                : undefined;
+              const sourceUrl = prior ? validatedConversationSourceUrl(prior) : undefined;
+              return sourceUrl ? { sourceUrl } : {};
+            })(),
             text: match.text,
             createdAt: match.createdAt.toISOString(),
           })),
