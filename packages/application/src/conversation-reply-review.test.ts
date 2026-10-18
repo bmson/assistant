@@ -88,24 +88,32 @@ describe('reviewed conversation replies', () => {
     expect(object.mock.calls[1]?.[1].prompt).toContain('24 display words');
   });
 
-  it('keeps the real action contract authoritative when a reviewer approves a false receipt', async () => {
-    const object = vi.fn().mockResolvedValue({
-      ok: true,
-      object: { decision: 'publish', checks: passingReasoningChecks, reasons: [] },
-    });
-    const result = await reviewConversationReply({
-      router: { object } as unknown as Pick<ModelRouter, 'object'>,
-      taskId: 'task',
-      request: 'Simulate only a fictional reply. No tools.',
-      draft: 'I sent the email to Bob.',
-      context: [],
-      guard: (text) =>
-        guardDraft(text, [], { requestText: 'Simulate only a fictional reply. No tools.' }),
-    });
-    expect(object).toHaveBeenCalledTimes(2);
-    expect(result.corrected).toBe(true);
-    expect(result.text).not.toBe('I sent the email to Bob.');
-  });
+  it.each([true, false])(
+    'keeps a rejected receipt incomplete when review is available: %s',
+    async (available) => {
+      const object = vi.fn().mockResolvedValue(
+        available
+          ? {
+              ok: true,
+              object: { decision: 'publish', checks: passingReasoningChecks, reasons: [] },
+            }
+          : { ok: false, decision: { mode: 'park', reason: 'budget' } },
+      );
+      const result = await reviewConversationReply({
+        router: { object } as unknown as Pick<ModelRouter, 'object'>,
+        taskId: 'task',
+        request: 'Simulate only a fictional reply. No tools.',
+        draft: 'I sent the email to Bob.',
+        context: [],
+        guard: (text) =>
+          guardDraft(text, [], { requestText: 'Simulate only a fictional reply. No tools.' }),
+      });
+      expect(object).toHaveBeenCalledTimes(available ? 2 : 1);
+      expect(result.corrected).toBe(true);
+      expect(result.incomplete).toBe(true);
+      expect(result.text).not.toBe('I sent the email to Bob.');
+    },
+  );
 
   it('keeps a valid answer if optional review is unavailable', async () => {
     const object = vi

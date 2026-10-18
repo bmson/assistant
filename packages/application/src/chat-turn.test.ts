@@ -212,6 +212,7 @@ type RouterScript = {
   triageUnavailable?: boolean;
   streamError?: Error;
   reviewedReply?: string;
+  reviewUnavailable?: boolean;
   rejectReasoningAudit?: boolean;
   completeWhenConsumed?: boolean;
 };
@@ -229,6 +230,8 @@ function scriptedRouter(script: RouterScript) {
     return { ok: true as const, modelId: 'test/model' };
   });
   const object = vi.fn(async (role: string) => {
+    if ((role === 'rewrite' || role === 'reason') && script.reviewUnavailable)
+      return { ok: false, decision: { mode: 'park', reason: 'budget' } };
     if (role === 'rewrite' || role === 'reason')
       return {
         ok: true,
@@ -2140,6 +2143,35 @@ describe('tool-less conversational reply', () => {
     expect(wire).not.toContain(draft);
     expect(wire).not.toContain('data-off-course');
   });
+
+  it.each([false, true])(
+    'keeps a rejected simulation incomplete without inviting real execution (review unavailable: %s)',
+    async (reviewUnavailable) => {
+      const draft = 'I sent the email to Bob.';
+      const result = await turn(
+        'Simulate only. Explain the correct handling in this fictional example under 120 words. No tools. Do not send any message.',
+        {
+          draft,
+          reviewUnavailable,
+          completeWhenConsumed: true,
+        },
+      );
+      const wire = await result.response.text();
+      expect(result.object.mock.calls.filter(([role]) => role === 'reason')).toHaveLength(
+        reviewUnavailable ? 1 : 2,
+      );
+      expect(result.completions).toHaveLength(1);
+      expect(result.completions[0]?.status).toBe('failed');
+      const saved = result.completions[0]?.messages[0];
+      expect(saved?.text).toBeTruthy();
+      expect(saved?.text).not.toBe(draft);
+      expect(wire).toContain(saved?.text);
+      expect(wire).not.toContain(draft);
+      expect(wire).not.toContain('data-off-course');
+      expect(saved?.parts).not.toContainEqual(expect.objectContaining({ type: 'data-off-course' }));
+      expect(stubs.enqueueTask).not.toHaveBeenCalled();
+    },
+  );
 
   it('marks an unrepaired length failure incomplete and shows the same bounded answer', async () => {
     const result = await turn('Simulate only. No tools. Explain the options under 3 words.', {
