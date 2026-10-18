@@ -50,6 +50,7 @@ import {
   handleChatTurn,
   hideChatMessage,
   type ImportCommandPersistence,
+  improvementProposalSuggestion,
   isValidChatCursor,
   listActivity,
   listAnomalies,
@@ -1084,10 +1085,7 @@ async function queryPostgresWorkspacePage(db: Db, input: WorkspacePageRequest) {
     kind: row.kind,
     title: row.title,
     rationale: row.rationale,
-    suggestion:
-      typeof (row.change as { suggestion?: unknown } | null)?.suggestion === 'string'
-        ? (row.change as { suggestion: string }).suggestion
-        : '',
+    suggestion: improvementProposalSuggestion(row.kind, row.change),
     evidenceCount: row.evidenceIds.length,
     applyable: row.kind === 'model_role',
     createdAt: row.createdAt.toISOString(),
@@ -1253,7 +1251,7 @@ async function queryFirestoreWorkspacePage(
       kind: row.kind,
       title: row.title,
       rationale: row.rationale,
-      suggestion: typeof row.change.suggestion === 'string' ? row.change.suggestion : '',
+      suggestion: improvementProposalSuggestion(row.kind, row.change),
       evidenceCount: row.evidenceIds.length,
       applyable: row.kind === 'model_role',
       createdAt: row.createdAt.toISOString(),
