@@ -80,5 +80,10 @@ export async function reviewConversationReply(input: {
       text:
         maximum >= 11 ? 'I couldn’t fit a complete answer within your word limit.' : 'Incomplete.',
     };
-  return { ...input.guard(candidate), ...(incomplete ? { incomplete: true } : {}) };
+  const finalGuard = input.guard(candidate);
+  // A reviewer cannot publish a draft the deterministic contract still rejects.
+  return {
+    ...finalGuard,
+    ...(incomplete || finalGuard.corrected ? { incomplete: true } : {}),
+  };
 }

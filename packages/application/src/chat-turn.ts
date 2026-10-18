@@ -1601,7 +1601,9 @@ export async function handleChatTurn(
             return;
           }
           const guarded = await guardOnce(stripped.text);
-          if (guarded.corrected) {
+          // Supplied scenarios never authorize a real-execution recovery action.
+          const actionOffCourse = guarded.corrected && !needsReplyReview;
+          if (actionOffCourse) {
             console.warn('tool-less chat draft claimed unperformed work', {
               taskId: task.id,
             });
@@ -1616,7 +1618,7 @@ export async function handleChatTurn(
             recall: recallSources,
             privacyObservationGeneration,
             cues: guarded.corrected || needsReplyReview ? undefined : stripped.cues,
-            offCourse: guarded.corrected,
+            offCourse: actionOffCourse,
           });
           if (!completed) throw new Error('Chat completion was fenced before publication');
         },
@@ -1693,8 +1695,6 @@ export async function handleChatTurn(
         writer.write({ type: 'text-start', id: 'reviewed-reply' });
         writer.write({ type: 'text-delta', id: 'reviewed-reply', delta: guarded.text });
         writer.write({ type: 'text-end', id: 'reviewed-reply' });
-        if (guarded.corrected)
-          writer.write({ type: 'data-off-course', data: { text: guarded.text } });
         writer.write({ type: 'finish', finishReason: 'stop' });
         return;
       }
