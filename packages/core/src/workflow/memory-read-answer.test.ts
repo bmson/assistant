@@ -267,6 +267,91 @@ describe('exact historical source projection', () => {
     expect(memoryContextAnchorRefs(request, rows)).toEqual([]);
     expect(memoryContextAnchorRefs(request, rows, false)).toEqual([]);
   });
+  it('recovers the queried attribution context even when a weaker comparison pair is already complete', () => {
+    const request =
+      'Look back at the earlier hypothetical Harbor exercise. Did I earmark its project budget for public transport, or was that an Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step, citing the relevant conversation messages.';
+    const target = {
+      ...message(
+        'target-assistant',
+        'Project Harbor has a $600 budget and a rule to avoid taxi travel. Next step: map public transit routes against the budget.',
+        'assistant',
+        'assistant',
+      ),
+      conversationId: 'target-chat',
+    };
+    const rows: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        result: {
+          matches: [
+            message(
+              'weak-owner',
+              'For the hypothetical Harbor exercise, my original budget is $600 and my travel constraint is no taxis.',
+              'user',
+              'owner',
+            ),
+            ...Array.from({ length: 10 }, (_, index) =>
+              message(
+                `weak-assistant-${index}`,
+                'For the Harbor exercise, the suggested next step is to define the budget and travel options.',
+                'assistant',
+                'assistant',
+              ),
+            ),
+            target,
+          ],
+        },
+      },
+    ];
+
+    expect(memoryContextAnchorRefs(request, rows).map((ref) => ref.messageId)).toEqual([
+      'target-assistant',
+    ]);
+    expect(memoryReadSources(rows, request).map((source) => source.key)).toContain(
+      'message:target-assistant',
+    );
+  });
+  it('rejects a selected assistant passage that never addresses the queried attribution', async () => {
+    const request =
+      'For the hypothetical Harbor exercise, did I earmark its project budget for public transport, or was that an Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step.';
+    const owner = message(
+      'harbor-owner',
+      'For the hypothetical Harbor exercise, my original budget is $600 and my travel constraint is no taxis.',
+      'user',
+      'owner',
+    );
+    const assistant = message(
+      'harbor-assistant',
+      'For the Harbor exercise, the suggested next step is to define the budget and travel options.',
+      'assistant',
+      'assistant',
+    );
+    const rows: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: { matches: [owner, assistant] },
+      },
+    ];
+    const object = vi.fn(async () => ({
+      ok: true,
+      object: {
+        selections: [
+          { sourceKey: 'message:harbor-owner', quote: owner.text },
+          { sourceKey: 'message:harbor-assistant', quote: assistant.text },
+        ],
+      },
+    }));
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request,
+      evidence: rows,
+    });
+    expect(result.status).not.toBe('complete');
+  });
   it('rejects invented quotes, changed source bodies, and duplicate selections', () => {
     const originalEvidence = evidence[0];
     const firstSelection = selection.selections[0];

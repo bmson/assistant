@@ -522,11 +522,54 @@ describe('bounded no-send email review', () => {
       threadIds.slice(EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE),
     ]);
     expect(calls.filter((call) => call.repair).map((call) => call.ids)).toEqual([
-      threadIds.slice(1, EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE),
-      threadIds.slice(EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE + 1),
+      [...threadIds.slice(1, EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE), threadIds[6]],
+      [threadIds[7]],
     ]);
     expect(result.attempts).toBe(4);
     expect(result.attempts).toBeLessThanOrEqual(EMAIL_REVIEW_MAX_ASSESSMENT_MODEL_CALLS);
+    expect(result.answer?.items.map((item) => item.thread.threadId)).toEqual(threadIds);
+    expect(result.sourceBatches?.map((batch) => batch.length)).toEqual([5, 3]);
+    expect(
+      revalidateEmailReviewAssessmentBatches(
+        result.sourceBatches,
+        threadIds,
+        'owner@example.com',
+        evidence,
+      )?.items.map((item) => item.thread.threadId),
+    ).toEqual(threadIds);
+  });
+
+  it('uses one remaining call to repair missing rows across assessment batches', async () => {
+    const threadIds = Array.from({ length: 8 }, (_, index) => `thread-${index + 1}`);
+    const evidence = threadIds.flatMap((id) => [search(id), read(id, messages(id))]);
+    const threads = threadIds.map((id) =>
+      required(emailReviewCompleteThread(id, 'owner@example.com', evidence), 'complete thread'),
+    );
+    const calls: Array<{ ids: string[]; repair: boolean }> = [];
+    const result = await generateValidatedEmailReview(
+      threads,
+      async ({ prompt, repair }) => {
+        const input = JSON.parse(
+          prompt.split('\n\nThe previous assessment could not pass')[0] as string,
+        ) as {
+          threads: Array<{ threadId: string }>;
+        };
+        const ids = input.threads.map((thread) => thread.threadId);
+        calls.push({ ids, repair });
+        return {
+          ok: true,
+          value: {
+            items: (repair ? ids : ids.slice(0, -1)).map((id) =>
+              required(validAnswer(id).items[0], 'assessment'),
+            ),
+          },
+        };
+      },
+      3,
+    );
+
+    expect(result.attempts).toBe(3);
+    expect(calls.at(-1)).toEqual({ ids: [threadIds[4], threadIds[7]], repair: true });
     expect(result.answer?.items.map((item) => item.thread.threadId)).toEqual(threadIds);
     expect(result.sourceBatches?.map((batch) => batch.length)).toEqual([5, 3]);
     expect(
@@ -1550,6 +1593,51 @@ describe('bounded no-send email review', () => {
     expect(emailReviewValidationIssues({ items: [assessment] }, [thread])).toContain(
       'item_0:literal_explicit_deadline_or_null',
     );
+  });
+
+  it('shows drafts before owner decisions and names unfinished sources with coverage bullets', () => {
+    const ownerMessages = messages('needs-times');
+    const ownerLatest = required(ownerMessages.at(-1), 'owner request');
+    ownerLatest.text =
+      'Please provide your updated availability here https://schedule.example/owner so we can schedule the interview.';
+    ownerLatest.sourceLength = ownerLatest.text.length;
+    const ids = ['ready-draft', 'needs-times', 'unfinished-thread'];
+    const evidence = ids.flatMap((id) => [
+      search(id),
+      read(id, id === 'needs-times' ? ownerMessages : messages(id)),
+    ]);
+    const threads = ids.map((id) =>
+      required(emailReviewCompleteThread(id, 'owner@example.com', evidence), 'complete thread'),
+    );
+    const ready = required(
+      validateEmailReviewAnswer(validAnswer('ready-draft'), [required(threads[0], 'draft thread')])
+        ?.items[0],
+      'validated draft',
+    );
+    const coverage = emailReviewCoverage(ids, threads, evidence, 0, [], [], undefined, false, 2);
+    coverage.ownerDecisionRequiredThreads = [
+      emailReviewOwnerDecisionSummary(required(threads[1], 'owner thread')),
+    ];
+    coverage.unassessedThreads = [
+      { threadId: 'unfinished-thread', subject: required(threads[2], 'unfinished thread').subject },
+    ];
+    const text = formatEmailReviewAnswer([ready], coverage);
+    const draftAt = text.indexOf('### Please confirm the renewal date');
+    const ownerAt = text.indexOf('**Reply drafts not ready (1)**');
+    const unfinishedAt = text.indexOf('**Assessment unfinished (1)**');
+    expect(draftAt).toBeGreaterThan(-1);
+    expect(ownerAt).toBeGreaterThan(draftAt);
+    expect(unfinishedAt).toBeGreaterThan(ownerAt);
+    expect(text.indexOf('**Coverage:**')).toBeGreaterThan(unfinishedAt);
+    expect(text).toContain('**Coverage:**\n\n- ');
+    expect(text).toContain(
+      'Why it matters: The sender needs your confirmed availability to schedule the next step.',
+    );
+    expect(text).toContain('https://schedule.example/owner');
+    expect(text).toContain('https://mail.google.com/mail/u/0/#all/unfinished-thread');
+    expect(text).toContain('assessed 1 of 3 complete, eligible threads');
+    expect(text).toContain('2 selected threads could not be fully assessed');
+    expect(text).not.toContain('as shown above');
   });
 
   it('reports reviewed assessments separately from complete source reads', () => {

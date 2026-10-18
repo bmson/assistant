@@ -2054,9 +2054,8 @@ export async function generateValidatedEmailReview(
   // Give every batch an initial assessment before spending the remaining
   // calls on repairs. A repair only receives threads that are still missing
   // or have an unresolved deadline; accepted rows remain available.
-  for (const state of batchStates) {
-    if (attempts >= maxCalls) break;
-    const pending = state.threads.filter((thread) => {
+  const pendingRepairs = batchStates.flatMap((state) =>
+    state.threads.filter((thread) => {
       const prior = state.accepted.get(thread.threadId)?.validated;
       return (
         (!prior || prior.deadlineNeedsReview) &&
@@ -2065,18 +2064,34 @@ export async function generateValidatedEmailReview(
           emailReviewNeedsOwnerAvailability(thread)
         )
       );
-    });
-    if (pending.length === 0) continue;
+    }),
+  );
+  for (
+    let offset = 0;
+    offset < pendingRepairs.length && attempts < maxCalls;
+    offset += EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE
+  ) {
+    const pending = pendingRepairs.slice(offset, offset + EMAIL_REVIEW_ASSESSMENT_BATCH_SIZE);
+    const pendingIds = new Set(pending.map((thread) => thread.threadId));
+    const participatingStates = batchStates.filter((state) =>
+      state.threads.some((thread) => pendingIds.has(thread.threadId)),
+    );
+    // Pack unfinished rows across the original batches into each bounded call.
+    // A nearly complete batch must not consume the last repair slot by itself.
     const result = await generateValidatedEmailReviewBatch(
       pending,
       generate,
       1,
       true,
-      state.issues,
-      state.validationFeedback,
+      [...new Set(participatingStates.flatMap((state) => state.issues))],
+      participatingStates.flatMap((state) =>
+        state.validationFeedback.filter(
+          (finding) => finding.threadId === null || pendingIds.has(finding.threadId),
+        ),
+      ),
     );
     attempts += result.attempts;
-    mergeEmailReviewBatchResult(state, result);
+    for (const state of participatingStates) mergeEmailReviewBatchResult(state, result);
   }
 
   for (const state of batchStates) {
@@ -2241,10 +2256,12 @@ function mergeEmailReviewBatchResult(
     validationFeedback: EmailReviewThreadValidationFeedback[];
   },
 ): void {
+  const targetIds = new Set(target.threads.map((thread) => thread.threadId));
   const sourceByThread = new Map(
     (result.sourceItems ?? []).map((source) => [source.threadId, source] as const),
   );
   for (const item of result.answer?.items ?? []) {
+    if (!targetIds.has(item.thread.threadId)) continue;
     const source = sourceByThread.get(item.thread.threadId);
     target.ownerDecisionThreadIds.delete(item.thread.threadId);
     if (source)
@@ -2253,9 +2270,12 @@ function mergeEmailReviewBatchResult(
         validated: item,
       });
   }
-  for (const threadId of result.ownerDecisionThreadIds) target.ownerDecisionThreadIds.add(threadId);
+  for (const threadId of result.ownerDecisionThreadIds)
+    if (targetIds.has(threadId)) target.ownerDecisionThreadIds.add(threadId);
   target.issues = result.issues;
-  target.validationFeedback = result.validationFeedback;
+  target.validationFeedback = result.validationFeedback.filter(
+    (finding) => finding.threadId === null || targetIds.has(finding.threadId),
+  );
 }
 
 function acceptedResult(
@@ -2509,11 +2529,13 @@ export function formatEmailReviewAnswer(
     );
   if (coverage.unassessedCompleteThreads && coverage.unassessedCompleteThreads > 0)
     coverageNotes.push(
-      `${coverage.unassessedCompleteThreads} selected ${coverage.unassessedCompleteThreads === 1 ? 'thread could' : 'threads could'} not be fully assessed within the bounded checks${coverage.ownerDecisionRequiredThreads?.length ? `; ${coverage.ownerDecisionRequiredThreads.length} ${coverage.ownerDecisionRequiredThreads.length === 1 ? 'needs' : 'need'} your answer, as shown above` : ''}; no recipient-ready draft was prepared for these threads`,
+      `${coverage.unassessedCompleteThreads} selected ${coverage.unassessedCompleteThreads === 1 ? 'thread could' : 'threads could'} not be fully assessed within the bounded checks${coverage.ownerDecisionRequiredThreads?.length ? `; ${coverage.ownerDecisionRequiredThreads.length} ${coverage.ownerDecisionRequiredThreads.length === 1 ? 'needs' : 'need'} your answer, in the owner-decision section` : ''}; no recipient-ready draft was prepared for these threads`,
     );
+  const unfinishedLines: string[] = [];
+  const ownerDecisionLines: string[] = [];
   if (coverage.unassessedThreads?.length) {
-    lines.push(`**Assessment unfinished (${coverage.unassessedThreads.length})**`);
-    lines.push(
+    unfinishedLines.push(`**Assessment unfinished (${coverage.unassessedThreads.length})**`);
+    unfinishedLines.push(
       'These threads were read but their response obligations could not be verified. Check the source before deciding whether to respond.',
     );
     for (const item of coverage.unassessedThreads) {
@@ -2521,44 +2543,51 @@ export function formatEmailReviewAnswer(
         .replace(/[\r\n]+/g, ' ')
         .slice(0, 160)
         .replace(/[\\`*_{}[\]()<>#+\-=|!]/g, '\\$&');
-      lines.push(`**${subject}**`);
+      unfinishedLines.push(`**${subject}**`);
       if (/^[A-Za-z0-9_-]{3,128}$/.test(item.threadId))
-        lines.push(
+        unfinishedLines.push(
           `[Open the source thread](https://mail.google.com/mail/u/0/#all/${item.threadId})`,
         );
     }
   }
   if (coverage.ownerDecisionRequiredThreads?.length) {
-    lines.push(
+    ownerDecisionLines.push(
       `**Reply drafts not ready (${coverage.ownerDecisionRequiredThreads.length})**`,
-      'The available assessment did not produce recipient-ready text without choosing an answer for you. No draft is ready for these threads.',
+      'Choose the missing answer before preparing or using a reply.',
     );
     for (const item of coverage.ownerDecisionRequiredThreads) {
       const subject = item.subject
         .replace(/[\r\n]+/g, ' ')
         .slice(0, 160)
         .replace(/[\\`*_{}[\]()<>#+\-=|!]/g, '\\$&');
-      lines.push(`**${subject}** — needs your answer before a reply can be drafted.`);
-      if (item.requestQuote) lines.push(`Source asks: “${item.requestQuote}”`);
-      if (item.contextQuote) lines.push(`Source context: “${item.contextQuote}”`);
-      if (item.prerequisiteQuote) lines.push(`Activity prerequisite: “${item.prerequisiteQuote}”`);
-      if (item.qualificationQuote) lines.push(`Qualification: “${item.qualificationQuote}”`);
-      lines.push(
+      ownerDecisionLines.push(`**${subject}** — needs your answer before a reply can be drafted.`);
+      if (item.requestQuote) ownerDecisionLines.push(`Source asks: “${item.requestQuote}”`);
+      if (item.decisionPrompt?.startsWith('Which times and time zone'))
+        ownerDecisionLines.push(
+          'Why it matters: The sender needs your confirmed availability to schedule the next step.',
+        );
+      if (item.contextQuote) ownerDecisionLines.push(`Source context: “${item.contextQuote}”`);
+      if (item.prerequisiteQuote)
+        ownerDecisionLines.push(`Activity prerequisite: “${item.prerequisiteQuote}”`);
+      if (item.qualificationQuote)
+        ownerDecisionLines.push(`Qualification: “${item.qualificationQuote}”`);
+      ownerDecisionLines.push(
         item.deadlineQuote
           ? `Source timing: “${item.deadlineQuote}”`
           : 'No explicit reply deadline was verified.',
       );
-      if (item.decisionPrompt) lines.push(`Next: ${item.decisionPrompt}`);
-      if (item.actionUrl) lines.push(`[Source availability form](${item.actionUrl})`);
+      if (item.decisionPrompt) ownerDecisionLines.push(`Next: ${item.decisionPrompt}`);
+      if (item.actionUrl) ownerDecisionLines.push(`[Source availability form](${item.actionUrl})`);
       if (item.decisionPrompt?.startsWith('Which times and time zone'))
-        lines.push(
+        ownerDecisionLines.push(
           '**Reply outline — fill in before use:**',
           'Here is my updated availability: [confirmed dates, times and time zone].',
           'This outline is incomplete. If the source requests an availability form, submit the confirmed times there; an email reply does not complete that form.',
         );
-      if (item.contactQuote) lines.push(`Source contact instructions: “${item.contactQuote}”`);
+      if (item.contactQuote)
+        ownerDecisionLines.push(`Source contact instructions: “${item.contactQuote}”`);
       if (/^[A-Za-z0-9_-]{3,128}$/.test(item.threadId))
-        lines.push(
+        ownerDecisionLines.push(
           `[Open the source thread](https://mail.google.com/mail/u/0/#all/${item.threadId})`,
         );
     }
@@ -2578,7 +2607,7 @@ export function formatEmailReviewAnswer(
   } else if (drafts.length === 0 && coverage.searchPages > 0) {
     lines.push(
       coverage.ownerDecisionRequiredThreads?.length
-        ? 'A recipient-ready reply could not be prepared for the threads flagged above without adding an answer on your behalf.'
+        ? 'Some threads need your answer before a recipient-ready reply can be prepared.'
         : assessedThreads < coverage.completeThreads ||
             (coverage.unassessedCompleteThreads ?? 0) > 0
           ? `The reply review is incomplete; I could not reliably determine all requests needing your response.${uncertainNoReplies.length > 0 ? ' Check the possible deadlines above.' : ''}`
@@ -2667,7 +2696,9 @@ export function formatEmailReviewAnswer(
         `[Open the source thread](https://mail.google.com/mail/u/0/#all/${thread.threadId})`,
       );
   }
-  if (coverageNotes.length > 0) lines.push(`**Coverage:** ${coverageNotes.join('; ')}.`);
+  lines.push(...ownerDecisionLines, ...unfinishedLines);
+  if (coverageNotes.length > 0)
+    lines.push('**Coverage:**', coverageNotes.map((note) => `- ${note}.`).join('\n'));
   return lines.join('\n\n');
 }
 

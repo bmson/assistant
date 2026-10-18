@@ -82,6 +82,32 @@ function selectedSourceGroups(
   return groups;
 }
 
+function comparisonAttributionTarget(request: string): string | undefined {
+  return request
+    .match(
+      /\bdid\s+i\b[\s\S]{0,140}?\bfor\s+([^,?]+?),?\s+or\s+was\s+(?:that|it)\s+(?:an?\s+)?(?:the\s+)?assistant\s+(?:inference|suggestion)\b/iu,
+    )?.[1]
+    ?.trim();
+}
+
+function hasPositiveAttributionSuggestion(quote: string, target: string): boolean {
+  const targetTokens = (normalizedText(target).match(/[\p{L}\p{N}]+/gu) ?? []).filter(
+    (token) => !new Set(['a', 'an', 'and', 'for', 'in', 'of', 'the', 'to']).has(token),
+  );
+  if (targetTokens.length === 0) return false;
+  return quote.split(/(?<=[.!?])\s+|[;\n]+/u).some((sentence) => {
+    const tokens = new Set(normalizedText(sentence).match(/[\p{L}\p{N}]+/gu) ?? []);
+    return (
+      targetTokens.every((token) => {
+        const aliases = token === 'transport' ? ['transport', 'transit'] : [token];
+        return aliases.some((alias) => tokens.has(alias));
+      }) &&
+      /\b(?:suggest\w*|recommend\w*|propos\w*|next step|map\w*)\b/iu.test(sentence) &&
+      !/\b(?:not|never|no|without|avoid|don['’]?t|cannot|can['’]?t|isn['’]?t)\b/iu.test(sentence)
+    );
+  });
+}
+
 function directSelectedContrastAnswer(
   request: string,
   groups: ReturnType<typeof selectedSourceGroups>,
@@ -90,34 +116,8 @@ function directSelectedContrastAnswer(
   // question whose queried destination appears in the selected assistant source
   // and not in the selected owner source. This does not generalize absence beyond
   // the exact passages being cited.
-  const targetMatch = request.match(
-    /\bdid\s+i\b[\s\S]{0,140}?\bfor\s+([^,?]+?),?\s+or\s+was\s+(?:that|it)\s+(?:an?\s+)?(?:the\s+)?assistant\s+(?:inference|suggestion)\b/iu,
-  );
-  const target = targetMatch?.[1]?.trim();
+  const target = comparisonAttributionTarget(request);
   if (!target) return undefined;
-  const targetTokens = (normalizedText(target).match(/[\p{L}\p{N}]+/gu) ?? []).filter(
-    (token) => !new Set(['a', 'an', 'and', 'for', 'in', 'of', 'the', 'to']).has(token),
-  );
-  if (targetTokens.length === 0) return undefined;
-  const tokensIn = (value: string) => new Set(normalizedText(value).match(/[\p{L}\p{N}]+/gu) ?? []);
-  const hasTarget = (value: string) => {
-    const tokens = tokensIn(value);
-    return targetTokens.every((token) => {
-      const aliases = token === 'transport' ? ['transport', 'transit'] : [token];
-      return aliases.some((alias) => tokens.has(alias));
-    });
-  };
-  const hasPositiveTargetSuggestion = (quote: string) =>
-    quote
-      .split(/(?<=[.!?])\s+|[;\n]+/u)
-      .some(
-        (sentence) =>
-          hasTarget(sentence) &&
-          /\b(?:suggest\w*|recommend\w*|propos\w*|next step|map\w*)\b/iu.test(sentence) &&
-          !/\b(?:not|never|no|without|avoid|don['’]?t|cannot|can['’]?t|isn['’]?t)\b/iu.test(
-            sentence,
-          ),
-      );
   const owners = groups.filter((group) => group.speaker === 'Recorded owner message');
   const assistants = groups.filter(
     (group) => group.speaker === 'Earlier assistant claim (not verified fact)',
@@ -126,7 +126,7 @@ function directSelectedContrastAnswer(
     owners.length !== 1 ||
     assistants.length !== 1 ||
     normalizedText(owners[0]?.quote ?? '').includes(normalizedText(target)) ||
-    !hasPositiveTargetSuggestion(assistants[0]?.quote ?? '')
+    !hasPositiveAttributionSuggestion(assistants[0]?.quote ?? '', target)
   )
     return undefined;
   return 'That wording appears in the assistant’s suggestion. Your cited message doesn’t use it, so I can’t verify it as your instruction.';
@@ -403,7 +403,12 @@ export function memoryReadSources(
             ).map((excerpt) => ({
               source,
               score: assistantSpeaker
-                ? assistantComparisonEvidenceScore(excerpt, terms.owner, requested)
+                ? assistantComparisonEvidenceScore(
+                    excerpt,
+                    terms.owner,
+                    requested,
+                    terms.attributionTarget,
+                  )
                 : requested.filter((term) => matchesComparisonTerm(term, excerpt)).length,
             })),
           )
@@ -444,13 +449,30 @@ export function memoryReadSources(
         strongest === undefined
           ? []
           : pairs.filter((pair) => pair.score === strongest).flatMap((pair) => pair.sources);
-      const pairedKeys = new Set(pairedSources.map((source) => source.key));
+      // An attribution question may have a relevant assistant passage whose
+      // owner side needs bounded context recovery. Keep it visible even when
+      // earlier search results filled the speaker cap with generic suggestions.
+      const attributionSources = terms.attributionTarget
+        ? assistant.filter((source) =>
+            assistantComparisonEvidenceSegments(source, scope, terms.owner).some(
+              (excerpt) =>
+                assistantComparisonEvidenceScore(
+                  excerpt,
+                  terms.owner,
+                  terms.assistant,
+                  terms.attributionTarget,
+                ) >= 2,
+            ),
+          )
+        : [];
+      const reservedSources = [...pairedSources, ...attributionSources];
+      const pairedKeys = new Set(reservedSources.map((source) => source.key));
       // Do not silently let the fixed prompt budget choose among too many
       // equally strong contexts. The selector cannot resolve that ambiguity
       // from a truncated candidate set.
       if (pairedKeys.size > 20) return assessed([]);
       const prioritized = new Map<string, MemoryReadSource>();
-      for (const source of [...pairedSources, ...bounded]) {
+      for (const source of [...reservedSources, ...bounded]) {
         if (!prioritized.has(source.key) && prioritized.size < 20)
           prioritized.set(source.key, source);
       }
@@ -675,7 +697,12 @@ export function memoryContextAnchorRefs(
       const score = Math.max(
         -1,
         ...excerpts.map((excerpt) =>
-          assistantComparisonEvidenceScore(excerpt, terms.owner, terms.assistant),
+          assistantComparisonEvidenceScore(
+            excerpt,
+            terms.owner,
+            terms.assistant,
+            terms.attributionTarget,
+          ),
         ),
       );
       if (score < 2) continue;
@@ -855,7 +882,9 @@ function isNamedFictionalScopePassage(excerpt: string, scope: string): boolean {
   return sourceNamesScope && sourceMarksNamedExercise;
 }
 
-function comparisonTerms(request: string): { owner: string[]; assistant: string[] } | undefined {
+function comparisonTerms(
+  request: string,
+): { owner: string[]; assistant: string[]; attributionTarget?: string } | undefined {
   const ownerMatch = request.match(
     /\b(?:my|owner(?:['’]s)?)\s+original\b([\s\S]{1,100}?)(?:\bfrom\b|\bwith\b|\band\s+(?:the\s+)?assistant\b|[.;?]|$)/iu,
   );
@@ -905,7 +934,9 @@ function comparisonTerms(request: string): { owner: string[]; assistant: string[
       .filter((term) => term.length >= 3 && !stopWords.has(term));
   const owner = terms(ownerMatch[1]);
   const assistant = terms(beforeCitation ?? '');
-  return owner.length && assistant.length ? { owner, assistant } : undefined;
+  return owner.length && assistant.length
+    ? { owner, assistant, attributionTarget: comparisonAttributionTarget(request) }
+    : undefined;
 }
 
 function matchesComparisonTerm(term: string, sourceBody: string): boolean {
@@ -1015,7 +1046,9 @@ function assistantComparisonEvidenceScore(
   excerpt: string,
   ownerTopicTerms: string[],
   requestTerms: string[],
+  attributionTarget?: string,
 ): number {
+  if (attributionTarget && !hasPositiveAttributionSuggestion(excerpt, attributionTarget)) return -1;
   const topicMatches = ownerTopicTerms.filter((term) =>
     matchesComparisonTerm(term, excerpt),
   ).length;
@@ -1150,7 +1183,12 @@ function deterministicComparisonSelection(
             source,
             excerpt,
             score: assistantSpeaker
-              ? assistantComparisonEvidenceScore(excerpt, terms.owner, requestedTerms)
+              ? assistantComparisonEvidenceScore(
+                  excerpt,
+                  terms.owner,
+                  requestedTerms,
+                  terms.attributionTarget,
+                )
               : requestedTerms.filter((term) => matchesComparisonTerm(term, excerpt)).length,
           })),
         )
@@ -1210,7 +1248,12 @@ function deterministicComparisonSelection(
             source,
             excerpt,
             score: assistantSpeaker
-              ? assistantComparisonEvidenceScore(excerpt, terms.owner, requestedTerms)
+              ? assistantComparisonEvidenceScore(
+                  excerpt,
+                  terms.owner,
+                  requestedTerms,
+                  terms.attributionTarget,
+                )
               : requestedTerms.filter((term) => matchesComparisonTerm(term, excerpt)).length,
           })),
         )
@@ -1435,7 +1478,12 @@ function validateSelectedComparison(
           source,
           excerpt,
           score: assistantSpeaker
-            ? assistantComparisonEvidenceScore(excerpt, terms.owner, requestedTerms)
+            ? assistantComparisonEvidenceScore(
+                excerpt,
+                terms.owner,
+                requestedTerms,
+                terms.attributionTarget,
+              )
             : requestedTerms.filter((term) => matchesComparisonTerm(term, excerpt)).length,
         })),
       )
@@ -1516,7 +1564,12 @@ function validateSelectedComparison(
           source,
           excerpt,
           score: assistantSpeaker
-            ? assistantComparisonEvidenceScore(excerpt, terms.owner, requestedTerms)
+            ? assistantComparisonEvidenceScore(
+                excerpt,
+                terms.owner,
+                requestedTerms,
+                terms.attributionTarget,
+              )
             : requestedTerms.filter((term) => matchesComparisonTerm(term, excerpt)).length,
         })),
       )

@@ -2019,6 +2019,48 @@ describe('tool-less conversational reply', () => {
     expect(wire).not.toContain('data-off-course');
   });
 
+  it.each([
+    [
+      'Simulate only. For this fictional project, the owner says: stop its future checks. A check is queued and another is running; an unsent draft exists. Describe the correct handling under 120 words. Do not cancel any real task.',
+      'I stopped every check and deleted the draft.',
+      'Simulation only: disable future checks, cancel queued work, request interruption of running work, and verify each result before confirming success. Preserve the unsent draft.',
+    ],
+    [
+      'Use only this scenario. Revise this fictional plan: the illustrator is available Tuesday; the demo must show the workflow Monday. Explain the trade-off under 100 words. Do not invent completion dates.',
+      'The illustrator will finish the assets Tuesday.',
+      'Show the workflow Monday with placeholders. Tuesday is the illustrator’s availability, so confirm the completion date before scheduling final assets.',
+    ],
+  ])(
+    'reviews constrained scenarios even when rewrite routing matches: %s',
+    async (request, draft, reviewedReply) => {
+      const result = await turn(request, { draft, reviewedReply, completeWhenConsumed: true });
+      const wire = await result.response.text();
+      expect(result.object.mock.calls.filter(([role]) => role === 'rewrite')).toHaveLength(1);
+      expect(result.stream.mock.calls[0]?.[0]).toBe('reason');
+      expect(result.stream.mock.calls[0]?.[1].system).not.toContain('Transform only the text');
+      expect(result.completions).toHaveLength(1);
+      expect(result.completions[0]?.status).toBe('done');
+      expect(result.completions[0]?.messages[0]?.text).toBe(reviewedReply);
+      expect(wire).toContain(reviewedReply);
+      expect(wire).not.toContain(draft);
+      expect(wire).not.toContain('data-off-course');
+      expect(stubs.enqueueTask).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps a plain supplied-text rewrite on its existing publication path', async () => {
+    const draft = 'Please send your updates tomorrow.';
+    const result = await turn(
+      'Rewrite this note politely: "send updates tomorrow". Give only the rewritten note.',
+      { draft },
+    );
+    const wire = await result.response.text();
+    expect(result.object.mock.calls.filter(([role]) => role === 'rewrite')).toHaveLength(0);
+    expect(result.completions[0]?.messages[0]?.text).toBe(draft);
+    expect(wire).toContain(draft);
+    expect(stubs.enqueueTask).not.toHaveBeenCalled();
+  });
+
   it('preserves spoken mode while using the same durable reply', async () => {
     const result = await turn(
       'Hello.',
