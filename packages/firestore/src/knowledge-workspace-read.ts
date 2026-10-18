@@ -3,6 +3,7 @@ import {
   type KnowledgeCleanupSource,
   type KnowledgeMapEdgeFilter,
   type KnowledgeMapEdgeRecord,
+  type KnowledgeMapLegacyDisplayPolicy,
   type KnowledgeNeighborEdgeRecord,
   type KnowledgeWorkspaceEntity,
   type KnowledgeWorkspaceFocus,
@@ -79,6 +80,7 @@ const RELATION_FIELDS = [
   'validFrom',
   'validUntil',
   'assertionId',
+  'assertion',
 ];
 const ASSERTION_FIELDS = [
   'id',
@@ -132,6 +134,7 @@ type Relation = Pick<
   | 'validFrom'
   | 'validUntil'
   | 'assertionId'
+  | 'assertion'
 >;
 type Assertion = Pick<
   Records['knowledgeGraphAssertions'],
@@ -290,28 +293,168 @@ async function contentFor(
   store: InstallationStore,
   agentId: string,
   memoryIds: Iterable<string>,
+  expectedHashes?: ReadonlyMap<string, string>,
 ): Promise<Map<string, string>> {
-  const docs = await readMany(store, 'memories', memoryIds, ['id', 'agentId', 'content']);
+  const docs = await readMany(store, 'memories', memoryIds, [
+    'id',
+    'agentId',
+    'content',
+    ...(expectedHashes ? ['contentHash'] : []),
+  ]);
   const content = new Map<string, string>();
   for (const [id, doc] of docs) {
-    const row = decodeRecord<{ id?: unknown; agentId?: unknown; content?: unknown }>(doc.data());
-    if (row.id === id && row.agentId === agentId && typeof row.content === 'string')
+    const row = decodeRecord<{
+      id?: unknown;
+      agentId?: unknown;
+      content?: unknown;
+      contentHash?: unknown;
+    }>(doc.data());
+    if (
+      row.id === id &&
+      row.agentId === agentId &&
+      typeof row.content === 'string' &&
+      (!expectedHashes || row.contentHash === expectedHashes.get(id))
+    )
       content.set(id, row.content);
   }
   return content;
+}
+
+/** The same full source fences apply to both whole-map and targeted display reads. */
+async function eligibleRelations(input: {
+  store: InstallationStore;
+  agentId: string;
+  rows: Relation[];
+  entities: Map<string, Entity>;
+  memories: Map<string, Memory>;
+  sources: Map<string, Source>;
+  extractionVersion: number;
+  now: Date;
+  space?: EmbeddingSpace;
+  legacy?: KnowledgeMapLegacyDisplayPolicy;
+}): Promise<{ display: Relation[]; recallIds: Set<string> }> {
+  const { store, agentId, entities, memories, sources, extractionVersion, now, space, legacy } =
+    input;
+  if (!space) return { display: [], recallIds: new Set() };
+  const legacyMinimum =
+    legacy &&
+    Number.isInteger(legacy.minimumExtractionVersion) &&
+    legacy.minimumExtractionVersion >= 2 &&
+    legacy.minimumExtractionVersion < extractionVersion
+      ? legacy.minimumExtractionVersion
+      : extractionVersion;
+  const versionFor = (source: Source) =>
+    source.extractionVersion >= extractionVersion ? extractionVersion : legacyMinimum;
+  const candidates = input.rows.filter((row) => {
+    const source = sources.get(row.sourceMemoryId);
+    const memory = memories.get(row.sourceMemoryId);
+    return (
+      row.agentId === agentId &&
+      row.reviewStatus !== 'rejected' &&
+      row.evidenceQuote !== null &&
+      entities.has(row.subjectEntityId) &&
+      entities.has(row.objectEntityId) &&
+      !!source &&
+      source.memoryId === row.sourceMemoryId &&
+      (source.extractionVersion >= extractionVersion || (!!legacy && row.assertionId === null)) &&
+      activeSource(memory, source, versionFor(source), now) &&
+      !memory?.supersededById &&
+      memory?.embeddingSpaceKey === embeddingSpaceKey(space) &&
+      (source.subjectContactId ?? null) === (memory?.subjectContactId ?? null)
+    );
+  });
+  const legacyIds = new Set(
+    candidates
+      .filter(
+        (row) => (sources.get(row.sourceMemoryId)?.extractionVersion ?? 0) < extractionVersion,
+      )
+      .map((row) => row.sourceMemoryId),
+  );
+  const ids = [...new Set(candidates.map((row) => row.sourceMemoryId))];
+  const eligible = new Set<string>();
+  const legacyContent = new Map<string, string>();
+  for (let offset = 0; offset < ids.length; offset += GET_ALL_BATCH) {
+    const page = ids.slice(offset, offset + GET_ALL_BATCH);
+    const [docs, tombstones] = await Promise.all([
+      store.db.getAll(...page.map((id) => store.doc('memories', id)), {
+        fieldMask: [
+          ...MEMORY_FIELDS,
+          'embedding',
+          ...(page.some((id) => legacyIds.has(id)) ? ['content'] : []),
+        ],
+      }),
+      store.db.getAll(
+        ...page.map((id) => store.doc('memoryTombstones', memories.get(id)?.contentHash ?? id)),
+      ),
+    ]);
+    for (const [index, doc] of docs.entries()) {
+      const id = page[index];
+      const source = id ? sources.get(id) : undefined;
+      if (!id || !source || !doc.exists) continue;
+      const memory = decodeMemoryRecord(doc.data());
+      if (
+        memory.id !== id ||
+        documentKey(id) !== doc.id ||
+        (source.subjectContactId ?? null) !== (memory.subjectContactId ?? null) ||
+        !graphSourceEligible({
+          memory,
+          source,
+          agentId,
+          space,
+          storedSpace: doc.get('embeddingSpace'),
+          extractionVersion: versionFor(source),
+          now,
+          tombstoned: tombstones[index]?.exists === true,
+        })
+      )
+        continue;
+      eligible.add(id);
+      if (legacyIds.has(id) && typeof doc.get('content') === 'string')
+        legacyContent.set(id, doc.get('content') as string);
+    }
+  }
+  const recallIds = new Set<string>();
+  const display = candidates.filter((row) => {
+    if (!eligible.has(row.sourceMemoryId)) return false;
+    if ((sources.get(row.sourceMemoryId)?.extractionVersion ?? 0) >= extractionVersion) {
+      if (row.assertion && row.assertion.modality !== 'unverified') recallIds.add(row.id);
+      return true;
+    }
+    const subject = entities.get(row.subjectEntityId);
+    const object = entities.get(row.objectEntityId);
+    const sourceContent = legacyContent.get(row.sourceMemoryId);
+    return (
+      !!legacy &&
+      !!subject &&
+      !!object &&
+      sourceContent !== undefined &&
+      row.evidenceQuote !== null &&
+      legacy.isGrounded({
+        sourceContent,
+        subjectLabel: subject.label,
+        predicate: row.predicate,
+        objectLabel: object.label,
+        evidenceQuote: row.evidenceQuote,
+      })
+    );
+  });
+  return { display, recallIds };
 }
 
 /** Owner knowledge workspace reads from bounded projections and batched point reads. */
 export class FirestoreKnowledgeWorkspaceReadRepository implements KnowledgeWorkspaceReadRepository {
   readonly kind = 'knowledge-workspace-read-repository' as const;
   readonly embeddingSpace?: EmbeddingSpace;
+  readonly legacyDisplay?: KnowledgeMapLegacyDisplayPolicy;
 
   constructor(
     readonly store: InstallationStore,
     readonly configuredAgentId: string,
     embeddingSpace?: EmbeddingSpace,
+    legacyDisplay?: KnowledgeMapLegacyDisplayPolicy,
   ) {
     this.embeddingSpace = embeddingSpace ? snapshotEmbeddingSpace(embeddingSpace) : undefined;
+    this.legacyDisplay = legacyDisplay ? Object.freeze({ ...legacyDisplay }) : undefined;
   }
 
   async snapshot(input: {
@@ -437,7 +580,9 @@ export class FirestoreKnowledgeWorkspaceReadRepository implements KnowledgeWorks
         !source ||
         source.contentHash !== memory.contentHash ||
         (source.subjectContactId ?? null) !== (memory.subjectContactId ?? null) ||
-        source.status === 'failed'
+        source.status !== 'ready' ||
+        !Number.isInteger(source.extractionVersion) ||
+        source.extractionVersion < extractionVersion
       )
         pendingSources += 1;
     }
@@ -445,61 +590,21 @@ export class FirestoreKnowledgeWorkspaceReadRepository implements KnowledgeWorks
       .filter((source) => source.status === 'failed' || source.status === 'quarantined')
       .sort((a, b) => a.memoryId.localeCompare(b.memoryId));
 
-    const candidates = relations.filter(
-      (row: Relation) =>
-        row.reviewStatus !== 'rejected' &&
-        row.evidenceQuote !== null &&
-        entities.has(row.subjectEntityId) &&
-        entities.has(row.objectEntityId) &&
-        activeSource(
-          memories.get(row.sourceMemoryId),
-          sources.get(row.sourceMemoryId),
-          extractionVersion,
-          now,
-        ) &&
-        !memories.get(row.sourceMemoryId)?.supersededById &&
-        !!this.embeddingSpace &&
-        memories.get(row.sourceMemoryId)?.embeddingSpaceKey ===
-          embeddingSpaceKey(this.embeddingSpace),
-    );
-    // Only candidate source vectors are point-read, in bounded batches. A space
-    // marker alone cannot prove that a vector exists or has valid dimensions.
-    const eligible = new Set<string>();
-    const candidateIds = [...new Set(candidates.map((row) => row.sourceMemoryId))];
-    if (this.embeddingSpace) {
-      for (let offset = 0; offset < candidateIds.length; offset += GET_ALL_BATCH) {
-        const page = candidateIds.slice(offset, offset + GET_ALL_BATCH);
-        const docs = await store.db.getAll(...page.map((id) => store.doc('memories', id)), {
-          fieldMask: [...MEMORY_FIELDS, 'embedding'],
-        });
-        const tombstones = await store.db.getAll(
-          ...page.map((id) => store.doc('memoryTombstones', memories.get(id)?.contentHash ?? id)),
-        );
-        for (const [index, doc] of docs.entries()) {
-          const id = page[index];
-          const source = id ? sources.get(id) : undefined;
-          if (!id || !doc.exists || !source) continue;
-          const memory = decodeMemoryRecord(doc.data());
-          if (
-            memory.id === id &&
-            documentKey(id) === doc.id &&
-            graphSourceEligible({
-              memory,
-              source,
-              agentId,
-              space: this.embeddingSpace,
-              storedSpace: doc.get('embeddingSpace'),
-              extractionVersion,
-              now,
-              tombstoned: tombstones[index]?.exists === true,
-            })
-          )
-            eligible.add(id);
-        }
-      }
-    }
-    const active = candidates.filter((row) => eligible.has(row.sourceMemoryId)).sort(newestFirst);
-    const activeIds = new Set(active.map((row) => row.id));
+    const accepted = await eligibleRelations({
+      store,
+      agentId,
+      rows: relations,
+      entities,
+      memories,
+      sources,
+      extractionVersion,
+      now,
+      space: this.embeddingSpace,
+      legacy: this.legacyDisplay,
+    });
+    const active = accepted.display.sort(newestFirst);
+    // Read compatibility must never promote an old projection into graph recall.
+    const activeIds = accepted.recallIds;
     const activeEntities = new Set(
       active.flatMap((row) => [row.subjectEntityId, row.objectEntityId]),
     );
@@ -571,6 +676,12 @@ export class FirestoreKnowledgeWorkspaceReadRepository implements KnowledgeWorks
         store,
         agentId,
         rows.map((row) => row.sourceMemoryId),
+        new Map(
+          rows.map((row) => [
+            row.sourceMemoryId,
+            memories.get(row.sourceMemoryId)?.contentHash ?? '',
+          ]),
+        ),
       );
       await assertPrivacyErasureFenceUnchanged(store, agentId, fence);
       return rows.flatMap((row) => {
@@ -578,6 +689,19 @@ export class FirestoreKnowledgeWorkspaceReadRepository implements KnowledgeWorks
         const object = entities.get(row.objectEntityId);
         const sourceContent = content.get(row.sourceMemoryId);
         if (!subject || !object || sourceContent === undefined) return [];
+        if (
+          (sources.get(row.sourceMemoryId)?.extractionVersion ?? 0) < extractionVersion &&
+          (!this.legacyDisplay ||
+            row.evidenceQuote === null ||
+            !this.legacyDisplay.isGrounded({
+              sourceContent,
+              subjectLabel: subject.label,
+              predicate: row.predicate,
+              objectLabel: object.label,
+              evidenceQuote: row.evidenceQuote,
+            }))
+        )
+          return [];
         return [
           {
             id: row.id,
@@ -787,38 +911,38 @@ export class FirestoreKnowledgeWorkspaceReadRepository implements KnowledgeWorks
         ENTITY_FIELDS,
       ),
     ]);
-    const memory = (id: string) => {
-      const doc = memoryDocs.get(id);
-      const row = doc ? validMemory(doc, agentId) : null;
-      return row?.id === id ? row : undefined;
-    };
-    const source = (id: string) => {
-      const doc = sourceDocs.get(id);
-      const row = doc ? decodeRecord<Source>(doc.data()) : undefined;
-      return row?.memoryId === id ? row : undefined;
-    };
-    const endpoint = (id: string) => {
-      const doc = entityDocs.get(id);
-      const row = doc ? validEntity(doc, agentId) : null;
-      return row?.id === id ? row : null;
-    };
-    const edges = rows
+    const memories = new Map<string, Memory>();
+    for (const [id, doc] of memoryDocs) {
+      const memory = validMemory(doc, agentId);
+      if (memory?.id === id) memories.set(id, memory);
+    }
+    const sources = new Map<string, Source>();
+    for (const [id, doc] of sourceDocs) {
+      const source = decodeRecord<Source>(doc.data());
+      if (source.memoryId === id) sources.set(id, source);
+    }
+    const entities = new Map<string, Entity>();
+    for (const [id, doc] of entityDocs) {
+      const endpoint = validEntity(doc, agentId);
+      if (endpoint?.id === id) entities.set(id, endpoint);
+    }
+    const accepted = await eligibleRelations({
+      store,
+      agentId,
+      rows,
+      entities,
+      memories,
+      sources,
+      extractionVersion: input.extractionVersion,
+      now: input.now,
+      space: this.embeddingSpace,
+      legacy: this.legacyDisplay,
+    });
+    const edges = accepted.display
       .flatMap((row) => {
-        const subject = endpoint(row.subjectEntityId);
-        const object = endpoint(row.objectEntityId);
-        if (
-          !subject ||
-          !object ||
-          !activeSource(
-            memory(row.sourceMemoryId),
-            source(row.sourceMemoryId),
-            input.extractionVersion,
-            input.now,
-          )
-        )
-          return [];
         const isOutbound = row.subjectEntityId === entity.id;
-        return [{ row, edge: { isOutbound, other: isOutbound ? object : subject } }];
+        const other = entities.get(isOutbound ? row.objectEntityId : row.subjectEntityId);
+        return other ? [{ row, edge: { isOutbound, other } }] : [];
       })
       .sort(
         (a, b) =>
@@ -889,10 +1013,30 @@ export class FirestoreKnowledgeWorkspaceReadRepository implements KnowledgeWorks
     });
     const sourceRow = sourceDoc.exists ? decodeRecord<Source>(sourceDoc.data()) : undefined;
     const source = sourceRow?.memoryId === input.memoryId ? sourceRow : undefined;
-    const sourceActive = activeSource(memory, source, input.extractionVersion, input.now);
-    const activeConnectionCount = relations.filter(
-      (row) => sourceActive && row.reviewStatus !== 'rejected' && row.evidenceQuote !== null,
-    ).length;
+    const allEndpoints = await readMany(
+      store,
+      'knowledgeGraphEntities',
+      relations.flatMap((row) => [row.subjectEntityId, row.objectEntityId]),
+      ENTITY_FIELDS,
+    );
+    const entities = new Map<string, Entity>();
+    for (const [id, doc] of allEndpoints) {
+      const entity = validEntity(doc, agentId);
+      if (entity?.id === id) entities.set(id, entity);
+    }
+    // This count describes current recall eligibility, not legacy display compatibility.
+    const accepted = await eligibleRelations({
+      store,
+      agentId,
+      rows: relations,
+      entities,
+      memories: new Map([[input.memoryId, memory]]),
+      sources: source ? new Map([[input.memoryId, source]]) : new Map(),
+      extractionVersion: input.extractionVersion,
+      now: input.now,
+      space: this.embeddingSpace,
+    });
+    const activeConnectionCount = accepted.recallIds.size;
     // An endpoint is orphaned when only this source's relations reference it.
     // Reading one row past this source's own incident count proves otherwise.
     const sameSource = new Map<string, number>();
