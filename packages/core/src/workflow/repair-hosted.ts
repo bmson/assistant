@@ -8,6 +8,7 @@ import {
   type RepairWorker,
   repairBranch,
 } from './repair-github.js';
+import { REPAIR_SOURCE_SNAPSHOT, refreshRepairSourceSnapshot } from './repair-source-snapshot.js';
 
 const sha = z.string().regex(/^[a-f0-9]{40}$/i);
 const sessionId = z.string().regex(/^sess_[a-zA-Z0-9_]+$/);
@@ -131,6 +132,32 @@ export function createHostedRepairWorker(input: {
   }
   const github = (path: string, method = 'GET', body?: unknown) =>
     json('github', `/repos/${input.repo}${path}`, method, body);
+  async function sourceFile(path: string, ref: string, optional = false): Promise<string | null> {
+    const response = await request(
+      'github',
+      `/repos/${input.repo}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${sha.parse(ref)}`,
+    );
+    if (optional && response.status === 404) return null;
+    if (!response.ok) throw new RepairRequestUncertain('Could not read pinned source evidence');
+    const file = z
+      .object({ type: z.literal('file'), encoding: z.literal('base64'), content: z.string() })
+      .parse(await response.json());
+    const bytes = Buffer.from(file.content, 'base64');
+    if (
+      bytes.byteLength > 100 * 1024 ||
+      bytes.includes(0) ||
+      Buffer.from(bytes.toString('utf8')).compare(bytes) !== 0
+    )
+      throw new Error('Invalid bounded UTF-8 source evidence');
+    return bytes.toString('utf8');
+  }
+  async function derivedSnapshot(
+    source: string,
+    changes: Array<{ path: string; text: string | null }>,
+  ) {
+    const original = await sourceFile(REPAIR_SOURCE_SNAPSHOT, source, true);
+    return original === null ? null : refreshRepairSourceSnapshot(original, changes);
+  }
   const attempt = (issue: RepairIssue) => `${issue.id}:${issue.data.dispatchedAt}`;
   async function findSession(issue: RepairIssue): Promise<string | undefined> {
     if (issue.data.hostedSessionId) return sessionId.parse(issue.data.hostedSessionId);
@@ -274,12 +301,16 @@ export function createHostedRepairWorker(input: {
         },
       };
     const files = z
-      .array(z.object({ filename: z.string() }))
+      .array(z.object({ filename: z.string(), status: z.string().optional() }))
       .parse(await github(`/pulls/${pr.number}/files?per_page=100`));
     if (
       !files.length ||
       files.length > 20 ||
-      files.some((f) => repairPathBlocked(f.filename, input.allowExecutor))
+      files.some(
+        (f) =>
+          f.filename !== REPAIR_SOURCE_SNAPSHOT &&
+          repairPathBlocked(f.filename, input.allowExecutor),
+      )
     )
       return {
         status: 'failed' as const,
@@ -308,6 +339,37 @@ export function createHostedRepairWorker(input: {
           },
         };
       return { status: 'testing' as const, patch };
+    }
+    if (files.some((file) => file.filename === REPAIR_SOURCE_SNAPSHOT)) {
+      const invalidSnapshot = {
+        status: 'failed' as const,
+        patch: {
+          ...patch,
+          lastError: 'Published source snapshot does not match the bounded source changes',
+        },
+      };
+      if (!issue.data.hostedSourceSha) return invalidSnapshot;
+      try {
+        const changes = [];
+        let bytes = 0;
+        for (const file of files.filter((f) => f.filename !== REPAIR_SOURCE_SNAPSHOT)) {
+          const text =
+            file.status === 'removed' ? null : await sourceFile(file.filename, pr.head.sha);
+          bytes += Buffer.byteLength(text ?? '');
+          changes.push({ path: file.filename, text });
+        }
+        const expected = await derivedSnapshot(issue.data.hostedSourceSha, changes);
+        const actual = await sourceFile(REPAIR_SOURCE_SNAPSHOT, pr.head.sha);
+        if (
+          !expected ||
+          actual !== expected ||
+          bytes + Buffer.byteLength(actual ?? '') > 100 * 1024
+        )
+          return invalidSnapshot;
+      } catch (error) {
+        if (error instanceof RepairRequestUncertain) throw error;
+        return invalidSnapshot;
+      }
     }
     // CI establishes executable checks; a separate model reviews the actual
     // GitHub diff. Never promote an unreviewed or subsequently changed commit.
@@ -414,7 +476,8 @@ export function createHostedRepairWorker(input: {
       throw new Error('Hosted result does not match its immutable source commit');
     if (!result.reproduced || !result.changes.length)
       throw new Error('No reproduced defect or acceptance gap with code changes');
-    const paths = result.changes.map((c) => c.path);
+    const changes = [...result.changes];
+    const paths = changes.map((c) => c.path);
     if (
       new Set(paths).size !== paths.length ||
       paths.some((path) => repairPathBlocked(path, input.allowExecutor))
@@ -427,7 +490,7 @@ export function createHostedRepairWorker(input: {
     )
       throw new Error('A changed meaningful regression or acceptance test is required');
     let size = 0;
-    for (const change of result.changes) {
+    for (const change of changes) {
       if (change.content === null) continue;
       if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(change.content))
         throw new Error('Invalid hosted file encoding');
@@ -436,13 +499,30 @@ export function createHostedRepairWorker(input: {
         throw new Error('Only UTF-8 source files may be published');
       size += decoded.byteLength;
     }
+    const snapshot = await derivedSnapshot(
+      source,
+      changes.map((file) => ({
+        path: file.path,
+        text: file.content === null ? null : Buffer.from(file.content, 'base64').toString('utf8'),
+      })),
+    );
+    if (snapshot !== null) {
+      changes.push({
+        path: REPAIR_SOURCE_SNAPSHOT,
+        content: Buffer.from(snapshot).toString('base64'),
+        mode: '100644',
+      });
+      paths.push(REPAIR_SOURCE_SNAPSHOT);
+      size += Buffer.byteLength(snapshot);
+    }
+    if (changes.length > 20) throw new Error('Derived source evidence exceeds the 20-file limit');
     if (size > 100 * 1024)
       throw new Error('Hosted repair exceeds the 100 KiB changed-content limit');
     const base = z
       .object({ tree: z.object({ sha }) })
       .parse(await github(`/git/commits/${source}`));
     const tree: Array<{ path: string; mode: string; type: 'blob'; sha: string | null }> = [];
-    for (const change of result.changes) {
+    for (const change of changes) {
       const blob =
         change.content === null
           ? null
@@ -602,7 +682,7 @@ export function createHostedRepairWorker(input: {
             source_sha: source,
             base_branch: repo.default_branch,
           },
-          input: `Work in /workspace/repo on this synthetic technical brief: ${JSON.stringify(brief)}\nProtected paths must stay unchanged; only apps/ and packages/ source files are allowed, excluding authentication, credentials, privacy, trust, policies, schemas, dependency/configuration files and repair machinery. At most 20 files and 100 KiB total changed file contents. Demonstrate the defect or missing requested behavior with a failing meaningful test, implement the fix, format changed files with Biome, run the focused tests, pnpm lint, and pnpm typecheck. iOS verification runs later in repository CI. Write /workspace/result.json with {"reproduced":true or false,"regressionTest":"changed test path"}. Run python3 /workspace/export-repair.py to export the result. Do not modify the exporter or HEAD. Then stop.`,
+          input: `Work in /workspace/repo on this synthetic technical brief: ${JSON.stringify(brief)}\nProtected paths must stay unchanged; only apps/ and packages/ source files are allowed, excluding authentication, credentials, privacy, trust, policies, schemas, dependency/configuration files and repair machinery. Consult packages/persistence/src/repair-guard.ts for exact path exclusions, including all of packages/config, packages/db, packages/firestore and packages/persistence. At most 20 files and 100 KiB total changed file contents, including derived source evidence. Demonstrate the defect or missing requested behavior with a failing meaningful test, implement the fix, format changed files with Biome, and run focused tests and pnpm lint. The trusted publisher regenerates docs/runtime-support-matrix.generated.json; never edit it yourself. If lint fails only on that stale snapshot, report the exact limitation and export the source patch for independent CI. Run the full type checks with bounded memory: pnpm exec turbo typecheck --concurrency=2, followed by pnpm exec tsc --noEmit -p scripts/tsconfig.json. iOS verification runs later in repository CI. Write /workspace/result.json with {"reproduced":true or false,"regressionTest":"changed test path"}. Run python3 /workspace/export-repair.py to export the result. Do not modify the exporter or HEAD. Then stop.`,
           stream: false,
         }),
       );
