@@ -46,6 +46,7 @@ export async function reviewConversationReply(input: {
       ...(guarded.corrected
         ? [
             'The deterministic contract rejected the draft as unsupported or unperformed work. Answer the supplied scenario as analysis or explicitly proposed text; do not claim real actions were completed.',
+            'For fictional confirmation examples, describe conditionally in third person what can be confirmed before and after verification. Avoid first-person completion receipts or promises that read as actions performed in this turn; preserve the requested decision and preparation instead of a generic failure.',
           ]
         : []),
     ];

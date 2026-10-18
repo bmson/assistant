@@ -2037,7 +2037,8 @@ describe('tool-less conversational reply', () => {
       const wire = await result.response.text();
       expect(result.object.mock.calls.filter(([role]) => role === 'rewrite')).toHaveLength(1);
       expect(result.stream.mock.calls[0]?.[0]).toBe('reason');
-      expect(result.stream.mock.calls[0]?.[1].system).not.toContain('Transform only the text');
+      const [, options] = result.stream.mock.calls[0] as unknown as [string, { system: string }];
+      expect(options.system).not.toContain('Transform only the text');
       expect(result.completions).toHaveLength(1);
       expect(result.completions[0]?.status).toBe('done');
       expect(result.completions[0]?.messages[0]?.text).toBe(reviewedReply);
