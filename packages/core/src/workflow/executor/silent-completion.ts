@@ -4,6 +4,11 @@ type TaskRow = Records['tasks'];
 
 import type { TaskState } from '../../events.js';
 import type { StepCallOutcome } from '../../model-router/router.js';
+import {
+  type GoalToolEvidence,
+  isGoalWorkEvidence,
+  needsGoalProgressUpdate,
+} from '../goal-evidence.js';
 
 function object(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -11,8 +16,46 @@ function object(value: unknown): Record<string, unknown> {
     : {};
 }
 
-/** Only a server-created arrival observation authorizes a successful silent final. */
+/** Bind quiet goal completion to an actual recurring goal occurrence, never an owner turn. */
+export function isScheduledGoalCheck(task: TaskRow): boolean {
+  const trigger = object(task.trigger);
+  const payload = object(trigger.payload);
+  return (
+    task.trust === 'assistant' &&
+    task.type === 'scheduled' &&
+    Boolean(task.goalId) &&
+    Boolean(task.conversationId) &&
+    !task.parentTaskId &&
+    trigger.source === 'schedule' &&
+    payload.goalId === task.goalId &&
+    payload.schedule === `goal:${task.goalId}` &&
+    typeof payload.scheduleId === 'string' &&
+    typeof trigger.externalEventId === 'string' &&
+    trigger.externalEventId.startsWith(`schedule:${payload.scheduleId}:`) &&
+    payload.occurrenceId === trigger.externalEventId
+  );
+}
+
+/** A quiet goal check still needs verified work and its durable progress checkpoint. */
+export function hasQuietGoalEvidence(evidence: GoalToolEvidence[]): boolean {
+  return (
+    evidence.some(isGoalWorkEvidence) &&
+    !needsGoalProgressUpdate(evidence) &&
+    evidence.every((row) => row.status === 'succeeded' || row.status === 'cached') &&
+    evidence.every((row) => {
+      const result = object(row.result);
+      return (
+        result.ok !== false &&
+        !(typeof result.status === 'number' && result.status >= 400) &&
+        result.deliveryStatus !== 'unknown'
+      );
+    })
+  );
+}
+
+/** Server-created arrival observations and recurring goal checks may finish quietly. */
 export function authorizesSilentCompletion(task: TaskRow): boolean {
+  if (isScheduledGoalCheck(task)) return true;
   const trigger = object(task.trigger);
   const payload = object(trigger.payload);
   const policy = object(payload.completionPolicy);

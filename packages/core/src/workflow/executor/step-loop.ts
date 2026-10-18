@@ -196,7 +196,11 @@ import {
 } from './notices.js';
 import type { RunContext } from './phases.js';
 import { roleForTask } from './role.js';
-import { canCompleteSilently } from './silent-completion.js';
+import {
+  canCompleteSilently,
+  hasQuietGoalEvidence,
+  isScheduledGoalCheck,
+} from './silent-completion.js';
 import { type ExecuteResult, LOST_LEASE } from './types.js';
 import { compact, latestUserText, replaceToolResultMessage } from './util.js';
 
@@ -4617,12 +4621,15 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       const completed = await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id });
       if (
         canCompleteSilently(task, state, stepResult) &&
+        (!isScheduledGoalCheck(task) || hasQuietGoalEvidence(completed)) &&
         completed.every((row) => row.status === 'succeeded' || row.status === 'cached')
       ) {
         return stageFinalResponse(deps, lease, state, rc.window, {
           completionKind: 'successful_silent',
           text: '',
-          progress: 'Arrival observation completed; no useful notice to send.',
+          progress: isScheduledGoalCheck(task)
+            ? 'Goal check completed; no material update to report.'
+            : 'Arrival observation completed; no useful notice to send.',
           terminalStatus: 'done',
           outcome: 'done',
           contractBlocked: false,

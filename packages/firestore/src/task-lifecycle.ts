@@ -469,8 +469,22 @@ export class FirestoreTaskRepository
         row.state && typeof row.state === 'object' && !Array.isArray(row.state)
           ? ({ ...row.state } as Record<string, unknown>)
           : row.state;
-      if (row.status === 'needs_attention' && state && typeof state === 'object')
-        delete (state as Record<string, unknown>).pendingFinal;
+      if (row.status === 'needs_attention' && state && typeof state === 'object') {
+        const pending = (state as Record<string, unknown>).pendingFinal as
+          | {
+              deliveryNeedsAttention?: boolean;
+              deliveryAttempted?: boolean;
+              finalDelivery?: unknown;
+            }
+          | undefined;
+        // Retry the frozen delivery, preserving ambiguous provider outcomes.
+        // Regenerating the answer here would discard the no-resend receipt.
+        if (
+          !pending?.deliveryNeedsAttention &&
+          !(pending?.deliveryAttempted && !pending.finalDelivery)
+        )
+          delete (state as Record<string, unknown>).pendingFinal;
+      }
       return {
         status: 'pending',
         state,

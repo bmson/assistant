@@ -256,6 +256,7 @@ export function goalAutomationInstruction(
     goal.targetDate ? `Target date: ${goal.targetDate.toISOString().slice(0, 10)}.` : '',
     'Reassess the latest owner instructions, verified progress, and changed sources before choosing the next unfinished step. Adapt the approach when priorities or dependencies change; do not restart completed work or repeat an unanswered decision request. Prefer useful research, comparison, or preparation you can finish within this session over another plan.',
     'Make the result useful to the owner: lead with the verified outcome or material change, explain its effect on the goal, and identify the next concrete step. If a decision is truly required, present the relevant options, trade-offs, and a recommendation grounded in the available evidence. Do not claim to be watching, checking back, or continuing later unless a real enabled schedule or mission provides that follow-through.',
+    'After a verified check, if nothing material changed and there is no useful new result, decision, or blocker, finish with an empty final response. The runtime saves the check in Activity without posting another message. Do not send an unchanged-status update or repeat an earlier notice. Never use silence to hide a failed check or unfinished work.',
     'Take one concrete, permitted step now when a tool can do it. The runtime records goal progress from successful tool results; do not call goals.update_progress yourself. Report only verified results in this work chat. If a required action needs approval or information, say exactly what is needed. Do not create another schedule, mission, or background task.',
   ]
     .filter(Boolean)
@@ -318,13 +319,13 @@ async function goalConversationId(
 }
 
 /**
- * Cancel the work already queued for a goal the owner stopped.
+ * Cancel queued and running work for a goal the owner stopped.
  *
  * `ensureGoalAutomation` only unschedules *future* sessions, so without this a
  * stopped goal keeps whatever was already in the queue and the next sweep runs
- * — and bills — against it. Tasks a worker currently holds are deliberately
- * left alone: yanking a row out from under a running step is worse than
- * letting it finish, and the executor refuses those itself on next claim.
+ * — and bills — against it. Revoke running leases as well: the executor and
+ * dispatcher refuse subsequent work/delivery once that lease is invalid.
+ * This cannot undo an external action already started before Stop.
  *
  * Returns the number of tasks called off, so callers can report it.
  */
@@ -338,16 +339,17 @@ export async function cancelQueuedGoalWork(
     .update(tasks)
     .set({
       status: 'cancelled',
-      progress,
+      progress: sql`case when ${tasks.status} = 'running' then ${`${progress}; already-started actions may have completed`} else ${progress} end`,
       runAfter: null,
       lockedUntil: null,
+      leaseToken: null,
       updatedAt: sql`now()`,
     })
     .where(
       and(
         eq(tasks.agentId, agentId),
         eq(tasks.goalId, goalId),
-        notInArray(tasks.status, [...TERMINAL_TASK_STATUSES, 'running']),
+        notInArray(tasks.status, TERMINAL_TASK_STATUSES),
       ),
     )
     .returning({ id: tasks.id });
