@@ -241,7 +241,15 @@ export const PendingFinalSchema = z.object({
         .max(8),
     })
     .optional(),
-  /** True when the task is parked only because the last channel delivery was rejected/unknown. */
+  /** Original completion contract, recorded before delivery can override the task's resting state. */
+  preDeliveryCompletion: z
+    .object({
+      progress: z.string(),
+      terminalStatus: z.enum(['done', 'failed', 'needs_attention']),
+      outcome: z.enum(['done', 'clarify', 'failed', 'needs_attention']),
+    })
+    .optional(),
+  /** True when delivery rejection/ambiguity overlays the original completion contract. */
   deliveryNeedsAttention: z.boolean().optional(),
   /** Response-contract verdict, persisted to response_checks at finalize. */
   contractBlocked: z.boolean().optional(),

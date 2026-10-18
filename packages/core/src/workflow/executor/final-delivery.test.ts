@@ -16,13 +16,14 @@ function fixture(type = 'email_triage') {
     lockedUntil: new Date(Date.now() + 60_000),
   } as unknown as TaskLease;
   const checkpoint = vi.fn(async (_task: unknown, state: unknown) => {
-    savedStates.push(state as Record<string, unknown>);
+    savedStates.push(structuredClone(state) as Record<string, unknown>);
     return true;
   });
   const savedStates: Record<string, unknown>[] = [];
   const complete = vi.fn(async () => true);
   const needsAttention = vi.fn(async () => true);
   const append = vi.fn(async () => undefined);
+  const renew = vi.fn(async () => true);
   const evidence = {
     finalMessageExists: async () => false,
     recordResponseCheck: async () => true,
@@ -32,7 +33,7 @@ function fixture(type = 'email_triage') {
     persistence: {
       tasks: {
         kind: 'task-lease-repository',
-        renew: async () => true,
+        renew,
         checkpoint,
         completeTask: complete,
         markTaskNeedsAttention: needsAttention,
@@ -60,6 +61,8 @@ function fixture(type = 'email_triage') {
     complete,
     needsAttention,
     append,
+    evidence,
+    renew,
   };
 }
 
@@ -112,6 +115,113 @@ describe('final channel delivery receipts', () => {
     const retried = await finalizePendingResponse(f.deps, f.task, f.pending, f.state);
     expect(retried.outcome).toBe('needs_attention');
     expect(f.deps.deliverFinal).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['done', 'done', 'Completed the request.'],
+    ['needs_attention', 'needs_attention', 'Waiting for owner decision.'],
+    ['done', 'clarify', 'Asked for clarification.'],
+    ['failed', 'failed', 'The requested operation failed.'],
+  ] as const)(
+    'restores the original %s/%s completion contract after rejected delivery recovery',
+    async (terminalStatus, outcome, progress) => {
+      const f = fixture();
+      Object.assign(f.pending, { terminalStatus, outcome, progress });
+      f.deps.deliverFinal = vi
+        .fn<NonNullable<ExecutorDeps['deliverFinal']>>()
+        .mockImplementationOnce(async (_task, _text, attemptId) => ({
+          channel: 'email',
+          status: 'rejected',
+          attemptId,
+        }))
+        .mockImplementationOnce(async (_task, _text, attemptId) => ({
+          channel: 'email',
+          status: 'accepted',
+          attemptId,
+        }));
+      await finalizePendingResponse(f.deps, f.task, f.pending, f.state);
+      const restored = TaskStateSchema.parse(f.savedStates.at(-1));
+      const pending = restored.pendingFinal;
+      if (!pending) throw new Error('Missing durable delivery checkpoint');
+      expect(pending.progress).toContain('delivery was rejected');
+      const result = await finalizePendingResponse(f.deps, f.task, pending, restored);
+      expect(result).toMatchObject({ outcome, detail: progress });
+      expect(pending).toMatchObject({
+        terminalStatus,
+        outcome,
+        progress,
+        deliveryNeedsAttention: false,
+        preDeliveryCompletion: { terminalStatus, outcome, progress },
+      });
+      expect(f.deps.deliverFinal).toHaveBeenCalledTimes(2);
+      expect(f.complete).toHaveBeenCalledTimes(terminalStatus === 'needs_attention' ? 0 : 1);
+      expect(f.needsAttention).toHaveBeenCalledTimes(terminalStatus === 'needs_attention' ? 2 : 1);
+    },
+  );
+
+  it('keeps an accepted legacy retry open when its original completion contract was not recorded', async () => {
+    const f = fixture();
+    Object.assign(f.pending, {
+      text: 'Everything is complete.',
+      terminalStatus: 'needs_attention',
+      outcome: 'needs_attention',
+      progress: 'Final email delivery was rejected.',
+      deliveryNeedsAttention: true,
+      deliveryAttempted: true,
+      finalDelivery: { legs: [{ channel: 'email', status: 'rejected', attemptId: 'legacy:1' }] },
+    });
+    f.deps.deliverFinal = vi.fn<NonNullable<ExecutorDeps['deliverFinal']>>(
+      async (_task, _text, attemptId) => ({
+        channel: 'email',
+        status: 'accepted',
+        attemptId,
+      }),
+    );
+    const result = await finalizePendingResponse(f.deps, f.task, f.pending, f.state);
+    expect(result.outcome).toBe('needs_attention');
+    expect(f.pending.progress).toContain('original completion outcome was not recorded');
+    expect(f.pending.progress).not.toContain('rejected');
+    expect(f.pending.deliveryNeedsAttention).toBe(false);
+    expect(f.complete).not.toHaveBeenCalled();
+    expect(f.needsAttention).toHaveBeenCalledOnce();
+  });
+
+  it('does not start a dashboard append when Stop commits during the existence lookup', async () => {
+    const f = fixture();
+    let releaseLookup: (exists: boolean) => void = () => undefined;
+    let lookupStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => {
+      lookupStarted = resolve;
+    });
+    const lookup = new Promise<boolean>((resolve) => {
+      releaseLookup = resolve;
+    });
+    f.evidence.finalMessageExists = async () => {
+      lookupStarted();
+      return lookup;
+    };
+    const finalizing = finalizePendingResponse(f.deps, f.task, f.pending, f.state);
+    await started;
+    f.renew.mockResolvedValue(false);
+    releaseLookup(false);
+    expect((await finalizing).outcome).toBe('not_claimable');
+    expect(f.append).not.toHaveBeenCalled();
+    expect(f.deps.deliverFinal).not.toHaveBeenCalled();
+    expect(f.complete).not.toHaveBeenCalled();
+  });
+
+  it('retains an already-started dashboard append while blocking later channel dispatch', async () => {
+    const f = fixture();
+    f.append.mockImplementation(async () => {
+      // This write has already started when Stop revokes later lease checks.
+      f.renew.mockResolvedValue(false);
+      f.checkpoint.mockResolvedValue(false);
+    });
+    expect((await finalizePendingResponse(f.deps, f.task, f.pending, f.state)).outcome).toBe(
+      'not_claimable',
+    );
+    expect(f.append).toHaveBeenCalledOnce();
+    expect(f.deps.deliverFinal).not.toHaveBeenCalled();
   });
 
   it('allows dashboard-only finals with a not-applicable channel result', async () => {

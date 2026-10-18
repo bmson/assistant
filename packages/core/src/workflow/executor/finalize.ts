@@ -206,11 +206,12 @@ async function persistFinalConversationOnce(
   db: Db,
   task: TaskRow,
   text: string,
+  canAppend: () => Promise<boolean>,
   recall?: RecallSource[],
   contractNotice?: boolean,
   cues?: Cue[],
   responseCards?: Record<string, unknown>[],
-): Promise<boolean> {
+): Promise<boolean | null> {
   let conversationId = task.conversationId;
   let body = text;
   if (!conversationId) {
@@ -237,9 +238,25 @@ async function persistFinalConversationOnce(
     parts: assistantMessageParts(body, recall, { contractNotice, cues, responseCards }),
     text: body,
   };
+  // Stop may have revoked the lease while the existence lookup was awaiting.
+  // Recheck immediately before starting this write; an already-started append
+  // cannot be undone, and this does not make the cross-service boundary atomic.
+  if (!(await canAppend())) return null;
   if (messageRepository) await messageRepository.append(message);
   else await persistMessage(db, message);
   return true;
+}
+
+function preservePreDeliveryCompletion(pending: PendingFinal): void {
+  // A legacy failed-delivery checkpoint has already lost its original status.
+  // Never manufacture proof from its text or delivery-overlaid fields.
+  if (!pending.preDeliveryCompletion && !pending.deliveryNeedsAttention) {
+    pending.preDeliveryCompletion = {
+      progress: pending.progress,
+      terminalStatus: pending.terminalStatus,
+      outcome: pending.outcome,
+    };
+  }
 }
 
 /** Deliver a previously checkpointed final response, then finish under CAS. */
@@ -291,6 +308,7 @@ export async function finalizePendingResponse(
     ).catch((error) => console.error('quality signal record failed', error));
     return { outcome: 'done', detail: pending.progress.slice(0, 200) };
   }
+  preservePreDeliveryCompletion(pending);
   const recallSources = finalRecallSources(
     pending,
     (checkpointState ?? taskState(task)).recall ?? undefined,
@@ -303,11 +321,13 @@ export async function finalizePendingResponse(
     deps.db,
     task,
     pending.text,
+    () => renewTaskLease(deps.persistence?.tasks ?? deps.db, task),
     recallSources,
     pending.contractNotice,
     pending.cues,
     pending.responseCards,
   );
+  if (conversationDelivered === null) return LOST_LEASE;
 
   // Check cancellation/reclaim immediately before the external side effect.
   const state = checkpointState ?? taskState(task);
@@ -447,12 +467,16 @@ export async function finalizePendingResponse(
     if (!(await checkpointTask(deps.persistence?.tasks ?? deps.db, task, state))) return LOST_LEASE;
   } else if (pending.deliveryNeedsAttention) {
     pending.deliveryNeedsAttention = false;
-    const checklistStillBlocked = pending.checklistCorrection?.outcomes.some(
-      (outcome) => outcome.status === 'blocked',
-    );
-    pending.terminalStatus = checklistStillBlocked ? 'needs_attention' : 'done';
-    pending.outcome = checklistStillBlocked ? 'needs_attention' : 'done';
-    if (checklistStillBlocked) pending.progress = 'A requested lookup still needs attention.';
+    if (pending.preDeliveryCompletion) {
+      Object.assign(pending, pending.preDeliveryCompletion);
+    } else {
+      // Old checkpoints have no durable proof of the pre-delivery outcome.
+      // Delivery acceptance alone cannot establish that the task is complete.
+      pending.terminalStatus = 'needs_attention';
+      pending.outcome = 'needs_attention';
+      pending.progress =
+        'Final response delivered; the original completion outcome was not recorded. Review the task before marking it complete.';
+    }
     state.pendingFinal = pending;
     if (!(await checkpointTask(deps.persistence?.tasks ?? deps.db, task, state))) return LOST_LEASE;
   }
@@ -646,6 +670,7 @@ export async function stageFinalResponse(
       }
     }
   }
+  preservePreDeliveryCompletion(pending);
   state.pendingFinal = pending;
   state.contextWindow = compact(window) as unknown as TaskState['contextWindow'];
   if (!(await checkpointTask(deps.persistence?.tasks ?? deps.db, task, state))) return LOST_LEASE;
