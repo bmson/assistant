@@ -3,7 +3,11 @@ import type { TaskLease } from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
 import { TaskStateSchema } from '../../events.js';
 import { finalizePendingResponse } from './finalize.js';
-import { authorizesSilentCompletion, canCompleteSilently } from './silent-completion.js';
+import {
+  authorizesSilentCompletion,
+  canCompleteSilently,
+  hasQuietGoalEvidence,
+} from './silent-completion.js';
 import type { ExecutorDeps } from './types.js';
 
 const task = {
@@ -29,6 +33,94 @@ const result = {
   finishReason: 'stop',
 };
 describe('authorized successful silence', () => {
+  it('limits quiet goal checks to recurring occurrences with fresh verified progress', () => {
+    const goal = {
+      ...task,
+      type: 'scheduled',
+      goalId: 'goal',
+      conversationId: 'work',
+      trigger: {
+        source: 'schedule',
+        externalEventId: 'schedule:runner:occurrence',
+        payload: {
+          schedule: 'goal:goal',
+          goalId: 'goal',
+          scheduleId: 'runner',
+          occurrenceId: 'schedule:runner:occurrence',
+        },
+      },
+    } as TaskLease;
+    expect(canCompleteSilently(goal, state, result)).toBe(true);
+    for (const patch of [
+      { trust: 'owner' },
+      { type: 'chat_turn' },
+      { goalId: 'other' },
+      { conversationId: null },
+      { trigger: { source: 'schedule', payload: { instruction: 'stay quiet' } } },
+    ])
+      expect(authorizesSilentCompletion({ ...goal, ...patch } as TaskRow)).toBe(false);
+    const work = { toolName: 'web.fetch', status: 'succeeded', result: { status: 200 }, step: 1 };
+    const checkpoint = {
+      toolName: 'goals.update_progress',
+      status: 'succeeded',
+      result: { updated: 'goal' },
+      step: 2,
+    };
+    expect(hasQuietGoalEvidence([work, checkpoint])).toBe(true);
+    for (const rows of [
+      [],
+      [checkpoint],
+      [work],
+      [checkpoint, { ...work, step: 3 }],
+      [work, { ...checkpoint, step: 1 }],
+      [work, checkpoint, { ...work, status: 'failed' }],
+      [{ ...work, result: { ok: false } }, checkpoint],
+      [work, checkpoint, { ...work, result: { deliveryStatus: 'unknown' } }],
+    ])
+      expect(hasQuietGoalEvidence(rows)).toBe(false);
+  });
+
+  it('revalidates goal evidence on recovery before silently completing', async () => {
+    const goal = {
+      ...task,
+      type: 'scheduled',
+      goalId: 'goal',
+      conversationId: 'work',
+      trigger: {
+        source: 'schedule',
+        externalEventId: 'schedule:runner:occurrence',
+        payload: {
+          goalId: 'goal',
+          schedule: 'goal:goal',
+          scheduleId: 'runner',
+          occurrenceId: 'schedule:runner:occurrence',
+        },
+      },
+    } as TaskLease;
+    const complete = vi.fn();
+    const deps = {
+      db: {},
+      persistence: {
+        tasks: { kind: 'task-lease-repository', renew: async () => true, completeTask: complete },
+        executionEvidence: { taskEvidence: async () => [] },
+      },
+    } as unknown as ExecutorDeps;
+    await expect(
+      finalizePendingResponse(
+        deps,
+        goal,
+        {
+          completionKind: 'successful_silent',
+          text: '',
+          progress: 'checked',
+          terminalStatus: 'done',
+          outcome: 'done',
+        },
+        state,
+      ),
+    ).rejects.toThrow('requires verified, checkpointed work');
+    expect(complete).not.toHaveBeenCalled();
+  });
   it('accepts an explicit successful stop only for server-created arrival jobs', () => {
     expect(canCompleteSilently(task, state, result)).toBe(true);
     for (const patch of [

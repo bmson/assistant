@@ -423,7 +423,7 @@ describe('runDueSchedules goal wiring (integration)', () => {
 });
 
 describe('cancelQueuedGoalWork (integration)', () => {
-  it('calls off queued work but leaves a task a worker is holding', async (ctx) => {
+  it('calls off queued work and revokes a task a worker is holding', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const queued = await insertGoalTask({ status: 'pending' });
     const parked = await insertGoalTask({ status: 'waiting_approval' });
@@ -432,7 +432,7 @@ describe('cancelQueuedGoalWork (integration)', () => {
     const alreadyDone = await insertGoalTask({ status: 'done', progress: 'finished earlier' });
 
     const cancelled = await cancelQueuedGoalWork(db, agentId, goalId);
-    expect(cancelled).toBe(3);
+    expect(cancelled).toBe(4);
 
     const rows = await db
       .select({ id: tasks.id, status: tasks.status, progress: tasks.progress })
@@ -443,8 +443,8 @@ describe('cancelQueuedGoalWork (integration)', () => {
     expect(statusOf(queued)).toBe('cancelled');
     expect(statusOf(parked)).toBe('cancelled');
     expect(statusOf(sleeping)).toBe('cancelled');
-    // Held by a worker mid-step — the executor's own guard stops that one.
-    expect(statusOf(running)).toBe('running');
+    expect(statusOf(running)).toBe('cancelled');
+    expect(rows.find((row) => row.id === running)?.progress).toContain('already-started actions');
     // Finished work keeps its outcome and its progress note.
     expect(statusOf(alreadyDone)).toBe('done');
     expect(rows.find((row) => row.id === alreadyDone)?.progress).toBe('finished earlier');

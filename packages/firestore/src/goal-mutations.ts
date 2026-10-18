@@ -464,9 +464,8 @@ export class FirestoreGoalMutationRepository {
             throw new Error('Goal task identity mismatch');
           return row.agentId === this.configuredAgentId &&
             row.goalId === id &&
-            !TERMINAL_TASKS.has(row.status) &&
-            row.status !== 'running'
-            ? [doc]
+            !TERMINAL_TASKS.has(row.status)
+            ? [{ doc, running: row.status === 'running' }]
             : [];
         }) ?? [];
       tx.update(goalDoc.ref, encodeRecord({ status, updatedAt: now }));
@@ -476,12 +475,15 @@ export class FirestoreGoalMutationRepository {
           nextRunAt: activeStatus ? null : schedule.row.nextRunAt,
           updatedAt: now,
         });
-      for (const task of tasks)
-        tx.update(task.ref, {
+      for (const { doc, running } of tasks)
+        tx.update(doc.ref, {
           status: 'cancelled',
-          progress: 'stopped because its goal was stopped',
+          progress: running
+            ? 'stopped because its goal was stopped; already-started actions may have completed'
+            : 'stopped because its goal was stopped',
           runAfter: null,
           lockedUntil: null,
+          leaseToken: null,
           updatedAt: now,
         });
     });

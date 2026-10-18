@@ -98,7 +98,11 @@ import {
   notifyOwnerOfDeliveredAnswer,
   recordGoalBlocked,
 } from './notices.js';
-import { authorizesSilentCompletion } from './silent-completion.js';
+import {
+  authorizesSilentCompletion,
+  hasQuietGoalEvidence,
+  isScheduledGoalCheck,
+} from './silent-completion.js';
 import { type ExecuteResult, type ExecutorDeps, LOST_LEASE } from './types.js';
 import { compact, latestUserText } from './util.js';
 
@@ -263,6 +267,15 @@ export async function finalizePendingResponse(
       requestChecklistHasUnfinished(state.requestChecklist)
     )
       throw new Error('Successful silent completion has unfinished obligations');
+    // Revalidate durable evidence on recovery too: a saved empty final cannot
+    // bypass the goal-work/progress guard just because the model already ran.
+    if (
+      isScheduledGoalCheck(task) &&
+      !hasQuietGoalEvidence(
+        await executionEvidence(deps).taskEvidence({ agentId: task.agentId, taskId: task.id }),
+      )
+    )
+      throw new Error('Successful silent goal completion requires verified, checkpointed work');
     const completed = await completeTask(deps.persistence?.tasks ?? deps.db, task, {
       status: 'done',
       progress: pending.progress,

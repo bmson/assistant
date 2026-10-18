@@ -416,8 +416,13 @@ export async function wakeTask(
       // A needs-attention final has already been delivered. Retrying it must
       // continue from the saved work checkpoint, not finalize the same message
       // and immediately return to needs_attention. Approval/budget/event wakes
-      // keep their checkpoint untouched.
-      state: sql`CASE WHEN ${tasks.status} = 'needs_attention' THEN ${tasks.state} - 'pendingFinal' ELSE ${tasks.state} END`,
+      // keep their checkpoint untouched. Delivery failures/ambiguity must keep
+      // the frozen answer and receipt, or a wake can send it twice.
+      state: sql`CASE WHEN ${tasks.status} = 'needs_attention'
+        AND NOT (coalesce(${tasks.state} #>> '{pendingFinal,deliveryNeedsAttention}', 'false') = 'true'
+          OR (coalesce(${tasks.state} #>> '{pendingFinal,deliveryAttempted}', 'false') = 'true'
+            AND (${tasks.state} #> '{pendingFinal,finalDelivery}') IS NULL))
+        THEN ${tasks.state} - 'pendingFinal' ELSE ${tasks.state} END`,
       runAfter: null,
       lockedUntil: null,
       queueGeneration: sql`${tasks.queueGeneration} + 1`,

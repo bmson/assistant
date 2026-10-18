@@ -183,6 +183,9 @@ describe('task state machine (integration)', () => {
       terminalStatus: 'needs_attention',
       outcome: 'needs_attention',
       deliveryAttempted: true,
+      finalDelivery: {
+        legs: [{ channel: 'dashboard', status: 'not_applicable', attemptId: 'dashboard:1' }],
+      },
     };
     expect(await checkpointTask(db, claimed as NonNullable<typeof claimed>, state)).toBe(true);
     expect(
@@ -201,6 +204,38 @@ describe('task state machine (integration)', () => {
     expect(resumed.step).toBe(3);
     expect(resumed.completedToolCallIds).toContain('verified-work');
   });
+
+  it.each(['unknown', 'rejected', 'legacy'] as const)(
+    'preserves %s final delivery evidence on wake',
+    async (delivery) => {
+      if (!dbUp) throw new Error('This delivery-retry test requires the isolated test database');
+      const { task } = await track(enqueueTask(db, { event: event(), type: 'adhoc' }));
+      const lease = await claimTask(db, task.id);
+      if (!lease) throw new Error('Missing fixture lease');
+      const state = taskState(lease);
+      state.pendingFinal = {
+        text: 'Frozen response',
+        progress: 'delivery requires review',
+        terminalStatus: 'needs_attention',
+        outcome: 'needs_attention',
+        deliveryAttempted: true,
+        ...(delivery === 'legacy'
+          ? {}
+          : {
+              deliveryNeedsAttention: true,
+              finalDelivery: {
+                legs: [{ channel: 'email', status: delivery, attemptId: 'attempt:1' }],
+              },
+            }),
+      };
+      expect(await checkpointTask(db, lease, state)).toBe(true);
+      expect(await markTaskNeedsAttention(db, lease, 'delivery requires review')).toBe(true);
+      expect(await wakeTask(db, task.id)).toBe(true);
+      const [woken] = await db.select().from(tasks).where(eq(tasks.id, task.id));
+      if (!woken) throw new Error('Missing woken fixture task');
+      expect(taskState(woken).pendingFinal).toEqual(state.pendingFinal);
+    },
+  );
 
   it('raises an approved budget and wakes atomically, without changing cancelled or stale requests', async (ctx) => {
     if (!dbUp) return ctx.skip();
