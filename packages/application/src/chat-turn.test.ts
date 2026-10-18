@@ -2168,7 +2168,9 @@ describe('tool-less conversational reply', () => {
       expect(wire).toContain(saved?.text);
       expect(wire).not.toContain(draft);
       expect(wire).not.toContain('data-off-course');
-      expect(saved?.parts).not.toContainEqual(expect.objectContaining({ type: 'data-off-course' }));
+      expect(saved?.parts).not.toContainEqual(
+        expect.objectContaining({ type: 'notice', notice: 'off-course' }),
+      );
       expect(stubs.enqueueTask).not.toHaveBeenCalled();
     },
   );
