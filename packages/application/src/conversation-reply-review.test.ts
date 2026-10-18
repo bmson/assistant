@@ -2,7 +2,9 @@ import type { ModelRouter } from '@assistant/core/model-router';
 import { describe, expect, it, vi } from 'vitest';
 import { guardDraft } from './chat-guard.js';
 import {
+  replySentenceCount,
   replyWordCount,
+  requestedReplySentenceLimit,
   requestedReplyWordLimit,
   reviewConversationReply,
 } from './conversation-reply-review.js';
@@ -15,6 +17,70 @@ const passingReasoningChecks = Object.fromEntries(
 );
 
 describe('reviewed conversation replies', () => {
+  it('repairs an explicit sentence limit without losing the supplied facts', async () => {
+    const object = vi.fn().mockResolvedValue({
+      ok: true,
+      object: {
+        decision: 'revise',
+        revisedText: 'The project has a €240 budget, a Friday deadline, and no taxi travel.',
+        reasons: ['clarity_or_format'],
+      },
+    });
+    const result = await reviewConversationReply({
+      router: { object } as unknown as Pick<ModelRouter, 'object'>,
+      taskId: 'task',
+      request: 'Acknowledge in one sentence: budget €240, deadline Friday, no taxi travel.',
+      draft: 'The budget is €240. The deadline is Friday, with no taxi travel.',
+      context: [],
+      guard: (text) => ({ corrected: false, text }),
+    });
+    expect(result.text).toContain('€240');
+    expect(result.text).toContain('Friday');
+    expect(result.text).toContain('no taxi travel');
+    expect(replySentenceCount(result.text)).toBe(1);
+    expect(result.incomplete).not.toBe(true);
+    expect(object.mock.calls[0]?.[1].prompt).toContain('limit is one sentence');
+  });
+
+  it('does not treat quoted or negative sentence instructions as an output limit', () => {
+    expect(
+      requestedReplySentenceLimit('Explain “reply in one sentence” in detail.'),
+    ).toBeUndefined();
+    expect(requestedReplySentenceLimit('Do not reply in one sentence.')).toBeUndefined();
+    expect(requestedReplySentenceLimit('Give the result in one short sentence.')).toBe(1);
+    expect(replySentenceCount('Dr. Green will arrive at 9 a.m. tomorrow.')).toBe(1);
+    expect(
+      replySentenceCount('The cost is €2.40, according to [the source](https://example.test/a.b).'),
+    ).toBe(1);
+  });
+
+  it('uses the existing second pass to audit a successful short format repair', async () => {
+    const object = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        object: {
+          decision: 'revise',
+          reasons: ['clarity_or_format'],
+          revisedText: 'Compare the two supplied options, then review the choice tomorrow.',
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        object: { decision: 'publish', reasons: [], checks: passingReasoningChecks },
+      });
+    const result = await reviewConversationReply({
+      router: { object } as unknown as Pick<ModelRouter, 'object'>,
+      taskId: 'task',
+      request: 'Use only this fictional scenario. Compare two options under 20 words.',
+      draft: Array(30).fill('draft').join(' '),
+      context: [],
+      guard: (text) => ({ corrected: false, text }),
+    });
+    expect(replyWordCount(result.text)).toBeLessThan(20);
+    expect(object.mock.calls.map((call) => call[0])).toEqual(['rewrite', 'reason']);
+    expect(result.incomplete).not.toBe(true);
+  });
   it('keeps audit exhaustion incomplete through the outer presentation and action guard', async () => {
     const object = vi.fn().mockResolvedValue({
       ok: true,

@@ -83,7 +83,11 @@ import {
   isTaskProgressQuestion,
   looksLikeActionRequest,
 } from './chat-triage.js';
-import { reviewConversationReply } from './conversation-reply-review.js';
+import {
+  requestedReplySentenceLimit,
+  requestedReplyWordLimit,
+  reviewConversationReply,
+} from './conversation-reply-review.js';
 import { readBoundedJson } from './http-body.js';
 import { taskActivityComposerChecklistCancellationPolicy } from './tasks/commands.js';
 
@@ -1516,7 +1520,11 @@ export async function handleChatTurn(
   // full matcher set — and both the completion callback and the stream pump
   // need the same verdict for the same draft. Compute it once.
   // Supplied scenarios still need constraint review when wording also matches a rewrite.
-  const needsReplyReview = isConversationLocalContext(conversationalIntent.ownerAuthoredText);
+  const conversationLocal = isConversationLocalContext(conversationalIntent.ownerAuthoredText);
+  const needsReplyReview =
+    conversationLocal ||
+    requestedReplySentenceLimit(userText) !== undefined ||
+    requestedReplyWordLimit(userText) !== undefined;
   const guardCache = new Map<
     string,
     Promise<{ corrected: boolean; text: string; incomplete?: boolean }>
@@ -1576,7 +1584,7 @@ export async function handleChatTurn(
           ...(needsReplyReview && needsConversationReasoning(conversationalIntent.ownerAuthoredText)
             ? [CONVERSATION_REASONING_DIRECTIVE]
             : []),
-          ...(localTransformation && !needsReplyReview
+          ...(localTransformation && !conversationLocal
             ? [
                 'Transform only the text supplied in this request. Preserve its facts, timing, and uncertainty; do not add a new stage, reason, commitment, or context. Follow the requested output format and length.',
               ]
@@ -1602,7 +1610,7 @@ export async function handleChatTurn(
           }
           const guarded = await guardOnce(stripped.text);
           // Supplied scenarios never authorize a real-execution recovery action.
-          const actionOffCourse = guarded.corrected && !needsReplyReview;
+          const actionOffCourse = guarded.corrected && !conversationLocal;
           if (actionOffCourse) {
             console.warn('tool-less chat draft claimed unperformed work', {
               taskId: task.id,
@@ -1695,6 +1703,8 @@ export async function handleChatTurn(
         writer.write({ type: 'text-start', id: 'reviewed-reply' });
         writer.write({ type: 'text-delta', id: 'reviewed-reply', delta: guarded.text });
         writer.write({ type: 'text-end', id: 'reviewed-reply' });
+        if (guarded.corrected && !conversationLocal)
+          writer.write({ type: 'data-off-course', data: { text: guarded.text } });
         writer.write({ type: 'finish', finishReason: 'stop' });
         return;
       }

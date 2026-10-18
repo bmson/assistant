@@ -1,7 +1,12 @@
 # Backup, restore, and migration safety
 
-Every production release creates a PostgreSQL custom-format dump before applying migrations. The
-release stops if the backup fails. Backups are stored at:
+The release recovery gate depends on the live persistence driver. Firestore releases require
+point-in-time recovery or a recent READY managed backup before changing revisions; they do not run
+a PostgreSQL dump or migration job. See [the Firestore release gates](../infra/gcp/github-actions.md).
+
+PostgreSQL releases that apply database migrations create a custom-format dump first and stop if
+the backup fails. A release whose migration set is unchanged can skip that backup and migration
+job. PostgreSQL pre-migration backups are stored at:
 
 ```text
 gs://WORKSPACE_BUCKET/workspace/WORKSPACE_ID/backups/pre-migration/RELEASE_SHA.dump

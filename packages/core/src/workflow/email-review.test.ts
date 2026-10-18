@@ -289,6 +289,7 @@ describe('bounded no-send email review', () => {
     'Review your account. Email support@example.net with your preferred time.',
     'Review your account. Email us with your preferred time.',
     'Review your account. Write to support@example.net with your preferred time.',
+    'Please rate your recent purchase using the rating form. Please reply with your preferred time for a follow-up.',
   ])('keeps a direct email response route in an automated account notice: %s', (body) => {
     const id = 'automated-explicit-reply';
     const source = messages(id, 'no-reply@accounts.example.net');
@@ -313,6 +314,61 @@ describe('bounded no-send email review', () => {
     );
     if (body.includes('Please reply'))
       expect(validateEmailReviewAnswer(proposed, [thread])).toBeUndefined();
+  });
+
+  it.each([
+    'Please review your purchase. Please rate your recent purchase using the rating form. Your review is optional.',
+    'Please review your domain contact information. If it is correct, you do not need to do anything. Visit your account to update it.',
+  ])('does not turn a self-service review into an owner-answer blocker: %s', async (body) => {
+    const id = 'optional-review';
+    const source = messages(id, 'notices@service.example.net');
+    const latest = required(source.at(-1), 'latest');
+    latest.text = body;
+    latest.sourceLength = body.length;
+    const thread = required(
+      emailReviewCompleteThread(id, 'owner@example.com', [search(id), read(id, source)]),
+      'thread',
+    );
+    const proposed = validAnswer(id);
+    Object.assign(required(proposed.items[0], 'item'), {
+      disposition: 'no_reply',
+      recipient: null,
+      draftBody: null,
+      draftSourceMessageIds: [],
+      deadline: null,
+      why: 'The source asks for self-service review, without an email reply request.',
+      whyQuote: body,
+    });
+    const result = await generateValidatedEmailReview(
+      [thread],
+      async () => ({ ok: true, value: proposed }),
+      1,
+    );
+    expect(result.answer?.items[0]?.disposition).toBe('no_reply');
+    expect(result.ownerDecisionThreadIds).toEqual([]);
+    const wrongDraft = structuredClone(proposed);
+    Object.assign(required(wrongDraft.items[0], 'wrong draft'), {
+      disposition: 'draft',
+      recipient: thread.recipient,
+      draftBody: 'Owner decision required: add your answer before sending.',
+      draftSourceMessageIds: [thread.latestMessageId],
+    });
+    const corrected = await generateValidatedEmailReview(
+      [thread],
+      async () => ({ ok: true, value: wrongDraft }),
+      1,
+    );
+    expect(corrected.answer?.items[0]?.disposition).toBe('no_reply');
+    expect(corrected.ownerDecisionThreadIds).toEqual([]);
+    expect(
+      mergeEmailReviewOwnerDecisionFindings({
+        prior: [{ threadId: id, latestMessageId: latest.messageId }],
+        currentThreadIds: [id],
+        threads: [thread],
+        selectedThreadIds: [id],
+        resolvedThreadIds: [],
+      }),
+    ).toEqual([]);
   });
 
   it.each(['person', 'same-automated-sender'])(

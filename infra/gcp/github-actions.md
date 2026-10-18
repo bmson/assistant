@@ -1,8 +1,8 @@
 # Keyless GitHub deployment setup
 
 The normal release command is `bash infra/gcp/release.sh`. It builds immutable
-images with Cloud Build, runs the database migrations in a short-lived Cloud
-Run Job, then updates the services and browser job. It assumes the Cloud Run
+images with Cloud Build, checks the persistence-specific recovery and schema
+gates described below, then updates the services and browser job. It assumes the Cloud Run
 services, service accounts, secrets, queues, and Artifact Registry already
 exist; provision or reconcile those once with `bash infra/gcp/deploy.sh`.
 
