@@ -1,3 +1,19 @@
+/** An owner can require an answer from supplied text without granting any tool use. */
+export function explicitlyDisallowsTools(text: string): boolean {
+  const authored = text.replace(/[“"][^“”"]*[”"]/g, '').replace(/’/g, "'");
+  const simulationOnly =
+    /^\s*(?:please\s+)?simulate\s+only\b/i.test(authored) ||
+    (/^\s*(?:please\s+)?simulate\b/i.test(authored) &&
+      /\b(?:fictional|hypothetical)\b/i.test(authored) &&
+      /\b(?:do not|don't|no|without)\b[^.!?\n]{0,120}\b(?:real\s+(?:tasks?|actions?)|read\s+accounts|send\s+anything)\b/i.test(
+        authored,
+      ));
+  if (simulationOnly) return true;
+  return /\b(?:do not|don't|never)\s+(?:use|call|invoke|run|access)\s+(?:(?:any|external|real|live)\s+)?tools\b|\bwithout\s+(?:(?:using|calling|invoking|running|accessing)\s+)?(?:(?:any|external|real|live)\s+)?tools\b|\bno\s+(?:(?:external|real|live)\s+)?(?:tools\b|tool\s+(?:calls|use)\b)/i.test(
+    authored,
+  );
+}
+
 /** Shared, dependency-free boundary for work scoped to this conversation. */
 export function stripNegativePrivateWriteConstraints(text: string): string {
   return (
@@ -28,6 +44,7 @@ export function stripNegativePrivateWriteConstraints(text: string): string {
 }
 
 export function isConversationLocalContext(text: string): boolean {
+  if (explicitlyDisallowsTools(text)) return true;
   const withoutNegativeReadConstraints = text.replace(
     /\b(?:do not|don't|don’t|never|without|avoid)\s+(?:search|read|look(?:\s+up)?|check|consult|use|retrieve|review|open|pull\s+up)\b[^.!?;,\n]*\b(?:memories?|history|past chats|old messages|older messages|previous conversations|old conversations|calendar|schedule|agenda|email|mail|inbox|messages?|threads?|drive)\b/giu,
     '',
@@ -50,7 +67,24 @@ export function isConversationLocalContext(text: string): boolean {
       withoutNegativeReadConstraints,
     );
   if (explicitHistoricalRead || explicitPrivateRead) return false;
+  const hypotheticalWithoutLookup =
+    /\b(?:hypothetical|hypothetically|fictional)\b/i.test(text) &&
+    /\b(?:do not|don't|don’t)\s+look\s+anything\s+up\b|\bno\s+research(?:\s+needed|\s+or\s+actions)?\b/i.test(
+      text,
+    );
+  const suppliedScenarioOnly =
+    /\b(?:use|using)\s+only\s+(?:this|the(?:\s+supplied)?)\s+(?:scenario|facts|example)\b/i.test(
+      text,
+    );
+  const hypotheticalWithoutInventedFacts =
+    /\b(?:fictional|hypothetical)\b/i.test(text) &&
+    /\b(?:do not|don't|don’t)\s+(?:assume|invent|add|infer)\b[^.!?\n]{0,120}\b(?:facts|details|information)\b/i.test(
+      text,
+    );
   return (
+    hypotheticalWithoutLookup ||
+    suppliedScenarioOnly ||
+    hypotheticalWithoutInventedFacts ||
     /\b(?:hypothetical|fictional)\b[^.!?\n]{0,80}\b(?:exercise|scenario|example|project|schedule|planning|plan|morning|afternoon|day|week|test)\b|\b(?:exercise|scenario)\s+only\b/i.test(
       text,
     ) ||
@@ -76,4 +110,14 @@ export function isSelfContainedCalculationRequest(text: string): boolean {
     'i',
   );
   return expression.test(text.trim());
+}
+
+/** Deliberation over supplied constraints deserves reasoning without granting tools. */
+export function needsConversationReasoning(text: string): boolean {
+  return (
+    isConversationLocalContext(text) &&
+    /\b(?:assess|explain|choose|suggest|experiment|options?|update|change|plan|reason|compare|trade[- ]?offs?|tension|competing|recommend|revise|revised|propose|prioriti[sz]e|decision|alternatives?|distinguish|constraints?|pilot|success|what useful|what changes|handling|fair arrangement)\b/i.test(
+      text,
+    )
+  );
 }

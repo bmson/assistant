@@ -62,6 +62,10 @@ import {
   compoundTripThreadReadInputs,
   MAX_COMPOUND_TRIP_TOOL_CALLS,
 } from '../compound-trip-read.js';
+import {
+  explicitlyDisallowsTools,
+  needsConversationReasoning,
+} from '../conversation-local-context.js';
 import { nextCreatedDocumentRead } from '../document-verification.js';
 import {
   boundEmailReviewThreads,
@@ -577,6 +581,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   const ownerWindow = ownerAuthoredWindow(rc.window, ownerIntent);
   const ownerText = ownerIntent.ownerAuthoredText;
   const directOwner =
+    !explicitlyDisallowsTools(ownerText) &&
     task.trust === 'owner' &&
     !isForwardedIngest(task) &&
     ownerIntent.separation !== 'unknown' &&
@@ -931,7 +936,11 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // answers these with plausible prose and no tool calls — how a request can
   // look handled while nothing happened.
   const role =
-    restrictedChecklistResume || readRequest || memoryWrite || liveLookup
+    (conceptualNoTool && needsConversationReasoning(ownerText)) ||
+    restrictedChecklistResume ||
+    readRequest ||
+    memoryWrite ||
+    liveLookup
       ? 'reason'
       : roleForTask(task, plan);
   // Artifact retries can use the draft role's tool-capable fallback. Agent
@@ -942,6 +951,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   const triggerPayload = (task.trigger as { payload?: Record<string, unknown> } | null)?.payload;
   const arrivalTask = triggerPayload?.kind === 'arrival';
   const ownerCard =
+    !isConversationLocalContext(ownerText) &&
     !restrictedChecklistResume &&
     privilegedTask &&
     !readRequest &&
@@ -955,6 +965,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // transient, so it mirrors the owner-card gate.
   let ambientBlock: string | undefined;
   if (
+    !isConversationLocalContext(ownerText) &&
     !restrictedChecklistResume &&
     privilegedTask &&
     !readRequest &&
@@ -1055,6 +1066,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   if (
     !restrictedChecklistResume &&
     !localTransformation &&
+    !isConversationLocalContext(ownerText) &&
     privilegedTask &&
     !state.untrustedContext &&
     task.conversationId
@@ -1084,7 +1096,8 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // exactly the path that needs it. The dispatcher's taint-approval gate still
   // holds every outward action, so surfacing a procedure changes how well the
   // task is done, not what it is allowed to do. Fetched once and reused across
-  // loop iterations — the library is task-stable.
+  // loop iterations — the library is task-stable. Supplied-only reasoning and
+  // simulations still exclude stored procedures along with other account context.
   let skillsBlock: string | undefined;
   let explicitlyRequestedSkillRetrieved = false;
   const explicitlyRequestedSkillName = readRequest
@@ -1115,7 +1128,12 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       console.error('named skill lookup failed — continuing without it', err);
     }
   }
-  if (!restrictedChecklistResume && privilegedTask && !readRequest) {
+  if (
+    !restrictedChecklistResume &&
+    !isConversationLocalContext(ownerText) &&
+    privilegedTask &&
+    !readRequest
+  ) {
     const lastUser = [...rc.window].reverse().find((m) => m.role === 'user');
     const skillQuery = [
       plan?.reasoning,

@@ -21,6 +21,17 @@ const turn = (text: string, prior = '') => [
 ];
 
 describe('detectPersonalReadRequest', () => {
+  it('does not turn a fictional no-tool background check into calendar/mail discovery', () => {
+    const text =
+      'Simulate a background check only; do not use tools or notify anyone. A fictional assistant already reported that two venue quotes are unchanged and is waiting for the owner to choose. No new source information, deadline, risk, or owner reply has arrived. Should it interrupt again? State the decision and the event that would justify another update in at most 80 words.';
+    expect(detectPersonalReadRequest(turn(text))).toBeNull();
+    expect(
+      detectPersonalReadRequest(
+        turn('Do not use tools. What is on my calendar in this supplied fictional example?'),
+      ),
+    ).toBeNull();
+  });
+
   it('routes a subscription audit to bounded Gmail only and asks for a zone or month count before reading', () => {
     const text =
       'Audit recurring subscriptions evidenced in authorized billing messages over the last 3 complete local calendar months. Separate actual charges, trials, refunds, cancellation notices and uncertain recurring purchases. No login/account change/cancel/unsubscribe/purchase/hold/send/Gmail draft/document/calendar/memory writes.';

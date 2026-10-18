@@ -150,6 +150,7 @@ export interface EmailReviewCoverage {
     deadlineQuote?: string;
     prerequisiteQuote?: string;
     contactQuote?: string;
+    qualificationQuote?: string;
     actionUrl?: string;
     decisionPrompt?: string;
   }>;
@@ -1458,6 +1459,19 @@ function draftAnswersLatestRequest(thread: EmailReviewThread, draft: string): bo
     .trim();
   if (!substantive) return false;
   const body = latestUnquotedBody(thread) ?? '';
+  // A deadline-only question does not answer a request for the owner's availability.
+  if (/\bavailability\b/i.test(body) && /\b(?:deadline|due date|by when)\b/i.test(substantive)) {
+    const withoutDeadlineQuestion = substantive
+      .replace(/[^.!?\n]*\b(?:deadline|due date|by when)\b[^.!?\n]*[.!?]?/gi, '')
+      .trim();
+    if (
+      !withoutDeadlineQuestion ||
+      !/\b(?:available|availability|time zone|which week|which dates)\b/i.test(
+        withoutDeadlineQuestion,
+      )
+    )
+      return false;
+  }
   if (/\brsvp\b/i.test(body) && sourceRsvpRoute(thread) && !sourceAllowsEmailRsvp(thread))
     return (
       /\b(?:source|link|button|form|platform|rsvp)\b/i.test(substantive) &&
@@ -1526,7 +1540,14 @@ export function emailReviewOwnerDecisionSummary(thread: EmailReviewThread) {
         /\b(?:fine|forfeit(?:ed)?|cancel(?:led|ed)?|reschedul\w*)\b/i.test(sentence),
     )
     ?.trim();
+  const conciseContextQuote = contextQuote
+    ? (/\bIf a team\b[^.!?]{1,320}/i.exec(contextQuote)?.[0]?.trim() ?? contextQuote)
+    : undefined;
   const availability = /\bavailability\b/i.test(body);
+  const qualificationQuote =
+    /Are you already a licensed referee\?\s*If you are, you already qualify as a STAR referee/i
+      .exec(body)?.[0]
+      ?.trim();
   const contactQuote = body
     .split(/\r?\n|(?<=[.!?])\s+/)
     .find(
@@ -1552,10 +1573,11 @@ export function emailReviewOwnerDecisionSummary(thread: EmailReviewThread) {
     threadId: thread.threadId,
     subject: thread.subject,
     ...(requestQuote ? { requestQuote } : {}),
-    ...(contextQuote ? { contextQuote } : {}),
+    ...(conciseContextQuote ? { contextQuote: conciseContextQuote } : {}),
     ...(deadlineQuote ? { deadlineQuote } : {}),
     ...(prerequisiteQuote ? { prerequisiteQuote } : {}),
     ...(contactQuote ? { contactQuote } : {}),
+    ...(qualificationQuote ? { qualificationQuote } : {}),
     ...(actionUrl ? { actionUrl } : {}),
     decisionPrompt: availability
       ? 'Which times and time zone can you offer? Use the source’s availability link if provided.'
@@ -2489,6 +2511,7 @@ export function formatEmailReviewAnswer(
       if (item.requestQuote) lines.push(`Source asks: “${item.requestQuote}”`);
       if (item.contextQuote) lines.push(`Source context: “${item.contextQuote}”`);
       if (item.prerequisiteQuote) lines.push(`Activity prerequisite: “${item.prerequisiteQuote}”`);
+      if (item.qualificationQuote) lines.push(`Qualification: “${item.qualificationQuote}”`);
       lines.push(
         item.deadlineQuote
           ? `Source timing: “${item.deadlineQuote}”`
@@ -2496,6 +2519,12 @@ export function formatEmailReviewAnswer(
       );
       if (item.decisionPrompt) lines.push(`Next: ${item.decisionPrompt}`);
       if (item.actionUrl) lines.push(`[Source availability form](${item.actionUrl})`);
+      if (item.decisionPrompt?.startsWith('Which times and time zone'))
+        lines.push(
+          '**Reply outline — fill in before use:**',
+          'Here is my updated availability: [confirmed dates, times and time zone].',
+          'This outline is incomplete. If the source requests an availability form, submit the confirmed times there; an email reply does not complete that form.',
+        );
       if (item.contactQuote) lines.push(`Source contact instructions: “${item.contactQuote}”`);
       if (/^[A-Za-z0-9_-]{3,128}$/.test(item.threadId))
         lines.push(
@@ -2537,8 +2566,8 @@ export function formatEmailReviewAnswer(
     lines.push(`Source sender: ${thread.recipient}`);
     const sourceSummary = emailReviewOwnerDecisionSummary(thread);
     if (sourceSummary.contextQuote) lines.push(`Source context: “${sourceSummary.contextQuote}”`);
-    if (sourceSummary.contactQuote)
-      lines.push(`Source contact instructions: “${sourceSummary.contactQuote}”`);
+    if (sourceSummary.qualificationQuote)
+      lines.push(`Qualification: “${sourceSummary.qualificationQuote}”`);
     if (/^(?:no[-_.]?reply|do[-_.]?not[-_.]?reply)@/i.test(thread.recipient))
       lines.push(
         'The source sender is a no-reply address; confirm the source’s contact instructions before using a draft.',
@@ -2552,7 +2581,11 @@ export function formatEmailReviewAnswer(
           : /\brsvp\b/i.test(latestUnquotedBody(thread) ?? '') &&
               /\b(?:food|headcount|count|catering)\b/i.test(latestUnquotedBody(thread) ?? '')
             ? 'Why it matters: The RSVP is needed for the food or attendance count.'
-            : 'Why it matters: The latest message asks for a response; your answer is still needed.'
+            : sourceSummary.contextQuote && /\bfine of \$[0-9]+/i.test(sourceSummary.contextQuote)
+              ? `Why it matters: The source warns of ${/\bfine of \$[0-9]+/i.exec(sourceSummary.contextQuote)?.[0]} if the team has no referee. Confirm whether you qualify or can train.`
+              : /\bavailability\b/i.test(latestUnquotedBody(thread) ?? '')
+                ? 'Why it matters: Interview scheduling is waiting for your available times and time zone.'
+                : 'Why it matters: The latest message asks for a response; your answer is still needed.'
         : 'Why it matters: This may be a reply request; confirm the quoted text before sending.',
     );
     lines.push(`Source request: “${item.whyQuote}”`);
@@ -2596,6 +2629,8 @@ export function formatEmailReviewAnswer(
         : '**Draft:**',
     );
     lines.push(draftBody);
+    if (sourceSummary.contactQuote)
+      lines.push(`Contact instructions from source: “${sourceSummary.contactQuote}”`);
     if (/^[A-Za-z0-9_-]{3,128}$/.test(thread.threadId))
       lines.push(
         `[Open the source thread](https://mail.google.com/mail/u/0/#all/${thread.threadId})`,

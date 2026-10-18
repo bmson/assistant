@@ -310,6 +310,28 @@ const refreshedTextResult = {
 };
 
 describe('resumed conversations.search refresh', () => {
+  it('retains exact absolute source links when a semantic snapshot is revalidated', async () => {
+    const window = originalWindow();
+    const result = (
+      window[2] as unknown as {
+        content: Array<{ output: { value: { matches: Array<Record<string, unknown>> } } }>;
+      }
+    ).content[0]?.output.value;
+    const match = result?.matches[0];
+    if (!match) throw new Error('Missing original source match');
+    const sourceUrl = `https://assistant.example/chat/${ids.conversation}#message-${ids.message}`;
+    match.sourceUrl = sourceUrl;
+    const refresh = repository([true]);
+    await refreshResumedConversationSearch(window, {
+      agentId: ids.task,
+      currentConversationId: ids.conversation,
+      repository: refresh,
+    });
+    expect(refresh.refreshForResume).toHaveBeenCalledOnce();
+    expect(JSON.stringify(window)).toContain(sourceUrl);
+    expect(JSON.stringify(window)).toContain(oldSourceText);
+  });
+
   it('replaces stale search evidence and derived assistant prose without changing approved effects', async () => {
     const window = originalWindow();
     const refresh = repository([false]);

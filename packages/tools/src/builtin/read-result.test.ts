@@ -301,6 +301,21 @@ describe('read_result conversation-search privacy fence', () => {
     });
   });
 
+  it('accepts exact source-link metadata on a current stored search while rejecting mismatched links', async () => {
+    const call = storedCall();
+    const result = structuredClone(call.result) as { matches: Array<Record<string, unknown>> };
+    const match = result.matches[0];
+    if (!match) throw new Error('Missing source match');
+    match.sourceUrl = `https://assistant.example/chat/${CONVERSATION}#message-${SOURCE}`;
+    const conversations = freshRepository();
+    const { run } = harness({ call: storedCall({ result }), conversations });
+    expect(await run()).toMatchObject({ offset: 0, hasMore: true });
+    expect(conversations.refreshForResume).toHaveBeenCalledOnce();
+    match.sourceUrl = `https://assistant.example/chat/${CONVERSATION}#message-wrong`;
+    const bad = harness({ call: storedCall({ result }), conversations: freshRepository() });
+    expect((await bad.run()).error).toContain('stored conversation search is unavailable');
+  });
+
   it('rejects an aggregate search payload above the pre-hash text budget', async () => {
     const firstId = randomUUID();
     const secondId = randomUUID();

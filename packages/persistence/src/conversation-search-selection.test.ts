@@ -3,6 +3,7 @@ import type { ConversationSearchMatch } from './builtin-tools.js';
 import {
   conversationSearchCandidateLimit,
   selectConversationSearchMatches,
+  validatedConversationSourceUrl,
 } from './conversation-search-selection.js';
 
 function row(index: number, text: string, conversationId: string, role = 'user', origin = 'owner') {
@@ -68,4 +69,21 @@ describe('bounded conversation source selection', () => {
     expect(selected.filter((source) => source.role === 'assistant')).toHaveLength(8);
     expect(selected.every((source) => ranked.includes(source))).toBe(true);
   });
+});
+
+it('validates optional source links against exact message identity without changing source authority', () => {
+  const match = {
+    conversationId: 'chat-1',
+    messageId: 'message-2',
+    sourceUrl: 'https://assistant.example/chat/chat-1#message-message-2',
+  };
+  expect(validatedConversationSourceUrl(match)).toBe(match.sourceUrl);
+  for (const sourceUrl of [
+    'https://assistant.example/chat/other#message-message-2',
+    'https://assistant.example/chat/chat-1#message-other',
+    'https://user:secret@assistant.example/chat/chat-1#message-message-2',
+    'https://assistant.example/chat/chat-1?redirect=evil#message-message-2',
+    'javascript:alert(1)',
+  ])
+    expect(validatedConversationSourceUrl({ ...match, sourceUrl })).toBeUndefined();
 });
