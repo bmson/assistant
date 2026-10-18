@@ -50,6 +50,10 @@ class RepairRequestUncertain extends Error {}
 export type RepairPatchReviewer = (candidate: {
   commitSha: string;
   files: Array<{ filename: string; patch: string }>;
+  verification?: {
+    checks: Array<{ name: string; headSha: string; conclusion: string }>;
+    sourceContext: Array<{ filename: string; text: string; truncated: boolean }>;
+  };
 }) => Promise<{ approved: boolean; modelId: string; summary: string } | null>;
 
 /** No application, publishing, or API credential is placed in the generated-code environment. */
@@ -157,6 +161,73 @@ export function createHostedRepairWorker(input: {
   ) {
     const original = await sourceFile(REPAIR_SOURCE_SNAPSHOT, source, true);
     return original === null ? null : refreshRepairSourceSnapshot(original, changes);
+  }
+  async function reviewSourceContext(paths: string[], ref: string) {
+    const context: Array<{ filename: string; text: string; truncated: boolean }> = [];
+    let remaining = 24000;
+    const add = (filename: string, text: string) => {
+      if (remaining <= 0) return;
+      const bounded = text.slice(0, Math.min(8000, remaining));
+      context.push({ filename, text: bounded, truncated: bounded.length !== text.length });
+      remaining -= bounded.length;
+    };
+    const root = await sourceFile('package.json', ref, true);
+    if (root) {
+      const metadata = JSON.parse(root);
+      add(
+        'package.json',
+        JSON.stringify(
+          {
+            packageManager: metadata.packageManager,
+            engines: metadata.engines,
+            dependencies: metadata.dependencies,
+            devDependencies: metadata.devDependencies,
+          },
+          null,
+          2,
+        ),
+      );
+    }
+    const packages = [
+      ...new Set(
+        paths
+          .map((path) => /^(packages\/[^/]+)\//.exec(path)?.[1])
+          .filter((path): path is string => Boolean(path)),
+      ),
+    ].slice(0, 2);
+    for (const directory of packages) {
+      const manifest = await sourceFile(`${directory}/package.json`, ref, true);
+      if (!manifest) continue;
+      const metadata = JSON.parse(manifest);
+      add(
+        `${directory}/package.json`,
+        JSON.stringify(
+          {
+            name: metadata.name,
+            version: metadata.version,
+            exports: metadata.exports,
+            main: metadata.main,
+            types: metadata.types,
+          },
+          null,
+          2,
+        ),
+      );
+      const entry =
+        typeof metadata.exports === 'string'
+          ? metadata.exports
+          : (metadata.exports?.['.'] ?? metadata.main);
+      // Read only a declared public index, never an arbitrary path from metadata.
+      if (
+        typeof entry !== 'string' ||
+        !/^\.\/(?:[A-Za-z0-9_-]+\/)*index\.(?:ts|tsx|js|mjs)$/.test(entry)
+      )
+        continue;
+      const filename = `${directory}/${entry.slice(2)}`;
+      const index = await sourceFile(filename, ref, true);
+      if (index) add(filename, index);
+    }
+    return context;
   }
   const attempt = (issue: RepairIssue) => `${issue.id}:${issue.data.dispatchedAt}`;
   async function findSession(issue: RepairIssue): Promise<string | undefined> {
@@ -397,7 +468,21 @@ export function createHostedRepairWorker(input: {
         comparison.files.reduce((n, f) => n + Buffer.byteLength(f.patch) + 1024, 0) > 100000
       )
         throw new Error('Independent review requires the complete bounded published diff');
-      const result = await input.reviewPatch({ commitSha: pr.head.sha, files: comparison.files });
+      const result = await input.reviewPatch({
+        commitSha: pr.head.sha,
+        files: comparison.files,
+        verification: {
+          checks: rows.flat().map((check) => ({
+            name: check.name,
+            headSha: check.head_sha,
+            conclusion: check.conclusion ?? '',
+          })),
+          sourceContext: await reviewSourceContext(
+            files.map((file) => file.filename),
+            pr.head.sha,
+          ),
+        },
+      });
       if (!result) {
         const expired =
           now().getTime() - new Date(patch.hostedPublishedAt ?? '').getTime() > 60 * 60000;

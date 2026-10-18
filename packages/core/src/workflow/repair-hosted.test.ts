@@ -2,7 +2,7 @@ import { Buffer } from 'node:buffer';
 import type { RepairIssue } from '@assistant/persistence';
 import { expect, it, vi } from 'vitest';
 import { repairBranch } from './repair-github.js';
-import { createHostedRepairWorker } from './repair-hosted.js';
+import { createHostedRepairWorker, type RepairPatchReviewer } from './repair-hosted.js';
 import { REPAIR_SOURCE_SNAPSHOT, refreshRepairSourceSnapshot } from './repair-source-snapshot.js';
 
 const source = 'a'.repeat(40);
@@ -53,6 +53,7 @@ function harness() {
     snapshot: '',
     tamperedSnapshot: false,
     publishedFiles: null as string[] | null,
+    reviewContext: {} as Record<string, string>,
     result: {
       baseSha: source,
       reproduced: true,
@@ -98,7 +99,9 @@ function harness() {
       const path = decodeURIComponent(new URL(u).pathname.split('/contents/')[1] ?? '');
       const ref = new URL(u).searchParams.get('ref');
       let text: string | null = null;
-      if (path === REPAIR_SOURCE_SNAPSHOT && state.snapshot) {
+      if (ref === commit && Object.hasOwn(state.reviewContext, path)) {
+        text = state.reviewContext[path] ?? null;
+      } else if (path === REPAIR_SOURCE_SNAPSHOT && state.snapshot) {
         text =
           ref === source
             ? state.snapshot
@@ -250,7 +253,7 @@ function harness() {
     throw new Error(`Unexpected test endpoint: ${u}`);
   });
   const reviewPatch = vi.fn(
-    async () =>
+    async (_candidate: Parameters<RepairPatchReviewer>[0]) =>
       ({
         approved: true,
         modelId: 'independent-model',
@@ -284,7 +287,18 @@ it('keeps the draft when an independent reviewer rejects the exact commit', asyn
     status: 'failed',
     patch: { hostedReview: { approved: false, commitSha: commit } },
   });
-  expect(h.reviewPatch).toHaveBeenCalledWith({ commitSha: commit, files: expect.any(Array) });
+  expect(h.reviewPatch).toHaveBeenCalledWith(
+    expect.objectContaining({
+      commitSha: commit,
+      files: expect.any(Array),
+      verification: {
+        checks: expect.arrayContaining([
+          expect.objectContaining({ name: 'verify', headSha: commit, conclusion: 'success' }),
+        ]),
+        sourceContext: [],
+      },
+    }),
+  );
   expect(h.state.ready).toBe(false);
 });
 it('waits without promoting when independent review is unavailable', async () => {
@@ -294,6 +308,61 @@ it('waits without promoting when independent review is unavailable', async () =>
   h.reviewPatch.mockResolvedValue(null);
   expect(await h.worker.inspect(issue)).toMatchObject({ status: 'testing' });
   expect(h.state.ready).toBe(false);
+});
+it('grounds review in exact-commit CI, installed library versions and existing public re-exports', async () => {
+  const h = harness();
+  h.state.pr = true;
+  h.state.checks = true;
+  const file = h.state.result.changes[0];
+  if (!file) throw new Error('Missing test source');
+  file.path = 'packages/application/src/example.test.ts';
+  h.state.reviewContext = {
+    'package.json': JSON.stringify({ devDependencies: { vitest: '^5.0.2' } }),
+    'packages/application/package.json': JSON.stringify({ exports: { '.': './src/index.ts' } }),
+    'packages/application/src/index.ts': "export * from './workspace-improvements.js';",
+  };
+  expect(await h.worker.inspect(issue)).toMatchObject({ status: 'pr_open' });
+  const evidence = h.reviewPatch.mock.calls[0]?.[0].verification;
+  expect(evidence?.sourceContext).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        filename: 'package.json',
+        text: expect.stringContaining('^5.0.2'),
+        truncated: false,
+      }),
+      expect.objectContaining({
+        filename: 'packages/application/src/index.ts',
+        text: "export * from './workspace-improvements.js';",
+        truncated: false,
+      }),
+    ]),
+  );
+  expect(evidence?.checks.every((check) => check.headSha === commit)).toBe(true);
+  expect(
+    h.calls
+      .filter((call) => call.url.includes('/contents/'))
+      .every((call) => call.url.endsWith(`?ref=${commit}`)),
+  ).toBe(true);
+});
+it('bounds and labels truncated review context rather than implying complete source knowledge', async () => {
+  const h = harness();
+  h.state.pr = true;
+  h.state.checks = true;
+  const file = h.state.result.changes[0];
+  if (!file) throw new Error('Missing test source');
+  file.path = 'packages/application/src/example.test.ts';
+  h.state.reviewContext = {
+    'package.json': JSON.stringify({ devDependencies: { vitest: 'x'.repeat(20000) } }),
+    'packages/application/package.json': JSON.stringify({
+      exports: { '.': './src/index.ts' },
+      types: 'x'.repeat(20000),
+    }),
+    'packages/application/src/index.ts': 'x'.repeat(20000),
+  };
+  expect(await h.worker.inspect(issue)).toMatchObject({ status: 'pr_open' });
+  const context = h.reviewPatch.mock.calls[0]?.[0].verification?.sourceContext ?? [];
+  expect(context.reduce((sum, file) => sum + file.text.length, 0)).toBe(24000);
+  expect(context.every((file) => file.text.length <= 8000 && file.truncated)).toBe(true);
 });
 it('reuses a durable review only for the same commit', async () => {
   const h = harness();
