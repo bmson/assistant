@@ -2630,9 +2630,7 @@ export function formatEmailReviewAnswer(
     );
     lines.push(draftBody);
     if (sourceSummary.contactQuote)
-      lines.push(
-        `Training proof/contact instructions from source: “${sourceSummary.contactQuote}”`,
-      );
+      lines.push(`Contact instructions from source: “${sourceSummary.contactQuote}”`);
     if (/^[A-Za-z0-9_-]{3,128}$/.test(thread.threadId))
       lines.push(
         `[Open the source thread](https://mail.google.com/mail/u/0/#all/${thread.threadId})`,

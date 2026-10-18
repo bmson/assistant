@@ -5569,6 +5569,46 @@ San Francisco (SFO-San Francisco Intl.)`;
       ],
     };
   }
+  it('retains an explicit return label in a dated fallback without inferring it from a reversed route', () => {
+    const { evidence } = sources();
+    const read = detectPersonalReadRequest([{ role: 'user', content: focusedPrompt }], {
+      now: new Date('2026-10-17T20:00:00Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!read?.upcomingFlightDiscovery) throw new Error('Expected focused flight intent');
+    const datedEvidence = evidence.map((item) =>
+      item.toolName === 'calendar.list_events'
+        ? {
+            ...item,
+            args: { timeMin: read.timeWindow?.timeMin, timeMax: read.timeWindow?.timeMax },
+          }
+        : item,
+    );
+    expect(upcomingFlightReadProjection(read, datedEvidence).text).not.toContain(
+      'The booking explicitly labels this return.',
+    );
+    const bookingIndex = datedEvidence.findIndex((item) => item.toolName === 'gmail.read_thread');
+    datedEvidence[bookingIndex] = row(
+      'gmail.read_thread',
+      { threadId: 'egencia-table' },
+      {
+        complete: true,
+        hasMore: false,
+        messages: [
+          {
+            messageId: 'table-message',
+            subject: 'Flight - BOOKED - Berlin',
+            text: table.replace('[image: Flight] BER to SFO', 'Return\n[image: Flight] BER to SFO'),
+          },
+        ],
+      },
+    );
+    const projection = upcomingFlightReadProjection(read, datedEvidence);
+    expect(projection.text).toContain('The booking explicitly labels this return.');
+    expect(projection.text).toContain('not verified as the next future departure');
+    expect(projection.flight).toBeUndefined();
+  });
+
   it('keeps source clocks and route-group inference separate from verified next-flight identity', () => {
     const { read, evidence } = sources();
     const projection = upcomingFlightReadProjection(read, evidence);

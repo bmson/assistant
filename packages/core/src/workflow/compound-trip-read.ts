@@ -5242,7 +5242,7 @@ export function upcomingFlightReadProjection(
     : undefined;
   const compactSummary = latestDatedGroup
     ? [
-        `Checked dated booking: ${latestDatedGroup.legs.map((leg) => `${leg.flightNumber} ${leg.originAirport}→${leg.destinationAirport}, ${leg.departureDate} ${leg.departureTime} (${leg.departureTimeZone ?? 'zone not stated'})`).join('; ')}. This checked dated route is not verified as the next future departure.${datedSourceLink ? ` [Booking email](${datedSourceLink})` : ''}`,
+        `Checked dated booking: ${latestDatedGroup.legs.map((leg) => `${leg.flightNumber} ${leg.originAirport}→${leg.destinationAirport}, ${leg.departureDate} ${leg.departureTime} (${leg.departureTimeZone ?? 'zone not stated'})`).join('; ')}.${latestDatedGroup.direction === 'unknown' ? '' : ` The booking explicitly labels this ${latestDatedGroup.direction}.`} This checked dated route is not verified as the next future departure.${datedSourceLink ? ` [Booking email](${datedSourceLink})` : ''}`,
       ]
     : observedGroup
       ? (() => {
