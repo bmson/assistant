@@ -318,7 +318,7 @@ describe('bounded no-send email review', () => {
 
   it.each([
     'Please review your purchase. Please rate your recent purchase using the rating form. Your review is optional.',
-    'Please review your domain contact information. If it is correct, you do not need to do anything. Visit your account to update it.',
+    'Please review your domain contact information. If it is correct, you do not need to do anything. Visit your account to update it. Contact Us.',
   ])('does not turn a self-service review into an owner-answer blocker: %s', async (body) => {
     const id = 'optional-review';
     const source = messages(id, 'notices@service.example.net');
@@ -392,6 +392,52 @@ describe('bounded no-send email review', () => {
       expect(JSON.parse(emailReviewPrompt([thread])).threads[0].responseRoute).toBe(
         'assess_from_source',
       );
+    },
+  );
+
+  it.each([
+    ['Please confirm which time works for you.', false],
+    ['Contact support@example.net with your preferred time.', false],
+    [
+      'Do not reply to this email, but please confirm which time works using the source form.',
+      false,
+    ],
+    ['Please confirm which time works for you.', true],
+    ['Contact support@example.net with your preferred time.', true],
+    ['Contact us with your preferred time.', true],
+  ] as const)(
+    'preserves a genuine current or earlier response request beside a conditional notice: %s (earlier: %s)',
+    (request, earlier) => {
+      const id = 'conditional-notice-with-request';
+      const source = messages(id, 'notices@service.example.net');
+      const notice =
+        'Please review your contact information. If the information is correct, you do not need to do anything.';
+      const latest = required(source.at(-1), 'latest');
+      latest.text = earlier ? notice : `${notice} ${request}`;
+      latest.sourceLength = latest.text.length;
+      if (earlier)
+        Object.assign(required(source[0], 'earlier request'), {
+          from: 'reviewer@example.net',
+          to: 'owner@example.com',
+          text: request,
+          sourceLength: request.length,
+        });
+      const thread = required(
+        emailReviewCompleteThread(id, 'owner@example.com', [search(id), read(id, source)]),
+        'thread',
+      );
+      expect(JSON.parse(emailReviewPrompt([thread])).threads[0].responseRoute).toBe(
+        'assess_from_source',
+      );
+      expect(
+        mergeEmailReviewOwnerDecisionFindings({
+          prior: [{ threadId: id, latestMessageId: latest.messageId }],
+          currentThreadIds: [],
+          threads: [thread],
+          selectedThreadIds: [id],
+          resolvedThreadIds: [],
+        }),
+      ).toEqual([{ threadId: id, latestMessageId: latest.messageId }]);
     },
   );
 

@@ -32,7 +32,7 @@ export function requestedReplySentenceLimit(request: string): number | undefined
   return /\b(?:in|with|using|use|only|exactly)\s+(?:one|a single|1)\s+(?:short\s+)?sentence\b/i.test(
     authored,
   ) &&
-    !/\b(?:not|never|avoid)\s+(?:(?:reply|answer|respond)(?:ing)?\s+)?(?:in|with|using)\s+(?:one|a single|1)\s+sentence\b/i.test(
+    !/\b(?:not|never|avoid)\s+(?:(?:reply|answer|respond)(?:ing)?\s+)?(?:in|with|using|use)\s+(?:one|a single|1)\s+(?:short\s+)?sentence\b/i.test(
       authored,
     )
     ? 1
@@ -46,6 +46,34 @@ export function replySentenceCount(text: string): number {
   return [...new Intl.Segmenter('en', { granularity: 'sentence' }).segment(display)].filter(
     (part) => /[\p{L}\p{N}]/u.test(part.segment),
   ).length;
+}
+
+/** Separate unmistakable inline lists without rewriting their words or code. */
+export function separateInlineReplyItems(text: string): string {
+  let fence: string | undefined;
+  return text
+    .split('\n')
+    .map((line) => {
+      const boundary = /^\s*(`{3,}|~{3,})/.exec(line)?.[1]?.[0];
+      if (boundary) {
+        if (!fence) fence = boundary;
+        else if (fence === boundary) fence = undefined;
+        return line;
+      }
+      if (fence || /^(?: {4}|\t)|^\s*>/.test(line) || line.includes('`')) return line;
+      let markers = [...line.matchAll(/(?:^|\s)([1-9])[.)]\s+(?=\S)/g)];
+      const ordered =
+        markers.length >= 2 && markers.every((match, index) => Number(match[1]) === index + 1);
+      if (!ordered) markers = [...line.matchAll(/(?:^|\s)-\s+\*\*[^*\r\n]{1,100}\*\*/g)];
+      if (markers.length < 2) return line;
+      const parts = [line.slice(0, markers[0]?.index ?? 0).trimEnd()];
+      for (const [index, marker] of markers.entries()) {
+        const start = (marker.index ?? 0) + marker[0].length - marker[0].trimStart().length;
+        parts.push(line.slice(start, markers[index + 1]?.index ?? line.length).trim());
+      }
+      return parts.filter(Boolean).join('\n\n');
+    })
+    .join('\n');
 }
 
 /** The two consumers share this promise: one review, one durable and visible answer. */
@@ -63,7 +91,17 @@ export async function reviewConversationReply(input: {
   const sentences = requestedReplySentenceLimit(input.request);
   const authored = extractOwnerIntent({ text: input.request, trust: 'owner' }).ownerAuthoredText;
   const reasoningReview = needsConversationReasoning(authored);
+  const normalizeReply = (text: string) =>
+    reasoningReview &&
+    sentences === undefined &&
+    !/\b(?:one|single)\s+(?:paragraph|line)\b|\b(?:preserve|keep)\b[^.!?\n]{0,30}\b(?:format|formatting|layout)\b/i.test(
+      authored,
+    )
+      ? separateInlineReplyItems(text)
+      : text;
+  candidate = normalizeReply(candidate);
   let reasoningReviewed = false;
+  let formatRevised = false;
   for (let pass = 0; pass < 2; pass += 1) {
     const guarded = input.guard(candidate);
     const words = replyWordCount(candidate);
@@ -90,9 +128,10 @@ export async function reviewConversationReply(input: {
     ];
     if (pass > 0 && findings.length === 0 && (!reasoningReview || reasoningReviewed)) break;
     // A short formatting repair should not spend its output budget on a full
-    // constraint audit. Keep the same two-pass bound and audit the result once
-    // its shape fits, or repair a later audit's length overrun on the last pass.
-    const auditReasoning = reasoningReview && (formatFindings.length === 0 || guarded.corrected);
+    // constraint audit. Keep the same two-pass bound; the last pass audits
+    // reasoning even when the first formatting repair was insufficient.
+    const auditReasoning =
+      reasoningReview && (pass === 1 || formatFindings.length === 0 || guarded.corrected);
     const review = await verifyFinalOutput(input.router, {
       taskId: input.taskId,
       request: input.request,
@@ -104,7 +143,8 @@ export async function reviewConversationReply(input: {
       reasoningReview: auditReasoning,
     });
     if (auditReasoning && !review.unavailable) reasoningReviewed = true;
-    candidate = review.text;
+    if (reasoningReview && !auditReasoning && review.revised) formatRevised = true;
+    candidate = normalizeReply(review.text);
     incomplete =
       review.incomplete === true || (incomplete && (!review.revised || review.unavailable));
     if (review.unavailable) break;
@@ -127,6 +167,8 @@ export async function reviewConversationReply(input: {
   // A reviewer cannot publish a draft the deterministic contract still rejects.
   return {
     ...finalGuard,
-    ...(incomplete || finalGuard.corrected ? { incomplete: true } : {}),
+    ...(incomplete || finalGuard.corrected || (formatRevised && !reasoningReviewed)
+      ? { incomplete: true }
+      : {}),
   };
 }

@@ -1306,9 +1306,12 @@ function hasPossibleSourceDeadline(thread: EmailReviewThread): boolean {
 /** Explicit self-service ratings and conditional account maintenance are not email replies. */
 function selfServiceReviewNotice(thread: EmailReviewThread): boolean {
   const affirmativeReply = (text: string) =>
-    text.replace(/\b(?:do not|don't|don’t|never) reply\b[^.!?\n]*/gi, '');
+    text.replace(
+      /\b(?:do not|don't|don’t|never) reply(?:\s+to\s+(?:this|the)\s+(?:email|message))?\b/gi,
+      '',
+    );
   const replyCue =
-    /\b(?:reply|respond)\b|\blet (?:me|us) know\b|\b(?:could|would|can|will) you\b|\bplease (?:send|share|provide|tell)\b|\b(?:e-?mail|write to)\s+(?:me|us|[\w.+-]+@)/i;
+    /\b(?:reply|respond)\b|\blet (?:me|us) know\b|\b(?:could|would|can|will) you\b|\bplease (?:send|share|provide|tell|confirm)\b|\b(?:e-?mail|write to)\s+(?:me|us|[\w.+-]+@)|\bcontact\s+[\w.+-]+@[\w.-]+|\bcontact\s+(?:me|us)\b[^.!?\n]{0,100}\b(?:your\s+(?:availability|schedule|choice|answer)|preferred\s+time)\b/i;
   if (
     thread.messages.some(
       (message) =>
