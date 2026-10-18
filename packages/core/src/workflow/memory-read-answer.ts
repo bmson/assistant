@@ -1587,6 +1587,51 @@ function deterministicFictionalExerciseRecall(
   };
 }
 
+/** Keep a complete selected fact sentence, without duplicate copies or task directions. */
+function compactFictionalExerciseSelection(
+  request: string,
+  selection: MemoryReadSelection,
+  sources: MemoryReadSource[],
+): MemoryReadSelection | undefined {
+  const selectedKeys = new Set(selection.selections.map((item) => item.sourceKey));
+  const selectedSources = sources.filter((source) => selectedKeys.has(source.key));
+  if (selectedSources.some((source) => source.speaker !== 'Recorded owner message'))
+    return undefined;
+  const compact = deterministicFictionalExerciseRecall(request, selectedSources);
+  const quote = compact?.selections[0]?.quote;
+  const scope = explicitComparisonScope(request);
+  if (!compact || !quote || !scope) return undefined;
+  const normalized = normalizedText(quote);
+  if (!selection.selections.some((item) => normalizedText(item.quote).includes(normalized)))
+    return undefined;
+  const hasSeparateFact = selection.selections.some((item) => {
+    const selected = normalizedText(item.quote);
+    if (selected === normalized || normalized.includes(selected)) return false;
+    // Inspect text on BOTH sides of the retained sentence. A selected quote
+    // can contain a complete fact sentence followed by its correction.
+    const remaining = selected.includes(normalized)
+      ? selected.replace(normalized, '').trim()
+      : selected;
+    // Remove only narrow task-direction clauses. Unknown prose may contain
+    // an additional constraint even without a date, amount or field label.
+    return remaining.split(/(?<=[.!?])\s+|\n/u).some((part) => {
+      const direction = part.trim().replace(/[.!?]$/, '');
+      return (
+        direction.length > 0 &&
+        !/^acknowledge(?: in (?:one|a single) sentence)?$/iu.test(direction) &&
+        !/^do not (?:save|store|retain|remember) (?:these |this |the |any )?(?:fictional |hypothetical )?(?:facts|details|information)(?: as personal memories| (?:to|in) (?:long-term )?memory)?(?: or change anything)?$/iu.test(
+          direction,
+        ) &&
+        !/^this is a fictional test document(?:, not my personal information)?$/iu.test(
+          direction,
+        ) &&
+        !/^include a heading$/iu.test(direction)
+      );
+    });
+  });
+  return hasSeparateFact ? undefined : compact;
+}
+
 /** Guard a successful selector against equally relevant same-scope records it omitted. */
 function validateSelectedComparison(
   request: string,
@@ -1937,6 +1982,8 @@ export async function selectMemoryReadAnswer(input: {
   if (requestedFamilyBirthdays(input.request)) return first;
   if (first.status !== 'complete')
     return validatedComparisonFallback() ?? validatedFictionalExerciseFallback() ?? first;
+  const compactRecall = compactFictionalExerciseSelection(input.request, first, sources);
+  if (compactRecall) return compactRecall;
 
   const ownerHistoryQuestion = asksAboutOwnerHistory(input.request);
   const ownerSources = selectorVisibleSources(

@@ -212,8 +212,16 @@ type RouterScript = {
   triageUnavailable?: boolean;
   streamError?: Error;
   reviewedReply?: string;
+  rejectReasoningAudit?: boolean;
   completeWhenConsumed?: boolean;
 };
+
+const passingReasoningChecks = Object.fromEntries(
+  ['grounding', 'feasibility', 'causalClaims', 'usefulness', 'actionScope'].map((name) => [
+    name,
+    { status: 'pass', explanation: 'The supplied facts support this answer.' },
+  ]),
+);
 
 function scriptedRouter(script: RouterScript) {
   const route = vi.fn(async () => {
@@ -226,10 +234,23 @@ function scriptedRouter(script: RouterScript) {
         ok: true,
         object:
           script.reviewedReply === undefined
-            ? { decision: 'publish', reasons: [] }
+            ? {
+                decision: 'publish',
+                reasons: [],
+                checks: script.rejectReasoningAudit
+                  ? {
+                      ...passingReasoningChecks,
+                      grounding: {
+                        status: 'revise',
+                        explanation: 'The recipient address is absent from the supplied facts.',
+                      },
+                    }
+                  : passingReasoningChecks,
+              }
             : {
                 decision: 'revise',
                 revisedText: script.reviewedReply,
+                checks: passingReasoningChecks,
                 reasons: ['clarity_or_format'],
               },
       };
@@ -2003,6 +2024,24 @@ describe('tool-less conversational reply', () => {
     expect(wire).not.toContain('data-off-course');
     expect(result.object.mock.calls.filter(([role]) => role === 'reason')).toHaveLength(1);
     expect(stubs.enqueueTask).not.toHaveBeenCalled();
+  });
+
+  it('persists exhausted scenario verification as failed with the same safe visible answer', async () => {
+    const draft = 'Choose Morgan Lee at morgan@example.test.';
+    const result = await turn('Simulate only. Compare two recipients named Morgan. No tools.', {
+      draft,
+      rejectReasoningAudit: true,
+      completeWhenConsumed: true,
+    });
+    const wire = await result.response.text();
+    expect(result.object.mock.calls.filter(([role]) => role === 'reason')).toHaveLength(2);
+    expect(result.completions).toHaveLength(1);
+    expect(result.completions[0]?.status).toBe('failed');
+    const text = result.completions[0]?.messages[0]?.text;
+    expect(text).toBeTruthy();
+    expect(wire).toContain(text);
+    expect(wire).not.toContain(draft);
+    expect(wire).not.toContain('data-off-course');
   });
 
   it('marks an unrepaired length failure incomplete and shows the same bounded answer', async () => {

@@ -7,7 +7,41 @@ import {
   reviewConversationReply,
 } from './conversation-reply-review.js';
 
+const passingReasoningChecks = Object.fromEntries(
+  ['grounding', 'feasibility', 'causalClaims', 'usefulness', 'actionScope'].map((name) => [
+    name,
+    { status: 'pass', explanation: 'The supplied facts support this answer.' },
+  ]),
+);
+
 describe('reviewed conversation replies', () => {
+  it('keeps audit exhaustion incomplete through the outer presentation and action guard', async () => {
+    const object = vi.fn().mockResolvedValue({
+      ok: true,
+      object: {
+        decision: 'publish',
+        reasons: [],
+        checks: {
+          ...passingReasoningChecks,
+          grounding: {
+            status: 'revise',
+            explanation: 'The contact address does not appear in the supplied facts.',
+          },
+        },
+      },
+    });
+    const result = await reviewConversationReply({
+      router: { object } as unknown as Pick<ModelRouter, 'object'>,
+      taskId: 'task',
+      request: 'Simulate only. Compare two possible recipients with the same first name. No tools.',
+      draft: 'Choose Morgan Lee at morgan@example.test.',
+      context: [],
+      guard: (text) => guardDraft(text, []),
+    });
+    expect(object).toHaveBeenCalledTimes(2);
+    expect(result.incomplete).toBe(true);
+    expect(result.text).not.toContain('morgan@example.test');
+  });
   it('distinguishes strict and inclusive limits and ignores quoted instructions', () => {
     expect(requestedReplyWordLimit('Compare the options under 220 words.')).toBe(219);
     expect(requestedReplyWordLimit('Use at most 170 words.')).toBe(170);
@@ -25,13 +59,19 @@ describe('reviewed conversation replies', () => {
         ok: true,
         object: {
           decision: 'revise',
+          checks: passingReasoningChecks,
           revisedText: Array(24).fill('candidate').join(' '),
           reasons: ['clarity_or_format'],
         },
       })
       .mockResolvedValueOnce({
         ok: true,
-        object: { decision: 'revise', revisedText: final, reasons: ['clarity_or_format'] },
+        object: {
+          decision: 'revise',
+          checks: passingReasoningChecks,
+          revisedText: final,
+          reasons: ['clarity_or_format'],
+        },
       });
     const result = await reviewConversationReply({
       router: { object } as unknown as Pick<ModelRouter, 'object'>,
@@ -49,9 +89,10 @@ describe('reviewed conversation replies', () => {
   });
 
   it('keeps the real action contract authoritative when a reviewer approves a false receipt', async () => {
-    const object = vi
-      .fn()
-      .mockResolvedValue({ ok: true, object: { decision: 'publish', reasons: [] } });
+    const object = vi.fn().mockResolvedValue({
+      ok: true,
+      object: { decision: 'publish', checks: passingReasoningChecks, reasons: [] },
+    });
     const result = await reviewConversationReply({
       router: { object } as unknown as Pick<ModelRouter, 'object'>,
       taskId: 'task',
@@ -86,13 +127,14 @@ describe('reviewed conversation replies', () => {
   it.each([true, false])(
     'withholds a known word overrun when review cannot repair it (available: %s)',
     async (available) => {
-      const object = vi
-        .fn()
-        .mockResolvedValue(
-          available
-            ? { ok: true, object: { decision: 'publish', reasons: [] } }
-            : { ok: false, decision: { mode: 'park', reason: 'budget' } },
-        );
+      const object = vi.fn().mockResolvedValue(
+        available
+          ? {
+              ok: true,
+              object: { decision: 'publish', checks: passingReasoningChecks, reasons: [] },
+            }
+          : { ok: false, decision: { mode: 'park', reason: 'budget' } },
+      );
       const result = await reviewConversationReply({
         router: { object } as unknown as Pick<ModelRouter, 'object'>,
         taskId: 'task',

@@ -37,6 +37,7 @@ export async function reviewConversationReply(input: {
   guard: (text: string) => { corrected: boolean; text: string };
 }): Promise<{ corrected: boolean; text: string; incomplete?: boolean }> {
   let candidate = input.draft;
+  let incomplete = false;
   const maximum = requestedReplyWordLimit(input.request);
   const authored = extractOwnerIntent({ text: input.request, trust: 'owner' }).ownerAuthoredText;
   const reasoningReview = needsConversationReasoning(authored);
@@ -68,6 +69,8 @@ export async function reviewConversationReply(input: {
       reasoningReview,
     });
     candidate = review.text;
+    incomplete =
+      review.incomplete === true || (incomplete && (!review.revised || review.unavailable));
     if (review.unavailable) break;
   }
   if (maximum !== undefined && replyWordCount(candidate) > maximum)
@@ -77,5 +80,5 @@ export async function reviewConversationReply(input: {
       text:
         maximum >= 11 ? 'I couldn’t fit a complete answer within your word limit.' : 'Incomplete.',
     };
-  return input.guard(candidate);
+  return { ...input.guard(candidate), ...(incomplete ? { incomplete: true } : {}) };
 }

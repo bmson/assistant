@@ -30,6 +30,7 @@ const SEARCH_ARGS = z
   .object({
     query: z.string().min(2).max(500),
     limit: z.number().int().min(1).max(SEARCH_LIMIT).default(5),
+    mode: z.enum(['semantic', 'text']).optional(),
   })
   .strict();
 
@@ -75,6 +76,7 @@ function searchSourceRefs(
     !hasOnlyKeys(result, ['mode', 'matches']) ||
     result.truncated === true ||
     (result.mode !== 'semantic' && result.mode !== 'text') ||
+    (args.data.mode === 'text' && result.mode !== 'text') ||
     !Array.isArray(result.matches) ||
     result.matches.length > args.data.limit
   )

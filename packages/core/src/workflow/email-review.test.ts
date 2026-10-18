@@ -171,6 +171,174 @@ function required<T>(value: T | undefined, label: string): T {
 }
 
 describe('bounded no-send email review', () => {
+  it('stores exact source quote bytes when the model flattens email line wrapping', async () => {
+    const id = 'wrapped-source-quotes';
+    const source = messages(id);
+    const latest = required(source.at(-1), 'latest');
+    latest.text = 'Could you confirm the\r\nrenewal date by\r\nFriday?';
+    latest.sourceLength = latest.text.length;
+    const thread = required(
+      emailReviewCompleteThread(id, 'owner@example.com', [search(id), read(id, source)]),
+      'complete thread',
+    );
+    const proposed = validAnswer(id);
+    const item = required(proposed.items[0], 'item');
+    item.whyQuote = 'Could you confirm the renewal date by Friday?';
+    item.deadline.quote = 'by Friday';
+    const result = await generateValidatedEmailReview(
+      [thread],
+      async () => ({ ok: true, value: proposed }),
+      1,
+    );
+    expect(result.sourceItems?.[0]?.whyQuote).toBe(latest.text);
+    expect(result.sourceItems?.[0]?.deadline?.quote).toBe('by\r\nFriday');
+    expect(result.answer?.items).toHaveLength(1);
+    expect(result.attempts).toBe(1);
+    expect(
+      revalidateEmailReviewAssessmentBatches(result.sourceBatches, [id], 'owner@example.com', [
+        search(id),
+        read(id, source),
+      ])?.items,
+    ).toHaveLength(1);
+    expect(item.whyQuote).toBe('Could you confirm the renewal date by Friday?');
+  });
+
+  it.each([
+    [
+      'changed punctuation',
+      'The policy update is now available.',
+      'The policy update is now available!',
+    ],
+    ['paraphrase', 'The policy update is now available.', 'The policy change is now available.'],
+    [
+      'ambiguous wrapping',
+      'The policy\r\nupdate is available. The policy\tupdate is available.',
+      'The policy update is available.',
+    ],
+  ])('does not repair quote wording or ambiguous matches: %s', async (_, body, quote) => {
+    const id = 'unverified-source-quote';
+    const source = messages(id);
+    const latest = required(source.at(-1), 'latest');
+    latest.text = body;
+    latest.sourceLength = body.length;
+    const thread = required(
+      emailReviewCompleteThread(id, 'owner@example.com', [search(id), read(id, source)]),
+      'complete thread',
+    );
+    const proposed = validAnswer(id);
+    Object.assign(required(proposed.items[0], 'item'), {
+      disposition: 'no_reply',
+      recipient: null,
+      draftBody: null,
+      draftSourceMessageIds: [],
+      deadline: null,
+      whyQuote: quote,
+    });
+    const result = await generateValidatedEmailReview(
+      [thread],
+      async () => ({ ok: true, value: proposed }),
+      1,
+    );
+    expect(result.answer).toBeUndefined();
+    expect(result.sourceItems).toBeUndefined();
+  });
+
+  it.each([
+    [
+      'no-reply@accounts.example.net',
+      'Please review your contact information in your account. If it is correct, you do not need to do anything.',
+    ],
+    [
+      'donotreply+notice@school.example.net',
+      'There are six sign-ups available. Please visit the following link to sign up: https://school.example.net/form',
+    ],
+  ])('separates an automated platform action from an email reply: %s', async (sender, body) => {
+    const id = 'self-service-notice';
+    const source = messages(id, sender);
+    const latest = required(source.at(-1), 'latest');
+    latest.text = body;
+    latest.sourceLength = body.length;
+    const thread = required(
+      emailReviewCompleteThread(id, 'owner@example.com', [search(id), read(id, source)]),
+      'complete thread',
+    );
+    const proposed = validAnswer(id);
+    Object.assign(required(proposed.items[0], 'item'), {
+      disposition: 'no_reply',
+      recipient: null,
+      draftBody: null,
+      draftSourceMessageIds: [],
+      deadline: null,
+      why: 'Any action uses the account or linked form; no email reply is requested.',
+      whyQuote: body,
+    });
+    expect(JSON.parse(emailReviewPrompt([thread])).threads[0].responseRoute).toBe(
+      'account_or_platform',
+    );
+    const result = await generateValidatedEmailReview(
+      [thread],
+      async () => ({ ok: true, value: proposed }),
+      1,
+    );
+    expect(result.answer?.items[0]?.disposition).toBe('no_reply');
+    expect(result.ownerDecisionThreadIds).toEqual([]);
+  });
+
+  it.each([
+    'Please review your account. Please reply with your preferred time for a call.',
+    'Review your account. Email support@example.net with your preferred time.',
+    'Review your account. Email us with your preferred time.',
+    'Review your account. Write to support@example.net with your preferred time.',
+  ])('keeps a direct email response route in an automated account notice: %s', (body) => {
+    const id = 'automated-explicit-reply';
+    const source = messages(id, 'no-reply@accounts.example.net');
+    const latest = required(source.at(-1), 'latest');
+    latest.text = body;
+    latest.sourceLength = latest.text.length;
+    const thread = required(
+      emailReviewCompleteThread(id, 'owner@example.com', [search(id), read(id, source)]),
+      'complete thread',
+    );
+    const proposed = validAnswer(id);
+    Object.assign(required(proposed.items[0], 'item'), {
+      disposition: 'no_reply',
+      recipient: null,
+      draftBody: null,
+      draftSourceMessageIds: [],
+      deadline: null,
+      whyQuote: latest.text,
+    });
+    expect(JSON.parse(emailReviewPrompt([thread])).threads[0].responseRoute).toBe(
+      'assess_from_source',
+    );
+    if (body.includes('Please reply'))
+      expect(validateEmailReviewAnswer(proposed, [thread])).toBeUndefined();
+  });
+
+  it.each(['person', 'same-automated-sender'])(
+    'does not dismiss earlier inbound response requests from %s',
+    (earlierSender) => {
+      const id = 'notice-after-response-request';
+      const sender = 'no-reply@accounts.example.net';
+      const source = messages(id, sender);
+      const earlier = required(source[0], 'earlier');
+      earlier.from = earlierSender === 'person' ? 'reviewer@example.net' : sender;
+      earlier.to = 'owner@example.com';
+      earlier.text = 'Please reply with your preferred time for the account review.';
+      earlier.sourceLength = earlier.text.length;
+      const latest = required(source.at(-1), 'latest');
+      latest.text = 'Please review your contact information in your account.';
+      latest.sourceLength = latest.text.length;
+      const thread = required(
+        emailReviewCompleteThread(id, 'owner@example.com', [search(id), read(id, source)]),
+        'complete thread',
+      );
+      expect(JSON.parse(emailReviewPrompt([thread])).threads[0].responseRoute).toBe(
+        'assess_from_source',
+      );
+    },
+  );
+
   it('keeps qualification choices, conditional training timing, stakes and source contact in a no-send review', async () => {
     const id = 'qualification-choice';
     const source = messages(id);

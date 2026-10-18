@@ -6,6 +6,7 @@ import { detectLiveLookup } from './live-lookup.js';
 import { detectPersonalReadRequest } from './read-intent.js';
 
 export {
+  CONVERSATION_REASONING_DIRECTIVE,
   isConversationLocalContext,
   isSelfContainedCalculationRequest,
   needsConversationReasoning,
