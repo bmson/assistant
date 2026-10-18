@@ -3,6 +3,7 @@ import type { RepairIssue } from '@assistant/persistence';
 import { expect, it, vi } from 'vitest';
 import { repairBranch } from './repair-github.js';
 import { createHostedRepairWorker } from './repair-hosted.js';
+import { REPAIR_SOURCE_SNAPSHOT, refreshRepairSourceSnapshot } from './repair-source-snapshot.js';
 
 const source = 'a'.repeat(40);
 const commit = 'b'.repeat(40);
@@ -49,6 +50,9 @@ function harness() {
     wrongTurn: false,
     invalidLegacyCredential: false,
     publisherDenied: false,
+    snapshot: '',
+    tamperedSnapshot: false,
+    publishedFiles: null as string[] | null,
     result: {
       baseSha: source,
       reproduced: true,
@@ -90,6 +94,36 @@ function harness() {
     if (u === 'https://api.github.com/repos/owner/repo')
       return Response.json({ private: false, default_branch: 'main' });
     if (u.endsWith('/commits/main')) return Response.json({ sha: source });
+    if (u.includes('/contents/')) {
+      const path = decodeURIComponent(new URL(u).pathname.split('/contents/')[1] ?? '');
+      const ref = new URL(u).searchParams.get('ref');
+      let text: string | null = null;
+      if (path === REPAIR_SOURCE_SNAPSHOT && state.snapshot) {
+        text =
+          ref === source
+            ? state.snapshot
+            : state.tamperedSnapshot
+              ? '{}'
+              : refreshRepairSourceSnapshot(
+                  state.snapshot,
+                  state.result.changes.map((f) => ({
+                    path: f.path,
+                    text:
+                      f.content === null ? null : Buffer.from(f.content, 'base64').toString('utf8'),
+                  })),
+                );
+      } else if (ref === commit) {
+        const file = state.result.changes.find((f) => f.path === path);
+        text = file?.content ? Buffer.from(file.content, 'base64').toString('utf8') : null;
+      }
+      return text === null
+        ? new Response(null, { status: 404 })
+        : Response.json({
+            type: 'file',
+            encoding: 'base64',
+            content: Buffer.from(text).toString('base64'),
+          });
+    }
     if (u.endsWith('/sessions') && init?.method === 'POST')
       return Response.json({ id: 'sess_test' });
     if (u.includes('/sessions?'))
@@ -144,7 +178,11 @@ function harness() {
         ? new Response(null, { status: 503 })
         : Response.json(state.result);
     if (u.includes('/files?'))
-      return Response.json(state.result.changes.map((c) => ({ filename: c.path })));
+      return Response.json(
+        (state.publishedFiles ?? state.result.changes.map((c) => c.path)).map((filename) => ({
+          filename,
+        })),
+      );
     if (u.includes('/pulls?')) return Response.json(state.pr ? [pr()] : []);
     if (u.endsWith('/pulls/123')) {
       const latest = pr();
@@ -177,10 +215,12 @@ function harness() {
       });
     if (u.includes('/compare/'))
       return Response.json({
-        files: state.result.changes.map((c) => ({
-          filename: c.path,
-          patch: state.oversizedDiff ? 'x'.repeat(100001) : '@@ -1 +1 @@\n-old\n+new',
-        })),
+        files: (state.publishedFiles ?? state.result.changes.map((c) => c.path)).map(
+          (filename) => ({
+            filename,
+            patch: state.oversizedDiff ? 'x'.repeat(100001) : '@@ -1 +1 @@\n-old\n+new',
+          }),
+        ),
       });
     if (u.includes('/git/commits/') && init?.method === 'GET')
       return Response.json({ tree: { sha: 'c'.repeat(40) } });
@@ -188,7 +228,12 @@ function harness() {
       return state.publisherDenied
         ? new Response('PRIVATE PROVIDER RESPONSE', { status: 403 })
         : Response.json({ sha: 'd'.repeat(40) });
-    if (u.endsWith('/git/trees')) return Response.json({ sha: 'e'.repeat(40) });
+    if (u.endsWith('/git/trees')) {
+      state.publishedFiles = JSON.parse(String(init?.body)).tree.map(
+        (f: { path: string }) => f.path,
+      );
+      return Response.json({ sha: 'e'.repeat(40) });
+    }
     if (u.endsWith('/git/commits')) return Response.json({ sha: commit });
     if (u.includes('/git/ref/heads/')) return new Response(null, { status: 404 });
     if (u.endsWith('/git/refs')) return Response.json({});
@@ -410,11 +455,70 @@ it('keeps a failed CI draft out of the ready queue', async () => {
   });
   expect(h.state.ready).toBe(false);
 });
+it.each([false, true])('revalidates trusted source evidence (tampered=%s)', async (tampered) => {
+  const h = harness();
+  h.state.snapshot = JSON.stringify({
+    format: 1,
+    runtimeSources: { 'apps/web/lib/server.ts': 'a'.repeat(64) },
+    webApiRouteCount: 0,
+    routes: {},
+  });
+  h.state.result.changes.push({
+    path: 'apps/web/lib/server.ts',
+    content: Buffer.from('new source').toString('base64'),
+    mode: '100644',
+  });
+  const result = await h.worker.inspect(issue);
+  expect(result?.status).toBe('testing');
+  expect(h.state.publishedFiles).toContain(REPAIR_SOURCE_SNAPSHOT);
+  h.state.checks = true;
+  h.state.tamperedSnapshot = tampered;
+  expect(
+    await h.worker.inspect({ ...issue, data: { ...issue.data, ...result?.patch } }),
+  ).toMatchObject({ status: tampered ? 'failed' : 'pr_open' });
+  if (tampered) {
+    expect(h.reviewPatch).not.toHaveBeenCalled();
+    expect(h.state.ready).toBe(false);
+  }
+});
+it.each(['files', 'bytes'])('counts trusted source evidence toward the %s limit', async (limit) => {
+  const h = harness();
+  h.state.snapshot = JSON.stringify({
+    format: 1,
+    runtimeSources: { 'apps/web/lib/server.ts': 'a'.repeat(64) },
+    webApiRouteCount: 0,
+    routes: {},
+  });
+  h.state.result.changes.push({
+    path: 'apps/web/lib/server.ts',
+    content: Buffer.from('new source').toString('base64'),
+    mode: '100644',
+  });
+  if (limit === 'files') {
+    h.state.result.changes.push(
+      ...Array.from({ length: 18 }, (_, i) => ({
+        path: `apps/web/lib/example-${i}.ts`,
+        content: 'eA==',
+        mode: '100644',
+      })),
+    );
+  } else {
+    const test = h.state.result.changes[0];
+    if (!test) throw new Error('Missing changed test fixture');
+    test.content = Buffer.alloc(100 * 1024 - 50, 120).toString('base64');
+  }
+  expect(await h.worker.inspect(issue)).toMatchObject({
+    status: 'failed',
+    patch: { lastError: expect.stringContaining(limit === 'files' ? '20-file' : '100 KiB') },
+  });
+  expect(h.calls.some((c) => c.url.endsWith('/git/blobs'))).toBe(false);
+});
 it.each([
   'packages/config/src/index.ts',
   '../outside.ts',
   'apps/web/.env',
   'packages/core/src/workflow/repair-hosted.ts',
+  REPAIR_SOURCE_SNAPSHOT,
 ])('rejects protected or escaping path %s before any write to GitHub', async (path) => {
   const h = harness();
   h.state.result.changes.push({ path, content: 'eA==', mode: '100644' });
