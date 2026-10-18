@@ -2005,6 +2005,20 @@ describe('tool-less conversational reply', () => {
     expect(stubs.enqueueTask).not.toHaveBeenCalled();
   });
 
+  it('marks an unrepaired length failure incomplete and shows the same bounded answer', async () => {
+    const result = await turn('Simulate only. No tools. Explain the options under 3 words.', {
+      draft: 'A much longer answer than requested.',
+      completeWhenConsumed: true,
+    });
+    const wire = await result.response.text();
+    expect(result.completions).toHaveLength(1);
+    expect(result.completions[0]?.status).toBe('failed');
+    expect(result.completions[0]?.messages[0]?.text).toBe('Incomplete.');
+    expect(wire).toContain('Incomplete.');
+    expect(wire).not.toContain('A much longer');
+    expect(wire).not.toContain('data-off-course');
+  });
+
   it('preserves spoken mode while using the same durable reply', async () => {
     const result = await turn(
       'Hello.',

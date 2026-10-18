@@ -82,4 +82,29 @@ describe('reviewed conversation replies', () => {
     expect(result).toEqual({ corrected: false, text: draft });
     expect(object).toHaveBeenCalledOnce();
   });
+
+  it.each([true, false])(
+    'withholds a known word overrun when review cannot repair it (available: %s)',
+    async (available) => {
+      const object = vi
+        .fn()
+        .mockResolvedValue(
+          available
+            ? { ok: true, object: { decision: 'publish', reasons: [] } }
+            : { ok: false, decision: { mode: 'park', reason: 'budget' } },
+        );
+      const result = await reviewConversationReply({
+        router: { object } as unknown as Pick<ModelRouter, 'object'>,
+        taskId: 'task',
+        request: 'Use only this scenario. Compare options under 20 words.',
+        draft: Array(30).fill('draft').join(' '),
+        context: [],
+        guard: (text) => ({ corrected: false, text }),
+      });
+      expect(result.incomplete).toBe(true);
+      expect(replyWordCount(result.text)).toBeLessThan(20);
+      expect(result.text).not.toContain('draft draft');
+      expect(object).toHaveBeenCalledTimes(available ? 2 : 1);
+    },
+  );
 });

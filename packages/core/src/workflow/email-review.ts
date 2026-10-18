@@ -1559,7 +1559,9 @@ export function emailReviewOwnerDecisionSummary(thread: EmailReviewThread) {
     )
     ?.trim();
   const candidateUrl = availability
-    ? /\bavailability\b[\s\S]{0,120}?(https:\/\/[^\s<>]+)/i.exec(body)?.[1]
+    ? /\bavailability\b[^.!?]{0,80}?\b(?:here|at|via|using|through|form|link)\b[^.!?]{0,80}?(https:\/\/[^\s<>]+)/i.exec(
+        body,
+      )?.[1]
     : undefined;
   let actionUrl: string | undefined;
   if (candidateUrl) {

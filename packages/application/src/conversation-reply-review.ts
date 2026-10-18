@@ -31,7 +31,7 @@ export async function reviewConversationReply(input: {
   draft: string;
   context: ReadonlyArray<ReadIntentMessage>;
   guard: (text: string) => { corrected: boolean; text: string };
-}): Promise<{ corrected: boolean; text: string }> {
+}): Promise<{ corrected: boolean; text: string; incomplete?: boolean }> {
   let candidate = input.draft;
   const maximum = requestedReplyWordLimit(input.request);
   for (let pass = 0; pass < 2; pass += 1) {
@@ -62,5 +62,12 @@ export async function reviewConversationReply(input: {
     candidate = review.text;
     if (review.unavailable) break;
   }
+  if (maximum !== undefined && replyWordCount(candidate) > maximum)
+    return {
+      corrected: false,
+      incomplete: true,
+      text:
+        maximum >= 11 ? 'I couldn’t fit a complete answer within your word limit.' : 'Incomplete.',
+    };
   return input.guard(candidate);
 }

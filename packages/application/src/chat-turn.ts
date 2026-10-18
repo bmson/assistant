@@ -1480,8 +1480,13 @@ export async function handleChatTurn(
   // full matcher set — and both the completion callback and the stream pump
   // need the same verdict for the same draft. Compute it once.
   const needsReplyReview = !localTransformation && isConversationLocalContext(userText);
-  const guardCache = new Map<string, Promise<{ corrected: boolean; text: string }>>();
-  const guardOnce = (draft: string) => {
+  const guardCache = new Map<
+    string,
+    Promise<{ corrected: boolean; text: string; incomplete?: boolean }>
+  >();
+  const guardOnce = (
+    draft: string,
+  ): Promise<{ corrected: boolean; text: string; incomplete?: boolean }> => {
     const cached = guardCache.get(draft);
     if (cached) return cached;
     const guard = (text: string) =>
@@ -1559,7 +1564,7 @@ export async function handleChatTurn(
             });
           }
           const completed = await finishApplicationChatTask(chat, agent.id, task, {
-            status: 'done',
+            status: guarded.incomplete ? 'failed' : 'done',
             // Persist the contract-owned replacement, never the unsupported
             // draft. The stream pump below sends the client this same text, so
             // the live reply and the durable one stay identical — which is what

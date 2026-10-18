@@ -262,6 +262,15 @@ describe('bounded no-send email review', () => {
       decisionPrompt: expect.stringContaining('Which times and time zone'),
     });
     expect(emailReviewOwnerDecisionSummary(thread).deadlineQuote).toBeUndefined();
+    const backgroundLink = {
+      ...thread,
+      messages: thread.messages.map((message) =>
+        message.messageId === thread.latestMessageId
+          ? { ...message, text: 'What is your availability? Background: https://example.com/about' }
+          : message,
+      ),
+    };
+    expect(emailReviewOwnerDecisionSummary(backgroundLink).actionUrl).toBeUndefined();
   });
   it('reserves a retry assessment step only for eligible multi-thread reviews', () => {
     expect(emailReviewAssessmentStepReserve({ maxSteps: 12, requestedCount: 5 })).toBe(1);
