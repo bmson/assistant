@@ -217,7 +217,8 @@ export function decodeMessageCursor(value: string | null | undefined): MessageCu
 // v42: relative reminders use the originating request clock; event completion
 // is never inferred from a scheduled end time.
 // v44: supplied-scenario isolation, deliberate reasoning and compact daily schedules.
-export const PROMPT_VERSION = 44;
+// v45: shared scenario criteria for drafting and candidate review.
+export const PROMPT_VERSION = 45;
 // v39: grounded situation packs, scoped decision reasons and dependency review.
 // v40: scan-first dashboard answers. "Prose for conversation, markdown for
 // data" left every explanation and recommendation as long paragraphs; about a

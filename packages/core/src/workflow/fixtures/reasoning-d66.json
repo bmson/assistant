@@ -1,0 +1,54 @@
+{
+  "source": "d66f91b4da2816149f85ad29acce3da35451a6c4",
+  "scope": "Frozen fictional prompts and replies; local scripted review tests, not new model grades.",
+  "cases": [
+    {
+      "id": "abstract-counterfactual-causation",
+      "request": "In a fictional company, support tickets fell after a redesign, but traffic also fell and the support form moved. A manager says the redesign improved usability. Assess that claim, give competing explanations, and propose a practical way to distinguish them. Use only this scenario; under 200 words.",
+      "draft": "The manager’s claim is plausible but not proven. Two main explanations fit the data: (1) the redesign made the form easier, so users solve issues without filing tickets; (2) the redesign reduced exposure—traffic fell and the form moved, so fewer people even attempt to submit. A third possibility is that users shifted to another channel (email, chat) after the move. To separate these factors, collect three simple metrics for a four‑week period before and after the change: **Ticket rate** = tickets ÷ visits, which normalizes tickets by traffic; **Form abandonment rate** = form starts ÷ submissions, which shows friction at the form itself; **Alternative‑channel rate** = tickets via other channels ÷ visits, which captures any migration. If the ticket rate drops while abandonment stays constant, the decline is driven by lower traffic, not usability. If the ticket rate falls and abandonment also falls, the redesign likely improved usability. If abandonment rises but the ticket rate is unchanged, the new location adds friction. Comparing these rates gives a clear, data‑driven test of the manager’s claim.",
+      "check": "causalClaims",
+      "finding": "Starts divided by submissions is not abandonment; normalized rates still do not control reporting friction.",
+      "answerFileSha256": "ec9514d072e5046c4bf81c72e1c9907e0b75a0b96853fb2b6ed364600396535e"
+    },
+    {
+      "id": "abstract-changing-priorities",
+      "request": "Use this fictional plan only: prepare a demo by Friday, finish a design by Thursday, and write an optional launch post. It is Tuesday. The designer is now unavailable until Friday, and the demo audience only needs to understand the workflow. Revise the plan, explain the trade-off, and give the next action. Do not create tasks or contact anyone. Under 180 words.",
+      "draft": "**Revised plan:** - **Demo (Friday):** Limit the demo to a workflow walkthrough; no visual design polish is required. - **Design:** Delay the design work until the designer returns on Friday; the Thursday deadline cannot be met. - **Launch post:** Keep it optional and defer it until after the design is completed. **Trade‑off:** By accepting a minimal demo that only shows the workflow, we preserve the Friday delivery date but sacrifice the visual polish and the Thursday design milestone. The demo still meets the audience’s need to understand the workflow, while the design and launch post are postponed without breaking any hard deadline. **Next step:** Prepare the demo script and any necessary screen‑capture or mock‑up materials that illustrate the workflow, ensuring they can be presented without the designer’s input.",
+      "check": "feasibility",
+      "finding": "The Thursday design deadline remains unmet; a Friday workflow demo does not meet every hard deadline.",
+      "answerFileSha256": "1d95f72843affda32e02a3aa85160bf525d62cdd2e522651ff4494c41559e070"
+    },
+    {
+      "id": "proactive-responsibility-next-step",
+      "request": "Simulate an ongoing assistant session; do not create real tasks, read accounts, or send anything. Responsibility: help prepare a fictional offsite. Owner authorized research and draft preparation only. Verified state: 12 attendees, two venues with supplied quotes of $900 and $1400, total budget $1200, no decision yet. What useful work should you prepare now, what decision should reach the owner, and what should trigger the next check? Under 200 words.",
+      "draft": "**Work to prepare now (draft only, no commitments):** 1. *Budget outline*: note the $900 venue leaves $300 for other items; estimate $25 per person for food (12 × $25 = $300) and flag the tight margin. 2. *Venue comparison note*: brief pros/cons of the $900 and $1,400 options, highlighting that the $1,400 quote exceeds the $1,200 budget by $200. 3. *Preliminary agenda sketch*: list agenda blocks and break ideas without fixed times. 4. *Kick‑off email template*: placeholder text to be personalized once venue and date are set. **Decision needed from owner:** Choose a venue and indicate whether the budget can be increased, the $900 quote can be reduced, or another line‑item can be cut by $200. No vendor contact should occur until that decision is made. **Trigger for the next check:** When the owner confirms a venue choice and the budget approach (or provides a revised headcount/date), the assistant will update the budget outline and finalize the agenda draft.",
+      "check": "feasibility",
+      "finding": "The higher venue quote alone exceeds the total budget; cutting other costs cannot make it fit, and food cost is unknown.",
+      "answerFileSha256": "f32f4d53fb03620a2945c2781514548a8fbc3584ea2e70438b7dc256e696042e"
+    },
+    {
+      "id": "proactive-material-change",
+      "request": "Simulate only; no tools or real notifications. A fictional offsite assistant previously recommended venue A for $900 under a $1200 budget. New verified source says A is unavailable, while venue B is $1400. Draft the update that would merit interrupting the owner, including implications and a useful next step. Do not imply anything was booked or contacted. Under 140 words.",
+      "draft": "**Update – Offsite Venue**  Venue A is confirmed unavailable. Venue B is available at $1,400, which exceeds your $1,200 budget by $200.  **Implications**  • The cost overrun would require either reducing another line‑item in the offsite budget or increasing the total budget.  • No alternative venues have been evaluated yet.  **Next step**  Review whether you can reallocate $200 from another budget area, or ask me to identify additional venues that meet the $1,200 limit.  Please let me know which direction you prefer.",
+      "check": "feasibility",
+      "finding": "The higher venue quote alone exceeds the total budget before extras; its availability is not established.",
+      "answerFileSha256": "b47556c2aaf5bf676fde3b5fe286c94896dcc302fe3894c6f9bc3d866f3a2ce7"
+    },
+    {
+      "id": "proactive-owner-steering",
+      "request": "Simulate only; no account reads or actions. A fictional assistant has been researching an offsite for 12 people. The owner now says: reduce it to six people, keep the $1200 budget, and prioritize accessibility over outdoor space. Describe what changes in the next work session and what previous work remains useful. Under 170 words.",
+      "draft": "**Changes for the next session**: With the headcount cut to six, the $1,200 budget gives about $200 per person. Shift the venue search from outdoor parks to indoor, step‑free locations such as a single‑level hotel conference room or a community‑center hall that list accessible restrooms and seating. Remove any sites that lack guaranteed accessibility. Scale catering to six meals and plan shared transport for fewer vehicles. **Useful prior work**: The geographic radius, preferred dates, and travel‑time limits remain valid. The earlier vendor list (caterers, AV providers, facilitators), the budget worksheet, activity agenda, and the accessibility checklist can be reused, needing only updated quotes for six participants. **Next concrete step**: Identify 2‑3 indoor venues that explicitly state step‑free access, check their availability for the chosen dates, and request revised quotes for six attendees.",
+      "check": "grounding",
+      "finding": "Accessibility priority does not mean indoor-only and no previous dates, travel radius or artifacts are established.",
+      "answerFileSha256": "384a4334728cdf58201723a7880787073850a833994a0a2815b908431c0fc474"
+    },
+    {
+      "id": "proactive-decision-needed",
+      "request": "Simulate only; no sending or real tasks. A fictional owner authorized drafting an invitation, not sending. The draft is ready, but two contacts share the recipient name Alex and no address has been selected. Give the owner the smallest useful decision request and explain what preparation can continue. Under 120 words.",
+      "draft": "**Decision needed:** Which Alex is the intended recipient? - Alex Chen - Alex Rivera.  (Select the correct name.)  Once clarified, the appropriate contact can be added to the invitation.  In the meantime you can continue preparing: - Review and polish the draft text; - Draft a concise email subject line; - Choose a tentative send date/time; - Write a brief cover note to accompany the invitation if desired.  These steps are ready to finalize once the recipient is confirmed.",
+      "check": "grounding",
+      "finding": "No surnames or addresses were supplied; ask for the exact recipient while preserving draft-only authority.",
+      "answerFileSha256": "9d71e365edb9351c98808d96f59ee84bdd0cdcc4b31a6c9e488e5929bbbe3119"
+    }
+  ]
+}
