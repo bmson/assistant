@@ -541,7 +541,7 @@ describe('source-backed fictional history', () => {
     expect(rendered).not.toContain('These are facts about you');
   });
 
-  it('does not describe a negated assistant statement as a positive suggestion', () => {
+  it('does not describe a negated assistant statement as a positive suggestion', async () => {
     const request =
       'Look back at the earlier hypothetical Nimbus exercise. Did I earmark its budget for public transport, or was that the Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step.';
     const negativeSuggestion =
@@ -593,6 +593,25 @@ describe('source-backed fictional history', () => {
     };
 
     expect(validMemoryReadSelection(selection, negativeEvidence, request)).toBe(true);
+    const result = await selectMemoryReadAnswer({
+      router: {
+        object: vi
+          .fn()
+          .mockResolvedValue({ ok: true, object: { selections: selection.selections } }),
+      } as never,
+      taskId: 'negative-source-quotation',
+      request,
+      evidence: negativeEvidence,
+    });
+    expect(result.status).toBe('complete');
+    expect(result.selections).toEqual(selection.selections);
+    expect(validMemoryReadSelection(result, negativeEvidence, request)).toBe(true);
+    const rendered = renderMemoryReadAnswer(result, negativeEvidence, request);
+    expect(rendered).toContain(negativeSuggestion);
+    expect(rendered).toContain('/chat/exercise-chat#message-assistant-nimbus');
+    expect(rendered).toContain('The cited assistant passage rejects that step.');
+    expect(rendered).not.toContain('That wording appears in the assistant’s suggestion.');
+    expect(rendered).not.toContain('Your cited message explicitly allocates the budget that way');
     expect(renderMemoryReadAnswer(selection, negativeEvidence, request)).not.toContain(
       'no literal “public transport” wording',
     );

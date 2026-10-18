@@ -100,15 +100,21 @@ function attributionTargetPattern(target: string): string | undefined {
     .join('\\s+');
 }
 
-function hasPositiveAttributionSuggestion(quote: string, target: string): boolean {
+function attributionSuggestionMatches(
+  quote: string,
+  target: string,
+  polarity: 'positive' | 'negative',
+): boolean {
   const pattern = attributionTargetPattern(target);
   if (!pattern) return false;
   return quote.split(/(?<=[.!?])\s+|[;\n]+/u).some((sentence) => {
     const normalized = normalizedText(sentence);
     const targetMatch = new RegExp(`\\b${pattern}\\b`, 'u').exec(normalized);
-    const suggestion = /\b(?:suggest\w*|recommend\w*|propos\w*|next step|map\w*)\b/iu.exec(
-      normalized,
-    );
+    const signal =
+      polarity === 'negative'
+        ? /\b(?:suggest\w*|recommend\w*|propos\w*|next step|map\w*|use|take|choose|consider)\b/iu
+        : /\b(?:suggest\w*|recommend\w*|propos\w*|next step|map\w*)\b/iu;
+    const suggestion = signal.exec(normalized);
     if (!targetMatch || !suggestion || suggestion.index > targetMatch.index) return false;
     // A rejected alternative after the target ("public transit, not taxis")
     // does not negate the recommendation. Negating the recommendation or the
@@ -116,14 +122,22 @@ function hasPositiveAttributionSuggestion(quote: string, target: string): boolea
     const before = normalized.slice(0, suggestion.index);
     const between = normalized.slice(suggestion.index, targetMatch.index);
     const after = normalized.slice(targetMatch.index + targetMatch[0].length);
-    return (
-      !/\b(?:not|never|don['’]?t|doesn['’]?t|didn['’]?t|cannot|can['’]?t)\s*(?:\w+\s+){0,2}$/iu.test(
+    const negated =
+      /\b(?:not|never|don['’]?t|doesn['’]?t|didn['’]?t|cannot|can['’]?t)\s*(?:\w+\s+){0,2}$/iu.test(
         before,
-      ) &&
-      !/\b(?:not|never|no|without|avoid\w*|don['’]?t|cannot|can['’]?t)\b/iu.test(between) &&
-      !/^\s+(?:(?:is|should|must|would|will)\s+)?(?:not|never|cannot|can['’]?t)\b/iu.test(after)
-    );
+      ) ||
+      /\b(?:not|never|no|without|avoid\w*|don['’]?t|cannot|can['’]?t)\b/iu.test(between) ||
+      /^\s+(?:(?:is|should|must|would|will)\s+)?(?:not|never|cannot|can['’]?t)\b/iu.test(after);
+    return (polarity === 'negative') === negated;
   });
+}
+
+function hasPositiveAttributionSuggestion(quote: string, target: string): boolean {
+  return attributionSuggestionMatches(quote, target, 'positive');
+}
+
+function hasNegativeAttributionSuggestion(quote: string, target: string): boolean {
+  return attributionSuggestionMatches(quote, target, 'negative');
 }
 
 function hasExplicitOwnerAllocation(quote: string, target: string): boolean {
@@ -199,6 +213,14 @@ function directSelectedContrastAnswer(
     hasExplicitOwnerAllocation(owners[0]?.quote ?? '', target)
   )
     return 'Your cited message explicitly allocates the budget that way; it isn’t only an assistant inference.';
+  if (
+    owners.length === 1 &&
+    assistants.length === 1 &&
+    !new RegExp(`\\b${targetPattern}\\b`, 'u').test(normalizedText(owners[0]?.quote ?? '')) &&
+    hasNegativeAttributionSuggestion(assistants[0]?.quote ?? '', target) &&
+    !hasPositiveAttributionSuggestion(assistants[0]?.quote ?? '', target)
+  )
+    return 'The cited assistant passage rejects that step. These passages don’t establish that you earmarked the budget for it.';
   if (
     owners.length !== 1 ||
     assistants.length !== 1 ||
@@ -1162,8 +1184,16 @@ function assistantComparisonEvidenceScore(
   ownerTopicTerms: string[],
   requestTerms: string[],
   attributionTarget?: string,
+  allowNegativeAttribution = false,
 ): number {
-  if (attributionTarget && !hasPositiveAttributionSuggestion(excerpt, attributionTarget)) return -1;
+  // A selected exact negative quote is relevant historical evidence. It never
+  // qualifies for automatic positive recommendation recovery or wording.
+  if (
+    attributionTarget &&
+    !hasPositiveAttributionSuggestion(excerpt, attributionTarget) &&
+    !(allowNegativeAttribution && hasNegativeAttributionSuggestion(excerpt, attributionTarget))
+  )
+    return -1;
   const topicMatches = ownerTopicTerms.filter((term) =>
     matchesComparisonTerm(term, excerpt),
   ).length;
@@ -1636,6 +1666,7 @@ function validateSelectedComparison(
                   scope,
                   terms.owner,
                 ),
+                true,
               )
             : requestedTerms.filter((term) => matchesComparisonTerm(term, excerpt)).length,
         })),
@@ -1738,6 +1769,7 @@ function validateSelectedComparison(
                   scope,
                   terms.owner,
                 ),
+                true,
               )
             : requestedTerms.filter((term) => matchesComparisonTerm(term, excerpt)).length,
         })),
