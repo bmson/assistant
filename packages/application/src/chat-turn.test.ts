@@ -361,6 +361,81 @@ function queuedPayload() {
 }
 
 describe('chat needs-action triage', () => {
+  it('hands a code complaint to Improvements without a duplicate ordinary model task', async () => {
+    const store = chatStore({
+      history: [{ role: 'assistant', text: 'Earlier result', taskId: 'original-failed-task' }],
+    });
+    store.chat.getTaskKinds = async () => new Map([['original-failed-task', 'chat_turn']]);
+    const scripted = scriptedRouter({ triage: { needsAction: true }, draft: 'should not run' });
+    const report = vi.fn(async () => ({ id: 'repair', status: 'reported' }));
+    const response = await handleChatTurn(
+      send("The save button doesn't work. Please investigate the code."),
+      {
+        config: { ...config(), SELF_REPAIR_ENABLED: true },
+        router: scripted.router,
+        chat: store.chat,
+        persistence: { selfRepair: { report }, tasks: {}, ownerContext: {} } as never,
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(report).toHaveBeenCalledWith(
+      AGENT,
+      expect.objectContaining({
+        source: 'feedback',
+        sourceTaskId: 'original-failed-task',
+        conversationId: CONVERSATION,
+      }),
+    );
+    expect(scripted.object).not.toHaveBeenCalled();
+    expect(scripted.stream).not.toHaveBeenCalled();
+    expect(stubs.queueAdmission).not.toHaveBeenCalled();
+    expect(
+      store.completions
+        .at(-1)
+        ?.messages.some((message) => message.text.includes('Improvements under Code fixes')),
+    ).toBe(true);
+  });
+  it('does not describe a settled existing repair as a new queued coding attempt', async () => {
+    const store = chatStore();
+    const scripted = scriptedRouter({ draft: 'should not run' });
+    const response = await handleChatTurn(send("That didn't work. Investigate the code."), {
+      config: { ...config(), SELF_REPAIR_ENABLED: true },
+      router: scripted.router,
+      chat: store.chat,
+      persistence: {
+        selfRepair: { report: async () => ({ id: 'repair', status: 'failed' }) },
+        tasks: {},
+        ownerContext: {},
+      } as never,
+    });
+    expect(response.status).toBe(200);
+    expect(
+      store.completions
+        .at(-1)
+        ?.messages.some(
+          (message) =>
+            message.text.includes('status: failed') &&
+            message.text.includes('no new coding attempt'),
+        ),
+    ).toBe(true);
+    expect(scripted.object).not.toHaveBeenCalled();
+  });
+  it('preserves an additional owner action alongside a code-repair complaint', async () => {
+    const store = chatStore();
+    const scripted = scriptedRouter({ triage: { needsAction: true }, draft: 'unused' });
+    const report = vi.fn(async () => ({ id: 'repair', status: 'reported' }));
+    await handleChatTurn(
+      send("That didn't work. Please investigate the code. Also remind me to call Sam tomorrow."),
+      {
+        config: { ...config(), SELF_REPAIR_ENABLED: true },
+        router: scripted.router,
+        chat: store.chat,
+        persistence: { selfRepair: { report }, tasks: {}, ownerContext: {} } as never,
+      },
+    );
+    expect(report).toHaveBeenCalledOnce();
+    expect(stubs.queueAdmission).toHaveBeenCalledOnce();
+  });
   it('routes a uniquely selected internal cancellation through durable persistence without model work', async () => {
     const store = chatStore({
       composerCancellationResult: {

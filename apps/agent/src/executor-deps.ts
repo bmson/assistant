@@ -11,6 +11,7 @@ import {
   readCalendarEvent,
 } from '@assistant/tools/modules/google';
 import { type AgentDeps, agentServices } from './deps.js';
+import { repairRepositoryReader } from './repair-repository.js';
 
 /**
  * The in-thread version of the parked-approval notice. It deliberately does NOT
@@ -46,6 +47,7 @@ export function executorDeps(deps: AgentDeps): ExecutorDeps {
     documentExtractionRepository: deps.documentExtractionRepository,
     importJobRepository: deps.importJobRepository,
     router: deps.router,
+    repairRepositoryReader: repairRepositoryReader(deps),
     dispatcher: deps.dispatcher,
     workspace: deps.workspace,
     documentProcessor: deps.documentProcessor,

@@ -22,11 +22,27 @@ export function projectRepairIssue(issue: RepairIssue) {
     title: issue.data.title,
     summary: issue.data.summary,
     status: issue.status,
-    diagnosis: issue.data.diagnosis ?? '',
+    diagnosis: [
+      issue.data.diagnosis ?? '',
+      ...(issue.data.hostedReview
+        ? [
+            `Independent code review (${issue.data.hostedReview.modelId}): ${issue.data.hostedReview.summary}`,
+          ]
+        : []),
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
     lastError: ['failed', 'blocked'].includes(issue.status)
       ? `${outcome.message} ${outcome.nextStep}`
       : '',
     outcome,
+    codeReview: issue.data.hostedReview ?? null,
+    repositoryInspection: issue.data.repositoryEvidence
+      ? {
+          source: issue.data.repositoryEvidence.source,
+          files: issue.data.repositoryEvidence.files.map((file) => file.path),
+        }
+      : null,
     deploymentConfirmed: Boolean(issue.data.mergeSha && issue.data.monitoringAt),
     sourceTaskId: issue.data.sourceTaskId ?? null,
     manualRunRequested: Boolean(issue.data.manualRunRequestedAt),
@@ -130,6 +146,7 @@ export async function decideRepairIssue(
             targetPaths: undefined,
             reproduction: undefined,
             acceptance: undefined,
+            repositoryEvidence: undefined,
             branch: undefined,
             dispatchedAt: undefined,
             workerProvider: undefined,
@@ -139,6 +156,7 @@ export async function decideRepairIssue(
             hostedCommitSha: undefined,
             hostedPublishedAt: undefined,
             hostedCleanupPending: undefined,
+            hostedReview: undefined,
             prNumber: undefined,
             prUrl: undefined,
             mergeSha: undefined,

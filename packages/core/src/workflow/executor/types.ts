@@ -19,6 +19,7 @@ import type { ReminderSportsScoreboardReader } from '../../memory/jobs.js';
 import type { ModelRouter } from '../../model-router/router.js';
 import type { BriefingCalendarReader, CalendarEventReader } from '../briefing.js';
 import type { OwnerIntent } from '../owner-intent.js';
+import type { RepairRepositoryReader } from '../self-repair.js';
 
 /** Structural port implemented by @assistant/tools' ToolDispatcher — keeps core free of a package cycle. */
 export interface DispatcherPort {
@@ -152,6 +153,7 @@ export interface ExecutorDeps {
   calendarReader?: BriefingCalendarReader;
   calendarEventReader?: CalendarEventReader;
   emailThreadReader?: EmailThreadHeadReader;
+  repairRepositoryReader?: RepairRepositoryReader;
   /** True only when the active dispatcher exposes the bound cancellation tool. */
   calendarCancellationEnabled?: boolean;
   /** Synthetic provider seam for event-completion reminder tests. */
