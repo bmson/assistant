@@ -471,6 +471,8 @@ describe('exact historical source projection', () => {
     'For the Harbor exercise, I do not suggest public transit within the project budget.',
     'For the Harbor exercise, I suggest avoiding public transit within the project budget.',
     'For the Harbor exercise, I suggest public transit should not be used within the project budget.',
+    'For the Harbor exercise, I suggest not only public transit within the project budget but also comparing walking routes.',
+    'For the Harbor exercise, I do not suggest avoiding public transit within the project budget.',
   ])(
     'does not treat negated target advice as a positive recommendation: %s',
     async (assistantText) => {

@@ -103,7 +103,7 @@ function attributionTargetPattern(target: string): string | undefined {
 function attributionSuggestionMatches(
   quote: string,
   target: string,
-  polarity: 'positive' | 'negative',
+  mode: 'positive' | 'selected',
 ): boolean {
   const pattern = attributionTargetPattern(target);
   if (!pattern) return false;
@@ -111,11 +111,14 @@ function attributionSuggestionMatches(
     const normalized = normalizedText(sentence);
     const targetMatch = new RegExp(`\\b${pattern}\\b`, 'u').exec(normalized);
     const signal =
-      polarity === 'negative'
+      mode === 'selected'
         ? /\b(?:suggest\w*|recommend\w*|propos\w*|next step|map\w*|use|take|choose|consider)\b/iu
         : /\b(?:suggest\w*|recommend\w*|propos\w*|next step|map\w*)\b/iu;
     const suggestion = signal.exec(normalized);
     if (!targetMatch || !suggestion || suggestion.index > targetMatch.index) return false;
+    // Exact selected historical evidence need not be a positive recommendation.
+    // Its provenance and relevance are validated separately; do not infer polarity.
+    if (mode === 'selected') return true;
     // A rejected alternative after the target ("public transit, not taxis")
     // does not negate the recommendation. Negating the recommendation or the
     // target itself still makes the passage ineligible.
@@ -128,7 +131,7 @@ function attributionSuggestionMatches(
       ) ||
       /\b(?:not|never|no|without|avoid\w*|don['’]?t|cannot|can['’]?t)\b/iu.test(between) ||
       /^\s+(?:(?:is|should|must|would|will)\s+)?(?:not|never|cannot|can['’]?t)\b/iu.test(after);
-    return (polarity === 'negative') === negated;
+    return !negated;
   });
 }
 
@@ -136,8 +139,8 @@ function hasPositiveAttributionSuggestion(quote: string, target: string): boolea
   return attributionSuggestionMatches(quote, target, 'positive');
 }
 
-function hasNegativeAttributionSuggestion(quote: string, target: string): boolean {
-  return attributionSuggestionMatches(quote, target, 'negative');
+function hasTargetLinkedAttributionPassage(quote: string, target: string): boolean {
+  return attributionSuggestionMatches(quote, target, 'selected');
 }
 
 function hasExplicitOwnerAllocation(quote: string, target: string): boolean {
@@ -217,10 +220,10 @@ function directSelectedContrastAnswer(
     owners.length === 1 &&
     assistants.length === 1 &&
     !new RegExp(`\\b${targetPattern}\\b`, 'u').test(normalizedText(owners[0]?.quote ?? '')) &&
-    hasNegativeAttributionSuggestion(assistants[0]?.quote ?? '', target) &&
+    hasTargetLinkedAttributionPassage(assistants[0]?.quote ?? '', target) &&
     !hasPositiveAttributionSuggestion(assistants[0]?.quote ?? '', target)
   )
-    return 'The cited assistant passage rejects that step. These passages don’t establish that you earmarked the budget for it.';
+    return 'The cited assistant passage mentions that step. These passages don’t establish that you earmarked the budget for it.';
   if (
     owners.length !== 1 ||
     assistants.length !== 1 ||
@@ -1184,23 +1187,24 @@ function assistantComparisonEvidenceScore(
   ownerTopicTerms: string[],
   requestTerms: string[],
   attributionTarget?: string,
-  allowNegativeAttribution = false,
+  allowSelectedAttribution = false,
 ): number {
-  // A selected exact negative quote is relevant historical evidence. It never
-  // qualifies for automatic positive recommendation recovery or wording.
+  // A selected exact target-linked quote is relevant historical evidence even
+  // when polarity is uncertain. Only definite-positive advice qualifies for
+  // automatic recommendation recovery or affirmative wording.
   if (
     attributionTarget &&
     !hasPositiveAttributionSuggestion(excerpt, attributionTarget) &&
-    !(allowNegativeAttribution && hasNegativeAttributionSuggestion(excerpt, attributionTarget))
+    !(allowSelectedAttribution && hasTargetLinkedAttributionPassage(excerpt, attributionTarget))
   )
     return -1;
   const topicMatches = ownerTopicTerms.filter((term) =>
     matchesComparisonTerm(term, excerpt),
   ).length;
   const requestMatches = requestTerms.filter((term) => matchesComparisonTerm(term, excerpt)).length;
-  // The excerpt was already required to contain an unnegated recommendation
-  // signal, so it can remain relevant when the request's generic phrasing does
-  // not appear literally in the assistant's own wording.
+  // The excerpt already passed the applicable recommendation or selected
+  // target-link gate, so it can remain relevant when the request's generic
+  // phrasing does not appear literally in the assistant's own wording.
   return topicMatches + Math.max(1, requestMatches);
 }
 
