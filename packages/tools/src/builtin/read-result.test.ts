@@ -157,6 +157,51 @@ function freshRepository(unchanged = true) {
 }
 
 describe('read_result conversation-search privacy fence', () => {
+  it.each(['text', 'semantic'] as const)(
+    'pages a stored search with the supported explicit %s mode after refreshing sources',
+    async (mode) => {
+      const base = storedCall();
+      const result = structuredClone(base.result) as {
+        mode: string;
+        matches: Array<Record<string, unknown>>;
+      };
+      result.mode = mode;
+      if (mode === 'text') delete result.matches[0]?.similarity;
+      const call = storedCall({ args: { query: 'source result', limit: 5, mode }, result });
+      const conversations = freshRepository();
+      const { run } = harness({ call, conversations });
+      const page = await run(8_000);
+      expect(page).toMatchObject({ offset: 8_000 });
+      expect(page.chunk).toBe(JSON.stringify(result).slice(8_000, 22_000));
+      expect(conversations.refreshForResume).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('still refuses changed sources for an explicit text-mode search', async () => {
+    const base = storedCall();
+    const result = structuredClone(base.result) as {
+      mode: string;
+      matches: Array<Record<string, unknown>>;
+    };
+    result.mode = 'text';
+    delete result.matches[0]?.similarity;
+    const { run } = harness({
+      call: storedCall({ args: { query: 'source result', limit: 5, mode: 'text' }, result }),
+      conversations: freshRepository(false),
+    });
+    expect((await run()).error).toContain('stored conversation search changed');
+  });
+
+  it('rejects a result mode impossible for an explicitly lexical search', async () => {
+    const conversations = freshRepository();
+    const { run } = harness({
+      call: storedCall({ args: { query: 'source result', limit: 5, mode: 'text' } }),
+      conversations,
+    });
+    expect((await run()).error).toContain('stored conversation search is unavailable');
+    expect(conversations.refreshForResume).not.toHaveBeenCalled();
+  });
+
   it('applies the same stale-source refusal to the PostgreSQL built-in reader', async () => {
     const call = storedCall();
     const row = {

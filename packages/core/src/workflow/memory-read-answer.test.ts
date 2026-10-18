@@ -75,6 +75,83 @@ const selection = {
   ],
 };
 describe('exact historical source projection', () => {
+  it.each(['none', 'separate', 'suffix', 'prefix', 'unlabelled-constraint'] as const)(
+    'compacts selected exercise facts and task directions while retaining a selected correction: %s',
+    async (correctionLocation) => {
+      const request =
+        'Look back at the earlier hypothetical Mosaic exercise. Recall the original project name, budget, deadline, and travel constraint. Cite the owner statement and keep the fictional exercise separate from my real plans.';
+      const facts =
+        'For this hypothetical exercise only, the project is named Mosaic, the budget is $500, the deadline is Wednesday, and we must avoid taxi travel.';
+      const directions = ' Acknowledge in one sentence. Do not save these fictional facts.';
+      const instructionQuote = 'This is a fictional test document. Include a heading ';
+      const correction = 'The deadline is Thursday instead of Wednesday.';
+      const extra =
+        correctionLocation === 'unlabelled-constraint'
+          ? 'Wheelchair access is required.'
+          : correction;
+      const withCorrection = correctionLocation !== 'none';
+      const fullQuote =
+        correctionLocation === 'suffix' || correctionLocation === 'unlabelled-constraint'
+          ? `${facts} ${extra}${directions}`
+          : correctionLocation === 'prefix'
+            ? `${extra} ${facts}${directions}`
+            : facts + directions;
+      const rows: ActionEvidence[] = [
+        {
+          toolName: 'conversations.search',
+          status: 'succeeded',
+          result: {
+            matches: [
+              message('exercise-first', fullQuote, 'user', 'owner'),
+              message('exercise-copy', facts + directions, 'user', 'owner'),
+              message('document-directions', `${instructionQuote}Mosaic.`, 'user', 'owner'),
+              ...(correctionLocation === 'separate'
+                ? [message('exercise-correction', correction, 'user', 'owner')]
+                : []),
+            ],
+          },
+        },
+      ];
+      const proposed = [
+        { sourceKey: 'message:exercise-first', quote: fullQuote },
+        { sourceKey: 'message:exercise-copy', quote: facts + directions },
+        { sourceKey: 'message:document-directions', quote: instructionQuote },
+        ...(correctionLocation === 'separate'
+          ? [{ sourceKey: 'message:exercise-correction', quote: correction }]
+          : []),
+      ];
+      const router = {
+        object: vi.fn(async () => ({ ok: true, object: { selections: proposed } })),
+      };
+      const selected = await selectMemoryReadAnswer({
+        router: router as never,
+        taskId: 'exercise-recall',
+        request,
+        evidence: rows,
+      });
+      expect(router.object).toHaveBeenCalledOnce();
+      expect(validMemoryReadSelection(selected, rows, request)).toBe(true);
+      if (withCorrection) {
+        expect(selected.selections).toContainEqual({
+          sourceKey:
+            correctionLocation === 'separate'
+              ? 'message:exercise-correction'
+              : 'message:exercise-first',
+          quote: correctionLocation === 'separate' ? correction : fullQuote,
+        });
+      } else {
+        expect(selected.selections).toEqual([
+          { sourceKey: 'message:exercise-first', quote: facts },
+        ]);
+        const rendered = renderMemoryReadAnswer(selected, rows, request);
+        expect(rendered).toContain(facts);
+        expect(rendered).not.toContain('Acknowledge');
+        expect(rendered).not.toContain('Include a heading');
+        expect(rendered).not.toContain('exercise-copy');
+      }
+    },
+  );
+
   it('keeps owner correction and assistant claim separate, with actual source identities and historical limits', () => {
     const text = renderMemoryReadAnswer(selection, evidence);
     expect(text).toContain('Recorded owner message');

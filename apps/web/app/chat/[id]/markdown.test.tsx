@@ -157,6 +157,25 @@ describe('MessageMarkdown', () => {
     expect(html).toContain('$1,050');
   });
 
+  it('does not inherit trusted math rendering from a polluted object prototype', () => {
+    const previous = Object.getOwnPropertyDescriptor(Object.prototype, 'trust');
+    Object.defineProperty(Object.prototype, 'trust', {
+      configurable: true,
+      writable: true,
+      value: true,
+    });
+    try {
+      const html = renderToStaticMarkup(
+        <MessageMarkdown text={'$$\\includegraphics{https://tracking.example.test/pixel.png}$$'} />,
+      );
+      expect(html).not.toContain('<img');
+      expect(html).not.toContain('rel="preload"');
+    } finally {
+      if (previous) Object.defineProperty(Object.prototype, 'trust', previous);
+      else Reflect.deleteProperty(Object.prototype, 'trust');
+    }
+  });
+
   it('keeps mixed Markdown currency inside equations readable and code literal', () => {
     const html = renderToStaticMarkup(
       <MessageMarkdown

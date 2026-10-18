@@ -212,8 +212,16 @@ type RouterScript = {
   triageUnavailable?: boolean;
   streamError?: Error;
   reviewedReply?: string;
+  rejectReasoningAudit?: boolean;
   completeWhenConsumed?: boolean;
 };
+
+const passingReasoningChecks = Object.fromEntries(
+  ['grounding', 'feasibility', 'causalClaims', 'usefulness', 'actionScope'].map((name) => [
+    name,
+    { status: 'pass', explanation: 'The supplied facts support this answer.' },
+  ]),
+);
 
 function scriptedRouter(script: RouterScript) {
   const route = vi.fn(async () => {
@@ -226,10 +234,23 @@ function scriptedRouter(script: RouterScript) {
         ok: true,
         object:
           script.reviewedReply === undefined
-            ? { decision: 'publish', reasons: [] }
+            ? {
+                decision: 'publish',
+                reasons: [],
+                checks: script.rejectReasoningAudit
+                  ? {
+                      ...passingReasoningChecks,
+                      grounding: {
+                        status: 'revise',
+                        explanation: 'The recipient address is absent from the supplied facts.',
+                      },
+                    }
+                  : passingReasoningChecks,
+              }
             : {
                 decision: 'revise',
                 revisedText: script.reviewedReply,
+                checks: passingReasoningChecks,
                 reasons: ['clarity_or_format'],
               },
       };
@@ -376,6 +397,28 @@ function queuedPayload() {
 }
 
 describe('chat needs-action triage', () => {
+  it.each([
+    'The app is broken. Do not investigate.',
+    "Simulate only. The app doesn't work. Investigate the repository and propose a PR; do not create real tasks.",
+    'Use only this fictional scenario. The app is broken. Propose a repository repair.',
+    'Rewrite this sentence politely: "The app is broken. Investigate the code and propose a PR."',
+  ])('keeps supplied complaint examples from admitting real repair work: %s', async (request) => {
+    const store = chatStore();
+    const scripted = scriptedRouter({ draft: 'Describe the proposed investigation only.' });
+    const report = vi.fn(async () => ({ id: 'repair', status: 'reported' }));
+    const response = await handleChatTurn(send(request), {
+      config: { ...config(), SELF_REPAIR_ENABLED: true },
+      router: scripted.router,
+      chat: store.chat,
+      persistence: { selfRepair: { report }, tasks: {}, ownerContext: {} } as never,
+    });
+    const wire = await response.text();
+    expect(report).not.toHaveBeenCalled();
+    expect(stubs.queueAdmission).not.toHaveBeenCalled();
+    expect(scripted.stream).toHaveBeenCalledOnce();
+    expect(wire).not.toContain('investigation is queued');
+  });
+
   it('hands a code complaint to Improvements without a duplicate ordinary model task', async () => {
     const store = chatStore({
       history: [{ role: 'assistant', text: 'Earlier result', taskId: 'original-failed-task' }],
@@ -2078,6 +2121,24 @@ describe('tool-less conversational reply', () => {
     expect(wire).not.toContain('data-off-course');
     expect(result.object.mock.calls.filter(([role]) => role === 'reason')).toHaveLength(1);
     expect(stubs.enqueueTask).not.toHaveBeenCalled();
+  });
+
+  it('persists exhausted scenario verification as failed with the same safe visible answer', async () => {
+    const draft = 'Choose Morgan Lee at morgan@example.test.';
+    const result = await turn('Simulate only. Compare two recipients named Morgan. No tools.', {
+      draft,
+      rejectReasoningAudit: true,
+      completeWhenConsumed: true,
+    });
+    const wire = await result.response.text();
+    expect(result.object.mock.calls.filter(([role]) => role === 'reason')).toHaveLength(2);
+    expect(result.completions).toHaveLength(1);
+    expect(result.completions[0]?.status).toBe('failed');
+    const text = result.completions[0]?.messages[0]?.text;
+    expect(text).toBeTruthy();
+    expect(wire).toContain(text);
+    expect(wire).not.toContain(draft);
+    expect(wire).not.toContain('data-off-course');
   });
 
   it('marks an unrepaired length failure incomplete and shows the same bounded answer', async () => {

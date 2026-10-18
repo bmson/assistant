@@ -144,3 +144,9 @@ Do not delete PostgreSQL based only on a successful import. Retirement requires 
 7. The application is explicitly activated on Firestore, observed under real workload, and a separately retained PostgreSQL backup has passed its retention window.
 
 The database snapshot preserves the `files` inventory and checksums; the referenced workspace/Cloud Storage objects must be copied and digest-verified through the storage transfer path as a separate acceptance item. There is deliberately no activation or PostgreSQL deletion command in this tooling. Those actions remain separate cutover decisions after runtime acceptance.
+
+## Installation owner validation
+
+An installation currently supports one owner. Agent readiness and chat resolution reject an installation with zero or multiple owners, except that an empty Firestore destination may remain inert while a controlled import is prepared. Firestore maintenance rechecks the sole owner and activation checks that it matches the imported workspace.
+
+Import preview does not access the destination and returns `destinationOwnerChecked: false`. Write and verify modes check the destination owner before updating migration markers or data. A configured agent identifier does not bypass the sole-owner check. This boundary does not add support for multiple tenants; legacy administrative database writers and every recovery path still need qualification.

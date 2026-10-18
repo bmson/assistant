@@ -58,6 +58,11 @@ describe('owner correction detection', () => {
     'The app is broken; do not investigate this.',
     "That didn't work. Don't investigate the code.",
     'The app is broken. Do not open a PR.',
+    'The app is broken. Do not investigate.',
+    "Simulate only. The app doesn't work. Investigate the repository and propose a PR; do not create real tasks.",
+    "The app doesn't work. Investigate the code, but do not create any real task.",
+    'Use only this fictional scenario. The app is broken. Propose a repository repair.',
+    "No tools. The save button doesn't work. Explain how a repair would be investigated.",
   ])('does not treat quoted examples or discussion as authorization: %s', (text) =>
     expect(isRepairFeedback(text)).toBe(false),
   );

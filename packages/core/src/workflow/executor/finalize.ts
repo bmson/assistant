@@ -73,7 +73,11 @@ import {
   requestedPublicPageReceiptFindings,
   verifyFinalOutput,
 } from '../output-verification.js';
-import { isConversationLocalContext, latestOwnerIntent } from '../owner-intent.js';
+import {
+  isConversationLocalContext,
+  latestOwnerIntent,
+  needsConversationReasoning,
+} from '../owner-intent.js';
 import { PLANNER_VERSION } from '../planner.js';
 import { detectPersonalReadRequest, type PersonalReadRequest } from '../read-intent.js';
 import { requestChecklistHasUnfinished, requestChecklistSummary } from '../request-checklist.js';
@@ -1134,6 +1138,16 @@ export async function stageModelFinalResponse(
         draft: initialCheck.text,
         evidence,
         critical: task.trust === 'owner',
+        reasoningReview:
+          task.trust === 'owner' &&
+          !isForwardedIngest(task) &&
+          needsConversationReasoning(
+            latestOwnerIntent(window, {
+              trust: 'owner',
+              trigger: task.trigger,
+              clarificationContinuation: state.clarificationContinuation,
+            }).ownerAuthoredText,
+          ),
         context:
           task.trust === 'owner' && !isForwardedIngest(task)
             ? window.slice(0, Math.max(0, latestOwnerIndex))

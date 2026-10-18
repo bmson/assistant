@@ -2,6 +2,18 @@
 
 Reviewed October 3, 2026. This document defines the experience standard for Assistant and records its current web and native foundations. Guidelines marked **target** are acceptance criteria for future work, not claims that every retained screen implements them. The [screenshot-led refinement](audits/ui-review-2026-10-03.md), [web audit](audits/web-experience-2026-10-02.md) and [iOS audit](audits/ios-experience-2026-10-02.md) contain page-level findings and validation limits.
 
+Owner direction added October 7, 2026: the UI and UX must stay **simple, clean, and minimal**, with particular care for typography, grid alignment, and iconography. This is a direct product requirement from the owner. Implementation-playbook proposals remain source material to evaluate; they do not override this direction or establish that a screen is already validated.
+
+For every changed screen, apply these acceptance criteria:
+
+- **Typography:** keep one native interface family and a small semantic hierarchy of title, reading text, and supporting information. Use weight and space deliberately; avoid ornamental uppercase labels or additional type styles. Preserve readable line lengths, Dynamic Type, and browser zoom.
+- **Grid:** align the page title, content, row labels, fields, and actions to shared gutters. Use consistent spacing between related items and more space between separate groups. Icons occupy a consistent lane within comparable rows. Text wraps instead of clipping or displacing essential controls.
+- **Iconography:** use the established SF Symbol or web icon family with consistent optical size and weight. An icon conveys an action, object, or status; it does not decorate an otherwise clear heading. Ambiguous actions need a visible label, and every icon-only control needs an accessible name.
+- **Simplicity:** show a clear primary action and the information needed for the current task. Put secondary evidence and advanced configuration behind explicit disclosure. Remove competing shadows, decorative washes, unnecessary badges, and repeated controls without hiding important warnings or capabilities.
+- **Verification:** inspect the actual rendered screen in light and dark appearance, narrow and wide layouts where applicable, and increased text size. Check keyboard focus on web and native interaction/accessibility where available. A source review or successful build alone does not close visual or interaction acceptance; record unavailable checks explicitly.
+
+These criteria cover the current iPhone experience and served web console. Checks of retained web product routes must be labelled separately from current availability. New capabilities should fit this shared visual language rather than introducing another navigation layer or a new component style for each feature.
+
 ## Design intent
 
 Assistant should feel like a calm, capable person who knows the situation, keeps useful notes, and follows through. The interface should make three things obvious: what matters now, what the assistant is doing, and what needs the owner's judgment. Routine technical work should recede behind those answers.
@@ -57,9 +69,9 @@ Use system faces. Web uses SF on Apple platforms and Segoe/system elsewhere; dis
 
 | Purpose | Web working scale | Native guidance |
 | --- | --- | --- |
-| Page title | 28 px on phones, 30 px on larger screens, strong | Native navigation title or large title |
+| Page title | 24 px on phones, 30 px on larger screens, strong | Native navigation title or large title |
 | Content title | 24 px | Title/Title2, appropriate to sheet hierarchy |
-| Section title | 18 px | Headline |
+| Section title | 16 px, semibold | Headline |
 | Reading and conversation | 16 px or comfortable reading size | Body, scales with owner text settings |
 | Controls and secondary text | 14 px | Subheadline/Callout |
 | Metadata | 12 px minimum in ordinary browser layouts | Caption, never required to understand an action |
@@ -218,6 +230,14 @@ A notification must restore the conversation that contains its information. Reso
 **Target:** measure time to first useful screen and first visible reply token, request count/bytes, large-list memory, frame pacing while streaming, and polling wakeups in active/idle/background states. Keep real-device measures distinct from synthetic screenshot timing and compile checks. Set numeric budgets from representative device traces, not from an unmeasured promise.
 
 ## Review and maintenance
+
+### Form review and selected values
+
+Forms use the existing reading hierarchy, shared gutters and native controls. Show public warnings beside the fields they qualify. **Review in message** places the answers in the ordinary editable composer; **Send** admits the reviewed request. Preserve edited text through reload, and keep an uncertain submission bound to its original operation until its result is known. A separate ordinary reply must remain available while the form's exact task waits for a decision.
+
+Keep native date and choice controls at their normal text size. Where the selected value cannot fit, show its complete value in a wrapping caption immediately below the control and connect that caption through `aria-describedby`. Remove the caption when a shorter value or wider layout makes it unnecessary. Captions use the existing supporting text style; they add no new color, badge or icon vocabulary.
+
+The October 8 card-form component review inspected 97 captures across 50 state/layout combinations in Chromium, including light/dark appearance, 320/390/1280px widths and doubled root text on narrow layouts. Overlapping viewport captures establish that every rendered selected-value caption can be read in full; value changes and resizing preserve the description relationship. This is synthetic component evidence with actual repository CSS. Doubled root text is not browser zoom or OS Dynamic Type, and this review does not qualify the authenticated route, native interface, VoiceOver or physical-device interaction. The implementation register records the separate behavioral and native checks.
 
 For each change, review its final content in light and dark, narrow and wide layouts, keyboard/accessibility navigation, empty/error/pending states, and long labels. Native additions also need large Dynamic Type, VoiceOver, Reduced Motion, keyboard/safe areas, and scene transitions. Stateful controls need behavioral verification, not only screenshots.
 

@@ -5,6 +5,8 @@ dist/
 .cache/
 coverage/
 *.tsbuildinfo
+__pycache__/
+*.py[cod]
 
 # env & secrets
 .env

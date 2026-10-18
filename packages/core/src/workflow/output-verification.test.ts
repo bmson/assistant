@@ -4,12 +4,139 @@ import {
   OUTPUT_VERIFICATION_SYSTEM,
   type OutputVerification,
   publicWebClaimFindings,
+  REASONING_VERIFICATION_SYSTEM,
+  ReasoningVerificationSchema,
   repairRequestedBullets,
   shortBulletFindings,
   verifyFinalOutput,
 } from './output-verification.js';
 
+const passingReasoningChecks = Object.fromEntries(
+  ['grounding', 'feasibility', 'causalClaims', 'usefulness', 'actionScope'].map((name) => [
+    name,
+    { status: 'pass', explanation: 'The supplied facts support this answer.' },
+  ]),
+);
+
 describe('self-reflective output verification', () => {
+  it('requires all five concrete audit explanations for supplied reasoning', () => {
+    expect(
+      ReasoningVerificationSchema.safeParse({ decision: 'publish', reasons: [] }).success,
+    ).toBe(false);
+    expect(
+      ReasoningVerificationSchema.safeParse({
+        decision: 'publish',
+        reasons: [],
+        checks: { ...passingReasoningChecks, grounding: { status: 'pass', explanation: '' } },
+      }).success,
+    ).toBe(false);
+    expect(
+      ReasoningVerificationSchema.safeParse({
+        decision: 'publish',
+        reasons: [],
+        checks: passingReasoningChecks,
+      }).success,
+    ).toBe(true);
+  });
+
+  it.each(['contradictory', 'missing'] as const)(
+    'corrects a %s publish audit without accepting an unsupported resource claim',
+    async (kind) => {
+      const calls: Array<{ system: string; prompt: string }> = [];
+      const draft = 'The rental is affordable; cut the other expenses to make room.';
+      const final =
+        'The rental alone exceeds the total budget. Request a lower quote or choose a different plan; no alternative price is established.';
+      const router = {
+        object: async (_role: string, options: { system: string; prompt: string }) => {
+          calls.push(options);
+          return {
+            ok: true,
+            object:
+              calls.length === 1
+                ? {
+                    decision: 'publish',
+                    reasons: [],
+                    ...(kind === 'contradictory'
+                      ? {
+                          checks: {
+                            ...passingReasoningChecks,
+                            feasibility: {
+                              status: 'revise',
+                              explanation: 'The component exceeds the entire available budget.',
+                            },
+                          },
+                        }
+                      : {}),
+                  }
+                : {
+                    decision: 'revise',
+                    revisedText: final,
+                    reasons: ['ungrounded_fact'],
+                    checks: passingReasoningChecks,
+                  },
+          };
+        },
+      };
+      const result = await verifyFinalOutput(router as never, {
+        taskId: 't',
+        request:
+          'Use only this scenario. The rental is $760 and the entire budget is $600. Assess feasibility.',
+        draft,
+        evidence: [],
+        critical: true,
+        reasoningReview: true,
+      });
+      expect(calls).toHaveLength(2);
+      expect(calls.every((call) => call.system === REASONING_VERIFICATION_SYSTEM)).toBe(true);
+      expect(calls[1]?.prompt).toContain('<constraint_audit_findings>');
+      expect(result.text).toBe(final);
+      expect(result.incomplete).toBeUndefined();
+    },
+  );
+
+  it.each(['publish', 'revise'] as const)(
+    'withholds a draft when the second %s verdict leaves its audit defect unchanged',
+    async (decision) => {
+      let calls = 0;
+      const draft = 'Send the prepared draft to Jordan Smith at jordan@example.test.';
+      const result = await verifyFinalOutput(
+        {
+          object: async () => {
+            calls += 1;
+            return {
+              ok: true,
+              object: {
+                decision: calls > 1 ? decision : 'publish',
+                ...(decision === 'revise' ? { revisedText: `  ${draft}\n` } : {}),
+                reasons: [],
+                checks: {
+                  ...passingReasoningChecks,
+                  grounding: {
+                    status: 'revise',
+                    explanation: 'Neither the surname nor address appears in the supplied facts.',
+                  },
+                },
+              },
+            };
+          },
+        } as never,
+        {
+          taskId: 't',
+          request:
+            'Simulate only. Two contacts are named Jordan. Prepare the smallest recipient decision; do not send.',
+          draft,
+          evidence: [],
+          critical: true,
+          reasoningReview: true,
+        },
+      );
+      expect(calls).toBe(2);
+      expect(result.incomplete).toBe(true);
+      expect(result.text).not.toContain('jordan@example.test');
+      expect(result.text).not.toContain('Jordan Smith');
+    },
+  );
+
   it('uses bounded reasoning review for supplied deliberation without inheriting the conversation picker', async () => {
     const calls: Array<{ role: string; resolved?: boolean; critical: boolean }> = [];
     const final =
@@ -25,6 +152,7 @@ describe('self-reflective output verification', () => {
           object: {
             decision: 'revise',
             revisedText: calls.length === 1 ? 'Compare both options.' : final,
+            checks: passingReasoningChecks,
             reasons: ['clarity_or_format'],
           },
         };

@@ -336,11 +336,11 @@ More includes Automatic and the eligible enabled models for the active conversat
 
 Current-chat model changes wait for the active reply to finish or be stopped. AI providers preserves unsaved main/fast selections independently across refreshes. Existing MCP connections appear before an expandable add form; tool review follows active approval policy rather than a promise that autonomous operation always asks.
 
-### Share iPhone location and background arrival nudges
+### Share iPhone location
 
-Location sharing is opt-in and requests OS permission when enabled. The server receives short-lived position pings and a device timezone for relevant owner-private context. Current location is considered fresh for 30 minutes; pings default to three-day retention and do not become semantic long-term location history.
+Location sharing is opt-in and requests OS permission when enabled. While it is on, the app sends short-lived foreground position pings and device timezone for owner-private nearby context. Current location is considered fresh for 30 minutes; pings default to three-day retention and do not become semantic long-term location history. A separate **Generic arrival nudges** option requires sharing to be enabled. It can send one fixed, location-free arrival message after a confirmed three-minute stop at a new place. It creates a task with an opaque ping reference that expires after five minutes; the server cancels stale work before dispatch and removes the reference when the task ends.
 
-Background arrival nudges separately opt into coarse significant-change monitoring and require Always location access for background use. The app sends throttled wake pings; the server decides whether a useful tip is warranted. This is not continuous precision tracking, and the map of remembered places does not automatically contain every place the phone visited.
+Background location collection remains paused. The arrival option uses foreground location only and never sends coordinates, addresses, or venue names in the task or notification. The map of remembered places does not automatically contain every place the phone visited.
 
 ### Recurring jobs and standing approvals
 

@@ -113,6 +113,9 @@ export function isSelfContainedCalculationRequest(text: string): boolean {
 }
 
 /** Deliberation over supplied constraints deserves reasoning without granting tools. */
+export const CONVERSATION_REASONING_DIRECTIVE =
+  'Reason from the supplied facts and constraints only. Before answering, check each proposed identity, number, prior event, resource assumption and causal conclusion: supplied facts, conditional proposals and unknowns must stay distinct. Do not invent contacts, deadlines, earlier arrangements, availability or completed preparation. Give a useful conditional recommendation and the smallest reversible next step, rather than questions that can be answered from the scenario. Recompute costs against the entire budget, account for effort and dependencies, preserve competing explanations, and give an observable measure and review point for an experiment. Use short separated entries for several options or steps. For simulations, describe what should happen in third person or conditionally, including what may be confirmed only after verification; never issue a first-person action receipt or promise an actual future check. Honor the requested length.';
+
 export function needsConversationReasoning(text: string): boolean {
   return (
     isConversationLocalContext(text) &&

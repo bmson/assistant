@@ -1,6 +1,8 @@
 # Investigating an audit record
 
-Open `/audit/<task UUID>` and use **Copy investigation request** to ask the assistant to investigate from the mobile app. The bot's `audit.read` and `audit.read_field` tools use the same owner-scoped projection as the console. They are unavailable to externally triggered tasks, return untrusted evidence, and never retry or mutate the investigated task.
+Open `/audit/<task UUID>` to inspect the owner-scoped report locally. **Copy investigation request** starts a separate model-assisted path from the mobile app: the assistant may call `audit.read` and `audit.read_field`, and the returned material becomes model context sent to the configured provider. This can include captured prompts and answers when capture was enabled, as well as task messages and tool arguments/results. The local `pnpm audit:llm` report makes no model call. See [model-output review](llm-output-review.md) before using a provider for a sensitive investigation.
+
+The tools query through the current agent's task scope, return untrusted evidence, and do not retry or mutate the investigated task. Credential-like fields and runtime resume tokens are excluded from the projection, but redaction cannot make arbitrary private prose anonymous. The tools are unavailable to externally triggered tasks, including unknown external identities; owner/agent scoping does not waive that prohibition.
 
 The record includes task setup, trigger, plan, attempt/reclaim counts, budgets, deadlines and selected diagnostic state; tool arguments, results, errors and policy decisions; model role, provider/model, token usage, finish reason and latency; captured system/input/output; approval requests and resolutions; messages from the task and conversation at task creation; response-contract and verification checks; and recall quality counters.
 
