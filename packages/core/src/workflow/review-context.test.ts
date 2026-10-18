@@ -19,6 +19,9 @@ describe('bounded review context', () => {
       'Correction: six people; keep the budget; access comes first.',
     ]);
     expect(context.omittedAssistantTurns).toBe(6);
+    expect(context.assistantTurns.map((turn: { turnIndex: number }) => turn.turnIndex)).toEqual([
+      8, 9,
+    ]);
     expect(result.ownerFacts).toContain('Correction: six people');
     expect(result.ownerFacts).not.toMatch(/worksheet|available/);
     expect(result.contextJson).not.toMatch(/TOOL_SECRET|SYSTEM_SECRET/);
@@ -41,6 +44,33 @@ describe('bounded review context', () => {
     },
   );
 
+  it('retains the offer preceding an owner selection across different role interleavings', () => {
+    const firstOffer = { role: 'assistant', content: 'Choose plan A or plan B.' };
+    const secondOffer = { role: 'assistant', content: 'Alternatively, choose plan C or plan D.' };
+    const selection = { role: 'user', content: 'Use the first option.' };
+    const before = buildReviewContext('Explain my selected plan.', [
+      firstOffer,
+      selection,
+      secondOffer,
+    ]);
+    const after = buildReviewContext('Explain my selected plan.', [
+      firstOffer,
+      secondOffer,
+      selection,
+    ]);
+    const precedingOffer = (serialized: string) => {
+      const context = JSON.parse(serialized);
+      return context.assistantTurns
+        .filter((turn: { turnIndex: number }) => turn.turnIndex < context.ownerTurns[0].turnIndex)
+        .at(-1).text;
+    };
+    expect(before.contextJson).not.toBe(after.contextJson);
+    expect(precedingOffer(before.contextJson)).toBe(firstOffer.content);
+    expect(precedingOffer(after.contextJson)).toBe(secondOffer.content);
+    expect(before.ownerFacts).toBe(after.ownerFacts);
+    expect(before.ownerFacts).not.toMatch(/plan [ABCD]/);
+  });
+
   it('caps escaped JSON while preserving the latest owner turn and exact source-check corpus', () => {
     const result = buildReviewContext('Current request.', [
       ...Array.from({ length: 10 }, (_, index) => ({
@@ -52,6 +82,7 @@ describe('bounded review context', () => {
     expect(result.contextJson.length).toBeLessThanOrEqual(4000);
     const context = JSON.parse(result.contextJson);
     expect(context.ownerTurns.at(-1).text).toContain('Latest correction: $800 total');
+    expect(context.ownerTurns.at(-1).turnIndex).toBe(10);
     expect(context.omittedOwnerTurns).toBeGreaterThan(0);
     expect(result.ownerFacts).toBe(
       [...context.ownerTurns.map((turn: { text: string }) => turn.text), result.request].join('\n'),

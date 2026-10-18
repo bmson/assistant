@@ -1735,10 +1735,21 @@ export async function verifyFinalOutput(
       const corrected = text ? repairRequestedBullets(input.request, text) : undefined;
       const rejectedReasoningCorrection =
         reasoningReview && correction.ok && reasoningReviewFindings(correction.object).length > 0;
+      // A second revise verdict must actually repair the rejected replacement;
+      // replaying it cannot resolve the completion finding that triggered this call.
+      const unchangedRejectedReplacement =
+        reasoningReview &&
+        incompleteReplacement &&
+        correction.ok &&
+        correction.object.decision === 'revise' &&
+        corrected === repairRequestedBullets(input.request, correctionDraft);
       if (
         !corrected ||
         rejectedReasoningCorrection ||
-        (!reasoningReview && (incompleteReplacement || formatFindings.length)
+        unchangedRejectedReplacement ||
+        // Known completion/format repairs may legitimately remove bad details
+        // and headings. Discretionary wording must still preserve the answer.
+        (incompleteReplacement || formatFindings.length
           ? hasStructuralOutputDefect(corrected)
           : revisionLosesAnswer(input.draft, corrected)) ||
         isVisiblyIncompleteReplacement(corrected) ||

@@ -17,12 +17,14 @@ function excerpt(text: string, limit: number): string {
  * action authority, retrieval, or evidence of an earlier assistant's claims.
  */
 export function buildReviewContext(request: string, context: readonly ReadIntentMessage[] = []) {
-  const owner = context.filter((message) => message.role === 'user');
-  const assistant = context.filter((message) => message.role === 'assistant');
-  const take = (messages: readonly ReadIntentMessage[], count: number, limit: number) =>
-    messages.slice(-count).map((message) => {
+  // Original indices preserve offer/selection order across the separate budgets.
+  const indexed = context.map((message, turnIndex) => ({ message, turnIndex }));
+  const owner = indexed.filter(({ message }) => message.role === 'user');
+  const assistant = indexed.filter(({ message }) => message.role === 'assistant');
+  const take = (messages: typeof indexed, count: number, limit: number) =>
+    messages.slice(-count).map(({ message, turnIndex }) => {
       const raw = readIntentText(message);
-      return { text: excerpt(raw, limit), truncated: raw.length > limit };
+      return { turnIndex, text: excerpt(raw, limit), truncated: raw.length > limit };
     });
   const ownerTurns = take(owner, 6, 900);
   const assistantTurns = take(assistant, 2, 250);

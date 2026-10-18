@@ -24,6 +24,51 @@ describe('scenario candidate review regressions (scripted, no model quality grad
     }
   });
 
+  it('publishes a complete terse decision without spending a correction call', async () => {
+    const object = vi.fn(async () => ({
+      ok: true,
+      object: { decision: 'publish', reasons: [], checks: checks() },
+    }));
+    const result = await verifyFinalOutput({ object } as never, {
+      taskId: 'terse-decision',
+      request: 'Simulate only: A fits the budget; B exceeds it. Reply only "Choose A.".',
+      draft: 'Choose A.',
+      evidence: [],
+      critical: true,
+      reasoningReview: true,
+    });
+    expect(object).toHaveBeenCalledTimes(1);
+    expect(result.text).toBe('Choose A.');
+    expect(result.incomplete).toBeUndefined();
+  });
+
+  it('rejects a structurally unfinished audited completion repair within two calls', async () => {
+    let calls = 0;
+    const object = vi.fn(async () => ({
+      ok: true,
+      object: {
+        decision: 'revise',
+        revisedText:
+          ++calls === 1
+            ? 'Only A is supported; the remaining requested details are not established.'
+            : '```text\nOnly A is supported; the remaining details are not established.',
+        reasons: ['ungrounded_fact'],
+        checks: checks(),
+      },
+    }));
+    const result = await verifyFinalOutput({ object } as never, {
+      taskId: 'structural-repair',
+      request: 'Use only the supplied evidence to identify the supported result.',
+      draft: `UNSUPPORTED_DETAILS ${'The original asserted unverified material. '.repeat(30)}`,
+      evidence: [],
+      critical: true,
+      reasoningReview: true,
+    });
+    expect(object).toHaveBeenCalledTimes(2);
+    expect(result.incomplete).toBe(true);
+    expect(result.text).not.toMatch(/UNSUPPORTED_DETAILS|```/);
+  });
+
   it.each(
     frozen.cases.flatMap((item) =>
       ['publish', 'revise'].map((firstDecision) => ({ ...item, firstDecision })),

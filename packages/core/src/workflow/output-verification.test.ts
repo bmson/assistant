@@ -1141,41 +1141,127 @@ ${body}`;
     expect(result.text).not.toContain('unsupported names');
   });
 
-  it('repairs a short grounding revision rejected by the collapse guard without exposing the original', async () => {
-    const calls: string[] = [];
-    const original = `UNSUPPORTED_PRIVATE_DETAIL ${'unverified material. '.repeat(40)}`;
-    const revision =
-      'The available evidence confirms one result. The other requested details are not supported.';
-    const safe = 'One result is confirmed; the remaining requested details are not supported.';
-    const router = {
-      object: async (_role: string, input: { prompt: string }) => {
-        calls.push(input.prompt);
-        return {
+  it.each([false, true])(
+    'repairs a short grounding revision rejected by the collapse guard without exposing the original (reasoning=%s)',
+    async (reasoningReview) => {
+      const calls: string[] = [];
+      const original = `UNSUPPORTED_PRIVATE_DETAIL ${'unverified material. '.repeat(40)}`;
+      const revision =
+        'The available evidence confirms one result. The other requested details are not supported.';
+      const safe = 'One result is confirmed; the remaining requested details are not supported.';
+      const router = {
+        object: async (_role: string, input: { prompt: string }) => {
+          calls.push(input.prompt);
+          return {
+            ok: true,
+            finishReason: 'stop',
+            object:
+              calls.length === 1
+                ? {
+                    decision: 'revise',
+                    revisedText: revision,
+                    reasons: ['ungrounded_fact'],
+                    ...(reasoningReview ? { checks: passingReasoningChecks } : {}),
+                  }
+                : {
+                    decision: 'revise',
+                    revisedText: safe,
+                    reasons: [],
+                    ...(reasoningReview ? { checks: passingReasoningChecks } : {}),
+                  },
+          };
+        },
+      };
+
+      const result = await verifyFinalOutput(router as never, {
+        taskId: 'long-private-facts',
+        request: 'Give a complete answer using the available evidence.',
+        draft: original,
+        evidence: [],
+        critical: true,
+        reasoningReview,
+      });
+
+      expect(revision.length).toBeLessThan(original.length / 3);
+      expect(revision.trimEnd()).not.toMatch(/:\s*$/);
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).toContain(revision);
+      expect(calls[1]).not.toContain('UNSUPPORTED_PRIVATE_DETAIL');
+      expect(result).toMatchObject({ text: safe, revised: true, unavailable: false });
+      expect(result.text).not.toContain('UNSUPPORTED_PRIVATE_DETAIL');
+    },
+  );
+
+  it.each(['long draft', 'changed headings'])(
+    'accepts a fully audited explicit short-format repair of a %s',
+    async (kind) => {
+      const draft =
+        kind === 'long draft'
+          ? `Compare the supplied plans in detail. ${'The scenario has two alternatives to examine. '.repeat(20)}`
+          : '## Cost comparison\nPlan A costs $400; plan B costs $600.\n## Recommended next step\nSelect the plan that fits the $500 budget.';
+      const repaired =
+        '- Plan A costs $400.\n- Plan B exceeds the $500 budget.\n- Choose A; no action has been taken.';
+      const calls: string[] = [];
+      const result = await verifyFinalOutput(
+        {
+          object: async (_role: string, input: { prompt: string }) => {
+            calls.push(input.prompt);
+            return {
+              ok: true,
+              object: {
+                decision: 'revise',
+                revisedText: repaired,
+                reasons: ['clarity_or_format'],
+                checks: passingReasoningChecks,
+              },
+            };
+          },
+        } as never,
+        {
+          taskId: 'short-format-repair',
+          request:
+            'Simulate only: plan A costs $400; plan B costs $600; total budget is $500. Choose in exactly three short bullets without headings. No action.',
+          draft,
+          evidence: [],
+          critical: true,
+          reasoningReview: true,
+        },
+      );
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).toContain('<format_findings>');
+      expect(result).toMatchObject({ text: repaired, revised: true, unavailable: false });
+      expect(result.incomplete).toBeUndefined();
+      expect(shortBulletFindings('three short bullets', result.text)).toEqual([]);
+    },
+  );
+
+  it('keeps the collapse guard for a discretionary wording pass despite passing audits', async () => {
+    const draft = `## Comparison\n${'Option A fits the budget; option B requires more funding. '.repeat(12)}\n## Decision\nChoose A within the current budget.`;
+    let calls = 0;
+    const result = await verifyFinalOutput(
+      {
+        object: async () => ({
           ok: true,
-          finishReason: 'stop',
-          object:
-            calls.length === 1
-              ? { decision: 'revise', revisedText: revision, reasons: ['ungrounded_fact'] }
-              : { decision: 'revise', revisedText: safe, reasons: [] },
-        };
+          object: {
+            decision: 'revise',
+            revisedText: ++calls === 1 ? 'Review both options.' : 'Consider the options.',
+            reasons: ['clarity_or_format'],
+            checks: passingReasoningChecks,
+          },
+        }),
+      } as never,
+      {
+        taskId: 'discretionary-collapse',
+        request: 'Compare the plans and give the decision.',
+        draft,
+        evidence: [],
+        critical: true,
+        reasoningReview: true,
       },
-    };
-
-    const result = await verifyFinalOutput(router as never, {
-      taskId: 'long-private-facts',
-      request: 'Give a complete answer using the available evidence.',
-      draft: original,
-      evidence: [],
-      critical: true,
-    });
-
-    expect(revision.length).toBeLessThan(original.length / 3);
-    expect(revision.trimEnd()).not.toMatch(/:\s*$/);
-    expect(calls).toHaveLength(2);
-    expect(calls[1]).toContain(revision);
-    expect(calls[1]).not.toContain('UNSUPPORTED_PRIVATE_DETAIL');
-    expect(result).toMatchObject({ text: safe, revised: true, unavailable: false });
-    expect(result.text).not.toContain('UNSUPPORTED_PRIVATE_DETAIL');
+    );
+    expect(calls).toBe(2);
+    expect(result.incomplete).toBe(true);
+    expect(result.text).not.toBe('Consider the options.');
   });
 
   it('fails closed when the one completion correction is unavailable or still unfinished', async () => {
