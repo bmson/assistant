@@ -50,17 +50,13 @@ export function replySentenceCount(text: string): number {
 
 /** Separate unmistakable inline lists without rewriting their words or code. */
 export function separateInlineReplyItems(text: string): string {
-  let fence: string | undefined;
+  // A literal code example can contain shorter nested fence-like lines.
+  // Preserve the whole answer rather than interpreting fence delimiters.
+  if (/^\s*(?:`{3,}|~{3,})/m.test(text)) return text;
   return text
     .split('\n')
     .map((line) => {
-      const boundary = /^\s*(`{3,}|~{3,})/.exec(line)?.[1]?.[0];
-      if (boundary) {
-        if (!fence) fence = boundary;
-        else if (fence === boundary) fence = undefined;
-        return line;
-      }
-      if (fence || /^(?: {4}|\t)|^\s*>/.test(line) || line.includes('`')) return line;
+      if (/^(?: {4}|\t)|^\s*>/.test(line) || line.includes('`')) return line;
       let markers = [...line.matchAll(/(?:^|\s)([1-9])[.)]\s+(?=\S)/g)];
       const ordered =
         markers.length >= 2 && markers.every((match, index) => Number(match[1]) === index + 1);
@@ -94,7 +90,7 @@ export async function reviewConversationReply(input: {
   const normalizeReply = (text: string) =>
     reasoningReview &&
     sentences === undefined &&
-    !/\b(?:one|single)\s+(?:paragraph|line)\b|\b(?:preserve|keep)\b[^.!?\n]{0,30}\b(?:format|formatting|layout)\b/i.test(
+    !/\b(?:one|single|1)(?:[\s‐‑–—-]+\w+){0,2}[\s‐‑–—-]+(?:paragraph|line|sentence)\b|\b(?:preserve|keep)\b[^.!?\n]{0,30}\b(?:format|formatting|layout)\b|\b(?:no|without|avoid|do not|don't|don’t)\b[^.!?\n]{0,40}\b(?:line ?breaks?|newlines?|lists?|bullets?)\b/i.test(
       authored,
     )
       ? separateInlineReplyItems(text)

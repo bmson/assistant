@@ -33,30 +33,39 @@ describe('reviewed conversation replies', () => {
     'This is 1) an example referring to section 3) rather than an ordered list.',
     'Use `1) a 2) b` literally.',
     '```text\n1) Keep this literal. 2) Keep this too.\n```',
+    '````text\n```\n1) This is literal code. 2) Still inside the longer fence.\n````',
     '    1) Indented code. 2) Still code.',
     '> 1) Quoted source. 2) Still quoted.',
   ])('preserves code, decimals and ambiguous numbering: %s', (draft) => {
     expect(separateInlineReplyItems(draft)).toBe(draft);
   });
 
-  it('preserves a requested single paragraph when a reasoning answer contains inline choices', async () => {
-    const object = vi
-      .fn()
-      .mockResolvedValue({
+  it.each([
+    'in one paragraph',
+    'as a single-line response',
+    'in 1 paragraph',
+    'as a single‑line response',
+    'without line breaks',
+    'in one short paragraph',
+  ])(
+    'preserves an explicit compact layout when a reasoning answer contains inline choices: %s',
+    async (layout) => {
+      const object = vi.fn().mockResolvedValue({
         ok: true,
         object: { decision: 'publish', reasons: [], checks: passingReasoningChecks },
       });
-    const draft = '1) Prepare the draft for review. 2) Wait for the missing decision.';
-    const result = await reviewConversationReply({
-      router: { object } as unknown as Pick<ModelRouter, 'object'>,
-      taskId: 'task',
-      request: 'Use only this fictional scenario. Compare the choices in one paragraph.',
-      draft,
-      context: [],
-      guard: (text) => ({ corrected: false, text }),
-    });
-    expect(result.text).toBe(draft);
-  });
+      const draft = '1) Prepare the draft for review. 2) Wait for the missing decision.';
+      const result = await reviewConversationReply({
+        router: { object } as unknown as Pick<ModelRouter, 'object'>,
+        taskId: 'task',
+        request: `Use only this fictional scenario. Compare the choices ${layout}.`,
+        draft,
+        context: [],
+        guard: (text) => ({ corrected: false, text }),
+      });
+      expect(result.text).toBe(draft);
+    },
+  );
   it('repairs an explicit sentence limit without losing the supplied facts', async () => {
     const object = vi.fn().mockResolvedValue({
       ok: true,
