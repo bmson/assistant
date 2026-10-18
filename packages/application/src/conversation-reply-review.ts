@@ -57,19 +57,42 @@ export function separateInlineReplyItems(text: string): string {
     .split('\n')
     .map((line) => {
       if (/^(?: {4}|\t)|^\s*>/.test(line) || line.includes('`')) return line;
-      let markers = [...line.matchAll(/(?:^|\s)([1-9])[.)]\s+(?=\S)/g)];
-      const ordered =
-        markers.length >= 2 && markers.every((match, index) => Number(match[1]) === index + 1);
-      if (!ordered) markers = [...line.matchAll(/(?:^|\s)-\s+\*\*[^*\r\n]{1,100}\*\*/g)];
-      if (markers.length < 2) return line;
-      const parts = [line.slice(0, markers[0]?.index ?? 0).trimEnd()];
-      for (const [index, marker] of markers.entries()) {
-        const start = (marker.index ?? 0) + marker[0].length - marker[0].trimStart().length;
-        parts.push(line.slice(start, markers[index + 1]?.index ?? line.length).trim());
-      }
-      return parts.filter(Boolean).join('\n\n');
+      // Repeated labelled sections distinguish collapsed Markdown dividers
+      // from a dash in ordinary prose. Keep every non-whitespace character.
+      const divider = /\s(---)\s+(?=\*\*[^*\r\n]{1,100}\*\*\s*:)/g;
+      const sections =
+        [...line.matchAll(divider)].length >= 2 ? line.replace(divider, '\n\n$1\n\n') : line;
+      return sections.split('\n').map(separateInlineListLine).join('\n');
     })
     .join('\n');
+}
+
+function separateInlineListLine(line: string): string {
+  let markers = [...line.matchAll(/(?:^|\s)([1-9])[.)]\s+(?=\S)/g)];
+  const ordered =
+    markers.length >= 2 && markers.every((match, index) => Number(match[1]) === index + 1);
+  if (!ordered) markers = [...line.matchAll(/(?:^|\s)-\s+\*\*[^*\r\n]{1,100}\*\*/g)];
+  if (markers.length < 2) {
+    markers = [...line.matchAll(/(?:^|\s)•\s+(?=\S)/g)];
+    // A short symbol-separated expression is not a prose bullet list.
+    if (
+      markers.some((marker, index) => {
+        const item = line.slice(
+          (marker.index ?? 0) + marker[0].length,
+          markers[index + 1]?.index ?? line.length,
+        );
+        return !/[\p{L}]/u.test(item) || !/[.!?;][”’"')]*$/.test(item.trim());
+      })
+    )
+      return line;
+  }
+  if (markers.length < 2) return line;
+  const parts = [line.slice(0, markers[0]?.index ?? 0).trimEnd()];
+  for (const [index, marker] of markers.entries()) {
+    const start = (marker.index ?? 0) + marker[0].length - marker[0].trimStart().length;
+    parts.push(line.slice(start, markers[index + 1]?.index ?? line.length).trim());
+  }
+  return parts.filter(Boolean).join('\n\n');
 }
 
 /** The two consumers share this promise: one review, one durable and visible answer. */
