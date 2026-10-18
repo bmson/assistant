@@ -3652,3 +3652,38 @@ describe('bounded no-send email review', () => {
     expect(text).not.toContain('no more threads to replace');
   });
 });
+
+it('rejects a deadline-only draft for an availability request and retains the source form and owner decision', async () => {
+  const id = 'availability-deadline-only';
+  const source = messages(id);
+  const body =
+    'We would love to get your updated availability here: https://schedule.example.test/availability/abc so we can set up these interviews.';
+  source[1] = {
+    ...required(source[1], 'latest'),
+    subject: 'Interview availability',
+    text: body,
+    sourceLength: body.length,
+  };
+  const thread = required(
+    emailReviewCompleteThread(id, 'owner@example.com', [search(id), read(id, source)]),
+    'thread',
+  );
+  const value = {
+    items: [
+      {
+        ...required(validAnswer(id).items[0], 'answer'),
+        whyQuote: 'We would love to get your updated availability here',
+        deadline: null,
+        draftBody:
+          'Could you let me know if there is a preferred deadline for submitting my updated availability?',
+      },
+    ],
+  };
+  expect(validateEmailReviewAnswer(value, [thread])).toBeUndefined();
+  const result = await generateValidatedEmailReview([thread], async () => ({ ok: true, value }));
+  expect(result.answer?.items ?? []).toHaveLength(0);
+  expect(result.ownerDecisionThreadIds).toContain(id);
+  const summary = emailReviewOwnerDecisionSummary(thread);
+  expect(summary.actionUrl).toBe('https://schedule.example.test/availability/abc');
+  expect(summary.decisionPrompt).toContain('Which times and time zone');
+});

@@ -1827,32 +1827,39 @@ describe('tool-less conversational reply', () => {
     expect(request.system).toContain('Preserve its facts, timing, and uncertainty');
   });
 
-  it('keeps fictional exercise context in the current chat without ambient recall', async () => {
+  it.each([
+    'For this hypothetical exercise only, the project deadline is Friday. Do not save fictional facts as personal memories.',
+    'In a fictional company, support tickets fell after a redesign but traffic also fell. Assess the claim using only this scenario.',
+    'I value spontaneity and reliability, but a hypothetical friend wants every weekend planned. Do not assume either person is wrong or invent facts about us.',
+    'Simulate only; no account reads or actions. A fictional assistant is planning an offsite. Explain what changes in the next session.',
+    'Hypothetically I want to schedule every minute. Suggest a bounded experiment with buffers. No research needed.',
+    'Invent options for a fictional library with no spending. Compare the options; no research or actions.',
+    'A hypothetical team must choose between two approaches. Explain the choice. Do not look anything up.',
+  ])('keeps supplied hypothetical context out of ambient recall: %s', async (prompt) => {
     const store = chatStore();
     const scripted = scriptedRouter({
       triage: { needsAction: false },
       draft: 'For this exercise, the project deadline is Friday.',
     });
-    const response = await handleChatTurn(
-      send(
-        'For this hypothetical exercise only, the project deadline is Friday. Do not save fictional facts as personal memories.',
-      ),
-      {
-        config: loadConfig({
-          OPENROUTER_API_KEY: 'test-key',
-          QUEUE_DRIVER: 'local',
-          CHAT_RECALL_ENABLED: 'true',
-          GRAPH_RAG_ENABLED: 'false',
-        }),
-        router: scripted.router,
-        chat: store.chat,
-        persistence: { tasks: {}, ownerContext: {} } as never,
-      },
-    );
+    const response = await handleChatTurn(send(prompt), {
+      config: loadConfig({
+        OPENROUTER_API_KEY: 'test-key',
+        QUEUE_DRIVER: 'local',
+        CHAT_RECALL_ENABLED: 'true',
+        GRAPH_RAG_ENABLED: 'false',
+      }),
+      router: scripted.router,
+      chat: store.chat,
+      persistence: { tasks: {}, ownerContext: {} } as never,
+    });
     expect(response.status).toBe(200);
     await response.text();
     expect(stubs.getAmbientBlock).not.toHaveBeenCalled();
     expect(stubs.getOwnerCard).not.toHaveBeenCalled();
+    const expectedRole = /assess|reason|what should|explain|suggest|compare/i.test(prompt)
+      ? 'reason'
+      : 'draft';
+    expect(scripted.stream.mock.calls[0]?.[0]).toBe(expectedRole);
     const message = store.completions[0]?.messages[0];
     expect(message).toBeDefined();
     expect(message?.parts.some((part) => (part as { type?: string }).type === 'recall')).toBe(

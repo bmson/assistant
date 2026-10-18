@@ -5569,6 +5569,46 @@ San Francisco (SFO-San Francisco Intl.)`;
       ],
     };
   }
+  it('retains an explicit return label in a dated fallback without inferring it from a reversed route', () => {
+    const { evidence } = sources();
+    const read = detectPersonalReadRequest([{ role: 'user', content: focusedPrompt }], {
+      now: new Date('2026-10-17T20:00:00Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!read?.upcomingFlightDiscovery) throw new Error('Expected focused flight intent');
+    const datedEvidence = evidence.map((item) =>
+      item.toolName === 'calendar.list_events'
+        ? {
+            ...item,
+            args: { timeMin: read.timeWindow?.timeMin, timeMax: read.timeWindow?.timeMax },
+          }
+        : item,
+    );
+    expect(upcomingFlightReadProjection(read, datedEvidence).text).not.toContain(
+      'The booking explicitly labels this return.',
+    );
+    const bookingIndex = datedEvidence.findIndex((item) => item.toolName === 'gmail.read_thread');
+    datedEvidence[bookingIndex] = row(
+      'gmail.read_thread',
+      { threadId: 'egencia-table' },
+      {
+        complete: true,
+        hasMore: false,
+        messages: [
+          {
+            messageId: 'table-message',
+            subject: 'Flight - BOOKED - Berlin',
+            text: table.replace('[image: Flight] BER to SFO', 'Return\n[image: Flight] BER to SFO'),
+          },
+        ],
+      },
+    );
+    const projection = upcomingFlightReadProjection(read, datedEvidence);
+    expect(projection.text).toContain('The booking explicitly labels this return.');
+    expect(projection.text).toContain('not verified as the next future departure');
+    expect(projection.flight).toBeUndefined();
+  });
+
   it('keeps source clocks and route-group inference separate from verified next-flight identity', () => {
     const { read, evidence } = sources();
     const projection = upcomingFlightReadProjection(read, evidence);
@@ -6025,17 +6065,29 @@ San Francisco (SFO-San Francisco Intl.)`;
     const readInputs = compoundTripThreadReadInputs(evidence, read);
     expect(readInputs.map((input) => input.threadId)).toEqual([
       'older-complete-itinerary',
-      'recent-flight-purchase',
       'older-confirmation',
+      'recent-flight-purchase',
     ]);
     expect(readInputs).toHaveLength(3);
     expect(new Set(readInputs.map((input) => input.threadId)).size).toBe(3);
     expect(readInputs.map((input) => input.threadId)).not.toContain('unrelated-purchase');
     expect(readInputs.map((input) => input.threadId)).not.toContain('second-flight-purchase');
     expect(compoundTripThreadIdsToRead(evidence, read)).not.toContain('flight-newsletter');
+    const metadata = evidence[0]?.result as { results: Array<Record<string, unknown>> };
+    metadata.results.push({
+      threadId: 'second-clock-confirmation',
+      from: 'Example Airways confirmations <tickets@example-air.invalid>',
+      subject: 'Flight confirmation code for KL703',
+      snippet: 'Flight KL703 departs 9:50 AM local time',
+    });
+    expect(compoundTripThreadReadInputs(evidence, read).map((input) => input.threadId)).toEqual([
+      'older-complete-itinerary',
+      'older-confirmation',
+      'second-clock-confirmation',
+    ]);
   });
 
-  it('reserves the second flight-only read for a supplier purchase when two booked itineraries rank first', () => {
+  it('keeps both booked itineraries and the supplier purchase within the three-read cap', () => {
     const read = detectPersonalReadRequest([{ role: 'user', content: 'What is my next flight?' }], {
       now: new Date('2026-10-16T12:00:00.000Z'),
       timeZone: 'America/Los_Angeles',
@@ -6075,9 +6127,9 @@ San Francisco (SFO-San Francisco Intl.)`;
     expect(readInputs.map((input) => input.threadId)).toEqual([
       'booked-flight-one',
       'direct-flight-purchase',
+      'booked-flight-two',
     ]);
-    expect(readInputs).toHaveLength(2);
-    expect(readInputs.map((input) => input.threadId)).not.toContain('booked-flight-two');
+    expect(readInputs).toHaveLength(3);
   });
 
   it('ranks complete itineraries and individual confirmations before generic purchases, shower and spa reads', () => {
@@ -7293,4 +7345,27 @@ it('keeps a named accommodation observation while refusing an unrelated corporat
   expect(hotel?.address).toBeUndefined();
   expect(hotel?.checkIn).toBeUndefined();
   expect(result.routeDestination).toBeUndefined();
+});
+
+it('preserves property and literal stay labels from a rendered confirmation without inferring a year', () => {
+  const read = request();
+  const hotelBody =
+    'Thank you for your reservation\nYour hotel is confirmed.\nGarden Court, a Sample Hotel\n\nHotels.com itinerary: SAMPLE-73535\n\nCheck-in\n4:00pm\n\nSat, Sep 5\n\nCheck-out\n11:00am\n\nSun, Sep 6\n\n1 night, 1 room\n\n123 Example Ave, Sample City, CA, 94087 United States\n\nPrice details\nTotal $105\nCorporate offices\n1111 Example Group Way, Other City';
+  const rows = bookingEmailEvidence({ hotelBody, includeFlight: false });
+  const projection = compoundTripReadProjection(read, [completeCalendarEvents([]), ...rows]);
+  const hotel = projection.presentation.hotels[0];
+  expect(hotel).toMatchObject({
+    hotelName: 'Garden Court, a Sample Hotel',
+    address: '123 Example Ave, Sample City, CA, 94087 United States',
+    city: 'Sample City',
+    association: 'unlinked',
+    stayDateLabels: { checkIn: 'Sat, Sep 5', checkOut: 'Sun, Sep 6' },
+  });
+  expect(hotel?.checkIn).toBeUndefined();
+  expect(hotel?.checkOut).toBeUndefined();
+  expect(projection.routeDestination).toBeUndefined();
+  const answer = renderCompoundTripReadResponse(projection);
+  expect(answer).toContain('Sat, Sep 5 (year unverified)');
+  expect(answer).toContain('Sun, Sep 6 (year unverified)');
+  expect(answer).not.toContain('1111 Example Group');
 });

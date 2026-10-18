@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { type Plan, PlanSchema, type Trust, wasTriagedActionable } from '../events.js';
 import type { BudgetDecision } from '../model-router/budget.js';
 import { type ModelRouter, TruncatedObjectError } from '../model-router/router.js';
+import { explicitlyDisallowsTools } from './conversation-local-context.js';
 import { isMissionSessionTask, missionSessionId } from './executor/context-helpers.js';
 import {
   detectFutureWatchIntent,
@@ -33,7 +34,8 @@ import { detectPersonalReadRequest, type PersonalReadRequest } from './read-inte
 // v10: identify exact owner-requested outcome spans for durable follow-through.
 // v16: route each private-read kind to its matching source instead of treating
 // memory, graph, and Drive reads as calendar/email lookups.
-export const PLANNER_VERSION = 16;
+// v17: explicit no-tool constraints take precedence over automatic source/watch routing.
+export const PLANNER_VERSION = 17;
 
 type PlannerBudgetDecision = Extract<BudgetDecision, { mode: 'park' | 'block' }>;
 
@@ -57,6 +59,7 @@ export class PlanningUnavailableError extends Error {
  * cannot turn a direct answer into an unrelated production read.
  */
 export function isConceptualNoToolRequest(text: string): boolean {
+  if (explicitlyDisallowsTools(text)) return true;
   const normalized = text.trim().replace(/[“”]/g, '"');
   if (
     !normalized ||
@@ -333,7 +336,10 @@ export async function planTask(
     return { ...message, content: latestOwnerRequest } as ModelMessage;
   });
   const contextText = plannerContext(window, ownerIntent);
-  const futureWatch = task.trust === 'owner' ? detectFutureWatchIntent(latestOwnerRequest) : null;
+  const futureWatch =
+    task.trust === 'owner' && !explicitlyDisallowsTools(latestOwnerRequest)
+      ? detectFutureWatchIntent(latestOwnerRequest)
+      : null;
   const conceptual = task.trust === 'owner' && isConceptualNoToolRequest(latestOwnerRequest);
   if (conceptual && !futureWatch) {
     const plan: Plan = {

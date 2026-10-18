@@ -1,5 +1,6 @@
 import { emailProvenanceText, isForwardedIngest } from '../email-provenance.js';
 import type { ClarificationContinuation, Trust } from '../events.js';
+import { explicitlyDisallowsTools } from './conversation-local-context.js';
 import { detectFutureWatchIntent } from './future-watch-intent.js';
 import { detectLiveLookup } from './live-lookup.js';
 import { detectPersonalReadRequest } from './read-intent.js';
@@ -7,6 +8,7 @@ import { detectPersonalReadRequest } from './read-intent.js';
 export {
   isConversationLocalContext,
   isSelfContainedCalculationRequest,
+  needsConversationReasoning,
 } from './conversation-local-context.js';
 
 export type OwnerIntentScope =
@@ -257,6 +259,7 @@ function orderedReadThenSend(text: string, sendVerbs: string): boolean {
 }
 
 function scopesFor(text: string): OwnerIntentScope[] {
+  if (explicitlyDisallowsTools(text)) return [];
   const scopes = new Set<OwnerIntentScope>();
   // A direct, explicit future-notification request authorizes only creation of
   // its bounded personal watch. The detector strips quoted spans and rejects

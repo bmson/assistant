@@ -5,6 +5,7 @@ import {
   conversationMessageSpeakerRevision,
   type Records,
   type ToolExecutionRepository,
+  validatedConversationSourceUrl,
   validConversationSpeaker,
 } from '@assistant/persistence';
 import { z } from 'zod';
@@ -97,7 +98,14 @@ function searchSourceRefs(
     if (
       !match ||
       !validConversationSpeaker(match) ||
-      !hasOnlyKeys(match, [...allowedMatchKeys, 'role', 'origin', 'speakerRevision']) ||
+      !hasOnlyKeys(match, [
+        ...allowedMatchKeys,
+        'role',
+        'origin',
+        'speakerRevision',
+        'sourceUrl',
+      ]) ||
+      (match.sourceUrl !== undefined && !validatedConversationSourceUrl(match)) ||
       typeof match.messageId !== 'string' ||
       !UUID.test(match.messageId) ||
       typeof match.conversationId !== 'string' ||
@@ -310,7 +318,9 @@ function contextSourceRefs(
         'origin',
         'text',
         'createdAt',
+        ...(match.sourceUrl !== undefined ? ['sourceUrl'] : []),
       ]) ||
+      (match.sourceUrl !== undefined && !validatedConversationSourceUrl(match)) ||
       !validConversationSpeaker(match) ||
       typeof match.messageId !== 'string' ||
       !UUID.test(match.messageId) ||

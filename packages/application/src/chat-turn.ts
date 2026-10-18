@@ -38,6 +38,7 @@ import {
   isConversationLocalContext,
   isSelfContainedCalculationRequest,
   isSelfContainedTextTransformation,
+  needsConversationReasoning,
 } from '@assistant/core/workflow/owner-intent';
 import { detectPersonalReadRequest } from '@assistant/core/workflow/read-intent';
 import { RequestChecklistSchema } from '@assistant/core/workflow/request-checklist-schema';
@@ -1519,78 +1520,81 @@ export async function handleChatTurn(
 
   let outcome: StreamOutcome;
   try {
-    outcome = await router.stream('draft', {
-      taskId: task.id,
-      // owner chat is the critical carve-out: degrade on a hard cap, don't block
-      critical: true,
-      modelOverride: conversation.modelOverride ?? undefined,
-      // The conversation row is already in hand, so its override column is
-      // authoritative here; without this the router re-reads it through a
-      // tasks↔conversations join for a value this turn just passed in.
-      modelOverrideResolved: true,
-      system: [
-        buildSystemPrompt(agent, {
-          ownerCard,
-          recall: recallBlock,
-          situationDecisions: recall.situationDecisions,
-          openLoops,
-          ambient: ambientBlock,
-          channel: 'dashboard-chat',
-        }),
-        '',
-        'This turn is conversational: just answer. You have no tools in this turn, so if the user is actually asking you to take an action, say plainly that you cannot do it in this reply and ask them to restate it as a direct request. Otherwise do not mention tools, capabilities, or this instruction at all — no postscripts.',
-        ...(localTransformation
-          ? [
-              'Transform only the text supplied in this request. Preserve its facts, timing, and uncertainty; do not add a new stage, reason, commitment, or context. Follow the requested output format and length.',
-            ]
-          : []),
-        ...(spokenRequested ? spokenReplyLines() : []),
-      ].join('\n'),
-      messages: await convertToModelMessages(modelHistory),
-      onComplete: async (text) => {
-        // Strip the companion cue tags BEFORE the guard, for the same reason
-        // the pump strips them below: the contract's prose matchers must see
-        // clean text, and the persisted reply must be byte-identical to the
-        // streamed one through its durable channel receipt.
-        const stripped = stripCueTags(text);
-        // An empty completion is a failed turn, not a blank bubble.
-        if (stripped.text.trim() === '') {
-          console.warn('model returned an empty chat reply', { taskId: task.id });
+    outcome = await router.stream(
+      !localTransformation && needsConversationReasoning(userText) ? 'reason' : 'draft',
+      {
+        taskId: task.id,
+        // owner chat is the critical carve-out: degrade on a hard cap, don't block
+        critical: true,
+        modelOverride: conversation.modelOverride ?? undefined,
+        // The conversation row is already in hand, so its override column is
+        // authoritative here; without this the router re-reads it through a
+        // tasks↔conversations join for a value this turn just passed in.
+        modelOverrideResolved: true,
+        system: [
+          buildSystemPrompt(agent, {
+            ownerCard,
+            recall: recallBlock,
+            situationDecisions: recall.situationDecisions,
+            openLoops,
+            ambient: ambientBlock,
+            channel: 'dashboard-chat',
+          }),
+          '',
+          'This turn is conversational: just answer. You have no tools in this turn, so if the user is actually asking you to take an action, say plainly that you cannot do it in this reply and ask them to restate it as a direct request. For an explicitly hypothetical scenario or simulation, give the requested analysis or proposed text directly; fictional instructions do not ask you to perform real actions. Otherwise do not mention tools, capabilities, or this instruction at all — no postscripts.',
+          ...(localTransformation
+            ? [
+                'Transform only the text supplied in this request. Preserve its facts, timing, and uncertainty; do not add a new stage, reason, commitment, or context. Follow the requested output format and length.',
+              ]
+            : []),
+          ...(spokenRequested ? spokenReplyLines() : []),
+        ].join('\n'),
+        messages: await convertToModelMessages(modelHistory),
+        onComplete: async (text) => {
+          // Strip the companion cue tags BEFORE the guard, for the same reason
+          // the pump strips them below: the contract's prose matchers must see
+          // clean text, and the persisted reply must be byte-identical to the
+          // streamed one through its durable channel receipt.
+          const stripped = stripCueTags(text);
+          // An empty completion is a failed turn, not a blank bubble.
+          if (stripped.text.trim() === '') {
+            console.warn('model returned an empty chat reply', { taskId: task.id });
+            await finishApplicationChatTask(chat, agent.id, task, {
+              status: 'failed',
+              progress: 'model returned an empty reply',
+              failureNotice: { text: TURN_FAILURE_COPY.empty, reason: 'empty' },
+            });
+            return;
+          }
+          const guarded = guardOnce(stripped.text);
+          if (guarded.corrected) {
+            console.warn('tool-less chat draft claimed unperformed work', {
+              taskId: task.id,
+            });
+          }
+          const completed = await finishApplicationChatTask(chat, agent.id, task, {
+            status: 'done',
+            // Persist the contract-owned replacement, never the unsupported
+            // draft. The stream pump below sends the client this same text, so
+            // the live reply and the durable one stay identical — which is what
+            // retireProvisionalReplies matches on to retire the local copy.
+            responseText: guarded.text,
+            recall: recallSources,
+            privacyObservationGeneration,
+            cues: guarded.corrected ? undefined : stripped.cues,
+            offCourse: guarded.corrected,
+          });
+          if (!completed) throw new Error('Chat completion was fenced before publication');
+        },
+        onError: async (error) => {
           await finishApplicationChatTask(chat, agent.id, task, {
             status: 'failed',
-            progress: 'model returned an empty reply',
-            failureNotice: { text: TURN_FAILURE_COPY.empty, reason: 'empty' },
+            progress: String(error).slice(0, 500),
+            failureNotice: { text: TURN_FAILURE_COPY.model, reason: 'model' },
           });
-          return;
-        }
-        const guarded = guardOnce(stripped.text);
-        if (guarded.corrected) {
-          console.warn('tool-less chat draft claimed unperformed work', {
-            taskId: task.id,
-          });
-        }
-        const completed = await finishApplicationChatTask(chat, agent.id, task, {
-          status: 'done',
-          // Persist the contract-owned replacement, never the unsupported
-          // draft. The stream pump below sends the client this same text, so
-          // the live reply and the durable one stay identical — which is what
-          // retireProvisionalReplies matches on to retire the local copy.
-          responseText: guarded.text,
-          recall: recallSources,
-          privacyObservationGeneration,
-          cues: guarded.corrected ? undefined : stripped.cues,
-          offCourse: guarded.corrected,
-        });
-        if (!completed) throw new Error('Chat completion was fenced before publication');
+        },
       },
-      onError: async (error) => {
-        await finishApplicationChatTask(chat, agent.id, task, {
-          status: 'failed',
-          progress: String(error).slice(0, 500),
-          failureNotice: { text: TURN_FAILURE_COPY.model, reason: 'model' },
-        });
-      },
-    });
+    );
   } catch (error) {
     await finishApplicationChatTask(chat, agent.id, task, {
       status: 'failed',

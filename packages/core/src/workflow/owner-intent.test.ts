@@ -13,6 +13,42 @@ import {
 
 describe('owner intent provenance', () => {
   it.each([
+    'No tools. Explain what is on my calendar.',
+    'Without tools, explain what is on my calendar.',
+    'Simulate a background check only; do not use tools or notify anyone. A fictional assistant already reported that two venue quotes are unchanged and is waiting for the owner to choose. No new source information, deadline, risk, or owner reply has arrived. Should it interrupt again? State the decision and the event that would justify another update in at most 80 words.',
+    'Do not use any tools. Explain whether the supplied fictional email needs a reply.',
+    'Simulate an ongoing assistant session; do not create real tasks, read accounts, or send anything. Responsibility: help prepare a fictional offsite. What useful work should you prepare now?',
+    'Simulate only; no sending or real tasks. A fictional owner authorized drafting an invitation, not sending. Give the smallest useful decision request.',
+    'Without using tools, reason about my calendar from this supplied example.',
+    'No tool calls. Simulate a reminder tomorrow and explain the proposed text.',
+    'Don’t invoke external tools; explain the schedule below.',
+  ])('keeps an explicit no-tool instruction free of capabilities: %s', (text) => {
+    expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).toEqual([]);
+    expect(isConversationLocalContext(text)).toBe(true);
+    expect(
+      latestOwnerIntent(
+        [
+          { role: 'user', content: 'Check my calendar and mail for the venue booking.' },
+          { role: 'assistant', content: 'Which venue?' },
+          { role: 'user', content: text },
+        ],
+        { trust: 'owner' },
+      ).authorizedScopes,
+    ).toEqual([]);
+  });
+  it('keeps a separate real source request routable after a simulated example', () => {
+    const text = 'Simulate a planning example, then check my actual calendar for tomorrow.';
+    expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).toContain('private_read');
+  });
+  it.each([
+    'Read my calendar tomorrow and summarize this note: “Do not use tools.”',
+    'Read my calendar tomorrow and summarize this note: “No tools.”',
+    'Read my calendar tomorrow and summarize this note: "Without tools."',
+  ])('does not let quoted no-tool text cancel a separate owner source request: %s', (text) => {
+    expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).toContain('private_read');
+  });
+
+  it.each([
     'What is 17 × 23? Give the result in one short sentence.',
     'Calculate 1,250 divided by 5 and show the answer.',
     'Compute 12.5 * 4.',

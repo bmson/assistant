@@ -1,6 +1,7 @@
 import type { ConversationSearchSourceRef } from '@assistant/persistence';
 import {
   conversationMessageSourceRevision,
+  validatedConversationSourceUrl,
   validConversationSpeaker,
 } from '@assistant/persistence';
 import { z } from 'zod';
@@ -177,23 +178,6 @@ type MemoryReadSource = {
   subjectContactId?: string;
 };
 
-function conversationSourceUrl(match: Record<string, unknown>): string | undefined {
-  const path = `/chat/${encodeURIComponent(text(match.conversationId))}`;
-  const hash = `#message-${encodeURIComponent(text(match.messageId))}`;
-  try {
-    const url = new URL(text(match.sourceUrl));
-    return ['https:', 'http:'].includes(url.protocol) &&
-      !url.username &&
-      !url.password &&
-      url.pathname === path &&
-      url.hash === hash
-      ? url.href
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 const birthdayMonths = [
   'January',
   'February',
@@ -277,7 +261,7 @@ export function memoryReadSources(
                   : 'Historical message (authorship not confirmed)',
             provenance: `conversation ${text(match.conversationId)}; message ${text(match.messageId)}${text(match.createdAt) ? `; ${text(match.createdAt).slice(0, 10)}` : ''}`,
             contextId: text(match.conversationId),
-            url: conversationSourceUrl(match),
+            url: validatedConversationSourceUrl(match),
           },
           pass,
         );
@@ -323,7 +307,7 @@ export function memoryReadSources(
                   : 'Historical message (authorship not confirmed)',
             provenance: `conversation ${text(match.conversationId)}; message ${text(match.messageId)}${text(match.createdAt) ? `; ${text(match.createdAt).slice(0, 10)}` : ''}`,
             contextId: text(match.conversationId),
-            url: conversationSourceUrl(match),
+            url: validatedConversationSourceUrl(match),
           },
           pass,
         );
@@ -685,6 +669,7 @@ export function memoryContextAnchorRefs(
         speaker: 'Earlier assistant claim (not verified fact)',
         provenance: '',
         contextId: text(match.conversationId),
+        url: validatedConversationSourceUrl(match),
       };
       const excerpts = assistantComparisonEvidenceSegments(source, scope, terms.owner);
       const score = Math.max(
