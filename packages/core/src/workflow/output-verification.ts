@@ -1515,6 +1515,8 @@ export const OUTPUT_VERIFICATION_SYSTEM = [
   'Honor explicit length and format requests. If the owner asks for three short bullets, provide three concise bullets; include only the requested essentials and keep source links with the bullet they support. Do not add a long preamble or extra sections.',
   'For a phone-sized comparison, prefer two columns (option and concise assessment) unless the owner requires a different layout. Avoid wide tables that become long stacks of labels; preserve the distinctions and resource constraints that make the comparison useful.',
   'For supplied scenarios, recompute every numerical claim and check units, time windows and percentages. Separate stated facts from assumptions and proposals. Availability does not establish completion. A resource-constrained plan must account for setup, cleanup, people, time and any extras rather than silently assuming them. Include a baseline and review point when proposing an experiment. Do useful preparation before asking only the decision that actually blocks further progress; do not diagnose the owner from a hypothetical scenario.',
+  'Audit feasibility against every supplied constraint before publishing a plan: a price above the entire budget cannot be fixed by reallocating other spending; missing availability, included services, supplies, measurements or prior work remain unknown. Describe proposed verification as a next step, never as something already confirmed. For changed requirements, reuse only established facts and recheck assumptions affected by the change. A small pilot or negotiated arrangement needs a simple observable success measure and a point to revisit it.',
+  'When evaluating a causal claim, keep every stated competing explanation active through the conclusion. A normalized rate can address a changing denominator without addressing a changed measurement or reporting process. Do not treat a rate change as support for the claimed cause until the other confounds are accounted for. For several requested comparisons or ideas, use short separated entries so constraints, trade-offs and the recommended next step remain easy to scan.',
   'A simulation is analysis or proposed text, never evidence of a real action or a promise of future background work. Preserve its requested acknowledgement, decision brief or quiet token while making hypothetical scope clear. If detected_issues reports an unsupported-action claim, remove the real-world completion claim rather than replacing the requested simulation with a generic failure.',
 ].join('\n');
 
@@ -1533,6 +1535,8 @@ export async function verifyFinalOutput(
     critical: boolean;
     context?: ReadonlyArray<ReadIntentMessage>;
     findings?: ReadonlyArray<string>;
+    /** Internal caller classified deliberation over owner-supplied context. */
+    reasoningReview?: boolean;
   },
 ): Promise<OutputVerificationResult> {
   const ownerFacts = [
@@ -1572,16 +1576,23 @@ export async function verifyFinalOutput(
   let attempted = false;
   let incompleteCorrectionPending = false;
   let unresolvedFormatPending = false;
+  const reasoningReview = input.reasoningReview === true;
   try {
-    const outcome = await router.object<OutputVerification>('rewrite', {
-      taskId: input.taskId,
-      critical: input.critical,
-      system: OUTPUT_VERIFICATION_SYSTEM,
-      prompt: buildOutputVerificationPrompt({ ...input, draft: original }),
-      schema: OutputVerificationSchema,
-      temperature: 0,
-      maxOutputTokens: Math.min(6_000, Math.max(1_024, Math.ceil(input.draft.length / 2) + 512)),
-    });
+    const outcome = await router.object<OutputVerification>(
+      reasoningReview ? 'reason' : 'rewrite',
+      {
+        taskId: input.taskId,
+        critical: input.critical,
+        // Internal review uses its configured role, independently of the owner's
+        // conversation picker, as the former rewrite route did.
+        ...(reasoningReview ? { modelOverrideResolved: true } : {}),
+        system: OUTPUT_VERIFICATION_SYSTEM,
+        prompt: buildOutputVerificationPrompt({ ...input, draft: original }),
+        schema: OutputVerificationSchema,
+        temperature: 0,
+        maxOutputTokens: Math.min(6_000, Math.max(1_024, Math.ceil(input.draft.length / 2) + 512)),
+      },
+    );
     attempted = outcome.ok;
     if (!outcome.ok || outcome.finishReason === 'length') {
       const contradicted = publicWebClaimFindings(original, input.evidence, ownerFacts).length > 0;
@@ -1655,10 +1666,11 @@ export async function verifyFinalOutput(
       // wording pass. This replaces the existing correction; the two-call
       // bound and all deterministic checks below remain unchanged.
       const correction = await router.object<OutputVerification>(
-        findings.length ? 'reason' : 'rewrite',
+        findings.length || reasoningReview ? 'reason' : 'rewrite',
         {
           taskId: input.taskId,
           critical: input.critical,
+          ...(reasoningReview ? { modelOverrideResolved: true } : {}),
           system: OUTPUT_VERIFICATION_SYSTEM,
           prompt: `${buildOutputVerificationPrompt({ ...input, draft: correctionDraft })}\n${correctionInstructions}`,
           schema: OutputVerificationSchema,

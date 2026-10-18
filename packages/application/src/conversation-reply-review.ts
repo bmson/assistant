@@ -1,5 +1,9 @@
 import type { ModelRouter } from '@assistant/core/model-router';
 import { verifyFinalOutput } from '@assistant/core/workflow/output-verification';
+import {
+  extractOwnerIntent,
+  needsConversationReasoning,
+} from '@assistant/core/workflow/owner-intent';
 import type { ReadIntentMessage } from '@assistant/core/workflow/read-intent';
 
 export function requestedReplyWordLimit(request: string): number | undefined {
@@ -34,6 +38,8 @@ export async function reviewConversationReply(input: {
 }): Promise<{ corrected: boolean; text: string; incomplete?: boolean }> {
   let candidate = input.draft;
   const maximum = requestedReplyWordLimit(input.request);
+  const authored = extractOwnerIntent({ text: input.request, trust: 'owner' }).ownerAuthoredText;
+  const reasoningReview = needsConversationReasoning(authored);
   for (let pass = 0; pass < 2; pass += 1) {
     const guarded = input.guard(candidate);
     const words = replyWordCount(candidate);
@@ -46,6 +52,7 @@ export async function reviewConversationReply(input: {
       ...(guarded.corrected
         ? [
             'The deterministic contract rejected the draft as unsupported or unperformed work. Answer the supplied scenario as analysis or explicitly proposed text; do not claim real actions were completed.',
+            'For fictional confirmation examples, describe conditionally in third person what can be confirmed before and after verification. Avoid first-person completion receipts or promises that read as actions performed in this turn; preserve the requested decision and preparation instead of a generic failure.',
           ]
         : []),
     ];
@@ -58,6 +65,7 @@ export async function reviewConversationReply(input: {
       context: input.context,
       findings,
       critical: true,
+      reasoningReview,
     });
     candidate = review.text;
     if (review.unavailable) break;

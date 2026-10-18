@@ -267,6 +267,330 @@ describe('exact historical source projection', () => {
     expect(memoryContextAnchorRefs(request, rows)).toEqual([]);
     expect(memoryContextAnchorRefs(request, rows, false)).toEqual([]);
   });
+  it('recovers the queried attribution context even when a weaker comparison pair is already complete', () => {
+    const request =
+      'Look back at the earlier hypothetical Harbor exercise. Did I earmark its project budget for public transport, or was that an Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step, citing the relevant conversation messages.';
+    const target = {
+      ...message(
+        'target-assistant',
+        'Project Harbor has a $600 budget and a rule to avoid taxi travel. Next step: map public transit routes against the budget.',
+        'assistant',
+        'assistant',
+      ),
+      conversationId: 'target-chat',
+    };
+    const rows: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        result: {
+          matches: [
+            message(
+              'weak-owner',
+              'For the hypothetical Harbor exercise, my original budget is $600 and my travel constraint is no taxis.',
+              'user',
+              'owner',
+            ),
+            ...Array.from({ length: 10 }, (_, index) =>
+              message(
+                `weak-assistant-${index}`,
+                'For the Harbor exercise, the suggested next step is to define the budget and travel options.',
+                'assistant',
+                'assistant',
+              ),
+            ),
+            target,
+          ],
+        },
+      },
+    ];
+
+    expect(memoryContextAnchorRefs(request, rows).map((ref) => ref.messageId)).toEqual([
+      'target-assistant',
+    ]);
+    expect(memoryReadSources(rows, request).map((source) => source.key)).toContain(
+      'message:target-assistant',
+    );
+  });
+  it('rejects a selected assistant passage that never addresses the queried attribution', async () => {
+    const request =
+      'For the hypothetical Harbor exercise, did I earmark its project budget for public transport, or was that an Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step.';
+    const owner = message(
+      'harbor-owner',
+      'For the hypothetical Harbor exercise, my original budget is $600 and my travel constraint is no taxis.',
+      'user',
+      'owner',
+    );
+    const assistant = message(
+      'harbor-assistant',
+      'For the Harbor exercise, the suggested next step is to define the budget and travel options.',
+      'assistant',
+      'assistant',
+    );
+    const rows: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: { matches: [owner, assistant] },
+      },
+    ];
+    const object = vi.fn(async () => ({
+      ok: true,
+      object: {
+        selections: [
+          { sourceKey: 'message:harbor-owner', quote: owner.text },
+          { sourceKey: 'message:harbor-assistant', quote: assistant.text },
+        ],
+      },
+    }));
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request,
+      evidence: rows,
+    });
+    expect(result.status).not.toBe('complete');
+  });
+  it('answers explicit owner allocation without requiring the assistant to repeat it', async () => {
+    const request =
+      'For the hypothetical Harbor exercise, did I earmark its project budget for public transport, or was that an Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step.';
+    const ownerText =
+      'For the hypothetical Harbor exercise, my original budget is $600 for public transport and my travel constraint is no taxis.';
+    const assistantText =
+      'For the Harbor exercise, the suggested next step is to define the budget and travel options.';
+    const rows: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        result: {
+          matches: [
+            message('harbor-owner', ownerText, 'user', 'owner'),
+            message('harbor-assistant', assistantText, 'assistant', 'assistant'),
+          ],
+        },
+      },
+    ];
+    const object = vi.fn(async () => ({ ok: true, object: { selections: [] } }));
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request,
+      evidence: rows,
+    });
+    expect(result.status).toBe('complete');
+    expect(memoryContextAnchorRefs(request, rows)).toEqual([]);
+    const answer = renderMemoryReadAnswer(result, rows, request);
+    expect(answer).toContain('Your cited message explicitly allocates the budget that way');
+    expect(answer).not.toContain('Your cited message doesn’t use it');
+    expect(answer).toContain('#message-harbor-owner)');
+  });
+  it.each(['not taxis', 'to avoid taxi travel'])(
+    'keeps target-positive assistant advice when another choice is negated: %s',
+    async (constraint) => {
+      const request =
+        'For the hypothetical Harbor exercise, did I earmark its project budget for public transport, or was that an Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step.';
+      const rows: ActionEvidence[] = [
+        {
+          toolName: 'conversations.search',
+          status: 'succeeded',
+          result: {
+            matches: [
+              message(
+                'harbor-owner',
+                'For the hypothetical Harbor exercise, my original budget is $600 and my travel constraint is no taxis.',
+                'user',
+                'owner',
+              ),
+              message(
+                'harbor-assistant',
+                `For the Harbor exercise, I suggest public transit within the project budget, ${constraint}.`,
+                'assistant',
+                'assistant',
+              ),
+            ],
+          },
+        },
+      ];
+      const object = vi.fn(async () => ({ ok: true, object: { selections: [] } }));
+      const result = await selectMemoryReadAnswer({
+        router: { object } as never,
+        taskId: 'qa',
+        request,
+        evidence: rows,
+      });
+      expect(result.status).toBe('complete');
+      expect(renderMemoryReadAnswer(result, rows, request)).toContain(
+        'That wording appears in the assistant’s suggestion.',
+      );
+    },
+  );
+  it.each([
+    'For the hypothetical Harbor exercise, my original budget is not for public transport and my travel constraint is no taxis.',
+    'For the hypothetical Harbor exercise, my original budget is $600 for public transport, which was an Assistant inference, and my travel constraint is no taxis.',
+    'For the hypothetical Harbor exercise, was my original budget $600 for public transport and my travel constraint no taxis?',
+    'For the hypothetical Harbor exercise, my original budget is $600 and my travel constraint is to look for public transport instead of taxis.',
+    'For the hypothetical Harbor exercise, my original budget is $600 and my travel constraint is to use a route for public transport.',
+  ])(
+    'does not turn negated, reported or questioned allocation into owner intent: %s',
+    async (ownerText) => {
+      const request =
+        'For the hypothetical Harbor exercise, did I earmark its project budget for public transport, or was that an Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step.';
+      const rows: ActionEvidence[] = [
+        {
+          toolName: 'conversations.search',
+          status: 'succeeded',
+          result: {
+            matches: [
+              message('harbor-owner', ownerText, 'user', 'owner'),
+              message(
+                'harbor-assistant',
+                'For the Harbor exercise, the suggested next step is to define the budget and travel options.',
+                'assistant',
+                'assistant',
+              ),
+            ],
+          },
+        },
+      ];
+      const object = vi.fn(async () => ({ ok: true, object: { selections: [] } }));
+      const result = await selectMemoryReadAnswer({
+        router: { object } as never,
+        taskId: 'qa',
+        request,
+        evidence: rows,
+      });
+      expect(result.status).not.toBe('complete');
+      expect(renderMemoryReadAnswer(result, rows, request)).not.toContain(
+        'Your cited message explicitly allocates',
+      );
+    },
+  );
+  it.each([
+    'For the Harbor exercise, I do not suggest public transit within the project budget.',
+    'For the Harbor exercise, I suggest avoiding public transit within the project budget.',
+    'For the Harbor exercise, I suggest public transit should not be used within the project budget.',
+    'For the Harbor exercise, I suggest not only public transit within the project budget but also comparing walking routes.',
+    'For the Harbor exercise, I do not suggest avoiding public transit within the project budget.',
+  ])(
+    'does not treat negated target advice as a positive recommendation: %s',
+    async (assistantText) => {
+      const request =
+        'For the hypothetical Harbor exercise, did I earmark its project budget for public transport, or was that an Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step.';
+      const rows: ActionEvidence[] = [
+        {
+          toolName: 'conversations.search',
+          status: 'succeeded',
+          result: {
+            matches: [
+              message(
+                'harbor-owner',
+                'For the hypothetical Harbor exercise, my original budget is $600 and my travel constraint is no taxis.',
+                'user',
+                'owner',
+              ),
+              message('harbor-assistant', assistantText, 'assistant', 'assistant'),
+            ],
+          },
+        },
+      ];
+      const object = vi.fn(async () => ({ ok: true, object: { selections: [] } }));
+      const result = await selectMemoryReadAnswer({
+        router: { object } as never,
+        taskId: 'qa',
+        request,
+        evidence: rows,
+      });
+      expect(result.status).not.toBe('complete');
+    },
+  );
+  it('does not claim the owner omitted a target expressed with a validated alias', async () => {
+    const request =
+      'For the hypothetical Harbor exercise, did I earmark its project budget for public transport, or was that an Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step.';
+    const rows: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: {
+          matches: [
+            message(
+              'harbor-owner',
+              'For the hypothetical Harbor exercise, my original budget is $600 and my travel constraint is to avoid public transit.',
+              'user',
+              'owner',
+            ),
+            message(
+              'harbor-assistant',
+              'For the Harbor exercise, I suggest public transit within the project budget.',
+              'assistant',
+              'assistant',
+            ),
+          ],
+        },
+      },
+    ];
+    const object = vi.fn(async () => ({ ok: true, object: { selections: [] } }));
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'qa',
+      request,
+      evidence: rows,
+    });
+    expect(result.status).toBe('complete');
+    const answer = renderMemoryReadAnswer(result, rows, request);
+    expect(answer).toContain('avoid public transit');
+    expect(answer).not.toContain('Your cited message doesn’t use it');
+    expect(answer).not.toContain('Your cited message explicitly allocates');
+  });
+  it('does not borrow owner allocation from another context to complete an unrelated assistant pair', () => {
+    const request =
+      'For the hypothetical Harbor exercise, did I earmark its project budget for public transport, or was that an Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step.';
+    const rows: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        result: {
+          matches: [
+            message(
+              'weak-owner',
+              'For the hypothetical Harbor exercise, my original budget is $600 and my travel constraint is no taxis.',
+              'user',
+              'owner',
+            ),
+            message(
+              'weak-assistant',
+              'For the Harbor exercise, the suggested next step is to define the budget and travel options.',
+              'assistant',
+              'assistant',
+            ),
+            {
+              ...message(
+                'other-owner',
+                'For the hypothetical Harbor exercise, my original budget is $600 for public transport and my travel constraint is no taxis.',
+                'user',
+                'owner',
+              ),
+              conversationId: 'other-chat',
+            },
+            {
+              ...message(
+                'target-assistant',
+                'Project Harbor has a $600 budget. Next step: map public transit routes against the budget.',
+                'assistant',
+                'assistant',
+              ),
+              conversationId: 'target-chat',
+            },
+          ],
+        },
+      },
+    ];
+    expect(memoryContextAnchorRefs(request, rows).map((ref) => ref.messageId)).toEqual([
+      'target-assistant',
+    ]);
+  });
   it('rejects invented quotes, changed source bodies, and duplicate selections', () => {
     const originalEvidence = evidence[0];
     const firstSelection = selection.selections[0];

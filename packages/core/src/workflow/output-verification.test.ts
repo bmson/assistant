@@ -10,6 +10,84 @@ import {
 } from './output-verification.js';
 
 describe('self-reflective output verification', () => {
+  it('uses bounded reasoning review for supplied deliberation without inheriting the conversation picker', async () => {
+    const calls: Array<{ role: string; resolved?: boolean; critical: boolean }> = [];
+    const final =
+      '- Compare the two options.\n- Try a small reversible step.\n- Review the result before committing.';
+    const router = {
+      object: async (
+        role: string,
+        opts: { modelOverrideResolved?: boolean; critical: boolean },
+      ) => {
+        calls.push({ role, resolved: opts.modelOverrideResolved, critical: opts.critical });
+        return {
+          ok: true,
+          object: {
+            decision: 'revise',
+            revisedText: calls.length === 1 ? 'Compare both options.' : final,
+            reasons: ['clarity_or_format'],
+          },
+        };
+      },
+    };
+    const result = await verifyFinalOutput(router as never, {
+      taskId: 't',
+      request:
+        'Use only this scenario. A team has two prototype options. Compare them in three short bullets. No tools.',
+      draft: 'Compare the options.',
+      evidence: [],
+      critical: true,
+      reasoningReview: true,
+    });
+    expect(calls).toEqual([
+      { role: 'reason', resolved: true, critical: true },
+      { role: 'reason', resolved: true, critical: true },
+    ]);
+    expect(result.text).toBe(final);
+    expect(result.unavailable).toBe(false);
+  });
+  it.each([
+    'Rewrite this sentence politely: send the update tomorrow.',
+    'Summarize this supplied public source.',
+  ])('preserves ordinary review routing: %s', async (request) => {
+    const calls: Array<{ role: string; resolved?: boolean }> = [];
+    const router = {
+      object: async (role: string, opts: { modelOverrideResolved?: boolean }) => {
+        calls.push({ role, resolved: opts.modelOverrideResolved });
+        return { ok: true, object: { decision: 'publish', reasons: [] } };
+      },
+    };
+    const result = await verifyFinalOutput(router as never, {
+      taskId: 't',
+      request,
+      draft: 'The supplied text remains available.',
+      evidence: [],
+      critical: true,
+    });
+    expect(calls).toEqual([{ role: 'rewrite', resolved: undefined }]);
+    expect(result.text).toBe('The supplied text remains available.');
+  });
+  it('keeps the guarded candidate when reasoning review is unavailable', async () => {
+    const calls: string[] = [];
+    const router = {
+      object: async (role: string) => {
+        calls.push(role);
+        return { ok: false, decision: { mode: 'park', reason: 'budget' } };
+      },
+    };
+    const draft = 'Prefer a small reversible comparison before committing.';
+    const result = await verifyFinalOutput(router as never, {
+      taskId: 't',
+      request: 'Use only this scenario. Compare the two options.',
+      draft,
+      evidence: [],
+      critical: true,
+      reasoningReview: true,
+    });
+    expect(calls).toEqual(['reason']);
+    expect(result.text).toBe(draft);
+    expect(result.unavailable).toBe(true);
+  });
   it.each(['introduction', 'missing-section', 'truncated'] as const)(
     'preserves a detailed checked answer after a %s revision',
     async (kind) => {

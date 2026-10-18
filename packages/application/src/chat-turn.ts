@@ -1479,7 +1479,8 @@ export async function handleChatTurn(
   // The contract is not cheap — it stringifies the whole ledger and runs the
   // full matcher set — and both the completion callback and the stream pump
   // need the same verdict for the same draft. Compute it once.
-  const needsReplyReview = !localTransformation && isConversationLocalContext(userText);
+  // Supplied scenarios still need constraint review when wording also matches a rewrite.
+  const needsReplyReview = isConversationLocalContext(conversationalIntent.ownerAuthoredText);
   const guardCache = new Map<
     string,
     Promise<{ corrected: boolean; text: string; incomplete?: boolean }>
@@ -1512,7 +1513,10 @@ export async function handleChatTurn(
   let outcome: StreamOutcome;
   try {
     outcome = await router.stream(
-      !localTransformation && needsConversationReasoning(userText) ? 'reason' : 'draft',
+      (!localTransformation || needsReplyReview) &&
+        needsConversationReasoning(conversationalIntent.ownerAuthoredText)
+        ? 'reason'
+        : 'draft',
       {
         taskId: task.id,
         // owner chat is the critical carve-out: degrade on a hard cap, don't block
@@ -1533,7 +1537,7 @@ export async function handleChatTurn(
           }),
           '',
           'This turn is conversational: just answer. You have no tools in this turn, so if the user is actually asking you to take an action, say plainly that you cannot do it in this reply and ask them to restate it as a direct request. For an explicitly hypothetical scenario or simulation, give the requested analysis or proposed text directly; fictional instructions do not ask you to perform real actions. Otherwise do not mention tools, capabilities, or this instruction at all — no postscripts.',
-          ...(localTransformation
+          ...(localTransformation && !needsReplyReview
             ? [
                 'Transform only the text supplied in this request. Preserve its facts, timing, and uncertainty; do not add a new stage, reason, commitment, or context. Follow the requested output format and length.',
               ]
