@@ -436,6 +436,67 @@ describe('named saved skill use during a personal read', () => {
     expect(f.skills.findByName).not.toHaveBeenCalled();
   });
 
+  it.each([undefined, 'Community hall'])(
+    'retains a conditional preparation step for a conflict-free saved-skill briefing when advice is unavailable (location: %s)',
+    async (location) => {
+      const actionSkill = { ...skill, steps: 'End with the next useful action.' };
+      const f = await runPersonalRead('What is on my calendar today?', null, undefined, [
+        {
+          id: 'review',
+          summary: 'Design review',
+          start: '2026-10-13T09:00:00-07:00',
+          end: '2026-10-13T09:30:00-07:00',
+          ...(location ? { location } : {}),
+        },
+      ]);
+      f.state.usedSkillIds = [actionSkill.id];
+      f.state.skillRetrievalReceipts = [skillRetrievalReceipt(actionSkill)];
+      f.skills.findByName.mockResolvedValue(actionSkill);
+      f.window[0] = {
+        role: 'user',
+        content:
+          'Apply my saved skill "Calendar review" to my calendar today. Give a compact briefing.',
+      };
+      const readRequest: PersonalReadRequest = {
+        kind: 'calendar',
+        queryTerms: [],
+        requiresThreadRead: false,
+        firstToolName: 'calendar.list_events',
+        includeCalendarBriefing: true,
+        compactCalendarBriefing: true,
+        timeZone: 'America/Los_Angeles',
+        timeWindow: {
+          label: 'today',
+          timeMin: '2026-10-13T07:00:00.000Z',
+          timeMax: '2026-10-14T07:00:00.000Z',
+        },
+      };
+      const projection = verifiedReadResponse(readRequest, f.rows as never);
+      expect(projection).not.toContain('Next step:');
+      f.router.object.mockClear();
+      await stageModelFinalResponse(
+        f.deps as unknown as import('./types.js').ExecutorDeps,
+        { ...f.task, type: 'scheduled_task', conversationId: null } as never,
+        f.state,
+        f.window as never,
+        {
+          text: projection,
+          progress: 'Calendar checked.',
+          terminalStatus: 'done',
+          outcome: 'done',
+        },
+        undefined,
+        { readRequest },
+      );
+      expect(f.state.pendingFinal?.text).toContain(projection);
+      expect(f.state.pendingFinal?.text).toContain(
+        `Next step: Check whether you need to attend **Design review**, then review its source details for preparation${location ? ' and travel' : ''}.`,
+      );
+      expect(f.state.pendingFinal?.text?.match(/^Next step:/gm)).toHaveLength(1);
+      expect(f.router.object).toHaveBeenCalledOnce();
+    },
+  );
+
   it('recovers the authorized calendar brief when a saved-skill turn has no carried read request', async () => {
     const actionSkill: LearnedSkill = {
       ...skill,

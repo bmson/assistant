@@ -1960,6 +1960,25 @@ describe('tool-less conversational reply', () => {
     );
   });
 
+  it.each([false, true])(
+    'publishes one reviewed sentence identically live and durably (consume first: %s)',
+    async (completeWhenConsumed) => {
+      const draft = 'The budget is €240. The deadline is Friday and taxi travel is excluded.';
+      const repaired = 'The budget is €240, the deadline is Friday, and taxi travel is excluded.';
+      const result = await turn(
+        'For this conversation only, acknowledge in one sentence: budget €240, deadline Friday, no taxi travel.',
+        { draft, reviewedReply: repaired, completeWhenConsumed },
+      );
+      const live = await result.response.text();
+      expect(live).toContain(repaired);
+      expect(live).not.toContain(draft);
+      expect(result.completions[0]?.status).toBe('done');
+      expect(result.completions[0]?.messages[0]?.text).toBe(repaired);
+      expect(stubs.enqueueTask).not.toHaveBeenCalled();
+      expect(result.object.mock.calls.filter((call) => call[0] === 'rewrite')).toHaveLength(1);
+    },
+  );
+
   it('uses the shared owner-scoped decision projection without tools', async () => {
     const store = chatStore();
     const scripted = scriptedRouter({

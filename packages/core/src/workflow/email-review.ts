@@ -1006,7 +1006,9 @@ export function mergeEmailReviewOwnerDecisionFindings(input: {
   }
   return input.threads.flatMap((thread) => {
     const finding = findings.get(thread.threadId);
-    return finding ? [finding] : [];
+    return finding && !selfServiceReviewNotice(thread) && !selfServiceEmailNotice(thread)
+      ? [finding]
+      : [];
   });
 }
 
@@ -1098,7 +1100,10 @@ function emailReviewPromptThreadProjection(thread: EmailReviewThread) {
   return {
     ...promptThread,
     acceptedConditionalDraft: acceptedConditionalDraftForPrompt(thread),
-    responseRoute: selfServiceEmailNotice(thread) ? 'account_or_platform' : 'assess_from_source',
+    responseRoute:
+      selfServiceEmailNotice(thread) || selfServiceReviewNotice(thread)
+        ? 'account_or_platform'
+        : 'assess_from_source',
     messages: promptThread.messages.map((message) => ({
       ...message,
       promptRole:
@@ -1298,6 +1303,40 @@ function hasPossibleSourceDeadline(thread: EmailReviewThread): boolean {
   });
 }
 
+/** Explicit self-service ratings and conditional account maintenance are not email replies. */
+function selfServiceReviewNotice(thread: EmailReviewThread): boolean {
+  const affirmativeReply = (text: string) =>
+    text.replace(
+      /\b(?:do not|don't|don’t|never) reply(?:\s+to\s+(?:this|the)\s+(?:email|message))?\b/gi,
+      '',
+    );
+  const replyCue =
+    /\b(?:reply|respond)\b|\blet (?:me|us) know\b|\b(?:could|would|can|will) you\b|\bplease (?:send|share|provide|tell|confirm)\b|\b(?:e-?mail|write to)\s+(?:me|us|[\w.+-]+@)|\bcontact\s+[\w.+-]+@[\w.-]+|\bcontact\s+(?:me|us)\b[^.!?\n]{0,100}\b(?:your\s+(?:availability|schedule|choice|answer)|preferred\s+time)\b/i;
+  if (
+    thread.messages.some(
+      (message) =>
+        singleEmail(message.from) !== thread.ownerMailbox &&
+        replyCue.test(
+          affirmativeReply(
+            latestUnquotedBody({ ...thread, latestMessageId: message.messageId }) ?? '',
+          ),
+        ),
+    )
+  )
+    return false;
+  const body = (latestUnquotedBody(thread) ?? '').replace(/\s+/g, ' ');
+  return (
+    (/\brate your (?:recent )?(?:purchase|product)\b/i.test(body) &&
+      /\b(?:click (?:the )?stars|select a rating|submit review|review form|rating form)\b/i.test(
+        body,
+      )) ||
+    (/\b(?:account|contact information|contact details|domain)\b/i.test(body) &&
+      /\bif\b[^.!?]{0,100}\b(?:correct|accurate)\b[^.!?]{0,100}\b(?:don't|do not|don’t) need to (?:do anything|take (?:any )?action)\b/i.test(
+        body,
+      ))
+  );
+}
+
 /** Automated account actions do not establish an obligation to reply by email. */
 function selfServiceEmailNotice(thread: EmailReviewThread): boolean {
   const latest = thread.messages.find((message) => message.messageId === thread.latestMessageId);
@@ -1338,7 +1377,7 @@ function latestMessageNeedsReply(thread: EmailReviewThread): boolean {
     !addressList(latest.to).includes(thread.ownerMailbox)
   )
     return false;
-  if (selfServiceEmailNotice(thread)) return false;
+  if (selfServiceEmailNotice(thread) || selfServiceReviewNotice(thread)) return false;
   const currentBody = (latestUnquotedBody(thread) ?? '').replace(/\s+/g, ' ');
   if (/\bdo not reply to (?:this|the) (?:email|message)\b/i.test(currentBody)) return false;
   const imperativeAvailabilityAsk =
@@ -1579,6 +1618,7 @@ function sourceExplicitlyRequiresAlternateReplyRoute(
   whyQuote: string,
 ): boolean {
   const body = latestUnquotedBody(thread) ?? '';
+  if (selfServiceReviewNotice(thread)) return true;
   if (/\bdo not reply to (?:this|the) (?:email|message)\b/i.test(body)) return true;
   if (!sourceRsvpRoute(thread) || sourceAllowsEmailRsvp(thread)) return false;
   return body.split(/(?<=[.!?])\s+/).some((sentence) => {
@@ -2262,6 +2302,8 @@ async function generateValidatedEmailReviewBatch(
         ? parsed.data.items.flatMap((item) => {
             const thread = pendingThreads.find((candidate) => candidate.threadId === item.threadId);
             return thread &&
+              !selfServiceReviewNotice(thread) &&
+              !selfServiceEmailNotice(thread) &&
               item.disposition === 'draft' &&
               item.draftBody &&
               draftRequiresOwnerDecision(thread, item.draftBody)

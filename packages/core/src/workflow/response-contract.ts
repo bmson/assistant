@@ -3431,9 +3431,11 @@ export function groundReadDraft(
     .replace(/[*_`#]/g, ' ');
   const draftWords = groundingWords(prose);
   if (hasVerifiedPrefix) {
+    // The canonical briefing's own preparation step uses these connectors
+    // and travel advice; named facts, clocks and action claims stay checked.
     const adviceWords = new Set(
       groundingWords(
-        'next step consider confirm check review prepare preparation preparing decide prioritize prioritise keep use before if whether for allow plan take bring make need needs necessary attend attendance involvement details sources links source dates times date time coverage calendars unavailable confirm confirmation checking reviewing preparing planning clarify verify avoid resolve conflicts overlapping relevant yourself which who can could should would may might must does do did be being been it they them these those that this their theirs we us our own only both each any more less some rather instead personal priorities priority practical required requirements materials notes organizer organiser agenda',
+        'next step consider confirm check review prepare preparation preparing decide prioritize prioritise keep use before if whether for allow plan take bring make need needs necessary attend attendance involvement details sources links source dates times date time coverage calendars unavailable confirm confirmation checking reviewing preparing planning clarify verify avoid resolve conflicts overlapping relevant yourself which who can could should would may might must does do did be being been it its they them these those that this their theirs we us our own only both each any more less some rather instead then travel personal priorities priority practical required requirements materials notes organizer organiser agenda',
       ),
     );
     if (draftWords.some((word) => !vocabulary.has(word) && !adviceWords.has(word)))
