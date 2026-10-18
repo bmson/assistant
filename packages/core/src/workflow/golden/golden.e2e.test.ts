@@ -354,6 +354,17 @@ describe('golden tasks', () => {
       throw new Error('Exact owner prompt did not enter the compound-trip read path');
     const departure = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     const departureDay = departure.toISOString().slice(0, 10);
+    // Seven days ahead can cross Berlin's seasonal clock change. The calendar
+    // fixture must describe the same local departure as the booking evidence.
+    const departureOffset = new Intl.DateTimeFormat('en', {
+      timeZone: 'Europe/Berlin',
+      timeZoneName: 'longOffset',
+    })
+      .formatToParts(new Date(`${departureDay}T12:00:00Z`))
+      .find((part) => part.type === 'timeZoneName')
+      ?.value.replace('GMT', '');
+    if (!departureOffset || !/^[+-]\d{2}:\d{2}$/.test(departureOffset))
+      throw new Error('Missing Berlin calendar fixture offset');
     const checkout = new Date(departure.getTime() + 2 * 24 * 60 * 60 * 1000)
       .toISOString()
       .slice(0, 10);
@@ -488,7 +499,7 @@ describe('golden tasks', () => {
                   summary: 'Outbound flight LH 777 to Berlin',
                   description: 'Arrival airport: BER. Booking reference: FLIGHT-728',
                   location: 'Berlin Brandenburg Airport',
-                  start: `${departureDay}T10:10:00+02:00`,
+                  start: `${departureDay}T10:10:00${departureOffset}`,
                   timeZone: 'Europe/Berlin',
                   status: 'confirmed',
                   links: [
