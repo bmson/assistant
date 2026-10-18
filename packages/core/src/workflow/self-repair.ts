@@ -18,6 +18,7 @@ import {
 } from '../model-router/provider.js';
 import type { ModelRouter, ObjectOutcome } from '../model-router/router.js';
 import { ModelFallbackAttemptError } from '../model-router/router.js';
+import { isConversationLocalContext } from './conversation-local-context.js';
 import { RepairDispatchRejected, type RepairWorker, repairBranch } from './repair-github.js';
 
 export function isRepairFeedback(text: string): boolean {
@@ -29,8 +30,9 @@ export function isRepairFeedback(text: string): boolean {
     .replace(/^\s*>.*$/gm, ' ')
     .replace(/`[^`\n]*`|"[^"\n]*"|“[^”\n]*”/g, ' ')
     .replace(/[’‘]/g, "'");
+  if (isConversationLocalContext(ownerText)) return false;
   if (
-    /\b(?:don't|do not|never|no need to)\s+(?:(?:file|open|create) (?:an? |any |this )?(?:bug|issue|report|PR|pull request)|report (?:it|this|that|a bug|an issue)|investigate (?:it|this|that|(?:the )?(?:code|codebase|repository|app|bug|issue)))\b/i.test(
+    /\b(?:don't|do not|never|no need to)\s+(?:(?:file|open|create) (?:an? |any |this )?(?:bug|issue|report|PR|pull request)|report (?:it|this|that|a bug|an issue)|investigate(?:\s+(?:it|this|that|(?:the )?(?:code|codebase|repository|app|bug|issue)))?|(?:create|queue|start|run|schedule)\s+(?:(?:an?|any|real|new|actual|background)\s+){0,3}(?:tasks?|investigations?))\b/i.test(
       ownerText,
     )
   )

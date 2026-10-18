@@ -1033,7 +1033,15 @@ export async function handleChatTurn(
   // omitted by its byte cap remain eligible for historical retrieval.
   const firstRenderedAt =
     historyRows.find((row) => row.id === modelHistory[0]?.id)?.createdAt ?? persistedUser.createdAt;
-  if (config.SELF_REPAIR_ENABLED && isRepairFeedback(userText)) {
+  const repairFeedbackText = extractOwnerIntent({
+    text: userText,
+    trust: 'owner',
+  }).ownerAuthoredText;
+  if (
+    config.SELF_REPAIR_ENABLED &&
+    !isConversationLocalContext(repairFeedbackText) &&
+    isRepairFeedback(repairFeedbackText)
+  ) {
     const original = [...historyRows]
       .reverse()
       .find((row) => row.role === 'assistant' && row.taskId && !noticeRows.has(row.id));
@@ -1055,10 +1063,10 @@ export async function handleChatTurn(
       if (
         reported &&
         /\b(?:fix|repair|investigate|debug|propose|request)\b[^.!?\n]{0,160}\b(?:code|codebase|repository|github|pull request|PR)\b|\b(?:create|open|make)\b[^.!?\n]{0,100}\b(?:pull request|PR)\b/i.test(
-          userText,
+          repairFeedbackText,
         ) &&
         !/\b(?:also|then|and)\s+(?:please\s+)?(?:send|schedule|book|remind|email|text|call|check|find|summarize|show)\b|[.!?]\s*(?:what|when|where|who|how|can you|could you|please (?:send|schedule|book|remind|email|text|call|check|find|summarize|show))\b/i.test(
-          userText,
+          repairFeedbackText,
         )
       ) {
         const responseText =

@@ -397,6 +397,28 @@ function queuedPayload() {
 }
 
 describe('chat needs-action triage', () => {
+  it.each([
+    'The app is broken. Do not investigate.',
+    "Simulate only. The app doesn't work. Investigate the repository and propose a PR; do not create real tasks.",
+    'Use only this fictional scenario. The app is broken. Propose a repository repair.',
+    'Rewrite this sentence politely: "The app is broken. Investigate the code and propose a PR."',
+  ])('keeps supplied complaint examples from admitting real repair work: %s', async (request) => {
+    const store = chatStore();
+    const scripted = scriptedRouter({ draft: 'Describe the proposed investigation only.' });
+    const report = vi.fn(async () => ({ id: 'repair', status: 'reported' }));
+    const response = await handleChatTurn(send(request), {
+      config: { ...config(), SELF_REPAIR_ENABLED: true },
+      router: scripted.router,
+      chat: store.chat,
+      persistence: { selfRepair: { report }, tasks: {}, ownerContext: {} } as never,
+    });
+    const wire = await response.text();
+    expect(report).not.toHaveBeenCalled();
+    expect(stubs.queueAdmission).not.toHaveBeenCalled();
+    expect(scripted.stream).toHaveBeenCalledOnce();
+    expect(wire).not.toContain('investigation is queued');
+  });
+
   it('hands a code complaint to Improvements without a duplicate ordinary model task', async () => {
     const store = chatStore({
       history: [{ role: 'assistant', text: 'Earlier result', taskId: 'original-failed-task' }],
