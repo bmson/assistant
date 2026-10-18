@@ -45,6 +45,19 @@ export interface KnowledgeMapEdgeRecord {
   assertionContext?: KnowledgeMapAssertionContext | null;
 }
 
+/** Pure display compatibility for quoted projections predating canonical assertions. */
+export interface KnowledgeMapLegacyDisplayPolicy {
+  readonly minimumExtractionVersion: number;
+  /** Domain validation, after the adapter has checked source/owner/vector/privacy eligibility. */
+  isGrounded(input: {
+    sourceContent: string;
+    subjectLabel: string;
+    predicate: string;
+    objectLabel: string;
+    evidenceQuote: string;
+  }): boolean;
+}
+
 export interface KnowledgeMapEdgeFilter {
   query: string;
   kind: string;

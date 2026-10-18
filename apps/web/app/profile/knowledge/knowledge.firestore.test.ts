@@ -209,6 +209,7 @@ describe.skipIf(!localEmulator)('Firestore knowledge workspace with PostgreSQL o
       objectEntityId,
       sourceMemoryId,
       predicate: 'lives_in',
+      assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
       confidence: '0.90',
       reviewStatus: 'unreviewed',
       reviewedAt: null,

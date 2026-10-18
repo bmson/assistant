@@ -1,9 +1,13 @@
 import type { MemoryHealth } from '@assistant/core/memory/health';
-import { GRAPH_EXTRACTION_VERSION } from '@assistant/core/memory/knowledge-graph';
+import {
+  GRAPH_EXTRACTION_VERSION,
+  graphRelationshipIsGrounded,
+} from '@assistant/core/memory/knowledge-graph';
 import type {
   KnowledgeAssertionEndpointView,
   KnowledgeCleanupSource,
   KnowledgeMapEdgeRecord,
+  KnowledgeMapLegacyDisplayPolicy,
   KnowledgeWorkspaceReadRepository,
 } from '@assistant/persistence';
 import { knowledgeAssertionEndpointView } from '@assistant/persistence';
@@ -102,9 +106,9 @@ export interface KnowledgeSourceImpact {
   content: string;
   /** Legacy total of all stored projections removed with this source. */
   connectionCount: number;
-  /** Connections currently visible on the map and eligible for graph recall. */
+  /** Connections eligible for current graph recall; legacy display alone does not qualify. */
   activeConnectionCount: number;
-  /** Retired, rejected, or stale derived rows that are cleared alongside the source. */
+  /** Older or non-recallable derived rows that are cleared alongside the source. */
   retiredProjectionCount: number;
   orphanedItems: Array<{ id: string; label: string }>;
 }
@@ -133,6 +137,20 @@ const MAP_VISIBLE_EDGE_LIMIT = 1000;
  */
 export const NEIGHBORHOOD_DEFAULT_LIMIT = 150;
 export const NEIGHBORHOOD_MAX_LIMIT = 250;
+
+/** Read old quoted claims without upgrading their extraction or recall eligibility. */
+export function legacyKnowledgeMapDisplayPolicy(): KnowledgeMapLegacyDisplayPolicy {
+  return {
+    minimumExtractionVersion: 2,
+    isGrounded: (claim) =>
+      graphRelationshipIsGrounded(claim.sourceContent, {
+        subject: { label: claim.subjectLabel },
+        predicate: claim.predicate,
+        object: { label: claim.objectLabel },
+        evidenceQuote: claim.evidenceQuote,
+      }),
+  };
+}
 
 export function knowledgeMapFilters(input: KnowledgeMapInput): KnowledgeMapSnapshot['filters'] {
   return {
