@@ -65,6 +65,7 @@
     "./workflow/live-lookup": "./src/workflow/live-lookup.ts",
     "./workflow/machine": "./src/workflow/machine.ts",
     "./workflow/read-intent": "./src/workflow/read-intent.ts",
+    "./workflow/output-verification": "./src/workflow/output-verification.ts",
     "./workflow/request-checklist-schema": "./src/workflow/request-checklist-schema.ts",
     "./workflow/request-checklist": "./src/workflow/request-checklist.ts",
     "./workflow/checklist-correction-resume": "./src/workflow/checklist-correction-resume.ts",

@@ -4694,12 +4694,19 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
   const lines = [view.summary];
   const groups = view.groups.filter((group) => group.legs.length);
   if (view.summary.startsWith('No later trip verified.')) {
+    const allClocksHaveUnknownZones = groups
+      .flatMap((group) => group.legs)
+      .every((leg) => !leg.departureTimeZone);
+    if (groups.length && allClocksHaveUnknownZones)
+      lines.push(
+        'Departure clocks below are as booked; all time zones remain unverified. Connection durations are source-stated.',
+      );
     for (const group of groups) {
       const first = group.legs[0];
       const last = group.legs.at(-1);
       if (first && last)
         lines.push(
-          `- Checked booking: ${group.legs.map((leg) => cell(leg.originAirport ?? 'origin unverified')).join('→')}→${cell(last.destinationAirport ?? 'destination unverified')}, ${first.departureDate}–${last.arrivalDate ?? last.departureDate}. Departures: ${group.legs.map((leg) => `${cell(leg.flightNumber)} ${leg.departureDate} ${cell(leg.departureTime)} (${cell(leg.departureTimeZone ?? 'time zone unverified')})${leg.sourceStatedLayover ? `; connection ${cell(leg.sourceStatedLayover)}` : ''}`).join('; ')}.${links.get(first.threadId) ? ` [Booking](${links.get(first.threadId)})` : ''}`,
+          `**Checked booking: ${group.legs.map((leg) => cell(leg.originAirport ?? 'origin unverified')).join('→')}→${cell(last.destinationAirport ?? 'destination unverified')}**, ${first.departureDate}–${last.arrivalDate ?? last.departureDate}.${links.get(first.threadId) ? ` [Booking](${links.get(first.threadId)})` : ''}\n${group.legs.map((leg) => `- ${cell(leg.flightNumber)} — ${leg.departureDate} ${cell(leg.departureTime)}${allClocksHaveUnknownZones ? '' : ` (${cell(leg.departureTimeZone ?? 'time zone unverified')})`}${leg.sourceStatedLayover ? `; source-stated connection ${cell(leg.sourceStatedLayover)}` : ''}.`).join('\n')}`,
         );
     }
   } else if (groups.length) {
@@ -4842,7 +4849,12 @@ export function renderCompoundTripReadResponse(projection: CompoundTripReadProje
       unknowns.add('Transfer fares/times or endpoint-matched source coverage remain incomplete.');
     else unknowns.add(gap);
   }
-  if (unknowns.size) lines.push(`Unverified: ${[...unknowns].join(' ')}`);
+  if (unknowns.size)
+    lines.push(
+      unknowns.size > 2
+        ? `Unverified:\n${[...unknowns].map((gap) => `- ${gap}`).join('\n')}`
+        : `Unverified: ${[...unknowns].join(' ')}`,
+    );
   if (!projection.flight && projection.blocked)
     lines.push(
       'Next: confirm which later flight and hotel booking to investigate. A destination and linked stay are needed for a useful public transport/taxi comparison.',

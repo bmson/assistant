@@ -206,10 +206,10 @@ describe('executor email review composition', () => {
       script: [{ text: 'The review is ready.' }],
       objects: [
         { role: 'reason', value: { threadIds: rankedIds } },
-        { role: 'draft', value: initialAssessment },
-        { role: 'draft', value: reserveAssessment },
-        { role: 'draft', value: failedAssessmentRepair },
-        { role: 'draft', value: replacementAssessment },
+        { role: 'reason', value: initialAssessment },
+        { role: 'reason', value: reserveAssessment },
+        { role: 'reason', value: failedAssessmentRepair },
+        { role: 'reason', value: replacementAssessment },
       ],
       tools: {
         'gmail.search': {
@@ -269,7 +269,7 @@ describe('executor email review composition', () => {
 
     expect(readIds).toEqual(rankedIds.slice(0, 9));
     expect(result.objectRoles[0]).toBe('reason');
-    expect(result.objectRoles.filter((role) => role === 'draft')).toHaveLength(4);
+    expect(result.objectRoles).toEqual(Array(5).fill('reason'));
     expect(result.toolNames).toContain('gmail.read_thread');
     expect(result.toolNames).not.toContain('gmail.send');
     expect(result.finalText).toContain(
@@ -279,7 +279,7 @@ describe('executor email review composition', () => {
     expect(result.finalText.match(/\*\*Draft:\*\*/g)).toHaveLength(5);
     expect(result.finalText).toContain('3 assessed threads did not clearly require a response');
     expect(result.finalText).toContain(
-      '1 selected thread could not be assessed reliably within the bounded checks',
+      '1 selected thread could not be fully assessed within the bounded checks',
     );
     expect(result.finalText).not.toContain('I can confirm that this works for me.');
     expect(result.finalText).not.toMatch(/\[(?:Choose|Add|Select)/i);
@@ -327,10 +327,10 @@ describe('executor email review composition', () => {
       script: [{ text: 'The review is ready.' }],
       objects: [
         { role: 'reason', value: { threadIds: rankedIds } },
-        { role: 'draft', value: initialAssessment },
-        { role: 'draft', value: { items: [] } },
-        { role: 'draft', value: { items: [availabilityDraft] } },
-        { role: 'draft', value: { items: [] } },
+        { role: 'reason', value: initialAssessment },
+        { role: 'reason', value: { items: [] } },
+        { role: 'reason', value: { items: [availabilityDraft] } },
+        { role: 'reason', value: { items: [] } },
       ],
       tools: {
         'gmail.search': {
@@ -396,7 +396,7 @@ describe('executor email review composition', () => {
     expect(readIds).toContain(availabilityId);
     expect(result.toolNames).not.toContain('gmail.send');
     expect(result.finalText).toContain('Could you share the time windows you have in mind?');
-    expect(result.finalText).toContain('could not be assessed reliably');
+    expect(result.finalText).toContain('could not be fully assessed');
     expect(result.status).toBe('needs_attention');
     expect(state.plannerState.emailReviewGeneration).toMatchObject({
       assessmentPasses: 2,
@@ -612,7 +612,7 @@ describe('executor email review composition', () => {
       script: [{ text: 'The review is ready.' }],
       objects: [
         { role: 'reason', value: { threadIds: rankedIds } },
-        { role: 'draft', value: { items: initialIds.map((id) => answerItem(id, 'draft')) } },
+        { role: 'reason', value: { items: initialIds.map((id) => answerItem(id, 'draft')) } },
       ],
       tools: {
         'gmail.search': {
@@ -665,7 +665,7 @@ describe('executor email review composition', () => {
     expect(result.toolNames).toContain('gmail.read_thread');
     expect(result.toolNames).not.toContain('gmail.send');
     expect(result.finalText.match(/\*\*Draft:\*\*/g)).toHaveLength(5);
-    expect(result.finalText).toContain('Reviewed 5 of 5 selected threads');
+    expect(result.finalText).toContain('Read 5 of 5 selected threads');
     expect(result.finalText).not.toContain('context did not fit');
     expect(result.status).toBe('done');
     expect(TaskStateSchema.parse(task?.state).plannerState.emailReviewGeneration).toMatchObject({

@@ -142,6 +142,7 @@ export interface EmailReviewCoverage {
   metadataFallback?: boolean;
   searchMailboxMismatch?: boolean;
   unassessedCompleteThreads?: number;
+  unassessedThreads?: Array<{ threadId: string; subject: string }>;
   ownerDecisionRequiredThreads?: Array<{
     threadId: string;
     subject: string;
@@ -1585,6 +1586,11 @@ export function emailReviewOwnerDecisionSummary(thread: EmailReviewThread) {
   };
 }
 
+/** A scheduling form needs the owner's actual times; another wording pass cannot supply them. */
+export function emailReviewNeedsOwnerAvailability(thread: EmailReviewThread): boolean {
+  return Boolean(emailReviewOwnerDecisionSummary(thread).actionUrl);
+}
+
 function draftRequiresOwnerDecision(thread: EmailReviewThread, draft: string): boolean {
   const internalDecisionScaffolding =
     /\bowner decision required\b|\bif clarification is needed\b|\badd your (?:answer|availability|choice|decision)\b|\b(?:choose|select|decide)\b[^.!?\n]{0,120}\b(?:before sending|before i send|to send)\b/i;
@@ -2050,7 +2056,13 @@ export async function generateValidatedEmailReview(
     if (attempts >= maxCalls) break;
     const pending = state.threads.filter((thread) => {
       const prior = state.accepted.get(thread.threadId)?.validated;
-      return !prior || prior.deadlineNeedsReview;
+      return (
+        (!prior || prior.deadlineNeedsReview) &&
+        !(
+          state.ownerDecisionThreadIds.has(thread.threadId) &&
+          emailReviewNeedsOwnerAvailability(thread)
+        )
+      );
     });
     if (pending.length === 0) continue;
     const result = await generateValidatedEmailReviewBatch(
@@ -2403,7 +2415,7 @@ export function formatEmailReviewAnswer(
     ? `a bounded newest-first inbox scan${scope.startAt && scope.endAt ? ' within the requested time window' : ''}`
     : `a bounded ${scope?.windowDays ?? 7}-${reviewRange} mail scan`;
   const lines = [
-    `Reviewed ${reviewedThreads} of ${coverage.selectedThreads} selected threads from ${scanDescription}; assessed ${assessedThreads} of ${coverage.completeThreads} complete, eligible threads; prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'}${scope?.requestedCount ? ` (you asked for ${scope.requestedCount})` : ''}.`,
+    `Read ${coverage.completeThreads + coverage.alreadyAnsweredThreads + coverage.notEligibleThreads} of ${coverage.selectedThreads} selected threads from ${scanDescription}; assessed ${assessedThreads} of ${coverage.completeThreads} complete, eligible threads; prepared ${drafts.length} reply ${drafts.length === 1 ? 'draft' : 'drafts'}${scope?.requestedCount ? ` (you asked for ${scope.requestedCount})` : ''}.`,
   ];
   if (drafts.length > 0)
     lines.push(
@@ -2495,8 +2507,25 @@ export function formatEmailReviewAnswer(
     );
   if (coverage.unassessedCompleteThreads && coverage.unassessedCompleteThreads > 0)
     coverageNotes.push(
-      `${coverage.unassessedCompleteThreads} selected ${coverage.unassessedCompleteThreads === 1 ? 'thread could' : 'threads could'} not be assessed reliably within the bounded checks; no draft was prepared for the unassessed ${coverage.unassessedCompleteThreads === 1 ? 'thread listed above' : 'threads listed above'}`,
+      `${coverage.unassessedCompleteThreads} selected ${coverage.unassessedCompleteThreads === 1 ? 'thread could' : 'threads could'} not be fully assessed within the bounded checks${coverage.ownerDecisionRequiredThreads?.length ? `; ${coverage.ownerDecisionRequiredThreads.length} ${coverage.ownerDecisionRequiredThreads.length === 1 ? 'needs' : 'need'} your answer, as shown above` : ''}; no recipient-ready draft was prepared for these threads`,
     );
+  if (coverage.unassessedThreads?.length) {
+    lines.push(`**Assessment unfinished (${coverage.unassessedThreads.length})**`);
+    lines.push(
+      'These threads were read but their response obligations could not be verified. Check the source before deciding whether to respond.',
+    );
+    for (const item of coverage.unassessedThreads) {
+      const subject = item.subject
+        .replace(/[\r\n]+/g, ' ')
+        .slice(0, 160)
+        .replace(/[\\`*_{}[\]()<>#+\-=|!]/g, '\\$&');
+      lines.push(`**${subject}**`);
+      if (/^[A-Za-z0-9_-]{3,128}$/.test(item.threadId))
+        lines.push(
+          `[Open the source thread](https://mail.google.com/mail/u/0/#all/${item.threadId})`,
+        );
+    }
+  }
   if (coverage.ownerDecisionRequiredThreads?.length) {
     lines.push(
       `**Reply drafts not ready (${coverage.ownerDecisionRequiredThreads.length})**`,

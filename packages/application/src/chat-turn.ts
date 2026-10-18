@@ -82,6 +82,7 @@ import {
   isTaskProgressQuestion,
   looksLikeActionRequest,
 } from './chat-triage.js';
+import { reviewConversationReply } from './conversation-reply-review.js';
 import { readBoundedJson } from './http-body.js';
 import { taskActivityComposerChecklistCancellationPolicy } from './tasks/commands.js';
 
@@ -1478,15 +1479,27 @@ export async function handleChatTurn(
   // The contract is not cheap — it stringifies the whole ledger and runs the
   // full matcher set — and both the completion callback and the stream pump
   // need the same verdict for the same draft. Compute it once.
-  const guardCache = new Map<string, { corrected: boolean; text: string }>();
+  const needsReplyReview = !localTransformation && isConversationLocalContext(userText);
+  const guardCache = new Map<string, Promise<{ corrected: boolean; text: string }>>();
   const guardOnce = (draft: string) => {
     const cached = guardCache.get(draft);
     if (cached) return cached;
-    const result = guardDraft(draft, toolEvidence, {
-      readRequest,
-      urlCorpus,
-      requestText: userText,
-    });
+    const guard = (text: string) =>
+      guardDraft(text, toolEvidence, {
+        readRequest,
+        urlCorpus,
+        requestText: userText,
+      });
+    const result = needsReplyReview
+      ? reviewConversationReply({
+          router,
+          taskId: task.id,
+          request: userText,
+          draft,
+          context: modelHistory.slice(0, -1),
+          guard,
+        })
+      : Promise.resolve(guard(draft));
     guardCache.set(draft, result);
     return result;
   };
@@ -1539,7 +1552,7 @@ export async function handleChatTurn(
             });
             return;
           }
-          const guarded = guardOnce(stripped.text);
+          const guarded = await guardOnce(stripped.text);
           if (guarded.corrected) {
             console.warn('tool-less chat draft claimed unperformed work', {
               taskId: task.id,
@@ -1554,7 +1567,7 @@ export async function handleChatTurn(
             responseText: guarded.text,
             recall: recallSources,
             privacyObservationGeneration,
-            cues: guarded.corrected ? undefined : stripped.cues,
+            cues: guarded.corrected || needsReplyReview ? undefined : stripped.cues,
             offCourse: guarded.corrected,
           });
           if (!completed) throw new Error('Chat completion was fenced before publication');
@@ -1618,6 +1631,25 @@ export async function handleChatTurn(
       // re-emits them as data-* parts, so the face reacts mid-stream while the
       // streamed text stays byte-identical to what onComplete persists.
       const parts = okOutcome.toUIMessageStream({ sendFinish: false });
+      if (needsReplyReview) {
+        // Consume the draft to completion without exposing unreviewed fragments.
+        // The completion callback and this pump await the same cached review.
+        for await (const _part of parts as unknown as AsyncIterable<StreamChunk>) {
+          /* drain */
+        }
+        const guarded = await guardOnce(stripCueTags(await okOutcome.text).text);
+        writer.write({
+          type: 'start',
+          messageMetadata: { channelMessageId: `chat-reply:${task.id}` },
+        });
+        writer.write({ type: 'text-start', id: 'reviewed-reply' });
+        writer.write({ type: 'text-delta', id: 'reviewed-reply', delta: guarded.text });
+        writer.write({ type: 'text-end', id: 'reviewed-reply' });
+        if (guarded.corrected)
+          writer.write({ type: 'data-off-course', data: { text: guarded.text } });
+        writer.write({ type: 'finish', finishReason: 'stop' });
+        return;
+      }
       await pumpWithCues(
         parts as unknown as AsyncIterable<StreamChunk>,
         (chunk) =>
@@ -1628,7 +1660,7 @@ export async function handleChatTurn(
           ),
         createCueScanner(),
       );
-      const guarded = guardOnce(stripCueTags(await okOutcome.text).text);
+      const guarded = await guardOnce(stripCueTags(await okOutcome.text).text);
       if (guarded.corrected) {
         writer.write({ type: 'data-off-course', data: { text: guarded.text } });
       }
