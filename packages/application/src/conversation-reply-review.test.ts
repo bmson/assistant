@@ -21,6 +21,8 @@ describe('reviewed conversation replies', () => {
   it.each([
     '**Handling steps:**\u202f1) Cancel the queued check.\u202f2) Verify whether the running worker stopped.',
     'Options: - **Local:** prepare a draft. - **Remote:** wait for the missing decision.',
+    'Signals: • Check the supplied churn data. • Ask for evidence of demand.',
+    '**Choice**: Compare the evidence. \u202f--- **Signals**: • Check the supplied churn data. • Ask for evidence of demand. \u202f--- **First step**: Prepare a reversible comparison.',
   ])('separates inline list items while preserving every non-whitespace character: %s', (draft) => {
     const formatted = separateInlineReplyItems(draft);
     expect(formatted).toContain('\n\n');
@@ -36,9 +38,44 @@ describe('reviewed conversation replies', () => {
     '````text\n```\n1) This is literal code. 2) Still inside the longer fence.\n````',
     '    1) Indented code. 2) Still code.',
     '> 1) Quoted source. 2) Still quoted.',
+    'The expression is alpha • beta • gamma.',
+    'Use a • b • c to label the examples.',
+    'One isolated bullet: • Keep this as supplied.',
+    'Words --- **Label**: a single ambiguous dash separator.',
+    'Use `• A. • B.` literally.',
+    '> • Quoted first item. • Quoted second item.',
   ])('preserves code, decimals and ambiguous numbering: %s', (draft) => {
     expect(separateInlineReplyItems(draft)).toBe(draft);
   });
+
+  it.each(['', ' in one paragraph', ' without line breaks'])(
+    'formats collapsed scenario sections only when the owner permits it: %s',
+    async (layout) => {
+      const object = vi.fn().mockResolvedValue({
+        ok: true,
+        object: { decision: 'publish', reasons: [], checks: passingReasoningChecks },
+      });
+      const draft =
+        '**Choice**: Compare the evidence. --- **Signals**: • Check supplied churn data. • Ask for demand evidence. --- **First step**: Prepare a reversible comparison.';
+      const result = await reviewConversationReply({
+        router: { object } as unknown as Pick<ModelRouter, 'object'>,
+        taskId: 'task',
+        request: `Use only this fictional scenario. Compare the choices${layout} under 80 words.`,
+        draft,
+        context: [],
+        guard: (text) => ({ corrected: false, text }),
+      });
+      if (layout) expect(result.text).toBe(draft);
+      else {
+        expect(result.text).toContain('\n\n---\n\n**Signals**:');
+        expect(result.text).toContain('\n\n• Check supplied churn data.\n\n• Ask');
+      }
+      expect(result.text.replace(/\s/g, '')).toBe(draft.replace(/\s/g, ''));
+      expect(replyWordCount(result.text)).toBe(replyWordCount(draft));
+      expect(result.incomplete).not.toBe(true);
+      expect(object).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each([
     'in one paragraph',
