@@ -6,9 +6,13 @@ set -euo pipefail
 : "${BACKUP_WORKSPACE_ID:?BACKUP_WORKSPACE_ID is required}"
 : "${BACKUP_RELEASE:?BACKUP_RELEASE is required}"
 
-source /usr/local/bin/database-admin.sh
+# shellcheck source=infra/docker/database-admin.sh
+source "$(dirname "${BASH_SOURCE[0]}")/database-admin.sh"
 
-backup_file="/tmp/assistant-${BACKUP_RELEASE}.dump"
+umask 077
+backup_directory="$(mktemp -d)"
+trap 'rm -rf "$backup_directory"' EXIT
+backup_file="${backup_directory}/assistant.dump"
 object_name="workspace/${BACKUP_WORKSPACE_ID}/backups/pre-migration/${BACKUP_RELEASE}.dump"
 encoded_object="${object_name//\//%2F}"
 
@@ -25,12 +29,15 @@ token="$(
 )"
 [ -n "$token" ] || { echo "Could not obtain a Google access token" >&2; exit 1; }
 
+# A repeated release must not replace its original pre-migration recovery point
+# with a dump taken after that release's migrations. The storage precondition is
+# atomic, so concurrent jobs cannot both create this release's object either.
 curl --fail --silent --show-error \
   -X POST \
   -H "Authorization: Bearer ${token}" \
   -H 'Content-Type: application/octet-stream' \
   --data-binary "@${backup_file}" \
-  "https://storage.googleapis.com/upload/storage/v1/b/${BACKUP_BUCKET}/o?uploadType=media&name=${encoded_object}" \
+  "https://storage.googleapis.com/upload/storage/v1/b/${BACKUP_BUCKET}/o?uploadType=media&name=${encoded_object}&ifGenerationMatch=0" \
   >/dev/null
 
 sha256sum "$backup_file"

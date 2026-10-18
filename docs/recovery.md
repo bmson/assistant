@@ -15,6 +15,12 @@ gs://WORKSPACE_BUCKET/workspace/WORKSPACE_ID/backups/pre-migration/RELEASE_SHA.d
 The backup job uses PostgreSQL 17 tooling, the agent's existing database secret, and object-only
 workspace access. Serving containers never receive backup tooling.
 
+Each release's backup object is create-only. Repeating a release whose backup already exists
+fails the backup gate with HTTP 412 before migration, preserving the original recovery point.
+Keep that object; do not delete it to make a retry pass. Inspect the earlier release and migration
+outcome before choosing a new release or the existing schema-unchanged release path. Temporary
+local dumps have owner-only permissions and are removed when the backup process exits.
+
 ## PostgreSQL restore rehearsal
 
 The opt-in local restore profile is deliberately inert. It requires `QUEUE_DRIVER=inert`, a

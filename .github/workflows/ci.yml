@@ -61,6 +61,7 @@ jobs:
           bash infra/gcp/release-diagnostics.test.sh
           bash infra/gcp/release.test.sh
           bash infra/docker/database-admin.test.sh
+          bash infra/docker/backup.test.sh
       # The Firestore runtime and release path must stay free of the retired
       # PostgreSQL database; PostgreSQL-only files are listed, not counted.
       - name: Check the Firestore path has no database dependency
