@@ -35,6 +35,11 @@ export interface RepairDetails {
   targetPaths?: string[];
   reproduction?: string;
   acceptance?: string;
+  repositoryEvidence?: {
+    source: 'github_mcp' | 'unavailable';
+    connectionId?: string;
+    files: Array<{ path: string; excerpt: string }>;
+  };
   branch?: string;
   runId?: number;
   runUrl?: string;
@@ -49,6 +54,14 @@ export interface RepairDetails {
   hostedCommitSha?: string;
   hostedPublishedAt?: string;
   hostedCleanupPending?: boolean;
+  /** Independent model review is bound to the exact published commit. */
+  hostedReview?: {
+    commitSha: string;
+    approved: boolean;
+    modelId: string;
+    summary: string;
+    reviewedAt: string;
+  };
   monitoringAt?: string;
   lastError?: string;
   outcome?: RepairOutcome;
