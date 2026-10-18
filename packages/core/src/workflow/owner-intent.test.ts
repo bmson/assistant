@@ -13,6 +13,8 @@ import {
 
 describe('owner intent provenance', () => {
   it.each([
+    'No tools. Explain what is on my calendar.',
+    'Without tools, explain what is on my calendar.',
     'Simulate a background check only; do not use tools or notify anyone. A fictional assistant already reported that two venue quotes are unchanged and is waiting for the owner to choose. No new source information, deadline, risk, or owner reply has arrived. Should it interrupt again? State the decision and the event that would justify another update in at most 80 words.',
     'Do not use any tools. Explain whether the supplied fictional email needs a reply.',
     'Simulate an ongoing assistant session; do not create real tasks, read accounts, or send anything. Responsibility: help prepare a fictional offsite. What useful work should you prepare now?',
@@ -38,8 +40,11 @@ describe('owner intent provenance', () => {
     const text = 'Simulate a planning example, then check my actual calendar for tomorrow.';
     expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).toContain('private_read');
   });
-  it('does not let quoted no-tool text cancel a separate owner source request', () => {
-    const text = 'Read my calendar tomorrow and summarize this note: “Do not use tools.”';
+  it.each([
+    'Read my calendar tomorrow and summarize this note: “Do not use tools.”',
+    'Read my calendar tomorrow and summarize this note: “No tools.”',
+    'Read my calendar tomorrow and summarize this note: "Without tools."',
+  ])('does not let quoted no-tool text cancel a separate owner source request: %s', (text) => {
     expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).toContain('private_read');
   });
 

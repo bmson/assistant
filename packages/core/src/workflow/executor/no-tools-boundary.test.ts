@@ -52,6 +52,8 @@ describe('explicit no-tool owner boundary through the executor', () => {
     await (db as unknown as { $client: { end(): Promise<void> } }).$client.end();
   });
   it.each([
+    'No tools. Explain what is on my calendar.',
+    'Without tools, explain what is on my calendar.',
     'Simulate a background check only; do not use tools or notify anyone. A fictional assistant already reported that two venue quotes are unchanged and is waiting for the owner to choose. No new source information, deadline, risk, or owner reply has arrived. Should it interrupt again? State the decision and the event that would justify another update in at most 80 words.',
     'Without using any tools, explain whether a fictional assistant should check my calendar or schedule another reminder when nothing has changed.',
     'Simulate an ongoing assistant session; do not create real tasks, read accounts, or send anything. Responsibility: help prepare a fictional offsite. Owner authorized research and draft preparation only. Verified state: 12 attendees, two supplied quotes of $900 and $1400, budget $1200. What useful work should you prepare now?',

@@ -9,7 +9,7 @@ export function explicitlyDisallowsTools(text: string): boolean {
         authored,
       ));
   if (simulationOnly) return true;
-  return /\b(?:do not|don't|never)\s+(?:use|call|invoke|run|access)\s+(?:(?:any|external|real|live)\s+)?tools\b|\bwithout\s+(?:using|calling|invoking|running|accessing)\s+(?:(?:any|external|real|live)\s+)?tools\b|\bno\s+(?:(?:external|real|live)\s+)?tool\s+(?:calls|use)\b/i.test(
+  return /\b(?:do not|don't|never)\s+(?:use|call|invoke|run|access)\s+(?:(?:any|external|real|live)\s+)?tools\b|\bwithout\s+(?:(?:using|calling|invoking|running|accessing)\s+)?(?:(?:any|external|real|live)\s+)?tools\b|\bno\s+(?:(?:external|real|live)\s+)?(?:tools\b|tool\s+(?:calls|use)\b)/i.test(
     authored,
   );
 }
