@@ -1,3 +1,4 @@
+import { improvementProposalSuggestion } from '@assistant/application';
 import { ProposalCard, type ProposalView } from '@/app/improvements/proposal-card';
 import { requireOwner } from '@/auth';
 import { relativeTime } from '@/lib/format';
@@ -16,13 +17,12 @@ export default async function ImprovementsPage() {
   const [rows, repairs] = await Promise.all([listOpenImprovements(), getSelfRepairOverview()]);
 
   const proposals: ProposalView[] = rows.map((p) => {
-    const change = (p.change ?? {}) as { suggestion?: unknown };
     return {
       id: p.id,
       kind: p.kind,
       title: p.title,
       rationale: p.rationale,
-      suggestion: typeof change.suggestion === 'string' ? change.suggestion : '',
+      suggestion: improvementProposalSuggestion(p.kind, p.change),
       evidenceCount: p.evidenceIds.length,
       applyable: p.kind === 'model_role',
       createdLabel: relativeTime(p.createdAt, now),
