@@ -248,18 +248,29 @@ describe('bounded no-send email review', () => {
     expect(emailReviewValidationIssues(rejected, [thread])).toContain(
       'item_0:direct_latest_request_requires_review_draft',
     );
-    const result = await generateValidatedEmailReview([thread], async () => ({
-      ok: true,
-      value: rejected,
-    }));
+    let assessmentCalls = 0;
+    const result = await generateValidatedEmailReview([thread], async () => {
+      assessmentCalls += 1;
+      return { ok: true, value: rejected };
+    });
     expect(result.answer?.items ?? []).toHaveLength(0);
     expect(result.ownerDecisionThreadIds).toContain(id);
+    expect(assessmentCalls).toBe(1);
     expect(emailReviewOwnerDecisionSummary(thread)).toMatchObject({
       requestQuote: 'we would love to get your updated availability* here',
       actionUrl: 'https://schedule.example/owner',
       decisionPrompt: expect.stringContaining('Which times and time zone'),
     });
     expect(emailReviewOwnerDecisionSummary(thread).deadlineQuote).toBeUndefined();
+    const backgroundLink = {
+      ...thread,
+      messages: thread.messages.map((message) =>
+        message.messageId === thread.latestMessageId
+          ? { ...message, text: 'What is your availability? Background: https://example.com/about' }
+          : message,
+      ),
+    };
+    expect(emailReviewOwnerDecisionSummary(backgroundLink).actionUrl).toBeUndefined();
   });
   it('reserves a retry assessment step only for eligible multi-thread reviews', () => {
     expect(emailReviewAssessmentStepReserve({ maxSteps: 12, requestedCount: 5 })).toBe(1);
@@ -711,7 +722,7 @@ describe('bounded no-send email review', () => {
       ),
     );
     expect(formatted).toContain('**Possible deadlines to verify (1)**');
-    expect(formatted).toContain('Reviewed 1 of 1 selected threads');
+    expect(formatted).toContain('Read 1 of 1 selected threads');
     expect(formatted).not.toContain('Completed verified reply checks');
     expect(formatted).toContain(
       '**Please confirm the renewal date** — No reply draft was prepared',
@@ -1194,7 +1205,7 @@ describe('bounded no-send email review', () => {
     expect(rendered).toContain('starts at 6:00 PM');
     expect(rendered).toContain('starts at 7:00 PM');
     expect(rendered).toContain('Additional request in a duplicate reminder:');
-    expect(rendered).toContain('Reviewed 3 of 3 selected threads');
+    expect(rendered).toContain('Read 3 of 3 selected threads');
     expect(rendered).toContain('prepared 2 reply drafts');
   });
 
@@ -1564,7 +1575,7 @@ describe('bounded no-send email review', () => {
         ]),
       ),
     );
-    expect(text).toContain('Reviewed 1 of 2 selected threads');
+    expect(text).toContain('Read 2 of 2 selected threads');
     expect(text).not.toContain('Completed verified reply checks');
     expect(text).toContain('complete, eligible source reads: 2 of 2 selected threads');
   });
@@ -1600,12 +1611,15 @@ describe('bounded no-send email review', () => {
       false,
       7,
     );
+    coverage.unassessedThreads = eligibleThreads
+      .slice(1)
+      .map(({ threadId, subject }) => ({ threadId, subject }));
     const text = formatEmailReviewAnswer(assessment?.items ?? [], coverage, false, {
       requestedCount: 5,
     });
 
     expect(text).toContain(
-      'Reviewed 2 of 10 selected threads from a bounded 7-day mail scan; assessed 1 of 8 complete, eligible threads; prepared 1 reply draft (you asked for 5).',
+      'Read 9 of 10 selected threads from a bounded 7-day mail scan; assessed 1 of 8 complete, eligible threads; prepared 1 reply draft (you asked for 5).',
     );
     expect(text).toContain('complete, eligible source reads: 8 of 10 selected threads');
     expect(text).toContain(
@@ -1614,7 +1628,11 @@ describe('bounded no-send email review', () => {
     expect(text).toContain(
       '1 selected thread lacked enough complete chronology or eligibility evidence to assess',
     );
-    expect(text).toContain('7 selected threads could not be assessed reliably');
+    expect(text).toContain('7 selected threads could not be fully assessed');
+    expect(text).toContain('**Assessment unfinished (7)**');
+    for (const thread of eligibleThreads.slice(1))
+      expect(text).toContain(`https://mail.google.com/mail/u/0/#all/${thread.threadId}`);
+    expect(text).not.toContain('unassessed threads listed above');
   });
 
   it('discloses mailbox mismatch and complete threads left unassessed without leaking addresses', () => {
@@ -1638,7 +1656,7 @@ describe('bounded no-send email review', () => {
     expect(coverage).toMatchObject({ searchMailboxMismatch: true, unassessedCompleteThreads: 1 });
     const formatted = formatEmailReviewAnswer([], coverage);
     expect(formatted).toContain('connected mailbox used for search differs');
-    expect(formatted).toContain('1 selected thread could not be assessed reliably');
+    expect(formatted).toContain('1 selected thread could not be fully assessed');
     expect(formatted).not.toContain('connected-alias@example.net');
     expect(formatted).not.toContain('owner@example.com');
   });
@@ -2316,7 +2334,7 @@ describe('bounded no-send email review', () => {
       { query: 'in:inbox -from:me', requestedCount: 1, latestUnanswered: true },
     );
 
-    expect(answer).toContain('Reviewed 0 of 1 selected threads');
+    expect(answer).toContain('Read 0 of 1 selected threads');
     expect(answer).toContain('bounded newest-first inbox scan');
     expect(answer).toContain('complete, eligible source reads: 0 of 1 selected threads');
     expect(answer).not.toContain('checked against its complete thread');

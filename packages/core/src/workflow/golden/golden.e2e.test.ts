@@ -844,7 +844,7 @@ describe('golden tasks', () => {
       objects: [
         { role: 'reason', value: { threadIds: ['request-a'] } },
         {
-          role: 'draft',
+          role: 'reason',
           value: {
             items: [
               {
@@ -951,7 +951,7 @@ describe('golden tasks', () => {
     createdTaskIds.push(result.taskId);
 
     expect(result.toolNames).toEqual(['gmail.search', 'gmail.read_thread']);
-    expect(result.objectRoles).toEqual(['reason', 'draft']);
+    expect(result.objectRoles).toEqual(['reason', 'reason']);
     expect(result.status).toBe('done');
     expect(result.finalText).toContain('**Draft:**');
     expect(result.finalText).toContain('Drafts below are unsent and not saved');
@@ -984,7 +984,7 @@ describe('golden tasks', () => {
       name: 'bounded-email-review-uses-verified-metadata-fallback-after-ranker-failure',
       objects: [
         { role: 'reason', value: {}, unavailable: true },
-        fixture.objects?.[1] ?? { role: 'draft', value: { items: [] } },
+        fixture.objects?.[1] ?? { role: 'reason', value: { items: [] } },
       ],
     });
     createdTaskIds.push(metadataFallback.taskId);
@@ -1047,7 +1047,7 @@ describe('golden tasks', () => {
       objects: [
         fixture.objects?.[0] ?? { role: 'reason', value: { threadIds: ['request-a'] } },
         {
-          role: 'draft',
+          role: 'reason',
           value: {
             items: [
               {
@@ -1093,17 +1093,16 @@ describe('golden tasks', () => {
       initialRequestChecklist: reviewChecklist,
       objects: [
         fixture.objects?.[0] ?? { role: 'reason', value: { threadIds: [] } },
-        { role: 'draft', value: {}, unavailable: true },
-        { role: 'draft', value: {}, unavailable: true },
+        { role: 'reason', value: {}, unavailable: true },
+        { role: 'reason', value: {}, unavailable: true },
       ],
     });
     createdTaskIds.push(failedGeneration.taskId);
 
     expect(failedGeneration.status).toBe('needs_attention');
-    expect(failedGeneration.finalText).toContain('0 of 1 selected threads');
-    expect(failedGeneration.finalText).toContain(
-      '1 selected thread could not be assessed reliably',
-    );
+    expect(failedGeneration.finalText).toContain('Read 1 of 1 selected threads');
+    expect(failedGeneration.finalText).toContain('assessed 0 of 1 complete, eligible threads');
+    expect(failedGeneration.finalText).toContain('1 selected thread could not be fully assessed');
     expect(failedGeneration.finalText).not.toContain('**Draft:**');
     expect(failedGeneration.finalText).not.toContain(EMAIL_REVIEW_CONFIRMATION_DRAFT);
 
@@ -1122,7 +1121,7 @@ describe('golden tasks', () => {
     const ownerChoiceScaffold =
       'Owner decision required: choose whether to confirm this request before sending.\n\nIf clarification is needed: “Please clarify what confirmation is required for this request.”';
     const assessment = (draftBody: string) => ({
-      role: 'draft' as const,
+      role: 'reason' as const,
       value: {
         items: [
           {
@@ -1211,7 +1210,7 @@ describe('golden tasks', () => {
       maxSteps: 12,
       objects: [
         { role: 'reason', value: { threadIds: rankedIds } },
-        { role: 'draft', value: { items: rankedIds.slice(1).map(emailReviewDraft) } },
+        { role: 'reason', value: { items: rankedIds.slice(1).map(emailReviewDraft) } },
       ],
       script: [],
       tools: {
@@ -1304,7 +1303,7 @@ describe('golden tasks', () => {
     expect(result.stepCount).toBeLessThanOrEqual(12);
     expect(readThreadIds).toEqual(rankedIds);
     expect(result.toolNames.filter((name) => name === 'gmail.read_thread')).toHaveLength(6);
-    expect(result.objectRoles).toEqual(['reason', 'draft']);
+    expect(result.objectRoles).toEqual(['reason', 'reason']);
     expect(result.finalText.match(/^\*\*Draft:\*\*$/gm)).toHaveLength(5);
     expect(result.finalText).not.toContain('I confirmed this request.');
     expect(result.finalText).toContain('Could you confirm request request-f?');
@@ -1333,7 +1332,7 @@ describe('golden tasks', () => {
       plan: workflowPlan,
       objects: [
         { role: 'reason', value: {}, unavailable: true },
-        { role: 'draft', value: { items: threadIds.map(emailReviewDraft) } },
+        { role: 'reason', value: { items: threadIds.map(emailReviewDraft) } },
       ],
       script: [],
       tools: {
@@ -1457,7 +1456,7 @@ describe('golden tasks', () => {
       maxSteps: 14,
       objects: [
         { role: 'reason', value: { threadIds: rankedIds } },
-        { role: 'draft', value: { items: eligibleIds.map(emailReviewDraft) } },
+        { role: 'reason', value: { items: eligibleIds.map(emailReviewDraft) } },
       ],
       script: [],
       tools: {
@@ -1580,7 +1579,7 @@ describe('golden tasks', () => {
       objects: [
         { role: 'reason', value: { threadIds: rankedIds } },
         {
-          role: 'draft',
+          role: 'reason',
           value: {
             items: [
               ...rankedIds.slice(0, 2).map(noReply),
@@ -1588,8 +1587,8 @@ describe('golden tasks', () => {
             ],
           },
         },
-        { role: 'draft', value: { items: rankedIds.slice(3, 5).map(emailReviewDraft) } },
-        { role: 'draft', value: { items: rankedIds.slice(5, 7).map(emailReviewDraft) } },
+        { role: 'reason', value: { items: rankedIds.slice(3, 5).map(emailReviewDraft) } },
+        { role: 'reason', value: { items: rankedIds.slice(5, 7).map(emailReviewDraft) } },
       ],
       script: [],
       tools: {
@@ -1706,8 +1705,8 @@ describe('golden tasks', () => {
       maxSteps: 14,
       objects: [
         { role: 'reason', value: { threadIds: rankedIds } },
-        { role: 'draft', value: { items: assessments } },
-        { role: 'draft', value: { items: assessments } },
+        { role: 'reason', value: { items: assessments } },
+        { role: 'reason', value: { items: assessments } },
       ],
       script: [],
       tools: {
@@ -1814,7 +1813,7 @@ describe('golden tasks', () => {
       maxSteps: 12,
       objects: [
         { role: 'reason', value: { threadIds: rankedIds } },
-        { role: 'draft', value: rankedAnswer },
+        { role: 'reason', value: rankedAnswer },
       ],
       script: [],
       tools: {
@@ -1957,7 +1956,7 @@ describe('golden tasks', () => {
       'gmail.read_thread',
       'gmail.read_thread',
     ]);
-    expect(result.objectRoles).toEqual(['reason', 'draft']);
+    expect(result.objectRoles).toEqual(['reason', 'reason']);
     expect(result.status).toBe('needs_attention');
     expect(result.finalText.match(/^\*\*Draft:\*\*$/gm)).toHaveLength(4);
     expect(result.finalText).toContain('1 selected thread had a later reply from your mailbox');

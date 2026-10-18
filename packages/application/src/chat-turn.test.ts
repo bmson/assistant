@@ -211,6 +211,8 @@ type RouterScript = {
   budgetBlocked?: boolean;
   triageUnavailable?: boolean;
   streamError?: Error;
+  reviewedReply?: string;
+  completeWhenConsumed?: boolean;
 };
 
 function scriptedRouter(script: RouterScript) {
@@ -218,7 +220,19 @@ function scriptedRouter(script: RouterScript) {
     if (script.routeError) throw script.routeError;
     return { ok: true as const, modelId: 'test/model' };
   });
-  const object = vi.fn(async () => {
+  const object = vi.fn(async (role: string) => {
+    if (role === 'rewrite')
+      return {
+        ok: true,
+        object:
+          script.reviewedReply === undefined
+            ? { decision: 'publish', reasons: [] }
+            : {
+                decision: 'revise',
+                revisedText: script.reviewedReply,
+                reasons: ['clarity_or_format'],
+              },
+      };
     if (script.triage instanceof Error) throw script.triage;
     if (script.triageUnavailable) return { ok: false, decision: { mode: 'park', reason: 'cap' } };
     return { ok: true, object: script.triage ?? { needsAction: false } };
@@ -235,7 +249,7 @@ function scriptedRouter(script: RouterScript) {
       if (script.budgetBlocked)
         return { ok: false, decision: { mode: 'block', reason: 'daily cap reached' } };
       const draft = script.draft ?? '';
-      await options.onComplete(draft);
+      if (!script.completeWhenConsumed) await options.onComplete(draft);
       const chunks = [
         { type: 'start' },
         { type: 'text-start', id: 't' },
@@ -250,6 +264,7 @@ function scriptedRouter(script: RouterScript) {
         toUIMessageStream: () =>
           (async function* () {
             yield* chunks;
+            if (script.completeWhenConsumed) await options.onComplete(draft);
           })(),
       };
     },
@@ -1971,6 +1986,37 @@ describe('tool-less conversational reply', () => {
     expect(replyIdentity).toMatch(/^chat-reply:/);
     expect(wire).toContain(replyIdentity);
     expect(stubs.enqueueTask).not.toHaveBeenCalled();
+  });
+
+  it('reviews a supplied scenario once and publishes only the final identical answer', async () => {
+    const draft = 'Unreviewed candidate that misses the requested constraints.';
+    const reviewedReply = 'Simulation only: prepare the two options, then ask which budget to use.';
+    const result = await turn(
+      'Simulate only a fictional decision. Use no tools. Compare options under 80 words.',
+      { draft, reviewedReply, completeWhenConsumed: true },
+    );
+    const wire = await result.response.text();
+    expect(result.completions).toHaveLength(1);
+    expect(result.completions[0]?.messages[0]?.text).toBe(reviewedReply);
+    expect(wire).toContain(reviewedReply);
+    expect(wire).not.toContain(draft);
+    expect(wire).not.toContain('data-off-course');
+    expect(result.object.mock.calls.filter(([role]) => role === 'rewrite')).toHaveLength(1);
+    expect(stubs.enqueueTask).not.toHaveBeenCalled();
+  });
+
+  it('marks an unrepaired length failure incomplete and shows the same bounded answer', async () => {
+    const result = await turn('Simulate only. No tools. Explain the options under 3 words.', {
+      draft: 'A much longer answer than requested.',
+      completeWhenConsumed: true,
+    });
+    const wire = await result.response.text();
+    expect(result.completions).toHaveLength(1);
+    expect(result.completions[0]?.status).toBe('failed');
+    expect(result.completions[0]?.messages[0]?.text).toBe('Incomplete.');
+    expect(wire).toContain('Incomplete.');
+    expect(wire).not.toContain('A much longer');
+    expect(wire).not.toContain('data-off-course');
   });
 
   it('preserves spoken mode while using the same durable reply', async () => {
