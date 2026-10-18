@@ -1535,6 +1535,8 @@ export async function verifyFinalOutput(
     critical: boolean;
     context?: ReadonlyArray<ReadIntentMessage>;
     findings?: ReadonlyArray<string>;
+    /** Internal caller classified deliberation over owner-supplied context. */
+    reasoningReview?: boolean;
   },
 ): Promise<OutputVerificationResult> {
   const ownerFacts = [
@@ -1574,16 +1576,23 @@ export async function verifyFinalOutput(
   let attempted = false;
   let incompleteCorrectionPending = false;
   let unresolvedFormatPending = false;
+  const reasoningReview = input.reasoningReview === true;
   try {
-    const outcome = await router.object<OutputVerification>('rewrite', {
-      taskId: input.taskId,
-      critical: input.critical,
-      system: OUTPUT_VERIFICATION_SYSTEM,
-      prompt: buildOutputVerificationPrompt({ ...input, draft: original }),
-      schema: OutputVerificationSchema,
-      temperature: 0,
-      maxOutputTokens: Math.min(6_000, Math.max(1_024, Math.ceil(input.draft.length / 2) + 512)),
-    });
+    const outcome = await router.object<OutputVerification>(
+      reasoningReview ? 'reason' : 'rewrite',
+      {
+        taskId: input.taskId,
+        critical: input.critical,
+        // Internal review uses its configured role, independently of the owner's
+        // conversation picker, as the former rewrite route did.
+        ...(reasoningReview ? { modelOverrideResolved: true } : {}),
+        system: OUTPUT_VERIFICATION_SYSTEM,
+        prompt: buildOutputVerificationPrompt({ ...input, draft: original }),
+        schema: OutputVerificationSchema,
+        temperature: 0,
+        maxOutputTokens: Math.min(6_000, Math.max(1_024, Math.ceil(input.draft.length / 2) + 512)),
+      },
+    );
     attempted = outcome.ok;
     if (!outcome.ok || outcome.finishReason === 'length') {
       const contradicted = publicWebClaimFindings(original, input.evidence, ownerFacts).length > 0;
@@ -1657,10 +1666,11 @@ export async function verifyFinalOutput(
       // wording pass. This replaces the existing correction; the two-call
       // bound and all deterministic checks below remain unchanged.
       const correction = await router.object<OutputVerification>(
-        findings.length ? 'reason' : 'rewrite',
+        findings.length || reasoningReview ? 'reason' : 'rewrite',
         {
           taskId: input.taskId,
           critical: input.critical,
+          ...(reasoningReview ? { modelOverrideResolved: true } : {}),
           system: OUTPUT_VERIFICATION_SYSTEM,
           prompt: `${buildOutputVerificationPrompt({ ...input, draft: correctionDraft })}\n${correctionInstructions}`,
           schema: OutputVerificationSchema,

@@ -1480,7 +1480,7 @@ export async function handleChatTurn(
   // full matcher set — and both the completion callback and the stream pump
   // need the same verdict for the same draft. Compute it once.
   // Supplied scenarios still need constraint review when wording also matches a rewrite.
-  const needsReplyReview = isConversationLocalContext(userText);
+  const needsReplyReview = isConversationLocalContext(conversationalIntent.ownerAuthoredText);
   const guardCache = new Map<
     string,
     Promise<{ corrected: boolean; text: string; incomplete?: boolean }>
@@ -1513,7 +1513,8 @@ export async function handleChatTurn(
   let outcome: StreamOutcome;
   try {
     outcome = await router.stream(
-      (!localTransformation || needsReplyReview) && needsConversationReasoning(userText)
+      (!localTransformation || needsReplyReview) &&
+        needsConversationReasoning(conversationalIntent.ownerAuthoredText)
         ? 'reason'
         : 'draft',
       {
