@@ -169,7 +169,7 @@ final class PhoneCalendarStoreTests: XCTestCase {
         source.access = .notDetermined
         source.suspendRequest = true
         let request = Task { await store.enable() }
-        await Task.yield()
+        await source.waitUntilRequestPending()
         XCTAssertTrue(store.isRequesting)
         store.disable()
         source.finishRequest()
@@ -270,15 +270,26 @@ private final class CalendarSourceFixture: PhoneCalendarSource {
     var lastInterval: DateInterval?
     var suspendRequest = false
     private var pendingRequest: CheckedContinuation<Void, Never>?
+    private var requestStarted: CheckedContinuation<Void, Never>?
 
     func requestAccess() async throws -> Bool {
         requests += 1
-        if suspendRequest { await withCheckedContinuation { pendingRequest = $0 } }
+        if suspendRequest {
+            await withCheckedContinuation {
+                pendingRequest = $0
+                requestStarted?.resume()
+                requestStarted = nil
+            }
+        }
         if failsRequest { throw NSError(domain: "CalendarFixture", code: 1) }
         access = grantsAccess ? .fullAccess : .denied
         return grantsAccess
     }
     func finishRequest() { pendingRequest?.resume(); pendingRequest = nil }
+    func waitUntilRequestPending() async {
+        if pendingRequest != nil { return }
+        await withCheckedContinuation { requestStarted = $0 }
+    }
     func calendars() -> [PhoneCalendar] { calendarReads += 1; return available }
     func events(in interval: DateInterval, calendarIDs: Set<String>) -> [PhoneCalendarEvent] {
         eventReads.append(calendarIDs)
