@@ -1,4 +1,4 @@
-FROM mirror.gcr.io/library/node:22-slim AS build
+FROM mirror.gcr.io/library/node:26-slim AS build
 WORKDIR /src
 RUN corepack enable
 
@@ -22,7 +22,7 @@ ARG GIT_SHA=unknown
 ENV BUILD_SHA=${GIT_SHA}
 RUN pnpm --filter @assistant/web build
 
-FROM mirror.gcr.io/library/node:22-slim AS runtime
+FROM mirror.gcr.io/library/node:26-slim AS runtime
 # Apply available Debian security updates even when the base image is older.
 RUN apt-get update \
   && apt-get upgrade -y --no-install-recommends \

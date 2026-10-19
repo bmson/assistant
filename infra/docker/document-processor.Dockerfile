@@ -6,7 +6,7 @@
 # Resolve workspace tooling in a build-only stage and deploy the worker with
 # production dependencies only; the root TypeScript/esbuild development tools
 # are excluded from the final image.
-FROM mirror.gcr.io/library/node:22-slim AS build
+FROM mirror.gcr.io/library/node:26-slim AS build
 WORKDIR /workspace
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
@@ -17,7 +17,7 @@ COPY packages ./packages
 RUN pnpm install --frozen-lockfile --filter @assistant/document-processor... \
   && pnpm --filter @assistant/document-processor deploy --prod --legacy /runtime
 
-FROM mirror.gcr.io/library/node:22-slim
+FROM mirror.gcr.io/library/node:26-slim
 WORKDIR /app
 # tesseract (OCR) + poppler (pdftoppm rasterizes scanned PDFs page-by-page).
 RUN apt-get update \
