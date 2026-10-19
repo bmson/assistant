@@ -78,7 +78,9 @@ Overview and workspace reads coalesce by connection and edit revision. Leaving
 a page cancels that page's publication, while the shared request can still warm
 the next page. Workspace and People prefetch begin after bootstrap without the
 former artificial 1.5-second delay. Warm content remains editable if a refresh
-fails; availability metadata and server-side validation still apply.
+fails; availability metadata and server-side validation still apply. Memory library
+queries retain the eight most recently opened results, and relationship maps
+retain twelve snapshots. Reconciliation does not restore an evicted query.
 
 ## Validation
 
@@ -87,13 +89,16 @@ ordered rapid edits, retry retention, ambiguous creates, connection changes,
 atomic reconciliation, independent Observation, and encrypted owner-scoped
 recovery. A 100-edit acceptance benchmark enforces the 200 ms budget.
 `APIClientRetryTests` additionally covers actual settings PATCH acceptance,
-rejection, stale reads, coalesced page loads, and navigation cancellation using
-`URLProtocol` responses.
+rejection, stale reads, coalesced page loads, navigation cancellation, bounded
+query caches, and native feedback rendering before a delayed write completes
+using `URLProtocol` responses. `NativeVisualReviewTests` captures saving, failed,
+and confirmed-but-refresh-pending states in light/dark appearance and large text.
 
 The October 18 macOS host run executed the same production outbox, model and
-recovery sources with **14 tests passing**. Worst acceptance in 100 consecutive
-edits was **0.199 ms** in that run. This measures model acceptance, not iPhone
+recovery sources with **15 tests passing**. Worst acceptance in 100 consecutive
+edits was **0.364 ms** in that run. This measures model acceptance, not iPhone
 frames, keyboard response, navigation animation, or time to first network data.
-The iOS simulator build-for-testing passed. Simulator execution and native visual
-checks were blocked while the Mac was locked; they must be completed before
-claiming a fully verified release or app-wide device latency.
+The iOS simulator build-for-testing passed. Local iOS execution is blocked by
+Xcode 27 beta's Simulator test-service connection failure; no local native
+assertions ran. Hosted native execution and visual review are still pending.
+These checks do not establish app-wide latency on a physical device.

@@ -142,12 +142,14 @@ jobs:
             | head -60 \
             || echo "(no error lines matched; see the xcresult artifact)"
 
-      # The result bundle carries the failing assertion and any crash logs,
-      # which the console output truncates.
+      # Keep passing runs too: native visual attachments and interaction
+      # timings are review evidence, not just failure diagnostics.
       - name: Upload the test results
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
         with:
           name: ios-xcresult-${{ github.sha }}
-          path: ${{ runner.temp }}/Assistant.xcresult
+          path: |
+            ${{ runner.temp }}/Assistant.xcresult
+            ${{ runner.temp }}/xcodebuild.log
           retention-days: 14
