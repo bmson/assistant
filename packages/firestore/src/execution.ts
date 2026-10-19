@@ -11,6 +11,7 @@ import { FirestoreApprovalRepository } from './approvals.js';
 import { FirestoreAssistantHealthRepository } from './assistant-health.js';
 import { FirestoreAuditInvestigationRepository } from './audit-investigation.js';
 import { FirestoreBriefingRepository } from './briefing.js';
+import { FirestoreCalendarAccountRepository } from './calendar-accounts.js';
 import { FirestoreCallSessionRepository } from './call-sessions.js';
 import { createFirestoreCardRefreshRepository } from './card-refresh.js';
 import { FirestoreCommitmentMaintenanceRepository } from './commitment-maintenance.js';
@@ -127,6 +128,7 @@ export function createFirestoreExecutionPersistence(
     voiceContext: new FirestoreVoiceContextRepository(store, agentId, capturedEmbeddingSpace),
     smsChannel: new FirestoreSmsChannelRepository(store, agentId),
     callSessions: new FirestoreCallSessionRepository(store, agentId),
+    calendarAccounts: new FirestoreCalendarAccountRepository(store),
     modelConnections: new FirestoreModelConnectionRepository(store),
     modelCatalog: new FirestoreModelCatalogRepository(store),
     applications: new FirestoreApplicationConfirmationRepository(store, agentId),

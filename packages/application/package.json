@@ -43,7 +43,8 @@
     "./provider-billing": "./src/provider-billing.ts",
     "./public-web": "./src/public-web.ts",
     "./audit-investigation": "./src/audit-investigation.ts",
-    "./http-body": "./src/http-body.ts"
+    "./http-body": "./src/http-body.ts",
+    "./calendar-accounts": "./src/calendar-accounts.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

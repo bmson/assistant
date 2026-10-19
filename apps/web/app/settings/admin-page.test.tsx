@@ -15,6 +15,9 @@ vi.mock('@assistant/config', () => ({
   loadConfig: () => ({ GCP_PROJECT: 'fixture' }),
   envFile: '/tmp/nonexistent-admin-fixture',
 }));
+vi.mock('@/lib/server', () => ({
+  getCalendarAccountPorts: () => ({ config: {}, accounts: { list: async () => [] } }),
+}));
 vi.mock('@/lib/mobile-access-token', () => ({
   getMobileAccessToken: state.token,
   hasMobileTokenRotationCapability: () => true,
@@ -39,7 +42,7 @@ beforeEach(() => {
   state.token.mockResolvedValue('abcdef-secret-token-1234');
 });
 it('shows mobile access immediately and sends only a masked credential', async () => {
-  const html = renderToStaticMarkup(await SettingsPage());
+  const html = renderToStaticMarkup(await SettingsPage({}));
   expect(html).toContain('Mobile app connection');
   expect(html).toContain('https://bot.bmson.com');
   expect(html).toContain('abcdef…1234');
@@ -47,11 +50,11 @@ it('shows mobile access immediately and sends only a masked credential', async (
 });
 it('offers independent device keys in passkey mode', async () => {
   state.mode = 'passkey';
-  expect(renderToStaticMarkup(await SettingsPage())).toContain('Create device key');
+  expect(renderToStaticMarkup(await SettingsPage({}))).toContain('Create device key');
   expect(state.token).not.toHaveBeenCalled();
 });
 it('requires owner sign-in before accessing credentials', async () => {
   state.owner.mockRejectedValue(new Error('sign in required'));
-  await expect(SettingsPage()).rejects.toThrow('sign in required');
+  await expect(SettingsPage({})).rejects.toThrow('sign in required');
   expect(state.token).not.toHaveBeenCalled();
 });

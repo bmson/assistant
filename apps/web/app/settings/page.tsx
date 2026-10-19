@@ -1,19 +1,30 @@
 import { existsSync } from 'node:fs';
+import { calendarAccountsOverview } from '@assistant/application/calendar-accounts';
 import { envFile, loadConfig } from '@assistant/config';
 import { headers } from 'next/headers';
 import Link from 'next/link';
 import { SecurityClient } from '@/app/security/security-client';
 import { authMode, requireOwner } from '@/auth';
 import { getMobileAccessToken, hasMobileTokenRotationCapability } from '@/lib/mobile-access-token';
+import { getCalendarAccountPorts } from '@/lib/server';
 import { btn, Card, PageHeader, PageShell, SectionHeading } from '@/lib/ui';
+import { CalendarAccounts } from './calendar-accounts';
 import { MobileTokenPanel } from './mobile-token';
 
 export const metadata = { title: 'Settings' };
 export const dynamic = 'force-dynamic';
 
-export default async function SettingsPage() {
+export default async function SettingsPage({
+  searchParams,
+}: {
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+}) {
   await requireOwner();
   const config = loadConfig();
+  const calendarAccounts = await calendarAccountsOverview(getCalendarAccountPorts());
+  const params = await searchParams;
+  const calendarResult =
+    typeof params?.calendarConnection === 'string' ? params.calendarConnection : undefined;
   const requestHeaders = await headers();
   const host = requestHeaders.get('x-forwarded-host') ?? requestHeaders.get('host');
   const proto = requestHeaders.get('x-forwarded-proto') ?? 'http';
@@ -22,6 +33,7 @@ export default async function SettingsPage() {
   return (
     <PageShell size="reading" className="grid gap-8">
       <PageHeader title="Settings" intro="Connect your iPhone and manage your assistant account." />
+      <CalendarAccounts {...calendarAccounts} result={calendarResult} />
       {authMode === 'passkey' ? (
         <>
           <SecurityClient serverUrl={serverUrl} mode="pairing" />

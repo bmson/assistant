@@ -1,6 +1,7 @@
 export * from '../applications.js';
 export * from '../google/calendar.js';
 export * from '../google/client.js';
+export { ConnectedCalendarClient, connectedCalendarClient } from '../google/connected-calendars.js';
 export * from '../google/docs.js';
 export * from '../google/drive.js';
 export * from '../google/gmail.js';

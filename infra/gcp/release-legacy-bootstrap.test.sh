@@ -22,7 +22,10 @@ PY
 chmod +x "$TEST_ROOT/bin/gcloud"
 export PATH="$TEST_ROOT/bin:$PATH"
 export PROJECT=bmson-assistant REGION=us-west1 RELEASE_COMPONENTS=agent,web RELEASE_PERSISTENCE_DRIVER=firestore ASSISTANT_RELEASE_WRITES_PAUSED=true
-source "$ROOT/release-legacy-bootstrap.sh"
+# Exercise the immutable historical candidate; new migrations intentionally change the live contract.
+cp "$ROOT/release-legacy-bootstrap.sh" "$TEST_ROOT/release-legacy-bootstrap.sh"
+cp "$ROOT/fixtures/legacy-bootstrap-contract.json" "$TEST_ROOT/release-contracts.json"
+source "$TEST_ROOT/release-legacy-bootstrap.sh"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 reset_case() {
 cat >"$STATE" <<'JSON'
@@ -83,4 +86,11 @@ PY
 if release_preflight_legacy_firestore_bootstrap agent,web 1 1 1; then fail 'split serving traffic must fail'; fi
 reset_case; export BAD_REVISION_DIGEST=1
 if release_preflight_legacy_firestore_bootstrap agent,web 1 1 1; then fail 'revision image digest mismatch must fail'; fi
+# The real candidate must remain ineligible when its contract has moved beyond the pinned bytes.
+if ! cmp -s "$ROOT/release-contracts.json" "$ROOT/fixtures/legacy-bootstrap-contract.json"; then
+  (
+    source "$ROOT/release-legacy-bootstrap.sh"
+    if legacy_bootstrap_candidate_contract_ok; then fail 'changed current candidate contract must fail'; fi
+  )
+fi
 echo 'legacy Firestore bootstrap profile tests passed'

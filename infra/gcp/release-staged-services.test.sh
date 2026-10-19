@@ -515,7 +515,9 @@ import json,sys
 s=json.load(open(sys.argv[1])); assert s['assistant-agent']['traffic']=={'agent-old':100}; assert list(s['assistant-web']['traffic'])[0].startswith('assistant-web-new')
 PY
 reset_case; export RELEASE_MODULES=documents
-if (( POSTGRES_SCHEMA_VERSION > 125 )); then
+PROCESSOR_SCHEMA_MIN="$(node -e 'process.stdout.write(String(require(process.argv[1]).components.processor.schema.postgres.min))' "$ROOT/release-contracts.json")"
+PROCESSOR_SCHEMA_MAX="$(node -e 'process.stdout.write(String(require(process.argv[1]).components.processor.schema.postgres.max))' "$ROOT/release-contracts.json")"
+if (( POSTGRES_SCHEMA_VERSION < PROCESSOR_SCHEMA_MIN || POSTGRES_SCHEMA_VERSION > PROCESSOR_SCHEMA_MAX )); then
   if release_staged_services; then fail 'documents processor outside its declared schema range must fail closed'; fi
   assert_old_traffic
   python3 - "$TEST_ROOT/state.json" <<'PY'

@@ -4,8 +4,10 @@ import type {
   ExecutionPersistence,
 } from '@assistant/persistence';
 import {
+  connectedCalendarClient,
   GoogleClient,
   registerApplicationTools,
+  registerCalendarReadTools,
   registerCalendarTools,
   registerDocsTools,
   registerDriveTools,
@@ -270,7 +272,14 @@ export const googleModule = defineModule<GoogleClient>({
       },
     };
 
+    const readClient = connectedCalendarClient(client, config, persistence.calendarAccounts);
     if (!client.configured()) {
+      if (readClient.configured())
+        registerCalendarReadTools(registry, {
+          client: readClient,
+          botEmail: config.ASSISTANT_EMAIL,
+          ownerEmail: config.OWNER_EMAIL,
+        });
       console.warn('google module enabled but unavailable — run pnpm auth:bot');
       return { exports: client, hooks };
     }
@@ -292,11 +301,15 @@ export const googleModule = defineModule<GoogleClient>({
       workspace,
       prepareOutbound,
     });
-    registerCalendarTools(registry, {
-      client,
-      botEmail: config.ASSISTANT_EMAIL,
-      ownerEmail: config.OWNER_EMAIL,
-    });
+    registerCalendarTools(
+      registry,
+      {
+        client,
+        botEmail: config.ASSISTANT_EMAIL,
+        ownerEmail: config.OWNER_EMAIL,
+      },
+      { readClient },
+    );
     registerDocsTools(registry, {
       client,
       botEmail: config.ASSISTANT_EMAIL,

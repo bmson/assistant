@@ -1,9 +1,11 @@
+import type { CalendarAccount } from './calendar-accounts.js';
 import type { DocumentExtractionMetadata } from './document-extraction-metadata.js';
 /** Portable record shapes. PostgreSQL compatibility is checked by records.test.ts.
  * These types are owned by persistence: change them intentionally, not on every SQL migration. */
 import type { KnowledgeGraphAssertion } from './knowledge-graph-sync.js';
 
 export interface Records {
+  calendarAccounts: CalendarAccount;
   selfRepairIssues: {
     id: string;
     agentId: string;
