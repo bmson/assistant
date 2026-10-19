@@ -8,7 +8,7 @@
     "apps/web/lib/server.ts": "1f3d7ca563435b2e6df9d413e65c22f3eefadfffe8a334dd52c29bc834e5ff8c",
     "apps/web/proxy.ts": "90533856646481eda890fab2725b1c4ae6156e2c15b088c91a57c73531ec5b7d",
     "packages/db/drizzle/meta/_journal.json": "f7dee0462df8ea55a23c293fb451da52f8433098c1761c549c84a9916c5236da",
-    "infra/gcp/release-contracts.json": "dcaf4ac0456be4bdf3ae6a6666c6f355dc64340e01a986202a07e529047ee55f"
+    "infra/gcp/release-contracts.json": "cc4f5f333545ce12a63b081b720c621c8bef25623bc17aecb5dbe5f85c437680"
   },
   "latestPostgresMigration": "0128_connected_calendar_accounts",
   "postgresSchemaVersion": 128,
@@ -45,9 +45,9 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 125
+        "max": 128
       },
-      "currentPostgresSchemaCompatible": false
+      "currentPostgresSchemaCompatible": true
     },
     "code": {
       "apiContract": 1,
@@ -57,9 +57,9 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 125
+        "max": 128
       },
-      "currentPostgresSchemaCompatible": false
+      "currentPostgresSchemaCompatible": true
     },
     "processor": {
       "apiContract": 1,
@@ -69,9 +69,9 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 125
+        "max": 128
       },
-      "currentPostgresSchemaCompatible": false
+      "currentPostgresSchemaCompatible": true
     }
   },
   "agentWebSchemaCompatible": true,

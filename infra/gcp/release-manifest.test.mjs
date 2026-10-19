@@ -77,6 +77,19 @@ test('manifest rejects mutable tags, missing selected images, incompatible schem
   assert.throws(() => validateManifest(pair), /new web and agent API contracts are incompatible/);
 });
 
+test('a selected worker outside its schema range fails closed', () => {
+  const manifest = createManifest({
+    release: 'abc123',
+    imageRoot: 'registry/repo',
+    selected: ['agent', 'web', 'processor'],
+    digests: { agent: digestA, web: digestB, processor: digestA },
+    contract,
+    schemaVersion: CURRENT_SCHEMA,
+  });
+  manifest.components.processor.schema.max = CURRENT_SCHEMA - 1;
+  assert.throws(() => validateManifest(manifest), /processor is incompatible with postgres schema/);
+});
+
 test('web-only release is allowed only with proven compatible live agent metadata', () => {
   const manifest = createManifest({
     release: 'abc123',
