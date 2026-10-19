@@ -9,6 +9,7 @@ import type {
   ConversationSearchRepository,
   SituationDecisionContextRepository,
 } from './builtin-tools.js';
+import type { CalendarAccountRepository } from './calendar-accounts.js';
 import type { CallSessionRepository } from './call-sessions.js';
 import type { CardRefreshRepository } from './card-refresh.js';
 import type { CommitmentMaintenanceRepository } from './commitment-maintenance.js';
@@ -139,6 +140,7 @@ export interface ExecutionPersistence {
   /** Phone calls placed by the calls module. */
   readonly callSessions?: CallSessionRepository;
   /** Owner-connected model providers (keys sealed). */
+  readonly calendarAccounts?: CalendarAccountRepository;
   readonly modelConnections?: ModelConnectionRepository;
   /** The model catalog and role routing. */
   readonly modelCatalog?: ModelCatalogRepository;

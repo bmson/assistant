@@ -5,13 +5,13 @@
     "packages/config/src/index.ts": "d65963a4a350f41242da86910f085d60909f13b584aa710e4a0423f60437fe9b",
     "apps/agent/src/deps.ts": "c269a9646faecb88ebb9356ca25f8d0e751ea6833305697ba0cf4ca964c90299",
     "apps/agent/src/index.ts": "6da57b60f853ca6622142a12b70bb31a73e8155eac30dd7d905218c19ca2fd56",
-    "apps/web/lib/server.ts": "df2cd83f7c34ac905715baccbcca0e63a033bec34b0b58e65a22d01b5b1106f5",
-    "apps/web/proxy.ts": "a745fba9df94c27e8e782739c874e4bbb0b9dbe48eb924d23326353bf4540125",
-    "packages/db/drizzle/meta/_journal.json": "cfb945af440bd5114b986fb9e85699ac41fedf97c754f2761b835d0dcbf3b9e1",
-    "infra/gcp/release-contracts.json": "10adc7fbc9be8965c86df71e6612b6fcd24f1b21a3f5fca048786bbac55c8261"
+    "apps/web/lib/server.ts": "1f3d7ca563435b2e6df9d413e65c22f3eefadfffe8a334dd52c29bc834e5ff8c",
+    "apps/web/proxy.ts": "90533856646481eda890fab2725b1c4ae6156e2c15b088c91a57c73531ec5b7d",
+    "packages/db/drizzle/meta/_journal.json": "f7dee0462df8ea55a23c293fb451da52f8433098c1761c549c84a9916c5236da",
+    "infra/gcp/release-contracts.json": "dcaf4ac0456be4bdf3ae6a6666c6f355dc64340e01a986202a07e529047ee55f"
   },
-  "latestPostgresMigration": "0127_call_voice_effect_receipts",
-  "postgresSchemaVersion": 127,
+  "latestPostgresMigration": "0128_connected_calendar_accounts",
+  "postgresSchemaVersion": 128,
   "releaseContracts": {
     "agent": {
       "apiContract": 1,
@@ -20,8 +20,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 127,
-        "max": 127
+        "min": 128,
+        "max": 128
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -32,8 +32,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 127,
-        "max": 127
+        "min": 128,
+        "max": 128
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -75,7 +75,7 @@
     }
   },
   "agentWebSchemaCompatible": true,
-  "webApiRouteCount": 95,
+  "webApiRouteCount": 97,
   "routes": {
     "apps/web/app/api/audit/[id]/route.ts": {
       "methods": ["GET"],
@@ -83,7 +83,15 @@
     },
     "apps/web/app/api/auth/[...nextauth]/route.ts": {
       "methods": ["GET", "POST"],
-      "sha256": "447ba29a07f6e6c6b9c2d47096763ee3808bde2f148326c742ef35c627d3b210"
+      "sha256": "e72661f36c52b772716f294c49c9662f478998bf6ba822da88ac0fce58008b21"
+    },
+    "apps/web/app/api/calendar-accounts/callback/route.ts": {
+      "methods": ["GET"],
+      "sha256": "ceac179cae45718f96d9be99bb320ee0ae7a7e4b511d205379a371b50f8448a9"
+    },
+    "apps/web/app/api/calendar-accounts/connect/route.ts": {
+      "methods": ["GET"],
+      "sha256": "978f8006b01c120198a9c5192f502210ae60f59c7ed144d2c1beee1c42ee544c"
     },
     "apps/web/app/api/card-image/route.ts": {
       "methods": ["GET"],

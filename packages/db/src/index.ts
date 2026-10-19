@@ -4,6 +4,7 @@ export { createPostgresApplicationConfirmationRepository } from './application-c
 export { createPostgresApprovalPolicyRepository } from './approval-policy-repository.js';
 export { createPostgresApprovalRepository } from './approval-repository.js';
 export { createPostgresAuditInvestigationRepository } from './audit-investigation-repository.js';
+export { createPostgresCalendarAccountRepository } from './calendar-account-repository.js';
 export { createPostgresCallSessionRepository } from './call-session-repository.js';
 export { createPostgresCardFormAdmissionRepository } from './card-form-admission-repository.js';
 export { createPostgresCardRefreshRepository } from './card-refresh-repository.js';

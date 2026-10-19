@@ -45,6 +45,27 @@ vi.mock('@assistant/config', () => ({
     ...(fixture.canRotate ? { GCP_PROJECT: 'synthetic-preview' } : {}),
   }),
 }));
+vi.mock('@/lib/server', () => ({
+  getCalendarAccountPorts: () => ({
+    config: {
+      AUTH_URL: 'https://assistant.example',
+      ASSISTANT_MODULES: ['calendar'],
+      GOOGLE_OAUTH_CLIENT_ID: 'synthetic-client',
+      GOOGLE_OAUTH_CLIENT_SECRET: 'synthetic-secret',
+      MCP_ENC_KEY: 'aa'.repeat(32),
+    },
+    accounts: {
+      list: async () => [
+        {
+          id: 'synthetic-work',
+          email: 'work@example.test',
+          clientId: 'synthetic-client',
+          lastError: null,
+        },
+      ],
+    },
+  }),
+}));
 vi.mock('@/lib/mobile-access-token', () => ({
   getMobileAccessToken: async () => 'synthetic-token',
   hasMobileTokenRotationCapability: () => fixture.canRotate,
@@ -222,14 +243,14 @@ import SignInPage from './signin/page';
 it('renders the six reachable console surfaces from isolated synthetic data', async () => {
   const directory = process.env.WEB_EXPERIENCE_QA_DIR;
   const pages = [
-    { name: 'settings', path: '/settings', render: () => SettingsPage() },
-    { name: 'settings-token', path: '/settings', mode: 'google', render: () => SettingsPage() },
+    { name: 'settings', path: '/settings', render: () => SettingsPage({}) },
+    { name: 'settings-token', path: '/settings', mode: 'google', render: () => SettingsPage({}) },
     {
       name: 'settings-token-rotate',
       path: '/settings',
       mode: 'google',
       canRotate: true,
-      render: () => SettingsPage(),
+      render: () => SettingsPage({}),
     },
     { name: 'security', path: '/security', render: () => SecurityPage() },
     { name: 'signin', path: '/signin', render: () => SignInPage() },

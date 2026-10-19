@@ -23,6 +23,7 @@ export const MIGRATION_TABLES = [
     id: 'id',
     scope: 'agent',
   },
+  { table: 'calendar_accounts', collection: 'calendarAccounts', id: 'id', scope: 'installation' },
   { table: 'budgets', collection: 'budgets', id: 'scope', scope: 'installation' },
   {
     table: 'calendar_event_snapshots',

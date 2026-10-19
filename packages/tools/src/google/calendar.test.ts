@@ -651,7 +651,12 @@ describe('portable calendar read surface', () => {
         .all()
         .map(({ tool }) => tool.name)
         .sort(),
-    ).toEqual(['calendar.availability', 'calendar.list_calendars', 'calendar.list_events']);
+    ).toEqual([
+      'calendar.availability',
+      'calendar.list_calendars',
+      'calendar.list_events',
+      'calendar.search_events',
+    ]);
   });
 });
 
