@@ -84,11 +84,12 @@ final class OptimisticEditStore {
     @ObservationIgnored private var recoveryScope: String?
     @ObservationIgnored private var recoveryCleanup: Task<Void, Never>?
     @ObservationIgnored var reconcile: Reconcile?
+    @ObservationIgnored var recoveryJournalFactory: (String) -> MobileEditRecoveryJournal = { MobileEditRecoveryJournal(scope: $0) }
 
     func configureRecovery(scope: String) {
         guard recoveryScope != scope else { return }
         recoveryScope = scope
-        let journal = MobileEditRecoveryJournal(scope: scope)
+        let journal = recoveryJournalFactory(scope)
         self.journal = journal
         let epoch = generation
         let cleanup = recoveryCleanup
@@ -96,7 +97,7 @@ final class OptimisticEditStore {
             do {
                 await cleanup?.value
                 let records = try await journal.load()
-                guard let self, self.generation == epoch else { return }
+                guard let self, self.generation == epoch, self.recoveryScope == scope else { return }
                 for record in records where !self.entries.contains(where: { $0.id == record.id }) {
                     var edit = Edit(id: record.id, title: record.title, resources: record.memoryRelated == true ? [.memory] : [], patch: { _ in },
                                     write: {}, retrySafe: false, draft: record.draft)
@@ -108,7 +109,7 @@ final class OptimisticEditStore {
                 }
                 self.rebuild()
             } catch {
-                guard let self, self.generation == epoch else { return }
+                guard let self, self.generation == epoch, self.recoveryScope == scope else { return }
                 // Keep the encrypted record intact if the device is locked.
                 let id = UUID()
                 var edit = Edit(id: id, title: "Saved changes need review", resources: [], patch: { _ in },
@@ -320,14 +321,16 @@ struct MobileEditRecoveryRecord: Codable, Identifiable, Sendable {
 actor MobileEditRecoveryJournal {
     private let partition: String
     private let url: URL
-    private let vault = KeychainCardFormDraftKeyVault()
+    private let vault: any CardFormDraftKeyVault
     private let files = ProtectedCardFormDraftFileAccess()
     private var records: [MobileEditRecoveryRecord]?
 
-    init(scope: String) {
+    init(scope: String, keyVault: any CardFormDraftKeyVault = KeychainCardFormDraftKeyVault(),
+         applicationSupportRoot: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]) {
+        vault = keyVault
         let digest = SHA256.hash(data: Data(scope.utf8)).map { String(format: "%02x", $0) }.joined()
         partition = "mobile-edit-recovery-" + digest
-        url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        url = applicationSupportRoot
             .appendingPathComponent("MobileEditRecovery", isDirectory: true)
             .appendingPathComponent(digest + ".sealed")
     }

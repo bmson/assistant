@@ -6740,7 +6740,7 @@ extension APIClientRetryTests {
 
 extension APIClientRetryTests {
     @MainActor
-    func testSettingsSaveDrawsNativeFeedbackBeforeTheDelayedWriteFinishes() async throws {
+    func testSettingsSaveCommitsNativeFeedbackBeforeTheDelayedWriteFinishes() async throws {
         StubURLProtocol.prime([.success(status: 200, body: optimisticWorkspace())])
         let model = AppModel(apiClient: makeClient())
         _ = await model.refreshWorkspace()
@@ -6765,16 +6765,22 @@ extension APIClientRetryTests {
         let accepted = await model.updateAgentSettings(.init(timezone: "UTC", locale: "en-US", signature: "Changed"))
         await Task.yield()
         window.layoutIfNeeded()
+        window.layer.displayIfNeeded()
+        CATransaction.flush()
+        let elapsed = ContinuousClock.now - started
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(model.edits.pendingCount, 1, "Native feedback must commit while the write is still pending")
+        XCTAssertLessThan(elapsed, .milliseconds(200), "Native save feedback commit exceeded the interaction budget")
+        // Screenshot readback and image allocation are evidence collection,
+        // not work performed by a tap in the app. Time them separately.
+        let captureStarted = ContinuousClock.now
         var rendered = false
         let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
             rendered = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
         }
-        let elapsed = ContinuousClock.now - started
-        XCTAssertTrue(accepted)
         XCTAssertTrue(rendered)
-        XCTAssertEqual(model.edits.pendingCount, 1, "Native feedback must draw while the write is still pending")
-        XCTAssertLessThan(elapsed, .milliseconds(200), "Native save feedback exceeded the interaction budget")
-        print("Native settings save acceptance and rendered feedback: \(elapsed)")
+        XCTAssertEqual(model.edits.pendingCount, 1)
+        print("Native settings save acceptance and layer commit: \(elapsed); screenshot readback: \(ContinuousClock.now - captureStarted)")
         let attachment = XCTAttachment(image: image)
         attachment.name = "settings-save-before-backend-response"
         attachment.lifetime = .keepAlways

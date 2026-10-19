@@ -90,15 +90,20 @@ atomic reconciliation, independent Observation, and encrypted owner-scoped
 recovery. A 100-edit acceptance benchmark enforces the 200 ms budget.
 `APIClientRetryTests` additionally covers actual settings PATCH acceptance,
 rejection, stale reads, coalesced page loads, navigation cancellation, bounded
-query caches, and native feedback rendering before a delayed write completes
+query caches, and native feedback layer commits before a delayed write completes
 using `URLProtocol` responses. `NativeVisualReviewTests` captures saving, failed,
 and confirmed-but-refresh-pending states in light/dark appearance and large text.
 
 The October 18 macOS host run executed the same production outbox, model and
-recovery sources with **15 tests passing**. Worst acceptance in 100 consecutive
-edits was **0.364 ms** in that run. This measures model acceptance, not iPhone
+recovery sources with **16 tests passing**. Worst acceptance in 100 consecutive
+edits was **0.058 ms** in that run. This measures model acceptance, not iPhone
 frames, keyboard response, navigation animation, or time to first network data.
 The iOS simulator build-for-testing passed. Local iOS execution is blocked by
 Xcode 27 beta's Simulator test-service connection failure; no local native
-assertions ran. Hosted native execution and visual review are still pending.
+assertions ran. Hosted CI retains its result bundle, visual attachments and
+timing log on both passing and failing runs. Distribution requires reviewing
+the applicable native run and captures. Unsigned CI injects an isolated key
+vault while exercising production AES-GCM and protected-file storage; the
+production default remains Keychain. The native 200 ms assertion covers
+acceptance, layout and layer commit; screenshot readback is timed separately.
 These checks do not establish app-wide latency on a physical device.

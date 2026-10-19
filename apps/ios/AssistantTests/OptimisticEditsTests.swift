@@ -239,20 +239,37 @@ final class OptimisticEditsTests: XCTestCase {
 
     func testRecoveryIsEncryptedScopedAndRemovedOnConfirmation() async throws {
         let scope = "https://recovery.test|owner-" + UUID().uuidString
-        let journal = MobileEditRecoveryJournal(scope: scope)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let vault = TestMobileEditKeyVault()
+        let journal = MobileEditRecoveryJournal(scope: scope, keyVault: vault, applicationSupportRoot: root)
         let record = MobileEditRecoveryRecord(id: UUID(), title: "Memory", draft: "Private submitted wording")
         try await journal.save(record)
-        let recovered = try await MobileEditRecoveryJournal(scope: scope).load()
+        let recovered = try await MobileEditRecoveryJournal(scope: scope, keyVault: vault, applicationSupportRoot: root).load()
         XCTAssertEqual(recovered.first?.draft, record.draft)
-        let otherOwner = try await MobileEditRecoveryJournal(scope: scope + "-other").load()
+        let otherOwner = try await MobileEditRecoveryJournal(scope: scope + "-other", keyVault: vault, applicationSupportRoot: root).load()
         XCTAssertTrue(otherOwner.isEmpty)
         let digest = SHA256.hash(data: Data(scope.utf8)).map { String(format: "%02x", $0) }.joined()
-        let file = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let file = root
             .appendingPathComponent("MobileEditRecovery/" + digest + ".sealed")
         let encrypted = try Data(contentsOf: file)
         XCTAssertNil(encrypted.range(of: Data(record.draft.utf8)))
         try await journal.remove(record.id)
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    func testRecoveryLoadCannotPublishIntoANewerOwnerScope() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let vault = TestMobileEditKeyVault()
+        let oldJournal = MobileEditRecoveryJournal(scope: "old-owner", keyVault: vault, applicationSupportRoot: root)
+        try await oldJournal.save(.init(id: UUID(), title: "Old owner", draft: "Private old draft"))
+        let store = OptimisticEditStore()
+        store.recoveryJournalFactory = { MobileEditRecoveryJournal(scope: $0, keyVault: vault, applicationSupportRoot: root) }
+        store.configureRecovery(scope: "old-owner")
+        store.configureRecovery(scope: "new-owner")
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(store.failures.isEmpty, "An old asynchronous recovery load must not expose another owner's draft")
     }
 
     func testHundredRapidEditsKeepLatestIntentUnder200ms() async {
@@ -279,4 +296,33 @@ private final class ObservationProbe: @unchecked Sendable {
     private var value = 0
     var count: Int { lock.withLock { value } }
     func increment() { lock.withLock { value += 1 } }
+}
+
+/// The unsigned CI Simulator has no Keychain access group. Production still
+/// uses Keychain; these tests retain the production AES-GCM and file adapter.
+final class TestMobileEditKeyVault: CardFormDraftKeyVault, @unchecked Sendable {
+    private let lock = NSLock()
+    private var keys: [String: SymmetricKey] = [:]
+    private var closed = Set<String>()
+
+    func assertOpen(partition: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        if closed.contains(partition) { throw EncryptedCardFormDraftStorageError.partitionClosed }
+    }
+
+    func key(for partition: String, createIfMissing: Bool) throws -> SymmetricKey {
+        lock.lock(); defer { lock.unlock() }
+        if closed.contains(partition) { throw EncryptedCardFormDraftStorageError.partitionClosed }
+        if let key = keys[partition] { return key }
+        guard createIfMissing else { throw EncryptedCardFormDraftStorageError.keyUnavailable }
+        let key = SymmetricKey(size: .bits256)
+        keys[partition] = key
+        return key
+    }
+
+    func close(partition: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        keys.removeValue(forKey: partition)
+        closed.insert(partition)
+    }
 }

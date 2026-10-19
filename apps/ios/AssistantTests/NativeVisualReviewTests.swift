@@ -17,6 +17,14 @@ final class NativeVisualReviewTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "assistant.optimistic-save-visual-review"))
         defaults.removePersistentDomain(forName: "assistant.optimistic-save-visual-review")
         let model = AppModel(apiClient: client, defaults: defaults)
+        // CI deliberately runs an unsigned Simulator app. Exercise the real
+        // encrypted file journal with an isolated vault instead of Keychain.
+        let recoveryRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let vault = TestMobileEditKeyVault()
+        model.edits.recoveryJournalFactory = { scope in
+            MobileEditRecoveryJournal(scope: scope, keyVault: vault, applicationSupportRoot: recoveryRoot)
+        }
+        defer { try? FileManager.default.removeItem(at: recoveryRoot) }
         await model.refreshAll()
         _ = await model.refreshWorkspace()
         await model.loadPeople()
