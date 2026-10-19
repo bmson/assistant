@@ -74,7 +74,7 @@ test, call hang-up, merge, or erasure must not be labelled completed merely
 because the phone accepted the tap. Compound knowledge edits still stop at the
 first failed dependent write and preserve their partial-success explanation.
 
-Overview and workspace reads coalesce by connection and edit revision. Leaving
+Overview and workspace reads coalesce by connection and the affected projection’s edit revision. Leaving
 a page cancels that page's publication, while the shared request can still warm
 the next page. Workspace and People prefetch begin after bootstrap without the
 former artificial 1.5-second delay. Warm content remains editable if a refresh
@@ -95,8 +95,8 @@ using `URLProtocol` responses. `NativeVisualReviewTests` captures saving, failed
 and confirmed-but-refresh-pending states in light/dark appearance and large text.
 
 The October 18 macOS host run executed the same production outbox, model and
-recovery sources with **16 tests passing**. Worst acceptance in 100 consecutive
-edits was **0.058 ms** in that run. This measures model acceptance, not iPhone
+recovery sources with **17 tests passing**. Worst acceptance in 100 consecutive
+edits was **0.205 ms** in that run. This measures model acceptance, not iPhone
 frames, keyboard response, navigation animation, or time to first network data.
 The iOS simulator build-for-testing passed. Local iOS execution is blocked by
 Xcode 27 beta's Simulator test-service connection failure; no local native

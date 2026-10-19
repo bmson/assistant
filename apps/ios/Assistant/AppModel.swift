@@ -643,9 +643,10 @@ final class AppModel {
     func relationshipGraph(personID: String? = nil, entityID: String? = nil, query: String = "") async -> RelationshipGraphSnapshot? {
         guard let client else { return nil }
         let version = connectionVersion
+        let revision = edits.revision(for: [.memory])
         do {
             let snapshot = try await client.relationshipGraph(personID: personID, entityID: entityID, query: query)
-            guard connectionIsCurrent(client, version: version) else { return nil }
+            guard connectionIsCurrent(client, version: version), edits.revision(for: [.memory]) == revision else { return nil }
             let key = RelationshipGraphQuery(personID: personID, entityID: entityID, query: query)
             graphCache[key] = snapshot
             graphCacheRecency.removeAll { $0 == key }
@@ -1719,14 +1720,14 @@ final class AppModel {
     }
 
     private func fetchOverview(_ client: APIClient) async -> ScopedOverviewRead {
-        let revision = edits.revision
+        let revision = edits.revision(for: [.overview])
         do { return ScopedOverviewRead(editRevision: revision, result: .success(try await client.overview())) }
         catch { return ScopedOverviewRead(editRevision: revision, result: .failure(error)) }
     }
 
     private func applyOverviewResult(_ read: ScopedOverviewRead,
                                      using client: APIClient, version: Int, reportFailure: Bool) {
-        guard connectionIsCurrent(client, version: version), read.editRevision == edits.revision else { return }
+        guard connectionIsCurrent(client, version: version), read.editRevision == edits.revision(for: [.overview]) else { return }
         do {
             overview = withLocalApprovalDecisions(try read.result.get())
             clearRecoveredError(from: .overview)
@@ -1796,7 +1797,7 @@ final class AppModel {
     func refreshOverview(reportFailure: Bool = true) async -> Bool {
         guard let client else { return false }
         let version = connectionVersion
-        let editRevision = edits.revision
+        let editRevision = edits.revision(for: [.overview])
         do {
             let request: Task<OverviewResponse, Error>
             let requestID: UUID
@@ -1811,7 +1812,7 @@ final class AppModel {
             defer { if sharedOverviewRead?.id == requestID { sharedOverviewRead = nil } }
             let response = try await request.value
             guard !Task.isCancelled else { return false }
-            guard edits.revision == editRevision, connectionIsCurrent(client, version: version) else { return false }
+            guard edits.revision(for: [.overview]) == editRevision, connectionIsCurrent(client, version: version) else { return false }
             overview = withLocalApprovalDecisions(response)
             documentPageError = nil
             clearRecoveredError(from: .overview)
@@ -2007,11 +2008,17 @@ final class AppModel {
     private func reconcilePeopleEdits(_ resources: Set<MobileEditResource>) async -> Bool {
         guard let client else { return false }
         let version = connectionVersion
-        let revision = edits.revision
+        let readResources = resources.filter { resource in
+            switch resource {
+            case .people, .personCaches, .person: true
+            default: false
+            }
+        }
+        let revision = edits.revision(for: readResources)
         do {
             if resources.contains(.people) {
                 let response = try await client.people()
-                guard connectionIsCurrent(client, version: version), edits.revision == revision else { return false }
+                guard connectionIsCurrent(client, version: version), edits.revision(for: readResources) == revision else { return false }
                 people = response.people
                 peoplePagination = response.pagination.flatMap { $0.isSupported ? $0 : nil }
                 peopleGeneration = response.generatedAt
@@ -2022,7 +2029,7 @@ final class AppModel {
                 async let profile = client.personProfile(id: id)
                 async let card = client.personCard(id: id)
                 let (loadedProfile, loadedCard) = try await (profile, card)
-                guard connectionIsCurrent(client, version: version), edits.revision == revision else { return false }
+                guard connectionIsCurrent(client, version: version), edits.revision(for: readResources) == revision else { return false }
                 edits.updateRemote(resources: [.person(id)]) { state in
                     state.personProfiles[id] = loadedProfile
                     state.personCards[id] = loadedCard
@@ -2035,10 +2042,10 @@ final class AppModel {
     private func reloadArchivedGoals() async -> Bool {
         guard let client else { return false }
         let version = connectionVersion
-        let revision = edits.revision
+        let revision = edits.revision(for: [.archivedGoals])
         do {
             let response = try await client.goals(archived: true)
-            guard connectionIsCurrent(client, version: version), edits.revision == revision else { return false }
+            guard connectionIsCurrent(client, version: version), edits.revision(for: [.archivedGoals]) == revision else { return false }
             archivedGoals = response
             return true
         } catch { return false }
@@ -2047,10 +2054,10 @@ final class AppModel {
     private func reloadCommitments() async -> Bool {
         guard let client else { return false }
         let version = connectionVersion
-        let revision = edits.revision
+        let revision = edits.revision(for: [.commitments])
         do {
             let response = try await client.commitments()
-            guard connectionIsCurrent(client, version: version), edits.revision == revision else { return false }
+            guard connectionIsCurrent(client, version: version), edits.revision(for: [.commitments]) == revision else { return false }
             edits.updateRemote(resources: [.commitments]) { $0.commitments = response.commitments }
             return true
         } catch { return false }
@@ -2076,10 +2083,10 @@ final class AppModel {
     private func reloadVoiceProfile() async -> Bool {
         guard let client else { return false }
         let version = connectionVersion
-        let revision = edits.revision
+        let revision = edits.revision(for: [.voiceProfile])
         do {
             let response = try await client.voiceProfile()
-            guard connectionIsCurrent(client, version: version), edits.revision == revision else { return false }
+            guard connectionIsCurrent(client, version: version), edits.revision(for: [.voiceProfile]) == revision else { return false }
             edits.updateRemote(resources: [.voiceProfile]) { $0.voiceProfile = response }
             return true
         } catch { return false }
@@ -2521,8 +2528,8 @@ final class AppModel {
     /// Warm the workspace once the conversation is up. Memory, Settings, Costs,
     /// Skills and the rest all draw on this one large projection, and the first
     /// screen to open used to start it cold: the owner tapped, then waited for
-    /// the heaviest read the app makes. A short delay keeps it behind the
-    /// launch-critical requests; a screen that opens first simply wins.
+    /// the heaviest read the app makes. Bootstrap finishes first; secondary
+    /// requests then start immediately and coalesce with any opened page.
     func prefetchSecondaryScreens() async {
         guard let client else { return }
         let version = connectionVersion
@@ -2536,7 +2543,7 @@ final class AppModel {
     func refreshWorkspace(reportFailure: Bool = true) async -> Bool {
         guard let client else { return false }
         let version = connectionVersion
-        let editRevision = edits.revision
+        let editRevision = edits.revision(for: [.workspace])
         workspaceRequestsInFlight[version, default: 0] += 1
         defer {
             let remaining = workspaceRequestsInFlight[version, default: 1] - 1
@@ -2557,7 +2564,7 @@ final class AppModel {
             defer { if sharedWorkspaceRead?.id == requestID { sharedWorkspaceRead = nil } }
             let loaded = try await request.value
             guard !Task.isCancelled else { return false }
-            guard edits.revision == editRevision, connectionIsCurrent(client, version: version) else { return false }
+            guard edits.revision(for: [.workspace]) == editRevision, connectionIsCurrent(client, version: version) else { return false }
             workspace = loaded
             clearRecoveredError(from: .workspace)
             applyMemoryHealth(loaded.memory.health)
@@ -2756,10 +2763,10 @@ final class AppModel {
     func refreshCards(reportFailure: Bool = true) async -> Bool {
         guard let client else { return false }
         let version = connectionVersion
-        let editRevision = edits.revision
+        let editRevision = edits.revision(for: [.cards])
         do {
             let result = try await client.cards()
-            guard edits.revision == editRevision, connectionIsCurrent(client, version: version) else { return false }
+            guard edits.revision(for: [.cards]) == editRevision, connectionIsCurrent(client, version: version) else { return false }
             savedCards = result.cards.map { card in
                 var result = card
                 if let marker = cardRefreshMarkers[card.id],
@@ -3120,10 +3127,10 @@ final class AppModel {
     func refreshModelProviders(reportFailure: Bool = true) async -> Bool {
         guard let client else { return false }
         let version = connectionVersion
-        let editRevision = edits.revision
+        let editRevision = edits.revision(for: [.providers])
         do {
             let response = try await client.modelProviders()
-            guard edits.revision == editRevision, connectionIsCurrent(client, version: version) else { return false }
+            guard edits.revision(for: [.providers]) == editRevision, connectionIsCurrent(client, version: version) else { return false }
             modelProviders = response
             return true
         } catch {
@@ -3375,10 +3382,10 @@ final class AppModel {
     func memoryLibrary(_ query: MemoryLibraryQuery, reportFailure: Bool = true, updateRecency: Bool = true) async -> MemoryLibraryResponse? {
         guard let client else { return nil }
         let version = connectionVersion
-        let revision = edits.revision
+        let revision = edits.revision(for: [.memory, .library(query)])
         do {
             let response = try await client.memoryLibrary(query)
-            guard connectionIsCurrent(client, version: version), edits.revision == revision else { return nil }
+            guard connectionIsCurrent(client, version: version), edits.revision(for: [.memory, .library(query)]) == revision else { return nil }
             if updateRecency {
                 memoryLibraryRecency.removeAll { $0 == query }
                 memoryLibraryRecency.append(query)
@@ -3450,6 +3457,7 @@ final class AppModel {
         do {
             try await client.forgetLongTermMemory()
             guard connectionIsCurrent(client, version: version) else { return false }
+            edits.invalidateReads(for: [.memory, .workspace, .voiceProfile, .commitments])
             edits.discardSettled(resources: [.memory])
             edits.updateRemote { state in
                 state.workspace?.memory.facts = []
@@ -3541,11 +3549,11 @@ final class AppModel {
     func loadPeople() async {
         guard let client else { return }
         let version = connectionVersion
-        let editRevision = edits.revision
+        let editRevision = edits.revision(for: [.people])
         let ownerID = bootstrap?.identity.id
         do {
             let response = try await client.people()
-            guard edits.revision == editRevision, connectionIsCurrent(client, version: version), bootstrap?.identity.id == ownerID else { return }
+            guard edits.revision(for: [.people]) == editRevision, connectionIsCurrent(client, version: version), bootstrap?.identity.id == ownerID else { return }
             people = response.people
             peoplePagination = response.pagination.flatMap { $0.isSupported ? $0 : nil }
             peopleGeneration = response.generatedAt
@@ -3651,10 +3659,10 @@ final class AppModel {
     func loadPersonCard(id: String) async {
         guard let client else { return }
         let version = connectionVersion
-        let editRevision = edits.revision
+        let editRevision = edits.revision(for: [.person(id), .personCaches])
         do {
             let response = try await client.personCard(id: id)
-            guard edits.revision == editRevision, connectionIsCurrent(client, version: version) else { return }
+            guard edits.revision(for: [.person(id), .personCaches]) == editRevision, connectionIsCurrent(client, version: version) else { return }
             edits.updateRemote(resources: [.person(id)]) { $0.personCards[id] = response }
         }
         catch where isRequestCancellation(error) { return }
@@ -3664,10 +3672,10 @@ final class AppModel {
     func loadPersonProfile(id: String) async {
         guard let client else { return }
         let version = connectionVersion
-        let editRevision = edits.revision
+        let editRevision = edits.revision(for: [.person(id), .personCaches])
         do {
             let response = try await client.personProfile(id: id)
-            guard edits.revision == editRevision, connectionIsCurrent(client, version: version) else { return }
+            guard edits.revision(for: [.person(id), .personCaches]) == editRevision, connectionIsCurrent(client, version: version) else { return }
             edits.updateRemote(resources: [.person(id)]) { $0.personProfiles[id] = response }
         }
         catch where isRequestCancellation(error) { return }

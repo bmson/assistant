@@ -74,6 +74,8 @@ final class OptimisticEditStore {
     private(set) var pendingCount = 0
     private(set) var needsRefresh = false
     private(set) var revision = 0
+    @ObservationIgnored private var resourceRevisions: [MobileEditResource: Int] = [:]
+    @ObservationIgnored private var resetRevision = 0
     @ObservationIgnored private var remote = MobileScreenState()
     @ObservationIgnored private var stagedRemote: MobileScreenState?
     @ObservationIgnored private var stagingResources: Set<MobileEditResource> = []
@@ -125,6 +127,20 @@ final class OptimisticEditStore {
 
     var serverSnapshot: MobileScreenState { remote }
 
+    /// An unrelated edit cannot invalidate a page's in-flight read.
+    func revision(for resources: Set<MobileEditResource>) -> Int {
+        resources.reduce(resetRevision) { max($0, resourceRevisions[$1, default: resetRevision]) }
+    }
+
+    private func advanceRevision(resources: Set<MobileEditResource>) {
+        revision += 1
+        for resource in resources { resourceRevisions[resource] = revision }
+    }
+
+    func invalidateReads(for resources: Set<MobileEditResource>) {
+        advanceRevision(resources: resources)
+    }
+
     func updateRemote(resources: Set<MobileEditResource>? = nil, immediate: Bool = false, _ update: (inout MobileScreenState) -> Void) {
         if var staged = stagedRemote {
             update(&staged)
@@ -144,7 +160,7 @@ final class OptimisticEditStore {
                 patch: @escaping Patch, write: @escaping Write) {
         entries.append(Edit(id: UUID(), title: title, resources: resources,
                             patch: patch, write: write, retrySafe: retrySafe, draft: draft))
-        revision += 1
+        advanceRevision(resources: resources)
         rebuild(resources: resources)
         startWorker()
     }
@@ -157,7 +173,7 @@ final class OptimisticEditStore {
         edit.failure = nil
         // An explicit retry is the owner's newest intent for this record.
         entries.append(edit)
-        revision += 1
+        advanceRevision(resources: edit.resources)
         rebuild(resources: edit.resources)
         startWorker()
     }
@@ -200,6 +216,8 @@ final class OptimisticEditStore {
         stagedRemote = nil
         stagingResources = []
         revision += 1
+        resetRevision = revision
+        resourceRevisions = [:]
         rebuild()
     }
 
@@ -266,7 +284,7 @@ final class OptimisticEditStore {
                                 canRetry: edit.retrySafe, outcomeUnknown: dispatched && Self.isUnknownOutcome(error))
                         }
                     }
-                    self.revision += 1
+                    self.advanceRevision(resources: edit.resources)
                     self.rebuild(resources: edit.resources)
                     continue
                 }

@@ -237,6 +237,20 @@ final class OptimisticEditsTests: XCTestCase {
         XCTAssertEqual(store.visible.commitments?.first?.title, "Saved")
     }
 
+    func testReadRevisionsOnlyAdvanceForAffectedResourcesAndReset() async {
+        let store = OptimisticEditStore()
+        let providers = store.revision(for: [.providers])
+        let workspace = store.revision(for: [.workspace])
+        store.reconcile = { _ in true }
+        store.submit(title: "Settings", resources: [.workspace], patch: { _ in }) {}
+        XCTAssertEqual(store.revision(for: [.providers]), providers)
+        XCTAssertNotEqual(store.revision(for: [.workspace]), workspace)
+        await store.settle()
+        XCTAssertEqual(store.revision(for: [.providers]), providers, "Confirmation must not invalidate an unrelated read either")
+        store.reset()
+        XCTAssertNotEqual(store.revision(for: [.providers]), providers)
+    }
+
     func testRecoveryIsEncryptedScopedAndRemovedOnConfirmation() async throws {
         let scope = "https://recovery.test|owner-" + UUID().uuidString
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

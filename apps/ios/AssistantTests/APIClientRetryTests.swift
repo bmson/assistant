@@ -6810,3 +6810,47 @@ extension APIClientRetryTests {
         XCTAssertNotNil(model.cachedMemoryLibrary(latest))
     }
 }
+
+extension APIClientRetryTests {
+    @MainActor
+    func testProviderPageReadSurvivesAnUnrelatedSettingsSave() async throws {
+        StubURLProtocol.prime([.success(status: 200, body: optimisticWorkspace())])
+        let model = AppModel(apiClient: makeClient())
+        _ = await model.refreshWorkspace()
+        let providers = ModelProviderSettings(connections: [], models: [], mainModel: "loaded", fastModel: nil, voiceModel: nil, voicePresets: [])
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/providers": [.delayed(after: 0.15, status: 200, body: try JSONEncoder().encode(providers))],
+            "/api/mobile/v1/settings": [.delayed(after: 0.5, status: 200, body: Data(#"{"ok":true}"#.utf8))],
+            "/api/mobile/v1/workspace": [.success(status: 200, body: optimisticWorkspace(signature: "Changed"))]
+        ])
+        let pageRead = Task { await model.refreshModelProviders() }
+        try await Task.sleep(for: .milliseconds(30))
+        _ = await model.updateAgentSettings(.init(timezone: "UTC", locale: "en-US", signature: "Changed"))
+        let loaded = await pageRead.value
+        XCTAssertTrue(loaded, "An unrelated save must not discard a page that is opening")
+        XCTAssertEqual(model.modelProviders?.mainModel, "loaded")
+        XCTAssertEqual(model.edits.pendingCount, 1)
+        await model.edits.settle()
+        XCTAssertTrue(model.edits.failures.isEmpty)
+    }
+}
+
+extension APIClientRetryTests {
+    @MainActor
+    func testReadFromBeforeMemoryErasureCannotRestoreTheLibraryCache() async throws {
+        let query = MemoryLibraryQuery()
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/memory/library": [.delayed(after: 0.3, status: 200, body: try JSONEncoder().encode(MemoryLibraryResponse.empty))],
+            "/api/mobile/v1/memory/profile": [.success(status: 200, body: Data(#"{"ok":true}"#.utf8))],
+            "/api/mobile/v1/workspace": [.success(status: 200, body: optimisticWorkspace())]
+        ])
+        let model = AppModel(apiClient: makeClient())
+        let staleRead = Task { await model.memoryLibrary(query) }
+        try await Task.sleep(for: .milliseconds(30))
+        let erased = await model.forgetLongTermMemory()
+        XCTAssertTrue(erased)
+        let result = await staleRead.value
+        XCTAssertNil(result)
+        XCTAssertNil(model.cachedMemoryLibrary(query), "A pre-erasure response must not restore erased cached content")
+    }
+}
