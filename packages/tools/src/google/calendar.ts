@@ -85,7 +85,6 @@ interface CalendarEntry {
   primary: boolean;
   accessRole: string;
   timeZone?: string;
-  connectedAccount?: string;
 }
 
 interface RawEvent {
@@ -163,7 +162,6 @@ interface CalendarRoster {
   calendars: CalendarEntry[];
   /** Provider page left unread when the bounded roster walk reaches its limit. */
   nextPageToken?: string;
-  accountErrors?: string[];
 }
 
 async function fetchCalendarPage(
@@ -184,11 +182,9 @@ async function fetchCalendarPage(
       primary?: boolean;
       accessRole?: string;
       timeZone?: string;
-      connectedAccount?: string;
       deleted?: boolean;
     }>;
     nextPageToken?: string;
-    accountErrors?: string[];
   }>(`${CAL}/users/me/calendarList?${params.toString()}`);
   return {
     calendars: (res.items ?? [])
@@ -199,31 +195,23 @@ async function fetchCalendarPage(
         primary: c.primary === true,
         accessRole: c.accessRole ?? 'reader',
         ...(c.timeZone ? { timeZone: c.timeZone } : {}),
-        ...(c.connectedAccount ? { connectedAccount: c.connectedAccount } : {}),
       })),
     ...(res.nextPageToken ? { nextPageToken: res.nextPageToken } : {}),
-    ...(res.accountErrors ? { accountErrors: res.accountErrors } : {}),
   };
 }
 
 async function fetchCalendars(client: GoogleClient): Promise<CalendarRoster> {
   const calendars: CalendarEntry[] = [];
-  const accountErrors: string[] = [];
   let pageToken: string | undefined;
   let pages = 0;
   while (pages < MAX_CALENDAR_ROSTER_PAGES) {
     const res = await fetchCalendarPage(client, pageToken);
     calendars.push(...res.calendars);
-    accountErrors.push(...(res.accountErrors ?? []));
     pages += 1;
     pageToken = res.nextPageToken;
     if (!pageToken) break;
   }
-  return {
-    calendars: [...new Map(calendars.map((c) => [c.id, c])).values()],
-    ...(pageToken ? { nextPageToken: pageToken } : {}),
-    ...(accountErrors.length ? { accountErrors: [...new Set(accountErrors)] } : {}),
-  };
+  return { calendars, ...(pageToken ? { nextPageToken: pageToken } : {}) };
 }
 
 function localDateTimeInZone(value: string, timeZone: string): number {
@@ -381,7 +369,6 @@ function normalizeEvent(raw: RawEvent, calendar: CalendarEntry) {
     // whether something is on the work calendar or the family one.
     calendar: calendar.name,
     calendarId: calendar.id,
-    ...(calendar.connectedAccount ? { connectedAccount: calendar.connectedAccount } : {}),
     startTimeZone: raw.start?.timeZone ?? calendar.timeZone,
     ...(calendar.timeZone ? { calendarTimeZone: calendar.timeZone } : {}),
     summary: raw.summary ?? '',
@@ -549,9 +536,7 @@ async function collectEvents(
     }),
   );
 
-  const unavailable: Array<{ calendar: string; reason: string; candidates?: string[] }> = (
-    roster.accountErrors ?? []
-  ).map((reason) => ({ calendar: 'Connected account', reason }));
+  const unavailable: Array<{ calendar: string; reason: string; candidates?: string[] }> = [];
   const nextCursorById = new Map<string, PageCursor>();
   for (const calendar of targets)
     nextCursorById.set(
@@ -593,7 +578,6 @@ async function collectEvents(
   // event, so callers must retain the ordinary incomplete-coverage caveat.
   const lastReturnedMs = lastReturnedEvent ? startedAt(lastReturnedEvent) : Number.NaN;
   const chronologicalPrefixThrough =
-    !roster.accountErrors?.length &&
     Number.isFinite(lastReturnedMs) &&
     [...nextCursorById.values()].every((cursor) => {
       if (cursor.token === null && cursor.buffered.length === 0) return true;
@@ -676,7 +660,7 @@ async function collectEvents(
       .filter((calendar) => searchedIds.has(calendar.id))
       .map((calendar) => calendar.id),
     unavailable,
-    calendarRosterComplete: !rosterTruncated && !roster.accountErrors?.length,
+    calendarRosterComplete: !rosterTruncated,
     ...(roster.nextPageToken ? { calendarRosterNextPageToken: roster.nextPageToken } : {}),
     ...(nextPageToken ? { nextPageToken } : {}),
     ...(chronologicalPrefixThrough ? { chronologicalPrefixThrough } : {}),
@@ -886,9 +870,8 @@ export async function listEventsInWindow(
 export function registerCalendarTools(
   registry: ToolRegistry,
   deps: CalendarToolDeps,
-  options: { readOnly?: boolean; readClient?: GoogleClient } = {},
+  options: { readOnly?: boolean } = {},
 ): ToolRegistry {
-  const reads = { ...deps, client: options.readClient ?? deps.client };
   register(
     registry,
     {
@@ -907,18 +890,17 @@ export function registerCalendarTools(
         // and the owner's address: a busy block on a shared "Work" calendar is
         // exactly as blocking as one on the owner's primary.
         let calendarRosterComplete = true;
-        const roster: CalendarRoster = await fetchCalendars(reads.client).catch(() => {
+        const roster: CalendarRoster = await fetchCalendars(deps.client).catch(() => {
           calendarRosterComplete = false;
           return { calendars: [] as CalendarEntry[], nextPageToken: undefined };
         });
-        calendarRosterComplete =
-          calendarRosterComplete && !roster.nextPageToken && !roster.accountErrors?.length;
+        calendarRosterComplete = calendarRosterComplete && !roster.nextPageToken;
         const ids = new Set<string>([deps.botEmail, deps.ownerEmail]);
         for (const calendar of roster.calendars) ids.add(calendar.id);
         const items = [...ids].slice(0, MAX_FREEBUSY_ITEMS).map((id) => ({ id }));
         const nameFor = new Map(roster.calendars.map((c) => [c.id, c.name]));
 
-        const res = await reads.client.api<{
+        const res = await deps.client.api<{
           calendars?: Record<
             string,
             { busy?: Array<{ start: string; end: string }>; errors?: unknown[] }
@@ -1030,7 +1012,7 @@ export function registerCalendarTools(
       acceptsUntrustedInput: true,
       cacheTtlSeconds: 0,
       execute: async (args) => {
-        const roster = await fetchCalendarPage(reads.client, args.pageToken);
+        const roster = await fetchCalendarPage(deps.client, args.pageToken);
         return {
           calendars: roster.calendars.map((c) => ({
             id: c.id,
@@ -1038,11 +1020,9 @@ export function registerCalendarTools(
             primary: c.primary,
             // reader = shared read-only; owner/writer = the bot can edit it.
             access: c.accessRole,
-            ...(c.connectedAccount ? { connectedAccount: c.connectedAccount } : {}),
           })),
           ...(roster.nextPageToken ? { nextPageToken: roster.nextPageToken } : {}),
-          complete: !roster.nextPageToken && !roster.accountErrors?.length,
-          ...(roster.accountErrors ? { unavailable: roster.accountErrors } : {}),
+          complete: !roster.nextPageToken,
         };
       },
     },
@@ -1057,7 +1037,7 @@ export function registerCalendarTools(
     {
       name: 'calendar.list_events',
       description:
-        'List events in a time range across every calendar the assistant can read: its own, connected accounts, and shared calendars. This is the default for "what is happening Monday" and "what\'s on my calendar". Do not ask which calendar or provider; omit calendarIds to read them all. Results include literal organizer, attendee, location, and event/meeting links when Google returned them, plus whether coverage was complete.',
+        'List events in a time range across every calendar the assistant can read: its own plus all shared calendars. This is the default for "what is happening Monday" and "what\'s on my calendar". Do not ask which calendar or provider; omit calendarIds to read them all. Results include literal organizer, attendee, location, and event/meeting links when Google returned them, plus whether coverage was complete.',
       inputSchema: z.object({
         timeMin: z.string().datetime({ offset: true }),
         timeMax: z.string().datetime({ offset: true }),
@@ -1069,7 +1049,7 @@ export function registerCalendarTools(
       risk: 'autonomous',
       acceptsUntrustedInput: true,
       execute: async (args) =>
-        collectEvents(reads, {
+        collectEvents(deps, {
           calendarIds: args.calendarIds,
           maxResults: args.maxResults,
           pageToken: args.pageToken,
@@ -1094,13 +1074,12 @@ export function registerCalendarTools(
   // installing the SQL-backed Google Workspace module. Keep that surface
   // strictly read-only until event mutations have their own portable approval
   // and audit path.
-
   register(
     registry,
     {
       name: 'calendar.search_events',
       description:
-        'Search by keyword (attendee, title, location, or description) across every calendar the assistant can read: its own, connected accounts, and shared calendars. Do not ask which calendar or provider; omit calendarIds to search them all. Results include literal organizer, attendee, location, and event/meeting links when Google returned them, plus calendar identity, coverage, and ISO 8601 times.',
+        'Search by keyword (attendee, title, location, or description) across every calendar the assistant can read: its own plus all shared calendars. Do not ask which calendar or provider; omit calendarIds to search them all. Results include literal organizer, attendee, location, and event/meeting links when Google returned them, plus calendar identity, coverage, and ISO 8601 times.',
       inputSchema: z.object({
         query: z.string().min(1).max(200),
         timeMin: z.string().datetime({ offset: true }).optional(),
@@ -1113,7 +1092,7 @@ export function registerCalendarTools(
       risk: 'autonomous',
       acceptsUntrustedInput: true,
       execute: async (args) =>
-        collectEvents(reads, {
+        collectEvents(deps, {
           calendarIds: args.calendarIds,
           maxResults: args.maxResults,
           pageToken: args.pageToken,

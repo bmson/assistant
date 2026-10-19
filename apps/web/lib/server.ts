@@ -89,7 +89,6 @@ import {
   waitForChatUpdates,
 } from '@assistant/application';
 import { readAuditInvestigation } from '@assistant/application/audit-investigation';
-import type { CalendarAccountPorts } from '@assistant/application/calendar-accounts';
 import type { CallsPorts } from '@assistant/application/calls';
 import type { GoalInput } from '@assistant/application/goals';
 import { GRAPH_EXTRACTION_VERSION } from '@assistant/application/knowledge-graph';
@@ -133,7 +132,6 @@ import {
   createDb,
   createPostgresApplicationChatPersistence,
   createPostgresAuditInvestigationRepository,
-  createPostgresCalendarAccountRepository,
   createPostgresCallSessionRepository,
   createPostgresCardFormAdmissionRepository,
   createPostgresCardRefreshRepository,
@@ -162,7 +160,6 @@ import {
   FirestoreActiveJobLookup,
   FirestoreApplicationChatPersistence,
   FirestoreAuditInvestigationRepository,
-  FirestoreCalendarAccountRepository,
   FirestoreCallSessionRepository,
   FirestoreCommitmentMutationRepository,
   FirestoreDeviceTokenRepository,
@@ -1801,31 +1798,5 @@ export async function getTaskDiscoveryPorts() {
   return {
     repository: createPostgresTaskDiscoveryRepository(getDb()),
     agentId: (await getAgent(getDb())).id,
-  };
-}
-
-/** Calendar grants are owner-managed and shared with the agent through persistence. */
-export function getCalendarAccountPorts(): CalendarAccountPorts {
-  const config = loadConfig();
-  return {
-    config: {
-      ...config,
-      // Existing installations expose the same Google client to the web under AUTH_*.
-      // An explicitly configured integration client always wins as a complete pair.
-      GOOGLE_OAUTH_CLIENT_ID:
-        config.GOOGLE_OAUTH_CLIENT_ID || config.GOOGLE_OAUTH_CLIENT_SECRET
-          ? config.GOOGLE_OAUTH_CLIENT_ID
-          : config.AUTH_GOOGLE_ID,
-      GOOGLE_OAUTH_CLIENT_SECRET:
-        config.GOOGLE_OAUTH_CLIENT_ID || config.GOOGLE_OAUTH_CLIENT_SECRET
-          ? config.GOOGLE_OAUTH_CLIENT_SECRET
-          : config.AUTH_GOOGLE_SECRET,
-    },
-    accounts:
-      config.PERSISTENCE_DRIVER === 'firestore'
-        ? new FirestoreCalendarAccountRepository(getFirestoreInstallationStore())
-        : createPostgresCalendarAccountRepository(getDb()),
-    seal: encryptStoredCredential,
-    open: decryptStoredCredential,
   };
 }

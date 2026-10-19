@@ -2,7 +2,6 @@ import type { ExecutionPersistence } from '@assistant/persistence';
 import { createPostgresApplicationConfirmationRepository } from './application-confirmation-repository.js';
 import { createPostgresApprovalPolicyRepository } from './approval-policy-repository.js';
 import { createPostgresApprovalRepository } from './approval-repository.js';
-import { createPostgresCalendarAccountRepository } from './calendar-account-repository.js';
 import { createPostgresCallSessionRepository } from './call-session-repository.js';
 import { createPostgresCardRefreshRepository } from './card-refresh-repository.js';
 import type { Db } from './client.js';
@@ -80,7 +79,6 @@ export function createPostgresExecutionPersistence(db: Db): ExecutionPersistence
     voiceContext: createPostgresVoiceContextRepository(db),
     smsChannel: createPostgresSmsChannelRepository(db),
     callSessions: createPostgresCallSessionRepository(db),
-    calendarAccounts: createPostgresCalendarAccountRepository(db),
     modelConnections: createPostgresModelConnectionRepository(db),
     modelCatalog: createPostgresModelCatalogRepository(db),
     applications: createPostgresApplicationConfirmationRepository(db),

@@ -1,4 +1,3 @@
-import { isModuleEnabled } from '@assistant/config/modules';
 import { type ExecutorDeps, firestoreCodeJobUnavailable } from '@assistant/core';
 import { calendarModule, googleModule } from '@assistant/modules';
 import {
@@ -7,8 +6,6 @@ import {
   finalChannelDeliveryReport,
 } from '@assistant/persistence';
 import {
-  connectedCalendarClient,
-  type GoogleClient,
   gmailThreadHeadReader,
   listEventsInWindow,
   readCalendarEvent,
@@ -44,19 +41,9 @@ export function approvalNoticeEmail(
 export function executorDeps(deps: AgentDeps): ExecutorDeps {
   const services = agentServices(deps);
   const channels = deps.modules.channels;
-  let calendarClient: GoogleClient | undefined;
   const calendarReadClient = () => {
-    if (calendarClient) return calendarClient;
-    const botCalendar = deps.modules.requireExports(googleModule);
-    calendarClient = connectedCalendarClient(
-      botCalendar.configured() ? botCalendar : deps.modules.requireExports(calendarModule),
-      deps.config,
-      deps.persistence?.calendarAccounts &&
-        (isModuleEnabled(deps.config, 'calendar') || isModuleEnabled(deps.config, 'google'))
-        ? deps.persistence.calendarAccounts
-        : undefined,
-    );
-    return calendarClient;
+    const google = deps.modules.requireExports(googleModule);
+    return google.configured() ? google : deps.modules.requireExports(calendarModule);
   };
   return {
     db: deps.db,
@@ -68,9 +55,8 @@ export function executorDeps(deps: AgentDeps): ExecutorDeps {
     dispatcher: deps.dispatcher,
     workspace: deps.workspace,
     documentProcessor: deps.documentProcessor,
-    // The briefing's calendar input. The google module's absent value is a
-    // client whose configured() is false, so an installation without Google
-    // simply briefs without a calendar section.
+    // Prefer the bot client, falling back to the portable calendar-only module.
+    // Both absent exports report configured() false.
     calendarReader: async ({ timeMin, timeMax }) => {
       const client = calendarReadClient();
       if (!client.configured()) return { events: [], complete: false };

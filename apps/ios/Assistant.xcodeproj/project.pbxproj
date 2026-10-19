@@ -81,6 +81,9 @@
 		B000000000000000000000B0 /* NativeCardFormParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B0 /* NativeCardFormParserTests.swift */; };
 		B000000000000000000000B1 /* NativeCardFormView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B1 /* NativeCardFormView.swift */; };
 		B000000000000000000000B2 /* SecurityReviewSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B2 /* SecurityReviewSection.swift */; };
+		B000000000000000000000B3 /* System/PhoneCalendarStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B3 /* System/PhoneCalendarStore.swift */; };
+		B000000000000000000000B4 /* Views/PhoneCalendarsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B4 /* Views/PhoneCalendarsView.swift */; };
+		B000000000000000000000B5 /* PhoneCalendarStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B5 /* PhoneCalendarStoreTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -193,6 +196,9 @@
 		C000000000000000000000B0 /* NativeCardFormParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCardFormParserTests.swift; sourceTree = "<group>"; };
 		C000000000000000000000B1 /* NativeCardFormView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCardFormView.swift; sourceTree = "<group>"; };
 		C000000000000000000000B2 /* SecurityReviewSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/SecurityReviewSection.swift; sourceTree = "<group>"; };
+		C000000000000000000000B3 /* System/PhoneCalendarStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = System/PhoneCalendarStore.swift; sourceTree = "<group>"; };
+		C000000000000000000000B4 /* Views/PhoneCalendarsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/PhoneCalendarsView.swift; sourceTree = "<group>"; };
+		C000000000000000000000B5 /* PhoneCalendarStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneCalendarStoreTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -245,6 +251,8 @@
 			children = (
 				C00000000000000000000001 /* AssistantApp.swift */,
 				C00000000000000000000002 /* AppModel.swift */,
+				C000000000000000000000B4 /* Views/PhoneCalendarsView.swift */,
+				C000000000000000000000B3 /* System/PhoneCalendarStore.swift */,
 				C00000000000000000000003 /* Design/AssistantTheme.swift */,
 				C00000000000000000000004 /* Models/APIModels.swift */,
 				C00000000000000000000055 /* Models/PollingPolicy.swift */,
@@ -313,6 +321,7 @@
 			isa = PBXGroup;
 			children = (
 				C00000000000000000000020 /* APIModelsTests.swift */,
+				C000000000000000000000B5 /* PhoneCalendarStoreTests.swift */,
 				C000000000000000000000A2 /* ConversationDraftsTests.swift */,
 				C000000000000000000000A3 /* NativeVisualReviewTests.swift */,
 				C000000000000000000000A7 /* CardFormDraftsTests.swift */,
@@ -469,6 +478,8 @@
 			files = (
 				B00000000000000000000001 /* AssistantApp.swift in Sources */,
 				B00000000000000000000002 /* AppModel.swift in Sources */,
+				B000000000000000000000B4 /* Views/PhoneCalendarsView.swift in Sources */,
+				B000000000000000000000B3 /* System/PhoneCalendarStore.swift in Sources */,
 				B00000000000000000000003 /* Design/AssistantTheme.swift in Sources */,
 				B00000000000000000000004 /* Models/APIModels.swift in Sources */,
 				B00000000000000000000055 /* Models/PollingPolicy.swift in Sources */,
@@ -532,6 +543,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B00000000000000000000012 /* APIModelsTests.swift in Sources */,
+				B000000000000000000000B5 /* PhoneCalendarStoreTests.swift in Sources */,
 				B000000000000000000000A2 /* ConversationDraftsTests.swift in Sources */,
 				B000000000000000000000A3 /* NativeVisualReviewTests.swift in Sources */,
 				B000000000000000000000A7 /* CardFormDraftsTests.swift in Sources */,

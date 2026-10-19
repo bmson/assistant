@@ -141,8 +141,6 @@ export function proxy(request: NextRequest) {
   const securityReviewIdPath = /^\/api\/mobile\/v1\/security-reviews\/([^/]+)$/;
   if (
     path.startsWith('/api/auth/') ||
-    (['/api/calendar-accounts/connect', '/api/calendar-accounts/callback'].includes(path) &&
-      request.method === 'GET') ||
     // Passkey owner auth; each route returns 404 unless OWNER_AUTH_MODE=passkey.
     (path.startsWith('/api/owner/') && ['GET', 'POST', 'DELETE'].includes(request.method)) ||
     (['/setup', '/signin', '/security'].includes(path) && request.method === 'GET') ||

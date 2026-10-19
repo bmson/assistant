@@ -2834,12 +2834,16 @@ final class APIClientRetryTests: XCTestCase {
                 case 2: await model.refreshWorkspace()
                 default: _ = await model.knowledge()
                 }
-                XCTAssertTrue((1...requests).contains(StubURLProtocol.attempts.count))
-                XCTAssertTrue(StubURLProtocol.attempts.allSatisfy { $0 == "GET" })
-                XCTAssertEqual(Set(StubURLProtocol.urls.map(\.path)).count, StubURLProtocol.attempts.count,
+                // A parallel overview may start between two individually
+                // locked getters. Compare methods and paths from one snapshot.
+                let recorded = StubURLProtocol.requests
+                let paths = Set(recorded.map { $0.1.path })
+                XCTAssertTrue((1...requests).contains(recorded.count))
+                XCTAssertTrue(recorded.allSatisfy { $0.0 == "GET" })
+                XCTAssertEqual(paths.count, recorded.count,
                     "Cancellation must not trigger a second attempt for an endpoint")
                 if read == 0 {
-                    XCTAssertTrue(Set(StubURLProtocol.urls.map(\.path)).isSubset(of:
+                    XCTAssertTrue(paths.isSubset(of:
                         ["/api/mobile/v1/bootstrap", "/api/mobile/v1/overview"]))
                 }
                 XCTAssertEqual(model.errorMessage, original)
@@ -4248,8 +4252,9 @@ extension APIClientRetryTests {
     @MainActor
     func testSupersededTaskReplyNoLongerQualifiesAsCurrentResult() async throws {
         let recorder = LocalNotificationRecorder()
+        let notificationReady = expectation(description: "The settled task reports its retracted reply")
         let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
-            await recorder.schedule(
+            let scheduled = await recorder.schedule(
                 title: title,
                 body: body,
                 route: route,
@@ -4257,6 +4262,8 @@ extension APIClientRetryTests {
                 agentID: agentID,
                 conversationID: conversationID
             )
+            notificationReady.fulfill()
+            return scheduled
         })
         let taskId = "33333333-3333-4333-8333-333333333333"
         let earlyReply = ChatMessage(
@@ -4291,10 +4298,9 @@ extension APIClientRetryTests {
         ])
 
         model.send("Check the completed task")
-        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
-        while recorder.entries.isEmpty, ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        // Wake on the settled notification with headroom for simulator
+        // scheduling and the production reply-grace polling.
+        await fulfillment(of: [notificationReady], timeout: 15)
 
         let notification = try XCTUnwrap(recorder.entries.first)
         XCTAssertEqual(notification.title, "Task complete; reply not yet available")
@@ -4573,7 +4579,9 @@ extension APIClientRetryTests {
 
     @MainActor
     func testRetainedFollowUpDraftSurvivesDelayedTerminalTurnAndCanThenSend() async throws {
-        let model = try await notificationModel()
+        // Draft admission does not depend on the simulator's notification
+        // service accepting a real notification before the turn can settle.
+        let model = try await notificationModel(scheduleLocalNotification: { _, _, _, _, _, _ in true })
         let scope = try XCTUnwrap(model.composerDraftScope)
         let firstTaskId = "33333333-3333-4333-8333-333333333333"
         let secondTaskId = "44444444-4444-4444-8444-444444444444"
