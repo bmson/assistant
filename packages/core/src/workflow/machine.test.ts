@@ -1,8 +1,16 @@
-import { createDb, type Db, tasks } from '@assistant/db';
+import {
+  createDb,
+  createPostgresExecutionPersistence,
+  type Db,
+  messages,
+  tasks,
+} from '@assistant/db';
 import { eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getAgent } from '../chat.js';
-import type { InboundEvent } from '../events.js';
+import type { InboundEvent, PendingFinal } from '../events.js';
+import { finalizePendingResponse } from './executor/finalize.js';
+import type { ExecutorDeps } from './executor/types.js';
 import {
   checkpointTask,
   claimTask,
@@ -73,6 +81,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (dbUp && createdTaskIds.length) {
+    await db.delete(messages).where(inArray(messages.taskId, createdTaskIds));
     await db.delete(tasks).where(inArray(tasks.id, createdTaskIds));
   }
   await (db as unknown as { $client: { end: () => Promise<void> } }).$client?.end?.();
@@ -234,6 +243,59 @@ describe('task state machine (integration)', () => {
       const [woken] = await db.select().from(tasks).where(eq(tasks.id, task.id));
       if (!woken) throw new Error('Missing woken fixture task');
       expect(taskState(woken).pendingFinal).toEqual(state.pendingFinal);
+    },
+  );
+
+  it.each(['needs_attention', 'clarify'] as const)(
+    'preserves the original %s final through SQL rejection, wake and accepted retry',
+    async (outcome) => {
+      if (!dbUp) throw new Error('This recovery test requires the isolated database');
+      const { task } = await track(enqueueTask(db, { event: event(), type: 'adhoc' }));
+      const lease = await claimTask(db, task.id);
+      if (!lease) throw new Error('Missing fixture lease');
+      const persistence = createPostgresExecutionPersistence(db);
+      const deliver = vi
+        .fn<NonNullable<ExecutorDeps['deliverFinal']>>()
+        .mockImplementationOnce(async (_task, _text, attemptId) => ({
+          channel: 'qa-channel',
+          status: 'rejected',
+          attemptId,
+        }))
+        .mockImplementationOnce(async (_task, _text, attemptId) => ({
+          channel: 'qa-channel',
+          status: 'accepted',
+          attemptId,
+        }));
+      const deps = { db, persistence, deliverFinal: deliver } as unknown as ExecutorDeps;
+      const progress = 'Waiting for owner decision';
+      const pending: PendingFinal = {
+        text: 'Which option should I use?',
+        progress,
+        terminalStatus: 'needs_attention',
+        outcome,
+      };
+      expect((await finalizePendingResponse(deps, lease, pending, taskState(lease))).outcome).toBe(
+        'needs_attention',
+      );
+      expect(await wakeTask(db, task.id)).toBe(true);
+      const recovered = await claimTask(db, task.id);
+      if (!recovered) throw new Error('Missing retry lease');
+      const state = taskState(recovered);
+      if (!state.pendingFinal) throw new Error('Frozen final was lost during wake');
+      const result = await finalizePendingResponse(deps, recovered, state.pendingFinal, state);
+      expect(result).toMatchObject({ outcome, detail: progress });
+      const [stored] = await db.select().from(tasks).where(eq(tasks.id, task.id));
+      expect(stored).toMatchObject({ status: 'needs_attention', progress });
+      expect(stored?.attentionNotifiedAt).toBeTruthy();
+      expect(taskState(stored as NonNullable<typeof stored>).pendingFinal).toMatchObject({
+        terminalStatus: 'needs_attention',
+        outcome,
+        progress,
+        preDeliveryCompletion: { terminalStatus: 'needs_attention', outcome, progress },
+        deliveryNeedsAttention: false,
+      });
+      expect(await db.select().from(messages).where(eq(messages.taskId, task.id))).toHaveLength(1);
+      expect(deliver).toHaveBeenCalledTimes(2);
     },
   );
 

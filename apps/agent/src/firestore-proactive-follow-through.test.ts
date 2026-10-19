@@ -366,6 +366,101 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect(JSON.stringify(step.mock.calls).includes('fictional venue budget is $200')).toBe(true);
     });
 
+    it.each([false, true])(
+      'retains a real blocked owner decision after a rejected final is accepted (crash=%s)',
+      async (crashAfterAcceptance) => {
+        const fired = await tick();
+        const id = fired[0]?.taskId;
+        if (!id) throw new Error('Missing decision fixture task');
+        await store.doc('tasks', id).update({
+          plan: {
+            action: 'clarify',
+            reasoning: 'The fictional venue budget is missing',
+            steps: [],
+            missingInfo: ['What is the venue budget?'],
+          },
+        });
+        deliver
+          .mockImplementationOnce(async (_task, _text, attemptId) =>
+            finalChannelDelivery('qa-channel', 'rejected', attemptId),
+          )
+          .mockImplementationOnce(async (_task, _text, attemptId) =>
+            finalChannelDelivery('qa-channel', 'accepted', attemptId),
+          );
+        expect((await executeTask(deps, id)).outcome).toBe('needs_attention');
+        const before = await readTask(id);
+        const messagesBefore = (await messages()).length;
+        const noticesBefore = notify.mock.calls.length;
+        expect(await persistence.tasks.wakeTask(id)).not.toBeNull();
+        if (crashAfterAcceptance)
+          vi.spyOn(persistence.tasks, 'markTaskNeedsAttention').mockResolvedValueOnce(false);
+        let retry = await executeTask(deps, id);
+        if (crashAfterAcceptance) {
+          expect(retry.outcome).toBe('not_claimable');
+          expect((await readTask(id)).status).toBe('running');
+          await store.doc('tasks', id).update({ lockedUntil: new Date(clock.getTime() - 1) });
+          retry = await executeTask(deps, id);
+        }
+        const restored = await readTask(id);
+        expect(retry.outcome).toBe('needs_attention');
+        expect(restored.status).toBe('needs_attention');
+        expect(restored.progress).toContain('blocked on owner input:');
+        expect(restored.progress).not.toContain('delivery was rejected');
+        expect(restored.attentionNotifiedAt).toBeTruthy();
+        expect((restored.state as { pendingFinal?: unknown }).pendingFinal).toMatchObject({
+          terminalStatus: 'needs_attention',
+          outcome: 'needs_attention',
+          progress: restored.progress,
+          deliveryNeedsAttention: false,
+          preDeliveryCompletion: {
+            terminalStatus: 'needs_attention',
+            outcome: 'needs_attention',
+            progress: restored.progress,
+          },
+        });
+        expect((await messages()).length).toBe(messagesBefore);
+        expect(notify).toHaveBeenCalledTimes(noticesBefore);
+        expect(deliver).toHaveBeenCalledTimes(2);
+        expect(step).not.toHaveBeenCalled();
+        expect((await store.doc('goals', goalId).get()).get('nextAction')).toContain(
+          'Waiting on the owner:',
+        );
+        expect(await tick()).toEqual([]);
+        expect(before.progress).toContain('delivery was rejected');
+      },
+    );
+
+    it('Stop during final existence lookup prevents a dashboard append that has not started', async () => {
+      const original = persistence.executionEvidence.finalMessageExists.bind(
+        persistence.executionEvidence,
+      );
+      vi.spyOn(persistence.executionEvidence, 'finalMessageExists').mockImplementationOnce(
+        async (input) => {
+          const exists = await original(input);
+          await mutations.setStatus(goalId, 'abandoned');
+          return exists;
+        },
+      );
+      const append = vi.spyOn(persistence.messages, 'append');
+      const stopped = await fire([
+        tool('qa.inspect'),
+        final('Cedar has a confirmed accessible entrance.'),
+      ]);
+      expect(stopped.result.outcome).toBe('not_claimable');
+      expect((await readTask(stopped.id)).status).toBe('cancelled');
+      expect((await readTask(stopped.id)).leaseToken).toBeNull();
+      expect(append).not.toHaveBeenCalled();
+      expect(deliver).not.toHaveBeenCalled();
+      expect(
+        (await messages()).some(
+          (message) =>
+            message.taskId === stopped.id &&
+            message.text === 'Cedar has a confirmed accessible entrance.',
+        ),
+      ).toBe(false);
+      expect(await tick()).toEqual([]);
+    });
+
     it('does not resend an acknowledged delivery after a crash before terminal completion', async () => {
       deliver.mockImplementation(async (_task, _text, attemptId) =>
         finalChannelDelivery('qa-channel', 'accepted', attemptId),
