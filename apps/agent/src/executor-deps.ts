@@ -1,5 +1,5 @@
 import { type ExecutorDeps, firestoreCodeJobUnavailable } from '@assistant/core';
-import { googleModule } from '@assistant/modules';
+import { calendarModule, googleModule } from '@assistant/modules';
 import {
   type FinalChannelDeliveryResult,
   finalChannelDelivery,
@@ -41,6 +41,10 @@ export function approvalNoticeEmail(
 export function executorDeps(deps: AgentDeps): ExecutorDeps {
   const services = agentServices(deps);
   const channels = deps.modules.channels;
+  const calendarReadClient = () => {
+    const google = deps.modules.requireExports(googleModule);
+    return google.configured() ? google : deps.modules.requireExports(calendarModule);
+  };
   return {
     db: deps.db,
     persistence: deps.persistence,
@@ -51,11 +55,10 @@ export function executorDeps(deps: AgentDeps): ExecutorDeps {
     dispatcher: deps.dispatcher,
     workspace: deps.workspace,
     documentProcessor: deps.documentProcessor,
-    // The briefing's calendar input. The google module's absent value is a
-    // client whose configured() is false, so an installation without Google
-    // simply briefs without a calendar section.
+    // Prefer the bot client, falling back to the portable calendar-only module.
+    // Both absent exports report configured() false.
     calendarReader: async ({ timeMin, timeMax }) => {
-      const client = deps.modules.requireExports(googleModule);
+      const client = calendarReadClient();
       if (!client.configured()) return { events: [], complete: false };
       const res = await listEventsInWindow(client, { timeMin, timeMax, maxResults: 50 });
       return {
@@ -89,7 +92,7 @@ export function executorDeps(deps: AgentDeps): ExecutorDeps {
       return gmailThreadHeadReader(client)(input);
     },
     calendarEventReader: async (input) => {
-      const client = deps.modules.requireExports(googleModule);
+      const client = calendarReadClient();
       if (!client.configured()) return null;
       return readCalendarEvent(client, input);
     },

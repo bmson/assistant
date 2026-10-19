@@ -884,7 +884,7 @@ export function registerCalendarTools(
       }),
       risk: 'autonomous',
       acceptsUntrustedInput: true,
-      cacheTtlSeconds: 300,
+      cacheTtlSeconds: 0,
       execute: async (args) => {
         // Ask about every calendar this account can see, not just the bot's own
         // and the owner's address: a busy block on a shared "Work" calendar is
@@ -1010,7 +1010,7 @@ export function registerCalendarTools(
       inputSchema: z.object({ pageToken: z.string().max(4096).optional() }),
       risk: 'autonomous',
       acceptsUntrustedInput: true,
-      cacheTtlSeconds: 300,
+      cacheTtlSeconds: 0,
       execute: async (args) => {
         const roster = await fetchCalendarPage(deps.client, args.pageToken);
         return {
@@ -1074,6 +1074,46 @@ export function registerCalendarTools(
   // installing the SQL-backed Google Workspace module. Keep that surface
   // strictly read-only until event mutations have their own portable approval
   // and audit path.
+  register(
+    registry,
+    {
+      name: 'calendar.search_events',
+      description:
+        'Search by keyword (attendee, title, location, or description) across every calendar the assistant can read: its own plus all shared calendars. Do not ask which calendar or provider; omit calendarIds to search them all. Results include literal organizer, attendee, location, and event/meeting links when Google returned them, plus calendar identity, coverage, and ISO 8601 times.',
+      inputSchema: z.object({
+        query: z.string().min(1).max(200),
+        timeMin: z.string().datetime({ offset: true }).optional(),
+        timeMax: z.string().datetime({ offset: true }).optional(),
+        maxResults: z.number().int().min(1).max(50).default(20),
+        pageToken: z.string().max(MAX_CALENDAR_CURSOR_BYTES).optional(),
+        /** Names or ids from calendar.list_calendars. Omit to search every one. */
+        calendarIds: z.array(z.string().min(1).max(200)).max(25).optional(),
+      }),
+      risk: 'autonomous',
+      acceptsUntrustedInput: true,
+      execute: async (args) =>
+        collectEvents(deps, {
+          calendarIds: args.calendarIds,
+          maxResults: args.maxResults,
+          pageToken: args.pageToken,
+          queryKey: `search:${args.query}:${args.timeMin ?? ''}:${args.timeMax ?? ''}:singleEvents=true:orderBy=startTime`,
+          query: (calendarId, pageSize, pageToken) => {
+            const params = new URLSearchParams({
+              q: args.query,
+              maxResults: String(pageSize),
+              singleEvents: 'true',
+              orderBy: 'startTime',
+            });
+            if (args.timeMin) params.set('timeMin', args.timeMin);
+            if (args.timeMax) params.set('timeMax', args.timeMax);
+            if (pageToken) params.set('pageToken', pageToken);
+            return `${CAL}/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`;
+          },
+        }),
+    },
+    { confidentialRead: true, returnsUntrustedContent: true },
+  );
+
   if (options.readOnly) return registry;
 
   const createSchema = z
@@ -1171,46 +1211,6 @@ export function registerCalendarTools(
       ownerVisibleOnly: (args) =>
         ((args as z.infer<typeof createSchema>).attendees?.length ?? 0) === 0,
     },
-  );
-
-  register(
-    registry,
-    {
-      name: 'calendar.search_events',
-      description:
-        'Search by keyword (attendee, title, location, or description) across every calendar the assistant can read: its own plus all shared calendars. Do not ask which calendar or provider; omit calendarIds to search them all. Results include literal organizer, attendee, location, and event/meeting links when Google returned them, plus calendar identity, coverage, and ISO 8601 times.',
-      inputSchema: z.object({
-        query: z.string().min(1).max(200),
-        timeMin: z.string().datetime({ offset: true }).optional(),
-        timeMax: z.string().datetime({ offset: true }).optional(),
-        maxResults: z.number().int().min(1).max(50).default(20),
-        pageToken: z.string().max(MAX_CALENDAR_CURSOR_BYTES).optional(),
-        /** Names or ids from calendar.list_calendars. Omit to search every one. */
-        calendarIds: z.array(z.string().min(1).max(200)).max(25).optional(),
-      }),
-      risk: 'autonomous',
-      acceptsUntrustedInput: true,
-      execute: async (args) =>
-        collectEvents(deps, {
-          calendarIds: args.calendarIds,
-          maxResults: args.maxResults,
-          pageToken: args.pageToken,
-          queryKey: `search:${args.query}:${args.timeMin ?? ''}:${args.timeMax ?? ''}:singleEvents=true:orderBy=startTime`,
-          query: (calendarId, pageSize, pageToken) => {
-            const params = new URLSearchParams({
-              q: args.query,
-              maxResults: String(pageSize),
-              singleEvents: 'true',
-              orderBy: 'startTime',
-            });
-            if (args.timeMin) params.set('timeMin', args.timeMin);
-            if (args.timeMax) params.set('timeMax', args.timeMax);
-            if (pageToken) params.set('pageToken', pageToken);
-            return `${CAL}/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`;
-          },
-        }),
-    },
-    { confidentialRead: true, returnsUntrustedContent: true },
   );
 
   const updateSchema = z
