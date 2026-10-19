@@ -111,7 +111,7 @@ struct PhoneCalendarsView: View {
                 store.clearVisibleEvents()
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged).receive(on: RunLoop.main)) { _ in
             if scenePhase == .active && isVisible { store.refresh() }
         }
         .onDisappear {

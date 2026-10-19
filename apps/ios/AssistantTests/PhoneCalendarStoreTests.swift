@@ -267,6 +267,28 @@ final class PhoneCalendarStoreTests: XCTestCase {
         XCTAssertTrue(store.events.isEmpty)
     }
 
+    func testAccountSyncNotificationsRefreshOnTheMainThread() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let (store, source, _) = fixture(enabled: true, selected: ["work"])
+        let initialRead = expectation(description: "The visible calendar loads")
+        source.didReadEvents = { initialRead.fulfill() }
+        let controller = UIHostingController(rootView:
+            NavigationStack { PhoneCalendarsView(store: store) }.environment(\.scenePhase, .active))
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { source.didReadEvents = nil; window.isHidden = true; window.rootViewController = nil }
+        await fulfillment(of: [initialRead], timeout: 5)
+        let syncedRead = expectation(description: "An account sync refreshes the visible calendar")
+        source.didReadEvents = { syncedRead.fulfill() }
+        await Task.detached {
+            NotificationCenter.default.post(name: .EKEventStoreChanged, object: nil)
+        }.value
+        await fulfillment(of: [syncedRead], timeout: 5)
+        XCTAssertTrue(source.readsStayedOnMainThread)
+    }
+
     private func event(_ store: PhoneCalendarStore, id: String, calendarID: String = "work", offset: TimeInterval = 3600) -> PhoneCalendarEvent {
         let start = Calendar.autoupdatingCurrent.startOfDay(for: store.day).addingTimeInterval(offset)
         return .init(id: id, calendarID: calendarID, title: "Team planning", start: start,
@@ -285,6 +307,8 @@ private final class CalendarSourceFixture: PhoneCalendarSource {
     var calendarReads = 0
     var eventReads: [Set<String>] = []
     var lastInterval: DateInterval?
+    var didReadEvents: (() -> Void)?
+    var readsStayedOnMainThread = true
     var suspendRequest = false
     private var pendingRequest: CheckedContinuation<Void, Never>?
     private var requestStarted: CheckedContinuation<Void, Never>?
@@ -307,10 +331,16 @@ private final class CalendarSourceFixture: PhoneCalendarSource {
         if pendingRequest != nil { return }
         await withCheckedContinuation { requestStarted = $0 }
     }
-    func calendars() -> [PhoneCalendar] { calendarReads += 1; return available }
+    func calendars() -> [PhoneCalendar] {
+        readsStayedOnMainThread = readsStayedOnMainThread && Thread.isMainThread
+        calendarReads += 1
+        return available
+    }
     func events(in interval: DateInterval, calendarIDs: Set<String>) -> [PhoneCalendarEvent] {
         eventReads.append(calendarIDs)
         lastInterval = interval
+        readsStayedOnMainThread = readsStayedOnMainThread && Thread.isMainThread
+        didReadEvents?()
         return records
     }
 }
