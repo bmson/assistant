@@ -143,7 +143,7 @@ describe.skipIf(!localEmulator)('Firestore owner settings page with PostgreSQL o
     expect(proxy(new NextRequest('http://localhost/settings', { method: 'POST' })).status).toBe(
       200,
     );
-    const html = renderToStaticMarkup(await page.default({}));
+    const html = renderToStaticMarkup(await page.default());
     expect(html).toContain('Mobile app connection');
     expect(html).toContain('https://assistant.test');
     expect(html).not.toContain('Recurring jobs');
@@ -274,6 +274,6 @@ describe.skipIf(!localEmulator)('Firestore owner settings page with PostgreSQL o
 
   it('requires owner authentication before reading', async () => {
     auth.owner.mockRejectedValueOnce(new Error('owner authentication required'));
-    await expect(page.default({})).rejects.toThrow('owner authentication required');
+    await expect(page.default()).rejects.toThrow('owner authentication required');
   });
 });

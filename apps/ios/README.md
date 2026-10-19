@@ -151,6 +151,26 @@ The manual path still exists for Cloud Run deployments (where the web process ha
 automatically on first provision when it is missing, and a regular release preserves the web
 service's existing secret binding.
 
+## Calendars on this iPhone
+
+Open **More → iPhone calendars → Use calendars on this iPhone**, grant calendar access,
+then choose calendars already synced to Apple Calendar. No Google account connection is
+needed in Assistant. iOS requires Full Access to read events; this feature never creates,
+changes, or deletes events. Managed calendars remain subject to device and workplace policy.
+
+The daily agenda displays titles, times, locations, and calendar names locally. Calendar data
+is never uploaded or added to model/chat context, so the server assistant, web app, and
+background jobs cannot see these events. Only the opt-in and selected calendar identifiers
+are saved in device preferences. Event details are cleared when the view leaves the foreground.
+Changes in Apple Calendar and permission changes refresh on return to the screen. Removed
+calendars and revoked access clear their selection rather than silently reading another calendar.
+**Stop using iPhone calendars** clears the selection; calendar permission can also be revoked
+in iPhone Settings. This requires an updated native app; a server deployment alone cannot add it.
+
+The former additional Google-account OAuth connection is retired. Its endpoints and runtime
+credential readers have been removed. Released schema migration 0128 and historical backup
+record metadata remain for forward-compatible upgrades; they do not enable account access.
+
 ## MCP connections
 
 In **More → MCP connections**, add a public Streamable HTTP MCP endpoint and give it a name.

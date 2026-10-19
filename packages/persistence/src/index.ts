@@ -13,7 +13,6 @@ export * from './audit-investigation.js';
 export * from './briefing.js';
 export * from './budget-caps.js';
 export * from './builtin-tools.js';
-export * from './calendar-accounts.js';
 export { type CalendarOccurrenceIdentity, sameCalendarOccurrence } from './calendar-occurrence.js';
 export * from './call-sessions.js';
 export * from './card-form.js';

@@ -1,14 +1,11 @@
-import { isModuleEnabled } from '@assistant/config/modules';
 import { type ExecutorDeps, firestoreCodeJobUnavailable } from '@assistant/core';
-import { calendarModule, googleModule } from '@assistant/modules';
+import { googleModule } from '@assistant/modules';
 import {
   type FinalChannelDeliveryResult,
   finalChannelDelivery,
   finalChannelDeliveryReport,
 } from '@assistant/persistence';
 import {
-  connectedCalendarClient,
-  type GoogleClient,
   gmailThreadHeadReader,
   listEventsInWindow,
   readCalendarEvent,
@@ -44,20 +41,6 @@ export function approvalNoticeEmail(
 export function executorDeps(deps: AgentDeps): ExecutorDeps {
   const services = agentServices(deps);
   const channels = deps.modules.channels;
-  let calendarClient: GoogleClient | undefined;
-  const calendarReadClient = () => {
-    if (calendarClient) return calendarClient;
-    const botCalendar = deps.modules.requireExports(googleModule);
-    calendarClient = connectedCalendarClient(
-      botCalendar.configured() ? botCalendar : deps.modules.requireExports(calendarModule),
-      deps.config,
-      deps.persistence?.calendarAccounts &&
-        (isModuleEnabled(deps.config, 'calendar') || isModuleEnabled(deps.config, 'google'))
-        ? deps.persistence.calendarAccounts
-        : undefined,
-    );
-    return calendarClient;
-  };
   return {
     db: deps.db,
     persistence: deps.persistence,
@@ -72,7 +55,7 @@ export function executorDeps(deps: AgentDeps): ExecutorDeps {
     // client whose configured() is false, so an installation without Google
     // simply briefs without a calendar section.
     calendarReader: async ({ timeMin, timeMax }) => {
-      const client = calendarReadClient();
+      const client = deps.modules.requireExports(googleModule);
       if (!client.configured()) return { events: [], complete: false };
       const res = await listEventsInWindow(client, { timeMin, timeMax, maxResults: 50 });
       return {
@@ -106,7 +89,7 @@ export function executorDeps(deps: AgentDeps): ExecutorDeps {
       return gmailThreadHeadReader(client)(input);
     },
     calendarEventReader: async (input) => {
-      const client = calendarReadClient();
+      const client = deps.modules.requireExports(googleModule);
       if (!client.configured()) return null;
       return readCalendarEvent(client, input);
     },

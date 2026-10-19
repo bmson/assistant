@@ -105,6 +105,11 @@ struct MoreView: View {
 
             Section("Services") {
                 NavigationLink {
+                    PhoneCalendarsView()
+                } label: {
+                    Label("iPhone calendars", systemImage: "calendar")
+                }
+                NavigationLink {
                     ConnectionView(isOnboarding: false)
                 } label: {
                     Label("Assistant server", systemImage: "network")

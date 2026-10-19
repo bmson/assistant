@@ -18,14 +18,6 @@ describe('Firestore mobile and web ingress', () => {
     runtimeConfig.RESTORE_REHEARSAL = false;
   });
 
-  it('passes only calendar OAuth navigation routes to the owner-authenticated handlers', () => {
-    for (const path of ['/api/calendar-accounts/connect', '/api/calendar-accounts/callback']) {
-      expect(status(path, 'GET')).toBe(200);
-      expect(status(path, 'POST')).toBe(503);
-      expect(status(`${path}/extra`, 'GET')).toBe(503);
-    }
-  });
-
   it('passes repair reads, reports, and decisions to authenticated handlers', () => {
     for (const method of ['GET', 'POST'])
       expect(status('/api/mobile/v1/repairs', method)).toBe(200);
