@@ -461,7 +461,7 @@ struct WorkspaceView: View {
     }
 
     private var isLandscape: Bool { verticalSizeClass == .compact }
-    private var actionsUnavailable: Bool { workspaceActionInFlight != nil || isLoading || loadFailed }
+    private var actionsUnavailable: Bool { workspaceActionInFlight != nil || model.workspace == nil }
 
     @ViewBuilder
     private func loadMoreButton(

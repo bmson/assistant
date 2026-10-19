@@ -139,6 +139,13 @@ struct RootView: View {
                     .zIndex(99)
             }
         }
+        .overlay(alignment: .bottom) {
+            if model.bootstrap != nil {
+                MobileSaveFeedback(store: model.edits)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, model.navigationPath.isEmpty ? 100 : 24)
+            }
+        }
         // This is intentionally on the outer stack, not merely the clear
         // background. Otherwise the overlay begins below the notch's safe
         // area, leaving the visible green gap shown above the notification.
@@ -528,5 +535,66 @@ struct AssistantErrorBanner: View {
         }
         .buttonStyle(AssistantActionButtonStyle(kind: .secondary, compact: true))
         .accessibilityLabel("Dismiss message")
+    }
+}
+
+/// One status surface for all ordinary edits, including after a sheet closes.
+/// This observes the outbox itself so save progress does not invalidate chat.
+struct MobileSaveFeedback: View {
+    let store: OptimisticEditStore
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var showingChanges = false
+
+    var body: some View {
+        Group {
+            if !store.failures.isEmpty {
+                Button { showingChanges = true } label: {
+                    Label(store.failures.count == 1 ? "A change needs attention" : "\(store.failures.count) changes need attention",
+                          systemImage: "exclamationmark.arrow.trianglehead.2.clockwise.rotate.90")
+                        .font(.subheadline.weight(.medium))
+                        .padding(.horizontal, 16).padding(.vertical, 12)
+                        .background(.regularMaterial, in: Capsule())
+                }
+                .accessibilityIdentifier("assistant.save.review")
+            } else if store.pendingCount > 0 || store.needsRefresh {
+                HStack(spacing: 8) {
+                    if store.pendingCount > 0 { ProgressView().controlSize(.small) }
+                    else { Image(systemName: "checkmark") }
+                    Text(store.pendingCount > 0 ? "Saving changes…" : "Saved · updating view")
+                        .font(.subheadline)
+                    if store.pendingCount == 0 {
+                        Button("Refresh") { store.refreshConfirmed() }.font(.subheadline.weight(.semibold))
+                    }
+                }
+                .padding(.horizontal, 16).padding(.vertical, 12)
+                .background(.regularMaterial, in: Capsule())
+                .accessibilityIdentifier("assistant.save.status")
+            }
+        }
+        .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+        .sheet(isPresented: $showingChanges) {
+            NavigationStack {
+                List {
+                    ForEach(store.failures) { failure in
+                        Section(failure.title) {
+                            Text(failure.message)
+                            if !failure.draft.isEmpty {
+                                Text(failure.draft).textSelection(.enabled)
+                            }
+                            if failure.canRetry {
+                                Button("Retry save", systemImage: "arrow.clockwise") { store.retry(failure.id) }
+                            } else {
+                                Text("Check the current information before adding this again. Your submitted text is kept here for copying.")
+                                    .font(.footnote).foregroundStyle(.secondary)
+                            }
+                            Button("Discard saved draft", role: .destructive) { store.dismissFailure(failure.id) }
+                        }
+                    }
+                }
+                .navigationTitle("Unsynced changes")
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingChanges = false } } }
+                .onChange(of: store.failures.count) { _, count in if count == 0 { showingChanges = false } }
+            }
+        }
     }
 }

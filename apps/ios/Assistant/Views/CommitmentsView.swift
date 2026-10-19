@@ -4,8 +4,7 @@ import SwiftUI
 struct CommitmentsScreen: View {
     @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
-    @State private var rows: [Commitment] = []
-    @State private var loaded = false
+    private var rows: [Commitment] { model.cachedCommitments ?? [] }
     @State private var loadFailed = false
     @State private var pendingIDs: Set<String> = []
     @State private var correcting: Commitment?
@@ -20,7 +19,7 @@ struct CommitmentsScreen: View {
                     .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.vertical, 8)
-                if !loaded {
+                if model.cachedCommitments == nil {
                     if loadFailed {
                         VStack(alignment: .leading, spacing: AssistantTheme.cardContentSpacing) {
                             Text("Open loops couldn’t be loaded.").font(.subheadline)
@@ -79,9 +78,9 @@ struct CommitmentsScreen: View {
             Text("This removes “\(row.title)” from your open loops.")
         }
         .refreshable { await load() }
-        .task { if !loaded { await load() } }
+        .task { if model.cachedCommitments == nil { await load() } }
         .sheet(item: $correcting) { row in
-            NavigationStack { CommitmentEditor(commitment: row, onSaved: { Task { await load() } }) }
+            NavigationStack { CommitmentEditor(commitment: row, onSaved: {}) }
         }
     }
 
@@ -203,19 +202,12 @@ struct CommitmentsScreen: View {
     private func perform(_ row: Commitment, action: String) async {
         guard pendingIDs.insert(row.id).inserted else { return }
         defer { pendingIDs.remove(row.id) }
-        if await model.updateCommitment(CommitmentMutation(action: action, id: row.id)) {
-            await load()
-        }
+        _ = await model.updateCommitment(CommitmentMutation(action: action, id: row.id))
     }
 
     private func load() async {
         loadFailed = false
-        if let result = await model.commitments() {
-            rows = result
-            loaded = true
-        } else {
-            loadFailed = true
-        }
+        loadFailed = await model.commitments() == nil
     }
 }
 
