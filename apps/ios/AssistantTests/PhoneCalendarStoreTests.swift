@@ -227,6 +227,7 @@ final class PhoneCalendarStoreTests: XCTestCase {
                     source.access = access
                     source.records = [event(store, id: "meeting")]
                     let view = NavigationStack { PhoneCalendarsView(store: store) }
+                        .environment(\.scenePhase, .active)
                         .environment(\.colorScheme, scheme).environment(\.dynamicTypeSize, size)
                         .preferredColorScheme(scheme)
                     let controller = UIHostingController(rootView: view)
@@ -248,6 +249,22 @@ final class PhoneCalendarStoreTests: XCTestCase {
                 }
             }
         }
+    }
+
+    func testInactiveCalendarViewDoesNotReadEvents() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let (store, source, _) = fixture(enabled: true, selected: ["work"])
+        let controller = UIHostingController(rootView:
+            NavigationStack { PhoneCalendarsView(store: store) }.environment(\.scenePhase, .background))
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(source.calendarReads, 0)
+        XCTAssertTrue(source.eventReads.isEmpty)
+        XCTAssertTrue(store.events.isEmpty)
     }
 
     private func event(_ store: PhoneCalendarStore, id: String, calendarID: String = "work", offset: TimeInterval = 3600) -> PhoneCalendarEvent {

@@ -7,6 +7,7 @@ struct PhoneCalendarsView: View {
     @State private var store: PhoneCalendarStore
     @State private var choosingCalendars = false
     @State private var confirmingDisconnect = false
+    @State private var isVisible = false
     @Environment(\.openURL) private var openURL
 
     init(store: PhoneCalendarStore? = nil) {
@@ -90,23 +91,33 @@ struct PhoneCalendarsView: View {
         }
         .navigationTitle("iPhone calendars")
         .assistantSubmenuChrome()
-        .refreshable { store.refresh() }
-        .task { store.refresh() }
-        .onChange(of: store.day) { _, _ in store.refresh() }
+        .refreshable {
+            if scenePhase == .active && isVisible { store.refresh() }
+        }
+        .task {
+            isVisible = true
+            if scenePhase == .active { store.refresh() }
+        }
+        .onChange(of: store.day) { _, _ in
+            if scenePhase == .active && isVisible { store.refresh() }
+        }
         .onChange(of: store.isEnabled) { _, enabled in
             if enabled && store.selectedIDs.isEmpty && !store.calendars.isEmpty { choosingCalendars = true }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { store.refresh() }
+            if phase == .active && isVisible { store.refresh() }
             else {
                 choosingCalendars = false
                 store.clearVisibleEvents()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
-            if scenePhase == .active { store.refresh() }
+            if scenePhase == .active && isVisible { store.refresh() }
         }
-        .onDisappear { store.clearVisibleEvents() }
+        .onDisappear {
+            isVisible = false
+            store.clearVisibleEvents()
+        }
         .sheet(isPresented: $choosingCalendars) {
             NavigationStack { PhoneCalendarSelectionView(store: store) }
         }
