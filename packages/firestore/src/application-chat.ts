@@ -412,6 +412,7 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
       .collection('tasks')
       .where('agentId', '==', agentId)
       .where('status', 'not-in', TERMINAL_TASK_STATUSES)
+      .select('conversationId')
       .limit(MAX_ACTIVE_TASKS + 1)
       .get();
     if (snapshot.size > MAX_ACTIVE_TASKS)
