@@ -2834,12 +2834,16 @@ final class APIClientRetryTests: XCTestCase {
                 case 2: await model.refreshWorkspace()
                 default: _ = await model.knowledge()
                 }
-                XCTAssertTrue((1...requests).contains(StubURLProtocol.attempts.count))
-                XCTAssertTrue(StubURLProtocol.attempts.allSatisfy { $0 == "GET" })
-                XCTAssertEqual(Set(StubURLProtocol.urls.map(\.path)).count, StubURLProtocol.attempts.count,
+                // A parallel overview may start between two individually
+                // locked getters. Compare methods and paths from one snapshot.
+                let recorded = StubURLProtocol.requests
+                let paths = Set(recorded.map { $0.1.path })
+                XCTAssertTrue((1...requests).contains(recorded.count))
+                XCTAssertTrue(recorded.allSatisfy { $0.0 == "GET" })
+                XCTAssertEqual(paths.count, recorded.count,
                     "Cancellation must not trigger a second attempt for an endpoint")
                 if read == 0 {
-                    XCTAssertTrue(Set(StubURLProtocol.urls.map(\.path)).isSubset(of:
+                    XCTAssertTrue(paths.isSubset(of:
                         ["/api/mobile/v1/bootstrap", "/api/mobile/v1/overview"]))
                 }
                 XCTAssertEqual(model.errorMessage, original)
