@@ -87,14 +87,16 @@ export function MobileTokenPanel({
       ) : null}
 
       {canRotate ? (
-        <div className="grid gap-2">
+        <div className="grid min-w-0 grid-cols-1 gap-2">
           {maskedToken ? (
             <p className="text-sm leading-6 text-muted">
               Creating a new key disconnects devices using the current key within 30 seconds. Update
               each device with the new key.
             </p>
           ) : null}
+          {/* Keep enlarged safety copy readable; cap only this form's decorative spacing on phones. */}
           <form
+            className="min-w-0 max-w-full hyphens-auto [overflow-wrap:anywhere] [--spacing:min(0.25rem,4px)] md:[--spacing:0.25rem]"
             action={async () => {
               setError(null);
               try {
