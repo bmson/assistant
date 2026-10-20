@@ -1209,6 +1209,18 @@ final class AssistantMarkdownTests: XCTestCase {
         XCTAssertEqual(String(rendered.characters), source)
     }
 
+    func testMessageLinksKeepDestinationsAndNonColorAffordance() {
+        for inline in [true, false] {
+            let rendered = AssistantMarkdown.attributed("Read [the guide](https://example.com/guide) first.", inline: inline)
+            XCTAssertEqual(String(rendered.characters), "Read the guide first.")
+            let links = rendered.runs.filter { $0.link != nil }
+            XCTAssertEqual(links.count, 1)
+            XCTAssertEqual(links.first?.link, URL(string: "https://example.com/guide"))
+            XCTAssertEqual(links.first?.underlineStyle, .single)
+            XCTAssertTrue(rendered.runs.filter { $0.link == nil }.allSatisfy { $0.underlineStyle == nil })
+        }
+    }
+
     func testTablePadsShortRowsToHeaderWidth() {
         let source = """
         | A | B | C |
