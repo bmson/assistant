@@ -1,0 +1,5409 @@
+{
+  "baseCommit": "c790625c3f7f66da9dcf40b98d798c045f38735f",
+  "before": {
+    "before": true,
+    "sourceHashes": {
+      "apps/web/lib/ui.tsx": "00258d1db6fa312822dd229df9d18fdfa5dd9d5e010a04b44da9962c0b9eb429",
+      "apps/web/lib/ui-client.tsx": "eb14ffb46278d313cbe16bb7801ccf0a57780e10b06c046b754d747898024e25",
+      "apps/web/app/globals.css": "ddf7bf8e6254c9475fdb3959e230353804ba6ab80163f7bec76aa8bd1fc39e75",
+      "apps/web/app/goals/goal-card.tsx": "67d6112f5d94c6ee97d12d24b48620ca56c42cc759362cd91b16edc073520ce5",
+      "apps/web/app/security/security-client.tsx": "b85b4fa0fe138d47a4c98bf3c593e44bc0197cc38985bcdd54b742bd1126e000"
+    },
+    "harnessSha256": "4a3c99f4ebc485f91ade5ecb0c1e36da38840058c0dc7c8a478fdad0f612cfda",
+    "boundary": "Actual shared controls/CSS with exact GoalCard and Security confirmation labels in representative menu wrappers. No complete authenticated route. Only first activation, blur/Escape; no second confirm or owner action. Pending/disabled props synthetic; standalone comparison uses unchanged regular variant. No external request.",
+    "errors": [],
+    "results": [
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "goal",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 183,
+            "bottom": 227,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 378,
+            "width": 224,
+            "height": 250,
+            "clientWidth": 222,
+            "scrollWidth": 241,
+            "scrollLeft": 0
+          },
+          "visibleText": "Run autonomously",
+          "lines": [
+            {
+              "left": 77.390625,
+              "right": 199.984375,
+              "top": 196,
+              "bottom": 213
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": false,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 183,
+            "bottom": 227,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 378,
+            "width": 224,
+            "height": 250,
+            "clientWidth": 222,
+            "scrollWidth": 241,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 59,
+              "right": 250.390625,
+              "top": 196,
+              "bottom": 213
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 193,
+            "bottom": 217,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 183,
+            "bottom": 227,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 378,
+            "width": 224,
+            "height": 250,
+            "clientWidth": 222,
+            "scrollWidth": 241,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 59,
+              "right": 250.390625,
+              "top": 196,
+              "bottom": 213
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 193,
+            "bottom": 217,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "passkey",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey",
+          "lines": [
+            {
+              "left": 46.609375,
+              "right": 156.6875,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey?",
+          "lines": [
+            {
+              "left": 59,
+              "right": 176.296875,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey?",
+          "lines": [
+            {
+              "left": 59,
+              "right": 176.296875,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "device",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key",
+          "lines": [
+            {
+              "left": 46.609375,
+              "right": 167.953125,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key?",
+          "lines": [
+            {
+              "left": 59,
+              "right": 187.5625,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key?",
+          "lines": [
+            {
+              "left": 59,
+              "right": 187.5625,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "dark"
+        },
+        "kind": "goal",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 183,
+            "bottom": 227,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 378,
+            "width": 224,
+            "height": 250,
+            "clientWidth": 222,
+            "scrollWidth": 241,
+            "scrollLeft": 0
+          },
+          "visibleText": "Run autonomously",
+          "lines": [
+            {
+              "left": 77.390625,
+              "right": 199.984375,
+              "top": 196,
+              "bottom": 213
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": false,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 183,
+            "bottom": 227,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 378,
+            "width": 224,
+            "height": 250,
+            "clientWidth": 222,
+            "scrollWidth": 241,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 59,
+              "right": 250.390625,
+              "top": 196,
+              "bottom": 213
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 193,
+            "bottom": 217,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 183,
+            "bottom": 227,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 378,
+            "width": 224,
+            "height": 250,
+            "clientWidth": 222,
+            "scrollWidth": 241,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 59,
+              "right": 250.390625,
+              "top": 196,
+              "bottom": 213
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 193,
+            "bottom": 217,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "dark"
+        },
+        "kind": "passkey",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey",
+          "lines": [
+            {
+              "left": 46.609375,
+              "right": 156.6875,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey?",
+          "lines": [
+            {
+              "left": 59,
+              "right": 176.296875,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey?",
+          "lines": [
+            {
+              "left": 59,
+              "right": 176.296875,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "dark"
+        },
+        "kind": "device",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key",
+          "lines": [
+            {
+              "left": 46.609375,
+              "right": 167.953125,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key?",
+          "lines": [
+            {
+              "left": 59,
+              "right": 187.5625,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key?",
+          "lines": [
+            {
+              "left": 59,
+              "right": 187.5625,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "light"
+        },
+        "kind": "goal",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 335,
+            "bottom": 407,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 660,
+            "width": 288,
+            "height": 418,
+            "clientWidth": 286,
+            "scrollWidth": 435,
+            "scrollLeft": 0
+          },
+          "visibleText": "Run autonomously",
+          "lines": [
+            {
+              "left": 128.96875,
+              "right": 359.59375,
+              "top": 354,
+              "bottom": 387
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 335,
+            "bottom": 407,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 660,
+            "width": 288,
+            "height": 418,
+            "clientWidth": 286,
+            "scrollWidth": 435,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 85,
+              "right": 443.5625,
+              "top": 354,
+              "bottom": 387
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 359,
+            "bottom": 383,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 335,
+            "bottom": 407,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 660,
+            "width": 288,
+            "height": 418,
+            "clientWidth": 286,
+            "scrollWidth": 435,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 85,
+              "right": 443.5625,
+              "top": 354,
+              "bottom": 387
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 359,
+            "bottom": 383,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "light"
+        },
+        "kind": "passkey",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 327,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 460,
+            "width": 288,
+            "height": 218,
+            "clientWidth": 286,
+            "scrollWidth": 298,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey",
+          "lines": [
+            {
+              "left": 72.25,
+              "right": 280.015625,
+              "top": 274,
+              "bottom": 307
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": false,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 327,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 460,
+            "width": 288,
+            "height": 218,
+            "clientWidth": 286,
+            "scrollWidth": 298,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey?",
+          "lines": [
+            {
+              "left": 85,
+              "right": 307.265625,
+              "top": 274,
+              "bottom": 307
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 279,
+            "bottom": 303,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 327,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 460,
+            "width": 288,
+            "height": 218,
+            "clientWidth": 286,
+            "scrollWidth": 298,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey?",
+          "lines": [
+            {
+              "left": 85,
+              "right": 307.265625,
+              "top": 274,
+              "bottom": 307
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 279,
+            "bottom": 303,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "light"
+        },
+        "kind": "device",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 327,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 540,
+            "width": 288,
+            "height": 298,
+            "clientWidth": 286,
+            "scrollWidth": 317,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key",
+          "lines": [
+            {
+              "left": 72.234375,
+              "right": 299.21875,
+              "top": 274,
+              "bottom": 307
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 327,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 540,
+            "width": 288,
+            "height": 298,
+            "clientWidth": 286,
+            "scrollWidth": 317,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key?",
+          "lines": [
+            {
+              "left": 85,
+              "right": 326.46875,
+              "top": 274,
+              "bottom": 307
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 279,
+            "bottom": 303,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 327,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 540,
+            "width": 288,
+            "height": 298,
+            "clientWidth": 286,
+            "scrollWidth": 317,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key?",
+          "lines": [
+            {
+              "left": 85,
+              "right": 326.46875,
+              "top": 274,
+              "bottom": 307
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 279,
+            "bottom": 303,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "kind": "goal",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 335,
+            "bottom": 407,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 660,
+            "width": 288,
+            "height": 418,
+            "clientWidth": 286,
+            "scrollWidth": 435,
+            "scrollLeft": 0
+          },
+          "visibleText": "Run autonomously",
+          "lines": [
+            {
+              "left": 128.96875,
+              "right": 359.59375,
+              "top": 354,
+              "bottom": 387
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 335,
+            "bottom": 407,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 660,
+            "width": 288,
+            "height": 418,
+            "clientWidth": 286,
+            "scrollWidth": 435,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 85,
+              "right": 443.5625,
+              "top": 354,
+              "bottom": 387
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 359,
+            "bottom": 383,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 335,
+            "bottom": 407,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 660,
+            "width": 288,
+            "height": 418,
+            "clientWidth": 286,
+            "scrollWidth": 435,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 85,
+              "right": 443.5625,
+              "top": 354,
+              "bottom": 387
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 359,
+            "bottom": 383,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "kind": "passkey",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 327,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 460,
+            "width": 288,
+            "height": 218,
+            "clientWidth": 286,
+            "scrollWidth": 298,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey",
+          "lines": [
+            {
+              "left": 72.25,
+              "right": 280.015625,
+              "top": 274,
+              "bottom": 307
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": false,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 327,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 460,
+            "width": 288,
+            "height": 218,
+            "clientWidth": 286,
+            "scrollWidth": 298,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey?",
+          "lines": [
+            {
+              "left": 85,
+              "right": 307.265625,
+              "top": 274,
+              "bottom": 307
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 279,
+            "bottom": 303,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 327,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 460,
+            "width": 288,
+            "height": 218,
+            "clientWidth": 286,
+            "scrollWidth": 298,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey?",
+          "lines": [
+            {
+              "left": 85,
+              "right": 307.265625,
+              "top": 274,
+              "bottom": 307
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 279,
+            "bottom": 303,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "kind": "device",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 327,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 540,
+            "width": 288,
+            "height": 298,
+            "clientWidth": 286,
+            "scrollWidth": 317,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key",
+          "lines": [
+            {
+              "left": 72.234375,
+              "right": 299.21875,
+              "top": 274,
+              "bottom": 307
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 327,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 540,
+            "width": 288,
+            "height": 298,
+            "clientWidth": 286,
+            "scrollWidth": 317,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key?",
+          "lines": [
+            {
+              "left": 85,
+              "right": 326.46875,
+              "top": 274,
+              "bottom": 307
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 279,
+            "bottom": 303,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 327,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 540,
+            "width": 288,
+            "height": 298,
+            "clientWidth": 286,
+            "scrollWidth": 317,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key?",
+          "lines": [
+            {
+              "left": 85,
+              "right": 326.46875,
+              "top": 274,
+              "bottom": 307
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 279,
+            "bottom": 303,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "goal",
+        "mode": "pending",
+        "bottom": false,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 183,
+            "bottom": 227,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 378,
+            "width": 224,
+            "height": 250,
+            "clientWidth": 222,
+            "scrollWidth": 241,
+            "scrollLeft": 0
+          },
+          "visibleText": "Enabling\u2026",
+          "lines": [
+            {
+              "left": 120.40625,
+              "right": 188.984375,
+              "top": 196,
+              "bottom": 213
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": false,
+          "icon": {
+            "left": 88.40625,
+            "right": 112.40625,
+            "top": 193,
+            "bottom": 217,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": true,
+          "busy": "true",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "goal",
+        "mode": "disabled",
+        "bottom": false,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 183,
+            "bottom": 227,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 378,
+            "width": 224,
+            "height": 250,
+            "clientWidth": 222,
+            "scrollWidth": 241,
+            "scrollLeft": 0
+          },
+          "visibleText": "Run autonomously",
+          "lines": [
+            {
+              "left": 77.390625,
+              "right": 199.984375,
+              "top": 196,
+              "bottom": 213
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": false,
+          "icon": null,
+          "disabled": true,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "passkey",
+        "mode": "pending",
+        "bottom": false,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Working\u2026",
+          "lines": [
+            {
+              "left": 84.46875,
+              "right": 150.828125,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 52.46875,
+            "right": 76.46875,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": true,
+          "busy": "true",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "passkey",
+        "mode": "disabled",
+        "bottom": false,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey",
+          "lines": [
+            {
+              "left": 46.609375,
+              "right": 156.6875,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": true,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "standalone",
+        "mode": "normal",
+        "bottom": false,
+        "escapeDisarms": true,
+        "resting": {
+          "button": {
+            "left": 16,
+            "right": 148.9375,
+            "top": 76,
+            "bottom": 120,
+            "width": 132.9375,
+            "height": 44
+          },
+          "panel": null,
+          "visibleText": "Delete",
+          "lines": [
+            {
+              "left": 61.09375,
+              "right": 103.84375,
+              "top": 89,
+              "bottom": 106
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 16,
+            "right": 148.9375,
+            "top": 76,
+            "bottom": 120,
+            "width": 132.9375,
+            "height": 44
+          },
+          "panel": null,
+          "visibleText": "Delete?",
+          "lines": [
+            {
+              "left": 69.46875,
+              "right": 119.453125,
+              "top": 89,
+              "bottom": 106
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 45.46875,
+            "right": 61.46875,
+            "top": 90,
+            "bottom": 106,
+            "width": 16,
+            "height": 16
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "kind": "goal",
+        "mode": "pending",
+        "bottom": false,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 335,
+            "bottom": 407,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 660,
+            "width": 288,
+            "height": 418,
+            "clientWidth": 286,
+            "scrollWidth": 435,
+            "scrollLeft": 0
+          },
+          "visibleText": "Enabling\u2026",
+          "lines": [
+            {
+              "left": 201.640625,
+              "right": 326.90625,
+              "top": 354,
+              "bottom": 387
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 161.640625,
+            "right": 185.640625,
+            "top": 359,
+            "bottom": 383,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": true,
+          "busy": "true",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "kind": "goal",
+        "mode": "disabled",
+        "bottom": false,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 335,
+            "bottom": 407,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 660,
+            "width": 288,
+            "height": 418,
+            "clientWidth": 286,
+            "scrollWidth": 435,
+            "scrollLeft": 0
+          },
+          "visibleText": "Run autonomously",
+          "lines": [
+            {
+              "left": 128.96875,
+              "right": 359.59375,
+              "top": 354,
+              "bottom": 387
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": null,
+          "disabled": true,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "kind": "passkey",
+        "mode": "pending",
+        "bottom": false,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 327,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 460,
+            "width": 288,
+            "height": 218,
+            "clientWidth": 286,
+            "scrollWidth": 298,
+            "scrollLeft": 0
+          },
+          "visibleText": "Working\u2026",
+          "lines": [
+            {
+              "left": 135.75,
+              "right": 256.5,
+              "top": 274,
+              "bottom": 307
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": false,
+          "icon": {
+            "left": 95.75,
+            "right": 119.75,
+            "top": 279,
+            "bottom": 303,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": true,
+          "busy": "true",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "kind": "passkey",
+        "mode": "disabled",
+        "bottom": false,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 327,
+            "width": 262,
+            "height": 72
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 460,
+            "width": 288,
+            "height": 218,
+            "clientWidth": 286,
+            "scrollWidth": 298,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey",
+          "lines": [
+            {
+              "left": 72.25,
+              "right": 280.015625,
+              "top": 274,
+              "bottom": 307
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": false,
+          "icon": null,
+          "disabled": true,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "kind": "standalone",
+        "mode": "normal",
+        "bottom": false,
+        "escapeDisarms": true,
+        "resting": {
+          "button": {
+            "left": 32,
+            "right": 283.640625,
+            "top": 152,
+            "bottom": 234,
+            "width": 251.640625,
+            "height": 82
+          },
+          "panel": null,
+          "visibleText": "Delete",
+          "lines": [
+            {
+              "left": 117.609375,
+              "right": 198.015625,
+              "top": 176,
+              "bottom": 209
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 32,
+            "right": 283.640625,
+            "top": 152,
+            "bottom": 234,
+            "width": 251.640625,
+            "height": 82
+          },
+          "panel": null,
+          "visibleText": "Delete?",
+          "lines": [
+            {
+              "left": 134.40625,
+              "right": 229.234375,
+              "top": 176,
+              "bottom": 209
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 86.40625,
+            "right": 118.40625,
+            "top": 177,
+            "bottom": 209,
+            "width": 32,
+            "height": 32
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "goal",
+        "mode": "normal",
+        "bottom": true,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 399,
+            "bottom": 443,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 344,
+            "bottom": 594,
+            "width": 224,
+            "height": 250,
+            "clientWidth": 222,
+            "scrollWidth": 241,
+            "scrollLeft": 0
+          },
+          "visibleText": "Run autonomously",
+          "lines": [
+            {
+              "left": 77.390625,
+              "right": 199.984375,
+              "top": 412,
+              "bottom": 429
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": false,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 399,
+            "bottom": 443,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 344,
+            "bottom": 594,
+            "width": 224,
+            "height": 250,
+            "clientWidth": 222,
+            "scrollWidth": 241,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 59,
+              "right": 250.390625,
+              "top": 412,
+              "bottom": 429
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 409,
+            "bottom": 433,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 399,
+            "bottom": 443,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 344,
+            "bottom": 594,
+            "width": 224,
+            "height": 250,
+            "clientWidth": 222,
+            "scrollWidth": 241,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 59,
+              "right": 250.390625,
+              "top": 412,
+              "bottom": 429
+            }
+          ],
+          "visibleFits": false,
+          "reservesFit": false,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 409,
+            "bottom": 433,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        }
+      }
+    ]
+  },
+  "after": {
+    "before": false,
+    "sourceHashes": {
+      "apps/web/lib/ui.tsx": "71c83dac5c8a40a7e2d3348eece117a09505094f157cb610cca329251f6d8755",
+      "apps/web/lib/ui-client.tsx": "db6ba45d07d1e3ea23c8d4d15b51f973c55a1927281b09ef4e2e1a1d391767be",
+      "apps/web/app/globals.css": "ddf7bf8e6254c9475fdb3959e230353804ba6ab80163f7bec76aa8bd1fc39e75",
+      "apps/web/app/goals/goal-card.tsx": "67d6112f5d94c6ee97d12d24b48620ca56c42cc759362cd91b16edc073520ce5",
+      "apps/web/app/security/security-client.tsx": "b85b4fa0fe138d47a4c98bf3c593e44bc0197cc38985bcdd54b742bd1126e000"
+    },
+    "harnessSha256": "4a3c99f4ebc485f91ade5ecb0c1e36da38840058c0dc7c8a478fdad0f612cfda",
+    "boundary": "Actual shared controls/CSS with exact GoalCard and Security confirmation labels in representative menu wrappers. No complete authenticated route. Only first activation, blur/Escape; no second confirm or owner action. Pending/disabled props synthetic; standalone comparison uses unchanged regular variant. No external request.",
+    "errors": [],
+    "results": [
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "goal",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 183,
+            "bottom": 239,
+            "width": 210,
+            "height": 56
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 390,
+            "width": 224,
+            "height": 262,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Run autonomously",
+          "lines": [
+            {
+              "left": 27,
+              "right": 149.59375,
+              "top": 202,
+              "bottom": 219
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 183,
+            "bottom": 239,
+            "width": 210,
+            "height": 56
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 390,
+            "width": 224,
+            "height": 262,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 59,
+              "right": 153.4375,
+              "top": 192,
+              "bottom": 209
+            },
+            {
+              "left": 59,
+              "right": 152.28125,
+              "top": 212,
+              "bottom": 229
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 199,
+            "bottom": 223,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 183,
+            "bottom": 239,
+            "width": 210,
+            "height": 56
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 390,
+            "width": 224,
+            "height": 262,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 59,
+              "right": 153.4375,
+              "top": 192,
+              "bottom": 209
+            },
+            {
+              "left": 59,
+              "right": 152.28125,
+              "top": 212,
+              "bottom": 229
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 199,
+            "bottom": 223,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "passkey",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey",
+          "lines": [
+            {
+              "left": 27,
+              "right": 137.078125,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey?",
+          "lines": [
+            {
+              "left": 59,
+              "right": 176.296875,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey?",
+          "lines": [
+            {
+              "left": 59,
+              "right": 176.296875,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "device",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key",
+          "lines": [
+            {
+              "left": 27,
+              "right": 148.34375,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key?",
+          "lines": [
+            {
+              "left": 59,
+              "right": 187.5625,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key?",
+          "lines": [
+            {
+              "left": 59,
+              "right": 187.5625,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "dark"
+        },
+        "kind": "goal",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 183,
+            "bottom": 239,
+            "width": 210,
+            "height": 56
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 390,
+            "width": 224,
+            "height": 262,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Run autonomously",
+          "lines": [
+            {
+              "left": 27,
+              "right": 149.59375,
+              "top": 202,
+              "bottom": 219
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 183,
+            "bottom": 239,
+            "width": 210,
+            "height": 56
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 390,
+            "width": 224,
+            "height": 262,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 59,
+              "right": 153.4375,
+              "top": 192,
+              "bottom": 209
+            },
+            {
+              "left": 59,
+              "right": 152.28125,
+              "top": 212,
+              "bottom": 229
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 199,
+            "bottom": 223,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 183,
+            "bottom": 239,
+            "width": 210,
+            "height": 56
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 390,
+            "width": 224,
+            "height": 262,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 59,
+              "right": 153.4375,
+              "top": 192,
+              "bottom": 209
+            },
+            {
+              "left": 59,
+              "right": 152.28125,
+              "top": 212,
+              "bottom": 229
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 199,
+            "bottom": 223,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "dark"
+        },
+        "kind": "passkey",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey",
+          "lines": [
+            {
+              "left": 27,
+              "right": 137.078125,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey?",
+          "lines": [
+            {
+              "left": 59,
+              "right": 176.296875,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey?",
+          "lines": [
+            {
+              "left": 59,
+              "right": 176.296875,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "dark"
+        },
+        "kind": "device",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key",
+          "lines": [
+            {
+              "left": 27,
+              "right": 148.34375,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key?",
+          "lines": [
+            {
+              "left": 59,
+              "right": 187.5625,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key?",
+          "lines": [
+            {
+              "left": 59,
+              "right": 187.5625,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "light"
+        },
+        "kind": "goal",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 335,
+            "bottom": 447,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 740,
+            "width": 288,
+            "height": 498,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Run autonomously",
+          "lines": [
+            {
+              "left": 45,
+              "right": 93.75,
+              "top": 354,
+              "bottom": 387
+            },
+            {
+              "left": 45,
+              "right": 220.828125,
+              "top": 394,
+              "bottom": 427
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 335,
+            "bottom": 447,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 740,
+            "width": 288,
+            "height": 498,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 77,
+              "right": 253.6875,
+              "top": 354,
+              "bottom": 387
+            },
+            {
+              "left": 77,
+              "right": 252.828125,
+              "top": 394,
+              "bottom": 427
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 379,
+            "bottom": 403,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 335,
+            "bottom": 447,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 740,
+            "width": 288,
+            "height": 498,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 77,
+              "right": 253.6875,
+              "top": 354,
+              "bottom": 387
+            },
+            {
+              "left": 77,
+              "right": 252.828125,
+              "top": 394,
+              "bottom": 427
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 379,
+            "bottom": 403,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "light"
+        },
+        "kind": "passkey",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 367,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 500,
+            "width": 288,
+            "height": 258,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey",
+          "lines": [
+            {
+              "left": 45,
+              "right": 252.765625,
+              "top": 294,
+              "bottom": 327
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 367,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 500,
+            "width": 288,
+            "height": 258,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey?",
+          "lines": [
+            {
+              "left": 77,
+              "right": 177.078125,
+              "top": 274,
+              "bottom": 307
+            },
+            {
+              "left": 77,
+              "right": 193.140625,
+              "top": 314,
+              "bottom": 347
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 299,
+            "bottom": 323,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 367,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 500,
+            "width": 288,
+            "height": 258,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey?",
+          "lines": [
+            {
+              "left": 77,
+              "right": 177.078125,
+              "top": 274,
+              "bottom": 307
+            },
+            {
+              "left": 77,
+              "right": 193.140625,
+              "top": 314,
+              "bottom": 347
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 299,
+            "bottom": 323,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "light"
+        },
+        "kind": "device",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 367,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 580,
+            "width": 288,
+            "height": 338,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key",
+          "lines": [
+            {
+              "left": 45,
+              "right": 223.078125,
+              "top": 274,
+              "bottom": 307
+            },
+            {
+              "left": 45,
+              "right": 87.859375,
+              "top": 314,
+              "bottom": 347
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 367,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 580,
+            "width": 288,
+            "height": 338,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key?",
+          "lines": [
+            {
+              "left": 77,
+              "right": 255.078125,
+              "top": 274,
+              "bottom": 307
+            },
+            {
+              "left": 77,
+              "right": 134.34375,
+              "top": 314,
+              "bottom": 347
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 299,
+            "bottom": 323,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 367,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 580,
+            "width": 288,
+            "height": 338,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key?",
+          "lines": [
+            {
+              "left": 77,
+              "right": 255.078125,
+              "top": 274,
+              "bottom": 307
+            },
+            {
+              "left": 77,
+              "right": 134.34375,
+              "top": 314,
+              "bottom": 347
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 299,
+            "bottom": 323,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "kind": "goal",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 335,
+            "bottom": 447,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 740,
+            "width": 288,
+            "height": 498,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Run autonomously",
+          "lines": [
+            {
+              "left": 45,
+              "right": 93.75,
+              "top": 354,
+              "bottom": 387
+            },
+            {
+              "left": 45,
+              "right": 220.828125,
+              "top": 394,
+              "bottom": 427
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 335,
+            "bottom": 447,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 740,
+            "width": 288,
+            "height": 498,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 77,
+              "right": 253.6875,
+              "top": 354,
+              "bottom": 387
+            },
+            {
+              "left": 77,
+              "right": 252.828125,
+              "top": 394,
+              "bottom": 427
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 379,
+            "bottom": 403,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 335,
+            "bottom": 447,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 740,
+            "width": 288,
+            "height": 498,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 77,
+              "right": 253.6875,
+              "top": 354,
+              "bottom": 387
+            },
+            {
+              "left": 77,
+              "right": 252.828125,
+              "top": 394,
+              "bottom": 427
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 379,
+            "bottom": 403,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "kind": "passkey",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 367,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 500,
+            "width": 288,
+            "height": 258,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey",
+          "lines": [
+            {
+              "left": 45,
+              "right": 252.765625,
+              "top": 294,
+              "bottom": 327
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 367,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 500,
+            "width": 288,
+            "height": 258,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey?",
+          "lines": [
+            {
+              "left": 77,
+              "right": 177.078125,
+              "top": 274,
+              "bottom": 307
+            },
+            {
+              "left": 77,
+              "right": 193.140625,
+              "top": 314,
+              "bottom": 347
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 299,
+            "bottom": 323,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 367,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 500,
+            "width": 288,
+            "height": 258,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey?",
+          "lines": [
+            {
+              "left": 77,
+              "right": 177.078125,
+              "top": 274,
+              "bottom": 307
+            },
+            {
+              "left": 77,
+              "right": 193.140625,
+              "top": 314,
+              "bottom": 347
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 299,
+            "bottom": 323,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "kind": "device",
+        "mode": "normal",
+        "bottom": false,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 367,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 580,
+            "width": 288,
+            "height": 338,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key",
+          "lines": [
+            {
+              "left": 45,
+              "right": 223.078125,
+              "top": 274,
+              "bottom": 307
+            },
+            {
+              "left": 45,
+              "right": 87.859375,
+              "top": 314,
+              "bottom": 347
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 367,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 580,
+            "width": 288,
+            "height": 338,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key?",
+          "lines": [
+            {
+              "left": 77,
+              "right": 255.078125,
+              "top": 274,
+              "bottom": 307
+            },
+            {
+              "left": 77,
+              "right": 134.34375,
+              "top": 314,
+              "bottom": 347
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 299,
+            "bottom": 323,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 367,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 580,
+            "width": 288,
+            "height": 338,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Revoke device key?",
+          "lines": [
+            {
+              "left": 77,
+              "right": 255.078125,
+              "top": 274,
+              "bottom": 307
+            },
+            {
+              "left": 77,
+              "right": 134.34375,
+              "top": 314,
+              "bottom": 347
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 299,
+            "bottom": 323,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "goal",
+        "mode": "pending",
+        "bottom": false,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 183,
+            "bottom": 239,
+            "width": 210,
+            "height": 56
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 390,
+            "width": 224,
+            "height": 262,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Enabling\u2026",
+          "lines": [
+            {
+              "left": 59,
+              "right": 127.578125,
+              "top": 202,
+              "bottom": 219
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 199,
+            "bottom": 223,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": true,
+          "busy": "true",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "goal",
+        "mode": "disabled",
+        "bottom": false,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 183,
+            "bottom": 239,
+            "width": 210,
+            "height": 56
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 390,
+            "width": 224,
+            "height": 262,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Run autonomously",
+          "lines": [
+            {
+              "left": 27,
+              "right": 149.59375,
+              "top": 202,
+              "bottom": 219
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": true,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "passkey",
+        "mode": "pending",
+        "bottom": false,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Working\u2026",
+          "lines": [
+            {
+              "left": 59,
+              "right": 125.359375,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 145,
+            "bottom": 169,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": true,
+          "busy": "true",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "passkey",
+        "mode": "disabled",
+        "bottom": false,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 135,
+            "bottom": 179,
+            "width": 210,
+            "height": 44
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 128,
+            "bottom": 246,
+            "width": 224,
+            "height": 118,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey",
+          "lines": [
+            {
+              "left": 27,
+              "right": 137.078125,
+              "top": 148,
+              "bottom": 165
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": true,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "standalone",
+        "mode": "normal",
+        "bottom": false,
+        "escapeDisarms": true,
+        "resting": {
+          "button": {
+            "left": 16,
+            "right": 148.9375,
+            "top": 76,
+            "bottom": 120,
+            "width": 132.9375,
+            "height": 44
+          },
+          "panel": null,
+          "visibleText": "Delete",
+          "lines": [
+            {
+              "left": 61.09375,
+              "right": 103.84375,
+              "top": 89,
+              "bottom": 106
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 16,
+            "right": 148.9375,
+            "top": 76,
+            "bottom": 120,
+            "width": 132.9375,
+            "height": 44
+          },
+          "panel": null,
+          "visibleText": "Delete?",
+          "lines": [
+            {
+              "left": 69.46875,
+              "right": 119.453125,
+              "top": 89,
+              "bottom": 106
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 45.46875,
+            "right": 61.46875,
+            "top": 90,
+            "bottom": 106,
+            "width": 16,
+            "height": 16
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "kind": "goal",
+        "mode": "pending",
+        "bottom": false,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 335,
+            "bottom": 447,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 740,
+            "width": 288,
+            "height": 498,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Enabling\u2026",
+          "lines": [
+            {
+              "left": 77,
+              "right": 202.265625,
+              "top": 374,
+              "bottom": 407
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 379,
+            "bottom": 403,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": true,
+          "busy": "true",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "kind": "goal",
+        "mode": "disabled",
+        "bottom": false,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 335,
+            "bottom": 447,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 740,
+            "width": 288,
+            "height": 498,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Run autonomously",
+          "lines": [
+            {
+              "left": 45,
+              "right": 93.75,
+              "top": 354,
+              "bottom": 387
+            },
+            {
+              "left": 45,
+              "right": 220.828125,
+              "top": 394,
+              "bottom": 427
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": true,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "kind": "passkey",
+        "mode": "pending",
+        "bottom": false,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 367,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 500,
+            "width": 288,
+            "height": 258,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Working\u2026",
+          "lines": [
+            {
+              "left": 77,
+              "right": 197.75,
+              "top": 294,
+              "bottom": 327
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 45,
+            "right": 69,
+            "top": 299,
+            "bottom": 323,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": true,
+          "busy": "true",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "kind": "passkey",
+        "mode": "disabled",
+        "bottom": false,
+        "resting": {
+          "button": {
+            "left": 21,
+            "right": 283,
+            "top": 255,
+            "bottom": 367,
+            "width": 262,
+            "height": 112
+          },
+          "panel": {
+            "left": 8,
+            "right": 296,
+            "top": 242,
+            "bottom": 500,
+            "width": 288,
+            "height": 258,
+            "clientWidth": 286,
+            "scrollWidth": 286,
+            "scrollLeft": 0
+          },
+          "visibleText": "Remove passkey",
+          "lines": [
+            {
+              "left": 45,
+              "right": 252.765625,
+              "top": 294,
+              "bottom": 327
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": true,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        }
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "kind": "standalone",
+        "mode": "normal",
+        "bottom": false,
+        "escapeDisarms": true,
+        "resting": {
+          "button": {
+            "left": 32,
+            "right": 283.640625,
+            "top": 152,
+            "bottom": 234,
+            "width": 251.640625,
+            "height": 82
+          },
+          "panel": null,
+          "visibleText": "Delete",
+          "lines": [
+            {
+              "left": 117.609375,
+              "right": 198.015625,
+              "top": 176,
+              "bottom": 209
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 32,
+            "right": 283.640625,
+            "top": 152,
+            "bottom": 234,
+            "width": 251.640625,
+            "height": 82
+          },
+          "panel": null,
+          "visibleText": "Delete?",
+          "lines": [
+            {
+              "left": 134.40625,
+              "right": 229.234375,
+              "top": 176,
+              "bottom": 209
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 86.40625,
+            "right": 118.40625,
+            "top": 177,
+            "bottom": 209,
+            "width": 32,
+            "height": 32
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 320,
+          "focusIsTarget": true
+        }
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "kind": "goal",
+        "mode": "normal",
+        "bottom": true,
+        "nativeEscapeFocusRestored": true,
+        "resting": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 387,
+            "bottom": 443,
+            "width": 210,
+            "height": 56
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 332,
+            "bottom": 594,
+            "width": 224,
+            "height": 262,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Run autonomously",
+          "lines": [
+            {
+              "left": 27,
+              "right": 149.59375,
+              "top": 406,
+              "bottom": 423
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": null,
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": false
+        },
+        "armed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 387,
+            "bottom": 443,
+            "width": 210,
+            "height": 56
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 332,
+            "bottom": 594,
+            "width": 224,
+            "height": 262,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 59,
+              "right": 153.4375,
+              "top": 396,
+              "bottom": 413
+            },
+            {
+              "left": 59,
+              "right": 152.28125,
+              "top": 416,
+              "bottom": 433
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 403,
+            "bottom": 427,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        },
+        "keyboardArmed": {
+          "button": {
+            "left": 15,
+            "right": 225,
+            "top": 387,
+            "bottom": 443,
+            "width": 210,
+            "height": 56
+          },
+          "panel": {
+            "left": 8,
+            "right": 232,
+            "top": 332,
+            "bottom": 594,
+            "width": 224,
+            "height": 262,
+            "clientWidth": 222,
+            "scrollWidth": 222,
+            "scrollLeft": 0
+          },
+          "visibleText": "Confirm \u2014 run autonomously",
+          "lines": [
+            {
+              "left": 59,
+              "right": 153.4375,
+              "top": 396,
+              "bottom": 413
+            },
+            {
+              "left": 59,
+              "right": 152.28125,
+              "top": 416,
+              "bottom": 433
+            }
+          ],
+          "visibleFits": true,
+          "reservesFit": true,
+          "icon": {
+            "left": 27,
+            "right": 51,
+            "top": 403,
+            "bottom": 427,
+            "width": 24,
+            "height": 24
+          },
+          "disabled": false,
+          "busy": "false",
+          "forbiddenActions": "0",
+          "documentWidth": 390,
+          "focusIsTarget": true
+        }
+      }
+    ]
+  },
+  "checks": {
+    "sameHarness": true,
+    "casesPerSeries": 23,
+    "screenshotsPerSeries": 38,
+    "allFinalVisibleAndThreeReservedLabelsFit": true,
+    "firstActivationBoundsStable": true,
+    "standaloneAllRecordedMetricsIdentical": true,
+    "ConfirmButtonHandlersByteIdentical": true,
+    "ActionMenuPlacementComponentByteIdentical": true,
+    "secondActivations": 0,
+    "actionWrites": 0
+  },
+  "reservedLineProofExample": {
+    "before": {
+      "profile": {
+        "width": 320,
+        "fontSize": 32,
+        "scheme": "dark"
+      },
+      "kind": "goal",
+      "mode": "normal",
+      "bottom": false,
+      "resting": {
+        "button": {
+          "left": 21,
+          "right": 283,
+          "top": 335,
+          "bottom": 407,
+          "width": 262,
+          "height": 72
+        },
+        "panel": {
+          "left": 8,
+          "right": 296,
+          "top": 242,
+          "bottom": 660,
+          "width": 288,
+          "height": 418,
+          "clientWidth": 286,
+          "scrollWidth": 435,
+          "scrollLeft": 0
+        },
+        "visibleText": "Run autonomously",
+        "lines": [
+          {
+            "left": 128.96875,
+            "right": 359.59375,
+            "top": 354,
+            "bottom": 387
+          }
+        ],
+        "reserves": [
+          [
+            {
+              "left": 128.96875,
+              "right": 359.59375,
+              "top": 354,
+              "bottom": 387
+            }
+          ],
+          [
+            {
+              "left": 85,
+              "right": 443.5625,
+              "top": 354,
+              "bottom": 387
+            }
+          ],
+          [
+            {
+              "left": 201.640625,
+              "right": 326.90625,
+              "top": 354,
+              "bottom": 387
+            }
+          ]
+        ],
+        "visibleFits": false,
+        "reservesFit": false,
+        "icon": null,
+        "disabled": false,
+        "busy": "false",
+        "forbiddenActions": "0",
+        "documentWidth": 320,
+        "focusIsTarget": false
+      },
+      "armed": {
+        "button": {
+          "left": 21,
+          "right": 283,
+          "top": 335,
+          "bottom": 407,
+          "width": 262,
+          "height": 72
+        },
+        "panel": {
+          "left": 8,
+          "right": 296,
+          "top": 242,
+          "bottom": 660,
+          "width": 288,
+          "height": 418,
+          "clientWidth": 286,
+          "scrollWidth": 435,
+          "scrollLeft": 0
+        },
+        "visibleText": "Confirm \u2014 run autonomously",
+        "lines": [
+          {
+            "left": 85,
+            "right": 443.5625,
+            "top": 354,
+            "bottom": 387
+          }
+        ],
+        "reserves": [
+          [
+            {
+              "left": 128.96875,
+              "right": 359.59375,
+              "top": 354,
+              "bottom": 387
+            }
+          ],
+          [
+            {
+              "left": 85,
+              "right": 443.5625,
+              "top": 354,
+              "bottom": 387
+            }
+          ],
+          [
+            {
+              "left": 201.640625,
+              "right": 326.90625,
+              "top": 354,
+              "bottom": 387
+            }
+          ]
+        ],
+        "visibleFits": false,
+        "reservesFit": false,
+        "icon": {
+          "left": 45,
+          "right": 69,
+          "top": 359,
+          "bottom": 383,
+          "width": 24,
+          "height": 24
+        },
+        "disabled": false,
+        "busy": "false",
+        "forbiddenActions": "0",
+        "documentWidth": 320,
+        "focusIsTarget": true
+      },
+      "keyboardArmed": {
+        "button": {
+          "left": 21,
+          "right": 283,
+          "top": 335,
+          "bottom": 407,
+          "width": 262,
+          "height": 72
+        },
+        "panel": {
+          "left": 8,
+          "right": 296,
+          "top": 242,
+          "bottom": 660,
+          "width": 288,
+          "height": 418,
+          "clientWidth": 286,
+          "scrollWidth": 435,
+          "scrollLeft": 0
+        },
+        "visibleText": "Confirm \u2014 run autonomously",
+        "lines": [
+          {
+            "left": 85,
+            "right": 443.5625,
+            "top": 354,
+            "bottom": 387
+          }
+        ],
+        "reserves": [
+          [
+            {
+              "left": 128.96875,
+              "right": 359.59375,
+              "top": 354,
+              "bottom": 387
+            }
+          ],
+          [
+            {
+              "left": 85,
+              "right": 443.5625,
+              "top": 354,
+              "bottom": 387
+            }
+          ],
+          [
+            {
+              "left": 201.640625,
+              "right": 326.90625,
+              "top": 354,
+              "bottom": 387
+            }
+          ]
+        ],
+        "visibleFits": false,
+        "reservesFit": false,
+        "icon": {
+          "left": 45,
+          "right": 69,
+          "top": 359,
+          "bottom": 383,
+          "width": 24,
+          "height": 24
+        },
+        "disabled": false,
+        "busy": "false",
+        "forbiddenActions": "0",
+        "documentWidth": 320,
+        "focusIsTarget": true
+      },
+      "nativeEscapeFocusRestored": true
+    },
+    "after": {
+      "profile": {
+        "width": 320,
+        "fontSize": 32,
+        "scheme": "dark"
+      },
+      "kind": "goal",
+      "mode": "normal",
+      "bottom": false,
+      "resting": {
+        "button": {
+          "left": 21,
+          "right": 283,
+          "top": 335,
+          "bottom": 447,
+          "width": 262,
+          "height": 112
+        },
+        "panel": {
+          "left": 8,
+          "right": 296,
+          "top": 242,
+          "bottom": 740,
+          "width": 288,
+          "height": 498,
+          "clientWidth": 286,
+          "scrollWidth": 286,
+          "scrollLeft": 0
+        },
+        "visibleText": "Run autonomously",
+        "lines": [
+          {
+            "left": 45,
+            "right": 93.75,
+            "top": 354,
+            "bottom": 387
+          },
+          {
+            "left": 45,
+            "right": 220.828125,
+            "top": 394,
+            "bottom": 427
+          }
+        ],
+        "reserves": [
+          [
+            {
+              "left": 45,
+              "right": 93.75,
+              "top": 354,
+              "bottom": 387
+            },
+            {
+              "left": 45,
+              "right": 220.828125,
+              "top": 394,
+              "bottom": 427
+            }
+          ],
+          [
+            {
+              "left": 77,
+              "right": 253.6875,
+              "top": 354,
+              "bottom": 387
+            },
+            {
+              "left": 77,
+              "right": 252.828125,
+              "top": 394,
+              "bottom": 427
+            }
+          ],
+          [
+            {
+              "left": 77,
+              "right": 202.265625,
+              "top": 374,
+              "bottom": 407
+            }
+          ]
+        ],
+        "visibleFits": true,
+        "reservesFit": true,
+        "icon": null,
+        "disabled": false,
+        "busy": "false",
+        "forbiddenActions": "0",
+        "documentWidth": 320,
+        "focusIsTarget": false
+      },
+      "armed": {
+        "button": {
+          "left": 21,
+          "right": 283,
+          "top": 335,
+          "bottom": 447,
+          "width": 262,
+          "height": 112
+        },
+        "panel": {
+          "left": 8,
+          "right": 296,
+          "top": 242,
+          "bottom": 740,
+          "width": 288,
+          "height": 498,
+          "clientWidth": 286,
+          "scrollWidth": 286,
+          "scrollLeft": 0
+        },
+        "visibleText": "Confirm \u2014 run autonomously",
+        "lines": [
+          {
+            "left": 77,
+            "right": 253.6875,
+            "top": 354,
+            "bottom": 387
+          },
+          {
+            "left": 77,
+            "right": 252.828125,
+            "top": 394,
+            "bottom": 427
+          }
+        ],
+        "reserves": [
+          [
+            {
+              "left": 45,
+              "right": 93.75,
+              "top": 354,
+              "bottom": 387
+            },
+            {
+              "left": 45,
+              "right": 220.828125,
+              "top": 394,
+              "bottom": 427
+            }
+          ],
+          [
+            {
+              "left": 77,
+              "right": 253.6875,
+              "top": 354,
+              "bottom": 387
+            },
+            {
+              "left": 77,
+              "right": 252.828125,
+              "top": 394,
+              "bottom": 427
+            }
+          ],
+          [
+            {
+              "left": 77,
+              "right": 202.265625,
+              "top": 374,
+              "bottom": 407
+            }
+          ]
+        ],
+        "visibleFits": true,
+        "reservesFit": true,
+        "icon": {
+          "left": 45,
+          "right": 69,
+          "top": 379,
+          "bottom": 403,
+          "width": 24,
+          "height": 24
+        },
+        "disabled": false,
+        "busy": "false",
+        "forbiddenActions": "0",
+        "documentWidth": 320,
+        "focusIsTarget": true
+      },
+      "keyboardArmed": {
+        "button": {
+          "left": 21,
+          "right": 283,
+          "top": 335,
+          "bottom": 447,
+          "width": 262,
+          "height": 112
+        },
+        "panel": {
+          "left": 8,
+          "right": 296,
+          "top": 242,
+          "bottom": 740,
+          "width": 288,
+          "height": 498,
+          "clientWidth": 286,
+          "scrollWidth": 286,
+          "scrollLeft": 0
+        },
+        "visibleText": "Confirm \u2014 run autonomously",
+        "lines": [
+          {
+            "left": 77,
+            "right": 253.6875,
+            "top": 354,
+            "bottom": 387
+          },
+          {
+            "left": 77,
+            "right": 252.828125,
+            "top": 394,
+            "bottom": 427
+          }
+        ],
+        "reserves": [
+          [
+            {
+              "left": 45,
+              "right": 93.75,
+              "top": 354,
+              "bottom": 387
+            },
+            {
+              "left": 45,
+              "right": 220.828125,
+              "top": 394,
+              "bottom": 427
+            }
+          ],
+          [
+            {
+              "left": 77,
+              "right": 253.6875,
+              "top": 354,
+              "bottom": 387
+            },
+            {
+              "left": 77,
+              "right": 252.828125,
+              "top": 394,
+              "bottom": 427
+            }
+          ],
+          [
+            {
+              "left": 77,
+              "right": 202.265625,
+              "top": 374,
+              "bottom": 407
+            }
+          ]
+        ],
+        "visibleFits": true,
+        "reservesFit": true,
+        "icon": {
+          "left": 45,
+          "right": 69,
+          "top": 379,
+          "bottom": 403,
+          "width": 24,
+          "height": 24
+        },
+        "disabled": false,
+        "busy": "false",
+        "forbiddenActions": "0",
+        "documentWidth": 320,
+        "focusIsTarget": true
+      },
+      "nativeEscapeFocusRestored": true
+    }
+  },
+  "lockfileSha256": "2283f0dd95d8ea01333e46b6870b9cdc3082166d2f0ec5bc07bd6c2e8a4d8342",
+  "limits": "Representative wrappers of actual shared primitives with exact Goal/Security safety copy; no full authenticated routes, owner/provider actions, real pending write, native or production claim. Full raw reserves/receipts in .workspace/menu-readability; earlier8settledbaseline preserved in designer qa-monitors."
+}

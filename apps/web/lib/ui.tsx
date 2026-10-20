@@ -71,7 +71,7 @@ const btnVariants = {
  * that only light up under the pointer. Not built on btnBase: its
  * justify-center would win the stylesheet-order fight against justify-start.
  */
-const menuItem = `mobile-touch-target inline-flex h-9 w-full items-center gap-2 rounded-lg px-3 text-left text-sm font-medium whitespace-nowrap motion-safe:transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${focusRing}`;
+const menuItem = `mobile-touch-target inline-flex min-h-9 min-w-0 w-full max-w-full items-center gap-[min(0.5rem,8px)] rounded-lg px-3 py-2 text-left text-sm font-medium whitespace-normal [overflow-wrap:anywhere] [&_svg]:shrink-0 motion-safe:transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${focusRing}`;
 const menuVariants = {
   menu: `${menuItem} text-strong hover:bg-sunken active:bg-sunken/80`,
   menuDanger: `${menuItem} text-red-700 hover:bg-red-50 active:bg-red-100 dark:text-red-400 dark:hover:bg-red-950/40 dark:active:bg-red-950/70`,
