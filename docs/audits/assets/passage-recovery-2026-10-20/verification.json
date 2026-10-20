@@ -1,0 +1,348 @@
+{
+  "baseCommit": "c790625c3f7f66da9dcf40b98d798c045f38735f",
+  "before": {
+    "before": true,
+    "sourceHashes": {
+      "apps/web/app/documents/document-passages.tsx": "6767684b19116b9c8930bfb1ff9414f51a62eb63b19874c3b55723ded66e94f2",
+      "apps/web/lib/document-passage-state.ts": "d93c79fdd77a8ebce4c44fbefbfe854cc0cb8d03073da70e434b90b72a7a01ce",
+      "apps/web/lib/ui.tsx": "00258d1db6fa312822dd229df9d18fdfa5dd9d5e010a04b44da9962c0b9eb429",
+      "apps/web/app/globals.css": "ddf7bf8e6254c9475fdb3959e230353804ba6ab80163f7bec76aa8bd1fc39e75"
+    },
+    "harnessSha256": "43ec861f8979e86bcf95a74e4e66546e380ff3121b118faf7e24fa9f07a4e579",
+    "boundary": "Actual DocumentPassages/React client and CSS, controlled loopback GET responses only. No authenticated route, owner data, database, storage writes or provider. Native Tab/Return Retry in retained numeric/opaque paths; duplicate event activation separately synthetic.",
+    "errors": [],
+    "results": [
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "scenario": "pagination",
+        "expectedDeadEnd": true,
+        "requests": ["0", "50"],
+        "failureScreenshot": "pagination-390-16-light-failed.png"
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "dark"
+        },
+        "scenario": "pagination",
+        "expectedDeadEnd": true,
+        "requests": ["0", "50"],
+        "failureScreenshot": "pagination-390-16-dark-failed.png"
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "light"
+        },
+        "scenario": "pagination",
+        "expectedDeadEnd": true,
+        "requests": ["0", "50"],
+        "failureScreenshot": "pagination-320-32-light-failed.png"
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "scenario": "pagination",
+        "expectedDeadEnd": true,
+        "requests": ["0", "50"],
+        "failureScreenshot": "pagination-320-32-dark-failed.png"
+      }
+    ]
+  },
+  "after": {
+    "before": false,
+    "sourceHashes": {
+      "apps/web/app/documents/document-passages.tsx": "326b340d29de058e30f75572b103c2b2a654fec53c32147f890a030b88b8d82b",
+      "apps/web/lib/document-passage-state.ts": "d93c79fdd77a8ebce4c44fbefbfe854cc0cb8d03073da70e434b90b72a7a01ce",
+      "apps/web/lib/ui.tsx": "00258d1db6fa312822dd229df9d18fdfa5dd9d5e010a04b44da9962c0b9eb429",
+      "apps/web/app/globals.css": "ddf7bf8e6254c9475fdb3959e230353804ba6ab80163f7bec76aa8bd1fc39e75"
+    },
+    "harnessSha256": "43ec861f8979e86bcf95a74e4e66546e380ff3121b118faf7e24fa9f07a4e579",
+    "boundary": "Actual DocumentPassages/React client and CSS, controlled loopback GET responses only. No authenticated route, owner data, database, storage writes or provider. Native Tab/Return Retry in retained numeric/opaque paths; duplicate event activation separately synthetic.",
+    "errors": [],
+    "results": [
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "scenario": "pagination",
+        "requests": ["0", "50", "50", "100"],
+        "retainedCount": 50,
+        "finalCount": 101,
+        "duplicateActivationAddsRequests": false,
+        "keyboardRetry": true,
+        "errorCleared": true,
+        "failureScreenshot": "pagination-390-16-light-failed.png",
+        "successScreenshot": "pagination-390-16-light-recovered.png"
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "scenario": "initial",
+        "requests": ["0", "0"],
+        "retainedCount": 0,
+        "finalCount": 50,
+        "duplicateActivationAddsRequests": false,
+        "keyboardRetry": false,
+        "errorCleared": true,
+        "failureScreenshot": "initial-390-16-light-failed.png",
+        "successScreenshot": "initial-390-16-light-recovered.png"
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "scenario": "conflict",
+        "requests": ["0", "50", "0"],
+        "retainedCount": 0,
+        "finalCount": 50,
+        "duplicateActivationAddsRequests": false,
+        "keyboardRetry": false,
+        "errorCleared": true,
+        "failureScreenshot": "conflict-390-16-light-failed.png",
+        "successScreenshot": "conflict-390-16-light-recovered.png"
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "scenario": "opaque",
+        "requests": [
+          "0",
+          "passage:0?offset=10&version=synthetic",
+          "passage:0?offset=10&version=synthetic"
+        ],
+        "retainedCount": 1,
+        "finalCount": 1,
+        "duplicateActivationAddsRequests": false,
+        "keyboardRetry": true,
+        "errorCleared": true,
+        "failureScreenshot": "opaque-390-16-light-failed.png",
+        "successScreenshot": "opaque-390-16-light-recovered.png"
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "dark"
+        },
+        "scenario": "pagination",
+        "requests": ["0", "50", "50", "100"],
+        "retainedCount": 50,
+        "finalCount": 101,
+        "duplicateActivationAddsRequests": false,
+        "keyboardRetry": true,
+        "errorCleared": true,
+        "failureScreenshot": "pagination-390-16-dark-failed.png",
+        "successScreenshot": "pagination-390-16-dark-recovered.png"
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "dark"
+        },
+        "scenario": "initial",
+        "requests": ["0", "0"],
+        "retainedCount": 0,
+        "finalCount": 50,
+        "duplicateActivationAddsRequests": false,
+        "keyboardRetry": false,
+        "errorCleared": true,
+        "failureScreenshot": "initial-390-16-dark-failed.png",
+        "successScreenshot": "initial-390-16-dark-recovered.png"
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "dark"
+        },
+        "scenario": "conflict",
+        "requests": ["0", "50", "0"],
+        "retainedCount": 0,
+        "finalCount": 50,
+        "duplicateActivationAddsRequests": false,
+        "keyboardRetry": false,
+        "errorCleared": true,
+        "failureScreenshot": "conflict-390-16-dark-failed.png",
+        "successScreenshot": "conflict-390-16-dark-recovered.png"
+      },
+      {
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "dark"
+        },
+        "scenario": "opaque",
+        "requests": [
+          "0",
+          "passage:0?offset=10&version=synthetic",
+          "passage:0?offset=10&version=synthetic"
+        ],
+        "retainedCount": 1,
+        "finalCount": 1,
+        "duplicateActivationAddsRequests": false,
+        "keyboardRetry": true,
+        "errorCleared": true,
+        "failureScreenshot": "opaque-390-16-dark-failed.png",
+        "successScreenshot": "opaque-390-16-dark-recovered.png"
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "light"
+        },
+        "scenario": "pagination",
+        "requests": ["0", "50", "50", "100"],
+        "retainedCount": 50,
+        "finalCount": 101,
+        "duplicateActivationAddsRequests": false,
+        "keyboardRetry": true,
+        "errorCleared": true,
+        "failureScreenshot": "pagination-320-32-light-failed.png",
+        "successScreenshot": "pagination-320-32-light-recovered.png"
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "light"
+        },
+        "scenario": "initial",
+        "requests": ["0", "0"],
+        "retainedCount": 0,
+        "finalCount": 50,
+        "duplicateActivationAddsRequests": false,
+        "keyboardRetry": false,
+        "errorCleared": true,
+        "failureScreenshot": "initial-320-32-light-failed.png",
+        "successScreenshot": "initial-320-32-light-recovered.png"
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "light"
+        },
+        "scenario": "conflict",
+        "requests": ["0", "50", "0"],
+        "retainedCount": 0,
+        "finalCount": 50,
+        "duplicateActivationAddsRequests": false,
+        "keyboardRetry": false,
+        "errorCleared": true,
+        "failureScreenshot": "conflict-320-32-light-failed.png",
+        "successScreenshot": "conflict-320-32-light-recovered.png"
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "light"
+        },
+        "scenario": "opaque",
+        "requests": [
+          "0",
+          "passage:0?offset=10&version=synthetic",
+          "passage:0?offset=10&version=synthetic"
+        ],
+        "retainedCount": 1,
+        "finalCount": 1,
+        "duplicateActivationAddsRequests": false,
+        "keyboardRetry": true,
+        "errorCleared": true,
+        "failureScreenshot": "opaque-320-32-light-failed.png",
+        "successScreenshot": "opaque-320-32-light-recovered.png"
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "scenario": "pagination",
+        "requests": ["0", "50", "50", "100"],
+        "retainedCount": 50,
+        "finalCount": 101,
+        "duplicateActivationAddsRequests": false,
+        "keyboardRetry": true,
+        "errorCleared": true,
+        "failureScreenshot": "pagination-320-32-dark-failed.png",
+        "successScreenshot": "pagination-320-32-dark-recovered.png"
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "scenario": "initial",
+        "requests": ["0", "0"],
+        "retainedCount": 0,
+        "finalCount": 50,
+        "duplicateActivationAddsRequests": false,
+        "keyboardRetry": false,
+        "errorCleared": true,
+        "failureScreenshot": "initial-320-32-dark-failed.png",
+        "successScreenshot": "initial-320-32-dark-recovered.png"
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "scenario": "conflict",
+        "requests": ["0", "50", "0"],
+        "retainedCount": 0,
+        "finalCount": 50,
+        "duplicateActivationAddsRequests": false,
+        "keyboardRetry": false,
+        "errorCleared": true,
+        "failureScreenshot": "conflict-320-32-dark-failed.png",
+        "successScreenshot": "conflict-320-32-dark-recovered.png"
+      },
+      {
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "scenario": "opaque",
+        "requests": [
+          "0",
+          "passage:0?offset=10&version=synthetic",
+          "passage:0?offset=10&version=synthetic"
+        ],
+        "retainedCount": 1,
+        "finalCount": 1,
+        "duplicateActivationAddsRequests": false,
+        "keyboardRetry": true,
+        "errorCleared": true,
+        "failureScreenshot": "opaque-320-32-dark-failed.png",
+        "successScreenshot": "opaque-320-32-dark-recovered.png"
+      }
+    ]
+  },
+  "checks": "Same final harness; four expected baseline dead ends,16 final scenarios pass; source component alone changes, no API/storage changes. Before snapshot contains exact tracked inputs from c790625c and same installed dependency runtime. Layout uses root main container, not authenticated full route."
+}
