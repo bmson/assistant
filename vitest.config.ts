@@ -93,7 +93,7 @@ export default defineConfig({
       // Fixture and recovery scripts share the allocated PostgreSQL database.
       serial('scripts', 7),
       {
-        ...parallel('apps/web'),
+        ...serial('apps/web', 8),
         // Next resolves "@/..." from the app's tsconfig paths; vitest does not
         // read those, so without this any web test that imports a component
         // reaching for @/lib fails to resolve the package rather than the file.
