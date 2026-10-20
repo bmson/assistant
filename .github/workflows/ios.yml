@@ -1,5 +1,5 @@
 # Temporary diagnostic branch only; no app or test source changes.
-name: iOS stream follow targeted comparison
+name: iOS stream follow observed comparison
 
 permissions:
   contents: read
@@ -81,6 +81,73 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
           git status --porcelain
           shasum -a 256 apps/ios/AssistantTests/APIClientRetryTests.swift
+
+      - name: Observe original host and delta snapshots without changing outcomes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import difflib
+          import hashlib
+          import os
+
+          path = Path('apps/ios/AssistantTests/APIClientRetryTests.swift')
+          original = path.read_text()
+          start = original.index('    func testChatFollowsNewMessagesAndGrowingStreamWhileAtBottom()')
+          end = original.index('    func testCardFormUnknownResponseReplaysTheExactFrozenBody()', start)
+          section = original[start:end]
+          old_host = '''        try await Task.sleep(for: .milliseconds(400))
+                  func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
+                  let scroll = try XCTUnwrap(descendants(window).compactMap { $0 as? UIScrollView }
+                      .first { !($0 is UITextView) })'''
+          new_host = r'''        let diagnosticHostStart = ContinuousClock.now
+                  try await Task.sleep(for: .milliseconds(400))
+                  func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
+                  let diagnosticInitialScroll = descendants(window).compactMap { $0 as? UIScrollView }
+                      .first { !($0 is UITextView) }
+                  print("STREAM_OBSERVE host initial elapsed=\(diagnosticHostStart.duration(to: ContinuousClock.now)) scroll=\(diagnosticInitialScroll != nil) views=\(descendants(window).count) key=\(window.isKeyWindow) hidden=\(window.isHidden) scene=\(scene.activationState.rawValue) bounds=\(window.bounds)")
+                  if diagnosticInitialScroll == nil {
+                      let observationDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+                      var eventualScroll: UIScrollView?
+                      repeat {
+                          try await Task.sleep(for: .milliseconds(50))
+                          eventualScroll = descendants(window).compactMap { $0 as? UIScrollView }
+                              .first { !($0 is UITextView) }
+                      } while eventualScroll == nil && ContinuousClock.now < observationDeadline
+                      print("STREAM_OBSERVE host eventual elapsed=\(diagnosticHostStart.duration(to: ContinuousClock.now)) scroll=\(eventualScroll != nil) views=\(descendants(window).count)")
+                  }
+                  // Retain the original observation: a late view still fails this diagnostic.
+                  let scroll = try XCTUnwrap(diagnosticInitialScroll)'''
+          old_delta = '''            StubURLProtocol.appendStream(try chunk(delta))
+                      try await Task.sleep(for: .milliseconds(150))
+                      XCTAssertEqual(model.messages.last?.text, previousText + delta)'''
+          new_delta = r'''            let diagnosticDeltaStart = ContinuousClock.now
+                      StubURLProtocol.appendStream(try chunk(delta))
+                      try await Task.sleep(for: .milliseconds(150))
+                      let diagnosticInitialText = model.messages.last?.text
+                      let diagnosticExpectedText = previousText + delta
+                      print("STREAM_OBSERVE delta=\(index) initial elapsed=\(diagnosticDeltaStart.duration(to: ContinuousClock.now)) match=\(diagnosticInitialText == diagnosticExpectedText) actualCount=\(diagnosticInitialText?.count ?? -1) expectedCount=\(diagnosticExpectedText.count) sending=\(model.isSending)")
+                      if diagnosticInitialText != diagnosticExpectedText {
+                          let observationDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+                          repeat {
+                              try await Task.sleep(for: .milliseconds(50))
+                          } while model.messages.last?.text != diagnosticExpectedText && ContinuousClock.now < observationDeadline
+                          print("STREAM_OBSERVE delta=\(index) eventual elapsed=\(diagnosticDeltaStart.duration(to: ContinuousClock.now)) match=\(model.messages.last?.text == diagnosticExpectedText) actualCount=\(model.messages.last?.text.count ?? -1) expectedCount=\(diagnosticExpectedText.count) sending=\(model.isSending)")
+                      }
+                      // Assert the original 150ms snapshot, even if later observation succeeds.
+                      XCTAssertEqual(diagnosticInitialText, diagnosticExpectedText)'''
+          assert section.count(old_host) == 1
+          assert section.count(old_delta) == 1
+          section = section.replace(old_host, new_host).replace(old_delta, new_delta)
+          modified = original[:start] + section + original[end:]
+          output = Path(os.environ.get('RUNNER_TEMP', '/tmp')) / 'stream-diagnostics'
+          output.mkdir(parents=True, exist_ok=True)
+          (output / 'APIClientRetryTests.original.swift').write_text(original)
+          (output / 'APIClientRetryTests.observed.swift').write_text(modified)
+          (output / 'observation.diff').write_text(''.join(difflib.unified_diff(original.splitlines(True), modified.splitlines(True), fromfile='original', tofile='observed')))
+          print('STREAM_SOURCE original=' + hashlib.sha256(original.encode()).hexdigest())
+          print('STREAM_SOURCE observed=' + hashlib.sha256(modified.encode()).hexdigest())
+          path.write_text(modified)
+          PY
 
       # The app targets iOS 18 but compiles iOS 26 APIs behind
       # `if #available(iOS 26.0, *)` — the Liquid Glass surfaces in ChatView.
@@ -194,8 +261,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
         with:
-          name: stream-follow-${{ matrix.label }}-${{ matrix.source }}
+          name: stream-observe-${{ matrix.label }}-${{ matrix.source }}
           path: |
+            ${{ runner.temp }}/stream-diagnostics
             ${{ runner.temp }}/stream-results
             ${{ runner.temp }}/xcodebuild.log
           retention-days: 14
