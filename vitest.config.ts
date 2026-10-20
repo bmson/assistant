@@ -36,13 +36,23 @@ const target = isolatedTestTarget();
 
 /**
  * Projects that never touch PostgreSQL run their files in parallel; the
- * integration projects inherit the root's serial setting because they share
- * one database, where parallel files let count-based assertions observe
- * another suite's fixture.
+ * integration projects explicitly inherit the root configuration and run in
+ * distinct sequence groups. They share one database: files in different
+ * projects must not overlap either, including temporary owners and triggers.
  */
 const parallel = (root: string) => ({
   extends: true as const,
   test: { root, fileParallelism: true },
+});
+
+const serial = (root: string, groupOrder: number) => ({
+  extends: true as const,
+  test: {
+    root,
+    name: root === 'scripts' ? 'scripts' : `@assistant/${root.split('/').at(-1)}`,
+    fileParallelism: false,
+    sequence: { groupOrder },
+  },
 });
 
 export default defineConfig({
@@ -53,17 +63,17 @@ export default defineConfig({
       ...(target.token ? { ASSISTANT_TEST_TARGET_TOKEN: target.token } : {}),
       ASSISTANT_TEST_TARGET_KIND: target.kind,
     },
-    // Inherited default for the DB-touching projects listed as plain strings.
+    // Serial project definitions below also serialize shared-database groups.
     fileParallelism: false,
     projects: [
-      'packages/application',
-      'packages/core',
-      'packages/db',
+      serial('packages/application', 1),
+      serial('packages/core', 2),
+      serial('packages/db', 3),
       // Serial since the watches e2e suite moved in with the watches module —
       // it shares the one database with the other integration projects.
-      'packages/modules',
-      'packages/tools',
-      'apps/agent',
+      serial('packages/modules', 4),
+      serial('packages/tools', 5),
+      serial('apps/agent', 6),
       parallel('packages/persistence'),
       {
         extends: true,
@@ -81,7 +91,7 @@ export default defineConfig({
       parallel('packages/config'),
       parallel('packages/setup'),
       // Fixture and recovery scripts share the allocated PostgreSQL database.
-      'scripts',
+      serial('scripts', 7),
       {
         ...parallel('apps/web'),
         // Next resolves "@/..." from the app's tsconfig paths; vitest does not
