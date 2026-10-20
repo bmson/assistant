@@ -1,6 +1,7 @@
 import { type ChatPageQuery, renderChatConversation } from '../conversation-page';
 
 export const dynamic = 'force-dynamic';
+export const metadata = { title: 'Chat' };
 
 export default async function ChatConversationPage({
   params,
