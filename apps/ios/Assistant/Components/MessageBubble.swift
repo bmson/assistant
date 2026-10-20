@@ -3223,13 +3223,19 @@ struct RichResponseCards: View {
                     .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
             } else {
                 compactResultRows(passages) { passage in
+                    let stacksHeading = usesAccessibilityLayout && passage.similarity != nil
+                    let headingLayout = stacksHeading
+                        ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+                        : AnyLayout(HStackLayout(alignment: .firstTextBaseline))
                     VStack(alignment: .leading, spacing: 5) {
-                        HStack(alignment: .firstTextBaseline) {
+                        headingLayout {
                             Text(AssistantMarkdown.inlineAttributed(passage.document))
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(AssistantTheme.ink(for: colorScheme))
                                 .fixedSize(horizontal: false, vertical: true)
-                            Spacer(minLength: 6)
+                            if !stacksHeading {
+                                Spacer(minLength: 6)
+                            }
                             if let similarity = passage.similarity {
                                 Text("\(Int((similarity * 100).rounded()))% match")
                                     .font(.caption2.monospacedDigit())
