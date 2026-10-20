@@ -38,11 +38,10 @@ export default async function CapabilitiesPage() {
           );
           return (
             <article key={capability.name} className="rounded-2xl border border-edge bg-raised p-5">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <h2 className="font-semibold text-strong">{capability.title}</h2>
-                  <p className="mt-1 text-sm leading-6 text-muted">{capability.summary}</p>
-                </div>
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <h2 className="min-w-0 break-words font-semibold text-strong">
+                  {capability.title}
+                </h2>
                 <Badge
                   tone={
                     status === 'ready' ? 'green' : status === 'setup_needed' ? 'amber' : 'neutral'
@@ -51,6 +50,7 @@ export default async function CapabilitiesPage() {
                   {capabilityStatusTitle(status)}
                 </Badge>
               </div>
+              <p className="mt-1 text-sm leading-6 text-muted">{capability.summary}</p>
               {status === 'setup_needed' || status === 'unavailable' ? (
                 <p
                   className={`mt-3 rounded-xl px-3 py-2 text-xs leading-5 ${

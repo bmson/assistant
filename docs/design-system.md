@@ -95,6 +95,8 @@ Hierarchy comes from size, weight, space, and material. Do not put every section
 
 Use platform spacing deliberately, rather than forcing the web corner radius onto iPhone. A utility card holds one meaningful object or decision. A list of records should use rows, not a nested stack of elevated cards inside another card. Borders and tonal wells create separation; shadows are reserved for actual raised or overlay material.
 
+The October 20 browser follow-up uses a bounded 24px conversation reading inset and an opaque composer well without transcript fades. At enlarged text sizes, decorative padding and icon-control growth stay bounded while reading text keeps scaling. Jump to latest sits with the composer controls and aligns actual final reading content, including rich cards and media. Keyboard activation returns focus to Message; pointer activation preserves the draft without programmatically opening editing. See the [dated review](audits/ui-consistency-2026-10-20.md) for acceptance scope and remaining independent checks.
+
 Own safe areas once. The composer and transcript must move as one surface when the native directory is revealed. Derive status-crown and Dynamic Island clearances from actual device geometry. Do not fix one phone by adding a constant padding that fails another phone, keyboard state, or text size.
 
 ## Shared state language

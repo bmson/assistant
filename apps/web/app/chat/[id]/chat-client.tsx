@@ -173,6 +173,56 @@ function matchesToken(entry: SlashEntry, token: string): boolean {
   );
 }
 
+/** Keep the latest reading line above the composer, including in a short viewport.
+ * Row actions and feedback can extend beyond the reply's actual text. */
+function latestReadingScrollTop(scroller: HTMLElement, form: HTMLElement | null): number {
+  const maximum = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+  const candidates = scroller.querySelectorAll<HTMLElement>(
+    '[data-message-block], [data-chat-reading-block]',
+  );
+  const latest = candidates[candidates.length - 1];
+  if (!latest) return maximum;
+  const walker = document.createTreeWalker(latest, NodeFilter.SHOW_TEXT);
+  let lastText: Node | null = null;
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const parent = node.parentElement;
+    if (
+      node.textContent?.trim() &&
+      parent?.checkVisibility({ opacityProperty: true }) &&
+      !parent.closest('.sr-only, [aria-hidden="true"], [data-message-utility]')
+    )
+      lastText = node;
+  }
+  let end = latest.getBoundingClientRect().bottom;
+  if (lastText) {
+    const range = document.createRange();
+    range.selectNodeContents(lastText);
+    end = [...range.getClientRects()].at(-1)?.bottom ?? end;
+  }
+  const media = [
+    ...latest.querySelectorAll<HTMLElement>('img, svg[role="img"], canvas, video, audio'),
+  ]
+    .filter(
+      (element) =>
+        element.checkVisibility({ opacityProperty: true }) &&
+        !element.closest('[aria-hidden="true"], [data-message-utility]') &&
+        element.getBoundingClientRect().height > 1,
+    )
+    .at(-1);
+  const mediaIsLast =
+    !!media &&
+    (!lastText || !!(lastText.compareDocumentPosition(media) & Node.DOCUMENT_POSITION_FOLLOWING));
+  if (media && mediaIsLast) end = media.getBoundingClientRect().bottom;
+  const readingBottom = Math.min(
+    scroller.getBoundingClientRect().bottom,
+    form?.getBoundingClientRect().top ?? Number.POSITIVE_INFINITY,
+  );
+  return Math.max(
+    0,
+    Math.min(maximum, scroller.scrollTop + end - readingBottom + (mediaIsLast ? 8 : 16)),
+  );
+}
+
 export function ChatClient({
   conversationId,
   formSessionScope,
@@ -1099,7 +1149,7 @@ export function ChatClient({
     if (!stickToBottomRef.current) return;
     const frame = window.requestAnimationFrame(() => {
       const scroller = messageScrollerRef.current;
-      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      if (scroller) scroller.scrollTop = latestReadingScrollTop(scroller, formRef.current);
     });
     return () => window.cancelAnimationFrame(frame);
   }, [log, composerHeight, liveRecall, asyncNote, asyncActionError, pollTrouble]);
@@ -1123,7 +1173,9 @@ export function ChatClient({
     let frame = 0;
     const measure = () => {
       frame = 0;
-      const bottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
+      const bottom =
+        scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48 ||
+        Math.abs(scroller.scrollTop - latestReadingScrollTop(scroller, formRef.current)) < 48;
       stickToBottomRef.current = bottom;
       setAtBottom(bottom);
       if (bottom) setUnseenCount(0);
@@ -1167,7 +1219,7 @@ export function ChatClient({
   // on it taking layout space. Measure the form and feed that height back two
   // ways: a negative top margin cancels the space it would occupy in the
   // column, and the scroller reserves it as bottom padding so the newest
-  // message still clears the composer by the same 5rem the log keeps on top.
+  // message still clears the composer by the same inset the log keeps on top.
   useLayoutEffect(() => {
     const element = formRef.current;
     if (!element) return;
@@ -1209,6 +1261,7 @@ export function ChatClient({
   useLayoutEffect(() => {
     const element = textareaRef.current;
     if (!element) return;
+    const followLatest = stickToBottomRef.current;
     const previous = previousInputRef.current;
     previousInputRef.current = input;
     const mayShrink = appliedInputHeightRef.current === 0 || input.length <= previous.length;
@@ -1217,6 +1270,13 @@ export function ChatClient({
     if (next !== appliedInputHeightRef.current || mayShrink) {
       appliedInputHeightRef.current = next;
       element.style.height = `${next}px`;
+      // Preserve the reading endpoint before the form ResizeObserver commits.
+      // Otherwise a large field growth can look like the owner scrolled away.
+      const scroller = messageScrollerRef.current;
+      if (followLatest && scroller) {
+        scroller.scrollTop = latestReadingScrollTop(scroller, formRef.current);
+        stickToBottomRef.current = true;
+      }
     }
   }, [input]);
 
@@ -1228,7 +1288,7 @@ export function ChatClient({
     if (!scroller) return;
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     scroller.scrollTo({
-      top: scroller.scrollHeight,
+      top: latestReadingScrollTop(scroller, formRef.current),
       behavior: reduceMotion ? 'auto' : 'smooth',
     });
   };
@@ -1745,7 +1805,7 @@ export function ChatClient({
         // A side thread is a subpage like any other: it gets back to its parent
         // list, which gets back to the main thread. The "/" palette only exists
         // in the composer below, so this is the way out that is always visible.
-        <header className="chat-heading border-b border-white/15 pt-7 pb-3 lg:pt-10">
+        <header className="chat-heading border-b border-white/15 pt-[min(1.75rem,28px)] pb-[min(0.75rem,12px)] lg:pt-10">
           <BackLink href="/chat/all">All chats</BackLink>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
@@ -1799,8 +1859,11 @@ export function ChatClient({
         ref={messageScrollerRef}
         role="log"
         aria-label="Conversation"
-        style={{ paddingBottom: `calc(5rem + ${composerHeight}px)` }}
-        className={`scroll-subtle min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto ${log.length === 0 ? 'pt-6' : 'pt-20'}`}
+        style={{
+          paddingTop: 'min(1.5rem, 24px)',
+          paddingBottom: `calc(min(1.5rem, 24px) + ${composerHeight}px)`,
+        }}
+        className="scroll-subtle min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto"
       >
         {/* A short thread rests on the composer instead of hanging from the top
             of the window with a void beneath it — `mt-auto` on the log (and
@@ -1808,7 +1871,10 @@ export function ChatClient({
             enough to overflow simply scrolls as before. */}
         <div className="flex min-h-full min-w-0 flex-col">
           {log.length === 0 ? (
-            <div className="mx-auto flex max-w-xl flex-col items-center text-center my-auto">
+            <div
+              data-chat-reading-block="true"
+              className="mx-auto flex min-w-0 w-full max-w-xl flex-col items-center text-center my-auto"
+            >
               {isPrimary ? (
                 <span className="inline-flex size-14 items-center justify-center rounded-2xl">
                   <Sparkles className="size-5" aria-hidden="true" />
@@ -1926,33 +1992,6 @@ export function ChatClient({
           the space it would otherwise take from the log. Everything transient
           (errors, palettes) sits in an out-of-flow stack above it, so opening
           the "/" palette never resizes the conversation. */}
-      {/* Out of the composer's form on purpose, even though it is positioned
-          against it. Out here the pill shares the log's own context, so what it
-          frosts is the conversation itself — inside, it sat above the veil and
-          could only ever pick up the veil's own output. The composer's measured
-          height is what keeps it in the same place either way. */}
-      {!atBottom && log.length > 0 && !error && !commandPaletteOpen && !modelCommandOpen ? (
-        <div
-          // `composerHeight` is the whole form's box, padding and safe-area
-          // clearance included, so this is the same 1.25rem gap above the card
-          // that the old `-top-14` inside the form worked out to.
-          style={{ bottom: `calc(${composerHeight}px + 1.25rem)` }}
-          className="pointer-events-none absolute inset-x-0 z-30 flex justify-center"
-        >
-          <button
-            type="button"
-            onClick={jumpToLatest}
-            aria-label="Jump to latest"
-            className={`pointer-events-auto mobile-touch-target inline-flex h-9 items-center gap-1.5 rounded-full px-3.5 text-xs font-medium motion-safe:animate-[pop-in_140ms_ease-out] ${focusRing}`}
-          >
-            <ArrowDown className="size-3.5" aria-hidden="true" />
-            Jump to latest
-            {unseenCount > 0 ? (
-              <span aria-hidden="true" className="size-1.5 rounded-full bg-accent" />
-            ) : null}
-          </button>
-        </div>
-      ) : null}
       <form
         ref={formRef}
         onSubmit={(event) => {
@@ -1962,18 +2001,6 @@ export function ChatClient({
         style={{ marginTop: `-${composerHeight}px` }}
         className="mobile-safe-bottom pointer-events-none sticky bottom-0 z-20 min-w-0 sm:pb-3"
       >
-        {/* The veil the composer and the jump pill are glass against: it
-            frosts and thins the log on its way under them rather than hiding
-            it behind a band of stage — conversation.css cuts the material.
-
-            It stops at the composer's own bottom edge. It used to hang below
-            it, which cost nothing when the column ended above the fold but now
-            adds its overhang to the document — the whole page would scroll a
-            little, sliding the "full height" log out of place. */}
-        <span
-          aria-hidden="true"
-          className="composer-veil pointer-events-none absolute inset-x-0 -top-28 bottom-0"
-        />
         <div className="pointer-events-none absolute inset-x-0 bottom-full z-20 min-w-0">
           {/* Autonomy is a per-turn choice, so it no longer holds a permanent
               seat in the composer — /auto sets it and this says so until the
@@ -2118,7 +2145,7 @@ export function ChatClient({
               the only inset either of them needs. */}
           <div
             data-testid="chat-composer-surface"
-            className="flex min-w-0 items-end gap-2 overflow-hidden rounded-[var(--radius-shell)] p-2 motion-safe:transition-shadow"
+            className="flex min-w-0 items-end gap-[8px] overflow-hidden rounded-[var(--radius-shell)] p-[8px] motion-safe:transition-shadow"
           >
             <textarea
               ref={textareaRef}
@@ -2228,7 +2255,7 @@ export function ChatClient({
               }}
               placeholder="Ask anything…"
               rows={1}
-              className="block max-h-40 min-h-10 w-full min-w-0 flex-1 resize-none self-center border-0 bg-transparent px-2 py-2 text-base leading-6 outline-none sm:text-sm"
+              className="block max-h-[min(10rem,160px)] min-h-10 w-full min-w-0 flex-1 resize-none self-center border-0 bg-transparent px-[8px] py-[8px] text-base leading-6 outline-none sm:text-sm"
             />
             {/* No rule between the field and its controls. A full-bleed border
                 ran straight into the card's corner arc, which cut it off at an
@@ -2236,6 +2263,28 @@ export function ChatClient({
                 the card reads as a single well with the controls resting in it,
                 and the round send button agrees with the corners instead of
                 fighting them. */}
+            {!atBottom && log.length > 0 && !error && !commandPaletteOpen && !modelCommandOpen ? (
+              <button
+                type="button"
+                onClick={(event) => {
+                  jumpToLatest();
+                  // Keyboard/assistive activation removes this button. Keep
+                  // focus useful without opening the keyboard for a pointer tap.
+                  if (event.detail === 0) textareaRef.current?.focus({ preventScroll: true });
+                }}
+                aria-label="Jump to latest"
+                title="Jump to latest"
+                className={`relative inline-flex size-[min(2.5rem,44px)] shrink-0 items-center justify-center rounded-full border border-white/25 text-stage-strong hover:bg-white/15 ${focusRing}`}
+              >
+                <ArrowDown className="size-4" aria-hidden="true" />
+                {unseenCount > 0 ? (
+                  <span
+                    aria-hidden="true"
+                    className="absolute right-0 top-0 size-1.5 rounded-full bg-accent"
+                  />
+                ) : null}
+              </button>
+            ) : null}
             {operationCancellation?.turn.conversationId === conversationId ? (
               <button
                 type="button"
@@ -2245,7 +2294,7 @@ export function ChatClient({
                 aria-label={
                   operationCancellation.phase === 'checking' ? 'Checking stop' : 'Retry stop'
                 }
-                className={`inline-flex size-10 shrink-0 items-center justify-center rounded-full border border-white/25 bg-white/15 text-stage-strong motion-safe:transition-colors hover:bg-white/25 disabled:cursor-not-allowed ${focusRing}`}
+                className={`inline-flex size-[min(2.5rem,44px)] shrink-0 items-center justify-center rounded-full border border-white/25 bg-white/15 text-stage-strong motion-safe:transition-colors hover:bg-white/25 disabled:cursor-not-allowed ${focusRing}`}
               >
                 {operationCancellation.phase === 'checking' ? (
                   <Loader2 className="size-4 motion-safe:animate-spin" aria-hidden="true" />
@@ -2263,7 +2312,7 @@ export function ChatClient({
                 onClick={cancelAsyncTurn}
                 title="Stop this task"
                 aria-label={isCancellingAsync ? 'Stopping the task' : 'Stop this task'}
-                className={`inline-flex size-10 shrink-0 items-center justify-center rounded-full border border-white/25 bg-white/15 text-stage-strong motion-safe:transition-colors hover:bg-white/25 disabled:cursor-not-allowed ${focusRing}`}
+                className={`inline-flex size-[min(2.5rem,44px)] shrink-0 items-center justify-center rounded-full border border-white/25 bg-white/15 text-stage-strong motion-safe:transition-colors hover:bg-white/25 disabled:cursor-not-allowed ${focusRing}`}
               >
                 <Square className="size-3 fill-current" aria-hidden="true" />
               </button>
@@ -2280,7 +2329,7 @@ export function ChatClient({
                     : 'Stop generating and request cancellation'
                 }
                 aria-label={formAdmissionAwaitingReceipt ? 'Waiting for form receipt' : 'Stop'}
-                className={`inline-flex size-10 shrink-0 items-center justify-center rounded-full border border-white/25 bg-white/15 text-stage-strong motion-safe:animate-[pop-in_120ms_ease-out] motion-safe:transition-colors hover:bg-white/25 disabled:cursor-wait disabled:opacity-70 ${focusRing}`}
+                className={`inline-flex size-[min(2.5rem,44px)] shrink-0 items-center justify-center rounded-full border border-white/25 bg-white/15 text-stage-strong motion-safe:animate-[pop-in_120ms_ease-out] motion-safe:transition-colors hover:bg-white/25 disabled:cursor-wait disabled:opacity-70 ${focusRing}`}
               >
                 {formAdmissionAwaitingReceipt ? (
                   <Loader2 className="size-4 motion-safe:animate-spin" aria-hidden="true" />
@@ -2303,7 +2352,7 @@ export function ChatClient({
                 onClick={stopCurrentTurn}
                 title="Stop this task"
                 aria-label={isCancellingAsync ? 'Stopping the task' : 'Stop this task'}
-                className={`group/stop inline-flex size-10 shrink-0 items-center justify-center rounded-full border border-white/25 bg-white/15 text-stage-strong motion-safe:transition-colors hover:bg-white/25 disabled:cursor-not-allowed ${focusRing}`}
+                className={`group/stop inline-flex size-[min(2.5rem,44px)] shrink-0 items-center justify-center rounded-full border border-white/25 bg-white/15 text-stage-strong motion-safe:transition-colors hover:bg-white/25 disabled:cursor-not-allowed ${focusRing}`}
               >
                 {/* The square only replaces the spinner under a pointer that
                     can hover; on a touch screen the spinner stays put and the
@@ -2326,7 +2375,7 @@ export function ChatClient({
                 type="submit"
                 disabled={!canSend}
                 aria-label="Send"
-                className={`inline-flex size-10 shrink-0 items-center justify-center rounded-full motion-safe:transition-[background-color,color] ${focusRing} ${
+                className={`inline-flex size-[min(2.5rem,44px)] shrink-0 items-center justify-center rounded-full motion-safe:transition-[background-color,color] ${focusRing} ${
                   canSend
                     ? 'bg-white text-stage hover:bg-white/90'
                     : 'cursor-not-allowed bg-white/12 text-stage-muted'

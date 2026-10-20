@@ -20,6 +20,14 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const before = process.argv.includes('--before');
 const chatStates = process.argv.includes('--chat-states');
 const hydrateChat = process.argv.includes('--hydrate-chat') || chatStates;
+const longChat = process.argv.includes('--long-chat');
+const cardChat = process.argv.find((arg) => arg.startsWith('--chat-card='))?.slice(12) ?? '';
+if (cardChat && !['only', 'with-prose', 'agenda', 'image'].includes(cardChat))
+  throw new Error('Unknown card-chat fixture');
+const narrow = process.argv.includes('--narrow');
+const rootFontSize = process.argv.includes('--large-text') ? 32 : 16;
+const captureWidths = narrow ? [320] : hydrateChat ? [390] : [1280, 390];
+const staticLargeText = rootFontSize > 16 && !hydrateChat;
 if (before && hydrateChat) throw new Error('Keep the before chat baseline static');
 const destination = process.argv.find((arg, index) => index > 1 && !arg.startsWith('--'));
 const output = path.resolve(
@@ -102,6 +110,8 @@ const fixture = process.argv.includes('--reuse-html')
         PRODUCT_VISUAL_QA_BEFORE: before ? '1' : '0',
         PRODUCT_VISUAL_QA_CHAT: hydrateChat ? '1' : '0',
         PRODUCT_VISUAL_QA_CHAT_STATES: chatStates ? '1' : '0',
+        PRODUCT_VISUAL_QA_LONG_CHAT: longChat ? '1' : '0',
+        PRODUCT_VISUAL_QA_CARD_CHAT: cardChat,
       },
       encoding: 'utf8',
     });
@@ -170,6 +180,15 @@ if (Component) hydrateRoot(host, <Component {...JSON.parse(host.dataset.qaProps)
             contents: `const forbidden = () => { throw new Error('Synthetic layout check must not navigate'); }; export const useRouter = () => ({ push: forbidden, replace: forbidden, refresh: forbidden });`,
             loader: 'js',
           }));
+          builder.onResolve({ filter: /^next\/image$/ }, (args) => ({
+            path: args.path,
+            namespace: 'qa-product-image',
+          }));
+          builder.onLoad({ filter: /.*/, namespace: 'qa-product-image' }, () => ({
+            contents: `import ImageModule from ${JSON.stringify(webRequire.resolve('next/image'))}; export default ImageModule.default ?? ImageModule;`,
+            loader: 'js',
+            resolveDir: path.join(root, 'apps/web'),
+          }));
           builder.onResolve({ filter: /^next\/link$/ }, (args) => ({
             path: args.path,
             namespace: 'qa-product-link',
@@ -220,6 +239,79 @@ type PageFixture = {
 };
 const isConversationFixture = (entry: PageFixture) =>
   /^\/chat(?:\/[^/]+)?$/.test(entry.route) && entry.route !== '/chat/all';
+function readLastTranscriptLine() {
+  const log = document.querySelector<HTMLElement>('[role="log"]');
+  const composer = document.querySelector('[data-testid="chat-composer-surface"]');
+  const form = composer?.closest('form');
+  const candidates = log?.querySelectorAll(
+    '[data-message-block][data-role="assistant"], .my-auto .grid button',
+  );
+  const last = candidates?.[candidates.length - 1];
+  if (!log || !composer || !form || !last) return null;
+  const image = last.querySelector<HTMLImageElement>('img[alt="Latest visual card"]');
+  if (image) {
+    const box = image.getBoundingClientRect();
+    const logTop = log.getBoundingClientRect().top;
+    const composerTop = composer.getBoundingClientRect().top;
+    const visibleMediaPixels = Math.max(
+      0,
+      Math.min(box.bottom, composerTop) - Math.max(box.top, logTop),
+    );
+    return {
+      readable:
+        image.complete &&
+        image.naturalWidth > 0 &&
+        visibleMediaPixels >= Math.min(48, box.height) &&
+        document.body.scrollHeight <= innerHeight + 1 &&
+        Math.round(form.getBoundingClientRect().height) ===
+          -Number.parseFloat(getComputedStyle(form).marginTop),
+      finalText: image.alt,
+      mediaHeight: box.height,
+      mediaTop: box.top,
+      mediaBottom: box.bottom,
+      visibleMediaPixels,
+      logTop,
+      composerTop,
+      actualScrollTop: log.scrollTop,
+      physicalMaximum: log.scrollHeight - log.clientHeight,
+      bodyHeight: document.body.scrollHeight,
+      viewportHeight: innerHeight,
+    };
+  }
+  const walker = document.createTreeWalker(last, NodeFilter.SHOW_TEXT);
+  let text: Node | null = null;
+  for (let node = walker.nextNode(); node; node = walker.nextNode())
+    if (
+      node.textContent?.trim() &&
+      node.parentElement?.checkVisibility({ opacityProperty: true }) &&
+      !node.parentElement.closest('.sr-only, [aria-hidden="true"], [data-message-utility]')
+    )
+      text = node;
+  if (!text) return null;
+  const range = document.createRange();
+  range.selectNodeContents(text);
+  const line = [...range.getClientRects()].at(-1);
+  const logTop = log.getBoundingClientRect().top;
+  const composerTop = composer.getBoundingClientRect().top;
+  return {
+    readable:
+      !!line &&
+      line.top >= logTop - 1 &&
+      line.bottom <= composerTop + 1 &&
+      document.body.scrollHeight <= innerHeight + 1 &&
+      Math.round(form.getBoundingClientRect().height) ===
+        -Number.parseFloat(getComputedStyle(form).marginTop),
+    finalText: text.textContent,
+    lineTop: line?.top,
+    lineBottom: line?.bottom,
+    logTop,
+    composerTop,
+    actualScrollTop: log.scrollTop,
+    physicalMaximum: log.scrollHeight - log.clientHeight,
+    bodyHeight: document.body.scrollHeight,
+    viewportHeight: innerHeight,
+  };
+}
 const manifestSource =
   hydrateChat && process.argv.includes('--reuse-html')
     ? await readFile(path.join(output, 'source-manifest.json'), 'utf8').catch(() =>
@@ -241,6 +333,7 @@ const selectedPages = hydrateChat
       .split(',');
 const pages = allPages.filter(
   (entry) =>
+    (!staticLargeText || !isConversationFixture(entry)) &&
     (!selectedPages || selectedPages.includes(entry.name)) &&
     (!process.argv.includes('--forms-only') ||
       ['skills', 'improvements', 'writing-voice'].includes(entry.name)),
@@ -255,6 +348,8 @@ const buildSha256 = visualHash(
     ),
     lock: visualHash(await readFile(path.join(root, 'pnpm-lock.yaml'))),
     client: before ? null : visualHash(await readFile(path.join(output, 'client.js'))),
+    captureWidths,
+    rootFontSize,
   }),
 );
 const stylesheetSha256 = visualHash(
@@ -270,6 +365,8 @@ const fixtureInputs = {
   before,
   hydrateChat,
   chatStates,
+  longChat,
+  cardChat,
   componentSha256,
   html: Object.fromEntries(
     await Promise.all(
@@ -325,7 +422,7 @@ async function renderedFixtureHtml(entry: PageFixture): Promise<string> {
   return (await readFile(path.join(output, `${entry.name}.html`), 'utf8'))
     .replace(
       '</head>',
-      `<link rel="stylesheet" href="/style.css">${!before && isConversationFixture(entry) ? '<link rel="stylesheet" href="/conversation.css">' : ''}${hydrateChat ? '<link rel="stylesheet" href="/client.css">' : ''}</head>`,
+      `<link rel="stylesheet" href="/style.css">${!before && isConversationFixture(entry) ? '<link rel="stylesheet" href="/conversation.css">' : ''}${hydrateChat ? '<link rel="stylesheet" href="/client.css">' : ''}<style>html { font-size: ${rootFontSize}px; }</style></head>`,
     )
     .replace(
       '</body>',
@@ -399,12 +496,10 @@ const syntheticApiRequests: Array<Record<string, unknown>> = [];
 let blockedRequests = 0;
 try {
   for (const scheme of ['light', 'dark'] as const) {
-    for (const viewport of hydrateChat
-      ? [{ width: 390, height: 844 }]
-      : [
-          { width: 1280, height: 960 },
-          { width: 390, height: 844 },
-        ]) {
+    for (const viewport of captureWidths.map((width) => ({
+      width,
+      height: width >= 1280 ? 960 : 844,
+    }))) {
       const context = await browser.newContext({
         viewport,
         colorScheme: scheme,
@@ -423,6 +518,19 @@ try {
             path: url.pathname,
             method: route.request().method(),
           });
+          if (
+            cardChat === 'image' &&
+            url.pathname === '/api/card-image' &&
+            route.request().method() === 'GET' &&
+            url.searchParams.get('url') === 'https://visual-qa.invalid/late-image.svg'
+          ) {
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            await route.fulfill({
+              contentType: 'image/svg+xml',
+              body: '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="1200"><rect width="600" height="1200" fill="#d6eadc"/><path d="M0 0L600 1200M600 0L0 1200" stroke="#217a4b" stroke-width="30"/><circle cx="300" cy="1000" r="120" fill="#217a4b"/></svg>',
+            });
+            return;
+          }
           if (url.pathname === '/api/chat/status' && route.request().method() === 'GET') {
             await route.fulfill({
               contentType: 'application/json',
@@ -449,26 +557,101 @@ try {
       page.on('pageerror', (error) => process.stderr.write(`Preview error: ${error.message}\n`));
       for (const entry of pages) {
         currentFixture = entry.name;
+        const waitForReadable = async (label: string) => {
+          try {
+            await page.waitForFunction(
+              `(${readLastTranscriptLine.toString()})()?.readable === true`,
+              undefined,
+              { timeout: 5000 },
+            );
+          } catch (error) {
+            const directory = path.join(output, 'failures');
+            await mkdir(directory, { recursive: true });
+            const stem = `${label}-${entry.name}-${viewport.width}-${scheme}`;
+            const observed = await page.evaluate(readLastTranscriptLine);
+            await writeFile(
+              path.join(directory, `${stem}.json`),
+              JSON.stringify(observed, null, 2),
+            );
+            await page.screenshot({ path: path.join(directory, `${stem}.png`), fullPage: true });
+            throw new Error(
+              `${label} did not expose readable final content: ${JSON.stringify(observed)}`,
+              { cause: error },
+            );
+          }
+        };
         const errors: string[] = [];
         const onError = (error: Error) => errors.push(error.message);
         page.on('pageerror', onError);
         await page.goto(`${origin}/fixture/${entry.name}`, { waitUntil: 'networkidle' });
+        if (cardChat && entry.state !== 'empty') {
+          const latest = page.locator('[data-message-block][data-role="assistant"]').last();
+          if (cardChat === 'agenda')
+            await latest.getByText('Latest weekend agenda', { exact: true }).waitFor();
+          else
+            await latest
+              .getByRole('region', {
+                name: cardChat === 'image' ? 'Latest visual card' : 'Latest weekend card',
+                exact: true,
+              })
+              .waitFor();
+          if (cardChat === 'image')
+            await latest.getByRole('img', { name: 'Latest visual card', exact: true }).waitFor();
+          else
+            await latest
+              .getByText('Latest card ends here: bring the hotel confirmation.', { exact: true })
+              .waitFor();
+          const prose = await latest.locator('.bubble-assistant').count();
+          if (
+            (cardChat !== 'with-prose' && prose !== 0) ||
+            (cardChat === 'with-prose' && prose === 0)
+          )
+            throw new Error('Card fixture does not represent its declared response shape');
+        }
         await page.evaluate((scheme) => {
           document.documentElement.dataset.theme = scheme;
           document.documentElement.classList.toggle('dark', scheme === 'dark');
           document.documentElement.style.colorScheme = scheme;
         }, scheme);
         if (hydrateChat) {
-          await page.waitForFunction(() => {
-            const composer = document.querySelector('[data-testid="chat-composer-surface"]');
-            const form = composer?.closest('form');
-            return (
-              form &&
-              Math.round(form.getBoundingClientRect().height) ===
-                -Number.parseFloat(getComputedStyle(form).marginTop) &&
-              document.body.scrollHeight <= innerHeight + 1
-            );
-          });
+          await page
+            .waitForFunction(() => {
+              const composer = document.querySelector('[data-testid="chat-composer-surface"]');
+              const form = composer?.closest('form');
+              return (
+                form &&
+                Math.round(form.getBoundingClientRect().height) ===
+                  -Number.parseFloat(getComputedStyle(form).marginTop) &&
+                document.body.scrollHeight <= innerHeight + 1
+              );
+            })
+            .catch(async (error) => {
+              const failureDirectory = path.join(output, 'failures');
+              await mkdir(failureDirectory, { recursive: true });
+              const failureName = `${entry.name}-${viewport.width}-${scheme}`;
+              await page.screenshot({
+                path: path.join(failureDirectory, `${failureName}.png`),
+                fullPage: true,
+              });
+              const geometry = await page.evaluate(() => {
+                const form = document
+                  .querySelector('[data-testid="chat-composer-surface"]')
+                  ?.closest('form');
+                return {
+                  viewportHeight: innerHeight,
+                  bodyScrollHeight: document.body.scrollHeight,
+                  formHeight: form?.getBoundingClientRect().height,
+                  marginTop: form ? getComputedStyle(form).marginTop : null,
+                  headerHeight: document.querySelector('body > header')?.getBoundingClientRect()
+                    .height,
+                };
+              });
+              await writeFile(
+                path.join(failureDirectory, `${failureName}.json`),
+                JSON.stringify(geometry, null, 2),
+              );
+              throw error;
+            });
           if (chatStates) {
             await page.getByRole('button', { name: 'Stop this task', exact: true }).click();
             await page
@@ -488,13 +671,174 @@ try {
                 requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
               ),
           );
+          if (cardChat === 'image' && entry.state !== 'empty')
+            await waitForReadable('initial-image-auto-follow');
+        }
+        const scrollingProof =
+          hydrateChat && (rootFontSize > 16 || longChat || cardChat !== '')
+            ? await page.evaluate(async () => {
+                const log = document.querySelector<HTMLElement>('[role="log"]');
+                const composer = document.querySelector('[data-testid="chat-composer-surface"]');
+                if (!log || !composer) throw new Error('Missing conversation regions');
+                const targets = log.querySelectorAll<HTMLElement>(
+                  '.bubble-assistant, .bubble-owner, [data-decision-card], [data-response-card], .recall-note, .chat-action-error, .my-auto > p:first-of-type, .my-auto .grid button',
+                );
+                if (targets.length === 0) throw new Error('Missing declared conversation content');
+                const settle = () =>
+                  new Promise<void>((resolve) =>
+                    requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+                  );
+                const walker = document.createTreeWalker(log, NodeFilter.SHOW_TEXT);
+                const textNodes: Text[] = [];
+                for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+                  const parent = node.parentElement;
+                  if (
+                    node.textContent?.trim() &&
+                    parent?.checkVisibility({ opacityProperty: true }) &&
+                    !parent.closest('.sr-only')
+                  )
+                    textNodes.push(node as Text);
+                }
+                if (textNodes.length === 0) throw new Error('Missing readable conversation text');
+                const expectedLines = new Set<string>();
+                const readableLines = new Set<string>();
+                const readingHeight = Math.max(
+                  1,
+                  composer.getBoundingClientRect().top - log.getBoundingClientRect().top,
+                );
+                const maximum = Math.max(0, log.scrollHeight - log.clientHeight);
+                const offsets = Array.from(
+                  { length: Math.ceil(maximum / Math.max(1, readingHeight / 3)) + 1 },
+                  (_, index) => Math.min(maximum, index * Math.max(1, readingHeight / 3)),
+                );
+                for (const offset of offsets) {
+                  log.scrollTop = offset;
+                  await settle();
+                  const top = log.getBoundingClientRect().top;
+                  const bottom = composer.getBoundingClientRect().top;
+                  textNodes.forEach((node, index) => {
+                    if (!node.isConnected) throw new Error('Transcript changed during read sweep');
+                    const range = document.createRange();
+                    range.selectNodeContents(node);
+                    [...range.getClientRects()].forEach((box, line) => {
+                      if (box.width <= 1 || box.height <= 1) return;
+                      const key = `${index}:${line}`;
+                      expectedLines.add(key);
+                      if (box.top >= top - 1 && box.bottom <= bottom + 1) readableLines.add(key);
+                    });
+                  });
+                }
+                const unreadableLines = [...expectedLines].filter((key) => !readableLines.has(key));
+                if (expectedLines.size === 0 || unreadableLines.length)
+                  throw new Error(`Transcript lines cannot be read: ${unreadableLines.join(', ')}`);
+                log.scrollTop = 0;
+                await settle();
+                await settle();
+                await settle();
+                const first = targets[0]?.getBoundingClientRect();
+                const logBox = log.getBoundingClientRect();
+                const readingBottom = Math.min(logBox.bottom, composer.getBoundingClientRect().top);
+                const firstLineHeight = targets[0]
+                  ? Number.parseFloat(getComputedStyle(targets[0]).lineHeight)
+                  : 0;
+                const firstReachable =
+                  !first ||
+                  (first.top >= logBox.top - 1 &&
+                    first.top + Math.min(first.height, firstLineHeight) <= readingBottom + 1);
+                log.scrollTop = log.scrollHeight;
+                await settle();
+                await settle();
+                let last = targets[targets.length - 1]?.getBoundingClientRect();
+                let composerTop = composer.getBoundingClientRect().top;
+                const maximumScrollTop = log.scrollTop;
+                if (last) {
+                  log.scrollTop += last.bottom - (composerTop - 24);
+                  await settle();
+                  await settle();
+                  last = targets[targets.length - 1]?.getBoundingClientRect();
+                  composerTop = composer.getBoundingClientRect().top;
+                }
+                return {
+                  firstReachable,
+                  textLineCount: expectedLines.size,
+                  readableLineCount: readableLines.size,
+                  firstActualTextLineReadable: readableLines.has([...expectedLines][0] ?? ''),
+                  lastActualTextLineReadable: readableLines.has([...expectedLines].at(-1) ?? ''),
+                  readingOffsetsChecked: offsets.length,
+                  firstTopAtStart: first?.top ?? null,
+                  firstBottomAtStart: first?.bottom ?? null,
+                  logTop: logBox.top,
+                  logBottom: logBox.bottom,
+                  readingBottom,
+                  lastReachable:
+                    !last || (last.bottom <= composerTop + 1 && last.bottom > logBox.top),
+                  scrollHeight: log.scrollHeight,
+                  maximumScrollTop,
+                  readingScrollTop: log.scrollTop,
+                  clientHeight: log.clientHeight,
+                  composerTop,
+                  lastTopAtEnd: last?.top ?? null,
+                  lastBottomAtEnd: last?.bottom ?? null,
+                  bodyScrollHeight: document.body.scrollHeight,
+                  viewportHeight: innerHeight,
+                };
+              })
+            : null;
+        if (
+          scrollingProof &&
+          (!scrollingProof.firstReachable ||
+            !scrollingProof.lastReachable ||
+            scrollingProof.bodyScrollHeight !== scrollingProof.viewportHeight)
+        )
+          throw new Error(
+            `Enlarged conversation is not reachable: ${JSON.stringify(scrollingProof)}`,
+          );
+        if (scrollingProof) {
+          const scrollToEdge = async (edge: 'top' | 'bottom') => {
+            await page.evaluate(async (edge) => {
+              const log = document.querySelector<HTMLElement>('[role="log"]');
+              if (!log) throw new Error('Missing conversation log');
+              log.scrollTop = edge === 'top' ? 0 : log.scrollHeight;
+              await new Promise<void>((resolve) =>
+                requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+              );
+              if (edge === 'bottom') {
+                const targets = log.querySelectorAll<HTMLElement>(
+                  '.bubble-assistant, .bubble-owner, [data-decision-card], [data-response-card], .recall-note, .chat-action-error, .my-auto > p:first-of-type, .my-auto .grid button',
+                );
+                const last = targets[targets.length - 1]?.getBoundingClientRect();
+                const composer = document.querySelector('[data-testid="chat-composer-surface"]');
+                if (last && composer)
+                  log.scrollTop += last.bottom - (composer.getBoundingClientRect().top - 24);
+              }
+              await new Promise<void>((resolve) =>
+                requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+              );
+            }, edge);
+          };
+          const topScreenshot = `${entry.name}-${viewport.width}-${scheme}-top.png`;
+          await scrollToEdge('top');
+          await provenanceScreenshot(page, {
+            path: path.join(output, topScreenshot),
+            fullPage: true,
+            animations: 'disabled',
+          });
+          await scrollToEdge('bottom');
+          Object.assign(scrollingProof, {
+            topScreenshot,
+            bottomScreenshot: `${entry.name}-${viewport.width}-${scheme}.png`,
+          });
         }
         const layout = await page.evaluate(() => {
           const main = document.querySelector('main');
           const overflow = [...document.querySelectorAll<HTMLElement>('main *')]
             .filter((element) => {
               const box = element.getBoundingClientRect();
-              return box.width > 0 && (box.right > innerWidth + 1 || box.left < -1);
+              return (
+                element.checkVisibility() &&
+                box.width > 0 &&
+                (box.right > innerWidth + 1 || box.left < -1)
+              );
             })
             .slice(0, 12)
             .map((element) => ({
@@ -529,7 +873,7 @@ try {
               const form = composer?.closest('form');
               const transcriptClearComposer = [
                 ...document.querySelectorAll(
-                  '.bubble-assistant, .bubble-owner, [data-decision-card], .recall-note, .chat-action-error',
+                  '.bubble-assistant, .bubble-owner, [data-decision-card], [data-response-card], .recall-note, .chat-action-error',
                 ),
               ].every((bubble) => {
                 const box = bubble.getBoundingClientRect();
@@ -617,10 +961,14 @@ try {
                 const chat = element.closest('.chat-viewport');
                 const aboveFade =
                   !chat ||
+                  getComputedStyle(chat, '::after').content === 'none' ||
                   element.closest('[data-testid="chat-composer-surface"]') ||
                   element.getBoundingClientRect().bottom <=
                     chat.getBoundingClientRect().bottom -
-                      9 * Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+                      Math.min(
+                        144,
+                        9 * Number.parseFloat(getComputedStyle(document.documentElement).fontSize),
+                      );
                 if (!aboveFade)
                   throw new Error(`Contrast target intersects the conversation fade: ${target}`);
                 const ink = rgba(style.color);
@@ -698,7 +1046,7 @@ try {
             conversationPresentation.composerBorderStyle !== 'solid' ||
             conversationPresentation.assistantSurface === 'rgba(0, 0, 0, 0)' ||
             !conversationPresentation.suggestionsClearComposer ||
-            !conversationPresentation.transcriptClearComposer ||
+            (!scrollingProof && !conversationPresentation.transcriptClearComposer) ||
             conversationPresentation.chatBottom === null ||
             conversationPresentation.chatBottom > conversationPresentation.viewportHeight + 1)
         )
@@ -718,6 +1066,8 @@ try {
           ...entry,
           screenshot: name,
           width: viewport.width,
+          rootFontSize,
+          scrollingProof,
           screenshotWidth: capture.readUInt32BE(16),
           screenshotHeight: capture.readUInt32BE(20),
           scheme,
@@ -733,6 +1083,176 @@ try {
             : 'Actual source HTML and stylesheet. Skills, writing voice and repair forms hydrate against synthetic actions after; other retained pages remain static visual evidence. No owner mutations.',
         };
         measurements.push(measurement);
+        if (scrollingProof) {
+          const auditLink = page.getByRole('link', { name: 'Audit trail', exact: true });
+          await auditLink.focus();
+          const navigationReachable = await auditLink.evaluate((link) => {
+            const nav = link.closest('nav');
+            if (!nav) return false;
+            const box = link.getBoundingClientRect();
+            const navBox = nav.getBoundingClientRect();
+            return box.left >= navBox.left - 1 && box.right <= navBox.right + 1;
+          });
+          const field = page.getByRole('combobox', { name: 'Message', exact: true });
+          const initialJump = page.getByRole('button', { name: 'Jump to latest', exact: true });
+          if (entry.state !== 'empty' && (await initialJump.isVisible())) {
+            await initialJump.click();
+            await waitForReadable('actual-jump');
+          }
+          const editingDraft = `Draft begins: confirm the weekend plan.\n${'Review the weekend plan. '.repeat(50)}\nDraft ends: bring the hotel confirmation.`;
+          await field.fill(editingDraft);
+          await field.press(process.platform === 'darwin' ? 'Meta+ArrowUp' : 'Control+Home');
+          const draftStart = await field.evaluate((element: HTMLTextAreaElement) => ({
+            caretAtStart: element.selectionStart === 0 && element.selectionEnd === 0,
+            firstLineVisible: element.scrollTop <= 1,
+          }));
+          if (!draftStart.caretAtStart || !draftStart.firstLineVisible)
+            throw new Error(`Cannot reach the start of the draft: ${JSON.stringify(draftStart)}`);
+          const composerStartScreenshot = `${entry.name}-${viewport.width}-${scheme}-editing-start.png`;
+          await provenanceScreenshot(page, {
+            path: path.join(output, composerStartScreenshot),
+            fullPage: true,
+            animations: 'disabled',
+          });
+          await field.press(process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End');
+          await page.waitForFunction(() => {
+            const form = document
+              .querySelector('[data-testid="chat-composer-surface"]')
+              ?.closest('form');
+            return (
+              form &&
+              Math.round(form.getBoundingClientRect().height) ===
+                -Number.parseFloat(getComputedStyle(form).marginTop) &&
+              document.body.scrollHeight <= innerHeight + 1
+            );
+          });
+          const editing = await page.evaluate(() => {
+            const field = document.querySelector<HTMLTextAreaElement>(
+              'textarea[aria-label="Message"]',
+            );
+            const send = document.querySelector<HTMLButtonElement>('button[aria-label="Send"]');
+            const box = send?.getBoundingClientRect();
+            return {
+              focused: document.activeElement === field,
+              fieldScrolls: !!field && field.scrollHeight > field.clientHeight,
+              caretAtEnd:
+                !!field &&
+                field.selectionStart === field.value.length &&
+                field.selectionEnd === field.value.length,
+              caretVisible:
+                !!field && field.scrollTop + field.clientHeight >= field.scrollHeight - 1,
+              fieldWidth: field?.getBoundingClientRect().width,
+              sendEnabled: !!send && !send.disabled,
+              sendVisible:
+                !!box &&
+                box.top >= 0 &&
+                box.bottom <= innerHeight &&
+                box.left >= 0 &&
+                box.right <= innerWidth,
+              bodyHeight: document.body.scrollHeight,
+              viewportHeight: innerHeight,
+            };
+          });
+          if (
+            !navigationReachable ||
+            !editing.focused ||
+            !editing.fieldScrolls ||
+            !editing.caretAtEnd ||
+            !editing.caretVisible ||
+            !editing.sendEnabled ||
+            !editing.sendVisible ||
+            editing.bodyHeight !== editing.viewportHeight
+          )
+            throw new Error(
+              `Enlarged composer/navigation is not operable: ${JSON.stringify({ navigationReachable, editing })}`,
+            );
+          const composerScreenshot = `${entry.name}-${viewport.width}-${scheme}-editing.png`;
+          await waitForReadable('composer-growth');
+          const lastTextAfterGrowth = await page.evaluate(readLastTranscriptLine);
+          if (!lastTextAfterGrowth?.readable)
+            throw new Error('Final reply cannot be read while editing');
+          await provenanceScreenshot(page, {
+            path: path.join(output, composerScreenshot),
+            fullPage: true,
+            animations: 'disabled',
+          });
+          const logOverflows = await page.evaluate(() => {
+            const log = document.querySelector<HTMLElement>('[role="log"]');
+            if (!log) return false;
+            log.scrollTop = 0;
+            return log.scrollHeight - log.clientHeight > 48;
+          });
+          let jumpKeyboard = false;
+          let jumpPointer = false;
+          const jumpOutcomes: Array<Record<string, unknown>> = [];
+          const inspectJump = async (activation: string) => {
+            await waitForReadable('actual-jump');
+            const destination = await page.evaluate(readLastTranscriptLine);
+            if (!destination?.readable)
+              throw new Error(
+                `Actual ${activation} Jump hid final reply: ${JSON.stringify(destination)}`,
+              );
+            if (
+              cardChat &&
+              destination.finalText?.trim() !==
+                (cardChat === 'image'
+                  ? 'Latest visual card'
+                  : 'Latest card ends here: bring the hotel confirmation.')
+            )
+              throw new Error('Jump did not expose the newest generated-card fact');
+            const screenshot = `${entry.name}-${viewport.width}-${scheme}-jump-${activation}.png`;
+            await provenanceScreenshot(page, {
+              path: path.join(output, screenshot),
+              fullPage: true,
+              animations: 'disabled',
+            });
+            jumpOutcomes.push({
+              activation,
+              ...destination,
+              screenshot,
+              scriptedScrollCorrection: false,
+            });
+          };
+          if (logOverflows && entry.state !== 'empty') {
+            const jump = page.getByRole('button', { name: 'Jump to latest', exact: true });
+            await jump.waitFor({ state: 'visible' });
+            await jump.click();
+            await inspectJump('pointer');
+            jumpPointer = await field.evaluate(
+              (element: HTMLTextAreaElement, expected: string) =>
+                document.activeElement !== element && element.value === expected,
+              editingDraft,
+            );
+            if (!jumpPointer) throw new Error('Pointer Jump opened editing or lost the draft');
+            await page.evaluate(() => {
+              const log = document.querySelector<HTMLElement>('[role="log"]');
+              if (!log) throw new Error('Missing conversation log');
+              log.scrollTop = 0;
+            });
+            await jump.waitFor({ state: 'visible' });
+            await jump.focus();
+            await jump.press('Enter');
+            await inspectJump('keyboard');
+            jumpKeyboard = await field.evaluate(
+              (element: HTMLTextAreaElement, expected: string) =>
+                document.activeElement === element && element.value === expected,
+              editingDraft,
+            );
+            if (!jumpKeyboard) throw new Error('Keyboard Jump lost focus or draft');
+          }
+          Object.assign(scrollingProof, {
+            navigationReachable,
+            draftStart,
+            editing,
+            composerScreenshot,
+            composerStartScreenshot,
+            lastTextAfterGrowth,
+            jumpKeyboard,
+            jumpPointer,
+            jumpOutcomes,
+          });
+          await field.fill('');
+        }
         if (hydrateChat) {
           const client = await page.evaluate(() => ({
             writes: (window as Window & { __qaWrites?: string[] }).__qaWrites ?? [],
@@ -907,16 +1427,36 @@ try {
     }
   }
   const pngs = (await readdir(output)).filter((file) => file.endsWith('.png'));
+  const declaredHydratedScreenshots = measurements.flatMap((entry) => {
+    const proof = entry.scrollingProof as {
+      topScreenshot?: string;
+      composerScreenshot?: string;
+      composerStartScreenshot?: string;
+      jumpOutcomes?: Array<{ screenshot: string }>;
+    } | null;
+    return [
+      entry.screenshot,
+      proof?.topScreenshot,
+      proof?.composerScreenshot,
+      proof?.composerStartScreenshot,
+      ...(proof?.jumpOutcomes?.map((entry) => entry.screenshot) ?? []),
+    ].filter((name): name is string => typeof name === 'string');
+  });
   if (
     hydrateChat &&
-    (measurements.length !== (chatStates ? 4 : 8) || pngs.length !== measurements.length)
+    (measurements.length !== (chatStates ? 4 : 8) ||
+      pngs.length !== declaredHydratedScreenshots.length ||
+      pngs.some((name) => !declaredHydratedScreenshots.includes(name)))
   )
     throw new Error('Hydrated evidence must contain exactly its declared layouts and screenshots');
   if (
     hydrateChat &&
     (blockedRequests > 0 ||
       syntheticApiRequests.some(
-        (request) => request.path !== '/api/chat/status' || request.method !== 'GET',
+        (request) =>
+          request.method !== 'GET' ||
+          (request.path !== '/api/chat/status' &&
+            !(cardChat === 'image' && request.path === '/api/card-image')),
       ))
   )
     throw new Error('Hydrated chat attempted an unexpected account or external request');
@@ -958,8 +1498,13 @@ try {
   );
   // Hydrated chat is a separate evidence series; static selective recaptures
   // still require the complete product matrix.
-  const expectedScreenshots = (hydrateChat ? pages : allPages).flatMap((entry) =>
-    (hydrateChat ? [390] : [1280, 390]).flatMap((width) =>
+  const expectedPages = hydrateChat
+    ? pages
+    : staticLargeText
+      ? allPages.filter((entry) => !isConversationFixture(entry))
+      : allPages;
+  const expectedScreenshots = expectedPages.flatMap((entry) =>
+    captureWidths.flatMap((width) =>
       ['light', 'dark'].map((scheme) => `${entry.name}-${width}-${scheme}.png`),
     ),
   );
@@ -1048,7 +1593,12 @@ try {
           (total, entry) => total + Number(entry.simulatedCancellationFailures),
           0,
         ),
-        syntheticStatusReads: syntheticApiRequests.length,
+        syntheticStatusReads: syntheticApiRequests.filter(
+          (request) => request.path === '/api/chat/status',
+        ).length,
+        syntheticImageReads: syntheticApiRequests.filter(
+          (request) => request.path === '/api/card-image',
+        ).length,
         ownerReads: 0,
         providerCalls: 0,
         sendsOrVoiceExercised: false,
@@ -1103,7 +1653,12 @@ try {
         blockedRequests,
         syntheticApiRequests,
         currentCoverage,
-        coverageScope: hydrateChat ? selectedPages : 'all-product-states',
+        coverageScope: hydrateChat
+          ? selectedPages
+          : staticLargeText
+            ? 'non-conversation-product-states; use hydrated chat for enlarged conversation'
+            : 'all-product-states',
+        captureProfile: { widths: captureWidths, rootFontSize, longChat, cardChat },
         captureInventory,
         missingCurrentScreenshots,
         staleOrUnknownScreenshots: combined
@@ -1130,7 +1685,12 @@ try {
       {
         ...artifactManifest,
         currentCoverage,
-        coverageScope: hydrateChat ? selectedPages : 'all-product-states',
+        coverageScope: hydrateChat
+          ? selectedPages
+          : staticLargeText
+            ? 'non-conversation-product-states; use hydrated chat for enlarged conversation'
+            : 'all-product-states',
+        captureProfile: { widths: captureWidths, rootFontSize, longChat, cardChat },
         captureInventory,
         missingCurrentScreenshots,
         provenancePolicy:

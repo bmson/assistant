@@ -142,7 +142,7 @@ export function VoiceSamplesPanel({
                   accept=".mbox,.txt,.json,.md,text/plain,application/json"
                   className={fileInputClass}
                 />
-                <label className="flex items-center gap-1.5 text-xs text-muted">
+                <label className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5 text-xs text-muted">
                   Style
                   <select name="register" defaultValue="email_casual" className={selectClass}>
                     {registerOptions.map((opt) => (

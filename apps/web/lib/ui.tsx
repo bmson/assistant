@@ -129,7 +129,7 @@ export function Skeleton({ className = '' }: { className?: string }) {
 }
 
 export const inputClass =
-  'min-h-11 min-w-0 rounded-lg border border-edge bg-raised px-3 py-2 text-base text-strong outline-none placeholder:text-muted motion-safe:transition-shadow focus:border-accent focus:ring-2 focus:ring-accent/20 sm:text-sm';
+  'min-h-11 min-w-0 max-w-full rounded-lg border border-edge bg-raised px-3 py-2 text-base text-strong outline-none placeholder:text-muted motion-safe:transition-shadow focus:border-accent focus:ring-2 focus:ring-accent/20 sm:text-sm';
 
 /**
  * Native <select>, sharing inputClass's metrics and focus treatment. The UA's
@@ -171,7 +171,7 @@ export const fileInputClass =
  */
 export const cardShellClass =
   'min-w-0 overflow-hidden rounded-[var(--radius-card)] bg-raised ring-1 ring-edge/70';
-export const cardBodyClass = 'grid min-w-0 gap-4 p-4 sm:p-5';
+export const cardBodyClass = 'grid min-w-0 grid-cols-1 gap-4 p-4 sm:p-5';
 export const cardHeaderClass = 'grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3';
 /** Footer chrome (divider + tonal well + padding), shared by the button-row
  *  footer and disclosure-style footers that can't be a flex container. */
@@ -196,7 +196,7 @@ export const cardGridClass = 'grid min-w-0 items-stretch gap-4 lg:grid-cols-2';
  *  draws the rotating chevron and globals.css animates the panel itself, so
  *  every section built from this opens the same way. */
 export const summaryClass =
-  'disclosure flex min-h-11 cursor-pointer list-none items-center gap-2 text-sm font-medium';
+  'disclosure flex min-h-11 cursor-pointer list-none flex-wrap items-center gap-2 text-sm font-medium';
 
 /**
  * "Back to the parent surface" link above a detail page's title.
