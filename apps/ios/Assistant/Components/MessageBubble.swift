@@ -3201,7 +3201,7 @@ struct RichResponseCards: View {
                 subtitleStyle: .query
             )
             if messages.isEmpty {
-                Text("No matching messages.")
+                Text(complete ? "No matching messages." : "No messages returned in this incomplete search.")
                     .font(.subheadline)
                     .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
             } else {
