@@ -330,4 +330,21 @@ describe('real SDK pre-output stream recovery', () => {
     expect(f.model.doStreamCalls).toHaveLength(1);
     expect(f.onError).toHaveBeenCalledOnce();
   });
+  it.each(['outer', 'inner'])('honors a non-retryable %s provider error', async (position) => {
+    const denied = new StreamProviderError({
+      message: 'Do not retry this provider failure',
+      statusCode: 429,
+      isRetryable: false,
+      ...(position === 'outer' ? { cause: rejected() } : {}),
+    });
+    const error =
+      position === 'outer'
+        ? denied
+        : new StreamProviderError({ message: 'gateway', statusCode: 429, cause: denied });
+    const f = fixture([[{ type: 'error', error }], success]);
+    await drain(await f.router.stream('draft', { prompt: 'hello', ...f }));
+    expect(f.model.doStreamCalls).toHaveLength(1);
+    expect(f.recoverBeforeOutput).not.toHaveBeenCalled();
+    expect(f.onError).toHaveBeenCalledOnce();
+  });
 });

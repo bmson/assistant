@@ -152,10 +152,19 @@ export function isProviderAuthDenial(error: unknown): boolean {
 export function isProviderTransientError(error: unknown): boolean {
   const nodes = providerErrorNodes(error);
   if (isProviderAuthDenial(error)) return false;
+  // A transient wrapper or cause must not override a provider's explicit
+  // instruction that repeating the request cannot recover this failure.
+  if (
+    nodes.some(
+      ({ value }) =>
+        (isProviderApiError(value) || value.name === 'AI_StreamProviderError') &&
+        value.isRetryable === false,
+    )
+  )
+    return false;
   return nodes.some(({ value }) => {
     if (value.name === 'TimeoutError') return true;
     if (!isProviderApiError(value) && value.name !== 'AI_StreamProviderError') return false;
-    if (value.isRetryable === false) return false;
     const status = providerStatusCode(value.statusCode ?? value.status);
     return status === 429 || (status !== undefined && status >= 500 && status <= 599);
   });
