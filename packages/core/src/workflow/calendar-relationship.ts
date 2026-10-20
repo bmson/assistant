@@ -1,3 +1,4 @@
+import { probablePhoneCalendarDuplicate } from '@assistant/persistence';
 import type { BriefingCalendarEvent } from './briefing.js';
 
 export type CalendarRelationship = 'probable_duplicate' | 'compatible_time_roles' | 'unresolved';
@@ -94,7 +95,11 @@ export function calendarRelationship(
   )
     return 'unresolved';
   const name = title(left);
-  if (name !== title(right) || name.split(' ').length < 2) return 'unresolved';
+  const phoneMirror =
+    left.calendarId.startsWith('iphone:') || right.calendarId.startsWith('iphone:');
+  if (name !== title(right) || (name.split(' ').length < 2 && (!phoneMirror || name.length < 4)))
+    return 'unresolved';
+  if (probablePhoneCalendarDuplicate(left, right)) return 'probable_duplicate';
   const venue = venues(right);
   if (![...venues(left)].some((entry) => venue.has(entry))) return 'unresolved';
   const earlier = Date.parse(left.start) <= Date.parse(right.start) ? left : right;

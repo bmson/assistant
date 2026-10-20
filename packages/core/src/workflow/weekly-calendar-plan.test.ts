@@ -2621,3 +2621,47 @@ describe('exact-ID event-list recovery of missing free/busy', () => {
     },
   );
 });
+
+it('does not report a phone mirror as a conflict but retains a separate accepted overlap', () => {
+  const meeting = {
+    eventId: 'google-event',
+    calendarId: 'google-work',
+    summary: 'Team planning',
+    start: '2026-10-12T09:00:00-07:00',
+    end: '2026-10-12T10:00:00-07:00',
+    ownerResponse: 'accepted',
+    blocksTime: true,
+  };
+  const text = weeklyCalendarPlan({
+    timeMin,
+    timeMax,
+    timeZone: 'America/Los_Angeles',
+    evidence: evidence({
+      pages: [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          args: { timeMin, timeMax, maxResults: 50 },
+          result: {
+            events: [
+              meeting,
+              { ...meeting, calendarId: 'iphone:work', eventId: 'phone-copy' },
+              {
+                ...meeting,
+                calendarId: 'personal',
+                eventId: 'other-event',
+                summary: 'Dentist appointment',
+              },
+            ],
+            complete: true,
+            calendarRosterComplete: true,
+            unavailable: [],
+          },
+        },
+      ],
+    }) as never,
+  });
+  expect(text).toContain('Possible duplicate listing: Team planning and Team planning');
+  expect(text).not.toContain('Scheduling conflict: Team planning and Team planning');
+  expect(text).toContain('Scheduling conflict: Team planning and Dentist appointment');
+});

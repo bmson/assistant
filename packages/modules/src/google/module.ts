@@ -3,6 +3,7 @@ import type {
   ApplicationConfirmationRepository,
   ExecutionPersistence,
 } from '@assistant/persistence';
+import { readPhoneCalendars } from '@assistant/persistence';
 import {
   GoogleClient,
   registerApplicationTools,
@@ -296,6 +297,7 @@ export const googleModule = defineModule<GoogleClient>({
       client,
       botEmail: config.ASSISTANT_EMAIL,
       ownerEmail: config.OWNER_EMAIL,
+      phoneCalendars: (agentId) => readPhoneCalendars(persistence.toolExecution, agentId),
     });
     registerDocsTools(registry, {
       client,

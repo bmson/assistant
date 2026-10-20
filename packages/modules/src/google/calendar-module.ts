@@ -1,4 +1,5 @@
 import { isModuleEnabled } from '@assistant/config/modules';
+import { readPhoneCalendars } from '@assistant/persistence';
 import { GoogleClient, registerCalendarReadTools } from '@assistant/tools/modules/google';
 import { defineModule } from '../platform.js';
 import { calendarMeta } from './calendar-meta.js';
@@ -7,7 +8,7 @@ import { calendarMeta } from './calendar-meta.js';
 export const calendarModule = defineModule<GoogleClient>({
   meta: calendarMeta,
   absent: () => new GoogleClient({ clientId: '', clientSecret: '', refreshToken: '' }),
-  create: ({ config, registry }) => {
+  create: ({ config, registry, persistence }) => {
     const client = new GoogleClient({
       clientId: config.GOOGLE_OAUTH_CLIENT_ID,
       clientSecret: config.GOOGLE_OAUTH_CLIENT_SECRET,
@@ -25,6 +26,7 @@ export const calendarModule = defineModule<GoogleClient>({
         client,
         botEmail: config.ASSISTANT_EMAIL,
         ownerEmail: config.OWNER_EMAIL,
+        phoneCalendars: (agentId) => readPhoneCalendars(persistence.toolExecution, agentId),
       });
     }
     return { exports: client };

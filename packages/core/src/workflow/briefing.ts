@@ -1018,7 +1018,11 @@ export async function runBriefing(
     cancelledBookingProposals = cancelledBookingProposals.filter(
       (entry) => !inactiveRefs.has(entry.sourceRef),
     );
-    const conflicts = calendar ? findConflicts(calendar.events, agent.timezone) : [];
+    const overlaps = calendar ? findConflicts(calendar.events, agent.timezone) : [];
+    const duplicateListings = overlaps.filter(
+      (overlap) => overlap.relationship === 'probable_duplicate',
+    );
+    const conflicts = overlaps.filter((overlap) => overlap.relationship !== 'probable_duplicate');
     // Salience is judged against the owner's own addresses so an unanswered
     // invitation can be told from one they already accepted, and an in-house
     // organizer from an outside one.
@@ -1083,6 +1087,15 @@ export async function runBriefing(
         ...conflicts.map(
           (c) =>
             `- "${collapseWhitespace(c.a[0]?.summary ?? 'Untitled event')}" overlaps "${collapseWhitespace(c.b[0]?.summary ?? 'Untitled event')}" (${localDateTime(c.overlapStart, agent.timezone)} to ${localDateTime(c.overlapEnd, agent.timezone)})`,
+        ),
+      );
+    }
+    if (duplicateListings.length > 0) {
+      lines.push(
+        'Possible duplicate calendar listings (not scheduling conflicts; both sources retained):',
+        ...duplicateListings.map(
+          (entry) =>
+            `- "${collapseWhitespace(entry.a[0]?.summary ?? 'Untitled event')}" and "${collapseWhitespace(entry.b[0]?.summary ?? 'Untitled event')}" may be copies of one event.`,
         ),
       );
     }
