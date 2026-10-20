@@ -16,7 +16,7 @@
     "./gmail-search-identity": "./src/gmail-search-identity.ts"
   },
   "dependencies": {
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
