@@ -202,7 +202,8 @@ export function MergeEntity({
   const [sameKindOnly, setSameKindOnly] = useState(true);
   const [results, setResults] = useState<KnowledgeGraphEntityView[]>([]);
   const [target, setTarget] = useState<{ id: string; label: string; kind: string } | null>(null);
-  const [searching, startSearch] = useTransition();
+  const [, startSearch] = useTransition();
+  const [pendingSearchContext, setPendingSearchContext] = useState<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const retryButtonRef = useRef<HTMLButtonElement>(null);
   const retryFocusHandoff = useRef<HTMLButtonElement | null>(null);
@@ -214,6 +215,8 @@ export function MergeEntity({
   // A changed query/filter must not display feedback from an earlier lookup.
   const searchContext = JSON.stringify([query, sameKindOnly, entity.id, entity.kind]);
   const searchError = searchFeedback?.context === searchContext ? searchFeedback.message : null;
+  // A canceled older transition may remain unresolved after the current lookup settles.
+  const searching = pendingSearchContext === searchContext;
   // Return focus only after results replace Retry, and only if the user stayed there.
   useEffect(() => {
     if (searchFeedback) return;
@@ -231,6 +234,7 @@ export function MergeEntity({
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: searchAttempt explicitly retries the same lookup without changing its inputs.
   useEffect(() => {
+    setPendingSearchContext(null);
     const trimmed = query.trim();
     if (trimmed.length < 2) {
       setResults([]);
@@ -239,6 +243,8 @@ export function MergeEntity({
     }
     const token = ++requestRef.current;
     const timer = setTimeout(() => {
+      if (requestRef.current !== token) return;
+      setPendingSearchContext(searchContext);
       startSearch(async () => {
         try {
           const rows = await searchKnowledgeEntities(
@@ -261,6 +267,8 @@ export function MergeEntity({
               message: 'Couldn’t search items. Try again.',
             });
           }
+        } finally {
+          if (requestRef.current === token) setPendingSearchContext(null);
         }
       });
     }, 200);
