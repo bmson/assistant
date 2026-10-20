@@ -2801,20 +2801,27 @@ struct RichResponseCards: View {
         let windows = dayRows.isEmpty ? split.days : WeatherPresentation.windowGroups(split.days)
         let hasForecast = !split.days.isEmpty || !dayRows.isEmpty
         let metrics = dayRows.isEmpty ? [] : WeatherPresentation.metrics(forecast.current, fallback: split.current)
+        let locationLabel = Text(AssistantMarkdown.inlineAttributed(location))
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+        let periodLabel = Text(WeatherPresentation.caption(details: details, hasForecast: hasForecast))
+            .font(.caption.weight(.medium))
+            .monospacedDigit()
+            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
 
         return VStack(alignment: .leading, spacing: 15) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text(AssistantMarkdown.inlineAttributed(location))
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.82)
-                Spacer(minLength: 8)
-                Text(WeatherPresentation.caption(details: details, hasForecast: hasForecast))
-                    .font(.caption.weight(.medium))
-                    .monospacedDigit()
-                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                    .lineLimit(1)
+            // Keep the place and forecast period together when they fit;
+            // stack them before either essential label must be truncated.
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    locationLabel.fixedSize()
+                    Spacer(minLength: 8)
+                    periodLabel.fixedSize()
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    locationLabel.fixedSize(horizontal: false, vertical: true)
+                    periodLabel.fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             weatherHeadline(reading: reading, condition: condition, symbol: symbol)
