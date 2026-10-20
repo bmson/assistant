@@ -1062,7 +1062,7 @@ struct ActivityItem: Codable, Identifiable, Sendable {
         // progress message. Hiding them here keeps Activity readable while
         // preserving the raw value in the task record for diagnostics.
         let lower = humanized.lowercased()
-        if lower.range(of: #"\bai_(?:apicallerror|retryerror)\b|^attempt\s+\d+\s+failed:"#, options: .regularExpression) != nil {
+        if lower.range(of: #"\bai_(?:apicallerror|retryerror|streamprovidererror)\b|^attempt\s+\d+\s+failed:"#, options: .regularExpression) != nil {
             return "A service request failed."
         }
         if lower.hasPrefix("pulse:") || lower.hasPrefix("document processor:") ||
