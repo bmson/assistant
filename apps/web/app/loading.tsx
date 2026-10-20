@@ -3,7 +3,7 @@ import { PageShell, Skeleton } from '@/lib/ui';
 /** Route-level loading fallback — a light skeleton while the RSC query resolves. */
 export default function Loading() {
   return (
-    <PageShell size="reading" className="grid min-w-0">
+    <PageShell size="reading" className="grid min-w-0 grid-cols-1">
       <p role="status" className="sr-only">
         Loading page…
       </p>

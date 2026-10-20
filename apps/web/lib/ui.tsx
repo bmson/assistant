@@ -123,7 +123,7 @@ export const countBadgeClass =
 export function Skeleton({ className = '' }: { className?: string }) {
   return (
     <div
-      className={`relative overflow-hidden rounded-md bg-zinc-200/70 after:absolute after:inset-0 after:-translate-x-full after:bg-gradient-to-r after:from-transparent after:via-white/50 after:to-transparent motion-safe:after:animate-[skeleton-sheen_1.5s_ease-in-out_infinite] dark:bg-zinc-800/70 dark:after:via-white/10 ${className}`}
+      className={`relative min-w-0 max-w-full overflow-hidden rounded-md bg-zinc-200/70 after:absolute after:inset-0 after:-translate-x-full after:bg-gradient-to-r after:from-transparent after:via-white/50 after:to-transparent motion-safe:after:animate-[skeleton-sheen_1.5s_ease-in-out_infinite] dark:bg-zinc-800/70 dark:after:via-white/10 ${className}`}
     />
   );
 }
