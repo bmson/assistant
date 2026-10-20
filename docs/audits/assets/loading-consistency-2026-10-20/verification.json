@@ -3837,7 +3837,11 @@
             "overflow": false
           }
         ],
-        "avatar": null
+        "avatar": {
+          "width": 56,
+          "height": 56,
+          "borderRadius": "3.35544e+07px"
+        }
       },
       {
         "name": "memory",
@@ -4281,7 +4285,11 @@
             "overflow": false
           }
         ],
-        "avatar": null
+        "avatar": {
+          "width": 56,
+          "height": 56,
+          "borderRadius": "3.35544e+07px"
+        }
       },
       {
         "name": "memory",
@@ -4725,7 +4733,11 @@
             "overflow": false
           }
         ],
-        "avatar": null
+        "avatar": {
+          "width": 112,
+          "height": 112,
+          "borderRadius": "3.35544e+07px"
+        }
       },
       {
         "name": "memory",
@@ -5169,7 +5181,11 @@
             "overflow": false
           }
         ],
-        "avatar": null
+        "avatar": {
+          "width": 112,
+          "height": 112,
+          "borderRadius": "3.35544e+07px"
+        }
       },
       {
         "name": "memory",
@@ -5613,7 +5629,11 @@
             "overflow": false
           }
         ],
-        "avatar": null
+        "avatar": {
+          "width": 56,
+          "height": 56,
+          "borderRadius": "3.35544e+07px"
+        }
       },
       {
         "name": "memory",
@@ -6057,7 +6077,11 @@
             "overflow": false
           }
         ],
-        "avatar": null
+        "avatar": {
+          "width": 56,
+          "height": 56,
+          "borderRadius": "3.35544e+07px"
+        }
       },
       {
         "name": "memory",
@@ -6501,7 +6525,11 @@
             "overflow": false
           }
         ],
-        "avatar": null
+        "avatar": {
+          "width": 112,
+          "height": 112,
+          "borderRadius": "3.35544e+07px"
+        }
       },
       {
         "name": "memory",
@@ -6945,7 +6973,11 @@
             "overflow": false
           }
         ],
-        "avatar": null
+        "avatar": {
+          "width": 112,
+          "height": 112,
+          "borderRadius": "3.35544e+07px"
+        }
       },
       {
         "name": "memory",
@@ -7155,8 +7187,31 @@
     "allSkeletonHeightsPreserved": true,
     "allWideSkeletonDimensionsPreserved": true,
     "loadedAvatarDimensionsPreserved": true,
-    "afterAvatarCircularDimensionsAndRadius": true
+    "afterAvatarCircularDimensionsAndRadius": true,
+    "requiredPersonAvatarMeasurements": 8,
+    "requiredLoadedAvatarMeasurements": 8
   },
-  "captureHarnessSha256": "4e06d2935fc45a810e14294246bf04181a2ffd3ec958f55626edc2205545b1a0",
-  "qualification": "Actual source components rendered in the root main geometry, not an authenticated route or loading transition. Full original PNGs and harness retained in this checkout .workspace/loading-review. Intermediate captures are excluded."
+  "qualification": "Actual source components rendered in the root main geometry, not an authenticated route or loading transition. Full original PNGs and harness retained in this checkout .workspace/loading-review. Intermediate captures are excluded.",
+  "afterCaptureHarnessSha256": "e90e1f4236397874b0749f99bd68bc957868fa1418a0962097eb77e45779a3c2",
+  "evidenceRepair": {
+    "productionSourceCommit": "c1e6aaeaab243189716389f95e4c8157361bfdd9",
+    "applicationSourcesUnchanged": true,
+    "reason": "Initial after selector missed rounded-full! and returned null for loading avatars. New selector matches both exact class tokens and requires non-null avatar measurements for both person fixtures. All48 after states recaptured; source hashes identical.",
+    "afterDirectory": ".workspace/loading-review/after-required-avatar"
+  },
+  "independentQA": {
+    "productionSourceCommit": "c1e6aaeaab243189716389f95e4c8157361bfdd9",
+    "sampleCount": 18,
+    "result": "pass",
+    "checks": [
+      "Individual block bounds within main gutters",
+      "Skeleton height parity",
+      "Sampled1280 width and height parity",
+      "Loaded avatar56/112 size preservation",
+      "Actual loading avatar56x56/112x112 and circular computed radius"
+    ],
+    "evidence": "/tmp/assistant-independent-loading/independent-measurements.json",
+    "durableEvidence": "~/.codex/qa-monitors/assistant-main/preserved/loading-c1e6aaea",
+    "limits": "Independent18 component/root-main samples, not full48owner matrix, authenticated transitions, native or production."
+  }
 }
