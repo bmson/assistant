@@ -65,6 +65,21 @@ describe('ModelRouter streaming finalization', () => {
     stubs.streamText.mockReturnValue(fakeStreamResult());
   });
 
+  it('does not allocate an unused SDK tee when recovery is not enabled', async () => {
+    const { router } = makeRouter();
+    const fullStream = vi.fn(() => {
+      throw new Error('unused projection');
+    });
+    stubs.streamText.mockReturnValue({
+      ...fakeStreamResult(),
+      get fullStream() {
+        return fullStream();
+      },
+    });
+    await router.stream('draft', { prompt: 'hello' });
+    expect(fullStream).not.toHaveBeenCalled();
+  });
+
   it('releases the reservation and reports asynchronous stream errors', async () => {
     const { router } = makeRouter();
     const onError = vi.fn(async () => {});
