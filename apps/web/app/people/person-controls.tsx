@@ -1,7 +1,7 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
-import { useId, useState, useTransition } from 'react';
+import { unstable_rethrow, useRouter } from 'next/navigation';
+import { useId, useRef, useState, useTransition } from 'react';
 import {
   deleteContactAction,
   updateContactIdentityAction,
@@ -34,6 +34,7 @@ export function PersonControls({
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
   const fieldId = useId();
+  const saving = useRef(false);
 
   // The server action revalidates this page, so the initial* props catch up
   // after a save and the button settles back to disabled on its own.
@@ -47,27 +48,40 @@ export function PersonControls({
   };
 
   const save = () => {
-    if (pending || !dirty) return;
+    // Block a second activation before React renders the pending state.
+    if (saving.current || pending || !dirty) return;
+    saving.current = true;
     setError(null);
     setSaved(false);
     startTransition(async () => {
-      const result = await updateContactIdentityAction(contactId, name, aliases);
-      if (result.error) {
-        setError(result.error);
-        return;
-      }
-      if (relationship !== initialRelationship) {
-        // This one reports failure by throwing rather than returning an error,
-        // so an unguarded await escaped the transition: the owner saw neither a
-        // confirmation nor a message, even though the name had already saved.
+      try {
+        let result: Awaited<ReturnType<typeof updateContactIdentityAction>>;
         try {
-          await updateContactRelationship(contactId, relationship);
-        } catch {
-          setError('The name was saved, but the relationship could not be. Try again.');
+          result = await updateContactIdentityAction(contactId, name, aliases);
+        } catch (cause) {
+          unstable_rethrow(cause);
+          setError('Couldn’t confirm the save. Your edits are still here. Try again.');
           return;
         }
+        if (result.error) {
+          setError(result.error);
+          return;
+        }
+        if (relationship !== initialRelationship) {
+          // This one reports failure by throwing rather than returning an error,
+          // so an unguarded await escaped the transition: the owner saw neither a
+          // confirmation nor a message, even though the name had already saved.
+          try {
+            await updateContactRelationship(contactId, relationship);
+          } catch {
+            setError('The name was saved, but the relationship could not be. Try again.');
+            return;
+          }
+        }
+        setSaved(true);
+      } finally {
+        saving.current = false;
       }
-      setSaved(true);
     });
   };
 
