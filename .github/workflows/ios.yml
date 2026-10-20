@@ -1,5 +1,5 @@
 # Temporary diagnostic branch only; no app or test source changes.
-name: iOS stream follow observed comparison
+name: iOS stream readiness controlled validation
 
 permissions:
   contents: read
@@ -68,8 +68,8 @@ jobs:
         include:
           - label: production-base
             source: c790625c3f7f66da9dcf40b98d798c045f38735f
-          - label: email-candidate
-            source: ca15fe81ab955d9fc90dae638aa2e596c4bd5f71
+          - label: readiness-candidate
+            source: ec8cf610478cc5baec4fac7fb0cd4a7c6ffd9713
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -82,7 +82,7 @@ jobs:
           git status --porcelain
           shasum -a 256 apps/ios/AssistantTests/APIClientRetryTests.swift
 
-      - name: Observe original host and delta snapshots without changing outcomes
+      - name: Apply controlled delayed and missing state fixtures
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -92,60 +92,73 @@ jobs:
 
           path = Path('apps/ios/AssistantTests/APIClientRetryTests.swift')
           original = path.read_text()
-          start = original.index('    func testChatFollowsNewMessagesAndGrowingStreamWhileAtBottom()')
-          end = original.index('    func testCardFormUnknownResponseReplaysTheExactFrozenBody()', start)
+          function = original.index('    func testChatFollowsNewMessagesAndGrowingStreamWhileAtBottom()')
+          start = original.rfind('    @MainActor', 0, function)
+          assert original[start:function].strip() == '@MainActor'
+          end = original.index('    func testCardFormUnknownResponseReplaysTheExactFrozenBody()', function)
           section = original[start:end]
-          old_host = '''        try await Task.sleep(for: .milliseconds(400))
-                  func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
-                  let scroll = try XCTUnwrap(descendants(window).compactMap { $0 as? UIScrollView }
-                      .first { !($0 is UITextView) })'''
-          new_host = r'''        let diagnosticHostStart = ContinuousClock.now
-                  try await Task.sleep(for: .milliseconds(400))
-                  func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
-                  let diagnosticInitialScroll = descendants(window).compactMap { $0 as? UIScrollView }
-                      .first { !($0 is UITextView) }
-                  print("STREAM_OBSERVE host initial elapsed=\(diagnosticHostStart.duration(to: ContinuousClock.now)) scroll=\(diagnosticInitialScroll != nil) views=\(descendants(window).count) key=\(window.isKeyWindow) hidden=\(window.isHidden) scene=\(scene.activationState.rawValue) bounds=\(window.bounds)")
-                  if diagnosticInitialScroll == nil {
-                      let observationDeadline = ContinuousClock.now.advanced(by: .seconds(3))
-                      var eventualScroll: UIScrollView?
-                      repeat {
-                          try await Task.sleep(for: .milliseconds(50))
-                          eventualScroll = descendants(window).compactMap { $0 as? UIScrollView }
-                              .first { !($0 is UITextView) }
-                      } while eventualScroll == nil && ContinuousClock.now < observationDeadline
-                      print("STREAM_OBSERVE host eventual elapsed=\(diagnosticHostStart.duration(to: ContinuousClock.now)) scroll=\(eventualScroll != nil) views=\(descendants(window).count)")
-                  }
-                  // Retain the original observation: a late view still fails this diagnostic.
-                  let scroll = try XCTUnwrap(diagnosticInitialScroll)'''
-          old_delta = '''            StubURLProtocol.appendStream(try chunk(delta))
-                      try await Task.sleep(for: .milliseconds(150))
-                      XCTAssertEqual(model.messages.last?.text, previousText + delta)'''
-          new_delta = r'''            let diagnosticDeltaStart = ContinuousClock.now
-                      StubURLProtocol.appendStream(try chunk(delta))
-                      try await Task.sleep(for: .milliseconds(150))
-                      let diagnosticInitialText = model.messages.last?.text
-                      let diagnosticExpectedText = previousText + delta
-                      print("STREAM_OBSERVE delta=\(index) initial elapsed=\(diagnosticDeltaStart.duration(to: ContinuousClock.now)) match=\(diagnosticInitialText == diagnosticExpectedText) actualCount=\(diagnosticInitialText?.count ?? -1) expectedCount=\(diagnosticExpectedText.count) sending=\(model.isSending)")
-                      if diagnosticInitialText != diagnosticExpectedText {
-                          let observationDeadline = ContinuousClock.now.advanced(by: .seconds(3))
-                          repeat {
-                              try await Task.sleep(for: .milliseconds(50))
-                          } while model.messages.last?.text != diagnosticExpectedText && ContinuousClock.now < observationDeadline
-                          print("STREAM_OBSERVE delta=\(index) eventual elapsed=\(diagnosticDeltaStart.duration(to: ContinuousClock.now)) match=\(model.messages.last?.text == diagnosticExpectedText) actualCount=\(model.messages.last?.text.count ?? -1) expectedCount=\(diagnosticExpectedText.count) sending=\(model.isSending)")
+          variants = []
+          for mode, name in [('mount', 'testControlledDelayedMount'), ('missing-mount', 'testControlledMissingMount'), ('delta', 'testControlledDelayedDelta'), ('missing', 'testControlledMissingDelta')]:
+              test = section.replace('testChatFollowsNewMessagesAndGrowingStreamWhileAtBottom', name)
+              if mode in ('mount', 'missing-mount'):
+                  test = test.replace('window.rootViewController = UIHostingController(rootView:', 'let diagnosticRoot = UIHostingController(rootView:', 1)
+                  test = test.replace('        window.makeKeyAndVisible()', '''        window.rootViewController = UIViewController()
+                  var diagnosticMountTask: Task<Void, Never>?
+                  window.makeKeyAndVisible()''', 1)
+                  test = test.replace('            model.cancelSend()', '            diagnosticMountTask?.cancel()\n            model.cancelSend()', 1)
+                  old = '        func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }'
+                  new = r'''        func descendants(_ view: UIView) -> [UIView] {
+                      if view === window, diagnosticMountTask == nil {
+                          print("STREAM_CONTROL mount first-inspection gated")
+                          diagnosticMountTask = Task {
+                              try? await Task.sleep(for: .milliseconds(650))
+                              guard !Task.isCancelled else { return }
+                              window.rootViewController = diagnosticRoot
+                              print("STREAM_CONTROL mount released after650ms")
+                          }
                       }
-                      // Assert the original 150ms snapshot, even if later observation succeeds.
-                      XCTAssertEqual(diagnosticInitialText, diagnosticExpectedText)'''
-          assert section.count(old_host) == 1
-          assert section.count(old_delta) == 1
-          section = section.replace(old_host, new_host).replace(old_delta, new_delta)
-          modified = original[:start] + section + original[end:]
-          output = Path(os.environ.get('RUNNER_TEMP', '/tmp')) / 'stream-diagnostics'
+                      return [view] + view.subviews.flatMap(descendants)
+                  }'''
+                  assert test.count(old) == 1
+                  if mode == 'missing-mount':
+                      new = '''        func descendants(_ view: UIView) -> [UIView] {
+                      return [view] + view.subviews.flatMap(descendants)
+                  }'''
+                  test = test.replace(old, new)
+              else:
+                  test = test.replace('        window.makeKeyAndVisible()', '        var diagnosticDeliveryTask: Task<Void, Never>?\n        window.makeKeyAndVisible()', 1)
+                  test = test.replace('            model.cancelSend()', '            diagnosticDeliveryTask?.cancel()\n            model.cancelSend()', 1)
+                  old = '            StubURLProtocol.appendStream(try chunk(delta))'
+                  if mode == 'delta':
+                      new = r'''            let diagnosticBytes = try chunk(delta)
+                      if index == 3 {
+                          print("STREAM_CONTROL delta3 scheduled650ms")
+                          diagnosticDeliveryTask = Task {
+                              try? await Task.sleep(for: .milliseconds(650))
+                              guard !Task.isCancelled else { return }
+                              StubURLProtocol.appendStream(diagnosticBytes)
+                              print("STREAM_CONTROL delta3 released after650ms")
+                          }
+                      } else {
+                          StubURLProtocol.appendStream(diagnosticBytes)
+                      }'''
+                  else:
+                      new = r'''            if index == 3 {
+                          print("STREAM_CONTROL delta3 deliberately withheld")
+                      } else {
+                          StubURLProtocol.appendStream(try chunk(delta))
+                      }'''
+                  assert test.count(old) == 1
+                  test = test.replace(old, new)
+              variants.append(test)
+          modified = original[:start] + '\n'.join(variants) + original[end:]
+          output = Path(os.environ.get('RUNNER_TEMP', '/tmp')) / 'stream-controls'
           output.mkdir(parents=True, exist_ok=True)
           (output / 'APIClientRetryTests.original.swift').write_text(original)
-          (output / 'APIClientRetryTests.observed.swift').write_text(modified)
-          (output / 'observation.diff').write_text(''.join(difflib.unified_diff(original.splitlines(True), modified.splitlines(True), fromfile='original', tofile='observed')))
-          print('STREAM_SOURCE original=' + hashlib.sha256(original.encode()).hexdigest())
-          print('STREAM_SOURCE observed=' + hashlib.sha256(modified.encode()).hexdigest())
+          (output / 'APIClientRetryTests.controlled.swift').write_text(modified)
+          (output / 'controls.diff').write_text(''.join(difflib.unified_diff(original.splitlines(True), modified.splitlines(True), fromfile='original', tofile='controlled')))
+          print('STREAM_CONTROL_SOURCE original=' + hashlib.sha256(original.encode()).hexdigest())
+          print('STREAM_CONTROL_SOURCE controlled=' + hashlib.sha256(modified.encode()).hexdigest())
           path.write_text(modified)
           PY
 
@@ -199,6 +212,7 @@ jobs:
       - name: Build and test
         env:
           DESTINATION_UDID: ${{ steps.simulator.outputs.udid }}
+          CONTROL_SOURCE_LABEL: ${{ matrix.label }}
         run: |
           set -o pipefail
           xcodebuild \
@@ -217,28 +231,42 @@ jobs:
           xcrun simctl install "$DESTINATION_UDID" \
             "${RUNNER_TEMP}/Assistant-build/Build/Products/Debug-iphonesimulator/Assistant.app"
           xcrun simctl privacy "$DESTINATION_UDID" grant calendar com.baldvinsmarason.assistant
-          mkdir -p "${RUNNER_TEMP}/stream-results"
-          overall=0
-          for attempt in 1 2 3; do
-            set +e
-            xcodebuild \
-              -project apps/ios/Assistant.xcodeproj \
-              -scheme Assistant \
-              -destination "id=${DESTINATION_UDID}" \
-              -derivedDataPath "${RUNNER_TEMP}/Assistant-build" \
-              -resultBundlePath "${RUNNER_TEMP}/stream-results/attempt-${attempt}.xcresult" \
-              -parallel-testing-enabled NO \
-              CODE_SIGNING_ALLOWED=NO \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGN_IDENTITY="" \
-              -only-testing:AssistantTests/APIClientRetryTests/testChatFollowsNewMessagesAndGrowingStreamWhileAtBottom \
-              test-without-building 2>&1 | tee -a "${RUNNER_TEMP}/xcodebuild.log"
-            result=${PIPESTATUS[0]}
-            set -e
-            echo "attempt=${attempt} exit=${result}" | tee -a "${RUNNER_TEMP}/stream-results/attempt-status.txt"
-            if [ "$result" -ne 0 ]; then overall=1; fi
-          done
-          exit "$overall"
+          mkdir -p "${RUNNER_TEMP}/stream-controls"
+          set +e
+          xcodebuild \
+            -project apps/ios/Assistant.xcodeproj \
+            -scheme Assistant \
+            -destination "id=${DESTINATION_UDID}" \
+            -derivedDataPath "${RUNNER_TEMP}/Assistant-build" \
+            -resultBundlePath "${RUNNER_TEMP}/stream-controls/Controlled.xcresult" \
+            -parallel-testing-enabled NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            -only-testing:AssistantTests/APIClientRetryTests/testControlledDelayedMount \
+            -only-testing:AssistantTests/APIClientRetryTests/testControlledMissingMount \
+            -only-testing:AssistantTests/APIClientRetryTests/testControlledDelayedDelta \
+            -only-testing:AssistantTests/APIClientRetryTests/testControlledMissingDelta \
+            test-without-building 2>&1 | tee -a "${RUNNER_TEMP}/xcodebuild.log"
+          result=${PIPESTATUS[0]}
+          set -e
+          echo "Controlled XCTest exit=${result}; expected failure assertions are validated below"
+          xcrun xcresulttool get test-results summary --path "${RUNNER_TEMP}/stream-controls/Controlled.xcresult" > "${RUNNER_TEMP}/stream-controls/summary.json"
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,os
+          p=Path(os.environ['RUNNER_TEMP'])/'stream-controls/summary.json'
+          s=json.loads(p.read_text())
+          expected={'testControlledMissingMount()','testControlledMissingDelta()'}
+          if os.environ['CONTROL_SOURCE_LABEL']=='production-base':
+              expected|={'testControlledDelayedMount()','testControlledDelayedDelta()'}
+          actual={x['testName'] for x in s.get('testFailures',[])}
+          assert actual==expected,(actual,expected)
+          assert s['failedTests']==len(expected) and s['passedTests']==4-len(expected) and s['skippedTests']==0
+          for f in s['testFailures']:
+              assert ('XCTUnwrap failed' if 'Mount' in f['testName'] else 'XCTAssertEqual failed') in f['failureText']
+          print('CONTROL_VERDICT expected assertion failures retained:',sorted(actual),'passed:',s['passedTests'])
+          PY
 
       # xcodebuild interleaves its diagnostics with thousands of lines of
       # compile commands, and the errors land wherever the parallel jobs
@@ -261,9 +289,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
         with:
-          name: stream-observe-${{ matrix.label }}-${{ matrix.source }}
+          name: stream-controls-${{ matrix.label }}-${{ matrix.source }}
           path: |
-            ${{ runner.temp }}/stream-diagnostics
-            ${{ runner.temp }}/stream-results
+            ${{ runner.temp }}/stream-controls
             ${{ runner.temp }}/xcodebuild.log
           retention-days: 14
