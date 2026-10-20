@@ -56,3 +56,47 @@ describe('calendar occurrence identity', () => {
     ).toBe(false);
   });
 });
+
+it('separates probable phone copies from distinct overlaps and recurring instances', async () => {
+  const { probablePhoneCalendarDuplicate } = await import('./calendar-occurrence.js');
+  const event = {
+    calendarId: 'google',
+    summary: 'Team Planning',
+    start: '2026-10-19T09:00:00Z',
+    end: '2026-10-19T10:00:00Z',
+  };
+  expect(
+    probablePhoneCalendarDuplicate(event, {
+      ...event,
+      calendarId: 'iphone:work',
+      summary: 'Team planning',
+      iCalUID: 'different-provider-id',
+    }),
+  ).toBe(true);
+  expect(
+    probablePhoneCalendarDuplicate(event, {
+      ...event,
+      calendarId: 'iphone:work',
+      summary: 'Different appointment',
+    }),
+  ).toBe(false);
+  expect(
+    probablePhoneCalendarDuplicate(event, {
+      ...event,
+      calendarId: 'iphone:work',
+      start: '2026-10-19T09:30:00Z',
+    }),
+  ).toBe(false);
+  expect(
+    probablePhoneCalendarDuplicate(
+      { ...event, location: 'Office A' },
+      { ...event, calendarId: 'iphone:work', location: 'Office B' },
+    ),
+  ).toBe(false);
+  expect(
+    probablePhoneCalendarDuplicate(
+      { ...event, originalStartTime: '2026-10-18T09:00:00Z' },
+      { ...event, calendarId: 'iphone:work', originalStartTime: event.start },
+    ),
+  ).toBe(false);
+});

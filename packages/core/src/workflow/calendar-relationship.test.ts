@@ -106,3 +106,31 @@ describe('advisory calendar relationships', () => {
     );
   });
 });
+
+it('recognizes an exact iPhone mirror without a venue while retaining distinct overlaps', () => {
+  const event = {
+    summary: 'Dentist',
+    start: '2026-10-19T09:00:00Z',
+    end: '2026-10-19T10:00:00Z',
+    calendar: 'Google',
+    allDay: false,
+    calendarId: 'google',
+  };
+  expect(calendarRelationship(event, { ...event, calendarId: 'iphone:work' })).toBe(
+    'probable_duplicate',
+  );
+  expect(
+    calendarRelationship(event, {
+      ...event,
+      calendarId: 'iphone:work',
+      summary: 'Project meeting',
+    }),
+  ).toBe('unresolved');
+  expect(
+    calendarRelationship(event, {
+      ...event,
+      calendarId: 'iphone:work',
+      start: '2026-10-19T09:15:00Z',
+    }),
+  ).toBe('unresolved');
+});

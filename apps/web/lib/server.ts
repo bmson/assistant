@@ -273,6 +273,26 @@ export function getBillingOverview(options: { refreshBudgetMs?: number } = {}) {
   });
 }
 
+/** Authenticated device snapshots share the agent's portable expiring read store. */
+export async function getPhoneCalendarPorts() {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    const problems = validateAgentPersistenceConfig(config);
+    if (problems.length) throw new Error(problems.join('; '));
+    const store = getFirestoreInstallationStore();
+    const owner = await createFirestoreSettingsPersistence(
+      store,
+      config.FIRESTORE_AGENT_ID,
+    ).settings.getOwner();
+    if (!owner) throw new Error('Configured calendar owner is missing');
+    return { agentId: owner.id, cache: new FirestoreToolExecutionRepository(store) };
+  }
+  return {
+    agentId: (await getAgent(getDb())).id,
+    cache: createPostgresToolExecutionRepository(getDb()),
+  };
+}
+
 /** Phone calls for the owner, on whichever driver this installation runs. */
 export async function getCallsPorts(): Promise<CallsPorts> {
   const config = loadConfig();

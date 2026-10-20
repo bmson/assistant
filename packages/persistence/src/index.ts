@@ -13,7 +13,11 @@ export * from './audit-investigation.js';
 export * from './briefing.js';
 export * from './budget-caps.js';
 export * from './builtin-tools.js';
-export { type CalendarOccurrenceIdentity, sameCalendarOccurrence } from './calendar-occurrence.js';
+export {
+  type CalendarOccurrenceIdentity,
+  probablePhoneCalendarDuplicate,
+  sameCalendarOccurrence,
+} from './calendar-occurrence.js';
 export * from './call-sessions.js';
 export * from './card-form.js';
 export * from './card-form-admission.js';
@@ -95,6 +99,7 @@ export * from './nudge-policy.js';
 export * from './owner-card-compilation.js';
 export * from './owner-context.js';
 export * from './owner-knowledge-graph-fact.js';
+export * from './phone-calendars.js';
 export * from './privacy-erasure.js';
 export * from './privacy-export.js';
 export * from './proactive-health.js';
