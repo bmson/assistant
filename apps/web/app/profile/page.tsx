@@ -408,12 +408,12 @@ function HubTile({
   return (
     <Link
       href={href}
-      className={`${cardShellClass} ${cardInteractiveClass} group flex min-w-0 items-start gap-3 p-4`}
+      className={`${cardShellClass} ${cardInteractiveClass} @container/hub group grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-3 p-4`}
     >
       <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-xl bg-sunken text-muted">
         <Icon className="size-4" aria-hidden="true" />
       </span>
-      <span className="min-w-0 flex-1">
+      <span className="min-w-0 [overflow-wrap:anywhere] @max-[12rem]/hub:col-span-3 @max-[12rem]/hub:col-start-1 @max-[12rem]/hub:row-start-2">
         <span className="flex min-w-0 flex-wrap items-baseline gap-x-2">
           <span className="text-sm font-semibold text-strong">{title}</span>
           {detail ? <span className="text-xs text-muted">{detail}</span> : null}
@@ -421,7 +421,7 @@ function HubTile({
         <span className="mt-1 block text-xs leading-5 text-muted">{hint}</span>
       </span>
       <ArrowRight
-        className="mt-1 size-3.5 shrink-0 text-muted motion-safe:transition-transform group-hover:translate-x-0.5"
+        className="mt-1 size-3.5 shrink-0 text-muted motion-safe:transition-transform group-hover:translate-x-0.5 @max-[12rem]/hub:col-start-3 @max-[12rem]/hub:row-start-1"
         aria-hidden="true"
       />
     </Link>
