@@ -4,9 +4,9 @@
 # Build the workspace dependency graph, then deploy only this worker's production
 # dependencies. The root development install (TypeScript, test tools, old esbuild)
 # is confined to this stage and is not copied into the image.
-FROM mirror.gcr.io/library/node:22-slim AS build
+FROM mirror.gcr.io/library/node:26-slim AS build
 WORKDIR /workspace
-RUN corepack enable
+RUN npm install --global corepack@0.36.0 && corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY workers/browser-job ./workers/browser-job
 # Legacy deploy resolves root workspace links even for a filtered worker.
@@ -16,7 +16,7 @@ RUN pnpm install --frozen-lockfile --filter @assistant/browser-job... \
   && pnpm --filter @assistant/browser-job deploy --prod --legacy /runtime
 
 # Chromium and its matched Playwright package are installed in the final image.
-FROM mirror.gcr.io/library/node:22-slim
+FROM mirror.gcr.io/library/node:26-slim
 WORKDIR /app
 RUN apt-get update \
   && apt-get upgrade -y --no-install-recommends \

@@ -44,9 +44,9 @@ assert "postgres://assistant:assistant@localhost:5432/assistant" in build
 
 base = job_block("base-images")
 assert "timeout-minutes: 5" in base
-assert "mirror.gcr.io/library/node:22-slim" in base
+assert "mirror.gcr.io/library/node:26-slim" in base
 assert "docker pull \"$image\"" in base
-assert "process.versions.node" in base and '22.*' in base
+assert "process.versions.node" in base and '26.*' in base
 assert "postgres:17" not in base, "the unrelated PostgreSQL image is not part of this release path"
 
 for expected in (

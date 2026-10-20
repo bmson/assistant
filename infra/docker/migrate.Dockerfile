@@ -1,9 +1,9 @@
-FROM mirror.gcr.io/library/node:22-slim
+FROM mirror.gcr.io/library/node:26-slim
 ENV NODE_ENV=development
 ENV ASSISTANT_REPO_ROOT=/app
 ENV COREPACK_HOME=/opt/corepack
 WORKDIR /app
-RUN corepack enable \
+RUN npm install --global corepack@0.36.0 && corepack enable \
   && apt-get update \
   && apt-get install -y --no-install-recommends --only-upgrade libpcre2-8-0 \
   && rm -rf /var/lib/apt/lists/*
