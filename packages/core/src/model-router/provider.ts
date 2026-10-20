@@ -137,7 +137,7 @@ export function isProviderApiError(value: Record<string, unknown>): boolean {
 
 export function isProviderAuthDenial(error: unknown): boolean {
   return providerErrorNodes(error).some(({ value }) => {
-    if (!isProviderApiError(value)) return false;
+    if (!isProviderApiError(value) && value.name !== 'AI_StreamProviderError') return false;
     const status = providerStatusCode(value.statusCode ?? value.status);
     const message = typeof value.message === 'string' ? value.message : '';
     return (
@@ -154,7 +154,8 @@ export function isProviderTransientError(error: unknown): boolean {
   if (isProviderAuthDenial(error)) return false;
   return nodes.some(({ value }) => {
     if (value.name === 'TimeoutError') return true;
-    if (!isProviderApiError(value)) return false;
+    if (!isProviderApiError(value) && value.name !== 'AI_StreamProviderError') return false;
+    if (value.isRetryable === false) return false;
     const status = providerStatusCode(value.statusCode ?? value.status);
     return status === 429 || (status !== undefined && status >= 500 && status <= 599);
   });

@@ -400,6 +400,47 @@ function queuedPayload() {
 }
 
 describe('chat needs-action triage', () => {
+  it.each([false, true])(
+    'revalidates direct-stream recovery against the current task lease (postgres=%s)',
+    async (postgres) => {
+      const record: Record<string, unknown> = {
+        id: 'task-1',
+        agentId: AGENT,
+        conversationId: CONVERSATION,
+        status: 'running',
+        leaseToken: 'lease-task-1',
+        lockedUntil: new Date(Date.now() + 60_000),
+      };
+      const result = await turn(
+        'Hello.',
+        { draft: 'Hello.' },
+        {},
+        { tasks: { 'task-1': record } },
+        postgres,
+      );
+      await result.response.text();
+      const options = result.stream.mock.calls[0]?.[1] as unknown as {
+        recoverBeforeOutput: () => Promise<boolean>;
+        abortSignal: AbortSignal;
+      };
+      expect(await options.recoverBeforeOutput()).toBe(true);
+      expect(options.abortSignal).toBeInstanceOf(AbortSignal);
+      for (const patch of [
+        { status: 'cancelled' },
+        { leaseToken: 'reclaimed' },
+        { agentId: 'another-owner' },
+        { lockedUntil: new Date(0) },
+      ]) {
+        const original = { ...record };
+        Object.assign(record, patch);
+        expect(await options.recoverBeforeOutput()).toBe(false);
+        Object.assign(record, original);
+      }
+      expect(result.messages.filter((message) => message.role === 'user')).toHaveLength(1);
+      expect(result.completions).toHaveLength(1);
+    },
+  );
+
   it.each([
     'The app is broken. Do not investigate.',
     "Simulate only. The app doesn't work. Investigate the repository and propose a PR; do not create real tasks.",
