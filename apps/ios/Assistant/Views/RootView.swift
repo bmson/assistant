@@ -583,6 +583,7 @@ struct MobileSaveFeedback: View {
                             }
                             if failure.canRetry {
                                 Button("Retry save", systemImage: "arrow.clockwise") { store.retry(failure.id) }
+                                    .disabled(!store.canRetry(failure.id))
                             } else {
                                 Text("Check the current information before adding this again. Your submitted text is kept here for copying.")
                                     .font(.footnote).foregroundStyle(.secondary)

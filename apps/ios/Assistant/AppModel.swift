@@ -155,7 +155,9 @@ final class AppModel {
     }
     private(set) var bootstrap: BootstrapResponse?
     let edits = OptimisticEditStore()
-    @ObservationIgnored private var memoryErasureToken: UUID?
+    @ObservationIgnored private var memoryErasureToken: UUID? {
+        didSet { edits.retryBlockedResources = memoryErasureToken == nil ? [] : [.memory] }
+    }
     private(set) var overview: OverviewResponse? {
         get { edits.visible.overview }
         set { edits.updateRemote(resources: [.overview]) { $0.overview = newValue } }
@@ -3369,6 +3371,7 @@ final class AppModel {
             try await client.updateMemoryProfile(action: action)
             guard connectionIsCurrent(client, version: version) else { return false }
             if action == "purge-voice" {
+                edits.invalidateReads(for: [.voiceProfile, .workspace])
                 edits.updateRemote(resources: [.voiceProfile]) { $0.voiceProfile = nil }
             }
             Task { [weak self] in await self?.refreshWorkspace(reportFailure: false) }
@@ -3507,7 +3510,7 @@ final class AppModel {
         let localID = id ?? "local:" + UUID().uuidString
         let aliases = mutation.aliases.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let initials = mutation.name.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined()
-        var resources: Set<MobileEditResource> = [.people, .workspace]
+        var resources: Set<MobileEditResource> = [.people, .personCaches, .workspace]
         if let id { resources.insert(.person(id)) }
         return enqueueEdit("Person changes", draft: [mutation.name, mutation.relationship, mutation.aliases].joined(separator: "\n"), resources: resources, retrySafe: id != nil, patch: { state in
             if let index = state.people.firstIndex(where: { $0.id == localID }) {
@@ -3525,6 +3528,9 @@ final class AppModel {
             state.personCards[localID]?.name = mutation.name
             state.personCards[localID]?.relationship = mutation.relationship
             state.personCards[localID]?.initials = initials
+            // Other dossiers can embed this person in relationships and merge options.
+            state.personProfiles = state.personProfiles.filter { $0.key == localID }
+            state.personCards = state.personCards.filter { $0.key == localID }
             if let index = state.workspace?.memory.people?.firstIndex(where: { $0.id == localID }) {
                 state.workspace?.memory.people?[index].name = mutation.name
                 state.workspace?.memory.people?[index].relationship = mutation.relationship
@@ -3540,8 +3546,8 @@ final class AppModel {
         guard !id.hasPrefix("local:") else { return false }
         return enqueueEdit("Remove person", resources: [.people, .personCaches, .workspace], patch: { state in
             state.people.removeAll { $0.id == id }
-            state.personProfiles.removeValue(forKey: id)
-            state.personCards.removeValue(forKey: id)
+            state.personProfiles = [:]
+            state.personCards = [:]
             state.workspace?.memory.people?.removeAll { $0.id == id }
         }) { try await $0.deletePerson(id: id) }
     }

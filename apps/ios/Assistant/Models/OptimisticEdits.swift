@@ -74,6 +74,7 @@ final class OptimisticEditStore {
     private(set) var pendingCount = 0
     private(set) var needsRefresh = false
     private(set) var revision = 0
+    var retryBlockedResources: Set<MobileEditResource> = []
     @ObservationIgnored private var resourceRevisions: [MobileEditResource: Int] = [:]
     @ObservationIgnored private var resetRevision = 0
     @ObservationIgnored private var remote = MobileScreenState()
@@ -165,9 +166,14 @@ final class OptimisticEditStore {
         startWorker()
     }
 
+    func canRetry(_ id: UUID) -> Bool {
+        guard let edit = entries.first(where: { $0.id == id }), edit.failure?.canRetry == true else { return false }
+        return edit.resources.isDisjoint(with: retryBlockedResources)
+    }
+
     func retry(_ id: UUID) {
         guard let index = entries.firstIndex(where: { $0.id == id }),
-              entries[index].failure?.canRetry == true else { return }
+              canRetry(id) else { return }
         var edit = entries.remove(at: index)
         edit.phase = .queued
         edit.failure = nil
@@ -215,6 +221,7 @@ final class OptimisticEditStore {
         remote = MobileScreenState()
         stagedRemote = nil
         stagingResources = []
+        retryBlockedResources = []
         revision += 1
         resetRevision = revision
         resourceRevisions = [:]

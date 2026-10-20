@@ -7005,3 +7005,25 @@ extension APIClientRetryTests {
         XCTAssertTrue(model.edits.failures.isEmpty)
     }
 }
+
+extension APIClientRetryTests {
+    @MainActor
+    func testDeletingPersonInvalidatesOtherDossiersWithStaleMergeOptions() async throws {
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/people/removed": [.success(status: 200, body: Data(#"{"ok":true}"#.utf8))],
+            "/api/mobile/v1/people": [.success(status: 200, body: Data(#"{"generatedAt":"now","people":[]}"#.utf8))],
+            "/api/mobile/v1/workspace": [.success(status: 200, body: optimisticWorkspace())]
+        ])
+        let model = AppModel(apiClient: makeClient())
+        model.edits.updateRemote { state in
+            state.personProfiles["other"] = PersonProfileResponse(
+                contact: .init(id: "other", name: "Other", aliases: [], relationship: "Friend", trust: "known"),
+                occasions: [], mergeOptions: [.init(id: "removed", label: "Removed person")])
+        }
+        let accepted = await model.deletePerson(id: "removed")
+        XCTAssertTrue(accepted)
+        await model.edits.settle()
+        XCTAssertNil(model.personProfiles["other"], "Deleting a person must invalidate cached references in other dossiers")
+        XCTAssertTrue(model.edits.failures.isEmpty)
+    }
+}
