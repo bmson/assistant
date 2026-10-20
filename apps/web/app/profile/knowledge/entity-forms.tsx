@@ -2,6 +2,7 @@
 
 import type { KnowledgeGraphDuplicate, KnowledgeGraphEntityView } from '@assistant/application';
 import { ArrowRightLeft, Check, Search } from 'lucide-react';
+import { unstable_rethrow } from 'next/navigation';
 import { useActionState, useCallback, useEffect, useRef, useState, useTransition } from 'react';
 import {
   type KnowledgeActionState,
@@ -202,29 +203,72 @@ export function MergeEntity({
   const [results, setResults] = useState<KnowledgeGraphEntityView[]>([]);
   const [target, setTarget] = useState<{ id: string; label: string; kind: string } | null>(null);
   const [searching, startSearch] = useTransition();
-  // Guards against an earlier, slower search landing after a later one and
-  // overwriting the results the typed query actually asked for.
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const retryButtonRef = useRef<HTMLButtonElement>(null);
+  const retryFocusHandoff = useRef<HTMLButtonElement | null>(null);
+  const [searchAttempt, setSearchAttempt] = useState(0);
+  const [searchFeedback, setSearchFeedback] = useState<{
+    context: string;
+    message: string;
+  } | null>(null);
+  // A changed query/filter must not display feedback from an earlier lookup.
+  const searchContext = JSON.stringify([query, sameKindOnly, entity.id, entity.kind]);
+  const searchError = searchFeedback?.context === searchContext ? searchFeedback.message : null;
+  // Return focus only after results replace Retry, and only if the user stayed there.
+  useEffect(() => {
+    if (searchFeedback) return;
+    const previous = retryFocusHandoff.current;
+    if (!previous) return;
+    retryFocusHandoff.current = null;
+    if (document.activeElement === document.body || document.activeElement === previous) {
+      searchInputRef.current?.focus();
+    }
+  }, [searchFeedback]);
+
+  // Guards both outcomes of canceled requests, including a shortened query,
+  // a chosen target, or closing the editor while a lookup is in flight.
   const requestRef = useRef(0);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: searchAttempt explicitly retries the same lookup without changing its inputs.
   useEffect(() => {
     const trimmed = query.trim();
     if (trimmed.length < 2) {
       setResults([]);
+      setSearchFeedback(null);
       return;
     }
     const token = ++requestRef.current;
     const timer = setTimeout(() => {
       startSearch(async () => {
-        const rows = await searchKnowledgeEntities(
-          trimmed,
-          entity.id,
-          sameKindOnly ? entity.kind : '',
-        );
-        if (requestRef.current === token) setResults(rows);
+        try {
+          const rows = await searchKnowledgeEntities(
+            trimmed,
+            entity.id,
+            sameKindOnly ? entity.kind : '',
+          );
+          if (requestRef.current === token) {
+            setResults(rows);
+            retryFocusHandoff.current =
+              document.activeElement === retryButtonRef.current ? retryButtonRef.current : null;
+            setSearchFeedback(null);
+          }
+        } catch (cause) {
+          unstable_rethrow(cause);
+          if (requestRef.current === token) {
+            setResults([]);
+            setSearchFeedback({
+              context: searchContext,
+              message: 'Couldn’t search items. Try again.',
+            });
+          }
+        }
       });
     }, 200);
-    return () => clearTimeout(timer);
-  }, [query, sameKindOnly, entity.id, entity.kind]);
+    return () => {
+      clearTimeout(timer);
+      if (requestRef.current === token) requestRef.current += 1;
+    };
+  }, [query, sameKindOnly, entity.id, entity.kind, searchAttempt, searchContext]);
 
   const choose = (option: { id: string; label: string; kind: string }) => {
     setTarget(option);
@@ -290,6 +334,7 @@ export function MergeEntity({
                   aria-hidden="true"
                 />
                 <input
+                  ref={searchInputRef}
                   type="search"
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
@@ -308,7 +353,33 @@ export function MergeEntity({
               </label>
               {query.trim().length >= 2 ? (
                 <ul className="max-h-48 overflow-y-auto rounded-lg border border-edge bg-raised">
-                  {results.length === 0 ? (
+                  {searchError ? (
+                    <li className="grid gap-2 px-3 py-2">
+                      <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+                        {searchError}
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          ref={retryButtonRef}
+                          type="button"
+                          disabled={busy}
+                          aria-disabled={busy || searching}
+                          aria-busy={searching}
+                          onClick={() => {
+                            if (!busy && !searching) setSearchAttempt((attempt) => attempt + 1);
+                          }}
+                          className={`${btnSm.outline} aria-disabled:cursor-not-allowed aria-disabled:opacity-50`}
+                        >
+                          Retry search
+                        </button>
+                        {searching ? (
+                          <span role="status" className="text-xs text-muted">
+                            Searching…
+                          </span>
+                        ) : null}
+                      </div>
+                    </li>
+                  ) : results.length === 0 ? (
                     <li className="px-3 py-2 text-xs text-muted">
                       {searching ? 'Searching…' : 'No matching items.'}
                     </li>
