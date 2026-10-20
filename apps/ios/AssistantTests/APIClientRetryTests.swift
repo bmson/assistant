@@ -2634,9 +2634,10 @@ final class APIClientRetryTests: XCTestCase {
     func testPendingApprovalIDsRemainIndependentUntilEachRequestFinishes() async throws {
         let firstPath = "/api/mobile/v1/approvals/a1"
         let secondPath = "/api/mobile/v1/approvals/a2"
-        let accepted = Data(#"{"ok":true,"taskId":"t1","toolCallId":"tc1"}"#.utf8)
-        StubURLProtocol.prime([], paths: [firstPath: [.held(status: 200, body: accepted)],
-                                         secondPath: [.held(status: 200, body: accepted)]])
+        let firstAccepted = Data(#"{"ok":true,"taskId":"t1","toolCallId":"tc1","approvalId":"a1"}"#.utf8)
+        let secondAccepted = Data(#"{"ok":true,"taskId":"t2","toolCallId":"tc2","approvalId":"a2"}"#.utf8)
+        StubURLProtocol.prime([], paths: [firstPath: [.held(status: 200, body: firstAccepted)],
+                                         secondPath: [.held(status: 200, body: secondAccepted)]])
         let model = AppModel(apiClient: makeClient())
         let first = Task { await model.decideApproval(id: "a1", decision: "approved") }
         let second = Task { await model.decideApproval(id: "a2", decision: "denied") }
@@ -2646,13 +2647,13 @@ final class APIClientRetryTests: XCTestCase {
         XCTAssertEqual(StubURLProtocol.requests.filter { $0.0 == "POST" }.count, 2)
         StubURLProtocol.releaseHeldResponse(path: firstPath)
         let firstResult = await first.value
-        XCTAssertTrue(firstResult)
+        XCTAssertTrue(firstResult, model.errorMessage ?? "The first approval response should decode")
         let duplicate = await model.approveAndRemember(id: "a2")
         XCTAssertFalse(duplicate, "Finishing a different ID must not clear this admission")
         XCTAssertEqual(StubURLProtocol.requests.filter { $0.0 == "POST" }.count, 2)
         StubURLProtocol.releaseHeldResponse(path: secondPath)
         let secondResult = await second.value
-        XCTAssertTrue(secondResult)
+        XCTAssertTrue(secondResult, model.errorMessage ?? "The second approval response should decode")
         await model.settleApprovalReconciliation()
     }
 
