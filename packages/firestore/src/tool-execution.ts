@@ -472,7 +472,9 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
     result: unknown;
     expiresAt: Date;
   }): Promise<void> {
-    await this.store.doc('toolCache', input.cacheKey).set(encodeRecord(input), { merge: true });
+    // Cache entries are complete replacements. Deep-merging a result map retains
+    // removed private fields and can poison a later read after revocation.
+    await this.store.doc('toolCache', input.cacheKey).set(encodeRecord(input));
   }
 
   async start(
