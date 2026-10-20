@@ -69,9 +69,9 @@ export function UploadPanel({
         encType="multipart/form-data"
         onSubmit={submit}
         aria-busy={pending}
-        className="mt-3 flex flex-col items-start gap-3"
+        className="mt-3 flex min-w-0 w-full flex-col items-start gap-3"
       >
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex min-w-0 w-full flex-wrap items-center gap-3">
           <input
             type="file"
             name="file"
@@ -88,7 +88,7 @@ export function UploadPanel({
             {pending ? 'Uploading…' : error ? 'Retry upload' : submitLabel}
           </button>
         </div>
-        <details className="text-xs text-muted">
+        <details className="min-w-0 max-w-full text-xs text-muted">
           <summary className="disclosure flex items-center gap-2 cursor-pointer">
             {labelSummary}
           </summary>

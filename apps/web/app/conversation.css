@@ -124,38 +124,8 @@ body:has(.chat-viewport) > main > .route-surface {
   --surface-sunken: var(--stage-well);
 }
 
-/* Keep the transcript fully clear at the top. The bottom fade remains so the
-   composer can sit over a moving log without its edge cutting through a row.
- *
- * The fade is painted ON the log rather than masked OUT of it. A mask on a
- * scroll container is the expensive way to do this: it forces the scroller into
- * its own composited layer with an alpha channel, so every scroll frame
- * re-composites the whole visible transcript through the mask instead of
- * shifting what is already rasterised — and it costs the text subpixel
- * antialiasing along the way.
- *
- * A scrim is identical here because the log fades into a flat ground: the stage
- * is painted on `body` (above), so `alpha·text + (1-alpha)·stage` is the same
- * pixel whether the alpha comes from erasing the text or from laying that much
- * stage over it. The stops below are the mask's, complemented — 1.0/0.88/0.62
- * became 0/0.12/0.38 — and render pixel-for-pixel the same ramp.
- *
- * It sits above the log and below the composer (z-20) and jump pill (z-30), so
- * both still frost a faded transcript exactly as before. */
-.chat-viewport::after {
-  position: absolute;
-  z-index: 10;
-  inset: 0;
-  pointer-events: none;
-  background: linear-gradient(
-    to bottom,
-    transparent 0,
-    transparent calc(100% - 9rem),
-    color-mix(in srgb, var(--stage) 12%, transparent) calc(100% - 5.5rem),
-    color-mix(in srgb, var(--stage) 38%, transparent) 100%
-  );
-  content: "";
-}
+/* The opaque composer well separates editing from reading. Keep the transcript
+   free of decorative fades so enlarged text can use the full scroll area. */
 
 /* …and anything that is still PAPER inside the chat — an approval, a budget
    request, a notice card, a palette — puts both back, because ink that reads
@@ -427,16 +397,6 @@ body:has(.chat-viewport) > main > .route-surface {
    rectangular boundary, which clipped rounded message bubbles on iOS. A long,
    low-opacity wash supports the controls while the transcript mask above owns
    the actual fade. */
-.composer-veil {
-  z-index: 0;
-  background: linear-gradient(
-    to top,
-    color-mix(in srgb, var(--stage) 38%, transparent) 0%,
-    color-mix(in srgb, var(--stage) 18%, transparent) 46%,
-    color-mix(in srgb, var(--stage) 5%, transparent) 76%,
-    transparent 100%
-  );
-}
 
 /* ── The composer ─────────────────────────────────────────────────────────────
    The opaque well preserves text contrast over any scrolled reply. The send

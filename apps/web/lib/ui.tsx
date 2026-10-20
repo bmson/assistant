@@ -123,13 +123,13 @@ export const countBadgeClass =
 export function Skeleton({ className = '' }: { className?: string }) {
   return (
     <div
-      className={`relative overflow-hidden rounded-md bg-zinc-200/70 after:absolute after:inset-0 after:-translate-x-full after:bg-gradient-to-r after:from-transparent after:via-white/50 after:to-transparent motion-safe:after:animate-[skeleton-sheen_1.5s_ease-in-out_infinite] dark:bg-zinc-800/70 dark:after:via-white/10 ${className}`}
+      className={`relative min-w-0 max-w-full overflow-hidden rounded-md bg-zinc-200/70 after:absolute after:inset-0 after:-translate-x-full after:bg-gradient-to-r after:from-transparent after:via-white/50 after:to-transparent motion-safe:after:animate-[skeleton-sheen_1.5s_ease-in-out_infinite] dark:bg-zinc-800/70 dark:after:via-white/10 ${className}`}
     />
   );
 }
 
 export const inputClass =
-  'min-h-11 min-w-0 rounded-lg border border-edge bg-raised px-3 py-2 text-base text-strong outline-none placeholder:text-muted motion-safe:transition-shadow focus:border-accent focus:ring-2 focus:ring-accent/20 sm:text-sm';
+  'min-h-11 min-w-0 max-w-full rounded-lg border border-edge bg-raised px-3 py-2 text-base text-strong outline-none placeholder:text-muted motion-safe:transition-shadow focus:border-accent focus:ring-2 focus:ring-accent/20 sm:text-sm';
 
 /**
  * Native <select>, sharing inputClass's metrics and focus treatment. The UA's
@@ -171,7 +171,7 @@ export const fileInputClass =
  */
 export const cardShellClass =
   'min-w-0 overflow-hidden rounded-[var(--radius-card)] bg-raised ring-1 ring-edge/70';
-export const cardBodyClass = 'grid min-w-0 gap-4 p-4 sm:p-5';
+export const cardBodyClass = 'grid min-w-0 grid-cols-1 gap-4 p-4 sm:p-5';
 export const cardHeaderClass = 'grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3';
 /** Footer chrome (divider + tonal well + padding), shared by the button-row
  *  footer and disclosure-style footers that can't be a flex container. */
@@ -196,7 +196,7 @@ export const cardGridClass = 'grid min-w-0 items-stretch gap-4 lg:grid-cols-2';
  *  draws the rotating chevron and globals.css animates the panel itself, so
  *  every section built from this opens the same way. */
 export const summaryClass =
-  'disclosure flex min-h-11 cursor-pointer list-none items-center gap-2 text-sm font-medium';
+  'disclosure flex min-h-11 cursor-pointer list-none flex-wrap items-center gap-2 text-sm font-medium';
 
 /**
  * "Back to the parent surface" link above a detail page's title.
