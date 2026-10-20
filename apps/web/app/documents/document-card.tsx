@@ -56,8 +56,8 @@ export function DocumentCard({ doc }: { doc: DocumentCardView }) {
   return (
     <article className={`${cardShellClass} flex h-full flex-col`}>
       <div className={`${cardBodyClass} @container/document flex-1`}>
-        <div className={`${cardHeaderClass} @max-[12rem]/document:grid-cols-1`}>
-          <div className="flex min-w-0 items-start gap-3 @max-[12rem]/document:flex-col">
+        <div className={`${cardHeaderClass} @max-[18rem]/document:grid-cols-1`}>
+          <div className="flex min-w-0 items-start gap-3 @max-[18rem]/document:flex-col">
             <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-xl bg-accent/10 text-accent">
               <FileText className="size-4" aria-hidden="true" />
             </span>
