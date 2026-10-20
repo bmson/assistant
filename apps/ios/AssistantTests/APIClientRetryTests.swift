@@ -6949,3 +6949,59 @@ extension APIClientRetryTests {
         XCTAssertNil(model.cachedMemoryLibrary(query), "A pre-erasure response must not restore erased cached content")
     }
 }
+
+extension APIClientRetryTests {
+    @MainActor
+    func testVoiceReadFromBeforeSamplePurgeCannotRestoreCachedSamples() async throws {
+        let path = "/api/mobile/v1/memory/profile"
+        let old = VoiceProfileResponse(voiceStats: .init(total: 3, auto: 1, uploaded: 2), voiceProfile: .empty)
+        StubURLProtocol.prime([], paths: [
+            path: [.held(status: 200, body: try JSONEncoder().encode(old)),
+                   .success(status: 200, body: Data(#"{"ok":true}"#.utf8))],
+            "/api/mobile/v1/workspace": [.success(status: 200, body: optimisticWorkspace())]
+        ])
+        let model = AppModel(apiClient: makeClient())
+        let stale = Task { await model.voiceProfile() }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !StubURLProtocol.isHoldingResponse(path: path), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: path))
+        let purged = await model.updateMemoryProfile(action: "purge-voice")
+        XCTAssertTrue(purged)
+        StubURLProtocol.releaseHeldResponse(path: path)
+        let result = await stale.value
+        XCTAssertNil(result, "A read started before the purge cannot restore old sample counts")
+        XCTAssertNil(model.cachedVoiceProfile)
+    }
+
+    @MainActor
+    func testMemoryErasureBlocksRetryOfAnEarlierFailedMemorySave() async throws {
+        let path = "/api/mobile/v1/memory/profile"
+        StubURLProtocol.prime([], paths: [
+            path: [.held(status: 200, body: Data(#"{"ok":true}"#.utf8))],
+            "/api/mobile/v1/workspace": [.success(status: 200, body: optimisticWorkspace())]
+        ])
+        let model = AppModel(apiClient: makeClient())
+        var writes = 0
+        model.edits.submit(title: "Memory correction", resources: [.memory], patch: { _ in }) {
+            writes += 1
+            throw APIError.server(status: 400, message: "Rejected")
+        }
+        await model.edits.settle()
+        let failureID = try XCTUnwrap(model.edits.failures.first?.id)
+        let erasure = Task { await model.forgetLongTermMemory() }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !StubURLProtocol.isHoldingResponse(path: path), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: path))
+        model.edits.retry(failureID)
+        await model.edits.settle()
+        XCTAssertEqual(writes, 1, "A retry cannot recreate memory while erasure is in flight")
+        StubURLProtocol.releaseHeldResponse(path: path)
+        let erased = await erasure.value
+        XCTAssertTrue(erased)
+        XCTAssertTrue(model.edits.failures.isEmpty)
+    }
+}
