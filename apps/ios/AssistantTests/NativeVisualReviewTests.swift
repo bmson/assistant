@@ -64,6 +64,10 @@ final class NativeVisualReviewTests: XCTestCase {
                 let ratio = (max(foreground, background) + 0.05) / (min(foreground, background) + 0.05)
                 XCTAssertGreaterThanOrEqual(ratio, 4.5, "Normal conversation text requires a stable contrast pair")
             }
+            let link = luminance(AssistantTheme.accent(for: scheme))
+            let paper = luminance(AssistantTheme.bubblePaper(for: scheme))
+            let linkRatio = (max(link, paper) + 0.05) / (min(link, paper) + 0.05)
+            XCTAssertGreaterThanOrEqual(linkRatio, 4.5, "Small Markdown links must remain readable on reply paper")
         }
     }
 

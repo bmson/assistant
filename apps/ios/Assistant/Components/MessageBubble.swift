@@ -5484,12 +5484,19 @@ enum AssistantMarkdown {
             let withBreaks = request.inline
                 ? tableCellText(readable)
                 : preservingSoftBreaks(readable)
-            return (try? AttributedString(
+            var rendered = (try? AttributedString(
                 markdown: withBreaks,
                 options: .init(
                     interpretedSyntax: request.inline ? .inlineOnlyPreservingWhitespace : .full
                 )
             )) ?? AttributedString(request.source)
+            // User bubbles use the same high-contrast ink for text and links.
+            // Keep links recognizable without relying on their color alone,
+            // and do this only on a cache miss rather than each render.
+            for run in rendered.runs where run.link != nil {
+                rendered[run.range].underlineStyle = .single
+            }
+            return rendered
         }
     }
 
@@ -5992,6 +5999,7 @@ private struct AssistantMarkdownView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .tint(accent)
         .accessibilityElement(children: .contain)
     }
 
