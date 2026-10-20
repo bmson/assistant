@@ -46,6 +46,45 @@ final class NativeVisualReviewTests: XCTestCase {
         XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
     }
 
+    @MainActor
+    func testGeneratedTableFormatting() async throws {
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [NativeReviewProtocol.self]
+        NativeReviewProtocol.install([:])
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+                               session: URLSession(configuration: sessionConfig))
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "assistant.table-visual-review"))
+        defaults.removePersistentDomain(forName: "assistant.table-visual-review")
+        let model = AppModel(apiClient: client, defaults: defaults)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let entries = [("hotel", "Harbor House"), ("price", "$189 per night"),
+                       ("location", "Historic waterfront, 20 minutes from the station"),
+                       ("policy", "Free cancellation until 6 PM Thursday"),
+                       ("hotel2", "Station Garden"), ("price2", "$145 per night"),
+                       ("location2", "Opposite the central railway station"), ("policy2", "Non-refundable")]
+        let facts: [String: MessageResponseCard.GeneratedFact] = Dictionary(uniqueKeysWithValues: entries.map {
+            ($0.0, .init(id: $0.0, label: $0.0, value: $0.1, sensitive: false))
+        })
+        for count in [2, 4] {
+            let columns = Array(["Hotel", "Price", "Location", "Cancellation"].prefix(count))
+            let rows = [["hotel", "price", "location", "policy"], ["hotel2", "price2", "location2", "policy2"]]
+            let block = MessageResponseCard.GeneratedBlock(id: "comparison", type: "table", values: [
+                "columns": .array(columns.map { .string($0) }),
+                "rows": .array(rows.map { .array($0.prefix(count).map { .string($0) }) })
+            ])
+            let page = Page("generated-table-\(count)-columns", ScrollView {
+                GeneratedCardBlockView(block: block, facts: facts, cardId: "visual-review").padding(20)
+            })
+            for scheme in [ColorScheme.light, .dark] {
+                for size in [DynamicTypeSize.large, .accessibility3] {
+                    try await capture(page, scheme: scheme, size: size, scene: scene, model: model)
+                }
+            }
+        }
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+    }
+
     func testConversationSmallTextPairsClearContrast() {
         func luminance(_ color: Color) -> Double {
             var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
