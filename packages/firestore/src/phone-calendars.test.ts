@@ -44,5 +44,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore phone calendar 
     expect(await readPhoneCalendars(cache, 'owner')).toBeNull();
     const document = await store.doc('toolCache', 'phone-calendars:v1:owner').get();
     expect(document.get('result')).toEqual({ disconnected: true });
+    await savePhoneCalendars(cache, 'owner', input, now);
+    expect(await readPhoneCalendars(cache, 'owner')).toEqual({
+      ...input,
+      syncedAt: now.toISOString(),
+    });
   });
 });
