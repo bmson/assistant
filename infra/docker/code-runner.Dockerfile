@@ -9,7 +9,7 @@
 # and Vitest never enter the final filesystem.
 FROM mirror.gcr.io/library/node:26-slim AS build
 WORKDIR /workspace
-RUN corepack enable
+RUN npm install --global corepack@0.36.0 && corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY workers/code-runner ./workers/code-runner
 # Legacy deploy resolves root workspace links even for a filtered worker.

@@ -28,7 +28,7 @@ jobs:
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: 26
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # Narrow brace-expansion overrides retain the 1.x and 2.x CommonJS export
@@ -86,12 +86,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Pull and verify public Node 22 base image
+      - name: Pull and verify public Node 26 base image
         run: |
-          image=mirror.gcr.io/library/node:22-slim
+          image=mirror.gcr.io/library/node:26-slim
           docker pull "$image"
           version=$(docker run --rm "$image" node -p 'process.versions.node')
-          [[ "$version" == 22.* ]]
+          [[ "$version" == 26.* ]]
+          # Node 25+ no longer includes Corepack. Exercise the same bootstrap
+          # used by the Docker build stages before accepting a runtime update.
+          docker run --rm "$image" sh -ec 'npm install --global corepack@0.36.0 && corepack enable && corepack prepare pnpm@10.34.5 --activate && pnpm --version'
 
   verify:
     runs-on: ubuntu-latest
@@ -112,7 +115,7 @@ jobs:
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: 26
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
@@ -148,7 +151,7 @@ jobs:
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: 26
           cache: pnpm
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
@@ -205,7 +208,7 @@ jobs:
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: 26
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # turbo.json declares outputs for both builds; persisting the caches is

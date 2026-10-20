@@ -8,7 +8,7 @@
 # are excluded from the final image.
 FROM mirror.gcr.io/library/node:26-slim AS build
 WORKDIR /workspace
-RUN corepack enable
+RUN npm install --global corepack@0.36.0 && corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY workers/document-processor ./workers/document-processor
 # Legacy deploy resolves root workspace links even for a filtered worker.

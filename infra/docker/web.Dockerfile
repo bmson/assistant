@@ -1,6 +1,6 @@
 FROM mirror.gcr.io/library/node:26-slim AS build
 WORKDIR /src
-RUN corepack enable
+RUN npm install --global corepack@0.36.0 && corepack enable
 
 # Manifests first: dependency layers survive source edits.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json ./
