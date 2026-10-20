@@ -2525,13 +2525,15 @@ final class APIModelsTests: XCTestCase {
             "Error: AI_StreamProviderError: upstream overloaded\nrequestId=synthetic-request",
             "ai_streamprovidererror: service unavailable",
         ]
-        for progress in diagnostics {
-            let task = activityItem(title: "Draft reply", status: "needs_attention", progress: progress)
+        for status in ["failed", "needs_attention"] {
+            for progress in diagnostics {
+                let task = activityItem(title: "Draft reply", status: status, progress: progress)
 
-            XCTAssertEqual(task.displayProgress, "A service request failed.")
-            XCTAssertEqual(task.progress, progress, "Display wording must preserve the recorded diagnostic")
-            XCTAssertEqual(task.status, "needs_attention")
-            XCTAssertEqual(task.displayStatus, "needs_attention")
+                XCTAssertEqual(task.displayProgress, "A service request failed.")
+                XCTAssertEqual(task.progress, progress, "Display wording must preserve the recorded diagnostic")
+                XCTAssertEqual(task.status, status)
+                XCTAssertEqual(task.displayStatus, status)
+            }
         }
 
         let ordinary = activityItem(
