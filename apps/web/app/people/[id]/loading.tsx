@@ -6,7 +6,7 @@ export default function Loading() {
     <PageShell size="reading">
       <Skeleton className="h-9 w-64" />
       <div className="mt-4 flex items-start gap-4">
-        <Skeleton className="size-14 rounded-full" />
+        <Skeleton className="size-14 shrink-0 rounded-full!" />
         <Skeleton className="mt-2 h-4 w-72" />
       </div>
       <Skeleton className="mt-6 h-24 w-full rounded-2xl" />

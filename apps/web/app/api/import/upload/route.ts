@@ -81,5 +81,7 @@ export async function POST(req: Request) {
     register: String(form.get('register') ?? ''),
   });
 
+  if (req.headers.get('accept')?.includes('application/json'))
+    return Response.json({ redirectTo: result.destination });
   redirect(result.destination);
 }

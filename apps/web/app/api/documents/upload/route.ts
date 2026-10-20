@@ -71,5 +71,7 @@ export async function POST(req: Request) {
     await uploadDocument(getFirestoreDocumentStores(), getWorkspace(), input);
   else await getApplication().uploadDocument(input);
 
+  if (req.headers.get('accept')?.includes('application/json'))
+    return Response.json({ redirectTo: '/documents' });
   redirect('/documents');
 }

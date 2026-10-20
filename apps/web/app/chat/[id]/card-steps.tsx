@@ -97,7 +97,7 @@ export function CardSteps({ steps }: { steps: CardStep[] }) {
   // disclosure is a promise of detail that isn't there.
   if (steps.length === 0) return null;
   return (
-    <div className="mt-3 border-t border-edge/60 pt-2.5">
+    <div data-message-utility="true" className="mt-3 border-t border-edge/60 pt-2.5">
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}

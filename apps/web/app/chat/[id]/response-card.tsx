@@ -237,7 +237,7 @@ function CardShell({
     >
       <header className="flex min-h-11 items-center gap-2.5 border-b border-edge/60 px-4 py-2.5 sm:px-5">
         <Icon className="size-4 shrink-0 stroke-[1.75] text-accent" aria-hidden="true" />
-        <p className="min-w-0 truncate text-sm leading-5 font-medium text-strong">{label}</p>
+        <p className="min-w-0 break-words text-sm leading-5 font-medium text-strong">{label}</p>
       </header>
       <div className="min-w-0 px-4 pt-3 pb-4 sm:px-5">{children}</div>
     </section>
@@ -749,7 +749,7 @@ function CalendarDayCard({ data, timeZone }: { data: Raw; timeZone: string }) {
           return (
             <li
               key={str(event.id) || index}
-              className="grid min-w-0 grid-cols-[5.5rem_1fr] gap-3 border-t border-edge/55 pt-4 first:border-0 first:pt-0"
+              className="grid min-w-0 grid-cols-1 sm:grid-cols-[5.5rem_minmax(0,1fr)] gap-3 border-t border-edge/55 pt-4 first:border-0 first:pt-0"
             >
               <span className="font-mono text-xs font-semibold text-accent">
                 {calendarEventTime(event, timeZone)}
@@ -789,7 +789,7 @@ function AgendaCard({ data }: { data: Raw }) {
         {items.map((item, index) => (
           <li
             key={str(item.id) || `${str(item.time)}-${index.toString()}`}
-            className="grid min-w-0 grid-cols-[5.5rem_1fr] gap-3 border-t border-edge/55 pt-3 first:border-0 first:pt-0"
+            className="grid min-w-0 grid-cols-1 sm:grid-cols-[5.5rem_minmax(0,1fr)] gap-3 border-t border-edge/55 pt-3 first:border-0 first:pt-0"
           >
             <span className="font-mono text-xs font-semibold text-accent">{str(item.time)}</span>
             <span className="min-w-0">
