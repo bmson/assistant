@@ -2659,7 +2659,8 @@ struct RichResponseCards: View {
         let content = Label(label, systemImage: "calendar")
             .font(.caption)
             .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-            .lineLimit(1)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
         if let calendarLinkURL = event.calendarLinkURL, let url = URL(string: calendarLinkURL) {
             Link(destination: url) { content }
                 .accessibilityLabel("Open \(event.title) in calendar")
