@@ -1,4 +1,5 @@
-name: iOS
+# Temporary diagnostic branch only; not part of the test-only candidate.
+name: iOS deadline fixture targeted validation
 
 permissions:
   contents: read
@@ -142,6 +143,8 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
+            -only-testing:AssistantTests/APIClientRetryTests/testChecklistCorrectionHeldPostAndReadbackShareOneDeadline \
+            -only-testing:AssistantTests/APIClientRetryTests/testChecklistCorrectionExhaustedTotalDeadlineDoesNotStartReadback \
             test-without-building 2>&1 | tee -a "${RUNNER_TEMP}/xcodebuild.log"
           if grep -Eq 'testEventKitReadsRecurringEventsFromSelectedCalendar.*skipped' "${RUNNER_TEMP}/xcodebuild.log"; then
             echo "::error::The real EventKit read test skipped despite pre-granted calendar access."
