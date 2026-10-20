@@ -475,20 +475,25 @@ export default async function KnowledgePage({
         ))}
       </nav>
 
-      <section className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-        {[
-          ['Memories in use', overview.memory.totalUsable],
-          ['Connected items', overview.graph.activeEntities],
-          ['Connections', overview.graph.activeRelations],
-          ['Needs care', overview.cleanupCount],
-        ].map(([label, value]) => (
-          <div key={label} className="rounded-xl border border-edge bg-sunken/30 px-4 py-3">
-            <p className="font-display text-2xl font-semibold text-strong">
-              {Number(value).toLocaleString()}
-            </p>
-            <p className="text-xs text-muted">{label}</p>
-          </div>
-        ))}
+      <section className="mt-4 @container/knowledge-stats">
+        <div className="grid grid-cols-1 gap-2 @min-[16rem]/knowledge-stats:grid-cols-2 @min-[32rem]/knowledge-stats:grid-cols-4">
+          {[
+            ['Memories in use', overview.memory.totalUsable],
+            ['Connected items', overview.graph.activeEntities],
+            ['Connections', overview.graph.activeRelations],
+            ['Needs care', overview.cleanupCount],
+          ].map(([label, value]) => (
+            <div
+              key={label}
+              className="min-w-0 rounded-xl border border-edge bg-sunken/30 px-4 py-3 [overflow-wrap:anywhere]"
+            >
+              <p className="font-display text-2xl font-semibold text-strong">
+                {Number(value).toLocaleString()}
+              </p>
+              <p className="text-xs text-muted">{label}</p>
+            </div>
+          ))}
+        </div>
       </section>
 
       {view === 'library' && library && libraryFilters ? (
