@@ -586,16 +586,25 @@ export default async function KnowledgePage({
                 </option>
               ))}
             </select>
-            <select
-              name="filter"
-              defaultValue={filter}
-              className={`${selectClass} w-full min-w-0`}
-              aria-label="Verification"
-            >
-              <option value="all">Any verification</option>
-              <option value="verified">Verified</option>
-              <option value="untidied">Not yet tidied</option>
-            </select>
+            <label className="grid min-w-0 content-start gap-1 self-start md:row-span-2">
+              <span className="text-sm font-medium">Verification</span>
+              <select
+                name="filter"
+                defaultValue={filter}
+                className={`${selectClass} w-full min-w-0`}
+                aria-label="Verification"
+                style={{
+                  paddingLeft: 'min(0.75rem, 12px)',
+                  paddingRight: 'min(2.25rem, 36px)',
+                  backgroundSize: 'min(1rem, 16px) min(1rem, 16px)',
+                  backgroundPosition: 'right min(0.625rem, 10px) center',
+                }}
+              >
+                <option value="all">All</option>
+                <option value="verified">Verified</option>
+                <option value="untidied">Not tidied</option>
+              </select>
+            </label>
             <div className="flex gap-2">
               <button type="submit" className={btn.primary}>
                 Apply
