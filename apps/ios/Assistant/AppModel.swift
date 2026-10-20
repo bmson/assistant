@@ -4010,10 +4010,16 @@ final class AppModel {
         refreshingWorkspace: Bool = false,
         operation: () async throws -> ApprovalResult
     ) async -> Bool {
-        guard let client else { return false }
+        guard let client, approvalsBeingDecided.insert(id).inserted else { return false }
         let version = connectionVersion
+        defer {
+            // A cancelled request still owns its admission on this connection.
+            // A late reply from an old connection must not release a newer one.
+            if connectionIdentityIsCurrent(client, version: version) {
+                approvalsBeingDecided.remove(id)
+            }
+        }
         errorMessage = nil
-        approvalsBeingDecided.insert(id)
         let removed = optimisticallyResolveApproval(id: id)
         // The card leaves the app on this frame, so the Island and the badge
         // leave with it — but the request does not wait for them. Ending an
@@ -4026,10 +4032,10 @@ final class AppModel {
         }
         do {
             let result = try await operation()
-            guard connectionIsCurrent(client, version: version) else { return false }
+            guard connectionIdentityIsCurrent(client, version: version) else { return false }
+            try Task.checkCancellation()
             guard result.ok else { throw APIError.server(status: 409, message: "The approval decision was not accepted.") }
             setDecisionStatus(id: id, status: status)
-            approvalsBeingDecided.remove(id)
             // The server has accepted the decision, so the control is done.
             // The inbox and the chat's decision cards converge from here in
             // the background; they used to be awaited, which held every
@@ -4037,8 +4043,7 @@ final class AppModel {
             scheduleApprovalReconciliation(refreshingWorkspace: refreshingWorkspace)
             return true
         } catch {
-            guard connectionIsCurrent(client, version: version) else { return false }
-            approvalsBeingDecided.remove(id)
+            guard connectionIdentityIsCurrent(client, version: version) else { return false }
             if let removed { restorePendingApproval(removed) }
             Task { [weak self] in
                 guard let self, self.connectionIsCurrent(client, version: version) else { return }

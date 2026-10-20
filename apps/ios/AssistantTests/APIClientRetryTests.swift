@@ -148,6 +148,11 @@ final class StubURLProtocol: URLProtocol {
         let protocolInstance = lock.withLock { heldResponses.removeValue(forKey: path) }
         protocolInstance?.releaseHeldResponse()
     }
+    /// Retain one held response while a new connection starts the same path.
+    static func detachHeldResponse(path: String) -> () -> Void {
+        let response = lock.withLock { heldResponses.removeValue(forKey: path) }
+        return { response?.releaseHeldResponse() }
+    }
     static var requests: [(String, URL, [String: String], Data)] {
         lock.withLock {
             (0..<recordedMethods.count).compactMap { index in
@@ -2578,6 +2583,134 @@ final class APIClientRetryTests: XCTestCase {
             XCTAssertNotNil(model.errorMessage)
             XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
         }
+    }
+
+    @MainActor
+    private func waitForHeldApproval(_ path: String) async throws {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while !StubURLProtocol.isHoldingResponse(path: path), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: path), "Expected a pending approval transport")
+        guard StubURLProtocol.isHoldingResponse(path: path) else { throw URLError(.timedOut) }
+    }
+
+    @MainActor
+    private func mutateApproval(_ model: AppModel, id: String, action: String) async -> Bool {
+        if action == "remember" { return await model.approveAndRemember(id: id) }
+        return await model.decideApproval(id: id, decision: action)
+    }
+
+    @MainActor
+    func testPendingApprovalRejectsApproveDenyAndRememberWithoutClearingItsAdmission() async throws {
+        let path = "/api/mobile/v1/approvals/a1"
+        let accepted = Data(#"{"ok":true,"taskId":"t1","toolCallId":"tc1","approvalId":"a1"}"#.utf8)
+        for firstAction in ["approved", "denied", "remember"] {
+            let model = AppModel(apiClient: makeClient())
+            StubURLProtocol.prime([.success(status: 200, body: try overviewBody(pending: [pendingApproval()]))])
+            await model.refreshOverview()
+            StubURLProtocol.prime([], paths: [path: [.held(status: 200, body: accepted)]])
+            let first = Task { await mutateApproval(model, id: "a1", action: firstAction) }
+            defer { StubURLProtocol.releaseHeldResponse(path: path) }
+            try await waitForHeldApproval(path)
+            XCTAssertEqual(model.pendingApprovalCount, 0, "Only the admitted request owns optimistic removal")
+            model.errorMessage = "Keep the existing notice"
+            for duplicateAction in ["approved", "denied", "remember", "approved"] {
+                let duplicate = await mutateApproval(model, id: "a1", action: duplicateAction)
+                XCTAssertFalse(duplicate)
+                XCTAssertEqual(model.errorMessage, "Keep the existing notice")
+                XCTAssertEqual(model.pendingApprovalCount, 0)
+                XCTAssertEqual(StubURLProtocol.requests.filter { $0.0 == "POST" }.count, 1)
+            }
+            StubURLProtocol.releaseHeldResponse(path: path)
+            let result = await first.value
+            XCTAssertTrue(result)
+            await model.settleApprovalReconciliation()
+            XCTAssertEqual(StubURLProtocol.requests.filter { $0.0 == "POST" }.count, 1)
+        }
+    }
+
+    @MainActor
+    func testPendingApprovalIDsRemainIndependentUntilEachRequestFinishes() async throws {
+        let firstPath = "/api/mobile/v1/approvals/a1"
+        let secondPath = "/api/mobile/v1/approvals/a2"
+        let accepted = Data(#"{"ok":true,"taskId":"t1","toolCallId":"tc1"}"#.utf8)
+        StubURLProtocol.prime([], paths: [firstPath: [.held(status: 200, body: accepted)],
+                                         secondPath: [.held(status: 200, body: accepted)]])
+        let model = AppModel(apiClient: makeClient())
+        let first = Task { await model.decideApproval(id: "a1", decision: "approved") }
+        let second = Task { await model.decideApproval(id: "a2", decision: "denied") }
+        defer { StubURLProtocol.releaseHeldResponse(path: firstPath); StubURLProtocol.releaseHeldResponse(path: secondPath) }
+        try await waitForHeldApproval(firstPath)
+        try await waitForHeldApproval(secondPath)
+        XCTAssertEqual(StubURLProtocol.requests.filter { $0.0 == "POST" }.count, 2)
+        StubURLProtocol.releaseHeldResponse(path: firstPath)
+        let firstResult = await first.value
+        XCTAssertTrue(firstResult)
+        let duplicate = await model.approveAndRemember(id: "a2")
+        XCTAssertFalse(duplicate, "Finishing a different ID must not clear this admission")
+        XCTAssertEqual(StubURLProtocol.requests.filter { $0.0 == "POST" }.count, 2)
+        StubURLProtocol.releaseHeldResponse(path: secondPath)
+        let secondResult = await second.value
+        XCTAssertTrue(secondResult)
+        await model.settleApprovalReconciliation()
+    }
+
+    @MainActor
+    func testRejectedOrCancelledApprovalReleasesItsAdmissionForExplicitRetry() async throws {
+        let path = "/api/mobile/v1/approvals/a1"
+        let accepted = Data(#"{"ok":true,"taskId":"t1","toolCallId":"tc1","approvalId":"a1"}"#.utf8)
+        for cancel in [false, true] {
+            let model = AppModel(apiClient: makeClient())
+            StubURLProtocol.prime([.success(status: 200, body: try overviewBody(pending: [pendingApproval()]))])
+            await model.refreshOverview()
+            StubURLProtocol.prime([], paths: [path: [.held(status: 500, body: Data()), .success(status: 200, body: accepted)]])
+            let first = Task { await model.decideApproval(id: "a1", decision: "approved") }
+            defer { StubURLProtocol.releaseHeldResponse(path: path) }
+            try await waitForHeldApproval(path)
+            let duplicate = await model.approveAndRemember(id: "a1")
+            XCTAssertFalse(duplicate)
+            if cancel { first.cancel() } else { StubURLProtocol.releaseHeldResponse(path: path) }
+            let firstResult = await first.value
+            XCTAssertFalse(firstResult)
+            XCTAssertEqual(model.pendingApprovalCount, 1, "Only the failed operation restores the optimistic removal")
+            let retry = await model.decideApproval(id: "a1", decision: "denied")
+            XCTAssertTrue(retry)
+            await model.settleApprovalReconciliation()
+            XCTAssertEqual(StubURLProtocol.requests.filter { $0.0 == "POST" }.count, 2)
+        }
+    }
+
+    @MainActor
+    func testOldOwnerApprovalCompletionCannotClearNewOwnerAdmission() async throws {
+        let path = "/api/mobile/v1/approvals/a1"
+        let accepted = Data(#"{"ok":true,"taskId":"t1","toolCallId":"tc1","approvalId":"a1"}"#.utf8)
+        let model = try await notificationModel()
+        let prior = try JSONDecoder().decode(BootstrapResponse.self, from: notificationBootstrap())
+        let replacement = BootstrapResponse(generatedAt: "2026-10-03T00:00:01Z",
+            identity: .init(id: "replacement-owner", name: "Robin", avatarUrl: nil),
+            shell: prior.shell, conversation: prior.conversation)
+        StubURLProtocol.prime([], paths: [path: [.held(status: 200, body: accepted), .held(status: 200, body: accepted)],
+            "/api/mobile/v1/bootstrap": [.success(status: 200, body: try JSONEncoder().encode(replacement))],
+            "/api/mobile/v1/overview": [.success(status: 401, body: Data())]])
+        let old = Task { await model.approveAndRemember(id: "a1") }
+        try await waitForHeldApproval(path)
+        let releaseOld = StubURLProtocol.detachHeldResponse(path: path)
+        defer { releaseOld(); StubURLProtocol.releaseHeldResponse(path: path) }
+        await model.refreshAll(reportFailure: false)
+        XCTAssertEqual(model.bootstrap?.identity.id, "replacement-owner")
+        let current = Task { await model.decideApproval(id: "a1", decision: "approved") }
+        try await waitForHeldApproval(path)
+        releaseOld()
+        let oldResult = await old.value
+        XCTAssertFalse(oldResult)
+        let duplicate = await model.decideApproval(id: "a1", decision: "denied")
+        XCTAssertFalse(duplicate, "An old connection must not release the new connection's admission")
+        XCTAssertEqual(StubURLProtocol.requests.filter { $0.0 == "POST" && $0.1.path == path }.count, 2)
+        StubURLProtocol.releaseHeldResponse(path: path)
+        let currentResult = await current.value
+        XCTAssertTrue(currentResult)
+        await model.settleApprovalReconciliation()
     }
 
     private func pendingApproval(id: String = "a1", summary: String = "Send the note") -> PendingApproval {
