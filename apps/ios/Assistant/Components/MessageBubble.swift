@@ -3738,8 +3738,12 @@ struct RichResponseCards: View {
                     .fixedSize(horizontal: false, vertical: true)
                 detailRows(details)
                 if let linkURL, let url = URL(string: linkURL) {
-                    Link(linkLabel ?? "Open", destination: url)
-                        .font(.caption.weight(.semibold))
+                    Link(destination: url) {
+                        Text(linkLabel ?? "Open")
+                            .multilineTextAlignment(.leading)
+                    }
+                    .font(.caption.weight(.semibold))
+                    .tint(AssistantTheme.accent(for: colorScheme))
                 }
             }
             Spacer(minLength: 0)
@@ -3776,8 +3780,12 @@ struct RichResponseCards: View {
                 }
                 detailRows(details)
                 if let linkURL, let url = URL(string: linkURL) {
-                    Link(linkLabel ?? "Open", destination: url)
-                        .font(.caption.weight(.semibold))
+                    Link(destination: url) {
+                        Text(linkLabel ?? "Open")
+                            .multilineTextAlignment(.leading)
+                    }
+                    .font(.caption.weight(.semibold))
+                    .tint(AssistantTheme.accent(for: colorScheme))
                 }
             }
             Spacer(minLength: 0)
