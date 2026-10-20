@@ -192,7 +192,7 @@ export function OccasionsPanel({
                   Unverified
                 </Badge>
               ) : null}
-              <span className="ml-auto flex flex-wrap justify-end gap-2">
+              <span className="ml-auto flex min-w-0 max-w-full flex-wrap justify-end gap-2">
                 {o.quarantined ? (
                   <>
                     <ActionButton
