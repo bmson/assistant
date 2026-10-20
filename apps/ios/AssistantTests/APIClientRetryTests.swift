@@ -7025,5 +7025,7 @@ extension APIClientRetryTests {
         await model.edits.settle()
         XCTAssertNil(model.personProfiles["other"], "Deleting a person must invalidate cached references in other dossiers")
         XCTAssertTrue(model.edits.failures.isEmpty)
+        XCTAssertEqual(StubURLProtocol.requests.filter { $0.0 == "DELETE" }.map { $0.1.path },
+                       ["/api/mobile/v1/memory/people/removed"])
     }
 }
