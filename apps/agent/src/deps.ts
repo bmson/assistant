@@ -115,6 +115,7 @@ import {
 } from '@assistant/tools/builtin';
 import { ToolDispatcher } from '@assistant/tools/dispatcher';
 import { registerMcpTools } from '@assistant/tools/mcp';
+import { registerPhoneCalendarFallback } from '@assistant/tools/modules/google';
 import { ToolRegistry } from '@assistant/tools/registry';
 import {
   GcsWorkspaceStore,
@@ -907,6 +908,11 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
       getTimezone: ownerTimezone,
     },
   });
+  registerPhoneCalendarFallback(
+    registry,
+    persistence.toolExecution,
+    config.INTERNAL_API_SECRET || config.AUTH_SECRET,
+  );
   const modules: InstalledModuleSet = {
     ...installedModules,
     sweepSteps: [
@@ -1053,6 +1059,11 @@ export function buildDeps(): AgentDeps {
     workspaceRoot,
     persistence,
   });
+  registerPhoneCalendarFallback(
+    registry,
+    persistence.toolExecution,
+    config.INTERNAL_API_SECRET || config.AUTH_SECRET,
+  );
   const modules: InstalledModuleSet = {
     ...installedModules,
     sweepSteps: [

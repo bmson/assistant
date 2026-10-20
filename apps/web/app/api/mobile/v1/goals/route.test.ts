@@ -259,7 +259,9 @@ describe.skipIf(!localEmulator)('Firestore mobile Goals routes with PostgreSQL o
     expect((await action(currentId, { action: 'archive' })).status).toBe(409);
     expect((await action(currentId, { action: 'status', status: 'abandoned' })).status).toBe(200);
     expect((await store.doc('tasks', 'goal-queued-task').get()).get('status')).toBe('cancelled');
-    expect((await store.doc('tasks', 'goal-task').get()).get('status')).toBe('running');
+    // Abandoning a goal fences running work as well as queued work.
+    expect((await store.doc('tasks', 'goal-task').get()).get('status')).toBe('cancelled');
+    expect((await store.doc('tasks', 'goal-task').get()).get('leaseToken')).toBeNull();
     expect((await action(currentId, { action: 'status', status: 'paused' })).status).toBe(200);
     expect((await store.doc('schedules', scheduleId).get()).get('enabled')).toBe(false);
     await store.doc('tasks', 'goal-task').update({ status: 'done' });

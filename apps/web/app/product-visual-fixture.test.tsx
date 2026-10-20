@@ -644,7 +644,7 @@ it.each(fixtureStates)(
   30_000,
 );
 
-it('accounts for all34 source routes and asserts the legacy person redirect', async () => {
+it('accounts for all 34 source routes and asserts the legacy person redirect', async () => {
   const directory = process.env.PRODUCT_VISUAL_QA_DIR;
   const manifest: Array<Record<string, unknown>> = fixtureStates.map((page) => ({
     name: page.name,
@@ -655,9 +655,11 @@ it('accounts for all34 source routes and asserts the legacy person redirect', as
       : page.empty
         ? 'empty'
         : 'loaded',
-    availability: 'retained-product-redirected-by-proxy',
+    availability: page.route.startsWith('/chat')
+      ? 'owner-chat-route'
+      : 'retained-product-redirected-by-proxy',
     evidence:
-      'Actual source component with synthetic read dependencies; not a navigable product route.',
+      'Actual source component with synthetic read dependencies; route admission and live account behavior are not exercised.',
     persistenceFixture:
       page.productName === 'memory-read-only'
         ? 'Firestore read-only branch'
@@ -710,8 +712,9 @@ it('accounts for all34 source routes and asserts the legacy person redirect', as
         {
           sourcePageCount: all.length,
           reachableConsolePages: 6,
+          reachableChatPages: 3,
           rootRedirect: '/settings',
-          retainedProductSourcePages: 27,
+          retainedProductSourcePages: 24,
           before: process.env.PRODUCT_VISUAL_QA_BEFORE === '1',
           pages: manifest,
         },

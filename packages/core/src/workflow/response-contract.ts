@@ -1,3 +1,4 @@
+import { sameCalendarOccurrence } from '@assistant/persistence';
 import { stripBackgroundNoticeEcho } from '../chat-card.js';
 import { communicationReceipt } from '../communication-receipt.js';
 import {
@@ -1829,6 +1830,7 @@ function calendarOverlapSummary(
     const left = candidates[index];
     if (!left) continue;
     for (const right of candidates.slice(index + 1)) {
+      if (sameCalendarOccurrence(left.projected, right.projected)) continue;
       const start = Math.max(left.interval.start, right.interval.start, window?.start ?? -Infinity);
       const end = Math.min(left.interval.end, right.interval.end, window?.end ?? Infinity);
       if (start >= end) continue;

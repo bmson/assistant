@@ -18,6 +18,16 @@ describe('Firestore mobile and web ingress', () => {
     runtimeConfig.RESTORE_REHEARSAL = false;
   });
 
+  it('passes exact calendar snapshot writes to owner-authenticated portable handlers', () => {
+    for (const method of ['PUT', 'DELETE'])
+      expect(status('/api/mobile/v1/calendars', method)).toBe(200);
+    for (const method of ['GET', 'POST', 'PATCH'])
+      expect(status('/api/mobile/v1/calendars', method)).toBe(503);
+    expect(status('/api/mobile/v1/calendars/extra', 'PUT')).toBe(503);
+    runtimeConfig.RESTORE_REHEARSAL = true;
+    expect(status('/api/mobile/v1/calendars', 'PUT')).toBe(503);
+  });
+
   it('passes repair reads, reports, and decisions to authenticated handlers', () => {
     for (const method of ['GET', 'POST'])
       expect(status('/api/mobile/v1/repairs', method)).toBe(200);

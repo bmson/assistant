@@ -120,11 +120,33 @@ jobs:
             -project apps/ios/Assistant.xcodeproj \
             -scheme Assistant \
             -destination "id=${DESTINATION_UDID}" \
-            -resultBundlePath "${RUNNER_TEMP}/Assistant.xcresult" \
+            -derivedDataPath "${RUNNER_TEMP}/Assistant-build" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            test 2>&1 | tee "${RUNNER_TEMP}/xcodebuild.log"
+            build-for-testing 2>&1 | tee "${RUNNER_TEMP}/xcodebuild.log"
+          # The device contains no accounts. Grant only this test app access so
+          # the EventKit fixture exercises real recurring-event reads, with its
+          # own temporary calendar removed at the end of the test.
+          xcrun simctl bootstatus "$DESTINATION_UDID" -b
+          xcrun simctl install "$DESTINATION_UDID" \
+            "${RUNNER_TEMP}/Assistant-build/Build/Products/Debug-iphonesimulator/Assistant.app"
+          xcrun simctl privacy "$DESTINATION_UDID" grant calendar com.baldvinsmarason.assistant
+          xcodebuild \
+            -project apps/ios/Assistant.xcodeproj \
+            -scheme Assistant \
+            -destination "id=${DESTINATION_UDID}" \
+            -derivedDataPath "${RUNNER_TEMP}/Assistant-build" \
+            -resultBundlePath "${RUNNER_TEMP}/Assistant.xcresult" \
+            -parallel-testing-enabled NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            test-without-building 2>&1 | tee -a "${RUNNER_TEMP}/xcodebuild.log"
+          if grep -Eq 'testEventKitReadsRecurringEventsFromSelectedCalendar.*skipped' "${RUNNER_TEMP}/xcodebuild.log"; then
+            echo "::error::The real EventKit read test skipped despite pre-granted calendar access."
+            exit 1
+          fi
 
       # xcodebuild interleaves its diagnostics with thousands of lines of
       # compile commands, and the errors land wherever the parallel jobs

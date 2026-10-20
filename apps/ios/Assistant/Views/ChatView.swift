@@ -2123,7 +2123,10 @@ struct ChatView: View {
 
     private var composerInput: some View {
         composerInputSurface {
-            HStack(alignment: .bottom, spacing: 8) {
+            // Bound the type crossing the multi-branch surface. Expanding the
+            // entire composer through it can overflow Swift metadata decoding
+            // on a physical iPhone, before the first frame is displayed.
+            AnyView(HStack(alignment: .bottom, spacing: 8) {
                 if model.nextMessageAutonomous {
                     // Auto mode lives inside the field as a leading affordance
                     // — the pill above the composer read as a separate banner
@@ -2289,7 +2292,7 @@ struct ChatView: View {
             .padding(.leading, 10)
             .padding(.trailing, 8)
             .padding(.vertical, 8)
-            .frame(minHeight: 60)
+            .frame(minHeight: 60))
         }
         // No manual stroke or top highlight on top of the glass: the glass
         // rim already draws the edge, and a static outline layered over the
@@ -2523,8 +2526,8 @@ struct ChatView: View {
     private var conversationControlBackgroundOpacity: Double { 1 }
 
     @ViewBuilder
-    private func composerInputSurface<Content: View>(
-        @ViewBuilder content: () -> Content
+    private func composerInputSurface(
+        @ViewBuilder content: () -> AnyView
     ) -> some View {
         let shape = RoundedRectangle(
             cornerRadius: AssistantTheme.conversationCornerRadius,

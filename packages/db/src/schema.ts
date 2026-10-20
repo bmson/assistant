@@ -3417,3 +3417,14 @@ export const selfRepairIssues = pgTable(
     ),
   ],
 );
+
+/** Owner-connected calendars carry read-only grants; never used for outgoing mail. */
+export const calendarAccounts = pgTable('calendar_accounts', {
+  id: text('id').primaryKey(),
+  email: text('email').notNull(),
+  clientId: text('client_id').notNull(),
+  refreshTokenEncrypted: text('refresh_token_encrypted').notNull(),
+  scopes: jsonb('scopes').$type<string[]>().notNull(),
+  lastError: text('last_error'),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull(),
+});

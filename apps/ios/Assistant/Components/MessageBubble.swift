@@ -2659,7 +2659,8 @@ struct RichResponseCards: View {
         let content = Label(label, systemImage: "calendar")
             .font(.caption)
             .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-            .lineLimit(1)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
         if let calendarLinkURL = event.calendarLinkURL, let url = URL(string: calendarLinkURL) {
             Link(destination: url) { content }
                 .accessibilityLabel("Open \(event.title) in calendar")
@@ -2801,20 +2802,27 @@ struct RichResponseCards: View {
         let windows = dayRows.isEmpty ? split.days : WeatherPresentation.windowGroups(split.days)
         let hasForecast = !split.days.isEmpty || !dayRows.isEmpty
         let metrics = dayRows.isEmpty ? [] : WeatherPresentation.metrics(forecast.current, fallback: split.current)
+        let locationLabel = Text(AssistantMarkdown.inlineAttributed(location))
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+        let periodLabel = Text(WeatherPresentation.caption(details: details, hasForecast: hasForecast))
+            .font(.caption.weight(.medium))
+            .monospacedDigit()
+            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
 
         return VStack(alignment: .leading, spacing: 15) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text(AssistantMarkdown.inlineAttributed(location))
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.82)
-                Spacer(minLength: 8)
-                Text(WeatherPresentation.caption(details: details, hasForecast: hasForecast))
-                    .font(.caption.weight(.medium))
-                    .monospacedDigit()
-                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                    .lineLimit(1)
+            // Keep the place and forecast period together when they fit;
+            // stack them before either essential label must be truncated.
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    locationLabel.fixedSize()
+                    Spacer(minLength: 8)
+                    periodLabel.fixedSize()
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    locationLabel.fixedSize(horizontal: false, vertical: true)
+                    periodLabel.fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             weatherHeadline(reading: reading, condition: condition, symbol: symbol)
@@ -3223,13 +3231,19 @@ struct RichResponseCards: View {
                     .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
             } else {
                 compactResultRows(passages) { passage in
+                    let stacksHeading = usesAccessibilityLayout && passage.similarity != nil
+                    let headingLayout = stacksHeading
+                        ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+                        : AnyLayout(HStackLayout(alignment: .firstTextBaseline))
                     VStack(alignment: .leading, spacing: 5) {
-                        HStack(alignment: .firstTextBaseline) {
+                        headingLayout {
                             Text(AssistantMarkdown.inlineAttributed(passage.document))
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(AssistantTheme.ink(for: colorScheme))
                                 .fixedSize(horizontal: false, vertical: true)
-                            Spacer(minLength: 6)
+                            if !stacksHeading {
+                                Spacer(minLength: 6)
+                            }
                             if let similarity = passage.similarity {
                                 Text("\(Int((similarity * 100).rounded()))% match")
                                     .font(.caption2.monospacedDigit())
@@ -3277,7 +3291,9 @@ struct RichResponseCards: View {
                                 Link(destination: url) {
                                     Text(AssistantMarkdown.inlineAttributed(file.name))
                                         .font(.subheadline.weight(.semibold))
+                                        .multilineTextAlignment(.leading)
                                 }
+                                .tint(AssistantTheme.accent(for: colorScheme))
                             } else {
                                 Text(AssistantMarkdown.inlineAttributed(file.name))
                                     .font(.subheadline.weight(.semibold))
@@ -4872,6 +4888,7 @@ struct SuggestionCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .multilineTextAlignment(.leading)
             .frame(minHeight: 44, alignment: .leading)
             .accessibilityElement(children: .combine)
         }
@@ -5484,12 +5501,19 @@ enum AssistantMarkdown {
             let withBreaks = request.inline
                 ? tableCellText(readable)
                 : preservingSoftBreaks(readable)
-            return (try? AttributedString(
+            var rendered = (try? AttributedString(
                 markdown: withBreaks,
                 options: .init(
                     interpretedSyntax: request.inline ? .inlineOnlyPreservingWhitespace : .full
                 )
             )) ?? AttributedString(request.source)
+            // User bubbles use the same high-contrast ink for text and links.
+            // Keep links recognizable without relying on their color alone,
+            // and do this only on a cache miss rather than each render.
+            for run in rendered.runs where run.link != nil {
+                rendered[run.range].underlineStyle = .single
+            }
+            return rendered
         }
     }
 
@@ -5992,6 +6016,7 @@ private struct AssistantMarkdownView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .tint(accent)
         .accessibilityElement(children: .contain)
     }
 
@@ -6170,21 +6195,49 @@ private struct AssistantMarkdownView: View {
     // would be defined in terms of itself), so the nesting is expressed as a
     // concrete `NestedList` whose body recurses instead.
     private func listNodesView(_ nodes: [AssistantMarkdown.ListNode]) -> some View {
-        NestedList(nodes: nodes) { node in AnyView(listNodeRow(node)) }
+        NestedList(nodes: nodes, numberMarkerFont: .system(size: baseFontSize * 0.9, weight: .semibold)) { node, numberMarkerSample in
+            AnyView(listNodeRow(node, numberMarkerSample: numberMarkerSample))
+        }
     }
 
     private struct NestedList: View {
         let nodes: [AssistantMarkdown.ListNode]
-        let row: (AssistantMarkdown.ListNode) -> AnyView
+        let numberMarkerFont: Font
+        let row: (AssistantMarkdown.ListNode, String) -> AnyView
+
+        private var numberMarkerSample: String {
+            let digits = nodes.compactMap { node -> Int? in
+                guard case let .number(ordinal) = node.marker else { return nil }
+                return String(ordinal).count
+            }.max() ?? 1
+            return String(repeating: "0", count: digits) + "."
+        }
 
         var body: some View {
+            let markerSample = numberMarkerSample
             VStack(alignment: .leading, spacing: 7) {
                 ForEach(Array(nodes.enumerated()), id: \.offset) { _, node in
                     VStack(alignment: .leading, spacing: 7) {
-                        row(node)
+                        row(node, markerSample)
                         if !node.children.isEmpty {
-                            NestedList(nodes: node.children, row: row)
-                                .padding(.leading, 18)
+                            let children = NestedList(nodes: node.children, numberMarkerFont: numberMarkerFont, row: row)
+                            if case .number = node.marker {
+                                // Anchor child markers at the parent's text
+                                // column; a fixed inset loses hierarchy when
+                                // large parent ordinals outgrow child markers.
+                                HStack(alignment: .top, spacing: 8) {
+                                    Text(markerSample)
+                                        .font(numberMarkerFont)
+                                        .monospacedDigit()
+                                        .hidden()
+                                        .fixedSize()
+                                        .frame(minWidth: 17)
+                                        .accessibilityHidden(true)
+                                    children
+                                }
+                            } else {
+                                children.padding(.leading, 18)
+                            }
                         }
                     }
                 }
@@ -6193,12 +6246,12 @@ private struct AssistantMarkdownView: View {
     }
 
     @ViewBuilder
-    private func listNodeRow(_ node: AssistantMarkdown.ListNode) -> some View {
+    private func listNodeRow(_ node: AssistantMarkdown.ListNode, numberMarkerSample: String) -> some View {
         switch node.marker {
         case .bullet:
             listRow(marker: "•", text: node.text, markerColor: accent)
         case let .number(ordinal):
-            listRow(marker: "\(ordinal).", text: node.text, markerColor: mutedInk)
+            listRow(marker: "\(ordinal).", text: node.text, markerColor: mutedInk, markerSample: numberMarkerSample)
         case let .task(isComplete):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: isComplete ? "checkmark.circle.fill" : "circle")
@@ -6213,10 +6266,15 @@ private struct AssistantMarkdownView: View {
         }
     }
 
-    private func listRow(marker: String, text: String, markerColor: Color) -> some View {
+    private func listRow(marker: String, text: String, markerColor: Color, markerSample: String? = nil) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(marker)
+            // Measure the widest ordinal once per list level. Equal-width
+            // digits keep 9, 10 and 11 aligned even at accessibility sizes.
+            Text(markerSample ?? marker)
+                .hidden()
+                .overlay(alignment: .trailing) { Text(marker) }
                 .font(.system(size: baseFontSize * 0.9, weight: .semibold))
+                .monospacedDigit()
                 .foregroundStyle(markerColor)
                 .frame(minWidth: marker.count > 1 ? 17 : 10, alignment: .trailing)
                 .accessibilityHidden(true)
