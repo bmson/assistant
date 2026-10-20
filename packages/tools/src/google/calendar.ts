@@ -1,8 +1,16 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import {
+  type PhoneCalendarCache,
+  type PhoneCalendarSnapshot,
+  phoneCalendarCoverage,
+  probablePhoneCalendarDuplicate,
+  readPhoneCalendars,
+  sameCalendarOccurrence,
+} from '@assistant/persistence';
 import { z } from 'zod';
 import type { ToolRegistry } from '../registry.js';
 import type { AssistantTool, ToolFlags } from '../types.js';
-import type { GoogleClient } from './client.js';
+import { GoogleClient } from './client.js';
 
 const CAL = 'https://www.googleapis.com/calendar/v3';
 
@@ -77,6 +85,8 @@ export interface CalendarToolDeps {
   client: GoogleClient;
   botEmail: string;
   ownerEmail: string;
+  googleAvailable?: boolean;
+  phoneCalendars?: (agentId: string) => Promise<PhoneCalendarSnapshot | null>;
 }
 
 interface CalendarEntry {
@@ -112,6 +122,66 @@ interface RawEvent {
     responseStatus?: string;
     self?: boolean;
   }>;
+}
+
+function phoneRoster(snapshot: PhoneCalendarSnapshot | null): CalendarEntry[] {
+  return (
+    snapshot?.calendars.map((calendar) => ({
+      id: `iphone:${calendar.id}`,
+      name: `${calendar.name} (iPhone)`,
+      primary: false,
+      accessRole: 'reader',
+      timeZone: snapshot.timeZone,
+    })) ?? []
+  );
+}
+
+function phoneEvents(snapshot: PhoneCalendarSnapshot, calendar: CalendarEntry, query: string) {
+  const params = new URL(query).searchParams;
+  const min = params.get('timeMin');
+  const max = params.get('timeMax');
+  const q = params.get('q')?.toLocaleLowerCase();
+  const events = snapshot.events
+    .filter(
+      (event) =>
+        `iphone:${event.calendarId}` === calendar.id &&
+        (!min ||
+          startedAt({ start: event.end, startTimeZone: snapshot.timeZone }) > Date.parse(min)) &&
+        (!max ||
+          startedAt({ start: event.start, startTimeZone: snapshot.timeZone }) < Date.parse(max)) &&
+        (!q || `${event.summary} ${event.location}`.toLocaleLowerCase().includes(q)),
+    )
+    .map((event) => ({
+      ...normalizeEvent(
+        {
+          id: event.eventId,
+          iCalUID: event.iCalUID,
+          ...(event.originalStartTime
+            ? {
+                originalStartTime: event.allDay
+                  ? { date: event.originalStartTime }
+                  : { dateTime: event.originalStartTime },
+              }
+            : {}),
+          summary: event.summary,
+          location: event.location,
+          start: event.allDay ? { date: event.start } : { dateTime: event.start },
+          end: event.allDay ? { date: event.end } : { dateTime: event.end },
+          transparency: event.blocksTime ? 'opaque' : 'transparent',
+        },
+        calendar,
+      ),
+      ownerResponse: event.ownerResponse,
+    }));
+  events.sort((left, right) => startedAt(left) - startedAt(right));
+  const offsetText = params.get('pageToken') ?? '0';
+  if (!/^\d+$/.test(offsetText)) throw new Error('Invalid iPhone calendar page token');
+  const offset = Number(offsetText);
+  const count = Number(params.get('maxResults'));
+  return {
+    events: events.slice(offset, offset + count),
+    nextPageToken: offset + count < events.length ? String(offset + count) : undefined,
+  };
 }
 
 function urlsIn(text: string): string[] {
@@ -405,13 +475,29 @@ async function collectEvents(
   deps: CalendarToolDeps,
   opts: {
     calendarIds?: string[];
+    agentId: string;
+    timeMin?: string;
+    timeMax?: string;
     maxResults: number;
     pageToken?: string;
     queryKey: string;
     query: (calendarId: string, maxResults: number, pageToken?: string) => string;
   },
 ) {
-  const roster = await fetchCalendars(deps.client);
+  const phone = (await deps.phoneCalendars?.(opts.agentId)) ?? null;
+  let googleUnavailable = false;
+  const googleRoster =
+    deps.googleAvailable === false
+      ? { calendars: [] }
+      : await fetchCalendars(deps.client).catch((error) => {
+          if (!phone) throw error;
+          googleUnavailable = true;
+          return { calendars: [] };
+        });
+  const roster: CalendarRoster = {
+    ...googleRoster,
+    calendars: [...googleRoster.calendars, ...phoneRoster(phone)],
+  };
   const available = roster.calendars;
   const explicit = Boolean(opts.calendarIds?.length);
   const requestedNames = opts.calendarIds ?? [];
@@ -445,12 +531,15 @@ async function collectEvents(
   }
   const targets = resolved.slice(0, MAX_CALENDAR_FANOUT);
   if (targets.length === 0 && !explicit)
-    throw new Error('the assistant account returned no readable calendars');
+    throw new Error(
+      'No readable calendars are connected. On the iPhone, choose calendars and enable assistant access.',
+    );
 
   const queryKey = createHash('sha256')
     .update(
       JSON.stringify({
         query: opts.queryKey,
+        phoneSyncedAt: phone?.syncedAt,
         requested: requestedNames,
         calendars: targets.map((calendar) => calendar.id),
         maxResults: opts.maxResults,
@@ -525,11 +614,18 @@ async function collectEvents(
         pages < MAX_EVENT_PAGES_PER_CALENDAR_PER_CALL
       ) {
         const pageSize = opts.maxResults - buffered.length;
-        const page: { items?: RawEvent[]; nextPageToken?: string } = await deps.client.api(
-          opts.query(calendar.id, pageSize, token || undefined),
-        );
-        buffered.push(...(page.items ?? []).map((raw: RawEvent) => normalizeEvent(raw, calendar)));
-        token = page.nextPageToken ?? null;
+        const query = opts.query(calendar.id, pageSize, token || undefined);
+        if (phone && phoneRoster(phone).some((entry) => entry.id === calendar.id)) {
+          const page = phoneEvents(phone, calendar, query);
+          buffered.push(...page.events);
+          token = page.nextPageToken ?? null;
+        } else {
+          const page: { items?: RawEvent[]; nextPageToken?: string } = await deps.client.api(query);
+          buffered.push(
+            ...(page.items ?? []).map((raw: RawEvent) => normalizeEvent(raw, calendar)),
+          );
+          token = page.nextPageToken ?? null;
+        }
         pages += 1;
       }
       return { id: calendar.id, token, buffered };
@@ -625,7 +721,18 @@ async function collectEvents(
     .filter((cursor) => cursor.token !== null || cursor.buffered.length > 0)
     .map((cursor) => targets.find((calendar) => calendar.id === cursor.id)?.name)
     .filter((name): name is string => Boolean(name));
+  const phoneCoverage =
+    phone && targets.some((calendar) => calendar.id.startsWith('iphone:'))
+      ? phoneCalendarCoverage(phone, opts.timeMin, opts.timeMax)
+      : undefined;
   const notes: string[] = [];
+  if (phoneCoverage?.note) notes.push(phoneCoverage.note);
+  if (googleUnavailable) {
+    unavailable.push({
+      calendar: 'Google Calendar',
+      reason: 'Google calendars could not be read; iPhone results are still available.',
+    });
+  }
   if (truncatedCalendars.length > 0) {
     notes.push(
       `Additional matching events remain on: ${[...new Set(truncatedCalendars)].join(', ')}.`,
@@ -647,8 +754,53 @@ async function collectEvents(
     );
   }
 
+  const duplicateOccurrences = events.flatMap((event, index) => {
+    const original = events
+      .slice(0, index)
+      .find((candidate) => sameCalendarOccurrence(candidate, event));
+    return original
+      ? [
+          {
+            event: { calendarId: event.calendarId, eventId: event.eventId },
+            sameOccurrenceAs: { calendarId: original.calendarId, eventId: original.eventId },
+          },
+        ]
+      : [];
+  });
+  const probableDuplicateOccurrences = events.flatMap((event, index) => {
+    const original = events
+      .slice(0, index)
+      .find(
+        (candidate) =>
+          !sameCalendarOccurrence(candidate, event) &&
+          probablePhoneCalendarDuplicate(candidate, event),
+      );
+    return original
+      ? [
+          {
+            event: { calendarId: event.calendarId, eventId: event.eventId },
+            possibleCopyOf: { calendarId: original.calendarId, eventId: original.eventId },
+          },
+        ]
+      : [];
+  });
   return {
     events,
+    ...(probableDuplicateOccurrences.length
+      ? {
+          probableDuplicateOccurrences,
+          probableDuplicateNote:
+            'These iPhone mirrors match title, start and end, with no conflicting location. Treat them as probable duplicate listings, not scheduling conflicts. Identity is unverified; retain both sources and do not edit or cancel either copy based on similarity.',
+        }
+      : {}),
+    ...(duplicateOccurrences.length
+      ? {
+          duplicateOccurrences,
+          duplicateNote:
+            'Each duplicateOccurrences pair is one event listed on multiple calendars. Do not count it twice or report a scheduling conflict between its copies. Source records are retained.',
+        }
+      : {}),
+    ...(phoneCoverage ? { phoneCalendarCoverage: phoneCoverage } : {}),
     calendarsRequested: requestedNames,
     calendarsResolved: resolved.map(({ id, name, timeZone }) => ({
       id,
@@ -663,9 +815,12 @@ async function collectEvents(
     calendarRosterComplete: !rosterTruncated,
     ...(roster.nextPageToken ? { calendarRosterNextPageToken: roster.nextPageToken } : {}),
     ...(nextPageToken ? { nextPageToken } : {}),
-    ...(chronologicalPrefixThrough ? { chronologicalPrefixThrough } : {}),
+    ...(chronologicalPrefixThrough && phoneCoverage?.complete !== false
+      ? { chronologicalPrefixThrough }
+      : {}),
     ...(paginationUnavailable ? { paginationUnavailable: true } : {}),
     complete:
+      phoneCoverage?.complete !== false &&
       unresolved.length === 0 &&
       unavailable.length === 0 &&
       !fanoutTruncated &&
@@ -850,6 +1005,7 @@ export async function listEventsInWindow(
   return collectEvents(
     { client, botEmail: '', ownerEmail: '' },
     {
+      agentId: '',
       maxResults,
       queryKey: `events:${opts.timeMin.toISOString()}:${opts.timeMax.toISOString()}:singleEvents=true:orderBy=startTime`,
       query: (calendarId, pageSize, pageToken) => {
@@ -877,7 +1033,7 @@ export function registerCalendarTools(
     {
       name: 'calendar.availability',
       description:
-        'Check when the owner is free or busy. Covers every calendar shared with the assistant, plus its own. Times are ISO 8601 with offset.',
+        'Check when the owner is free or busy. Covers Google calendars and selected calendars synced from the iPhone. Repeated busy intervals from different calendars do not imply an event conflict. Times are ISO 8601 with offset.',
       inputSchema: z.object({
         timeMin: z.string().datetime({ offset: true }),
         timeMax: z.string().datetime({ offset: true }),
@@ -885,34 +1041,52 @@ export function registerCalendarTools(
       risk: 'autonomous',
       acceptsUntrustedInput: true,
       cacheTtlSeconds: 0,
-      execute: async (args) => {
+      execute: async (args, ctx) => {
+        const phone = (await deps.phoneCalendars?.(ctx.agentId)) ?? null;
+        const phoneCoverage = phone
+          ? phoneCalendarCoverage(phone, args.timeMin, args.timeMax)
+          : undefined;
         // Ask about every calendar this account can see, not just the bot's own
         // and the owner's address: a busy block on a shared "Work" calendar is
         // exactly as blocking as one on the owner's primary.
         let calendarRosterComplete = true;
-        const roster: CalendarRoster = await fetchCalendars(deps.client).catch(() => {
-          calendarRosterComplete = false;
-          return { calendars: [] as CalendarEntry[], nextPageToken: undefined };
-        });
+        const roster: CalendarRoster =
+          deps.googleAvailable === false
+            ? { calendars: [] }
+            : await fetchCalendars(deps.client).catch(() => {
+                calendarRosterComplete = false;
+                return { calendars: [] as CalendarEntry[], nextPageToken: undefined };
+              });
         calendarRosterComplete = calendarRosterComplete && !roster.nextPageToken;
-        const ids = new Set<string>([deps.botEmail, deps.ownerEmail]);
+        const ids = new Set<string>(
+          deps.googleAvailable === false ? [] : [deps.botEmail, deps.ownerEmail].filter(Boolean),
+        );
         for (const calendar of roster.calendars) ids.add(calendar.id);
         const items = [...ids].slice(0, MAX_FREEBUSY_ITEMS).map((id) => ({ id }));
         const nameFor = new Map(roster.calendars.map((c) => [c.id, c.name]));
 
-        const res = await deps.client.api<{
-          calendars?: Record<
-            string,
-            { busy?: Array<{ start: string; end: string }>; errors?: unknown[] }
-          >;
-        }>(`${CAL}/freeBusy`, {
-          method: 'POST',
-          body: JSON.stringify({
-            timeMin: args.timeMin,
-            timeMax: args.timeMax,
-            items,
-          }),
-        });
+        const res =
+          items.length === 0
+            ? { calendars: {} }
+            : await deps.client
+                .api<{
+                  calendars?: Record<
+                    string,
+                    { busy?: Array<{ start: string; end: string }>; errors?: unknown[] }
+                  >;
+                }>(`${CAL}/freeBusy`, {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    timeMin: args.timeMin,
+                    timeMax: args.timeMax,
+                    items,
+                  }),
+                })
+                .catch((error) => {
+                  if (!phone) throw error;
+                  calendarRosterComplete = false;
+                  return { calendars: {} };
+                });
 
         const calendars = res.calendars ?? {};
         const busy: Array<{ start: string; end: string; calendar: string; calendarId: string }> =
@@ -966,11 +1140,38 @@ export function registerCalendarTools(
           for (const slot of Array.isArray(slots) ? slots : [])
             busy.push({ ...slot, calendar: label, calendarId: id });
         }
+        if (phone) {
+          for (const calendar of phoneRoster(phone)) {
+            for (const event of phoneEvents(
+              phone,
+              calendar,
+              `${CAL}/events?${new URLSearchParams({ timeMin: args.timeMin, timeMax: args.timeMax, maxResults: '2000' })}`,
+            ).events) {
+              if (event.blocksTime && event.ownerResponse !== 'declined')
+                busy.push({
+                  start: new Date(startedAt(event)).toISOString(),
+                  end: new Date(startedAt({ ...event, start: event.end })).toISOString(),
+                  calendar: calendar.name,
+                  calendarId: calendar.id,
+                });
+            }
+            calendarCoverage.push({
+              calendarId: calendar.id,
+              name: calendar.name,
+              status: phoneCoverage?.complete ? 'checked' : 'unavailable',
+            });
+          }
+        }
         busy.sort((a, b) => startedAt(a) - startedAt(b));
 
         const complete =
-          calendarRosterComplete && ids.size === items.length && unavailable.length === 0;
+          phoneCoverage?.complete !== false &&
+          calendarRosterComplete &&
+          ids.size === items.length &&
+          unavailable.length === 0 &&
+          (items.length > 0 || Boolean(phone));
         const coverageNotes: string[] = [];
+        if (phoneCoverage?.note) coverageNotes.push(phoneCoverage.note);
         if (!calendarRosterComplete) {
           coverageNotes.push('The readable calendar list could not be loaded.');
         }
@@ -983,8 +1184,12 @@ export function registerCalendarTools(
 
         return {
           busy,
-          calendarsChecked: items.map(({ id }) => nameFor.get(id) ?? id),
-          calendarIdsRequested: [...ids],
+          calendarsChecked: [
+            ...items.map(({ id }) => nameFor.get(id) ?? id),
+            ...phoneRoster(phone).map((calendar) => calendar.name),
+          ],
+          calendarIdsRequested: [...ids, ...phoneRoster(phone).map((calendar) => calendar.id)],
+          ...(phoneCoverage ? { phoneCalendarCoverage: phoneCoverage } : {}),
           calendarCoverage,
           calendarRosterComplete,
           coverageWindow: { timeMin: args.timeMin, timeMax: args.timeMax },
@@ -1006,13 +1211,23 @@ export function registerCalendarTools(
     {
       name: 'calendar.list_calendars',
       description:
-        'List every calendar the assistant can read — its own and any shared with it. Use this to find out which calendars exist before reading a specific one.',
+        'List every calendar the assistant can read, including selected iPhone calendars synced with assistant access enabled. Use this to find out which calendars exist before reading a specific one.',
       inputSchema: z.object({ pageToken: z.string().max(4096).optional() }),
       risk: 'autonomous',
       acceptsUntrustedInput: true,
       cacheTtlSeconds: 0,
-      execute: async (args) => {
-        const roster = await fetchCalendarPage(deps.client, args.pageToken);
+      execute: async (args, ctx) => {
+        const phone = (await deps.phoneCalendars?.(ctx.agentId)) ?? null;
+        let googleComplete = true;
+        const roster =
+          deps.googleAvailable === false
+            ? { calendars: [] }
+            : await fetchCalendarPage(deps.client, args.pageToken).catch((error) => {
+                if (!phone) throw error;
+                googleComplete = false;
+                return { calendars: [] };
+              });
+        if (!args.pageToken) roster.calendars.push(...phoneRoster(phone));
         return {
           calendars: roster.calendars.map((c) => ({
             id: c.id,
@@ -1022,7 +1237,7 @@ export function registerCalendarTools(
             access: c.accessRole,
           })),
           ...(roster.nextPageToken ? { nextPageToken: roster.nextPageToken } : {}),
-          complete: !roster.nextPageToken,
+          complete: googleComplete && !roster.nextPageToken,
         };
       },
     },
@@ -1037,7 +1252,7 @@ export function registerCalendarTools(
     {
       name: 'calendar.list_events',
       description:
-        'List events in a time range across every calendar the assistant can read: its own plus all shared calendars. This is the default for "what is happening Monday" and "what\'s on my calendar". Do not ask which calendar or provider; omit calendarIds to read them all. Results include literal organizer, attendee, location, and event/meeting links when Google returned them, plus whether coverage was complete.',
+        'List events in a time range across every calendar the assistant can read: its own, all shared calendars, and selected calendars synced from the iPhone. Copies with the same occurrence identity are the same obligation, not conflicts. This is the default for "what is happening Monday" and "what\'s on my calendar". Do not ask which calendar or provider; omit calendarIds to read them all. Results include literal organizer, attendee, location, and event/meeting links when Google returned them, plus whether coverage was complete.',
       inputSchema: z.object({
         timeMin: z.string().datetime({ offset: true }),
         timeMax: z.string().datetime({ offset: true }),
@@ -1048,8 +1263,11 @@ export function registerCalendarTools(
       }),
       risk: 'autonomous',
       acceptsUntrustedInput: true,
-      execute: async (args) =>
+      execute: async (args, ctx) =>
         collectEvents(deps, {
+          agentId: ctx.agentId,
+          timeMin: args.timeMin,
+          timeMax: args.timeMax,
           calendarIds: args.calendarIds,
           maxResults: args.maxResults,
           pageToken: args.pageToken,
@@ -1079,7 +1297,7 @@ export function registerCalendarTools(
     {
       name: 'calendar.search_events',
       description:
-        'Search by keyword (attendee, title, location, or description) across every calendar the assistant can read: its own plus all shared calendars. Do not ask which calendar or provider; omit calendarIds to search them all. Results include literal organizer, attendee, location, and event/meeting links when Google returned them, plus calendar identity, coverage, and ISO 8601 times.',
+        'Search by keyword (attendee, title, location, or description) across every calendar the assistant can read: its own, all shared calendars, and selected calendars synced from the iPhone. Copies with the same occurrence identity are the same obligation, not conflicts. Do not ask which calendar or provider; omit calendarIds to search them all. Results include literal organizer, attendee, location, and event/meeting links when Google returned them, plus calendar identity, coverage, and ISO 8601 times.',
       inputSchema: z.object({
         query: z.string().min(1).max(200),
         timeMin: z.string().datetime({ offset: true }).optional(),
@@ -1091,8 +1309,11 @@ export function registerCalendarTools(
       }),
       risk: 'autonomous',
       acceptsUntrustedInput: true,
-      execute: async (args) =>
+      execute: async (args, ctx) =>
         collectEvents(deps, {
+          agentId: ctx.agentId,
+          timeMin: args.timeMin,
+          timeMax: args.timeMax,
           calendarIds: args.calendarIds,
           maxResults: args.maxResults,
           pageToken: args.pageToken,
@@ -1510,4 +1731,24 @@ export function registerCalendarReadTools(
   deps: CalendarToolDeps,
 ): ToolRegistry {
   return registerCalendarTools(registry, deps, { readOnly: true });
+}
+
+/** Calendar access remains available to a phone-only installation without Google OAuth. */
+export function registerPhoneCalendarFallback(
+  registry: ToolRegistry,
+  cache: PhoneCalendarCache,
+  secret: string,
+) {
+  if (registry.get('calendar.list_events')) return;
+  registerCalendarReadTools(registry, {
+    client: new GoogleClient({
+      clientId: 'iphone-calendar',
+      clientSecret: secret || randomBytes(32).toString('hex'),
+      refreshToken: '',
+    }),
+    botEmail: '',
+    ownerEmail: '',
+    googleAvailable: false,
+    phoneCalendars: (agentId) => readPhoneCalendars(cache, agentId),
+  });
 }

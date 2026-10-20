@@ -3,10 +3,10 @@
   "purpose": "Source composition and route drift evidence only; not a deployment or configured-runtime receipt.",
   "runtimeSources": {
     "packages/config/src/index.ts": "d65963a4a350f41242da86910f085d60909f13b584aa710e4a0423f60437fe9b",
-    "apps/agent/src/deps.ts": "c269a9646faecb88ebb9356ca25f8d0e751ea6833305697ba0cf4ca964c90299",
+    "apps/agent/src/deps.ts": "834cd2eae4ce22015789e28770724681f07e2daa369bb851949ba7d6447dacf6",
     "apps/agent/src/index.ts": "6da57b60f853ca6622142a12b70bb31a73e8155eac30dd7d905218c19ca2fd56",
-    "apps/web/lib/server.ts": "df2cd83f7c34ac905715baccbcca0e63a033bec34b0b58e65a22d01b5b1106f5",
-    "apps/web/proxy.ts": "a745fba9df94c27e8e782739c874e4bbb0b9dbe48eb924d23326353bf4540125",
+    "apps/web/lib/server.ts": "d178fa1a8285f3fea7bd89c573d4860af6e5a2f8816a6d1041277234603002ac",
+    "apps/web/proxy.ts": "272a503b301d93bb9690b8ad579d073997081023570bc7138848efc0acec007d",
     "packages/db/drizzle/meta/_journal.json": "f7dee0462df8ea55a23c293fb451da52f8433098c1761c549c84a9916c5236da",
     "infra/gcp/release-contracts.json": "cc4f5f333545ce12a63b081b720c621c8bef25623bc17aecb5dbe5f85c437680"
   },
@@ -75,7 +75,7 @@
     }
   },
   "agentWebSchemaCompatible": true,
-  "webApiRouteCount": 95,
+  "webApiRouteCount": 96,
   "routes": {
     "apps/web/app/api/audit/[id]/route.ts": {
       "methods": ["GET"],
@@ -152,6 +152,10 @@
     "apps/web/app/api/mobile/v1/bootstrap/route.ts": {
       "methods": ["GET"],
       "sha256": "114f4f3803727c84617b59c30df2679159257e8bba5b9135ef0ba953d312123a"
+    },
+    "apps/web/app/api/mobile/v1/calendars/route.ts": {
+      "methods": ["DELETE", "PUT"],
+      "sha256": "7aff24e407d761aaccf026e937a4d0066937376f9406bb51b88957396029b065"
     },
     "apps/web/app/api/mobile/v1/calls/[id]/route.ts": {
       "methods": ["GET", "POST"],

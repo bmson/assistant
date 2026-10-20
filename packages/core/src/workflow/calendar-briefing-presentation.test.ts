@@ -901,3 +901,37 @@ describe('calendar day and practical briefing fidelity', () => {
 function stringLink(id: string): string {
   return `event?eid=${id}`;
 }
+
+it('does not present two provider copies with one occurrence UID as a scheduling conflict', () => {
+  const original = {
+    ...timed,
+    calendarId: 'google-work',
+    iCalUID: 'invitation-123',
+    ownerResponse: 'accepted',
+    summary: 'Review',
+  };
+  const copy = {
+    ...original,
+    calendarId: 'iphone:work',
+    eventId: 'phone-copy',
+    summary: 'Review invitation',
+  };
+  const text = verifiedReadResponse(request, evidence([original, copy]) as never);
+  expect(text).not.toContain('Scheduling conflict');
+  expect(text).not.toContain('Possible overlap');
+});
+
+it('treats a matching phone mirror as a duplicate and retains a distinct accepted overlap', () => {
+  const original = { ...timed, calendarId: 'google-work', ownerResponse: 'accepted' };
+  const copy = { ...original, calendarId: 'iphone:work', eventId: 'phone-copy' };
+  const other = {
+    ...original,
+    calendarId: 'personal',
+    eventId: 'dentist',
+    summary: 'Dentist appointment',
+  };
+  const text = verifiedReadResponse(request, evidence([original, copy, other]) as never);
+  expect(text).not.toMatch(/Scheduling conflict[^\n]*Project review[^\n]*and[^\n]*Project review/);
+  expect(text).toContain('Dentist appointment');
+  expect(text).toContain('Scheduling conflict');
+});
