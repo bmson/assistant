@@ -1,4 +1,5 @@
-name: iOS
+# Temporary diagnostic branch only; no app or test source changes.
+name: iOS stream follow targeted comparison
 
 permissions:
   contents: read
@@ -61,8 +62,25 @@ jobs:
     if: needs.changes.outputs.ios == 'true'
     runs-on: macos-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: production-base
+            source: c790625c3f7f66da9dcf40b98d798c045f38735f
+          - label: email-candidate
+            source: ca15fe81ab955d9fc90dae638aa2e596c4bd5f71
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ matrix.source }}
+      - name: Verify exact unmodified test source identity
+        env:
+          EXPECTED_SOURCE: ${{ matrix.source }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          git status --porcelain
+          shasum -a 256 apps/ios/AssistantTests/APIClientRetryTests.swift
 
       # The app targets iOS 18 but compiles iOS 26 APIs behind
       # `if #available(iOS 26.0, *)` — the Liquid Glass surfaces in ChatView.
@@ -132,21 +150,28 @@ jobs:
           xcrun simctl install "$DESTINATION_UDID" \
             "${RUNNER_TEMP}/Assistant-build/Build/Products/Debug-iphonesimulator/Assistant.app"
           xcrun simctl privacy "$DESTINATION_UDID" grant calendar com.baldvinsmarason.assistant
-          xcodebuild \
-            -project apps/ios/Assistant.xcodeproj \
-            -scheme Assistant \
-            -destination "id=${DESTINATION_UDID}" \
-            -derivedDataPath "${RUNNER_TEMP}/Assistant-build" \
-            -resultBundlePath "${RUNNER_TEMP}/Assistant.xcresult" \
-            -parallel-testing-enabled NO \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            test-without-building 2>&1 | tee -a "${RUNNER_TEMP}/xcodebuild.log"
-          if grep -Eq 'testEventKitReadsRecurringEventsFromSelectedCalendar.*skipped' "${RUNNER_TEMP}/xcodebuild.log"; then
-            echo "::error::The real EventKit read test skipped despite pre-granted calendar access."
-            exit 1
-          fi
+          mkdir -p "${RUNNER_TEMP}/stream-results"
+          overall=0
+          for attempt in 1 2 3; do
+            set +e
+            xcodebuild \
+              -project apps/ios/Assistant.xcodeproj \
+              -scheme Assistant \
+              -destination "id=${DESTINATION_UDID}" \
+              -derivedDataPath "${RUNNER_TEMP}/Assistant-build" \
+              -resultBundlePath "${RUNNER_TEMP}/stream-results/attempt-${attempt}.xcresult" \
+              -parallel-testing-enabled NO \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
+              -only-testing:AssistantTests/APIClientRetryTests/testChatFollowsNewMessagesAndGrowingStreamWhileAtBottom \
+              test-without-building 2>&1 | tee -a "${RUNNER_TEMP}/xcodebuild.log"
+            result=${PIPESTATUS[0]}
+            set -e
+            echo "attempt=${attempt} exit=${result}" | tee -a "${RUNNER_TEMP}/stream-results/attempt-status.txt"
+            if [ "$result" -ne 0 ]; then overall=1; fi
+          done
+          exit "$overall"
 
       # xcodebuild interleaves its diagnostics with thousands of lines of
       # compile commands, and the errors land wherever the parallel jobs
@@ -169,6 +194,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
         with:
-          name: ios-xcresult-${{ github.sha }}
-          path: ${{ runner.temp }}/Assistant.xcresult
+          name: stream-follow-${{ matrix.label }}-${{ matrix.source }}
+          path: |
+            ${{ runner.temp }}/stream-results
+            ${{ runner.temp }}/xcodebuild.log
           retention-days: 14
