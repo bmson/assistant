@@ -233,7 +233,9 @@ struct VoiceProfileEditor: View {
         guard !loaded, !isLoading, !isSaving else { return }
         isLoading = true
         loadFailed = false
-        let response = await model.voiceProfile()
+        let response: VoiceProfileResponse?
+        if let cached = model.cachedVoiceProfile { response = cached }
+        else { response = await model.voiceProfile() }
         isLoading = false
         guard !Task.isCancelled else { return }
         guard let response else {

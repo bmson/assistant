@@ -154,10 +154,23 @@ final class AppModel {
         }
     }
     private(set) var bootstrap: BootstrapResponse?
-    private(set) var overview: OverviewResponse?
+    let edits = OptimisticEditStore()
+    @ObservationIgnored private var memoryErasureToken: UUID? {
+        didSet { edits.retryBlockedResources = memoryErasureToken == nil ? [] : [.memory] }
+    }
+    private(set) var overview: OverviewResponse? {
+        get { edits.visible.overview }
+        set { edits.updateRemote(resources: [.overview]) { $0.overview = newValue } }
+    }
     private(set) var archivedActivity: ActivityList?
-    private(set) var archivedGoals: GoalsDashboard?
-    private(set) var workspace: WorkspaceResponse?
+    private(set) var archivedGoals: GoalsDashboard? {
+        get { edits.visible.archivedGoals }
+        set { edits.updateRemote(resources: [.archivedGoals]) { $0.archivedGoals = newValue } }
+    }
+    private(set) var workspace: WorkspaceResponse? {
+        get { edits.visible.workspace }
+        set { edits.updateRemote(resources: [.workspace]) { $0.workspace = newValue } }
+    }
     private(set) var workspacePagesLoading: Set<String> = []
     private(set) var workspacePageErrors: [String: String] = [:]
     private(set) var documentPageLoading = false
@@ -167,16 +180,47 @@ final class AppModel {
     private(set) var peoplePageError: String?
     private(set) var memoryReviewCount = 0
     private(set) var mcpConnections: [McpConnection] = []
-    private(set) var modelProviders: ModelProviderSettings?
-    private(set) var savedCards: [SavedCardRecord] = []
+    private(set) var mcpConnectionsLoaded = false
+    private(set) var modelProviders: ModelProviderSettings? {
+        get { edits.visible.modelProviders }
+        set { edits.updateRemote(resources: [.providers]) { $0.modelProviders = newValue } }
+    }
+    private(set) var savedCards: [SavedCardRecord] {
+        get { edits.visible.savedCards }
+        set { edits.updateRemote(resources: [.cards]) { $0.savedCards = newValue } }
+    }
     private(set) var activeConversation: ConversationView?
-    private(set) var personProfiles: [String: PersonProfileResponse] = [:]
+    private(set) var personProfiles: [String: PersonProfileResponse] {
+        get { edits.visible.personProfiles }
+        set { edits.updateRemote(resources: [.person("")]) { $0.personProfiles = newValue } }
+    }
     /// The People directory, loaded when that screen opens.
-    private(set) var people: [PersonSummary] = []
+    private(set) var people: [PersonSummary] {
+        get { edits.visible.people }
+        set { edits.updateRemote(resources: [.people]) { $0.people = newValue } }
+    }
     private(set) var peopleLoaded = false
+    private(set) var cachedCalls: [PhoneCall]?
+    private(set) var cachedSituationPacks: SituationOverview?
+    @ObservationIgnored private var graphCache: [RelationshipGraphQuery: RelationshipGraphSnapshot] = [:]
+    @ObservationIgnored private var graphCacheRecency: [RelationshipGraphQuery] = []
+    @ObservationIgnored private var memoryLibraryRecency: [MemoryLibraryQuery] = []
+
+    struct RelationshipGraphQuery: Hashable {
+        let personID: String?
+        let entityID: String?
+        let query: String
+    }
+
+    func cachedRelationshipGraph(personID: String? = nil, entityID: String? = nil, query: String = "") -> RelationshipGraphSnapshot? {
+        graphCache[RelationshipGraphQuery(personID: personID, entityID: entityID, query: query)]
+    }
     /// Cards keyed by contact id, so reopening a person is instant and a
     /// tapped relationship can push straight through to the other person.
-    private(set) var personCards: [String: PersonCard] = [:]
+    private(set) var personCards: [String: PersonCard] {
+        get { edits.visible.personCards }
+        set { edits.updateRemote(resources: [.person("")]) { $0.personCards = newValue } }
+    }
     private(set) var messages: [ChatMessage] = []
     private(set) var isLoading = false
     private(set) var isSending = false {
@@ -600,7 +644,18 @@ final class AppModel {
 
     func relationshipGraph(personID: String? = nil, entityID: String? = nil, query: String = "") async -> RelationshipGraphSnapshot? {
         guard let client else { return nil }
-        do { return try await client.relationshipGraph(personID: personID, entityID: entityID, query: query) }
+        let version = connectionVersion
+        let revision = edits.revision(for: [.memory])
+        do {
+            let snapshot = try await client.relationshipGraph(personID: personID, entityID: entityID, query: query)
+            guard connectionIsCurrent(client, version: version), edits.revision(for: [.memory]) == revision else { return nil }
+            let key = RelationshipGraphQuery(personID: personID, entityID: entityID, query: query)
+            graphCache[key] = snapshot
+            graphCacheRecency.removeAll { $0 == key }
+            graphCacheRecency.append(key)
+            while graphCacheRecency.count > 12 { graphCache.removeValue(forKey: graphCacheRecency.removeFirst()) }
+            return snapshot
+        }
         catch where isRequestCancellation(error) { return nil }
         catch { reportError(error); return nil }
     }
@@ -772,7 +827,7 @@ final class AppModel {
     /// Supplementary reads and device setup follow an authenticated bootstrap.
     /// They cannot reject a usable pairing or publish into a newer session.
     private func finishConnectionSetup(using client: APIClient, version: Int,
-                                       prefetchedOverview: Result<OverviewResponse, Error>? = nil) async {
+                                       prefetchedOverview: ScopedOverviewRead? = nil) async {
         guard connectionIsCurrent(client, version: version) else { return }
         hasSavedConnection = true
         defaults.set(true, forKey: configuredKey)
@@ -1513,13 +1568,25 @@ final class AppModel {
         nextMessageAutonomous = false
         activeConversation = nil
         bootstrap = nil
+        sharedWorkspaceRead?.task.cancel()
+        sharedWorkspaceRead = nil
+        sharedOverviewRead?.task.cancel()
+        sharedOverviewRead = nil
+        memoryErasureToken = nil
+        edits.reset()
         overview = nil
         archivedActivity = nil
         archivedGoals = nil
         workspace = nil
         modelProviders = nil
         mcpConnections = []
+        mcpConnectionsLoaded = false
         savedCards = []
+        cachedCalls = nil
+        cachedSituationPacks = nil
+        graphCache = [:]
+        graphCacheRecency = []
+        memoryLibraryRecency = []
         memoryReviewCount = 0
         people = []
         peopleLoaded = false
@@ -1649,15 +1716,22 @@ final class AppModel {
 
     /// One overview read as a value, so it can run beside another request and be
     /// judged on its own once the other has landed.
-    private func fetchOverview(_ client: APIClient) async -> Result<OverviewResponse, Error> {
-        do { return .success(try await client.overview()) } catch { return .failure(error) }
+    private struct ScopedOverviewRead {
+        let editRevision: Int
+        let result: Result<OverviewResponse, Error>
     }
 
-    private func applyOverviewResult(_ result: Result<OverviewResponse, Error>,
+    private func fetchOverview(_ client: APIClient) async -> ScopedOverviewRead {
+        let revision = edits.revision(for: [.overview])
+        do { return ScopedOverviewRead(editRevision: revision, result: .success(try await client.overview())) }
+        catch { return ScopedOverviewRead(editRevision: revision, result: .failure(error)) }
+    }
+
+    private func applyOverviewResult(_ read: ScopedOverviewRead,
                                      using client: APIClient, version: Int, reportFailure: Bool) {
-        guard connectionIsCurrent(client, version: version) else { return }
+        guard connectionIsCurrent(client, version: version), read.editRevision == edits.revision(for: [.overview]) else { return }
         do {
-            overview = withLocalApprovalDecisions(try result.get())
+            overview = withLocalApprovalDecisions(try read.result.get())
             clearRecoveredError(from: .overview)
         } catch {
             if reportFailure {
@@ -1679,6 +1753,7 @@ final class AppModel {
         guard isSceneActive != isNowActive else { return }
         isSceneActive = isNowActive
         if isNowActive {
+            edits.refreshConfirmed()
             discardStaleConnectionsIfNeeded()
             if bootstrap != nil { startIdlePolling() }
             resumeInterruptedTurn()
@@ -1724,9 +1799,22 @@ final class AppModel {
     func refreshOverview(reportFailure: Bool = true) async -> Bool {
         guard let client else { return false }
         let version = connectionVersion
+        let editRevision = edits.revision(for: [.overview])
         do {
-            let response = try await client.overview()
-            guard connectionIsCurrent(client, version: version) else { return false }
+            let request: Task<OverviewResponse, Error>
+            let requestID: UUID
+            if let shared = sharedOverviewRead, shared.version == version, shared.revision == editRevision {
+                request = shared.task
+                requestID = shared.id
+            } else {
+                request = Task { try await client.overview() }
+                requestID = UUID()
+                sharedOverviewRead = (version, editRevision, requestID, request)
+            }
+            defer { if sharedOverviewRead?.id == requestID { sharedOverviewRead = nil } }
+            let response = try await request.value
+            guard !Task.isCancelled else { return false }
+            guard edits.revision(for: [.overview]) == editRevision, connectionIsCurrent(client, version: version) else { return false }
             overview = withLocalApprovalDecisions(response)
             documentPageError = nil
             clearRecoveredError(from: .overview)
@@ -1877,93 +1965,231 @@ final class AppModel {
         }
     }
 
-    func createGoal(_ goal: GoalMutation) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
-            try await client.createGoal(goal)
-            reconcileAfterMutation()
-            return true
-        } catch {
-            reportError(error)
+    /// Acceptance is synchronous; the app owns the write after the editor closes.
+    /// Only edits with a deterministic local projection use this path.
+    private func enqueueEdit(
+        _ title: String, draft: String = "", resources: Set<MobileEditResource>, retrySafe: Bool = true,
+        patch: @escaping OptimisticEditStore.Patch,
+        write: @escaping @MainActor (APIClient) async throws -> Void
+    ) -> Bool {
+        guard let client else {
+            errorMessage = "Connect to your assistant before saving."
             return false
         }
+        guard memoryErasureToken == nil || !resources.contains(.memory) else {
+            errorMessage = "Memory erasure is still finishing. Try again when it completes."
+            return false
+        }
+        let version = connectionVersion
+        edits.reconcile = { [weak self] resources in
+            guard let self, self.connectionIsCurrent(client, version: version) else { return false }
+            return await self.reconcileEdits(resources)
+        }
+        edits.submit(title: title, draft: draft, resources: resources, retrySafe: retrySafe, patch: patch) { [weak self] in
+            guard let self, self.connectionIsCurrent(client, version: version) else { throw CancellationError() }
+            try await write(client)
+            guard self.connectionIsCurrent(client, version: version) else { throw CancellationError() }
+        }
+        return true
+    }
+
+    private func reconcileEdits(_ resources: Set<MobileEditResource>) async -> Bool {
+        async let workspaceRead = resources.contains(.workspace) ? refreshWorkspace(reportFailure: false) : true
+        async let overviewRead = resources.contains(.overview) ? refreshOverview(reportFailure: false) : true
+        async let providersRead = resources.contains(.providers) ? refreshModelProviders(reportFailure: false) : true
+        async let cardsRead = resources.contains(.cards) ? refreshCards(reportFailure: false) : true
+        async let peopleRead = reconcilePeopleEdits(resources)
+        async let commitmentsRead = resources.contains(.commitments) ? reloadCommitments() : true
+        async let archiveRead = resources.contains(.archivedGoals) ? reloadArchivedGoals() : true
+        async let libraryRead = reconcileMemoryLibraries(resources)
+        async let voiceRead = resources.contains(.voiceProfile) ? reloadVoiceProfile() : true
+        let results = await [workspaceRead, overviewRead, providersRead, cardsRead, peopleRead, commitmentsRead, libraryRead, voiceRead, archiveRead]
+        return results.allSatisfy { $0 }
+    }
+
+    private func reconcilePeopleEdits(_ resources: Set<MobileEditResource>) async -> Bool {
+        guard let client else { return false }
+        let version = connectionVersion
+        let readResources = resources.filter { resource in
+            switch resource {
+            case .people, .personCaches, .person: true
+            default: false
+            }
+        }
+        let revision = edits.revision(for: readResources)
+        do {
+            if resources.contains(.people) {
+                let response = try await client.people()
+                guard connectionIsCurrent(client, version: version), edits.revision(for: readResources) == revision else { return false }
+                people = response.people
+                peoplePagination = response.pagination.flatMap { $0.isSupported ? $0 : nil }
+                peopleGeneration = response.generatedAt
+                peopleLoaded = true
+            }
+            for resource in resources {
+                guard case let .person(id) = resource else { continue }
+                async let profile = client.personProfile(id: id)
+                async let card = client.personCard(id: id)
+                let (loadedProfile, loadedCard) = try await (profile, card)
+                guard connectionIsCurrent(client, version: version), edits.revision(for: readResources) == revision else { return false }
+                edits.updateRemote(resources: [.person(id)]) { state in
+                    state.personProfiles[id] = loadedProfile
+                    state.personCards[id] = loadedCard
+                }
+            }
+            return true
+        } catch { return false }
+    }
+
+    private func reloadArchivedGoals() async -> Bool {
+        guard let client else { return false }
+        let version = connectionVersion
+        let revision = edits.revision(for: [.archivedGoals])
+        do {
+            let response = try await client.goals(archived: true)
+            guard connectionIsCurrent(client, version: version), edits.revision(for: [.archivedGoals]) == revision else { return false }
+            archivedGoals = response
+            return true
+        } catch { return false }
+    }
+
+    private func reloadCommitments() async -> Bool {
+        guard let client else { return false }
+        let version = connectionVersion
+        let revision = edits.revision(for: [.commitments])
+        do {
+            let response = try await client.commitments()
+            guard connectionIsCurrent(client, version: version), edits.revision(for: [.commitments]) == revision else { return false }
+            edits.updateRemote(resources: [.commitments]) { $0.commitments = response.commitments }
+            return true
+        } catch { return false }
+    }
+
+    private func reconcileMemoryLibraries(_ resources: Set<MobileEditResource>) async -> Bool {
+        for resource in resources {
+            if case let .library(query) = resource, cachedMemoryLibrary(query) != nil, await memoryLibrary(query, reportFailure: false, updateRecency: false) == nil { return false }
+        }
+        return true
+    }
+
+    private var memoryEditResources: Set<MobileEditResource> {
+        Set(edits.visible.memoryLibraries.keys.map { MobileEditResource.library($0) }).union([.workspace, .memory])
+    }
+
+    func cachedMemoryLibrary(_ query: MemoryLibraryQuery) -> MemoryLibraryResponse? {
+        edits.visible.memoryLibraries[query]
+    }
+
+    var cachedVoiceProfile: VoiceProfileResponse? { edits.visible.voiceProfile }
+
+    private func reloadVoiceProfile() async -> Bool {
+        guard let client else { return false }
+        let version = connectionVersion
+        let revision = edits.revision(for: [.voiceProfile])
+        do {
+            let response = try await client.voiceProfile()
+            guard connectionIsCurrent(client, version: version), edits.revision(for: [.voiceProfile]) == revision else { return false }
+            edits.updateRemote(resources: [.voiceProfile]) { $0.voiceProfile = response }
+            return true
+        } catch { return false }
+    }
+
+    var cachedCommitments: [Commitment]? { edits.visible.commitments }
+
+    private func goalDraft(_ goal: GoalMutation) -> String {
+        [goal.title, goal.description, "Priority: \(goal.priority)",
+         "Target date: " + (goal.targetDate ?? "None"), "Progress: " + goal.progress,
+         "Next action: " + goal.nextAction,
+         "Updates in main chat: " + (goal.mirrorToPrimary ? "Yes" : "No")].joined(separator: "\n")
+    }
+
+    func createGoal(_ goal: GoalMutation) async -> Bool {
+        let id = "local:" + UUID().uuidString
+        let now = Date().ISO8601Format()
+        return enqueueEdit("New goal", draft: goalDraft(goal), resources: [.overview], retrySafe: false, patch: { state in
+            let record = GoalRecord(id: id, title: goal.title, description: goal.description, status: "active",
+                priority: goal.priority, progress: goal.progress, nextAction: goal.nextAction,
+                targetDate: goal.targetDate, createdAt: now, updatedAt: now, archivedAt: nil,
+                mirrorToPrimary: goal.mirrorToPrimary, autonomy: false, taintedOrigin: false)
+            state.overview?.goals.items.removeAll { $0.id == id }
+            state.overview?.goals.items.insert(GoalDashboardItem(goal: record, conversationId: nil,
+                workActive: false, automation: nil, cadenceLabel: "", blockedQuestion: "", stalled: false), at: 0)
+        }) { try await $0.createGoal(goal) }
     }
 
     func updateGoal(id: String, goal: GoalMutation) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
-            try await client.updateGoal(id: id, goal: goal)
-            reconcileAfterMutation()
-            return true
-        } catch {
-            reportError(error)
-            return false
-        }
+        guard !id.hasPrefix("local:") else { return false }
+        return enqueueEdit("Goal changes", draft: goalDraft(goal), resources: [.overview], patch: { state in
+            guard let index = state.overview?.goals.items.firstIndex(where: { $0.id == id }) else { return }
+            state.overview?.goals.items[index].goal.title = goal.title
+            state.overview?.goals.items[index].goal.description = goal.description
+            state.overview?.goals.items[index].goal.priority = goal.priority
+            state.overview?.goals.items[index].goal.progress = goal.progress
+            state.overview?.goals.items[index].goal.nextAction = goal.nextAction
+            state.overview?.goals.items[index].goal.targetDate = goal.targetDate
+            state.overview?.goals.items[index].goal.mirrorToPrimary = goal.mirrorToPrimary
+        }) { try await $0.updateGoal(id: id, goal: goal) }
     }
 
     /// Mobile “delete” matches the web goal UI: archive the goal while
     /// retaining its work conversation and evidence for later restoration.
     func deleteGoal(_ goal: GoalRecord) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
-            try await client.updateGoal(id: goal.id, action: "delete")
-            reconcileAfterMutation(archivedGoals: true)
-            return true
-        } catch {
-            reportError(error)
-            return false
-        }
+        guard !goal.id.hasPrefix("local:") else { return false }
+        return enqueueEdit("Archive goal", draft: goal.title, resources: [.overview, .archivedGoals], patch: { state in
+            if var item = state.overview?.goals.items.first(where: { $0.id == goal.id }) {
+                item.goal.archivedAt = Date().ISO8601Format()
+                state.archivedGoals?.items.removeAll { $0.id == goal.id }
+                state.archivedGoals?.items.insert(item, at: 0)
+            }
+            state.overview?.goals.items.removeAll { $0.id == goal.id }
+        }) { try await $0.updateGoal(id: goal.id, action: "delete") }
     }
 
     func restoreGoal(_ goal: GoalRecord) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
-            try await client.updateGoal(id: goal.id, action: "restore")
-            reconcileAfterMutation(archivedGoals: true)
-            return true
-        } catch {
-            reportError(error)
-            return false
-        }
+        return enqueueEdit("Restore goal", draft: goal.title, resources: [.overview, .archivedGoals], patch: { state in
+            if var item = state.archivedGoals?.items.first(where: { $0.id == goal.id }) {
+                item.goal.archivedAt = nil
+                state.overview?.goals.items.removeAll { $0.id == goal.id }
+                state.overview?.goals.items.insert(item, at: 0)
+            }
+            state.archivedGoals?.items.removeAll { $0.id == goal.id }
+        }) { try await $0.updateGoal(id: goal.id, action: "restore") }
     }
 
     func updateGoalLifecycle(
-        _ goal: GoalRecord,
-        action: String,
-        status: String? = nil,
-        enabled: Bool? = nil
+        _ goal: GoalRecord, action: String, status: String? = nil, enabled: Bool? = nil
     ) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
-            try await client.updateGoal(
-                id: goal.id,
-                action: action,
-                status: status,
-                enabled: enabled
-            )
-            reconcileAfterMutation()
-            return true
-        } catch {
-            reportError(error)
-            return false
+        guard !goal.id.hasPrefix("local:") else { return false }
+        // Starting/stopping work has a server outcome, unlike editing the
+        // goal's fields. Existing progress stays visible while it is pending.
+        if action == "start" || action == "stop" {
+            guard let client else { return false }
+            do {
+                try await client.updateGoal(id: goal.id, action: action, status: status, enabled: enabled)
+                reconcileAfterMutation()
+                return true
+            } catch { reportError(error); return false }
         }
+        return enqueueEdit("Goal status", draft: goal.title + "\n" + (status ?? action), resources: [.overview], patch: { state in
+            guard let index = state.overview?.goals.items.firstIndex(where: { $0.id == goal.id }) else { return }
+            if let status { state.overview?.goals.items[index].goal.status = status }
+            if let enabled, action == "autonomy" { state.overview?.goals.items[index].goal.autonomy = enabled }
+        }) { try await $0.updateGoal(id: goal.id, action: action, status: status, enabled: enabled) }
     }
 
     func archiveInactiveGoals() async -> Bool {
-        guard let client else { return false }
-        do {
-            try await client.archiveInactiveGoals()
-            reconcileAfterMutation(archivedGoals: true)
-            return true
-        } catch {
-            reportError(error)
-            return false
-        }
+        let cutoff = Date().addingTimeInterval(-30 * 24 * 60 * 60)
+        let formatter = ISO8601DateFormatter()
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let ids = Set((overview?.goals.items ?? []).filter { item in
+            guard ["done", "abandoned"].contains(item.goal.status), !item.workActive,
+                  let updated = fractional.date(from: item.goal.updatedAt) ?? formatter.date(from: item.goal.updatedAt) else { return false }
+            return updated < cutoff
+        }.prefix(100).map(\.id))
+        return enqueueEdit("Archive inactive goals", resources: [.overview, .archivedGoals], patch: { state in
+            state.overview?.goals.items.removeAll { ids.contains($0.id) }
+        }) { try await $0.archiveInactiveGoals() }
     }
 
     func openConversation(id: String) async -> Bool {
@@ -2297,26 +2523,29 @@ final class AppModel {
 
     /// Requests currently out for the workspace projection, so a prefetch never
     /// duplicates the read a screen has just started.
+    @ObservationIgnored private var sharedWorkspaceRead: (version: Int, revision: Int, id: UUID, task: Task<WorkspaceResponse, Error>)?
+    @ObservationIgnored private var sharedOverviewRead: (version: Int, revision: Int, id: UUID, task: Task<OverviewResponse, Error>)?
     @ObservationIgnored private var workspaceRequestsInFlight: [Int: Int] = [:]
 
     /// Warm the workspace once the conversation is up. Memory, Settings, Costs,
     /// Skills and the rest all draw on this one large projection, and the first
     /// screen to open used to start it cold: the owner tapped, then waited for
-    /// the heaviest read the app makes. A short delay keeps it behind the
-    /// launch-critical requests; a screen that opens first simply wins.
+    /// the heaviest read the app makes. Bootstrap finishes first; secondary
+    /// requests then start immediately and coalesce with any opened page.
     func prefetchSecondaryScreens() async {
-        guard let client, workspace == nil, workspaceRequestsInFlight[connectionVersion, default: 0] == 0 else { return }
+        guard let client else { return }
         let version = connectionVersion
-        try? await Task.sleep(for: .seconds(1.5))
-        guard connectionIsCurrent(client, version: version),
-              workspace == nil, workspaceRequestsInFlight[version, default: 0] == 0 else { return }
-        await refreshWorkspace(reportFailure: false)
+        guard connectionIsCurrent(client, version: version) else { return }
+        async let workspaceRead = workspace == nil ? refreshWorkspace(reportFailure: false) : true
+        async let peopleRead: Void = peopleLoaded ? () : loadPeople()
+        _ = await (workspaceRead, peopleRead)
     }
 
     @discardableResult
     func refreshWorkspace(reportFailure: Bool = true) async -> Bool {
         guard let client else { return false }
         let version = connectionVersion
+        let editRevision = edits.revision(for: [.workspace])
         workspaceRequestsInFlight[version, default: 0] += 1
         defer {
             let remaining = workspaceRequestsInFlight[version, default: 1] - 1
@@ -2324,8 +2553,20 @@ final class AppModel {
             else { workspaceRequestsInFlight[version] = remaining }
         }
         do {
-            let loaded = try await client.workspace()
-            guard connectionIsCurrent(client, version: version) else { return false }
+            let request: Task<WorkspaceResponse, Error>
+            let requestID: UUID
+            if let shared = sharedWorkspaceRead, shared.version == version, shared.revision == editRevision {
+                request = shared.task
+                requestID = shared.id
+            } else {
+                request = Task { try await client.workspace() }
+                requestID = UUID()
+                sharedWorkspaceRead = (version, editRevision, requestID, request)
+            }
+            defer { if sharedWorkspaceRead?.id == requestID { sharedWorkspaceRead = nil } }
+            let loaded = try await request.value
+            guard !Task.isCancelled else { return false }
+            guard edits.revision(for: [.workspace]) == editRevision, connectionIsCurrent(client, version: version) else { return false }
             workspace = loaded
             clearRecoveredError(from: .workspace)
             applyMemoryHealth(loaded.memory.health)
@@ -2339,7 +2580,7 @@ final class AppModel {
 
     @discardableResult
     func loadMoreWorkspace(_ section: WorkspacePageSection, archived: Bool = false) async -> Bool {
-        guard let client, let initial = workspace, let index = initial.sectionPagination else { return false }
+        guard let client, let initial = edits.serverSnapshot.workspace, let index = initial.sectionPagination else { return false }
         let connection = connectionVersion
         let ownerID = bootstrap?.identity.id
         let workspaceGeneration = initial.generatedAt
@@ -2381,7 +2622,7 @@ final class AppModel {
             func isCurrent(_ response: WorkspacePageResponseMetadata, sectionName: String, actualSection: String) -> Bool {
                 guard connectionIsCurrent(client, version: connection),
                       bootstrap?.identity.id == ownerID,
-                      let current = workspace, current.generatedAt == workspaceGeneration,
+                      let current = edits.serverSnapshot.workspace, current.generatedAt == workspaceGeneration,
                       let currentIndex = current.sectionPagination else { return false }
                 let currentPagination: WorkspaceSectionPagination?
                 if section == .chats {
@@ -2428,7 +2669,7 @@ final class AppModel {
                 guard page.availability.isAvailable,
                       page.items.count <= page.pagination.pageSize,
                       isCurrent(page.pagination, sectionName: section.rawValue, actualSection: page.section),
-                      var loaded = workspace else {
+                      var loaded = edits.serverSnapshot.workspace else {
                     throw APIError.invalidResponse
                 }
                 if archived {
@@ -2449,7 +2690,7 @@ final class AppModel {
                 let page: WorkspaceSectionPage<WorkspaceSkill> = try await client.workspacePage(section: section, cursor: cursor)
                 guard page.availability.isAvailable, page.items.count <= page.pagination.pageSize,
                       isCurrent(page.pagination, sectionName: section.rawValue, actualSection: page.section),
-                      var loaded = workspace else {
+                      var loaded = edits.serverSnapshot.workspace else {
                     throw APIError.invalidResponse
                 }
                 appendUnique(page.items, to: &loaded.skills)
@@ -2461,7 +2702,7 @@ final class AppModel {
                 let page: WorkspaceSectionPage<WorkspaceAnomaly> = try await client.workspacePage(section: section, cursor: cursor)
                 guard page.availability.isAvailable, page.items.count <= page.pagination.pageSize,
                       isCurrent(page.pagination, sectionName: section.rawValue, actualSection: page.section),
-                      var loaded = workspace else {
+                      var loaded = edits.serverSnapshot.workspace else {
                     throw APIError.invalidResponse
                 }
                 appendUnique(page.items, to: &loaded.anomalies)
@@ -2473,7 +2714,7 @@ final class AppModel {
                 let page: WorkspaceSectionPage<WorkspaceImprovement> = try await client.workspacePage(section: section, cursor: cursor)
                 guard page.availability.isAvailable, page.items.count <= page.pagination.pageSize,
                       isCurrent(page.pagination, sectionName: section.rawValue, actualSection: page.section),
-                      var loaded = workspace else {
+                      var loaded = edits.serverSnapshot.workspace else {
                     throw APIError.invalidResponse
                 }
                 appendUnique(page.items, to: &loaded.improvements)
@@ -2487,7 +2728,7 @@ final class AppModel {
                 )
                 guard page.availability.isAvailable, page.items.count <= page.pagination.pageSize,
                       isCurrent(page.pagination, sectionName: section.rawValue, actualSection: page.section),
-                      var loaded = workspace, var imports = loaded.imports else {
+                      var loaded = edits.serverSnapshot.workspace, var imports = loaded.imports else {
                     throw APIError.invalidResponse
                 }
                 appendUnique(page.items, to: &imports.sources)
@@ -2502,7 +2743,7 @@ final class AppModel {
                 )
                 guard page.availability.isAvailable, page.items.count <= page.pagination.pageSize,
                       isCurrent(page.pagination, sectionName: section.rawValue, actualSection: page.section),
-                      var loaded = workspace, var imports = loaded.imports else {
+                      var loaded = edits.serverSnapshot.workspace, var imports = loaded.imports else {
                     throw APIError.invalidResponse
                 }
                 appendUnique(page.items, to: &imports.unstartedFiles)
@@ -2524,9 +2765,10 @@ final class AppModel {
     func refreshCards(reportFailure: Bool = true) async -> Bool {
         guard let client else { return false }
         let version = connectionVersion
+        let editRevision = edits.revision(for: [.cards])
         do {
             let result = try await client.cards()
-            guard connectionIsCurrent(client, version: version) else { return false }
+            guard edits.revision(for: [.cards]) == editRevision, connectionIsCurrent(client, version: version) else { return false }
             savedCards = result.cards.map { card in
                 var result = card
                 if let marker = cardRefreshMarkers[card.id],
@@ -2575,9 +2817,11 @@ final class AppModel {
             marker.taskId = result.taskId
             cardRefreshMarkers[id] = marker
             messages = messages.map { $0.applyingCardRefreshes([id: marker]) }
-            if let index = savedCards.firstIndex(where: { $0.id == id }) {
-                savedCards[index].refreshState = "refreshing"
-                savedCards[index].refreshError = nil
+            edits.updateRemote(resources: [.cards]) { state in
+                if let index = state.savedCards.firstIndex(where: { $0.id == id }) {
+                    state.savedCards[index].refreshState = "refreshing"
+                    state.savedCards[index].refreshError = nil
+                }
             }
             await refreshDecisionMessages(refreshingCard: id)
             guard connectionIsCurrent(client, version: version) else { return nil }
@@ -2595,7 +2839,11 @@ final class AppModel {
 
     func loadSituationPacks() async throws -> SituationOverview {
         guard let client else { throw APIError.invalidServerURL }
-        return try await client.situationPacks()
+        let version = connectionVersion
+        let result = try await client.situationPacks()
+        guard connectionIsCurrent(client, version: version) else { throw CancellationError() }
+        cachedSituationPacks = result
+        return result
     }
 
     func discussSituationPack(id: String) {
@@ -2614,15 +2862,9 @@ final class AppModel {
     }
 
     func dismissCard(_ card: SavedCardRecord) async -> Bool {
-        guard let client else { return false }
-        do {
-            try await client.dismissCard(id: card.id)
-            savedCards.removeAll { $0.id == card.id }
-            return true
-        } catch {
-            reportError(error)
-            return false
-        }
+        return enqueueEdit("Dismiss card", resources: [.cards], patch: { state in
+            state.savedCards.removeAll { $0.id == card.id }
+        }) { try await $0.dismissCard(id: card.id) }
     }
 
     func uploadDocument(data: Data, name: String, title: String, mime: String) async -> Bool {
@@ -2630,7 +2872,7 @@ final class AppModel {
         errorMessage = nil
         do {
             try await client.uploadDocument(data: data, name: name, title: title, mime: mime)
-            await refreshOverview(reportFailure: false)
+            reconcileAfterMutation()
             return true
         } catch {
             reportError(error)
@@ -2639,16 +2881,9 @@ final class AppModel {
     }
 
     func deleteDocument(_ document: DocumentRecord) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
-            try await client.deleteDocument(id: document.id)
-            await refreshOverview(reportFailure: false)
-            return true
-        } catch {
-            reportError(error)
-            return false
-        }
+        return enqueueEdit("Remove document", resources: [.overview], patch: { state in
+            state.overview?.documents.documents.removeAll { $0.id == document.id }
+        }) { try await $0.deleteDocument(id: document.id) }
     }
 
     func uploadImport(
@@ -2668,7 +2903,7 @@ final class AppModel {
                 voice: voice,
                 register: register
             )
-            await refreshWorkspace(reportFailure: false)
+            Task { [weak self] in await self?.refreshWorkspace(reportFailure: false) }
             return true
         } catch {
             reportError(error)
@@ -2691,7 +2926,7 @@ final class AppModel {
                 verdict: verdict,
                 workspacePath: workspacePath
             )
-            await refreshWorkspace(reportFailure: false)
+            Task { [weak self] in await self?.refreshWorkspace(reportFailure: false) }
             return true
         } catch {
             reportError(error)
@@ -2700,56 +2935,48 @@ final class AppModel {
     }
 
     func saveSkill(id: String? = nil, mutation: SkillMutation) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
+        guard id?.hasPrefix("local:") != true else { return false }
+        let localID = id ?? "local:" + UUID().uuidString
+        let now = Date().ISO8601Format()
+        return enqueueEdit("Skill changes", draft: [mutation.name, mutation.preconditions, mutation.steps, mutation.gotchas].joined(separator: "\n\n"), resources: [.workspace], retrySafe: id != nil, patch: { state in
+            if let index = state.workspace?.skills.firstIndex(where: { $0.id == localID }) {
+                state.workspace?.skills[index].name = mutation.name
+                state.workspace?.skills[index].preconditions = mutation.preconditions
+                state.workspace?.skills[index].steps = mutation.steps
+                state.workspace?.skills[index].gotchas = mutation.gotchas
+            } else {
+                state.workspace?.skills.insert(WorkspaceSkill(id: localID, name: mutation.name,
+                    preconditions: mutation.preconditions, steps: mutation.steps, gotchas: mutation.gotchas,
+                    ownerAuthored: true, deprecated: false, useCount: 0, successCount: 0, failureCount: 0,
+                    updatedAt: now), at: 0)
+            }
+        }) { client in
             if let id { try await client.updateSkill(id: id, skill: mutation) }
             else { try await client.createSkill(mutation) }
-            await refreshWorkspace(reportFailure: false)
-            return true
-        } catch {
-            reportError(error)
-            return false
         }
     }
 
     func setSkillDeprecated(_ skill: WorkspaceSkill, deprecated: Bool) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
-            try await client.setSkillDeprecated(id: skill.id, deprecated: deprecated)
-            await refreshWorkspace(reportFailure: false)
-            return true
-        } catch {
-            reportError(error)
-            return false
-        }
+        guard !skill.id.hasPrefix("local:") else { return false }
+        return enqueueEdit("Skill status", draft: skill.name + (deprecated ? " · Deprecated" : " · Available"), resources: [.workspace], patch: { state in
+            guard let index = state.workspace?.skills.firstIndex(where: { $0.id == skill.id }) else { return }
+            state.workspace?.skills[index].deprecated = deprecated
+        }) { try await $0.setSkillDeprecated(id: skill.id, deprecated: deprecated) }
     }
 
     func deleteSkill(_ skill: WorkspaceSkill) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
-            try await client.deleteSkill(id: skill.id)
-            await refreshWorkspace(reportFailure: false)
-            return true
-        } catch {
-            reportError(error)
-            return false
-        }
+        guard !skill.id.hasPrefix("local:") else { return false }
+        return enqueueEdit("Remove skill", draft: [skill.name, skill.preconditions, skill.steps, skill.gotchas].joined(separator: "\n\n"), resources: [.workspace], patch: { state in
+            state.workspace?.skills.removeAll { $0.id == skill.id }
+        }) { try await $0.deleteSkill(id: skill.id) }
     }
 
     func updateCostLimits(_ limits: CostLimitsMutation) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
-            try await client.updateCostLimits(limits)
-            await refreshWorkspace(reportFailure: false)
-            return true
-        } catch {
-            reportError(error)
-            return false
-        }
+        return enqueueEdit("Spending limits", draft: "Per task: " + limits.taskDefault + "\nDaily: " + limits.daily + "\nMonthly: " + limits.monthly, resources: [.workspace], patch: { state in
+            state.workspace?.costs.taskDefaultLimit = limits.taskDefault.isEmpty ? nil : limits.taskDefault
+            state.workspace?.costs.dailyLimitUsd = Double(limits.daily)
+            state.workspace?.costs.monthlyLimitUsd = Double(limits.monthly)
+        }) { try await $0.updateCostLimits(limits) }
     }
 
     func updateAnomaly(_ anomaly: WorkspaceAnomaly, action: String) async -> Bool {
@@ -2757,7 +2984,7 @@ final class AppModel {
         errorMessage = nil
         do {
             try await client.updateAnomaly(id: anomaly.id, action: action)
-            await refreshWorkspace(reportFailure: false)
+            Task { [weak self] in await self?.refreshWorkspace(reportFailure: false) }
             return true
         } catch {
             reportError(error)
@@ -2775,7 +3002,7 @@ final class AppModel {
         do {
             try await client.reportRepair(title: title, summary: summary, sourceTaskId: sourceTaskId)
             guard connectionIsCurrent(client, version: version) else { return false }
-            await refreshWorkspace(reportFailure: false)
+            Task { [weak self] in await self?.refreshWorkspace(reportFailure: false) }
             return connectionIsCurrent(client, version: version)
         } catch {
             guard connectionIsCurrent(client, version: version) else { return false }
@@ -2791,7 +3018,7 @@ final class AppModel {
         do {
             try await client.updateRepair(id: issue.id, action: action)
             guard connectionIsCurrent(client, version: version) else { return false }
-            await refreshWorkspace(reportFailure: false)
+            Task { [weak self] in await self?.refreshWorkspace(reportFailure: false) }
             return connectionIsCurrent(client, version: version)
         } catch {
             guard connectionIsCurrent(client, version: version) else { return false }
@@ -2807,7 +3034,7 @@ final class AppModel {
         do {
             let result = try await client.updateImprovement(id: improvement.id, action: action)
             guard connectionIsCurrent(client, version: version) else { return nil }
-            await refreshWorkspace(reportFailure: false)
+            Task { [weak self] in await self?.refreshWorkspace(reportFailure: false) }
             return connectionIsCurrent(client, version: version) ? result : nil
         } catch {
             guard connectionIsCurrent(client, version: version) else { return nil }
@@ -2818,97 +3045,52 @@ final class AppModel {
     }
 
     func updateAgentSettings(_ mutation: AgentSettingsMutation) async -> Bool {
-        guard let client else { return false }
-        let version = connectionVersion
-        errorMessage = nil
-        do {
-            try await client.updateSettings(mutation)
-            guard connectionIsCurrent(client, version: version) else { return false }
-            await refreshWorkspace(reportFailure: false)
-            return connectionIsCurrent(client, version: version)
-        } catch {
-            guard connectionIsCurrent(client, version: version) else { return false }
-            reportError(error)
-            return false
-        }
+        return enqueueEdit("Assistant settings", draft: [mutation.timezone, mutation.locale, mutation.signature].joined(separator: "\n"), resources: [.workspace], patch: { state in
+            state.workspace?.settings.agent.timezone = mutation.timezone
+            state.workspace?.settings.agent.locale = mutation.locale
+            state.workspace?.settings.agent.signature = mutation.signature
+        }) { try await $0.updateSettings(mutation) }
     }
 
     func setSchedule(_ schedule: WorkspaceSchedule, enabled: Bool) async -> Bool {
-        guard let client else { return false }
-        let version = connectionVersion
-        errorMessage = nil
-        do {
-            try await client.setScheduleEnabled(id: schedule.id, enabled: enabled)
-            guard connectionIsCurrent(client, version: version) else { return false }
-            await refreshWorkspace(reportFailure: false)
-            return connectionIsCurrent(client, version: version)
-        } catch {
-            guard connectionIsCurrent(client, version: version) else { return false }
-            reportError(error)
-            return false
-        }
+        return enqueueEdit("Schedule changes", draft: schedule.displayName + (enabled ? " · On" : " · Off"), resources: [.workspace], patch: { state in
+            guard let index = state.workspace?.settings.schedules.firstIndex(where: { $0.id == schedule.id }) else { return }
+            state.workspace?.settings.schedules[index].enabled = enabled
+        }) { try await $0.setScheduleEnabled(id: schedule.id, enabled: enabled) }
     }
 
     func deleteReminder(_ reminder: WorkspaceReminder) async -> Bool {
-        guard let client else { return false }
-        let version = connectionVersion
-        errorMessage = nil
-        do {
-            try await client.deleteReminder(id: reminder.id)
-            guard connectionIsCurrent(client, version: version) else { return false }
-            await refreshWorkspace(reportFailure: false)
-            return connectionIsCurrent(client, version: version)
-        } catch {
-            guard connectionIsCurrent(client, version: version) else { return false }
-            reportError(error)
-            return false
-        }
+        return enqueueEdit("Remove reminder", draft: reminder.text, resources: [.workspace], patch: { state in
+            state.workspace?.settings.reminders.removeAll { $0.id == reminder.id }
+        }) { try await $0.deleteReminder(id: reminder.id) }
     }
 
     func setPolicy(_ policy: WorkspacePolicy, enabled: Bool) async -> Bool {
-        guard let client else { return false }
-        let version = connectionVersion
-        errorMessage = nil
-        do {
-            try await client.setPolicyEnabled(id: policy.id, enabled: enabled)
-            guard connectionIsCurrent(client, version: version) else { return false }
-            await refreshWorkspace(reportFailure: false)
-            return connectionIsCurrent(client, version: version)
-        } catch {
-            guard connectionIsCurrent(client, version: version) else { return false }
-            reportError(error)
-            return false
-        }
+        return enqueueEdit("Standing approval changes", draft: policy.displayName + (enabled ? " · On" : " · Off"), resources: [.workspace], patch: { state in
+            guard let index = state.workspace?.settings.policies.firstIndex(where: { $0.id == policy.id }) else { return }
+            state.workspace?.settings.policies[index].enabled = enabled
+        }) { try await $0.setPolicyEnabled(id: policy.id, enabled: enabled) }
     }
 
     func deletePolicy(_ policy: WorkspacePolicy) async -> Bool {
-        guard let client else { return false }
-        let version = connectionVersion
-        errorMessage = nil
-        do {
-            try await client.deletePolicy(id: policy.id)
-            guard connectionIsCurrent(client, version: version) else { return false }
-            await refreshWorkspace(reportFailure: false)
-            return connectionIsCurrent(client, version: version)
-        } catch {
-            guard connectionIsCurrent(client, version: version) else { return false }
-            reportError(error)
-            return false
-        }
+        return enqueueEdit("Remove standing approval", draft: policy.displayName, resources: [.workspace], patch: { state in
+            state.workspace?.settings.policies.removeAll { $0.id == policy.id }
+        }) { try await $0.deletePolicy(id: policy.id) }
     }
 
     @discardableResult
-    func refreshMcpConnections() async -> Bool {
+    func refreshMcpConnections(reportFailure: Bool = true) async -> Bool {
         guard let client else { return false }
         let version = connectionVersion
         do {
             let response = try await client.mcpConnections()
             guard connectionIsCurrent(client, version: version) else { return false }
             mcpConnections = response.connections
+            mcpConnectionsLoaded = true
             return true
         } catch {
             guard connectionIsCurrent(client, version: version) else { return false }
-            reportError(error)
+            if reportFailure { reportError(error) }
             return false
         }
     }
@@ -2934,7 +3116,7 @@ final class AppModel {
         do {
             try await operation(client)
             guard connectionIsCurrent(client, version: version) else { return false }
-            await refreshMcpConnections()
+            Task { [weak self] in await self?.refreshMcpConnections(reportFailure: false) }
             return connectionIsCurrent(client, version: version)
         } catch {
             guard connectionIsCurrent(client, version: version) else { return false }
@@ -2944,17 +3126,18 @@ final class AppModel {
     }
 
     @discardableResult
-    func refreshModelProviders() async -> Bool {
+    func refreshModelProviders(reportFailure: Bool = true) async -> Bool {
         guard let client else { return false }
         let version = connectionVersion
+        let editRevision = edits.revision(for: [.providers])
         do {
             let response = try await client.modelProviders()
-            guard connectionIsCurrent(client, version: version) else { return false }
+            guard edits.revision(for: [.providers]) == editRevision, connectionIsCurrent(client, version: version) else { return false }
             modelProviders = response
             return true
         } catch {
             guard connectionIsCurrent(client, version: version) else { return false }
-            reportError(error)
+            if reportFailure { reportError(error) }
             return false
         }
     }
@@ -2967,7 +3150,7 @@ final class AppModel {
         do {
             let result = try await client.connectModelProvider(input)
             guard connectionIsCurrent(client, version: version) else { return nil }
-            await refreshModelProviders()
+            Task { [weak self] in await self?.refreshModelProviders() }
             guard connectionIsCurrent(client, version: version) else { return nil }
             return result
         } catch {
@@ -2984,13 +3167,13 @@ final class AppModel {
         do {
             let result = try await client.testModelProvider(id: id)
             guard connectionIsCurrent(client, version: version) else { return nil }
-            await refreshModelProviders()
+            Task { [weak self] in await self?.refreshModelProviders() }
             guard connectionIsCurrent(client, version: version) else { return nil }
             return result.models
         } catch {
             guard connectionIsCurrent(client, version: version) else { return nil }
             guard connectionIsCurrent(client, version: version) else { return nil }
-            await refreshModelProviders()
+            Task { [weak self] in await self?.refreshModelProviders() }
             guard connectionIsCurrent(client, version: version) else { return nil }
             reportError(error)
             return nil
@@ -3026,11 +3209,16 @@ final class AppModel {
     }
 
     func chooseTextModels(main: String, fast: String) async -> Bool {
-        await modelProviderMutation { try await $0.chooseTextModels(main: main, fast: fast) }
+        return enqueueEdit("Default models", draft: "Main: " + main + "\nFast: " + fast, resources: [.providers], patch: { state in
+            state.modelProviders?.mainModel = main
+            state.modelProviders?.fastModel = fast
+        }) { try await $0.chooseTextModels(main: main, fast: fast) }
     }
 
     func chooseVoiceModel(_ modelId: String) async -> Bool {
-        await modelProviderMutation { try await $0.chooseVoiceModel(modelId) }
+        return enqueueEdit("Voice model", draft: modelId, resources: [.providers], patch: { state in
+            state.modelProviders?.voiceModel = modelId
+        }) { try await $0.chooseVoiceModel(modelId) }
     }
 
     func addVoicePreset(connectionId: String, model: String) async -> Bool {
@@ -3040,7 +3228,11 @@ final class AppModel {
     func loadPhoneCalls() async -> [PhoneCall]? {
         guard let client else { return nil }
         do {
-            return try await client.phoneCalls().calls
+            let version = connectionVersion
+            let result = try await client.phoneCalls()
+            guard connectionIsCurrent(client, version: version) else { return nil }
+            cachedCalls = result.calls
+            return result.calls
         } catch {
             reportError(error)
             return nil
@@ -3083,7 +3275,7 @@ final class AppModel {
         do {
             try await work(client)
             guard connectionIsCurrent(client, version: version) else { return false }
-            await refreshModelProviders()
+            Task { [weak self] in await self?.refreshModelProviders() }
             return connectionIsCurrent(client, version: version)
         } catch {
             guard connectionIsCurrent(client, version: version) else { return false }
@@ -3093,50 +3285,96 @@ final class AppModel {
     }
 
     func createMemory(_ memory: MemoryMutation) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
-            try await client.createMemory(memory)
-            await refreshWorkspace(reportFailure: false)
-            return true
-        } catch {
-            reportError(error)
-            return false
-        }
+        let id = "local:" + UUID().uuidString
+        let fact = WorkspaceMemoryFact(id: id, content: memory.content, kind: "fact", domain: memory.domain,
+            ownerConfirmed: true, pinned: memory.pinned, importance: memory.importance, createdAt: Date().ISO8601Format())
+        return enqueueEdit("New memory", draft: memory.content, resources: memoryEditResources, retrySafe: false, patch: { state in
+            state.workspace?.memory.facts.removeAll { $0.id == id }
+            state.workspace?.memory.facts.insert(fact, at: 0)
+        }) { try await $0.createMemory(memory) }
     }
 
     func correctMemory(id: String, content: String) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
-            try await client.updateMemory(id: id, content: content)
-            await refreshWorkspace(reportFailure: false)
-            return true
-        } catch {
-            reportError(error)
-            return false
-        }
+        guard !id.hasPrefix("local:") else { return false }
+        return enqueueEdit("Memory correction", draft: content, resources: memoryEditResources, patch: { state in
+            if let index = state.workspace?.memory.facts.firstIndex(where: { $0.id == id }) {
+                state.workspace?.memory.facts[index].content = content
+            }
+            if let index = state.workspace?.memory.awaitingReview.firstIndex(where: { $0.id == id }) {
+                state.workspace?.memory.awaitingReview[index].content = content
+            }
+            for query in state.memoryLibraries.keys {
+                guard let index = state.memoryLibraries[query]?.rows.firstIndex(where: { $0.id == id }) else { continue }
+                state.memoryLibraries[query]?.rows[index].content = content
+            }
+        }) { try await $0.updateMemory(id: id, content: content) }
     }
 
     func updateMemory(id: String, action: String, prominence: String? = nil, refreshAfterSave: Bool = true) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
-            try await client.updateMemory(id: id, action: action, prominence: prominence)
-            if refreshAfterSave { await refreshWorkspace(reportFailure: false) }
-            return true
-        } catch {
-            reportError(error)
-            return false
-        }
+        guard !id.hasPrefix("local:") else { return false }
+        return enqueueEdit("Memory changes", draft: action + " " + (prominence ?? ""), resources: memoryEditResources, patch: { state in
+            switch action {
+            case "forget", "reject", "archive":
+                state.workspace?.memory.facts.removeAll { $0.id == id }
+                state.workspace?.memory.awaitingReview.removeAll { $0.id == id }
+            case "confirm", "approve":
+                if var fact = state.workspace?.memory.awaitingReview.first(where: { $0.id == id }) {
+                    fact.ownerConfirmed = true
+                    state.workspace?.memory.awaitingReview.removeAll { $0.id == id }
+                    state.workspace?.memory.facts.removeAll { $0.id == id }
+                    state.workspace?.memory.facts.insert(fact, at: 0)
+                }
+            default:
+                if let index = state.workspace?.memory.facts.firstIndex(where: { $0.id == id }), prominence != nil {
+                    state.workspace?.memory.facts[index].pinned = prominence == "always"
+                    if prominence == "minor" { state.workspace?.memory.facts[index].importance = 1 }
+                    else if prominence == "auto", (state.workspace?.memory.facts[index].importance ?? 3) <= 1 {
+                        state.workspace?.memory.facts[index].importance = 3
+                    }
+                }
+            }
+            for query in state.memoryLibraries.keys {
+                guard let index = state.memoryLibraries[query]?.rows.firstIndex(where: { $0.id == id }) else { continue }
+                if ["forget", "reject", "archive", "approve"].contains(action) {
+                    state.memoryLibraries[query]?.rows.removeAll { $0.id == id }
+                } else if action == "confirm" {
+                    state.memoryLibraries[query]?.rows[index].ownerConfirmed = true
+                } else if action == "prominence" {
+                    state.memoryLibraries[query]?.rows[index].pinned = prominence == "always"
+                    if prominence == "minor" { state.memoryLibraries[query]?.rows[index].importance = 1 }
+                    else if prominence == "auto", (state.memoryLibraries[query]?.rows[index].importance ?? 3) <= 1 {
+                        state.memoryLibraries[query]?.rows[index].importance = 3
+                    }
+                }
+            }
+        }) { try await $0.updateMemory(id: id, action: action, prominence: prominence) }
     }
 
     func updateMemoryProfile(action: String) async -> Bool {
         guard let client else { return false }
+        let version = connectionVersion
+        let purgeID: UUID? = action.hasPrefix("purge") ? UUID() : nil
+        if let purgeID {
+            guard memoryErasureToken == nil else { return false }
+            memoryErasureToken = purgeID
+        }
+        defer { if let purgeID, memoryErasureToken == purgeID { memoryErasureToken = nil } }
+        if purgeID != nil {
+            await edits.settle()
+            guard connectionIsCurrent(client, version: version), !edits.hasUnknownWrite(in: [.memory]) else {
+                errorMessage = "Review the memory save with an unknown outcome before clearing this data."
+                return false
+            }
+        }
         errorMessage = nil
         do {
             try await client.updateMemoryProfile(action: action)
-            await refreshWorkspace(reportFailure: false)
+            guard connectionIsCurrent(client, version: version) else { return false }
+            if action == "purge-voice" {
+                edits.invalidateReads(for: [.voiceProfile, .workspace])
+                edits.updateRemote(resources: [.voiceProfile]) { $0.voiceProfile = nil }
+            }
+            Task { [weak self] in await self?.refreshWorkspace(reportFailure: false) }
             return true
         } catch {
             reportError(error)
@@ -3144,12 +3382,30 @@ final class AppModel {
         }
     }
 
-    func memoryLibrary(_ query: MemoryLibraryQuery) async -> MemoryLibraryResponse? {
+    func memoryLibrary(_ query: MemoryLibraryQuery, reportFailure: Bool = true, updateRecency: Bool = true) async -> MemoryLibraryResponse? {
         guard let client else { return nil }
+        let version = connectionVersion
+        let revision = edits.revision(for: [.memory, .library(query)])
         do {
-            return try await client.memoryLibrary(query)
+            let response = try await client.memoryLibrary(query)
+            guard connectionIsCurrent(client, version: version), edits.revision(for: [.memory, .library(query)]) == revision else { return nil }
+            if updateRecency {
+                memoryLibraryRecency.removeAll { $0 == query }
+                memoryLibraryRecency.append(query)
+                let evicted = Array(memoryLibraryRecency.dropLast(8))
+                memoryLibraryRecency = Array(memoryLibraryRecency.suffix(8))
+                edits.updateRemote(resources: [.library(query)], immediate: true) { state in
+                    for key in evicted { state.memoryLibraries.removeValue(forKey: key) }
+                    state.memoryLibraries[query] = response
+                }
+            } else {
+                edits.updateRemote(resources: [.library(query)]) { state in
+                    if state.memoryLibraries[query] != nil { state.memoryLibraries[query] = response }
+                }
+            }
+            return response
         } catch {
-            reportError(error)
+            if reportFailure, !isRequestCancellation(error) { reportError(error) }
             return nil
         }
     }
@@ -3157,65 +3413,64 @@ final class AppModel {
     /// Open loops the assistant is tracking. Returns nil only on failure, so an
     /// empty list stays distinguishable from an unreachable server.
     func commitments() async -> [Commitment]? {
-        guard let client else { return nil }
-        do {
-            return try await client.commitments().commitments
-        } catch {
-            reportError(error)
-            return nil
-        }
+        if await reloadCommitments() { return cachedCommitments }
+        return cachedCommitments
     }
 
     func updateCommitment(_ mutation: CommitmentMutation) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
-            try await client.updateCommitment(mutation)
-            return true
-        } catch {
-            reportError(error)
-            return false
-        }
+        return enqueueEdit("Loop changes", draft: [mutation.title, mutation.details, mutation.nextAction].compactMap { $0 }.joined(separator: "\n"), resources: [.commitments], patch: { state in
+            guard let index = state.commitments?.firstIndex(where: { $0.id == mutation.id }) else { return }
+            if mutation.action == "correct" {
+                if let title = mutation.title { state.commitments?[index].title = title }
+                if let details = mutation.details { state.commitments?[index].details = details }
+                if let next = mutation.nextAction { state.commitments?[index].nextAction = next }
+            } else {
+                state.commitments?.removeAll { $0.id == mutation.id }
+            }
+        }) { try await $0.updateCommitment(mutation) }
     }
 
     func voiceProfile() async -> VoiceProfileResponse? {
-        guard let client else { return nil }
-        let version = connectionVersion
-        do {
-            let response = try await client.voiceProfile()
-            guard connectionIsCurrent(client, version: version) else { return nil }
-            return response
-        } catch {
-            guard connectionIsCurrent(client, version: version) else { return nil }
-            reportError(error)
-            return nil
-        }
+        _ = await reloadVoiceProfile()
+        return cachedVoiceProfile
     }
 
     func saveVoiceProfile(_ profile: VoiceProfileMutation) async -> Bool {
-        guard let client else { return false }
-        let version = connectionVersion
-        errorMessage = nil
-        do {
-            try await client.updateVoiceProfile(profile)
-            guard connectionIsCurrent(client, version: version) else { return false }
-            await refreshWorkspace(reportFailure: false)
-            return connectionIsCurrent(client, version: version)
-        } catch {
-            guard connectionIsCurrent(client, version: version) else { return false }
-            reportError(error)
-            return false
-        }
+        return enqueueEdit("Writing voice", draft: [profile.description, profile.dos, profile.donts, profile.signature].joined(separator: "\n\n"), resources: [.memory, .voiceProfile, .workspace], patch: { state in
+            state.voiceProfile?.voiceProfile = VoiceProfile(description: profile.description,
+                dos: profile.dos.components(separatedBy: .newlines).filter { !$0.isEmpty },
+                donts: profile.donts.components(separatedBy: .newlines).filter { !$0.isEmpty }, signature: profile.signature)
+        }) { try await $0.updateVoiceProfile(profile) }
     }
 
     func forgetLongTermMemory() async -> Bool {
         guard let client else { return false }
         let version = connectionVersion
         errorMessage = nil
+        guard memoryErasureToken == nil else { return false }
+        let erasureID = UUID()
+        memoryErasureToken = erasureID
+        defer { if memoryErasureToken == erasureID { memoryErasureToken = nil } }
+        await edits.settle()
+        guard connectionIsCurrent(client, version: version) else { return false }
+        guard !edits.hasUnknownWrite(in: [.memory]) else {
+            errorMessage = "A memory save still has an unknown outcome. Review the unsynced change and check its current information before erasing memory."
+            return false
+        }
         do {
             try await client.forgetLongTermMemory()
             guard connectionIsCurrent(client, version: version) else { return false }
-            await refreshWorkspace(reportFailure: false)
+            edits.invalidateReads(for: [.memory, .workspace, .voiceProfile, .commitments])
+            edits.discardSettled(resources: [.memory])
+            edits.updateRemote { state in
+                state.workspace?.memory.facts = []
+                state.workspace?.memory.awaitingReview = []
+                state.memoryLibraries = [:]
+                state.voiceProfile = nil
+                state.commitments = nil
+            }
+            graphCache = [:]
+            Task { [weak self] in await self?.refreshWorkspace(reportFailure: false) }
             return connectionIsCurrent(client, version: version)
         } catch {
             guard connectionIsCurrent(client, version: version) else { return false }
@@ -3251,51 +3506,60 @@ final class AppModel {
     }
 
     func savePerson(id: String? = nil, mutation: PersonMutation) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
+        guard id?.hasPrefix("local:") != true else { return false }
+        let localID = id ?? "local:" + UUID().uuidString
+        let aliases = mutation.aliases.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let initials = mutation.name.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined()
+        var resources: Set<MobileEditResource> = [.people, .personCaches, .workspace]
+        if let id { resources.insert(.person(id)) }
+        return enqueueEdit("Person changes", draft: [mutation.name, mutation.relationship, mutation.aliases].joined(separator: "\n"), resources: resources, retrySafe: id != nil, patch: { state in
+            if let index = state.people.firstIndex(where: { $0.id == localID }) {
+                state.people[index].name = mutation.name
+                state.people[index].relationship = mutation.relationship
+                state.people[index].initials = initials
+            } else {
+                state.people.insert(PersonSummary(id: localID, name: mutation.name, initials: initials,
+                    relationship: mutation.relationship, group: "other", groupLabel: "", trust: "untrusted",
+                    location: nil, factCount: 0, birthday: nil, birthdayDaysUntil: nil, lastContact: nil), at: 0)
+            }
+            state.personProfiles[localID]?.contact.name = mutation.name
+            state.personProfiles[localID]?.contact.relationship = mutation.relationship
+            state.personProfiles[localID]?.contact.aliases = aliases
+            state.personCards[localID]?.name = mutation.name
+            state.personCards[localID]?.relationship = mutation.relationship
+            state.personCards[localID]?.initials = initials
+            // Other dossiers can embed this person in relationships and merge options.
+            state.personProfiles = state.personProfiles.filter { $0.key == localID }
+            state.personCards = state.personCards.filter { $0.key == localID }
+            if let index = state.workspace?.memory.people?.firstIndex(where: { $0.id == localID }) {
+                state.workspace?.memory.people?[index].name = mutation.name
+                state.workspace?.memory.people?[index].relationship = mutation.relationship
+                state.workspace?.memory.people?[index].aliases = aliases
+            }
+        }) { client in
             if let id { try await client.updatePerson(id: id, person: mutation) }
             else { try await client.createPerson(mutation) }
-            // Adding or renaming a person changes the directory and that
-            // person's card, neither of which refreshWorkspace touches. The
-            // People tab only reloads when peopleLoaded is false, so without
-            // this a just-added person stayed invisible there until a manual
-            // pull to refresh — and the first one left the tab reading empty.
-            invalidatePersonCaches()
-            await loadPeople()
-            await refreshWorkspace(reportFailure: false)
-            return true
-        } catch {
-            reportError(error)
-            return false
         }
     }
 
     func deletePerson(id: String) async -> Bool {
-        guard let client else { return false }
-        errorMessage = nil
-        do {
-            try await client.deletePerson(id: id)
-            // Not just this person's profile: personCards[id] kept a full card
-            // for someone who no longer exists, and its owning screen only
-            // reloads when the entry is absent, so it never refetched.
-            invalidatePersonCaches()
-            await loadPeople()
-            await refreshWorkspace(reportFailure: false)
-            return true
-        } catch {
-            reportError(error)
-            return false
-        }
+        guard !id.hasPrefix("local:") else { return false }
+        return enqueueEdit("Remove person", resources: [.people, .personCaches, .workspace], patch: { state in
+            state.people.removeAll { $0.id == id }
+            state.personProfiles = [:]
+            state.personCards = [:]
+            state.workspace?.memory.people?.removeAll { $0.id == id }
+        }) { try await $0.deletePerson(id: id) }
     }
 
     func loadPeople() async {
         guard let client else { return }
         let version = connectionVersion
+        let editRevision = edits.revision(for: [.people])
         let ownerID = bootstrap?.identity.id
         do {
             let response = try await client.people()
-            guard connectionIsCurrent(client, version: version), bootstrap?.identity.id == ownerID else { return }
+            guard edits.revision(for: [.people]) == editRevision, connectionIsCurrent(client, version: version), bootstrap?.identity.id == ownerID else { return }
             people = response.people
             peoplePagination = response.pagination.flatMap { $0.isSupported ? $0 : nil }
             peopleGeneration = response.generatedAt
@@ -3331,9 +3595,9 @@ final class AppModel {
                 peoplePageError = "The people list returned an unsupported page. Refresh and try again."
                 return false
             }
-            var ids = Set(people.map(\.id))
-            for person in response.people where ids.insert(person.id).inserted {
-                people.append(person)
+            edits.updateRemote(resources: [.people]) { state in
+                var ids = Set(state.people.map(\.id))
+                for person in response.people where ids.insert(person.id).inserted { state.people.append(person) }
             }
             peoplePagination = next
             return true
@@ -3349,7 +3613,7 @@ final class AppModel {
 
     @discardableResult
     func loadMoreDocuments() async -> Bool {
-        guard let client, let initial = overview,
+        guard let client, let initial = edits.serverSnapshot.overview,
               let pagination = initial.documents.pagination, pagination.isSupported,
               pagination.hasMore, let cursor = pagination.nextCursor,
               !documentPageLoading else { return false }
@@ -3362,7 +3626,7 @@ final class AppModel {
         do {
             let page = try await client.documentsPage(cursor: cursor, limit: pagination.pageSize)
             guard connectionIsCurrent(client, version: version), bootstrap?.identity.id == ownerID,
-                  let latest = overview, latest.generatedAt == generation,
+                  let latest = edits.serverSnapshot.overview, latest.generatedAt == generation,
                   latest.documents.pagination?.nextCursor == cursor else { return false }
             guard let next = page.pagination, next.isSupported, next.pageSize == pagination.pageSize,
                   page.hasMore == next.hasMore,
@@ -3401,10 +3665,11 @@ final class AppModel {
     func loadPersonCard(id: String) async {
         guard let client else { return }
         let version = connectionVersion
+        let editRevision = edits.revision(for: [.person(id), .personCaches])
         do {
             let response = try await client.personCard(id: id)
-            guard connectionIsCurrent(client, version: version) else { return }
-            personCards[id] = response
+            guard edits.revision(for: [.person(id), .personCaches]) == editRevision, connectionIsCurrent(client, version: version) else { return }
+            edits.updateRemote(resources: [.person(id)]) { $0.personCards[id] = response }
         }
         catch where isRequestCancellation(error) { return }
         catch { if connectionIsCurrent(client, version: version) { reportError(error) } }
@@ -3413,30 +3678,27 @@ final class AppModel {
     func loadPersonProfile(id: String) async {
         guard let client else { return }
         let version = connectionVersion
+        let editRevision = edits.revision(for: [.person(id), .personCaches])
         do {
             let response = try await client.personProfile(id: id)
-            guard connectionIsCurrent(client, version: version) else { return }
-            personProfiles[id] = response
+            guard edits.revision(for: [.person(id), .personCaches]) == editRevision, connectionIsCurrent(client, version: version) else { return }
+            edits.updateRemote(resources: [.person(id)]) { $0.personProfiles[id] = response }
         }
         catch where isRequestCancellation(error) { return }
         catch { if connectionIsCurrent(client, version: version) { reportError(error) } }
     }
 
     func addOccasion(personId: String, mutation: OccasionMutation, occasionId: String? = nil) async -> Bool {
-        guard let client else { return false }
-        do {
-            if let occasionId {
-                try await client.updateOccasion(id: occasionId, occasion: mutation)
-            } else {
-                try await client.addOccasion(personId: personId, occasion: mutation)
-            }
-            await loadPersonProfile(id: personId)
-            await loadPersonCard(id: personId)
-            await loadPeople()
-            return true
-        } catch {
-            reportError(error)
-            return false
+        guard !personId.hasPrefix("local:"), occasionId?.hasPrefix("local:") != true else { return false }
+        let id = occasionId ?? "local:" + UUID().uuidString
+        return enqueueEdit("Occasion changes", draft: [mutation.kind, mutation.label, mutation.month + "/" + mutation.day + "/" + mutation.year, mutation.leadDays + " days before", mutation.notes].joined(separator: "\n"), resources: [.people, .person(personId)], retrySafe: occasionId != nil, patch: { state in
+            state.personProfiles[personId]?.occasions.removeAll { $0.id == id }
+            state.personProfiles[personId]?.occasions.append(PersonOccasion(id: id, kind: mutation.kind,
+                label: mutation.label, month: Int(mutation.month) ?? 1, day: Int(mutation.day) ?? 1,
+                year: Int(mutation.year), notes: mutation.notes, quarantined: false, leadDays: Int(mutation.leadDays)))
+        }) { client in
+            if let occasionId { try await client.updateOccasion(id: occasionId, occasion: mutation) }
+            else { try await client.addOccasion(personId: personId, occasion: mutation) }
         }
     }
 
@@ -3455,17 +3717,10 @@ final class AppModel {
     }
 
     func deleteOccasion(personId: String, occasion: PersonOccasion) async -> Bool {
-        guard let client else { return false }
-        do {
-            try await client.deleteOccasion(id: occasion.id)
-            await loadPersonProfile(id: personId)
-            await loadPersonCard(id: personId)
-            await loadPeople()
-            return true
-        } catch {
-            reportError(error)
-            return false
-        }
+        guard !occasion.id.hasPrefix("local:") else { return false }
+        return enqueueEdit("Remove occasion", draft: occasion.label + " " + String(occasion.month) + "/" + String(occasion.day), resources: [.people, .person(personId)], patch: { state in
+            state.personProfiles[personId]?.occasions.removeAll { $0.id == occasion.id }
+        }) { try await $0.deleteOccasion(id: occasion.id) }
     }
 
     /// Drop the cached person cards and profiles.
@@ -3492,7 +3747,7 @@ final class AppModel {
             // target gains their facts, so neither cached card is still true.
             invalidatePersonCaches()
             await loadPeople()
-            await refreshWorkspace(reportFailure: false)
+            Task { [weak self] in await self?.refreshWorkspace(reportFailure: false) }
             return true
         } catch {
             reportError(error)
@@ -3680,13 +3935,13 @@ final class AppModel {
     /// server's answer. Returns the item and where it sat so a failure can put
     /// it back exactly there.
     private func optimisticallyResolveApproval(id: String) -> (item: PendingApproval, index: Int)? {
-        guard let current = overview,
+        guard let current = edits.serverSnapshot.overview,
               let index = current.approvals.pending.firstIndex(where: { $0.id == id }) else { return nil }
         let item = current.approvals.pending[index]
-        overview = overviewReplacingPending(
-            current.approvals.pending.filter { $0.id != id },
-            in: current
-        )
+        edits.updateRemote(resources: [.overview], immediate: true) { state in
+            guard let snapshot = state.overview else { return }
+            state.overview = overviewReplacingPending(snapshot.approvals.pending.filter { $0.id != id }, in: snapshot)
+        }
         return (item, index)
     }
 
@@ -3719,11 +3974,16 @@ final class AppModel {
     }
 
     private func restorePendingApproval(_ removed: (item: PendingApproval, index: Int)) {
-        guard let current = overview,
+        guard let current = edits.serverSnapshot.overview,
               !current.approvals.pending.contains(where: { $0.id == removed.item.id }) else { return }
-        var pending = current.approvals.pending
-        pending.insert(removed.item, at: min(removed.index, pending.count))
-        overview = overviewReplacingPending(pending, in: current)
+        edits.updateRemote(resources: [.overview], immediate: true) { state in
+            guard let snapshot = state.overview else { return }
+            var pending = snapshot.approvals.pending
+            if !pending.contains(where: { $0.id == removed.item.id }) {
+                pending.insert(removed.item, at: min(removed.index, pending.count))
+            }
+            state.overview = overviewReplacingPending(pending, in: snapshot)
+        }
     }
 
     private func setDecisionStatus(id: String, status: String) {
@@ -4176,6 +4436,9 @@ final class AppModel {
             connectionVersion += 1
             activityConnectionRevision += 1
             resetConnectedState()
+        }
+        if let client {
+            edits.configureRecovery(scope: client.configuration.baseURL.absoluteString + "|" + response.identity.id)
         }
         bootstrap = response
         applyMemoryHealth(response.shell.memoryHealth)

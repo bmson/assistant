@@ -521,8 +521,8 @@ struct RelationshipGraphScreen: View {
 
     private func load() async {
         let token = UUID(); requestID = token; failure = nil
-        if !hasLoaded, let initialGraph, !initialGraph.nodes.isEmpty, graph.nodes.isEmpty {
-            graph = initialGraph; hasLoaded = true
+        if !hasLoaded, let cached = initialGraph ?? model.cachedRelationshipGraph(), !cached.nodes.isEmpty, graph.nodes.isEmpty {
+            graph = cached; hasLoaded = true
         }
         loading = true
         var next = await model.relationshipGraph()

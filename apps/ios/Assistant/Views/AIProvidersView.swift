@@ -26,7 +26,7 @@ struct AIProvidersView: View {
                     Section {
                         AssistantLoadFailureState(
                             title: "Couldn’t refresh AI providers",
-                            message: settings == nil ? "Try again to load your providers and models." : "Previous providers are shown. Refresh before changing them.",
+                            message: settings == nil ? "Try again to load your providers and models." : "Previous providers are shown. You can keep editing while we reconnect.",
                             retry: { Task { await load() } }
                         )
                     }
@@ -36,9 +36,9 @@ struct AIProvidersView: View {
                 }
                 if let settings {
                     modelsSection(settings)
-                        .disabled(isSaving || isLoading || loadFailed)
+                        .disabled(isSaving)
                     voiceSection(settings)
-                        .disabled(isSaving || isLoading || loadFailed)
+                        .disabled(isSaving)
                     Section {
                         ForEach(settings.connections) { connection in
                             NavigationLink {
@@ -57,7 +57,7 @@ struct AIProvidersView: View {
                     } footer: {
                         Text("API keys are encrypted on your server and never sent back to this phone.")
                     }
-                    .disabled(isSaving || isLoading || loadFailed)
+                    .disabled(isSaving)
                 } else {
                     if !loadFailed { Section { ProgressView("Loading AI providers") } }
                 }
@@ -95,7 +95,8 @@ struct AIProvidersView: View {
 
     private func load() async {
         guard !isLoading, !isSaving else { return }
-        isLoading = true
+        if settings != nil { acceptDefaults() }
+        isLoading = settings == nil
         let refreshed = await model.refreshModelProviders()
         isLoading = false
         guard !Task.isCancelled else { return }
@@ -182,7 +183,7 @@ struct AIProvidersView: View {
     }
 
     private func run(_ work: @escaping () async -> Bool) {
-        guard !isSaving, !isLoading, !loadFailed else { return }
+        guard !isSaving, settings != nil else { return }
         isSaving = true
         actionFailed = false
         Task {

@@ -49,7 +49,7 @@ struct PeopleView: View {
 
     var body: some View {
         AssistantSettingsList {
-            if !model.peopleLoaded {
+            if !model.peopleLoaded && model.people.isEmpty {
                 AssistantLoadingState(title: "Loading people…")
             } else if model.people.isEmpty {
                 Section {
@@ -90,6 +90,7 @@ struct PeopleView: View {
                                 NavigationLink(value: AssistantDestination.person(id: person.id)) {
                                     personRow(person)
                                 }
+                                .disabled(person.id.hasPrefix("local:"))
                             }
                         } header: {
                             HStack {

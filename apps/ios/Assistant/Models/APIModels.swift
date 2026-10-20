@@ -1531,18 +1531,18 @@ struct ArchiveOldActivityProgress: Codable, Sendable {
 
 struct GoalRecord: Codable, Identifiable, Sendable {
     let id: String
-    let title: String
-    let description: String
-    let status: String
-    let priority: Int
-    let progress: String
-    let nextAction: String
-    let targetDate: String?
+    var title: String
+    var description: String
+    var status: String
+    var priority: Int
+    var progress: String
+    var nextAction: String
+    var targetDate: String?
     let createdAt: String
     let updatedAt: String
-    let archivedAt: String?
-    let mirrorToPrimary: Bool
-    let autonomy: Bool
+    var archivedAt: String?
+    var mirrorToPrimary: Bool
+    var autonomy: Bool
     let taintedOrigin: Bool
 
     /// Human-facing goal title. Test and automation-created goals can arrive
@@ -1569,9 +1569,9 @@ struct GoalAutomation: Codable, Sendable {
 
 struct GoalDashboardItem: Codable, Identifiable, Sendable {
     var id: String { goal.id }
-    let goal: GoalRecord
+    var goal: GoalRecord
     let conversationId: String?
-    let workActive: Bool
+    var workActive: Bool
     let automation: GoalAutomation?
     let cadenceLabel: String
     let blockedQuestion: String
@@ -1579,8 +1579,8 @@ struct GoalDashboardItem: Codable, Identifiable, Sendable {
 }
 
 struct GoalsDashboard: Codable, Sendable {
-    let items: [GoalDashboardItem]
-    let archivedCount: Int
+    var items: [GoalDashboardItem]
+    var archivedCount: Int
 }
 
 struct ApprovalRecord: Codable, Identifiable, Sendable {
@@ -1671,9 +1671,9 @@ struct DocumentsOverview: Codable, Sendable {
 struct OverviewResponse: Codable, Sendable {
     let generatedAt: String
     let activity: ActivityList
-    let goals: GoalsDashboard
+    var goals: GoalsDashboard
     let approvals: ApprovalInbox
-    let documents: DocumentsOverview
+    var documents: DocumentsOverview
 }
 
 struct WorkspaceResponse: Codable, Sendable {
@@ -1682,13 +1682,13 @@ struct WorkspaceResponse: Codable, Sendable {
     /// the original all-or-nothing shape; unknown future states fail closed.
     let sectionAvailability: [String: WorkspaceSectionAvailability]?
     var chats: WorkspaceChats
-    let memory: WorkspaceMemory
+    var memory: WorkspaceMemory
     var skills: [WorkspaceSkill]
     // Optional so a newer app remains usable while an older server is still
     // rolling out the capabilities projection.
     let capabilities: [WorkspaceCapability]?
-    let settings: WorkspaceSettings
-    let costs: WorkspaceCosts
+    var settings: WorkspaceSettings
+    var costs: WorkspaceCosts
     var anomalies: [WorkspaceAnomaly]
     var improvements: [WorkspaceImprovement]
     var sectionPagination: WorkspaceSectionPaginationIndex?
@@ -1901,10 +1901,10 @@ struct WorkspaceMemory: Codable, Sendable {
     /// Optional keeps an app paired to an older server usable until it refreshes.
     let ownerContactId: String?
     let health: MemoryHealth
-    let facts: [WorkspaceMemoryFact]
-    let awaitingReview: [WorkspaceMemoryFact]
+    var facts: [WorkspaceMemoryFact]
+    var awaitingReview: [WorkspaceMemoryFact]
     let peopleCount: Int
-    let people: [WorkspacePerson]?
+    var people: [WorkspacePerson]?
     let card: WorkspaceMemoryCard?
     let voiceStats: WorkspaceVoiceStats?
     let latestOrganizer: WorkspaceMemoryOrganizer?
@@ -1912,16 +1912,16 @@ struct WorkspaceMemory: Codable, Sendable {
 
 struct WorkspacePerson: Codable, Identifiable, Sendable {
     let id: String
-    let name: String
-    let aliases: [String]
-    let relationship: String
+    var name: String
+    var aliases: [String]
+    var relationship: String
     let trust: String
     let factCount: Int
 }
 
 struct PersonProfileResponse: Codable, Sendable {
-    let contact: PersonProfileContact
-    let occasions: [PersonOccasion]
+    var contact: PersonProfileContact
+    var occasions: [PersonOccasion]
     let mergeOptions: [PersonMergeOption]
     /// Dates already sitting in this person's saved facts that are not yet
     /// recurring occasions. The endpoint has always sent these; leaving them
@@ -1953,9 +1953,9 @@ struct PersonDuplicateHint: Codable, Sendable {
 // .sheet(item:), which requires it — an `id` field alone does not satisfy it.
 struct PersonProfileContact: Codable, Sendable, Identifiable {
     let id: String
-    let name: String
-    let aliases: [String]
-    let relationship: String
+    var name: String
+    var aliases: [String]
+    var relationship: String
     let trust: String
 }
 
@@ -1986,9 +1986,9 @@ struct PersonMergeOption: Codable, Identifiable, Sendable {
 /// nothing and cannot drift from the web.
 struct PersonSummary: Codable, Identifiable, Sendable {
     let id: String
-    let name: String
-    let initials: String
-    let relationship: String
+    var name: String
+    var initials: String
+    var relationship: String
     let group: String
     /// Empty for the "other" bucket, which is a placement rather than a label.
     let groupLabel: String
@@ -2063,9 +2063,9 @@ struct PersonReminder: Codable, Sendable {
 /// The full person card.
 struct PersonCard: Codable, Identifiable, Sendable {
     let id: String
-    let name: String
-    let initials: String
-    let relationship: String
+    var name: String
+    var initials: String
+    var relationship: String
     let group: String
     let groupLabel: String
     let trust: String
@@ -2075,7 +2075,7 @@ struct PersonCard: Codable, Identifiable, Sendable {
     let howWeMet: [String]
     let relations: [PersonRelationSummary]
     let connections: [PersonConnectionSummary]
-    let events: [PersonEventSummary]
+    var events: [PersonEventSummary]
     let eventsAreRecent: Bool
     let reminder: PersonReminder?
     let factCount: Int
@@ -2106,17 +2106,17 @@ struct VoiceProfile: Codable, Sendable {
 
 struct VoiceProfileResponse: Codable, Sendable {
     let voiceStats: WorkspaceVoiceStats
-    let voiceProfile: VoiceProfile
+    var voiceProfile: VoiceProfile
 }
 
 /// One row of the memory library, already worded by the server.
 struct MemoryLibraryRow: Codable, Identifiable, Equatable, Sendable {
     let id: String
-    let content: String
+    var content: String
     let domain: String
-    let ownerConfirmed: Bool
-    let pinned: Bool
-    let importance: Int
+    var ownerConfirmed: Bool
+    var pinned: Bool
+    var importance: Int
     let organized: Bool
     let originTrust: String
     let subjectLabel: String
@@ -2136,7 +2136,7 @@ struct MemoryLibrarySubject: Codable, Identifiable, Hashable, Sendable {
 }
 
 struct MemoryLibraryResponse: Codable, Sendable {
-    let rows: [MemoryLibraryRow]
+    var rows: [MemoryLibraryRow]
     let total: Int
     let page: Int
     let totalPages: Int
@@ -2148,7 +2148,7 @@ struct MemoryLibraryResponse: Codable, Sendable {
 
 /// What the library is being asked for. Mirrors the web query string exactly so
 /// the two clients page and filter the same way.
-struct MemoryLibraryQuery: Equatable, Sendable {
+struct MemoryLibraryQuery: Hashable, Sendable {
     var state = "in-use"
     var filter = "all"
     var search = ""
@@ -2181,12 +2181,12 @@ struct MemoryLibraryQuery: Equatable, Sendable {
 struct Commitment: Codable, Sendable, Identifiable {
     let id: String
     let kind: String
-    let title: String
-    let details: String
-    let nextAction: String
+    var title: String
+    var details: String
+    var nextAction: String
     /// ISO-8601, or nil when the loop has no deadline.
     let dueAt: String?
-    let status: String
+    var status: String
 }
 
 struct CommitmentsResponse: Codable, Sendable {
@@ -2218,12 +2218,12 @@ struct WorkspaceMemoryOrganizer: Codable, Sendable {
 
 struct WorkspaceMemoryFact: Codable, Identifiable, Sendable {
     let id: String
-    let content: String
+    var content: String
     let kind: String
     let domain: String?
-    let ownerConfirmed: Bool
-    let pinned: Bool
-    let importance: Int
+    var ownerConfirmed: Bool
+    var pinned: Bool
+    var importance: Int
     let createdAt: String
 }
 
@@ -2421,12 +2421,12 @@ struct KnowledgeCorrectionMutation: Codable, Sendable {
 
 struct WorkspaceSkill: Codable, Identifiable, Sendable {
     let id: String
-    let name: String
-    let preconditions: String
-    let steps: String
-    let gotchas: String
+    var name: String
+    var preconditions: String
+    var steps: String
+    var gotchas: String
     let ownerAuthored: Bool
-    let deprecated: Bool
+    var deprecated: Bool
     let useCount: Int
     let successCount: Int
     let failureCount: Int
@@ -2434,10 +2434,10 @@ struct WorkspaceSkill: Codable, Identifiable, Sendable {
 }
 
 struct WorkspaceSettings: Codable, Sendable {
-    let agent: WorkspaceAgentSettings
-    let schedules: [WorkspaceSchedule]
-    let reminders: [WorkspaceReminder]
-    let policies: [WorkspacePolicy]
+    var agent: WorkspaceAgentSettings
+    var schedules: [WorkspaceSchedule]
+    var reminders: [WorkspaceReminder]
+    var policies: [WorkspacePolicy]
     let goalAutomationCount: Int
 
     private enum CodingKeys: String, CodingKey {
@@ -2465,9 +2465,9 @@ struct WorkspaceSettings: Codable, Sendable {
 
 struct WorkspaceAgentSettings: Codable, Sendable {
     let name: String
-    let timezone: String
-    let locale: String
-    let signature: String
+    var timezone: String
+    var locale: String
+    var signature: String
 }
 
 struct WorkspaceSchedule: Codable, Identifiable, Sendable {
@@ -2477,7 +2477,7 @@ struct WorkspaceSchedule: Codable, Identifiable, Sendable {
     /// doesn't know, in which case the UI sentence-cases the identifier.
     let label: String?
     let cron: String
-    let enabled: Bool
+    var enabled: Bool
     let nextRunAt: String?
     let lastRunAt: String?
 
@@ -2503,7 +2503,7 @@ struct WorkspacePolicy: Codable, Identifiable, Sendable {
     /// doesn't know, in which case the UI sentence-cases the identifier.
     let label: String?
     let effect: String
-    let enabled: Bool
+    var enabled: Bool
     let createdVia: String
 
     var scope: String? = nil
@@ -2517,9 +2517,9 @@ struct WorkspaceCosts: Codable, Sendable {
     let dailySpentUsd: Double
     let monthlySpentUsd: Double
     let heldUsd: Double
-    let dailyLimitUsd: Double?
-    let monthlyLimitUsd: Double?
-    let taskDefaultLimit: String?
+    var dailyLimitUsd: Double?
+    var monthlyLimitUsd: Double?
+    var taskDefaultLimit: String?
     let parkedTasks: Int
     let bySource: [WorkspaceCostBreakdown]
     let byModel: [WorkspaceModelBreakdown]
@@ -2786,9 +2786,9 @@ struct McpConnection: Codable, Identifiable, Sendable {
 struct ModelProviderSettings: Codable, Sendable {
     let connections: [ModelConnection]
     let models: [CatalogModel]
-    let mainModel: String?
-    let fastModel: String?
-    let voiceModel: String?
+    var mainModel: String?
+    var fastModel: String?
+    var voiceModel: String?
     let voicePresets: [VoiceModelPreset]?
 
     /// Chat models the assistant could route to right now, by connection.
