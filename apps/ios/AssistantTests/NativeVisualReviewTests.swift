@@ -280,9 +280,13 @@ final class NativeVisualReviewTests: XCTestCase {
             ((view as? UIScrollView).map { [$0] } ?? []) + view.subviews.flatMap { scrollViews(in: $0) }
         }
         // Presented native sheets live outside the original hosting subtree.
-        if let scroll = scrollViews(in: window).filter({
-            $0.bounds.width >= window.bounds.width * 0.7 && $0.bounds.height >= window.bounds.height * 0.35 &&
-                $0.contentSize.height > $0.bounds.height + 12
+        if let scroll = scrollViews(in: window).filter({ scroll in
+            // Safe-area/navigation insets reduce the usable viewport even
+            // when the content is shorter than the scroll view's bounds.
+            let viewportHeight = max(0, scroll.bounds.height
+                                     - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom)
+            return scroll.bounds.width >= window.bounds.width * 0.7 && scroll.bounds.height >= window.bounds.height * 0.35 &&
+                scroll.contentSize.height > viewportHeight + 2
         }).max(by: { $0.bounds.height < $1.bounds.height }) {
             let initial = scroll.contentOffset
             var offset = max(initial.y, -scroll.adjustedContentInset.top)
@@ -294,7 +298,9 @@ final class NativeVisualReviewTests: XCTestCase {
                 let bottom = max(-scroll.adjustedContentInset.top,
                                  scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
                 guard offset < bottom - 2 else { break }
-                offset = min(bottom, offset + scroll.bounds.height * 0.72)
+                let viewportHeight = max(1, scroll.bounds.height
+                                         - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom)
+                offset = min(bottom, offset + viewportHeight * 0.72)
                 scroll.setContentOffset(CGPoint(x: initial.x, y: offset), animated: false)
                 try await Task.sleep(for: .milliseconds(130))
                 window.layoutIfNeeded()
