@@ -3,6 +3,7 @@ import { getChatApplication } from '@/lib/server';
 import { type ChatPageQuery, renderChatConversation } from './conversation-page';
 
 export const dynamic = 'force-dynamic';
+export const metadata = { title: 'Chat' };
 
 /**
  * The single long-running thread is the default chat experience (Phase 3 of the

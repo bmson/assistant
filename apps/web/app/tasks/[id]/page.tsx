@@ -36,6 +36,7 @@ import {
 import { ChecklistCorrectionEntry } from './checklist-correction-entry';
 
 export const dynamic = 'force-dynamic';
+export const metadata = { title: 'Activity detail' };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TERMINAL_TASK_STATUSES = new Set(['done', 'failed', 'cancelled']);

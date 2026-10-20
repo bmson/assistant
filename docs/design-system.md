@@ -30,9 +30,9 @@ Five principles govern decisions:
 
 ## Product surfaces and navigation
 
-The iPhone is the current everyday assistant client. Its directory contains Chat, Activity, Goals, Approvals, Chats, Memory, Cards, People, and More. Web is currently an owner administration console: Settings, Security, Audit, audit detail, Setup, and Sign in. Security, Setup and Sign in are available in passkey mode; Google/shared-token installations expose Settings and Audit. Its 27 other product/legacy route implementations are retained but blocked by the web proxy; `/` lands on Settings. Their retained UI is useful reference material, not current web feature availability.
+The iPhone is the current everyday assistant client. Its directory contains Chat, Activity, Goals, Approvals, Chats, Memory, Cards, People, and More. Web provides owner Chat, All chats, individual conversations, and the administration console: Settings, Security, Audit, audit detail, Setup, and Sign in. Security, Setup and Sign in are available in passkey mode; Google/shared-token installations expose Settings and Audit. Its 24 other product/legacy route implementations are retained but blocked by the web proxy; `/` lands on Settings. Their retained UI is useful reference material, not current web feature availability.
 
-Use the same concepts across clients without copying platform geometry. For example, native uses sheets and a pull-up directory; the browser console uses navigation links and content regions. A person, fact, decision, goal, or task has one server identity even if it appears in several places. A resolved approval must read resolved in its originating chat, Activity, and Approvals.
+Use the same concepts across clients without copying platform geometry. For example, native uses sheets and a pull-up directory; the browser uses navigation links and content regions. A person, fact, decision, goal, or task has one server identity even if it appears in several places. A resolved approval must read resolved in its originating chat, Activity, and Approvals.
 
 **Target:** navigation badges count actionable items, rather than every stored record. An approval badge should take the owner to the same exact decision shown in chat. More should group preferences, connections, workspace, and diagnostics by purpose; ordinary conversation should not expose that information hierarchy.
 
