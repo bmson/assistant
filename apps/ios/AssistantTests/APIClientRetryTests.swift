@@ -6744,3 +6744,300 @@ extension APIClientRetryTests {
         controller.dispose()
     }
 }
+
+extension APIClientRetryTests {
+    private func optimisticWorkspace(signature: String = "Original") -> Data {
+        Data("""
+        {"generatedAt":"2026-10-18T10:00:00Z","chats":{"current":[],"archived":[]},
+        "memory":{"ownerName":"Owner","ownerContactId":"owner","health":{"totalUsable":0,"notYetOrganized":0,"awaitingReview":0,"ownerConfirmed":0},"facts":[],"awaitingReview":[],"peopleCount":0},
+        "skills":[],"settings":{"agent":{"name":"Assistant","timezone":"UTC","locale":"en-US","signature":"\(signature)"},"schedules":[],"reminders":[],"policies":[],"goalAutomationCount":0},
+        "costs":{"dailySpentUsd":0,"monthlySpentUsd":0,"heldUsd":0,"parkedTasks":0,"bySource":[],"byModel":[],"held":[],"topTasks":[],"recent":[]},"anomalies":[],"improvements":[]}
+        """.utf8)
+    }
+
+    @MainActor
+    func testSettingsSaveAcceptsUnder200msBeforeTheWriteResponds() async throws {
+        StubURLProtocol.prime([.success(status: 200, body: optimisticWorkspace())])
+        let model = AppModel(apiClient: makeClient())
+        let loaded = await model.refreshWorkspace()
+        XCTAssertTrue(loaded)
+        StubURLProtocol.prime([
+            .delayed(after: 0.5, status: 200, body: Data(#"{"ok":true}"#.utf8)),
+            .success(status: 200, body: optimisticWorkspace(signature: "Changed"))
+        ])
+        let started = ContinuousClock.now
+        let accepted = await model.updateAgentSettings(.init(timezone: "UTC", locale: "en-US", signature: "Changed"))
+        XCTAssertTrue(accepted)
+        XCTAssertLessThan(ContinuousClock.now - started, .milliseconds(200))
+        XCTAssertEqual(model.workspace?.settings.agent.signature, "Changed")
+        XCTAssertEqual(model.edits.pendingCount, 1)
+        await model.edits.settle()
+        XCTAssertEqual(StubURLProtocol.attempts, ["PATCH", "GET"])
+        XCTAssertEqual(model.workspace?.settings.agent.signature, "Changed")
+        XCTAssertTrue(model.edits.failures.isEmpty)
+    }
+
+    @MainActor
+    func testRejectedSettingsSaveRollsBackAndKeepsDraftForRetry() async throws {
+        StubURLProtocol.prime([.success(status: 200, body: optimisticWorkspace())])
+        let model = AppModel(apiClient: makeClient())
+        _ = await model.refreshWorkspace()
+        StubURLProtocol.prime([.delayed(after: 0.1, status: 400, body: Data(#"{"error":"Rejected"}"#.utf8))])
+        let accepted = await model.updateAgentSettings(.init(timezone: "UTC", locale: "en-US", signature: "Draft wording"))
+        XCTAssertTrue(accepted, "Acceptance means the app owns the pending edit, not that the server committed it")
+        XCTAssertEqual(model.workspace?.settings.agent.signature, "Draft wording")
+        await model.edits.settle()
+        XCTAssertEqual(model.workspace?.settings.agent.signature, "Original")
+        XCTAssertEqual(model.edits.failures.count, 1)
+        XCTAssertTrue(model.edits.failures.first?.draft.contains("Draft wording") == true)
+        XCTAssertEqual(StubURLProtocol.attempts, ["PATCH"], "A failed write must not be replayed automatically")
+    }
+
+    @MainActor
+    func testConcurrentPageOpensShareTheWorkspaceRead() async throws {
+        StubURLProtocol.prime([.delayed(after: 0.15, status: 200, body: optimisticWorkspace())])
+        let model = AppModel(apiClient: makeClient())
+        async let first = model.refreshWorkspace()
+        async let second = model.refreshWorkspace()
+        let results = await [first, second]
+        XCTAssertTrue(results.allSatisfy { $0 })
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+    }
+
+    @MainActor
+    func testCancelledPageReadStillWarmsCacheForTheNextPage() async throws {
+        StubURLProtocol.prime([.delayed(after: 0.2, status: 200, body: optimisticWorkspace())])
+        let model = AppModel(apiClient: makeClient())
+        let abandoned = Task { await model.refreshWorkspace() }
+        try await Task.sleep(for: .milliseconds(30))
+        abandoned.cancel()
+        let opened = await model.refreshWorkspace()
+        _ = await abandoned.value
+        XCTAssertTrue(opened)
+        XCTAssertNotNil(model.workspace)
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        XCTAssertNil(model.errorMessage)
+    }
+}
+
+extension APIClientRetryTests {
+    @MainActor
+    func testWorkspaceReadFromBeforeSaveCannotOverwriteTheConfirmedEdit() async throws {
+        StubURLProtocol.prime([.success(status: 200, body: optimisticWorkspace())])
+        let model = AppModel(apiClient: makeClient())
+        _ = await model.refreshWorkspace()
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/workspace": [
+                .delayed(after: 0.4, status: 200, body: optimisticWorkspace()),
+                .success(status: 200, body: optimisticWorkspace(signature: "Latest"))
+            ],
+            "/api/mobile/v1/settings": [.delayed(after: 0.1, status: 200, body: Data(#"{"ok":true}"#.utf8))]
+        ])
+        let stale = Task { await model.refreshWorkspace() }
+        try await Task.sleep(for: .milliseconds(30))
+        _ = await model.updateAgentSettings(.init(timezone: "UTC", locale: "en-US", signature: "Latest"))
+        await model.edits.settle()
+        let appliedStale = await stale.value
+        XCTAssertFalse(appliedStale)
+        XCTAssertEqual(model.workspace?.settings.agent.signature, "Latest")
+        XCTAssertEqual(StubURLProtocol.attempts.filter { $0 == "PATCH" }.count, 1)
+        XCTAssertTrue(model.edits.failures.isEmpty)
+    }
+}
+
+extension APIClientRetryTests {
+    @MainActor
+    func testSettingsSaveCommitsNativeFeedbackBeforeTheDelayedWriteFinishes() async throws {
+        StubURLProtocol.prime([.success(status: 200, body: optimisticWorkspace())])
+        let model = AppModel(apiClient: makeClient())
+        _ = await model.refreshWorkspace()
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        let host = UIHostingController(rootView:
+            NavigationStack { MoreView() }
+                .overlay(alignment: .bottom) { MobileSaveFeedback(store: model.edits).padding(.bottom, 24) }
+                .environment(model)
+                .transaction { $0.animation = nil; $0.disablesAnimations = true })
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await Task.sleep(for: .milliseconds(500))
+        window.layoutIfNeeded()
+        StubURLProtocol.prime([
+            .delayed(after: 1.5, status: 200, body: Data(#"{"ok":true}"#.utf8)),
+            .success(status: 200, body: optimisticWorkspace(signature: "Changed"))
+        ])
+        let started = ContinuousClock.now
+        let accepted = await model.updateAgentSettings(.init(timezone: "UTC", locale: "en-US", signature: "Changed"))
+        await Task.yield()
+        window.layoutIfNeeded()
+        window.layer.displayIfNeeded()
+        CATransaction.flush()
+        let elapsed = ContinuousClock.now - started
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(model.edits.pendingCount, 1, "Native feedback must commit while the write is still pending")
+        XCTAssertLessThan(elapsed, .milliseconds(200), "Native save feedback commit exceeded the interaction budget")
+        // Screenshot readback and image allocation are evidence collection,
+        // not work performed by a tap in the app. Time them separately.
+        let captureStarted = ContinuousClock.now
+        var rendered = false
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            rendered = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        XCTAssertTrue(rendered)
+        XCTAssertEqual(model.edits.pendingCount, 1)
+        print("Native settings save acceptance and layer commit: \(elapsed); screenshot readback: \(ContinuousClock.now - captureStarted)")
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "settings-save-before-backend-response"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        await model.edits.settle()
+        XCTAssertEqual(model.workspace?.settings.agent.signature, "Changed")
+        XCTAssertTrue(model.edits.failures.isEmpty)
+    }
+}
+
+extension APIClientRetryTests {
+    @MainActor
+    func testMemoryLibraryRetainsABoundedSetOfRecentQueries() async throws {
+        let body = try JSONEncoder().encode(MemoryLibraryResponse.empty)
+        StubURLProtocol.prime(Array(repeating: .success(status: 200, body: body), count: 12))
+        let model = AppModel(apiClient: makeClient())
+        for page in 1...12 {
+            var query = MemoryLibraryQuery()
+            query.page = page
+            let response = await model.memoryLibrary(query)
+            XCTAssertNotNil(response)
+        }
+        XCTAssertEqual(model.edits.visible.memoryLibraries.count, 8)
+        XCTAssertNil(model.cachedMemoryLibrary(MemoryLibraryQuery()))
+        var latest = MemoryLibraryQuery()
+        latest.page = 12
+        XCTAssertNotNil(model.cachedMemoryLibrary(latest))
+    }
+}
+
+extension APIClientRetryTests {
+    @MainActor
+    func testProviderPageReadSurvivesAnUnrelatedSettingsSave() async throws {
+        StubURLProtocol.prime([.success(status: 200, body: optimisticWorkspace())])
+        let model = AppModel(apiClient: makeClient())
+        _ = await model.refreshWorkspace()
+        let providers = ModelProviderSettings(connections: [], models: [], mainModel: "loaded", fastModel: nil, voiceModel: nil, voicePresets: [])
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/providers": [.delayed(after: 0.15, status: 200, body: try JSONEncoder().encode(providers))],
+            "/api/mobile/v1/settings": [.delayed(after: 0.5, status: 200, body: Data(#"{"ok":true}"#.utf8))],
+            "/api/mobile/v1/workspace": [.success(status: 200, body: optimisticWorkspace(signature: "Changed"))]
+        ])
+        let pageRead = Task { await model.refreshModelProviders() }
+        try await Task.sleep(for: .milliseconds(30))
+        _ = await model.updateAgentSettings(.init(timezone: "UTC", locale: "en-US", signature: "Changed"))
+        let loaded = await pageRead.value
+        XCTAssertTrue(loaded, "An unrelated save must not discard a page that is opening")
+        XCTAssertEqual(model.modelProviders?.mainModel, "loaded")
+        XCTAssertEqual(model.edits.pendingCount, 1)
+        await model.edits.settle()
+        XCTAssertTrue(model.edits.failures.isEmpty)
+    }
+}
+
+extension APIClientRetryTests {
+    @MainActor
+    func testReadFromBeforeMemoryErasureCannotRestoreTheLibraryCache() async throws {
+        let query = MemoryLibraryQuery()
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/memory/library": [.delayed(after: 0.3, status: 200, body: try JSONEncoder().encode(MemoryLibraryResponse.empty))],
+            "/api/mobile/v1/memory/profile": [.success(status: 200, body: Data(#"{"ok":true}"#.utf8))],
+            "/api/mobile/v1/workspace": [.success(status: 200, body: optimisticWorkspace())]
+        ])
+        let model = AppModel(apiClient: makeClient())
+        let staleRead = Task { await model.memoryLibrary(query) }
+        try await Task.sleep(for: .milliseconds(30))
+        let erased = await model.forgetLongTermMemory()
+        XCTAssertTrue(erased)
+        let result = await staleRead.value
+        XCTAssertNil(result)
+        XCTAssertNil(model.cachedMemoryLibrary(query), "A pre-erasure response must not restore erased cached content")
+    }
+}
+
+extension APIClientRetryTests {
+    @MainActor
+    func testVoiceReadFromBeforeSamplePurgeCannotRestoreCachedSamples() async throws {
+        let path = "/api/mobile/v1/memory/profile"
+        let old = VoiceProfileResponse(voiceStats: .init(total: 3, auto: 1, uploaded: 2), voiceProfile: .empty)
+        StubURLProtocol.prime([], paths: [
+            path: [.held(status: 200, body: try JSONEncoder().encode(old)),
+                   .success(status: 200, body: Data(#"{"ok":true}"#.utf8))],
+            "/api/mobile/v1/workspace": [.success(status: 200, body: optimisticWorkspace())]
+        ])
+        let model = AppModel(apiClient: makeClient())
+        let stale = Task { await model.voiceProfile() }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !StubURLProtocol.isHoldingResponse(path: path), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: path))
+        let purged = await model.updateMemoryProfile(action: "purge-voice")
+        XCTAssertTrue(purged)
+        StubURLProtocol.releaseHeldResponse(path: path)
+        let result = await stale.value
+        XCTAssertNil(result, "A read started before the purge cannot restore old sample counts")
+        XCTAssertNil(model.cachedVoiceProfile)
+    }
+
+    @MainActor
+    func testMemoryErasureBlocksRetryOfAnEarlierFailedMemorySave() async throws {
+        let path = "/api/mobile/v1/memory/profile"
+        StubURLProtocol.prime([], paths: [
+            path: [.held(status: 200, body: Data(#"{"ok":true}"#.utf8))],
+            "/api/mobile/v1/workspace": [.success(status: 200, body: optimisticWorkspace())]
+        ])
+        let model = AppModel(apiClient: makeClient())
+        var writes = 0
+        model.edits.submit(title: "Memory correction", resources: [.memory], patch: { _ in }) {
+            writes += 1
+            throw APIError.server(status: 400, message: "Rejected")
+        }
+        await model.edits.settle()
+        let failureID = try XCTUnwrap(model.edits.failures.first?.id)
+        let erasure = Task { await model.forgetLongTermMemory() }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !StubURLProtocol.isHoldingResponse(path: path), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: path))
+        model.edits.retry(failureID)
+        await model.edits.settle()
+        XCTAssertEqual(writes, 1, "A retry cannot recreate memory while erasure is in flight")
+        StubURLProtocol.releaseHeldResponse(path: path)
+        let erased = await erasure.value
+        XCTAssertTrue(erased)
+        XCTAssertTrue(model.edits.failures.isEmpty)
+    }
+}
+
+extension APIClientRetryTests {
+    @MainActor
+    func testDeletingPersonInvalidatesOtherDossiersWithStaleMergeOptions() async throws {
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/memory/people/removed": [.success(status: 200, body: Data(#"{"ok":true}"#.utf8))],
+            "/api/mobile/v1/people": [.success(status: 200, body: Data(#"{"generatedAt":"now","people":[]}"#.utf8))],
+            "/api/mobile/v1/workspace": [.success(status: 200, body: optimisticWorkspace())]
+        ])
+        let model = AppModel(apiClient: makeClient())
+        model.edits.updateRemote { state in
+            state.personProfiles["other"] = PersonProfileResponse(
+                contact: .init(id: "other", name: "Other", aliases: [], relationship: "Friend", trust: "known"),
+                occasions: [], mergeOptions: [.init(id: "removed", label: "Removed person")])
+        }
+        let accepted = await model.deletePerson(id: "removed")
+        XCTAssertTrue(accepted)
+        await model.edits.settle()
+        XCTAssertNil(model.personProfiles["other"], "Deleting a person must invalidate cached references in other dossiers")
+        XCTAssertTrue(model.edits.failures.isEmpty)
+        XCTAssertEqual(StubURLProtocol.requests.filter { $0.0 == "DELETE" }.map { $0.1.path },
+                       ["/api/mobile/v1/memory/people/removed"])
+    }
+}

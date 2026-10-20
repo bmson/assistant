@@ -257,6 +257,7 @@ struct GoalsView: View {
             }
         }
         .assistantCard(in: colorScheme)
+        .disabled(item.goal.id.hasPrefix("local:"))
     }
 
     private func attentionCallout(_ item: GoalDashboardItem) -> some View {

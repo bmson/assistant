@@ -6,7 +6,7 @@ struct CallsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
-    @State private var calls: [PhoneCall]?
+    private var calls: [PhoneCall]? { model.cachedCalls }
     @State private var loadFailed = false
 
     var body: some View {
@@ -63,7 +63,6 @@ struct CallsView: View {
     private func reload() async {
         let result = await model.loadPhoneCalls()
         guard !Task.isCancelled else { return }
-        if let result { calls = result }
         loadFailed = result == nil
     }
 }

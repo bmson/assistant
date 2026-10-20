@@ -13,7 +13,7 @@ struct MemoryLibraryScreen: View {
 
     @State private var query = MemoryLibraryQuery()
     @State private var search = ""
-    @State private var response = MemoryLibraryResponse.empty
+    private var response: MemoryLibraryResponse { model.cachedMemoryLibrary(query) ?? .empty }
     @State private var responseQuery = MemoryLibraryQuery()
     @State private var loading = false
     @State private var loaded = false
@@ -211,7 +211,7 @@ struct MemoryLibraryScreen: View {
             }
         }
         .font(.subheadline)
-        .disabled(loading || loadFailed || pendingRowIDs.contains(row.id))
+        .disabled(pendingRowIDs.contains(row.id))
     }
 
     private func perform(_ row: MemoryLibraryRow, action: String, prominence: String? = nil) {
@@ -223,9 +223,7 @@ struct MemoryLibraryScreen: View {
     private func act(_ row: MemoryLibraryRow, action: String, prominence: String? = nil) async {
         guard pendingRowIDs.insert(row.id).inserted else { return }
         defer { pendingRowIDs.remove(row.id) }
-        if await model.updateMemory(id: row.id, action: action, prominence: prominence) {
-            await load()
-        }
+        _ = await model.updateMemory(id: row.id, action: action, prominence: prominence)
     }
 
     private func memoryTag(_ text: String) -> some View {
@@ -303,8 +301,7 @@ struct MemoryLibraryScreen: View {
         let result = await model.memoryLibrary(requested)
         // Only the request that still matches the current filters may publish.
         guard !Task.isCancelled, requestID == self.requestID, requested == query else { return }
-        if let result {
-            response = result
+        if result != nil {
             responseQuery = requested
         }
         loadFailed = result == nil

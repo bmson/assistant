@@ -7,6 +7,76 @@ import SwiftUI
 /// review evidence, not pixel-perfect assertions or physical interaction QA.
 final class NativeVisualReviewTests: XCTestCase {
     @MainActor
+    func testOptimisticSaveFeedbackInLightDarkAndLargeText() async throws {
+        let fixture = try NativeReviewFixture()
+        NativeReviewProtocol.install(fixture.responses)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+                               session: URLSession(configuration: configuration))
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "assistant.optimistic-save-visual-review"))
+        defaults.removePersistentDomain(forName: "assistant.optimistic-save-visual-review")
+        let model = AppModel(apiClient: client, defaults: defaults)
+        // CI deliberately runs an unsigned Simulator app. Exercise the real
+        // encrypted file journal with an isolated vault instead of Keychain.
+        let recoveryRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let vault = TestMobileEditKeyVault()
+        model.edits.recoveryJournalFactory = { scope in
+            MobileEditRecoveryJournal(scope: scope, keyVault: vault, applicationSupportRoot: recoveryRoot)
+        }
+        defer { try? FileManager.default.removeItem(at: recoveryRoot) }
+        await model.refreshAll()
+        _ = await model.refreshWorkspace()
+        await model.loadPeople()
+        model.present(.settings)
+        defer { model.edits.reset() }
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let gate = NativeSaveReviewGate()
+        model.edits.reconcile = { _ in false }
+        model.edits.submit(title: "Assistant settings", draft: "Signature: Review draft", resources: [.workspace], patch: {
+            $0.workspace?.settings.agent.signature = "Review draft"
+        }) {
+            await gate.wait()
+            throw APIError.server(status: 400, message: "The submitted settings were rejected. Your draft is kept for review.")
+        }
+        for scheme in [ColorScheme.light, .dark] {
+            for size in [DynamicTypeSize.large, .accessibility3] {
+                try await capture(Page("save-pending", ownsNavigation: true,
+                    RootView().environment(\.scenePhase, .inactive)), scheme: scheme, size: size, scene: scene, model: model)
+            }
+        }
+        XCTAssertEqual(model.edits.pendingCount, 1)
+        XCTAssertEqual(model.workspace?.settings.agent.signature, "Review draft")
+        gate.release()
+        await model.edits.settle()
+        XCTAssertEqual(model.edits.failures.count, 1)
+        XCTAssertEqual(model.workspace?.settings.agent.signature, "Alex")
+        for scheme in [ColorScheme.light, .dark] {
+            for size in [DynamicTypeSize.large, .accessibility3] {
+                try await capture(Page("save-needs-review", ownsNavigation: true,
+                    RootView().environment(\.scenePhase, .inactive)), scheme: scheme, size: size, scene: scene, model: model)
+            }
+        }
+        model.edits.dismissFailure(try XCTUnwrap(model.edits.failures.first?.id))
+        model.edits.submit(title: "Assistant settings", resources: [.workspace], patch: {
+            $0.workspace?.settings.agent.signature = "Saved signature"
+        }) {}
+        await model.edits.settle()
+        XCTAssertTrue(model.edits.needsRefresh)
+        for scheme in [ColorScheme.light, .dark] {
+            try await capture(Page("save-confirmed-refresh-pending", ownsNavigation: true,
+                RootView().environment(\.scenePhase, .inactive)), scheme: scheme, size: .large, scene: scene, model: model)
+        }
+        let exported = try JSONSerialization.data(withJSONObject: fixture.responses.mapValues { $0.base64EncodedString() }, options: [.sortedKeys])
+        let attachment = XCTAttachment(data: exported, uniformTypeIdentifier: "public.json")
+        attachment.name = "mobile-interaction-fixtures.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+    }
+
+    @MainActor
     func testPartialAnswerNoticeFormatting() async throws {
         let fixture = try NativeReviewFixture()
         NativeReviewProtocol.install(fixture.responses)
@@ -483,5 +553,20 @@ private struct NativeReviewFixture {
         // Card data is private fixture material, never fetched from a live account.
         values["knowledge/\(graph.nodes.first!.id)"] = try encoder.encode(graph.nodes.first!.entity)
         responses = Dictionary(uniqueKeysWithValues: values.map { ("/api/mobile/v1/" + $0.key, $0.value) })
+    }
+}
+
+@MainActor
+private final class NativeSaveReviewGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+    func wait() async {
+        guard !released else { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
     }
 }

@@ -20,6 +20,9 @@ to `MessageBubble` or parsing anything in a view body. Getting a build to
 TestFlight is [`docs/shipping.md`](docs/shipping.md) — the app does not ship
 from CI.
 
+The local save contract, surface inventory, recovery behavior and latency evidence
+are in [`docs/interaction-performance.md`](docs/interaction-performance.md).
+
 Relationship-map preparation, cancellation and its repeatable synthetic host
 benchmark are documented in [`docs/graph-performance.md`](docs/graph-performance.md).
 Host solver timings are separate from iPhone rendering and gesture verification.

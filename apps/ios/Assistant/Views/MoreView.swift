@@ -29,7 +29,7 @@ struct MoreView: View {
         AssistantSettingsList {
             Section {
                 Button { showingAgentSettings = true } label: { assistantIdentity }
-                .disabled(model.workspace == nil || isLoadingSettings || settingsLoadFailed)
+                .disabled(model.workspace == nil)
                 .accessibilityLabel("Edit preferences for \(model.agentName)")
                 .accessibilityHint("Language, time zone, and email signature")
             }
@@ -37,7 +37,7 @@ struct MoreView: View {
             if settingsLoadFailed {
                 AssistantLoadFailureState(
                     title: "Couldn’t refresh assistant settings",
-                    message: model.workspace == nil ? "Try again to load your preferences and rules." : "Your previous settings are shown. Refresh before changing them.",
+                    message: model.workspace == nil ? "Try again to load your preferences and rules." : "Your previous settings are shown. You can keep editing while we reconnect.",
                     retry: { Task { await reloadSettings() } }
                 )
                 .listRowBackground(Color.clear)
@@ -332,7 +332,7 @@ struct MoreView: View {
     }
 
     private func performSettingsAction(_ id: String, requiresWorkspace: Bool = true, action: @escaping () async -> Bool) {
-        guard settingsActionInFlight == nil, !(requiresWorkspace && (settingsLoadFailed || isLoadingSettings)) else { return }
+        guard settingsActionInFlight == nil, !(requiresWorkspace && (model.workspace == nil)) else { return }
         settingsActionFailed = false
         settingsActionInFlight = id
         Task {
@@ -510,7 +510,7 @@ struct MoreView: View {
                 }
             )
         ) { detail }
-        .disabled(settingsActionInFlight != nil || isLoadingSettings || settingsLoadFailed)
+        .disabled(settingsActionInFlight != nil || model.workspace == nil)
     }
 
     @ViewBuilder
@@ -552,7 +552,7 @@ struct MoreView: View {
         ), label: label)
         .accessibilityLabel(policy.displayName)
         .accessibilityHint(policy.scope ?? policy.toolName.sentenceCaseIdentifier)
-        .disabled(settingsActionInFlight != nil || isLoadingSettings || settingsLoadFailed)
+        .disabled(settingsActionInFlight != nil || model.workspace == nil)
     }
 
     private func policyActions(_ policy: WorkspacePolicy) -> some View {
@@ -565,7 +565,7 @@ struct MoreView: View {
         }
         .buttonStyle(.borderless)
         .accessibilityLabel("Actions for \(policy.displayName)")
-        .disabled(settingsActionInFlight != nil || isLoadingSettings || settingsLoadFailed)
+        .disabled(settingsActionInFlight != nil || model.workspace == nil)
     }
 
 }
@@ -860,7 +860,7 @@ private struct MCPConnectionsView: View {
                 }
                 .buttonStyle(AssistantActionButtonStyle(kind: .primary))
                 .tint(AssistantTheme.accent(for: colorScheme))
-                .disabled(isAdding || workingConnectionID != nil || isLoading || loadFailed || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(isAdding || workingConnectionID != nil || ((isLoading || loadFailed) && !hasLoaded) || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .buttonStyle(AssistantTactileButtonStyle(reduceMotion: reduceMotion, pressedScale: 0.99))
 
                 Text("Only public HTTPS endpoints are accepted in production. Bearer tokens are encrypted on the server and never shown again.")
@@ -1002,14 +1002,14 @@ private struct MCPConnectionsView: View {
             }
             .buttonStyle(AssistantActionButtonStyle(kind: .primary))
             .tint(AssistantTheme.accent(for: colorScheme))
-            .disabled(workingConnectionID != nil || isAdding || isLoading || loadFailed)
+            .disabled(workingConnectionID != nil || isAdding || ((isLoading || loadFailed) && !hasLoaded))
         } else {
             Button { perform(connection, action: action) } label: {
                 actionButtonLabel(title, icon: icon, working: working)
             }
             .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
             .tint(AssistantTheme.inkMuted(for: colorScheme))
-            .disabled(workingConnectionID != nil || isAdding || isLoading || loadFailed)
+            .disabled(workingConnectionID != nil || isAdding || ((isLoading || loadFailed) && !hasLoaded))
         }
     }
 
@@ -1024,12 +1024,12 @@ private struct MCPConnectionsView: View {
 
     private func deleteButton(_ connection: McpConnection, working: Bool) -> some View {
         AssistantConfirmationButton("Remove", hint: "Deletes \(connection.name), its tools, and saved credential.") {
-            guard workingConnectionID == nil, !isAdding, !isLoading, !loadFailed else { return }
+            guard workingConnectionID == nil, !isAdding, !(isLoading && !hasLoaded), !(loadFailed && !hasLoaded) else { return }
             workingConnectionID = connection.id
             actionFailed = !(await model.deleteMcpConnection(id: connection.id))
             workingConnectionID = nil
         }
-        .disabled(workingConnectionID != nil || working || isAdding || isLoading || loadFailed)
+        .disabled(workingConnectionID != nil || working || isAdding || ((isLoading || loadFailed) && !hasLoaded))
     }
 
     private func statusTag(_ connection: McpConnection) -> some View {
@@ -1054,7 +1054,7 @@ private struct MCPConnectionsView: View {
     private func add() {
         let candidateName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let candidateEndpoint = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isAdding, workingConnectionID == nil, !isLoading, !loadFailed, !candidateName.isEmpty, !candidateEndpoint.isEmpty else { return }
+        guard !isAdding, workingConnectionID == nil, !(isLoading && !hasLoaded), !(loadFailed && !hasLoaded), !candidateName.isEmpty, !candidateEndpoint.isEmpty else { return }
         focusedField = nil
         isAdding = true
         actionFailed = false
@@ -1072,7 +1072,7 @@ private struct MCPConnectionsView: View {
     }
 
     private func perform(_ connection: McpConnection, action: String) {
-        guard workingConnectionID == nil, !isAdding, !isLoading, !loadFailed else { return }
+        guard workingConnectionID == nil, !isAdding, !(isLoading && !hasLoaded), !(loadFailed && !hasLoaded) else { return }
         actionFailed = false
         workingConnectionID = connection.id
         Task {
@@ -1083,6 +1083,7 @@ private struct MCPConnectionsView: View {
 
     private func load() async {
         guard !isLoading, !isAdding, workingConnectionID == nil else { return }
+        hasLoaded = hasLoaded || model.mcpConnectionsLoaded
         isLoading = true
         let refreshed = await model.refreshMcpConnections()
         isLoading = false

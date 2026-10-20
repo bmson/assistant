@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B000000000000000000000BD /* OptimisticEditsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000BD /* OptimisticEditsTests.swift */; };
+		B000000000000000000000BC /* OptimisticEdits.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000BC /* OptimisticEdits.swift */; };
 		B00000000000000000000001 /* AssistantApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000001 /* AssistantApp.swift */; };
 		B00000000000000000000002 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000002 /* AppModel.swift */; };
 		B00000000000000000000003 /* Design/AssistantTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000003 /* Design/AssistantTheme.swift */; };
@@ -118,6 +120,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		C000000000000000000000BD /* OptimisticEditsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptimisticEditsTests.swift; sourceTree = "<group>"; };
+		C000000000000000000000BC /* OptimisticEdits.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/OptimisticEdits.swift; sourceTree = "<group>"; };
 		C00000000000000000000001 /* AssistantApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantApp.swift; sourceTree = "<group>"; };
 		C00000000000000000000002 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		C00000000000000000000003 /* Design/AssistantTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Design/AssistantTheme.swift; sourceTree = "<group>"; };
@@ -255,6 +259,7 @@
 				C000000000000000000000B3 /* System/PhoneCalendarStore.swift */,
 				C00000000000000000000003 /* Design/AssistantTheme.swift */,
 				C00000000000000000000004 /* Models/APIModels.swift */,
+				C000000000000000000000BC /* OptimisticEdits.swift */,
 				C00000000000000000000055 /* Models/PollingPolicy.swift */,
 				C000000000000000000000A1 /* Models/ConversationDrafts.swift */,
 				C000000000000000000000A5 /* CardFormDrafts.swift */,
@@ -321,6 +326,7 @@
 			isa = PBXGroup;
 			children = (
 				C00000000000000000000020 /* APIModelsTests.swift */,
+				C000000000000000000000BD /* OptimisticEditsTests.swift */,
 				C000000000000000000000B5 /* PhoneCalendarStoreTests.swift */,
 				C000000000000000000000A2 /* ConversationDraftsTests.swift */,
 				C000000000000000000000A3 /* NativeVisualReviewTests.swift */,
@@ -482,6 +488,7 @@
 				B000000000000000000000B3 /* System/PhoneCalendarStore.swift in Sources */,
 				B00000000000000000000003 /* Design/AssistantTheme.swift in Sources */,
 				B00000000000000000000004 /* Models/APIModels.swift in Sources */,
+				B000000000000000000000BC /* OptimisticEdits.swift in Sources */,
 				B00000000000000000000055 /* Models/PollingPolicy.swift in Sources */,
 				B000000000000000000000A1 /* Models/ConversationDrafts.swift in Sources */,
 				B000000000000000000000A5 /* CardFormDrafts.swift in Sources */,
@@ -543,6 +550,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B00000000000000000000012 /* APIModelsTests.swift in Sources */,
+				B000000000000000000000BD /* OptimisticEditsTests.swift in Sources */,
 				B000000000000000000000B5 /* PhoneCalendarStoreTests.swift in Sources */,
 				B000000000000000000000A2 /* ConversationDraftsTests.swift in Sources */,
 				B000000000000000000000A3 /* NativeVisualReviewTests.swift in Sources */,

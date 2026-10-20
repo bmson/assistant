@@ -18,7 +18,6 @@ struct MemoryView: View {
     @State private var reviewInFlightID: String?
     @State private var reviewInFlightAction: String?
     @State private var reviewErrorID: String?
-    @State private var reviewedIDs: Set<String> = []
     @State private var forgetting: WorkspaceMemoryFact?
     @State private var graph: RelationshipGraphSnapshot?
     @State private var graphFailed = false
@@ -74,7 +73,7 @@ struct MemoryView: View {
             }
         }
         .sheet(item: $openFact, onDismiss: { Task { await model.refreshWorkspace(reportFailure: false) } }) { fact in
-            NavigationStack { MemoryFactSheet(fact: fact, onReviewCompleted: { reviewedIDs.insert(fact.id); openFact = nil }) }
+            NavigationStack { MemoryFactSheet(fact: fact, onReviewCompleted: { openFact = nil }) }
                 .presentationDetents([.medium, .large])
         }
         .confirmationDialog(
@@ -97,7 +96,7 @@ struct MemoryView: View {
                 .listRowBackground(Color.clear)
         }
 
-        let toReview = memory.awaitingReview.filter { !reviewedIDs.contains($0.id) }
+        let toReview = memory.awaitingReview
         if !toReview.isEmpty {
             Section {
                 ForEach(toReview) { fact in
@@ -303,11 +302,9 @@ struct MemoryView: View {
         reviewErrorID = nil
         Task {
             let saved = await model.updateMemory(id: fact.id, action: action, refreshAfterSave: false)
-            if saved { reviewedIDs.insert(fact.id) }
             reviewErrorID = saved ? nil : fact.id
             reviewInFlightID = nil
             reviewInFlightAction = nil
-            if saved { await model.refreshWorkspace(reportFailure: false) }
         }
     }
 

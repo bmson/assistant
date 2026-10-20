@@ -141,6 +141,7 @@ struct SituationPacksView: View {
     }
 
     private func load() async {
+        if overview == nil { overview = model.cachedSituationPacks }
         do {
             overview = try await model.loadSituationPacks()
             error = nil
