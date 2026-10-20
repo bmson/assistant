@@ -32,14 +32,15 @@ final class NativeVisualReviewTests: XCTestCase {
             """),
             .init(type: "notice", notice: "response-contract")
         ])
-        let page = Page("partial-answer-notice", ScrollView {
+        let page = Page("partial-answer-notice", ownsNavigation: true, ScrollView {
             MessageBubble(message: message, userPrompt: nil, isStreaming: false,
                           openApprovals: {}, runForReal: nil, retry: nil, decideApproval: nil)
                 .padding(20)
         })
         for scheme in [ColorScheme.light, .dark] {
             for size in [DynamicTypeSize.large, .accessibility3] {
-                try await capture(page, scheme: scheme, size: size, scene: scene, model: model)
+                try await capture(page, scheme: scheme, size: size, scene: scene, model: model,
+                                  requiresScrolling: size.isAccessibilitySize && scene.coordinateSpace.bounds.width < 600)
             }
         }
         XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
@@ -72,12 +73,13 @@ final class NativeVisualReviewTests: XCTestCase {
                 "columns": .array(columns.map { .string($0) }),
                 "rows": .array(rows.map { .array($0.prefix(count).map { .string($0) }) })
             ])
-            let page = Page("generated-table-\(count)-columns", ScrollView {
+            let page = Page("generated-table-\(count)-columns", ownsNavigation: true, ScrollView {
                 GeneratedCardBlockView(block: block, facts: facts, cardId: "visual-review").padding(20)
             })
             for scheme in [ColorScheme.light, .dark] {
                 for size in [DynamicTypeSize.large, .accessibility3] {
-                    try await capture(page, scheme: scheme, size: size, scene: scene, model: model)
+                    try await capture(page, scheme: scheme, size: size, scene: scene, model: model,
+                                      requiresScrolling: count == 4 && size.isAccessibilitySize && scene.coordinateSpace.bounds.width < 600)
                 }
             }
         }
@@ -235,7 +237,7 @@ final class NativeVisualReviewTests: XCTestCase {
     }
 
     @MainActor private func capture(_ page: Page, scheme: ColorScheme, size: DynamicTypeSize,
-                                    scene: UIWindowScene, model: AppModel) async throws {
+                                    scene: UIWindowScene, model: AppModel, requiresScrolling: Bool = false) async throws {
         UserDefaults.standard.set((scheme == .light ? AssistantAppearance.light : .dark).rawValue,
                                   forKey: AssistantAppearance.defaultsKey)
         let window = UIWindow(windowScene: scene)
@@ -271,6 +273,7 @@ final class NativeVisualReviewTests: XCTestCase {
             add(attachment)
         }
         record("top")
+        var capturedScrollPositions = 0
         // Lists recycle off-screen cells, so a tall bitmap alone would hide
         // rows. Capture every vertical viewport with overlapping scroll steps.
         func scrollViews(in view: UIView) -> [UIScrollView] {
@@ -297,12 +300,16 @@ final class NativeVisualReviewTests: XCTestCase {
                 window.layoutIfNeeded()
                 offset = scroll.contentOffset.y
                 index += 1
+                capturedScrollPositions += 1
                 record("scroll-\(String(format: "%02d", index))")
             }
             let finalBottom = max(-scroll.adjustedContentInset.top,
                                   scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
             XCTAssertLessThanOrEqual(finalBottom - offset, 2, "Incomplete below-fold capture: \(page.name)")
             scroll.setContentOffset(initial, animated: false)
+        }
+        if requiresScrolling {
+            XCTAssertGreaterThan(capturedScrollPositions, 0, "Long message fixture was not captured below the fold: \(page.name)")
         }
     }
 
