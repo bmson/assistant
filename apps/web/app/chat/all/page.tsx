@@ -104,7 +104,9 @@ export default async function ChatListPage({
               uses — fifty separate slabs made a plain list of chats look far
               heavier than it is, and gave the scroll-reveal fifty animations to
               drive instead of one. */}
-          <ul className={`${cardShellClass} mt-6`}>
+          {/* Use available inline space relative to text size: enlarged type
+              needs a full text row before the housekeeping action. */}
+          <ul className={`${cardShellClass} mt-6 @container/history`}>
             {chatRows.map((conversation, index) => {
               // Unread = activity since the owner last opened the thread (the
               // read stamp lives on the conversation). A never-opened thread
@@ -116,18 +118,18 @@ export default async function ChatListPage({
               return (
                 <li
                   key={conversation.id}
-                  className={`grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 p-2 ${
+                  className={`grid min-w-0 grid-cols-1 items-center gap-[min(0.5rem,8px)] p-[min(0.5rem,8px)] @min-[16rem]/history:grid-cols-[minmax(0,1fr)_auto] @min-[16rem]/history:gap-2 @min-[16rem]/history:p-2 ${
                     index > 0 ? 'border-t border-edge' : ''
                   }`}
                 >
                   <Link
                     href={`/chat/${conversation.id}`}
                     data-mobile-touch-target="true"
-                    className={`mobile-touch-target flex min-w-0 items-center gap-3 rounded-xl px-2 py-2 motion-safe:transition-colors hover:bg-sunken/65 ${
-                      conversation.isPrimary ? 'col-span-2' : ''
+                    className={`mobile-touch-target flex min-w-0 items-start gap-[min(0.75rem,12px)] rounded-xl p-[min(0.5rem,8px)] @min-[16rem]/history:items-center @min-[16rem]/history:gap-3 @min-[16rem]/history:p-2 motion-safe:transition-colors hover:bg-sunken/65 ${
+                      conversation.isPrimary ? '@min-[16rem]/history:col-span-2' : ''
                     }`}
                   >
-                    <span className="relative inline-flex size-9 shrink-0 items-center justify-center rounded-xl bg-sunken text-muted">
+                    <span className="relative inline-flex size-9 shrink-0 items-center justify-center rounded-xl bg-sunken text-muted [--spacing:min(0.25rem,4px)] @min-[16rem]/history:[--spacing:0.25rem]">
                       <MessageSquareText className="size-4" aria-hidden="true" />
                       {unread ? (
                         <span
@@ -139,8 +141,10 @@ export default async function ChatListPage({
                       ) : null}
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="flex min-w-0 items-center gap-2">
-                        <span className={`truncate ${cardTitleClass}`}>
+                      <span className="flex min-w-0 flex-wrap items-center gap-[min(0.5rem,8px)] @min-[16rem]/history:flex-nowrap @min-[16rem]/history:gap-2">
+                        <span
+                          className={`min-w-0 max-w-full hyphens-auto [overflow-wrap:anywhere] @min-[16rem]/history:truncate @min-[16rem]/history:[overflow-wrap:normal] ${cardTitleClass}`}
+                        >
                           {conversation.title && conversation.title !== 'Untitled'
                             ? conversation.title
                             : 'New conversation'}
@@ -162,13 +166,19 @@ export default async function ChatListPage({
                     </span>
                   </Link>
                   {conversation.isPrimary ? null : archived ? (
-                    <form action={restoreConversation.bind(null, conversation.id)}>
+                    <form
+                      action={restoreConversation.bind(null, conversation.id)}
+                      className="min-w-0 max-w-full justify-self-start [--spacing:min(0.25rem,4px)] @min-[16rem]/history:[--spacing:0.25rem]"
+                    >
                       <SubmitButton variant="outline" size="sm" pendingLabel="Restoring…">
                         Restore
                       </SubmitButton>
                     </form>
                   ) : activeConversationIds.has(conversation.id) ? null : (
-                    <form action={archiveConversation.bind(null, conversation.id)}>
+                    <form
+                      action={archiveConversation.bind(null, conversation.id)}
+                      className="min-w-0 max-w-full justify-self-start [--spacing:min(0.25rem,4px)] @min-[16rem]/history:[--spacing:0.25rem]"
+                    >
                       <SubmitButton variant="outline" size="sm" pendingLabel="Archiving…">
                         Archive
                       </SubmitButton>

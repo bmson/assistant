@@ -10,8 +10,8 @@ import { OwnerAccountMenu } from './owner-account-menu';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: { default: 'Assistant settings', template: '%s · Assistant' },
-  description: 'Mobile access and diagnostics for your assistant.',
+  title: { default: 'Assistant', template: '%s · Assistant' },
+  description: 'Chat, mobile access, and diagnostics for your assistant.',
   icons: { icon: '/icon.svg' },
 };
 export const viewport: Viewport = { width: 'device-width', initialScale: 1 };

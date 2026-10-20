@@ -324,6 +324,7 @@ struct GeneratedCardBlockView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .title3) private var metricMinimumColumnWidth: CGFloat = 136
+    @ScaledMetric(relativeTo: .body) private var tableMinimumColumnWidth: CGFloat = 100
 
     var body: some View {
         switch block.type {
@@ -698,7 +699,50 @@ struct GeneratedCardBlockView: View {
                 row.indices.contains(index) && facts[row[index]].map { !$0.sensitive && GeneratedCardValue.number($0.value) != nil } == true
             }
         }
-        return Grid(alignment: .leading, horizontalSpacing: CardStyle.gutter, verticalSpacing: 10) {
+        return Group {
+            if dynamicTypeSize.isAccessibilitySize {
+                stackedTable(columns: columns, rows: rows)
+            } else {
+                // Reserve a readable measure for each column. A grid can
+                // otherwise fit by breaking names and prices mid-word.
+                ViewThatFits(in: .horizontal) {
+                    tableGrid(columns: columns, rows: rows, numeric: numeric)
+                        .frame(minWidth: CGFloat(columns.count) * tableMinimumColumnWidth
+                               + CGFloat(max(0, columns.count - 1)) * CardStyle.gutter,
+                               idealWidth: CGFloat(columns.count) * tableMinimumColumnWidth
+                               + CGFloat(max(0, columns.count - 1)) * CardStyle.gutter,
+                               maxWidth: .infinity)
+                    stackedTable(columns: columns, rows: rows)
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Table with \(columns.count) columns and \(rows.count) rows")
+    }
+
+    private func stackedTable(columns: [String], rows: [[String]]) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
+                if rowIndex > 0 { Divider() }
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(columns.enumerated()), id: \.offset) { index, column in
+                        if let cell = facts[row[index]] {
+                            VStack(alignment: .leading, spacing: 3) {
+                                CardEyebrow(column)
+                                value(cell, font: index == 0 ? CardStyle.value : CardStyle.body.monospacedDigit())
+                            }
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityElement(children: .combine)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func tableGrid(columns: [String], rows: [[String]], numeric: [Bool]) -> some View {
+        Grid(alignment: .leading, horizontalSpacing: CardStyle.gutter, verticalSpacing: 10) {
             GridRow {
                 ForEach(Array(columns.enumerated()), id: \.offset) { index, column in
                     CardEyebrow(column)

@@ -195,8 +195,8 @@ export const reportRepairAction = () => update('report-repair'); export const re
             ...(hydrateChat
               ? {
                   contents: `const forbidden = async () => { window.__qaWrites = [...(window.__qaWrites || []), 'unexpected-chat-action']; throw new Error('Synthetic chat layout check must not perform actions.'); };
-${chatStates ? "export const cancelTask = async taskId => { window.__qaSimulatedCancels = [...(window.__qaSimulatedCancels || []), taskId]; throw new Error('Synthetic cancel unavailable.'); };" : 'export { forbidden as cancelTask };'}
-export { forbidden as addSkillAction, forbidden as editSkillAction, forbidden as deleteSkillAction, forbidden as toggleSkillDeprecatedAction, forbidden as updateVoiceProfileAction, forbidden as forgetLongTermMemoryAction, forbidden as reportRepairAction, forbidden as repairDecisionAction, forbidden as signOutAction, forbidden as archiveConversation, forbidden as changeConversationModel, forbidden as restoreConversation, forbidden as recordRecallFeedbackAction, forbidden as refreshSavedCardInline, forbidden as resolveApprovalInline, forbidden as raiseTaskBudgetAndRetry, forbidden as decideSuggestionInline, forbidden as snoozeSuggestionInline };`,
+${chatStates ? "export const cancelChatTask = async taskId => { window.__qaSimulatedCancels = [...(window.__qaSimulatedCancels || []), taskId]; throw new Error('Synthetic cancel unavailable.'); };" : 'export { forbidden as cancelChatTask };'}
+export { forbidden as cancelTask, forbidden as addSkillAction, forbidden as editSkillAction, forbidden as deleteSkillAction, forbidden as toggleSkillDeprecatedAction, forbidden as updateVoiceProfileAction, forbidden as forgetLongTermMemoryAction, forbidden as reportRepairAction, forbidden as repairDecisionAction, forbidden as signOutAction, forbidden as archiveConversation, forbidden as changeConversationModel, forbidden as restoreConversation, forbidden as recordRecallFeedbackAction, forbidden as refreshSavedCardInline, forbidden as resolveApprovalInline, forbidden as raiseTaskBudgetAndRetry, forbidden as decideSuggestionInline, forbidden as snoozeSuggestionInline };`,
                 }
               : {}),
             loader: 'js',
@@ -956,7 +956,9 @@ try {
       return { ...entry, freshness: pixelsMatch ? freshness : 'unknown' };
     }),
   );
-  const expectedScreenshots = allPages.flatMap((entry) =>
+  // Hydrated chat is a separate evidence series; static selective recaptures
+  // still require the complete product matrix.
+  const expectedScreenshots = (hydrateChat ? pages : allPages).flatMap((entry) =>
     (hydrateChat ? [390] : [1280, 390]).flatMap((width) =>
       ['light', 'dark'].map((scheme) => `${entry.name}-${width}-${scheme}.png`),
     ),
@@ -1101,6 +1103,7 @@ try {
         blockedRequests,
         syntheticApiRequests,
         currentCoverage,
+        coverageScope: hydrateChat ? selectedPages : 'all-product-states',
         captureInventory,
         missingCurrentScreenshots,
         staleOrUnknownScreenshots: combined
@@ -1127,6 +1130,7 @@ try {
       {
         ...artifactManifest,
         currentCoverage,
+        coverageScope: hydrateChat ? selectedPages : 'all-product-states',
         captureInventory,
         missingCurrentScreenshots,
         provenancePolicy:

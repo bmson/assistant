@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { mergeDocumentPassagePage, type RenderedDocumentChunk } from '@/lib/document-passage-state';
 import { btn } from '@/lib/ui';
 
@@ -8,6 +8,7 @@ type Chunk = RenderedDocumentChunk;
 type PageResponse = { chunks: Chunk[]; nextCursor: number | string | null; totalChunks: number };
 
 export function DocumentPassages({ documentId, total }: { documentId: string; total: number }) {
+  const requestInFlight = useRef(false);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [chunks, setChunks] = useState<Chunk[]>([]);
@@ -16,7 +17,8 @@ export function DocumentPassages({ documentId, total }: { documentId: string; to
   const [error, setError] = useState<string | null>(null);
 
   async function load(cursor: number | string) {
-    if (loading) return;
+    if (requestInFlight.current) return;
+    requestInFlight.current = true;
     setLoading(true);
     setError(null);
     try {
@@ -31,9 +33,7 @@ export function DocumentPassages({ documentId, total }: { documentId: string; to
         if (response.status === 409 && typeof payload.error === 'object') {
           setChunks([]);
           setNextCursor(0);
-          throw new Error(
-            'This passage changed. Hide and reopen passages to load the current text.',
-          );
+          throw new Error('This passage changed. Retry to load the current text.');
         }
         const detail = typeof payload.error === 'object' ? payload.error.message : payload.error;
         throw new Error(detail || 'Document passages could not be loaded.');
@@ -44,6 +44,7 @@ export function DocumentPassages({ documentId, total }: { documentId: string; to
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Document passages could not be loaded.');
     } finally {
+      requestInFlight.current = false;
       setLoading(false);
     }
   }
@@ -83,18 +84,23 @@ export function DocumentPassages({ documentId, total }: { documentId: string; to
             </article>
           ))}
           {error ? (
-            <p role="status" className="text-sm text-red-700 dark:text-red-300">
+            <p
+              id={`document-passages-error-${documentId}`}
+              role="status"
+              className="text-sm text-red-700 dark:text-red-300"
+            >
               {error}
             </p>
           ) : null}
-          {nextCursor !== null && !error ? (
+          {nextCursor !== null ? (
             <button
               type="button"
               className={btn.outline}
               disabled={loading}
+              aria-describedby={error ? `document-passages-error-${documentId}` : undefined}
               onClick={() => void load(nextCursor)}
             >
-              {loading ? 'Loading…' : 'Load more'}
+              {loading ? 'Loading…' : error ? 'Retry loading passages' : 'Load more'}
             </button>
           ) : null}
         </div>

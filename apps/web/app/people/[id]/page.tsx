@@ -37,6 +37,7 @@ import {
 } from '@/lib/ui';
 
 export const dynamic = 'force-dynamic';
+export const metadata = { title: 'Person' };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FACT_LIMIT = 250;
