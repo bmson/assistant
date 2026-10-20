@@ -3021,10 +3021,18 @@ final class APIClientRetryTests: XCTestCase {
             window.rootViewController = nil
             previousKeyWindow?.makeKey()
         }
-        try await Task.sleep(for: .milliseconds(400))
         func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
-        let scroll = try XCTUnwrap(descendants(window).compactMap { $0 as? UIScrollView }
-            .first { !($0 is UITextView) })
+        func transcriptScrollView() -> UIScrollView? {
+            descendants(window).compactMap { $0 as? UIScrollView }.first { !($0 is UITextView) }
+        }
+        // Hosting is asynchronous; wait for the view this test actually inspects.
+        let mountDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        var mountedScroll = transcriptScrollView()
+        while mountedScroll == nil, ContinuousClock.now < mountDeadline {
+            try await Task.sleep(for: .milliseconds(50))
+            mountedScroll = transcriptScrollView()
+        }
+        let scroll = try XCTUnwrap(mountedScroll)
         func assertAtBottom(file: StaticString = #filePath, line: UInt = #line) async throws {
             let deadline = ContinuousClock.now.advanced(by: .seconds(3))
             var settled = 0
@@ -3062,7 +3070,11 @@ final class APIClientRetryTests: XCTestCase {
             let delta = String(repeating: "Streaming section \(index).\n", count: 35)
             let previousText = model.messages.last?.text ?? ""
             StubURLProtocol.appendStream(try chunk(delta))
-            try await Task.sleep(for: .milliseconds(150))
+            // Use the same bounded state wait as the first streamed chunk above.
+            let deltaDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+            while model.messages.last?.text != previousText + delta, ContinuousClock.now < deltaDeadline {
+                try await Task.sleep(for: .milliseconds(50))
+            }
             XCTAssertEqual(model.messages.last?.text, previousText + delta)
             XCTAssertEqual(model.messages.last?.id, streamID)
             XCTAssertTrue(model.isSending)
