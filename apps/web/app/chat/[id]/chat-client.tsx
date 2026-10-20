@@ -1980,7 +1980,11 @@ export function ChatClient({
             canRetry={!busy && lastSubmittedText.trim() !== ''}
             onRetry={retryLastTurn}
           />
-          {log.length > 0 && liveRecall ? <RecallNote sources={liveRecall} /> : null}
+          {log.length > 0 && liveRecall && liveRecall.length > 0 ? (
+            <div data-chat-reading-block="true" className="contents">
+              <RecallNote sources={liveRecall} />
+            </div>
+          ) : null}
         </div>
       </div>
 

@@ -1,8 +1,15 @@
 {
   "pin-growth-large": {
-    "scope": ["chat", "chat-empty", "side-chat", "side-chat-empty"],
+    "scope": [
+      "chat",
+      "chat-empty",
+      "side-chat",
+      "side-chat-empty"
+    ],
     "profile": {
-      "widths": [320],
+      "widths": [
+        320
+      ],
       "rootFontSize": 32,
       "longChat": false,
       "cardChat": ""
@@ -14,7 +21,11 @@
     "componentSha256": "a48448b9295171fbe868d4f2c6756796000a03c26d00949596c5342a223c2163",
     "boundary": {
       "client": "Actual ChatClient, AI SDK useChat, useChatPolling and composer layout effects",
-      "mocks": ["Next navigation", "server actions", "local empty GET chat-status responses"],
+      "mocks": [
+        "Next navigation",
+        "server actions",
+        "local empty GET chat-status responses"
+      ],
       "serverActions": 0,
       "externalRequestsAttempted": 0,
       "simulatedCancellationFailures": 0,
@@ -649,9 +660,16 @@
     ]
   },
   "generated-large-v2": {
-    "scope": ["chat", "chat-empty", "side-chat", "side-chat-empty"],
+    "scope": [
+      "chat",
+      "chat-empty",
+      "side-chat",
+      "side-chat-empty"
+    ],
     "profile": {
-      "widths": [320],
+      "widths": [
+        320
+      ],
       "rootFontSize": 32,
       "longChat": false,
       "cardChat": "only"
@@ -663,7 +681,11 @@
     "componentSha256": "25610e32a4c0376585dd5290ce219c4efb9699b6f79e9f1ad35076e67f697848",
     "boundary": {
       "client": "Actual ChatClient, AI SDK useChat, useChatPolling and composer layout effects",
-      "mocks": ["Next navigation", "server actions", "local empty GET chat-status responses"],
+      "mocks": [
+        "Next navigation",
+        "server actions",
+        "local empty GET chat-status responses"
+      ],
       "serverActions": 0,
       "externalRequestsAttempted": 0,
       "simulatedCancellationFailures": 0,
@@ -1298,9 +1320,16 @@
     ]
   },
   "agenda-large": {
-    "scope": ["chat", "chat-empty", "side-chat", "side-chat-empty"],
+    "scope": [
+      "chat",
+      "chat-empty",
+      "side-chat",
+      "side-chat-empty"
+    ],
     "profile": {
-      "widths": [320],
+      "widths": [
+        320
+      ],
       "rootFontSize": 32,
       "longChat": false,
       "cardChat": "agenda"
@@ -1312,7 +1341,11 @@
     "componentSha256": "25610e32a4c0376585dd5290ce219c4efb9699b6f79e9f1ad35076e67f697848",
     "boundary": {
       "client": "Actual ChatClient, AI SDK useChat, useChatPolling and composer layout effects",
-      "mocks": ["Next navigation", "server actions", "local empty GET chat-status responses"],
+      "mocks": [
+        "Next navigation",
+        "server actions",
+        "local empty GET chat-status responses"
+      ],
       "serverActions": 0,
       "externalRequestsAttempted": 0,
       "simulatedCancellationFailures": 0,
@@ -1947,9 +1980,16 @@
     ]
   },
   "image-large-final": {
-    "scope": ["chat", "chat-empty", "side-chat", "side-chat-empty"],
+    "scope": [
+      "chat",
+      "chat-empty",
+      "side-chat",
+      "side-chat-empty"
+    ],
     "profile": {
-      "widths": [320],
+      "widths": [
+        320
+      ],
       "rootFontSize": 32,
       "longChat": false,
       "cardChat": "image"
@@ -1957,11 +1997,15 @@
     "layouts": 8,
     "screenshots": 40,
     "captureTimeCoverageCurrent": true,
-    "listedSourceHashesMatchFinalWorktree": true,
+    "listedSourceHashesMatchFinalWorktree": false,
     "componentSha256": "16268e702796a390298aa8cc485e0ad9d887e3c797714277eabf9d2b9ceca7c1",
     "boundary": {
       "client": "Actual ChatClient, AI SDK useChat, useChatPolling and composer layout effects",
-      "mocks": ["Next navigation", "server actions", "local empty GET chat-status responses"],
+      "mocks": [
+        "Next navigation",
+        "server actions",
+        "local empty GET chat-status responses"
+      ],
       "serverActions": 0,
       "externalRequestsAttempted": 0,
       "simulatedCancellationFailures": 0,
@@ -2618,5 +2662,2148 @@
         }
       }
     ]
+  },
+  "live-recall-final-large": {
+    "scope": [
+      "chat",
+      "chat-empty",
+      "side-chat",
+      "side-chat-empty"
+    ],
+    "profile": {
+      "widths": [
+        320
+      ],
+      "rootFontSize": 32,
+      "longChat": false,
+      "cardChat": "",
+      "streamRecall": true
+    },
+    "layouts": 8,
+    "screenshots": 64,
+    "captureTimeCoverageCurrent": true,
+    "listedSourceHashesMatchFinalWorktree": true,
+    "componentSha256": {
+      "apps/web/app/chat/[id]/chat-client.tsx": "da3e56e1dded00b7060218c70a113ac7267eb3bfe06912a46a4169ad802c2277",
+      "apps/web/app/chat/[id]/message-view.tsx": "b65912904f69fe932f125a9e4aba547c85f4fe0d082e5e0f97f44fe345bf8dae",
+      "apps/web/app/chat/[id]/use-chat-polling.ts": "12f984a0d2e723b7d8baf083387aec0d176d38d9ee0185885cc0aef5f8da75e0",
+      "apps/web/app/chat/conversation-page.tsx": "105797963ccbd058702b124661f699aced623c34218cbb7232bf4de9c8cd4a52",
+      "apps/web/app/conversation.css": "e47b90be45d882acae44d6792d80494a2f10d24dd10030d5b5731729ebe7b30c",
+      "apps/web/app/globals.css": "ddf7bf8e6254c9475fdb3959e230353804ba6ab80163f7bec76aa8bd1fc39e75",
+      "apps/web/app/layout.tsx": "7a06562f357a256cfc12675069772620e3240f073fee9ea27c044f0a345ff252",
+      "apps/web/lib/ui.tsx": "76dd36555dac4092399bec238668a344fec8ca375bf66aaad76cf200ffead985",
+      "apps/web/app/product-visual-fixture.test.tsx": "32a510b1c403828bf7985339768ab9618e735d23183e77e6dc84614a966c7b8c",
+      "scripts/product-visual-qa.ts": "ff343321d4dde298f74dcb5216031564cb5c703ffd9772b1a4d6377b0c9aaee2"
+    },
+    "boundary": {
+      "client": "Actual ChatClient, AI SDK useChat, useChatPolling and composer layout effects",
+      "mocks": [
+        "Next navigation",
+        "server actions",
+        "local controlled UI-message stream with x-recall; no provider",
+        "local empty GET chat-status responses"
+      ],
+      "serverActions": 0,
+      "externalRequestsAttempted": 0,
+      "simulatedCancellationFailures": 0,
+      "syntheticStatusReads": 8,
+      "syntheticImageReads": 0,
+      "ownerReads": 0,
+      "providerCalls": 0,
+      "sendsOrVoiceExercised": true,
+      "syntheticLocalSends": 8,
+      "liveOwnerSends": 0,
+      "liveRouteAdmissionExercised": false
+    },
+    "proofs": [
+      {
+        "name": "chat",
+        "scheme": "light",
+        "scrollingProof": {
+          "firstReachable": true,
+          "textLineCount": 174,
+          "readableLineCount": 174,
+          "firstActualTextLineReadable": true,
+          "lastActualTextLineReadable": true,
+          "readingOffsetsChecked": 59,
+          "firstTopAtStart": 295,
+          "firstBottomAtStart": 537,
+          "logTop": 271,
+          "logBottom": 844,
+          "readingBottom": 698,
+          "lastReachable": true,
+          "scrollHeight": 8791,
+          "maximumScrollTop": 8218,
+          "readingScrollTop": 8202,
+          "clientHeight": 573,
+          "composerTop": 698,
+          "lastTopAtEnd": 605.75,
+          "lastBottomAtEnd": 673.75,
+          "bodyScrollHeight": 844,
+          "viewportHeight": 844,
+          "liveRecallProof": {
+            "initialPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 654.25,
+              "lineBottom": 682.25,
+              "logTop": 271,
+              "composerTop": 698,
+              "actualScrollTop": 4983,
+              "physicalMaximum": 5009,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "continuedPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 653.75,
+              "lineBottom": 681.75,
+              "logTop": 271,
+              "composerTop": 698,
+              "actualScrollTop": 8192,
+              "physicalMaximum": 8218,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "readerPosition": 0,
+            "screenshots": [
+              "chat-320-light-recall-streaming.png",
+              "chat-320-light-recall-continued.png"
+            ],
+            "syntheticLocalSend": true,
+            "liveOwnerSend": false
+          },
+          "topScreenshot": "chat-320-light-top.png",
+          "bottomScreenshot": "chat-320-light.png",
+          "navigationReachable": true,
+          "draftStart": {
+            "caretAtStart": true,
+            "firstLineVisible": true
+          },
+          "editing": {
+            "focused": true,
+            "fieldScrolls": true,
+            "caretAtEnd": true,
+            "caretVisible": true,
+            "fieldWidth": 186,
+            "sendEnabled": true,
+            "sendVisible": true,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "composerScreenshot": "chat-320-light-editing.png",
+          "composerStartScreenshot": "chat-320-light-editing-start.png",
+          "lastTextAfterGrowth": {
+            "readable": true,
+            "finalText": "Live recall",
+            "lineTop": 605.75,
+            "lineBottom": 633.75,
+            "logTop": 271,
+            "composerTop": 650,
+            "actualScrollTop": 8240,
+            "physicalMaximum": 8266,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "jumpKeyboard": true,
+          "jumpPointer": true,
+          "jumpOutcomes": [
+            {
+              "activation": "pointer",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 605.75,
+              "lineBottom": 633.75,
+              "logTop": 271,
+              "composerTop": 650,
+              "actualScrollTop": 8240,
+              "physicalMaximum": 8266,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "chat-320-light-jump-pointer.png",
+              "scriptedScrollCorrection": false
+            },
+            {
+              "activation": "keyboard",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 605.75,
+              "lineBottom": 633.75,
+              "logTop": 271,
+              "composerTop": 650,
+              "actualScrollTop": 8240,
+              "physicalMaximum": 8266,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "chat-320-light-jump-keyboard.png",
+              "scriptedScrollCorrection": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "chat-empty",
+        "scheme": "light",
+        "scrollingProof": {
+          "firstReachable": true,
+          "textLineCount": 156,
+          "readableLineCount": 156,
+          "firstActualTextLineReadable": true,
+          "lastActualTextLineReadable": true,
+          "readingOffsetsChecked": 52,
+          "firstTopAtStart": 295,
+          "firstBottomAtStart": 441,
+          "logTop": 271,
+          "logBottom": 844,
+          "readingBottom": 698,
+          "lastReachable": true,
+          "scrollHeight": 7740,
+          "maximumScrollTop": 7167,
+          "readingScrollTop": 7151,
+          "clientHeight": 573,
+          "composerTop": 698,
+          "lastTopAtEnd": 605.875,
+          "lastBottomAtEnd": 673.875,
+          "bodyScrollHeight": 844,
+          "viewportHeight": 844,
+          "liveRecallProof": {
+            "initialPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 654.375,
+              "lineBottom": 682.375,
+              "logTop": 271,
+              "composerTop": 698,
+              "actualScrollTop": 3932,
+              "physicalMaximum": 3958,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "continuedPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 653.875,
+              "lineBottom": 681.875,
+              "logTop": 271,
+              "composerTop": 698,
+              "actualScrollTop": 7141,
+              "physicalMaximum": 7167,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "readerPosition": 0,
+            "screenshots": [
+              "chat-empty-320-light-recall-streaming.png",
+              "chat-empty-320-light-recall-continued.png"
+            ],
+            "syntheticLocalSend": true,
+            "liveOwnerSend": false
+          },
+          "topScreenshot": "chat-empty-320-light-top.png",
+          "bottomScreenshot": "chat-empty-320-light.png",
+          "navigationReachable": true,
+          "draftStart": {
+            "caretAtStart": true,
+            "firstLineVisible": true
+          },
+          "editing": {
+            "focused": true,
+            "fieldScrolls": true,
+            "caretAtEnd": true,
+            "caretVisible": true,
+            "fieldWidth": 186,
+            "sendEnabled": true,
+            "sendVisible": true,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "composerScreenshot": "chat-empty-320-light-editing.png",
+          "composerStartScreenshot": "chat-empty-320-light-editing-start.png",
+          "lastTextAfterGrowth": {
+            "readable": true,
+            "finalText": "Live recall",
+            "lineTop": 605.875,
+            "lineBottom": 633.875,
+            "logTop": 271,
+            "composerTop": 650,
+            "actualScrollTop": 7189,
+            "physicalMaximum": 7215,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "jumpKeyboard": true,
+          "jumpPointer": true,
+          "jumpOutcomes": [
+            {
+              "activation": "pointer",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 605.875,
+              "lineBottom": 633.875,
+              "logTop": 271,
+              "composerTop": 650,
+              "actualScrollTop": 7189,
+              "physicalMaximum": 7215,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "chat-empty-320-light-jump-pointer.png",
+              "scriptedScrollCorrection": false
+            },
+            {
+              "activation": "keyboard",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 605.875,
+              "lineBottom": 633.875,
+              "logTop": 271,
+              "composerTop": 650,
+              "actualScrollTop": 7189,
+              "physicalMaximum": 7215,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "chat-empty-320-light-jump-keyboard.png",
+              "scriptedScrollCorrection": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "side-chat",
+        "scheme": "light",
+        "scrollingProof": {
+          "firstReachable": true,
+          "textLineCount": 174,
+          "readableLineCount": 174,
+          "firstActualTextLineReadable": true,
+          "lastActualTextLineReadable": true,
+          "readingOffsetsChecked": 239,
+          "firstTopAtStart": 614,
+          "firstBottomAtStart": 856,
+          "logTop": 590,
+          "logBottom": 844,
+          "readingBottom": 698,
+          "lastReachable": true,
+          "scrollHeight": 8791,
+          "maximumScrollTop": 8537,
+          "readingScrollTop": 8521,
+          "clientHeight": 254,
+          "composerTop": 698,
+          "lastTopAtEnd": 605.75,
+          "lastBottomAtEnd": 673.75,
+          "bodyScrollHeight": 844,
+          "viewportHeight": 844,
+          "liveRecallProof": {
+            "initialPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 654.25,
+              "lineBottom": 682.25,
+              "logTop": 590,
+              "composerTop": 698,
+              "actualScrollTop": 5302,
+              "physicalMaximum": 5328,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "continuedPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 653.75,
+              "lineBottom": 681.75,
+              "logTop": 590,
+              "composerTop": 698,
+              "actualScrollTop": 8511,
+              "physicalMaximum": 8537,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "readerPosition": 0,
+            "screenshots": [
+              "side-chat-320-light-recall-streaming.png",
+              "side-chat-320-light-recall-continued.png"
+            ],
+            "syntheticLocalSend": true,
+            "liveOwnerSend": false
+          },
+          "topScreenshot": "side-chat-320-light-top.png",
+          "bottomScreenshot": "side-chat-320-light.png",
+          "navigationReachable": true,
+          "draftStart": {
+            "caretAtStart": true,
+            "firstLineVisible": true
+          },
+          "editing": {
+            "focused": true,
+            "fieldScrolls": true,
+            "caretAtEnd": true,
+            "caretVisible": true,
+            "fieldWidth": 186,
+            "sendEnabled": true,
+            "sendVisible": true,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "composerScreenshot": "side-chat-320-light-editing.png",
+          "composerStartScreenshot": "side-chat-320-light-editing-start.png",
+          "lastTextAfterGrowth": {
+            "readable": true,
+            "finalText": "Live recall",
+            "lineTop": 605.75,
+            "lineBottom": 633.75,
+            "logTop": 590,
+            "composerTop": 650,
+            "actualScrollTop": 8559,
+            "physicalMaximum": 8585,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "jumpKeyboard": true,
+          "jumpPointer": true,
+          "jumpOutcomes": [
+            {
+              "activation": "pointer",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 605.75,
+              "lineBottom": 633.75,
+              "logTop": 590,
+              "composerTop": 650,
+              "actualScrollTop": 8559,
+              "physicalMaximum": 8585,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "side-chat-320-light-jump-pointer.png",
+              "scriptedScrollCorrection": false
+            },
+            {
+              "activation": "keyboard",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 605.75,
+              "lineBottom": 633.75,
+              "logTop": 590,
+              "composerTop": 650,
+              "actualScrollTop": 8559,
+              "physicalMaximum": 8585,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "side-chat-320-light-jump-keyboard.png",
+              "scriptedScrollCorrection": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "side-chat-empty",
+        "scheme": "light",
+        "scrollingProof": {
+          "firstReachable": true,
+          "textLineCount": 156,
+          "readableLineCount": 156,
+          "firstActualTextLineReadable": true,
+          "lastActualTextLineReadable": true,
+          "readingOffsetsChecked": 209,
+          "firstTopAtStart": 614,
+          "firstBottomAtStart": 760,
+          "logTop": 590,
+          "logBottom": 844,
+          "readingBottom": 698,
+          "lastReachable": true,
+          "scrollHeight": 7740,
+          "maximumScrollTop": 7486,
+          "readingScrollTop": 7470,
+          "clientHeight": 254,
+          "composerTop": 698,
+          "lastTopAtEnd": 605.875,
+          "lastBottomAtEnd": 673.875,
+          "bodyScrollHeight": 844,
+          "viewportHeight": 844,
+          "liveRecallProof": {
+            "initialPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 654.375,
+              "lineBottom": 682.375,
+              "logTop": 590,
+              "composerTop": 698,
+              "actualScrollTop": 4251,
+              "physicalMaximum": 4277,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "continuedPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 653.875,
+              "lineBottom": 681.875,
+              "logTop": 590,
+              "composerTop": 698,
+              "actualScrollTop": 7460,
+              "physicalMaximum": 7486,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "readerPosition": 0,
+            "screenshots": [
+              "side-chat-empty-320-light-recall-streaming.png",
+              "side-chat-empty-320-light-recall-continued.png"
+            ],
+            "syntheticLocalSend": true,
+            "liveOwnerSend": false
+          },
+          "topScreenshot": "side-chat-empty-320-light-top.png",
+          "bottomScreenshot": "side-chat-empty-320-light.png",
+          "navigationReachable": true,
+          "draftStart": {
+            "caretAtStart": true,
+            "firstLineVisible": true
+          },
+          "editing": {
+            "focused": true,
+            "fieldScrolls": true,
+            "caretAtEnd": true,
+            "caretVisible": true,
+            "fieldWidth": 186,
+            "sendEnabled": true,
+            "sendVisible": true,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "composerScreenshot": "side-chat-empty-320-light-editing.png",
+          "composerStartScreenshot": "side-chat-empty-320-light-editing-start.png",
+          "lastTextAfterGrowth": {
+            "readable": true,
+            "finalText": "Live recall",
+            "lineTop": 605.875,
+            "lineBottom": 633.875,
+            "logTop": 590,
+            "composerTop": 650,
+            "actualScrollTop": 7508,
+            "physicalMaximum": 7534,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "jumpKeyboard": true,
+          "jumpPointer": true,
+          "jumpOutcomes": [
+            {
+              "activation": "pointer",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 605.875,
+              "lineBottom": 633.875,
+              "logTop": 590,
+              "composerTop": 650,
+              "actualScrollTop": 7508,
+              "physicalMaximum": 7534,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "side-chat-empty-320-light-jump-pointer.png",
+              "scriptedScrollCorrection": false
+            },
+            {
+              "activation": "keyboard",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 605.875,
+              "lineBottom": 633.875,
+              "logTop": 590,
+              "composerTop": 650,
+              "actualScrollTop": 7508,
+              "physicalMaximum": 7534,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "side-chat-empty-320-light-jump-keyboard.png",
+              "scriptedScrollCorrection": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "chat",
+        "scheme": "dark",
+        "scrollingProof": {
+          "firstReachable": true,
+          "textLineCount": 174,
+          "readableLineCount": 174,
+          "firstActualTextLineReadable": true,
+          "lastActualTextLineReadable": true,
+          "readingOffsetsChecked": 59,
+          "firstTopAtStart": 295,
+          "firstBottomAtStart": 537,
+          "logTop": 271,
+          "logBottom": 844,
+          "readingBottom": 698,
+          "lastReachable": true,
+          "scrollHeight": 8791,
+          "maximumScrollTop": 8218,
+          "readingScrollTop": 8202,
+          "clientHeight": 573,
+          "composerTop": 698,
+          "lastTopAtEnd": 605.75,
+          "lastBottomAtEnd": 673.75,
+          "bodyScrollHeight": 844,
+          "viewportHeight": 844,
+          "liveRecallProof": {
+            "initialPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 654.25,
+              "lineBottom": 682.25,
+              "logTop": 271,
+              "composerTop": 698,
+              "actualScrollTop": 4983,
+              "physicalMaximum": 5009,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "continuedPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 653.75,
+              "lineBottom": 681.75,
+              "logTop": 271,
+              "composerTop": 698,
+              "actualScrollTop": 8192,
+              "physicalMaximum": 8218,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "readerPosition": 0,
+            "screenshots": [
+              "chat-320-dark-recall-streaming.png",
+              "chat-320-dark-recall-continued.png"
+            ],
+            "syntheticLocalSend": true,
+            "liveOwnerSend": false
+          },
+          "topScreenshot": "chat-320-dark-top.png",
+          "bottomScreenshot": "chat-320-dark.png",
+          "navigationReachable": true,
+          "draftStart": {
+            "caretAtStart": true,
+            "firstLineVisible": true
+          },
+          "editing": {
+            "focused": true,
+            "fieldScrolls": true,
+            "caretAtEnd": true,
+            "caretVisible": true,
+            "fieldWidth": 186,
+            "sendEnabled": true,
+            "sendVisible": true,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "composerScreenshot": "chat-320-dark-editing.png",
+          "composerStartScreenshot": "chat-320-dark-editing-start.png",
+          "lastTextAfterGrowth": {
+            "readable": true,
+            "finalText": "Live recall",
+            "lineTop": 605.75,
+            "lineBottom": 633.75,
+            "logTop": 271,
+            "composerTop": 650,
+            "actualScrollTop": 8240,
+            "physicalMaximum": 8266,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "jumpKeyboard": true,
+          "jumpPointer": true,
+          "jumpOutcomes": [
+            {
+              "activation": "pointer",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 605.75,
+              "lineBottom": 633.75,
+              "logTop": 271,
+              "composerTop": 650,
+              "actualScrollTop": 8240,
+              "physicalMaximum": 8266,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "chat-320-dark-jump-pointer.png",
+              "scriptedScrollCorrection": false
+            },
+            {
+              "activation": "keyboard",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 605.75,
+              "lineBottom": 633.75,
+              "logTop": 271,
+              "composerTop": 650,
+              "actualScrollTop": 8240,
+              "physicalMaximum": 8266,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "chat-320-dark-jump-keyboard.png",
+              "scriptedScrollCorrection": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "chat-empty",
+        "scheme": "dark",
+        "scrollingProof": {
+          "firstReachable": true,
+          "textLineCount": 156,
+          "readableLineCount": 156,
+          "firstActualTextLineReadable": true,
+          "lastActualTextLineReadable": true,
+          "readingOffsetsChecked": 52,
+          "firstTopAtStart": 295,
+          "firstBottomAtStart": 441,
+          "logTop": 271,
+          "logBottom": 844,
+          "readingBottom": 698,
+          "lastReachable": true,
+          "scrollHeight": 7740,
+          "maximumScrollTop": 7167,
+          "readingScrollTop": 7151,
+          "clientHeight": 573,
+          "composerTop": 698,
+          "lastTopAtEnd": 605.875,
+          "lastBottomAtEnd": 673.875,
+          "bodyScrollHeight": 844,
+          "viewportHeight": 844,
+          "liveRecallProof": {
+            "initialPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 654.375,
+              "lineBottom": 682.375,
+              "logTop": 271,
+              "composerTop": 698,
+              "actualScrollTop": 3932,
+              "physicalMaximum": 3958,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "continuedPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 653.875,
+              "lineBottom": 681.875,
+              "logTop": 271,
+              "composerTop": 698,
+              "actualScrollTop": 7141,
+              "physicalMaximum": 7167,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "readerPosition": 0,
+            "screenshots": [
+              "chat-empty-320-dark-recall-streaming.png",
+              "chat-empty-320-dark-recall-continued.png"
+            ],
+            "syntheticLocalSend": true,
+            "liveOwnerSend": false
+          },
+          "topScreenshot": "chat-empty-320-dark-top.png",
+          "bottomScreenshot": "chat-empty-320-dark.png",
+          "navigationReachable": true,
+          "draftStart": {
+            "caretAtStart": true,
+            "firstLineVisible": true
+          },
+          "editing": {
+            "focused": true,
+            "fieldScrolls": true,
+            "caretAtEnd": true,
+            "caretVisible": true,
+            "fieldWidth": 186,
+            "sendEnabled": true,
+            "sendVisible": true,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "composerScreenshot": "chat-empty-320-dark-editing.png",
+          "composerStartScreenshot": "chat-empty-320-dark-editing-start.png",
+          "lastTextAfterGrowth": {
+            "readable": true,
+            "finalText": "Live recall",
+            "lineTop": 605.875,
+            "lineBottom": 633.875,
+            "logTop": 271,
+            "composerTop": 650,
+            "actualScrollTop": 7189,
+            "physicalMaximum": 7215,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "jumpKeyboard": true,
+          "jumpPointer": true,
+          "jumpOutcomes": [
+            {
+              "activation": "pointer",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 605.875,
+              "lineBottom": 633.875,
+              "logTop": 271,
+              "composerTop": 650,
+              "actualScrollTop": 7189,
+              "physicalMaximum": 7215,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "chat-empty-320-dark-jump-pointer.png",
+              "scriptedScrollCorrection": false
+            },
+            {
+              "activation": "keyboard",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 605.875,
+              "lineBottom": 633.875,
+              "logTop": 271,
+              "composerTop": 650,
+              "actualScrollTop": 7189,
+              "physicalMaximum": 7215,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "chat-empty-320-dark-jump-keyboard.png",
+              "scriptedScrollCorrection": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "side-chat",
+        "scheme": "dark",
+        "scrollingProof": {
+          "firstReachable": true,
+          "textLineCount": 174,
+          "readableLineCount": 174,
+          "firstActualTextLineReadable": true,
+          "lastActualTextLineReadable": true,
+          "readingOffsetsChecked": 239,
+          "firstTopAtStart": 614,
+          "firstBottomAtStart": 856,
+          "logTop": 590,
+          "logBottom": 844,
+          "readingBottom": 698,
+          "lastReachable": true,
+          "scrollHeight": 8791,
+          "maximumScrollTop": 8537,
+          "readingScrollTop": 8521,
+          "clientHeight": 254,
+          "composerTop": 698,
+          "lastTopAtEnd": 605.75,
+          "lastBottomAtEnd": 673.75,
+          "bodyScrollHeight": 844,
+          "viewportHeight": 844,
+          "liveRecallProof": {
+            "initialPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 654.25,
+              "lineBottom": 682.25,
+              "logTop": 590,
+              "composerTop": 698,
+              "actualScrollTop": 5302,
+              "physicalMaximum": 5328,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "continuedPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 653.75,
+              "lineBottom": 681.75,
+              "logTop": 590,
+              "composerTop": 698,
+              "actualScrollTop": 8511,
+              "physicalMaximum": 8537,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "readerPosition": 0,
+            "screenshots": [
+              "side-chat-320-dark-recall-streaming.png",
+              "side-chat-320-dark-recall-continued.png"
+            ],
+            "syntheticLocalSend": true,
+            "liveOwnerSend": false
+          },
+          "topScreenshot": "side-chat-320-dark-top.png",
+          "bottomScreenshot": "side-chat-320-dark.png",
+          "navigationReachable": true,
+          "draftStart": {
+            "caretAtStart": true,
+            "firstLineVisible": true
+          },
+          "editing": {
+            "focused": true,
+            "fieldScrolls": true,
+            "caretAtEnd": true,
+            "caretVisible": true,
+            "fieldWidth": 186,
+            "sendEnabled": true,
+            "sendVisible": true,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "composerScreenshot": "side-chat-320-dark-editing.png",
+          "composerStartScreenshot": "side-chat-320-dark-editing-start.png",
+          "lastTextAfterGrowth": {
+            "readable": true,
+            "finalText": "Live recall",
+            "lineTop": 605.75,
+            "lineBottom": 633.75,
+            "logTop": 590,
+            "composerTop": 650,
+            "actualScrollTop": 8559,
+            "physicalMaximum": 8585,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "jumpKeyboard": true,
+          "jumpPointer": true,
+          "jumpOutcomes": [
+            {
+              "activation": "pointer",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 605.75,
+              "lineBottom": 633.75,
+              "logTop": 590,
+              "composerTop": 650,
+              "actualScrollTop": 8559,
+              "physicalMaximum": 8585,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "side-chat-320-dark-jump-pointer.png",
+              "scriptedScrollCorrection": false
+            },
+            {
+              "activation": "keyboard",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 605.75,
+              "lineBottom": 633.75,
+              "logTop": 590,
+              "composerTop": 650,
+              "actualScrollTop": 8559,
+              "physicalMaximum": 8585,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "side-chat-320-dark-jump-keyboard.png",
+              "scriptedScrollCorrection": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "side-chat-empty",
+        "scheme": "dark",
+        "scrollingProof": {
+          "firstReachable": true,
+          "textLineCount": 156,
+          "readableLineCount": 156,
+          "firstActualTextLineReadable": true,
+          "lastActualTextLineReadable": true,
+          "readingOffsetsChecked": 209,
+          "firstTopAtStart": 614,
+          "firstBottomAtStart": 760,
+          "logTop": 590,
+          "logBottom": 844,
+          "readingBottom": 698,
+          "lastReachable": true,
+          "scrollHeight": 7740,
+          "maximumScrollTop": 7486,
+          "readingScrollTop": 7470,
+          "clientHeight": 254,
+          "composerTop": 698,
+          "lastTopAtEnd": 605.875,
+          "lastBottomAtEnd": 673.875,
+          "bodyScrollHeight": 844,
+          "viewportHeight": 844,
+          "liveRecallProof": {
+            "initialPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 654.375,
+              "lineBottom": 682.375,
+              "logTop": 590,
+              "composerTop": 698,
+              "actualScrollTop": 4251,
+              "physicalMaximum": 4277,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "continuedPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 653.875,
+              "lineBottom": 681.875,
+              "logTop": 590,
+              "composerTop": 698,
+              "actualScrollTop": 7460,
+              "physicalMaximum": 7486,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "readerPosition": 0,
+            "screenshots": [
+              "side-chat-empty-320-dark-recall-streaming.png",
+              "side-chat-empty-320-dark-recall-continued.png"
+            ],
+            "syntheticLocalSend": true,
+            "liveOwnerSend": false
+          },
+          "topScreenshot": "side-chat-empty-320-dark-top.png",
+          "bottomScreenshot": "side-chat-empty-320-dark.png",
+          "navigationReachable": true,
+          "draftStart": {
+            "caretAtStart": true,
+            "firstLineVisible": true
+          },
+          "editing": {
+            "focused": true,
+            "fieldScrolls": true,
+            "caretAtEnd": true,
+            "caretVisible": true,
+            "fieldWidth": 186,
+            "sendEnabled": true,
+            "sendVisible": true,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "composerScreenshot": "side-chat-empty-320-dark-editing.png",
+          "composerStartScreenshot": "side-chat-empty-320-dark-editing-start.png",
+          "lastTextAfterGrowth": {
+            "readable": true,
+            "finalText": "Live recall",
+            "lineTop": 605.875,
+            "lineBottom": 633.875,
+            "logTop": 590,
+            "composerTop": 650,
+            "actualScrollTop": 7508,
+            "physicalMaximum": 7534,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "jumpKeyboard": true,
+          "jumpPointer": true,
+          "jumpOutcomes": [
+            {
+              "activation": "pointer",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 605.875,
+              "lineBottom": 633.875,
+              "logTop": 590,
+              "composerTop": 650,
+              "actualScrollTop": 7508,
+              "physicalMaximum": 7534,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "side-chat-empty-320-dark-jump-pointer.png",
+              "scriptedScrollCorrection": false
+            },
+            {
+              "activation": "keyboard",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 605.875,
+              "lineBottom": 633.875,
+              "logTop": 590,
+              "composerTop": 650,
+              "actualScrollTop": 7508,
+              "physicalMaximum": 7534,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "side-chat-empty-320-dark-jump-keyboard.png",
+              "scriptedScrollCorrection": false
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "live-recall-final-normal": {
+    "scope": [
+      "chat",
+      "chat-empty",
+      "side-chat",
+      "side-chat-empty"
+    ],
+    "profile": {
+      "widths": [
+        390
+      ],
+      "rootFontSize": 16,
+      "longChat": false,
+      "cardChat": "",
+      "streamRecall": true
+    },
+    "layouts": 8,
+    "screenshots": 64,
+    "captureTimeCoverageCurrent": true,
+    "listedSourceHashesMatchFinalWorktree": true,
+    "componentSha256": {
+      "apps/web/app/chat/[id]/chat-client.tsx": "da3e56e1dded00b7060218c70a113ac7267eb3bfe06912a46a4169ad802c2277",
+      "apps/web/app/chat/[id]/message-view.tsx": "b65912904f69fe932f125a9e4aba547c85f4fe0d082e5e0f97f44fe345bf8dae",
+      "apps/web/app/chat/[id]/use-chat-polling.ts": "12f984a0d2e723b7d8baf083387aec0d176d38d9ee0185885cc0aef5f8da75e0",
+      "apps/web/app/chat/conversation-page.tsx": "105797963ccbd058702b124661f699aced623c34218cbb7232bf4de9c8cd4a52",
+      "apps/web/app/conversation.css": "e47b90be45d882acae44d6792d80494a2f10d24dd10030d5b5731729ebe7b30c",
+      "apps/web/app/globals.css": "ddf7bf8e6254c9475fdb3959e230353804ba6ab80163f7bec76aa8bd1fc39e75",
+      "apps/web/app/layout.tsx": "7a06562f357a256cfc12675069772620e3240f073fee9ea27c044f0a345ff252",
+      "apps/web/lib/ui.tsx": "76dd36555dac4092399bec238668a344fec8ca375bf66aaad76cf200ffead985",
+      "apps/web/app/product-visual-fixture.test.tsx": "32a510b1c403828bf7985339768ab9618e735d23183e77e6dc84614a966c7b8c",
+      "scripts/product-visual-qa.ts": "ff343321d4dde298f74dcb5216031564cb5c703ffd9772b1a4d6377b0c9aaee2"
+    },
+    "boundary": {
+      "client": "Actual ChatClient, AI SDK useChat, useChatPolling and composer layout effects",
+      "mocks": [
+        "Next navigation",
+        "server actions",
+        "local controlled UI-message stream with x-recall; no provider",
+        "local empty GET chat-status responses"
+      ],
+      "serverActions": 0,
+      "externalRequestsAttempted": 0,
+      "simulatedCancellationFailures": 0,
+      "syntheticStatusReads": 8,
+      "syntheticImageReads": 0,
+      "ownerReads": 0,
+      "providerCalls": 0,
+      "sendsOrVoiceExercised": true,
+      "syntheticLocalSends": 8,
+      "liveOwnerSends": 0,
+      "liveRouteAdmissionExercised": false
+    },
+    "proofs": [
+      {
+        "name": "chat",
+        "scheme": "light",
+        "scrollingProof": {
+          "firstReachable": true,
+          "textLineCount": 60,
+          "readableLineCount": 60,
+          "firstActualTextLineReadable": true,
+          "lastActualTextLineReadable": true,
+          "readingOffsetsChecked": 7,
+          "firstTopAtStart": 141,
+          "firstBottomAtStart": 191,
+          "logTop": 117,
+          "logBottom": 844,
+          "readingBottom": 774,
+          "lastReachable": true,
+          "scrollHeight": 1927,
+          "maximumScrollTop": 1200,
+          "readingScrollTop": 1192,
+          "clientHeight": 727,
+          "composerTop": 774,
+          "lastTopAtEnd": 733.875,
+          "lastBottomAtEnd": 749.875,
+          "bodyScrollHeight": 844,
+          "viewportHeight": 844,
+          "liveRecallProof": {
+            "initialPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 742.625,
+              "lineBottom": 757.625,
+              "logTop": 117,
+              "composerTop": 774,
+              "actualScrollTop": 580,
+              "physicalMaximum": 597,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "continuedPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 742.875,
+              "lineBottom": 757.875,
+              "logTop": 117,
+              "composerTop": 774,
+              "actualScrollTop": 1183,
+              "physicalMaximum": 1200,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "readerPosition": 0,
+            "screenshots": [
+              "chat-390-light-recall-streaming.png",
+              "chat-390-light-recall-continued.png"
+            ],
+            "syntheticLocalSend": true,
+            "liveOwnerSend": false
+          },
+          "topScreenshot": "chat-390-light-top.png",
+          "bottomScreenshot": "chat-390-light.png",
+          "navigationReachable": true,
+          "draftStart": {
+            "caretAtStart": true,
+            "firstLineVisible": true
+          },
+          "editing": {
+            "focused": true,
+            "fieldScrolls": true,
+            "caretAtEnd": true,
+            "caretVisible": true,
+            "fieldWidth": 288,
+            "sendEnabled": true,
+            "sendVisible": true,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "composerScreenshot": "chat-390-light-editing.png",
+          "composerStartScreenshot": "chat-390-light-editing-start.png",
+          "lastTextAfterGrowth": {
+            "readable": true,
+            "finalText": "Live recall",
+            "lineTop": 626.875,
+            "lineBottom": 641.875,
+            "logTop": 117,
+            "composerTop": 658,
+            "actualScrollTop": 1299,
+            "physicalMaximum": 1316,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "jumpKeyboard": true,
+          "jumpPointer": true,
+          "jumpOutcomes": [
+            {
+              "activation": "pointer",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 626.875,
+              "lineBottom": 641.875,
+              "logTop": 117,
+              "composerTop": 658,
+              "actualScrollTop": 1299,
+              "physicalMaximum": 1316,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "chat-390-light-jump-pointer.png",
+              "scriptedScrollCorrection": false
+            },
+            {
+              "activation": "keyboard",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 626.875,
+              "lineBottom": 641.875,
+              "logTop": 117,
+              "composerTop": 658,
+              "actualScrollTop": 1299,
+              "physicalMaximum": 1316,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "chat-390-light-jump-keyboard.png",
+              "scriptedScrollCorrection": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "chat-empty",
+        "scheme": "light",
+        "scrollingProof": {
+          "firstReachable": true,
+          "textLineCount": 56,
+          "readableLineCount": 56,
+          "firstActualTextLineReadable": true,
+          "lastActualTextLineReadable": true,
+          "readingOffsetsChecked": 6,
+          "firstTopAtStart": 141,
+          "firstBottomAtStart": 191,
+          "logTop": 117,
+          "logBottom": 844,
+          "readingBottom": 774,
+          "lastReachable": true,
+          "scrollHeight": 1641,
+          "maximumScrollTop": 914,
+          "readingScrollTop": 906,
+          "clientHeight": 727,
+          "composerTop": 774,
+          "lastTopAtEnd": 734.4375,
+          "lastBottomAtEnd": 750.4375,
+          "bodyScrollHeight": 844,
+          "viewportHeight": 844,
+          "liveRecallProof": {
+            "initialPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 743.1875,
+              "lineBottom": 758.1875,
+              "logTop": 117,
+              "composerTop": 774,
+              "actualScrollTop": 294,
+              "physicalMaximum": 311,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "continuedPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 743.4375,
+              "lineBottom": 758.4375,
+              "logTop": 117,
+              "composerTop": 774,
+              "actualScrollTop": 897,
+              "physicalMaximum": 914,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "readerPosition": 0,
+            "screenshots": [
+              "chat-empty-390-light-recall-streaming.png",
+              "chat-empty-390-light-recall-continued.png"
+            ],
+            "syntheticLocalSend": true,
+            "liveOwnerSend": false
+          },
+          "topScreenshot": "chat-empty-390-light-top.png",
+          "bottomScreenshot": "chat-empty-390-light.png",
+          "navigationReachable": true,
+          "draftStart": {
+            "caretAtStart": true,
+            "firstLineVisible": true
+          },
+          "editing": {
+            "focused": true,
+            "fieldScrolls": true,
+            "caretAtEnd": true,
+            "caretVisible": true,
+            "fieldWidth": 288,
+            "sendEnabled": true,
+            "sendVisible": true,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "composerScreenshot": "chat-empty-390-light-editing.png",
+          "composerStartScreenshot": "chat-empty-390-light-editing-start.png",
+          "lastTextAfterGrowth": {
+            "readable": true,
+            "finalText": "Live recall",
+            "lineTop": 627.4375,
+            "lineBottom": 642.4375,
+            "logTop": 117,
+            "composerTop": 658,
+            "actualScrollTop": 1013,
+            "physicalMaximum": 1030,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "jumpKeyboard": true,
+          "jumpPointer": true,
+          "jumpOutcomes": [
+            {
+              "activation": "pointer",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 627.4375,
+              "lineBottom": 642.4375,
+              "logTop": 117,
+              "composerTop": 658,
+              "actualScrollTop": 1013,
+              "physicalMaximum": 1030,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "chat-empty-390-light-jump-pointer.png",
+              "scriptedScrollCorrection": false
+            },
+            {
+              "activation": "keyboard",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 627.4375,
+              "lineBottom": 642.4375,
+              "logTop": 117,
+              "composerTop": 658,
+              "actualScrollTop": 1013,
+              "physicalMaximum": 1030,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "chat-empty-390-light-jump-keyboard.png",
+              "scriptedScrollCorrection": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "side-chat",
+        "scheme": "light",
+        "scrollingProof": {
+          "firstReachable": true,
+          "textLineCount": 60,
+          "readableLineCount": 60,
+          "firstActualTextLineReadable": true,
+          "lastActualTextLineReadable": true,
+          "readingOffsetsChecked": 9,
+          "firstTopAtStart": 282,
+          "firstBottomAtStart": 332,
+          "logTop": 258,
+          "logBottom": 844,
+          "readingBottom": 774,
+          "lastReachable": true,
+          "scrollHeight": 1927,
+          "maximumScrollTop": 1341,
+          "readingScrollTop": 1333,
+          "clientHeight": 586,
+          "composerTop": 774,
+          "lastTopAtEnd": 733.875,
+          "lastBottomAtEnd": 749.875,
+          "bodyScrollHeight": 844,
+          "viewportHeight": 844,
+          "liveRecallProof": {
+            "initialPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 742.625,
+              "lineBottom": 757.625,
+              "logTop": 258,
+              "composerTop": 774,
+              "actualScrollTop": 721,
+              "physicalMaximum": 738,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "continuedPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 742.875,
+              "lineBottom": 757.875,
+              "logTop": 258,
+              "composerTop": 774,
+              "actualScrollTop": 1324,
+              "physicalMaximum": 1341,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "readerPosition": 0,
+            "screenshots": [
+              "side-chat-390-light-recall-streaming.png",
+              "side-chat-390-light-recall-continued.png"
+            ],
+            "syntheticLocalSend": true,
+            "liveOwnerSend": false
+          },
+          "topScreenshot": "side-chat-390-light-top.png",
+          "bottomScreenshot": "side-chat-390-light.png",
+          "navigationReachable": true,
+          "draftStart": {
+            "caretAtStart": true,
+            "firstLineVisible": true
+          },
+          "editing": {
+            "focused": true,
+            "fieldScrolls": true,
+            "caretAtEnd": true,
+            "caretVisible": true,
+            "fieldWidth": 288,
+            "sendEnabled": true,
+            "sendVisible": true,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "composerScreenshot": "side-chat-390-light-editing.png",
+          "composerStartScreenshot": "side-chat-390-light-editing-start.png",
+          "lastTextAfterGrowth": {
+            "readable": true,
+            "finalText": "Live recall",
+            "lineTop": 626.875,
+            "lineBottom": 641.875,
+            "logTop": 258,
+            "composerTop": 658,
+            "actualScrollTop": 1440,
+            "physicalMaximum": 1457,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "jumpKeyboard": true,
+          "jumpPointer": true,
+          "jumpOutcomes": [
+            {
+              "activation": "pointer",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 626.875,
+              "lineBottom": 641.875,
+              "logTop": 258,
+              "composerTop": 658,
+              "actualScrollTop": 1440,
+              "physicalMaximum": 1457,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "side-chat-390-light-jump-pointer.png",
+              "scriptedScrollCorrection": false
+            },
+            {
+              "activation": "keyboard",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 626.875,
+              "lineBottom": 641.875,
+              "logTop": 258,
+              "composerTop": 658,
+              "actualScrollTop": 1440,
+              "physicalMaximum": 1457,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "side-chat-390-light-jump-keyboard.png",
+              "scriptedScrollCorrection": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "side-chat-empty",
+        "scheme": "light",
+        "scrollingProof": {
+          "firstReachable": true,
+          "textLineCount": 56,
+          "readableLineCount": 56,
+          "firstActualTextLineReadable": true,
+          "lastActualTextLineReadable": true,
+          "readingOffsetsChecked": 8,
+          "firstTopAtStart": 282,
+          "firstBottomAtStart": 332,
+          "logTop": 258,
+          "logBottom": 844,
+          "readingBottom": 774,
+          "lastReachable": true,
+          "scrollHeight": 1641,
+          "maximumScrollTop": 1055,
+          "readingScrollTop": 1047,
+          "clientHeight": 586,
+          "composerTop": 774,
+          "lastTopAtEnd": 734.4375,
+          "lastBottomAtEnd": 750.4375,
+          "bodyScrollHeight": 844,
+          "viewportHeight": 844,
+          "liveRecallProof": {
+            "initialPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 743.1875,
+              "lineBottom": 758.1875,
+              "logTop": 258,
+              "composerTop": 774,
+              "actualScrollTop": 435,
+              "physicalMaximum": 452,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "continuedPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 743.4375,
+              "lineBottom": 758.4375,
+              "logTop": 258,
+              "composerTop": 774,
+              "actualScrollTop": 1038,
+              "physicalMaximum": 1055,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "readerPosition": 0,
+            "screenshots": [
+              "side-chat-empty-390-light-recall-streaming.png",
+              "side-chat-empty-390-light-recall-continued.png"
+            ],
+            "syntheticLocalSend": true,
+            "liveOwnerSend": false
+          },
+          "topScreenshot": "side-chat-empty-390-light-top.png",
+          "bottomScreenshot": "side-chat-empty-390-light.png",
+          "navigationReachable": true,
+          "draftStart": {
+            "caretAtStart": true,
+            "firstLineVisible": true
+          },
+          "editing": {
+            "focused": true,
+            "fieldScrolls": true,
+            "caretAtEnd": true,
+            "caretVisible": true,
+            "fieldWidth": 288,
+            "sendEnabled": true,
+            "sendVisible": true,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "composerScreenshot": "side-chat-empty-390-light-editing.png",
+          "composerStartScreenshot": "side-chat-empty-390-light-editing-start.png",
+          "lastTextAfterGrowth": {
+            "readable": true,
+            "finalText": "Live recall",
+            "lineTop": 627.4375,
+            "lineBottom": 642.4375,
+            "logTop": 258,
+            "composerTop": 658,
+            "actualScrollTop": 1154,
+            "physicalMaximum": 1171,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "jumpKeyboard": true,
+          "jumpPointer": true,
+          "jumpOutcomes": [
+            {
+              "activation": "pointer",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 627.4375,
+              "lineBottom": 642.4375,
+              "logTop": 258,
+              "composerTop": 658,
+              "actualScrollTop": 1154,
+              "physicalMaximum": 1171,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "side-chat-empty-390-light-jump-pointer.png",
+              "scriptedScrollCorrection": false
+            },
+            {
+              "activation": "keyboard",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 627.4375,
+              "lineBottom": 642.4375,
+              "logTop": 258,
+              "composerTop": 658,
+              "actualScrollTop": 1154,
+              "physicalMaximum": 1171,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "side-chat-empty-390-light-jump-keyboard.png",
+              "scriptedScrollCorrection": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "chat",
+        "scheme": "dark",
+        "scrollingProof": {
+          "firstReachable": true,
+          "textLineCount": 60,
+          "readableLineCount": 60,
+          "firstActualTextLineReadable": true,
+          "lastActualTextLineReadable": true,
+          "readingOffsetsChecked": 7,
+          "firstTopAtStart": 141,
+          "firstBottomAtStart": 191,
+          "logTop": 117,
+          "logBottom": 844,
+          "readingBottom": 774,
+          "lastReachable": true,
+          "scrollHeight": 1927,
+          "maximumScrollTop": 1200,
+          "readingScrollTop": 1192,
+          "clientHeight": 727,
+          "composerTop": 774,
+          "lastTopAtEnd": 733.875,
+          "lastBottomAtEnd": 749.875,
+          "bodyScrollHeight": 844,
+          "viewportHeight": 844,
+          "liveRecallProof": {
+            "initialPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 742.625,
+              "lineBottom": 757.625,
+              "logTop": 117,
+              "composerTop": 774,
+              "actualScrollTop": 580,
+              "physicalMaximum": 597,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "continuedPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 742.875,
+              "lineBottom": 757.875,
+              "logTop": 117,
+              "composerTop": 774,
+              "actualScrollTop": 1183,
+              "physicalMaximum": 1200,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "readerPosition": 0,
+            "screenshots": [
+              "chat-390-dark-recall-streaming.png",
+              "chat-390-dark-recall-continued.png"
+            ],
+            "syntheticLocalSend": true,
+            "liveOwnerSend": false
+          },
+          "topScreenshot": "chat-390-dark-top.png",
+          "bottomScreenshot": "chat-390-dark.png",
+          "navigationReachable": true,
+          "draftStart": {
+            "caretAtStart": true,
+            "firstLineVisible": true
+          },
+          "editing": {
+            "focused": true,
+            "fieldScrolls": true,
+            "caretAtEnd": true,
+            "caretVisible": true,
+            "fieldWidth": 288,
+            "sendEnabled": true,
+            "sendVisible": true,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "composerScreenshot": "chat-390-dark-editing.png",
+          "composerStartScreenshot": "chat-390-dark-editing-start.png",
+          "lastTextAfterGrowth": {
+            "readable": true,
+            "finalText": "Live recall",
+            "lineTop": 626.875,
+            "lineBottom": 641.875,
+            "logTop": 117,
+            "composerTop": 658,
+            "actualScrollTop": 1299,
+            "physicalMaximum": 1316,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "jumpKeyboard": true,
+          "jumpPointer": true,
+          "jumpOutcomes": [
+            {
+              "activation": "pointer",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 626.875,
+              "lineBottom": 641.875,
+              "logTop": 117,
+              "composerTop": 658,
+              "actualScrollTop": 1299,
+              "physicalMaximum": 1316,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "chat-390-dark-jump-pointer.png",
+              "scriptedScrollCorrection": false
+            },
+            {
+              "activation": "keyboard",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 626.875,
+              "lineBottom": 641.875,
+              "logTop": 117,
+              "composerTop": 658,
+              "actualScrollTop": 1299,
+              "physicalMaximum": 1316,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "chat-390-dark-jump-keyboard.png",
+              "scriptedScrollCorrection": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "chat-empty",
+        "scheme": "dark",
+        "scrollingProof": {
+          "firstReachable": true,
+          "textLineCount": 56,
+          "readableLineCount": 56,
+          "firstActualTextLineReadable": true,
+          "lastActualTextLineReadable": true,
+          "readingOffsetsChecked": 6,
+          "firstTopAtStart": 141,
+          "firstBottomAtStart": 191,
+          "logTop": 117,
+          "logBottom": 844,
+          "readingBottom": 774,
+          "lastReachable": true,
+          "scrollHeight": 1641,
+          "maximumScrollTop": 914,
+          "readingScrollTop": 906,
+          "clientHeight": 727,
+          "composerTop": 774,
+          "lastTopAtEnd": 734.4375,
+          "lastBottomAtEnd": 750.4375,
+          "bodyScrollHeight": 844,
+          "viewportHeight": 844,
+          "liveRecallProof": {
+            "initialPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 743.1875,
+              "lineBottom": 758.1875,
+              "logTop": 117,
+              "composerTop": 774,
+              "actualScrollTop": 294,
+              "physicalMaximum": 311,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "continuedPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 743.4375,
+              "lineBottom": 758.4375,
+              "logTop": 117,
+              "composerTop": 774,
+              "actualScrollTop": 897,
+              "physicalMaximum": 914,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "readerPosition": 0,
+            "screenshots": [
+              "chat-empty-390-dark-recall-streaming.png",
+              "chat-empty-390-dark-recall-continued.png"
+            ],
+            "syntheticLocalSend": true,
+            "liveOwnerSend": false
+          },
+          "topScreenshot": "chat-empty-390-dark-top.png",
+          "bottomScreenshot": "chat-empty-390-dark.png",
+          "navigationReachable": true,
+          "draftStart": {
+            "caretAtStart": true,
+            "firstLineVisible": true
+          },
+          "editing": {
+            "focused": true,
+            "fieldScrolls": true,
+            "caretAtEnd": true,
+            "caretVisible": true,
+            "fieldWidth": 288,
+            "sendEnabled": true,
+            "sendVisible": true,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "composerScreenshot": "chat-empty-390-dark-editing.png",
+          "composerStartScreenshot": "chat-empty-390-dark-editing-start.png",
+          "lastTextAfterGrowth": {
+            "readable": true,
+            "finalText": "Live recall",
+            "lineTop": 627.4375,
+            "lineBottom": 642.4375,
+            "logTop": 117,
+            "composerTop": 658,
+            "actualScrollTop": 1013,
+            "physicalMaximum": 1030,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "jumpKeyboard": true,
+          "jumpPointer": true,
+          "jumpOutcomes": [
+            {
+              "activation": "pointer",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 627.4375,
+              "lineBottom": 642.4375,
+              "logTop": 117,
+              "composerTop": 658,
+              "actualScrollTop": 1013,
+              "physicalMaximum": 1030,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "chat-empty-390-dark-jump-pointer.png",
+              "scriptedScrollCorrection": false
+            },
+            {
+              "activation": "keyboard",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 627.4375,
+              "lineBottom": 642.4375,
+              "logTop": 117,
+              "composerTop": 658,
+              "actualScrollTop": 1013,
+              "physicalMaximum": 1030,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "chat-empty-390-dark-jump-keyboard.png",
+              "scriptedScrollCorrection": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "side-chat",
+        "scheme": "dark",
+        "scrollingProof": {
+          "firstReachable": true,
+          "textLineCount": 60,
+          "readableLineCount": 60,
+          "firstActualTextLineReadable": true,
+          "lastActualTextLineReadable": true,
+          "readingOffsetsChecked": 9,
+          "firstTopAtStart": 282,
+          "firstBottomAtStart": 332,
+          "logTop": 258,
+          "logBottom": 844,
+          "readingBottom": 774,
+          "lastReachable": true,
+          "scrollHeight": 1927,
+          "maximumScrollTop": 1341,
+          "readingScrollTop": 1333,
+          "clientHeight": 586,
+          "composerTop": 774,
+          "lastTopAtEnd": 733.875,
+          "lastBottomAtEnd": 749.875,
+          "bodyScrollHeight": 844,
+          "viewportHeight": 844,
+          "liveRecallProof": {
+            "initialPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 742.625,
+              "lineBottom": 757.625,
+              "logTop": 258,
+              "composerTop": 774,
+              "actualScrollTop": 721,
+              "physicalMaximum": 738,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "continuedPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 742.875,
+              "lineBottom": 757.875,
+              "logTop": 258,
+              "composerTop": 774,
+              "actualScrollTop": 1324,
+              "physicalMaximum": 1341,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "readerPosition": 0,
+            "screenshots": [
+              "side-chat-390-dark-recall-streaming.png",
+              "side-chat-390-dark-recall-continued.png"
+            ],
+            "syntheticLocalSend": true,
+            "liveOwnerSend": false
+          },
+          "topScreenshot": "side-chat-390-dark-top.png",
+          "bottomScreenshot": "side-chat-390-dark.png",
+          "navigationReachable": true,
+          "draftStart": {
+            "caretAtStart": true,
+            "firstLineVisible": true
+          },
+          "editing": {
+            "focused": true,
+            "fieldScrolls": true,
+            "caretAtEnd": true,
+            "caretVisible": true,
+            "fieldWidth": 288,
+            "sendEnabled": true,
+            "sendVisible": true,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "composerScreenshot": "side-chat-390-dark-editing.png",
+          "composerStartScreenshot": "side-chat-390-dark-editing-start.png",
+          "lastTextAfterGrowth": {
+            "readable": true,
+            "finalText": "Live recall",
+            "lineTop": 626.875,
+            "lineBottom": 641.875,
+            "logTop": 258,
+            "composerTop": 658,
+            "actualScrollTop": 1440,
+            "physicalMaximum": 1457,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "jumpKeyboard": true,
+          "jumpPointer": true,
+          "jumpOutcomes": [
+            {
+              "activation": "pointer",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 626.875,
+              "lineBottom": 641.875,
+              "logTop": 258,
+              "composerTop": 658,
+              "actualScrollTop": 1440,
+              "physicalMaximum": 1457,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "side-chat-390-dark-jump-pointer.png",
+              "scriptedScrollCorrection": false
+            },
+            {
+              "activation": "keyboard",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 626.875,
+              "lineBottom": 641.875,
+              "logTop": 258,
+              "composerTop": 658,
+              "actualScrollTop": 1440,
+              "physicalMaximum": 1457,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "side-chat-390-dark-jump-keyboard.png",
+              "scriptedScrollCorrection": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "side-chat-empty",
+        "scheme": "dark",
+        "scrollingProof": {
+          "firstReachable": true,
+          "textLineCount": 56,
+          "readableLineCount": 56,
+          "firstActualTextLineReadable": true,
+          "lastActualTextLineReadable": true,
+          "readingOffsetsChecked": 8,
+          "firstTopAtStart": 282,
+          "firstBottomAtStart": 332,
+          "logTop": 258,
+          "logBottom": 844,
+          "readingBottom": 774,
+          "lastReachable": true,
+          "scrollHeight": 1641,
+          "maximumScrollTop": 1055,
+          "readingScrollTop": 1047,
+          "clientHeight": 586,
+          "composerTop": 774,
+          "lastTopAtEnd": 734.4375,
+          "lastBottomAtEnd": 750.4375,
+          "bodyScrollHeight": 844,
+          "viewportHeight": 844,
+          "liveRecallProof": {
+            "initialPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 743.1875,
+              "lineBottom": 758.1875,
+              "logTop": 258,
+              "composerTop": 774,
+              "actualScrollTop": 435,
+              "physicalMaximum": 452,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "continuedPin": {
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 743.4375,
+              "lineBottom": 758.4375,
+              "logTop": 258,
+              "composerTop": 774,
+              "actualScrollTop": 1038,
+              "physicalMaximum": 1055,
+              "bodyHeight": 844,
+              "viewportHeight": 844
+            },
+            "readerPosition": 0,
+            "screenshots": [
+              "side-chat-empty-390-dark-recall-streaming.png",
+              "side-chat-empty-390-dark-recall-continued.png"
+            ],
+            "syntheticLocalSend": true,
+            "liveOwnerSend": false
+          },
+          "topScreenshot": "side-chat-empty-390-dark-top.png",
+          "bottomScreenshot": "side-chat-empty-390-dark.png",
+          "navigationReachable": true,
+          "draftStart": {
+            "caretAtStart": true,
+            "firstLineVisible": true
+          },
+          "editing": {
+            "focused": true,
+            "fieldScrolls": true,
+            "caretAtEnd": true,
+            "caretVisible": true,
+            "fieldWidth": 288,
+            "sendEnabled": true,
+            "sendVisible": true,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "composerScreenshot": "side-chat-empty-390-dark-editing.png",
+          "composerStartScreenshot": "side-chat-empty-390-dark-editing-start.png",
+          "lastTextAfterGrowth": {
+            "readable": true,
+            "finalText": "Live recall",
+            "lineTop": 627.4375,
+            "lineBottom": 642.4375,
+            "logTop": 258,
+            "composerTop": 658,
+            "actualScrollTop": 1154,
+            "physicalMaximum": 1171,
+            "bodyHeight": 844,
+            "viewportHeight": 844
+          },
+          "jumpKeyboard": true,
+          "jumpPointer": true,
+          "jumpOutcomes": [
+            {
+              "activation": "pointer",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 627.4375,
+              "lineBottom": 642.4375,
+              "logTop": 258,
+              "composerTop": 658,
+              "actualScrollTop": 1154,
+              "physicalMaximum": 1171,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "side-chat-empty-390-dark-jump-pointer.png",
+              "scriptedScrollCorrection": false
+            },
+            {
+              "activation": "keyboard",
+              "readable": true,
+              "finalText": "Live recall",
+              "lineTop": 627.4375,
+              "lineBottom": 642.4375,
+              "logTop": 258,
+              "composerTop": 658,
+              "actualScrollTop": 1154,
+              "physicalMaximum": 1171,
+              "bodyHeight": 844,
+              "viewportHeight": 844,
+              "screenshot": "side-chat-empty-390-dark-jump-keyboard.png",
+              "scriptedScrollCorrection": false
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "live-recall-before": {
+    "sourceCommit": "6726e52906a67c829f916b925cf4cdb63d18eb96",
+    "sameFinalHarness": true,
+    "expectedFailure": {
+      "readable": false,
+      "finalText": "Live recall",
+      "lineTop": 846.25,
+      "lineBottom": 874.25,
+      "logTop": 271,
+      "composerTop": 698,
+      "actualScrollTop": 4791,
+      "physicalMaximum": 5009,
+      "bodyHeight": 844,
+      "viewportHeight": 844
+    },
+    "qualification": "Archived prior source with only the final harness copied in; expected regression failure."
   }
 }

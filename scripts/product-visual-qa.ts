@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
+import { createServer, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +21,9 @@ const before = process.argv.includes('--before');
 const chatStates = process.argv.includes('--chat-states');
 const hydrateChat = process.argv.includes('--hydrate-chat') || chatStates;
 const longChat = process.argv.includes('--long-chat');
+const streamRecall = process.argv.includes('--stream-recall');
+if (streamRecall && (!hydrateChat || chatStates))
+  throw new Error('Live recall requires a hydrated ordinary chat');
 const cardChat = process.argv.find((arg) => arg.startsWith('--chat-card='))?.slice(12) ?? '';
 if (cardChat && !['only', 'with-prose', 'agenda', 'image'].includes(cardChat))
   throw new Error('Unknown card-chat fixture');
@@ -246,7 +249,11 @@ function readLastTranscriptLine() {
   const candidates = log?.querySelectorAll(
     '[data-message-block][data-role="assistant"], .my-auto .grid button',
   );
-  const last = candidates?.[candidates.length - 1];
+  const standaloneRecall = [...(log?.querySelectorAll('.recall-note') ?? [])].find(
+    (element) =>
+      element.textContent?.includes('Live recall') && !element.closest('[data-message-block]'),
+  );
+  const last = standaloneRecall ?? candidates?.[candidates.length - 1];
   if (!log || !composer || !form || !last) return null;
   const image = last.querySelector<HTMLImageElement>('img[alt="Latest visual card"]');
   if (image) {
@@ -350,6 +357,11 @@ const buildSha256 = visualHash(
     client: before ? null : visualHash(await readFile(path.join(output, 'client.js'))),
     captureWidths,
     rootFontSize,
+    hydrateChat,
+    chatStates,
+    longChat,
+    cardChat,
+    streamRecall,
   }),
 );
 const stylesheetSha256 = visualHash(
@@ -366,6 +378,7 @@ const fixtureInputs = {
   hydrateChat,
   chatStates,
   longChat,
+  streamRecall,
   cardChat,
   componentSha256,
   html: Object.fromEntries(
@@ -438,9 +451,39 @@ async function captureInputs(entry: PageFixture, currentComponentHash = componen
   };
 }
 await mkdir(path.join(output, 'capture-receipts'), { recursive: true });
+const recallStream = { response: null as ServerResponse | null };
+const writeRecallChunk = (chunk: Record<string, unknown>) => {
+  if (!recallStream.response) throw new Error('No active synthetic recall stream');
+  recallStream.response.write(`data: ${JSON.stringify(chunk)}\n\n`);
+};
 const server = createServer(async (request, response) => {
   try {
     const pathname = new URL(request.url ?? '/', 'http://localhost').pathname;
+    if (streamRecall && pathname === '/api/chat' && request.method === 'POST') {
+      request.resume();
+      if (recallStream.response) throw new Error('Overlapping synthetic recall streams');
+      recallStream.response = response;
+      response.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-store',
+        'x-vercel-ai-ui-message-stream': 'v1',
+        'x-owner-message-id': '00000000-0000-4000-8000-000000000005',
+        'x-recall': encodeURIComponent(
+          JSON.stringify([{ date: '2026-10-01', label: 'Live recall', kind: 'chat' }]),
+        ),
+      });
+      writeRecallChunk({
+        type: 'start',
+        messageId: '00000000-0000-4000-8000-000000000004',
+      });
+      writeRecallChunk({ type: 'text-start', id: 'synthetic-recall-text' });
+      writeRecallChunk({
+        type: 'text-delta',
+        id: 'synthetic-recall-text',
+        delta: `Live recall reply begins.\n\n${'Check the weekend plan and leave time for the journey. '.repeat(20)}`,
+      });
+      return;
+    }
     if (pathname === '/style.css') {
       response.setHeader('Content-Type', 'text/css');
       response.end(css.css);
@@ -518,6 +561,19 @@ try {
             path: url.pathname,
             method: route.request().method(),
           });
+          if (streamRecall && url.pathname === '/api/chat' && route.request().method() === 'POST') {
+            const body = route.request().postDataJSON() as {
+              messages?: Array<{ role?: string; parts?: Array<{ text?: string }> }>;
+            };
+            if (
+              body.messages?.length !== 1 ||
+              body.messages[0]?.role !== 'user' ||
+              body.messages[0]?.parts?.[0]?.text !== 'Review live recall fixture'
+            )
+              throw new Error('Unexpected synthetic recall submission');
+            await route.continue();
+            return;
+          }
           if (
             cardChat === 'image' &&
             url.pathname === '/api/card-image' &&
@@ -674,8 +730,84 @@ try {
           if (cardChat === 'image' && entry.state !== 'empty')
             await waitForReadable('initial-image-auto-follow');
         }
+        let liveRecallProof: Record<string, unknown> | null = null;
+        if (streamRecall) {
+          const screenshots: string[] = [];
+          const captureRecall = async (phase: string) => {
+            await waitForReadable(`live-recall-${phase}`);
+            const observed = await page.evaluate(readLastTranscriptLine);
+            if (!observed?.finalText?.includes('Live recall'))
+              throw new Error('Streaming oracle did not find standalone live provenance');
+            const screenshot = `${entry.name}-${viewport.width}-${scheme}-recall-${phase}.png`;
+            await provenanceScreenshot(page, {
+              path: path.join(output, screenshot),
+              fullPage: true,
+              animations: 'disabled',
+            });
+            screenshots.push(screenshot);
+            return observed;
+          };
+          const field = page.getByRole('combobox', { name: 'Message', exact: true });
+          await field.fill('Review live recall fixture');
+          await page.getByRole('button', { name: 'Send', exact: true }).click();
+          await page.locator('.recall-note').filter({ hasText: 'Live recall' }).waitFor();
+          await page.getByRole('button', { name: 'Stop', exact: true }).waitFor();
+          const initialPin = await captureRecall('streaming');
+          const log = page.getByRole('log', { name: 'Conversation' });
+          await log.hover({ position: { x: 8, y: 8 } });
+          await page.mouse.wheel(0, -100000);
+          await page.waitForFunction(
+            () => (document.querySelector<HTMLElement>('[role="log"]')?.scrollTop ?? -1) <= 1,
+          );
+          await page.getByRole('button', { name: 'Jump to latest', exact: true }).waitFor();
+          writeRecallChunk({
+            type: 'text-delta',
+            id: 'synthetic-recall-text',
+            delta: `\n\nUnpinned stream update.\n\n${'Additional local stream detail. '.repeat(12)}`,
+          });
+          await page.getByText('Unpinned stream update.', { exact: true }).waitFor();
+          const readerPosition = await page.evaluate(async () => {
+            await new Promise<void>((resolve) =>
+              requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+            );
+            return document.querySelector<HTMLElement>('[role="log"]')?.scrollTop ?? -1;
+          });
+          if (readerPosition < 0 || readerPosition > 1)
+            throw new Error('Streaming growth stole the reader position');
+          await page.getByRole('button', { name: 'Jump to latest', exact: true }).click();
+          await waitForReadable('live-recall-actual-jump');
+          writeRecallChunk({
+            type: 'text-delta',
+            id: 'synthetic-recall-text',
+            delta: `\n\nPinned stream update.\n\n${'Continue the local fixture response. '.repeat(12)}\n\nStream appendix completed.`,
+          });
+          await page.getByText('Stream appendix completed.', { exact: true }).waitFor();
+          const continuedPin = await captureRecall('continued');
+          writeRecallChunk({ type: 'text-end', id: 'synthetic-recall-text' });
+          writeRecallChunk({ type: 'finish', finishReason: 'stop' });
+          if (!recallStream.response) throw new Error('Synthetic recall stream disappeared');
+          recallStream.response.end('data: [DONE]\n\n');
+          recallStream.response = null;
+          await page.getByRole('button', { name: 'Send', exact: true }).waitFor();
+          // Enter the read sweep through an actual reader gesture after the
+          // SDK's final commit, rather than racing its queued pinned-follow.
+          await log.hover({ position: { x: 8, y: 8 } });
+          await page.mouse.wheel(0, -100000);
+          await page.waitForFunction(
+            () => (document.querySelector<HTMLElement>('[role="log"]')?.scrollTop ?? -1) <= 1,
+          );
+          await page.getByRole('button', { name: 'Jump to latest', exact: true }).waitFor();
+          liveRecallProof = {
+            initialPin,
+            continuedPin,
+            readerPosition,
+            screenshots,
+            syntheticLocalSend: true,
+            liveOwnerSend: false,
+          };
+        }
         const scrollingProof =
-          hydrateChat && (rootFontSize > 16 || longChat || cardChat !== '')
+          hydrateChat && (rootFontSize > 16 || longChat || cardChat !== '' || streamRecall)
             ? await page.evaluate(async () => {
                 const log = document.querySelector<HTMLElement>('[role="log"]');
                 const composer = document.querySelector('[data-testid="chat-composer-surface"]');
@@ -784,6 +916,7 @@ try {
                 };
               })
             : null;
+        if (scrollingProof && liveRecallProof) Object.assign(scrollingProof, { liveRecallProof });
         if (
           scrollingProof &&
           (!scrollingProof.firstReachable ||
@@ -1095,7 +1228,7 @@ try {
           });
           const field = page.getByRole('combobox', { name: 'Message', exact: true });
           const initialJump = page.getByRole('button', { name: 'Jump to latest', exact: true });
-          if (entry.state !== 'empty' && (await initialJump.isVisible())) {
+          if ((entry.state !== 'empty' || streamRecall) && (await initialJump.isVisible())) {
             await initialJump.click();
             await waitForReadable('actual-jump');
           }
@@ -1213,7 +1346,7 @@ try {
               scriptedScrollCorrection: false,
             });
           };
-          if (logOverflows && entry.state !== 'empty') {
+          if (logOverflows && (entry.state !== 'empty' || streamRecall)) {
             const jump = page.getByRole('button', { name: 'Jump to latest', exact: true });
             await jump.waitFor({ state: 'visible' });
             await jump.click();
@@ -1433,6 +1566,7 @@ try {
       composerScreenshot?: string;
       composerStartScreenshot?: string;
       jumpOutcomes?: Array<{ screenshot: string }>;
+      liveRecallProof?: { screenshots: string[] };
     } | null;
     return [
       entry.screenshot,
@@ -1440,6 +1574,7 @@ try {
       proof?.composerScreenshot,
       proof?.composerStartScreenshot,
       ...(proof?.jumpOutcomes?.map((entry) => entry.screenshot) ?? []),
+      ...(proof?.liveRecallProof?.screenshots ?? []),
     ].filter((name): name is string => typeof name === 'string');
   });
   if (
@@ -1454,9 +1589,12 @@ try {
     (blockedRequests > 0 ||
       syntheticApiRequests.some(
         (request) =>
-          request.method !== 'GET' ||
-          (request.path !== '/api/chat/status' &&
-            !(cardChat === 'image' && request.path === '/api/card-image')),
+          !(
+            (request.method === 'GET' &&
+              (request.path === '/api/chat/status' ||
+                (cardChat === 'image' && request.path === '/api/card-image'))) ||
+            (streamRecall && request.method === 'POST' && request.path === '/api/chat')
+          ),
       ))
   )
     throw new Error('Hydrated chat attempted an unexpected account or external request');
@@ -1580,6 +1718,9 @@ try {
         mocks: [
           'Next navigation',
           'server actions',
+          ...(streamRecall
+            ? ['local controlled UI-message stream with x-recall; no provider']
+            : []),
           chatStates
             ? 'local running GET chat-status responses and rejecting cancellation stub'
             : 'local empty GET chat-status responses',
@@ -1601,7 +1742,11 @@ try {
         ).length,
         ownerReads: 0,
         providerCalls: 0,
-        sendsOrVoiceExercised: false,
+        sendsOrVoiceExercised: streamRecall,
+        syntheticLocalSends: syntheticApiRequests.filter(
+          (request) => request.method === 'POST' && request.path === '/api/chat',
+        ).length,
+        liveOwnerSends: 0,
         liveRouteAdmissionExercised: false,
       }
     : null;
@@ -1658,7 +1803,7 @@ try {
           : staticLargeText
             ? 'non-conversation-product-states; use hydrated chat for enlarged conversation'
             : 'all-product-states',
-        captureProfile: { widths: captureWidths, rootFontSize, longChat, cardChat },
+        captureProfile: { widths: captureWidths, rootFontSize, longChat, cardChat, streamRecall },
         captureInventory,
         missingCurrentScreenshots,
         staleOrUnknownScreenshots: combined
@@ -1690,7 +1835,7 @@ try {
           : staticLargeText
             ? 'non-conversation-product-states; use hydrated chat for enlarged conversation'
             : 'all-product-states',
-        captureProfile: { widths: captureWidths, rootFontSize, longChat, cardChat },
+        captureProfile: { widths: captureWidths, rootFontSize, longChat, cardChat, streamRecall },
         captureInventory,
         missingCurrentScreenshots,
         provenancePolicy:
