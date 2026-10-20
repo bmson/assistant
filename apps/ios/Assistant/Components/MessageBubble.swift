@@ -6170,18 +6170,29 @@ private struct AssistantMarkdownView: View {
     // would be defined in terms of itself), so the nesting is expressed as a
     // concrete `NestedList` whose body recurses instead.
     private func listNodesView(_ nodes: [AssistantMarkdown.ListNode]) -> some View {
-        NestedList(nodes: nodes) { node in AnyView(listNodeRow(node)) }
+        NestedList(nodes: nodes) { node, numberMarkerSample in
+            AnyView(listNodeRow(node, numberMarkerSample: numberMarkerSample))
+        }
     }
 
     private struct NestedList: View {
         let nodes: [AssistantMarkdown.ListNode]
-        let row: (AssistantMarkdown.ListNode) -> AnyView
+        let row: (AssistantMarkdown.ListNode, String) -> AnyView
+
+        private var numberMarkerSample: String {
+            let digits = nodes.compactMap { node -> Int? in
+                guard case let .number(ordinal) = node.marker else { return nil }
+                return String(ordinal).count
+            }.max() ?? 1
+            return String(repeating: "0", count: digits) + "."
+        }
 
         var body: some View {
+            let markerSample = numberMarkerSample
             VStack(alignment: .leading, spacing: 7) {
                 ForEach(Array(nodes.enumerated()), id: \.offset) { _, node in
                     VStack(alignment: .leading, spacing: 7) {
-                        row(node)
+                        row(node, markerSample)
                         if !node.children.isEmpty {
                             NestedList(nodes: node.children, row: row)
                                 .padding(.leading, 18)
@@ -6193,12 +6204,12 @@ private struct AssistantMarkdownView: View {
     }
 
     @ViewBuilder
-    private func listNodeRow(_ node: AssistantMarkdown.ListNode) -> some View {
+    private func listNodeRow(_ node: AssistantMarkdown.ListNode, numberMarkerSample: String) -> some View {
         switch node.marker {
         case .bullet:
             listRow(marker: "•", text: node.text, markerColor: accent)
         case let .number(ordinal):
-            listRow(marker: "\(ordinal).", text: node.text, markerColor: mutedInk)
+            listRow(marker: "\(ordinal).", text: node.text, markerColor: mutedInk, markerSample: numberMarkerSample)
         case let .task(isComplete):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: isComplete ? "checkmark.circle.fill" : "circle")
@@ -6213,10 +6224,15 @@ private struct AssistantMarkdownView: View {
         }
     }
 
-    private func listRow(marker: String, text: String, markerColor: Color) -> some View {
+    private func listRow(marker: String, text: String, markerColor: Color, markerSample: String? = nil) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(marker)
+            // Measure the widest ordinal once per list level. Equal-width
+            // digits keep 9, 10 and 11 aligned even at accessibility sizes.
+            Text(markerSample ?? marker)
+                .hidden()
+                .overlay(alignment: .trailing) { Text(marker) }
                 .font(.system(size: baseFontSize * 0.9, weight: .semibold))
+                .monospacedDigit()
                 .foregroundStyle(markerColor)
                 .frame(minWidth: marker.count > 1 ? 17 : 10, alignment: .trailing)
                 .accessibilityHidden(true)
