@@ -2519,6 +2519,36 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(humanTask.displayProgress, "Three options are ready to compare")
     }
 
+    func testActivityStreamProviderDiagnosticsKeepRawFailureAndTaskIdentity() {
+        let diagnostics = [
+            "AI_StreamProviderError: service unavailable (429) https://provider.example/private",
+            "Error: AI_StreamProviderError: upstream overloaded\nrequestId=synthetic-request",
+            "ai_streamprovidererror: service unavailable",
+        ]
+        for status in ["failed", "needs_attention"] {
+            for progress in diagnostics {
+                let task = activityItem(title: "Draft reply", status: status, progress: progress)
+
+                XCTAssertEqual(task.displayProgress, "A service request failed.")
+                XCTAssertEqual(task.progress, progress, "Display wording must preserve the recorded diagnostic")
+                XCTAssertEqual(task.status, status)
+                XCTAssertEqual(task.displayStatus, status)
+            }
+        }
+
+        let ordinary = activityItem(
+            title: "Implementation notes",
+            progress: "AI_StreamProviderErrorHandler is ready: https://docs.example.test/draft"
+        )
+        XCTAssertEqual(ordinary.displayProgress, ordinary.progress, "Match the error name, not a longer identifier")
+
+        let cancelled = activityItem(
+            title: "Cancelled request", status: "cancelled", progress: diagnostics[0]
+        )
+        XCTAssertEqual(cancelled.displayProgress, "This task was cancelled.")
+        XCTAssertEqual(cancelled.progress, diagnostics[0])
+    }
+
     func testActivityHidesProviderDiagnosticsAndUsesNeutralCancelledProgress() {
         let diagnostic = activityItem(
             title: "Provider retry",
