@@ -32,14 +32,55 @@ final class NativeVisualReviewTests: XCTestCase {
             """),
             .init(type: "notice", notice: "response-contract")
         ])
-        let page = Page("partial-answer-notice", ScrollView {
+        let page = Page("partial-answer-notice", ownsNavigation: true, ScrollView {
             MessageBubble(message: message, userPrompt: nil, isStreaming: false,
                           openApprovals: {}, runForReal: nil, retry: nil, decideApproval: nil)
                 .padding(20)
         })
         for scheme in [ColorScheme.light, .dark] {
             for size in [DynamicTypeSize.large, .accessibility3] {
-                try await capture(page, scheme: scheme, size: size, scene: scene, model: model)
+                try await capture(page, scheme: scheme, size: size, scene: scene, model: model,
+                                  requiresScrolling: size.isAccessibilitySize && scene.coordinateSpace.bounds.width < 600)
+            }
+        }
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+    }
+
+    @MainActor
+    func testGeneratedTableFormatting() async throws {
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [NativeReviewProtocol.self]
+        NativeReviewProtocol.install([:])
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+                               session: URLSession(configuration: sessionConfig))
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "assistant.table-visual-review"))
+        defaults.removePersistentDomain(forName: "assistant.table-visual-review")
+        let model = AppModel(apiClient: client, defaults: defaults)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let entries = [("hotel", "Harbor House"), ("price", "$189 per night"),
+                       ("location", "Historic waterfront, 20 minutes from the station"),
+                       ("policy", "Free cancellation until 6 PM Thursday"),
+                       ("hotel2", "Station Garden"), ("price2", "$145 per night"),
+                       ("location2", "Opposite the central railway station"), ("policy2", "Non-refundable")]
+        let facts: [String: MessageResponseCard.GeneratedFact] = Dictionary(uniqueKeysWithValues: entries.map {
+            ($0.0, .init(id: $0.0, label: $0.0, value: $0.1, sensitive: false))
+        })
+        for count in [2, 3, 4] {
+            let columns = Array(["Hotel", "Price", "Location", "Cancellation"].prefix(count))
+            let rows = [["hotel", "price", "location", "policy"], ["hotel2", "price2", "location2", "policy2"]]
+            let block = MessageResponseCard.GeneratedBlock(id: "comparison", type: "table", values: [
+                "columns": .array(columns.map { .string($0) }),
+                "rows": .array(rows.map { .array($0.prefix(count).map { .string($0) }) })
+            ])
+            let page = Page("generated-table-\(count)-columns", ownsNavigation: true, ScrollView {
+                GeneratedCardBlockView(block: block, facts: facts, cardId: "visual-review").padding(20)
+            })
+            for scheme in [ColorScheme.light, .dark] {
+                for size in [DynamicTypeSize.large, .accessibility3] {
+                    try await capture(page, scheme: scheme, size: size, scene: scene, model: model,
+                                      requiresScrolling: count == 4 && size.isAccessibilitySize && scene.coordinateSpace.bounds.width < 600)
+                }
             }
         }
         XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
@@ -64,6 +105,10 @@ final class NativeVisualReviewTests: XCTestCase {
                 let ratio = (max(foreground, background) + 0.05) / (min(foreground, background) + 0.05)
                 XCTAssertGreaterThanOrEqual(ratio, 4.5, "Normal conversation text requires a stable contrast pair")
             }
+            let link = luminance(AssistantTheme.accent(for: scheme))
+            let paper = luminance(AssistantTheme.bubblePaper(for: scheme))
+            let linkRatio = (max(link, paper) + 0.05) / (min(link, paper) + 0.05)
+            XCTAssertGreaterThanOrEqual(linkRatio, 4.5, "Small Markdown links must remain readable on reply paper")
         }
     }
 
@@ -196,7 +241,7 @@ final class NativeVisualReviewTests: XCTestCase {
     }
 
     @MainActor private func capture(_ page: Page, scheme: ColorScheme, size: DynamicTypeSize,
-                                    scene: UIWindowScene, model: AppModel) async throws {
+                                    scene: UIWindowScene, model: AppModel, requiresScrolling: Bool = false) async throws {
         UserDefaults.standard.set((scheme == .light ? AssistantAppearance.light : .dark).rawValue,
                                   forKey: AssistantAppearance.defaultsKey)
         let window = UIWindow(windowScene: scene)
@@ -232,15 +277,20 @@ final class NativeVisualReviewTests: XCTestCase {
             add(attachment)
         }
         record("top")
+        var capturedScrollPositions = 0
         // Lists recycle off-screen cells, so a tall bitmap alone would hide
         // rows. Capture every vertical viewport with overlapping scroll steps.
         func scrollViews(in view: UIView) -> [UIScrollView] {
             ((view as? UIScrollView).map { [$0] } ?? []) + view.subviews.flatMap { scrollViews(in: $0) }
         }
         // Presented native sheets live outside the original hosting subtree.
-        if let scroll = scrollViews(in: window).filter({
-            $0.bounds.width >= window.bounds.width * 0.7 && $0.bounds.height >= window.bounds.height * 0.35 &&
-                $0.contentSize.height > $0.bounds.height + 12
+        if let scroll = scrollViews(in: window).filter({ scroll in
+            // Safe-area/navigation insets reduce the usable viewport even
+            // when the content is shorter than the scroll view's bounds.
+            let viewportHeight = max(0, scroll.bounds.height
+                                     - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom)
+            return scroll.bounds.width >= window.bounds.width * 0.7 && scroll.bounds.height >= window.bounds.height * 0.35 &&
+                scroll.contentSize.height > viewportHeight + 2
         }).max(by: { $0.bounds.height < $1.bounds.height }) {
             let initial = scroll.contentOffset
             var offset = max(initial.y, -scroll.adjustedContentInset.top)
@@ -252,18 +302,24 @@ final class NativeVisualReviewTests: XCTestCase {
                 let bottom = max(-scroll.adjustedContentInset.top,
                                  scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
                 guard offset < bottom - 2 else { break }
-                offset = min(bottom, offset + scroll.bounds.height * 0.72)
+                let viewportHeight = max(1, scroll.bounds.height
+                                         - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom)
+                offset = min(bottom, offset + viewportHeight * 0.72)
                 scroll.setContentOffset(CGPoint(x: initial.x, y: offset), animated: false)
                 try await Task.sleep(for: .milliseconds(130))
                 window.layoutIfNeeded()
                 offset = scroll.contentOffset.y
                 index += 1
+                capturedScrollPositions += 1
                 record("scroll-\(String(format: "%02d", index))")
             }
             let finalBottom = max(-scroll.adjustedContentInset.top,
                                   scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
             XCTAssertLessThanOrEqual(finalBottom - offset, 2, "Incomplete below-fold capture: \(page.name)")
             scroll.setContentOffset(initial, animated: false)
+        }
+        if requiresScrolling {
+            XCTAssertGreaterThan(capturedScrollPositions, 0, "Long message fixture was not captured below the fold: \(page.name)")
         }
     }
 

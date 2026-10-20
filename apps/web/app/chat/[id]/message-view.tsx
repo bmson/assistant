@@ -159,7 +159,10 @@ export function MessageActions({
   };
 
   return (
-    <div className="msg-actions mt-1.5 flex items-center gap-2 opacity-0 motion-safe:transition-opacity focus-within:opacity-100 group-hover/msg:opacity-100">
+    <div
+      data-message-utility="true"
+      className="msg-actions mt-1.5 flex items-center gap-2 opacity-0 motion-safe:transition-opacity focus-within:opacity-100 group-hover/msg:opacity-100"
+    >
       <button
         type="button"
         onClick={() => void copy()}

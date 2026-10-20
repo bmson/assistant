@@ -45,7 +45,11 @@ export function SubmitButton({
       title={title}
       className={`${btnScale[size][variant]} ${className}`}
     >
-      <StableLabel pending={pending} pendingLabel={pendingLabel}>
+      <StableLabel
+        pending={pending}
+        pendingLabel={pendingLabel}
+        menu={variant === 'menu' || variant === 'menuDanger'}
+      >
         {children}
       </StableLabel>
     </button>
@@ -61,27 +65,35 @@ function StableLabel({
   children,
   pending,
   pendingLabel,
+  menu = false,
 }: {
   children: ReactNode;
   pending: boolean;
   pendingLabel: ReactNode;
+  menu?: boolean;
 }) {
+  const alignment = menu ? 'justify-items-start' : 'justify-items-center';
+  const row = menu
+    ? 'justify-start gap-[min(0.5rem,8px)] [overflow-wrap:anywhere]'
+    : 'justify-center gap-2 [overflow-wrap:break-word]';
   return (
-    <span className="grid min-w-0 max-w-full grid-cols-[minmax(0,1fr)] items-center justify-items-center">
+    <span className={`grid min-w-0 max-w-full grid-cols-[minmax(0,1fr)] items-center ${alignment}`}>
       <span
-        className="invisible col-start-1 row-start-1 flex min-w-0 max-w-full flex-wrap items-center justify-center gap-2 [overflow-wrap:break-word]"
+        className={`invisible col-start-1 row-start-1 flex min-w-0 max-w-full flex-wrap items-center ${row}`}
         aria-hidden="true"
       >
         {children}
       </span>
       <span
-        className="invisible col-start-1 row-start-1 flex min-w-0 max-w-full flex-wrap items-center justify-center gap-2 [overflow-wrap:break-word]"
+        className={`invisible col-start-1 row-start-1 flex min-w-0 max-w-full flex-wrap items-center ${row}`}
         aria-hidden="true"
       >
         <LoaderCircle />
         {pendingLabel}
       </span>
-      <span className="col-start-1 row-start-1 flex min-w-0 max-w-full flex-wrap items-center justify-center gap-2 [overflow-wrap:break-word]">
+      <span
+        className={`col-start-1 row-start-1 flex min-w-0 max-w-full flex-wrap items-center ${row}`}
+      >
         {pending ? (
           <>
             <LoaderCircle className="motion-safe:animate-spin" aria-hidden="true" />
@@ -134,7 +146,11 @@ export function ActionButton({
       onClick={onClick}
       className={`${btnScale[size][variant]} ${className}`}
     >
-      <StableLabel pending={pending} pendingLabel={pendingLabel}>
+      <StableLabel
+        pending={pending}
+        pendingLabel={pendingLabel}
+        menu={variant === 'menu' || variant === 'menuDanger'}
+      >
         {children}
       </StableLabel>
     </button>
@@ -328,7 +344,14 @@ export function ConfirmButton({
     if (unavailable) setExpiresAt(null);
   }, [unavailable]);
 
-  const reserve = 'invisible col-start-1 row-start-1 inline-flex items-center gap-2';
+  const menu = variant === 'menu' || variant === 'menuDanger';
+  const labelGrid = menu
+    ? 'grid min-w-0 max-w-full grid-cols-[minmax(0,1fr)] items-center justify-items-start'
+    : 'grid items-center justify-items-center';
+  const labelRow = menu
+    ? 'col-start-1 row-start-1 flex min-w-0 max-w-full items-center justify-start gap-[min(0.5rem,8px)] [overflow-wrap:anywhere]'
+    : 'col-start-1 row-start-1 inline-flex items-center gap-2';
+  const reserve = `invisible ${labelRow}`;
   return (
     <button
       type="button"
@@ -353,7 +376,7 @@ export function ConfirmButton({
       className={base}
     >
       {/* Reserve every label so the confirmation stays under the pointer. */}
-      <span className="grid items-center justify-items-center">
+      <span className={labelGrid}>
         <span className={reserve} aria-hidden="true">
           {children}
         </span>
@@ -365,7 +388,7 @@ export function ConfirmButton({
           <LoaderCircle />
           {pendingLabel}
         </span>
-        <span className="col-start-1 row-start-1 inline-flex items-center gap-2" aria-live="polite">
+        <span className={labelRow} aria-live="polite">
           {pending ? (
             <>
               <LoaderCircle className="motion-safe:animate-spin" aria-hidden="true" />

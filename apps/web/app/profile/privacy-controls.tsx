@@ -30,7 +30,11 @@ export function PrivacyControls() {
         <a href="/api/profile-export" className={btn.outline}>
           Download memory export
         </a>
-        <form action={forgetLongTermMemoryAction}>
+        {/* Keep enlarged safety copy readable; cap only this form's decorative spacing on phones. */}
+        <form
+          className="min-w-0 max-w-full hyphens-auto [overflow-wrap:anywhere] [--spacing:min(0.25rem,4px)] md:[--spacing:0.25rem]"
+          action={forgetLongTermMemoryAction}
+        >
           <ConfirmButton
             confirmLabel="Erase memory & voice"
             pendingLabel="Erasing…"

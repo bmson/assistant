@@ -107,7 +107,7 @@
     },
     "apps/web/app/api/documents/upload/route.ts": {
       "methods": ["POST"],
-      "sha256": "b7581b7d4db25053a966d88c489b9401b1aff48b543179b39b13023dd99b5fcc"
+      "sha256": "a51c5735450033134274119ff14867e61029e53355bd95c53ebd924bc75c1651"
     },
     "apps/web/app/api/files/route.ts": {
       "methods": ["GET"],
@@ -119,7 +119,7 @@
     },
     "apps/web/app/api/import/upload/route.ts": {
       "methods": ["POST"],
-      "sha256": "503dbda09716e88ae8dc183f5ae2f90d1e5cf63117de6a642735c02d490e6a34"
+      "sha256": "a46770b8145848c7e36a610f8b3f77e426ff43328c854c5a9d9bef7b5e741e2e"
     },
     "apps/web/app/api/live/scoreboard/route.ts": {
       "methods": ["GET"],

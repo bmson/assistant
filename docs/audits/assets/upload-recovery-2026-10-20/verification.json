@@ -1,0 +1,720 @@
+{
+  "baseCommit": "c790625c3f7f66da9dcf40b98d798c045f38735f",
+  "before": {
+    "boundary": "Actual UploadPanel server rendering and native browser multipart navigation. Synthetic small file, controlled local413 JSON identical to Documents handler. Does not invoke actual authenticated API, storage or owner data. No API-size validation tested.",
+    "posts": 4,
+    "sourceHashes": {
+      "apps/web/app/upload-panel.tsx": "5769d1bb041636e4ee0a27bbacb15247c21e4ded99807cddd70b07e975b074b6",
+      "apps/web/app/api/documents/upload/route.ts": "b7581b7d4db25053a966d88c489b9401b1aff48b543179b39b13023dd99b5fcc",
+      "apps/web/app/api/import/upload/route.ts": "503dbda09716e88ae8dc183f5ae2f90d1e5cf63117de6a642735c02d490e6a34"
+    },
+    "rows": [
+      {
+        "width": 390,
+        "fontSize": 16,
+        "scheme": "light",
+        "after": {
+          "url": "http://127.0.0.1:61341/api/documents/upload",
+          "body": "{\"error\":\"file too large for upload\"}",
+          "forms": 0,
+          "buttons": 0,
+          "links": 0
+        }
+      },
+      {
+        "width": 390,
+        "fontSize": 16,
+        "scheme": "dark",
+        "after": {
+          "url": "http://127.0.0.1:61341/api/documents/upload",
+          "body": "{\"error\":\"file too large for upload\"}",
+          "forms": 0,
+          "buttons": 0,
+          "links": 0
+        }
+      },
+      {
+        "width": 320,
+        "fontSize": 32,
+        "scheme": "light",
+        "after": {
+          "url": "http://127.0.0.1:61341/api/documents/upload",
+          "body": "{\"error\":\"file too large for upload\"}",
+          "forms": 0,
+          "buttons": 0,
+          "links": 0
+        }
+      },
+      {
+        "width": 320,
+        "fontSize": 32,
+        "scheme": "dark",
+        "after": {
+          "url": "http://127.0.0.1:61341/api/documents/upload",
+          "body": "{\"error\":\"file too large for upload\"}",
+          "forms": 0,
+          "buttons": 0,
+          "links": 0
+        }
+      }
+    ]
+  },
+  "beforeHarnessSha256": "cc9d85a54d561ca07fafe4558060b7474137502efacfec00b56ee8f3bca1e009",
+  "after": {
+    "sourceHashes": {
+      "apps/web/app/upload-panel.tsx": "76656d403726a5220464f6293df10b3b5ef374a33bf8c76054ad7a62a73d4fb3",
+      "apps/web/app/upload-request.ts": "1d9843536ad7b5076da706187164a3e942083c509c1349e715d0910455b1d9f2",
+      "apps/web/app/api/documents/upload/route.ts": "a51c5735450033134274119ff14867e61029e53355bd95c53ebd924bc75c1651",
+      "apps/web/app/api/import/upload/route.ts": "a46770b8145848c7e36a610f8b3f77e426ff43328c854c5a9d9bef7b5e741e2e",
+      "apps/web/lib/ui.tsx": "00258d1db6fa312822dd229df9d18fdfa5dd9d5e010a04b44da9962c0b9eb429",
+      "apps/web/app/globals.css": "ddf7bf8e6254c9475fdb3959e230353804ba6ab80163f7bec76aa8bd1fc39e75"
+    },
+    "harnessSha256": "b5e1b8d4ed643e561fec2ab9b8b4b72120c5cac920ea7298e0d72aba739fbed0",
+    "boundary": "Actual client UploadPanel/helper/CSS with loopback synthetic multipart requests and controlled failure/success responses. Small synthetic file; real server size/type validation, authenticated route admission and storage writes are not exercised. Native route success/denial contracts tested separately in unit fixtures. Error screenshots do not certify preexisting main-base enlarged input geometry.",
+    "errors": [],
+    "results": [
+      {
+        "kind": "documents",
+        "scenario": "validation",
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "message": "The file or label was not accepted. Check them and try again.",
+        "calls": [
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/documents?uploaded=synthetic",
+        "errorScreenshot": "documents-validation-390-16-light-error.png",
+        "successScreenshot": "documents-validation-390-16-light-success.png"
+      },
+      {
+        "kind": "documents",
+        "scenario": "oversize",
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "message": "This file is too large. Choose a file up to 25MB and try again.",
+        "calls": [
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/documents?uploaded=synthetic",
+        "errorScreenshot": "documents-oversize-390-16-light-error.png",
+        "successScreenshot": "documents-oversize-390-16-light-success.png"
+      },
+      {
+        "kind": "documents",
+        "scenario": "network",
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "message": "The connection was interrupted. Refresh this page to check the list before retrying.",
+        "calls": [
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/documents?uploaded=synthetic",
+        "errorScreenshot": "documents-network-390-16-light-error.png",
+        "successScreenshot": "documents-network-390-16-light-success.png"
+      },
+      {
+        "kind": "documents",
+        "scenario": "server",
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "message": "The upload could not be completed. Try again.",
+        "calls": [
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/documents?uploaded=synthetic",
+        "errorScreenshot": "documents-server-390-16-light-error.png",
+        "successScreenshot": "documents-server-390-16-light-success.png"
+      },
+      {
+        "kind": "documents",
+        "scenario": "auth",
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "message": "Sign in again before retrying this upload.",
+        "calls": [
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/documents?uploaded=synthetic",
+        "errorScreenshot": "documents-auth-390-16-light-error.png",
+        "successScreenshot": "documents-auth-390-16-light-success.png"
+      },
+      {
+        "kind": "documents",
+        "scenario": "validation",
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "message": "The file or label was not accepted. Check them and try again.",
+        "calls": [
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/documents?uploaded=synthetic",
+        "errorScreenshot": "documents-validation-320-32-dark-error.png",
+        "successScreenshot": "documents-validation-320-32-dark-success.png"
+      },
+      {
+        "kind": "documents",
+        "scenario": "oversize",
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "message": "This file is too large. Choose a file up to 25MB and try again.",
+        "calls": [
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/documents?uploaded=synthetic",
+        "errorScreenshot": "documents-oversize-320-32-dark-error.png",
+        "successScreenshot": "documents-oversize-320-32-dark-success.png"
+      },
+      {
+        "kind": "documents",
+        "scenario": "network",
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "message": "The connection was interrupted. Refresh this page to check the list before retrying.",
+        "calls": [
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/documents?uploaded=synthetic",
+        "errorScreenshot": "documents-network-320-32-dark-error.png",
+        "successScreenshot": "documents-network-320-32-dark-success.png"
+      },
+      {
+        "kind": "documents",
+        "scenario": "server",
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "message": "The upload could not be completed. Try again.",
+        "calls": [
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/documents?uploaded=synthetic",
+        "errorScreenshot": "documents-server-320-32-dark-error.png",
+        "successScreenshot": "documents-server-320-32-dark-success.png"
+      },
+      {
+        "kind": "documents",
+        "scenario": "auth",
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "message": "Sign in again before retrying this upload.",
+        "calls": [
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "documents",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/documents?uploaded=synthetic",
+        "errorScreenshot": "documents-auth-320-32-dark-error.png",
+        "successScreenshot": "documents-auth-320-32-dark-success.png"
+      },
+      {
+        "kind": "import",
+        "scenario": "validation",
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "message": "The file or label was not accepted. Check them and try again.",
+        "calls": [
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/import?uploaded=synthetic",
+        "errorScreenshot": "import-validation-390-16-light-error.png",
+        "successScreenshot": "import-validation-390-16-light-success.png"
+      },
+      {
+        "kind": "import",
+        "scenario": "oversize",
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "message": "This file is too large. Choose a file up to 25MB and try again.",
+        "calls": [
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/import?uploaded=synthetic",
+        "errorScreenshot": "import-oversize-390-16-light-error.png",
+        "successScreenshot": "import-oversize-390-16-light-success.png"
+      },
+      {
+        "kind": "import",
+        "scenario": "network",
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "message": "The connection was interrupted. Refresh this page to check the list before retrying.",
+        "calls": [
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/import?uploaded=synthetic",
+        "errorScreenshot": "import-network-390-16-light-error.png",
+        "successScreenshot": "import-network-390-16-light-success.png"
+      },
+      {
+        "kind": "import",
+        "scenario": "server",
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "message": "The upload could not be completed. Try again.",
+        "calls": [
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/import?uploaded=synthetic",
+        "errorScreenshot": "import-server-390-16-light-error.png",
+        "successScreenshot": "import-server-390-16-light-success.png"
+      },
+      {
+        "kind": "import",
+        "scenario": "auth",
+        "profile": {
+          "width": 390,
+          "fontSize": 16,
+          "scheme": "light"
+        },
+        "message": "Sign in again before retrying this upload.",
+        "calls": [
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/import?uploaded=synthetic",
+        "errorScreenshot": "import-auth-390-16-light-error.png",
+        "successScreenshot": "import-auth-390-16-light-success.png"
+      },
+      {
+        "kind": "import",
+        "scenario": "validation",
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "message": "The file or label was not accepted. Check them and try again.",
+        "calls": [
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/import?uploaded=synthetic",
+        "errorScreenshot": "import-validation-320-32-dark-error.png",
+        "successScreenshot": "import-validation-320-32-dark-success.png"
+      },
+      {
+        "kind": "import",
+        "scenario": "oversize",
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "message": "This file is too large. Choose a file up to 25MB and try again.",
+        "calls": [
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/import?uploaded=synthetic",
+        "errorScreenshot": "import-oversize-320-32-dark-error.png",
+        "successScreenshot": "import-oversize-320-32-dark-success.png"
+      },
+      {
+        "kind": "import",
+        "scenario": "network",
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "message": "The connection was interrupted. Refresh this page to check the list before retrying.",
+        "calls": [
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/import?uploaded=synthetic",
+        "errorScreenshot": "import-network-320-32-dark-error.png",
+        "successScreenshot": "import-network-320-32-dark-success.png"
+      },
+      {
+        "kind": "import",
+        "scenario": "server",
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "message": "The upload could not be completed. Try again.",
+        "calls": [
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/import?uploaded=synthetic",
+        "errorScreenshot": "import-server-320-32-dark-error.png",
+        "successScreenshot": "import-server-320-32-dark-success.png"
+      },
+      {
+        "kind": "import",
+        "scenario": "auth",
+        "profile": {
+          "width": 320,
+          "fontSize": 32,
+          "scheme": "dark"
+        },
+        "message": "Sign in again before retrying this upload.",
+        "calls": [
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          },
+          {
+            "kind": "import",
+            "accept": "application/json",
+            "fileName": "synthetic-review.txt",
+            "content": "Synthetic upload fixture.",
+            "label": "Preserved review label"
+          }
+        ],
+        "fileAndLabelPreserved": true,
+        "duplicatePendingSubmitAddsRequests": false,
+        "nativeKeyboardRetry": true,
+        "destination": "/import?uploaded=synthetic",
+        "errorScreenshot": "import-auth-320-32-dark-error.png",
+        "successScreenshot": "import-auth-320-32-dark-success.png"
+      }
+    ]
+  },
+  "routeContractTests": "upload-routes.test.ts: enhanced success after existing command; native redirect unchanged; invalid/auth denial for both Accept modes. Commands mocked; no storage. upload-request.test.ts covers HTTP415,local destination contract and unconfirmed responses.",
+  "limits": "Before actual Documents UploadPanel nativePOST+controlled413; Import before source-backed shared form/API equivalent, not separately browser-reproduced. After actual both client forms. APIvalidation limits and storage mocked/synthetic, not executed live. Main-base enlarged field clipping is tracked separately in621, not claimed fixed by recovery."
+}

@@ -67,7 +67,7 @@ export function MemoryOrganizer({
                 : state.message;
 
   return (
-    <div className={`${cardShellClass} relative`}>
+    <div className={`${cardShellClass} relative @container/organizer`}>
       {/* Accent only — the former multicolor strip was the one place in the app
           speaking colors outside the shared vocabulary. */}
       <div
@@ -76,8 +76,8 @@ export function MemoryOrganizer({
         }`}
       />
       <div className="p-5 sm:p-6">
-        <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex min-w-0 items-start gap-3.5">
+        <div className="flex flex-col gap-5 @min-[32rem]/organizer:flex-row @min-[32rem]/organizer:items-center @min-[32rem]/organizer:justify-between">
+          <div className="flex min-w-0 flex-col items-start gap-3.5 @min-[20rem]/organizer:flex-row">
             <span
               className={`relative inline-flex size-11 shrink-0 items-center justify-center rounded-2xl bg-accent/10 text-accent ${
                 active ? 'motion-safe:animate-pulse' : ''
@@ -93,7 +93,7 @@ export function MemoryOrganizer({
                 <Brain className="size-5" aria-hidden="true" />
               )}
             </span>
-            <div className="min-w-0">
+            <div className="min-w-0 [overflow-wrap:anywhere]">
               <p className="text-sm font-medium text-accent">Memory desk</p>
               <h2 className="mt-0.5 text-lg font-semibold tracking-[-0.025em]">
                 {remaining === 0

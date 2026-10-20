@@ -14,6 +14,100 @@ const state = vi.hoisted(() => ({
   chatState: null as 'stage' | 'paper' | null,
 }));
 const data = () => createProductVisualData(state.empty);
+const chatMessages = (): UIMessage[] => {
+  const messages = data().messages;
+  const cardMode = process.env.PRODUCT_VISUAL_QA_CARD_CHAT ?? '';
+  const long = process.env.PRODUCT_VISUAL_QA_LONG_CHAT === '1';
+  if ((!long && !cardMode) || state.empty) return messages;
+  const longText = [
+    'Here is the weekend plan, from the first detail to the final reminder.',
+    ...Array.from(
+      { length: 20 },
+      (_, index) =>
+        `Plan detail ${index + 1}: leave time for an easy walk, check the travel arrangements, and confirm the next step before booking.`,
+    ),
+    'Final reminder: bring the hotel confirmation and leave time for the journey home.',
+  ].join('\n\n');
+  const facts = [
+    {
+      id: 'context',
+      value: 'Weekend card context: check the travel plan and leave time for an easy walk. '.repeat(
+        6,
+      ),
+    },
+    { id: 'latest', value: 'Latest card ends here: bring the hotel confirmation.' },
+  ];
+  const cardData: Record<string, unknown> =
+    cardMode === 'agenda'
+      ? {
+          kind: 'agenda',
+          title: 'Latest weekend agenda',
+          items: [
+            ...Array.from({ length: 8 }, (_, index) => ({
+              time: `${index + 9} AM`,
+              title: `Weekend agenda item ${index + 1}`,
+            })),
+            {
+              time: '5 PM',
+              title: 'Hotel confirmation',
+              detail: 'Latest card ends here: bring the hotel confirmation.',
+            },
+          ],
+        }
+      : {
+          kind: 'generated-card',
+          id: 'synthetic-latest-card',
+          grounding: cardMode === 'with-prose' ? 'answer' : 'evidence',
+          spec:
+            cardMode === 'image'
+              ? {
+                  version: 1,
+                  title: 'Latest visual card',
+                  sourceLabel: 'Synthetic review',
+                  accessibilityLabel: 'Latest visual card',
+                  facts: [
+                    { id: 'url', value: 'https://visual-qa.invalid/late-image.svg' },
+                    { id: 'alt', value: 'Latest visual card' },
+                  ],
+                  blocks: [{ type: 'image', urlFact: 'url', altFact: 'alt' }],
+                  actions: [],
+                }
+              : {
+                  version: 1,
+                  title: 'Latest weekend card',
+                  sourceLabel: 'Synthetic review',
+                  accessibilityLabel: 'Latest weekend card',
+                  facts,
+                  blocks: facts.map((fact) => ({ type: 'note', factId: fact.id })),
+                  actions: [],
+                },
+        };
+  const card = { type: 'data-card' as const, data: cardData };
+  const rendered = messages.map((message) =>
+    message.role === 'assistant'
+      ? {
+          ...message,
+          parts: cardMode
+            ? [
+                ...(cardMode === 'with-prose' ? [{ type: 'text' as const, text: longText }] : []),
+                card,
+              ]
+            : [{ type: 'text' as const, text: longText }],
+        }
+      : message,
+  );
+  return cardMode
+    ? [
+        {
+          id: '00000000-0000-4000-8000-000000000003',
+          role: 'assistant',
+          parts: [{ type: 'text', text: `Earlier discussion.\n\n${longText}` }],
+          metadata: { createdAt: '2026-10-02T18:00:00.000Z' },
+        },
+        ...rendered,
+      ]
+    : rendered;
+};
 const recalledMessages = (): UIMessage[] =>
   [
     {
@@ -295,7 +389,7 @@ vi.mock('@/lib/server', () => ({
       },
       agentName: 'Assistant',
       agentTimezone: 'America/Los_Angeles',
-      messages: state.chatState ? recalledMessages() : data().messages,
+      messages: state.chatState ? recalledMessages() : chatMessages(),
       models: [{ id: 'synthetic-model', label: 'Assistant default' }],
       goalTitle: undefined,
       canArchive: true,
@@ -644,7 +738,7 @@ it.each(fixtureStates)(
   30_000,
 );
 
-it('accounts for all34 source routes and asserts the legacy person redirect', async () => {
+it('accounts for all 34 source routes and asserts the legacy person redirect', async () => {
   const directory = process.env.PRODUCT_VISUAL_QA_DIR;
   const manifest: Array<Record<string, unknown>> = fixtureStates.map((page) => ({
     name: page.name,
@@ -655,9 +749,11 @@ it('accounts for all34 source routes and asserts the legacy person redirect', as
       : page.empty
         ? 'empty'
         : 'loaded',
-    availability: 'retained-product-redirected-by-proxy',
+    availability: page.route.startsWith('/chat')
+      ? 'owner-chat-route'
+      : 'retained-product-redirected-by-proxy',
     evidence:
-      'Actual source component with synthetic read dependencies; not a navigable product route.',
+      'Actual source component with synthetic read dependencies; route admission and live account behavior are not exercised.',
     persistenceFixture:
       page.productName === 'memory-read-only'
         ? 'Firestore read-only branch'
@@ -710,8 +806,9 @@ it('accounts for all34 source routes and asserts the legacy person redirect', as
         {
           sourcePageCount: all.length,
           reachableConsolePages: 6,
+          reachableChatPages: 3,
           rootRedirect: '/settings',
-          retainedProductSourcePages: 27,
+          retainedProductSourcePages: 24,
           before: process.env.PRODUCT_VISUAL_QA_BEFORE === '1',
           pages: manifest,
         },

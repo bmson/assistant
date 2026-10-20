@@ -475,20 +475,25 @@ export default async function KnowledgePage({
         ))}
       </nav>
 
-      <section className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-        {[
-          ['Memories in use', overview.memory.totalUsable],
-          ['Connected items', overview.graph.activeEntities],
-          ['Connections', overview.graph.activeRelations],
-          ['Needs care', overview.cleanupCount],
-        ].map(([label, value]) => (
-          <div key={label} className="rounded-xl border border-edge bg-sunken/30 px-4 py-3">
-            <p className="font-display text-2xl font-semibold text-strong">
-              {Number(value).toLocaleString()}
-            </p>
-            <p className="text-xs text-muted">{label}</p>
-          </div>
-        ))}
+      <section className="mt-4 @container/knowledge-stats">
+        <div className="grid grid-cols-1 gap-2 @min-[16rem]/knowledge-stats:grid-cols-2 @min-[32rem]/knowledge-stats:grid-cols-4">
+          {[
+            ['Memories in use', overview.memory.totalUsable],
+            ['Connected items', overview.graph.activeEntities],
+            ['Connections', overview.graph.activeRelations],
+            ['Needs care', overview.cleanupCount],
+          ].map(([label, value]) => (
+            <div
+              key={label}
+              className="min-w-0 rounded-xl border border-edge bg-sunken/30 px-4 py-3 [overflow-wrap:anywhere]"
+            >
+              <p className="font-display text-2xl font-semibold text-strong">
+                {Number(value).toLocaleString()}
+              </p>
+              <p className="text-xs text-muted">{label}</p>
+            </div>
+          ))}
+        </div>
       </section>
 
       {view === 'library' && library && libraryFilters ? (
@@ -586,16 +591,25 @@ export default async function KnowledgePage({
                 </option>
               ))}
             </select>
-            <select
-              name="filter"
-              defaultValue={filter}
-              className={`${selectClass} w-full min-w-0`}
-              aria-label="Verification"
-            >
-              <option value="all">Any verification</option>
-              <option value="verified">Verified</option>
-              <option value="untidied">Not yet tidied</option>
-            </select>
+            <label className="grid min-w-0 content-start gap-1 self-start md:row-span-2">
+              <span className="text-sm font-medium">Verification</span>
+              <select
+                name="filter"
+                defaultValue={filter}
+                className={`${selectClass} w-full min-w-0`}
+                aria-label="Verification"
+                style={{
+                  paddingLeft: 'min(0.75rem, 12px)',
+                  paddingRight: 'min(2.25rem, 36px)',
+                  backgroundSize: 'min(1rem, 16px) min(1rem, 16px)',
+                  backgroundPosition: 'right min(0.625rem, 10px) center',
+                }}
+              >
+                <option value="all">All</option>
+                <option value="verified">Verified</option>
+                <option value="untidied">Not tidied</option>
+              </select>
+            </label>
             <div className="flex gap-2">
               <button type="submit" className={btn.primary}>
                 Apply
@@ -738,7 +752,7 @@ export default async function KnowledgePage({
           </div>
           <form
             action="/profile/knowledge"
-            className="mt-5 grid gap-2 rounded-2xl bg-sunken/35 p-3 md:grid-cols-3"
+            className="mt-5 grid min-w-0 grid-cols-1 gap-2 rounded-2xl bg-sunken/35 p-3 md:grid-cols-3"
           >
             <input type="hidden" name="view" value="map" />
             {sourceMemoryId ? <input type="hidden" name="memory" value={sourceMemoryId} /> : null}
@@ -772,7 +786,7 @@ export default async function KnowledgePage({
                 </option>
               ))}
             </select>
-            <div className="flex gap-2 md:col-span-3 md:justify-end">
+            <div className="flex min-w-0 flex-wrap gap-2 md:col-span-3 md:justify-end">
               <select
                 name="review"
                 defaultValue={params.review ?? 'all'}

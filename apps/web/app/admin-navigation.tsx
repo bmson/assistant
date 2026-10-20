@@ -14,7 +14,10 @@ export function AdminNavigation({ passkey }: { passkey: boolean }) {
     { href: '/audit', label: 'Audit trail' },
   ];
   return (
-    <nav aria-label="Main navigation" className="flex min-w-0 flex-wrap items-center gap-1">
+    <nav
+      aria-label="Main navigation"
+      className="flex min-w-0 items-center gap-1 overflow-x-auto overscroll-x-contain py-[4px]"
+    >
       {links.map(({ href, label }) => {
         const active = pathname === href || pathname.startsWith(`${href}/`);
         return (
@@ -22,7 +25,7 @@ export function AdminNavigation({ passkey }: { passkey: boolean }) {
             key={href}
             href={href}
             aria-current={active ? 'page' : undefined}
-            className={`inline-flex min-h-[44px] items-center rounded-lg px-3 text-sm font-medium motion-safe:transition-colors ${active ? 'bg-sunken text-strong' : 'text-muted hover:bg-sunken/60 hover:text-strong'} ${focusRing}`}
+            className={`inline-flex min-h-[44px] shrink-0 items-center whitespace-nowrap rounded-lg px-2 sm:px-3 text-sm font-medium motion-safe:transition-colors ${active ? 'bg-sunken text-strong' : 'text-muted hover:bg-sunken/60 hover:text-strong'} ${focusRing}`}
           >
             {label}
           </Link>

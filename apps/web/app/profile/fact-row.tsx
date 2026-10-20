@@ -394,14 +394,14 @@ function ProminenceControl({
     : PROMINENCE_OPTIONS.filter((option) => option.level !== 'minor');
 
   return (
-    <div className="flex min-w-0 items-center gap-1.5">
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
       <span className="text-xs font-medium text-muted">In conversations</span>
       {/* biome-ignore lint/a11y/useSemanticElements: a toolbar-style segmented
           control, not a form fieldset; each option is an aria-pressed button. */}
       <div
         role="group"
         aria-label="How prominently the assistant uses this fact"
-        className="inline-flex rounded-lg bg-sunken/70 p-0.5"
+        className="inline-flex min-w-0 max-w-full flex-wrap rounded-lg bg-sunken/70 p-0.5"
       >
         {options.map((option) => {
           const active = option.level === current;
