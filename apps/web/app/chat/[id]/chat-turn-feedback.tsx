@@ -25,13 +25,14 @@ export function ChatTurnFeedback({
       {showError ? (
         <p
           role="alert"
+          data-chat-reading-block="true"
           className="chat-action-error mt-6 rounded-xl border px-4 py-3 text-sm leading-6"
         >
           {error}
         </p>
       ) : null}
       {note ? (
-        <p role="status" className="mt-3 text-xs text-stage-muted">
+        <p data-chat-reading-block="true" role="status" className="mt-3 text-xs text-stage-muted">
           {note.text}{' '}
           <Link href="/tasks" className="font-medium underline underline-offset-2">
             Open Activity
@@ -51,7 +52,7 @@ export function ChatTurnFeedback({
         </p>
       ) : null}
       {pollTrouble === 'expired' ? (
-        <p role="alert" className="mt-3 text-xs text-stage-muted">
+        <p data-chat-reading-block="true" role="alert" className="mt-3 text-xs text-stage-muted">
           Your session expired — live updates are off.{' '}
           <button
             type="button"
@@ -62,7 +63,7 @@ export function ChatTurnFeedback({
           </button>
         </p>
       ) : pollTrouble === 'stale' ? (
-        <p role="status" className="mt-3 text-xs text-stage-muted">
+        <p data-chat-reading-block="true" role="status" className="mt-3 text-xs text-stage-muted">
           Live updates paused — retrying.
         </p>
       ) : null}

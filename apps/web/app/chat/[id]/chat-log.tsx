@@ -354,6 +354,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
       {showTime && date ? (
         <p
           title={date.toLocaleString()}
+          data-message-utility="true"
           className={`text-xs text-stage-muted ${
             message.role === 'user' ? 'self-end' : 'self-start'
           }`}

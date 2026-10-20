@@ -738,7 +738,7 @@ export default async function KnowledgePage({
           </div>
           <form
             action="/profile/knowledge"
-            className="mt-5 grid gap-2 rounded-2xl bg-sunken/35 p-3 md:grid-cols-3"
+            className="mt-5 grid min-w-0 grid-cols-1 gap-2 rounded-2xl bg-sunken/35 p-3 md:grid-cols-3"
           >
             <input type="hidden" name="view" value="map" />
             {sourceMemoryId ? <input type="hidden" name="memory" value={sourceMemoryId} /> : null}
@@ -772,7 +772,7 @@ export default async function KnowledgePage({
                 </option>
               ))}
             </select>
-            <div className="flex gap-2 md:col-span-3 md:justify-end">
+            <div className="flex min-w-0 flex-wrap gap-2 md:col-span-3 md:justify-end">
               <select
                 name="review"
                 defaultValue={params.review ?? 'all'}

@@ -128,7 +128,7 @@ export default async function PeoplePage({
           <label htmlFor="people-search" className="sr-only">
             Search people
           </label>
-          <span className="relative min-w-0 flex-1">
+          <span className="relative min-w-0 flex-1 basis-48">
             <Search
               className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted"
               aria-hidden="true"
@@ -138,7 +138,7 @@ export default async function PeoplePage({
               name="q"
               defaultValue={query}
               placeholder="Name, relationship, or place"
-              className={`${inputClass} pl-9`}
+              className={`${inputClass} w-full pl-9`}
             />
           </span>
           <button type="submit" className={btn.outline}>

@@ -373,8 +373,8 @@ export default async function TaskDetailPage({
           <ul className="mt-4 divide-y divide-edge/60">
             {completedActions.map((call) => (
               <li key={call.id} className="py-3 first:pt-0 last:pb-0">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
+                <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 break-words">
                     <p className="text-sm font-medium">{actionLabel(call.toolName)}</p>
                     <p className="mt-0.5 text-xs text-muted">
                       {relativeTime(call.finishedAt ?? call.createdAt, now)}
