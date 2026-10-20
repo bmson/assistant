@@ -4197,9 +4197,12 @@ struct RichResponseCards: View {
     @ViewBuilder
     private func detailRows(_ details: [MessageResponseCard.Detail]) -> some View {
         if !details.isEmpty {
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: usesAccessibilityLayout ? 7 : 3) {
                 ForEach(details) { detail in
-                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                    let layout = usesAccessibilityLayout
+                        ? AnyLayout(VStackLayout(alignment: .leading, spacing: 2))
+                        : AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: 0))
+                    layout {
                         Text("\(detail.label): ")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
