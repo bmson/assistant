@@ -7010,7 +7010,7 @@ extension APIClientRetryTests {
     @MainActor
     func testDeletingPersonInvalidatesOtherDossiersWithStaleMergeOptions() async throws {
         StubURLProtocol.prime([], paths: [
-            "/api/mobile/v1/people/removed": [.success(status: 200, body: Data(#"{"ok":true}"#.utf8))],
+            "/api/mobile/v1/memory/people/removed": [.success(status: 200, body: Data(#"{"ok":true}"#.utf8))],
             "/api/mobile/v1/people": [.success(status: 200, body: Data(#"{"generatedAt":"now","people":[]}"#.utf8))],
             "/api/mobile/v1/workspace": [.success(status: 200, body: optimisticWorkspace())]
         ])
