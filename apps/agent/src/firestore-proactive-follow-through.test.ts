@@ -72,7 +72,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         'External network access is disabled',
       );
       clock = new Date();
-      vi.spyOn(Date, 'now').mockImplementation(() => clock.getTime());
+      // Keep Date construction and Date.now aligned for gRPC deadlines while
+      // advancing the fixture's application clock between scheduled turns.
+      vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: true });
+      vi.setSystemTime(clock);
       store = emulatorStore(() => clock);
       const db = new Proxy(
         {},
@@ -205,15 +208,23 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
     });
 
     afterEach(async () => {
-      expect(send).not.toHaveBeenCalled();
-      expect((await store.collection('costEvents').get()).empty).toBe(true);
-      expect((await store.collection('costReservations').get()).empty).toBe(true);
-      await disposeStore(store);
-      vi.restoreAllMocks();
+      try {
+        expect(send).not.toHaveBeenCalled();
+        expect((await store.collection('costEvents').get()).empty).toBe(true);
+        expect((await store.collection('costReservations').get()).empty).toBe(true);
+      } finally {
+        try {
+          await disposeStore(store);
+        } finally {
+          vi.useRealTimers();
+          vi.restoreAllMocks();
+        }
+      }
     });
 
     async function tick() {
       clock = new Date(clock.getTime() + 3_600_000);
+      vi.setSystemTime(clock);
       return runScheduleBatch(schedules, 'UTC', {
         now: clock,
         prepareGoal: (_row, template) =>
