@@ -212,8 +212,8 @@ export function GoalCard({ goal }: { goal: GoalView }) {
             one column of text to read rather than a stack of boxes. Only the
             blocked state keeps a panel: it's an alert, not a property. */}
         {/* Keep the title and status in separate lanes when enlarged text needs more room. */}
-        <div className="grid min-w-0 grid-cols-1 items-start gap-3 @min-[16rem]/goal:grid-cols-[minmax(0,1fr)_auto]">
-          <div className="min-w-0">
+        <div className="flex min-w-0 flex-col items-stretch gap-3 @min-[16rem]/goal:flex-row @min-[16rem]/goal:flex-wrap @min-[16rem]/goal:items-start">
+          <div className="min-w-0 @min-[16rem]/goal:flex-[1_1_8rem]">
             {/* The one shared card-title scale — the display face is reserved
                 for page titles and the brand, and a 16px one-off made goal
                 cards read a half-step louder than every other card. */}
@@ -222,7 +222,7 @@ export function GoalCard({ goal }: { goal: GoalView }) {
               <p className="mt-1 text-sm leading-5 text-muted">{goal.description}</p>
             ) : null}
           </div>
-          <div className="flex min-w-0 flex-wrap justify-start gap-1.5 @min-[16rem]/goal:shrink-0 @min-[16rem]/goal:justify-end">
+          <div className="flex min-w-0 max-w-full flex-wrap justify-start gap-1.5 @min-[16rem]/goal:flex-[0_1_auto] @min-[16rem]/goal:justify-end">
             {goal.blockedLabel ? (
               <Badge tone="amber">Needs you</Badge>
             ) : goal.workActive ? (
