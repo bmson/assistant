@@ -352,7 +352,7 @@ export default async function TaskDetailPage({
           </InfoItem>
         ) : null}
         {task.progress ? (
-          <InfoItem label="Latest update" className="col-span-2 sm:col-span-3">
+          <InfoItem label="Latest update" className="sm:col-span-3">
             {task.progress}
             {task.progressPercent != null ? ` (${task.progressPercent}%)` : ''}
           </InfoItem>
