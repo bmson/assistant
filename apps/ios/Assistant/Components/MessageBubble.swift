@@ -6170,13 +6170,14 @@ private struct AssistantMarkdownView: View {
     // would be defined in terms of itself), so the nesting is expressed as a
     // concrete `NestedList` whose body recurses instead.
     private func listNodesView(_ nodes: [AssistantMarkdown.ListNode]) -> some View {
-        NestedList(nodes: nodes) { node, numberMarkerSample in
+        NestedList(nodes: nodes, numberMarkerFont: .system(size: baseFontSize * 0.9, weight: .semibold)) { node, numberMarkerSample in
             AnyView(listNodeRow(node, numberMarkerSample: numberMarkerSample))
         }
     }
 
     private struct NestedList: View {
         let nodes: [AssistantMarkdown.ListNode]
+        let numberMarkerFont: Font
         let row: (AssistantMarkdown.ListNode, String) -> AnyView
 
         private var numberMarkerSample: String {
@@ -6194,8 +6195,24 @@ private struct AssistantMarkdownView: View {
                     VStack(alignment: .leading, spacing: 7) {
                         row(node, markerSample)
                         if !node.children.isEmpty {
-                            NestedList(nodes: node.children, row: row)
-                                .padding(.leading, 18)
+                            let children = NestedList(nodes: node.children, numberMarkerFont: numberMarkerFont, row: row)
+                            if case .number = node.marker {
+                                // Anchor child markers at the parent's text
+                                // column; a fixed inset loses hierarchy when
+                                // large parent ordinals outgrow child markers.
+                                HStack(alignment: .top, spacing: 8) {
+                                    Text(markerSample)
+                                        .font(numberMarkerFont)
+                                        .monospacedDigit()
+                                        .hidden()
+                                        .fixedSize()
+                                        .frame(minWidth: 17)
+                                        .accessibilityHidden(true)
+                                    children
+                                }
+                            } else {
+                                children.padding(.leading, 18)
+                            }
                         }
                     }
                 }
