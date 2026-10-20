@@ -29,6 +29,20 @@ const labels: Record<AuditSection, string> = {
   responseChecks: 'Response quality checks',
   recallMetrics: 'Recall diagnostics',
 };
+const sectionOptionLabels: Record<AuditSection, string> = {
+  ...labels,
+  modelCallAudit: 'Model details',
+  messages: 'Messages',
+  contextMessages: 'Chat at start',
+  responseChecks: 'Reply checks',
+  recallMetrics: 'Recall details',
+};
+const sectionSelectStyle = {
+  paddingInlineStart: 'min(0.75rem, 12px)',
+  paddingInlineEnd: 'min(2.25rem, 36px)',
+  backgroundSize: 'min(1rem, 16px) min(1rem, 16px)',
+  backgroundPosition: 'right min(0.625rem, 10px) center',
+};
 const payloadFields = new Set([
   'args',
   'result',
@@ -120,17 +134,19 @@ export default async function AuditDetailPage({
           Record ID <code className="break-all select-all">{id}</code>
         </p>
       </section>
-      <form
-        action={`/audit/${id}`}
-        className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-end gap-3 sm:max-w-lg"
-      >
-        <label className="grid min-w-0 gap-1.5 text-sm font-medium">
+      <form action={`/audit/${id}`} className="flex min-w-0 flex-wrap items-end gap-3 sm:max-w-lg">
+        <label className="grid min-w-0 flex-1 basis-[min(100%,16rem)] gap-1.5 text-sm font-medium">
           Evidence section
-          <select name="section" defaultValue={section ?? ''} className={`w-full ${selectClass}`}>
+          <select
+            name="section"
+            defaultValue={section ?? ''}
+            style={sectionSelectStyle}
+            className={`w-full ${selectClass}`}
+          >
             <option value="">Overview</option>
             {AUDIT_SECTIONS.map((name) => (
               <option key={name} value={name}>
-                {labels[name]}
+                {sectionOptionLabels[name]}
               </option>
             ))}
           </select>
