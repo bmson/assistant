@@ -4872,6 +4872,7 @@ struct SuggestionCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .multilineTextAlignment(.leading)
             .frame(minHeight: 44, alignment: .leading)
             .accessibilityElement(children: .combine)
         }
