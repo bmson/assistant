@@ -1,15 +1,8 @@
 {
   "pin-growth-large": {
-    "scope": [
-      "chat",
-      "chat-empty",
-      "side-chat",
-      "side-chat-empty"
-    ],
+    "scope": ["chat", "chat-empty", "side-chat", "side-chat-empty"],
     "profile": {
-      "widths": [
-        320
-      ],
+      "widths": [320],
       "rootFontSize": 32,
       "longChat": false,
       "cardChat": ""
@@ -21,11 +14,7 @@
     "componentSha256": "a48448b9295171fbe868d4f2c6756796000a03c26d00949596c5342a223c2163",
     "boundary": {
       "client": "Actual ChatClient, AI SDK useChat, useChatPolling and composer layout effects",
-      "mocks": [
-        "Next navigation",
-        "server actions",
-        "local empty GET chat-status responses"
-      ],
+      "mocks": ["Next navigation", "server actions", "local empty GET chat-status responses"],
       "serverActions": 0,
       "externalRequestsAttempted": 0,
       "simulatedCancellationFailures": 0,
@@ -660,16 +649,9 @@
     ]
   },
   "generated-large-v2": {
-    "scope": [
-      "chat",
-      "chat-empty",
-      "side-chat",
-      "side-chat-empty"
-    ],
+    "scope": ["chat", "chat-empty", "side-chat", "side-chat-empty"],
     "profile": {
-      "widths": [
-        320
-      ],
+      "widths": [320],
       "rootFontSize": 32,
       "longChat": false,
       "cardChat": "only"
@@ -681,11 +663,7 @@
     "componentSha256": "25610e32a4c0376585dd5290ce219c4efb9699b6f79e9f1ad35076e67f697848",
     "boundary": {
       "client": "Actual ChatClient, AI SDK useChat, useChatPolling and composer layout effects",
-      "mocks": [
-        "Next navigation",
-        "server actions",
-        "local empty GET chat-status responses"
-      ],
+      "mocks": ["Next navigation", "server actions", "local empty GET chat-status responses"],
       "serverActions": 0,
       "externalRequestsAttempted": 0,
       "simulatedCancellationFailures": 0,
@@ -1320,16 +1298,9 @@
     ]
   },
   "agenda-large": {
-    "scope": [
-      "chat",
-      "chat-empty",
-      "side-chat",
-      "side-chat-empty"
-    ],
+    "scope": ["chat", "chat-empty", "side-chat", "side-chat-empty"],
     "profile": {
-      "widths": [
-        320
-      ],
+      "widths": [320],
       "rootFontSize": 32,
       "longChat": false,
       "cardChat": "agenda"
@@ -1341,11 +1312,7 @@
     "componentSha256": "25610e32a4c0376585dd5290ce219c4efb9699b6f79e9f1ad35076e67f697848",
     "boundary": {
       "client": "Actual ChatClient, AI SDK useChat, useChatPolling and composer layout effects",
-      "mocks": [
-        "Next navigation",
-        "server actions",
-        "local empty GET chat-status responses"
-      ],
+      "mocks": ["Next navigation", "server actions", "local empty GET chat-status responses"],
       "serverActions": 0,
       "externalRequestsAttempted": 0,
       "simulatedCancellationFailures": 0,
@@ -1980,16 +1947,9 @@
     ]
   },
   "image-large-final": {
-    "scope": [
-      "chat",
-      "chat-empty",
-      "side-chat",
-      "side-chat-empty"
-    ],
+    "scope": ["chat", "chat-empty", "side-chat", "side-chat-empty"],
     "profile": {
-      "widths": [
-        320
-      ],
+      "widths": [320],
       "rootFontSize": 32,
       "longChat": false,
       "cardChat": "image"
@@ -2001,11 +1961,7 @@
     "componentSha256": "16268e702796a390298aa8cc485e0ad9d887e3c797714277eabf9d2b9ceca7c1",
     "boundary": {
       "client": "Actual ChatClient, AI SDK useChat, useChatPolling and composer layout effects",
-      "mocks": [
-        "Next navigation",
-        "server actions",
-        "local empty GET chat-status responses"
-      ],
+      "mocks": ["Next navigation", "server actions", "local empty GET chat-status responses"],
       "serverActions": 0,
       "externalRequestsAttempted": 0,
       "simulatedCancellationFailures": 0,
@@ -2664,16 +2620,9 @@
     ]
   },
   "live-recall-final-large": {
-    "scope": [
-      "chat",
-      "chat-empty",
-      "side-chat",
-      "side-chat-empty"
-    ],
+    "scope": ["chat", "chat-empty", "side-chat", "side-chat-empty"],
     "profile": {
-      "widths": [
-        320
-      ],
+      "widths": [320],
       "rootFontSize": 32,
       "longChat": false,
       "cardChat": "",
@@ -3727,16 +3676,9 @@
     ]
   },
   "live-recall-final-normal": {
-    "scope": [
-      "chat",
-      "chat-empty",
-      "side-chat",
-      "side-chat-empty"
-    ],
+    "scope": ["chat", "chat-empty", "side-chat", "side-chat-empty"],
     "profile": {
-      "widths": [
-        390
-      ],
+      "widths": [390],
       "rootFontSize": 16,
       "longChat": false,
       "cardChat": "",
