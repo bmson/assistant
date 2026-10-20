@@ -3277,7 +3277,9 @@ struct RichResponseCards: View {
                                 Link(destination: url) {
                                     Text(AssistantMarkdown.inlineAttributed(file.name))
                                         .font(.subheadline.weight(.semibold))
+                                        .multilineTextAlignment(.leading)
                                 }
+                                .tint(AssistantTheme.accent(for: colorScheme))
                             } else {
                                 Text(AssistantMarkdown.inlineAttributed(file.name))
                                     .font(.subheadline.weight(.semibold))
