@@ -65,7 +65,7 @@ final class NativeVisualReviewTests: XCTestCase {
         let facts: [String: MessageResponseCard.GeneratedFact] = Dictionary(uniqueKeysWithValues: entries.map {
             ($0.0, .init(id: $0.0, label: $0.0, value: $0.1, sensitive: false))
         })
-        for count in [2, 4] {
+        for count in [2, 3, 4] {
             let columns = Array(["Hotel", "Price", "Location", "Cancellation"].prefix(count))
             let rows = [["hotel", "price", "location", "policy"], ["hotel2", "price2", "location2", "policy2"]]
             let block = MessageResponseCard.GeneratedBlock(id: "comparison", type: "table", values: [

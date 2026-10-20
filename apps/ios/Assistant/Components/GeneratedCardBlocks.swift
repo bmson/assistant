@@ -708,7 +708,10 @@ struct GeneratedCardBlockView: View {
                 ViewThatFits(in: .horizontal) {
                     tableGrid(columns: columns, rows: rows, numeric: numeric)
                         .frame(minWidth: CGFloat(columns.count) * tableMinimumColumnWidth
-                               + CGFloat(max(0, columns.count - 1)) * CardStyle.gutter)
+                               + CGFloat(max(0, columns.count - 1)) * CardStyle.gutter,
+                               idealWidth: CGFloat(columns.count) * tableMinimumColumnWidth
+                               + CGFloat(max(0, columns.count - 1)) * CardStyle.gutter,
+                               maxWidth: .infinity)
                     stackedTable(columns: columns, rows: rows)
                 }
             }
