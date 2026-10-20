@@ -872,7 +872,7 @@ struct MessageBubble: View {
                 Text(presentation.summary)
                     .font(.subheadline)
                     .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                    .lineLimit(2)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let facts = compact?.facts?.prefix(3), !facts.isEmpty {
