@@ -1563,6 +1563,23 @@ export async function handleChatTurn(
         : 'draft',
       {
         taskId: task.id,
+        abortSignal: req.signal,
+        recoverBeforeOutput: async () => {
+          const repository =
+            dependencies.persistence?.tasks ??
+            (dependencies.db ? createPostgresTaskRepository(dependencies.db) : undefined);
+          const current = await repository?.getTask(task.id);
+          return Boolean(
+            current &&
+              current.id === task.id &&
+              current.conversationId === task.conversationId &&
+              current.agentId === agent.id &&
+              current.status === 'running' &&
+              current.leaseToken === task.leaseToken &&
+              current.lockedUntil &&
+              new Date(current.lockedUntil).getTime() > Date.now(),
+          );
+        },
         // owner chat is the critical carve-out: degrade on a hard cap, don't block
         critical: true,
         modelOverride: conversation.modelOverride ?? undefined,

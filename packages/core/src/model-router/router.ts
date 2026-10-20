@@ -140,6 +140,8 @@ export interface CallOptions {
   singleAttempt?: boolean;
   /** Exact features that must survive model routing and provider serialization. */
   requestProfile?: Omit<ProviderRequestProfile, 'reasoning' | 'maxPrice' | 'privacy'>;
+  /** Opt-in direct owner chat: revalidate its lease before one pre-output retry. */
+  recoverBeforeOutput?: () => Promise<boolean>;
 }
 
 /** Keep optional per-call cost ceilings inside the reservation path. */
@@ -303,6 +305,35 @@ function withAttemptEvidence<T extends object>(outcome: T, previous: ProviderAtt
         attempt.fallbackAttempted || (fallbackWasAttempted && attempt.selection === 'primary'),
     })),
   };
+}
+
+/** Honor an upstream backoff without consuming a second application deadline. */
+function streamRetryAfterMs(error: unknown): number {
+  for (const { value } of providerErrorNodes(error)) {
+    const headers = value.responseHeaders;
+    if (!headers || typeof headers !== 'object') continue;
+    const entry = Object.entries(headers).find(([name]) => name.toLowerCase() === 'retry-after');
+    if (!entry || typeof entry[1] !== 'string') continue;
+    const raw = entry[1].trim();
+    const delay = /^\d+$/.test(raw) ? Number(raw) * 1000 : Date.parse(raw) - Date.now();
+    if (Number.isFinite(delay)) return Math.max(0, delay);
+  }
+  return 0;
+}
+
+function waitForStreamRetry(delay: number, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', abort);
+      resolve();
+    }, delay);
+    signal.addEventListener('abort', abort, { once: true });
+  });
 }
 
 function providerFailureKind(error: unknown): ProviderAttemptEvidence['failureKind'] {
@@ -1790,11 +1821,122 @@ export class ModelRouter {
       onError?: (error: unknown) => Promise<void>;
     },
   ): Promise<StreamOutcome> {
+    if (!opts.recoverBeforeOutput || opts.singleAttempt) return this.streamOnce(role, opts);
+    // Both application attempts share one deadline. SDK transport retries are
+    // unchanged and also obey this signal; this is not a network-request count.
+    const deadlineAt = Date.now() + modelCallTimeoutMs(role, false);
+    const abortSignal = modelCallSignal(opts.abortSignal, role);
+    const attempts: ProviderAttemptEvidence[] = [];
+    let notified = false;
+    let recoveryModelId: string | undefined;
+    const notify = async (error: unknown) => {
+      if (notified) return;
+      notified = true;
+      await opts.onError?.(error);
+    };
+    for (let index = 0; index < 2; index += 1) {
+      abortSignal.throwIfAborted();
+      let holding = true;
+      let outputSeen = false;
+      let failure: unknown;
+      const outcome = await this.streamOnce(
+        role,
+        {
+          ...opts,
+          abortSignal,
+          onError: async (error) => {
+            failure = error;
+            if (!holding) await notify(error);
+          },
+        },
+        () => {
+          outputSeen = true;
+        },
+        recoveryModelId,
+      );
+      attempts.push(...(outcome.attempts ?? []));
+      if (!outcome.ok) return Object.assign(outcome, { attempts });
+      recoveryModelId ??= outcome.modelId;
+      // The SDK's collected-text promise can reject on transport cancellation
+      // while preflight is the only consumer. Observe it without converting a
+      // failed attempt into a successful completion.
+      void Promise.resolve(outcome.text).catch(() => {});
+      // The installed SDK replays independent projections via teeStream().
+      // Inspect only the prelude; its UI projection retains those parts once.
+      const reader = outcome.fullStream.getReader();
+      try {
+        while (true) {
+          const next = await reader.read();
+          if (next.done) break;
+          const part = next.value;
+          if (part.type === 'error') {
+            failure ??= part.error;
+            // Drain the failed attempt through SDK finalization before another
+            // reservation: its error audit/release callbacks must have settled.
+            continue;
+          }
+          if (
+            !['start', 'start-step', 'response-metadata', 'finish-step', 'finish'].includes(
+              part.type,
+            )
+          ) {
+            outputSeen = true;
+            break;
+          }
+        }
+      } finally {
+        // Stop buffering this inspection branch. A tee cancellation waits for
+        // its other branch, so initiate it without blocking the live UI reader.
+        void reader.cancel().catch(() => {});
+        reader.releaseLock();
+      }
+      if (failure === undefined || outputSeen) {
+        holding = false;
+        if (failure !== undefined) await notify(failure);
+        return Object.assign(outcome, { attempts });
+      }
+      const retryDelay = streamRetryAfterMs(failure);
+      let mayRetry =
+        index === 0 &&
+        !abortSignal.aborted &&
+        isProviderTransientError(failure) &&
+        retryDelay < deadlineAt - Date.now();
+      if (mayRetry && retryDelay > 0) await waitForStreamRetry(retryDelay, abortSignal);
+      // Recheck after any upstream backoff, rather than spending on a stale lease.
+      mayRetry = mayRetry && !abortSignal.aborted && (await opts.recoverBeforeOutput());
+      if (!mayRetry) {
+        await notify(failure);
+        return Object.assign(outcome, { attempts });
+      }
+      // The failed attempt already audited/released its own reservation. The
+      // next goes through normal policy, capability and budget preparation.
+    }
+    throw new Error('unreachable stream recovery state');
+  }
+
+  private async streamOnce(
+    role: ModelRole,
+    opts: CallOptions & {
+      onComplete?: (text: string) => Promise<void>;
+      onError?: (error: unknown) => Promise<void>;
+    },
+    observeOutput?: () => void,
+    expectedModelId?: string,
+  ): Promise<
+    | Exclude<StreamOutcome, { ok: true }>
+    | (Extract<StreamOutcome, { ok: true }> & {
+        fullStream: ReadableStream<{ type: string; error?: unknown }>;
+      })
+  > {
     if (role === 'embed') throw new Error('stream() cannot use the embed role');
     opts = { ...opts, requestProfile: opts.requestProfile ?? textRequestProfile(true) };
     const prepared = await this.prepareModelCall(role, opts);
     if (!prepared.ok) return prepared;
     const { route, reservationId, maxOutputTokens, providerOptions, estimatedUsd } = prepared;
+    if (expectedModelId !== undefined && route.modelId !== expectedModelId) {
+      await releaseReservation(this.persistence.costs, reservationId);
+      throw new Error('Model route changed before stream recovery');
+    }
 
     const started = Date.now();
     const attempt: ProviderAttemptEvidence = {
@@ -1825,6 +1967,21 @@ export class ModelRouter {
     try {
       await this.beginProviderAttempt(role, route, opts, reservationId, maxOutputTokens);
       result = streamText({
+        onChunk: async ({ chunk }) => {
+          if (
+            ![
+              'start',
+              'start-step',
+              'response-metadata',
+              'finish-step',
+              'finish',
+              'error',
+              'abort',
+            ].includes(chunk.type)
+          ) {
+            observeOutput?.();
+          }
+        },
         maxRetries: opts.maxRetries,
         model: route.model,
         // Cache-hint the system prefix on the messages path (the owner's chat
@@ -1928,6 +2085,7 @@ export class ModelRouter {
     }
 
     const narrowed = result as unknown as {
+      fullStream: ReadableStream<{ type: string; error?: unknown }>;
       text: PromiseLike<string>;
       toUIMessageStreamResponse: (options?: Record<string, unknown>) => Response;
       toUIMessageStream: (
@@ -1939,7 +2097,12 @@ export class ModelRouter {
       modelId: route.modelId,
       degraded: route.degraded,
       attempts,
-      text: narrowed.text,
+      get fullStream() {
+        return narrowed.fullStream;
+      },
+      get text() {
+        return narrowed.text;
+      },
       toUIMessageStreamResponse: (options) => narrowed.toUIMessageStreamResponse(options),
       toUIMessageStream: (options) => narrowed.toUIMessageStream(options),
     };
