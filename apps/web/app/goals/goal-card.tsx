@@ -16,7 +16,6 @@ import {
   btn,
   cardBodyClass,
   cardFooterClass,
-  cardHeaderClass,
   cardShellClass,
   cardTitleClass,
   MetaLine,
@@ -206,23 +205,24 @@ export function GoalCard({ goal }: { goal: GoalView }) {
   const value = (name: string, fallback: string) => editState.values?.[name] ?? fallback;
 
   return (
-    <div id={`goal-${goal.id}`} className={`${cardShellClass} scroll-mt-20`}>
+    <div id={`goal-${goal.id}`} className={`${cardShellClass} scroll-mt-20 @container/goal`}>
       <div className={cardBodyClass}>
         {/* Everything that used to be its own tinted panel — autonomy, chat
             mirroring, live work — is a pill up here instead, so the card has
             one column of text to read rather than a stack of boxes. Only the
             blocked state keeps a panel: it's an alert, not a property. */}
-        <div className={cardHeaderClass}>
-          <div className="min-w-0">
+        {/* Keep the title and status in separate lanes when enlarged text needs more room. */}
+        <div className="flex min-w-0 flex-col items-stretch gap-3 @min-[16rem]/goal:flex-row @min-[16rem]/goal:flex-wrap @min-[16rem]/goal:items-start">
+          <div className="min-w-0 @min-[16rem]/goal:flex-[1_1_8rem]">
             {/* The one shared card-title scale — the display face is reserved
                 for page titles and the brand, and a 16px one-off made goal
                 cards read a half-step louder than every other card. */}
-            <h3 className={cardTitleClass}>{goal.title}</h3>
+            <h3 className={`${cardTitleClass} [overflow-wrap:anywhere]`}>{goal.title}</h3>
             {goal.description ? (
               <p className="mt-1 text-sm leading-5 text-muted">{goal.description}</p>
             ) : null}
           </div>
-          <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
+          <div className="flex min-w-0 max-w-full flex-wrap justify-start gap-1.5 @min-[16rem]/goal:flex-[0_1_auto] @min-[16rem]/goal:justify-end">
             {goal.blockedLabel ? (
               <Badge tone="amber">Needs you</Badge>
             ) : goal.workActive ? (
