@@ -55,21 +55,23 @@ export function DocumentCard({ doc }: { doc: DocumentCardView }) {
 
   return (
     <article className={`${cardShellClass} flex h-full flex-col`}>
-      <div className={`${cardBodyClass} flex-1`}>
-        <div className={cardHeaderClass}>
-          <div className="flex min-w-0 items-start gap-3">
+      <div className={`${cardBodyClass} @container/document flex-1`}>
+        <div className={`${cardHeaderClass} @max-[18rem]/document:grid-cols-1`}>
+          <div className="flex min-w-0 items-start gap-3 @max-[18rem]/document:flex-col">
             <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-xl bg-accent/10 text-accent">
               <FileText className="size-4" aria-hidden="true" />
             </span>
             <div className="min-w-0">
-              <h3 className={`truncate ${cardTitleClass}`}>{doc.title}</h3>
+              <h3 className={`${cardTitleClass} [overflow-wrap:anywhere]`}>{doc.title}</h3>
               <p className="mt-0.5 text-xs text-muted">
                 {sourceLabel}
                 {doc.trust !== 'owner' ? ' · Third-party source' : ''}
               </p>
             </div>
           </div>
-          <Badge tone={status.tone}>{status.label}</Badge>
+          <div className="flex justify-self-start">
+            <Badge tone={status.tone}>{status.label}</Badge>
+          </div>
         </div>
 
         <MetaLine
