@@ -69,7 +69,7 @@ export function ApprovalCard({
   const actionLabel = actionLabels[approval.actionKind];
 
   return (
-    <article className={`${cardShellClass} ${cardInteractiveClass}`}>
+    <article className={`${cardShellClass} ${cardInteractiveClass} @container/approval`}>
       <div className={cardBodyClass}>
         <div className="flex items-start gap-3">
           <span className="inline-flex size-10 shrink-0 items-center justify-center rounded-2xl bg-accent/10 text-accent">
@@ -184,7 +184,9 @@ export function ApprovalCard({
           </div>
         </form>
       ) : (
-        <div className={`${cardFooterClass} max-sm:grid max-sm:grid-cols-2`}>
+        <div
+          className={`${cardFooterClass} max-sm:grid max-sm:grid-cols-1 @max-[21rem]/approval:px-3 @min-[21rem]/approval:max-sm:grid-cols-2`}
+        >
           <form action={approveApproval.bind(null, approval.id)} className="min-w-0">
             <ConfirmButton
               variant="primary"
@@ -210,7 +212,7 @@ export function ApprovalCard({
           <button
             type="button"
             onClick={() => setEditing(true)}
-            className={`${btn.outline} col-span-2 w-full sm:w-auto`}
+            className={`${btn.outline} col-span-1 w-full @min-[21rem]/approval:col-span-2 sm:col-auto sm:w-auto`}
           >
             <PencilLine aria-hidden="true" />
             Edit request
@@ -218,7 +220,7 @@ export function ApprovalCard({
           {approval.rememberLabel ? (
             <form
               action={approveAndRemember.bind(null, approval.id)}
-              className="col-span-2 sm:col-auto"
+              className="col-span-1 @min-[21rem]/approval:col-span-2 sm:col-auto"
             >
               <AlwaysApproveButton scope={approval.rememberLabel} className="w-full sm:w-auto" />
             </form>
