@@ -1378,6 +1378,19 @@ final class APIModelsTests: XCTestCase {
         XCTAssertTrue(message.visibleTextBubbles.isEmpty)
     }
 
+    func testTranscriptSkipsEmptyUserRowsWithoutChangingContextIndices() {
+        let first = ChatMessage.optimistic(role: .user, text: "Hello", id: "first")
+        let empty = ChatMessage.optimistic(role: .user, text: " \n ", id: "empty")
+        let reply = ChatMessage.optimistic(role: .assistant, text: "Hello back", id: "reply")
+        let items = [first, empty, reply].transcriptItems()
+        XCTAssertEqual(items.count, 2)
+        guard case let .message(message, index) = items.last else {
+            return XCTFail("Expected a visible reply after the empty echo")
+        }
+        XCTAssertEqual(message.id, reply.id)
+        XCTAssertEqual(index, 2, "Prompt lookup must still use the original log index")
+    }
+
     func testTranscriptGroupsOnlyConsecutiveApprovedApprovalReceipts() {
         func receipt(_ id: String, status: String = "approved") -> ChatMessage {
             ChatMessage(

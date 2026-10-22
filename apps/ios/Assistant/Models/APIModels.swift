@@ -853,6 +853,12 @@ extension Array where Element == ChatMessage {
 
         while index < endIndex {
             let message = self[index]
+            // User rows have no fallback or non-text surface. An empty echo
+            // must not reserve a bubble or a gap in the visible transcript.
+            if message.role == .user, message.textBubbles.isEmpty {
+                formIndex(after: &index)
+                continue
+            }
             guard message.isApprovedApprovalReceipt else {
                 items.append(.message(message, index: index))
                 formIndex(after: &index)

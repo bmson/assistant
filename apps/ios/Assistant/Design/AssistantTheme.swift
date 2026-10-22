@@ -30,6 +30,19 @@ enum AssistantAppearance: String, CaseIterable, Identifiable {
 }
 
 enum AssistantTheme {
+    /// Surface spacing is shared by transcript rows and the surfaces inside a
+    /// reply. Content sections inside a card keep their own hierarchy.
+    enum ConversationSpacing {
+        static let surfaceGap: CGFloat = 8
+        static let horizontalInset: CGFloat = 20
+        static let verticalInset: CGFloat = 16
+        static let maximumHorizontalInset: CGFloat = 28
+        static let maximumVerticalInset: CGFloat = 22
+        static let contextHorizontalInset: CGFloat = 12
+        static let contextVerticalInset: CGFloat = 8
+        static let contextCornerRadius: CGFloat = 16
+    }
+
     /// Semantic geometry keeps the conversation's signature silhouette while
     /// letting utility cards and nested panels recede behind it.
     static let heroCornerRadius: CGFloat = 27

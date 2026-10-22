@@ -174,8 +174,9 @@ final class AssistantMarkdownTests: XCTestCase {
             let renderer = ImageRenderer(content: view)
             renderer.scale = 1
             let image = try XCTUnwrap(renderer.uiImage)
-            XCTAssertEqual(image.size, CGSize(width: 320, height: 148),
-                "Two 44pt controls, two 10pt gaps, and 40pt of full-width content")
+            let gap: CGFloat = standalone ? 8 : 10
+            XCTAssertEqual(image.size, CGSize(width: 320, height: 44 * 2 + gap * 2 + 40),
+                "Two 44pt controls, two \(gap)pt gaps, and 40pt of full-width content")
         }
     }
 
@@ -836,27 +837,35 @@ final class AssistantMarkdownTests: XCTestCase {
 
     @MainActor
     func testReplyCardSnapshots() throws {
+        let prose = "Here are two places to stop along the way. Check the opening hours before leaving."
         for (name, scheme, size, width) in [
             ("light", ColorScheme.light, DynamicTypeSize.large, CGFloat(390)),
             ("dark", .dark, .large, 390),
             ("narrow", .light, .large, 320),
             ("accessible", .light, .accessibility3, 390)
         ] {
-            let view = MessageBubble(
-                message: .optimistic(role: .assistant, text: "Here are two places to stop along the way. Check the opening hours before leaving."),
-                userPrompt: "Can you find a place somewhere along the way?",
-                isStreaming: false, openApprovals: {},
-                runForReal: nil, retry: nil, decideApproval: nil
-            )
-            .padding(16).frame(width: width).background(AssistantTheme.stage)
-            .environment(\.colorScheme, scheme)
-            .environment(\.dynamicTypeSize, size)
-            let renderer = ImageRenderer(content: view)
-            renderer.scale = 3
-            renderer.proposedSize = ProposedViewSize(width: width, height: nil)
-            let image = try XCTUnwrap(renderer.uiImage)
+            func render(role: ChatRole) throws -> UIImage {
+                let view = MessageBubble(
+                    message: .optimistic(role: role, text: prose),
+                    userPrompt: "Can you find a place somewhere along the way?",
+                    isStreaming: false, openApprovals: {},
+                    runForReal: nil, retry: nil, decideApproval: nil
+                )
+                .padding(16).frame(width: width).background(AssistantTheme.stage)
+                .environment(\.colorScheme, scheme)
+                .environment(\.dynamicTypeSize, size)
+                let renderer = ImageRenderer(content: view)
+                renderer.scale = 3
+                renderer.proposedSize = ProposedViewSize(width: width, height: nil)
+                return try XCTUnwrap(renderer.uiImage)
+            }
+            let image = try render(role: .assistant)
+            let userImage = try render(role: .user)
             XCTAssertEqual(image.size.width, width)
-            XCTAssertGreaterThan(image.size.height, 100)
+            XCTAssertEqual(image.size, userImage.size,
+                "Identical plain prose must use the same content insets for either speaker")
+            XCTAssertGreaterThan(image.size.height, 16 * 2 + 16 * 2,
+                "Prose must contribute intrinsic height beyond bubble insets and fixture padding")
             let attachment = XCTAttachment(image: image)
             attachment.name = "reply-card-\(name)"
             attachment.lifetime = .keepAlways

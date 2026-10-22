@@ -300,10 +300,9 @@ struct ChatTranscriptRows: View, Equatable {
     var body: some View {
         let items = messages.transcriptItems()
         let context = TranscriptContext(messages: messages)
-        VStack(spacing: 0) {
+        VStack(spacing: AssistantTheme.ConversationSpacing.surfaceGap) {
             ForEach(items) { item in
                 row(item, context: context)
-                    .padding(.top, startsRun(at: item.firstIndex) ? 22 : 7)
                     .transition(
                         reduceMotion ? .opacity : .asymmetric(
                             insertion: .opacity
@@ -358,9 +357,6 @@ struct ChatTranscriptRows: View, Equatable {
         }
     }
 
-    private func startsRun(at index: Int) -> Bool {
-        index == 0 || messages[index - 1].role != messages[index].role
-    }
 }
 
 enum ChatComposerPrimaryAction: Equatable {
