@@ -1,4 +1,4 @@
-import { phoneCalendarSnapshotSchema } from '@assistant/persistence';
+import { phoneCalendarSnapshotSchema, phoneCalendarTimeZoneSchema } from '@assistant/persistence';
 import { z } from 'zod';
 import { getPhoneCalendarPorts } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
@@ -11,7 +11,7 @@ const sharedCalendar = z
     id: z.string().min(1).max(200),
     name: z.string().max(300),
     purpose: z.enum(['unspecified', 'commitments', 'reference']),
-    timeZone: z.string().max(100).optional(),
+    timeZone: phoneCalendarTimeZoneSchema.optional(),
   })
   .strict();
 const selection = z

@@ -6,7 +6,7 @@ import type {
 } from './phone-calendar-sharing.js';
 
 const instant = z.string().datetime({ offset: true });
-const timeZone = z
+export const phoneCalendarTimeZoneSchema = z
   .string()
   .min(1)
   .max(100)
@@ -40,7 +40,7 @@ export const phoneCalendarSnapshotSchema = z
       )
       .max(100)
       .optional(),
-    timeZone,
+    timeZone: phoneCalendarTimeZoneSchema,
     calendars: z
       .array(
         z
@@ -48,7 +48,7 @@ export const phoneCalendarSnapshotSchema = z
             id: z.string().min(1).max(200),
             name: z.string().max(300),
             purpose: z.enum(['unspecified', 'commitments', 'reference']).optional(),
-            timeZone: timeZone.optional(),
+            timeZone: phoneCalendarTimeZoneSchema.optional(),
           })
           .strict(),
       )
@@ -61,7 +61,7 @@ export const phoneCalendarSnapshotSchema = z
             calendarId: z.string().min(1).max(200),
             providerExternalIdentifier: z.string().max(1024).optional(),
             status: z.enum(['confirmed', 'tentative', 'cancelled']).optional(),
-            calendarTimeZone: timeZone.optional(),
+            calendarTimeZone: phoneCalendarTimeZoneSchema.optional(),
             ownerParticipant: z
               .object({
                 email: z.string().email().max(320),

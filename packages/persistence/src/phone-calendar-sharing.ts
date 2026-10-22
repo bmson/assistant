@@ -3,6 +3,7 @@ import {
   type PhoneCalendarSnapshot,
   type PhoneCalendarSnapshotInput,
   phoneCalendarSnapshotSchema,
+  phoneCalendarTimeZoneSchema,
 } from './phone-calendars.js';
 
 export type PhoneCalendarPurpose = 'unspecified' | 'commitments' | 'reference';
@@ -38,7 +39,7 @@ const sharedPhoneCalendarSchema = z
     id: z.string().min(1).max(200),
     name: z.string().max(300),
     purpose: phoneCalendarPurposeSchema,
-    timeZone: z.string().min(1).max(100).optional(),
+    timeZone: phoneCalendarTimeZoneSchema.optional(),
   })
   .strict();
 const stateInstant = z.string().datetime({ offset: true });
@@ -234,6 +235,39 @@ export function phoneCalendarCacheRecord(
   };
 }
 
+function hasExactSourceAvailability(
+  state: PhoneCalendarSharingState,
+  snapshot: PhoneCalendarSnapshotInput,
+): boolean {
+  const rows = snapshot.sourceAvailability ?? [];
+  const ids = new Set(rows.map((source) => source.calendarId));
+  return (
+    rows.length === state.calendars.length &&
+    ids.size === rows.length &&
+    state.calendars.every((calendar) => ids.has(calendar.id))
+  );
+}
+
+function hasExactCalendarRoster(
+  state: PhoneCalendarSharingState,
+  snapshot: PhoneCalendarSnapshotInput,
+): boolean {
+  if (snapshot.calendars.length !== state.calendars.length) return false;
+  const uploaded = new Map(snapshot.calendars.map((calendar) => [calendar.id, calendar]));
+  return (
+    uploaded.size === snapshot.calendars.length &&
+    state.calendars.every((selected) => {
+      const calendar = uploaded.get(selected.id);
+      return (
+        calendar !== undefined &&
+        selected.name === calendar.name &&
+        selected.purpose === (calendar.purpose ?? 'unspecified') &&
+        selected.timeZone === calendar.timeZone
+      );
+    })
+  );
+}
+
 /** Accept only a live event cache that still matches the current consent generation. */
 export function parsePhoneCalendarSnapshotCache(
   state: PhoneCalendarSharingState,
@@ -262,15 +296,8 @@ export function parsePhoneCalendarSnapshotCache(
     snapshot.timeMax !== state.timeMax ||
     snapshot.complete !== state.complete ||
     snapshot.truncated !== state.truncated ||
-    snapshot.calendars.length !== state.calendars.length ||
-    snapshot.calendars.some((calendar) => {
-      const selected = state.calendars.find((item) => item.id === calendar.id);
-      return (
-        !selected ||
-        selected.name !== calendar.name ||
-        selected.purpose !== (calendar.purpose ?? 'unspecified')
-      );
-    })
+    !hasExactCalendarRoster(state, snapshot) ||
+    !hasExactSourceAvailability(state, snapshot)
   )
     return null;
   return { ...snapshot, syncedAt };
@@ -376,16 +403,8 @@ export function transitionPhoneCalendarSharing(
       input.selectionRevision !== state.generation ||
       typeof input.complete !== 'boolean' ||
       typeof input.truncated !== 'boolean' ||
-      input.calendars.length !== roster.size ||
-      statuses.size !== roster.size ||
-      input.calendars.some((calendar) => {
-        const selected = roster.get(calendar.id);
-        return (
-          !selected ||
-          selected.name !== calendar.name ||
-          selected.purpose !== (calendar.purpose ?? 'unspecified')
-        );
-      }) ||
+      !hasExactCalendarRoster(state, input) ||
+      !hasExactSourceAvailability(state, input) ||
       [...roster.keys()].some((id) => !statuses.has(id)) ||
       input.events.some((event) => statuses.get(event.calendarId)?.status !== 'available') ||
       (input.complete &&
@@ -434,6 +453,8 @@ export function transitionPhoneCalendarSharing(
         !calendar.id ||
         calendar.id.length > 200 ||
         calendar.name.length > 300 ||
+        (calendar.timeZone !== undefined &&
+          !phoneCalendarTimeZoneSchema.safeParse(calendar.timeZone).success) ||
         !['unspecified', 'commitments', 'reference'].includes(calendar.purpose),
     )
   )

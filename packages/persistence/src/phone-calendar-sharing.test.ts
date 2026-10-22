@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   type PhoneCalendarSharingCommand,
   type PhoneCalendarSharingState,
+  parsePhoneCalendarSharingState,
   phoneCalendarSharingWindow,
   transitionPhoneCalendarSharing,
 } from './phone-calendar-sharing.js';
@@ -146,6 +147,66 @@ describe('selected phone calendar sharing authority', () => {
     expect(apply(enabled(), upload(snapshot({ calendars: [] }))).result.ok).toBe(false);
     expect(apply(enabled(), upload(snapshot({ sourceAvailability: [] }))).result.ok).toBe(false);
     expect(apply(enabled(), upload()).result.ok).toBe(true);
+  });
+  it('rejects a snapshot with a duplicated calendar ID standing in for a selected source', () => {
+    const workCalendar = calendars[0];
+    if (!workCalendar) throw new Error('missing work calendar fixture');
+    const familyCalendar = { id: 'family', name: 'Family', purpose: 'reference' as const };
+    const state = apply(null, { ...enable, calendars: [workCalendar, familyCalendar] }).result
+      .state;
+    expect(
+      apply(
+        state,
+        upload(
+          snapshot({
+            calendars: [workCalendar, workCalendar],
+            sourceAvailability: [
+              { calendarId: 'work', status: 'available', complete: true },
+              { calendarId: 'family', status: 'available', complete: true },
+            ],
+          }),
+        ),
+      ).result,
+    ).toMatchObject({ ok: false, error: 'invalid_snapshot' });
+  });
+  it('validates optional calendar time zones and requires the uploaded roster to match', () => {
+    const workCalendar = calendars[0];
+    if (!workCalendar) throw new Error('missing work calendar fixture');
+    expect(
+      apply(null, { ...enable, calendars: [{ ...workCalendar, timeZone: 'Mars/Olympus' }] }).result,
+    ).toMatchObject({ ok: false, error: 'invalid_snapshot' });
+
+    const state = enabled();
+    expect(
+      apply(
+        state,
+        upload(snapshot({ calendars: [{ ...workCalendar, timeZone: 'America/Los_Angeles' }] })),
+      ).result,
+    ).toMatchObject({ ok: false, error: 'invalid_snapshot' });
+    expect(
+      parsePhoneCalendarSharingState(
+        {
+          ...state,
+          calendars: [{ ...workCalendar, timeZone: '' }],
+        },
+        'owner',
+      ),
+    ).toBeNull();
+  });
+  it('rejects duplicate source-availability rows even when their last value claims completeness', () => {
+    expect(
+      apply(
+        enabled(),
+        upload(
+          snapshot({
+            sourceAvailability: [
+              { calendarId: 'work', status: 'missing', complete: false },
+              { calendarId: 'work', status: 'available', complete: true },
+            ],
+          }),
+        ),
+      ).result,
+    ).toMatchObject({ ok: false, error: 'invalid_snapshot' });
   });
   it.each([
     { capturedAt: '2026-10-22T18:06:00Z' },

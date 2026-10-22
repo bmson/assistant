@@ -2,6 +2,7 @@ import {
   type PhoneCalendarCache,
   type PhoneCalendarSharingRepository,
   type PhoneCalendarSharingState,
+  parsePhoneCalendarSnapshotCache,
   phoneCalendarCacheRecord,
   readPhoneCalendars,
   transitionPhoneCalendarSharing,
@@ -66,25 +67,35 @@ describe('mobile selected-calendar sharing protocol', () => {
     vi.setSystemTime(now);
     fixture.authed = true;
     sharing = null;
-    const rows = new Map<string, unknown>();
+    const rows = new Map<string, { result: unknown; expiresAt: Date }>();
     applies = vi.fn<PhoneCalendarSharingRepository['apply']>(async (ownerId, command) => {
       const changed = transitionPhoneCalendarSharing(ownerId, sharing, command, now);
       if (changed.result.ok) {
         sharing = changed.result.state;
         if (changed.snapshot !== undefined) {
           const record = phoneCalendarCacheRecord(ownerId, changed.snapshot, now);
-          rows.set(record.cacheKey, record.result);
+          rows.set(record.cacheKey, { result: record.result, expiresAt: record.expiresAt });
         }
       }
       return changed.result;
     });
     cache = {
-      cacheGet: async (key) => (rows.has(key) ? { result: rows.get(key) } : null),
+      cacheGet: async (key) => rows.get(key) ?? null,
       cachePut: async (row) => {
-        rows.set(row.cacheKey, row.result);
+        rows.set(row.cacheKey, { result: row.result, expiresAt: row.expiresAt });
       },
       phoneCalendarSharing: {
         get: async (ownerId) => (ownerId === 'owner-a' ? sharing : null),
+        readSnapshot: async (ownerId, at = now) => {
+          const state = ownerId === 'owner-a' ? sharing : null;
+          const cached = rows.get(`phone-calendars:v1:${ownerId}`);
+          return {
+            state,
+            snapshot: state
+              ? parsePhoneCalendarSnapshotCache(state, cached?.result, cached?.expiresAt, at)
+              : null,
+          };
+        },
         apply: applies,
       },
     };
@@ -139,6 +150,19 @@ describe('mobile selected-calendar sharing protocol', () => {
     expect((await PUT(request('PUT', snapshot))).status).toBe(400);
     expect(applies).not.toHaveBeenCalled();
   });
+  it.each(['', 'Mars/Olympus'])(
+    'rejects an invalid selected calendar time zone (%s)',
+    async (zone) => {
+      const response = await POST(
+        request('POST', {
+          ...consent,
+          calendars: [{ ...calendars[0], timeZone: zone }],
+        }),
+      );
+      expect(response.status).toBe(400);
+      expect(applies).not.toHaveBeenCalled();
+    },
+  );
   it.each(['POST', 'PUT', 'DELETE'])(
     'rejects a wrong-workspace %s before mutation',
     async (method) => {
