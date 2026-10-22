@@ -54,8 +54,8 @@ struct MessageBubble: View {
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .body) private var messageFontSize = 14.0
-    @ScaledMetric(relativeTo: .body) private var bubbleHorizontalInset: CGFloat = 20
-    @ScaledMetric(relativeTo: .body) private var bubbleVerticalInset: CGFloat = 15
+    @ScaledMetric(relativeTo: .body) private var bubbleHorizontalInset = AssistantTheme.ConversationSpacing.horizontalInset
+    @ScaledMetric(relativeTo: .body) private var bubbleVerticalInset = AssistantTheme.ConversationSpacing.verticalInset
     // Tool-result cards support the answer; they must not hide its caveats.
 
     @ViewBuilder
@@ -101,7 +101,7 @@ struct MessageBubble: View {
         // Bubbles are full-width cards like every other surface in the
         // stream: a one-word message gets the same width as a paragraph
         // rather than shrink-wrapping its text.
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: AssistantTheme.ConversationSpacing.surfaceGap) {
             if message.role == .assistant, let approvalSummary = message.approvalSummary {
                 approvalSummaryCard(approvalSummary)
             } else if let noticeKind = message.noticeKind,
@@ -335,7 +335,7 @@ struct MessageBubble: View {
     }
 
     private var resolvedBubbleHorizontalInset: CGFloat {
-        min(bubbleHorizontalInset, 28)
+        min(bubbleHorizontalInset, AssistantTheme.ConversationSpacing.maximumHorizontalInset)
     }
 
     /// One assistant bubble's worth of paper. The whole reply remains the
@@ -358,7 +358,7 @@ struct MessageBubble: View {
             )
             .textSelection(.enabled)
             .padding(.horizontal, resolvedBubbleHorizontalInset)
-            .padding(.vertical, resolvedBubbleVerticalInset * 2)
+            .padding(.vertical, resolvedBubbleVerticalInset)
             .frame(maxWidth: .infinity, alignment: .leading)
 
             if showsSources {
@@ -420,19 +420,30 @@ struct MessageBubble: View {
     }
 
     private func recallPill(title: String, sources: [MessageRecallSource]) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 5) {
+        HStack(alignment: .firstTextBaseline, spacing: AssistantTheme.ConversationSpacing.surfaceGap) {
             Image(systemName: sources.contains(where: \.isKnowledgeGraph) ? "point.3.connected.trianglepath.dotted" : "clock.arrow.circlepath")
                 .font(.caption2.weight(.semibold))
-            Text(title)
-                .font(.caption2.weight(.semibold))
-            Text(sources.prefix(2).map(\.label).joined(separator: " · "))
-                .font(.caption2)
-                .lineLimit(1)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.caption2.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(sources.prefix(2).map(\.label).joined(separator: " · "))
+                    .font(.caption2)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                    .truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .foregroundStyle(AssistantTheme.stageSecondary)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(AssistantTheme.stageWell(for: colorScheme), in: Capsule())
+        .padding(.horizontal, AssistantTheme.ConversationSpacing.contextHorizontalInset)
+        .padding(.vertical, AssistantTheme.ConversationSpacing.contextVerticalInset)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(minHeight: setRecallSourceSuppressed != nil && sources.contains(where: \.hasCurrentLedgerReference) ? 44 : nil)
+        .background(AssistantTheme.stageWell(for: colorScheme), in: RoundedRectangle(
+            cornerRadius: AssistantTheme.ConversationSpacing.contextCornerRadius, style: .continuous))
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(title): \(sources.map(\.label).joined(separator: ", "))")
     }
 
@@ -512,7 +523,7 @@ struct MessageBubble: View {
     }
 
     private var resolvedBubbleVerticalInset: CGFloat {
-        min(bubbleVerticalInset, 22)
+        min(bubbleVerticalInset, AssistantTheme.ConversationSpacing.maximumVerticalInset)
     }
 
     private var decisionParts: [MessagePart] {
@@ -944,8 +955,8 @@ struct MessageBubble: View {
                 .font(.caption.weight(.medium))
             }
         }
-        .padding(16)
-        .padding(.leading, 2)
+        .padding(.horizontal, resolvedBubbleHorizontalInset)
+        .padding(.vertical, resolvedBubbleVerticalInset)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(AssistantTheme.bubblePaper(for: colorScheme), in: shape)
         .overlay { shape.strokeBorder(presentation.tint.opacity(0.25), lineWidth: 0.9) }
@@ -2452,14 +2463,14 @@ struct RichResponseCards: View {
     var body: some View {
         let preview = Array(displayItems.prefix(3))
         let overflow = Array(displayItems.dropFirst(3))
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: AssistantTheme.ConversationSpacing.surfaceGap) {
             ForEach(preview) { item in
                 displayItem(item)
             }
             if !overflow.isEmpty {
                 CardDisclosure(collapsedLabel: "Show \(overflow.count) more \(overflow.count == 1 ? "result" : "results")",
                     expandedLabel: "Showing all \(displayItems.count) results", standalone: true, showsBottomCollapse: true) {
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: AssistantTheme.ConversationSpacing.surfaceGap) {
                         ForEach(overflow) { item in
                             displayItem(item)
                         }
@@ -4499,9 +4510,9 @@ struct CardDisclosure<Content: View>: View {
             if expanded {
                 VStack(alignment: .leading, spacing: 12) { content }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 10)
+                    .padding(.top, standalone ? AssistantTheme.ConversationSpacing.surfaceGap : 10)
                 if showsBottomCollapse {
-                    control(bottom: true).padding(.top, 10)
+                    control(bottom: true).padding(.top, standalone ? AssistantTheme.ConversationSpacing.surfaceGap : 10)
                 }
             }
         }
@@ -5082,10 +5093,16 @@ private struct ResponseCardSurface: ViewModifier {
     let colorSchemeContrast: ColorSchemeContrast
     let inset: CGFloat
     @Environment(\.responseCardIsEmbedded) private var embedded
+    @ScaledMetric(relativeTo: .body) private var horizontalInset = AssistantTheme.ConversationSpacing.horizontalInset
+    @ScaledMetric(relativeTo: .body) private var verticalInset = AssistantTheme.ConversationSpacing.verticalInset
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: AssistantTheme.cardCornerRadius, style: .continuous)
-        let padded = content.padding(inset)
+        // Embedded source details retain their deliberate density. Standalone
+        // cards share the prose bubble's outer content alignment.
+        let padded = content
+            .padding(.horizontal, embedded ? inset : min(horizontalInset, AssistantTheme.ConversationSpacing.maximumHorizontalInset))
+            .padding(.vertical, embedded ? inset : min(verticalInset, AssistantTheme.ConversationSpacing.maximumVerticalInset))
             .frame(maxWidth: .infinity, minHeight: AssistantTheme.responseCardMinHeight, alignment: .leading)
         if embedded {
             padded

@@ -118,6 +118,135 @@ final class NativeVisualReviewTests: XCTestCase {
     }
 
     @MainActor
+    func testConversationSpacingAndContextRows() async throws {
+        NativeReviewProtocol.install([:])
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+                               session: URLSession(configuration: sessionConfig))
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "assistant.conversation-spacing-visual-review"))
+        defaults.removePersistentDomain(forName: "assistant.conversation-spacing-visual-review")
+        let model = AppModel(apiClient: client, defaults: defaults)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+
+        let digest = String(repeating: "a", count: 64)
+        let sources: [MessageRecallSource] = [
+            .init(date: "2026-10-18", label: "The last planning conversation where Robin asked to keep Friday's arrival flexible", kind: "chat", hops: 1, surfaceKey: nil, sourceRevision: nil),
+            .init(date: "2026-10-17", label: "Robin prefers a quiet hotel near the station and a room away from the street", kind: "knowledge_graph", hops: 2, surfaceKey: digest, sourceRevision: String(repeating: "b", count: 64)),
+            .init(date: "2026-10-16", label: "Choose a refundable place before confirming the train", kind: "situation_decision", hops: 1, surfaceKey: String(repeating: "c", count: 64), sourceRevision: String(repeating: "d", count: 64)),
+            .init(date: "2026-10-15", label: "Confirm the weekend arrival time with Robin after the ticket is booked", kind: "commitment", hops: 1, surfaceKey: String(repeating: "e", count: 64), sourceRevision: String(repeating: "f", count: 64)),
+            .init(date: "2026-10-14", label: "Saved context with a deliberately long source title to check wrapping without clipping or squeezing the controls", kind: "future_source", hops: 1, surfaceKey: nil, sourceRevision: nil),
+        ]
+        let briefing = MessagePart(type: "data-card", data: .object([
+            "kind": .string("briefing"), "id": .string("briefing-review"), "date": .string("Saturday, October 24"),
+            "lead": .string("A relaxed start, with one decision to make before you leave."),
+            "sections": .array([
+                .object(["type": .string("agenda"), "title": .string("Today"), "complete": .bool(true), "items": .array([
+                    .object(["day": .string("Today"), "time": .string("9:30 AM"), "title": .string("Train to the coast"), "location": .string("Oakland station"), "flag": .string("On time"), "note": .string("Arrive ten minutes early")]),
+                    .object(["day": .string("Today"), "time": .string("3:00 PM"), "title": .string("Check in at Harbor House"), "location": .string("Near the old town"), "flag": .string("Flexible"), "note": .string("Cancellation is available until Thursday")])
+                ])]),
+                .object(["type": .string("weather"), "title": .string("Weather"), "location": .string("Monterey"), "temperature": .string("18°"), "condition": .string("Clouds and sun"), "symbol": .string("cloud.sun.fill"), "detail": .string("A light jacket should be enough.")])
+            ])
+        ]))
+        let alert = MessagePart(type: "data-card", data: RichMessageFixture.alert)
+        let event = MessagePart(type: "data-card", data: .object([
+            "kind": .string("calendar-event"), "id": .string("spacing-event"),
+            "start": .string("2026-10-24T09:30:00-07:00"), "time": .string("9:30 AM"),
+            "title": .string("Train to the coast"), "location": .string("Oakland station"),
+            "attendees": .array([]), "calendars": .array([.string("Personal")]),
+        ]))
+        let messages: [ChatMessage] = [
+            .optimistic(role: .user, text: "Plan a quiet weekend with Robin.", id: "spacing-user-short"),
+            .optimistic(role: .assistant, text: "I’ll keep it simple and leave room to adjust.", id: "spacing-assistant-short"),
+            .optimistic(role: .user, text: "Can you compare the options and remind me what we already decided?", id: "spacing-user-long"),
+            ChatMessage(id: "spacing-assistant-long", role: .assistant, parts: [
+                .init(type: "text", text: "**Harbor House** is close to the station, and the cancellation window gives us some flexibility.\n\nThe train gets in at 4:30 PM. I can keep the arrival time handy and check whether the hotel can hold the room until then.\n\nThe saved decision was to choose a refundable place before confirming travel."),
+                .init(type: "text", text: "One more thing: I’ll keep the check-in time open until the tickets are booked."),
+                .init(type: "recall", sources: sources),
+            ]),
+            ChatMessage(id: "spacing-assistant-second-bubble", role: .assistant, parts: [
+                .init(type: "text", text: "One more detail: the last conversation left the check-in time open until the tickets were booked."),
+                .init(type: "recall", sources: [sources[3], sources[4]]),
+            ]),
+            ChatMessage(id: "spacing-recall-missing", role: .assistant, parts: [
+                .init(type: "text", text: "This older reply has recall content without hydrated source rows, so it should keep a calm empty state."),
+                .init(type: "recall", sources: []),
+            ]),
+            ChatMessage(id: "spacing-receipt", role: .assistant, parts: [
+                .init(type: "text", text: "Sent Robin the confirmed arrival time."),
+                .init(type: "approval", approvalId: "receipt-1", shortCode: "A12", summary: "Send Robin the confirmed arrival time", purpose: "Weekend arrival", status: "approved"),
+            ]),
+            ChatMessage(id: "spacing-receipt-followup", role: .assistant, parts: [
+                .init(type: "text", text: "Confirmed the hotel can hold the room until 5 PM."),
+                .init(type: "approval", approvalId: "receipt-2", shortCode: "A13", summary: "Confirm the hotel's late arrival window", purpose: "Weekend arrival", status: "approved"),
+            ]),
+            ChatMessage(id: "stream-spacing-current", role: .assistant, parts: [
+                .init(type: "text", text: "I’m checking the latest arrival details now.")
+            ]),
+            ChatMessage(id: "spacing-proactive", role: .assistant, parts: [
+                .init(type: "text", text: "There is one item to review before the weekend."), alert, event,
+            ]),
+            ChatMessage(id: "spacing-briefing", role: .assistant, parts: [
+                .init(type: "text", text: "Here is your weekend briefing."), briefing,
+            ]),
+            ChatMessage(id: "spacing-generated", role: .assistant, parts: [
+                .init(type: "text", text: "I kept the travel details together for quick reference."), RichMessageFixture.generated(),
+            ]),
+        ]
+        func transcript(sending: Bool) -> ChatTranscriptRows {
+            ChatTranscriptRows(
+            messages: messages, isSending: sending,
+            openApprovals: {}, send: { _, _ in },
+            decideApproval: { _, _ in false }, rememberApproval: { _ in false },
+            decideSuggestion: { _, _ in nil }, openActivity: {},
+            refreshCard: { _, _ in nil }, hideMessage: { _ in },
+            setRecallSourceSuppressed: { _, _, _ in .failed },
+            recallSourceSuppressed: { _, _ in nil },
+            acknowledgeMessageDelivery: { _ in false },
+            cardFormActions: nil, cardFormStateRevision: 0, cardFormTaskRevision: 0
+            )
+        }
+        let page = Page("conversation-spacing-context", ownsNavigation: true, ScrollView {
+            transcript(sending: true).padding(.horizontal, 16).padding(.vertical, 8)
+        }.background(AssistantTheme.stage))
+        for scheme in [ColorScheme.light, .dark] {
+            try await capture(page, scheme: scheme, size: .large, scene: scene, model: model, requiresScrolling: true)
+            try await capture(page, scheme: scheme, size: .accessibility3, scene: scene, model: model, requiresScrolling: true)
+        }
+        let highContrastPage = Page("conversation-spacing-context-increased-contrast", ownsNavigation: true,
+            ScrollView { transcript(sending: true).padding(.horizontal, 16).padding(.vertical, 8) }
+                .background(AssistantTheme.stage))
+        try await capture(highContrastPage, scheme: .light, size: .accessibility3, scene: scene, model: model,
+                          requiresScrolling: true, increasedContrast: true)
+        for size in [DynamicTypeSize.large, .accessibility3] {
+            try await capture(page, scheme: .light, size: size, scene: scene, model: model,
+                              requiresScrolling: true, viewportWidth: 320)
+        }
+        let settledPage = Page("conversation-spacing-settled", ownsNavigation: true, ScrollView {
+            transcript(sending: false).padding(.horizontal, 16).padding(.vertical, 8)
+        }.background(AssistantTheme.stage))
+        try await capture(settledPage, scheme: .light, size: .large, scene: scene, model: model, requiresScrolling: true)
+        // Exercise the same standalone overflow composition in its expanded
+        // state; the first three results remain outside this disclosure.
+        let cards = try [alert, event, briefing, RichMessageFixture.generated()].map {
+            try XCTUnwrap(MessageResponseCard(part: $0))
+        }
+        XCTAssertEqual(cards.count, 4)
+        let expandedPage = Page("conversation-spacing-expanded-results", ownsNavigation: true, ScrollView {
+            VStack(spacing: 8) {
+                RichResponseCards(cards: Array(cards.prefix(3)))
+                CardDisclosure(collapsedLabel: "Show 1 more result", expandedLabel: "Showing all 4 results",
+                               standalone: true, showsBottomCollapse: true, initiallyExpanded: true) {
+                    RichResponseCards(cards: Array(cards.suffix(1)))
+                }
+            }.padding(.horizontal, 16).padding(.vertical, 8)
+        }.background(AssistantTheme.stage))
+        try await capture(expandedPage, scheme: .light, size: .large, scene: scene, model: model, requiresScrolling: true)
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+    }
+
+    @MainActor
     func testGeneratedTableFormatting() async throws {
         let sessionConfig = URLSessionConfiguration.ephemeral
         sessionConfig.protocolClasses = [NativeReviewProtocol.self]
@@ -311,11 +440,13 @@ final class NativeVisualReviewTests: XCTestCase {
     }
 
     @MainActor private func capture(_ page: Page, scheme: ColorScheme, size: DynamicTypeSize,
-                                    scene: UIWindowScene, model: AppModel, requiresScrolling: Bool = false) async throws {
+                                    scene: UIWindowScene, model: AppModel, requiresScrolling: Bool = false,
+                                    viewportWidth: CGFloat? = nil, increasedContrast: Bool = false) async throws {
         UserDefaults.standard.set((scheme == .light ? AssistantAppearance.light : .dark).rawValue,
                                   forKey: AssistantAppearance.defaultsKey)
         let window = UIWindow(windowScene: scene)
         window.frame = scene.coordinateSpace.bounds
+        if let viewportWidth { window.frame.size.width = viewportWidth }
         window.overrideUserInterfaceStyle = scheme == .light ? .light : .dark
         let host = UIHostingController(rootView: Group {
             if page.ownsNavigation { page.content }
@@ -330,6 +461,7 @@ final class NativeVisualReviewTests: XCTestCase {
             .environment(\.dynamicTypeSize, size).transaction { $0.animation = nil; $0.disablesAnimations = true }
             .environment(\.scenePhase, .active))
         window.rootViewController = host
+        if increasedContrast { host.traitOverrides.accessibilityContrast = .high }
         window.makeKeyAndVisible()
         defer { window.isHidden = true; window.rootViewController = nil }
         try await Task.sleep(for: .milliseconds(500))
