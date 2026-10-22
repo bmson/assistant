@@ -228,22 +228,23 @@ struct PhoneCalendarsView: View {
                 Text(error).font(.footnote).foregroundStyle(.secondary)
             }
 
-            if model.phoneCalendarSharing.isSharingEnabled {
-                Label("Sharing setup is on · \(model.phoneCalendarSharing.serverState?.calendars.count ?? 0) calendars", systemImage: "arrow.up.to.line")
-                if let state = model.phoneCalendarSharing.serverState {
-                    Text(snapshotStatus(for: state)).font(.footnote).foregroundStyle(.secondary)
-                    if let received = formattedReceipt(state.receivedAt) {
-                        Text("Last received by server: \(received)").font(.footnote).foregroundStyle(.secondary)
-                    }
-                    if let captured = formattedReceipt(state.capturedAt) {
-                        Text("Captured on this iPhone: \(captured)").font(.footnote).foregroundStyle(.secondary)
-                    }
-                    if let window = actualSnapshotWindow(state) {
-                        Text(window).font(.footnote).foregroundStyle(.secondary)
-                    }
+            if model.phoneCalendarSharing.canStopSharing, let state = model.phoneCalendarSharing.serverState, state.enabled {
+                Label(model.phoneCalendarSharing.isSharingEnabled
+                      ? "Sharing setup is on · \(state.calendars.count) calendars"
+                      : "Sharing is paused · \(state.calendars.count) calendars",
+                      systemImage: model.phoneCalendarSharing.isSharingEnabled ? "arrow.up.to.line" : "pause.circle")
+                Text(snapshotStatus(for: state)).font(.footnote).foregroundStyle(.secondary)
+                if let received = formattedReceipt(state.receivedAt) {
+                    Text("Last received by server: \(received)").font(.footnote).foregroundStyle(.secondary)
+                }
+                if let captured = formattedReceipt(state.capturedAt) {
+                    Text("Captured on this iPhone: \(captured)").font(.footnote).foregroundStyle(.secondary)
+                }
+                if let window = actualSnapshotWindow(state) {
+                    Text(window).font(.footnote).foregroundStyle(.secondary)
                 }
                 Button("Sync now") { Task { await model.refreshPhoneCalendarSharingSnapshot() } }
-                    .disabled(model.phoneCalendarSharing.isWorking)
+                    .disabled(model.phoneCalendarSharing.isWorking || model.phoneCalendarSharing.requiresPermissionReview)
                 Button("Review shared calendars") { reviewSharedCalendars() }
             }
             if model.phoneCalendarSharing.requiresReplace {
@@ -256,7 +257,7 @@ struct PhoneCalendarsView: View {
                 Label("Uploads are paused because Calendar access changed. Review the selected calendars and confirm sharing before uploads resume.", systemImage: "pause.circle")
                     .font(.footnote).foregroundStyle(.secondary)
             }
-            if model.phoneCalendarSharing.isSharingEnabled || model.phoneCalendarSharing.hasPendingMutation {
+            if model.phoneCalendarSharing.canStopSharing {
                 Button("Stop sharing calendars", role: .destructive) { confirmingShareRemoval = true }
                     .confirmationDialog("Stop sharing calendars?", isPresented: $confirmingShareRemoval, titleVisibility: .visible) {
                         Button("Stop sharing", role: .destructive) { Task { await model.stopPhoneCalendarSharing() } }
@@ -391,8 +392,11 @@ struct PhoneCalendarsView: View {
     }
 
     private func actualSnapshotWindow(_ state: PhoneCalendarSharingState) -> String? {
-        guard let lower = formattedReceipt(state.timeMin), let upper = formattedReceipt(state.timeMax) else { return nil }
-        return "Snapshot window: \(lower) – \(upper) (\(model.phoneCalendarSharing.ownerTimeZone ?? "owner time zone"))"
+        PhoneCalendarSnapshotWindowFormatter.format(
+            timeMin: state.timeMin,
+            timeMax: state.timeMax,
+            ownerTimeZone: model.phoneCalendarSharing.ownerTimeZone
+        )
     }
 
     private var sharingWindowDescription: String {

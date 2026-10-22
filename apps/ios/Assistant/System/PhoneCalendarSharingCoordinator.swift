@@ -102,6 +102,20 @@ final class PhoneCalendarSharingCoordinator {
     var localPublisherID: String? { localRecord?.publisherId }
     var hasPendingMutation: Bool { localRecord?.pendingMutation != nil }
     var hasPendingRemoval: Bool { localRecord?.pendingRevocation != nil }
+    var canStopSharing: Bool {
+        guard let ownerID = activeOwnerID, let read = serverRead, read.ownerId == ownerID,
+              let record = localRecord, record.installationID == installationID else { return false }
+        if let pending = record.pendingRevocation {
+            return pending.ownerId == ownerID && pending.publisherId == record.publisherId
+        }
+        if let pending = record.pendingMutation {
+            return pending.body.ownerId == ownerID && pending.body.publisherId == record.publisherId
+                && (serverState == nil || serverState?.publisherId == nil || serverState?.publisherId == record.publisherId
+                    || serverState?.mutationId == pending.body.mutationId)
+        }
+        guard let state = serverState else { return false }
+        return state.ownerId == ownerID && state.enabled && state.publisherId == record.publisherId
+    }
     var requiresReplace: Bool {
         guard let publisher = serverState?.publisherId else { return false }
         return publisher != localRecord?.publisherId || localRecord?.installationID != installationID
@@ -302,7 +316,7 @@ final class PhoneCalendarSharingCoordinator {
         Self.storePermissionPause(false, scope: scope)
         localRecord = record
         await sendPendingMutation(client: client, scope: scope)
-        if serverState?.enabled == true {
+        if serverState?.enabled == true, !hasPendingMutation {
             requestRevision += 1
             await publishSnapshot(client: client, revision: requestRevision)
         }
@@ -319,6 +333,10 @@ final class PhoneCalendarSharingCoordinator {
               let read = serverRead ?? localRecord?.lastRead,
               isOwnerVerified || read.ownerId == expectedOwnerID else {
             errorMessage = "Connect to the same verified assistant account to remove calendar sharing."
+            return
+        }
+        guard canStopSharing else {
+            errorMessage = "This iPhone can stop only its own verified calendar sharing. Review the current publisher before making changes."
             return
         }
         if localRecord?.pendingRevocation != nil {
@@ -558,7 +576,7 @@ final class PhoneCalendarSharingCoordinator {
 
     private func publishSnapshot(client: APIClient, revision: Int) async {
         guard revision == requestRevision, isOwnerVerified,
-              localRecord?.pendingRevocation == nil,
+              localRecord?.pendingRevocation == nil, localRecord?.pendingMutation == nil,
               let ownerID = activeOwnerID, let scope = activeScope,
               let state = serverState, state.enabled,
               let publisherID = state.publisherId,

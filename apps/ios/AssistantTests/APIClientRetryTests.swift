@@ -3575,6 +3575,18 @@ extension APIClientRetryTests {
         XCTAssertEqual(PhoneCalendarSnapshotFreshness.evaluate(state(received: formatter.string(from: now.addingTimeInterval(60)), captured: formatter.string(from: now), complete: true, truncated: false), ownerTimeZone: "America/Los_Angeles", now: now), .stale,
                        "A future server receipt cannot make a snapshot current")
     }
+
+    func testPhoneCalendarSnapshotWindowUsesOwnerZoneAndExclusiveUpperBound() {
+        let result = PhoneCalendarSnapshotWindowFormatter.format(
+            timeMin: "2026-10-22T00:00:00Z",
+            timeMax: "2026-10-24T07:00:00Z",
+            ownerTimeZone: "America/Los_Angeles",
+            locale: Locale(identifier: "en_US_POSIX")
+        )
+        XCTAssertEqual(result, "Snapshot window: Oct 21, 2026 through Oct 23, 2026 inclusive; exclusive end Oct 24, 2026 at 12:00 AM PDT (America/Los_Angeles).")
+        XCTAssertFalse(result?.contains("Oct 22, 2026 through Oct 24") == true,
+                        "The window must not use a Tokyo/device-zone rendering for a Los Angeles owner")
+    }
 }
 
 @MainActor
@@ -3715,6 +3727,8 @@ extension APIClientRetryTests {
         let store = PhoneCalendarSharingMemoryRecordStore()
         let state = phoneCalendarState(generation: 1, enabled: true,
                                        calendars: [.init(id: "work", name: "Work", purpose: .commitments, timeZone: nil)])
+        _ = store.save(.init(publisherId: "publisher-1", generation: 1, pendingMutation: nil,
+                             pendingRevocation: nil, lastRead: nil, lastState: state), scope: phoneCalendarScope())
         StubURLProtocol.prime([], paths: [
             "/api/mobile/v1/calendars": [
                 .success(status: 200, body: try phoneCalendarRead(state)),
@@ -3877,6 +3891,7 @@ extension APIClientRetryTests {
         source.access = .denied
         await coordinator.refresh(client: client, expectedOwnerID: "owner-1", publishIfEnabled: false)
         XCTAssertTrue(coordinator.requiresPermissionReview)
+        XCTAssertTrue(coordinator.canStopSharing, "Permission pause must not hide removal for this installation's publisher")
         source.access = .fullAccess
         await coordinator.refresh(client: client, expectedOwnerID: "owner-1", publishIfEnabled: true)
         XCTAssertTrue(coordinator.requiresPermissionReview)
@@ -3910,6 +3925,32 @@ extension APIClientRetryTests {
         XCTAssertFalse(coordinator.isSharingEnabled)
         XCTAssertEqual(source.shareQueryCount, 0, "A new app installation must not inherit a Keychain opt-in silently")
         XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET"])
+    }
+
+    @MainActor
+    func testFailedCalendarSelectionChangeDoesNotUploadPreviousRoster() async throws {
+        let previous = [SharedPhoneCalendar(id: "work", name: "Work", purpose: .commitments, timeZone: nil)]
+        let state = phoneCalendarState(publisher: "publisher-1", generation: 1, enabled: true, calendars: previous)
+        let store = PhoneCalendarSharingMemoryRecordStore()
+        _ = store.save(.init(publisherId: "publisher-1", generation: 1, pendingMutation: nil,
+                             pendingRevocation: nil, lastRead: nil, lastState: state), scope: phoneCalendarScope())
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/calendars": [
+                .success(status: 200, body: try phoneCalendarRead(state)),
+                .failure(URLError(.notConnectedToInternet))
+            ]
+        ])
+        let source = PhoneCalendarSharingFixtureSource()
+        let coordinator = PhoneCalendarSharingCoordinator(source: source, recordStore: store)
+        let client = makeClient()
+        await coordinator.refresh(client: client, expectedOwnerID: "owner-1", publishIfEnabled: false)
+        await coordinator.enable(client: client, expectedOwnerID: "owner-1", command: "select", selectedCalendars: [
+            .init(id: "personal", name: "Personal", purpose: .reference)
+        ])
+        XCTAssertTrue(coordinator.hasPendingMutation, "The rejected selection remains pending for explicit resolution")
+        XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "POST"],
+                       "No PUT may upload the old enabled roster while the selected-roster change is unconfirmed")
+        XCTAssertEqual(source.shareQueryCount, 0)
     }
 
     @MainActor
@@ -3996,17 +4037,24 @@ extension APIClientRetryTests {
                 ]
             ])
             let coordinator = PhoneCalendarSharingCoordinator(source: PhoneCalendarSharingFixtureSource(), recordStore: store)
-            await coordinator.refresh(client: makeClient(), expectedOwnerID: "owner-1", publishIfEnabled: false)
+            let client = makeClient()
+            await coordinator.refresh(client: client, expectedOwnerID: "owner-1", publishIfEnabled: false)
             XCTAssertFalse(coordinator.hasPendingRemoval)
             XCTAssertEqual(coordinator.serverState, authoritative)
             XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "DELETE"])
             if authoritative.enabled {
                 XCTAssertTrue(coordinator.requiresReplace)
                 XCTAssertFalse(coordinator.isSharingEnabled, "This iPhone must not claim the replacement publisher is local")
+                XCTAssertFalse(coordinator.canStopSharing, "A stale publisher must not expose a Stop action for another phone")
                 XCTAssertTrue(coordinator.statusMessage?.contains("another iPhone") == true)
             } else {
                 XCTAssertFalse(coordinator.isSharingEnabled)
                 XCTAssertTrue(coordinator.statusMessage?.contains("already removed") == true)
+            }
+            if authoritative.enabled {
+                await coordinator.disable(client: client, expectedOwnerID: "owner-1")
+                XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "DELETE"],
+                               "Stop cannot send a stale DELETE against the replacement publisher")
             }
         }
     }

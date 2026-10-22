@@ -57,6 +57,34 @@ enum PhoneCalendarSnapshotFreshness: Equatable {
     }
 }
 
+enum PhoneCalendarSnapshotWindowFormatter {
+    static func format(timeMin: String?, timeMax: String?, ownerTimeZone: String?, locale: Locale = .current) -> String? {
+        guard let timeMin, let timeMax, let ownerTimeZone,
+              let zone = TimeZone(identifier: ownerTimeZone),
+              let lower = parse(timeMin), let upper = parse(timeMax), lower < upper else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = zone
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        let inclusiveEnd = upper.addingTimeInterval(-1)
+        let exclusiveFormatter = DateFormatter()
+        exclusiveFormatter.locale = locale
+        exclusiveFormatter.calendar = Calendar(identifier: .gregorian)
+        exclusiveFormatter.timeZone = zone
+        exclusiveFormatter.dateFormat = "MMM d, yyyy 'at' h:mm a zzz"
+        return "Snapshot window: \(formatter.string(from: lower)) through \(formatter.string(from: inclusiveEnd)) inclusive; exclusive end \(exclusiveFormatter.string(from: upper)) (\(ownerTimeZone))."
+    }
+
+    private static func parse(_ value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: value)
+    }
+}
+
 struct PhoneCalendarEventRefreshRevision {
     private(set) var value = 0
 
