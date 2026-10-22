@@ -766,6 +766,12 @@ struct ChatView: View {
             .onChange(of: model.composerRecoveryRevision) { _, _ in
                 restoreUnsentMessageIfPossible()
             }
+            .onChange(of: model.calendarDraftRestoreRevision) { _, _ in
+                if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   let draftScope, !model.composerDraft(in: draftScope).isEmpty {
+                    draft = model.composerDraft(in: draftScope)
+                }
+            }
             .onChange(of: model.packDiscussionDraft) { _, requested in
                 guard requested != nil, let prompt = model.consumePackDiscussionDraft() else { return }
                 if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -2163,6 +2169,7 @@ struct ChatView: View {
                     completionColor: UIColor(composerCompletionColor),
                     onSubmit: sendDraft
                 )
+                    .disabled(model.isPreparingCalendarContext)
                     .padding(.leading, 6)
                     .padding(.vertical, 10)
                     .frame(minHeight: 44, alignment: .leading)
@@ -2917,7 +2924,7 @@ struct ChatView: View {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private var canSend: Bool { composerHasDraft && !model.isSending }
+    private var canSend: Bool { composerHasDraft && !model.isSending && !model.isPreparingCalendarContext }
 
     private var composerActionPolicy: ChatComposerActionPolicy {
         ChatComposerActionPolicy.resolve(

@@ -24,7 +24,13 @@ enum PhoneCalendarSnapshotFreshness: Equatable {
 
     static func evaluate(_ state: PhoneCalendarSharingState, ownerTimeZone: String, now: Date = Date()) -> Self {
         guard let received = state.receivedAt.flatMap(parseISODate) else { return .notSent }
-        guard now.timeIntervalSince(received) >= 0, now.timeIntervalSince(received) <= 30 * 60 else { return .stale }
+        guard let captured = state.capturedAt.flatMap(parseISODate) else { return .incomplete }
+        let receiptAge = now.timeIntervalSince(received)
+        let captureAge = now.timeIntervalSince(captured)
+        // A recent server receipt cannot make an old (or future-dated) capture
+        // current. Validate each timestamp independently against the same clock.
+        guard receiptAge >= 0, receiptAge <= 30 * 60,
+              captureAge >= 0, captureAge <= 30 * 60 else { return .stale }
         guard state.complete == true, state.truncated != true,
               let zone = TimeZone(identifier: ownerTimeZone),
               let actualMin = state.timeMin.flatMap(parseISODate),
@@ -49,6 +55,17 @@ enum PhoneCalendarSnapshotFreshness: Equatable {
               let end = calendar.date(byAdding: .day, value: 46, to: today) else { return nil }
         return DateInterval(start: start, end: end)
     }
+}
+
+struct PhoneCalendarEventRefreshRevision {
+    private(set) var value = 0
+
+    mutating func advance() -> Int {
+        value += 1
+        return value
+    }
+
+    func owns(_ revision: Int) -> Bool { value == revision }
 }
 
 struct SharedPhoneCalendar: Codable, Equatable, Identifiable, Sendable {

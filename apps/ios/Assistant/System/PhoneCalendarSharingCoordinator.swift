@@ -4,9 +4,22 @@ import Foundation
 import Observation
 import Security
 
+enum PhoneCalendarInstallationIdentity {
+    static var current: String {
+        let defaults = UserDefaults.standard
+        let key = "assistant.phoneCalendarSharing.installationID"
+        if let value = defaults.string(forKey: key), !value.isEmpty { return value }
+        let value = UUID().uuidString.lowercased()
+        defaults.set(value, forKey: key)
+        return value
+    }
+}
+
 struct PhoneCalendarSharingLocalRecord: Codable {
     var publisherId: String
     var generation: Int
+    var installationID: String? = PhoneCalendarInstallationIdentity.current
+    var uploadsPausedForPermissionReview: Bool? = false
     var pendingMutation: PendingPhoneCalendarMutation?
     var pendingRevocation: PendingPhoneCalendarRevocation?
     var lastRead: PhoneCalendarSharingRead?
@@ -52,12 +65,15 @@ final class PhoneCalendarSharingCoordinator {
     private(set) var statusMessage: String?
     private(set) var isOwnerVerified = false
     private(set) var hasPendingRevocation = false
+    @ObservationIgnored private(set) var lastSnapshotPreparationDuration: Duration?
 
     @ObservationIgnored private let source: any PhoneCalendarSource
     @ObservationIgnored private let recordStore: any PhoneCalendarSharingRecordStore
     @ObservationIgnored private let deviceTimeZone: TimeZone
+    @ObservationIgnored private let installationID: String
     @ObservationIgnored private var requestRevision = 0
     @ObservationIgnored private var activeWorkCount = 0
+    @ObservationIgnored private var completedSnapshotPublicationRevision = 0
     @ObservationIgnored private var activeRefreshID: UUID?
     @ObservationIgnored private var activeRefreshTask: Task<PhoneCalendarSharingRead, Error>?
     @ObservationIgnored private var activeScope: String?
@@ -68,23 +84,39 @@ final class PhoneCalendarSharingCoordinator {
     init(
         source: (any PhoneCalendarSource)? = nil,
         recordStore: (any PhoneCalendarSharingRecordStore)? = nil,
-        deviceTimeZone: TimeZone = .autoupdatingCurrent
+        deviceTimeZone: TimeZone = .autoupdatingCurrent,
+        installationID: String = PhoneCalendarInstallationIdentity.current
     ) {
         self.source = source ?? EventKitCalendarSource()
         self.recordStore = recordStore ?? KeychainPhoneCalendarSharingRecordStore()
         self.deviceTimeZone = deviceTimeZone
+        self.installationID = installationID
         access = self.source.access
     }
 
-    var isSharingEnabled: Bool { serverState?.enabled == true && localRecord?.pendingRevocation == nil }
+    var isSharingEnabled: Bool {
+        serverState?.enabled == true && !requiresReplace
+            && !requiresPermissionReview
+            && localRecord?.pendingRevocation == nil
+    }
+    var localPublisherID: String? { localRecord?.publisherId }
     var hasPendingMutation: Bool { localRecord?.pendingMutation != nil }
     var hasPendingRemoval: Bool { localRecord?.pendingRevocation != nil }
     var requiresReplace: Bool {
         guard let publisher = serverState?.publisherId else { return false }
-        return publisher != localRecord?.publisherId
+        return publisher != localRecord?.publisherId || localRecord?.installationID != installationID
+    }
+    var requiresPermissionReview: Bool {
+        localRecord?.uploadsPausedForPermissionReview == true
+            || activeScope.map(Self.permissionPauseIsStored) == true
     }
     var ownerEmail: String? { serverRead?.ownerEmail }
     var ownerTimeZone: String? { serverRead?.timeZone }
+
+    func matchesBinding(client: APIClient, expectedOwnerID: String) -> Bool {
+        activeOwnerID == expectedOwnerID
+            && activeBaseURL == Self.normalizedBaseURL(client.configuration.baseURL)
+    }
 
     func requestCalendarAccess() async {
         guard !isWorking else { return }
@@ -108,6 +140,21 @@ final class PhoneCalendarSharingCoordinator {
     /// server's or another owner's current credential.
     func refresh(client: APIClient, expectedOwnerID: String, publishIfEnabled: Bool) async {
         guard activeRefreshTask == nil else { return }
+        let requestedBaseURL = Self.normalizedBaseURL(client.configuration.baseURL)
+        let requestedScope = Self.scopeKey(baseURL: requestedBaseURL, ownerID: expectedOwnerID)
+        var permissionPauseSaveFailed = false
+        // Record an observed OS permission loss before networking. If the GET is
+        // offline, this local pause still prevents a later permission grant from
+        // silently resuming the old opt-in.
+        if source.access != .fullAccess, var cached = recordStore.load(scope: requestedScope),
+           cached.lastState?.enabled == true || cached.pendingMutation != nil {
+            cached.uploadsPausedForPermissionReview = true
+            Self.storePermissionPause(true, scope: requestedScope)
+            let saved = recordStore.save(cached, scope: requestedScope)
+            if activeScope == requestedScope { localRecord = cached }
+            statusMessage = "Calendar access changed. Uploads are paused until you review and confirm sharing again."
+            permissionPauseSaveFailed = !saved
+        }
         requestRevision += 1
         let revision = requestRevision
         let refreshID = UUID()
@@ -122,7 +169,9 @@ final class PhoneCalendarSharingCoordinator {
             }
             endWork()
         }
-        errorMessage = nil
+        errorMessage = permissionPauseSaveFailed
+            ? "Calendar uploads are paused locally, but the pause could not be saved securely. Reopen sharing settings before uploading."
+            : nil
         do {
             let read = try await refreshTask.value
             guard revision == requestRevision else { return }
@@ -148,6 +197,13 @@ final class PhoneCalendarSharingCoordinator {
             } : []
             localRecord = recordStore.load(scope: scope)
             if var record = localRecord {
+                if Self.permissionPauseIsStored(scope: scope) { record.uploadsPausedForPermissionReview = true }
+                if access != .fullAccess, read.state?.enabled == true,
+                   read.state?.publisherId == record.publisherId {
+                    record.uploadsPausedForPermissionReview = true
+                    Self.storePermissionPause(true, scope: scope)
+                    statusMessage = "Calendar access changed. Uploads are paused until you review and confirm sharing again."
+                }
                 record.lastRead = read
                 record.lastState = read.state
                 record.generation = max(record.generation, read.state?.generation ?? 0)
@@ -200,11 +256,23 @@ final class PhoneCalendarSharingCoordinator {
             errorMessage = "Choose at least one calendar and verify the assistant server before sharing."
             return
         }
+        let reviewedCalendars = selectedCalendars.map { calendar -> SharedPhoneCalendar in
+            var value = calendar
+            value.name = Self.truncateUTF16(value.name, limit: 300)
+            return value
+        }
         let availableIDs = Set(calendars.map(\.id))
-        guard selectedCalendars.allSatisfy({ availableIDs.contains($0.id) }) else {
+        let previouslySelectedMissingIDs: Set<String> = {
+            guard serverState?.publisherId == localRecord?.publisherId else { return [] }
+            let previousIDs = Set(serverState?.calendars.map(\.id) ?? [])
+            return previousIDs.subtracting(availableIDs)
+        }()
+        guard reviewedCalendars.allSatisfy({ availableIDs.contains($0.id) || previouslySelectedMissingIDs.contains($0.id) }) else {
             errorMessage = "A selected calendar is no longer available. Review the current calendar list."
             return
         }
+        beginWork()
+        defer { endWork() }
         let remote = serverState
         var record = localRecord ?? PhoneCalendarSharingLocalRecord(
             publisherId: UUID().uuidString.lowercased(), generation: remote?.generation ?? 0,
@@ -216,12 +284,14 @@ final class PhoneCalendarSharingCoordinator {
             return
         }
         if command == "replace" { record.publisherId = UUID().uuidString.lowercased() }
+        record.installationID = installationID
+        record.uploadsPausedForPermissionReview = false
         record.generation = remote?.generation ?? record.generation
         let mutationID = UUID().uuidString.lowercased()
         let effectiveCommand = command == "enable" && remote?.enabled == true ? "select" : command
         let body = PhoneCalendarSharingCommandBody.configure(
             effectiveCommand, ownerId: expectedOwnerID, publisherId: record.publisherId, expectedGeneration: record.generation,
-            mutationId: mutationID, calendars: selectedCalendars
+            mutationId: mutationID, calendars: reviewedCalendars
         )
         record.pendingMutation = PendingPhoneCalendarMutation(body: body, baselineGeneration: record.generation)
         record.pendingRevocation = nil
@@ -229,6 +299,7 @@ final class PhoneCalendarSharingCoordinator {
             errorMessage = "This iPhone couldn’t save the pending sharing change securely. No server change was sent."
             return
         }
+        Self.storePermissionPause(false, scope: scope)
         localRecord = record
         await sendPendingMutation(client: client, scope: scope)
         if serverState?.enabled == true {
@@ -282,8 +353,54 @@ final class PhoneCalendarSharingCoordinator {
         await sendRevocation(client: client, scope: scope)
     }
 
-    func synchronizeBeforeChat(client: APIClient, expectedOwnerID: String) async {
-        await refresh(client: client, expectedOwnerID: expectedOwnerID, publishIfEnabled: true)
+    func synchronizeBeforeChat(
+        client: APIClient,
+        expectedOwnerID: String,
+        timeout: Duration = .seconds(5)
+    ) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        let initialRevision = requestRevision
+        let baseURL = Self.normalizedBaseURL(client.configuration.baseURL)
+        let wasAlreadyWorking = isWorking
+        let publicationRevision = completedSnapshotPublicationRevision
+        guard matchesBinding(client: client, expectedOwnerID: expectedOwnerID) else { return false }
+        // A foreground refresh can already be in its GET -> reconciliation -> PUT
+        // pipeline. Wait for that whole operation before considering another GET.
+        while isWorking, ContinuousClock.now < deadline {
+            guard !Task.isCancelled, requestRevision == initialRevision,
+                  matchesBinding(client: client, expectedOwnerID: expectedOwnerID) else { return false }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        guard !Task.isCancelled, requestRevision == initialRevision,
+              matchesBinding(client: client, expectedOwnerID: expectedOwnerID),
+              ContinuousClock.now < deadline else { return false }
+        if wasAlreadyWorking, completedSnapshotPublicationRevision != publicationRevision,
+           hasCurrentSnapshot, errorMessage == nil { return true }
+
+        let refreshBaseRevision = requestRevision
+        let refreshTask = Task { @MainActor [weak self] in
+            guard let self, !Task.isCancelled,
+                  self.requestRevision == refreshBaseRevision,
+                  self.activeOwnerID == expectedOwnerID,
+                  self.activeBaseURL == baseURL else { return }
+            await self.refresh(client: client, expectedOwnerID: expectedOwnerID, publishIfEnabled: true)
+        }
+        _ = refreshTask // Keep the bounded waiter independent of the URL request timeout.
+        await Task.yield()
+        while ContinuousClock.now < deadline {
+            guard !Task.isCancelled, matchesBinding(client: client, expectedOwnerID: expectedOwnerID) else { return false }
+            if !isWorking { break }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        return !isWorking && matchesBinding(client: client, expectedOwnerID: expectedOwnerID)
+            && errorMessage == nil && hasCurrentSnapshot
+    }
+
+    private var hasCurrentSnapshot: Bool {
+        guard isOwnerVerified, !requiresReplace, !requiresPermissionReview,
+              !hasPendingMutation, !hasPendingRemoval,
+              let serverState, let ownerTimeZone = serverRead?.timeZone else { return false }
+        return PhoneCalendarSnapshotFreshness.evaluate(serverState, ownerTimeZone: ownerTimeZone) == .current
     }
 
     func cancelInFlightBinding() {
@@ -308,11 +425,21 @@ final class PhoneCalendarSharingCoordinator {
     private func settlePendingMutation(client: APIClient, revision: Int) async {
         guard revision == requestRevision, let scope = activeScope,
               localRecord?.pendingMutation != nil, localRecord?.pendingRevocation == nil else { return }
+        guard !requiresReplace, !requiresPermissionReview else {
+            statusMessage = "A saved sharing change needs review on this iPhone before it can be retried."
+            return
+        }
         await sendPendingMutation(client: client, scope: scope)
     }
 
     private func sendPendingMutation(client: APIClient, scope: String) async {
         guard var record = localRecord, let pending = record.pendingMutation else { return }
+        guard record.installationID == installationID,
+              record.uploadsPausedForPermissionReview != true,
+              !Self.permissionPauseIsStored(scope: scope) else {
+            statusMessage = "A saved sharing change needs review on this iPhone before it can be retried."
+            return
+        }
         let ownerID = activeOwnerID
         let baseURL = activeBaseURL
         beginWork()
@@ -331,10 +458,12 @@ final class PhoneCalendarSharingCoordinator {
             if result.ok || result.state.mutationId == pending.body.mutationId {
                 record.generation = result.state.generation
                 record.pendingMutation = nil
+                record.uploadsPausedForPermissionReview = false
                 record.lastState = result.state
                 if var cachedRead = record.lastRead { cachedRead.state = result.state; record.lastRead = cachedRead }
                 localRecord = record
                 _ = recordStore.save(record, scope: scope)
+                Self.storePermissionPause(false, scope: scope)
                 statusMessage = result.state.enabled ? "Calendar sharing is on." : "Calendar sharing is off."
                 errorMessage = nil
             } else {
@@ -379,6 +508,21 @@ final class PhoneCalendarSharingCoordinator {
             serverState = result.state
             guard result.ok, !result.state.enabled,
                   result.state.generation >= pending.tombstoneGeneration else {
+                if Self.isSupersededRevocation(pending, by: result.state) {
+                    record.generation = result.state.generation
+                    record.pendingRevocation = nil
+                    record.pendingMutation = nil
+                    record.lastState = result.state
+                    if var cachedRead = record.lastRead { cachedRead.state = result.state; record.lastRead = cachedRead }
+                    localRecord = record
+                    _ = recordStore.save(record, scope: scope)
+                    hasPendingRevocation = false
+                    statusMessage = result.state.enabled
+                        ? "This iPhone’s removal request was superseded. Calendar sharing is still active from another iPhone."
+                        : "The server already removed the shared snapshot. Earlier chat messages remain."
+                    errorMessage = nil
+                    return
+                }
                 errorMessage = "The server has not confirmed calendar removal yet. The removal request is still saved."
                 return
             }
@@ -401,6 +545,17 @@ final class PhoneCalendarSharingCoordinator {
         }
     }
 
+    private static func isSupersededRevocation(
+        _ pending: PendingPhoneCalendarRevocation,
+        by state: PhoneCalendarSharingState
+    ) -> Bool {
+        guard state.ownerId == pending.ownerId, state.generation > pending.expectedGeneration else { return false }
+        if state.enabled {
+            return state.publisherId != nil && state.publisherId != pending.publisherId
+        }
+        return state.publisherId == nil && state.consentVersion == 0
+    }
+
     private func publishSnapshot(client: APIClient, revision: Int) async {
         guard revision == requestRevision, isOwnerVerified,
               localRecord?.pendingRevocation == nil,
@@ -411,6 +566,11 @@ final class PhoneCalendarSharingCoordinator {
               let zoneID = serverRead?.timeZone, let timeZone = TimeZone(identifier: zoneID) else { return }
         guard localRecord?.publisherId == publisherID else {
             errorMessage = "Calendar sharing is active from another iPhone. This device won’t replace or upload over it."
+            return
+        }
+        guard localRecord?.installationID == installationID,
+              !requiresPermissionReview else {
+            errorMessage = "Review the selected calendars and confirm sharing on this iPhone before uploading again."
             return
         }
         let selected = state.calendars
@@ -434,6 +594,7 @@ final class PhoneCalendarSharingCoordinator {
             }
             return .init(calendarId: item.id, status: .available, complete: true, reason: nil)
         }
+        let preparationStartedAt = ContinuousClock.now
         let fetchedEvents = source.shareEvents(
             in: interval, calendarIDs: selectedIDs.intersection(Set(currentByID.keys)), verifiedOwnerEmail: ownerEmail
         ).sorted { ($0.start, $0.eventId) < ($1.start, $1.eventId) }
@@ -477,7 +638,8 @@ final class PhoneCalendarSharingCoordinator {
                     ownerParticipant: event.ownerParticipant,
                     iCalUID: nil, // EventKit does not expose a guaranteed RFC 5545 UID.
                     originalStartTime: event.originalStartTime.map { Self.eventTime($0, allDay: event.allDay, zone: sourceZone) },
-                    summary: String(event.summary.prefix(500)), location: String(event.location.prefix(2_000)),
+                    summary: Self.truncateUTF16(event.summary, limit: 500),
+                    location: Self.truncateUTF16(event.location, limit: 2_000),
                     start: Self.eventTime(event.start, allDay: event.allDay, zone: sourceZone),
                     end: Self.eventTime(event.end, allDay: event.allDay, zone: sourceZone),
                     allDay: event.allDay, blocksTime: event.blocksTime
@@ -486,7 +648,7 @@ final class PhoneCalendarSharingCoordinator {
         }
         let wireCalendars = selected.map { calendar -> SharedPhoneCalendar in
                 var value = calendar
-                value.name = String(value.name.prefix(300))
+                value.name = Self.truncateUTF16(value.name, limit: 300)
                 value.timeZone = calendar.timeZone
                 return value
         }
@@ -544,6 +706,7 @@ final class PhoneCalendarSharingCoordinator {
             errorMessage = "The shared calendar snapshot could not be reduced to the safe upload size."
             return
         }
+        lastSnapshotPreparationDuration = preparationStartedAt.duration(to: ContinuousClock.now)
         let complete = snapshot.complete
         beginWork()
         defer { endWork() }
@@ -560,6 +723,7 @@ final class PhoneCalendarSharingCoordinator {
             if result.ok {
                 if var record = localRecord {
                     record.lastState = result.state
+                    record.installationID = installationID
                     if var cachedRead = record.lastRead { cachedRead.state = result.state; record.lastRead = cachedRead }
                     localRecord = record
                     _ = recordStore.save(record, scope: scope)
@@ -569,6 +733,7 @@ final class PhoneCalendarSharingCoordinator {
                     : snapshot.sourceAvailability.first(where: { !$0.complete })?.reason
                         ?? "Calendar sharing is incomplete; check access and sync on this iPhone."
                 errorMessage = nil
+                completedSnapshotPublicationRevision += 1
             } else {
                 errorMessage = "Calendar sharing changed on the server. Review the sharing settings before syncing again."
             }
@@ -609,10 +774,36 @@ final class PhoneCalendarSharingCoordinator {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
+    private static func permissionPauseKey(scope: String) -> String {
+        "assistant.phoneCalendarSharing.permissionPause.\(scope)"
+    }
+
+    private static func permissionPauseIsStored(scope: String) -> Bool {
+        UserDefaults.standard.bool(forKey: permissionPauseKey(scope: scope))
+    }
+
+    private static func storePermissionPause(_ paused: Bool, scope: String) {
+        let key = permissionPauseKey(scope: scope)
+        if paused { UserDefaults.standard.set(true, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
     private static func instant(_ date: Date) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter.string(from: date)
+    }
+
+    private static func truncateUTF16(_ value: String, limit: Int) -> String {
+        var result = String.UnicodeScalarView()
+        var used = 0
+        for scalar in value.unicodeScalars {
+            let units = scalar.value > 0xFFFF ? 2 : 1
+            guard used + units <= limit else { break }
+            result.append(scalar)
+            used += units
+        }
+        return String(result)
     }
 
     private static func allDayEventIsOutsideOwnerWindow(
