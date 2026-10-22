@@ -106,6 +106,7 @@ export * from './nudge-policy.js';
 export * from './owner-card-compilation.js';
 export * from './owner-context.js';
 export * from './owner-knowledge-graph-fact.js';
+export * from './phone-calendar-compatibility.js';
 export * from './phone-calendar-sharing.js';
 export * from './phone-calendars.js';
 export * from './privacy-erasure.js';

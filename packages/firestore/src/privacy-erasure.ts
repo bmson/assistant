@@ -17,6 +17,7 @@ import {
   type Timestamp,
   type Transaction,
 } from '@google-cloud/firestore';
+import { eraseFirestorePhoneCalendarSharing } from './phone-calendar-compatibility.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
 const PAGE_SIZE = 50;
@@ -1402,6 +1403,10 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
     await this.deleteOwned(agentId, job.generation, 'importSourceDeletionJobs');
     await this.deleteOwned(agentId, job.generation, 'toolCallReceipts');
     await this.deleteOwned(agentId, job.generation, 'toolCallReceiptKeys');
+    await this.store.db.runTransaction(async (tx) => {
+      await this.activeJob(tx, agentId, job.generation);
+      await eraseFirestorePhoneCalendarSharing(tx, this.store, agentId, this.store.now());
+    });
     await this.eraseSituationPacks(agentId, job.generation);
     await this.deleteOwned(agentId, job.generation, 'selfRepairIssues');
     await this.eraseMissionReportText(agentId, job.generation);

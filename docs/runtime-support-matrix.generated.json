@@ -8,7 +8,7 @@
     "apps/web/lib/server.ts": "d178fa1a8285f3fea7bd89c573d4860af6e5a2f8816a6d1041277234603002ac",
     "apps/web/proxy.ts": "272a503b301d93bb9690b8ad579d073997081023570bc7138848efc0acec007d",
     "packages/db/drizzle/meta/_journal.json": "f7dee0462df8ea55a23c293fb451da52f8433098c1761c549c84a9916c5236da",
-    "infra/gcp/release-contracts.json": "cc4f5f333545ce12a63b081b720c621c8bef25623bc17aecb5dbe5f85c437680"
+    "infra/gcp/release-contracts.json": "0816aeff566d434b39bb20128ec0f23b8505225ae61d6a624eef8505fc47aefc"
   },
   "latestPostgresMigration": "0128_connected_calendar_accounts",
   "postgresSchemaVersion": 128,
@@ -21,7 +21,7 @@
       },
       "postgresSchema": {
         "min": 128,
-        "max": 128
+        "max": 129
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -33,7 +33,7 @@
       },
       "postgresSchema": {
         "min": 128,
-        "max": 128
+        "max": 129
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -45,7 +45,7 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 128
+        "max": 129
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -57,7 +57,7 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 128
+        "max": 129
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -69,7 +69,7 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 128
+        "max": 129
       },
       "currentPostgresSchemaCompatible": true
     }
@@ -155,7 +155,7 @@
     },
     "apps/web/app/api/mobile/v1/calendars/route.ts": {
       "methods": ["DELETE", "PUT"],
-      "sha256": "7aff24e407d761aaccf026e937a4d0066937376f9406bb51b88957396029b065"
+      "sha256": "2996392fe44301be286ba4b82da6e2be81aa4ce85f78d9f6d04f83f0a0467893"
     },
     "apps/web/app/api/mobile/v1/calls/[id]/route.ts": {
       "methods": ["GET", "POST"],
