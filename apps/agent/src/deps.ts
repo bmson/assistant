@@ -912,6 +912,7 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
     registry,
     persistence.toolExecution,
     config.INTERNAL_API_SECRET || config.AUTH_SECRET,
+    config.OWNER_EMAIL,
   );
   const modules: InstalledModuleSet = {
     ...installedModules,
@@ -1063,6 +1064,7 @@ export function buildDeps(): AgentDeps {
     registry,
     persistence.toolExecution,
     config.INTERNAL_API_SECRET || config.AUTH_SECRET,
+    config.OWNER_EMAIL,
   );
   const modules: InstalledModuleSet = {
     ...installedModules,

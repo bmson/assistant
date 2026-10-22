@@ -1,4 +1,8 @@
-import { sameCalendarOccurrence } from '@assistant/persistence';
+import {
+  type CalendarOccurrenceSource,
+  type CalendarOwnerParticipation,
+  sameCalendarOccurrence,
+} from '@assistant/persistence';
 import { calendarAgendaCards, calendarAgendaScopedEvidence } from './calendar-agenda.js';
 import { calendarSourceDateLabel, calendarWindowMembership } from './calendar-read-window.js';
 import { safeCalendarSourceUrl, safeVideoMeetingUrl } from './calendar-source-link.js';
@@ -49,6 +53,53 @@ function strings(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string').map((item) => item.trim())
     : [];
+}
+
+function ownerParticipation(value: unknown): CalendarOwnerParticipation | undefined {
+  const item = record(value);
+  const statuses = ['accepted', 'declined', 'tentative', 'needsAction', 'unknown'] as const;
+  const bases = ['attendee-email', 'organizer-email', 'unverified'] as const;
+  if (
+    !item ||
+    !statuses.includes(item.status as (typeof statuses)[number]) ||
+    !bases.includes(item.basis as (typeof bases)[number]) ||
+    typeof item.identityVerified !== 'boolean'
+  )
+    return undefined;
+  return {
+    status: item.status as CalendarOwnerParticipation['status'],
+    identityVerified: item.identityVerified,
+    basis: item.basis as CalendarOwnerParticipation['basis'],
+  };
+}
+
+function calendarOccurrenceSource(event: RecordValue): CalendarOccurrenceSource {
+  return {
+    ...(string(event.calendarId) ? { calendarId: string(event.calendarId) } : {}),
+    ...(string(event.calendar) ? { calendar: string(event.calendar) } : {}),
+    ...(string(event.calendarTimeZone) ? { calendarTimeZone: string(event.calendarTimeZone) } : {}),
+    ...(string(event.eventId) ? { eventId: string(event.eventId) } : {}),
+    ...(string(event.iCalUID) ? { iCalUID: string(event.iCalUID) } : {}),
+    ...(string(event.recurringEventId) ? { recurringEventId: string(event.recurringEventId) } : {}),
+    ...(string(event.originalStartTime)
+      ? { originalStartTime: string(event.originalStartTime) }
+      : {}),
+    ...(string(event.start) ? { start: string(event.start) } : {}),
+    ...(string(event.end) ? { end: string(event.end) } : {}),
+    ...(typeof event.allDay === 'boolean' ? { allDay: event.allDay } : {}),
+    ...(string(event.summary) ? { summary: string(event.summary) } : {}),
+    ...(string(event.description) ? { description: string(event.description) } : {}),
+    ...(string(event.location) ? { location: string(event.location) } : {}),
+    ...(string(event.status) ? { status: string(event.status) } : {}),
+    ...(typeof event.blocksTime === 'boolean' ? { blocksTime: event.blocksTime } : {}),
+    ...(string(event.ownerResponse) ? { ownerResponse: string(event.ownerResponse) } : {}),
+    ...(ownerParticipation(event.ownerParticipation)
+      ? { ownerParticipation: ownerParticipation(event.ownerParticipation) }
+      : {}),
+    ...(event.calendarPurpose === 'commitments' || event.calendarPurpose === 'reference'
+      ? { calendarPurpose: event.calendarPurpose }
+      : { calendarPurpose: 'unspecified' }),
+  };
 }
 
 function number(value: unknown): number | undefined {
@@ -220,30 +271,103 @@ export function calendarResponseCards(
       );
       const calendars = [...new Set(group.map((entry) => string(entry.calendar)).filter(Boolean))];
       const sourceLinks = group
-        .flatMap((entry) =>
-          Array.isArray(entry.links) ? entry.links.map(record).filter(Boolean) : [],
-        )
-        .filter((link) => string(link?.type) === 'calendar' && isSpecificCalendarLink(link));
+        .flatMap((entry) => {
+          const calendar = string(entry.calendar) || string(entry.calendarId) || 'calendar';
+          return Array.isArray(entry.links)
+            ? entry.links
+                .map(record)
+                .filter(Boolean)
+                .map((link) => ({ link, calendar }))
+            : [];
+        })
+        .filter(({ link }) => string(link?.type) === 'calendar' && isSpecificCalendarLink(link));
       const calendarLinks = [
         ...new Map(
-          sourceLinks.flatMap((link) => {
+          sourceLinks.flatMap(({ link, calendar }) => {
             const url = safeCalendarSourceUrl(string(link?.url));
-            return url ? [[url, { label: string(link?.label) || 'Open event', url }] as const] : [];
+            const key = `${url}\0${calendar}`;
+            return url ? [[key, { label: `Open ${calendar} event`, url }] as const] : [];
           }),
         ).values(),
       ];
-      const responses = group.map((entry) => string(entry.ownerResponse));
+      const verifiedResponses = group
+        .map((entry) => ownerParticipation(entry.ownerParticipation))
+        .filter(
+          (value): value is CalendarOwnerParticipation =>
+            value?.identityVerified === true && value.basis === 'attendee-email',
+        );
+      const participationStatuses = [...new Set(verifiedResponses.map((value) => value.status))];
+      const consolidatedParticipation: CalendarOwnerParticipation | undefined =
+        participationStatuses.length === 1 && verifiedResponses.length > 0
+          ? {
+              status: participationStatuses[0] as CalendarOwnerParticipation['status'],
+              identityVerified: true,
+              basis: 'attendee-email',
+            }
+          : undefined;
+      const timeBlocks = group.map((entry) => entry.blocksTime);
+      const consolidatedBlocksTime = timeBlocks.every((value) => value === true)
+        ? true
+        : timeBlocks.every((value) => value === false)
+          ? false
+          : undefined;
+      const purposes = group.map((entry) =>
+        entry.calendarPurpose === 'commitments' || entry.calendarPurpose === 'reference'
+          ? entry.calendarPurpose
+          : 'unspecified',
+      );
+      const canonicalValuesDiffer = (field: string) =>
+        new Set(
+          group.map((entry) => {
+            const value = entry[field];
+            if ((field === 'start' || field === 'end') && typeof value === 'string') {
+              const instant = Date.parse(value);
+              return Number.isFinite(instant) ? String(instant) : value;
+            }
+            return value ?? '';
+          }),
+        ).size > 1;
+      const titleDiffers = canonicalValuesDiffer('summary');
+      const timeDiffers = canonicalValuesDiffer('start') || canonicalValuesDiffer('end');
+      const locationDiffers = canonicalValuesDiffer('location');
+      const differingFields = [
+        ...(titleDiffers ? ['title'] : []),
+        ...(timeDiffers ? ['time'] : []),
+        ...(canonicalValuesDiffer('allDay') ? ['event type'] : []),
+        ...(canonicalValuesDiffer('calendarTimeZone') ? ['time zone'] : []),
+        ...(locationDiffers ? ['location'] : []),
+        ...(canonicalValuesDiffer('status') ? ['status'] : []),
+        ...(canonicalValuesDiffer('blocksTime') ? ['busy state'] : []),
+        ...(canonicalValuesDiffer('calendarPurpose') ? ['calendar purpose'] : []),
+        ...(participationStatuses.length > 1 ? ['owner response'] : []),
+      ];
+      const sourceIntegrity =
+        titleDiffers ||
+        locationDiffers ||
+        timeDiffers ||
+        canonicalValuesDiffer('allDay') ||
+        canonicalValuesDiffer('calendarTimeZone') ||
+        canonicalValuesDiffer('status') ||
+        canonicalValuesDiffer('blocksTime') ||
+        canonicalValuesDiffer('calendarPurpose') ||
+        participationStatuses.length > 1
+          ? 'disputed'
+          : 'consistent';
       return {
         kind: 'calendar-event' as const,
         id: `calendar-${group.map((entry) => `${string(entry.calendarId)}:${string(entry.eventId)}`).join('|')}`,
-        title: string(event.summary) || 'Untitled event',
-        start,
-        end,
-        time: allDay
-          ? request?.timeWindow
-            ? `All day · ${calendarSourceDateLabel(event)}`
-            : 'All day'
-          : calendarTimeRange(start, end, request?.timeZone),
+        title: differingFields.length
+          ? `Calendar sources differ: ${differingFields.join(', ')}`
+          : string(event.summary) || 'Untitled event',
+        start: timeDiffers ? '' : start,
+        end: timeDiffers ? '' : end,
+        time: timeDiffers
+          ? 'Time differs by calendar source'
+          : allDay
+            ? request?.timeWindow
+              ? `All day · ${calendarSourceDateLabel(event)}`
+              : 'All day'
+            : calendarTimeRange(start, end, request?.timeZone),
         allDay,
         ...(options?.includeUnresolvedDates
           ? { windowMembership: calendarWindowMembership(event, request) }
@@ -251,14 +375,33 @@ export function calendarResponseCards(
         ...(string(event.calendarTimeZone)
           ? { calendarTimeZone: string(event.calendarTimeZone) }
           : {}),
-        ...(responses.some((value) => value.toLowerCase() === 'needsaction')
-          ? { ownerResponse: 'needsAction' }
-          : string(event.ownerResponse)
-            ? { ownerResponse: string(event.ownerResponse) }
-            : {}),
-        ...(string(event.status) ? { status: string(event.status) } : {}),
-        ...(typeof event.blocksTime === 'boolean' ? { blocksTime: event.blocksTime } : {}),
-        location: string(event.location),
+        ...(string(event.eventId) ? { eventId: string(event.eventId) } : {}),
+        ...(string(event.calendarId) ? { calendarId: string(event.calendarId) } : {}),
+        ...(string(event.iCalUID) ? { iCalUID: string(event.iCalUID) } : {}),
+        ...(string(event.recurringEventId)
+          ? { recurringEventId: string(event.recurringEventId) }
+          : {}),
+        ...(string(event.originalStartTime)
+          ? { originalStartTime: string(event.originalStartTime) }
+          : {}),
+        ...(consolidatedParticipation && consolidatedParticipation.status !== 'unknown'
+          ? { ownerResponse: consolidatedParticipation.status }
+          : {}),
+        ...(new Set(group.map((entry) => string(entry.status))).size === 1 && string(event.status)
+          ? { status: string(event.status) }
+          : {}),
+        ...(typeof consolidatedBlocksTime === 'boolean'
+          ? { blocksTime: consolidatedBlocksTime }
+          : {}),
+        ...(consolidatedParticipation ? { ownerParticipation: consolidatedParticipation } : {}),
+        sourceIntegrity,
+        calendarPurpose: purposes.every((purpose) => purpose === 'commitments')
+          ? 'commitments'
+          : purposes.some((purpose) => purpose === 'reference')
+            ? 'reference'
+            : 'unspecified',
+        sourceVariants: group.map(calendarOccurrenceSource),
+        location: locationDiffers ? 'Location differs by calendar source' : string(event.location),
         attendees: Array.isArray(event.attendees)
           ? event.attendees
               .filter((value): value is string => typeof value === 'string')

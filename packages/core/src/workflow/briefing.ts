@@ -13,6 +13,8 @@ import {
 } from '@assistant/db';
 import {
   type BriefingInputs,
+  type CalendarOwnerParticipation,
+  type CalendarPurpose,
   type ExecutionPersistence,
   type OwnerNoticeDecisionFenceResult,
   resolveBookingLocalDateTime,
@@ -63,6 +65,8 @@ import {
   type CalendarRelationship,
   calendarRelationship,
   calendarRelationshipNote,
+  verifiedOwnerParticipation,
+  verifiedPersonalCommitment,
 } from './calendar-relationship.js';
 import { weatherResponseCards } from './response-cards.js';
 import {
@@ -155,6 +159,8 @@ export interface BriefingCalendarEvent {
   status?: string;
   /** Explicit provider policy; missing response does not establish personal attendance. */
   blocksTime?: boolean;
+  ownerParticipation?: CalendarOwnerParticipation;
+  calendarPurpose?: CalendarPurpose;
   ownerResponse?: string;
   location?: string;
   description?: string;
@@ -425,7 +431,7 @@ export function findConflicts(
         !event.allDay &&
         event.status !== 'cancelled' &&
         event.blocksTime !== false &&
-        event.ownerResponse !== 'declined' &&
+        verifiedOwnerParticipation(event) !== 'declined' &&
         !Number.isNaN(event.startMs) &&
         !Number.isNaN(event.endMs) &&
         event.endMs > event.startMs,
@@ -488,8 +494,8 @@ export function findConflicts(
               )
             : 'unresolved',
         attendance:
-          earlier.events.some((event) => event.ownerResponse === 'accepted') &&
-          later.events.some((event) => event.ownerResponse === 'accepted')
+          earlier.events.some((event) => verifiedPersonalCommitment({ ...event })) &&
+          later.events.some((event) => verifiedPersonalCommitment({ ...event }))
             ? 'confirmed'
             : 'unresolved',
         overlapStart: new Date(Math.max(earlier.startMs, later.startMs)).toISOString(),

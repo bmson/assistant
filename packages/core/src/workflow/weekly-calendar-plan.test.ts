@@ -153,7 +153,7 @@ describe('weeklyCalendarPlan', () => {
     ).toBe(true);
     expect(
       lines.some((line) =>
-        line.trimStart().startsWith('- Next: confirm that attendance; if you will attend both'),
+        line.trimStart().startsWith('- Next: confirm attendance for both; if you will attend both'),
       ),
     ).toBe(true);
     expect(text).toContain(
@@ -499,6 +499,7 @@ describe('weeklyCalendarPlan', () => {
         end: '2026-10-24T15:10:00-07:00',
         blocksTime: true,
         ownerResponse: 'accepted',
+        calendarPurpose: 'commitments',
       },
       {
         eventId: 'saturday-haircut',
@@ -509,6 +510,7 @@ describe('weeklyCalendarPlan', () => {
         end: '2026-10-24T13:45:00-07:00',
         blocksTime: true,
         ownerResponse: 'accepted',
+        calendarPurpose: 'commitments',
       },
     ];
     const rows = evidence({
@@ -588,9 +590,9 @@ describe('weeklyCalendarPlan', () => {
     });
     expect(text).toContain('Possible overlap: Review and Shared hold');
     expect(text).not.toContain('Scheduling conflict: Review and Shared hold');
-    expect(text).toContain('Attendance is unconfirmed for Shared hold.');
+    expect(text).toContain('Attendance for both is unconfirmed.');
     expect(text).toContain(
-      'Next: confirm that attendance; if you will attend both, choose which to keep and ask the other organizer whether it can move.',
+      'Next: confirm attendance for both; if you will attend both, choose which to keep and ask the other organizer whether it can move.',
     );
     expect(text).not.toContain('lower-priority');
   });
@@ -671,6 +673,12 @@ describe('weeklyCalendarPlan', () => {
                 end: '2026-10-12T18:00:00Z',
                 ownerResponse: 'accepted',
                 blocksTime: true,
+                calendarPurpose: 'commitments',
+                ownerParticipation: {
+                  status: 'accepted',
+                  identityVerified: true,
+                  basis: 'attendee-email',
+                },
                 organizer: 'planner@example.test',
                 links: [
                   {
@@ -687,6 +695,11 @@ describe('weeklyCalendarPlan', () => {
                 end: '2026-10-12T18:30:00Z',
                 ownerResponse: 'accepted',
                 blocksTime: true,
+                ownerParticipation: {
+                  status: 'accepted',
+                  identityVerified: true,
+                  basis: 'attendee-email',
+                },
                 organizer: 'host@example.test',
                 links: [
                   {
@@ -713,7 +726,7 @@ describe('weeklyCalendarPlan', () => {
     expect(text).toContain(
       'Next: choose which invite to keep and ask the other organizer whether it can move.',
     );
-    expect(text).toContain('Both invites show accepted.');
+    expect(text).toContain('Both entries have verified evidence as busy personal commitments.');
     expect(
       text.match(/https:\/\/calendar\.google\.com\/calendar\/event\?eid=planning/g),
     ).toHaveLength(1);
@@ -1333,6 +1346,7 @@ describe('weeklyCalendarPlan', () => {
                 end: '2026-10-12T20:00:00Z',
                 ownerResponse: 'accepted',
                 blocksTime: true,
+                calendarPurpose: 'commitments',
                 links: [
                   { type: 'calendar', url: 'https://calendar.google.com/calendar/event?eid=abc' },
                 ],
@@ -1344,6 +1358,7 @@ describe('weeklyCalendarPlan', () => {
                 end: '2026-10-12T19:30:00Z',
                 ownerResponse: 'accepted',
                 blocksTime: true,
+                calendarPurpose: 'commitments',
                 links: [{ type: 'calendar', url: 'https://example.test/event/secret' }],
               },
             ],
@@ -1632,6 +1647,11 @@ describe('requested focus-plan variations', () => {
           start: '2026-10-13T09:00:00-07:00',
           end: '2026-10-13T10:00:00-07:00',
           ownerResponse: 'declined',
+          ownerParticipation: {
+            status: 'declined',
+            identityVerified: true,
+            basis: 'attendee-email',
+          },
           blocksTime: true,
         },
       ],
@@ -2078,6 +2098,7 @@ describe('requested focus-plan variations', () => {
       end: '2026-10-12T17:00:00Z',
       ownerResponse: 'accepted',
       blocksTime: true,
+      calendarPurpose: 'commitments',
       links: [
         {
           type: 'calendar',
@@ -2143,6 +2164,7 @@ describe('requested focus-plan variations', () => {
       allDay: true,
       ownerResponse: 'accepted',
       blocksTime: true,
+      calendarPurpose: 'commitments',
     };
     const sportsA = {
       eventId: 'sports-a',
@@ -2167,6 +2189,7 @@ describe('requested focus-plan variations', () => {
       end: '2026-10-19T17:00:00Z',
       ownerResponse: 'accepted',
       blocksTime: true,
+      calendarPurpose: 'commitments',
     };
     const mondayB = {
       ...mondayA,
@@ -2262,6 +2285,7 @@ describe('requested focus-plan variations', () => {
       end: '2026-11-02T19:00:00Z',
       ownerResponse: 'accepted',
       blocksTime: true,
+      calendarPurpose: 'commitments',
     };
     const mondayB = {
       ...mondayA,
@@ -2631,6 +2655,7 @@ it('does not report a phone mirror as a conflict but retains a separate accepted
     end: '2026-10-12T10:00:00-07:00',
     ownerResponse: 'accepted',
     blocksTime: true,
+    calendarPurpose: 'commitments',
   };
   const text = weeklyCalendarPlan({
     timeMin,
@@ -2664,4 +2689,45 @@ it('does not report a phone mirror as a conflict but retains a separate accepted
   expect(text).toContain('Possible duplicate listing: Team planning and Team planning');
   expect(text).not.toContain('Scheduling conflict: Team planning and Team planning');
   expect(text).toContain('Scheduling conflict: Team planning and Dentist appointment');
+});
+
+it('keeps ambiguous nontransitive UID matches separate regardless of input order', () => {
+  const occurrence = '2026-10-13T09:00:00Z';
+  const shared = {
+    iCalUID: 'same-uid',
+    recurringEventId: 'series',
+    originalStartTime: occurrence,
+    summary: 'Recurring appointment',
+    start: occurrence,
+    end: '2026-10-13T10:00:00Z',
+    blocksTime: true,
+  };
+  const first = { ...shared, calendarId: 'google', eventId: 'google-a' };
+  const second = { ...shared, calendarId: 'google', eventId: 'google-b' };
+  const bridge = { ...shared, calendarId: 'family-copy', eventId: 'family-c' };
+  const render = (events: unknown[]) =>
+    weeklyCalendarPlan({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin, timeMax, maxResults: 50 },
+            result: { events, complete: true, calendarRosterComplete: true, unavailable: [] },
+          },
+        ],
+      }) as never,
+    });
+  const forward = render([first, second, bridge]);
+  const reverse = render([bridge, second, first]);
+  for (const text of [forward, reverse]) {
+    expect(text).toContain('Calendar occurrence identity is ambiguous');
+    expect(text).toContain('All records are retained separately');
+    expect(text).not.toContain(
+      'Scheduling conflict: Recurring appointment and Recurring appointment',
+    );
+  }
 });

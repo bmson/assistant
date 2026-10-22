@@ -17,7 +17,7 @@ function snapshot(): PhoneCalendarSnapshotInput {
     timeMax: '2027-04-01T00:00:00Z',
     timeZone: 'America/Los_Angeles',
     calendars: [
-      { id: 'work', name: 'Work' },
+      { id: 'work', name: 'Work', purpose: 'commitments', timeZone: 'America/Los_Angeles' },
       { id: 'personal', name: 'Personal' },
     ],
     events: [
@@ -32,6 +32,10 @@ function snapshot(): PhoneCalendarSnapshotInput {
         allDay: false,
         blocksTime: true,
         ownerResponse: 'accepted',
+        ownerParticipant: { email: 'owner@example.com', responseStatus: 'accepted' },
+        providerExternalIdentifier: 'eventkit-external-id',
+        calendarTimeZone: 'America/Los_Angeles',
+        status: 'confirmed',
       },
     ],
   };
@@ -56,11 +60,17 @@ function run(registry: ToolRegistry, name: string, args: object) {
     events: Array<Record<string, unknown>>;
     calendars: unknown[];
     busy: Array<Record<string, unknown>>;
+    calendarsSearched: string[];
     complete: boolean;
     nextPageToken?: string;
     duplicateOccurrences: unknown[];
     duplicateNote: string;
     note: string;
+    unavailable: Array<{ calendar: string; reason: string }>;
+    phoneCalendarCoverage?: {
+      complete: boolean;
+      sources?: Array<{ calendarId: string; status: string; complete: boolean }>;
+    };
   }>;
 }
 
@@ -77,12 +87,24 @@ describe('iPhone calendar access through normal calendar tools', () => {
     const cache = cacheFixture();
     await savePhoneCalendars(cache, 'owner', snapshot(), now);
     const registry = new ToolRegistry();
-    registerPhoneCalendarFallback(registry, cache, 'private-cursor-secret');
+    registerPhoneCalendarFallback(registry, cache, 'private-cursor-secret', 'owner@example.com');
     expect((await run(registry, 'calendar.list_calendars', {})).calendars).toHaveLength(2);
     const listing = await run(registry, 'calendar.list_events', window);
     expect(listing.complete).toBe(true);
     expect(listing.events).toMatchObject([
-      { calendarId: 'iphone:work', summary: 'Team planning', iCalUID: 'invitation-123' },
+      {
+        calendarId: 'iphone:work',
+        summary: 'Team planning',
+        iCalUID: 'invitation-123',
+        providerExternalIdentifier: 'eventkit-external-id',
+        status: 'confirmed',
+        ownerParticipation: {
+          status: 'accepted',
+          identityVerified: true,
+          basis: 'attendee-email',
+        },
+        calendarPurpose: 'commitments',
+      },
     ]);
     expect(
       (await run(registry, 'calendar.search_events', { ...window, query: 'planning' })).events,
@@ -138,6 +160,151 @@ describe('iPhone calendar access through normal calendar tools', () => {
     expect(result.events).toHaveLength(2);
     expect(result.duplicateOccurrences).toHaveLength(1);
     expect(result.duplicateNote).toContain('Do not count it twice');
+    const googleOnly = await run(registry, 'calendar.list_events', {
+      ...window,
+      calendarIds: ['google-work'],
+    });
+    expect(googleOnly.complete).toBe(true);
+    expect(googleOnly.events).toHaveLength(1);
+    expect(googleOnly).not.toHaveProperty('phoneCalendarCoverage');
+  });
+
+  it('defaults to every shared phone calendar but scopes coverage to an explicit phone selection', async () => {
+    const cache = cacheFixture();
+    const data = {
+      ...snapshot(),
+      complete: false,
+      truncated: false,
+      sourceAvailability: [
+        { calendarId: 'work', status: 'available' as const, complete: true },
+        {
+          calendarId: 'personal',
+          status: 'permission-denied' as const,
+          complete: false,
+          reason: 'Calendar permission was revoked.',
+        },
+      ],
+    };
+    await savePhoneCalendars(cache, 'owner', data, now);
+    const registry = new ToolRegistry();
+    registerPhoneCalendarFallback(registry, cache, 'secret');
+
+    const all = await run(registry, 'calendar.list_events', window);
+    expect(all.complete).toBe(false);
+    expect(all.unavailable).toContainEqual(
+      expect.objectContaining({
+        calendar: 'Personal (iPhone)',
+        reason: 'Calendar permission was revoked.',
+      }),
+    );
+
+    const selected = await run(registry, 'calendar.list_events', {
+      ...window,
+      calendarIds: ['iphone:work'],
+    });
+    expect(selected.complete).toBe(true);
+    expect(selected.phoneCalendarCoverage).toMatchObject({
+      complete: true,
+      sources: [{ calendarId: 'work', status: 'available', complete: true }],
+    });
+  });
+
+  it('includes a shared phone calendar in the bounded default fanout beside a large Google roster', async () => {
+    const cache = cacheFixture();
+    await savePhoneCalendars(cache, 'owner', snapshot(), now);
+    const client = new GoogleClient({
+      clientId: 'test',
+      clientSecret: 'secret',
+      refreshToken: 'refresh',
+    });
+    const roster = Array.from({ length: 50 }, (_, index) => ({
+      id: `google-${index}`,
+      summary: `Google ${index}`,
+      primary: index === 0,
+      timeZone: 'America/Los_Angeles',
+    }));
+    vi.spyOn(client, 'api').mockImplementation(async (url) => {
+      if (url.includes('calendarList')) return { items: roster } as never;
+      const calendarId = decodeURIComponent(/\/calendars\/([^/]+)\/events/.exec(url)?.[1] ?? '');
+      return {
+        items:
+          calendarId === 'google-0'
+            ? [
+                {
+                  id: 'primary-event',
+                  summary: 'Primary event',
+                  start: { dateTime: '2026-10-19T16:00:00Z' },
+                  end: { dateTime: '2026-10-19T17:00:00Z' },
+                },
+              ]
+            : [],
+      } as never;
+    });
+    const registry = new ToolRegistry();
+    registerCalendarReadTools(registry, {
+      client,
+      botEmail: 'bot',
+      ownerEmail: 'owner@example.com',
+      phoneCalendars: (id) => readPhoneCalendars(cache, id),
+    });
+
+    const generic = await run(registry, 'calendar.list_events', window);
+    expect(generic.events.map((event) => event.calendarId)).toEqual(
+      expect.arrayContaining(['google-0', 'iphone:work']),
+    );
+    expect(generic.calendarsSearched).toContain('Work (iPhone)');
+    expect(generic.calendarsSearched).toContain('Google 0');
+    expect(generic.calendarsSearched).toHaveLength(50);
+    expect(generic.complete).toBe(false);
+    expect(generic.note).toContain('first 50 of 52 resolved calendars');
+
+    const namedPhone = await run(registry, 'calendar.list_events', {
+      ...window,
+      calendarIds: ['Work'],
+    });
+    expect(namedPhone.events.map((event) => event.calendarId)).toEqual(['iphone:work']);
+    expect(namedPhone.complete).toBe(true);
+  });
+
+  it('surfaces stale phone coverage as an unavailable warning for downstream cards', async () => {
+    const cache = cacheFixture();
+    await savePhoneCalendars(cache, 'owner', snapshot(), new Date(now.getTime() - 60 * 60_000));
+    const registry = new ToolRegistry();
+    registerPhoneCalendarFallback(registry, cache, 'secret');
+
+    const result = await run(registry, 'calendar.list_events', window);
+
+    expect(result.complete).toBe(false);
+    expect(result.unavailable).toEqual([
+      expect.objectContaining({
+        calendar: 'iPhone calendars',
+        reason: expect.stringContaining('coverage is incomplete'),
+      }),
+    ]);
+  });
+
+  it('preserves all-day phone source dates when the selected calendar zone is unknown', async () => {
+    const cache = cacheFixture();
+    const data = snapshot();
+    data.calendars[0] = { id: 'work', name: 'Work', purpose: 'commitments' };
+    const firstEvent = data.events[0];
+    if (!firstEvent) throw new Error('Missing fixture event');
+    data.events[0] = {
+      ...firstEvent,
+      start: '2026-10-19',
+      end: '2026-10-20',
+      allDay: true,
+      calendarTimeZone: undefined,
+    };
+    await savePhoneCalendars(cache, 'owner', data, now);
+    const registry = new ToolRegistry();
+    registerPhoneCalendarFallback(registry, cache, 'secret');
+
+    const result = await run(registry, 'calendar.list_events', window);
+    expect(result.events).toMatchObject([
+      { eventId: 'phone-meeting', start: '2026-10-19', end: '2026-10-20', allDay: true },
+    ]);
+    expect(result.events[0]).not.toHaveProperty('calendarTimeZone');
   });
 
   it('paginates phone events without repeats or loss and binds the cursor to the request', async () => {
@@ -222,5 +389,111 @@ describe('iPhone calendar access through normal calendar tools', () => {
       expect(result.complete).toBe(false);
       expect(result.events ?? result.busy ?? result.calendars).not.toHaveLength(0);
     }
+  });
+
+  it('verifies owner participation from the configured owner email, not provider self flags', async () => {
+    const client = new GoogleClient({
+      clientId: 'test',
+      clientSecret: 'secret',
+      refreshToken: 'refresh',
+    });
+    vi.spyOn(client, 'api').mockImplementation(async (url) => {
+      if (url.includes('/users/me/calendarList'))
+        return {
+          items: [{ id: 'work-calendar', summary: 'Work', timeZone: 'America/Los_Angeles' }],
+        } as never;
+      return {
+        items: [
+          {
+            id: 'owner-attendee',
+            summary: 'Owner attendee',
+            start: { dateTime: '2026-10-19T16:00:00Z' },
+            end: { dateTime: '2026-10-19T17:00:00Z' },
+            attendees: [
+              { email: 'other@example.com', self: true, responseStatus: 'accepted' },
+              { email: 'OWNER@example.com', self: false, responseStatus: 'tentative' },
+            ],
+          },
+          {
+            id: 'owner-organizer',
+            summary: 'Owner organizer',
+            start: { dateTime: '2026-10-19T18:00:00Z' },
+            end: { dateTime: '2026-10-19T19:00:00Z' },
+            organizer: { email: 'owner@example.com' },
+            attendees: [{ email: 'other@example.com', self: true, responseStatus: 'accepted' }],
+          },
+          {
+            id: 'unverified-self',
+            summary: 'Unverified self',
+            start: { dateTime: '2026-10-19T20:00:00Z' },
+            end: { dateTime: '2026-10-19T21:00:00Z' },
+            attendees: [
+              { email: 'some-account@example.com', self: true, responseStatus: 'declined' },
+            ],
+          },
+        ],
+      } as never;
+    });
+    const registry = new ToolRegistry();
+    registerCalendarReadTools(registry, {
+      client,
+      botEmail: 'assistant@example.com',
+      ownerEmail: 'owner@example.com',
+      phoneCalendars: async () => null,
+    });
+    const result = await run(registry, 'calendar.list_events', window);
+    expect(result.events).toMatchObject([
+      {
+        eventId: 'owner-attendee',
+        ownerResponse: 'accepted',
+        ownerParticipation: {
+          status: 'tentative',
+          identityVerified: true,
+          basis: 'attendee-email',
+        },
+      },
+      {
+        eventId: 'owner-organizer',
+        ownerResponse: 'accepted',
+        ownerParticipation: {
+          status: 'unknown',
+          identityVerified: true,
+          basis: 'organizer-email',
+        },
+      },
+      {
+        eventId: 'unverified-self',
+        ownerResponse: 'declined',
+        ownerParticipation: {
+          status: 'unknown',
+          identityVerified: false,
+          basis: 'unverified',
+        },
+      },
+    ]);
+  });
+
+  it('does not treat legacy ownerResponse or a mismatched participant email as owner proof', async () => {
+    const cache = cacheFixture();
+    const legacy = snapshot();
+    const firstEvent = legacy.events[0];
+    if (!firstEvent) throw new Error('Missing fixture event');
+    firstEvent.ownerParticipant = {
+      email: 'other@example.com',
+      responseStatus: 'accepted',
+    };
+    await savePhoneCalendars(cache, 'owner', legacy, now);
+    const registry = new ToolRegistry();
+    registerPhoneCalendarFallback(registry, cache, 'private-cursor-secret', 'owner@example.com');
+    const result = await run(registry, 'calendar.list_events', window);
+    expect(result.events[0]).toMatchObject({
+      ownerResponse: 'accepted',
+      ownerParticipation: {
+        status: 'unknown',
+        identityVerified: false,
+        basis: 'unverified',
+      },
+      calendarPurpose: 'commitments',
+    });
   });
 });

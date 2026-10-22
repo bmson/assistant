@@ -14,7 +14,14 @@ export * from './briefing.js';
 export * from './budget-caps.js';
 export * from './builtin-tools.js';
 export {
+  type CalendarOccurrenceClassification,
   type CalendarOccurrenceIdentity,
+  type CalendarOccurrenceSource,
+  type CalendarOwnerParticipation,
+  type CalendarOwnerParticipationStatus,
+  type CalendarPurpose,
+  calendarOccurrenceKey,
+  classifyCalendarOccurrence,
   probablePhoneCalendarDuplicate,
   sameCalendarOccurrence,
 } from './calendar-occurrence.js';

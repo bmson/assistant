@@ -4,6 +4,7 @@ import {
   calendarAgendaScopedEvidence,
   wantsCalendarAgenda,
 } from './calendar-agenda.js';
+import { calendarRelationship } from './calendar-relationship.js';
 import type { PersonalReadRequest } from './read-intent.js';
 import type { ResponseCard } from './response-cards.js';
 import type { ActionEvidence } from './response-contract.js';
@@ -264,6 +265,192 @@ describe('calendarAgendaCards', () => {
         expect.objectContaining({ type: 'attention', title: 'Dates not verified' }),
       ]),
     );
+  });
+
+  it('places cross-midnight overlaps on the actual local overlap day', () => {
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: [
+        event('late', '2026-10-23T23:30:00Z', '2026-10-24T01:00:00Z'),
+        event('early', '2026-10-24T00:30:00Z', '2026-10-24T01:30:00Z'),
+      ],
+      request: request({
+        timeZone: 'UTC',
+        timeWindow: {
+          timeMin: '2026-10-23T00:00:00Z',
+          timeMax: '2026-10-25T00:00:00Z',
+          label: 'two days',
+        },
+      }),
+    });
+    const dayAfter = cards.find((card) => String(card.date).startsWith('Saturday, Oct 24'));
+    const sections = dayAfter?.sections as Array<Record<string, unknown>>;
+    expect(sections.find((section) => section.overlaps)?.overlaps).toMatchObject([
+      { title: 'Possible overlap: 12:30 AM – 1:00 AM' },
+    ]);
+    const firstDaySections = cards[0]?.sections as Array<Record<string, unknown>>;
+    expect(firstDaySections.some((section) => section.overlaps)).toBe(false);
+  });
+
+  it('surfaces canonical source differences in the row note and attention section', () => {
+    const card = event('canonical-planning', '2026-10-22T09:00:00Z', '2026-10-22T10:00:00Z', {
+      title: 'Planning',
+      sourceVariants: [
+        {
+          calendarId: 'work',
+          calendar: 'Work',
+          summary: 'Planning',
+          start: '2026-10-22T09:00:00Z',
+          end: '2026-10-22T10:00:00Z',
+          allDay: true,
+          calendarTimeZone: 'America/Los_Angeles',
+          location: 'Office',
+          status: 'confirmed',
+          blocksTime: true,
+          calendarPurpose: 'commitments',
+          ownerParticipation: {
+            status: 'accepted',
+            identityVerified: true,
+            basis: 'attendee-email',
+          },
+        },
+        {
+          calendarId: 'family',
+          calendar: 'Family',
+          summary: 'Planning hold',
+          start: '2026-10-23T09:30:00Z',
+          end: '2026-10-23T10:30:00Z',
+          allDay: false,
+          calendarTimeZone: 'UTC',
+          location: 'Home',
+          status: 'tentative',
+          blocksTime: false,
+          calendarPurpose: 'reference',
+          ownerResponse: 'needsAction',
+        },
+      ],
+    });
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: [card],
+      request: request({ timeZone: 'UTC' }),
+    });
+    expect(cards[0]?.date).toBe('Dates not verified');
+    expect(items(cards)[0]).toMatchObject({
+      day: 'Type differs by source',
+      title: 'Title differs by source',
+      time: 'Time differs by source',
+    });
+    const sections = cards[0]?.sections as Array<Record<string, unknown>>;
+    const differences = sections.find((section) => section.title === 'Calendar source differences');
+    expect(differences?.items).toMatchObject([
+      {
+        title:
+          'Event title differs by source · title, time, event type, time zone, location, status, busy state, response metadata, calendar purpose',
+      },
+    ]);
+    expect(JSON.stringify(differences?.items)).toContain('Work: title Planning');
+    expect(JSON.stringify(differences?.items)).toContain('Family: title Planning hold');
+    expect(JSON.stringify(differences?.items)).toContain('; time All day');
+    expect(JSON.stringify(differences?.items)).toContain('time 9:30 AM – 10:30 AM');
+    expect(JSON.stringify(differences?.items)).toContain('location Office');
+    expect(JSON.stringify(differences?.items)).toContain('calendar purpose commitments');
+    expect(JSON.stringify(differences?.items)).toContain('provider copy asks for a response');
+    expect(JSON.stringify(differences?.items)).not.toContain('needsAction');
+    expect(items(cards)[0]?.note).toContain(
+      'Calendar copies differ in title, time, event type, time zone, location, status, busy state, response metadata, calendar purpose.',
+    );
+  });
+
+  it('separates probable phone mirrors and uses explicit arrival guidance', () => {
+    const first = event('arrival', '2026-10-22T18:15:00Z', '2026-10-22T20:30:00Z', {
+      calendarId: 'google',
+      location: '100 Example Road',
+      sourceVariants: [
+        {
+          calendarId: 'google',
+          eventId: 'arrival',
+          summary: 'United Albion arrival',
+          description: 'Venue aliases: Example Field',
+          location: '100 Example Road',
+          start: '2026-10-22T18:15:00Z',
+          end: '2026-10-22T20:30:00Z',
+        },
+      ],
+    });
+    const kickoff = event('kickoff', '2026-10-22T19:00:00Z', '2026-10-22T20:30:00Z', {
+      calendarId: 'team',
+      description: 'Arrival: 45 minutes in advance',
+      location: 'Example Field',
+      sourceVariants: [
+        {
+          calendarId: 'team',
+          eventId: 'kickoff',
+          summary: 'United Albion kickoff',
+          description: 'Arrival: 45 minutes in advance',
+          location: 'Example Field',
+          start: '2026-10-22T19:00:00Z',
+          end: '2026-10-22T20:30:00Z',
+        },
+      ],
+    });
+    expect(
+      calendarRelationship(
+        {
+          summary: 'United Albion arrival',
+          start: '2026-10-22T18:15:00Z',
+          end: '2026-10-22T20:30:00Z',
+          allDay: false,
+          calendar: 'Family',
+          calendarId: 'google',
+          location: '100 Example Road',
+          description: 'Venue aliases: Example Field',
+        },
+        {
+          summary: 'United Albion kickoff',
+          start: '2026-10-22T19:00:00Z',
+          end: '2026-10-22T20:30:00Z',
+          allDay: false,
+          calendar: 'Team',
+          calendarId: 'team',
+          location: 'Example Field',
+          description: 'Arrival: 45 minutes in advance',
+        },
+      ),
+    ).toBe('compatible_time_roles');
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: [first, kickoff],
+      request: request({ timeZone: 'UTC' }),
+    });
+    const sections = cards[0]?.sections as Array<Record<string, unknown>>;
+    expect(sections.some((section) => section.title === 'Arrival guidance')).toBe(true);
+    expect(sections.some((section) => String(section.title).includes('possible overlap'))).toBe(
+      false,
+    );
+    const mirror = (calendarId: string, id: string) =>
+      event(id, '2026-10-22T21:00:00Z', '2026-10-22T22:00:00Z', {
+        title: 'Dentist',
+        sourceVariants: [
+          {
+            calendarId,
+            eventId: id,
+            summary: 'Dentist',
+            start: '2026-10-22T21:00:00Z',
+            end: '2026-10-22T22:00:00Z',
+          },
+        ],
+      });
+    const mirrorCards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: [mirror('google', 'google-dentist'), mirror('iphone:work', 'phone-dentist')],
+      request: request({ timeZone: 'UTC' }),
+    });
+    const mirrorSections = mirrorCards[0]?.sections as Array<Record<string, unknown>>;
+    expect(mirrorSections.some((section) => section.overlaps)).toBe(false);
+    expect(
+      mirrorSections.some((section) => String(section.title).includes('possible duplicate')),
+    ).toBe(true);
   });
 });
 

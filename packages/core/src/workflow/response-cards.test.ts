@@ -166,6 +166,95 @@ describe('response cards', () => {
     ]);
   });
 
+  it('keeps canonical source variants and refuses conflicting owner attendance metadata', () => {
+    const cards = calendarResponseCards(
+      [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          result: {
+            events: [
+              {
+                calendarId: 'google-work',
+                calendar: 'Work',
+                eventId: 'google-copy',
+                iCalUID: 'shared-uid',
+                recurringEventId: 'series',
+                originalStartTime: '2026-10-20T09:00:00Z',
+                summary: 'Planning',
+                start: '2026-10-20T09:00:00Z',
+                end: '2026-10-20T10:00:00Z',
+                allDay: false,
+                calendarTimeZone: 'America/Los_Angeles',
+                blocksTime: true,
+                ownerResponse: 'accepted',
+                ownerParticipation: {
+                  status: 'accepted',
+                  identityVerified: true,
+                  basis: 'attendee-email',
+                },
+                links: [
+                  {
+                    type: 'calendar',
+                    url: 'https://calendar.google.com/event?eid=work-copy',
+                  },
+                ],
+              },
+              {
+                calendarId: 'google-shared',
+                calendar: 'Shared',
+                eventId: 'shared-copy',
+                iCalUID: 'shared-uid',
+                recurringEventId: 'series',
+                originalStartTime: '2026-10-20T09:00:00+00:00',
+                summary: 'Planning hold',
+                start: '2026-10-20T09:30:00Z',
+                end: '2026-10-20T10:30:00Z',
+                allDay: false,
+                calendarTimeZone: 'America/Los_Angeles',
+                blocksTime: true,
+                ownerResponse: 'declined',
+                ownerParticipation: {
+                  status: 'declined',
+                  identityVerified: true,
+                  basis: 'attendee-email',
+                },
+                links: [
+                  {
+                    type: 'calendar',
+                    url: 'https://calendar.google.com/event?eid=shared-copy',
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+      request,
+    );
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({
+      sourceIntegrity: 'disputed',
+      blocksTime: true,
+      title: 'Calendar sources differ: title, time, owner response',
+      start: '',
+      end: '',
+      time: 'Time differs by calendar source',
+      sourceVariants: [{ calendarId: 'google-work' }, { calendarId: 'google-shared' }],
+    });
+    expect(JSON.stringify(cards[0]?.sourceVariants)).toContain('America/Los_Angeles');
+    expect(cards[0]?.sourceVariants).toMatchObject([
+      { allDay: false, calendarTimeZone: 'America/Los_Angeles' },
+      { allDay: false, calendarTimeZone: 'America/Los_Angeles' },
+    ]);
+    expect(cards[0]).not.toHaveProperty('ownerParticipation');
+    expect(cards[0]).not.toHaveProperty('ownerResponse');
+    expect(cards[0]?.calendarLinks).toMatchObject([
+      { label: 'Open Work event' },
+      { label: 'Open Shared event' },
+    ]);
+  });
+
   it('does not project booking history, newsletters, or other mail threads on a focused flight read', () => {
     const cards = responseCardsForFinal({
       requestText: 'Show me the Berlin flight confirmation in the calendar.',

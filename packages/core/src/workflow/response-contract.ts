@@ -18,6 +18,9 @@ import {
   calendarArrivalLead,
   calendarRelationship,
   calendarRelationshipNote,
+  parseCalendarOwnerParticipation,
+  verifiedOwnerParticipation,
+  verifiedPersonalCommitment,
 } from './calendar-relationship.js';
 import { safeCalendarSourceUrl, safeVideoMeetingUrl } from './calendar-source-link.js';
 import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
@@ -1697,13 +1700,11 @@ function compactAllDaySourceDetail(
 }
 
 function compactEventStatus(event: Record<string, unknown>): string {
-  const attendance =
-    typeof event.ownerResponse === 'string' &&
-    /^(?:accepted|declined|tentative|needsAction)$/i.test(event.ownerResponse)
-      ? event.ownerResponse.toLowerCase()
-      : '';
+  const attendance = verifiedOwnerParticipation(event);
   const availability = event.blocksTime === false ? 'free' : '';
-  return [availability, attendance].filter(Boolean).join(' · ');
+  return [availability, attendance === 'unknown' || attendance === 'needsAction' ? '' : attendance]
+    .filter(Boolean)
+    .join(' · ');
 }
 
 function compactLocationRequested(request: PersonalReadRequest): boolean {
@@ -1768,7 +1769,7 @@ function calendarOverlapSummary(
   const candidates = events.flatMap((event) => {
     if (
       stringField(event, 'status') === 'cancelled' ||
-      stringField(event, 'ownerResponse') === 'declined' ||
+      verifiedOwnerParticipation(event) === 'declined' ||
       event.blocksTime === false
     )
       return [];
@@ -1803,6 +1804,16 @@ function calendarOverlapSummary(
         : {}),
       ...(stringField(event, 'ownerResponse')
         ? { ownerResponse: stringField(event, 'ownerResponse') }
+        : {}),
+      ...(parseCalendarOwnerParticipation(event.ownerParticipation)
+        ? { ownerParticipation: parseCalendarOwnerParticipation(event.ownerParticipation) }
+        : {}),
+      ...(event.calendarPurpose === 'commitments' || event.calendarPurpose === 'reference'
+        ? { calendarPurpose: event.calendarPurpose }
+        : {}),
+      ...(Array.isArray(event.sourceVariants) ? { sourceVariants: event.sourceVariants } : {}),
+      ...(event.sourceIntegrity === 'disputed' || event.sourceIntegrity === 'consistent'
+        ? { sourceIntegrity: event.sourceIntegrity }
         : {}),
       ...(typeof event.blocksTime === 'boolean' ? { blocksTime: event.blocksTime } : {}),
       ...(stringField(event, 'location') ? { location: stringField(event, 'location') } : {}),
@@ -1869,18 +1880,25 @@ function calendarOverlapSummary(
         continue;
       }
       const relationship = calendarRelationship(left.projected, right.projected);
-      // Matching arrival/start records and exact duplicate candidates are
-      // retained in the agenda, but do not imply a scheduling conflict.
-      if (relationship !== 'unresolved') continue;
+      // Arrival/start records can be one event. Similar phone listings are
+      // reported as uncertain copies, never as personal conflicts.
+      if (relationship === 'compatible_time_roles') continue;
       const bothAccepted =
-        stringField(left.event, 'ownerResponse') === 'accepted' &&
-        stringField(right.event, 'ownerResponse') === 'accepted';
+        verifiedPersonalCommitment(left.event) && verifiedPersonalCommitment(right.event);
       const sameDay =
         eventLocalDay(new Date(start).toISOString(), zone) ===
         eventLocalDay(new Date(end).toISOString(), zone);
       const overlapLabel = sameDay
         ? `${shortDate(new Date(start).toISOString(), zone)} ${request.compactCalendarBriefing ? compactClock(start, zone) : overlapClock(start, zone)}–${request.compactCalendarBriefing ? compactClock(end, zone) : overlapClock(end, zone)}`
         : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
+      if (relationship === 'probable_duplicate') {
+        const note = `- Possible duplicate listing **${overlapLabel}**: ${left.projected.summary} + ${right.projected.summary}. Both sources are retained; occurrence identity is unverified.`;
+        notes.push(note);
+        namedPairs.push(
+          `Possible duplicate listing ${overlapLabel}: ${left.projected.summary} + ${right.projected.summary}`,
+        );
+        continue;
+      }
       notes.push(
         request.compactCalendarBriefing
           ? `- ${bothAccepted ? 'Conflict' : 'Possible overlap'} **${overlapLabel}**: ${left.projected.summary} + ${right.projected.summary}.`
@@ -4069,7 +4087,7 @@ export function verifiedReadResponse(
             event.allDay !== true &&
             !/^\d{4}-\d{2}-\d{2}$/.test(stringField(event, 'start')) &&
             event.blocksTime !== false &&
-            stringField(event, 'ownerResponse') !== 'declined' &&
+            verifiedOwnerParticipation(event) !== 'declined' &&
             !calendarLodgingContext(event, complete),
         );
         const next = firstAppointment

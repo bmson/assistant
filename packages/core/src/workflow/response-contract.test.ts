@@ -441,6 +441,7 @@ describe('response execution contract', () => {
               summary: 'Meeting',
               start: '2026-10-14T10:00:00-07:00',
               end: '2026-10-14T11:00:00-07:00',
+              blocksTime: true,
             },
           ],
         },
@@ -481,8 +482,8 @@ describe('response execution contract', () => {
               summary: 'Project review',
               start: '2026-10-14T10:00:00-07:00',
               end: '2026-10-14T11:30:00-07:00',
-              ownerResponse: 'accepted',
               blocksTime: true,
+              ownerResponse: 'accepted',
               links: [
                 {
                   type: 'calendar',
@@ -561,7 +562,13 @@ describe('response execution contract', () => {
               summary: 'Review',
               start: '2026-10-14T10:00:00-07:00',
               end: '2026-10-14T11:00:00-07:00',
+              blocksTime: true,
               ownerResponse: 'accepted',
+              ownerParticipation: {
+                status: 'accepted',
+                identityVerified: true,
+                basis: 'attendee-email',
+              },
             },
             {
               eventId: 'accepted-two',
@@ -570,7 +577,13 @@ describe('response execution contract', () => {
               summary: 'Appointment',
               start: '2026-10-14T10:30:00-07:00',
               end: '2026-10-14T11:30:00-07:00',
+              blocksTime: true,
               ownerResponse: 'accepted',
+              ownerParticipation: {
+                status: 'accepted',
+                identityVerified: true,
+                basis: 'attendee-email',
+              },
             },
             {
               eventId: 'arrival',

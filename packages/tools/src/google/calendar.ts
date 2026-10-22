@@ -1,5 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import {
+  type CalendarOwnerParticipation,
+  type CalendarOwnerParticipationStatus,
+  type CalendarPurpose,
   type PhoneCalendarCache,
   type PhoneCalendarSnapshot,
   phoneCalendarCoverage,
@@ -95,11 +98,13 @@ interface CalendarEntry {
   primary: boolean;
   accessRole: string;
   timeZone?: string;
+  purpose?: CalendarPurpose;
 }
 
 interface RawEvent {
   id: string;
   iCalUID?: string;
+  providerExternalIdentifier?: string;
   recurringEventId?: string;
   originalStartTime?: { dateTime?: string; date?: string };
   /** 'confirmed' | 'tentative' | 'cancelled'. Not every provider populates it. */
@@ -131,24 +136,46 @@ function phoneRoster(snapshot: PhoneCalendarSnapshot | null): CalendarEntry[] {
       name: `${calendar.name} (iPhone)`,
       primary: false,
       accessRole: 'reader',
-      timeZone: snapshot.timeZone,
+      ...(calendar.timeZone ? { timeZone: calendar.timeZone } : {}),
+      purpose: calendar.purpose ?? 'unspecified',
     })) ?? []
   );
 }
 
-function phoneEvents(snapshot: PhoneCalendarSnapshot, calendar: CalendarEntry, query: string) {
+function phoneEvents(
+  snapshot: PhoneCalendarSnapshot,
+  calendar: CalendarEntry,
+  query: string,
+  ownerEmail: string,
+) {
   const params = new URL(query).searchParams;
   const min = params.get('timeMin');
   const max = params.get('timeMax');
   const q = params.get('q')?.toLocaleLowerCase();
+  const overlapsUnknownAllDaySourceDate = (event: PhoneCalendarSnapshot['events'][number]) => {
+    if (!event.allDay || event.calendarTimeZone || calendar.timeZone) return false;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(event.start) || !/^\d{4}-\d{2}-\d{2}$/.test(event.end))
+      return true;
+    const minDay = min?.slice(0, 10);
+    const maxDay = max?.slice(0, 10);
+    return (!minDay || event.end > minDay) && (!maxDay || event.start < maxDay);
+  };
   const events = snapshot.events
     .filter(
       (event) =>
         `iphone:${event.calendarId}` === calendar.id &&
-        (!min ||
-          startedAt({ start: event.end, startTimeZone: snapshot.timeZone }) > Date.parse(min)) &&
-        (!max ||
-          startedAt({ start: event.start, startTimeZone: snapshot.timeZone }) < Date.parse(max)) &&
+        (overlapsUnknownAllDaySourceDate(event) ||
+          !min ||
+          startedAt({
+            start: event.end,
+            startTimeZone: event.calendarTimeZone ?? calendar.timeZone,
+          }) > Date.parse(min)) &&
+        (overlapsUnknownAllDaySourceDate(event) ||
+          !max ||
+          startedAt({
+            start: event.start,
+            startTimeZone: event.calendarTimeZone ?? calendar.timeZone,
+          }) < Date.parse(max)) &&
         (!q || `${event.summary} ${event.location}`.toLocaleLowerCase().includes(q)),
     )
     .map((event) => ({
@@ -156,6 +183,8 @@ function phoneEvents(snapshot: PhoneCalendarSnapshot, calendar: CalendarEntry, q
         {
           id: event.eventId,
           iCalUID: event.iCalUID,
+          providerExternalIdentifier: event.providerExternalIdentifier,
+          status: event.status,
           ...(event.originalStartTime
             ? {
                 originalStartTime: event.allDay
@@ -165,13 +194,17 @@ function phoneEvents(snapshot: PhoneCalendarSnapshot, calendar: CalendarEntry, q
             : {}),
           summary: event.summary,
           location: event.location,
-          start: event.allDay ? { date: event.start } : { dateTime: event.start },
+          start: event.allDay
+            ? { date: event.start }
+            : { dateTime: event.start, timeZone: event.calendarTimeZone ?? calendar.timeZone },
           end: event.allDay ? { date: event.end } : { dateTime: event.end },
           transparency: event.blocksTime ? 'opaque' : 'transparent',
         },
         calendar,
       ),
       ownerResponse: event.ownerResponse,
+      ownerParticipation: phoneOwnerParticipation(event, ownerEmail),
+      calendarPurpose: calendar.purpose ?? 'unspecified',
     }));
   events.sort((left, right) => startedAt(left) - startedAt(right));
   const offsetText = params.get('pageToken') ?? '0';
@@ -182,6 +215,42 @@ function phoneEvents(snapshot: PhoneCalendarSnapshot, calendar: CalendarEntry, q
     events: events.slice(offset, offset + count),
     nextPageToken: offset + count < events.length ? String(offset + count) : undefined,
   };
+}
+
+function phoneOwnerParticipation(
+  event: PhoneCalendarSnapshot['events'][number],
+  ownerEmail: string,
+): CalendarOwnerParticipation {
+  const configuredOwner = ownerEmail.trim().toLocaleLowerCase();
+  const participantEmail = event.ownerParticipant?.email.trim().toLocaleLowerCase();
+  return configuredOwner && participantEmail === configuredOwner
+    ? {
+        status: normalizeParticipationStatus(event.ownerParticipant?.responseStatus),
+        identityVerified: true,
+        basis: 'attendee-email',
+      }
+    : { status: 'unknown', identityVerified: false, basis: 'unverified' };
+}
+
+function unavailablePhoneSources(
+  snapshot: PhoneCalendarSnapshot,
+  coverage: ReturnType<typeof phoneCalendarCoverage>,
+) {
+  const names = new Map(phoneRoster(snapshot).map((calendar) => [calendar.id, calendar.name]));
+  const unavailable = (coverage.sources ?? [])
+    .filter((source) => source.status !== 'available' || !source.complete)
+    .map((source) => ({
+      calendar: names.get(`iphone:${source.calendarId}`) ?? `${source.calendarId} (iPhone)`,
+      reason:
+        source.reason ??
+        (source.status === 'available'
+          ? 'The iPhone calendar source returned incomplete coverage.'
+          : `The iPhone calendar source is ${source.status}.`),
+    }));
+  if (!coverage.complete && unavailable.length === 0 && coverage.note) {
+    return [{ calendar: 'iPhone calendars', reason: coverage.note }];
+  }
+  return unavailable;
 }
 
 function urlsIn(text: string): string[] {
@@ -401,7 +470,7 @@ function startedAt(event: { start: string; startTimeZone?: string }): number {
   return Number.isFinite(ms) ? ms : Number.POSITIVE_INFINITY;
 }
 
-function normalizeEvent(raw: RawEvent, calendar: CalendarEntry) {
+function normalizeEvent(raw: RawEvent, calendar: CalendarEntry, ownerEmail = '') {
   const links: Array<{ type: string; label: string; url: string }> = [];
   const addLink = (type: string, label: string, url?: string) => {
     if (!url || !/^https?:\/\//i.test(url) || links.some((link) => link.url === url)) return;
@@ -423,9 +492,35 @@ function normalizeEvent(raw: RawEvent, calendar: CalendarEntry) {
   }
   for (const url of urlsIn(raw.description ?? '')) addLink('description', 'Event link', url);
 
+  const ownerAddress = ownerEmail.trim().toLocaleLowerCase();
+  const ownerAttendee = ownerAddress
+    ? raw.attendees?.find((attendee) => attendee.email.trim().toLocaleLowerCase() === ownerAddress)
+    : undefined;
+  const ownerIsOrganizer = Boolean(
+    ownerAddress && raw.organizer?.email?.trim().toLocaleLowerCase() === ownerAddress,
+  );
+  const ownerParticipation: CalendarOwnerParticipation = ownerAttendee
+    ? {
+        status: normalizeParticipationStatus(ownerAttendee.responseStatus),
+        identityVerified: true,
+        basis: 'attendee-email' as const,
+      }
+    : ownerIsOrganizer
+      ? {
+          status: 'unknown' as const,
+          identityVerified: true,
+          basis: 'organizer-email' as const,
+        }
+      : {
+          status: 'unknown' as const,
+          identityVerified: false,
+          basis: 'unverified' as const,
+        };
+
   return {
     eventId: raw.id,
     iCalUID: raw.iCalUID,
+    providerExternalIdentifier: raw.providerExternalIdentifier,
     recurringEventId: raw.recurringEventId,
     originalStartTime: raw.originalStartTime?.dateTime ?? raw.originalStartTime?.date,
     // Carried through verbatim so a caller can tell a merely-tentative hold
@@ -435,6 +530,8 @@ function normalizeEvent(raw: RawEvent, calendar: CalendarEntry) {
     status: raw.status,
     blocksTime: raw.transparency !== 'transparent',
     ownerResponse: raw.attendees?.find((attendee) => attendee.self === true)?.responseStatus,
+    ownerParticipation,
+    calendarPurpose: calendar.purpose ?? 'unspecified',
     // Which calendar this came from — without it a merged list can't say
     // whether something is on the work calendar or the family one.
     calendar: calendar.name,
@@ -460,6 +557,20 @@ function normalizeEvent(raw: RawEvent, calendar: CalendarEntry) {
     })),
     links,
   };
+}
+
+function normalizeParticipationStatus(
+  status: string | undefined,
+): CalendarOwnerParticipationStatus {
+  switch (status) {
+    case 'accepted':
+    case 'declined':
+    case 'tentative':
+    case 'needsAction':
+      return status;
+    default:
+      return 'unknown';
+  }
 }
 
 /**
@@ -512,7 +623,11 @@ async function collectEvents(
           : available.filter(
               (calendar) =>
                 calendar.name.normalize('NFKC').toLowerCase() ===
-                requested.normalize('NFKC').toLowerCase(),
+                  requested.normalize('NFKC').toLowerCase() ||
+                (calendar.id.startsWith('iphone:') &&
+                  calendar.name.endsWith(' (iPhone)') &&
+                  calendar.name.slice(0, -' (iPhone)'.length).normalize('NFKC').toLowerCase() ===
+                    requested.normalize('NFKC').toLowerCase()),
             );
       if (matches.length === 1) {
         const match = matches[0];
@@ -535,7 +650,9 @@ async function collectEvents(
   } else {
     resolved.push(...available);
   }
-  const targets = resolved.slice(0, MAX_CALENDAR_FANOUT);
+  const targets = explicit
+    ? resolved.slice(0, MAX_CALENDAR_FANOUT)
+    : selectDefaultCalendarTargets(resolved);
   if (targets.length === 0 && !explicit)
     throw new Error(
       'No readable calendars are connected. On the iPhone, choose calendars and enable assistant access.',
@@ -546,6 +663,11 @@ async function collectEvents(
       JSON.stringify({
         query: opts.queryKey,
         phoneSyncedAt: phone?.syncedAt,
+        phoneCapturedAt: phone?.capturedAt,
+        phoneSelectionRevision: phone?.selectionRevision,
+        phoneSnapshotComplete: phone?.complete,
+        phoneSnapshotTruncated: phone?.truncated,
+        phoneSourceAvailability: phone?.sourceAvailability,
         requested: requestedNames,
         calendars: targets.map((calendar) => calendar.id),
         maxResults: opts.maxResults,
@@ -622,13 +744,15 @@ async function collectEvents(
         const pageSize = opts.maxResults - buffered.length;
         const query = opts.query(calendar.id, pageSize, token || undefined);
         if (phone && phoneRoster(phone).some((entry) => entry.id === calendar.id)) {
-          const page = phoneEvents(phone, calendar, query);
+          const page = phoneEvents(phone, calendar, query, deps.ownerEmail);
           buffered.push(...page.events);
           token = page.nextPageToken ?? null;
         } else {
           const page: { items?: RawEvent[]; nextPageToken?: string } = await deps.client.api(query);
           buffered.push(
-            ...(page.items ?? []).map((raw: RawEvent) => normalizeEvent(raw, calendar)),
+            ...(page.items ?? []).map((raw: RawEvent) =>
+              normalizeEvent(raw, calendar, deps.ownerEmail),
+            ),
           );
           token = page.nextPageToken ?? null;
         }
@@ -729,10 +853,17 @@ async function collectEvents(
     .filter((name): name is string => Boolean(name));
   const phoneCoverage =
     phone && targets.some((calendar) => calendar.id.startsWith('iphone:'))
-      ? phoneCalendarCoverage(phone, opts.timeMin, opts.timeMax)
+      ? phoneCalendarCoverage(
+          phone,
+          opts.timeMin,
+          opts.timeMax,
+          undefined,
+          targets.filter((calendar) => calendar.id.startsWith('iphone:')).map(({ id }) => id),
+        )
       : undefined;
   const notes: string[] = [];
   if (phoneCoverage?.note) notes.push(phoneCoverage.note);
+  if (phone && phoneCoverage) unavailable.push(...unavailablePhoneSources(phone, phoneCoverage));
   if (googleUnavailable) {
     unavailable.push({
       calendar: 'Google Calendar',
@@ -836,6 +967,35 @@ async function collectEvents(
       !paginationUnavailable,
     ...(notes.length > 0 ? { note: notes.join(' ') } : {}),
   };
+}
+
+/** Bound default reads without allowing a large Google roster to starve phone calendars. */
+function selectDefaultCalendarTargets(resolved: CalendarEntry[]): CalendarEntry[] {
+  if (resolved.length <= MAX_CALENDAR_FANOUT) return resolved;
+  const primary = resolved.find(
+    (calendar) => !calendar.id.startsWith('iphone:') && calendar.primary,
+  );
+  const phones = resolved.filter((calendar) => calendar.id.startsWith('iphone:'));
+  const google = resolved.filter(
+    (calendar) => !calendar.id.startsWith('iphone:') && calendar !== primary,
+  );
+  const selected = primary ? [primary] : [];
+  let googleIndex = 0;
+  let phoneIndex = 0;
+  let chooseGoogle = true;
+  while (
+    selected.length < MAX_CALENDAR_FANOUT &&
+    (googleIndex < google.length || phoneIndex < phones.length)
+  ) {
+    if (chooseGoogle && googleIndex < google.length)
+      selected.push(google[googleIndex++] as CalendarEntry);
+    else if (!chooseGoogle && phoneIndex < phones.length)
+      selected.push(phones[phoneIndex++] as CalendarEntry);
+    else if (googleIndex < google.length) selected.push(google[googleIndex++] as CalendarEntry);
+    else if (phoneIndex < phones.length) selected.push(phones[phoneIndex++] as CalendarEntry);
+    chooseGoogle = !chooseGoogle;
+  }
+  return selected;
 }
 
 /**
@@ -1049,8 +1209,9 @@ export function registerCalendarTools(
       cacheTtlSeconds: 0,
       execute: async (args, ctx) => {
         const phone = (await deps.phoneCalendars?.(ctx.agentId)) ?? null;
+        const phoneIds = phoneRoster(phone).map(({ id }) => id);
         const phoneCoverage = phone
-          ? phoneCalendarCoverage(phone, args.timeMin, args.timeMax)
+          ? phoneCalendarCoverage(phone, args.timeMin, args.timeMax, undefined, phoneIds)
           : undefined;
         // Ask about every calendar this account can see, not just the bot's own
         // and the owner's address: a busy block on a shared "Work" calendar is
@@ -1147,13 +1308,24 @@ export function registerCalendarTools(
             busy.push({ ...slot, calendar: label, calendarId: id });
         }
         if (phone) {
+          if (phoneCoverage)
+            unavailable.push(
+              ...unavailablePhoneSources(phone, phoneCoverage).map((source) => source.calendar),
+            );
           for (const calendar of phoneRoster(phone)) {
             for (const event of phoneEvents(
               phone,
               calendar,
               `${CAL}/events?${new URLSearchParams({ timeMin: args.timeMin, timeMax: args.timeMax, maxResults: '2000' })}`,
+              deps.ownerEmail,
             ).events) {
-              if (event.blocksTime && event.ownerResponse !== 'declined')
+              if (
+                event.blocksTime &&
+                !(
+                  event.ownerParticipation.identityVerified &&
+                  event.ownerParticipation.status === 'declined'
+                )
+              )
                 busy.push({
                   start: new Date(startedAt(event)).toISOString(),
                   end: new Date(startedAt({ ...event, start: event.end })).toISOString(),
@@ -1161,10 +1333,20 @@ export function registerCalendarTools(
                   calendarId: calendar.id,
                 });
             }
+            const sourceCoverage = phoneCoverage?.sources?.find(
+              (source) => source.calendarId === calendar.id.slice('iphone:'.length),
+            );
             calendarCoverage.push({
               calendarId: calendar.id,
               name: calendar.name,
-              status: phoneCoverage?.complete ? 'checked' : 'unavailable',
+              status: sourceCoverage
+                ? sourceCoverage.status === 'available' && sourceCoverage.complete
+                  ? 'checked'
+                  : 'unavailable'
+                : phoneCoverage?.complete
+                  ? 'checked'
+                  : 'unavailable',
+              ...(sourceCoverage?.reason ? { reason: sourceCoverage.reason } : {}),
             });
           }
         }
@@ -1744,6 +1926,7 @@ export function registerPhoneCalendarFallback(
   registry: ToolRegistry,
   cache: PhoneCalendarCache,
   secret: string,
+  ownerEmail = '',
 ) {
   if (registry.get('calendar.list_events')) return;
   registerCalendarReadTools(registry, {
@@ -1753,7 +1936,7 @@ export function registerPhoneCalendarFallback(
       refreshToken: '',
     }),
     botEmail: '',
-    ownerEmail: '',
+    ownerEmail,
     googleAvailable: false,
     phoneCalendars: (agentId) => readPhoneCalendars(cache, agentId),
   });

@@ -1,7 +1,116 @@
+import type {
+  CalendarOwnerParticipation,
+  CalendarOwnerParticipationStatus,
+} from '@assistant/persistence';
 import { probablePhoneCalendarDuplicate } from '@assistant/persistence';
 import type { BriefingCalendarEvent } from './briefing.js';
 
 export type CalendarRelationship = 'probable_duplicate' | 'compatible_time_roles' | 'unresolved';
+
+export function parseCalendarOwnerParticipation(
+  value: unknown,
+): CalendarOwnerParticipation | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const participation = value as Partial<CalendarOwnerParticipation>;
+  const statuses: CalendarOwnerParticipationStatus[] = [
+    'accepted',
+    'declined',
+    'tentative',
+    'needsAction',
+    'unknown',
+  ];
+  const bases = ['attendee-email', 'organizer-email', 'unverified'] as const;
+  return typeof participation.identityVerified === 'boolean' &&
+    statuses.includes(participation.status as CalendarOwnerParticipationStatus) &&
+    bases.includes(participation.basis as (typeof bases)[number])
+    ? {
+        status: participation.status as CalendarOwnerParticipationStatus,
+        identityVerified: participation.identityVerified,
+        basis: participation.basis as CalendarOwnerParticipation['basis'],
+      }
+    : undefined;
+}
+
+/** Only a verified owner attendee response can establish personal attendance. */
+export function verifiedOwnerParticipation(event: {
+  [key: string]: unknown;
+  ownerParticipation?: unknown;
+  sourceVariants?: unknown;
+}): CalendarOwnerParticipationStatus {
+  const variants = Array.isArray(event.sourceVariants)
+    ? event.sourceVariants.filter((value): value is Record<string, unknown> =>
+        Boolean(value && typeof value === 'object' && !Array.isArray(value)),
+      )
+    : [];
+  const verifiedStatuses = variants.flatMap((variant) => {
+    const participation = parseCalendarOwnerParticipation(variant.ownerParticipation);
+    if (!participation) return [];
+    return participation.identityVerified === true && participation.basis === 'attendee-email'
+      ? [participation.status]
+      : [];
+  });
+  const distinctVerifiedStatuses = new Set(verifiedStatuses);
+  if (distinctVerifiedStatuses.size > 1) return 'unknown';
+  if (verifiedStatuses.length > 0) {
+    const status = verifiedStatuses[0];
+    if (
+      status === 'accepted' ||
+      status === 'declined' ||
+      status === 'tentative' ||
+      status === 'needsAction' ||
+      status === 'unknown'
+    )
+      return status;
+  }
+  const value = parseCalendarOwnerParticipation(event.ownerParticipation);
+  return value?.identityVerified === true && value.basis === 'attendee-email'
+    ? value.status
+    : 'unknown';
+}
+
+/** Busy personal commitments require proof from the human attendee or policy. */
+export function verifiedPersonalCommitment(event: {
+  [key: string]: unknown;
+  ownerParticipation?: unknown;
+  calendarPurpose?: unknown;
+  blocksTime?: unknown;
+  sourceIntegrity?: unknown;
+  sourceVariants?: unknown;
+}): boolean {
+  if (event.blocksTime !== true || event.sourceIntegrity === 'disputed') return false;
+  const variants = Array.isArray(event.sourceVariants)
+    ? event.sourceVariants.filter((value): value is Record<string, unknown> =>
+        Boolean(value && typeof value === 'object' && !Array.isArray(value)),
+      )
+    : [];
+  const verifiedDecline = (value: unknown) => {
+    const participation = parseCalendarOwnerParticipation(value);
+    return (
+      participation?.status === 'declined' &&
+      participation.identityVerified === true &&
+      participation.basis === 'attendee-email'
+    );
+  };
+  if (event.status === 'cancelled' || verifiedDecline(event.ownerParticipation)) return false;
+  if (
+    variants.some(
+      (variant) =>
+        variant.blocksTime !== true ||
+        variant.status === 'cancelled' ||
+        verifiedDecline(variant.ownerParticipation),
+    )
+  )
+    return false;
+  if (
+    variants.length > 1 &&
+    (new Set(variants.map((variant) => variant.status ?? '')).size > 1 ||
+      new Set(variants.map((variant) => variant.calendarPurpose ?? 'unspecified')).size > 1)
+  )
+    return false;
+  return (
+    verifiedOwnerParticipation(event) === 'accepted' || event.calendarPurpose === 'commitments'
+  );
+}
 
 /** Advisory only: independently reconcile a source's explicit early-arrival rule. */
 export function calendarArrivalLead(
@@ -58,10 +167,16 @@ function normalized(value: string): string {
 }
 
 function role(event: BriefingCalendarEvent): 'arrival' | 'start' | undefined {
-  const text = `${event.summary}\n${event.description ?? ''}`;
-  const arrival = /\b(?:arrive|arrival|warm[ -]?up|check[ -]?in)\b/i.test(text);
-  const start = /\b(?:kick[ -]?off|match start|event start)\b/i.test(text);
-  return arrival === start ? undefined : arrival ? 'arrival' : 'start';
+  const classify = (text: string) => {
+    const arrival = /\b(?:arrive|arrival|warm[ -]?up|check[ -]?in)\b/i.test(text);
+    const start = /\b(?:kick[ -]?off|match start|event start)\b/i.test(text);
+    return arrival === start ? undefined : arrival ? 'arrival' : 'start';
+  };
+  const summaryRole = classify(event.summary);
+  if (summaryRole) return summaryRole;
+  const descriptionRole = classify(event.description ?? '');
+  if (descriptionRole) return descriptionRole;
+  return undefined;
 }
 
 function title(event: BriefingCalendarEvent): string {
@@ -119,6 +234,6 @@ export function calendarRelationshipNote(
   if (relationship === 'probable_duplicate')
     return 'These may be duplicate listings. Both sources are retained because their occurrence identity is unverified.';
   return attendance === 'confirmed'
-    ? 'Provider records show accepted invitations for both obligations; occurrence identity has not been equated.'
+    ? 'Both entries have verified evidence as busy personal commitments; occurrence identity has not been equated.'
     : 'The event times overlap; personal attendance and matching occurrence identity are not established for both records.';
 }

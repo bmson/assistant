@@ -1,4 +1,12 @@
 import { createHash } from 'node:crypto';
+import { classifyCalendarOccurrence } from '@assistant/persistence';
+import type { BriefingCalendarEvent } from './briefing.js';
+import {
+  calendarArrivalLead,
+  calendarRelationship,
+  parseCalendarOwnerParticipation,
+  verifiedOwnerParticipation,
+} from './calendar-relationship.js';
 import { ownerCalendarToolName } from './calendar-scope.js';
 import type { PersonalReadRequest } from './read-intent.js';
 import type { ResponseCard } from './response-cards.js';
@@ -10,6 +18,43 @@ const record = (value: unknown): Record<string, unknown> =>
     : {};
 const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
 const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+const eventSources = (event: ResponseCard): Record<string, unknown>[] => {
+  const sources = list(event.sourceVariants)
+    .map(record)
+    .filter((source) => Object.keys(source).length);
+  return sources.length ? sources : [event];
+};
+function relationshipEvent(event: ResponseCard): BriefingCalendarEvent {
+  const source = eventSources(event)[0] ?? {};
+  return {
+    summary: text(source.summary ?? event.title) || '(untitled event)',
+    start: text(event.start),
+    end: text(event.end),
+    calendar: text(event.calendar),
+    allDay: event.allDay === true,
+    ...(text(source.calendarId ?? event.calendarId)
+      ? { calendarId: text(source.calendarId ?? event.calendarId) }
+      : {}),
+    ...(text(source.eventId ?? event.eventId)
+      ? { eventId: text(source.eventId ?? event.eventId) }
+      : {}),
+    ...(text(source.iCalUID ?? event.iCalUID)
+      ? { iCalUID: text(source.iCalUID ?? event.iCalUID) }
+      : {}),
+    ...(text(source.recurringEventId ?? event.recurringEventId)
+      ? { recurringEventId: text(source.recurringEventId ?? event.recurringEventId) }
+      : {}),
+    ...(text(source.originalStartTime ?? event.originalStartTime)
+      ? { originalStartTime: text(source.originalStartTime ?? event.originalStartTime) }
+      : {}),
+    ...(text(source.location ?? event.location)
+      ? { location: text(source.location ?? event.location) }
+      : {}),
+    ...(text(source.description ?? event.description)
+      ? { description: text(source.description ?? event.description) }
+      : {}),
+  };
+}
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const validDate = (value: string) =>
   DATE.test(value) &&
@@ -82,6 +127,23 @@ function validZone(value: unknown): string | undefined {
 }
 
 function dayKey(event: ResponseCard, zone?: string): string {
+  const sources = eventSources(event);
+  if (sources.length > 1) {
+    const sourceDays = sources.map((source) => {
+      const start = text(source.start);
+      if (source.allDay === true && validDate(start)) return start;
+      const sourceZone = validZone(source.calendarTimeZone) ?? zone;
+      if (!sourceZone || !INSTANT.test(start) || !Number.isFinite(Date.parse(start)))
+        return 'unverified';
+      return new Intl.DateTimeFormat('en-CA', {
+        timeZone: sourceZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(new Date(start));
+    });
+    if (new Set(sourceDays).size > 1) return 'unverified';
+  }
   const start = text(event.start);
   if (event.allDay === true && validDate(start)) return start;
   if (!zone || !INSTANT.test(start) || !Number.isFinite(Date.parse(start))) return 'unverified';
@@ -135,6 +197,107 @@ function eventTime(event: ResponseCard, zone?: string): string {
   if (!INSTANT.test(end) || !Number.isFinite(Date.parse(end))) return from;
   const endDay = dayKey({ ...event, start: end }, zone);
   return `${from} – ${endDay !== dayKey(event, zone) ? `${dateLabel(endDay).split(' · ')[0]}, ` : ''}${clock(end, zone)}`;
+}
+
+function sourceDifferences(
+  event: ResponseCard,
+  zone?: string,
+): { fields: string[]; detail: string; titleDiffers: boolean; timeDiffers: boolean } | undefined {
+  const sources = eventSources(event);
+  if (sources.length < 2) return undefined;
+  const ownerResponse = (source: Record<string, unknown>) => {
+    const participation = parseCalendarOwnerParticipation(source.ownerParticipation);
+    if (participation?.identityVerified && participation.basis === 'attendee-email') {
+      return {
+        accepted: 'owner accepted',
+        declined: 'owner declined',
+        tentative: 'owner tentative',
+        needsAction: 'owner response needed',
+        unknown: 'owner response unknown',
+      }[participation.status];
+    }
+    const providerStatus = text(source.ownerResponse).toLowerCase();
+    const providerLabel =
+      providerStatus === 'accepted'
+        ? 'provider copy says accepted'
+        : providerStatus === 'declined'
+          ? 'provider copy says declined'
+          : providerStatus === 'tentative'
+            ? 'provider copy says tentative'
+            : providerStatus === 'needsaction'
+              ? 'provider copy asks for a response'
+              : 'provider response status unverified';
+    return providerLabel;
+  };
+  const fields: Array<{ label: string; value: (source: Record<string, unknown>) => string }> = [
+    { label: 'title', value: (source) => text(source.summary) || '(untitled)' },
+    {
+      label: 'time',
+      value: (source) =>
+        eventTime(
+          {
+            kind: 'calendar-event',
+            id: '',
+            start: text(source.start),
+            end: text(source.end),
+            allDay: source.allDay === true,
+          },
+          validZone(source.calendarTimeZone) ?? zone,
+        ),
+    },
+    {
+      label: 'event type',
+      value: (source) => (source.allDay === true ? 'all day' : 'timed'),
+    },
+    {
+      label: 'time zone',
+      value: (source) => text(source.calendarTimeZone) || 'time zone unavailable',
+    },
+    {
+      label: 'location',
+      value: (source) => text(source.location) || 'location not listed',
+    },
+    {
+      label: 'status',
+      value: (source) => text(source.status) || 'status not reported',
+    },
+    {
+      label: 'busy state',
+      value: (source) =>
+        source.blocksTime === true
+          ? 'busy'
+          : source.blocksTime === false
+            ? 'free'
+            : 'availability not reported',
+    },
+    { label: 'response metadata', value: ownerResponse },
+    {
+      label: 'calendar purpose',
+      value: (source) =>
+        source.calendarPurpose === 'commitments'
+          ? 'commitments'
+          : source.calendarPurpose === 'reference'
+            ? 'reference'
+            : 'purpose unspecified',
+    },
+  ];
+  const differing = fields.filter((field) => new Set(sources.map(field.value)).size > 1);
+  if (!differing.length) return undefined;
+  const titleDiffers =
+    new Set(sources.map((source) => text(source.summary) || '(untitled)')).size > 1;
+  const timeDiffers =
+    new Set(
+      sources.map((source) =>
+        JSON.stringify([text(source.start), text(source.end), source.allDay === true]),
+      ),
+    ).size > 1;
+  const detail = sources
+    .map((source) => {
+      const calendar = text(source.calendar) || text(source.calendarId) || 'Calendar';
+      return `${calendar}: ${differing.map((field) => `${field.label} ${field.value(source)}`).join('; ')}`;
+    })
+    .join(' · ');
+  return { fields: differing.map((field) => field.label), detail, titleDiffers, timeDiffers };
 }
 
 /** Only the final followed page can close a paginated read; missing metadata is not complete. */
@@ -247,15 +410,16 @@ export function calendarAgendaCards(input: {
         ? `${events.length} ${events.length === 1 ? 'event' : 'events'} from ${scope}.${warning ? ` ${warning}` : ''}`
         : emptyLead;
       const items = events.map((event) => {
-        const response = text(event.ownerResponse).toLowerCase();
+        const differences = sourceDifferences(event, zone);
         const status = text(event.status).toLowerCase();
         const note = [
-          response === 'needsaction'
+          verifiedOwnerParticipation(event) === 'needsAction'
             ? 'Needs response'
-            : response === 'tentative'
+            : verifiedOwnerParticipation(event) === 'tentative'
               ? 'Tentative'
               : '',
           status === 'cancelled' ? 'Cancelled' : '',
+          differences ? `Calendar copies differ in ${differences.fields.join(', ')}.` : '',
           event.windowMembership === 'source-date-only'
             ? `Date could not be verified in the requested window.${validDate(text(event.start)) ? ` Source date: ${text(event.start)}${validDate(text(event.end)) ? `; ends ${text(event.end)} (exclusive)` : ''}.${!validZone(event.calendarTimeZone) ? ' Calendar time zone unavailable.' : ''}` : ''}`
             : '',
@@ -264,12 +428,19 @@ export function calendarAgendaCards(input: {
           .join(' · ');
         return {
           id: event.id,
-          day: event.allDay === true ? 'All day' : 'Timed',
-          time: eventTime(event, zone),
-          title: text(event.title),
+          day:
+            differences &&
+            new Set(eventSources(event).map((source) => source.allDay === true)).size > 1
+              ? 'Type differs by source'
+              : event.allDay === true
+                ? 'All day'
+                : 'Timed',
+          time: differences?.timeDiffers ? 'Time differs by source' : eventTime(event, zone),
+          title: differences?.titleDiffers ? 'Title differs by source' : text(event.title),
           ...(text(event.location) ? { location: text(event.location) } : {}),
           ...(note ? { note } : {}),
           calendars: list(event.calendars),
+          sourceVariants: eventSources(event),
           calendarLinks: list(event.calendarLinks),
           ...(event.meetingLink ? { meetingLink: event.meetingLink } : {}),
         };
@@ -277,6 +448,23 @@ export function calendarAgendaCards(input: {
       const sections: Record<string, unknown>[] = items.length
         ? [{ type: 'agenda', title: dateLabel(day, zone), complete: groupComplete, items }]
         : [];
+      const sourceDifferencesForDay = events.flatMap((event) => {
+        const differences = sourceDifferences(event, zone);
+        return differences
+          ? [
+              {
+                title: `${differences.titleDiffers ? 'Event title differs by source' : 'Calendar event'} · ${differences.fields.join(', ')}`,
+                detail: differences.detail,
+              },
+            ]
+          : [];
+      });
+      if (sourceDifferencesForDay.length)
+        sections.push({
+          type: 'attention',
+          title: 'Calendar source differences',
+          items: sourceDifferencesForDay,
+        });
       const unavailable = [
         ...new Map(
           rows
@@ -300,14 +488,19 @@ export function calendarAgendaCards(input: {
           ],
         });
       const conflicts: { title: string; detail: string }[] = [];
+      const duplicateListings: { title: string; detail: string }[] = [];
+      const arrivalGuidance: { title: string; detail: string }[] = [];
+      const chronological = [...input.events].sort(
+        (left, right) => Date.parse(text(left.start)) - Date.parse(text(right.start)),
+      );
       for (
         let i = 0;
-        input.request?.includeCalendarOverlapSummary !== false && i < events.length;
+        input.request?.includeCalendarOverlapSummary !== false && i < chronological.length;
         i++
       )
-        for (let j = i + 1; j < events.length; j++) {
-          const a = events[i];
-          const b = events[j];
+        for (let j = i + 1; j < chronological.length; j++) {
+          const a = chronological[i];
+          const b = chronological[j];
           if (
             !a ||
             !b ||
@@ -316,7 +509,8 @@ export function calendarAgendaCards(input: {
             a.blocksTime === false ||
             b.blocksTime === false ||
             [a, b].some(
-              (event) => event.status === 'cancelled' || event.ownerResponse === 'declined',
+              (event) =>
+                event.status === 'cancelled' || verifiedOwnerParticipation(event) === 'declined',
             )
           )
             continue;
@@ -324,11 +518,54 @@ export function calendarAgendaCards(input: {
             continue;
           const from = Math.max(Date.parse(text(a.start)), Date.parse(text(b.start)));
           const to = Math.min(Date.parse(text(a.end)), Date.parse(text(b.end)));
-          if (zone && from < to)
+          if (zone && from < to) {
+            const overlapDay = dayKey(
+              { kind: 'calendar-event', id: '', start: new Date(from).toISOString() },
+              zone,
+            );
+            if (overlapDay !== day) continue;
+            const relationA = relationshipEvent(a);
+            const relationB = relationshipEvent(b);
+            if (calendarRelationship(relationA, relationB) === 'compatible_time_roles') {
+              const lead = calendarArrivalLead(relationA, relationB);
+              arrivalGuidance.push({
+                title: 'Possible arrival and start records',
+                detail: lead
+                  ? `${text(a.title)} and ${text(b.title)} may describe one event; the source asks for arrival ${lead} minutes early. Both records remain visible.`
+                  : `${text(a.title)} and ${text(b.title)} may describe one event. Both records remain visible because identity is unverified.`,
+              });
+              continue;
+            }
+            const probableMirror = eventSources(a).some((left) =>
+              eventSources(b).some(
+                (right) => classifyCalendarOccurrence(left, right).kind === 'probable-mirror',
+              ),
+            );
+            if (probableMirror) {
+              duplicateListings.push({
+                title: `Possible duplicate listing: ${text(a.title)} · ${text(b.title)}`,
+                detail:
+                  'The calendar sources may describe the same occurrence; both are retained and attendance is unverified.',
+              });
+              continue;
+            }
+            const fromDay = dayKey(
+              { kind: 'calendar-event', id: '', start: new Date(from).toISOString() },
+              zone,
+            );
+            const toDay = dayKey(
+              { kind: 'calendar-event', id: '', start: new Date(to).toISOString() },
+              zone,
+            );
+            const label =
+              fromDay === toDay
+                ? `${clock(new Date(from).toISOString(), zone)} – ${clock(new Date(to).toISOString(), zone)}`
+                : `${dateLabel(fromDay).split(' · ')[0]} ${clock(new Date(from).toISOString(), zone)} – ${dateLabel(toDay).split(' · ')[0]} ${clock(new Date(to).toISOString(), zone)}`;
             conflicts.push({
-              title: `Possible overlap: ${clock(new Date(from).toISOString(), zone)} – ${clock(new Date(to).toISOString(), zone)}`,
+              title: `Possible overlap: ${label}`,
               detail: `${text(a.title)} · ${text(b.title)}. Calendar overlap does not confirm attendance.`,
             });
+          }
         }
       if (conflicts.length)
         sections.push({
@@ -342,6 +579,14 @@ export function calendarAgendaCards(input: {
           ],
           overlaps: conflicts,
         });
+      if (duplicateListings.length)
+        sections.push({
+          type: 'attention',
+          title: `${duplicateListings.length} possible duplicate ${duplicateListings.length === 1 ? 'listing' : 'listings'}`,
+          items: duplicateListings,
+        });
+      if (arrivalGuidance.length)
+        sections.push({ type: 'attention', title: 'Arrival guidance', items: arrivalGuidance });
       return {
         kind: 'briefing',
         id: `calendar-agenda-${createHash('sha256')

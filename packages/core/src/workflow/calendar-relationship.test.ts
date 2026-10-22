@@ -5,6 +5,8 @@ import {
   calendarArrivalLead,
   calendarRelationship,
   calendarRelationshipNote,
+  verifiedOwnerParticipation,
+  verifiedPersonalCommitment,
 } from './calendar-relationship.js';
 
 const arrival: BriefingCalendarEvent = {
@@ -133,4 +135,115 @@ it('recognizes an exact iPhone mirror without a venue while retaining distinct o
       start: '2026-10-19T09:15:00Z',
     }),
   ).toBe('unresolved');
+});
+
+it('requires verified human attendee evidence or explicit busy-commitments policy', () => {
+  expect(verifiedOwnerParticipation({ ownerResponse: 'accepted' })).toBe('unknown');
+  expect(
+    verifiedOwnerParticipation({
+      ownerParticipation: {
+        status: 'accepted',
+        identityVerified: true,
+        basis: 'organizer-email',
+      },
+    }),
+  ).toBe('unknown');
+  expect(
+    verifiedOwnerParticipation({
+      ownerParticipation: {
+        status: 'accepted',
+        identityVerified: true,
+        basis: 'attendee-email',
+      },
+    }),
+  ).toBe('accepted');
+  expect(
+    verifiedOwnerParticipation({
+      ownerParticipation: {
+        status: 'accepted',
+        identityVerified: false,
+        basis: 'attendee-email',
+      },
+    }),
+  ).toBe('unknown');
+  expect(
+    verifiedPersonalCommitment({
+      blocksTime: true,
+      ownerParticipation: {
+        status: 'accepted',
+        identityVerified: true,
+        basis: 'attendee-email',
+      },
+    }),
+  ).toBe(true);
+  expect(
+    verifiedPersonalCommitment({
+      blocksTime: false,
+      ownerParticipation: {
+        status: 'accepted',
+        identityVerified: true,
+        basis: 'attendee-email',
+      },
+    }),
+  ).toBe(false);
+  expect(verifiedPersonalCommitment({ blocksTime: true, calendarPurpose: 'commitments' })).toBe(
+    true,
+  );
+  expect(verifiedPersonalCommitment({ blocksTime: true, calendarPurpose: 'reference' })).toBe(
+    false,
+  );
+  const declined = {
+    status: 'declined',
+    identityVerified: true,
+    basis: 'attendee-email',
+  } as const;
+  expect(verifiedPersonalCommitment({ blocksTime: true, calendarPurpose: 'commitments' })).toBe(
+    true,
+  );
+  expect(
+    verifiedPersonalCommitment({
+      blocksTime: true,
+      calendarPurpose: 'commitments',
+      ownerParticipation: declined,
+    }),
+  ).toBe(false);
+  expect(
+    verifiedPersonalCommitment({
+      blocksTime: true,
+      calendarPurpose: 'commitments',
+      status: 'cancelled',
+    }),
+  ).toBe(false);
+  expect(verifiedPersonalCommitment({ blocksTime: false, calendarPurpose: 'commitments' })).toBe(
+    false,
+  );
+  expect(
+    verifiedPersonalCommitment({
+      blocksTime: true,
+      calendarPurpose: 'commitments',
+      sourceVariants: [
+        { blocksTime: true, status: 'confirmed', calendarPurpose: 'commitments' },
+        {
+          blocksTime: true,
+          status: 'confirmed',
+          calendarPurpose: 'commitments',
+          ownerParticipation: declined,
+        },
+      ],
+    }),
+  ).toBe(false);
+  expect(
+    verifiedPersonalCommitment({
+      blocksTime: true,
+      calendarPurpose: 'commitments',
+      sourceVariants: [{ blocksTime: true, status: 'cancelled', calendarPurpose: 'commitments' }],
+    }),
+  ).toBe(false);
+  expect(
+    verifiedPersonalCommitment({
+      blocksTime: true,
+      calendarPurpose: 'commitments',
+      sourceVariants: [{ blocksTime: false, status: 'confirmed', calendarPurpose: 'commitments' }],
+    }),
+  ).toBe(false);
 });

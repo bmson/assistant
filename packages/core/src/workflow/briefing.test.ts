@@ -1951,18 +1951,35 @@ it('excludes explicit cancelled, nonblocking and owner-declined rows from hard o
     end: '2026-10-07T13:00:00Z',
     allDay: false,
   };
-  for (const patch of [
-    { status: 'cancelled' },
-    { blocksTime: false },
-    { ownerResponse: 'declined' },
-  ]) {
+  for (const patch of [{ status: 'cancelled' }, { blocksTime: false }]) {
     expect(findConflicts([event, { ...event, eventId: 'two', ...patch }])).toEqual([]);
   }
   const unknown = findConflicts([event, { ...event, eventId: 'two' }]);
   expect(unknown[0]?.attendance).toBe('unresolved');
   const confirmed = findConflicts([
-    { ...event, ownerResponse: 'accepted' },
-    { ...event, eventId: 'two', ownerResponse: 'accepted' },
+    {
+      ...event,
+      blocksTime: true,
+      ownerParticipation: { status: 'accepted', identityVerified: true, basis: 'attendee-email' },
+    },
+    {
+      ...event,
+      eventId: 'two',
+      blocksTime: true,
+      ownerParticipation: { status: 'accepted', identityVerified: true, basis: 'attendee-email' },
+    },
   ]);
   expect(confirmed[0]?.attendance).toBe('confirmed');
+  expect(
+    findConflicts([
+      { ...event, blocksTime: true, ownerResponse: 'accepted' },
+      { ...event, eventId: 'two', blocksTime: true, ownerResponse: 'accepted' },
+    ])[0]?.attendance,
+  ).toBe('unresolved');
+  expect(
+    findConflicts([
+      { ...event, blocksTime: true, ownerResponse: 'declined' },
+      { ...event, eventId: 'two', blocksTime: true },
+    ]),
+  ).toHaveLength(1);
 });
