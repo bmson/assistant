@@ -318,7 +318,12 @@ describe('calendar sources through provider normalization and persisted agenda',
         expect(JSON.stringify(cards)).toContain('Team planning');
         if (variant !== 'zone')
           expect(JSON.stringify(cards)).toContain('Calendar source differences');
-        if (variant === 'zone') expect(JSON.stringify(cards)).not.toContain('Dates not verified');
+        if (variant === 'zone') {
+          expect(JSON.stringify(cards)).not.toContain('Dates not verified');
+          expect(JSON.stringify(cards)).not.toContain('copies differ in time');
+          expect(JSON.stringify(cards)).toContain('Asia/Tokyo');
+          expect(JSON.stringify(cards)).toContain('America/Los_Angeles');
+        }
         if (variant === 'location') {
           expect(JSON.stringify(cards)).toContain('Office A');
           expect(JSON.stringify(cards)).toContain('Office B');
@@ -326,17 +331,17 @@ describe('calendar sources through provider normalization and persisted agenda',
         return;
       }
       if (variant === 'mirror' || named)
-        expect(JSON.stringify(card)).not.toContain('Personal commitment conflict');
+        expect(JSON.stringify(card)).not.toContain('Your accepted commitments overlap');
       if (named) expect(JSON.stringify(card)).not.toContain('Team planning');
       else {
         expect(JSON.stringify(card)).toContain('Team planning');
         if (variant === 'mirror') expect(JSON.stringify(card)).toContain('Possible duplicate');
         if (variant === 'verified')
-          expect(JSON.stringify(card)).toContain('Personal commitment conflict');
+          expect(JSON.stringify(card)).toContain('Your accepted commitments overlap');
         if (variant === 'marked') expect(JSON.stringify(card)).toContain('Commitments overlap');
         if (variant === 'shifted') {
           expect(JSON.stringify(card)).toContain('different source times');
-          expect(JSON.stringify(card)).not.toContain('Personal commitment conflict');
+          expect(JSON.stringify(card)).not.toContain('Your accepted commitments overlap');
         }
         expect(JSON.stringify(card)).toContain('Possible overlap');
       }
