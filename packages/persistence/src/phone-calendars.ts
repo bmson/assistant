@@ -1,6 +1,9 @@
 import { z } from 'zod';
 import type { ToolExecutionRepository } from './dispatch.js';
-import type { PhoneCalendarSharingRepository } from './phone-calendar-sharing.js';
+import type {
+  PhoneCalendarSharingRepository,
+  PhoneCalendarSharingState,
+} from './phone-calendar-sharing.js';
 
 const instant = z.string().datetime({ offset: true });
 const timeZone = z
@@ -129,11 +132,9 @@ export async function readPhoneCalendars(
   agentId: string,
   now = new Date(),
 ): Promise<PhoneCalendarSnapshot | null> {
-  const sharing = await cache.phoneCalendarSharing?.get(agentId);
-  // Legacy cache rows do not establish consent to the new sharing protocol.
-  if (cache.phoneCalendarSharing && (!sharing?.enabled || !sharing.calendars.length)) return null;
-  const cached = await cache.cacheGet(key(agentId));
-  const unavailableSnapshot = (): PhoneCalendarSnapshot | null =>
+  const unavailableSnapshot = (
+    sharing: PhoneCalendarSharingState | null,
+  ): PhoneCalendarSnapshot | null =>
     sharing
       ? {
           calendars: sharing.calendars,
@@ -156,17 +157,26 @@ export async function readPhoneCalendars(
           })),
         }
       : null;
-  if (!cached?.result) return unavailableSnapshot();
+  const sharingRepository = cache.phoneCalendarSharing;
+  if (sharingRepository) {
+    // A production sharing port without an atomic read capability is not
+    // allowed to fall back to an independently read cache row.
+    if (!sharingRepository.readSnapshot) return null;
+    const { state, snapshot } = await sharingRepository.readSnapshot(agentId, now);
+    if (!state?.enabled || !state.calendars.length) return null;
+    return snapshot ?? unavailableSnapshot(state);
+  }
+
+  // Legacy cache rows remain readable only when no consent repository exists.
+  const cached = await cache.cacheGet(key(agentId));
+  if (!cached?.result) return null;
   // The input schema is strict; validate the server-owned timestamp separately.
   const value = cached.result as Record<string, unknown>;
   const { syncedAt, ...input } = value;
   const snapshot = phoneCalendarSnapshotSchema.safeParse(input);
-  return snapshot.success &&
-    typeof syncedAt === 'string' &&
-    Number.isFinite(Date.parse(syncedAt)) &&
-    (!sharing || snapshot.data.selectionRevision === sharing.generation)
+  return snapshot.success && typeof syncedAt === 'string' && Number.isFinite(Date.parse(syncedAt))
     ? { ...snapshot.data, syncedAt }
-    : unavailableSnapshot();
+    : null;
 }
 
 export function phoneCalendarCoverage(

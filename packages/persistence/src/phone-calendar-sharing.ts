@@ -1,5 +1,9 @@
 import { z } from 'zod';
-import { type PhoneCalendarSnapshotInput, phoneCalendarSnapshotSchema } from './phone-calendars.js';
+import {
+  type PhoneCalendarSnapshot,
+  type PhoneCalendarSnapshotInput,
+  phoneCalendarSnapshotSchema,
+} from './phone-calendars.js';
 
 export type PhoneCalendarPurpose = 'unspecified' | 'commitments' | 'reference';
 export interface SharedPhoneCalendar {
@@ -153,6 +157,11 @@ export interface PhoneCalendarSharingResult {
 /** Implementations serialize state and event-cache mutation in one transaction. */
 export interface PhoneCalendarSharingRepository {
   get(ownerId: string): Promise<PhoneCalendarSharingState | null>;
+  /** Read consent and its matching expiring snapshot from one privacy-fenced view. */
+  readSnapshot?(
+    ownerId: string,
+    now?: Date,
+  ): Promise<{ state: PhoneCalendarSharingState | null; snapshot: PhoneCalendarSnapshot | null }>;
   apply(
     ownerId: string,
     command: PhoneCalendarSharingCommand,
@@ -223,6 +232,48 @@ export function phoneCalendarCacheRecord(
     result: snapshot ? { ...snapshot, syncedAt: now.toISOString() } : { disconnected: true },
     expiresAt: new Date(now.getTime() + (snapshot ? 7 * 86_400_000 : 0)),
   };
+}
+
+/** Accept only a live event cache that still matches the current consent generation. */
+export function parsePhoneCalendarSnapshotCache(
+  state: PhoneCalendarSharingState,
+  result: unknown,
+  expiresAt: unknown,
+  now: Date,
+): PhoneCalendarSnapshot | null {
+  if (!state.enabled || state.calendars.length === 0 || !(expiresAt instanceof Date)) return null;
+  const expiry = expiresAt.getTime();
+  if (!Number.isFinite(expiry) || expiry < now.getTime()) return null;
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return null;
+  const value = result as Record<string, unknown>;
+  const syncedAt = value.syncedAt;
+  if (typeof syncedAt !== 'string' || !Number.isFinite(Date.parse(syncedAt))) return null;
+  const input = { ...value };
+  delete input.syncedAt;
+  const parsed = phoneCalendarSnapshotSchema.safeParse(input);
+  if (!parsed.success) return null;
+  const snapshot = parsed.data;
+  if (
+    snapshot.selectionRevision !== state.generation ||
+    !state.receivedAt ||
+    syncedAt !== state.receivedAt ||
+    snapshot.capturedAt !== state.capturedAt ||
+    snapshot.timeMin !== state.timeMin ||
+    snapshot.timeMax !== state.timeMax ||
+    snapshot.complete !== state.complete ||
+    snapshot.truncated !== state.truncated ||
+    snapshot.calendars.length !== state.calendars.length ||
+    snapshot.calendars.some((calendar) => {
+      const selected = state.calendars.find((item) => item.id === calendar.id);
+      return (
+        !selected ||
+        selected.name !== calendar.name ||
+        selected.purpose !== (calendar.purpose ?? 'unspecified')
+      );
+    })
+  )
+    return null;
+  return { ...snapshot, syncedAt };
 }
 
 export function transitionPhoneCalendarSharing(

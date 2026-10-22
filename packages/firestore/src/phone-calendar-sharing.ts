@@ -1,6 +1,8 @@
 import type { PhoneCalendarSharingRepository, Records } from '@assistant/persistence';
 import {
   parsePhoneCalendarSharingState,
+  parsePhoneCalendarSnapshotCache,
+  phoneCalendarCacheKey,
   phoneCalendarCacheRecord,
   transitionPhoneCalendarSharing,
 } from '@assistant/persistence';
@@ -19,16 +21,39 @@ export function createFirestorePhoneCalendarSharingRepository(
   store: InstallationStore,
 ): PhoneCalendarSharingRepository {
   return {
-    get: async (ownerId) => {
-      const record = readSharingRecord(
-        await store.doc('phoneCalendarSharing', ownerId).get(),
-        ownerId,
-      );
-      if (!record) return null;
-      const state = parsePhoneCalendarSharingState(record.state, ownerId);
-      if (!state) throw new Error('Stored phone calendar sharing state is malformed');
-      return state;
-    },
+    get: async (ownerId) =>
+      store.db.runTransaction(async (tx) => {
+        await assertPrivacyErasureInactiveInTransaction(tx, store, ownerId);
+        const record = readSharingRecord(
+          await tx.get(store.doc('phoneCalendarSharing', ownerId)),
+          ownerId,
+        );
+        if (!record) return null;
+        const state = parsePhoneCalendarSharingState(record.state, ownerId);
+        if (!state) throw new Error('Stored phone calendar sharing state is malformed');
+        return state;
+      }),
+    readSnapshot: async (ownerId, now = store.now()) =>
+      store.db.runTransaction(async (tx) => {
+        await assertPrivacyErasureInactiveInTransaction(tx, store, ownerId);
+        const stateRef = store.doc('phoneCalendarSharing', ownerId);
+        const cacheRef = store.doc('toolCache', phoneCalendarCacheKey(ownerId));
+        const [stateSnapshot, cacheSnapshot] = await Promise.all([
+          tx.get(stateRef),
+          tx.get(cacheRef),
+        ]);
+        const record = readSharingRecord(stateSnapshot, ownerId);
+        if (!record) return { state: null, snapshot: null };
+        const state = parsePhoneCalendarSharingState(record.state, ownerId);
+        if (!state) throw new Error('Stored phone calendar sharing state is malformed');
+        const cached = cacheSnapshot.exists
+          ? decodeRecord<{ result?: unknown; expiresAt?: unknown }>(cacheSnapshot.data())
+          : null;
+        return {
+          state,
+          snapshot: parsePhoneCalendarSnapshotCache(state, cached?.result, cached?.expiresAt, now),
+        };
+      }),
     apply: async (ownerId, command, now = store.now()) =>
       store.db.runTransaction(async (tx) => {
         await assertPrivacyErasureInactiveInTransaction(tx, store, ownerId);

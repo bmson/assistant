@@ -27,6 +27,7 @@ describe('shared phone calendar manifest coverage', () => {
         cachePut: async () => {},
         phoneCalendarSharing: {
           get: async () => state,
+          readSnapshot: async () => ({ state, snapshot: null }),
           apply: async () => {
             throw new Error('unexpected mutation');
           },
@@ -42,5 +43,29 @@ describe('shared phone calendar manifest coverage', () => {
       selectionRevision: 1,
       sourceAvailability: [{ calendarId: 'work', status: 'missing', complete: false }],
     });
+  });
+
+  it('fails closed instead of combining a sharing manifest with a separate cache read', async () => {
+    const state = enabled();
+    let cacheRead = false;
+    const result = await readPhoneCalendars(
+      {
+        cacheGet: async () => {
+          cacheRead = true;
+          return { result: { calendars, events: [] } };
+        },
+        cachePut: async () => {},
+        phoneCalendarSharing: {
+          get: async () => state,
+          apply: async () => {
+            throw new Error('unexpected mutation');
+          },
+        },
+      },
+      'owner',
+      now,
+    );
+    expect(result).toBeNull();
+    expect(cacheRead).toBe(false);
   });
 });
