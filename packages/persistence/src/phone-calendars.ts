@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ToolExecutionRepository } from './dispatch.js';
+import { unavailableSharedPhoneCalendars } from './phone-calendar-compatibility.js';
 
 const instant = z.string().datetime({ offset: true });
 const timeZone = z
@@ -99,7 +100,10 @@ export const phoneCalendarSnapshotSchema = z
   });
 export type PhoneCalendarSnapshotInput = z.infer<typeof phoneCalendarSnapshotSchema>;
 export type PhoneCalendarSnapshot = PhoneCalendarSnapshotInput & { syncedAt: string };
-export type PhoneCalendarCache = Pick<ToolExecutionRepository, 'cacheGet' | 'cachePut'>;
+export type PhoneCalendarCache = Pick<
+  ToolExecutionRepository,
+  'cacheGet' | 'cachePut' | 'phoneCalendarCompatibility'
+>;
 const key = (agentId: string) => `phone-calendars:v1:${agentId}`;
 
 /** Transient device snapshot, on the same portable expiring store as provider reads. */
@@ -109,6 +113,10 @@ export async function savePhoneCalendars(
   input: unknown,
   now = new Date(),
 ) {
+  // The bridge is read-only even before table 129 exists. Do not probe then
+  // write: consent could change between those operations. B writes atomically.
+  if (cache.phoneCalendarCompatibility)
+    throw new Error('Legacy calendar writes are disabled by the schema compatibility bridge');
   const snapshot =
     input === null
       ? null
@@ -125,6 +133,9 @@ export async function readPhoneCalendars(
   cache: PhoneCalendarCache,
   agentId: string,
 ): Promise<PhoneCalendarSnapshot | null> {
+  const compatibility = await cache.phoneCalendarCompatibility?.read(agentId);
+  if (compatibility?.schema === 'sharing')
+    return unavailableSharedPhoneCalendars(compatibility.state);
   const cached = await cache.cacheGet(key(agentId));
   if (!cached?.result) return null;
   // The input schema is strict; validate the server-owned timestamp separately.

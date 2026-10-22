@@ -34,17 +34,32 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore phone calendar 
         },
       ],
     };
-    await savePhoneCalendars(cache, 'owner', input, now);
+    await savePhoneCalendars(
+      { cacheGet: cache.cacheGet.bind(cache), cachePut: cache.cachePut.bind(cache) },
+      'owner',
+      input,
+      now,
+    );
     expect(await readPhoneCalendars(cache, 'owner')).toEqual({
       ...input,
       syncedAt: now.toISOString(),
     });
     expect(await readPhoneCalendars(cache, 'other-owner')).toBeNull();
-    await savePhoneCalendars(cache, 'owner', null, now);
+    await savePhoneCalendars(
+      { cacheGet: cache.cacheGet.bind(cache), cachePut: cache.cachePut.bind(cache) },
+      'owner',
+      null,
+      now,
+    );
     expect(await readPhoneCalendars(cache, 'owner')).toBeNull();
     const document = await store.doc('toolCache', 'phone-calendars:v1:owner').get();
     expect(document.get('result')).toEqual({ disconnected: true });
-    await savePhoneCalendars(cache, 'owner', input, now);
+    await savePhoneCalendars(
+      { cacheGet: cache.cacheGet.bind(cache), cachePut: cache.cachePut.bind(cache) },
+      'owner',
+      input,
+      now,
+    );
     expect(await readPhoneCalendars(cache, 'owner')).toEqual({
       ...input,
       syncedAt: now.toISOString(),

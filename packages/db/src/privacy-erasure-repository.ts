@@ -10,6 +10,7 @@ import {
 } from '@assistant/persistence';
 import { and, asc, eq, gt, inArray, like, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
+import { erasePostgresPhoneCalendarSharing } from './phone-calendar-compatibility.js';
 import {
   agents,
   conversations,
@@ -888,6 +889,7 @@ export function createPostgresPrivacyErasureRepository(db: Db): PrivacyErasureRe
           .where(like(maintenanceCursors.name, preparedExtractionPrefix(agentId)));
         await tx.delete(memories).where(eq(memories.agentId, agentId));
         await tx.delete(occasions).where(eq(occasions.agentId, agentId));
+        await erasePostgresPhoneCalendarSharing(tx, agentId, new Date());
         const samples = await tx.delete(writingSamples).returning({ id: writingSamples.id });
         const now = new Date();
         await tx

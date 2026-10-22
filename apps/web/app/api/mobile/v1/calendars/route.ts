@@ -1,30 +1,19 @@
-import { phoneCalendarSnapshotSchema, savePhoneCalendars } from '@assistant/persistence';
-import { getPhoneCalendarPorts } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
 export const dynamic = 'force-dynamic';
 
-export async function PUT(request: Request): Promise<Response> {
+/** The bridge can read consent for safe rollback, but cannot publish or revoke it. */
+async function rejectLegacyMutation(request: Request): Promise<Response> {
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
-  const body = await request.text();
-  if (Buffer.byteLength(body) > 800_000)
-    return mobileJson({ error: 'Calendar snapshot too large' }, { status: 413 });
-  let input: unknown;
-  try {
-    input = JSON.parse(body);
-  } catch {
-    return mobileJson({ error: 'Invalid calendar snapshot' }, { status: 400 });
-  }
-  const parsed = phoneCalendarSnapshotSchema.safeParse(input);
-  if (!parsed.success) return mobileJson({ error: 'Invalid calendar snapshot' }, { status: 400 });
-  const { cache, agentId } = await getPhoneCalendarPorts();
-  await savePhoneCalendars(cache, agentId, parsed.data);
-  return mobileJson({ ok: true });
+  return mobileJson(
+    {
+      error:
+        'This server version does not accept calendar sharing changes. Use a server with publisher-verified calendar sharing.',
+      code: 'calendar_sharing_protocol_required',
+    },
+    { status: 503 },
+  );
 }
 
-export async function DELETE(request: Request): Promise<Response> {
-  if (!(await isMobileAuthed(request))) return mobileUnauthorized();
-  const { cache, agentId } = await getPhoneCalendarPorts();
-  await savePhoneCalendars(cache, agentId, null);
-  return mobileJson({ ok: true });
-}
+export const PUT = rejectLegacyMutation;
+export const DELETE = rejectLegacyMutation;

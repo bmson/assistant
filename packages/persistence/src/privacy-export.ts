@@ -1,3 +1,4 @@
+import type { phoneCalendarSharingExport } from './phone-calendar-compatibility.js';
 import type { Records } from './records.js';
 
 type MemoryExportRow = Pick<
@@ -89,6 +90,7 @@ type GraphAssertionEvidenceExportRow = Pick<
 >;
 
 export interface LongTermMemoryExportData {
+  phoneCalendarSharing?: ReturnType<typeof phoneCalendarSharingExport>;
   memories: MemoryExportRow[];
   knowledgeGraph: {
     entities: GraphEntityExportRow[];
