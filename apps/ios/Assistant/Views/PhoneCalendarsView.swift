@@ -254,7 +254,7 @@ struct PhoneCalendarsView: View {
                     .disabled(model.phoneCalendarSharing.isWorking)
             }
             if model.phoneCalendarSharing.requiresPermissionReview {
-                Label("Uploads are paused because Calendar access changed. Review the selected calendars and confirm sharing before uploads resume.", systemImage: "pause.circle")
+                Label("Uploads are paused. Review the selected calendars and confirm sharing before uploads resume.", systemImage: "pause.circle")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             if model.phoneCalendarSharing.canStopSharing {

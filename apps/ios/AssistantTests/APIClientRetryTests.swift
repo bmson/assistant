@@ -12,11 +12,13 @@ final class StubURLProtocol: URLProtocol {
     enum Outcome {
         case failure(URLError)
         case success(status: Int, body: Data)
+        case calendarConfigureAcknowledgement(status: Int, body: Data)
         /// Answers after `delay`, to stand in for a slow endpoint.
         case delayed(after: TimeInterval, status: Int, body: Data)
         case stream(body: Data)
         case taskStream(body: Data, taskId: String)
         case held(status: Int, body: Data)
+        case heldCalendarConfigureAcknowledgement(status: Int, body: Data)
         case operationCancellation(status: Int, outcome: String)
         case terminalOperationCancellation(status: Int, outcome: String, taskId: String, taskStatus: String, transitioned: Bool?)
         case delayedOperationCancellation(after: TimeInterval, status: Int, outcome: String)
@@ -257,6 +259,8 @@ final class StubURLProtocol: URLProtocol {
     private let stopped = NSLock()
     private var isStopped = false
     private var heldResponse: (status: Int, body: Data)?
+    private var heldResponseCorrelatesMutation = false
+    private var calendarConfigureRequestBody = Data()
     override func stopLoading() {
         stopped.withLock { isStopped = true }
         guard let path = request.url?.path,
@@ -279,7 +283,11 @@ final class StubURLProtocol: URLProtocol {
     private func releaseHeldResponse() {
         guard let heldResponse else { return }
         self.heldResponse = nil
-        respond(status: heldResponse.status, body: heldResponse.body)
+        let body = heldResponseCorrelatesMutation
+            ? calendarConfigureAcknowledgementBody(heldResponse.body, requestBody: calendarConfigureRequestBody, status: heldResponse.status)
+            : heldResponse.body
+        heldResponseCorrelatesMutation = false
+        respond(status: heldResponse.status, body: body)
     }
 
     private func respond(status: Int, body: Data) {
@@ -302,6 +310,7 @@ final class StubURLProtocol: URLProtocol {
     override func startLoading() {
         let method = request.httpMethod ?? "GET"
         let requestBody = Self.body(of: request)
+        calendarConfigureRequestBody = requestBody
         switch Self.next(
             for: method,
             url: request.url,
@@ -317,6 +326,21 @@ final class StubURLProtocol: URLProtocol {
                 return
             }
             heldResponse = (status, body)
+            heldResponseCorrelatesMutation = false
+            let key = Self.stopLoadingKey(path: path, testCaseID: requestTestCaseID)
+            Self.lock.withLock {
+                Self.stoppedPaths.remove(key)
+                Self.heldResponses[path] = self
+            }
+        case let .heldCalendarConfigureAcknowledgement(status, body):
+            guard let requestTestCaseID = Self.testCaseID(in: request.allHTTPHeaderFields ?? [:]),
+                  Self.isActiveTestCase(requestTestCaseID),
+                  let path = request.url?.path else {
+                client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
+                return
+            }
+            heldResponse = (status, body)
+            heldResponseCorrelatesMutation = true
             let key = Self.stopLoadingKey(path: path, testCaseID: requestTestCaseID)
             Self.lock.withLock {
                 Self.stoppedPaths.remove(key)
@@ -431,12 +455,32 @@ final class StubURLProtocol: URLProtocol {
             }
         case let .success(status, body):
             respond(status: status, body: body)
+        case let .calendarConfigureAcknowledgement(status, body):
+            respond(status: status, body: calendarConfigureAcknowledgementBody(body, requestBody: requestBody, status: status))
         case let .delayed(delay, status, body):
             DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [self] in
                 guard !stopped.withLock({ isStopped }) else { return }
                 respond(status: status, body: body)
             }
         }
+    }
+
+    /// This opt-in fixture emulates the server echoing a configure mutation ID.
+    /// Ordinary responses remain byte-for-byte unchanged so malformed and
+    /// mismatched acknowledgements stay testable.
+    private func calendarConfigureAcknowledgementBody(_ body: Data, requestBody: Data, status: Int) -> Data {
+        guard request.httpMethod == "POST", request.url?.path == "/api/mobile/v1/calendars",
+              status < 300,
+              let requestObject = try? JSONSerialization.jsonObject(with: requestBody) as? [String: Any],
+              let mutationId = requestObject["mutationId"] as? String,
+              let responseObject = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              responseObject["ok"] as? Bool == true,
+              var state = responseObject["state"] as? [String: Any],
+              state["mutationId"] == nil || state["mutationId"] is NSNull else { return body }
+        state["mutationId"] = mutationId
+        var correlated = responseObject
+        correlated["state"] = state
+        return (try? JSONSerialization.data(withJSONObject: correlated)) ?? body
     }
 }
 
@@ -3592,9 +3636,11 @@ extension APIClientRetryTests {
 @MainActor
 private final class PhoneCalendarSharingMemoryRecordStore: PhoneCalendarSharingRecordStore {
     private(set) var records: [String: PhoneCalendarSharingLocalRecord] = [:]
+    var failNextSave = false
 
     func load(scope: String) -> PhoneCalendarSharingLocalRecord? { records[scope] }
     func save(_ record: PhoneCalendarSharingLocalRecord, scope: String) -> Bool {
+        if failNextSave { failNextSave = false; return false }
         records[scope] = record
         return true
     }
@@ -3668,7 +3714,7 @@ extension APIClientRetryTests {
         StubURLProtocol.prime([], paths: [
             "/api/mobile/v1/calendars": [
                 .success(status: 200, body: try phoneCalendarRead(nil)),
-                .held(status: 200, body: try phoneCalendarMutation(enabled)),
+                .heldCalendarConfigureAcknowledgement(status: 200, body: try phoneCalendarMutation(enabled)),
                 .success(status: 200, body: try phoneCalendarMutation(disabled))
             ]
         ])
@@ -3692,6 +3738,158 @@ extension APIClientRetryTests {
     }
 
     @MainActor
+    func testFailedStopSaveDuringInitialEnableRetainsCancellationToken() async throws {
+        let owner = "owner-initial-stop-save"
+        let scope = phoneCalendarScope(owner: owner)
+        let pauseKey = "assistant.phoneCalendarSharing.permissionPause.\(scope)"
+        defer { UserDefaults.standard.removeObject(forKey: pauseKey) }
+        let store = PhoneCalendarSharingMemoryRecordStore()
+        let source = PhoneCalendarSharingFixtureSource()
+        _ = store.save(.init(publisherId: "publisher-initial-stop-save", generation: 0,
+                             pendingMutation: nil, pendingRevocation: nil, lastRead: nil, lastState: nil), scope: scope)
+        let work = SharedPhoneCalendar(id: "work", name: "Work", purpose: .commitments, timeZone: nil)
+        let enabled = phoneCalendarState(owner: owner, publisher: "publisher-initial-stop-save", generation: 1,
+                                         enabled: true, calendars: [work])
+        let disabled = phoneCalendarState(owner: owner, publisher: "publisher-initial-stop-save", generation: 2,
+                                          enabled: false)
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/calendars": [
+                .success(status: 200, body: try phoneCalendarRead(nil, owner: owner)),
+                .heldCalendarConfigureAcknowledgement(status: 200, body: try phoneCalendarMutation(enabled)),
+                .success(status: 200, body: try phoneCalendarRead(enabled, owner: owner)),
+                .success(status: 200, body: try phoneCalendarMutation(disabled))
+            ]
+        ])
+        let client = makeClient()
+        let coordinator = PhoneCalendarSharingCoordinator(source: source, recordStore: store)
+        await coordinator.refresh(client: client, expectedOwnerID: owner, publishIfEnabled: false)
+        let enabling = Task {
+            await coordinator.enable(client: client, expectedOwnerID: owner, selectedCalendars: [work])
+        }
+        try await waitForHeldCalendarRequest()
+        let pendingMutationID = try XCTUnwrap(store.load(scope: scope)?.pendingMutation?.body.mutationId)
+
+        store.failNextSave = true
+        await coordinator.disable(client: client, expectedOwnerID: owner)
+        XCTAssertTrue(coordinator.requiresPermissionReview)
+        XCTAssertTrue(coordinator.hasPendingMutation, "Failed Stop persistence keeps the held initial POST cancellation token")
+        XCTAssertTrue(coordinator.canStopSharing)
+        XCTAssertFalse(coordinator.hasPendingRemoval, "The failed local write is not described as a queued removal")
+        XCTAssertTrue(UserDefaults.standard.bool(forKey: pauseKey))
+        XCTAssertEqual(source.shareQueryCount, 0)
+        XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "POST"], "No DELETE is sent before revocation metadata is durably saved")
+
+        StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/calendars")
+        await enabling.value
+        XCTAssertTrue(coordinator.requiresPermissionReview, "A late enable acknowledgment cannot clear the Stop pause")
+        XCTAssertTrue(coordinator.hasPendingMutation)
+        XCTAssertEqual(source.shareQueryCount, 0, "The late enable acknowledgment cannot query event contents")
+
+        let relaunched = PhoneCalendarSharingCoordinator(source: source, recordStore: store)
+        await relaunched.refresh(client: client, expectedOwnerID: owner, publishIfEnabled: true)
+        XCTAssertTrue(relaunched.requiresPermissionReview)
+        XCTAssertTrue(relaunched.hasPendingMutation)
+        XCTAssertTrue(relaunched.canStopSharing)
+        XCTAssertEqual(source.shareQueryCount, 0, "Relaunch does not query or upload while the pause fence is present")
+
+        await relaunched.disable(client: client, expectedOwnerID: owner)
+        XCTAssertFalse(relaunched.hasPendingRemoval)
+        XCTAssertFalse(relaunched.requiresPermissionReview, "Confirmed server removal clears the local pause fence")
+        XCTAssertEqual(source.shareQueryCount, 0)
+        XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "POST", "GET", "DELETE"])
+        let deleteBody = try XCTUnwrap(JSONSerialization.jsonObject(with: StubURLProtocol.requests.last!.3) as? [String: Any])
+        XCTAssertEqual(deleteBody["cancelPendingMutationId"] as? String, pendingMutationID)
+        XCTAssertEqual(deleteBody["generation"] as? Int, 1)
+    }
+
+    @MainActor
+    func testSamePublisherStopGenerationConflictRequiresExplicitRetry() async throws {
+        let owner = "owner-stop-conflict"
+        let scope = phoneCalendarScope(owner: owner)
+        let pauseKey = "assistant.phoneCalendarSharing.permissionPause.\(scope)"
+        defer { UserDefaults.standard.removeObject(forKey: pauseKey) }
+        let work = SharedPhoneCalendar(id: "work", name: "Work", purpose: .commitments, timeZone: nil)
+        let initial = phoneCalendarState(owner: owner, publisher: "same-phone", generation: 4,
+                                         enabled: true, calendars: [work])
+        let advanced = phoneCalendarState(owner: owner, publisher: "same-phone", generation: 5,
+                                          enabled: true, calendars: [work])
+        let removed = phoneCalendarState(owner: owner, publisher: "same-phone", generation: 6, enabled: false)
+        let store = PhoneCalendarSharingMemoryRecordStore()
+        _ = store.save(.init(publisherId: "same-phone", generation: 4, pendingMutation: nil,
+                             pendingRevocation: nil, lastRead: nil, lastState: initial), scope: scope)
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/calendars": [
+                .success(status: 200, body: try phoneCalendarRead(initial, owner: owner)),
+                .success(status: 409, body: try phoneCalendarMutation(advanced, ok: false)),
+                .success(status: 200, body: try phoneCalendarRead(advanced, owner: owner)),
+                .success(status: 200, body: try phoneCalendarMutation(removed))
+            ]
+        ])
+        let source = PhoneCalendarSharingFixtureSource()
+        let client = makeClient()
+        let coordinator = PhoneCalendarSharingCoordinator(source: source, recordStore: store)
+        await coordinator.refresh(client: client, expectedOwnerID: owner, publishIfEnabled: false)
+        await coordinator.disable(client: client, expectedOwnerID: owner)
+        XCTAssertNil(store.load(scope: scope)?.pendingRevocation,
+                      "The stale DELETE is retired after the server confirms a newer same-publisher generation")
+        XCTAssertEqual(store.load(scope: scope)?.generation, 5)
+        XCTAssertFalse(coordinator.isSharingEnabled)
+        XCTAssertTrue(coordinator.requiresPermissionReview)
+        XCTAssertTrue(coordinator.canStopSharing, "The explicit Stop action can use the new generation")
+
+        await coordinator.refresh(client: client, expectedOwnerID: owner, publishIfEnabled: true)
+        XCTAssertFalse(coordinator.hasPendingRemoval)
+        XCTAssertTrue(coordinator.requiresPermissionReview)
+        XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "DELETE", "GET"],
+                       "Foreground refresh must not automatically retry a conflicted DELETE")
+        XCTAssertEqual(source.shareQueryCount, 0, "The paused roster is never queried while removal needs explicit retry")
+
+        await coordinator.disable(client: client, expectedOwnerID: owner)
+        XCTAssertFalse(coordinator.hasPendingRemoval)
+        XCTAssertFalse(coordinator.requiresPermissionReview)
+        XCTAssertEqual(source.shareQueryCount, 0)
+        XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "DELETE", "GET", "DELETE"])
+        let retriedBody = try XCTUnwrap(JSONSerialization.jsonObject(with: StubURLProtocol.requests.last!.3) as? [String: Any])
+        XCTAssertEqual(retriedBody["generation"] as? Int, 5)
+    }
+
+    @MainActor
+    func testOfflineStopForCommittedInitialEnableKeepsCancellationToken() async throws {
+        let owner = "owner-offline-initial-stop"
+        let scope = phoneCalendarScope(owner: owner)
+        let mutationID = "initial-enable-mutation"
+        let work = SharedPhoneCalendar(id: "work", name: "Work", purpose: .commitments, timeZone: nil)
+        let committed = phoneCalendarState(owner: owner, publisher: "initial-publisher", generation: 1,
+                                           enabled: true, calendars: [work], mutationId: mutationID)
+        let disabled = phoneCalendarState(owner: owner, publisher: "initial-publisher", generation: 2, enabled: false)
+        let pending = PendingPhoneCalendarRevocation(
+            baseURL: "https://assistant.test", ownerId: owner, ownerEmail: "owner@example.test",
+            publisherId: "initial-publisher", expectedGeneration: 0, tombstoneGeneration: 1,
+            cancelPendingMutationId: mutationID
+        )
+        let store = PhoneCalendarSharingMemoryRecordStore()
+        _ = store.save(.init(publisherId: "initial-publisher", generation: 0, pendingMutation: nil,
+                             pendingRevocation: pending, lastRead: nil, lastState: nil), scope: scope)
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/calendars": [
+                .success(status: 200, body: try phoneCalendarRead(committed, owner: owner)),
+                .success(status: 200, body: try phoneCalendarMutation(disabled))
+            ]
+        ])
+        let source = PhoneCalendarSharingFixtureSource()
+        let coordinator = PhoneCalendarSharingCoordinator(source: source, recordStore: store)
+        await coordinator.refresh(client: makeClient(), expectedOwnerID: owner, publishIfEnabled: true)
+        XCTAssertFalse(coordinator.hasPendingRemoval)
+        XCTAssertFalse(coordinator.isSharingEnabled)
+        XCTAssertEqual(source.shareQueryCount, 0)
+        XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "DELETE"],
+                       "A committed initial enable is canceled instead of being retired as a stale Stop")
+        let deleteBody = try XCTUnwrap(JSONSerialization.jsonObject(with: StubURLProtocol.requests.last!.3) as? [String: Any])
+        XCTAssertEqual(deleteBody["generation"] as? Int, 0)
+        XCTAssertEqual(deleteBody["cancelPendingMutationId"] as? String, mutationID)
+    }
+
+    @MainActor
     func testStopDuringPendingSnapshotMakesLatePutNonAuthoritative() async throws {
         let store = PhoneCalendarSharingMemoryRecordStore()
         let source = PhoneCalendarSharingFixtureSource()
@@ -3703,7 +3901,7 @@ extension APIClientRetryTests {
         StubURLProtocol.prime([], paths: [
             "/api/mobile/v1/calendars": [
                 .success(status: 200, body: try phoneCalendarRead(nil)),
-                .success(status: 200, body: try phoneCalendarMutation(enabled)),
+                .calendarConfigureAcknowledgement(status: 200, body: try phoneCalendarMutation(enabled)),
                 .held(status: 200, body: try phoneCalendarMutation(enabled)),
                 .success(status: 200, body: try phoneCalendarMutation(disabled))
             ]
@@ -3843,7 +4041,7 @@ extension APIClientRetryTests {
         StubURLProtocol.prime([], paths: [
             "/api/mobile/v1/calendars": [
                 .success(status: 200, body: try phoneCalendarRead(existing)),
-                .success(status: 200, body: try phoneCalendarMutation(updated)),
+                .calendarConfigureAcknowledgement(status: 200, body: try phoneCalendarMutation(updated)),
                 .success(status: 200, body: try phoneCalendarMutation(updated))
             ]
         ])
@@ -3956,6 +4154,213 @@ extension APIClientRetryTests {
     }
 
     @MainActor
+    func testFailedSecureSelectionSavePausesPreviousRosterUntilReview() async throws {
+        let owner = "owner-selection-save-failure"
+        let scope = phoneCalendarScope(owner: owner)
+        let pauseKey = "assistant.phoneCalendarSharing.permissionPause.\(scope)"
+        defer { UserDefaults.standard.removeObject(forKey: pauseKey) }
+        let work = SharedPhoneCalendar(id: "work", name: "Work", purpose: .commitments, timeZone: nil)
+        let remote = phoneCalendarState(owner: owner, publisher: "publisher-selection-save", generation: 1,
+                                        enabled: true, calendars: [work])
+        let store = PhoneCalendarSharingMemoryRecordStore()
+        _ = store.save(.init(publisherId: "publisher-selection-save", generation: 1, pendingMutation: nil,
+                             pendingRevocation: nil, lastRead: nil, lastState: remote), scope: scope)
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/calendars": [
+                .success(status: 200, body: try phoneCalendarRead(remote, owner: owner)),
+                .success(status: 200, body: try phoneCalendarRead(remote, owner: owner)),
+                .success(status: 200, body: try phoneCalendarRead(remote, owner: owner))
+            ]
+        ])
+        let source = PhoneCalendarSharingFixtureSource()
+        source.availableCalendars.append(.init(id: "personal", title: "Personal", account: "Personal"))
+        let client = makeClient()
+        let coordinator = PhoneCalendarSharingCoordinator(source: source, recordStore: store)
+        await coordinator.refresh(client: client, expectedOwnerID: owner, publishIfEnabled: false)
+
+        store.failNextSave = true
+        await coordinator.enable(client: client, expectedOwnerID: owner, command: "select", selectedCalendars: [
+            .init(id: "personal", name: "Personal", purpose: .reference, timeZone: nil)
+        ])
+        XCTAssertTrue(coordinator.requiresPermissionReview)
+        XCTAssertFalse(coordinator.hasPendingMutation)
+        XCTAssertTrue(UserDefaults.standard.bool(forKey: pauseKey))
+        XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET"], "No configure POST is sent when the reviewed selection cannot be saved")
+
+        await coordinator.refresh(client: client, expectedOwnerID: owner, publishIfEnabled: true)
+        let relaunched = PhoneCalendarSharingCoordinator(source: source, recordStore: store)
+        await relaunched.refresh(client: client, expectedOwnerID: owner, publishIfEnabled: true)
+        XCTAssertTrue(relaunched.requiresPermissionReview, "The defaults fence survives a failed secure write and relaunch")
+        XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "GET", "GET"])
+        XCTAssertEqual(source.shareQueryCount, 0, "The prior Work roster is never queried or uploaded after failed review persistence")
+    }
+
+    @MainActor
+    func testFailedSecureStopSavePausesUploadsAndCanRetryRemoval() async throws {
+        let owner = "owner-stop-save-failure"
+        let scope = phoneCalendarScope(owner: owner)
+        let pauseKey = "assistant.phoneCalendarSharing.permissionPause.\(scope)"
+        defer { UserDefaults.standard.removeObject(forKey: pauseKey) }
+        let work = SharedPhoneCalendar(id: "work", name: "Work", purpose: .commitments, timeZone: nil)
+        let remote = phoneCalendarState(owner: owner, publisher: "publisher-stop-save", generation: 2,
+                                        enabled: true, calendars: [work])
+        let disabled = phoneCalendarState(owner: owner, publisher: "publisher-stop-save", generation: 3,
+                                          enabled: false, calendars: [])
+        let store = PhoneCalendarSharingMemoryRecordStore()
+        _ = store.save(.init(publisherId: "publisher-stop-save", generation: 2, pendingMutation: nil,
+                             pendingRevocation: nil, lastRead: nil, lastState: remote), scope: scope)
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/calendars": [
+                .success(status: 200, body: try phoneCalendarRead(remote, owner: owner)),
+                .success(status: 200, body: try phoneCalendarRead(remote, owner: owner)),
+                .success(status: 200, body: try phoneCalendarRead(remote, owner: owner)),
+                .success(status: 200, body: try phoneCalendarMutation(disabled))
+            ]
+        ])
+        let source = PhoneCalendarSharingFixtureSource()
+        let client = makeClient()
+        let coordinator = PhoneCalendarSharingCoordinator(source: source, recordStore: store)
+        await coordinator.refresh(client: client, expectedOwnerID: owner, publishIfEnabled: false)
+
+        store.failNextSave = true
+        await coordinator.disable(client: client, expectedOwnerID: owner)
+        XCTAssertTrue(coordinator.requiresPermissionReview)
+        XCTAssertFalse(coordinator.hasPendingRemoval, "An unsaved removal is not described as durably queued")
+        XCTAssertTrue(coordinator.canStopSharing, "Stop remains available to retry after the failed local write")
+        XCTAssertTrue(UserDefaults.standard.bool(forKey: pauseKey))
+        XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET"], "No DELETE is sent without saved revocation metadata")
+
+        await coordinator.refresh(client: client, expectedOwnerID: owner, publishIfEnabled: true)
+        let relaunched = PhoneCalendarSharingCoordinator(source: source, recordStore: store)
+        await relaunched.refresh(client: client, expectedOwnerID: owner, publishIfEnabled: true)
+        XCTAssertTrue(relaunched.requiresPermissionReview)
+        XCTAssertEqual(source.shareQueryCount, 0, "Neither foreground refresh nor relaunch publishes during the local pause")
+        await relaunched.disable(client: client, expectedOwnerID: owner)
+        XCTAssertFalse(relaunched.isSharingEnabled)
+        XCTAssertFalse(relaunched.hasPendingRemoval)
+        XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "GET", "GET", "DELETE"])
+        let deleteBody = try XCTUnwrap(JSONSerialization.jsonObject(with: StubURLProtocol.bodies.last!) as? [String: Any])
+        XCTAssertEqual(deleteBody["generation"] as? Int, 2, "Retried Stop uses the latest verified server generation")
+        XCTAssertEqual(source.shareQueryCount, 0)
+    }
+
+    @MainActor
+    func testSamePublisherMutationConflictPausesRosterUntilReviewOrStop() async throws {
+        let scenarios: [(Int, Int, Bool, String?)] = [
+            (0, 409, false, "winner-mutation"),
+            (1, 200, true, "winner-mutation"),
+            (2, 200, true, nil),
+            (3, 409, false, "winner-mutation")
+        ]
+        for (index, conflictStatus, conflictOK, winningMutationID) in scenarios {
+            let owner = "owner-cas-\(index)"
+            let scope = phoneCalendarScope(owner: owner)
+            let pauseKey = "assistant.phoneCalendarSharing.permissionPause.\(scope)"
+            defer { UserDefaults.standard.removeObject(forKey: pauseKey) }
+            let work = SharedPhoneCalendar(id: "work", name: "Work", purpose: .commitments, timeZone: nil)
+            let personal = SharedPhoneCalendar(id: "personal", name: "Personal", purpose: .reference, timeZone: nil)
+            let remote = phoneCalendarState(owner: owner, publisher: "publisher-cas-\(index)", generation: 2,
+                                            enabled: true, calendars: [personal], mutationId: winningMutationID)
+            let prior = phoneCalendarState(owner: owner, publisher: "publisher-cas-\(index)", generation: 1,
+                                           enabled: true, calendars: [work], mutationId: "initial-mutation")
+            let request = PhoneCalendarSharingCommandBody.configure(
+                "select", ownerId: owner, publisherId: "publisher-cas-\(index)", expectedGeneration: 1,
+                mutationId: "latest-selection-\(index)", calendars: [work]
+            )
+            let store = PhoneCalendarSharingMemoryRecordStore()
+            var local = PhoneCalendarSharingLocalRecord(
+                publisherId: "publisher-cas-\(index)", generation: 1,
+                pendingMutation: PendingPhoneCalendarMutation(body: request, baselineGeneration: 1),
+                pendingRevocation: nil, lastRead: nil, lastState: prior
+            )
+            local.installationID = PhoneCalendarInstallationIdentity.current
+            _ = store.save(local, scope: scope)
+            let updated = phoneCalendarState(owner: owner, publisher: "publisher-cas-\(index)", generation: 3,
+                                             enabled: true, calendars: [work])
+            let disabled = phoneCalendarState(owner: owner, publisher: "publisher-cas-\(index)", generation: 4,
+                                              enabled: false, calendars: [])
+            var calendarResponses: [StubURLProtocol.Outcome] = [
+                .success(status: 200, body: try phoneCalendarRead(remote, owner: owner)),
+                .success(status: 200, body: try phoneCalendarRead(remote, owner: owner))
+            ]
+            let conflict = try phoneCalendarMutation(remote, ok: conflictOK)
+            calendarResponses.insert(index == 3 ? .held(status: conflictStatus, body: conflict)
+                                                 : .success(status: conflictStatus, body: conflict), at: 1)
+            if index == 0 || index == 2 || index == 3 {
+                calendarResponses.append(.success(status: 200, body: try phoneCalendarMutation(disabled)))
+            } else {
+                calendarResponses.append(contentsOf: [
+                    .calendarConfigureAcknowledgement(status: 200, body: try phoneCalendarMutation(updated)),
+                    .success(status: 200, body: try phoneCalendarMutation(updated)),
+                    .success(status: 200, body: try phoneCalendarMutation(disabled))
+                ])
+            }
+            StubURLProtocol.prime([], paths: ["/api/mobile/v1/calendars": calendarResponses])
+            let source = PhoneCalendarSharingFixtureSource()
+            source.availableCalendars.append(.init(id: "personal", title: "Personal", account: "Personal"))
+            let coordinator = PhoneCalendarSharingCoordinator(source: source, recordStore: store)
+            let client = makeClient()
+
+            if index == 3 {
+                let conflictRefresh = Task {
+                    await coordinator.refresh(client: client, expectedOwnerID: owner, publishIfEnabled: true)
+                }
+                try await waitForHeldCalendarRequest()
+                store.failNextSave = true
+                StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/calendars")
+                await conflictRefresh.value
+            } else {
+                await coordinator.refresh(client: client, expectedOwnerID: owner, publishIfEnabled: true)
+            }
+            XCTAssertTrue(coordinator.requiresPermissionReview, "A mismatched mutation ID is not an acknowledgment (HTTP \(conflictStatus))")
+            XCTAssertFalse(coordinator.hasPendingMutation, "A definite CAS conflict is cleared into review instead of retried forever")
+            XCTAssertFalse(coordinator.isSharingEnabled)
+            if index == 3 {
+                XCTAssertTrue(UserDefaults.standard.bool(forKey: pauseKey),
+                              "The defaults fence is saved even if secure record storage fails")
+                XCTAssertNotNil(store.load(scope: scope)?.pendingMutation,
+                                 "A failed secure write leaves the old durable pending mutation in place")
+            } else {
+                XCTAssertEqual(store.load(scope: scope)?.uploadsPausedForPermissionReview, true)
+            }
+            XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "POST"])
+            XCTAssertEqual(source.shareQueryCount, 0, "Conflict handling must not query the winning remote roster")
+
+            let relaunched = PhoneCalendarSharingCoordinator(source: source, recordStore: store)
+            await relaunched.refresh(client: client, expectedOwnerID: owner, publishIfEnabled: true)
+            XCTAssertTrue(relaunched.requiresPermissionReview, "Review pause survives coordinator relaunch")
+            XCTAssertTrue(relaunched.hasPendingMutation == (index == 3),
+                          "A stale persisted mutation remains review-fenced when the secure update failed")
+            XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "POST", "GET"])
+            XCTAssertEqual(source.shareQueryCount, 0, "Foreground refresh after relaunch cannot upload Personal")
+
+            if index == 0 || index == 2 || index == 3 {
+                XCTAssertTrue(relaunched.canStopSharing, "The authoritative same-publisher generation remains stoppable while paused")
+                await relaunched.disable(client: client, expectedOwnerID: owner)
+                XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "POST", "GET", "DELETE"])
+                XCTAssertFalse(relaunched.isSharingEnabled)
+                XCTAssertEqual(source.shareQueryCount, 0)
+                let deleteBody = try XCTUnwrap(JSONSerialization.jsonObject(with: StubURLProtocol.bodies.last!) as? [String: Any])
+                XCTAssertEqual(deleteBody["generation"] as? Int, 2,
+                               "Stop uses the authoritative generation rather than the stale pending baseline")
+            } else {
+                await relaunched.enable(client: client, expectedOwnerID: owner, command: "select", selectedCalendars: [work])
+                XCTAssertFalse(relaunched.requiresPermissionReview, "An explicit new selection clears review pause after matching acknowledgment")
+                XCTAssertEqual(source.shareQueryCount, 1)
+                XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "POST", "GET", "POST", "PUT"])
+                let put = try XCTUnwrap(StubURLProtocol.bodies.last)
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: put) as? [String: Any])
+                let snapshot = try XCTUnwrap(body["snapshot"] as? [String: Any])
+                let calendars = try XCTUnwrap(snapshot["calendars"] as? [[String: Any]])
+                XCTAssertEqual(calendars.compactMap { $0["id"] as? String }, ["work"],
+                               "Explicit review publishes only the newly confirmed roster")
+                await relaunched.disable(client: client, expectedOwnerID: owner)
+                XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }.last, "DELETE")
+            }
+        }
+    }
+
+    @MainActor
     func testPreChatWaitsForInFlightSnapshotPutBeforeCalendarRead() async throws {
         let now = Date()
         var ownerCalendar = Calendar(identifier: .gregorian)
@@ -4051,6 +4456,8 @@ extension APIClientRetryTests {
                 XCTAssertTrue(coordinator.statusMessage?.contains("another iPhone") == true)
             } else {
                 XCTAssertFalse(coordinator.isSharingEnabled)
+                XCTAssertFalse(coordinator.requiresPermissionReview,
+                               "A verified server tombstone clears the pause once its local state is saved")
                 XCTAssertTrue(coordinator.statusMessage?.contains("already removed") == true)
             }
             if authoritative.enabled {
@@ -4090,7 +4497,7 @@ extension APIClientRetryTests {
         StubURLProtocol.prime([], paths: [
             "/api/mobile/v1/calendars": [
                 .success(status: 200, body: try phoneCalendarRead(nil, timeZone: "Pacific/Honolulu")),
-                .success(status: 200, body: try phoneCalendarMutation(enabled)),
+                .calendarConfigureAcknowledgement(status: 200, body: try phoneCalendarMutation(enabled)),
                 .success(status: 200, body: try phoneCalendarMutation(enabled))
             ]
         ])

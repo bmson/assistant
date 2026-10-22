@@ -212,6 +212,13 @@ final class PhoneCalendarSharingCoordinator {
             localRecord = recordStore.load(scope: scope)
             if var record = localRecord {
                 if Self.permissionPauseIsStored(scope: scope) { record.uploadsPausedForPermissionReview = true }
+                // A confirmed disabled server state makes an old local pause
+                // irrelevant once no configure or removal is still pending.
+                if read.state?.enabled != true, record.pendingMutation == nil,
+                   record.pendingRevocation == nil {
+                    record.uploadsPausedForPermissionReview = false
+                    Self.storePermissionPause(false, scope: scope)
+                }
                 if access != .fullAccess, read.state?.enabled == true,
                    read.state?.publisherId == record.publisherId {
                     record.uploadsPausedForPermissionReview = true
@@ -225,6 +232,7 @@ final class PhoneCalendarSharingCoordinator {
                 localRecord = record
             }
             hasPendingRevocation = localRecord?.pendingRevocation != nil
+            _ = retireStaleSamePublisherRevocation(scope: scope)
             if await settlePendingRevocation(client: client, revision: revision) { return }
             await settlePendingMutation(client: client, revision: revision)
             guard revision == requestRevision else { return }
@@ -307,10 +315,25 @@ final class PhoneCalendarSharingCoordinator {
             effectiveCommand, ownerId: expectedOwnerID, publisherId: record.publisherId, expectedGeneration: record.generation,
             mutationId: mutationID, calendars: reviewedCalendars
         )
+        let changingExistingRoster = remote?.enabled == true && remote?.publisherId == record.publisherId
+        // Fence off the prior roster before changing its durable selection. If
+        // the protected record write fails, foreground refresh and relaunch
+        // must not silently resume uploads of the roster the user just changed.
+        if changingExistingRoster { Self.storePermissionPause(true, scope: scope) }
         record.pendingMutation = PendingPhoneCalendarMutation(body: body, baselineGeneration: record.generation)
         record.pendingRevocation = nil
         guard recordStore.save(record, scope: scope) else {
-            errorMessage = "This iPhone couldn’t save the pending sharing change securely. No server change was sent."
+            if changingExistingRoster {
+                record.pendingMutation = nil
+                record.uploadsPausedForPermissionReview = true
+                record.lastState = remote
+                localRecord = record
+                requestRevision += 1
+                statusMessage = "Uploads are paused. Review the selected calendars and confirm sharing before uploads resume."
+                errorMessage = "This iPhone couldn’t save the calendar selection securely. No server change was sent; the previous snapshot may remain available until removal is confirmed."
+            } else {
+                errorMessage = "This iPhone couldn’t save the pending sharing change securely. No server change was sent."
+            }
             return
         }
         Self.storePermissionPause(false, scope: scope)
@@ -340,9 +363,11 @@ final class PhoneCalendarSharingCoordinator {
             return
         }
         if localRecord?.pendingRevocation != nil {
-            hasPendingRevocation = true
-            await sendRevocation(client: client, scope: scope)
-            return
+            if !retireStaleSamePublisherRevocation(scope: scope) {
+                hasPendingRevocation = true
+                await sendRevocation(client: client, scope: scope)
+                return
+            }
         }
         let state = serverState
         var record = localRecord ?? PhoneCalendarSharingLocalRecord(
@@ -350,8 +375,14 @@ final class PhoneCalendarSharingCoordinator {
             generation: state?.generation ?? 0, pendingMutation: nil, pendingRevocation: nil,
             lastRead: serverRead, lastState: state
         )
-        let canceledMutationID = record.pendingMutation?.body.mutationId
-        let baseGeneration = record.pendingMutation?.baselineGeneration ?? state?.generation ?? record.generation
+        let previousPendingMutation = record.pendingMutation
+        let canceledMutationID = previousPendingMutation?.body.mutationId
+        // The pending request may be stale after a server-side CAS conflict
+        // whose new fence could not be written to secure storage. Stop must
+        // use the authoritative generation while retaining the mutation ID
+        // needed to cancel an initial POST whose outcome is still unknown.
+        let baseGeneration = max(record.pendingMutation?.baselineGeneration ?? 0,
+                                 state?.generation ?? 0, record.generation)
         let tombstoneGeneration = max(baseGeneration + 1, (state?.generation ?? baseGeneration) + 1)
         let revoke = PendingPhoneCalendarRevocation(
             baseURL: baseURL, ownerId: ownerID, ownerEmail: read.ownerEmail,
@@ -360,11 +391,24 @@ final class PhoneCalendarSharingCoordinator {
         )
         record.pendingRevocation = revoke
         record.pendingMutation = nil
+        record.uploadsPausedForPermissionReview = true
+        // Local stop takes effect even if the Keychain update fails. The
+        // installation-scoped defaults fence also survives coordinator restart.
+        Self.storePermissionPause(true, scope: scope)
+        requestRevision += 1
+        localRecord = record
         guard recordStore.save(record, scope: scope) else {
-            errorMessage = "This iPhone couldn’t save the removal request securely. No server change was sent."
+            record.pendingRevocation = nil
+            // Keep the initial configure token in memory when its POST may
+            // still be in flight. The durable pause fence prevents replay,
+            // while retaining the token lets a later Stop cancel a late commit.
+            record.pendingMutation = previousPendingMutation
+            localRecord = record
+            hasPendingRevocation = false
+            statusMessage = "Uploads are paused. The removal request wasn’t saved; tap Stop sharing to retry."
+            errorMessage = "The server hasn’t confirmed removal. The uploaded snapshot may remain available until removal is confirmed."
             return
         }
-        requestRevision += 1
         localRecord = record
         hasPendingRevocation = true
         statusMessage = "Calendar sharing is queued for removal."
@@ -460,11 +504,13 @@ final class PhoneCalendarSharingCoordinator {
         }
         let ownerID = activeOwnerID
         let baseURL = activeBaseURL
+        let revision = requestRevision
         beginWork()
         defer { endWork() }
         do {
             let result = try await client.configurePhoneCalendarSharing(pending.body)
-            guard activeScope == scope, activeOwnerID == ownerID, activeBaseURL == baseURL,
+            guard requestRevision == revision,
+                  activeScope == scope, activeOwnerID == ownerID, activeBaseURL == baseURL,
                   serverRead?.ownerId == pending.body.ownerId,
                   localRecord?.pendingMutation?.body.mutationId == pending.body.mutationId,
                   localRecord?.pendingRevocation == nil else { return }
@@ -473,7 +519,8 @@ final class PhoneCalendarSharingCoordinator {
                 return
             }
             serverState = result.state
-            if result.ok || result.state.mutationId == pending.body.mutationId {
+            if let mutationID = pending.body.mutationId, !mutationID.isEmpty,
+               result.state.mutationId == mutationID {
                 record.generation = result.state.generation
                 record.pendingMutation = nil
                 record.uploadsPausedForPermissionReview = false
@@ -487,14 +534,25 @@ final class PhoneCalendarSharingCoordinator {
             } else {
                 record.generation = result.state.generation
                 record.pendingMutation = nil
+                record.uploadsPausedForPermissionReview = true
                 record.lastState = result.state
                 if var cachedRead = record.lastRead { cachedRead.state = result.state; record.lastRead = cachedRead }
                 localRecord = record
-                _ = recordStore.save(record, scope: scope)
-                errorMessage = "Calendar sharing changed on the server. Review the current state before trying again."
+                // Persist the independent defaults fence before the Keychain
+                // record update. Even if secure storage fails, a later refresh
+                // must not publish the authoritative remote roster until the
+                // user explicitly reviews and confirms the selection.
+                Self.storePermissionPause(true, scope: scope)
+                if !recordStore.save(record, scope: scope) {
+                    errorMessage = "Calendar sharing changed on the server. Uploads remain paused while this iPhone’s review state is saved securely."
+                } else {
+                    errorMessage = "Calendar sharing changed on the server. Review the current calendars and confirm before uploads resume."
+                }
+                statusMessage = "Uploads are paused until you review the selected calendars on this iPhone."
             }
         } catch {
-            guard activeScope == scope, activeOwnerID == ownerID, activeBaseURL == baseURL,
+            guard requestRevision == revision,
+                  activeScope == scope, activeOwnerID == ownerID, activeBaseURL == baseURL,
                   localRecord?.pendingMutation?.body.mutationId == pending.body.mutationId,
                   localRecord?.pendingRevocation == nil else { return }
             errorMessage = "The sharing change hasn’t been confirmed. It will be checked before another update."
@@ -530,15 +588,36 @@ final class PhoneCalendarSharingCoordinator {
                     record.generation = result.state.generation
                     record.pendingRevocation = nil
                     record.pendingMutation = nil
+                    record.uploadsPausedForPermissionReview = result.state.enabled
                     record.lastState = result.state
                     if var cachedRead = record.lastRead { cachedRead.state = result.state; record.lastRead = cachedRead }
                     localRecord = record
-                    _ = recordStore.save(record, scope: scope)
+                    let saved = recordStore.save(record, scope: scope)
+                    if !result.state.enabled, saved { Self.storePermissionPause(false, scope: scope) }
                     hasPendingRevocation = false
                     statusMessage = result.state.enabled
                         ? "This iPhone’s removal request was superseded. Calendar sharing is still active from another iPhone."
                         : "The server already removed the shared snapshot. Earlier chat messages remain."
                     errorMessage = nil
+                    return
+                }
+                if result.state.enabled, result.state.publisherId == pending.publisherId,
+                   result.state.generation > pending.expectedGeneration {
+                    // The same publisher changed after this tombstone's CAS
+                    // baseline. Retire the stale request and keep uploads
+                    // paused; the user can explicitly Stop again against the
+                    // newly verified generation.
+                    record.generation = result.state.generation
+                    record.pendingRevocation = nil
+                    record.uploadsPausedForPermissionReview = true
+                    record.lastState = result.state
+                    if var cachedRead = record.lastRead { cachedRead.state = result.state; record.lastRead = cachedRead }
+                    localRecord = record
+                    Self.storePermissionPause(true, scope: scope)
+                    _ = recordStore.save(record, scope: scope)
+                    hasPendingRevocation = false
+                    statusMessage = "Uploads are paused. The server calendar changed while removal was pending; tap Stop sharing again to remove the current snapshot."
+                    errorMessage = "The current snapshot remains available until removal is confirmed."
                     return
                 }
                 errorMessage = "The server has not confirmed calendar removal yet. The removal request is still saved."
@@ -547,10 +626,13 @@ final class PhoneCalendarSharingCoordinator {
             record.generation = result.state.generation
             record.pendingRevocation = nil
             record.pendingMutation = nil
+            record.uploadsPausedForPermissionReview = false
             record.lastState = result.state
             if var cachedRead = record.lastRead { cachedRead.state = result.state; record.lastRead = cachedRead }
             localRecord = record
-            _ = recordStore.save(record, scope: scope)
+            if recordStore.save(record, scope: scope) {
+                Self.storePermissionPause(false, scope: scope)
+            }
             hasPendingRevocation = false
             statusMessage = "Calendar sharing is off. The uploaded snapshot was removed. Earlier chat messages remain."
             errorMessage = nil
@@ -572,6 +654,35 @@ final class PhoneCalendarSharingCoordinator {
             return state.publisherId != nil && state.publisherId != pending.publisherId
         }
         return state.publisherId == nil && state.consentVersion == 0
+    }
+
+    /// A verified same-publisher generation advance makes a saved DELETE
+    /// stale. Retire it while preserving the pause, so the user can explicitly
+    /// stop against the current generation without an automatic retry loop.
+    @discardableResult
+    private func retireStaleSamePublisherRevocation(scope: String) -> Bool {
+        guard var record = localRecord, let pending = record.pendingRevocation,
+              pending.baseURL == activeBaseURL, pending.ownerId == activeOwnerID,
+              pending.ownerEmail.caseInsensitiveCompare(serverRead?.ownerEmail ?? "") == .orderedSame,
+              let state = serverState, state.ownerId == pending.ownerId,
+              state.enabled, state.publisherId == pending.publisherId,
+              !(state.generation == pending.expectedGeneration + 1
+                && pending.cancelPendingMutationId?.isEmpty == false
+                && state.mutationId == pending.cancelPendingMutationId),
+              state.generation > pending.expectedGeneration else { return false }
+        record.generation = state.generation
+        record.pendingRevocation = nil
+        record.pendingMutation = nil
+        record.uploadsPausedForPermissionReview = true
+        record.lastState = state
+        if var cachedRead = record.lastRead { cachedRead.state = state; record.lastRead = cachedRead }
+        localRecord = record
+        hasPendingRevocation = false
+        Self.storePermissionPause(true, scope: scope)
+        _ = recordStore.save(record, scope: scope)
+        statusMessage = "Uploads are paused. The server calendar changed while removal was pending; tap Stop sharing again to remove the current snapshot."
+        errorMessage = "The current snapshot remains available until removal is confirmed."
+        return true
     }
 
     private func publishSnapshot(client: APIClient, revision: Int) async {
