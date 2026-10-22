@@ -257,7 +257,7 @@ export function calendarAgendaCards(input: {
               : '',
           status === 'cancelled' ? 'Cancelled' : '',
           event.windowMembership === 'source-date-only'
-            ? 'Date could not be verified in the requested window.'
+            ? `Date could not be verified in the requested window.${validDate(text(event.start)) ? ` Source date: ${text(event.start)}${validDate(text(event.end)) ? `; ends ${text(event.end)} (exclusive)` : ''}.${!validZone(event.calendarTimeZone) ? ' Calendar time zone unavailable.' : ''}` : ''}`
             : '',
         ]
           .filter(Boolean)

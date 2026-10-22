@@ -103,4 +103,16 @@ describe('deterministic calendar agenda integration', () => {
     });
     expect(cards.map((card) => card.kind)).toEqual(['calendar-event']);
   });
+  it('retains source civil dates for an all-day event without a source time zone', () => {
+    const cards = responseCardsForFinal({
+      evidence: [evidence([{ ...event(1), start: '2026-10-23', end: '2026-10-25', allDay: true }])],
+      readRequest: request,
+      requestText: ownerText,
+    });
+    expect(cards[0]).toMatchObject({ complete: false, date: 'Dates not verified' });
+    const payload = JSON.stringify(cards);
+    expect(payload).toContain('Source date: 2026-10-23');
+    expect(payload).toContain('ends 2026-10-25 (exclusive)');
+    expect(payload).toContain('Calendar time zone unavailable');
+  });
 });

@@ -12,7 +12,9 @@ export function requestedOwnerCalendarScope(text: string): OwnerCalendarScope | 
       text,
     );
   const proper =
-    /\b([\p{Lu}][\p{L}\p{N}'’&.-]*(?:\s+[\p{Lu}][\p{L}\p{N}'’&.-]*){0,3})\s+calendar\b/u.exec(text);
+    /\b([\p{Lu}][\p{L}\p{N}'’&.-]*(?:\s+[\p{L}\p{N}][\p{L}\p{N}'’&.-]*){0,3})\s+calendar\b/u.exec(
+      text,
+    );
   const work = /\bwork\s+calendar\b/i.exec(text);
   const candidates = [
     quoted ? { match: quoted, name: quoted[1], quoted: true } : undefined,
@@ -23,7 +25,7 @@ export function requestedOwnerCalendarScope(text: string): OwnerCalendarScope | 
     work ? { match: work, name: work[0].replace(/\s+calendar$/i, ''), quoted: false } : undefined,
   ];
   const stopWords =
-    /^(?:what|where|when|who|which|is|on|in|for|next|this|week|today|tomorrow|plan|before|after|editing|edit|and|with|from|to|review|check|show|search|find|list|booking|emails?|gmail|mail|trip|flight|hotel)$/i;
+    /^(?:my|our|the|all|every|calendar|what|where|when|who|which|is|on|in|if|source|events?|for|next|this|week|today|tomorrow|plan|before|after|editing|edit|and|with|from|to|review|check|show|search|find|list|booking|emails?|gmail|mail|trip|flight|hotel)$/i;
   for (const candidate of candidates) {
     if (!candidate) continue;
     const words = candidate.name?.trim().split(/\s+/u) ?? [];
@@ -31,7 +33,6 @@ export function requestedOwnerCalendarScope(text: string): OwnerCalendarScope | 
       words.shift();
     if (
       !candidate.name?.trim() ||
-      /^(?:my|our|the|all|every)$/i.test(candidate.name.trim()) ||
       (!candidate.quoted && words.some((word) => stopWords.test(word)))
     )
       continue;

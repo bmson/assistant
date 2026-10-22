@@ -393,7 +393,9 @@ describe('named saved skill use during a personal read', () => {
       expect(cards).toContain('Calendar overlap does not confirm attendance.');
       expect(final).toContain('Next step:');
       expect(final).toContain('attend both');
-      expect(final).not.toContain('I moved');
+      expect(final + JSON.stringify(f.state.pendingFinal?.responseCards ?? [])).not.toContain(
+        'I moved',
+      );
       if (condition === 'literal replacement token advice')
         expect(final).toContain('Next step: Check whether you need to attend both $&.');
       expect(final.match(/^Next step:/gm)).toHaveLength(1);
@@ -611,8 +613,12 @@ describe('named saved skill use during a personal read', () => {
     expect(cards).toContain('Possible overlap: 10:05 AM – 11:25 AM');
     expect(cards).toContain('Calendar overlap does not confirm attendance.');
     expect(cards).toContain('https://calendar.google.com/event?eid=fixture-flight');
-    expect(final).not.toContain('1:15 AM');
-    expect(final).not.toContain('back-to-back');
+    expect(final + JSON.stringify(f.state.pendingFinal?.responseCards ?? [])).not.toContain(
+      '1:15 AM',
+    );
+    expect(final + JSON.stringify(f.state.pendingFinal?.responseCards ?? [])).not.toContain(
+      'back-to-back',
+    );
     expect(final).toContain('Next step: Check whether you need to attend both.');
     expect(final.match(/^Next step:/gm)).toHaveLength(1);
     expect(f.router.object).toHaveBeenCalledOnce();
@@ -767,7 +773,9 @@ describe('named saved skill use during a personal read', () => {
         expect(final?.text).not.toContain(`Next step: ${proposedAdvice}`);
       }
       expect(final?.text.match(/^Next step:/gm)).toHaveLength(1);
-      expect(final?.text).not.toMatch(/Meridian Hall|15:00|you are free|I cancelled/);
+      expect(`${final?.text ?? ''} ${JSON.stringify(final?.responseCards ?? [])}`).not.toMatch(
+        /Meridian Hall|15:00|you are free|I cancelled/,
+      );
       if (condition.startsWith('missing receipt') || condition === 'changed advice')
         expect(f.router.object).not.toHaveBeenCalled();
       expect(final?.responseCards).toEqual(
