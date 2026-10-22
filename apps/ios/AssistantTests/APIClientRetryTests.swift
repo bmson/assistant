@@ -3603,11 +3603,12 @@ private final class PhoneCalendarSharingMemoryRecordStore: PhoneCalendarSharingR
 @MainActor
 private final class PhoneCalendarSharingFixtureSource: PhoneCalendarSource {
     var access: PhoneCalendarAccess = .fullAccess
+    var availableCalendars: [PhoneCalendar] = [.init(id: "work", title: "Work", account: "Personal")]
     var sharedEvents: [PhoneCalendarShareEvent] = []
     private(set) var shareQueryCount = 0
 
     func requestAccess() async throws -> Bool { true }
-    func calendars() -> [PhoneCalendar] { [.init(id: "work", title: "Work", account: "Personal")] }
+    func calendars() -> [PhoneCalendar] { availableCalendars }
     func events(in interval: DateInterval, calendarIDs: Set<String>) -> [PhoneCalendarEvent] { [] }
     func shareEvents(in interval: DateInterval, calendarIDs: Set<String>, verifiedOwnerEmail: String) -> [PhoneCalendarShareEvent] {
         shareQueryCount += 1
@@ -3941,6 +3942,7 @@ extension APIClientRetryTests {
             ]
         ])
         let source = PhoneCalendarSharingFixtureSource()
+        source.availableCalendars.append(.init(id: "personal", title: "Personal", account: "Personal"))
         let coordinator = PhoneCalendarSharingCoordinator(source: source, recordStore: store)
         let client = makeClient()
         await coordinator.refresh(client: client, expectedOwnerID: "owner-1", publishIfEnabled: false)
@@ -5928,15 +5930,26 @@ extension APIClientRetryTests {
             parts: [.init(type: "text", text: "This belongs to the old thread")])
         let updates = ChatUpdates(taskStatus: nil, messages: [oldReply], refreshed: [], superseded: nil,
             nextCursor: "old-thread-cursor", hasMore: false, activity: [])
-        StubURLProtocol.prime([
-            .delayed(after: 0.05, status: 200, body: try JSONEncoder().encode(updates)),
-            .success(status: 200, body: try JSONEncoder().encode(notificationConversation(notificationSideID))),
+        // Foreground calendar sync runs independently of this held chat read.
+        // Keep response bodies and the start barrier tied to their endpoints.
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat/status": [
+                .held(status: 200, body: try JSONEncoder().encode(updates))
+            ],
+            "/api/mobile/v1/chats/\(notificationSideID)": [
+                .success(status: 200, body: try JSONEncoder().encode(notificationConversation(notificationSideID)))
+            ],
         ])
         // This separate task deliberately remains uncancelled. The result
         // fence must protect a changed thread even if cancellation loses.
         let heldRead = Task { await model.refreshIdleConversation() }
-        while StubURLProtocol.attempts.isEmpty { await Task.yield() }
+        let heldDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/chat/status"), ContinuousClock.now < heldDeadline {
+            await Task.yield()
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/chat/status"))
         await model.openNotificationDestination(try notificationDestination(conversation: notificationSideID, owner: notificationOwner))
+        StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/chat/status")
         let changed = await heldRead.value
         XCTAssertNil(changed)
         XCTAssertEqual(model.conversationId, notificationSideID)
@@ -5944,10 +5957,13 @@ extension APIClientRetryTests {
 
         let quiet = ChatUpdates(taskStatus: nil, messages: [], refreshed: [], superseded: nil,
             nextCursor: nil, hasMore: false, activity: [])
-        StubURLProtocol.prime([.success(status: 200, body: try JSONEncoder().encode(quiet))])
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat/status": [.success(status: 200, body: try JSONEncoder().encode(quiet))]
+        ])
         let currentChanged = await model.refreshIdleConversation()
         XCTAssertEqual(currentChanged, false)
-        let components = try XCTUnwrap(URLComponents(url: XCTUnwrap(StubURLProtocol.urls.first), resolvingAgainstBaseURL: false))
+        let statusURL = try XCTUnwrap(StubURLProtocol.urls.first(where: { $0.path == "/api/mobile/v1/chat/status" }))
+        let components = try XCTUnwrap(URLComponents(url: statusURL, resolvingAgainstBaseURL: false))
         XCTAssertEqual(components.queryItems?.first(where: { $0.name == "conversationId" })?.value, notificationSideID)
         XCTAssertNil(components.queryItems?.first(where: { $0.name == "cursor" }), "An old poll cannot replace the new thread's cursor")
     }
