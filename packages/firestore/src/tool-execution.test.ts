@@ -253,7 +253,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
     await store.doc('privacyErasureJobs', 'owner').delete();
   });
 
-  it('linearizes a concurrent snapshot read with a calendar selection change', async () => {
+  it('returns a coherent snapshot during a concurrent selection scheduling smoke test', async () => {
     const ownerId = 'owner';
     const publisherId = 'device-publisher';
     const now = store.now();
@@ -288,6 +288,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
       now,
     );
 
+    // Promise.all exercises contention; either transaction may linearize first.
     const [changed, observed] = await Promise.all([
       repository.phoneCalendarSharing?.apply(
         ownerId,
