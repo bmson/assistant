@@ -237,7 +237,7 @@ describe('calendarAgendaCards', () => {
     expect(overlapSection?.overlaps).toMatchObject([
       {
         detail:
-          'overnight (Calendar) · overlap (Calendar). Your attendance is not confirmed for both events.',
+          'overnight (Calendar) · overlap (Calendar). Your attendance at overnight (Calendar) and overlap (Calendar) isn’t confirmed.',
       },
     ]);
   });
@@ -505,8 +505,41 @@ describe('calendarAgendaCards', () => {
       'You accepted both invitations, and the times overlap.',
     );
     expect(JSON.stringify(overlap?.overlaps)).toContain(
-      'Your attendance is not confirmed for both events.',
+      'Your attendance at unknown-1 (Calendar) and unknown-2 (Calendar) isn’t confirmed.',
     );
+  });
+
+  it('names verified and unconfirmed attendance per event without choosing a disputed source status', () => {
+    const accepted = { status: 'accepted', identityVerified: true, basis: 'attendee-email' };
+    const tentative = { status: 'tentative', identityVerified: true, basis: 'attendee-email' };
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: [
+        event('team-planning', '2026-10-22T09:00:00Z', '2026-10-22T10:00:00Z', {
+          title: 'Planning',
+          calendar: 'Team',
+          ownerParticipation: accepted,
+        }),
+        event('family-planning', '2026-10-22T09:30:00Z', '2026-10-22T10:30:00Z', {
+          title: 'Planning',
+          calendar: 'Family',
+          calendarPurpose: 'commitments',
+          sourceVariants: [
+            { calendar: 'Family', blocksTime: true, ownerParticipation: accepted },
+            { calendar: 'Family copy', blocksTime: true, ownerParticipation: tentative },
+          ],
+        }),
+      ],
+      request: request({ timeZone: 'UTC' }),
+    });
+    const overlap = ((cards[0]?.sections ?? []) as Array<Record<string, unknown>>).find(
+      (section) => section.overlaps,
+    );
+
+    expect(JSON.stringify(overlap?.overlaps)).toContain(
+      'Your calendar settings mark these as commitments. You accepted Planning (Team). Your attendance at Planning (Family, Family copy) isn’t confirmed.',
+    );
+    expect(JSON.stringify(overlap?.overlaps)).not.toContain('You accepted both invitations');
   });
 
   it('groups timed source instants in the owner display zone despite source-zone differences', () => {
@@ -553,6 +586,61 @@ describe('calendarAgendaCards', () => {
       },
     ]);
     expect(JSON.stringify(sections)).not.toContain('differ in time zone, time');
+  });
+
+  it('does not claim same-time meetings across zones without valid intervals and zones', () => {
+    const invalidSources: Record<string, unknown>[] = [
+      {
+        calendarId: 'family',
+        eventId: 'copy',
+        end: '2026-10-22T19:00:00-07:00',
+        allDay: false,
+        calendarTimeZone: 'America/Los_Angeles',
+      },
+      {
+        calendarId: 'family',
+        eventId: 'copy',
+        start: '2026-10-22',
+        end: '2026-10-23',
+        allDay: false,
+        calendarTimeZone: 'America/Los_Angeles',
+      },
+      {
+        calendarId: 'family',
+        eventId: 'copy',
+        start: '2026-10-22T18:00:00-07:00',
+        end: '2026-10-22T19:00:00-07:00',
+        allDay: false,
+        calendarTimeZone: 'Mars/Olympus',
+      },
+    ];
+
+    for (const source of invalidSources) {
+      const cards = calendarAgendaCards({
+        evidence: [evidence()],
+        events: [
+          event('source-zone-event', '2026-10-23T01:00:00Z', '2026-10-23T02:00:00Z', {
+            title: 'Late meeting',
+            sourceVariants: [
+              {
+                calendarId: 'work',
+                eventId: 'event',
+                start: '2026-10-23T01:00:00Z',
+                end: '2026-10-23T02:00:00Z',
+                allDay: false,
+                calendarTimeZone: 'UTC',
+              },
+              source,
+            ],
+          }),
+        ],
+        request: request(),
+      });
+
+      expect(JSON.stringify(cards[0]?.sections)).not.toContain(
+        'same meeting time in different calendar time zones',
+      );
+    }
   });
 
   it('separates probable phone mirrors and uses explicit arrival guidance', () => {

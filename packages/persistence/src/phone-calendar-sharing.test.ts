@@ -250,7 +250,7 @@ describe('selected phone calendar sharing authority', () => {
     expect(note).toContain('Captured on the sharing iPhone: Oct 22, 2026, 10:00 AM PDT.');
     expect(note).toContain('Last shared with Assistant: Oct 22, 2026, 10:30 AM PDT.');
     expect(note).toContain(
-      'Open iPhone calendars in Assistant on the sharing iPhone; choose Sync now.',
+      'On the iPhone where you enabled calendar sharing for this Assistant account, open iPhone calendars and choose Sync now. That phone can refresh the family calendars it shares.',
     );
     expect(note).toContain('Missing coverage does not show a free or empty calendar.');
     expect(note).not.toContain('last sent date window');

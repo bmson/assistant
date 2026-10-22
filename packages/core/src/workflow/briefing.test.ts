@@ -1435,8 +1435,18 @@ describe('runBriefing — richer inputs', () => {
       db,
       router,
       calendarReader: calendarReturning([
-        { summary: `${MARKER} Dentist`, start: at(9), end: at(10) },
-        { summary: `${MARKER} Interview`, start: at(9.5), end: at(11) },
+        {
+          summary: `${MARKER} Dentist`,
+          start: at(9),
+          end: at(10),
+          blocksTime: true,
+          ownerParticipation: {
+            status: 'accepted',
+            identityVerified: true,
+            basis: 'attendee-email',
+          },
+        },
+        { summary: `${MARKER} Interview`, start: at(9.5), end: at(11), blocksTime: true },
       ]),
     });
     expect(result.calendarConflicts).toBe(1);
@@ -1455,6 +1465,9 @@ describe('runBriefing — richer inputs', () => {
           data: expect.objectContaining({ kind: 'calendar-conflicts' }),
         }),
       ]),
+    );
+    expect(JSON.stringify(posted?.parts)).toContain(
+      `You accepted ${MARKER} Dentist (primary). Your attendance at ${MARKER} Interview (primary) isn’t confirmed.`,
     );
     // The briefing card leads, and its schedule marks both overlapping events.
     const briefing = ((posted?.parts ?? []) as Array<{ data?: Record<string, unknown> }>).find(

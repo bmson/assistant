@@ -215,6 +215,29 @@ export function classifyCalendarOverlap(
   return 'attendance_unconfirmed';
 }
 
+/** Describe each side only when the human attendee's response is verified. */
+export function calendarOverlapAttendanceNote(
+  left: Parameters<typeof verifiedOwnerParticipation>[0],
+  right: Parameters<typeof verifiedOwnerParticipation>[0],
+  leftLabel: string,
+  rightLabel: string,
+  classification?: CalendarOverlapClassification,
+): string {
+  const leftParticipation = verifiedOwnerParticipation(left);
+  const rightParticipation = verifiedOwnerParticipation(right);
+  const settingsPrefix =
+    classification === 'commitments_policy_overlap'
+      ? 'Your calendar settings mark these as commitments. '
+      : '';
+  if (leftParticipation === 'accepted' && rightParticipation === 'accepted')
+    return 'You accepted both invitations, and the times overlap.';
+  if (leftParticipation === 'accepted')
+    return `${settingsPrefix}You accepted ${leftLabel}. Your attendance at ${rightLabel} isn’t confirmed.`;
+  if (rightParticipation === 'accepted')
+    return `${settingsPrefix}You accepted ${rightLabel}. Your attendance at ${leftLabel} isn’t confirmed.`;
+  return `${settingsPrefix}Your attendance at ${leftLabel} and ${rightLabel} isn’t confirmed.`;
+}
+
 /** Advisory only: independently reconcile a source's explicit early-arrival rule. */
 export function calendarArrivalLead(
   left: BriefingCalendarEvent,

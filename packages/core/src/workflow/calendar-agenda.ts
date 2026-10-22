@@ -3,6 +3,7 @@ import { classifyCalendarOccurrence } from '@assistant/persistence';
 import type { BriefingCalendarEvent } from './briefing.js';
 import {
   calendarArrivalLead,
+  calendarOverlapAttendanceNote,
   calendarRelationship,
   classifyCalendarOverlap,
   parseCalendarOwnerParticipation,
@@ -376,7 +377,23 @@ function sourceDifferences(
     })
     .join(' · ');
   const sameTimedMeetingInDifferentZones =
-    !timeDiffers && timeZoneDisplayDiffers && sources.every((source) => source.allDay === false);
+    !timeDiffers &&
+    timeZoneDisplayDiffers &&
+    sources.every((source) => {
+      const start = text(source.start);
+      const end = text(source.end);
+      const startInstant = Date.parse(start);
+      const endInstant = Date.parse(end);
+      return (
+        source.allDay === false &&
+        INSTANT.test(start) &&
+        INSTANT.test(end) &&
+        Number.isFinite(startInstant) &&
+        Number.isFinite(endInstant) &&
+        endInstant > startInstant &&
+        Boolean(validZone(source.calendarTimeZone))
+      );
+    });
   return {
     fields: differing.map((field) => field.label),
     detail: sameTimedMeetingInDifferentZones
@@ -569,15 +586,18 @@ function calendarPairAttentionByDay(
             : classification === 'commitments_policy_overlap'
               ? `Possible commitments overlap: ${label}`
               : `Possible overlap: ${label}`;
-        const qualification =
-          classification === 'personal_commitment_conflict'
-            ? 'You accepted both invitations, and the times overlap.'
-            : classification === 'commitments_policy_overlap'
-              ? 'Your calendar settings mark these as commitments; acceptance is not confirmed for both.'
-              : 'Your attendance is not confirmed for both events.';
+        const leftLabel = `${text(left.event.title)} (${sourceNames(left.sources).join(', ')})`;
+        const rightLabel = `${text(right.event.title)} (${sourceNames(right.sources).join(', ')})`;
+        const qualification = calendarOverlapAttendanceNote(
+          left.event,
+          right.event,
+          leftLabel,
+          rightLabel,
+          classification,
+        );
         attention.conflicts.push({
           title: overlapTitle,
-          detail: `${text(left.event.title)} (${sourceNames(left.sources).join(', ')}) · ${text(right.event.title)} (${sourceNames(right.sources).join(', ')}). ${qualification}`,
+          detail: `${leftLabel} · ${rightLabel}. ${qualification}`,
           classification,
         });
       }

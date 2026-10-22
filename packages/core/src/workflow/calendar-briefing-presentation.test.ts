@@ -221,7 +221,9 @@ describe('calendar day and practical briefing fidelity', () => {
     );
 
     expect(response).toContain('You accepted both invitations, and the times overlap.');
-    expect(response).toContain('Whether you will attend both is unconfirmed.');
+    expect(response).toContain(
+      'You accepted Project review (Work). Your attendance at Shared hold (Shared) isn’t confirmed.',
+    );
     expect(response).toContain(
       'Some comparisons involve possible copies or entries whose attendance is unconfirmed.',
     );
@@ -858,6 +860,39 @@ describe('calendar day and practical briefing fidelity', () => {
     ).toHaveLength(1);
   });
 
+  it('does not imply hidden overlap pairs were classified after the detail cap', () => {
+    const compact = { ...request, compactCalendarBriefing: true };
+    const acceptedEvents = Array.from({ length: 15 }, (_, index) => ({
+      ...timed,
+      eventId: `accepted-${index}`,
+      summary: `Accepted appointment ${index}`,
+      ownerResponse: 'accepted',
+      links: link(`accepted-${index}`),
+    }));
+    const unconfirmedEvents = Array.from({ length: 2 }, (_, index) => ({
+      ...timed,
+      eventId: `unconfirmed-${index}`,
+      summary: `Unconfirmed appointment ${index}`,
+      start: '2026-10-15T11:00:00-07:00',
+      end: '2026-10-15T12:00:00-07:00',
+      calendar: 'Shared',
+      links: link(`unconfirmed-${index}`),
+    }));
+    const response = verifiedReadResponse(
+      compact,
+      evidence([...acceptedEvents, ...unconfirmedEvents], true, compact),
+    );
+
+    expect(response).toContain(
+      '- 106 calendar-entry pairs overlap in time; further pair details are not expanded.',
+    );
+    expect(response).toContain(
+      'Additional calendar-entry comparisons were not expanded; copy and attendance status were not verified for those pairs.',
+    );
+    expect(response).not.toContain('Some comparisons involve possible copies');
+    expect(response).not.toContain('Possible overlap **');
+  });
+
   it('checks appended practical advice without permitting fake free-time or executed actions', () => {
     const rows = evidence([timed]);
     const projection = verifiedReadResponse(request, rows);
@@ -985,7 +1020,9 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain(
       'Possible overlap: **Work · Conference hold** and **Work · Project review**',
     );
-    expect(response).toContain('Your attendance is not confirmed for both events.');
+    expect(response).toContain(
+      'Your attendance at Conference hold (Work) and Project review (Work) isn’t confirmed.',
+    );
   });
 });
 

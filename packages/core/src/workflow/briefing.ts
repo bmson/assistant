@@ -63,6 +63,7 @@ import {
 } from './briefing-card.js';
 import {
   type CalendarRelationship,
+  calendarOverlapAttendanceNote,
   calendarRelationship,
   canonicalOccurrenceGroups,
   classifyCalendarOverlap,
@@ -423,6 +424,30 @@ export type CalendarConflictResults = CalendarConflict[] & {
   totalCount: number;
   detailsOmitted: boolean;
 };
+
+function calendarConflictSideLabel(events: BriefingCalendarEvent[]): string {
+  return [
+    ...new Set(
+      events.map(
+        (event) =>
+          `${collapseWhitespace(event.summary) || '(untitled event)'} (${collapseWhitespace(event.calendar) || 'Calendar'})`,
+      ),
+    ),
+  ].join(', ');
+}
+
+function calendarConflictAttendanceNote(conflict: CalendarConflict): string {
+  const sideEvidence = (events: BriefingCalendarEvent[]) => ({
+    sourceVariants: events as unknown as Record<string, unknown>[],
+  });
+  return calendarOverlapAttendanceNote(
+    sideEvidence(conflict.a),
+    sideEvidence(conflict.b),
+    calendarConflictSideLabel(conflict.a),
+    calendarConflictSideLabel(conflict.b),
+    conflict.classification,
+  );
+}
 
 interface TimedCalendarEvent extends BriefingCalendarEvent {
   startMs: number;
@@ -1098,7 +1123,7 @@ export async function runBriefing(
         ...conflicts.map((c) =>
           c.sourceIdentityDisagreement
             ? `- ${c.a[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.a[0]?.summary ?? 'Untitled event')}" and ${c.b[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.b[0]?.summary ?? 'Untitled event')}" may be copies with different times. Assistant cannot confirm whether these are the same event or which time is current. Both entries stay visible; check each invitation.`
-            : `- ${c.a[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.a[0]?.summary ?? 'Untitled event')}" overlaps ${c.b[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.b[0]?.summary ?? 'Untitled event')}" (${localDateTime(c.overlapStart, agent.timezone)} to ${localDateTime(c.overlapEnd, agent.timezone)})${c.classification === 'personal_commitment_conflict' ? ' (you accepted both invitations, and the times overlap)' : c.classification === 'commitments_policy_overlap' ? ' (your calendar settings mark these as commitments; acceptance is not confirmed for both)' : ' (whether you will attend both is unconfirmed)'}`,
+            : `- ${c.a[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.a[0]?.summary ?? 'Untitled event')}" overlaps ${c.b[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.b[0]?.summary ?? 'Untitled event')}" (${localDateTime(c.overlapStart, agent.timezone)} to ${localDateTime(c.overlapEnd, agent.timezone)}). ${calendarConflictAttendanceNote(c)}`,
         ),
       );
     }
@@ -1431,11 +1456,7 @@ export async function runBriefing(
             ...(conflict.sourceIdentityDisagreement ? { sourceIdentityDisagreement: true } : {}),
             evidenceNote: conflict.sourceIdentityDisagreement
               ? 'Assistant cannot confirm whether these are the same event or which time is current. Both entries stay visible; check each invitation.'
-              : conflict.classification === 'personal_commitment_conflict'
-                ? 'You accepted both invitations, and the times overlap.'
-                : conflict.classification === 'commitments_policy_overlap'
-                  ? 'Your calendar settings mark these as commitments; acceptance is not confirmed for both.'
-                  : 'These calendar entries overlap; whether you will attend both is unconfirmed.',
+              : calendarConflictAttendanceNote(conflict),
             groups: [conflict.a, conflict.b].map((events) => ({
               events: events.map((event) => ({
                 id: event.eventId ?? `${event.calendar}-${event.start}-${event.summary}`,

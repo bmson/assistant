@@ -167,7 +167,9 @@ describe('executor calendar overview presentation', () => {
       expect(payload).toContain('Planning hold');
       expect(payload).toContain('Needs response');
       expect(payload).toContain('Possible overlap');
-      expect(payload).toContain('Calendar overlap does not confirm attendance.');
+      expect(payload).toContain(
+        'You accepted Project review (Work). Your attendance at Planning hold (Work) isn’t confirmed.',
+      );
       expect(payload).toContain('event?eid=overview-review');
       expect(payload).toContain('event?eid=overview-hold');
       const cardParts = assistant?.parts as

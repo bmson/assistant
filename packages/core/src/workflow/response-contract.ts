@@ -16,6 +16,7 @@ import {
 } from './calendar-read-window.js';
 import {
   calendarArrivalLead,
+  calendarOverlapAttendanceNote,
   calendarRelationship,
   classifyCalendarOverlap,
   parseCalendarOwnerParticipation,
@@ -1961,6 +1962,15 @@ function calendarOverlapSummary(
           : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
         const classification = classifyCalendarOverlap(left.event, right.event);
         if (classification !== 'personal_commitment_conflict') unconfirmedAttendanceCount += 1;
+        const leftLabel = `${left.projected.summary} (${left.projected.calendar || 'Calendar'})`;
+        const rightLabel = `${right.projected.summary} (${right.projected.calendar || 'Calendar'})`;
+        const attendanceNote = calendarOverlapAttendanceNote(
+          left.event,
+          right.event,
+          leftLabel,
+          rightLabel,
+          classification,
+        );
         const label =
           classification === 'personal_commitment_conflict'
             ? 'Your accepted commitments overlap'
@@ -1969,8 +1979,8 @@ function calendarOverlapSummary(
               : 'Possible overlap';
         notes.push(
           request.compactCalendarBriefing
-            ? `- ${label} **${overlapLabel}**: ${left.projected.calendar || 'Calendar'} · ${left.projected.summary} + ${right.projected.calendar || 'Calendar'} · ${right.projected.summary}.${classification === 'personal_commitment_conflict' ? ' You accepted both invitations, and the times overlap.' : classification === 'commitments_policy_overlap' ? ' Your calendar settings mark these as commitments; acceptance is not confirmed for both.' : ' Whether you will attend both is unconfirmed.'}`
-            : `- ${label}: **${left.projected.calendar || 'Calendar'} · ${left.projected.summary}** and **${right.projected.calendar || 'Calendar'} · ${right.projected.summary}**, ${overlapLabel}.${classification === 'personal_commitment_conflict' ? ' You accepted both invitations, and the times overlap.' : classification === 'commitments_policy_overlap' ? ' Your calendar settings mark these as commitments; acceptance is not confirmed for both.' : classification === 'attendance_unconfirmed' ? ' Your attendance is not confirmed for both events.' : ''}`,
+            ? `- ${label} **${overlapLabel}**: ${left.projected.calendar || 'Calendar'} · ${left.projected.summary} + ${right.projected.calendar || 'Calendar'} · ${right.projected.summary}. ${attendanceNote}`
+            : `- ${label}: **${left.projected.calendar || 'Calendar'} · ${left.projected.summary}** and **${right.projected.calendar || 'Calendar'} · ${right.projected.summary}**, ${overlapLabel}. ${attendanceNote}`,
         );
       }
     }
@@ -2006,6 +2016,10 @@ function calendarOverlapSummary(
   if (request.includeCalendarBriefing && result.length > 0 && unconfirmedAttendanceCount > 0)
     result.push(
       'Some comparisons involve possible copies or entries whose attendance is unconfirmed.',
+    );
+  if (request.includeCalendarBriefing && result.length > 0 && overlapPairCount > notes.length)
+    result.push(
+      'Additional calendar-entry comparisons were not expanded; copy and attendance status were not verified for those pairs.',
     );
   return result;
 }

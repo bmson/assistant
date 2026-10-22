@@ -267,7 +267,7 @@ export function phoneCalendarCoverage(
           note: [
             'iPhone calendar coverage is incomplete.',
             ...knownTimes,
-            'Phone calendars may have changed since the last shared snapshot. Open iPhone calendars in Assistant on the sharing iPhone; choose Sync now. Missing coverage does not show a free or empty calendar.',
+            'Phone calendars may have changed since the last shared snapshot. On the iPhone where you enabled calendar sharing for this Assistant account, open iPhone calendars and choose Sync now. That phone can refresh the family calendars it shares. Missing coverage does not show a free or empty calendar.',
           ].join(' '),
         }
       : {}),

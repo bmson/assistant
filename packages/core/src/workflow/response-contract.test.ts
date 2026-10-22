@@ -518,7 +518,9 @@ describe('response execution contract', () => {
     expect(response).toContain(
       'Possible overlap: **Work · Project review** and **Shared calendar · Planning hold**, Wed 14 Oct 11:00 AM–11:30 AM',
     );
-    expect(response).toContain('Your attendance is not confirmed for both events.');
+    expect(response).toContain(
+      'Your attendance at Project review (Work) and Planning hold (Shared calendar) isn’t confirmed.',
+    );
     expect(response).toContain('coverage was incomplete; unavailable: Shared calendar');
     expect(response).toContain('[Open event](https://calendar.google.com/event?eid=work)');
     expect(response).not.toContain('Scheduling conflict: **Project review**');
