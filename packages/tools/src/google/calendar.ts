@@ -510,7 +510,9 @@ async function collectEvents(
         byId.length > 0
           ? byId
           : available.filter(
-              (calendar) => calendar.name.normalize('NFKC').toLowerCase() === requested.normalize('NFKC').toLowerCase(),
+              (calendar) =>
+                calendar.name.normalize('NFKC').toLowerCase() ===
+                requested.normalize('NFKC').toLowerCase(),
             );
       if (matches.length === 1) {
         const match = matches[0];

@@ -20,6 +20,11 @@ import {
   requestedCalendarEventAnalysis,
 } from './calendar-event-analysis.js';
 import { type CalendarPlanOptions, requestedCalendarPlanOptions } from './calendar-plan-intent.js';
+import {
+  type OwnerCalendarScope,
+  ownerCalendarToolName,
+  requestedOwnerCalendarScope,
+} from './calendar-scope.js';
 import { requestedCardIntent } from './card-intent.js';
 import {
   compoundTripFetchTargets,
@@ -50,11 +55,6 @@ import {
 } from './family-birthday.js';
 import { detectFutureWatchIntent } from './future-watch-intent.js';
 import { requestedCalendarPerson } from './person-calendar.js';
-import {
-  ownerCalendarToolName,
-  requestedOwnerCalendarScope,
-  type OwnerCalendarScope,
-} from './calendar-scope.js';
 
 export type PersonalReadKind =
   | 'calendar'

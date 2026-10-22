@@ -803,10 +803,7 @@ function CalendarAgendaAttention({ section }: { section: Raw }) {
       <BriefingHeading>{str(section.title)}</BriefingHeading>
       {summaries.map((item) => (
         <p
-          key={
-            str(item.id) ||
-            JSON.stringify([str(item.title), str(item.detail), str(item.meta)])
-          }
+          key={str(item.id) || JSON.stringify([str(item.title), str(item.detail), str(item.meta)])}
           className="text-sm font-medium text-strong [overflow-wrap:anywhere]"
         >
           {str(item.title) && str(item.title) !== str(section.title) ? `${str(item.title)}. ` : ''}
@@ -869,13 +866,7 @@ function CalendarAgendaCard({ data }: { data: Raw }) {
           {sections.map((section) => {
             const key = str(section.id) || `${str(section.type)}:${str(section.title)}`;
             if (section.type === 'agenda')
-              return (
-                <CalendarAgendaSection
-                  key={key}
-                  section={section}
-                  date={str(data.date)}
-                />
-              );
+              return <CalendarAgendaSection key={key} section={section} date={str(data.date)} />;
             if (recs(section.overlaps).length)
               return <CalendarAgendaAttention key={key} section={section} />;
             return <BriefingList key={key} section={section} />;

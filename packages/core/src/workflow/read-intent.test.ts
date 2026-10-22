@@ -204,6 +204,40 @@ describe('detectPersonalReadRequest', () => {
     expect(nextRequiredReadTool(request, [calendar])).toBe('gmail.search');
   });
 
+  it('binds the named calendar child in an explicit paired-source read', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Check my Work calendar tomorrow and search my email for the Zendesk meeting invitation.',
+      ),
+      { now: new Date('2026-10-22T12:00:00.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    if (!request?.sourceReads) throw new Error('Expected paired source reads');
+    const calendarRequest = request.sourceReads.find(
+      (child) => child.explicitSource === 'calendar',
+    );
+    const mailRequest = request.sourceReads.find((child) => child.explicitSource === 'mail');
+    expect(calendarRequest?.calendarScope).toEqual({ name: 'Work' });
+    if (!calendarRequest || !mailRequest) throw new Error('Expected calendar and email children');
+
+    const mail: ReadToolEvidence = {
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      args: { query: mailRequest.mailQuery },
+      result: { results: [] },
+    };
+    expect(nextRequiredReadTool(request, [])).toBe('gmail.search');
+    expect(nextRequiredReadTool(request, [mail])).toBe('calendar.list_events');
+    const input = buildReadToolInput(request, 'calendar.list_events', [mail]);
+    expect(input?.calendarIds).toEqual(['Work']);
+    const calendar: ReadToolEvidence = {
+      toolName: 'calendar.list_events',
+      status: 'succeeded',
+      args: input,
+      result: { ok: true, complete: true, events: [], calendarsSearched: ['Work'] },
+    };
+    expect(nextRequiredReadTool(request, [mail, calendar])).toBeUndefined();
+  });
+
   it('does not widen an unknown or ambiguous named calendar after an unavailable result', () => {
     const request = detectPersonalReadRequest(turn('Check Zendesk calendar tomorrow.'), {
       now: new Date('2026-10-22T12:00:00.000Z'),
