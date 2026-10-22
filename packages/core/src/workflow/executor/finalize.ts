@@ -46,6 +46,7 @@ import {
   requestedPrivateArtifactIntent,
 } from '../artifact-intent.js';
 import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-import.js';
+import { calendarAgendaSummary } from '../calendar-agenda.js';
 import { CARD_NOT_BUILT, requestedCardIntent } from '../card-intent.js';
 import { responseCardSteps } from '../card-steps.js';
 import type { CompoundTripExtraction } from '../compound-trip-extraction.js';
@@ -670,6 +671,36 @@ export async function stageFinalResponse(
       }
     }
   }
+  // Primary agenda clients suppress the prose body. Keep checked guidance,
+  // skill receipts and unfinished-outcome notices inside the supported card.
+  const primaryAgenda = pending.responseCards?.find(
+    (card) => card.kind === 'briefing' && card.presentation === 'calendar-agenda',
+  );
+  if (primaryAgenda) {
+    const guidance = pending.text
+      .split(/\n+/)
+      .filter((line) =>
+        /^(?:Next step:|Saved skill “|I could not verify retrieval of the saved skill|This request is not fully completed\.)/.test(
+          line,
+        ),
+      );
+    if (guidance.length) {
+      const sections = Array.isArray(primaryAgenda.sections)
+        ? primaryAgenda.sections.filter(
+            (section) =>
+              !(section && typeof section === 'object' && section.title === 'Planning guidance'),
+          )
+        : [];
+      primaryAgenda.sections = [
+        ...sections,
+        {
+          type: 'attention',
+          title: 'Planning guidance',
+          items: guidance.map((title) => ({ title })),
+        },
+      ];
+    }
+  }
   preservePreDeliveryCompletion(pending);
   state.pendingFinal = pending;
   state.contextWindow = compact(window) as unknown as TaskState['contextWindow'];
@@ -869,7 +900,19 @@ export async function stageModelFinalResponse(
             'The verified source data is shown below.',
           )
         : liveFailure;
-    const text = mixedRead ? `${verifiedReadResponse(mixedRead, evidence)}\n\n${gap}` : gap;
+    const agendaSummary = calendarAgendaSummary(cards);
+    if (agendaSummary) {
+      for (const card of cards) {
+        const sections = Array.isArray(card.sections) ? card.sections : [];
+        card.sections = [
+          ...sections,
+          { type: 'attention', title: 'Lookup incomplete', items: [{ title: gap }] },
+        ];
+      }
+    }
+    const text = mixedRead
+      ? `${agendaSummary ?? verifiedReadResponse(mixedRead, evidence)}\n\n${gap}`
+      : gap;
     return stageFinalResponse(deps, task, state, window, {
       ...pending,
       text,
@@ -1243,6 +1286,7 @@ export async function stageModelFinalResponse(
     requestText: latestUserText(window),
     lookupOrder: liveLookups.map((lookup) => lookup.kind),
   });
+  const agendaSummary = calendarAgendaSummary(specializedCards);
   // An explicit "make that into a card" must reach the grounded compiler even
   // when a handwritten card already matched this turn. Without this, the
   // resource card for a docs.create — or the email-results card for the very
@@ -1308,6 +1352,7 @@ export async function stageModelFinalResponse(
     }
   }
   if (
+    (!agendaSummary || cardRequested || Boolean(refreshCardId)) &&
     !classifiedRead?.personCalendar &&
     !classifiedRead?.sourceReads &&
     !classifiedRead?.familyBirthday &&
@@ -1437,7 +1482,11 @@ export async function stageModelFinalResponse(
         ? generatedCard
           ? `Saved “${generatedCard.spec.title}” to your Cards page.`
           : CARD_NOT_BUILT
-        : checked.text;
+        : agendaSummary
+          ? [agendaSummary, /^Next step: [^\r\n]+$/m.exec(checked.text)?.[0]]
+              .filter(Boolean)
+              .join('\n\n')
+          : checked.text;
   if ((cardRequested || refreshCardId) && !generatedCard && !savedScoreCard) {
     pending.terminalStatus = 'needs_attention';
     pending.outcome = 'needs_attention';

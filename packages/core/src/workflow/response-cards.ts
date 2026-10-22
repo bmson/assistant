@@ -1,6 +1,7 @@
 import { sameCalendarOccurrence } from '@assistant/persistence';
+import { calendarAgendaCards, calendarAgendaScopedEvidence } from './calendar-agenda.js';
 import { calendarSourceDateLabel, calendarWindowMembership } from './calendar-read-window.js';
-import { safeCalendarSourceUrl } from './calendar-source-link.js';
+import { safeCalendarSourceUrl, safeVideoMeetingUrl } from './calendar-source-link.js';
 import type { LiveLookup } from './live-lookup.js';
 import type { PersonalReadRequest } from './read-intent.js';
 import { effectiveReminders } from './reminder-state.js';
@@ -155,6 +156,7 @@ function isSpecificCalendarLink(link: RecordValue | undefined): boolean {
 export function calendarResponseCards(
   evidence: ActionEvidence[],
   request?: PersonalReadRequest | null,
+  options?: { includeUnresolvedDates?: boolean },
 ): ResponseCard[] {
   // A flight departure answer is reconciled against its dated booking. A raw
   // calendar row would present an unverified airline/time as the answer again.
@@ -177,7 +179,12 @@ export function calendarResponseCards(
       ? result.events
           .map(record)
           .filter((event): event is RecordValue => !!event)
-          .filter((event) => calendarWindowMembership(event, request) === 'confirmed')
+          .filter(
+            (event) =>
+              calendarWindowMembership(event, request) === 'confirmed' ||
+              (options?.includeUnresolvedDates &&
+                calendarWindowMembership(event, request) === 'source-date-only'),
+          )
           // A successful update supersedes a flight row read before the write.
           // Keep its canonical receipt card; omit obsolete calendar copies.
           .filter(
@@ -208,8 +215,24 @@ export function calendarResponseCards(
           isSpecificCalendarLink(link) &&
           safeCalendarSourceUrl(string(link?.url)) !== undefined,
       );
-      const meetingLink = links.find(isVideoMeetingLink);
+      const meetingLink = links.find(
+        (link) => isVideoMeetingLink(link) && safeVideoMeetingUrl(string(link?.url)) !== undefined,
+      );
       const calendars = [...new Set(group.map((entry) => string(entry.calendar)).filter(Boolean))];
+      const sourceLinks = group
+        .flatMap((entry) =>
+          Array.isArray(entry.links) ? entry.links.map(record).filter(Boolean) : [],
+        )
+        .filter((link) => string(link?.type) === 'calendar' && isSpecificCalendarLink(link));
+      const calendarLinks = [
+        ...new Map(
+          sourceLinks.flatMap((link) => {
+            const url = safeCalendarSourceUrl(string(link?.url));
+            return url ? [[url, { label: string(link?.label) || 'Open event', url }] as const] : [];
+          }),
+        ).values(),
+      ];
+      const responses = group.map((entry) => string(entry.ownerResponse));
       return {
         kind: 'calendar-event' as const,
         id: `calendar-${group.map((entry) => `${string(entry.calendarId)}:${string(entry.eventId)}`).join('|')}`,
@@ -222,6 +245,19 @@ export function calendarResponseCards(
             : 'All day'
           : calendarTimeRange(start, end, request?.timeZone),
         allDay,
+        ...(options?.includeUnresolvedDates
+          ? { windowMembership: calendarWindowMembership(event, request) }
+          : {}),
+        ...(string(event.calendarTimeZone)
+          ? { calendarTimeZone: string(event.calendarTimeZone) }
+          : {}),
+        ...(responses.some((value) => value.toLowerCase() === 'needsaction')
+          ? { ownerResponse: 'needsAction' }
+          : string(event.ownerResponse)
+            ? { ownerResponse: string(event.ownerResponse) }
+            : {}),
+        ...(string(event.status) ? { status: string(event.status) } : {}),
+        ...(typeof event.blocksTime === 'boolean' ? { blocksTime: event.blocksTime } : {}),
         location: string(event.location),
         attendees: Array.isArray(event.attendees)
           ? event.attendees
@@ -229,6 +265,7 @@ export function calendarResponseCards(
               .slice(0, 3)
           : [],
         calendars,
+        ...(calendarLinks.length ? { calendarLinks } : {}),
         calendarLink: calendarLink
           ? {
               label: string(calendarLink.label) || 'Open event',
@@ -1364,6 +1401,15 @@ export function responseCardsForFinal(input: {
   /** The live lookups the request asked for, in the order it asked them. */
   lookupOrder?: ReadonlyArray<LiveLookup['kind']>;
 }): ResponseCard[] {
+  const agendaEvidence = calendarAgendaScopedEvidence(input.evidence, input.readRequest);
+  const agenda = calendarAgendaCards({
+    evidence: agendaEvidence,
+    events: calendarResponseCards(agendaEvidence, input.readRequest, {
+      includeUnresolvedDates: true,
+    }),
+    request: input.readRequest,
+    requestText: input.requestText,
+  });
   // These modes already produce a short, checked review from several sources.
   // Keep the supporting inbox and agenda reads from becoming a second, raw
   // answer underneath the review. Explicit source-display requests retain the
@@ -1390,7 +1436,11 @@ export function responseCardsForFinal(input: {
       ...statusResponseCards(input.evidence),
       ...calendarWriteResponseCards(input.evidence),
       ...reminderResponseCards(input.evidence),
-      ...(synthesizedRead ? [] : calendarResponseCards(input.evidence, input.readRequest)),
+      ...(agenda.length
+        ? agenda
+        : synthesizedRead
+          ? []
+          : calendarResponseCards(input.evidence, input.readRequest)),
       ...(synthesizedRead ? [] : availabilityResponseCards(input.evidence)),
       // Flight answers use mail only to reconcile the requested itinerary.
       // Do not turn every booking hit, historical message, or newsletter into
@@ -1408,7 +1458,17 @@ export function responseCardsForFinal(input: {
     ],
     input.lookupOrder ?? [],
   );
-  if (cards.length > 0) return cards;
+  if (cards.length > 0)
+    return cards.map((card) =>
+      card.presentation === 'calendar-agenda'
+        ? {
+            ...card,
+            accompaniesProse: cards.some(
+              (candidate) => candidate.presentation !== 'calendar-agenda',
+            ),
+          }
+        : card,
+    );
   // Ambient weather is useful for a conversational/weather answer, but must
   // never appear as an unrelated result below a tool-backed response — nor
   // contradict an answer about another place or later days, which the

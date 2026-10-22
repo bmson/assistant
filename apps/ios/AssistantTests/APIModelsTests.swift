@@ -1480,6 +1480,116 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(items.first?.title, "Design review")
     }
 
+    func testExactServerCalendarAgendaFixtureAndLegacyBriefingContract() throws {
+        let fixture = #"""
+        [{"kind":"briefing","id":"calendar-agenda-0d260f9f2b24cdc75ebdcdd3","presentation":"calendar-agenda","title":"Agenda","date":"Friday, Oct 23, 2026 · PDT","timeZone":"America/Los_Angeles","lead":"13 events from Work.","sections":[{"type":"agenda","title":"Friday, Oct 23, 2026 · PDT","complete":true,"items":[{"id":"calendar-work:event-0","day":"All day","time":"All day · through Saturday, Oct 24, 2026","title":"Project review 1","calendars":["Work"],"calendarLinks":[{"label":"Open event","url":"https://calendar.google.com/calendar/event?eid=event-0"}]},{"id":"calendar-work:event-1","day":"Timed","time":"8:25 AM – 9:25 AM","title":"A long project planning title with details that must wrap cleanly on narrow screens","calendars":["Work"],"calendarLinks":[{"label":"Open event","url":"https://calendar.google.com/calendar/event?eid=event-1"}]},{"id":"calendar-work:event-2","day":"Timed","time":"8:50 AM – 9:50 AM","title":"Project review 3","calendars":["Work"],"calendarLinks":[{"label":"Open event","url":"https://calendar.google.com/calendar/event?eid=event-2"}]},{"id":"calendar-work:event-3","day":"Timed","time":"9:15 AM – 10:15 AM","title":"Project review 4","calendars":["Work"],"calendarLinks":[{"label":"Open event","url":"https://calendar.google.com/calendar/event?eid=event-3"}]},{"id":"calendar-work:event-4","day":"Timed","time":"9:40 AM – 10:40 AM","title":"Project review 5","calendars":["Work"],"calendarLinks":[{"label":"Open event","url":"https://calendar.google.com/calendar/event?eid=event-4"}]},{"id":"calendar-work:event-5","day":"Timed","time":"10:05 AM – 11:05 AM","title":"Project review 6","note":"Needs response","calendars":["Work"],"calendarLinks":[{"label":"Open event","url":"https://calendar.google.com/calendar/event?eid=event-5"}]},{"id":"calendar-work:event-6","day":"Timed","time":"10:30 AM – 11:30 AM","title":"Project review 7","calendars":["Work"],"calendarLinks":[{"label":"Open event","url":"https://calendar.google.com/calendar/event?eid=event-6"}]},{"id":"calendar-work:event-7","day":"Timed","time":"10:55 AM – 11:55 AM","title":"Project review 8","calendars":["Work"],"calendarLinks":[{"label":"Open event","url":"https://calendar.google.com/calendar/event?eid=event-7"}]},{"id":"calendar-work:event-8","day":"Timed","time":"11:20 AM – 12:20 PM","title":"Project review 9","calendars":["Work"],"calendarLinks":[{"label":"Open event","url":"https://calendar.google.com/calendar/event?eid=event-8"}]},{"id":"calendar-work:event-9","day":"Timed","time":"11:45 AM – 12:45 PM","title":"Project review 10","calendars":["Work"],"calendarLinks":[{"label":"Open event","url":"https://calendar.google.com/calendar/event?eid=event-9"}]},{"id":"calendar-work:event-10","day":"Timed","time":"12:10 PM – 1:10 PM","title":"Project review 11","calendars":["Work"],"calendarLinks":[{"label":"Open event","url":"https://calendar.google.com/calendar/event?eid=event-10"}]},{"id":"calendar-work:event-11","day":"Timed","time":"12:35 PM – 1:35 PM","title":"Project review 12","calendars":["Work"],"calendarLinks":[{"label":"Open event","url":"https://calendar.google.com/calendar/event?eid=event-11"}]},{"id":"calendar-work:event-12","day":"Timed","time":"1:00 PM – 2:00 PM","title":"Project review 13","calendars":["Work"],"calendarLinks":[{"label":"Open event","url":"https://calendar.google.com/calendar/event?eid=event-12"}]}]},{"type":"attention","title":"21 possible overlaps","items":[{"title":"21 possible overlaps","detail":"Calendar overlap does not confirm attendance."}],"overlaps":[{"title":"Possible overlap: 8:50 AM – 9:25 AM","detail":"A long project planning title with details that must wrap cleanly on narrow screens · Project review 3. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 9:15 AM – 9:25 AM","detail":"A long project planning title with details that must wrap cleanly on narrow screens · Project review 4. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 9:15 AM – 9:50 AM","detail":"Project review 3 · Project review 4. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 9:40 AM – 9:50 AM","detail":"Project review 3 · Project review 5. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 9:40 AM – 10:15 AM","detail":"Project review 4 · Project review 5. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 10:05 AM – 10:15 AM","detail":"Project review 4 · Project review 6. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 10:05 AM – 10:40 AM","detail":"Project review 5 · Project review 6. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 10:30 AM – 10:40 AM","detail":"Project review 5 · Project review 7. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 10:30 AM – 11:05 AM","detail":"Project review 6 · Project review 7. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 10:55 AM – 11:05 AM","detail":"Project review 6 · Project review 8. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 10:55 AM – 11:30 AM","detail":"Project review 7 · Project review 8. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 11:20 AM – 11:30 AM","detail":"Project review 7 · Project review 9. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 11:20 AM – 11:55 AM","detail":"Project review 8 · Project review 9. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 11:45 AM – 11:55 AM","detail":"Project review 8 · Project review 10. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 11:45 AM – 12:20 PM","detail":"Project review 9 · Project review 10. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 12:10 PM – 12:20 PM","detail":"Project review 9 · Project review 11. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 12:10 PM – 12:45 PM","detail":"Project review 10 · Project review 11. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 12:35 PM – 12:45 PM","detail":"Project review 10 · Project review 12. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 12:35 PM – 1:10 PM","detail":"Project review 11 · Project review 12. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 1:00 PM – 1:10 PM","detail":"Project review 11 · Project review 13. Calendar overlap does not confirm attendance."},{"title":"Possible overlap: 1:00 PM – 1:35 PM","detail":"Project review 12 · Project review 13. Calendar overlap does not confirm attendance."}]}],"complete":true,"accompaniesProse":false}]
+        """#
+        let payload = try XCTUnwrap(JSONDecoder().decode([JSONValue].self, from: Data(fixture.utf8)).first?.objectValue)
+        let part = MessagePart(type: "data-card", data: .object(payload))
+        let message = ChatMessage(id: "server-calendar-agenda", role: .assistant, parts: [
+            .init(type: "text", text: "Here is your agenda."),
+            part,
+        ])
+        XCTAssertFalse(message.hasSupportingResultCards, "The existing briefing primary-card exception still applies.")
+        let cards = message.parts.compactMap(MessageResponseCard.init(part:))
+        guard case let .briefing(briefing)? = cards.first,
+              case let .agenda(_, complete, _, events)? = briefing.sections.first,
+              case let .list(kind, _, summaries, overlaps)? = briefing.sections.last else {
+            return XCTFail("Expected the server briefing with its agenda and overlap summary")
+        }
+        XCTAssertEqual(briefing.presentation, .calendarAgenda)
+        XCTAssertTrue(complete)
+        XCTAssertEqual(events.count, 13)
+        XCTAssertEqual(events.first?.time, "All day · through Saturday, Oct 24, 2026")
+        XCTAssertEqual(events.first?.calendarLinks.first?.url, "https://calendar.google.com/calendar/event?eid=event-0")
+        XCTAssertEqual(events[5].note, "Needs response")
+        XCTAssertEqual(kind, "attention")
+        XCTAssertEqual(summaries.first?.detail, "Calendar overlap does not confirm attendance.")
+        XCTAssertEqual(overlaps.count, 21)
+        XCTAssertTrue(MessageResponseCard.replacesProse(cards))
+
+        // Without the additive marker, the existing briefing path still
+        // exposes all rows and the human-readable warning summary. The
+        // Existing rendering ignores action and overlap-detail extras unless
+        // the additive marker selects the new presentation.
+        var legacyPayload = payload
+        legacyPayload.removeValue(forKey: "presentation")
+        let legacyPart = MessagePart(type: "data-card", data: .object(legacyPayload))
+        let legacyMessage = ChatMessage(id: "server-calendar-agenda-legacy", role: .assistant, parts: [
+            .init(type: "text", text: "Here is your agenda."),
+            legacyPart,
+        ])
+        XCTAssertFalse(legacyMessage.hasSupportingResultCards)
+        let legacyCards = legacyMessage.parts.compactMap(MessageResponseCard.init(part:))
+        guard case let .briefing(legacy)? = legacyCards.first,
+              case let .agenda(_, _, _, legacyEvents)? = legacy.sections.first,
+              case let .list(_, _, legacySummary, _)? = legacy.sections.last else {
+            return XCTFail("Expected the legacy briefing contract")
+        }
+        XCTAssertNil(legacy.presentation)
+        XCTAssertEqual(legacyEvents.count, 13)
+        XCTAssertEqual(legacySummary.first?.detail, "Calendar overlap does not confirm attendance.")
+        XCTAssertTrue(MessageResponseCard.replacesProse(legacyCards))
+    }
+
+    func testCalendarAgendaBriefingKeepsAllRowsAndSafeActions() throws {
+        for count in [13, 20] {
+            let rows = (0..<count).map { index in
+                """
+                {"id":"event-\(index)","day":"\(index == 0 ? "All day" : "Timed")","time":"\(index == 0 ? "All day · through October 27" : "\(9 + index):00 AM")","title":"Event \(index)","location":"Room \(index)","note":"Needs response","calendars":["Personal","Work"],"calendarLinks":[{"label":"Personal","url":"https://calendar.google.com/event/\(index)"}],"meetingLink":{"label":"Join meeting","url":"https://meet.google.com/abc-\(index)"}}
+                """
+            }.joined(separator: ",")
+            let json = """
+            {"id":"agenda-message","role":"assistant","parts":[{"type":"data-card","data":{"kind":"briefing","id":"agenda-1","date":"Tuesday, Oct 27 · Pacific Time","presentation":"calendar-agenda","title":"Agenda","lead":"20 events across Personal and Work; all calendars checked.","sections":[{"type":"agenda","title":"Tuesday, October 27","complete":true,"items":[\(rows)]},{"type":"attention","title":"5 possible overlaps","items":[{"title":"5 possible overlaps","detail":"Calendar overlap does not confirm attendance."}],"overlaps":[{"title":"Event 0 and Event 1","detail":"9:00 AM–10:00 AM"},{"title":"Event 2 and Event 3","detail":"10:00 AM–11:00 AM"},{"title":"Event 4 and Event 5","detail":"11:00 AM–12:00 PM"},{"title":"Event 6 and Event 7","detail":"12:00 PM–1:00 PM"},{"title":"Event 8 and Event 9","detail":"1:00 PM–2:00 PM"}]}]}}]}
+            """
+            let message = try JSONDecoder().decode(ChatMessage.self, from: Data(json.utf8))
+            XCTAssertFalse(message.hasSupportingResultCards)
+            let cards = message.parts.compactMap(MessageResponseCard.init(part:))
+            guard case let .briefing(card)? = cards.first,
+                  case let .agenda(title, complete, _, items)? = card.sections.first else {
+                return XCTFail("Expected the marked calendar agenda briefing")
+            }
+            XCTAssertEqual(card.presentation, .calendarAgenda)
+            XCTAssertEqual(card.title, "Agenda")
+            XCTAssertEqual(title, "Tuesday, October 27")
+            XCTAssertTrue(complete)
+            XCTAssertEqual(items.count, count, "All payload rows must remain available when the view collapses")
+            XCTAssertEqual(Set(items.map(\.id)).count, count, "Every row identity must remain distinct")
+            XCTAssertEqual(items.first?.calendars, ["Personal", "Work"])
+            XCTAssertEqual(items.first?.calendarLinks.first?.label, "Personal")
+            XCTAssertEqual(items.first?.meetingLink?.label, "Join meeting")
+            XCTAssertEqual(items.first?.time, "All day · through October 27")
+            guard case let .list(kind, _, summary, overlaps)? = card.sections.last else {
+                return XCTFail("Expected the attention and overlap evidence section")
+            }
+            XCTAssertEqual(kind, "attention")
+            XCTAssertEqual(summary.first?.detail, "Calendar overlap does not confirm attendance.")
+            XCTAssertEqual(overlaps.count, 5, "Every overlap pair remains in the decoded model")
+            XCTAssertEqual(overlaps.last?.title, "Event 8 and Event 9")
+            XCTAssertTrue(MessageResponseCard.replacesProse(cards))
+        }
+
+        let leadOnly = try JSONDecoder().decode(ChatMessage.self, from: Data(#"{"id":"lead","role":"assistant","parts":[{"type":"data-card","data":{"kind":"briefing","id":"lead-only","presentation":"calendar-agenda","title":"Agenda","lead":"No events in the requested window.","sections":[]}}]}"#.utf8))
+        let cards = leadOnly.parts.compactMap(MessageResponseCard.init(part:))
+        XCTAssertFalse(leadOnly.hasSupportingResultCards)
+        XCTAssertTrue(MessageResponseCard.replacesProse(cards))
+        guard case let .briefing(decoded)? = cards.first else { return XCTFail("Expected lead-only briefing") }
+        XCTAssertEqual(decoded.lead, "No events in the requested window.")
+    }
+
+    func testCalendarAgendaBriefingOptionalFieldsDefaultAndUnsafeLinksAreDropped() throws {
+        let json = #"{"kind":"briefing","id":"optional","presentation":"calendar-agenda","lead":"One item","sections":[{"type":"agenda","title":"Today","complete":false,"items":[{"day":"All day","time":"All day","title":"Holiday","calendarLinks":[{"label":"Unsafe","url":"javascript:alert(1)"},{"label":"No host","url":"https:/broken"},{"label":"Credentials","url":"https://user:secret@calendar.example/event"},{"label":"HTTP source","url":"http://calendar.example/event"}],"meetingLink":{"label":"Join","url":"http://meet.example/meeting"}}]}]}"#
+        let part = MessagePart(type: "data-card", data: try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)))
+        guard case let .briefing(card)? = MessageResponseCard(part: part),
+              case let .agenda(_, complete, _, items)? = card.sections.first else { return XCTFail("Expected an agenda") }
+        XCTAssertFalse(complete)
+        XCTAssertEqual(items.count, 1)
+        XCTAssertTrue(items[0].location.isEmpty)
+        XCTAssertTrue(items[0].calendars.isEmpty)
+        XCTAssertEqual(items[0].calendarLinks.map(\.label), ["HTTP source"])
+        XCTAssertEqual(items[0].meetingLink?.url, "http://meet.example/meeting")
+    }
+
     func testGeneratedCardDecodesVersionedFactsAndSensitiveCodes() {
         let card = MessagePart(
             type: "data-card",

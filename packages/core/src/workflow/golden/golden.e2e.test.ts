@@ -83,6 +83,11 @@ function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+async function responseCardsForTask(taskId: string): Promise<Record<string, unknown>[]> {
+  const [task] = await db.select({ state: tasks.state }).from(tasks).where(eq(tasks.id, taskId));
+  return TaskStateSchema.parse(task?.state).pendingFinal?.responseCards ?? [];
+}
+
 const workflowPlan = {
   action: 'workflow' as const,
   reasoning: 'look the fact up, then answer',
@@ -3378,14 +3383,16 @@ describe('golden tasks', () => {
     createdTaskIds.push(result.taskId);
 
     expect(result.toolNames).toEqual(['calendar.list_events']);
-    expect(result.finalText).toContain('**9:30 AM–10:15 AM** — Linear interview prep');
-    expect(result.finalText).toContain('**1:00 PM–2:00 PM** — Dentist');
-    expect(result.finalText).toContain('Zoom');
-    expect(result.finalText).toContain('Laugavegur 12');
-    expect(result.finalText).toContain('No unresolved overlaps between timed calendar entries');
-    expect(result.finalText).not.toContain('the afternoon is the tight one');
-    expect(result.finalText).not.toContain("Here's what the calendar has");
-    expect(result.finalText).not.toContain('organizer:');
+    const agendaPayload = JSON.stringify(await responseCardsForTask(result.taskId));
+    expect(agendaPayload).toContain('Linear interview prep');
+    expect(agendaPayload).toContain('9:30 AM');
+    expect(agendaPayload).toContain('Zoom');
+    expect(agendaPayload).toContain('Dentist');
+    expect(agendaPayload).toContain('1:00 PM');
+    expect(agendaPayload).toContain('Laugavegur 12');
+    expect(agendaPayload).not.toContain('the afternoon is the tight one');
+    expect(agendaPayload).not.toContain("Here's what the calendar has");
+    expect(agendaPayload).not.toContain('organizer:');
 
     const [check] = await db
       .select()
@@ -3429,7 +3436,7 @@ describe('golden tasks', () => {
                   summary: 'Design review',
                   start: `${tomorrow}T16:00:00Z`,
                   end: `${tomorrow}T16:30:00Z`,
-                  htmlLink: eventUrl,
+                  links: [{ type: 'calendar', label: 'Open event', url: eventUrl }],
                 },
               ],
             };
@@ -3450,8 +3457,10 @@ describe('golden tasks', () => {
     expect(gmailSearches).toBe(0);
     expect(result.toolNames).toEqual(['calendar.list_events']);
     expect(result.status).toBe('done');
-    expect(result.finalText).toContain('Design review');
-    expect(result.finalText).toContain('**4:00 PM–4:30 PM**');
+    const agenda = JSON.stringify(await responseCardsForTask(result.taskId));
+    expect(agenda).toContain('Design review');
+    expect(agenda).toContain('4:00 PM');
+    expect(agenda).toContain(eventUrl);
     expect(result.finalText).not.toMatch(/let me read|let me check|email results/i);
   });
 
@@ -3783,8 +3792,11 @@ describe('golden tasks', () => {
     const result = await runGoldenTask(db, agentId, fixture);
     createdTaskIds.push(result.taskId);
 
-    expect(result.finalText).not.toContain('Zuni Cafe');
-    expect(result.finalText).toContain('Linear interview prep');
+    const agenda = JSON.stringify(await responseCardsForTask(result.taskId));
+    expect(agenda).not.toContain('Zuni Cafe');
+    expect(agenda).toContain('Linear interview prep');
+    expect(agenda).toContain('9:30 AM');
+    expect(agenda).toContain('Zoom');
     // A fallback is not an honesty failure: the owner still gets every fact.
     const [check] = await db
       .select()
@@ -3820,8 +3832,10 @@ describe('golden tasks', () => {
     // The runtime owns private reads, so it retries exactly once without ever
     // letting the scripted model fill the gap with remembered or guessed events.
     expect(result.toolNames).toEqual(['calendar.list_events', 'calendar.list_events']);
-    expect(result.finalText).toContain("That's everything I could actually see.");
-    expect(result.finalText).toContain('calendar provider is temporarily unavailable');
+    const agenda = JSON.stringify(await responseCardsForTask(result.taskId));
+    expect(agenda).toContain(
+      'Couldn’t load the requested calendar. Please retry the calendar lookup.',
+    );
     expect(result.finalText).not.toContain('Done.');
 
     const [check] = await db

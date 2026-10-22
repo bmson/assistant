@@ -1,4 +1,4 @@
-import { createDb, type Db, messages, tasks, toolCalls } from '@assistant/db';
+import { conversations, createDb, type Db, messages, tasks, toolCalls } from '@assistant/db';
 import { assertAllocatedTestTarget } from '@assistant/db/test-target';
 import { eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -53,99 +53,115 @@ describe('executor calendar overview presentation', () => {
     if (dbUp) await (db as unknown as { $client: { end: () => Promise<void> } }).$client?.end?.();
   });
 
-  it('renders a natural day-overview with the compact event ledger and grounded overlaps', async (ctx) => {
-    if (!dbUp) return ctx.skip();
-    let gmailSearches = 0;
-    const fixture: GoldenFixture = {
-      name: 'natural-calendar-overview-defaults-to-compact-ledger',
-      event: {
-        source: 'chat',
-        trust: 'owner',
-        payload: { text: 'What does my calendar look like tomorrow?' },
-      },
-      taskType: 'chat_turn',
-      plan: {
-        action: 'workflow',
-        reasoning: 'inspect the owner calendar for the requested day',
-        steps: ['read the requested day', 'summarize the agenda'],
-        missingInfo: [],
-      },
-      script: [{ text: 'I found the requested calendar entries.' }],
-      tools: {
-        'calendar.list_events': {
-          schema: z.object({ timeMin: z.string(), timeMax: z.string() }).passthrough(),
-          execute: async (input) => {
-            const args = input as { timeMin: string; timeMax: string };
-            const start = Date.parse(args.timeMin);
-            const firstStart = new Date(start + 10 * 60 * 60_000).toISOString();
-            const firstEnd = new Date(start + 11 * 60 * 60_000).toISOString();
-            const secondStart = new Date(start + 10.5 * 60 * 60_000).toISOString();
-            const secondEnd = new Date(start + 11.5 * 60 * 60_000).toISOString();
-            return {
-              complete: true,
-              calendarsSearched: ['Work'],
-              events: [
-                {
-                  eventId: 'overview-review',
-                  calendarId: 'work',
-                  calendar: 'Work',
-                  summary: 'Project review',
-                  start: firstStart,
-                  end: firstEnd,
-                  blocksTime: true,
-                  ownerResponse: 'accepted',
-                  links: [
-                    {
-                      type: 'calendar',
-                      label: 'Open event',
-                      url: 'https://calendar.google.com/calendar/event?eid=overview-review',
-                    },
-                  ],
-                },
-                {
-                  eventId: 'overview-hold',
-                  calendarId: 'work',
-                  calendar: 'Work',
-                  summary: 'Planning hold',
-                  start: secondStart,
-                  end: secondEnd,
-                  blocksTime: true,
-                  ownerResponse: 'needsAction',
-                  links: [
-                    {
-                      type: 'calendar',
-                      label: 'Open event',
-                      url: 'https://calendar.google.com/calendar/event?eid=overview-hold',
-                    },
-                  ],
-                },
-              ],
-            };
+  for (const modelText of ['I found the requested calendar entries.', '']) {
+    it(`persists a primary evidence agenda with model text ${JSON.stringify(modelText)}`, async (ctx) => {
+      if (!dbUp) return ctx.skip();
+      const [conversation] = await db
+        .insert(conversations)
+        .values({ agentId, channel: 'chat', trust: 'owner', title: 'Calendar agenda regression' })
+        .returning();
+      if (!conversation) throw new Error('Missing conversation');
+      conversationIds.push(conversation.id);
+      let gmailSearches = 0;
+      const fixture: GoldenFixture = {
+        name: 'natural-calendar-overview-defaults-to-compact-ledger',
+        event: {
+          source: 'chat',
+          conversationId: conversation.id,
+          trust: 'owner',
+          payload: { text: 'What does my calendar look like tomorrow?' },
+        },
+        taskType: 'chat_turn',
+        plan: {
+          action: 'workflow',
+          reasoning: 'inspect the owner calendar for the requested day',
+          steps: ['read the requested day', 'summarize the agenda'],
+          missingInfo: [],
+        },
+        script: [{ text: modelText }],
+        tools: {
+          'calendar.list_events': {
+            schema: z.object({ timeMin: z.string(), timeMax: z.string() }).passthrough(),
+            execute: async (input) => {
+              const args = input as { timeMin: string; timeMax: string };
+              const start = Date.parse(args.timeMin);
+              const firstStart = new Date(start + 10 * 60 * 60_000).toISOString();
+              const firstEnd = new Date(start + 11 * 60 * 60_000).toISOString();
+              const secondStart = new Date(start + 10.5 * 60 * 60_000).toISOString();
+              const secondEnd = new Date(start + 11.5 * 60 * 60_000).toISOString();
+              return {
+                complete: true,
+                calendarsSearched: ['Work'],
+                events: [
+                  {
+                    eventId: 'overview-review',
+                    calendarId: 'work',
+                    calendar: 'Work',
+                    summary: 'Project review',
+                    start: firstStart,
+                    end: firstEnd,
+                    blocksTime: true,
+                    ownerResponse: 'accepted',
+                    links: [
+                      {
+                        type: 'calendar',
+                        label: 'Open event',
+                        url: 'https://calendar.google.com/calendar/event?eid=overview-review',
+                      },
+                    ],
+                  },
+                  {
+                    eventId: 'overview-hold',
+                    calendarId: 'work',
+                    calendar: 'Work',
+                    summary: 'Planning hold',
+                    start: secondStart,
+                    end: secondEnd,
+                    blocksTime: true,
+                    ownerResponse: 'needsAction',
+                    links: [
+                      {
+                        type: 'calendar',
+                        label: 'Open event',
+                        url: 'https://calendar.google.com/calendar/event?eid=overview-hold',
+                      },
+                    ],
+                  },
+                ],
+              };
+            },
+          },
+          'gmail.search': {
+            schema: z.object({}).passthrough(),
+            execute: async () => {
+              gmailSearches += 1;
+              return { complete: true, results: [] };
+            },
           },
         },
-        'gmail.search': {
-          schema: z.object({}).passthrough(),
-          execute: async () => {
-            gmailSearches += 1;
-            return { complete: true, results: [] };
-          },
-        },
-      },
-    };
-    const result = await runGoldenTask(db, agentId, fixture);
-    taskIds.push(result.taskId);
-    const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
-    if (task?.conversationId) conversationIds.push(task.conversationId);
+      };
+      const result = await runGoldenTask(db, agentId, fixture);
+      taskIds.push(result.taskId);
+      const [task] = await db.select().from(tasks).where(eq(tasks.id, result.taskId));
+      if (task?.conversationId) conversationIds.push(task.conversationId);
 
-    expect(result.toolNames).toEqual(['calendar.list_events']);
-    expect(gmailSearches).toBe(0);
-    expect(result.finalText).toContain('Timed appointments:');
-    expect(result.finalText).toContain('[Project review]');
-    expect(result.finalText).toContain('[Planning hold]');
-    expect(result.finalText).toMatch(/Possible overlap .*: Project review \+ Planning hold\./);
-    expect(result.finalText).toContain('Calendar overlap does not confirm attendance.');
-    expect(result.finalText).toContain('event?eid=overview-review');
-    expect(result.finalText).toContain('event?eid=overview-hold');
-    expect(result.finalText).not.toContain('Next step:');
-  });
+      expect(result.toolNames).toEqual(['calendar.list_events']);
+      expect(gmailSearches).toBe(0);
+      expect(result.finalText).toBe('2 events from Work.');
+      const persisted = await db.select().from(messages).where(eq(messages.taskId, result.taskId));
+      const assistant = persisted.filter((message) => message.role === 'assistant').at(-1);
+      const payload = JSON.stringify(assistant?.parts);
+      expect(payload).toContain('calendar-agenda');
+      expect(payload).toContain('briefing');
+      expect(payload).toContain('Project review');
+      expect(payload).toContain('Planning hold');
+      expect(payload).toContain('Needs response');
+      expect(payload).toContain('Possible overlap');
+      expect(payload).toContain('Calendar overlap does not confirm attendance.');
+      expect(payload).toContain('event?eid=overview-review');
+      expect(payload).toContain('event?eid=overview-hold');
+      expect(payload).not.toContain('"accepted"');
+      expect(result.finalText).not.toContain('Next step:');
+    });
+  }
 });

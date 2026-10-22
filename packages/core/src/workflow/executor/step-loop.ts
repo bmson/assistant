@@ -46,6 +46,7 @@ import {
   requestedConditionalArtifactIntent,
 } from '../artifact-intent.js';
 import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-import.js';
+import { calendarAgendaSummary } from '../calendar-agenda.js';
 import { requestedCardIntent } from '../card-intent.js';
 import { taskBoundCorrectionReadRequest } from '../checklist-correction-resume.js';
 import {
@@ -918,6 +919,22 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       verifiedCompoundTripChecklist,
       ...(compoundTripExtraction ? { compoundTripExtraction } : {}),
     };
+    // Empty model output and exhausted read budgets still use the same
+    // deterministic primary agenda as the normal final-response path.
+    if (!restrictedChecklistResume && !requestedCardIntent(ownerText)) {
+      const current = await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id });
+      const cards = responseCardsForFinal({
+        evidence: current.map((row) => ({ ...row, fromCurrentTask: true })),
+        readRequest,
+        requestText: ownerText,
+      });
+      const summary = calendarAgendaSummary(cards);
+      if (summary) {
+        pending.text = summary;
+        pending.progress = summary.slice(0, 200);
+        pending.responseCards = cards;
+      }
+    }
     return !restrictedChecklistResume &&
       directOwner &&
       (requestedCardIntent(ownerText) ||
@@ -4642,12 +4659,18 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         readRequest,
         requestText: latestUserText(rc.window),
       });
-      rc.window.push({ role: 'assistant', content: notice } as ModelMessage);
+      const agendaSummary = calendarAgendaSummary(cards);
+      const finalNotice = agendaSummary ?? notice;
+      const agendaComplete =
+        Boolean(agendaSummary) && cards.every((card) => card.complete === true);
+      rc.window.push({ role: 'assistant', content: finalNotice } as ModelMessage);
       return stageFinalResponse(deps, lease, state, rc.window, {
-        text: notice,
-        progress: 'model returned no usable final reply',
-        terminalStatus: 'needs_attention',
-        outcome: 'needs_attention',
+        text: finalNotice,
+        progress: agendaSummary
+          ? finalNotice.slice(0, 200)
+          : 'model returned no usable final reply',
+        terminalStatus: agendaComplete ? 'done' : 'needs_attention',
+        outcome: agendaComplete ? 'done' : 'needs_attention',
         ...(cards.length ? { responseCards: cards } : {}),
       });
     }

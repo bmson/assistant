@@ -156,10 +156,12 @@ export const ASSISTANT_SCENARIOS: QuestionCase[] = [
       { toolCalls: [smsCall] },
     ],
     expect: {
-      matches: ['Design review'],
+      matches: ['1 event from Fixture calendar'],
       excludes: ['\\[A999\\]', 'I sent', 'This needs your approval before I act'],
       statuses: ['done'],
       tools: ['calendar.list_events'],
+      responseCardKinds: ['briefing'],
+      forbiddenResponseCardKinds: ['calendar-event'],
       calls: [{ name: 'calendar.list_events', status: 'succeeded', count: 1 }],
       approvalCount: 0,
       executionCounts: { 'sms.send': 0 },
@@ -176,8 +178,9 @@ export const ASSISTANT_SCENARIOS: QuestionCase[] = [
     calendar: 'next-meeting',
     script: [{ text: 'Tomorrow: Design review at 1:00 AM Pacific time, at Oracle Park.' }],
     expect: {
-      matches: ['Design review', '1:00|01:00'],
+      matches: ['1 event from Fixture calendar'],
       tools: ['calendar.list_events'],
+      responseCardKinds: ['briefing'],
       forbiddenResponseCardKinds: ['calendar-event'],
       calls: [
         {
@@ -221,8 +224,9 @@ export const ASSISTANT_SCENARIOS: QuestionCase[] = [
     ],
     script: [{ text: 'Family day is all day on November 1.' }],
     expect: {
-      matches: ['Family day', 'all.day'],
+      matches: ['1 event from Family'],
       excludes: ['October 31', '11:00 PM'],
+      responseCardKinds: ['briefing'],
       forbiddenResponseCardKinds: ['calendar-event'],
       tools: ['calendar.list_events'],
     },
@@ -250,8 +254,9 @@ export const ASSISTANT_SCENARIOS: QuestionCase[] = [
     ],
     script: [{ text: 'Your calendar is clear tomorrow.' }],
     expect: {
-      matches: ['Work', 'incomplete|unavailable'],
+      matches: ['No matching events|Coverage is incomplete'],
       excludes: ['Your calendar is clear'],
+      responseCardKinds: ['briefing'],
       tools: ['calendar.list_events'],
     },
   },

@@ -507,7 +507,13 @@ async function collectEvents(
     for (const requested of requestedNames) {
       const byId = available.filter((calendar) => calendar.id === requested);
       const matches =
-        byId.length > 0 ? byId : available.filter((calendar) => calendar.name === requested);
+        byId.length > 0
+          ? byId
+          : available.filter(
+              (calendar) =>
+                calendar.name.normalize('NFKC').toLowerCase() ===
+                requested.normalize('NFKC').toLowerCase(),
+            );
       if (matches.length === 1) {
         const match = matches[0];
         if (match && !resolved.some((calendar) => calendar.id === match.id)) resolved.push(match);

@@ -21,6 +21,260 @@ const turn = (text: string, prior = '') => [
 ];
 
 describe('detectPersonalReadRequest', () => {
+  it('binds a literal named phone calendar and replaces model IDs on every page', () => {
+    const request = detectPersonalReadRequest(
+      turn('Check Zendesk calendar tomorrow, shared from phone.'),
+      {
+        now: new Date('2026-10-22T12:00:00.000Z'),
+        timeZone: 'America/Los_Angeles',
+      },
+    );
+    expect(request).toMatchObject({
+      kind: 'calendar',
+      calendarScope: { name: 'Zendesk', source: 'iphone' },
+      firstToolName: 'calendar.list_events',
+    });
+    if (!request) throw new Error('Expected named calendar request');
+    expect(buildReadToolInput(request, 'calendar.list_events', [])).toMatchObject({
+      calendarIds: ['Zendesk (iPhone)'],
+      timeMin: expect.any(String),
+      timeMax: expect.any(String),
+    });
+    const firstPage: ReadToolEvidence = {
+      toolName: 'calendar.list_events',
+      status: 'succeeded',
+      args: {
+        calendarIds: ['Zendesk (iPhone)'],
+        timeMin: request.timeWindow?.timeMin,
+        timeMax: request.timeWindow?.timeMax,
+      },
+      result: { events: [], nextPageToken: 'named-page-2' },
+    };
+    expect(nextRequiredReadTool(request, [firstPage])).toBe('calendar.list_events');
+    expect(buildReadToolInput(request, 'calendar.list_events', [firstPage])).toMatchObject({
+      calendarIds: ['Zendesk (iPhone)'],
+      pageToken: 'named-page-2',
+    });
+    expect(
+      groundReadToolInput(
+        request,
+        'calendar.list_events',
+        {
+          calendarIds: ['Personal Work'],
+          pageToken: 'model-page',
+          timeMin: '1900',
+          timeMax: '2100',
+        },
+        [],
+      ),
+    ).toMatchObject({
+      calendarIds: ['Zendesk (iPhone)'],
+      timeMin: request.timeWindow?.timeMin,
+      timeMax: request.timeWindow?.timeMax,
+    });
+    expect(
+      nextRequiredReadTool(request, [
+        {
+          ...firstPage,
+          args: {
+            calendarIds: ['Personal Work'],
+            timeMin: request.timeWindow?.timeMin,
+            timeMax: request.timeWindow?.timeMax,
+          },
+        },
+      ]),
+    ).toBe('calendar.list_events');
+  });
+
+  it('keeps generic calendar reads unscoped despite model-proposed calendar IDs', () => {
+    const request = detectPersonalReadRequest(turn('What is on my calendar tomorrow?'), {
+      now: new Date('2026-10-22T12:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!request) throw new Error('Expected generic calendar request');
+    expect(request.calendarScope).toBeUndefined();
+    expect(
+      groundReadToolInput(request, 'calendar.list_events', { calendarIds: ['Personal Work'] }, []),
+    ).not.toHaveProperty('calendarIds');
+  });
+
+  it('binds a lowercase literal work-calendar reference', () => {
+    const request = detectPersonalReadRequest(turn("What's on work calendar this week?"), {
+      now: new Date('2026-10-22T12:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    expect(request).toMatchObject({
+      calendarScope: { name: 'work' },
+      firstToolName: 'calendar.list_events',
+    });
+    if (!request) throw new Error('Expected named calendar request');
+    expect(buildReadToolInput(request, 'calendar.list_events', [])?.calendarIds).toEqual(['work']);
+  });
+
+  it('keeps named-calendar planning and statistics intents intact', () => {
+    const options = { now: new Date('2026-10-09T12:00:00.000Z'), timeZone: 'America/Los_Angeles' };
+    const plan = detectPersonalReadRequest(
+      turn(
+        'Review my Work calendar for next week and find three focus blocks during working hours, allowing time for breaks.',
+      ),
+      options,
+    );
+    expect(plan).toMatchObject({
+      calendarScope: { name: 'Work' },
+      weeklyCalendarPlan: true,
+    });
+
+    const analysis = detectPersonalReadRequest(
+      turn(
+        'For my Work calendar over the next 3 weekdays, how many days have an event lasting at least 45 minutes? Find gaps of at least 30 minutes between in-person events.',
+      ),
+      options,
+    );
+    expect(analysis).toMatchObject({
+      calendarScope: { name: 'Work' },
+      calendarEventAnalysis: { weekdayCount: 3, minimumDurationMinutes: 45 },
+      firstToolName: 'calendar.list_events',
+    });
+  });
+
+  it('continues a named Work calendar plus email lookup through both sources and the matching thread', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'What time is my Zendesk meeting tomorrow on the Work calendar, and did I receive the invitation email?',
+      ),
+      { now: new Date('2026-10-22T12:00:00.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    expect(request).toMatchObject({
+      kind: 'calendar_email',
+      calendarScope: { name: 'Work' },
+      firstToolName: 'calendar.search_events',
+      requiresThreadRead: true,
+    });
+    if (!request) throw new Error('Expected named calendar plus mail request');
+
+    const calendar: ReadToolEvidence = {
+      toolName: 'calendar.search_events',
+      status: 'succeeded',
+      args: {
+        calendarIds: ['Work'],
+        query: request.queryTerms.join(' '),
+        timeMin: request.timeWindow?.timeMin,
+        timeMax: request.timeWindow?.timeMax,
+      },
+      result: { ok: true, complete: true, events: [], calendarsSearched: ['Work'] },
+    };
+    expect(nextRequiredReadTool(request, [])).toBe('calendar.search_events');
+    expect(nextRequiredReadTool(request, [calendar])).toBe('gmail.search');
+
+    const mail: ReadToolEvidence = {
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      args: { query: request.mailQuery },
+      result: { results: [{ threadId: 'zendesk-invitation' }] },
+    };
+    expect(nextRequiredReadTool(request, [calendar, mail])).toBe('gmail.read_thread');
+    expect(buildReadToolInput(request, 'gmail.read_thread', [calendar, mail])).toMatchObject({
+      threadId: 'zendesk-invitation',
+    });
+  });
+
+  it('continues named Work-calendar trip discovery into booking-email searches', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Find the next trip from booking emails using the Work calendar. Confirm flight dates, departure times and time zones, connections, and hotel. Then compare public transport and taxi from the destination airport to the hotel.',
+      ),
+      { now: new Date('2026-10-13T18:00:00.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    expect(request).toMatchObject({
+      kind: 'calendar_email',
+      compoundTripDiscovery: true,
+      calendarScope: { name: 'Work' },
+      firstToolName: 'calendar.list_events',
+    });
+    if (!request) throw new Error('Expected named calendar trip request');
+    expect(nextRequiredReadTool(request, [])).toBe('calendar.list_events');
+    const calendarInput = buildReadToolInput(request, 'calendar.list_events', []);
+    expect(calendarInput?.calendarIds).toEqual(['Work']);
+    const calendar: ReadToolEvidence = {
+      toolName: 'calendar.list_events',
+      status: 'succeeded',
+      args: calendarInput,
+      result: { ok: true, complete: true, events: [], calendarsSearched: ['Work'] },
+    };
+    expect(nextRequiredReadTool(request, [calendar])).toBe('gmail.search');
+  });
+
+  it('binds the named calendar child in an explicit paired-source read', () => {
+    const request = detectPersonalReadRequest(
+      turn(
+        'Check my Work calendar tomorrow and search my email for the Zendesk meeting invitation.',
+      ),
+      { now: new Date('2026-10-22T12:00:00.000Z'), timeZone: 'America/Los_Angeles' },
+    );
+    if (!request?.sourceReads) throw new Error('Expected paired source reads');
+    const calendarRequest = request.sourceReads.find(
+      (child) => child.explicitSource === 'calendar',
+    );
+    const mailRequest = request.sourceReads.find((child) => child.explicitSource === 'mail');
+    expect(calendarRequest?.calendarScope).toEqual({ name: 'Work' });
+    if (!calendarRequest || !mailRequest) throw new Error('Expected calendar and email children');
+
+    const mail: ReadToolEvidence = {
+      toolName: 'gmail.search',
+      status: 'succeeded',
+      args: { query: mailRequest.mailQuery },
+      result: { results: [] },
+    };
+    expect(nextRequiredReadTool(request, [])).toBe('gmail.search');
+    expect(nextRequiredReadTool(request, [mail])).toBe('calendar.list_events');
+    const input = buildReadToolInput(request, 'calendar.list_events', [mail]);
+    expect(input?.calendarIds).toEqual(['Work']);
+    const calendar: ReadToolEvidence = {
+      toolName: 'calendar.list_events',
+      status: 'succeeded',
+      args: input,
+      result: { ok: true, complete: true, events: [], calendarsSearched: ['Work'] },
+    };
+    expect(nextRequiredReadTool(request, [mail, calendar])).toBeUndefined();
+  });
+
+  it('does not widen an unknown or ambiguous named calendar after an unavailable result', () => {
+    const request = detectPersonalReadRequest(turn('Check Zendesk calendar tomorrow.'), {
+      now: new Date('2026-10-22T12:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!request) throw new Error('Expected named calendar request');
+    const bound = buildReadToolInput(request, 'calendar.list_events', []);
+    expect(bound?.calendarIds).toEqual(['Zendesk']);
+    for (const unavailable of [
+      { calendar: 'Zendesk', reason: 'calendar was not found in the readable roster' },
+      {
+        calendar: 'Zendesk',
+        reason: 'calendar name is ambiguous; select by calendar ID',
+        candidates: ['zendesk-a@example.com', 'zendesk-b@example.com'],
+      },
+    ]) {
+      expect(
+        nextRequiredReadTool(request, [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: bound,
+            result: {
+              events: [],
+              calendarsSearched: [],
+              unavailable: [unavailable],
+              complete: false,
+            },
+          },
+        ]),
+      ).toBeUndefined();
+      expect(buildReadToolInput(request, 'calendar.list_events', [])?.calendarIds).toEqual([
+        'Zendesk',
+      ]);
+    }
+  });
+
   it('does not turn a fictional no-tool background check into calendar/mail discovery', () => {
     const text =
       'Simulate a background check only; do not use tools or notify anyone. A fictional assistant already reported that two venue quotes are unchanged and is waiting for the owner to choose. No new source information, deadline, risk, or owner reply has arrived. Should it interrupt again? State the decision and the event that would justify another update in at most 80 words.';
@@ -1200,7 +1454,7 @@ describe('detectPersonalReadRequest', () => {
       { now: new Date('2026-10-13T18:08:55.000Z'), timeZone: 'America/Los_Angeles' },
     );
     expect(excluded?.compactCalendarBriefing).toBe(true);
-    expect(excluded?.includeCalendarOverlapSummary).toBeUndefined();
+    expect(excluded?.includeCalendarOverlapSummary).toBe(false);
   });
 
   it('retains checked agenda grounding when a request also asks about weather', () => {
@@ -1251,7 +1505,7 @@ describe('detectPersonalReadRequest', () => {
     'Brief me on my calendar tomorrow, but do not check for overlaps.',
     'Give me a short schedule overview; no need to look for conflicts.',
   ])('does not add overlap analysis when explicitly excluded: %s', (text) => {
-    expect(detectPersonalReadRequest(turn(text))?.includeCalendarOverlapSummary).toBeUndefined();
+    expect(detectPersonalReadRequest(turn(text))?.includeCalendarOverlapSummary).toBe(false);
   });
 
   it.each(['Make this sentence clear.', 'Is the explanation clear?', 'Empty my inbox tomorrow.'])(

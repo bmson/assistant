@@ -85,6 +85,7 @@ import { SensitiveValue } from './sensitive-value';
 // made structured results look disconnected from the conversation around them.
 const CARD_WIDTH = 'min-w-0 w-full max-w-none';
 const PREVIEW_LIMIT = 3;
+const CALENDAR_AGENDA_PREVIEW_LIMIT = 6;
 
 type Raw = Record<string, unknown>;
 
@@ -668,6 +669,210 @@ function BriefingCard({ data }: { data: Raw }) {
           }
         })}
       </div>
+    </CardShell>
+  );
+}
+
+function CalendarAgendaRow({ item }: { item: Raw }) {
+  const calendars = strs(item.calendars)
+    .map((calendar) => calendar.trim())
+    .filter(Boolean);
+  const calendarLinks = recs(item.calendarLinks)
+    .map(link)
+    .filter((entry): entry is { label: string; url: string } => !!entry);
+  const eventLink = link(item.eventLink);
+  const meetingLink = link(item.meetingLink);
+  const day = str(item.day);
+  const time = day === 'Timed' ? str(item.time) : day;
+
+  return (
+    <li className="grid min-w-0 grid-cols-1 gap-x-3 rounded-md border border-edge/50 px-3 py-2.5 text-sm sm:grid-cols-[4.75rem_minmax(0,1fr)]">
+      <span className="min-w-0 text-xs leading-5 font-medium text-muted [overflow-wrap:anywhere]">
+        {day === 'All day' ? str(item.time) : time}
+      </span>
+      <span className="min-w-0">
+        <span className="block font-medium leading-5 text-strong [overflow-wrap:anywhere]">
+          {str(item.title)}
+        </span>
+        {str(item.location) ? (
+          <span className="mt-0.5 block text-xs leading-4 text-muted [overflow-wrap:anywhere]">
+            {str(item.location)}
+          </span>
+        ) : null}
+        {str(item.note) ? (
+          <span className="mt-1 block text-xs leading-4 text-accent [overflow-wrap:anywhere]">
+            {str(item.note)}
+          </span>
+        ) : null}
+        {item.showCalendarAttribution === true && calendars.length ? (
+          <span className="mt-1 block text-xs leading-4 text-muted [overflow-wrap:anywhere]">
+            {calendars.join(' · ')}
+          </span>
+        ) : null}
+        {eventLink || meetingLink || calendarLinks.length ? (
+          <span className="mt-2 flex min-w-0 flex-wrap gap-1.5">
+            {eventLink ? <CardLink href={eventLink.url} label="Open event" /> : null}
+            {meetingLink ? <CardLink href={meetingLink.url} label="Join meeting" /> : null}
+            {calendarLinks.map((entry) => (
+              <CardLink key={`${entry.label}-${entry.url}`} href={entry.url} label={entry.label} />
+            ))}
+          </span>
+        ) : null}
+      </span>
+    </li>
+  );
+}
+
+function CalendarAgendaGroup({ title, items }: { title: string; items: Raw[] }) {
+  if (!items.length) return null;
+  return (
+    <section className="min-w-0">
+      <h4 className="mb-1.5 text-xs font-medium text-muted">{title}</h4>
+      <ul className="flex min-w-0 flex-col gap-2">
+        {items.map((item, index) => (
+          <CalendarAgendaRow key={str(item.id) || `${str(item.title)}-${index}`} item={item} />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function CalendarAgendaSection({ section, date }: { section: Raw; date: string }) {
+  const items = recs(section.items).filter(validCalendarAgendaItem);
+  const [showAll, setShowAll] = useState(false);
+  const visibleItems = visibleCalendarAgendaItems(items, showAll);
+  const calendarNames = new Set(
+    items.flatMap((item) =>
+      strs(item.calendars)
+        .map((name) => name.trim())
+        .filter(Boolean),
+    ),
+  );
+  const showCalendarAttribution = calendarNames.size > 1;
+  const showableItems = visibleItems.map((item): Raw => ({ ...item, showCalendarAttribution }));
+  const allDay = showableItems.filter((item) => str(item.day) === 'All day');
+  const timed = showableItems.filter((item) => str(item.day) === 'Timed');
+  const unavailable = showableItems.filter((item) => str(item.day) === 'Time unavailable');
+  const sectionTitle = str(section.title);
+
+  return (
+    <section aria-label="Agenda items" className="min-w-0">
+      {sectionTitle && sectionTitle !== date ? (
+        <BriefingHeading>{sectionTitle}</BriefingHeading>
+      ) : null}
+      {items.length ? (
+        <div className="flex min-w-0 flex-col gap-2.5">
+          <CalendarAgendaGroup title="All day" items={allDay} />
+          <CalendarAgendaGroup title="Timed" items={timed} />
+          <CalendarAgendaGroup title="Time unavailable" items={unavailable} />
+          <p className="text-xs text-muted">
+            Showing {visibleItems.length} of {items.length}{' '}
+            {items.length === 1 ? 'event' : 'events'}
+          </p>
+        </div>
+      ) : (
+        <p className="text-sm text-muted">No events on the calendar. Showing 0 of 0 events.</p>
+      )}
+      {items.length > CALENDAR_AGENDA_PREVIEW_LIMIT ? (
+        <button
+          type="button"
+          className={`mt-2 rounded-sm text-xs font-medium text-accent underline-offset-2 hover:underline ${focusRing}`}
+          aria-expanded={showAll}
+          onClick={() => setShowAll((expanded) => !expanded)}
+        >
+          {showAll ? 'Show fewer' : `Show all ${items.length}`}
+        </button>
+      ) : null}
+      {section.complete === false ? (
+        <p className="mt-2 text-xs text-muted">
+          Some calendars could not be read, so this may be incomplete.
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function CalendarAgendaAttention({ section }: { section: Raw }) {
+  const summaries = recs(section.items).filter(validBriefingItem);
+  const overlaps = recs(section.overlaps).filter(validBriefingItem);
+  const [showAll, setShowAll] = useState(false);
+  const visibleOverlaps = showAll ? overlaps : overlaps.slice(0, 3);
+
+  return (
+    <section className="min-w-0">
+      <BriefingHeading>{str(section.title)}</BriefingHeading>
+      {summaries.map((item) => (
+        <p
+          key={str(item.id) || JSON.stringify([str(item.title), str(item.detail), str(item.meta)])}
+          className="text-sm font-medium text-strong [overflow-wrap:anywhere]"
+        >
+          {str(item.title) && str(item.title) !== str(section.title) ? `${str(item.title)}. ` : ''}
+          {str(item.detail)}
+        </p>
+      ))}
+      {overlaps.length ? (
+        <>
+          <ul className="mt-2 flex min-w-0 flex-col gap-2">
+            {visibleOverlaps.map((item) => (
+              <li
+                key={
+                  str(item.id) ||
+                  JSON.stringify([str(item.title), str(item.detail), str(item.meta)])
+                }
+                className="min-w-0 rounded-md border border-edge/50 px-3 py-2 text-sm"
+              >
+                <p className="font-medium text-strong [overflow-wrap:anywhere]">
+                  {str(item.title)}
+                </p>
+                {str(item.detail) ? (
+                  <p className="mt-0.5 text-xs text-muted [overflow-wrap:anywhere]">
+                    {str(item.detail)}
+                  </p>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+          {overlaps.length > 3 ? (
+            <button
+              type="button"
+              className={`mt-2 rounded-sm text-xs font-medium text-accent underline-offset-2 hover:underline ${focusRing}`}
+              aria-expanded={showAll}
+              onClick={() => setShowAll((expanded) => !expanded)}
+            >
+              {showAll ? 'Show fewer' : `Show all ${overlaps.length} overlaps`}
+            </button>
+          ) : null}
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+export function visibleCalendarAgendaItems(items: Raw[], showAll: boolean): Raw[] {
+  return showAll ? items : items.slice(0, CALENDAR_AGENDA_PREVIEW_LIMIT);
+}
+
+function CalendarAgendaCard({ data }: { data: Raw }) {
+  const sections = recs(data.sections).filter(validCalendarAgendaSection);
+  return (
+    <CardShell icon={CalendarDays} label={['Agenda', str(data.date)].filter(Boolean).join(' · ')}>
+      {str(data.lead) ? (
+        <p className="text-sm font-medium text-strong text-pretty [overflow-wrap:anywhere]">
+          {str(data.lead)}
+        </p>
+      ) : null}
+      {sections.length ? (
+        <div className="mt-3 flex min-w-0 flex-col gap-3.5 border-t border-edge/60 pt-3">
+          {sections.map((section) => {
+            const key = str(section.id) || `${str(section.type)}:${str(section.title)}`;
+            if (section.type === 'agenda')
+              return <CalendarAgendaSection key={key} section={section} date={str(data.date)} />;
+            if (recs(section.overlaps).length)
+              return <CalendarAgendaAttention key={key} section={section} />;
+            return <BriefingList key={key} section={section} />;
+          })}
+        </div>
+      ) : null}
     </CardShell>
   );
 }
@@ -2489,7 +2694,11 @@ function ResponseCardView({
     case 'weather':
       return <WeatherCard data={data} />;
     case 'briefing':
-      return <BriefingCard data={data} />;
+      return data.presentation === 'calendar-agenda' ? (
+        <CalendarAgendaCard data={data} />
+      ) : (
+        <BriefingCard data={data} />
+      );
     case 'route':
       return (
         <CardShell icon={MapPin} label="Directions">
@@ -2730,6 +2939,11 @@ function validAgendaItem(value: unknown, withDay = false): boolean {
   return !!item && (!withDay || hasText(item.day)) && hasText(item.time) && hasText(item.title);
 }
 
+function validCalendarAgendaItem(value: unknown): boolean {
+  const item = rec(value);
+  return !!item && hasText(item.day) && hasText(item.time) && hasText(item.title);
+}
+
 function validBriefingItem(value: unknown): boolean {
   const item = rec(value);
   return !!item && (hasText(item.title) || hasText(item.detail) || hasText(item.meta));
@@ -2757,6 +2971,19 @@ function validBriefingSection(value: unknown): boolean {
     return rows(section.items, validBriefingItem);
   // Unknown section variants use the text-list fallback today, but cannot be
   // claimed complete until the producer and renderer share a named contract.
+  return false;
+}
+
+function validCalendarAgendaSection(value: unknown): boolean {
+  const section = rec(value);
+  if (!section || !hasText(section.title)) return false;
+  if (section.type === 'agenda')
+    return Array.isArray(section.items) && section.items.every(validCalendarAgendaItem);
+  if (section.type === 'attention')
+    return (
+      rows(section.items, validBriefingItem) &&
+      validOptionalArray(section, 'overlaps', validBriefingItem)
+    );
   return false;
 }
 
@@ -2911,6 +3138,13 @@ function specializedCardSupported(card: Raw): boolean {
     return rows(card.items, (item) => validAgendaItem(item));
   if (kind === 'calendar-day') return rows(card.events, validEvent);
   if (kind === 'briefing') {
+    if (card.presentation === 'calendar-agenda') {
+      return (
+        (hasText(card.lead) || hasValidRow(card.sections, validCalendarAgendaSection)) &&
+        Array.isArray(card.sections) &&
+        card.sections.every(validCalendarAgendaSection)
+      );
+    }
     const sectionsValid = validOptionalArray(card, 'sections', validBriefingSection);
     const hasSections = rows(card.sections, validBriefingSection);
     return (hasText(card.lead) || hasSections) && sectionsValid;
@@ -3043,6 +3277,8 @@ function specializedCardHasVisibleContent(card: Raw): boolean {
   if (kind === 'calendar' || kind === 'agenda')
     return hasValidRow(card.items, (item) => validAgendaItem(item));
   if (kind === 'calendar-day') return hasValidRow(card.events, validEvent);
+  if (kind === 'briefing' && card.presentation === 'calendar-agenda')
+    return hasText(card.lead) || hasValidRow(card.sections, validCalendarAgendaSection);
   if (kind === 'briefing')
     return (
       hasText(card.lead) ||

@@ -359,11 +359,12 @@ export const QUESTION_CASES: QuestionCase[] = [
       { text: 'Tomorrow you have Design review. It will be 22°C and sunny.' },
     ],
     expect: {
-      matches: ['Design review', "couldn't retrieve current weather"],
+      matches: ['1 event from Fixture calendar', "couldn't retrieve current weather"],
       excludes: ['22°C', 'sunny'],
       tools: ['calendar.list_events'],
       failedTools: ['weather.lookup'],
       statuses: ['needs_attention'],
+      responseCardKinds: ['briefing'],
       forbiddenResponseCardKinds: ['weather', 'calendar-event'],
     },
   },

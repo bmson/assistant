@@ -394,6 +394,26 @@ describe('calendar.list_events', () => {
     expect(result.events.map((e) => e.eventId)).toEqual(['w1']);
   });
 
+  it('resolves a lowercased literal display name without widening', async () => {
+    const api = apiFor({
+      'owner@example.com': [event('o1', 'Dentist', '2026-07-24T09:00:00Z')],
+      'work@example.com': [event('w1', 'Standup', '2026-07-24T12:00:00Z')],
+    });
+    const result = (await toolsWith(api)
+      .get('calendar.list_events')
+      ?.tool.execute(
+        {
+          timeMin: '2026-07-24T00:00:00Z',
+          timeMax: '2026-07-25T00:00:00Z',
+          maxResults: 20,
+          calendarIds: ['work'],
+        },
+        {} as never,
+      )) as { events: Array<{ eventId: string }>; calendarsSearched: string[] };
+    expect(result.calendarsSearched).toEqual(['Work']);
+    expect(result.events.map((entry) => entry.eventId)).toEqual(['w1']);
+  });
+
   it('keeps requested, resolved, and searched calendar coverage distinct when some names are missing', async () => {
     const api = apiFor({ 'work@example.com': [event('w1', 'Standup', '2026-07-24T12:00:00Z')] });
     const result = (await toolsWith(api)
@@ -428,7 +448,7 @@ describe('calendar.list_events', () => {
   it('does not guess when a requested display name matches multiple calendars', async () => {
     const duplicateName = [
       { id: 'team-a@example.com', summary: 'Team', accessRole: 'reader' },
-      { id: 'team-b@example.com', summary: 'Team', accessRole: 'reader' },
+      { id: 'team-b@example.com', summary: 'team', accessRole: 'reader' },
     ];
     const api = apiFor({}, duplicateName);
     const result = (await toolsWith(api)
@@ -438,7 +458,7 @@ describe('calendar.list_events', () => {
           timeMin: '2026-07-24T00:00:00Z',
           timeMax: '2026-07-25T00:00:00Z',
           maxResults: 20,
-          calendarIds: ['Team'],
+          calendarIds: ['TEAM'],
         },
         {} as never,
       )) as {
@@ -449,7 +469,7 @@ describe('calendar.list_events', () => {
 
     expect(result.unavailable).toEqual([
       {
-        calendar: 'Team',
+        calendar: 'TEAM',
         reason: 'calendar name is ambiguous; select by calendar ID',
         candidates: ['team-a@example.com', 'team-b@example.com'],
       },
