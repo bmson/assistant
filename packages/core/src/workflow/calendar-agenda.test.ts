@@ -292,6 +292,65 @@ describe('calendarAgendaCards', () => {
     expect(firstDaySections.some((section) => section.overlaps)).toBe(false);
   });
 
+  it('keeps every agenda row while bounding dense overlap details and reporting the exact omitted count', () => {
+    const count = 2_000;
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: Array.from({ length: count }, (_, index) =>
+        event(`dense-${index}`, '2026-10-22T09:00:00Z', '2026-10-22T10:00:00Z', {
+          calendarId: `calendar-${index}`,
+          eventId: `event-${index}`,
+          title: `Dense meeting ${index}`,
+        }),
+      ),
+      request: request({ timeZone: 'UTC' }),
+    });
+    const sections = cards[0]?.sections as Array<Record<string, unknown>>;
+    const overlap = sections.find((section) => section.overlaps);
+    const details = overlap?.overlaps as unknown[];
+    expect(items(cards)).toHaveLength(count);
+    expect(details).toHaveLength(100);
+    expect(overlap).toMatchObject({
+      overlapCount: (count * (count - 1)) / 2,
+      overlapsTruncated: true,
+    });
+    expect(JSON.stringify(overlap?.items)).toContain('1998900 additional overlaps');
+    expect(JSON.stringify(cards).length).toBeLessThan(2_000_000);
+  });
+
+  it('caps formatted pair details across the whole response while preserving per-day counts', () => {
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: Array.from({ length: 120 }, (_, index) => {
+        const dayOffset = Math.floor(index / 10);
+        const date = new Date(Date.parse('2026-10-22T00:00:00Z') + dayOffset * 86_400_000)
+          .toISOString()
+          .slice(0, 10);
+        return event(`multi-day-${index}`, `${date}T09:00:00Z`, `${date}T10:00:00Z`, {
+          calendarId: `calendar-${index}`,
+          eventId: `event-${index}`,
+        });
+      }),
+      request: request({ timeZone: 'UTC' }),
+    });
+    const overlapSections = cards.flatMap((card) =>
+      (card.sections as Array<Record<string, unknown>>).filter((section) => section.overlaps),
+    );
+    expect(overlapSections.reduce((sum, section) => sum + Number(section.overlapCount), 0)).toBe(
+      540,
+    );
+    expect(
+      overlapSections.reduce((sum, section) => sum + (section.overlaps as unknown[]).length, 0),
+    ).toBe(100);
+    expect(
+      overlapSections.reduce(
+        (sum, section) =>
+          sum + Number(section.overlapCount) - (section.overlaps as unknown[]).length,
+        0,
+      ),
+    ).toBe(440);
+  });
+
   it('surfaces canonical source differences in the row note and attention section', () => {
     const card = event('canonical-planning', '2026-10-22T09:00:00Z', '2026-10-22T10:00:00Z', {
       title: 'Planning',
@@ -424,7 +483,11 @@ describe('calendarAgendaCards', () => {
       request: request({ timeZone: 'UTC' }),
     });
     const sections = cards[0]?.sections as Array<Record<string, unknown>>;
-    expect(sections.some((section) => section.title === 'Arrival guidance')).toBe(true);
+    expect(
+      String(
+        sections.find((section) => String(section.title).includes('arrival and start'))?.title,
+      ),
+    ).toContain('1 possible arrival and start pair');
     expect(sections.some((section) => String(section.title).includes('possible overlap'))).toBe(
       false,
     );
