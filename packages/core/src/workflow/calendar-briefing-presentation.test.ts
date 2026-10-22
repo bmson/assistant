@@ -55,7 +55,19 @@ const evidence = (
       ...(readRequest.queryTerms.length > 0 ? { query: readRequest.queryTerms.join(' ') } : {}),
     },
     result: {
-      events,
+      events: events.map((event) =>
+        event.ownerResponse === 'accepted' && event.ownerParticipation === undefined
+          ? {
+              ...event,
+              ownerParticipation: {
+                status: 'accepted',
+                identityVerified: true,
+                basis: 'attendee-email',
+              },
+              blocksTime: true,
+            }
+          : event,
+      ),
       complete,
       calendarRosterComplete: true,
       calendarsSearched: ['Work', 'Personal'],
@@ -96,7 +108,7 @@ describe('calendar day and practical briefing fidelity', () => {
       expect(response).toContain(event.summary);
     }
     expect(response).toContain('Work · accepted');
-    expect(response).toContain('Conflict');
+    expect(response).toContain('Your accepted commitments overlap');
     expect(response).not.toContain('Next:');
     expect(response).not.toContain('Example Street');
     expect(response).not.toContain('blocks time; attendance accepted');
@@ -176,7 +188,7 @@ describe('calendar day and practical briefing fidelity', () => {
     const response = verifiedReadResponse(compact, evidence([accepted, second], true, compact));
 
     expect(response).toContain(
-      'Conflict **Thu 15 Oct 9:30 AM–10:00 AM**: Project review + Planning hold.',
+      'Your accepted commitments overlap **Thu 15 Oct 9:30 AM–10:00 AM**: Work · Project review + Work · Planning hold.',
     );
   });
 
@@ -396,7 +408,7 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain('event?eid=second');
     expect(response).toContain('event?eid=stay');
     expect(response).toContain(
-      'Possible overlap **Thu 15 Oct 9:50 AM–10:00 AM**: Project review + Planning hold.',
+      'Possible overlap **Thu 15 Oct 9:50 AM–10:00 AM**: Work · Project review + Work · Planning hold.',
     );
     expect(response).toContain('Calendar overlap does not confirm attendance.');
     expect(response).not.toContain('Next:');
@@ -724,7 +736,7 @@ describe('calendar day and practical briefing fidelity', () => {
     const response = verifiedReadResponse(request, evidence(events));
     expect(response.match(/Possible overlap:/g)).toHaveLength(3);
     expect(response).toContain(
-      'Additional overlapping pairs: **Appointment 1** and **Appointment 2**; **Appointment 1** and **Appointment 3**; **Appointment 2** and **Appointment 3**.',
+      '- 6 overlapping pairs found; further pair details are not expanded.',
     );
     expect(response).not.toContain('additional overlapping pairs were found');
     expect(response.match(/do not establish that you must attend both/g)).toHaveLength(1);
@@ -763,7 +775,7 @@ describe('calendar day and practical briefing fidelity', () => {
     const response = verifiedReadResponse(request, evidence(events));
     expect(response.match(/Possible overlap:/g)).toHaveLength(3);
     expect(response).toContain(
-      'Additional overlapping pairs: **Appointment 0** and **Appointment 4**; **Appointment 0** and **Appointment 5**; **Appointment 0** and **Appointment 6**; 1,219 more not listed.',
+      '- 1,225 overlapping pairs found; further pair details are not expanded.',
     );
     expect(response).not.toContain('Appointment 49**');
     expect(response.match(/do not establish that you must attend both/g)).toHaveLength(1);
@@ -874,7 +886,7 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(checked.text).toContain('Library field trip');
     expect(checked.text).toContain('Soccer practice');
     expect(checked.text).toContain(
-      'Possible overlap: **Library field trip** and **Soccer practice**',
+      'Possible overlap: **Family · Library field trip** and **Soccer · Soccer practice**',
     );
     expect(checked.text).not.toContain('Possible overlap: **Berlin hotel stay**');
     expect(checked.text).not.toContain('Possible overlap: **Paycheck');
@@ -893,7 +905,9 @@ describe('calendar day and practical briefing fidelity', () => {
     const response = verifiedReadResponse(request, evidence([longBlock, timed]));
 
     expect(response).toContain('**Conference hold**');
-    expect(response).toContain('Possible overlap: **Conference hold** and **Project review**');
+    expect(response).toContain(
+      'Possible overlap: **Work · Conference hold** and **Work · Project review**',
+    );
     expect(response).toContain('do not establish that you must attend both');
   });
 });
@@ -933,5 +947,5 @@ it('treats a matching phone mirror as a duplicate and retains a distinct accepte
   const text = verifiedReadResponse(request, evidence([original, copy, other]) as never);
   expect(text).not.toMatch(/Scheduling conflict[^\n]*Project review[^\n]*and[^\n]*Project review/);
   expect(text).toContain('Dentist appointment');
-  expect(text).toContain('Scheduling conflict');
+  expect(text).toContain('Your accepted commitments overlap');
 });
