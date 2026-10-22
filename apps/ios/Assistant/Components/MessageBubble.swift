@@ -434,6 +434,7 @@ struct MessageBubble: View {
                     .truncationMode(.tail)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .multilineTextAlignment(.leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .foregroundStyle(AssistantTheme.stageSecondary)
