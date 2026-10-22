@@ -14,6 +14,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore phone calendar 
 
   it('stores device events, scopes reads to the owner, and clears event details on revocation', async () => {
     const cache = new FirestoreToolExecutionRepository(store);
+    const legacyCache = {
+      cacheGet: cache.cacheGet.bind(cache),
+      cachePut: cache.cachePut.bind(cache),
+    };
     const input = {
       timeMin: '2026-10-01T00:00:00Z',
       timeMax: '2027-01-01T00:00:00Z',
@@ -34,33 +38,19 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore phone calendar 
         },
       ],
     };
-    await savePhoneCalendars(
-      { cacheGet: cache.cacheGet.bind(cache), cachePut: cache.cachePut.bind(cache) },
-      'owner',
-      input,
-      now,
-    );
-    expect(await readPhoneCalendars(cache, 'owner')).toEqual({
+    await savePhoneCalendars(legacyCache, 'owner', input, now);
+    expect(await readPhoneCalendars(cache, 'owner')).toBeNull();
+    expect(await readPhoneCalendars(legacyCache, 'owner')).toEqual({
       ...input,
       syncedAt: now.toISOString(),
     });
-    expect(await readPhoneCalendars(cache, 'other-owner')).toBeNull();
-    await savePhoneCalendars(
-      { cacheGet: cache.cacheGet.bind(cache), cachePut: cache.cachePut.bind(cache) },
-      'owner',
-      null,
-      now,
-    );
-    expect(await readPhoneCalendars(cache, 'owner')).toBeNull();
+    expect(await readPhoneCalendars(legacyCache, 'other-owner')).toBeNull();
+    await savePhoneCalendars(legacyCache, 'owner', null, now);
+    expect(await readPhoneCalendars(legacyCache, 'owner')).toBeNull();
     const document = await store.doc('toolCache', 'phone-calendars:v1:owner').get();
     expect(document.get('result')).toEqual({ disconnected: true });
-    await savePhoneCalendars(
-      { cacheGet: cache.cacheGet.bind(cache), cachePut: cache.cachePut.bind(cache) },
-      'owner',
-      input,
-      now,
-    );
-    expect(await readPhoneCalendars(cache, 'owner')).toEqual({
+    await savePhoneCalendars(legacyCache, 'owner', input, now);
+    expect(await readPhoneCalendars(legacyCache, 'owner')).toEqual({
       ...input,
       syncedAt: now.toISOString(),
     });
