@@ -156,7 +156,7 @@ export const ASSISTANT_SCENARIOS: QuestionCase[] = [
       { toolCalls: [smsCall] },
     ],
     expect: {
-      matches: ['1 event from Fixture calendar'],
+      matches: ['1 calendar entry from Fixture calendar'],
       excludes: ['\\[A999\\]', 'I sent', 'This needs your approval before I act'],
       statuses: ['done'],
       tools: ['calendar.list_events'],
@@ -178,7 +178,7 @@ export const ASSISTANT_SCENARIOS: QuestionCase[] = [
     calendar: 'next-meeting',
     script: [{ text: 'Tomorrow: Design review at 1:00 AM Pacific time, at Oracle Park.' }],
     expect: {
-      matches: ['1 event from Fixture calendar'],
+      matches: ['1 calendar entry from Fixture calendar'],
       tools: ['calendar.list_events'],
       responseCardKinds: ['briefing'],
       forbiddenResponseCardKinds: ['calendar-event'],
@@ -224,7 +224,7 @@ export const ASSISTANT_SCENARIOS: QuestionCase[] = [
     ],
     script: [{ text: 'Family day is all day on November 1.' }],
     expect: {
-      matches: ['1 event from Family'],
+      matches: ['1 calendar entry from Family'],
       excludes: ['October 31', '11:00 PM'],
       responseCardKinds: ['briefing'],
       forbiddenResponseCardKinds: ['calendar-event'],
