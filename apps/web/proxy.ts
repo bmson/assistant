@@ -228,7 +228,8 @@ export function proxy(request: NextRequest) {
     (path === '/api/mobile/v1/activity' && request.method === 'POST') ||
     (path === '/api/mobile/v1/activity/foreground' && request.method === 'POST') ||
     (path === '/api/mobile/v1/location' && request.method === 'POST') ||
-    (path === '/api/mobile/v1/calendars' && ['PUT', 'DELETE'].includes(request.method)) ||
+    (path === '/api/mobile/v1/calendars' &&
+      ['GET', 'POST', 'PUT', 'DELETE'].includes(request.method)) ||
     (path === '/api/mobile/v1/goals' && ['GET', 'POST'].includes(request.method)) ||
     (path === '/api/mobile/v1/mcp' && ['GET', 'POST'].includes(request.method)) ||
     (path === '/api/mobile/v1/providers' && ['GET', 'POST'].includes(request.method)) ||

@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import {
   emailAttachmentCustodyCleanupIntentId,
   notificationDashboardMessageId,
+  type PhoneCalendarSharingCommand,
+  phoneCalendarCacheKey,
 } from '@assistant/persistence';
 import { asc, eq, like, sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
@@ -40,6 +42,7 @@ import {
   notificationOutbox,
   occasions,
   ownerCard,
+  phoneCalendarSharing,
   recallSurfaces,
   securityIncidentAttention,
   securityIncidentSources,
@@ -47,6 +50,7 @@ import {
   situationPacks,
   situationPreviews,
   tasks,
+  toolCache,
   toolCallReceiptKeys,
   toolCallReceipts,
   voiceProfile,
@@ -55,6 +59,7 @@ import {
   watchFires,
   writingSamples,
 } from './schema.js';
+import { createPostgresToolExecutionRepository } from './tool-execution-repository.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -69,6 +74,7 @@ describe('PostgreSQL privacy erasure repository', () => {
           const owners = await tx.select({ id: agents.id }).from(agents).limit(2);
           if (owners.length !== 1 || !owners[0]) throw new Error('Test requires one owner');
           const agentId = owners[0].id;
+          const now = new Date('2026-09-22T12:00:00Z');
           const memoryId = randomUUID();
           const hash = `privacy-${randomUUID()}`;
           const left = randomUUID();
@@ -103,6 +109,40 @@ describe('PostgreSQL privacy erasure repository', () => {
             embedding: Array.from({ length: 1536 }, () => 0.125),
             embeddingSpaceKey: 'a'.repeat(64),
           });
+          await tx.insert(phoneCalendarSharing).values({
+            id: agentId,
+            agentId,
+            state: {
+              version: 1,
+              ownerId: agentId,
+              publisherId: 'old-device',
+              generation: 1,
+              enabled: true,
+              consentVersion: 1,
+              calendars: [{ id: 'work', name: 'Private Work', purpose: 'commitments' }],
+              mutationId: 'old-enable',
+              capturedAt: '2026-09-21T00:00:00.000Z',
+              receivedAt: '2026-09-21T00:01:00.000Z',
+              timeMin: '2026-09-20T00:00:00.000Z',
+              timeMax: '2026-10-01T00:00:00.000Z',
+              complete: true,
+              truncated: false,
+              updatedAt: now.toISOString(),
+            },
+            updatedAt: now,
+          });
+          await tx
+            .insert(toolCache)
+            .values({
+              cacheKey: phoneCalendarCacheKey(agentId),
+              toolName: 'phone-calendars.snapshot',
+              result: { private: true },
+              expiresAt: new Date(Date.now() + 60_000),
+            })
+            .onConflictDoUpdate({
+              target: toolCache.cacheKey,
+              set: { result: { private: true }, expiresAt: new Date(Date.now() + 60_000) },
+            });
           await tx.insert(memoryEmbeddingRefreshes).values({
             id: refreshId,
             agentId,
@@ -454,6 +494,35 @@ describe('PostgreSQL privacy erasure repository', () => {
           const repository = createPostgresPrivacyErasureRepository(tx as unknown as Db);
           const beforeErasure = await postgresPrivacyObservationFence(tx as unknown as Db, agentId);
           await expect(repository.erase()).resolves.toEqual(expectedCounts);
+          const [scrubbedPhoneSharing] = await tx
+            .select()
+            .from(phoneCalendarSharing)
+            .where(eq(phoneCalendarSharing.agentId, agentId));
+          expect(scrubbedPhoneSharing?.state).toMatchObject({
+            version: 1,
+            ownerId: agentId,
+            publisherId: null,
+            generation: 2,
+            enabled: false,
+            consentVersion: 0,
+            calendars: [],
+          });
+          expect(Object.keys(scrubbedPhoneSharing?.state as object).sort()).toEqual([
+            'calendars',
+            'consentVersion',
+            'enabled',
+            'generation',
+            'ownerId',
+            'publisherId',
+            'updatedAt',
+            'version',
+          ]);
+          expect(
+            await tx
+              .select()
+              .from(toolCache)
+              .where(eq(toolCache.cacheKey, phoneCalendarCacheKey(agentId))),
+          ).toHaveLength(0);
           expect(
             await tx
               .select()
@@ -638,6 +707,61 @@ describe('PostgreSQL privacy erasure repository', () => {
           const afterErasure = await postgresPrivacyObservationFence(tx as unknown as Db, agentId);
           expect(afterErasure).toEqual(expect.any(String));
           expect(afterErasure).not.toBe(beforeErasure);
+          const sharing = createPostgresToolExecutionRepository(
+            tx as unknown as Db,
+          ).phoneCalendarSharing;
+          const delayedEnable: PhoneCalendarSharingCommand = {
+            command: 'enable',
+            publisherId: 'old-device',
+            expectedGeneration: 0,
+            mutationId: 'old-enable',
+            consentVersion: 1,
+            calendars: [{ id: 'work', name: 'Private Work', purpose: 'commitments' }],
+          };
+          expect(await sharing?.apply(agentId, delayedEnable, now)).toMatchObject({
+            ok: false,
+            error: 'stale_generation',
+          });
+          const delayedSnapshot: PhoneCalendarSharingCommand = {
+            command: 'snapshot',
+            publisherId: 'old-device',
+            expectedGeneration: 1,
+            snapshot: {
+              capturedAt: now.toISOString(),
+              selectionRevision: 1,
+              complete: true,
+              truncated: false,
+              timeMin: '2026-10-21T00:00:00Z',
+              timeMax: '2026-10-29T00:00:00Z',
+              timeZone: 'UTC',
+              calendars: [{ id: 'work', name: 'Private Work', purpose: 'commitments' }],
+              sourceAvailability: [{ calendarId: 'work', status: 'available', complete: true }],
+              events: [],
+            },
+          };
+          expect(await sharing?.apply(agentId, delayedSnapshot, now)).toMatchObject({
+            ok: false,
+            error: 'publisher_conflict',
+          });
+          await tx.delete(phoneCalendarSharing).where(eq(phoneCalendarSharing.agentId, agentId));
+          await repository.erase();
+          const [createdTombstone] = await tx
+            .select({ state: phoneCalendarSharing.state })
+            .from(phoneCalendarSharing)
+            .where(eq(phoneCalendarSharing.agentId, agentId));
+          expect(createdTombstone?.state).toMatchObject({
+            ownerId: agentId,
+            publisherId: null,
+            generation: 1,
+            enabled: false,
+            consentVersion: 0,
+            calendars: [],
+          });
+          await repository.complete();
+          expect(await sharing?.apply(agentId, delayedEnable, now)).toMatchObject({
+            ok: false,
+            error: 'stale_generation',
+          });
           expect(
             (
               await tx

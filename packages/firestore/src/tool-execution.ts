@@ -4,6 +4,7 @@ import type {
   CachedToolCallInput,
   ClaimApprovedToolCallInput,
   ClaimApprovedToolCallResult,
+  PhoneCalendarSharingRepository,
   Records,
   ToolExecutionOutcome,
   ToolExecutionRepository,
@@ -19,6 +20,7 @@ import {
   toolCallReceiptKeyId,
   toolCallReplayKeysForStart,
 } from '@assistant/persistence';
+import { createFirestorePhoneCalendarSharingRepository } from './phone-calendar-sharing.js';
 import { assertPrivacyErasureInactiveInTransaction } from './privacy-erasure.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
@@ -68,7 +70,10 @@ function linked(
 
 export class FirestoreToolExecutionRepository implements ToolExecutionRepository {
   readonly kind = 'tool-execution-repository' as const;
-  constructor(readonly store: InstallationStore) {}
+  readonly phoneCalendarSharing: PhoneCalendarSharingRepository;
+  constructor(readonly store: InstallationStore) {
+    this.phoneCalendarSharing = createFirestorePhoneCalendarSharingRepository(store);
+  }
 
   private async receiptForKey(input: {
     agentId: string;

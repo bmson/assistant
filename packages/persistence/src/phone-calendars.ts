@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ToolExecutionRepository } from './dispatch.js';
+import type { PhoneCalendarSharingRepository } from './phone-calendar-sharing.js';
 
 const instant = z.string().datetime({ offset: true });
 const timeZone = z
@@ -99,7 +100,9 @@ export const phoneCalendarSnapshotSchema = z
   });
 export type PhoneCalendarSnapshotInput = z.infer<typeof phoneCalendarSnapshotSchema>;
 export type PhoneCalendarSnapshot = PhoneCalendarSnapshotInput & { syncedAt: string };
-export type PhoneCalendarCache = Pick<ToolExecutionRepository, 'cacheGet' | 'cachePut'>;
+export type PhoneCalendarCache = Pick<ToolExecutionRepository, 'cacheGet' | 'cachePut'> & {
+  phoneCalendarSharing?: PhoneCalendarSharingRepository;
+};
 const key = (agentId: string) => `phone-calendars:v1:${agentId}`;
 
 /** Transient device snapshot, on the same portable expiring store as provider reads. */
@@ -124,16 +127,46 @@ export async function savePhoneCalendars(
 export async function readPhoneCalendars(
   cache: PhoneCalendarCache,
   agentId: string,
+  now = new Date(),
 ): Promise<PhoneCalendarSnapshot | null> {
+  const sharing = await cache.phoneCalendarSharing?.get(agentId);
+  // Legacy cache rows do not establish consent to the new sharing protocol.
+  if (cache.phoneCalendarSharing && (!sharing?.enabled || !sharing.calendars.length)) return null;
   const cached = await cache.cacheGet(key(agentId));
-  if (!cached?.result) return null;
+  const unavailableSnapshot = (): PhoneCalendarSnapshot | null =>
+    sharing
+      ? {
+          calendars: sharing.calendars,
+          events: [],
+          timeMin: sharing.timeMin ?? now.toISOString(),
+          timeMax: sharing.timeMax ?? new Date(now.getTime() + 1000).toISOString(),
+          timeZone: sharing.calendars.find((calendar) => calendar.timeZone)?.timeZone ?? 'UTC',
+          selectionRevision: sharing.generation,
+          capturedAt: sharing.capturedAt,
+          syncedAt: sharing.receivedAt ?? new Date(0).toISOString(),
+          complete: false,
+          truncated: false,
+          sourceAvailability: sharing.calendars.map((calendar) => ({
+            calendarId: calendar.id,
+            status: 'missing',
+            complete: false,
+            reason: sharing.receivedAt
+              ? 'The shared calendar snapshot expired or no longer matches the selected calendars.'
+              : 'No shared calendar snapshot has been received yet.',
+          })),
+        }
+      : null;
+  if (!cached?.result) return unavailableSnapshot();
   // The input schema is strict; validate the server-owned timestamp separately.
   const value = cached.result as Record<string, unknown>;
   const { syncedAt, ...input } = value;
   const snapshot = phoneCalendarSnapshotSchema.safeParse(input);
-  return snapshot.success && typeof syncedAt === 'string' && Number.isFinite(Date.parse(syncedAt))
+  return snapshot.success &&
+    typeof syncedAt === 'string' &&
+    Number.isFinite(Date.parse(syncedAt)) &&
+    (!sharing || snapshot.data.selectionRevision === sharing.generation)
     ? { ...snapshot.data, syncedAt }
-    : null;
+    : unavailableSnapshot();
 }
 
 export function phoneCalendarCoverage(

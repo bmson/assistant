@@ -21,6 +21,7 @@ const EXPECTED_TABLES = [
   'model_calls',
   'budgets',
   'tool_cache',
+  'phone_calendar_sharing',
   'rate_limits',
   'writing_samples',
   'voice_profile',

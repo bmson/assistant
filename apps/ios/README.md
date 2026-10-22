@@ -161,14 +161,34 @@ then choose calendars already synced to Apple Calendar. No Google account connec
 needed in Assistant. iOS requires Full Access to read events; this feature never creates,
 changes, or deletes events. Managed calendars remain subject to device and workplace policy.
 
-The daily agenda displays titles, times, locations, and calendar names locally. Calendar data
-is never uploaded or added to model/chat context, so the server assistant, web app, and
-background jobs cannot see these events. Only the opt-in and selected calendar identifiers
-are saved in device preferences. Event details are cleared when the view leaves the foreground.
-Changes in Apple Calendar and permission changes refresh on return to the screen. Removed
-calendars and revoked access clear their selection rather than silently reading another calendar.
-**Stop using iPhone calendars** clears the selection; calendar permission can also be revoked
-in iPhone Settings. This requires an updated native app; a server deployment alone cannot add it.
+The local daily agenda displays titles, times, locations, and calendar names on the iPhone.
+Local display choices do not authorize server sharing. Local event details are cleared when the
+view leaves the foreground; removed calendars and revoked access clear their local selection.
+**Stop using iPhone calendars** clears the local display selection.
+
+**Share with your assistant** is a separate opt-in, initially off even when local display is on.
+Review each named calendar and choose **Not specified**, **My commitments**, or
+**Shared, family or reference**. Sharing sends selected event titles, locations, times,
+identifiers, availability, and a matching human-owner invitation response. Notes and full guest
+lists are not sent. The reviewed window runs from seven civil days before today through
+45 days ahead in the verified owner's time zone. Unknown source time zones, missing sources,
+and event/size limits are reported as incomplete coverage rather than a free calendar.
+
+One iPhone publishes per workspace. Replacing another publisher requires an explicit choice.
+Sharing refreshes on opt-in or selection changes, app foreground, debounced calendar changes,
+manual sync, and before a chat send; continuous background refresh is not guaranteed. Settings
+shows the last server receipt and freshness separately from setup confirmation. Snapshots are
+fresh for at most 30 minutes and expire after seven days; maintenance removes expired payloads.
+
+**Stop sharing calendars** turns sharing off immediately on the device and queues removal when
+offline. **Uploaded snapshot removed** means the server acknowledged removal; earlier chat
+messages remain. Pending removal is bound to the verified server and owner and requires that
+same account to reconnect. No old credential is retained to send a removal after logout.
+Privacy erasure removes event data and keeps only a minimal consent generation tombstone so
+old requests cannot restore sharing. Calendar permission can also be revoked in iPhone Settings.
+
+These sharing changes require a future native build and the compatible server/schema release;
+a server deployment alone cannot enable sharing on an already installed local-only app.
 
 The former additional Google-account OAuth connection is retired. Its endpoints and runtime
 credential readers have been removed. Released schema migration 0128 and historical backup

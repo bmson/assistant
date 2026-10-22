@@ -1225,6 +1225,20 @@ enum MessageResponseCard: Identifiable {
             let url: String
         }
         struct AgendaItem: Hashable, Identifiable {
+            enum TimeCategory: String, Hashable {
+                case allDay
+                case timed
+                case timeUnavailable
+
+                var title: String {
+                    switch self {
+                    case .allDay: "All day"
+                    case .timed: "Timed"
+                    case .timeUnavailable: "Time unavailable"
+                    }
+                }
+            }
+
             let id: String
             let day: String
             let time: String
@@ -1235,6 +1249,12 @@ enum MessageResponseCard: Identifiable {
             let calendars: [String]
             let calendarLinks: [CalendarLink]
             let meetingLink: MeetingLink?
+
+            var timeCategory: TimeCategory {
+                if day == "All day" { return .allDay }
+                if day == "Timed", !time.isEmpty { return .timed }
+                return .timeUnavailable
+            }
         }
         struct ListItem: Hashable {
             let title: String
@@ -1248,7 +1268,16 @@ enum MessageResponseCard: Identifiable {
         enum Section: Hashable {
             case agenda(title: String, complete: Bool, omittedCount: Int?, items: [AgendaItem])
             case weather(title: String, location: String, temperature: String, condition: String, symbol: String, detail: String)
-            case list(kind: String, title: String, items: [ListItem], overlaps: [Overlap])
+            case list(
+                kind: String,
+                title: String,
+                items: [ListItem],
+                overlaps: [Overlap],
+                overlapCount: Int?,
+                overlapsTruncated: Bool,
+                itemCount: Int?,
+                itemsTruncated: Bool
+            )
         }
         let id: String
         let date: String
@@ -1316,8 +1345,23 @@ enum MessageResponseCard: Identifiable {
                                 return Overlap(title: title, detail: text(object, "detail"))
                             }
                         }()
+                        let overlapCount = section["overlapCount"]?.integerValue.flatMap {
+                            $0 >= 0 && $0 <= 9_007_199_254_740_991 ? $0 : nil
+                        }
+                        let itemCount = section["itemCount"]?.integerValue.flatMap {
+                            $0 >= 0 && $0 <= 9_007_199_254_740_991 ? $0 : nil
+                        }
                         if !rows.isEmpty || !overlaps.isEmpty {
-                            sections.append(.list(kind: kind, title: text(section, "title"), items: rows, overlaps: overlaps))
+                            sections.append(.list(
+                                kind: kind,
+                                title: text(section, "title"),
+                                items: rows,
+                                overlaps: overlaps,
+                                overlapCount: overlapCount,
+                                overlapsTruncated: section["overlapsTruncated"] == .bool(true),
+                                itemCount: itemCount,
+                                itemsTruncated: section["itemsTruncated"] == .bool(true)
+                            ))
                         }
                     default:
                         continue

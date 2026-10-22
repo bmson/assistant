@@ -19,6 +19,7 @@ import {
 } from '@assistant/persistence';
 import { and, eq, isNull, lte, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
+import { createPostgresPhoneCalendarSharingRepository } from './phone-calendar-sharing-repository.js';
 import { lockPostgresPrivacyObservationFence } from './privacy-erasure-repository.js';
 import {
   approvalPolicies,
@@ -124,6 +125,7 @@ async function load(
 export function createPostgresToolExecutionRepository(db: Db): ToolExecutionRepository {
   return {
     kind: 'tool-execution-repository',
+    phoneCalendarSharing: createPostgresPhoneCalendarSharingRepository(db),
     load: (agentId, taskId, toolCallId) => load(db, agentId, taskId, toolCallId),
     findByModelToolCallId: async (agentId, taskId, modelToolCallId) => {
       if (!modelToolCallId) return null;

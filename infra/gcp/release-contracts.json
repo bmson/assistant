@@ -12,8 +12,8 @@
       },
       "schema": {
         "postgres": {
-          "min": 128,
-          "max": 128
+          "min": 129,
+          "max": 129
         },
         "firestore": {
           "min": 1,
@@ -29,8 +29,8 @@
       },
       "schema": {
         "postgres": {
-          "min": 128,
-          "max": 128
+          "min": 129,
+          "max": 129
         },
         "firestore": {
           "min": 1,

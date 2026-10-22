@@ -8,6 +8,8 @@ import type {
 import {
   emailAttachmentCustodyCleanupIntentId,
   notificationDashboardMessageId,
+  phoneCalendarCacheKey,
+  phoneCalendarSharingErasureTombstone,
 } from '@assistant/persistence';
 import {
   type DocumentSnapshot,
@@ -253,6 +255,31 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
       });
       if (removed === 0) return;
     }
+  }
+
+  private async erasePhoneCalendarSharing(agentId: string, generation: string): Promise<void> {
+    await this.store.db.runTransaction(async (tx) => {
+      await this.activeJob(tx, agentId, generation);
+      const stateRef = this.store.doc('phoneCalendarSharing', agentId);
+      const stateSnapshot = await tx.get(stateRef);
+      const record = stateSnapshot.exists
+        ? decodeRecord<Records['phoneCalendarSharing']>(stateSnapshot.data())
+        : null;
+      if (stateSnapshot.exists && (!record || record.id !== agentId || record.agentId !== agentId))
+        throw new Error('phoneCalendarSharing document ownership or identity mismatch');
+      const now = this.store.now();
+      const state = phoneCalendarSharingErasureTombstone(agentId, record?.state, now);
+      tx.set(
+        stateRef,
+        encodeRecord({
+          id: agentId,
+          agentId,
+          state,
+          updatedAt: now,
+        } satisfies Records['phoneCalendarSharing']),
+      );
+      tx.delete(this.store.doc('toolCache', phoneCalendarCacheKey(agentId)));
+    });
   }
 
   private async eraseMemories(agentId: string, generation: string): Promise<void> {
@@ -1402,6 +1429,7 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
     await this.deleteOwned(agentId, job.generation, 'importSourceDeletionJobs');
     await this.deleteOwned(agentId, job.generation, 'toolCallReceipts');
     await this.deleteOwned(agentId, job.generation, 'toolCallReceiptKeys');
+    await this.erasePhoneCalendarSharing(agentId, job.generation);
     await this.eraseSituationPacks(agentId, job.generation);
     await this.deleteOwned(agentId, job.generation, 'selfRepairIssues');
     await this.eraseMissionReportText(agentId, job.generation);

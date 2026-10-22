@@ -1494,7 +1494,7 @@ final class APIModelsTests: XCTestCase {
         let cards = message.parts.compactMap(MessageResponseCard.init(part:))
         guard case let .briefing(briefing)? = cards.first,
               case let .agenda(_, complete, _, events)? = briefing.sections.first,
-              case let .list(kind, _, summaries, overlaps)? = briefing.sections.last else {
+              case let .list(kind, _, summaries, overlaps, _, _, _, _)? = briefing.sections.last else {
             return XCTFail("Expected the server briefing with its agenda and overlap summary")
         }
         XCTAssertEqual(briefing.presentation, .calendarAgenda)
@@ -1523,7 +1523,7 @@ final class APIModelsTests: XCTestCase {
         let legacyCards = legacyMessage.parts.compactMap(MessageResponseCard.init(part:))
         guard case let .briefing(legacy)? = legacyCards.first,
               case let .agenda(_, _, _, legacyEvents)? = legacy.sections.first,
-              case let .list(_, _, legacySummary, _)? = legacy.sections.last else {
+              case let .list(_, _, legacySummary, _, _, _, _, _)? = legacy.sections.last else {
             return XCTFail("Expected the legacy briefing contract")
         }
         XCTAssertNil(legacy.presentation)
@@ -1559,7 +1559,7 @@ final class APIModelsTests: XCTestCase {
             XCTAssertEqual(items.first?.calendarLinks.first?.label, "Personal")
             XCTAssertEqual(items.first?.meetingLink?.label, "Join meeting")
             XCTAssertEqual(items.first?.time, "All day · through October 27")
-            guard case let .list(kind, _, summary, overlaps)? = card.sections.last else {
+            guard case let .list(kind, _, summary, overlaps, _, _, _, _)? = card.sections.last else {
                 return XCTFail("Expected the attention and overlap evidence section")
             }
             XCTAssertEqual(kind, "attention")
@@ -1588,6 +1588,34 @@ final class APIModelsTests: XCTestCase {
         XCTAssertTrue(items[0].calendars.isEmpty)
         XCTAssertEqual(items[0].calendarLinks.map(\.label), ["HTTP source"])
         XCTAssertEqual(items[0].meetingLink?.url, "http://meet.example/meeting")
+    }
+
+    func testCalendarAgendaUnknownDayMarkerNeverMasqueradesAsTimed() throws {
+        let json = #"{"kind":"briefing","id":"unknown-time","presentation":"calendar-agenda","lead":"Two events","sections":[{"type":"agenda","title":"Today","items":[{"day":"Mystery provider value","time":"9:00 AM","title":"Unknown source event"},{"day":"Timed","time":"","title":"Missing time event"}]}]}"#
+        let part = MessagePart(type: "data-card", data: try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)))
+        guard case let .briefing(card)? = MessageResponseCard(part: part),
+              case let .agenda(_, _, _, items)? = card.sections.first else {
+            return XCTFail("Expected a calendar agenda")
+        }
+        XCTAssertEqual(items.map(\.timeCategory), [.timeUnavailable, .timeUnavailable])
+        XCTAssertTrue(items.allSatisfy { $0.timeCategory.title == "Time unavailable" })
+    }
+
+    func testCalendarAgendaRetainsBoundedAttentionCountsAndTruncation() throws {
+        let json = #"{"kind":"briefing","id":"bounded-attention","presentation":"calendar-agenda","lead":"Review the details","sections":[{"type":"attention","title":"21 possible overlaps","items":[{"title":"21 possible overlaps","detail":"Calendar overlap does not confirm attendance. 16 additional overlaps were counted but not expanded; 5 detail previews are available."}],"overlaps":[{"title":"Overlap 1"},{"title":"Overlap 2"},{"title":"Overlap 3"},{"title":"Overlap 4"},{"title":"Overlap 5"}],"overlapCount":21,"overlapsTruncated":true},{"type":"attention","title":"10 possible duplicate listings","items":[{"title":"Duplicate 1"},{"title":"Duplicate 2"},{"title":"Duplicate 3"},{"title":"Duplicate 4"},{"title":"Additional possible duplicate listings counted but not expanded."}],"itemCount":10,"itemsTruncated":true}]}"#
+        let part = MessagePart(type: "data-card", data: try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)))
+        guard case let .briefing(card)? = MessageResponseCard(part: part), card.sections.count == 2,
+              case let .list(_, _, overlapSummary, overlaps, overlapCount, overlapsTruncated, _, _)? = card.sections.first,
+              case let .list(_, _, duplicateItems, _, _, _, itemCount, itemsTruncated)? = card.sections.last else {
+            return XCTFail("Expected both bounded overlap and duplicate sections")
+        }
+        XCTAssertEqual(overlapSummary.first?.detail, "Calendar overlap does not confirm attendance. 16 additional overlaps were counted but not expanded; 5 detail previews are available.")
+        XCTAssertEqual(overlaps.count, 5)
+        XCTAssertEqual(overlapCount, 21)
+        XCTAssertTrue(overlapsTruncated)
+        XCTAssertEqual(duplicateItems.count, 5, "The final supported limit notice remains in the payload")
+        XCTAssertEqual(itemCount, 10)
+        XCTAssertTrue(itemsTruncated)
     }
 
     func testGeneratedCardDecodesVersionedFactsAndSensitiveCodes() {

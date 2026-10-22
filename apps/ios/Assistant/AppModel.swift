@@ -154,6 +154,7 @@ final class AppModel {
         }
     }
     private(set) var bootstrap: BootstrapResponse?
+    let phoneCalendarSharing: PhoneCalendarSharingCoordinator
     let edits = OptimisticEditStore()
     @ObservationIgnored private var memoryErasureToken: UUID? {
         didSet { edits.retryBlockedResources = memoryErasureToken == nil ? [] : [.memory] }
@@ -336,6 +337,8 @@ final class AppModel {
     /// revision reuses its server idempotency key.
     @ObservationIgnored private var cardRefreshOperations: [String: String] = [:]
     @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var phoneCalendarSyncTask: Task<Void, Never>?
+    @ObservationIgnored private var phoneCalendarSyncRevision = 0
     @ObservationIgnored private var idleTask: Task<Void, Never>?
     @ObservationIgnored private var idlePollingVersion = 0
     /// The turn in flight, kept so returning to the foreground can pick the
@@ -403,11 +406,13 @@ final class AppModel {
             SpeechPlayer.shared.enqueue(SpeakableText.passages(for: message), for: message.id)
         },
         scheduleLocalNotification: LocalNotificationScheduler? = nil,
+        phoneCalendarSharing: PhoneCalendarSharingCoordinator? = nil,
         captureCurrentPlace: @escaping @MainActor () async -> (location: CLLocation, label: String)? = {
             await LocationManager.shared.captureCurrentPlace()
         }
     ) {
         self.defaults = defaults
+        self.phoneCalendarSharing = phoneCalendarSharing ?? PhoneCalendarSharingCoordinator()
         self.storeConnectionToken = storeConnectionToken
         self.enqueueAutomaticSpeech = enqueueAutomaticSpeech
         self.scheduleLocalNotification = scheduleLocalNotification ?? { title, body, route, approvalId, agentID, conversationID in
@@ -789,6 +794,7 @@ final class AppModel {
             try await prepareCardFormSession(for: client, ownerId: response.identity.id, pairingAttempt: pairingAttempt)
             guard connectionIsCurrent(client, version: version), pairingAttempt == pairingAttemptVersion else { return }
             apply(response)
+            schedulePhoneCalendarSync(using: client, ownerID: response.identity.id)
             version = connectionVersion
             clearRecoveredError(from: .bootstrap)
             await resolvePendingNotificationDestination()
@@ -1520,6 +1526,7 @@ final class AppModel {
             defaults.set(normalized, forKey: serverKey)
             client = candidate
             apply(verified, preservingLocalMessages: keepsCurrentSession && isSending)
+            schedulePhoneCalendarSync(using: candidate, ownerID: verified.identity.id)
             showingConnection = false
             let version = connectionVersion
             await refreshConversationForNewlyEnabledForms(
@@ -1546,6 +1553,10 @@ final class AppModel {
     }
 
     private func resetConnectedState(preserveCardFormRecoveryFence: Bool = false) {
+        phoneCalendarSyncRevision += 1
+        phoneCalendarSyncTask?.cancel()
+        phoneCalendarSyncTask = nil
+        phoneCalendarSharing.cancelInFlightBinding()
         NotificationManager.shared.setRegistrationScope(nil)
         stopIdlePolling()
         pollTask?.cancel()
@@ -1755,10 +1766,66 @@ final class AppModel {
         if isNowActive {
             edits.refreshConfirmed()
             discardStaleConnectionsIfNeeded()
-            if bootstrap != nil { startIdlePolling() }
+            if let bootstrap {
+                startIdlePolling()
+                schedulePhoneCalendarSync(using: client, ownerID: bootstrap.identity.id)
+            }
             resumeInterruptedTurn()
         } else {
             stopIdlePolling()
+        }
+    }
+
+    func loadPhoneCalendarSharing() async {
+        guard let client, let ownerID = bootstrap?.identity.id else {
+            phoneCalendarSharing.cancelInFlightBinding()
+            return
+        }
+        await phoneCalendarSharing.refresh(client: client, expectedOwnerID: ownerID, publishIfEnabled: false)
+    }
+
+    func refreshPhoneCalendarSharingSnapshot() async {
+        guard let client, let ownerID = bootstrap?.identity.id else {
+            phoneCalendarSharing.cancelInFlightBinding()
+            return
+        }
+        await phoneCalendarSharing.refresh(client: client, expectedOwnerID: ownerID, publishIfEnabled: true)
+    }
+
+    func startPhoneCalendarSharing(with calendars: [SharedPhoneCalendar], replace: Bool = false) async {
+        guard let client, let ownerID = bootstrap?.identity.id else {
+            phoneCalendarSharing.cancelInFlightBinding()
+            return
+        }
+        if !phoneCalendarSharing.isOwnerVerified {
+            await phoneCalendarSharing.refresh(client: client, expectedOwnerID: ownerID, publishIfEnabled: false)
+        }
+        await phoneCalendarSharing.enable(
+            client: client, expectedOwnerID: ownerID,
+            command: replace ? "replace" : "enable", selectedCalendars: calendars
+        )
+    }
+
+    func stopPhoneCalendarSharing() async {
+        guard let client, let ownerID = bootstrap?.identity.id else {
+            phoneCalendarSharing.cancelInFlightBinding()
+            return
+        }
+        if !phoneCalendarSharing.isOwnerVerified {
+            await phoneCalendarSharing.refresh(client: client, expectedOwnerID: ownerID, publishIfEnabled: false)
+        }
+        await phoneCalendarSharing.disable(client: client, expectedOwnerID: ownerID)
+    }
+
+    private func schedulePhoneCalendarSync(using client: APIClient?, ownerID: String) {
+        guard let client, !Task.isCancelled, phoneCalendarSyncTask == nil else { return }
+        phoneCalendarSyncRevision += 1
+        let revision = phoneCalendarSyncRevision
+        phoneCalendarSyncTask = Task { [weak self] in
+            guard let self else { return }
+            await self.phoneCalendarSharing.refresh(client: client, expectedOwnerID: ownerID, publishIfEnabled: true)
+            guard revision == self.phoneCalendarSyncRevision else { return }
+            self.phoneCalendarSyncTask = nil
         }
     }
 
@@ -3763,6 +3830,9 @@ final class AppModel {
         guard !text.isEmpty, !isSending,
               let client,
               let conversationId, let draftScope = composerDraftScope else { return }
+        if let ownerID = bootstrap?.identity.id {
+            schedulePhoneCalendarSync(using: client, ownerID: ownerID)
+        }
         guard cardFormRecoveryReady, cardFormUnknownOperationIds.isEmpty,
               cardFormUnknownOperationId == nil else {
             errorMessage = "Check the saved form request before sending another message."

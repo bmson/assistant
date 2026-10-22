@@ -214,6 +214,12 @@ export const MIGRATION_TABLES = [
     scope: 'agent',
   },
   { table: 'owner_card', collection: 'ownerCards', id: 'id', scope: 'agent' },
+  {
+    table: 'phone_calendar_sharing',
+    collection: 'phoneCalendarSharing',
+    id: 'id',
+    scope: 'agent',
+  },
   { table: 'proactive_moments', collection: 'proactiveMoments', id: 'id', scope: 'agent' },
   { table: 'proactive_pings', collection: 'proactivePings', id: 'id', scope: 'agent' },
   { table: 'rate_limits', collection: 'rateLimits', id: 'scope', scope: 'installation' },

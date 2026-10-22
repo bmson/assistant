@@ -39,7 +39,7 @@
 		<true/>
 	</dict>
 	<key>NSCalendarsFullAccessUsageDescription</key>
-	<string>Display events from the calendars you choose on this iPhone. Assistant only reads events and never changes them. Calendar details stay on this phone and are not sent to your assistant server.</string>
+	<string>Display events from calendars you choose on this iPhone. If you separately turn on calendar sharing, selected event titles, times and locations are sent to your assistant server for the reviewed date range; a matching response from your own calendar invitation may also be included. Assistant only reads events and never changes them.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Connect to your Assistant server on your local network.</string>
 	<key>NSMicrophoneUsageDescription</key>

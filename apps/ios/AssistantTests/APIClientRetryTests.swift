@@ -2,6 +2,7 @@ import XCTest
 import SwiftUI
 import Observation
 import CoreLocation
+import CryptoKit
 @testable import Assistant
 
 /// Stands in for the network so a dead pooled connection can be reproduced
@@ -3459,6 +3460,405 @@ final class APIClientRetryTests: XCTestCase {
     func testOfflineGetsItsOwnCopy() {
         let error = APIError.transport(URLError(.notConnectedToInternet))
         XCTAssertEqual(error.errorDescription, "You appear to be offline.")
+    }
+}
+
+extension APIClientRetryTests {
+    func testPhoneCalendarSharingUsesVerifiedOwnerAndGenerationWireContract() async throws {
+        let activeState = #"{"version":1,"ownerId":"owner-1","publisherId":"publisher-1","generation":1,"enabled":true,"consentVersion":1,"calendars":[{"id":"work","name":"Work","purpose":"commitments"}],"updatedAt":"2026-10-22T12:00:00Z","mutationId":"mutation-1"}"#
+        let disabledState = #"{"version":1,"ownerId":"owner-1","publisherId":"publisher-1","generation":2,"enabled":false,"consentVersion":1,"calendars":[],"updatedAt":"2026-10-22T12:01:00Z"}"#
+        let stateBody = #"{"ok":true,"state":\#(activeState)}"#
+        let disabledBody = #"{"ok":true,"state":\#(disabledState)}"#
+        let getBody = #"{"ownerId":"owner-1","ownerEmail":"owner@example.com","timeZone":"America/Los_Angeles","state":null}"#
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/calendars": [
+                .success(status: 200, body: Data(getBody.utf8)),
+                .success(status: 200, body: Data(stateBody.utf8)),
+                .success(status: 200, body: Data(stateBody.utf8)),
+                .success(status: 200, body: Data(disabledBody.utf8)),
+            ]
+        ])
+        let client = makeClient()
+        let read = try await client.phoneCalendarSharing()
+        XCTAssertEqual(read.ownerId, "owner-1")
+        XCTAssertEqual(read.ownerEmail, "owner@example.com")
+        XCTAssertNil(read.state)
+
+        let calendar = SharedPhoneCalendar(id: "work", name: "Work", purpose: .commitments, timeZone: "America/Los_Angeles")
+        let command = PhoneCalendarSharingCommandBody.configure(
+            "enable", ownerId: "owner-1", publisherId: "publisher-1", expectedGeneration: 0,
+            mutationId: "mutation-1", calendars: [calendar]
+        )
+        let configured = try await client.configurePhoneCalendarSharing(command)
+        XCTAssertTrue(configured.ok)
+        XCTAssertEqual(configured.state.generation, 1)
+
+        let snapshot = PhoneCalendarSnapshotInput(
+            timeMin: "2026-10-15T07:00:00Z", timeMax: "2026-12-07T08:00:00Z",
+            capturedAt: "2026-10-22T12:00:00Z", selectionRevision: 1, complete: true, truncated: false,
+            sourceAvailability: [.init(calendarId: "work", status: .available, complete: true, reason: nil)],
+            timeZone: "America/Los_Angeles", calendars: [calendar],
+            events: [.init(eventId: "work:event:1", calendarId: "work", providerExternalIdentifier: "provider-event-id",
+                           status: "confirmed", calendarTimeZone: "America/Los_Angeles", ownerParticipant: nil,
+                           iCalUID: nil, originalStartTime: nil, summary: "Planning", location: "Room 2",
+                           start: "2026-10-23T16:00:00Z", end: "2026-10-23T17:00:00Z", allDay: false, blocksTime: true)]
+        )
+        _ = try await client.publishPhoneCalendarSnapshot(
+            ownerId: "owner-1", publisherId: "publisher-1", generation: 1, snapshot: snapshot
+        )
+        let removed = try await client.revokePhoneCalendarSharing(.init(
+            ownerId: "owner-1", publisherId: "publisher-1", generation: 0,
+            cancelPendingMutationId: "mutation-1"
+        ))
+        XCTAssertFalse(removed.state.enabled)
+
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET", "POST", "PUT", "DELETE"])
+        XCTAssertEqual(StubURLProtocol.urls.map(\.path), Array(repeating: "/api/mobile/v1/calendars", count: 4))
+        let post = try XCTUnwrap(try JSONSerialization.jsonObject(with: StubURLProtocol.bodies[1]) as? [String: Any])
+        XCTAssertEqual(post["ownerId"] as? String, "owner-1")
+        XCTAssertEqual(post["mutationId"] as? String, "mutation-1")
+        XCTAssertEqual(post["expectedGeneration"] as? Int, 0)
+        let put = try XCTUnwrap(try JSONSerialization.jsonObject(with: StubURLProtocol.bodies[2]) as? [String: Any])
+        XCTAssertEqual(put["ownerId"] as? String, "owner-1")
+        XCTAssertEqual(put["generation"] as? Int, 1)
+        let sentSnapshot = try XCTUnwrap(put["snapshot"] as? [String: Any])
+        let sentEvent = try XCTUnwrap((sentSnapshot["events"] as? [[String: Any]])?.first)
+        XCTAssertEqual(sentEvent["providerExternalIdentifier"] as? String, "provider-event-id")
+        XCTAssertNil(sentEvent["iCalUID"])
+        let delete = try XCTUnwrap(try JSONSerialization.jsonObject(with: StubURLProtocol.bodies[3]) as? [String: Any])
+        XCTAssertEqual(delete["ownerId"] as? String, "owner-1")
+        XCTAssertEqual(delete["generation"] as? Int, 0)
+        XCTAssertEqual(delete["cancelPendingMutationId"] as? String, "mutation-1")
+    }
+
+    func testPhoneCalendarSharingPreservesConflictStateFrom409() async throws {
+        let response = #"{"ok":false,"error":"publisher_conflict","state":{"version":1,"ownerId":"owner-1","publisherId":"other-device","generation":3,"enabled":true,"consentVersion":1,"calendars":[],"updatedAt":"2026-10-22T12:00:00Z"}}"#
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/calendars": [.success(status: 409, body: Data(response.utf8))]
+        ])
+        let result = try await makeClient().configurePhoneCalendarSharing(.configure(
+            "enable", ownerId: "owner-1", publisherId: "publisher-1", expectedGeneration: 0,
+            mutationId: "mutation-1", calendars: [.init(id: "work", name: "Work", purpose: .unspecified)]
+        ))
+        XCTAssertFalse(result.ok)
+        XCTAssertEqual(result.error, "publisher_conflict")
+        XCTAssertEqual(result.state.publisherId, "other-device")
+        XCTAssertEqual(result.state.generation, 3)
+    }
+
+    func testPhoneCalendarSnapshotFreshnessRequiresRecentCompleteFullWindow() {
+        let now = ISO8601DateFormatter().date(from: "2026-10-22T19:00:00Z")!
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        let today = calendar.startOfDay(for: now)
+        let min = calendar.date(byAdding: .day, value: -7, to: today)!
+        let max = calendar.date(byAdding: .day, value: 46, to: today)!
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        func state(received: String?, complete: Bool, truncated: Bool, lower: Date = min, upper: Date = max) -> PhoneCalendarSharingState {
+            .init(version: 1, ownerId: "owner-1", publisherId: "publisher-1", generation: 1, enabled: true,
+                  consentVersion: 1, calendars: [], updatedAt: formatter.string(from: now), capturedAt: nil,
+                  receivedAt: received, timeMin: formatter.string(from: lower), timeMax: formatter.string(from: upper),
+                  complete: complete, truncated: truncated, mutationId: nil)
+        }
+
+        XCTAssertEqual(PhoneCalendarSnapshotFreshness.evaluate(state(received: nil, complete: true, truncated: false), ownerTimeZone: "America/Los_Angeles", now: now), .notSent)
+        XCTAssertEqual(PhoneCalendarSnapshotFreshness.evaluate(state(received: formatter.string(from: now.addingTimeInterval(-31 * 60)), complete: true, truncated: false), ownerTimeZone: "America/Los_Angeles", now: now), .stale)
+        XCTAssertEqual(PhoneCalendarSnapshotFreshness.evaluate(state(received: formatter.string(from: now), complete: false, truncated: true), ownerTimeZone: "America/Los_Angeles", now: now), .incomplete)
+        XCTAssertEqual(PhoneCalendarSnapshotFreshness.evaluate(state(received: formatter.string(from: now), complete: true, truncated: false, lower: min.addingTimeInterval(1)), ownerTimeZone: "America/Los_Angeles", now: now), .incomplete)
+        XCTAssertEqual(PhoneCalendarSnapshotFreshness.evaluate(state(received: formatter.string(from: now), complete: true, truncated: false), ownerTimeZone: "America/Los_Angeles", now: now), .current)
+    }
+}
+
+@MainActor
+private final class PhoneCalendarSharingMemoryRecordStore: PhoneCalendarSharingRecordStore {
+    private(set) var records: [String: PhoneCalendarSharingLocalRecord] = [:]
+
+    func load(scope: String) -> PhoneCalendarSharingLocalRecord? { records[scope] }
+    func save(_ record: PhoneCalendarSharingLocalRecord, scope: String) -> Bool {
+        records[scope] = record
+        return true
+    }
+}
+
+@MainActor
+private final class PhoneCalendarSharingFixtureSource: PhoneCalendarSource {
+    var access: PhoneCalendarAccess = .fullAccess
+    var sharedEvents: [PhoneCalendarShareEvent] = []
+    private(set) var shareQueryCount = 0
+
+    func requestAccess() async throws -> Bool { true }
+    func calendars() -> [PhoneCalendar] { [.init(id: "work", title: "Work", account: "Personal")] }
+    func events(in interval: DateInterval, calendarIDs: Set<String>) -> [PhoneCalendarEvent] { [] }
+    func shareEvents(in interval: DateInterval, calendarIDs: Set<String>, verifiedOwnerEmail: String) -> [PhoneCalendarShareEvent] {
+        shareQueryCount += 1
+        return sharedEvents
+    }
+}
+
+extension APIClientRetryTests {
+    private func phoneCalendarState(
+        owner: String = "owner-1", publisher: String? = "publisher-1", generation: Int,
+        enabled: Bool, calendars: [SharedPhoneCalendar] = [], mutationId: String? = nil
+    ) -> PhoneCalendarSharingState {
+        .init(version: 1, ownerId: owner, publisherId: publisher, generation: generation,
+              enabled: enabled, consentVersion: enabled ? 1 : 0, calendars: calendars,
+              updatedAt: "2026-10-22T12:00:00Z", capturedAt: nil, receivedAt: nil,
+              timeMin: nil, timeMax: nil, complete: nil, truncated: nil, mutationId: mutationId)
+    }
+
+    private func phoneCalendarRead(
+        _ state: PhoneCalendarSharingState?, owner: String = "owner-1",
+        timeZone: String = "America/Los_Angeles"
+    ) throws -> Data {
+        try JSONEncoder().encode(PhoneCalendarSharingRead(
+            ownerId: owner, ownerEmail: "owner@example.test", timeZone: timeZone, state: state
+        ))
+    }
+
+    private func phoneCalendarMutation(_ state: PhoneCalendarSharingState, ok: Bool = true) throws -> Data {
+        let encodedState = try JSONSerialization.jsonObject(with: JSONEncoder().encode(state))
+        return try JSONSerialization.data(withJSONObject: ["ok": ok, "state": encodedState])
+    }
+
+    private func phoneCalendarScope(baseURL: String = "https://assistant.test", owner: String = "owner-1") -> String {
+        let normalized = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let digest = SHA256.hash(data: Data("\(normalized)|\(owner)".utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func waitForHeldCalendarRequest() async throws {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/calendars"), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/calendars"))
+    }
+
+    @MainActor
+    func testStopDuringPendingInitialEnableCancelsLateAcknowledgement() async throws {
+        let store = PhoneCalendarSharingMemoryRecordStore()
+        let source = PhoneCalendarSharingFixtureSource()
+        let scope = phoneCalendarScope()
+        _ = store.save(.init(publisherId: "publisher-1", generation: 0, pendingMutation: nil,
+                         pendingRevocation: nil, lastRead: nil, lastState: nil), scope: scope)
+        let enabled = phoneCalendarState(generation: 1, enabled: true,
+                                         calendars: [.init(id: "work", name: "Work", purpose: .commitments, timeZone: nil)])
+        let disabled = phoneCalendarState(generation: 2, enabled: false)
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/calendars": [
+                .success(status: 200, body: try phoneCalendarRead(nil)),
+                .held(status: 200, body: try phoneCalendarMutation(enabled)),
+                .success(status: 200, body: try phoneCalendarMutation(disabled))
+            ]
+        ])
+        let coordinator = PhoneCalendarSharingCoordinator(source: source, recordStore: store)
+        let client = makeClient()
+        await coordinator.refresh(client: client, expectedOwnerID: "owner-1", publishIfEnabled: false)
+        let enabling = Task {
+            await coordinator.enable(client: client, expectedOwnerID: "owner-1", selectedCalendars: [
+                .init(id: "work", name: "Work", purpose: .commitments, timeZone: nil)
+            ])
+        }
+        try await waitForHeldCalendarRequest()
+        XCTAssertTrue(coordinator.hasPendingMutation)
+        await coordinator.disable(client: client, expectedOwnerID: "owner-1")
+        XCTAssertFalse(coordinator.isSharingEnabled, "A saved local revocation hides the stale enabled state immediately")
+        XCTAssertFalse(coordinator.hasPendingRemoval, "The DELETE was acknowledged")
+        StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/calendars")
+        await enabling.value
+        XCTAssertFalse(coordinator.isSharingEnabled, "The late POST acknowledgement cannot restore sharing")
+        XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "POST", "DELETE"])
+    }
+
+    @MainActor
+    func testStopDuringPendingSnapshotMakesLatePutNonAuthoritative() async throws {
+        let store = PhoneCalendarSharingMemoryRecordStore()
+        let source = PhoneCalendarSharingFixtureSource()
+        _ = store.save(.init(publisherId: "publisher-1", generation: 0, pendingMutation: nil,
+                         pendingRevocation: nil, lastRead: nil, lastState: nil), scope: phoneCalendarScope())
+        let roster = [SharedPhoneCalendar(id: "work", name: "Work", purpose: .commitments, timeZone: nil)]
+        let enabled = phoneCalendarState(generation: 1, enabled: true, calendars: roster)
+        let disabled = phoneCalendarState(generation: 2, enabled: false)
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/calendars": [
+                .success(status: 200, body: try phoneCalendarRead(nil)),
+                .success(status: 200, body: try phoneCalendarMutation(enabled)),
+                .held(status: 200, body: try phoneCalendarMutation(enabled)),
+                .success(status: 200, body: try phoneCalendarMutation(disabled))
+            ]
+        ])
+        let coordinator = PhoneCalendarSharingCoordinator(source: source, recordStore: store)
+        let client = makeClient()
+        await coordinator.refresh(client: client, expectedOwnerID: "owner-1", publishIfEnabled: false)
+        let enabling = Task {
+            await coordinator.enable(client: client, expectedOwnerID: "owner-1", selectedCalendars: roster)
+        }
+        try await waitForHeldCalendarRequest()
+        XCTAssertEqual(source.shareQueryCount, 1, "The explicit enable queries the selected source")
+        await coordinator.disable(client: client, expectedOwnerID: "owner-1")
+        StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/calendars")
+        await enabling.value
+        XCTAssertFalse(coordinator.isSharingEnabled)
+        XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "POST", "PUT", "DELETE"])
+    }
+
+    @MainActor
+    func testOfflineDeleteReplaysAfterRestartOnlyForSameOwnerAndServer() async throws {
+        let store = PhoneCalendarSharingMemoryRecordStore()
+        let state = phoneCalendarState(generation: 1, enabled: true,
+                                       calendars: [.init(id: "work", name: "Work", purpose: .commitments, timeZone: nil)])
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/calendars": [
+                .success(status: 200, body: try phoneCalendarRead(state)),
+                .success(status: 500, body: Data()),
+                .success(status: 200, body: try phoneCalendarRead(state)),
+                .success(status: 200, body: try phoneCalendarMutation(phoneCalendarState(generation: 2, enabled: false)))
+            ]
+        ])
+        let first = PhoneCalendarSharingCoordinator(source: PhoneCalendarSharingFixtureSource(), recordStore: store)
+        let client = makeClient()
+        await first.refresh(client: client, expectedOwnerID: "owner-1", publishIfEnabled: false)
+        await first.disable(client: client, expectedOwnerID: "owner-1")
+        XCTAssertTrue(first.hasPendingRemoval)
+        let relaunched = PhoneCalendarSharingCoordinator(source: PhoneCalendarSharingFixtureSource(), recordStore: store)
+        await relaunched.refresh(client: client, expectedOwnerID: "owner-1", publishIfEnabled: false)
+        XCTAssertFalse(relaunched.hasPendingRemoval)
+        XCTAssertFalse(relaunched.isSharingEnabled)
+        XCTAssertEqual(StubURLProtocol.requests.filter { $0.0 == "DELETE" }.count, 2)
+    }
+
+    @MainActor
+    func testPendingRemovalDoesNotCrossServerOwnerOrLogoutBoundary() async throws {
+        let store = PhoneCalendarSharingMemoryRecordStore()
+        let pending = PendingPhoneCalendarRevocation(
+            baseURL: "https://assistant.test", ownerId: "owner-1", ownerEmail: "owner@example.test",
+            publisherId: "publisher-1", expectedGeneration: 0, tombstoneGeneration: 1,
+            cancelPendingMutationId: "mutation-1"
+        )
+        _ = store.save(.init(publisherId: "publisher-1", generation: 0, pendingMutation: nil,
+                         pendingRevocation: pending, lastRead: nil, lastState: nil), scope: phoneCalendarScope())
+        let state = phoneCalendarState(generation: 1, enabled: false)
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/calendars": [
+                .success(status: 200, body: try phoneCalendarRead(state)),
+                .success(status: 200, body: try phoneCalendarRead(
+                    phoneCalendarState(owner: "owner-2", publisher: nil, generation: 0, enabled: false), owner: "owner-2"
+                ))
+            ]
+        ])
+        let coordinator = PhoneCalendarSharingCoordinator(source: PhoneCalendarSharingFixtureSource(), recordStore: store)
+        let sameCredentialsOtherServer = makeClient().replacingConfiguration(
+            APIConfiguration(baseURL: URL(string: "https://other-assistant.test")!, token: "t")
+        )
+        await coordinator.refresh(client: sameCredentialsOtherServer, expectedOwnerID: "owner-1", publishIfEnabled: false)
+        XCTAssertTrue(StubURLProtocol.requests.last?.1.host == "other-assistant.test")
+        coordinator.cancelInFlightBinding()
+        await coordinator.refresh(client: makeClient(), expectedOwnerID: "owner-2", publishIfEnabled: false)
+        XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "GET"], "The previous owner's tombstone is not replayed after logout, owner change, or server change")
+        XCTAssertNotNil(store.load(scope: phoneCalendarScope())?.pendingRevocation)
+    }
+
+    @MainActor
+    func testCancelledDelayedSharingReadDoesNotLatchBusyAcrossOwnerChange() async throws {
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/calendars": [
+                .held(status: 200, body: try phoneCalendarRead(nil, owner: "owner-1")),
+                .success(status: 200, body: try phoneCalendarRead(nil, owner: "owner-2"))
+            ]
+        ])
+        let coordinator = PhoneCalendarSharingCoordinator(
+            source: PhoneCalendarSharingFixtureSource(), recordStore: PhoneCalendarSharingMemoryRecordStore()
+        )
+        let client = makeClient()
+        let oldOwnerRead = Task {
+            await coordinator.refresh(client: client, expectedOwnerID: "owner-1", publishIfEnabled: false)
+        }
+        try await waitForHeldCalendarRequest()
+        coordinator.cancelInFlightBinding()
+        await coordinator.refresh(client: client, expectedOwnerID: "owner-2", publishIfEnabled: false)
+        StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/calendars")
+        await oldOwnerRead.value
+        XCTAssertEqual(coordinator.serverRead?.ownerId, "owner-2")
+        XCTAssertTrue(coordinator.isOwnerVerified)
+        XCTAssertFalse(coordinator.isWorking, "The canceled request releases only its own busy token")
+        XCTAssertEqual(StubURLProtocol.requests.filter { $0.0 == "GET" }.count, 2)
+    }
+
+    @MainActor
+    func testReplaceConflictDoesNotPublishOrClaimSnapshotSynced() async throws {
+        let otherDevice = phoneCalendarState(owner: "owner-1", publisher: "other-device", generation: 4,
+                                             enabled: true,
+                                             calendars: [.init(id: "work", name: "Work", purpose: .reference, timeZone: nil)])
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/calendars": [
+                .success(status: 200, body: try phoneCalendarRead(otherDevice)),
+                .success(status: 409, body: try phoneCalendarMutation(otherDevice, ok: false))
+            ]
+        ])
+        let coordinator = PhoneCalendarSharingCoordinator(source: PhoneCalendarSharingFixtureSource(), recordStore: PhoneCalendarSharingMemoryRecordStore())
+        let client = makeClient()
+        await coordinator.refresh(client: client, expectedOwnerID: "owner-1", publishIfEnabled: false)
+        await coordinator.enable(client: client, expectedOwnerID: "owner-1", command: "replace", selectedCalendars: [
+            .init(id: "work", name: "Work", purpose: .commitments, timeZone: nil)
+        ])
+        XCTAssertTrue(coordinator.requiresReplace)
+        XCTAssertTrue(coordinator.errorMessage?.contains("active from another iPhone") == true)
+        XCTAssertEqual(StubURLProtocol.requests.map { $0.0 }, ["GET", "POST"], "A rejected replacement cannot upload a snapshot")
+        XCTAssertFalse(coordinator.statusMessage?.contains("up to date") == true)
+    }
+
+    @MainActor
+    func testSnapshotPreservesUnknownAllDayZoneAndTimedDSTInstant() async throws {
+        let source = PhoneCalendarSharingFixtureSource()
+        var deviceCalendar = Calendar(identifier: .gregorian)
+        deviceCalendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        let allDayStart = deviceCalendar.date(from: DateComponents(year: 2026, month: 10, day: 22))!
+        let dstInstant = ISO8601DateFormatter().date(from: "2026-11-01T08:30:00Z")!
+        source.sharedEvents = [
+            .init(eventId: "all-day", calendarId: "work", providerExternalIdentifier: nil,
+                  status: "confirmed", calendarTimeZone: nil, ownerParticipant: nil,
+                  originalStartTime: nil, summary: "Floating all-day event", location: "",
+                  start: allDayStart, end: allDayStart.addingTimeInterval(86_400), allDay: true, blocksTime: true),
+            .init(eventId: "dst", calendarId: "work", providerExternalIdentifier: "opaque-dst-id",
+                  status: "confirmed", calendarTimeZone: "America/Los_Angeles", ownerParticipant: nil,
+                  originalStartTime: dstInstant, summary: "DST event", location: "",
+                  start: dstInstant, end: dstInstant.addingTimeInterval(3_600), allDay: false, blocksTime: true)
+        ]
+        let roster = [SharedPhoneCalendar(id: "work", name: "Work", purpose: .commitments, timeZone: nil)]
+        let enabled = phoneCalendarState(generation: 1, enabled: true, calendars: roster)
+        let store = PhoneCalendarSharingMemoryRecordStore()
+        _ = store.save(.init(publisherId: "publisher-1", generation: 0, pendingMutation: nil,
+                         pendingRevocation: nil, lastRead: nil, lastState: nil), scope: phoneCalendarScope())
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/calendars": [
+                .success(status: 200, body: try phoneCalendarRead(nil, timeZone: "Pacific/Honolulu")),
+                .success(status: 200, body: try phoneCalendarMutation(enabled)),
+                .success(status: 200, body: try phoneCalendarMutation(enabled))
+            ]
+        ])
+        let coordinator = PhoneCalendarSharingCoordinator(
+            source: source, recordStore: store, deviceTimeZone: TimeZone(identifier: "America/Los_Angeles")!
+        )
+        let client = makeClient()
+        await coordinator.refresh(client: client, expectedOwnerID: "owner-1", publishIfEnabled: false)
+        await coordinator.enable(client: client, expectedOwnerID: "owner-1", selectedCalendars: roster)
+
+        let put = try XCTUnwrap(StubURLProtocol.requests.first { $0.0 == "PUT" })
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: put.3) as? [String: Any])
+        let snapshot = try XCTUnwrap(body["snapshot"] as? [String: Any])
+        let events = try XCTUnwrap(snapshot["events"] as? [[String: Any]])
+        XCTAssertEqual(snapshot["complete"] as? Bool, false, "Unknown source-zone membership cannot be labeled complete")
+        let availability = try XCTUnwrap(snapshot["sourceAvailability"] as? [[String: Any]])
+        XCTAssertEqual(availability.first?["complete"] as? Bool, false)
+        XCTAssertNotNil(availability.first?["reason"] as? String)
+        let allDay = try XCTUnwrap(events.first { $0["eventId"] as? String == "all-day" })
+        XCTAssertEqual(allDay["start"] as? String, "2026-10-22", "The source civil date is not reformatted in the owner's Honolulu zone")
+        XCTAssertTrue(allDay["calendarTimeZone"] == nil || allDay["calendarTimeZone"] is NSNull,
+                      "Unknown EventKit source zones remain unknown")
+        let dst = try XCTUnwrap(events.first { $0["eventId"] as? String == "dst" })
+        XCTAssertEqual(dst["start"] as? String, "2026-11-01T08:30:00.000Z")
+        XCTAssertEqual(dst["calendarTimeZone"] as? String, "America/Los_Angeles")
     }
 }
 

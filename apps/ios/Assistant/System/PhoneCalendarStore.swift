@@ -9,6 +9,7 @@ struct PhoneCalendar: Identifiable, Equatable {
     let id: String
     let title: String
     let account: String
+    var timeZoneIdentifier: String? = nil
 }
 
 struct PhoneCalendarEvent: Identifiable, Equatable {
@@ -21,6 +22,22 @@ struct PhoneCalendarEvent: Identifiable, Equatable {
     let location: String?
 }
 
+struct PhoneCalendarShareEvent: Sendable {
+    let eventId: String
+    let calendarId: String
+    let providerExternalIdentifier: String?
+    let status: String?
+    let calendarTimeZone: String?
+    let ownerParticipant: PhoneCalendarSharedEvent.OwnerParticipant?
+    let originalStartTime: Date?
+    let summary: String
+    let location: String
+    let start: Date
+    let end: Date
+    let allDay: Bool
+    let blocksTime: Bool
+}
+
 /// This boundary intentionally has no networking or event mutation operations.
 @MainActor
 protocol PhoneCalendarSource {
@@ -28,6 +45,20 @@ protocol PhoneCalendarSource {
     func requestAccess() async throws -> Bool
     func calendars() -> [PhoneCalendar]
     func events(in interval: DateInterval, calendarIDs: Set<String>) -> [PhoneCalendarEvent]
+    func shareEvents(in interval: DateInterval, calendarIDs: Set<String>, verifiedOwnerEmail: String) -> [PhoneCalendarShareEvent]
+}
+
+extension PhoneCalendarSource {
+    func shareEvents(in interval: DateInterval, calendarIDs: Set<String>, verifiedOwnerEmail: String) -> [PhoneCalendarShareEvent] {
+        events(in: interval, calendarIDs: calendarIDs).map { event in
+            PhoneCalendarShareEvent(
+                eventId: event.id, calendarId: event.calendarID, providerExternalIdentifier: nil,
+                status: "confirmed", calendarTimeZone: nil, ownerParticipant: nil,
+                originalStartTime: nil, summary: event.title, location: event.location ?? "",
+                start: event.start, end: event.end, allDay: event.isAllDay, blocksTime: true
+            )
+        }
+    }
 }
 
 @MainActor
@@ -64,7 +95,7 @@ final class EventKitCalendarSource: PhoneCalendarSource {
         // A nil calendar predicate would read every calendar. Never use that fallback.
         guard !calendars.isEmpty else { return [] }
         let predicate = store.predicateForEvents(withStart: interval.start, end: interval.end, calendars: calendars)
-        return store.events(matching: predicate).compactMap { event in
+        return store.events(matching: predicate).compactMap { event -> PhoneCalendarEvent? in
             guard event.status != .canceled, let calendar = event.calendar,
                   let start = event.startDate, let end = event.endDate else { return nil }
             return PhoneCalendarEvent(
@@ -75,6 +106,53 @@ final class EventKitCalendarSource: PhoneCalendarSource {
                 location: event.location?.isEmpty == false ? event.location : nil
             )
         }
+    }
+
+    func shareEvents(in interval: DateInterval, calendarIDs: Set<String>, verifiedOwnerEmail: String) -> [PhoneCalendarShareEvent] {
+        guard access == .fullAccess, !calendarIDs.isEmpty else { return [] }
+        let selected = store.calendars(for: .event).filter { calendarIDs.contains($0.calendarIdentifier) }
+        guard !selected.isEmpty else { return [] }
+        let predicate = store.predicateForEvents(withStart: interval.start, end: interval.end, calendars: selected)
+        return store.events(matching: predicate).compactMap { event -> PhoneCalendarShareEvent? in
+            guard event.status != .canceled, let calendar = event.calendar,
+                  calendarIDs.contains(calendar.calendarIdentifier),
+                  let start = event.startDate, let end = event.endDate, end > start else { return nil }
+            let verifiedEmail = verifiedOwnerEmail.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let participant = event.attendees?.first(where: \.isCurrentUser)
+            let participantEmail = participant.flatMap { Self.emailAddress(from: $0.url) }
+            let ownerParticipant: PhoneCalendarSharedEvent.OwnerParticipant? = {
+                guard let participant, let participantEmail,
+                      participantEmail.caseInsensitiveCompare(verifiedEmail) == .orderedSame else { return nil }
+                let status: String = switch participant.participantStatus {
+                case .accepted: "accepted"
+                case .declined: "declined"
+                case .tentative: "tentative"
+                case .pending, .unknown: "needsAction"
+                case .delegated, .completed, .inProcess: "needsAction"
+                @unknown default: "needsAction"
+                }
+                return .init(email: verifiedEmail, responseStatus: status)
+            }()
+            let eventID = "\(calendar.calendarIdentifier):\(event.calendarItemIdentifier):\(event.occurrenceDate.timeIntervalSince1970)"
+            return PhoneCalendarShareEvent(
+                eventId: String(eventID.prefix(1024)), calendarId: calendar.calendarIdentifier,
+                providerExternalIdentifier: event.calendarItemExternalIdentifier.isEmpty ? nil : String(event.calendarItemExternalIdentifier.prefix(1024)),
+                status: event.status == .tentative ? "tentative" : "confirmed",
+                calendarTimeZone: event.timeZone?.identifier,
+                ownerParticipant: ownerParticipant, originalStartTime: event.occurrenceDate,
+                summary: String((event.title?.isEmpty == false ? event.title! : "Untitled event").prefix(500)),
+                location: String((event.location ?? "").prefix(2000)), start: start, end: end,
+                allDay: event.isAllDay,
+                blocksTime: event.availability != .free
+            )
+        }
+    }
+
+    private static func emailAddress(from url: URL) -> String? {
+        guard url.scheme?.lowercased() == "mailto" else { return nil }
+        let value = String(url.absoluteString.dropFirst("mailto:".count))
+        guard !value.isEmpty, !value.contains("?") else { return nil }
+        return value.removingPercentEncoding ?? value
     }
 }
 
