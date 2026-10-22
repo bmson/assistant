@@ -195,7 +195,7 @@ function phoneEvents(
           summary: event.summary,
           location: event.location,
           start: event.allDay
-            ? { date: event.start }
+            ? { date: event.start, timeZone: event.calendarTimeZone ?? calendar.timeZone }
             : { dateTime: event.start, timeZone: event.calendarTimeZone ?? calendar.timeZone },
           end: event.allDay ? { date: event.end } : { dateTime: event.end },
           transparency: event.blocksTime ? 'opaque' : 'transparent',
@@ -537,7 +537,9 @@ function normalizeEvent(raw: RawEvent, calendar: CalendarEntry, ownerEmail = '')
     calendar: calendar.name,
     calendarId: calendar.id,
     startTimeZone: raw.start?.timeZone ?? calendar.timeZone,
-    ...(calendar.timeZone ? { calendarTimeZone: calendar.timeZone } : {}),
+    ...((raw.start?.timeZone ?? calendar.timeZone)
+      ? { calendarTimeZone: raw.start?.timeZone ?? calendar.timeZone }
+      : {}),
     summary: raw.summary ?? '',
     location: raw.location ?? '',
     description: (raw.description ?? '').slice(0, 4000),
@@ -1166,12 +1168,22 @@ export async function readCalendarEvent(
 export async function listEventsInWindow(
   client: GoogleClient,
   opts: { timeMin: Date; timeMax: Date; maxResults?: number },
+  context: {
+    ownerEmail?: string;
+    agentId?: string;
+    phoneCalendars?: (agentId: string) => Promise<PhoneCalendarSnapshot | null>;
+  } = {},
 ) {
   const maxResults = Math.min(Math.max(opts.maxResults ?? 20, 1), 50);
   return collectEvents(
-    { client, botEmail: '', ownerEmail: '' },
     {
-      agentId: '',
+      client,
+      botEmail: '',
+      ownerEmail: context.ownerEmail ?? '',
+      phoneCalendars: context.phoneCalendars,
+    },
+    {
+      agentId: context.agentId ?? '',
       maxResults,
       queryKey: `events:${opts.timeMin.toISOString()}:${opts.timeMax.toISOString()}:singleEvents=true:orderBy=startTime`,
       query: (calendarId, pageSize, pageToken) => {

@@ -236,7 +236,7 @@ describe('response cards', () => {
     expect(cards[0]).toMatchObject({
       sourceIntegrity: 'disputed',
       blocksTime: true,
-      title: 'Calendar sources differ: title, time, owner response',
+      title: 'Calendar titles differ: Work: Planning · Shared: Planning hold',
       start: '',
       end: '',
       time: 'Time differs by calendar source',
@@ -716,7 +716,7 @@ describe('response cards', () => {
         },
       },
     ]);
-    expect(result).toHaveLength(3);
+    expect(result).toHaveLength(4);
     expect(result.map((card) => card.start)).toContain('2026-10-07T09:30:00Z');
   });
 

@@ -752,7 +752,7 @@ function CalendarAgendaSection({ section, date }: { section: Raw; date: string }
   const showableItems = visibleItems.map((item): Raw => ({ ...item, showCalendarAttribution }));
   const allDay = showableItems.filter((item) => str(item.day) === 'All day');
   const timed = showableItems.filter((item) => str(item.day) === 'Timed');
-  const unavailable = showableItems.filter((item) => str(item.day) === 'Time unavailable');
+  const unavailable = showableItems.filter((item) => !['All day', 'Timed'].includes(str(item.day)));
   const sectionTitle = str(section.title);
 
   return (
@@ -793,8 +793,15 @@ function CalendarAgendaSection({ section, date }: { section: Raw; date: string }
 }
 
 function CalendarAgendaAttention({ section }: { section: Raw }) {
-  const summaries = recs(section.items).filter(validBriefingItem);
-  const overlaps = recs(section.overlaps).filter(validBriefingItem);
+  const items = recs(section.items).filter(validBriefingItem);
+  const inlinePairDetails =
+    typeof section.itemCount === 'number' && !Object.hasOwn(section, 'overlaps');
+  const summaries = inlinePairDetails
+    ? items.filter((item) => !str(item.detail) && /counted but not expanded/i.test(str(item.title)))
+    : items;
+  const overlaps = inlinePairDetails
+    ? items.filter((item) => !summaries.includes(item))
+    : recs(section.overlaps).filter(validBriefingItem);
   const [showAll, setShowAll] = useState(false);
   const visibleOverlaps = showAll ? overlaps : overlaps.slice(0, 3);
 
@@ -839,7 +846,7 @@ function CalendarAgendaAttention({ section }: { section: Raw }) {
               aria-expanded={showAll}
               onClick={() => setShowAll((expanded) => !expanded)}
             >
-              {showAll ? 'Show fewer' : `Show all ${overlaps.length} overlaps`}
+              {showAll ? 'Show fewer' : `Show ${overlaps.length} available details`}
             </button>
           ) : null}
         </>
@@ -867,7 +874,7 @@ function CalendarAgendaCard({ data }: { data: Raw }) {
             const key = str(section.id) || `${str(section.type)}:${str(section.title)}`;
             if (section.type === 'agenda')
               return <CalendarAgendaSection key={key} section={section} date={str(data.date)} />;
-            if (recs(section.overlaps).length)
+            if (Object.hasOwn(section, 'overlaps') || typeof section.itemCount === 'number')
               return <CalendarAgendaAttention key={key} section={section} />;
             return <BriefingList key={key} section={section} />;
           })}

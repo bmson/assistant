@@ -1,7 +1,11 @@
 import { sqlOnlyCodeJobs } from '@assistant/core';
 import type { TaskRow } from '@assistant/db';
 import type { InstalledModuleSet, ModuleChannel } from '@assistant/modules';
-import { finalChannelDelivery, finalChannelDeliveryReport } from '@assistant/persistence';
+import {
+  finalChannelDelivery,
+  finalChannelDeliveryReport,
+  savePhoneCalendars,
+} from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
 import { notifyAttention } from '../../../packages/core/src/workflow/executor/notices.js';
 import {
@@ -375,7 +379,7 @@ describe('calendar reader occurrence provenance', () => {
       configured: () => true,
       api: async (url: string) =>
         url.includes('calendarList')
-          ? { items: [{ id: 'work', summary: 'Work' }] }
+          ? { items: [{ id: 'work', summary: 'Work', timeZone: 'America/Los_Angeles' }] }
           : {
               items: [
                 {
@@ -383,9 +387,12 @@ describe('calendar reader occurrence provenance', () => {
                   iCalUID: 'series',
                   recurringEventId: 'r',
                   originalStartTime: { dateTime: '2026-10-08T09:00:00Z' },
-                  start: { dateTime: '2026-10-07T09:00:00Z' },
-                  end: { dateTime: '2026-10-07T10:00:00Z' },
+                  start: { dateTime: '2026-10-07T09:00:00', timeZone: 'Pacific/Honolulu' },
+                  end: { dateTime: '2026-10-07T10:00:00' },
                   summary: 'Standup',
+                  status: 'confirmed',
+                  transparency: 'opaque',
+                  attendees: [{ email: 'owner@example.com', responseStatus: 'accepted' }],
                 },
               ],
             },
@@ -393,7 +400,7 @@ describe('calendar reader occurrence provenance', () => {
     const deps = {
       db: {},
       persistence: {},
-      config: {},
+      config: { OWNER_EMAIL: 'owner@example.com' },
       modules: { channels: [], requireExports: () => client },
     } as unknown as AgentDeps;
     const read = executorDeps(deps).calendarReader;
@@ -407,6 +414,73 @@ describe('calendar reader occurrence provenance', () => {
       calendarId: 'work',
       iCalUID: 'series',
       originalStartTime: '2026-10-08T09:00:00Z',
+      calendarTimeZone: 'Pacific/Honolulu',
+      status: 'confirmed',
+      blocksTime: true,
+      calendarPurpose: 'unspecified',
+      ownerParticipation: {
+        status: 'accepted',
+        identityVerified: true,
+        basis: 'attendee-email',
+      },
+    });
+  });
+
+  it('reads selected phone calendars in scheduled context and preserves verified RSVP metadata', async () => {
+    const snapshotCache = new Map<string, { result: unknown; expiresAt: Date }>();
+    const toolExecution = {
+      cacheGet: async (key: string) => snapshotCache.get(key) ?? null,
+      cachePut: async (input: { cacheKey: string; result: unknown; expiresAt: Date }) => {
+        snapshotCache.set(input.cacheKey, { result: input.result, expiresAt: input.expiresAt });
+      },
+    };
+    await savePhoneCalendars(toolExecution, 'agent-owner', {
+      timeMin: '2026-10-01T00:00:00Z',
+      timeMax: '2026-11-01T00:00:00Z',
+      timeZone: 'America/Los_Angeles',
+      calendars: [{ id: 'phone-work', name: 'Work iPhone', purpose: 'commitments' }],
+      events: [
+        {
+          eventId: 'phone-accepted', calendarId: 'phone-work', summary: 'Accepted phone event', location: '',
+          start: '2026-10-07T09:00:00-07:00', end: '2026-10-07T10:00:00-07:00',
+          allDay: false, blocksTime: true, ownerParticipant: { email: 'owner@example.com', responseStatus: 'accepted' },
+        },
+        {
+          eventId: 'phone-declined', calendarId: 'phone-work', summary: 'Declined phone event', location: '',
+          start: '2026-10-07T11:00:00-07:00', end: '2026-10-07T12:00:00-07:00',
+          allDay: false, blocksTime: true, ownerParticipant: { email: 'owner@example.com', responseStatus: 'declined' },
+        },
+      ],
+    });
+    const client = {
+      configured: () => true,
+      api: async (url: string) =>
+        url.includes('calendarList')
+          ? { items: [{ id: 'google-work', summary: 'Google Work', timeZone: 'America/Los_Angeles' }] }
+          : { items: [] },
+    };
+    const deps = {
+      db: {},
+      persistence: { toolExecution },
+      config: { OWNER_EMAIL: 'owner@example.com' },
+      modules: { channels: [], requireExports: () => client },
+    } as unknown as AgentDeps;
+    const read = executorDeps(deps).calendarReader;
+    if (!read) throw new Error('Calendar reader unavailable');
+    const result = await read({
+      agentId: 'agent-owner',
+      timeMin: new Date('2026-10-07T00:00:00Z'),
+      timeMax: new Date('2026-10-08T00:00:00Z'),
+    });
+    expect(result.events).toHaveLength(2);
+    expect(result.events.map((event) => event.eventId)).toEqual(['phone-accepted', 'phone-declined']);
+    expect(result.events[0]).toMatchObject({
+      calendar: 'Work iPhone (iPhone)',
+      calendarPurpose: 'commitments',
+      ownerParticipation: { status: 'accepted', identityVerified: true, basis: 'attendee-email' },
+    });
+    expect(result.events[1]?.ownerParticipation).toMatchObject({
+      status: 'declined', identityVerified: true, basis: 'attendee-email',
     });
   });
 });

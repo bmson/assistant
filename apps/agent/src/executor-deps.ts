@@ -4,6 +4,7 @@ import {
   type FinalChannelDeliveryResult,
   finalChannelDelivery,
   finalChannelDeliveryReport,
+  readPhoneCalendars,
 } from '@assistant/persistence';
 import {
   gmailThreadHeadReader,
@@ -57,10 +58,18 @@ export function executorDeps(deps: AgentDeps): ExecutorDeps {
     documentProcessor: deps.documentProcessor,
     // Prefer the bot client, falling back to the portable calendar-only module.
     // Both absent exports report configured() false.
-    calendarReader: async ({ timeMin, timeMax }) => {
+    calendarReader: async ({ timeMin, timeMax, agentId }) => {
       const client = calendarReadClient();
       if (!client.configured()) return { events: [], complete: false };
-      const res = await listEventsInWindow(client, { timeMin, timeMax, maxResults: 50 });
+      const phoneCalendars =
+        agentId && deps.persistence
+          ? (ownerAgentId: string) => readPhoneCalendars(deps.persistence!.toolExecution, ownerAgentId)
+          : undefined;
+      const res = await listEventsInWindow(
+        client,
+        { timeMin, timeMax, maxResults: 50 },
+        { ownerEmail: deps.config.OWNER_EMAIL, agentId, phoneCalendars },
+      );
       return {
         // Carry the fields salience is judged from. `normalizeEvent` has
         // produced all of these all along; the port used to drop them, which is
@@ -78,6 +87,9 @@ export function executorDeps(deps: AgentDeps): ExecutorDeps {
           originalStartTime: event.originalStartTime,
           status: event.status,
           blocksTime: event.blocksTime,
+          ownerParticipation: event.ownerParticipation,
+          calendarPurpose: event.calendarPurpose,
+          calendarTimeZone: event.calendarTimeZone,
           ownerResponse: event.ownerResponse,
           location: event.location,
           description: event.description,

@@ -4,7 +4,9 @@ import type { BriefingCalendarEvent } from './briefing.js';
 import {
   calendarArrivalLead,
   calendarRelationship,
+  classifyCalendarOverlap,
   parseCalendarOwnerParticipation,
+  possibleCalendarIdentityDisagreement,
   verifiedOwnerParticipation,
 } from './calendar-relationship.js';
 import { ownerCalendarToolName } from './calendar-scope.js';
@@ -24,6 +26,11 @@ const eventSources = (event: ResponseCard): Record<string, unknown>[] => {
     .filter((source) => Object.keys(source).length);
   return sources.length ? sources : [event];
 };
+const sourceNames = (sources: Record<string, unknown>[]): string[] => [
+  ...new Set(
+    sources.map((source) => text(source.calendar) || text(source.calendarId) || 'Calendar'),
+  ),
+];
 function relationshipEvent(event: ResponseCard): BriefingCalendarEvent {
   const source = eventSources(event)[0] ?? {};
   return {
@@ -152,12 +159,11 @@ function dayKey(event: ResponseCard, zone?: string): string {
   if (sources.length > 1) {
     const sourceDays = sources.map((source) => {
       const start = text(source.start);
-      if (source.allDay === true && validDate(start)) return start;
-      const sourceZone = validZone(source.calendarTimeZone) ?? zone;
-      if (!sourceZone || !INSTANT.test(start) || !Number.isFinite(Date.parse(start)))
-        return 'unverified';
-      return formatter(`day:${sourceZone}`, 'en-CA', {
-        timeZone: sourceZone,
+      if (source.allDay === true)
+        return validDate(start) && validZone(source.calendarTimeZone) ? start : 'unverified';
+      if (!zone || !INSTANT.test(start) || !Number.isFinite(Date.parse(start))) return 'unverified';
+      return formatter(`day:${zone}`, 'en-CA', {
+        timeZone: zone,
         year: 'numeric',
         month: '2-digit',
         day: '2-digit',
@@ -166,7 +172,8 @@ function dayKey(event: ResponseCard, zone?: string): string {
     if (new Set(sourceDays).size > 1) return 'unverified';
   }
   const start = text(event.start);
-  if (event.allDay === true && validDate(start)) return start;
+  if (event.allDay === true)
+    return validDate(start) && validZone(event.calendarTimeZone) ? start : 'unverified';
   if (!zone || !INSTANT.test(start) || !Number.isFinite(Date.parse(start))) return 'unverified';
   return formatter(`day:${zone}`, 'en-CA', {
     timeZone: zone,
@@ -223,6 +230,26 @@ function eventTime(event: ResponseCard, zone?: string): string {
   return `${from} – ${endDay !== dayKey(event, zone) ? `${dateLabel(endDay).split(' · ')[0]}, ` : ''}${clock(end, zone)}`;
 }
 
+function sourceLocalTime(source: Record<string, unknown>, fallbackZone?: string): string {
+  const start = text(source.start);
+  const end = text(source.end);
+  if (source.allDay === true) return 'All day';
+  const zone = validZone(source.calendarTimeZone) ?? fallbackZone;
+  if (!zone || !INSTANT.test(start) || !INSTANT.test(end)) return 'Time unavailable';
+  const day = (value: Date) =>
+    formatter(`day:${zone}`, 'en-CA', {
+      timeZone: zone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(value);
+  const startDay = day(new Date(start));
+  const endDay = day(new Date(end));
+  const startLabel = `${dateLabel(startDay, zone).split(' · ')[0]} ${clock(start, zone)}`;
+  const endLabel = `${endDay !== startDay ? `${dateLabel(endDay, zone).split(' · ')[0]} ` : ''}${clock(end, zone)}`;
+  return `${startLabel} – ${endLabel} (${zone})`;
+}
+
 function sourceDifferences(
   event: ResponseCard,
   zone?: string,
@@ -257,17 +284,7 @@ function sourceDifferences(
     { label: 'title', value: (source) => text(source.summary) || '(untitled)' },
     {
       label: 'time',
-      value: (source) =>
-        eventTime(
-          {
-            kind: 'calendar-event',
-            id: '',
-            start: text(source.start),
-            end: text(source.end),
-            allDay: source.allDay === true,
-          },
-          validZone(source.calendarTimeZone) ?? zone,
-        ),
+      value: (source) => sourceLocalTime(source, zone),
     },
     {
       label: 'event type',
@@ -305,20 +322,40 @@ function sourceDifferences(
             : 'purpose unspecified',
     },
   ];
-  const differing = fields.filter((field) => new Set(sources.map(field.value)).size > 1);
-  if (!differing.length) return undefined;
-  const titleDiffers =
-    new Set(sources.map((source) => text(source.summary) || '(untitled)')).size > 1;
   const timeDiffers =
     new Set(
       sources.map((source) =>
-        JSON.stringify([text(source.start), text(source.end), source.allDay === true]),
+        JSON.stringify(
+          [source.start, source.end]
+            .map((value) => {
+              const raw = text(value);
+              if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return `date:${raw}`;
+              const instant = Date.parse(raw);
+              return Number.isFinite(instant) ? `instant:${instant}` : raw;
+            })
+            .concat([source.allDay === true ? 'all-day' : 'timed']),
+        ),
       ),
     ).size > 1;
+  const differing = fields.filter((field) =>
+    field.label === 'time' ? timeDiffers : new Set(sources.map(field.value)).size > 1,
+  );
+  if (!differing.length) return undefined;
+  const titleDiffers =
+    new Set(sources.map((source) => text(source.summary) || '(untitled)')).size > 1;
+  const timeZoneDisplayDiffers =
+    new Set(sources.map((source) => text(source.calendarTimeZone) || 'time zone unavailable'))
+      .size > 1;
+  const detailFields =
+    !timeDiffers && timeZoneDisplayDiffers
+      ? [...differing, fields.find((field) => field.label === 'time')].filter(
+          (field): field is (typeof fields)[number] => Boolean(field),
+        )
+      : differing;
   const detail = sources
     .map((source) => {
       const calendar = text(source.calendar) || text(source.calendarId) || 'Calendar';
-      return `${calendar}: ${differing.map((field) => `${field.label} ${field.value(source)}`).join('; ')}`;
+      return `${calendar}: ${detailFields.map((field) => `${field.label} ${field.value(source)}`).join('; ')}`;
     })
     .join(' · ');
   return { fields: differing.map((field) => field.label), detail, titleDiffers, timeDiffers };
@@ -348,19 +385,30 @@ function coverageComplete(rows: ActionEvidence[]): boolean {
 }
 
 type CalendarPairAttention = {
-  conflicts: Array<{ title: string; detail: string }>;
+  conflicts: Array<{
+    title: string;
+    detail: string;
+    classification?:
+      | 'personal_commitment_conflict'
+      | 'commitments_policy_overlap'
+      | 'attendance_unconfirmed';
+  }>;
+  sourceIdentityDisagreements: Array<{ title: string; detail: string }>;
   duplicateListings: Array<{ title: string; detail: string }>;
   arrivalGuidance: Array<{ title: string; detail: string }>;
   conflictCount: number;
+  sourceIdentityDisagreementCount: number;
   duplicateCount: number;
   arrivalCount: number;
 };
 
 const emptyPairAttention = (): CalendarPairAttention => ({
   conflicts: [],
+  sourceIdentityDisagreements: [],
   duplicateListings: [],
   arrivalGuidance: [],
   conflictCount: 0,
+  sourceIdentityDisagreementCount: 0,
   duplicateCount: 0,
   arrivalCount: 0,
 });
@@ -441,6 +489,23 @@ function calendarPairAttentionByDay(
         }
         continue;
       }
+      const sourceIdentityDisagreement = left.sources.some((leftSource) =>
+        right.sources.some((rightSource) =>
+          possibleCalendarIdentityDisagreement(leftSource, rightSource),
+        ),
+      );
+      if (sourceIdentityDisagreement) {
+        attention.sourceIdentityDisagreementCount += 1;
+        if (formattedDetails < MAX_PAIR_DETAILS) {
+          formattedDetails += 1;
+          attention.sourceIdentityDisagreements.push({
+            title: `Possible same event with different source times: ${text(left.event.title)} (${sourceNames(left.sources).join(', ')}) · ${text(right.event.title)} (${sourceNames(right.sources).join(', ')})`,
+            detail:
+              'The calendars share a trusted event UID but lack enough occurrence metadata to match these records. Both times remain visible; this is a source comparison, not a confirmed distinct-event conflict.',
+          });
+        }
+        continue;
+      }
       const probableMirror =
         (left.hasPhoneSource || right.hasPhoneSource) &&
         left.sources.some((leftSource) =>
@@ -454,9 +519,9 @@ function calendarPairAttentionByDay(
         if (formattedDetails < MAX_PAIR_DETAILS) {
           formattedDetails += 1;
           attention.duplicateListings.push({
-            title: `Possible duplicate listing: ${text(left.event.title)} · ${text(right.event.title)}`,
+            title: `Possible matching calendar entries: ${text(left.event.title)} (${sourceNames(left.sources).join(', ')}) · ${text(right.event.title)} (${sourceNames(right.sources).join(', ')})`,
             detail:
-              'The calendar sources may describe the same occurrence; both are retained and attendance is unverified.',
+              'These listings may describe the same occurrence. Both remain visible; attendance is unverified.',
           });
         }
         continue;
@@ -471,9 +536,23 @@ function calendarPairAttentionByDay(
           day === endDay
             ? `${clock(fromIso, zone)} – ${clock(endIso, zone)}`
             : `${dateLabel(day).split(' · ')[0]} ${clock(fromIso, zone)} – ${dateLabel(endDay).split(' · ')[0]} ${clock(endIso, zone)}`;
+        const classification = classifyCalendarOverlap(left.event, right.event);
+        const overlapTitle =
+          classification === 'personal_commitment_conflict'
+            ? `Your accepted commitments overlap: ${label}`
+            : classification === 'commitments_policy_overlap'
+              ? `Possible commitments overlap: ${label}`
+              : `Possible overlap: ${label}`;
+        const qualification =
+          classification === 'personal_commitment_conflict'
+            ? 'Your verified accepted commitments overlap and both block time.'
+            : classification === 'commitments_policy_overlap'
+              ? 'Your calendar settings mark these as commitments; acceptance is not confirmed for both.'
+              : 'Calendar overlap does not confirm attendance.';
         attention.conflicts.push({
-          title: `Possible overlap: ${label}`,
-          detail: `${text(left.event.title)} · ${text(right.event.title)}. Calendar overlap does not confirm attendance.`,
+          title: overlapTitle,
+          detail: `${text(left.event.title)} (${sourceNames(left.sources).join(', ')}) · ${text(right.event.title)} (${sourceNames(right.sources).join(', ')}). ${qualification}`,
+          classification,
         });
       }
     }
@@ -594,11 +673,17 @@ export function calendarAgendaCards(input: {
           day:
             differences &&
             new Set(eventSources(event).map((source) => source.allDay === true)).size > 1
-              ? 'Type differs by source'
+              ? 'Time unavailable'
               : event.allDay === true
                 ? 'All day'
                 : 'Timed',
-          time: differences?.timeDiffers ? 'Time differs by source' : eventTime(event, zone),
+          time:
+            differences?.timeDiffers &&
+            new Set(eventSources(event).map((source) => source.allDay === true)).size > 1
+              ? 'Time unavailable'
+              : differences?.timeDiffers
+                ? 'Time differs by source'
+                : eventTime(event, zone),
           title: differences?.titleDiffers ? 'Title differs by source' : text(event.title),
           ...(text(event.location) ? { location: text(event.location) } : {}),
           ...(note ? { note } : {}),
@@ -616,7 +701,9 @@ export function calendarAgendaCards(input: {
         return differences
           ? [
               {
-                title: `${differences.titleDiffers ? 'Event title differs by source' : 'Calendar event'} · ${differences.fields.join(', ')}`,
+                title: differences.titleDiffers
+                  ? `Source titles differ · ${text(event.title) || text(event.id)}`
+                  : `${text(event.title) || text(event.id)} · calendar sources differ in ${differences.fields.join(', ')}`,
                 detail: differences.detail,
               },
             ]
@@ -652,9 +739,11 @@ export function calendarAgendaCards(input: {
         });
       const {
         conflicts,
+        sourceIdentityDisagreements,
         duplicateListings,
         arrivalGuidance,
         conflictCount,
+        sourceIdentityDisagreementCount,
         duplicateCount,
         arrivalCount,
       } = pairAttention.get(day) ?? emptyPairAttention();
@@ -672,10 +761,27 @@ export function calendarAgendaCards(input: {
           overlapCount: conflictCount,
           overlapsTruncated: conflictCount > conflicts.length,
         });
+      if (sourceIdentityDisagreementCount)
+        sections.push({
+          type: 'attention',
+          title: `${sourceIdentityDisagreementCount} possible source identity ${sourceIdentityDisagreementCount === 1 ? 'difference' : 'differences'}`,
+          items: [
+            ...sourceIdentityDisagreements,
+            ...(sourceIdentityDisagreementCount > sourceIdentityDisagreements.length
+              ? [
+                  {
+                    title: `${sourceIdentityDisagreementCount - sourceIdentityDisagreements.length} additional identity comparisons counted but not expanded.`,
+                  },
+                ]
+              : []),
+          ],
+          itemCount: sourceIdentityDisagreementCount,
+          itemsTruncated: sourceIdentityDisagreementCount > sourceIdentityDisagreements.length,
+        });
       if (duplicateCount)
         sections.push({
           type: 'attention',
-          title: `${duplicateCount} possible duplicate ${duplicateCount === 1 ? 'listing' : 'listings'}`,
+          title: `${duplicateCount} possible duplicate listing ${duplicateCount === 1 ? 'pair' : 'pairs'}`,
           items: [
             ...duplicateListings,
             ...(duplicateCount > duplicateListings.length

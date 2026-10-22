@@ -516,7 +516,7 @@ describe('response execution contract', () => {
     ];
     const response = verifiedReadResponse(request, evidence);
     expect(response).toContain(
-      'Possible overlap: **Project review** and **Planning hold**, Wed 14 Oct 11:00 AM–11:30 AM',
+      'Possible overlap: **Work · Project review** and **Shared calendar · Planning hold**, Wed 14 Oct 11:00 AM–11:30 AM',
     );
     expect(response).toContain(
       'personal attendance and matching occurrence identity are not established',
@@ -609,7 +609,9 @@ describe('response execution contract', () => {
         },
       },
     ]);
-    expect(response).toContain('Scheduling conflict: **Review** and **Appointment**');
+    expect(response).toContain(
+      'Your accepted commitments overlap: **Work · Review** and **Personal · Appointment**',
+    );
     expect(response).not.toContain(
       'Possible overlap: **City match arrival** and **City match kickoff**',
     );
@@ -708,7 +710,7 @@ describe('response execution contract', () => {
       },
     ]);
     expect(response).toContain(
-      'Possible overlap: **Late review** and **Overnight appointment**, Wed, Oct 14, 2026, 11:30 PM – Thu, Oct 15, 2026, 12:00 AM',
+      'Possible overlap: **Work · Late review** and **Personal · Overnight appointment**, Wed, Oct 14, 2026, 11:30 PM – Thu, Oct 15, 2026, 12:00 AM',
     );
     expect(response).not.toContain('–Thu 15 Oct 1:00 AM');
   });
@@ -773,7 +775,9 @@ describe('response execution contract', () => {
     expect(response).toContain('— Project review — [Open event]');
     expect(response).toContain('— Appointment (Personal)');
     expect(response).toContain('[Open event](https://calendar.google.com/event?eid=briefing)');
-    expect(response).toContain('Possible overlap: **Project review** and **Appointment**');
+    expect(response).toContain(
+      'Possible overlap: **Work · Project review** and **Personal · Appointment**',
+    );
     expect(response).not.toContain('Private Street');
     expect(response).not.toContain('colleague@example.test');
   });

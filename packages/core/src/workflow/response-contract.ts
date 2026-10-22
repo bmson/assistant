@@ -18,9 +18,10 @@ import {
   calendarArrivalLead,
   calendarRelationship,
   calendarRelationshipNote,
+  classifyCalendarOverlap,
   parseCalendarOwnerParticipation,
+  possibleCalendarIdentityDisagreement,
   verifiedOwnerParticipation,
-  verifiedPersonalCommitment,
 } from './calendar-relationship.js';
 import { safeCalendarSourceUrl, safeVideoMeetingUrl } from './calendar-source-link.js';
 import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
@@ -1836,15 +1837,31 @@ function calendarOverlapSummary(
   const notes: string[] = [];
   const travelContextNotes: string[] = [];
   const arrivalNotes: string[] = [];
-  const namedPairs: string[] = [];
+  const MAX_FORMATTED_OVERLAP_DETAILS = 100;
+  let formattedDetails = 0;
+  let overlapPairCount = 0;
+  let travelContextCount = 0;
+  let arrivalCount = 0;
   for (let index = 0; index < candidates.length; index += 1) {
     const left = candidates[index];
     if (!left) continue;
-    for (const right of candidates.slice(index + 1)) {
+    for (let rightIndex = index + 1; rightIndex < candidates.length; rightIndex += 1) {
+      const right = candidates[rightIndex];
+      if (!right) continue;
       if (sameCalendarOccurrence(left.projected, right.projected)) continue;
       const start = Math.max(left.interval.start, right.interval.start, window?.start ?? -Infinity);
       const end = Math.min(left.interval.end, right.interval.end, window?.end ?? Infinity);
       if (start >= end) continue;
+      if (possibleCalendarIdentityDisagreement(left.projected, right.projected)) {
+        overlapPairCount += 1;
+        if (formattedDetails < MAX_FORMATTED_OVERLAP_DETAILS) {
+          formattedDetails += 1;
+          notes.push(
+            `- Possible same event with different source times: ${left.projected.calendar || 'Calendar'} · ${left.projected.summary} + ${right.projected.calendar || 'Calendar'} · ${right.projected.summary}. Both records remain visible; identity and attendance are unconfirmed.`,
+          );
+        }
+        continue;
+      }
       const contextOverlap = left.explicitStayContext || right.explicitStayContext;
       // A verified lodging stay can overlap a travel block in the calendar,
       // but that is useful context rather than evidence of physical attendance
@@ -1860,58 +1877,79 @@ function calendarOverlapSummary(
           .filter(Boolean)
           .join(' ');
         if (!FLIGHT_SOURCE.test(otherSource)) continue;
-        const sameDay =
-          eventLocalDay(new Date(start).toISOString(), zone) ===
-          eventLocalDay(new Date(end).toISOString(), zone);
-        const overlapLabel = sameDay
-          ? `${shortDate(new Date(start).toISOString(), zone)} ${compactClock(start, zone)}–${compactClock(end, zone)}`
-          : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
-        const note = `- Travel context overlap **${overlapLabel}**: ${stay.projected.summary} + ${other.projected.summary} (busy stay block).`;
-        travelContextNotes.push(note);
+        travelContextCount += 1;
+        if (formattedDetails < MAX_FORMATTED_OVERLAP_DETAILS) {
+          formattedDetails += 1;
+          const sameDay =
+            eventLocalDay(new Date(start).toISOString(), zone) ===
+            eventLocalDay(new Date(end).toISOString(), zone);
+          const overlapLabel = sameDay
+            ? `${shortDate(new Date(start).toISOString(), zone)} ${compactClock(start, zone)}–${compactClock(end, zone)}`
+            : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
+          travelContextNotes.push(
+            `- Travel context overlap **${overlapLabel}**: ${stay.projected.summary} + ${other.projected.summary} (busy stay block).`,
+          );
+        }
         continue;
       }
       const arrivalLead = calendarArrivalLead(left.projected, right.projected);
       if (arrivalLead !== undefined) {
         const earlier = left.interval.start < right.interval.start ? left : right;
         const later = earlier === left ? right : left;
-        arrivalNotes.push(
-          `- Arrival guidance: **${compactClock(earlier.interval.start, zone)} arrival for ${compactClock(later.interval.start, zone)} start** — ${later.projected.summary} requests arrival ${arrivalLead} minutes early. The overlapping records may describe one event; both sources are retained and matching identity is unconfirmed.`,
-        );
+        arrivalCount += 1;
+        if (formattedDetails < MAX_FORMATTED_OVERLAP_DETAILS) {
+          formattedDetails += 1;
+          arrivalNotes.push(
+            `- Arrival guidance: **${compactClock(earlier.interval.start, zone)} arrival for ${compactClock(later.interval.start, zone)} start** — ${later.projected.summary} requests arrival ${arrivalLead} minutes early. The overlapping records may describe one event; both sources are retained and matching identity is unconfirmed.`,
+          );
+        }
         continue;
       }
       const relationship = calendarRelationship(left.projected, right.projected);
       // Arrival/start records can be one event. Similar phone listings are
       // reported as uncertain copies, never as personal conflicts.
       if (relationship === 'compatible_time_roles') continue;
-      const bothAccepted =
-        verifiedPersonalCommitment(left.event) && verifiedPersonalCommitment(right.event);
-      const sameDay =
-        eventLocalDay(new Date(start).toISOString(), zone) ===
-        eventLocalDay(new Date(end).toISOString(), zone);
-      const overlapLabel = sameDay
-        ? `${shortDate(new Date(start).toISOString(), zone)} ${request.compactCalendarBriefing ? compactClock(start, zone) : overlapClock(start, zone)}–${request.compactCalendarBriefing ? compactClock(end, zone) : overlapClock(end, zone)}`
-        : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
       if (relationship === 'probable_duplicate') {
-        const note = `- Possible duplicate listing **${overlapLabel}**: ${left.projected.summary} + ${right.projected.summary}. Both sources are retained; occurrence identity is unverified.`;
-        notes.push(note);
-        namedPairs.push(
-          `Possible duplicate listing ${overlapLabel}: ${left.projected.summary} + ${right.projected.summary}`,
-        );
+        overlapPairCount += 1;
+        if (formattedDetails < MAX_FORMATTED_OVERLAP_DETAILS) {
+          formattedDetails += 1;
+          const sameDay =
+            eventLocalDay(new Date(start).toISOString(), zone) ===
+            eventLocalDay(new Date(end).toISOString(), zone);
+          const overlapLabel = sameDay
+            ? `${shortDate(new Date(start).toISOString(), zone)} ${request.compactCalendarBriefing ? compactClock(start, zone) : overlapClock(start, zone)}–${request.compactCalendarBriefing ? compactClock(end, zone) : overlapClock(end, zone)}`
+            : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
+          notes.push(
+            `- Possible matching calendar entries **${overlapLabel}**: ${left.projected.calendar || 'Calendar'} · ${left.projected.summary} + ${right.projected.calendar || 'Calendar'} · ${right.projected.summary}. Both sources are retained; occurrence identity is unverified.`,
+          );
+        }
         continue;
       }
-      notes.push(
-        request.compactCalendarBriefing
-          ? `- ${bothAccepted ? 'Conflict' : 'Possible overlap'} **${overlapLabel}**: ${left.projected.summary} + ${right.projected.summary}.`
-          : `- ${bothAccepted ? 'Scheduling conflict' : 'Possible overlap'}: **${left.projected.summary}** and **${right.projected.summary}**, ${overlapLabel}.${request.includeCalendarBriefing ? '' : ` ${calendarRelationshipNote(relationship, bothAccepted ? 'confirmed' : 'unresolved')}`}`,
-      );
-      namedPairs.push(
-        request.compactCalendarBriefing
-          ? `${bothAccepted ? 'Conflict' : 'Possible overlap'} ${overlapLabel}: ${left.projected.summary} + ${right.projected.summary}`
-          : `**${left.projected.summary}** and **${right.projected.summary}**`,
-      );
+      overlapPairCount += 1;
+      if (formattedDetails < MAX_FORMATTED_OVERLAP_DETAILS) {
+        formattedDetails += 1;
+        const sameDay =
+          eventLocalDay(new Date(start).toISOString(), zone) ===
+          eventLocalDay(new Date(end).toISOString(), zone);
+        const overlapLabel = sameDay
+          ? `${shortDate(new Date(start).toISOString(), zone)} ${request.compactCalendarBriefing ? compactClock(start, zone) : overlapClock(start, zone)}–${request.compactCalendarBriefing ? compactClock(end, zone) : overlapClock(end, zone)}`
+          : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
+        const classification = classifyCalendarOverlap(left.event, right.event);
+        const label =
+          classification === 'personal_commitment_conflict'
+            ? 'Your accepted commitments overlap'
+            : classification === 'commitments_policy_overlap'
+              ? 'Possible commitments overlap'
+              : 'Possible overlap';
+        notes.push(
+          request.compactCalendarBriefing
+            ? `- ${label} **${overlapLabel}**: ${left.projected.calendar || 'Calendar'} · ${left.projected.summary} + ${right.projected.calendar || 'Calendar'} · ${right.projected.summary}.`
+            : `- ${label}: **${left.projected.calendar || 'Calendar'} · ${left.projected.summary}** and **${right.projected.calendar || 'Calendar'} · ${right.projected.summary}**, ${overlapLabel}.${classification === 'commitments_policy_overlap' ? ' Your calendar settings mark these as commitments; acceptance is not confirmed for both.' : classification === 'attendance_unconfirmed' && !request.includeCalendarBriefing ? ` ${calendarRelationshipNote(relationship, 'unresolved')}` : ''}`,
+        );
+      }
     }
   }
-  if (notes.length === 0 && travelContextNotes.length === 0 && arrivalNotes.length === 0)
+  if (overlapPairCount === 0 && travelContextCount === 0 && arrivalCount === 0)
     return [
       complete
         ? 'No unresolved overlaps between timed calendar entries were found in the checked results.'
@@ -1920,15 +1958,25 @@ function calendarOverlapSummary(
           : 'An overlap check was requested, but no calendar events were available to compare.',
     ];
   const shown = notes.slice(0, 3);
-  if (notes.length > shown.length) {
-    const additionalPairs = namedPairs.slice(3);
-    const shownAdditionalPairs = additionalPairs.slice(0, 3);
-    const omitted = additionalPairs.length - shownAdditionalPairs.length;
+  if (overlapPairCount > shown.length)
     shown.push(
-      `- Additional ${request.compactCalendarBriefing ? 'overlaps' : 'overlapping pairs'}: ${shownAdditionalPairs.join('; ')}${omitted > 0 ? `; ${omitted.toLocaleString('en-US')} more not listed` : ''}.`,
+      `- ${overlapPairCount.toLocaleString('en-US')} overlapping pairs found; further pair details are not expanded.`,
     );
-  }
-  const result = [...shown, ...arrivalNotes.slice(0, 3), ...travelContextNotes.slice(0, 3)];
+  const result = [
+    ...shown,
+    ...arrivalNotes.slice(0, 3),
+    ...(arrivalCount > arrivalNotes.length
+      ? [
+          `- ${arrivalCount.toLocaleString('en-US')} additional arrival comparisons were counted but not expanded.`,
+        ]
+      : []),
+    ...travelContextNotes.slice(0, 3),
+    ...(travelContextCount > travelContextNotes.length
+      ? [
+          `- ${travelContextCount.toLocaleString('en-US')} additional travel-context overlaps were counted but not expanded.`,
+        ]
+      : []),
+  ];
   if (request.includeCalendarBriefing && result.length > 0)
     result.push(
       request.compactCalendarBriefing

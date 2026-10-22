@@ -13,13 +13,13 @@ import {
 } from '@assistant/db';
 import {
   type BriefingInputs,
+  type CalendarOccurrenceIdentity,
   type CalendarOwnerParticipation,
   type CalendarPurpose,
   type ExecutionPersistence,
   type OwnerNoticeDecisionFenceResult,
   resolveBookingLocalDateTime,
   type SecurityIncidentAttentionCandidate,
-  sameCalendarOccurrence,
 } from '@assistant/persistence';
 import { and, desc, eq, gt, gte, isNull } from 'drizzle-orm';
 import { z } from 'zod';
@@ -65,8 +65,10 @@ import {
   type CalendarRelationship,
   calendarRelationship,
   calendarRelationshipNote,
+  canonicalOccurrenceGroups,
+  classifyCalendarOverlap,
+  possibleCalendarIdentityDisagreement,
   verifiedOwnerParticipation,
-  verifiedPersonalCommitment,
 } from './calendar-relationship.js';
 import { weatherResponseCards } from './response-cards.js';
 import {
@@ -151,6 +153,8 @@ export interface BriefingCalendarEvent {
   iCalUID?: string;
   recurringEventId?: string;
   originalStartTime?: string;
+  /** Source zone retained for floating/all-day civil dates. */
+  calendarTimeZone?: string;
   /**
    * 'confirmed' | 'tentative' | 'cancelled', when the provider sends one. This
    * is what lets `calendar-diff.ts` recognize an explicit cancellation instead
@@ -177,6 +181,8 @@ export interface BriefingCalendarWindow {
 export type BriefingCalendarReader = (window: {
   timeMin: Date;
   timeMax: Date;
+  /** The owning agent scopes any locally shared phone calendars. */
+  agentId?: string;
 }) => Promise<BriefingCalendarWindow>;
 
 /** A point read is independent of the current calendar window. Null proves no cancellation. */
@@ -408,7 +414,16 @@ export interface CalendarConflict {
   overlapEnd: string;
   attendance?: 'confirmed' | 'unresolved';
   relationship?: CalendarRelationship;
+  classification?:
+    | 'personal_commitment_conflict'
+    | 'commitments_policy_overlap'
+    | 'attendance_unconfirmed';
+  sourceIdentityDisagreement?: boolean;
 }
+export type CalendarConflictResults = CalendarConflict[] & {
+  totalCount: number;
+  detailsOmitted: boolean;
+};
 
 interface TimedCalendarEvent extends BriefingCalendarEvent {
   startMs: number;
@@ -423,7 +438,7 @@ interface TimedCalendarEvent extends BriefingCalendarEvent {
 export function findConflicts(
   events: ReadonlyArray<BriefingCalendarEvent>,
   _timeZone = 'UTC',
-): CalendarConflict[] {
+): CalendarConflictResults {
   const timed = events
     .map((event) => ({ ...event, startMs: Date.parse(event.start), endMs: Date.parse(event.end) }))
     .filter(
@@ -437,39 +452,7 @@ export function findConflicts(
         event.endMs > event.startMs,
     )
     .sort((a, b) => a.startMs - b.startMs);
-  const parents = timed.map((_, index) => index);
-  const root = (index: number): number => {
-    let current = index;
-    while (parents[current] !== current) current = parents[current] as number;
-    return current;
-  };
-  const unite = (a: number, b: number) => {
-    const left = root(a);
-    const right = root(b);
-    if (left !== right) parents[right] = left;
-  };
-  for (let i = 0; i < timed.length; i++) {
-    for (let j = i + 1; j < timed.length; j++) {
-      const left = timed[i];
-      const right = timed[j];
-      if (!left || !right || right.startMs >= left.endMs) break;
-      if (sameCalendarOccurrence(left, right)) {
-        const leftRoot = root(i);
-        const rightRoot = root(j);
-        const leftGroup = timed.filter((_, index) => root(index) === leftRoot);
-        const rightGroup = timed.filter((_, index) => root(index) === rightRoot);
-        if (leftGroup.every((a) => rightGroup.every((b) => sameCalendarOccurrence(a, b))))
-          unite(i, j);
-      }
-    }
-  }
-  const grouped = new Map<number, TimedCalendarEvent[]>();
-  timed.forEach((event, index) => {
-    const group = grouped.get(root(index)) ?? [];
-    group.push(event);
-    grouped.set(root(index), group);
-  });
-  const groups = [...grouped.values()]
+  const groups = (canonicalOccurrenceGroups(timed) as TimedCalendarEvent[][])
     .map((group) => ({
       events: group,
       startMs: Math.min(...group.map((event) => event.startMs)),
@@ -477,12 +460,31 @@ export function findConflicts(
     }))
     .sort((a, b) => a.startMs - b.startMs);
   const conflicts: CalendarConflict[] = [];
+  let totalCount = 0;
   for (let i = 0; i < groups.length; i++) {
     const earlier = groups[i];
     if (!earlier) continue;
     for (let j = i + 1; j < groups.length; j++) {
       const later = groups[j];
       if (!later || later.startMs >= earlier.endMs) break;
+      totalCount += 1;
+      if (conflicts.length >= MAX_CONFLICTS) continue;
+      const sourceIdentityDisagreement = earlier.events.some((left) =>
+        later.events.some((right) =>
+          possibleCalendarIdentityDisagreement(left as CalendarOccurrenceIdentity, right),
+        ),
+      );
+      const aggregate = (group: TimedCalendarEvent[]) => ({
+        blocksTime: group.every((event) => event.blocksTime === true),
+        status: group.some((event) => event.status === 'cancelled') ? 'cancelled' : 'confirmed',
+        calendarPurpose: group.every((event) => event.calendarPurpose === 'commitments')
+          ? 'commitments'
+          : 'unspecified',
+        sourceVariants: group,
+      });
+      const classification = sourceIdentityDisagreement
+        ? 'attendance_unconfirmed'
+        : classifyCalendarOverlap(aggregate(earlier.events), aggregate(later.events));
       conflicts.push({
         a: earlier.events,
         b: later.events,
@@ -493,17 +495,19 @@ export function findConflicts(
                 later.events[0] as BriefingCalendarEvent,
               )
             : 'unresolved',
-        attendance:
-          earlier.events.some((event) => verifiedPersonalCommitment({ ...event })) &&
-          later.events.some((event) => verifiedPersonalCommitment({ ...event }))
-            ? 'confirmed'
-            : 'unresolved',
+        attendance: classification === 'personal_commitment_conflict' ? 'confirmed' : 'unresolved',
+        classification,
+        ...(sourceIdentityDisagreement ? { sourceIdentityDisagreement: true } : {}),
         overlapStart: new Date(Math.max(earlier.startMs, later.startMs)).toISOString(),
         overlapEnd: new Date(Math.min(earlier.endMs, later.endMs)).toISOString(),
       });
     }
   }
-  return conflicts.slice(0, MAX_CONFLICTS);
+  Object.defineProperties(conflicts, {
+    totalCount: { value: totalCount, enumerable: false },
+    detailsOmitted: { value: totalCount > conflicts.length, enumerable: false },
+  });
+  return conflicts as CalendarConflictResults;
 }
 
 function localDateTime(value: string, timeZone: string): string {
@@ -916,6 +920,7 @@ export async function runBriefing(
           .calendarReader({
             timeMin: now,
             timeMax: new Date(now.getTime() + CALENDAR_WINDOW_HOURS * 3600 * 1000),
+            agentId: agent.id,
           })
           .catch((err) => {
             console.error('briefing: calendar read failed', err);
@@ -976,6 +981,7 @@ export async function runBriefing(
         proposalCalendar = await deps.calendarReader({
           timeMin: now,
           timeMax: new Date(now.getTime() + 14 * 86_400_000),
+          agentId: agent.id,
         });
       } catch (error) {
         console.error('briefing: booking calendar reconciliation read failed', error);
@@ -1024,7 +1030,7 @@ export async function runBriefing(
     cancelledBookingProposals = cancelledBookingProposals.filter(
       (entry) => !inactiveRefs.has(entry.sourceRef),
     );
-    const overlaps = calendar ? findConflicts(calendar.events, agent.timezone) : [];
+    const overlaps = findConflicts(calendar?.events ?? [], agent.timezone);
     const duplicateListings = overlaps.filter(
       (overlap) => overlap.relationship === 'probable_duplicate',
     );
@@ -1089,19 +1095,20 @@ export async function runBriefing(
     const lines: string[] = [];
     if (conflicts.length > 0) {
       lines.push(
-        'Calendar time overlaps in the next day or two (personal attendance may be unverified):',
-        ...conflicts.map(
-          (c) =>
-            `- "${collapseWhitespace(c.a[0]?.summary ?? 'Untitled event')}" overlaps "${collapseWhitespace(c.b[0]?.summary ?? 'Untitled event')}" (${localDateTime(c.overlapStart, agent.timezone)} to ${localDateTime(c.overlapEnd, agent.timezone)})`,
+        `Calendar time overlaps in the next day or two (${overlaps.totalCount.toLocaleString('en-US')} timed pairs; showing ${conflicts.length} conflict detail${conflicts.length === 1 ? '' : 's'}; personal attendance may be unverified):`,
+        ...conflicts.map((c) =>
+          c.sourceIdentityDisagreement
+            ? `- ${c.a[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.a[0]?.summary ?? 'Untitled event')}" and ${c.b[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.b[0]?.summary ?? 'Untitled event')}" share a trusted event UID but have different source times; both records remain visible for review.`
+            : `- ${c.a[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.a[0]?.summary ?? 'Untitled event')}" overlaps ${c.b[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.b[0]?.summary ?? 'Untitled event')}" (${localDateTime(c.overlapStart, agent.timezone)} to ${localDateTime(c.overlapEnd, agent.timezone)})${c.classification === 'personal_commitment_conflict' ? ' (your accepted commitments overlap)' : c.classification === 'commitments_policy_overlap' ? ' (your calendar settings mark these as commitments; acceptance is not confirmed for both)' : ' (attendance unverified)'}`,
         ),
       );
     }
     if (duplicateListings.length > 0) {
       lines.push(
-        'Possible duplicate calendar listings (not scheduling conflicts; both sources retained):',
+        'Possible matching calendar entries (not confirmed distinct events; both listings retained):',
         ...duplicateListings.map(
           (entry) =>
-            `- "${collapseWhitespace(entry.a[0]?.summary ?? 'Untitled event')}" and "${collapseWhitespace(entry.b[0]?.summary ?? 'Untitled event')}" may be copies of one event.`,
+            `- ${entry.a[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(entry.a[0]?.summary ?? 'Untitled event')}" and ${entry.b[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(entry.b[0]?.summary ?? 'Untitled event')}" may be copies of one event.`,
         ),
       );
     }
@@ -1407,25 +1414,28 @@ export async function runBriefing(
           kind: 'calendar-conflicts',
           id: `calendar-conflicts-${opts.taskId ?? now.toISOString()}`,
           title: conflicts.every(
-            (conflict) =>
-              conflict.attendance === 'confirmed' && conflict.relationship === 'unresolved',
+            (conflict) => conflict.classification === 'personal_commitment_conflict',
           )
-            ? conflicts.length === 1
-              ? 'Schedule conflict'
-              : 'Schedule conflicts'
+            ? 'Your accepted commitments overlap'
             : 'Possible schedule conflict',
           timeZone: agent.timezone,
           complete: calendar?.complete ?? false,
+          timedOverlapCount: overlaps.totalCount,
+          overlapDetailsOmitted: overlaps.detailsOmitted,
           conflicts: conflicts.map((conflict, index) => ({
             id: `conflict-${index + 1}`,
             overlapStart: conflict.overlapStart,
             overlapEnd: conflict.overlapEnd,
             attendance: conflict.attendance,
             relationship: conflict.relationship,
-            evidenceNote: calendarRelationshipNote(
-              conflict.relationship ?? 'unresolved',
-              conflict.attendance ?? 'unresolved',
-            ),
+            classification: conflict.classification,
+            ...(conflict.sourceIdentityDisagreement ? { sourceIdentityDisagreement: true } : {}),
+            evidenceNote: conflict.sourceIdentityDisagreement
+              ? 'These calendar records share a trusted UID but lack matching occurrence metadata and have different times. Both sources remain visible; attendance and event identity are unconfirmed.'
+              : `${calendarRelationshipNote(
+                  conflict.relationship ?? 'unresolved',
+                  conflict.attendance ?? 'unresolved',
+                )}${conflict.classification === 'commitments_policy_overlap' ? ' Your calendar settings mark these as commitments; acceptance is not confirmed for both.' : ''}`,
             groups: [conflict.a, conflict.b].map((events) => ({
               events: events.map((event) => ({
                 id: event.eventId ?? `${event.calendar}-${event.start}-${event.summary}`,
