@@ -344,14 +344,13 @@ describe('calendar sources through provider normalization and persisted agenda',
       if (named) expect(JSON.stringify(card)).not.toContain('Team planning');
       else {
         expect(JSON.stringify(card)).toContain('Team planning');
-        if (variant === 'mirror')
-          expect(JSON.stringify(card)).toContain('Possible matching calendar entries');
+        if (variant === 'mirror') expect(JSON.stringify(card)).toContain('Possible copies:');
         if (variant === 'verified')
           expect(JSON.stringify(card)).toContain('Your accepted commitments overlap');
         if (variant === 'marked')
           expect(JSON.stringify(card)).toContain('Possible commitments overlap');
         if (variant === 'shifted') {
-          expect(JSON.stringify(card)).toContain('different source times');
+          expect(JSON.stringify(card)).toContain('Possible copies with different times');
           expect(JSON.stringify(card)).not.toContain('Your accepted commitments overlap');
         }
         expect(JSON.stringify(card)).toContain('Possible overlap');

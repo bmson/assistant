@@ -188,6 +188,26 @@ export async function readPhoneCalendars(
     : null;
 }
 
+function formatCoverageTime(value: string, timeZone: string): string | null {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZone,
+      timeZoneName: 'short',
+    }).format(date);
+  } catch {
+    // The ISO value still carries its known offset when a historical or
+    // malformed zone identifier cannot be formatted.
+    return date.toISOString();
+  }
+}
+
 export function phoneCalendarCoverage(
   snapshot: PhoneCalendarSnapshot,
   timeMin?: string,
@@ -220,6 +240,19 @@ export function phoneCalendarCoverage(
       Date.parse(timeMin) >= Date.parse(snapshot.timeMin) &&
       Date.parse(timeMax) <= Date.parse(snapshot.timeMax),
   );
+  const capturedAt = snapshot.capturedAt
+    ? formatCoverageTime(snapshot.capturedAt, snapshot.timeZone)
+    : null;
+  // readPhoneCalendars uses the epoch only as an internal marker for an
+  // enabled source that has never uploaded; it is not a recorded share time.
+  const receivedAt =
+    Date.parse(snapshot.syncedAt) === 0
+      ? null
+      : formatCoverageTime(snapshot.syncedAt, snapshot.timeZone);
+  const knownTimes = [
+    capturedAt ? `Captured on the sharing iPhone: ${capturedAt}.` : null,
+    receivedAt ? `Last shared with Assistant: ${receivedAt}.` : null,
+  ].filter((value): value is string => value !== null);
   return {
     complete: complete && covered,
     ...(snapshot.capturedAt ? { capturedAt: snapshot.capturedAt } : {}),
@@ -231,7 +264,11 @@ export function phoneCalendarCoverage(
     timeMax: snapshot.timeMax,
     ...(!complete || !covered
       ? {
-          note: 'Shared iPhone calendar coverage is incomplete. Open Assistant on the sharing iPhone and refresh. Only the last sent date window and available selected calendars can be checked; missing coverage does not establish a free or empty calendar.',
+          note: [
+            'iPhone calendar coverage is incomplete.',
+            ...knownTimes,
+            'Phone calendars may have changed since the last shared snapshot. Open iPhone calendars in Assistant on the sharing iPhone; choose Sync now. Missing coverage does not show a free or empty calendar.',
+          ].join(' '),
         }
       : {}),
   };

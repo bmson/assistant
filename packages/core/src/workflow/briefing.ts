@@ -64,7 +64,6 @@ import {
 import {
   type CalendarRelationship,
   calendarRelationship,
-  calendarRelationshipNote,
   canonicalOccurrenceGroups,
   classifyCalendarOverlap,
   possibleCalendarIdentityDisagreement,
@@ -1095,17 +1094,17 @@ export async function runBriefing(
     const lines: string[] = [];
     if (conflicts.length > 0) {
       lines.push(
-        `Calendar time overlaps in the next day or two (${overlaps.totalCount.toLocaleString('en-US')} timed pairs; showing ${conflicts.length} conflict detail${conflicts.length === 1 ? '' : 's'}; personal attendance may be unverified):`,
+        `Calendar-entry pairs overlap in the next day or two (${overlaps.totalCount.toLocaleString('en-US')} timed pairs; showing ${conflicts.length} detail${conflicts.length === 1 ? '' : 's'}):`,
         ...conflicts.map((c) =>
           c.sourceIdentityDisagreement
-            ? `- ${c.a[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.a[0]?.summary ?? 'Untitled event')}" and ${c.b[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.b[0]?.summary ?? 'Untitled event')}" share a trusted event UID but have different source times; both records remain visible for review.`
-            : `- ${c.a[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.a[0]?.summary ?? 'Untitled event')}" overlaps ${c.b[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.b[0]?.summary ?? 'Untitled event')}" (${localDateTime(c.overlapStart, agent.timezone)} to ${localDateTime(c.overlapEnd, agent.timezone)})${c.classification === 'personal_commitment_conflict' ? ' (your accepted commitments overlap)' : c.classification === 'commitments_policy_overlap' ? ' (your calendar settings mark these as commitments; acceptance is not confirmed for both)' : ' (attendance unverified)'}`,
+            ? `- ${c.a[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.a[0]?.summary ?? 'Untitled event')}" and ${c.b[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.b[0]?.summary ?? 'Untitled event')}" may be copies with different times. Assistant cannot confirm whether these are the same event or which time is current. Both entries stay visible; check each invitation.`
+            : `- ${c.a[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.a[0]?.summary ?? 'Untitled event')}" overlaps ${c.b[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.b[0]?.summary ?? 'Untitled event')}" (${localDateTime(c.overlapStart, agent.timezone)} to ${localDateTime(c.overlapEnd, agent.timezone)})${c.classification === 'personal_commitment_conflict' ? ' (you accepted both invitations, and the times overlap)' : c.classification === 'commitments_policy_overlap' ? ' (your calendar settings mark these as commitments; acceptance is not confirmed for both)' : ' (whether you will attend both is unconfirmed)'}`,
         ),
       );
     }
     if (duplicateListings.length > 0) {
       lines.push(
-        'Possible matching calendar entries (not confirmed distinct events; both listings retained):',
+        'Possible copies (both calendar entries remain visible):',
         ...duplicateListings.map(
           (entry) =>
             `- ${entry.a[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(entry.a[0]?.summary ?? 'Untitled event')}" and ${entry.b[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(entry.b[0]?.summary ?? 'Untitled event')}" may be copies of one event.`,
@@ -1416,8 +1415,8 @@ export async function runBriefing(
           title: conflicts.every(
             (conflict) => conflict.classification === 'personal_commitment_conflict',
           )
-            ? 'Your accepted commitments overlap'
-            : 'Possible schedule conflict',
+            ? 'You accepted both invitations, and the times overlap'
+            : 'Possible calendar timing overlaps',
           timeZone: agent.timezone,
           complete: calendar?.complete ?? false,
           timedOverlapCount: overlaps.totalCount,
@@ -1431,11 +1430,12 @@ export async function runBriefing(
             classification: conflict.classification,
             ...(conflict.sourceIdentityDisagreement ? { sourceIdentityDisagreement: true } : {}),
             evidenceNote: conflict.sourceIdentityDisagreement
-              ? 'These calendar records share a trusted UID but lack matching occurrence metadata and have different times. Both sources remain visible; attendance and event identity are unconfirmed.'
-              : `${calendarRelationshipNote(
-                  conflict.relationship ?? 'unresolved',
-                  conflict.attendance ?? 'unresolved',
-                )}${conflict.classification === 'commitments_policy_overlap' ? ' Your calendar settings mark these as commitments; acceptance is not confirmed for both.' : ''}`,
+              ? 'Assistant cannot confirm whether these are the same event or which time is current. Both entries stay visible; check each invitation.'
+              : conflict.classification === 'personal_commitment_conflict'
+                ? 'You accepted both invitations, and the times overlap.'
+                : conflict.classification === 'commitments_policy_overlap'
+                  ? 'Your calendar settings mark these as commitments; acceptance is not confirmed for both.'
+                  : 'These calendar entries overlap; whether you will attend both is unconfirmed.',
             groups: [conflict.a, conflict.b].map((events) => ({
               events: events.map((event) => ({
                 id: event.eventId ?? `${event.calendar}-${event.start}-${event.summary}`,

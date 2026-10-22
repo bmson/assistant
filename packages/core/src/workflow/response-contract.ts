@@ -17,7 +17,6 @@ import {
 import {
   calendarArrivalLead,
   calendarRelationship,
-  calendarRelationshipNote,
   classifyCalendarOverlap,
   parseCalendarOwnerParticipation,
   possibleCalendarIdentityDisagreement,
@@ -1863,6 +1862,7 @@ function calendarOverlapSummary(
   const MAX_FORMATTED_OVERLAP_DETAILS = 100;
   let formattedDetails = 0;
   let overlapPairCount = 0;
+  let unconfirmedAttendanceCount = 0;
   let travelContextCount = 0;
   let arrivalCount = 0;
   for (let index = 0; index < candidates.length; index += 1) {
@@ -1877,10 +1877,11 @@ function calendarOverlapSummary(
       if (start >= end) continue;
       if (possibleCalendarIdentityDisagreement(left.projected, right.projected)) {
         overlapPairCount += 1;
+        unconfirmedAttendanceCount += 1;
         if (formattedDetails < MAX_FORMATTED_OVERLAP_DETAILS) {
           formattedDetails += 1;
           notes.push(
-            `- Possible same event with different source times: ${left.projected.calendar || 'Calendar'} · ${left.projected.summary} + ${right.projected.calendar || 'Calendar'} · ${right.projected.summary}. Both records remain visible; identity and attendance are unconfirmed.`,
+            `- Possible copies with different times: ${left.projected.calendar || 'Calendar'} · ${left.projected.summary} + ${right.projected.calendar || 'Calendar'} · ${right.projected.summary}. Assistant cannot confirm whether these are the same event or which time is current. Both entries stay visible; check each invitation.`,
           );
         }
         continue;
@@ -1923,7 +1924,7 @@ function calendarOverlapSummary(
         if (formattedDetails < MAX_FORMATTED_OVERLAP_DETAILS) {
           formattedDetails += 1;
           arrivalNotes.push(
-            `- Arrival guidance: **${compactClock(earlier.interval.start, zone)} arrival for ${compactClock(later.interval.start, zone)} start** — ${later.projected.summary} requests arrival ${arrivalLead} minutes early. The overlapping records may describe one event; both sources are retained and matching identity is unconfirmed.`,
+            `- Arrival guidance: **${compactClock(earlier.interval.start, zone)} arrival for ${compactClock(later.interval.start, zone)} start** — ${later.projected.summary} requests arrival ${arrivalLead} minutes early. These entries may be for one event; both remain visible until the invitation is checked.`,
           );
         }
         continue;
@@ -1934,6 +1935,7 @@ function calendarOverlapSummary(
       if (relationship === 'compatible_time_roles') continue;
       if (relationship === 'probable_duplicate') {
         overlapPairCount += 1;
+        unconfirmedAttendanceCount += 1;
         if (formattedDetails < MAX_FORMATTED_OVERLAP_DETAILS) {
           formattedDetails += 1;
           const sameDay =
@@ -1943,7 +1945,7 @@ function calendarOverlapSummary(
             ? `${shortDate(new Date(start).toISOString(), zone)} ${request.compactCalendarBriefing ? compactClock(start, zone) : overlapClock(start, zone)}–${request.compactCalendarBriefing ? compactClock(end, zone) : overlapClock(end, zone)}`
             : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
           notes.push(
-            `- Possible matching calendar entries **${overlapLabel}**: ${left.projected.calendar || 'Calendar'} · ${left.projected.summary} + ${right.projected.calendar || 'Calendar'} · ${right.projected.summary}. Both sources are retained; occurrence identity is unverified.`,
+            `- Possible copies **${overlapLabel}**: ${left.projected.calendar || 'Calendar'} · ${left.projected.summary} + ${right.projected.calendar || 'Calendar'} · ${right.projected.summary}. Both entries stay visible; check the invitations to confirm.`,
           );
         }
         continue;
@@ -1958,6 +1960,7 @@ function calendarOverlapSummary(
           ? `${shortDate(new Date(start).toISOString(), zone)} ${request.compactCalendarBriefing ? compactClock(start, zone) : overlapClock(start, zone)}–${request.compactCalendarBriefing ? compactClock(end, zone) : overlapClock(end, zone)}`
           : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
         const classification = classifyCalendarOverlap(left.event, right.event);
+        if (classification !== 'personal_commitment_conflict') unconfirmedAttendanceCount += 1;
         const label =
           classification === 'personal_commitment_conflict'
             ? 'Your accepted commitments overlap'
@@ -1966,8 +1969,8 @@ function calendarOverlapSummary(
               : 'Possible overlap';
         notes.push(
           request.compactCalendarBriefing
-            ? `- ${label} **${overlapLabel}**: ${left.projected.calendar || 'Calendar'} · ${left.projected.summary} + ${right.projected.calendar || 'Calendar'} · ${right.projected.summary}.`
-            : `- ${label}: **${left.projected.calendar || 'Calendar'} · ${left.projected.summary}** and **${right.projected.calendar || 'Calendar'} · ${right.projected.summary}**, ${overlapLabel}.${classification === 'commitments_policy_overlap' ? ' Your calendar settings mark these as commitments; acceptance is not confirmed for both.' : classification === 'attendance_unconfirmed' && !request.includeCalendarBriefing ? ` ${calendarRelationshipNote(relationship, 'unresolved')}` : ''}`,
+            ? `- ${label} **${overlapLabel}**: ${left.projected.calendar || 'Calendar'} · ${left.projected.summary} + ${right.projected.calendar || 'Calendar'} · ${right.projected.summary}.${classification === 'personal_commitment_conflict' ? ' You accepted both invitations, and the times overlap.' : classification === 'commitments_policy_overlap' ? ' Your calendar settings mark these as commitments; acceptance is not confirmed for both.' : ' Whether you will attend both is unconfirmed.'}`
+            : `- ${label}: **${left.projected.calendar || 'Calendar'} · ${left.projected.summary}** and **${right.projected.calendar || 'Calendar'} · ${right.projected.summary}**, ${overlapLabel}.${classification === 'personal_commitment_conflict' ? ' You accepted both invitations, and the times overlap.' : classification === 'commitments_policy_overlap' ? ' Your calendar settings mark these as commitments; acceptance is not confirmed for both.' : classification === 'attendance_unconfirmed' ? ' Your attendance is not confirmed for both events.' : ''}`,
         );
       }
     }
@@ -1983,7 +1986,7 @@ function calendarOverlapSummary(
   const shown = notes.slice(0, 3);
   if (overlapPairCount > shown.length)
     shown.push(
-      `- ${overlapPairCount.toLocaleString('en-US')} overlapping pairs found; further pair details are not expanded.`,
+      `- ${overlapPairCount.toLocaleString('en-US')} calendar-entry pairs overlap in time; further pair details are not expanded.`,
     );
   const result = [
     ...shown,
@@ -2000,11 +2003,9 @@ function calendarOverlapSummary(
         ]
       : []),
   ];
-  if (request.includeCalendarBriefing && result.length > 0)
+  if (request.includeCalendarBriefing && result.length > 0 && unconfirmedAttendanceCount > 0)
     result.push(
-      request.compactCalendarBriefing
-        ? 'Calendar overlap does not confirm attendance.'
-        : 'Overlapping entries do not establish that you must attend both.',
+      'Some comparisons involve possible copies or entries whose attendance is unconfirmed.',
     );
   return result;
 }

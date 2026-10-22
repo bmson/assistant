@@ -518,9 +518,7 @@ describe('response execution contract', () => {
     expect(response).toContain(
       'Possible overlap: **Work · Project review** and **Shared calendar · Planning hold**, Wed 14 Oct 11:00 AM–11:30 AM',
     );
-    expect(response).toContain(
-      'personal attendance and matching occurrence identity are not established',
-    );
+    expect(response).toContain('Your attendance is not confirmed for both events.');
     expect(response).toContain('coverage was incomplete; unavailable: Shared calendar');
     expect(response).toContain('[Open event](https://calendar.google.com/event?eid=work)');
     expect(response).not.toContain('Scheduling conflict: **Project review**');
@@ -662,7 +660,7 @@ describe('response execution contract', () => {
       },
     ]);
     expect(response).toContain('4:25 PM arrival for 5:10 PM start');
-    expect(response).toContain('matching identity is unconfirmed');
+    expect(response).toContain('both remain visible until the invitation is checked');
     expect(response).toContain('Family');
     expect(response).toContain('Team');
     expect(response).not.toContain('Possible overlap: **United');

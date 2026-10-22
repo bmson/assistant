@@ -6,7 +6,11 @@ import {
   phoneCalendarSharingWindow,
   transitionPhoneCalendarSharing,
 } from './phone-calendar-sharing.js';
-import { type PhoneCalendarSnapshotInput, phoneCalendarCoverage } from './phone-calendars.js';
+import {
+  type PhoneCalendarSnapshotInput,
+  phoneCalendarCoverage,
+  readPhoneCalendars,
+} from './phone-calendars.js';
 
 const now = new Date('2026-10-22T18:00:00Z');
 const calendars = [{ id: 'work', name: 'Work', purpose: 'unspecified' as const, timeZone: 'UTC' }];
@@ -232,6 +236,72 @@ describe('selected phone calendar sharing authority', () => {
       capturedAt: '2026-10-22T17:00:00Z',
       receivedAt: now.toISOString(),
     });
+  });
+  it('explains incomplete phone coverage using the recorded capture and share times', () => {
+    const input = {
+      ...snapshot({
+        timeZone: 'America/Los_Angeles',
+        capturedAt: '2026-10-22T17:00:00Z',
+        complete: false,
+      }),
+      syncedAt: '2026-10-22T17:30:00Z',
+    };
+    const note = phoneCalendarCoverage(input, input.timeMin, input.timeMax, now).note;
+    expect(note).toContain('Captured on the sharing iPhone: Oct 22, 2026, 10:00 AM PDT.');
+    expect(note).toContain('Last shared with Assistant: Oct 22, 2026, 10:30 AM PDT.');
+    expect(note).toContain(
+      'Open iPhone calendars in Assistant on the sharing iPhone; choose Sync now.',
+    );
+    expect(note).toContain('Missing coverage does not show a free or empty calendar.');
+    expect(note).not.toContain('last sent date window');
+  });
+  it('does not invent capture or share times when their source timestamps are missing or invalid', () => {
+    const withoutCapture = snapshot({ complete: false });
+    delete withoutCapture.capturedAt;
+    const missingCaptureNote = phoneCalendarCoverage(
+      { ...withoutCapture, syncedAt: now.toISOString() },
+      withoutCapture.timeMin,
+      withoutCapture.timeMax,
+      now,
+    ).note;
+    expect(missingCaptureNote).not.toContain('Captured on the sharing iPhone:');
+    expect(missingCaptureNote).toContain('Last shared with Assistant: Oct 22, 2026, 6:00 PM UTC.');
+
+    const invalidCaptureNote = phoneCalendarCoverage(
+      { ...snapshot({ capturedAt: 'not-a-time', complete: false }), syncedAt: 'also-not-a-time' },
+      snapshot().timeMin,
+      snapshot().timeMax,
+      now,
+    ).note;
+    expect(invalidCaptureNote).not.toContain('Captured on the sharing iPhone:');
+    expect(invalidCaptureNote).not.toContain('Last shared with Assistant:');
+  });
+  it('does not present the never-uploaded fallback sentinel as a recorded share time', async () => {
+    const state = {
+      ...enabled(),
+      capturedAt: undefined,
+      receivedAt: undefined,
+      timeMin: undefined,
+      timeMax: undefined,
+    };
+    const cache = {
+      cacheGet: async () => null,
+      cachePut: async () => {},
+      phoneCalendarSharing: {
+        get: async () => state,
+        readSnapshot: async () => ({ state, snapshot: null }),
+        apply: async () => {
+          throw new Error('Unexpected phone calendar mutation');
+        },
+      },
+    };
+    const synthetic = await readPhoneCalendars(cache, 'owner', now);
+    expect(synthetic?.syncedAt).toBe('1970-01-01T00:00:00.000Z');
+    if (!synthetic) throw new Error('Missing synthetic not-yet-uploaded snapshot');
+    const note = phoneCalendarCoverage(synthetic, synthetic.timeMin, synthetic.timeMax, now).note;
+    expect(note).not.toContain('1970');
+    expect(note).not.toContain('Last shared with Assistant:');
+    expect(note).not.toContain('Captured on the sharing iPhone:');
   });
   it('limits completeness to requested source coverage without hiding a missing source by default', () => {
     const input = {
