@@ -1460,7 +1460,14 @@ export function responseCardsForFinal(input: {
   );
   if (cards.length > 0)
     return cards.map((card) =>
-      card.presentation === 'calendar-agenda' ? { ...card, accompaniesProse: false } : card,
+      card.presentation === 'calendar-agenda'
+        ? {
+            ...card,
+            accompaniesProse: cards.some(
+              (candidate) => candidate.presentation !== 'calendar-agenda',
+            ),
+          }
+        : card,
     );
   // Ambient weather is useful for a conversational/weather answer, but must
   // never appear as an unrelated result below a tool-backed response — nor

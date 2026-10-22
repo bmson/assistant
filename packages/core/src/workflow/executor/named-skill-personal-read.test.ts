@@ -386,7 +386,11 @@ describe('named saved skill use during a personal read', () => {
       );
 
       const final = f.state.pendingFinal?.text ?? '';
-      expect(final).toContain('Calendar overlap does not confirm attendance.');
+      const cards = JSON.stringify(f.state.pendingFinal?.responseCards ?? []);
+      expect(cards.match(/Planning guidance/g)).toHaveLength(1);
+      expect(cards).toContain('Saved skill');
+      expect(cards).toContain('Next step:');
+      expect(cards).toContain('Calendar overlap does not confirm attendance.');
       expect(final).toContain('Next step:');
       expect(final).toContain('attend both');
       expect(final).not.toContain('I moved');
@@ -488,7 +492,13 @@ describe('named saved skill use during a personal read', () => {
         undefined,
         { readRequest },
       );
-      expect(f.state.pendingFinal?.text).toContain(projection);
+      const finalText = f.state.pendingFinal?.text ?? '';
+      const cards = JSON.stringify(f.state.pendingFinal?.responseCards ?? []);
+      expect(finalText).toContain(
+        'Saved skill “Calendar review” was retrieved as planning guidance.',
+      );
+      expect(cards).toContain('Design review');
+      expect(cards).toContain('9:00 AM – 9:30 AM');
       expect(f.state.pendingFinal?.text).toContain(
         `Next step: Check whether you need to attend **Design review**, then review its source details for preparation${location ? ' and travel' : ''}.`,
       );
@@ -585,26 +595,22 @@ describe('named saved skill use during a personal read', () => {
     );
 
     const final = f.state.pendingFinal?.text ?? '';
+    const cards = JSON.stringify(f.state.pendingFinal?.responseCards ?? []);
     expect(final).toContain(
       'Saved skill “Clear task planning” was retrieved as planning guidance.',
     );
-    expect(final).toContain('Calendar briefing for tomorrow (local time):');
-    expect(final).toContain('Wed 14 Oct (America/Los_Angeles)');
-    expect(final).toContain('8:15 AM–9:00 AM');
-    expect(final).toContain('Strategy review');
-    expect(final).toContain('9:20 AM–11:30 AM');
-    expect(final).toContain('Partner briefing');
-    expect(final).toContain('10:05 AM–11:25 AM');
-    expect(final).toContain('Terminal C');
-    expect(final).toContain('North Hall');
-    expect(final).toContain('South Hall');
-    expect(final).toContain(
-      'Possible overlap **Wed 14 Oct 10:05 AM–11:25 AM**: Strategy review + Partner briefing.',
-    );
-    expect(final).toContain('Calendar overlap does not confirm attendance.');
-    expect(final).toContain(
-      '[Flight arrival](https://calendar.google.com/event?eid=fixture-flight)',
-    );
+    expect(cards).toContain('Wednesday, Oct 14, 2026');
+    expect(cards).toContain('8:15 AM – 9:00 AM');
+    expect(cards).toContain('Strategy review');
+    expect(cards).toContain('9:20 AM – 11:30 AM');
+    expect(cards).toContain('Partner briefing');
+    expect(cards).toContain('10:05 AM – 11:25 AM');
+    expect(cards).toContain('Terminal C');
+    expect(cards).toContain('North Hall');
+    expect(cards).toContain('South Hall');
+    expect(cards).toContain('Possible overlap: 10:05 AM – 11:25 AM');
+    expect(cards).toContain('Calendar overlap does not confirm attendance.');
+    expect(cards).toContain('https://calendar.google.com/event?eid=fixture-flight');
     expect(final).not.toContain('1:15 AM');
     expect(final).not.toContain('back-to-back');
     expect(final).toContain('Next step: Check whether you need to attend both.');
@@ -745,8 +751,9 @@ describe('named saved skill use during a personal read', () => {
         },
       );
       const final = f.state.pendingFinal;
-      expect(final?.text).toContain('Design review');
-      expect(final?.text).toContain('09:00–09:30');
+      const cards = JSON.stringify(final?.responseCards ?? []);
+      expect(cards).toContain('Design review');
+      expect(cards).toContain('9:00 AM – 9:30 AM');
       expect(final?.text).not.toContain('No timed commitments');
       expect(f.dispatch).toHaveBeenCalledOnce();
       if (condition.startsWith('valid')) {
@@ -761,13 +768,13 @@ describe('named saved skill use during a personal read', () => {
       }
       expect(final?.text.match(/^Next step:/gm)).toHaveLength(1);
       expect(final?.text).not.toMatch(/Meridian Hall|15:00|you are free|I cancelled/);
-      const factualLines = canonical
-        .split('\n')
-        .filter((line) => line && !line.startsWith('Next step:'));
-      for (const line of factualLines) expect(final?.text).toContain(line);
       if (condition.startsWith('missing receipt') || condition === 'changed advice')
         expect(f.router.object).not.toHaveBeenCalled();
-      expect(final?.responseCards).toBeUndefined();
+      expect(final?.responseCards).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ kind: 'briefing', presentation: 'calendar-agenda' }),
+        ]),
+      );
     },
   );
 

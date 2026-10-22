@@ -309,31 +309,6 @@ export async function finalizePendingResponse(
     ).catch((error) => console.error('quality signal record failed', error));
     return { outcome: 'done', detail: pending.progress.slice(0, 200) };
   }
-  // Primary agenda clients suppress the prose body. Keep checked guidance,
-  // skill receipts and unfinished-outcome notices inside the supported card.
-  const primaryAgenda = pending.responseCards?.find(
-    (card) => card.kind === 'briefing' && card.presentation === 'calendar-agenda',
-  );
-  if (primaryAgenda) {
-    const guidance = pending.text
-      .split(/\n+/)
-      .filter((line) =>
-        /^(?:Next step:|Saved skill “|I could not verify retrieval of the saved skill|This request is not fully completed\.)/.test(
-          line,
-        ),
-      );
-    if (guidance.length) {
-      const sections = Array.isArray(primaryAgenda.sections) ? primaryAgenda.sections : [];
-      primaryAgenda.sections = [
-        ...sections,
-        {
-          type: 'attention',
-          title: 'Planning guidance',
-          items: guidance.map((title) => ({ title })),
-        },
-      ];
-    }
-  }
   preservePreDeliveryCompletion(pending);
   const recallSources = finalRecallSources(
     pending,
@@ -710,7 +685,12 @@ export async function stageFinalResponse(
         ),
       );
     if (guidance.length) {
-      const sections = Array.isArray(primaryAgenda.sections) ? primaryAgenda.sections : [];
+      const sections = Array.isArray(primaryAgenda.sections)
+        ? primaryAgenda.sections.filter(
+            (section) =>
+              !(section && typeof section === 'object' && section.title === 'Planning guidance'),
+          )
+        : [];
       primaryAgenda.sections = [
         ...sections,
         {

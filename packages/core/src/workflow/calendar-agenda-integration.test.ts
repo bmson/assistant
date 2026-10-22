@@ -66,4 +66,41 @@ describe('deterministic calendar agenda integration', () => {
     expect(cards[0]?.lead).toContain('Couldn’t resolve Zendesk');
     expect(cards[0]?.complete).toBe(false);
   });
+
+  it('honors an explicit request to omit overlap analysis', () => {
+    const ownerText = 'Show my calendar tomorrow without checking overlaps';
+    const readRequest = detectPersonalReadRequest([{ role: 'user', content: ownerText }], {
+      now: new Date('2026-10-22T18:00:00Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    expect(readRequest?.includeCalendarOverlapSummary).toBe(false);
+    const cards = responseCardsForFinal({
+      evidence: [
+        {
+          ...evidence([
+            { ...event(1), start: '2026-10-23T09:00:00-07:00', end: '2026-10-23T10:00:00-07:00' },
+            { ...event(2), start: '2026-10-23T09:30:00-07:00', end: '2026-10-23T10:30:00-07:00' },
+          ]),
+          args: {
+            timeMin: readRequest?.timeWindow?.timeMin,
+            timeMax: readRequest?.timeWindow?.timeMax,
+          },
+        },
+      ],
+      readRequest,
+      requestText: ownerText,
+    });
+    const sections = cards.flatMap((card) => card.sections ?? []) as Array<{ type?: string }>;
+    expect(sections.some((section) => section.type === 'attention')).toBe(false);
+  });
+  it('keeps a specific event time answer in the existing prose-and-source format', () => {
+    const cards = responseCardsForFinal({
+      evidence: [evidence([event(1)])],
+      readRequest: detectPersonalReadRequest([
+        { role: 'user', content: 'What time is my Design review tomorrow?' },
+      ]),
+      requestText: 'What time is my Design review tomorrow?',
+    });
+    expect(cards.map((card) => card.kind)).toEqual(['calendar-event']);
+  });
 });

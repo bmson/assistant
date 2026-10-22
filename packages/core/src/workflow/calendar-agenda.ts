@@ -45,6 +45,13 @@ export function calendarAgendaScopedEvidence(
 /** Incidental calendar lookups must not replace a trip, analysis or availability answer. */
 export function wantsCalendarAgenda(request?: PersonalReadRequest | null, ownerText = ''): boolean {
   if (
+    /\b(?:what time|when (?:is|does|will)|where (?:is|does|will)|who (?:is|will))\b/i.test(
+      ownerText,
+    ) &&
+    !/\b(?:agenda|overview|briefing|show|list)\b/i.test(ownerText)
+  )
+    return false;
+  if (
     request?.answerFocus === 'flight' ||
     request?.sourceReads ||
     request?.personCalendar ||

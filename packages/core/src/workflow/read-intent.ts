@@ -2953,7 +2953,11 @@ function detectPersonalReadRequestInternal(
     ...(calendarBriefing ? { includeCalendarBriefing: true } : {}),
     ...(compactCalendarBriefing ? { compactCalendarBriefing: true } : {}),
     ...(includeCalendarLocations ? { includeCalendarLocations: true } : {}),
-    ...(includeCalendarOverlapSummary ? { includeCalendarOverlapSummary: true } : {}),
+    ...(explicitlyExcludesCalendarOverlapSummary(latest)
+      ? { includeCalendarOverlapSummary: false }
+      : includeCalendarOverlapSummary
+        ? { includeCalendarOverlapSummary: true }
+        : {}),
   };
   const calendarScope =
     calendar && !calendarReadProhibited ? requestedOwnerCalendarScope(latest) : undefined;

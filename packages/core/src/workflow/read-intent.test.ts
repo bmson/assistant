@@ -1454,7 +1454,7 @@ describe('detectPersonalReadRequest', () => {
       { now: new Date('2026-10-13T18:08:55.000Z'), timeZone: 'America/Los_Angeles' },
     );
     expect(excluded?.compactCalendarBriefing).toBe(true);
-    expect(excluded?.includeCalendarOverlapSummary).toBeUndefined();
+    expect(excluded?.includeCalendarOverlapSummary).toBe(false);
   });
 
   it('retains checked agenda grounding when a request also asks about weather', () => {
@@ -1505,7 +1505,7 @@ describe('detectPersonalReadRequest', () => {
     'Brief me on my calendar tomorrow, but do not check for overlaps.',
     'Give me a short schedule overview; no need to look for conflicts.',
   ])('does not add overlap analysis when explicitly excluded: %s', (text) => {
-    expect(detectPersonalReadRequest(turn(text))?.includeCalendarOverlapSummary).toBeUndefined();
+    expect(detectPersonalReadRequest(turn(text))?.includeCalendarOverlapSummary).toBe(false);
   });
 
   it.each(['Make this sentence clear.', 'Is the explanation clear?', 'Empty my inbox tomorrow.'])(
