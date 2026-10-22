@@ -63,7 +63,12 @@ extension PhoneCalendarSource {
 
 @MainActor
 final class EventKitCalendarSource: PhoneCalendarSource {
-    private let store = EKEventStore()
+    private static let sharedStore = EKEventStore()
+    private let store: EKEventStore
+
+    init(store: EKEventStore? = nil) {
+        self.store = store ?? Self.sharedStore
+    }
 
     var access: PhoneCalendarAccess {
         switch EKEventStore.authorizationStatus(for: .event) {
