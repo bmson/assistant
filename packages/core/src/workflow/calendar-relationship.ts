@@ -1,7 +1,219 @@
-import { probablePhoneCalendarDuplicate } from '@assistant/persistence';
+import type {
+  CalendarOccurrenceIdentity,
+  CalendarOwnerParticipation,
+  CalendarOwnerParticipationStatus,
+} from '@assistant/persistence';
+import { probablePhoneCalendarDuplicate, sameCalendarOccurrence } from '@assistant/persistence';
 import type { BriefingCalendarEvent } from './briefing.js';
 
 export type CalendarRelationship = 'probable_duplicate' | 'compatible_time_roles' | 'unresolved';
+export type CalendarOverlapClassification =
+  | 'personal_commitment_conflict'
+  | 'commitments_policy_overlap'
+  | 'attendance_unconfirmed';
+
+/** A trusted shared UID with incomplete occurrence metadata can signal a copy,
+ * but it is never enough to merge sources or suppress an ordinary event row. */
+export function possibleCalendarIdentityDisagreement(
+  left: CalendarOccurrenceIdentity,
+  right: CalendarOccurrenceIdentity,
+): boolean {
+  const leftCalendar = typeof left.calendarId === 'string' ? left.calendarId : '';
+  const rightCalendar = typeof right.calendarId === 'string' ? right.calendarId : '';
+  const uid = typeof left.iCalUID === 'string' ? left.iCalUID : '';
+  if (
+    !leftCalendar ||
+    !rightCalendar ||
+    leftCalendar === rightCalendar ||
+    !uid ||
+    uid !== right.iCalUID ||
+    left.recurringEventId ||
+    right.recurringEventId
+  )
+    return false;
+  const leftOriginal = typeof left.originalStartTime === 'string' ? left.originalStartTime : '';
+  const rightOriginal = typeof right.originalStartTime === 'string' ? right.originalStartTime : '';
+  if (
+    leftOriginal &&
+    rightOriginal &&
+    Number.isFinite(Date.parse(leftOriginal)) &&
+    Number.isFinite(Date.parse(rightOriginal)) &&
+    Date.parse(leftOriginal) !== Date.parse(rightOriginal)
+  )
+    return false;
+  const leftStart = Date.parse(String(left.start ?? ''));
+  const rightStart = Date.parse(String(right.start ?? ''));
+  const leftEnd = Date.parse(String(left.end ?? ''));
+  const rightEnd = Date.parse(String(right.end ?? ''));
+  return (
+    Number.isFinite(leftStart) &&
+    Number.isFinite(rightStart) &&
+    Number.isFinite(leftEnd) &&
+    Number.isFinite(rightEnd) &&
+    (leftStart !== rightStart || leftEnd !== rightEnd)
+  );
+}
+
+/** Merge only pairwise-equivalent canonical components; ambiguous bridges stay separate. */
+export function canonicalOccurrenceGroups<T extends CalendarOccurrenceIdentity>(
+  events: readonly T[],
+): T[][] {
+  const visited = new Set<number>();
+  const groups: Array<{ first: number; values: T[][] }> = [];
+  for (let index = 0; index < events.length; index += 1) {
+    if (visited.has(index)) continue;
+    const component = new Set([index]);
+    const queue = [index];
+    visited.add(index);
+    while (queue.length) {
+      const current = queue.pop();
+      const event = current === undefined ? undefined : events[current];
+      if (!event) continue;
+      for (let candidateIndex = 0; candidateIndex < events.length; candidateIndex += 1) {
+        if (visited.has(candidateIndex)) continue;
+        const candidate = events[candidateIndex];
+        if (candidate && sameCalendarOccurrence(event, candidate)) {
+          visited.add(candidateIndex);
+          component.add(candidateIndex);
+          queue.push(candidateIndex);
+        }
+      }
+    }
+    const indexes = [...component].sort((a, b) => a - b);
+    const values = indexes.flatMap((memberIndex) => {
+      const event = events[memberIndex];
+      return event ? [event] : [];
+    });
+    const isClique = values.every((left, leftIndex) =>
+      values.every(
+        (right, rightIndex) => leftIndex === rightIndex || sameCalendarOccurrence(left, right),
+      ),
+    );
+    groups.push({ first: index, values: isClique ? [values] : values.map((value) => [value]) });
+  }
+  return groups.sort((left, right) => left.first - right.first).flatMap((group) => group.values);
+}
+
+export function parseCalendarOwnerParticipation(
+  value: unknown,
+): CalendarOwnerParticipation | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const participation = value as Partial<CalendarOwnerParticipation>;
+  const statuses: CalendarOwnerParticipationStatus[] = [
+    'accepted',
+    'declined',
+    'tentative',
+    'needsAction',
+    'unknown',
+  ];
+  const bases = ['attendee-email', 'organizer-email', 'unverified'] as const;
+  return typeof participation.identityVerified === 'boolean' &&
+    statuses.includes(participation.status as CalendarOwnerParticipationStatus) &&
+    bases.includes(participation.basis as (typeof bases)[number])
+    ? {
+        status: participation.status as CalendarOwnerParticipationStatus,
+        identityVerified: participation.identityVerified,
+        basis: participation.basis as CalendarOwnerParticipation['basis'],
+      }
+    : undefined;
+}
+
+/** Only a verified owner attendee response can establish personal attendance. */
+export function verifiedOwnerParticipation(event: {
+  [key: string]: unknown;
+  ownerParticipation?: unknown;
+  sourceVariants?: unknown;
+}): CalendarOwnerParticipationStatus {
+  const variants = Array.isArray(event.sourceVariants)
+    ? event.sourceVariants.filter((value): value is Record<string, unknown> =>
+        Boolean(value && typeof value === 'object' && !Array.isArray(value)),
+      )
+    : [];
+  const verifiedStatuses = variants.flatMap((variant) => {
+    const participation = parseCalendarOwnerParticipation(variant.ownerParticipation);
+    if (!participation) return [];
+    return participation.identityVerified === true && participation.basis === 'attendee-email'
+      ? [participation.status]
+      : [];
+  });
+  const distinctVerifiedStatuses = new Set(verifiedStatuses);
+  if (distinctVerifiedStatuses.size > 1) return 'unknown';
+  if (verifiedStatuses.length > 0) {
+    const status = verifiedStatuses[0];
+    if (
+      status === 'accepted' ||
+      status === 'declined' ||
+      status === 'tentative' ||
+      status === 'needsAction' ||
+      status === 'unknown'
+    )
+      return status;
+  }
+  const value = parseCalendarOwnerParticipation(event.ownerParticipation);
+  return value?.identityVerified === true && value.basis === 'attendee-email'
+    ? value.status
+    : 'unknown';
+}
+
+/** Busy personal commitments require proof from the human attendee or policy. */
+export function verifiedPersonalCommitment(event: {
+  [key: string]: unknown;
+  ownerParticipation?: unknown;
+  calendarPurpose?: unknown;
+  blocksTime?: unknown;
+  sourceIntegrity?: unknown;
+  sourceVariants?: unknown;
+}): boolean {
+  if (event.blocksTime !== true || event.sourceIntegrity === 'disputed') return false;
+  const variants = Array.isArray(event.sourceVariants)
+    ? event.sourceVariants.filter((value): value is Record<string, unknown> =>
+        Boolean(value && typeof value === 'object' && !Array.isArray(value)),
+      )
+    : [];
+  const verifiedDecline = (value: unknown) => {
+    const participation = parseCalendarOwnerParticipation(value);
+    return (
+      participation?.status === 'declined' &&
+      participation.identityVerified === true &&
+      participation.basis === 'attendee-email'
+    );
+  };
+  if (event.status === 'cancelled' || verifiedDecline(event.ownerParticipation)) return false;
+  if (
+    variants.some(
+      (variant) =>
+        variant.blocksTime !== true ||
+        variant.status === 'cancelled' ||
+        verifiedDecline(variant.ownerParticipation),
+    )
+  )
+    return false;
+  if (
+    variants.length > 1 &&
+    (new Set(variants.map((variant) => variant.status ?? '')).size > 1 ||
+      new Set(variants.map((variant) => variant.calendarPurpose ?? 'unspecified')).size > 1)
+  )
+    return false;
+  return (
+    verifiedOwnerParticipation(event) === 'accepted' || event.calendarPurpose === 'commitments'
+  );
+}
+
+export function classifyCalendarOverlap(
+  left: Parameters<typeof verifiedPersonalCommitment>[0],
+  right: Parameters<typeof verifiedPersonalCommitment>[0],
+): CalendarOverlapClassification {
+  if (!verifiedPersonalCommitment(left) || !verifiedPersonalCommitment(right))
+    return 'attendance_unconfirmed';
+  if (
+    verifiedOwnerParticipation(left) === 'accepted' &&
+    verifiedOwnerParticipation(right) === 'accepted'
+  )
+    return 'personal_commitment_conflict';
+  if (left.calendarPurpose === 'commitments' || right.calendarPurpose === 'commitments')
+    return 'commitments_policy_overlap';
+  return 'attendance_unconfirmed';
+}
 
 /** Advisory only: independently reconcile a source's explicit early-arrival rule. */
 export function calendarArrivalLead(
@@ -58,10 +270,16 @@ function normalized(value: string): string {
 }
 
 function role(event: BriefingCalendarEvent): 'arrival' | 'start' | undefined {
-  const text = `${event.summary}\n${event.description ?? ''}`;
-  const arrival = /\b(?:arrive|arrival|warm[ -]?up|check[ -]?in)\b/i.test(text);
-  const start = /\b(?:kick[ -]?off|match start|event start)\b/i.test(text);
-  return arrival === start ? undefined : arrival ? 'arrival' : 'start';
+  const classify = (text: string) => {
+    const arrival = /\b(?:arrive|arrival|warm[ -]?up|check[ -]?in)\b/i.test(text);
+    const start = /\b(?:kick[ -]?off|match start|event start)\b/i.test(text);
+    return arrival === start ? undefined : arrival ? 'arrival' : 'start';
+  };
+  const summaryRole = classify(event.summary);
+  if (summaryRole) return summaryRole;
+  const descriptionRole = classify(event.description ?? '');
+  if (descriptionRole) return descriptionRole;
+  return undefined;
 }
 
 function title(event: BriefingCalendarEvent): string {
@@ -119,6 +337,6 @@ export function calendarRelationshipNote(
   if (relationship === 'probable_duplicate')
     return 'These may be duplicate listings. Both sources are retained because their occurrence identity is unverified.';
   return attendance === 'confirmed'
-    ? 'Provider records show accepted invitations for both obligations; occurrence identity has not been equated.'
+    ? 'Both entries have verified evidence as busy personal commitments; occurrence identity has not been equated.'
     : 'The event times overlap; personal attendance and matching occurrence identity are not established for both records.';
 }

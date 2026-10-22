@@ -102,6 +102,11 @@ describe('executor calendar overview presentation', () => {
                     end: firstEnd,
                     blocksTime: true,
                     ownerResponse: 'accepted',
+                    ownerParticipation: {
+                      status: 'accepted',
+                      identityVerified: true,
+                      basis: 'attendee-email',
+                    },
                     links: [
                       {
                         type: 'calendar',
@@ -119,6 +124,11 @@ describe('executor calendar overview presentation', () => {
                     end: secondEnd,
                     blocksTime: true,
                     ownerResponse: 'needsAction',
+                    ownerParticipation: {
+                      status: 'needsAction',
+                      identityVerified: true,
+                      basis: 'attendee-email',
+                    },
                     links: [
                       {
                         type: 'calendar',
@@ -147,7 +157,7 @@ describe('executor calendar overview presentation', () => {
 
       expect(result.toolNames).toEqual(['calendar.list_events']);
       expect(gmailSearches).toBe(0);
-      expect(result.finalText).toBe('2 events from Work.');
+      expect(result.finalText).toBe('2 calendar entries from Work.');
       const persisted = await db.select().from(messages).where(eq(messages.taskId, result.taskId));
       const assistant = persisted.filter((message) => message.role === 'assistant').at(-1);
       const payload = JSON.stringify(assistant?.parts);
@@ -160,7 +170,17 @@ describe('executor calendar overview presentation', () => {
       expect(payload).toContain('Calendar overlap does not confirm attendance.');
       expect(payload).toContain('event?eid=overview-review');
       expect(payload).toContain('event?eid=overview-hold');
-      expect(payload).not.toContain('"accepted"');
+      const cardParts = assistant?.parts as
+        | Array<{ data?: { sections?: Array<{ type: string; items?: Array<{ note?: string }> }> } }>
+        | undefined;
+      const visibleNotes = cardParts
+        ?.flatMap((part) => part.data?.sections ?? [])
+        .filter((section) => section.type === 'agenda')
+        .flatMap((section) => section.items ?? [])
+        .map((item) => item.note ?? '')
+        .join(' ');
+      expect(visibleNotes).toContain('Needs response');
+      expect(visibleNotes).not.toMatch(/needsAction|accepted/);
       expect(result.finalText).not.toContain('Next step:');
     });
   }

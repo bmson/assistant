@@ -923,6 +923,7 @@ export async function runPulse(
           .calendarReader({
             timeMin: now,
             timeMax: new Date(now.getTime() + CALENDAR_WINDOW_HOURS * 3600_000),
+            agentId: agent.id,
           })
           .catch((err) => {
             console.error('pulse: calendar read failed', err);

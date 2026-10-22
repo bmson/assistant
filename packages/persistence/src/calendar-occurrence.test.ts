@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { sameCalendarOccurrence } from './calendar-occurrence.js';
+import {
+  calendarOccurrenceKey,
+  classifyCalendarOccurrence,
+  sameCalendarOccurrence,
+} from './calendar-occurrence.js';
 
 const base = {
   calendarId: 'work',
@@ -31,15 +35,16 @@ describe('calendar occurrence identity', () => {
     ).toBe(false);
   });
   it('recognizes cross-calendar copies of a moved occurrence and equivalent time offsets', () => {
-    expect(
-      sameCalendarOccurrence(base, {
-        ...base,
-        calendarId: 'personal',
-        eventId: 'copy',
-        originalStartTime: '2026-10-07T02:00:00-07:00',
-        start: '2026-10-07T09:15:00Z',
-      }),
-    ).toBe(true);
+    const copy = {
+      ...base,
+      calendarId: 'personal',
+      eventId: 'copy',
+      originalStartTime: '2026-10-07T02:00:00-07:00',
+      start: '2026-10-07T09:15:00Z',
+    };
+    expect(sameCalendarOccurrence(base, copy)).toBe(true);
+    expect(calendarOccurrenceKey(base)).not.toBe(calendarOccurrenceKey(copy));
+    expect(classifyCalendarOccurrence(base, copy)).toMatchObject({ kind: 'canonical' });
   });
   it('requires provider UID and matching bounds for a single-event copy', () => {
     const single = { ...base, recurringEventId: undefined, originalStartTime: undefined };
@@ -54,6 +59,59 @@ describe('calendar occurrence identity', () => {
         end: '2026-10-07T11:00:00Z',
       }),
     ).toBe(false);
+  });
+
+  it('uses namespaced provider identity and never uses title as a canonical key', () => {
+    expect(calendarOccurrenceKey(base)).toContain('calendar:work');
+    expect(calendarOccurrenceKey({ calendarId: 'work' })).toBeUndefined();
+    expect(calendarOccurrenceKey({ calendarId: 'work', eventId: 'one' })).toBe(
+      calendarOccurrenceKey({ calendarId: 'work', eventId: 'one' }),
+    );
+    expect(calendarOccurrenceKey({ calendarId: 'work', eventId: 'one' })).not.toBe(
+      calendarOccurrenceKey({ calendarId: 'family', eventId: 'one' }),
+    );
+  });
+
+  it('does not equate recurring series across copies without an occurrence start', () => {
+    const series = { ...base, originalStartTime: undefined };
+    expect(
+      sameCalendarOccurrence(series, {
+        ...series,
+        calendarId: 'personal',
+        recurringEventId: 'r',
+      }),
+    ).toBe(false);
+  });
+
+  it('keeps same-calendar records distinct even when UID and occurrence match', () => {
+    expect(calendarOccurrenceKey(base)).not.toBe(
+      calendarOccurrenceKey({ ...base, eventId: 'another-event' }),
+    );
+    expect(sameCalendarOccurrence(base, { ...base, eventId: 'another-event' })).toBe(false);
+  });
+
+  it('uses original occurrence time when a same-calendar recurring ID is reused', () => {
+    const first = { ...base, eventId: 'eventkit-reused-id' };
+    const nextOccurrence = {
+      ...first,
+      originalStartTime: '2026-10-14T09:00:00-07:00',
+    };
+    expect(sameCalendarOccurrence(first, nextOccurrence)).toBe(false);
+    expect(calendarOccurrenceKey(first)).not.toBe(calendarOccurrenceKey(nextOccurrence));
+    expect(
+      sameCalendarOccurrence(first, {
+        ...first,
+        originalStartTime: '2026-10-07T02:00:00-07:00',
+      }),
+    ).toBe(true);
+    expect(sameCalendarOccurrence(first, { ...first, originalStartTime: undefined })).toBe(false);
+    expect(calendarOccurrenceKey({ ...first, originalStartTime: undefined })).toBeUndefined();
+    expect(
+      sameCalendarOccurrence(
+        { ...first, recurringEventId: undefined, originalStartTime: undefined },
+        { ...first, recurringEventId: undefined, originalStartTime: undefined },
+      ),
+    ).toBe(true);
   });
 });
 
@@ -99,4 +157,26 @@ it('separates probable phone copies from distinct overlaps and recurring instanc
       { ...event, calendarId: 'iphone:work', originalStartTime: event.start },
     ),
   ).toBe(false);
+  expect(
+    classifyCalendarOccurrence(event, {
+      ...event,
+      calendarId: 'iphone:work',
+      iCalUID: 'different-uid',
+    }),
+  ).toMatchObject({ kind: 'probable-mirror', reason: 'matching-phone-listing' });
+  expect(
+    classifyCalendarOccurrence(event, {
+      ...event,
+      calendarId: 'family',
+      summary: 'Team planning',
+    }),
+  ).toEqual({ kind: 'distinct' });
+  expect(
+    classifyCalendarOccurrence(base, {
+      ...base,
+      calendarId: 'personal',
+      eventId: 'copy',
+      originalStartTime: '2026-10-07T09:00:00Z',
+    }),
+  ).toMatchObject({ kind: 'canonical' });
 });

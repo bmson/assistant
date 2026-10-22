@@ -1527,8 +1527,65 @@ describe('runBriefing — richer inputs', () => {
         event,
         { ...event, calendarId: 'personal', calendar: 'Personal', eventId: 'copy' },
         { ...event, eventId: 'two', start: '2026-10-07T09:15:00Z' },
+      ]).every((conflict) => conflict.attendance === 'unresolved'),
+    ).toBe(true);
+    expect(
+      findConflicts([
+        event,
+        { ...event, calendarId: 'personal', calendar: 'Personal', eventId: 'copy' },
+        { ...event, eventId: 'two', start: '2026-10-07T09:15:00Z' },
       ]),
-    ).toHaveLength(1);
+    ).toHaveLength(3);
+  });
+
+  it('bounds dense conflict details while retaining the exact overlap count', () => {
+    const conflicts = findConflicts(
+      Array.from({ length: 5 }, (_, index) => ({
+        summary: `Event ${index + 1}`,
+        start: '2026-10-07T09:00:00Z',
+        end: '2026-10-07T10:00:00Z',
+        calendar: 'Work',
+        allDay: false,
+      })),
+    );
+    expect(conflicts).toHaveLength(4);
+    expect(conflicts.totalCount).toBe(10);
+    expect(conflicts.detailsOmitted).toBe(true);
+  });
+
+  it('keeps differing-time copies from becoming verified personal conflicts', () => {
+    const accepted = {
+      status: 'accepted' as const,
+      identityVerified: true,
+      basis: 'attendee-email' as const,
+    };
+    const shared = {
+      calendar: 'Work',
+      iCalUID: 'same-nonrecurring-event',
+      summary: 'Planning',
+      allDay: false,
+      blocksTime: true,
+      ownerParticipation: accepted,
+      start: '2026-10-07T10:00:00Z',
+      end: '2026-10-07T11:00:00Z',
+    };
+    const conflicts = findConflicts([
+      { ...shared, calendarId: 'work', eventId: 'work-event' },
+      {
+        ...shared,
+        calendar: 'Family',
+        calendarId: 'family',
+        eventId: 'family-copy',
+        start: '2026-10-07T10:05:00Z',
+        end: '2026-10-07T11:05:00Z',
+      },
+    ]);
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]).toMatchObject({
+      sourceIdentityDisagreement: true,
+      classification: 'attendance_unconfirmed',
+      attendance: 'unresolved',
+    });
   });
 
   it('still reports two instances of one series that collide on the same calendar', () => {
@@ -1951,18 +2008,35 @@ it('excludes explicit cancelled, nonblocking and owner-declined rows from hard o
     end: '2026-10-07T13:00:00Z',
     allDay: false,
   };
-  for (const patch of [
-    { status: 'cancelled' },
-    { blocksTime: false },
-    { ownerResponse: 'declined' },
-  ]) {
+  for (const patch of [{ status: 'cancelled' }, { blocksTime: false }]) {
     expect(findConflicts([event, { ...event, eventId: 'two', ...patch }])).toEqual([]);
   }
   const unknown = findConflicts([event, { ...event, eventId: 'two' }]);
   expect(unknown[0]?.attendance).toBe('unresolved');
   const confirmed = findConflicts([
-    { ...event, ownerResponse: 'accepted' },
-    { ...event, eventId: 'two', ownerResponse: 'accepted' },
+    {
+      ...event,
+      blocksTime: true,
+      ownerParticipation: { status: 'accepted', identityVerified: true, basis: 'attendee-email' },
+    },
+    {
+      ...event,
+      eventId: 'two',
+      blocksTime: true,
+      ownerParticipation: { status: 'accepted', identityVerified: true, basis: 'attendee-email' },
+    },
   ]);
   expect(confirmed[0]?.attendance).toBe('confirmed');
+  expect(
+    findConflicts([
+      { ...event, blocksTime: true, ownerResponse: 'accepted' },
+      { ...event, eventId: 'two', blocksTime: true, ownerResponse: 'accepted' },
+    ])[0]?.attendance,
+  ).toBe('unresolved');
+  expect(
+    findConflicts([
+      { ...event, blocksTime: true, ownerResponse: 'declined' },
+      { ...event, eventId: 'two', blocksTime: true },
+    ]),
+  ).toHaveLength(1);
 });

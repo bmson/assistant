@@ -1,7 +1,12 @@
+import { calendarOccurrenceKey, sameCalendarOccurrence } from '@assistant/persistence';
 import type { BriefingCalendarEvent } from './briefing.js';
 import type { CalendarPlanOptions } from './calendar-plan-intent.js';
 import { calendarCivilBoundary, calendarSourceInterval } from './calendar-read-window.js';
-import { calendarRelationship } from './calendar-relationship.js';
+import {
+  calendarRelationship,
+  verifiedOwnerParticipation,
+  verifiedPersonalCommitment,
+} from './calendar-relationship.js';
 import type { ActionEvidence } from './response-contract.js';
 
 const SLOT_MS = 15 * 60_000;
@@ -155,15 +160,148 @@ function strictGoogleCalendarLink(event: PlainRecord): string | undefined {
   return undefined;
 }
 
+const unidentifiedEventIds = new WeakMap<object, number>();
+let nextUnidentifiedEventId = 0;
+
 function eventIdentity(event: PlainRecord): string {
-  const occurrence =
-    typeof event.originalStartTime === 'string'
-      ? event.originalStartTime
-      : String(event.start ?? '');
-  if (typeof event.iCalUID === 'string' && event.iCalUID)
-    return `ical:${event.iCalUID}\0${occurrence}`;
-  const stable = event.recurringEventId ?? event.eventId ?? event.summary ?? '';
-  return `calendar:${String(event.calendarId ?? event.calendar ?? '')}\0${String(stable)}\0${occurrence}`;
+  if (typeof event._calendarPlanIdentity === 'string') return event._calendarPlanIdentity;
+  const canonical = calendarOccurrenceKey(event);
+  if (canonical) return canonical;
+  let id = unidentifiedEventIds.get(event);
+  if (!id) {
+    id = ++nextUnidentifiedEventId;
+    unidentifiedEventIds.set(event, id);
+  }
+  return `unidentified:${id}`;
+}
+
+function uniqueCanonicalEvents(events: PlainRecord[]): PlainRecord[] {
+  const consumed = new Set<number>();
+  const result: PlainRecord[] = [];
+  for (let start = 0; start < events.length; start += 1) {
+    if (consumed.has(start)) continue;
+    const first = events[start];
+    if (!first) continue;
+    if (!calendarOccurrenceKey(first)) {
+      consumed.add(start);
+      result.push(first);
+      continue;
+    }
+    const component = new Set([start]);
+    const queue = [start];
+    while (queue.length) {
+      const currentIndex = queue.pop();
+      const current = currentIndex === undefined ? undefined : events[currentIndex];
+      if (!current) continue;
+      events.forEach((candidate, index) => {
+        if (
+          !consumed.has(index) &&
+          !component.has(index) &&
+          calendarOccurrenceKey(candidate) &&
+          sameCalendarOccurrence(current, candidate)
+        ) {
+          component.add(index);
+          queue.push(index);
+        }
+      });
+    }
+    for (const index of component) consumed.add(index);
+    const members = [...component]
+      .sort((a, b) => a - b)
+      .flatMap((index) => {
+        const event = events[index];
+        return event ? [event] : [];
+      });
+    const isClique = members.every((left, leftIndex) =>
+      members.every(
+        (right, rightIndex) => leftIndex === rightIndex || sameCalendarOccurrence(left, right),
+      ),
+    );
+    if (members.length < 2 || !isClique) {
+      const ambiguity = `ambiguous:${members
+        .map((event) => calendarOccurrenceKey(event))
+        .sort()
+        .join('|')}`;
+      result.push(
+        ...members.map((event, index) => ({
+          ...event,
+          _calendarPlanIdentity: `${ambiguity}:${index}`,
+          ...(members.length > 1 ? { _canonicalIdentityAmbiguity: ambiguity } : {}),
+        })),
+      );
+      continue;
+    }
+    const firstEvent = members[0];
+    if (!firstEvent) continue;
+    const sourceVariants = members.flatMap((event) =>
+      Array.isArray(event.sourceVariants)
+        ? event.sourceVariants.map(record).filter((value): value is PlainRecord => Boolean(value))
+        : [event],
+    );
+    const statuses = [...new Set(sourceVariants.map((event) => verifiedOwnerParticipation(event)))];
+    const ownerStatus = statuses.length === 1 ? statuses[0] : 'unknown';
+    const busyValues = sourceVariants.map((event) => event.blocksTime);
+    const blocksTime = busyValues.every((value) => value === true)
+      ? true
+      : busyValues.every((value) => value === false)
+        ? false
+        : undefined;
+    const purposes = sourceVariants.map((event) =>
+      event.calendarPurpose === 'commitments' || event.calendarPurpose === 'reference'
+        ? event.calendarPurpose
+        : 'unspecified',
+    );
+    const calendarPurpose = purposes.every((purpose) => purpose === 'commitments')
+      ? 'commitments'
+      : purposes.includes('reference')
+        ? 'reference'
+        : 'unspecified';
+    const differs = (field: string) =>
+      new Set(
+        sourceVariants.map((event) => {
+          const value = event[field];
+          if ((field === 'start' || field === 'end') && typeof value === 'string') {
+            const instant = dateMs(value);
+            return instant ?? value;
+          }
+          return value ?? '';
+        }),
+      ).size > 1;
+    const sourceIntegrity =
+      ['summary', 'location', 'start', 'end', 'status', 'blocksTime', 'calendarPurpose'].some(
+        differs,
+      ) || statuses.length > 1
+        ? 'disputed'
+        : 'consistent';
+    result.push({
+      ...firstEvent,
+      _calendarPlanIdentity: `canonical:${calendarOccurrenceKey(firstEvent)}`,
+      sourceVariants,
+      blocksTime,
+      calendarPurpose,
+      sourceIntegrity,
+      ...(new Set(sourceVariants.map((event) => event.status ?? '')).size === 1 &&
+      typeof firstEvent.status === 'string'
+        ? { status: firstEvent.status }
+        : { status: undefined }),
+      ...(ownerStatus !== 'unknown'
+        ? {
+            ownerParticipation: {
+              status: ownerStatus,
+              identityVerified: true,
+              basis: 'attendee-email',
+            },
+          }
+        : {
+            ownerParticipation: {
+              status: 'unknown',
+              identityVerified: false,
+              basis: 'unverified',
+            },
+          }),
+    });
+  }
+  return result;
 }
 
 function relationshipEvent(event: PlainRecord): BriefingCalendarEvent {
@@ -185,6 +323,15 @@ function relationshipEvent(event: PlainRecord): BriefingCalendarEvent {
     ...(typeof event.status === 'string' ? { status: event.status } : {}),
     ...(typeof event.blocksTime === 'boolean' ? { blocksTime: event.blocksTime } : {}),
     ...(typeof event.ownerResponse === 'string' ? { ownerResponse: event.ownerResponse } : {}),
+    ...(event.ownerParticipation && typeof event.ownerParticipation === 'object'
+      ? {
+          ownerParticipation:
+            event.ownerParticipation as BriefingCalendarEvent['ownerParticipation'],
+        }
+      : {}),
+    ...(event.calendarPurpose === 'commitments' || event.calendarPurpose === 'reference'
+      ? { calendarPurpose: event.calendarPurpose }
+      : {}),
     ...(typeof event.location === 'string' ? { location: event.location } : {}),
     ...(typeof event.description === 'string' ? { description: event.description } : {}),
   };
@@ -227,12 +374,12 @@ function planWorkingDays(
 function attendance(event: PlainRecord): 'attending' | 'potential' | 'not-attending' {
   if (
     event.status === 'cancelled' ||
-    event.ownerResponse === 'declined' ||
+    verifiedOwnerParticipation(event) === 'declined' ||
     event.blocksTime === false
   )
     return 'not-attending';
-  if (event.ownerResponse === 'accepted') return 'attending';
-  if (event.ownerResponse === 'tentative') return 'potential';
+  if (verifiedPersonalCommitment(event)) return 'attending';
+  if (verifiedOwnerParticipation(event) === 'tentative') return 'potential';
   return event.blocksTime === true ? 'potential' : 'not-attending';
 }
 
@@ -381,7 +528,7 @@ function lodgingExplanationForBusy(
       lodging.includes(event) ||
       event.status === 'cancelled' ||
       event.blocksTime === false ||
-      event.ownerResponse !== 'declined'
+      verifiedOwnerParticipation(event) !== 'declined'
     )
       return false;
     const interval =
@@ -512,6 +659,14 @@ function calendarSourceReference(event: PlainRecord): string {
   const title = calendarSourceLabel(event);
   const url = strictGoogleCalendarLink(event);
   return url ? `[${title}](<${url}>)` : `**${title}**`;
+}
+
+function calendarSourceName(event: PlainRecord): string {
+  return typeof event.calendar === 'string' && event.calendar.trim()
+    ? event.calendar.trim()
+    : typeof event.calendarId === 'string' && event.calendarId.trim()
+      ? event.calendarId.trim()
+      : 'Calendar';
 }
 
 export interface WeeklyCalendarPlanInput {
@@ -657,7 +812,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     }
   }
 
-  const uniqueEvents = [...new Map(events.map((event) => [eventIdentity(event), event])).values()];
+  const uniqueEvents = uniqueCanonicalEvents(events);
   const availabilityComplete =
     busyValid &&
     availabilityResult?.complete === true &&
@@ -896,6 +1051,49 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const conflictPairs: string[] = [];
   const duplicateListingPairs: string[] = [];
   const probableDuplicatePairs = new Set<string>();
+  const ambiguityGroups = new Set(
+    uniqueEvents
+      .map((event) => event._canonicalIdentityAmbiguity)
+      .filter((value): value is string => typeof value === 'string'),
+  );
+  for (const ambiguity of ambiguityGroups) {
+    const variants = uniqueEvents.filter(
+      (event) => event._canonicalIdentityAmbiguity === ambiguity,
+    );
+    duplicateListingPairs.push(
+      `Calendar occurrence identity is ambiguous across ${variants.map(calendarSourceReference).join('; ')}. All records are retained separately; confirm which entries represent the same occurrence before treating their overlap as a personal conflict.`,
+    );
+  }
+  for (const event of uniqueEvents) {
+    const variants = Array.isArray(event.sourceVariants)
+      ? event.sourceVariants.map(record).filter((value): value is PlainRecord => Boolean(value))
+      : [];
+    if (variants.length < 2) continue;
+    const differingFields = [
+      'summary',
+      'start',
+      'end',
+      'status',
+      'blocksTime',
+      'calendarPurpose',
+    ].filter(
+      (field) =>
+        new Set(
+          variants.map((variant) =>
+            field === 'start' || field === 'end'
+              ? (dateMs(variant[field]) ?? variant[field])
+              : variant[field],
+          ),
+        ).size > 1,
+    );
+    if (new Set(variants.map((variant) => verifiedOwnerParticipation(variant))).size > 1)
+      differingFields.push('verified owner response');
+    if (differingFields.length > 0) {
+      duplicateListingPairs.push(
+        `Canonical calendar copies differ in ${differingFields.join(', ')} for ${eventTitle(event)}. Both source variants are retained for review: ${variants.map(calendarSourceReference).join('; ')}.`,
+      );
+    }
+  }
   const conflictEvents = uniqueEvents
     .filter((event) => attendance(event) !== 'not-attending' && event.allDay !== true)
     .map((event) => ({ event, interval: parseEventInterval(event), presence: attendance(event) }))
@@ -921,7 +1119,17 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         !overlap(left.interval, right.interval)
       )
         continue;
-      const pair = `${eventTitle(left.event)} and ${eventTitle(right.event)}`;
+      if (
+        typeof left.event._canonicalIdentityAmbiguity === 'string' &&
+        left.event._canonicalIdentityAmbiguity === right.event._canonicalIdentityAmbiguity
+      )
+        continue;
+      const leftTitle = eventTitle(left.event);
+      const rightTitle = eventTitle(right.event);
+      const pair =
+        leftTitle === rightTitle
+          ? `${calendarSourceName(left.event)} · ${leftTitle} and ${calendarSourceName(right.event)} · ${rightTitle}`
+          : `${leftTitle} and ${rightTitle}`;
       const overlappingInterval = {
         start: Math.max(left.interval.start, right.interval.start, start),
         end: Math.min(left.interval.end, right.interval.end, end),
@@ -943,7 +1151,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         if (!probableDuplicatePairs.has(pairKey)) {
           probableDuplicatePairs.add(pairKey);
           duplicateListingPairs.push(
-            `Possible duplicate listing: ${pair} (${labelTime(overlappingInterval.start, input.timeZone)}); occurrence identity unverified. Sources: ${calendarSourceReference(left.event)}; ${calendarSourceReference(right.event)}.\n  - Next: verify whether these entries are one occurrence.`,
+            `Possible matching calendar entries: ${pair} (${labelTime(overlappingInterval.start, input.timeZone)}); occurrence identity unverified. Sources: ${calendarSourceReference(left.event)}; ${calendarSourceReference(right.event)}.\n  - Next: verify whether these entries are one occurrence.`,
           );
         }
         continue;
@@ -955,9 +1163,9 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       const uncertain = [left, right].filter((item) => item.presence === 'potential');
       const overlapQualification =
         verified && uncertainLongContext
-          ? 'Both invites show accepted, but a long event span may not represent simultaneous attendance.'
+          ? 'Both entries have verified evidence as busy personal commitments, but a long event span may not represent simultaneous attendance.'
           : verified
-            ? 'Both invites show accepted.'
+            ? 'Both entries have verified evidence as busy personal commitments.'
             : uncertain.length === 2
               ? 'Attendance for both is unconfirmed.'
               : `Attendance is unconfirmed for ${eventTitle(uncertain[0]?.event ?? right.event)}.`;
@@ -1163,7 +1371,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   }
   if (allConflictDetails.length > visibleConflictLimit)
     lines.push(
-      `${allConflictDetails.length - visibleConflictLimit} additional overlaps or possible duplicate listings omitted from this brief; all were included in the planning check.`,
+      `${allConflictDetails.length - visibleConflictLimit} additional possible-overlap pairs or duplicate-entry comparisons omitted from this brief; all were included in the planning check.`,
     );
   if (conflictPairs.length === 0 && duplicateListingPairs.length === 0 && complete)
     lines.push('Conflicts: none found in checked calendar data.');

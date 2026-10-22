@@ -16,6 +16,11 @@ const event = (index: number) => ({
   start: `2026-10-23T${String(8 + Math.floor(index / 2)).padStart(2, '0')}:${index % 2 ? '30' : '00'}:00-07:00`,
   end: `2026-10-23T${String(9 + Math.floor(index / 2)).padStart(2, '0')}:${index % 2 ? '30' : '00'}:00-07:00`,
   ownerResponse: index === 5 ? 'needsAction' : 'accepted',
+  ownerParticipation: {
+    status: index === 5 ? 'needsAction' : 'accepted',
+    identityVerified: true,
+    basis: 'attendee-email',
+  },
 });
 const evidence = (events: unknown[], overrides: Record<string, unknown> = {}) => ({
   toolName: 'calendar.list_events',
@@ -39,13 +44,21 @@ describe('deterministic calendar agenda integration', () => {
       presentation: 'calendar-agenda',
       accompaniesProse: false,
       complete: true,
-      lead: '13 events from Work.',
+      lead: '13 calendar entries from Work.',
     });
     const sections = cards[0]?.sections as { type: string; items: unknown[] }[];
     expect(sections.find((s) => s.type === 'agenda')?.items).toHaveLength(13);
     expect(JSON.stringify(cards)).toContain('Needs response');
-    expect(JSON.stringify(cards)).not.toContain('needsAction');
-    expect(JSON.stringify(cards)).not.toContain('accepted');
+    const visibleAgenda = JSON.stringify(
+      sections
+        .find((section) => section.type === 'agenda')
+        ?.items.map((item) => {
+          const row = item as Record<string, unknown>;
+          return { title: row.title, time: row.time, note: row.note };
+        }),
+    );
+    expect(visibleAgenda).not.toContain('needsAction');
+    expect(visibleAgenda).not.toContain('accepted');
   });
   it('does not turn prior-task events or failed results into a current agenda', () => {
     const cards = responseCardsForFinal({

@@ -18,6 +18,10 @@ import {
   calendarArrivalLead,
   calendarRelationship,
   calendarRelationshipNote,
+  classifyCalendarOverlap,
+  parseCalendarOwnerParticipation,
+  possibleCalendarIdentityDisagreement,
+  verifiedOwnerParticipation,
 } from './calendar-relationship.js';
 import { safeCalendarSourceUrl, safeVideoMeetingUrl } from './calendar-source-link.js';
 import { type ClaimFact, evidenceClaimFacts } from './claim-facts.js';
@@ -1503,11 +1507,34 @@ function uniqueRecords(
   });
 }
 
+const dateTimeFormatters = new Map<string, Intl.DateTimeFormat>();
+const MAX_DATE_TIME_FORMATTERS = 64;
+
+function cachedDateTimeFormatter(
+  locale: string | string[],
+  options: Intl.DateTimeFormatOptions,
+): Intl.DateTimeFormat {
+  const key = JSON.stringify([locale, options]);
+  const cached = dateTimeFormatters.get(key);
+  if (cached) {
+    dateTimeFormatters.delete(key);
+    dateTimeFormatters.set(key, cached);
+    return cached;
+  }
+  const formatter = new Intl.DateTimeFormat(locale, options);
+  if (dateTimeFormatters.size >= MAX_DATE_TIME_FORMATTERS) {
+    const oldest = dateTimeFormatters.keys().next().value;
+    if (oldest !== undefined) dateTimeFormatters.delete(oldest);
+  }
+  dateTimeFormatters.set(key, formatter);
+  return formatter;
+}
+
 function calendarTime(value: string, timeZone?: string): string {
   if (!value) return value;
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     const date = new Date(`${value}T12:00:00.000Z`);
-    return new Intl.DateTimeFormat('en-US', {
+    return cachedDateTimeFormatter('en-US', {
       timeZone: 'UTC',
       weekday: 'long',
       year: 'numeric',
@@ -1519,7 +1546,7 @@ function calendarTime(value: string, timeZone?: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   try {
-    return new Intl.DateTimeFormat('en-US', {
+    return cachedDateTimeFormatter('en-US', {
       timeZone,
       weekday: 'long',
       year: 'numeric',
@@ -1540,7 +1567,7 @@ function clockOnly(value: string, timeZone?: string): string {
   const ms = Date.parse(value);
   if (Number.isNaN(ms)) return '';
   try {
-    return new Intl.DateTimeFormat('en-GB', {
+    return cachedDateTimeFormatter('en-GB', {
       timeZone: timeZone ?? 'UTC',
       hour: '2-digit',
       minute: '2-digit',
@@ -1558,7 +1585,7 @@ function shortDate(value: string, timeZone?: string): string {
   const ms = Date.parse(isDateOnly ? `${value}T12:00:00.000Z` : value);
   if (Number.isNaN(ms)) return '';
   try {
-    return new Intl.DateTimeFormat('en-GB', {
+    return cachedDateTimeFormatter('en-GB', {
       timeZone: isDateOnly ? 'UTC' : (timeZone ?? 'UTC'),
       weekday: 'short',
       day: 'numeric',
@@ -1574,7 +1601,7 @@ function intervalDateTime(value: string, timeZone?: string): string {
   const ms = Date.parse(value);
   if (!Number.isFinite(ms)) return value;
   try {
-    return new Intl.DateTimeFormat('en-US', {
+    return cachedDateTimeFormatter('en-US', {
       timeZone: timeZone ?? 'UTC',
       weekday: 'short',
       month: 'short',
@@ -1590,7 +1617,7 @@ function intervalDateTime(value: string, timeZone?: string): string {
 
 function overlapClock(value: number, timeZone?: string): string {
   try {
-    return new Intl.DateTimeFormat('en-US', {
+    return cachedDateTimeFormatter('en-US', {
       timeZone: timeZone ?? 'UTC',
       hour: 'numeric',
       minute: '2-digit',
@@ -1603,7 +1630,7 @@ function overlapClock(value: number, timeZone?: string): string {
 /** Compact agendas use one readable 12-hour clock style for rows and overlaps. */
 function compactClock(value: number, timeZone?: string): string {
   try {
-    return new Intl.DateTimeFormat('en-US', {
+    return cachedDateTimeFormatter('en-US', {
       timeZone: timeZone ?? 'UTC',
       hour: 'numeric',
       minute: '2-digit',
@@ -1697,13 +1724,11 @@ function compactAllDaySourceDetail(
 }
 
 function compactEventStatus(event: Record<string, unknown>): string {
-  const attendance =
-    typeof event.ownerResponse === 'string' &&
-    /^(?:accepted|declined|tentative|needsAction)$/i.test(event.ownerResponse)
-      ? event.ownerResponse.toLowerCase()
-      : '';
+  const attendance = verifiedOwnerParticipation(event);
   const availability = event.blocksTime === false ? 'free' : '';
-  return [availability, attendance].filter(Boolean).join(' · ');
+  return [availability, attendance === 'unknown' || attendance === 'needsAction' ? '' : attendance]
+    .filter(Boolean)
+    .join(' · ');
 }
 
 function compactLocationRequested(request: PersonalReadRequest): boolean {
@@ -1768,7 +1793,7 @@ function calendarOverlapSummary(
   const candidates = events.flatMap((event) => {
     if (
       stringField(event, 'status') === 'cancelled' ||
-      stringField(event, 'ownerResponse') === 'declined' ||
+      verifiedOwnerParticipation(event) === 'declined' ||
       event.blocksTime === false
     )
       return [];
@@ -1804,6 +1829,16 @@ function calendarOverlapSummary(
       ...(stringField(event, 'ownerResponse')
         ? { ownerResponse: stringField(event, 'ownerResponse') }
         : {}),
+      ...(parseCalendarOwnerParticipation(event.ownerParticipation)
+        ? { ownerParticipation: parseCalendarOwnerParticipation(event.ownerParticipation) }
+        : {}),
+      ...(event.calendarPurpose === 'commitments' || event.calendarPurpose === 'reference'
+        ? { calendarPurpose: event.calendarPurpose }
+        : {}),
+      ...(Array.isArray(event.sourceVariants) ? { sourceVariants: event.sourceVariants } : {}),
+      ...(event.sourceIntegrity === 'disputed' || event.sourceIntegrity === 'consistent'
+        ? { sourceIntegrity: event.sourceIntegrity }
+        : {}),
       ...(typeof event.blocksTime === 'boolean' ? { blocksTime: event.blocksTime } : {}),
       ...(stringField(event, 'location') ? { location: stringField(event, 'location') } : {}),
       ...(stringField(event, 'description')
@@ -1825,15 +1860,31 @@ function calendarOverlapSummary(
   const notes: string[] = [];
   const travelContextNotes: string[] = [];
   const arrivalNotes: string[] = [];
-  const namedPairs: string[] = [];
+  const MAX_FORMATTED_OVERLAP_DETAILS = 100;
+  let formattedDetails = 0;
+  let overlapPairCount = 0;
+  let travelContextCount = 0;
+  let arrivalCount = 0;
   for (let index = 0; index < candidates.length; index += 1) {
     const left = candidates[index];
     if (!left) continue;
-    for (const right of candidates.slice(index + 1)) {
+    for (let rightIndex = index + 1; rightIndex < candidates.length; rightIndex += 1) {
+      const right = candidates[rightIndex];
+      if (!right) continue;
       if (sameCalendarOccurrence(left.projected, right.projected)) continue;
       const start = Math.max(left.interval.start, right.interval.start, window?.start ?? -Infinity);
       const end = Math.min(left.interval.end, right.interval.end, window?.end ?? Infinity);
       if (start >= end) continue;
+      if (possibleCalendarIdentityDisagreement(left.projected, right.projected)) {
+        overlapPairCount += 1;
+        if (formattedDetails < MAX_FORMATTED_OVERLAP_DETAILS) {
+          formattedDetails += 1;
+          notes.push(
+            `- Possible same event with different source times: ${left.projected.calendar || 'Calendar'} · ${left.projected.summary} + ${right.projected.calendar || 'Calendar'} · ${right.projected.summary}. Both records remain visible; identity and attendance are unconfirmed.`,
+          );
+        }
+        continue;
+      }
       const contextOverlap = left.explicitStayContext || right.explicitStayContext;
       // A verified lodging stay can overlap a travel block in the calendar,
       // but that is useful context rather than evidence of physical attendance
@@ -1849,51 +1900,79 @@ function calendarOverlapSummary(
           .filter(Boolean)
           .join(' ');
         if (!FLIGHT_SOURCE.test(otherSource)) continue;
-        const sameDay =
-          eventLocalDay(new Date(start).toISOString(), zone) ===
-          eventLocalDay(new Date(end).toISOString(), zone);
-        const overlapLabel = sameDay
-          ? `${shortDate(new Date(start).toISOString(), zone)} ${compactClock(start, zone)}–${compactClock(end, zone)}`
-          : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
-        const note = `- Travel context overlap **${overlapLabel}**: ${stay.projected.summary} + ${other.projected.summary} (busy stay block).`;
-        travelContextNotes.push(note);
+        travelContextCount += 1;
+        if (formattedDetails < MAX_FORMATTED_OVERLAP_DETAILS) {
+          formattedDetails += 1;
+          const sameDay =
+            eventLocalDay(new Date(start).toISOString(), zone) ===
+            eventLocalDay(new Date(end).toISOString(), zone);
+          const overlapLabel = sameDay
+            ? `${shortDate(new Date(start).toISOString(), zone)} ${compactClock(start, zone)}–${compactClock(end, zone)}`
+            : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
+          travelContextNotes.push(
+            `- Travel context overlap **${overlapLabel}**: ${stay.projected.summary} + ${other.projected.summary} (busy stay block).`,
+          );
+        }
         continue;
       }
       const arrivalLead = calendarArrivalLead(left.projected, right.projected);
       if (arrivalLead !== undefined) {
         const earlier = left.interval.start < right.interval.start ? left : right;
         const later = earlier === left ? right : left;
-        arrivalNotes.push(
-          `- Arrival guidance: **${compactClock(earlier.interval.start, zone)} arrival for ${compactClock(later.interval.start, zone)} start** — ${later.projected.summary} requests arrival ${arrivalLead} minutes early. The overlapping records may describe one event; both sources are retained and matching identity is unconfirmed.`,
-        );
+        arrivalCount += 1;
+        if (formattedDetails < MAX_FORMATTED_OVERLAP_DETAILS) {
+          formattedDetails += 1;
+          arrivalNotes.push(
+            `- Arrival guidance: **${compactClock(earlier.interval.start, zone)} arrival for ${compactClock(later.interval.start, zone)} start** — ${later.projected.summary} requests arrival ${arrivalLead} minutes early. The overlapping records may describe one event; both sources are retained and matching identity is unconfirmed.`,
+          );
+        }
         continue;
       }
       const relationship = calendarRelationship(left.projected, right.projected);
-      // Matching arrival/start records and exact duplicate candidates are
-      // retained in the agenda, but do not imply a scheduling conflict.
-      if (relationship !== 'unresolved') continue;
-      const bothAccepted =
-        stringField(left.event, 'ownerResponse') === 'accepted' &&
-        stringField(right.event, 'ownerResponse') === 'accepted';
-      const sameDay =
-        eventLocalDay(new Date(start).toISOString(), zone) ===
-        eventLocalDay(new Date(end).toISOString(), zone);
-      const overlapLabel = sameDay
-        ? `${shortDate(new Date(start).toISOString(), zone)} ${request.compactCalendarBriefing ? compactClock(start, zone) : overlapClock(start, zone)}–${request.compactCalendarBriefing ? compactClock(end, zone) : overlapClock(end, zone)}`
-        : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
-      notes.push(
-        request.compactCalendarBriefing
-          ? `- ${bothAccepted ? 'Conflict' : 'Possible overlap'} **${overlapLabel}**: ${left.projected.summary} + ${right.projected.summary}.`
-          : `- ${bothAccepted ? 'Scheduling conflict' : 'Possible overlap'}: **${left.projected.summary}** and **${right.projected.summary}**, ${overlapLabel}.${request.includeCalendarBriefing ? '' : ` ${calendarRelationshipNote(relationship, bothAccepted ? 'confirmed' : 'unresolved')}`}`,
-      );
-      namedPairs.push(
-        request.compactCalendarBriefing
-          ? `${bothAccepted ? 'Conflict' : 'Possible overlap'} ${overlapLabel}: ${left.projected.summary} + ${right.projected.summary}`
-          : `**${left.projected.summary}** and **${right.projected.summary}**`,
-      );
+      // Arrival/start records can be one event. Similar phone listings are
+      // reported as uncertain copies, never as personal conflicts.
+      if (relationship === 'compatible_time_roles') continue;
+      if (relationship === 'probable_duplicate') {
+        overlapPairCount += 1;
+        if (formattedDetails < MAX_FORMATTED_OVERLAP_DETAILS) {
+          formattedDetails += 1;
+          const sameDay =
+            eventLocalDay(new Date(start).toISOString(), zone) ===
+            eventLocalDay(new Date(end).toISOString(), zone);
+          const overlapLabel = sameDay
+            ? `${shortDate(new Date(start).toISOString(), zone)} ${request.compactCalendarBriefing ? compactClock(start, zone) : overlapClock(start, zone)}–${request.compactCalendarBriefing ? compactClock(end, zone) : overlapClock(end, zone)}`
+            : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
+          notes.push(
+            `- Possible matching calendar entries **${overlapLabel}**: ${left.projected.calendar || 'Calendar'} · ${left.projected.summary} + ${right.projected.calendar || 'Calendar'} · ${right.projected.summary}. Both sources are retained; occurrence identity is unverified.`,
+          );
+        }
+        continue;
+      }
+      overlapPairCount += 1;
+      if (formattedDetails < MAX_FORMATTED_OVERLAP_DETAILS) {
+        formattedDetails += 1;
+        const sameDay =
+          eventLocalDay(new Date(start).toISOString(), zone) ===
+          eventLocalDay(new Date(end).toISOString(), zone);
+        const overlapLabel = sameDay
+          ? `${shortDate(new Date(start).toISOString(), zone)} ${request.compactCalendarBriefing ? compactClock(start, zone) : overlapClock(start, zone)}–${request.compactCalendarBriefing ? compactClock(end, zone) : overlapClock(end, zone)}`
+          : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
+        const classification = classifyCalendarOverlap(left.event, right.event);
+        const label =
+          classification === 'personal_commitment_conflict'
+            ? 'Your accepted commitments overlap'
+            : classification === 'commitments_policy_overlap'
+              ? 'Possible commitments overlap'
+              : 'Possible overlap';
+        notes.push(
+          request.compactCalendarBriefing
+            ? `- ${label} **${overlapLabel}**: ${left.projected.calendar || 'Calendar'} · ${left.projected.summary} + ${right.projected.calendar || 'Calendar'} · ${right.projected.summary}.`
+            : `- ${label}: **${left.projected.calendar || 'Calendar'} · ${left.projected.summary}** and **${right.projected.calendar || 'Calendar'} · ${right.projected.summary}**, ${overlapLabel}.${classification === 'commitments_policy_overlap' ? ' Your calendar settings mark these as commitments; acceptance is not confirmed for both.' : classification === 'attendance_unconfirmed' && !request.includeCalendarBriefing ? ` ${calendarRelationshipNote(relationship, 'unresolved')}` : ''}`,
+        );
+      }
     }
   }
-  if (notes.length === 0 && travelContextNotes.length === 0 && arrivalNotes.length === 0)
+  if (overlapPairCount === 0 && travelContextCount === 0 && arrivalCount === 0)
     return [
       complete
         ? 'No unresolved overlaps between timed calendar entries were found in the checked results.'
@@ -1902,15 +1981,25 @@ function calendarOverlapSummary(
           : 'An overlap check was requested, but no calendar events were available to compare.',
     ];
   const shown = notes.slice(0, 3);
-  if (notes.length > shown.length) {
-    const additionalPairs = namedPairs.slice(3);
-    const shownAdditionalPairs = additionalPairs.slice(0, 3);
-    const omitted = additionalPairs.length - shownAdditionalPairs.length;
+  if (overlapPairCount > shown.length)
     shown.push(
-      `- Additional ${request.compactCalendarBriefing ? 'overlaps' : 'overlapping pairs'}: ${shownAdditionalPairs.join('; ')}${omitted > 0 ? `; ${omitted.toLocaleString('en-US')} more not listed` : ''}.`,
+      `- ${overlapPairCount.toLocaleString('en-US')} overlapping pairs found; further pair details are not expanded.`,
     );
-  }
-  const result = [...shown, ...arrivalNotes.slice(0, 3), ...travelContextNotes.slice(0, 3)];
+  const result = [
+    ...shown,
+    ...arrivalNotes.slice(0, 3),
+    ...(arrivalCount > arrivalNotes.length
+      ? [
+          `- ${arrivalCount.toLocaleString('en-US')} additional arrival comparisons were counted but not expanded.`,
+        ]
+      : []),
+    ...travelContextNotes.slice(0, 3),
+    ...(travelContextCount > travelContextNotes.length
+      ? [
+          `- ${travelContextCount.toLocaleString('en-US')} additional travel-context overlaps were counted but not expanded.`,
+        ]
+      : []),
+  ];
   if (request.includeCalendarBriefing && result.length > 0)
     result.push(
       request.compactCalendarBriefing
@@ -2051,12 +2140,12 @@ function calendarAvailabilityLines(
   // turn an ISO timestamp into prose or imply a complete owner-local day.
   let timeZone = request.timeZone ?? 'UTC';
   try {
-    new Intl.DateTimeFormat('en-US', { timeZone }).format(0);
+    cachedDateTimeFormatter('en-US', { timeZone }).format(0);
   } catch {
     timeZone = 'UTC';
   }
-  const clock = new Intl.DateTimeFormat('en-US', { timeZone, hour: 'numeric', minute: '2-digit' });
-  const zonedTime = new Intl.DateTimeFormat('en-US', {
+  const clock = cachedDateTimeFormatter('en-US', { timeZone, hour: 'numeric', minute: '2-digit' });
+  const zonedTime = cachedDateTimeFormatter('en-US', {
     timeZone,
     hour: 'numeric',
     minute: '2-digit',
@@ -2066,7 +2155,7 @@ function calendarAvailabilityLines(
     Number.isFinite(ms)
       ? zonedTime.formatToParts(new Date(ms)).find((part) => part.type === 'timeZoneName')?.value
       : undefined;
-  const dateTime = new Intl.DateTimeFormat('en-US', {
+  const dateTime = cachedDateTimeFormatter('en-US', {
     timeZone,
     weekday: 'long',
     month: 'long',
@@ -2206,7 +2295,7 @@ function zonedClock(value: string, timeZone?: string): { day: string; minutes: n
   if (Number.isNaN(ms)) return null;
   try {
     const parts = Object.fromEntries(
-      new Intl.DateTimeFormat('en-CA', {
+      cachedDateTimeFormatter('en-CA', {
         timeZone: timeZone ?? 'UTC',
         year: 'numeric',
         month: '2-digit',
@@ -3122,7 +3211,7 @@ function timeZoneLabel(timeZone: string | undefined, instant: number): string {
   if (!timeZone) return 'your calendar time zone';
   try {
     return (
-      new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'long' })
+      cachedDateTimeFormatter('en-US', { timeZone, timeZoneName: 'long' })
         .formatToParts(new Date(instant))
         .find((part) => part.type === 'timeZoneName')?.value ?? 'your calendar time zone'
     );
@@ -4069,7 +4158,7 @@ export function verifiedReadResponse(
             event.allDay !== true &&
             !/^\d{4}-\d{2}-\d{2}$/.test(stringField(event, 'start')) &&
             event.blocksTime !== false &&
-            stringField(event, 'ownerResponse') !== 'declined' &&
+            verifiedOwnerParticipation(event) !== 'declined' &&
             !calendarLodgingContext(event, complete),
         );
         const next = firstAppointment

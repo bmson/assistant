@@ -189,7 +189,42 @@ describe('calendar agenda briefing', () => {
     expect(html).toContain('Overlap pair 1');
     expect(html).toContain('Overlap pair 3');
     expect(html).not.toContain('Overlap pair 4');
-    expect(html).toContain('Show all 5 overlaps');
+    expect(html).toContain('Show 5 available details');
+  });
+
+  it('keeps counted-but-unexpanded notices visible while pair details are collapsed', () => {
+    const card = makeCard(1);
+    const sections = card.sections as Array<Record<string, unknown>>;
+    sections.push({
+      type: 'attention',
+      title: '1000 possible duplicate listings',
+      itemCount: 1000,
+      itemsTruncated: true,
+      items: [
+        ...Array.from({ length: 100 }, (_, i) => ({
+          title: `Duplicate pair ${i + 1}`,
+          detail: 'Both source listings remain visible.',
+        })),
+        { title: '900 additional possible duplicate listings counted but not expanded.' },
+      ],
+    });
+    const html = renderAgenda(card);
+    expect(html).toContain('Duplicate pair 3');
+    expect(html).not.toContain('Duplicate pair 4');
+    expect(html).toContain('900 additional possible duplicate listings counted but not expanded.');
+    expect(html).toContain('Show 100 available details');
+    expect(html).not.toContain('Show all 1000');
+    expect(html).toContain('Agenda event 1');
+  });
+
+  it('renders every accepted row even when a future producer uses an unknown day category', () => {
+    const card = makeCard(1);
+    const section = (card.sections as Array<Record<string, unknown>>)[0];
+    (section.items as Array<Record<string, unknown>>)[0].day = 'Type differs by source';
+    const html = renderAgenda(card);
+    expect(html).toContain('Agenda event 1');
+    expect(html).toContain('Time unavailable');
+    expect(html).toContain('Showing 1 of 1 event');
   });
 
   it('preserves the historical briefing layout when the marker is absent', () => {

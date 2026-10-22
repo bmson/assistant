@@ -52,6 +52,54 @@ describe('scoreCalendarEvent', () => {
     expect(scored.reasons).not.toContain('you have not replied to the invitation');
   });
 
+  it('suppresses a verified declined invitation even when the event would otherwise be salient', () => {
+    const scored = scoreCalendarEvent(
+      event({
+        location: 'Clinic, 14 Main Street',
+        ownerResponse: 'accepted',
+        ownerParticipation: {
+          status: 'declined',
+          identityVerified: true,
+          basis: 'attendee-email',
+        },
+      }),
+      ctx,
+    );
+    expect(scored.score).toBe(0);
+    expect(scored.reasons).toEqual([]);
+  });
+
+  it('does not treat a reference-calendar row or unverified legacy response as an owner RSVP', () => {
+    const scored = scoreCalendarEvent(
+      event({
+        calendarPurpose: 'reference',
+        ownerResponse: 'needsAction',
+        ownerParticipation: {
+          status: 'unknown',
+          identityVerified: false,
+          basis: 'unverified',
+        },
+      }),
+      ctx,
+    );
+    expect(scored.score).toBe(0);
+    expect(scored.reasons).not.toContain('you have not replied to the invitation');
+  });
+
+  it('uses a verified phone owner RSVP when attendee strings are absent', () => {
+    const scored = scoreCalendarEvent(
+      event({
+        ownerParticipation: {
+          status: 'needsAction',
+          identityVerified: true,
+          basis: 'attendee-email',
+        },
+      }),
+      ctx,
+    );
+    expect(scored.reasons).toContain('you have not replied to the invitation');
+  });
+
   it('counts a physical location as travel but a video link as not', () => {
     const physical = scoreCalendarEvent(event({ location: 'Laugavegur 12, Reykjavik' }), ctx);
     expect(physical.reasons.some((r) => r.startsWith('it is at'))).toBe(true);
