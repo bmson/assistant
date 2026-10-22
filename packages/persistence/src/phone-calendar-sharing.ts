@@ -302,7 +302,6 @@ export function parsePhoneCalendarSnapshotCache(
     return null;
   return { ...snapshot, syncedAt };
 }
-
 export function transitionPhoneCalendarSharing(
   ownerId: string,
   current: PhoneCalendarSharingState | null,

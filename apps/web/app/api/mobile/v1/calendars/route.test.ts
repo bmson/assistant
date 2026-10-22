@@ -150,6 +150,11 @@ describe('mobile selected-calendar sharing protocol', () => {
     expect((await PUT(request('PUT', snapshot))).status).toBe(400);
     expect(applies).not.toHaveBeenCalled();
   });
+  it('rejects generation-free legacy deletion before storage access', async () => {
+    expect((await DELETE(request('DELETE', {}))).status).toBe(400);
+    expect(fixture.ports).not.toHaveBeenCalled();
+    expect(applies).not.toHaveBeenCalled();
+  });
   it.each(['', 'Mars/Olympus'])(
     'rejects an invalid selected calendar time zone (%s)',
     async (zone) => {

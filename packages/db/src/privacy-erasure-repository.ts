@@ -7,11 +7,10 @@ import type {
 import {
   emailAttachmentCustodyCleanupIntentId,
   notificationDashboardMessageId,
-  phoneCalendarCacheKey,
-  phoneCalendarSharingErasureTombstone,
 } from '@assistant/persistence';
 import { and, asc, eq, gt, inArray, like, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
+import { erasePostgresPhoneCalendarSharing } from './phone-calendar-compatibility.js';
 import {
   agents,
   conversations,
@@ -36,7 +35,6 @@ import {
   notificationOutbox,
   occasions,
   ownerCard,
-  phoneCalendarSharing,
   recallSurfaces,
   securityIncidentAttention,
   securityIncidentSources,
@@ -892,33 +890,7 @@ export function createPostgresPrivacyErasureRepository(db: Db): PrivacyErasureRe
           .where(like(maintenanceCursors.name, preparedExtractionPrefix(agentId)));
         await tx.delete(memories).where(eq(memories.agentId, agentId));
         await tx.delete(occasions).where(eq(occasions.agentId, agentId));
-        const [phoneSharing] = await tx
-          .select({ state: phoneCalendarSharing.state })
-          .from(phoneCalendarSharing)
-          .where(eq(phoneCalendarSharing.agentId, agentId))
-          .for('update')
-          .limit(1);
-        const erasedPhoneSharing = phoneCalendarSharingErasureTombstone(
-          agentId,
-          phoneSharing?.state,
-          new Date(),
-        );
-        await tx
-          .insert(phoneCalendarSharing)
-          .values({
-            id: agentId,
-            agentId,
-            state: erasedPhoneSharing,
-            updatedAt: new Date(erasedPhoneSharing.updatedAt),
-          })
-          .onConflictDoUpdate({
-            target: phoneCalendarSharing.agentId,
-            set: {
-              state: erasedPhoneSharing,
-              updatedAt: new Date(erasedPhoneSharing.updatedAt),
-            },
-          });
-        await tx.delete(toolCache).where(eq(toolCache.cacheKey, phoneCalendarCacheKey(agentId)));
+        await erasePostgresPhoneCalendarSharing(tx, agentId, new Date());
         const samples = await tx.delete(writingSamples).returning({ id: writingSamples.id });
         const now = new Date();
         await tx

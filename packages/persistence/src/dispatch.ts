@@ -1,4 +1,5 @@
 import type { ExternalEffectProgress } from './external-effect.js';
+import type { PhoneCalendarCompatibilityRepository } from './phone-calendar-compatibility.js';
 import type { PhoneCalendarSharingRepository } from './phone-calendar-sharing.js';
 import type { Records } from './records.js';
 
@@ -122,6 +123,7 @@ export interface ToolExecutionRepository {
   contacts(): Promise<Array<{ emails: string[]; phones: string[] }>>;
   underRateLimit(scope: string, toolName: string, now?: Date): Promise<boolean>;
   readonly phoneCalendarSharing?: PhoneCalendarSharingRepository;
+  phoneCalendarCompatibility?: PhoneCalendarCompatibilityRepository;
   cacheGet(cacheKey: string, now?: Date): Promise<{ result: unknown } | null>;
   cachePut(input: {
     cacheKey: string;

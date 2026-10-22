@@ -3,7 +3,9 @@ import type {
   PrivacyExportRepository,
   Records,
 } from '@assistant/persistence';
+import { phoneCalendarSharingExport } from '@assistant/persistence';
 import { FieldPath, type Query } from '@google-cloud/firestore';
+import { createFirestorePhoneCalendarCompatibilityRepository } from './phone-calendar-compatibility.js';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
@@ -261,6 +263,9 @@ export class FirestorePrivacyExportRepository implements PrivacyExportRepository
           ? pick(profile, ['description', 'dos', 'donts', 'signature', 'updatedAt'])
           : null,
       },
+      phoneCalendarSharing: phoneCalendarSharingExport(
+        (await createFirestorePhoneCalendarCompatibilityRepository(this.store).read(agentId)).state,
+      ),
       compiledOwnerCard:
         cardRow?.agentId === agentId &&
         typeof cardRow.content === 'string' &&

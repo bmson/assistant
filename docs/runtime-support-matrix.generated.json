@@ -8,7 +8,7 @@
     "apps/web/lib/server.ts": "c7134fe07612b8653ef7ee73f92076bbdea5a27fb665c8efb3d843f960d49211",
     "apps/web/proxy.ts": "93a75f2e8459877898c920d5a9560255f90771b98d6ff584aed16a2898b5485a",
     "packages/db/drizzle/meta/_journal.json": "6aaf30195d32ffcffca7dd36fa138c7d82a37d7249fa59ced46a1d2975ca42d6",
-    "infra/gcp/release-contracts.json": "55236cff59c6d784f9fa587d16a28eae81d26a25260e4822dc774d0c05e32a68"
+    "infra/gcp/release-contracts.json": "bf1237ceb69f5656c0529bee0c652d9a69957a5a2f18f7baa27144e72e9c7c2a"
   },
   "latestPostgresMigration": "0129_slow_archangel",
   "postgresSchemaVersion": 129,
@@ -45,9 +45,9 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 128
+        "max": 129
       },
-      "currentPostgresSchemaCompatible": false
+      "currentPostgresSchemaCompatible": true
     },
     "code": {
       "apiContract": 1,
@@ -57,9 +57,9 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 128
+        "max": 129
       },
-      "currentPostgresSchemaCompatible": false
+      "currentPostgresSchemaCompatible": true
     },
     "processor": {
       "apiContract": 1,
@@ -69,9 +69,9 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 128
+        "max": 129
       },
-      "currentPostgresSchemaCompatible": false
+      "currentPostgresSchemaCompatible": true
     }
   },
   "agentWebSchemaCompatible": true,
@@ -155,7 +155,7 @@
     },
     "apps/web/app/api/mobile/v1/calendars/route.ts": {
       "methods": ["DELETE", "GET", "POST", "PUT"],
-      "sha256": "aa997435390e0ef4a5d426f17b2fe647a5eed3cbe9b469b5bfbe57304fa2b35c"
+      "sha256": "25f1c93c91adbce3edb75c03f1634485998d6f5e518578f4c986af9d71a0ad3a"
     },
     "apps/web/app/api/mobile/v1/calls/[id]/route.ts": {
       "methods": ["GET", "POST"],

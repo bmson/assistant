@@ -3,8 +3,10 @@ import type {
   PrivacyExportRepository,
   Records,
 } from '@assistant/persistence';
+import { phoneCalendarSharingExport } from '@assistant/persistence';
 import { and, eq, isNotNull, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
+import { createPostgresPhoneCalendarCompatibilityRepository } from './phone-calendar-compatibility.js';
 import {
   agents,
   contacts,
@@ -333,6 +335,9 @@ export function createPostgresPrivacyExportRepository(db: Db): PrivacyExportRepo
         },
         people,
         writingVoice: { samples, profile: profile[0] ?? null },
+        phoneCalendarSharing: phoneCalendarSharingExport(
+          (await createPostgresPhoneCalendarCompatibilityRepository(db).read(agentId)).state,
+        ),
         compiledOwnerCard: card[0] ?? null,
         situationPacks: packs,
         emailObservers: {

@@ -35,6 +35,9 @@ it('replaces and revokes owner-scoped phone snapshots in the portable PostgreSQL
     expect((await readPhoneCalendars(legacyCache, agentId))?.calendars).toEqual([
       { id: 'work', name: 'Work' },
     ]);
+    await expect(readPhoneCalendars(cache, randomUUID())).rejects.toThrow(
+      'Privacy owner row is unavailable',
+    );
     expect(await readPhoneCalendars(cache, agentId)).toBeNull();
     expect(await readPhoneCalendars(legacyCache, randomUUID())).toBeNull();
     await savePhoneCalendars(legacyCache, agentId, null);
