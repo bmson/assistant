@@ -148,6 +148,35 @@ final class NativeVisualReviewTests: XCTestCase {
                 .object(["type": .string("weather"), "title": .string("Weather"), "location": .string("Monterey"), "temperature": .string("18°"), "condition": .string("Clouds and sun"), "symbol": .string("cloud.sun.fill"), "detail": .string("A light jacket should be enough.")])
             ])
         ]))
+        let calendarAgenda = MessagePart(type: "data-card", data: .object([
+            "kind": .string("briefing"), "id": .string("calendar-agenda-review"),
+            "presentation": .string("calendar-agenda"), "title": .string("Agenda"),
+            "date": .string("Tuesday, October 27 · Pacific Time"),
+            "lead": .string("Eight events across Personal and Work; all calendars checked."),
+            "sections": .array([.object([
+                "type": .string("agenda"), "title": .string("Tuesday, October 27"), "complete": .bool(true),
+                "items": .array((0..<8).map { index in .object([
+                    "id": .string("agenda-review-\(index)"),
+                    "day": .string(index == 0 ? "All day" : "Timed"),
+                    "time": .string(index == 0 ? "All day" : "\(9 + index):00 AM"),
+                    "title": .string(index == 0 ? "City holiday" : "Review \(index) with the team"),
+                    "location": .string(index == 0 ? "" : "Room \(index)"),
+                    "note": .string(index == 1 ? "Needs response" : ""),
+                    "calendars": .array([.string(index == 0 ? "Personal" : "Work")]),
+                    "calendarLinks": .array([.object(["label": .string("Open in Work"), "url": .string("https://calendar.google.com/event/review-\(index)")])]),
+                    "meetingLink": .object(["label": .string("Join meeting"), "url": .string("https://meet.google.com/review-\(index)")]),
+                ]) })
+            ]),
+            .object([
+                "type": .string("attention"), "title": .string("4 possible overlaps"),
+                "items": .array([.object(["title": .string("4 possible overlaps"), "detail": .string("Calendar overlap does not confirm attendance.")])]),
+                "overlaps": .array((0..<4).map { index in .object([
+                    "title": .string("Review \(index + 1) overlaps with another event"),
+                    "detail": .string("The two schedules overlap by 20 minutes."),
+                ]) }),
+            ])
+            ])
+        ]))
         let alert = MessagePart(type: "data-card", data: RichMessageFixture.alert)
         let event = MessagePart(type: "data-card", data: .object([
             "kind": .string("calendar-event"), "id": .string("spacing-event"),
@@ -188,6 +217,9 @@ final class NativeVisualReviewTests: XCTestCase {
             ]),
             ChatMessage(id: "spacing-briefing", role: .assistant, parts: [
                 .init(type: "text", text: "Here is your weekend briefing."), briefing,
+            ]),
+            ChatMessage(id: "spacing-calendar-agenda", role: .assistant, parts: [
+                .init(type: "text", text: "Here is the schedule for Tuesday."), calendarAgenda,
             ]),
             ChatMessage(id: "spacing-generated", role: .assistant, parts: [
                 .init(type: "text", text: "I kept the travel details together for quick reference."), RichMessageFixture.generated(),

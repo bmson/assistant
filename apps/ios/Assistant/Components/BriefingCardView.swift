@@ -13,6 +13,14 @@ struct BriefingCardView: View {
     private var stacksRows: Bool { dynamicTypeSize.isAccessibilitySize }
 
     var body: some View {
+        if card.presentation == .calendarAgenda {
+            calendarAgendaBody
+        } else {
+            legacyBody
+        }
+    }
+
+    private var legacyBody: some View {
         VStack(alignment: .leading, spacing: 14) {
             if stacksRows {
                 VStack(alignment: .leading, spacing: 4) {
@@ -58,6 +66,264 @@ struct BriefingCardView: View {
         .accessibilityElement(children: .contain)
     }
 
+    private var calendarAgendaBody: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            calendarAgendaHeader
+            if !card.lead.isEmpty {
+                Text(card.lead)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(Array(card.sections.enumerated()), id: \.offset) { _, section in
+                switch section {
+                case let .agenda(title, complete, omittedCount, items):
+                    calendarAgendaSection(title: title, complete: complete, omittedCount: omittedCount, items: items)
+                case let .list(kind, title, items, overlaps):
+                    if kind == "attention" && !overlaps.isEmpty {
+                        attentionSection(title: title, items: items, overlaps: overlaps)
+                    } else {
+                        VStack(alignment: .leading, spacing: 8) {
+                            heading(title)
+                            ForEach(Array(items.enumerated()), id: \.offset) { _, item in listRow(item) }
+                        }
+                    }
+                case let .weather(title, location, temperature, condition, symbol, detail):
+                    sectionView(.weather(title: title, location: location, temperature: temperature, condition: condition, symbol: symbol, detail: detail))
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private var calendarAgendaHeader: some View {
+        let title = Text(card.title.isEmpty ? "Agenda" : card.title)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+            .accessibilityAddTraits(.isHeader)
+        let date = Text(card.date)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+            .fixedSize(horizontal: false, vertical: true)
+        return Group {
+            if stacksRows {
+                VStack(alignment: .leading, spacing: 4) {
+                    title
+                    if !card.date.isEmpty { date }
+                }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        title
+                        Spacer(minLength: 4)
+                        if !card.date.isEmpty { date.multilineTextAlignment(.trailing) }
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        title
+                        if !card.date.isEmpty { date }
+                    }
+                }
+            }
+        }
+    }
+
+    private func calendarAgendaSection(
+        title: String,
+        complete: Bool,
+        omittedCount: Int?,
+        items: [MessageResponseCard.BriefingCard.AgendaItem]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            heading(title)
+            let mixedCalendars = Set(items.flatMap(\.calendars)).count > 1
+            let initial = Array(items.prefix(6))
+            groupedCalendarRows(initial, showCalendarAttribution: mixedCalendars)
+            if items.count > 6 {
+                CardDisclosure(collapsedLabel: "Showing 6 of \(items.count) · Show all", expandedLabel: "Show fewer", standalone: false) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(items.dropFirst(6))) { item in
+                            calendarAgendaRow(item, showCalendarAttribution: mixedCalendars)
+                        }
+                    }
+                }
+            }
+            if let omittedCount {
+                Text("\(omittedCount) additional \(omittedCount == 1 ? "event is" : "events are") not shown.")
+                    .font(.caption).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !complete {
+                Text("Some calendars could not be read, so this may be incomplete.")
+                    .font(.caption).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func groupedCalendarRows(
+        _ items: [MessageResponseCard.BriefingCard.AgendaItem],
+        showCalendarAttribution: Bool
+    ) -> some View {
+        let groups = ["All day", "Timed", "Time unavailable"].filter { group in
+            items.contains { category(for: $0) == group }
+        }
+        return VStack(alignment: .leading, spacing: 8) {
+            ForEach(groups, id: \.self) { group in
+                VStack(alignment: .leading, spacing: 8) {
+                    heading(group)
+                    ForEach(items.filter { category(for: $0) == group }) { item in
+                        calendarAgendaRow(item, showCalendarAttribution: showCalendarAttribution)
+                    }
+                }
+            }
+        }
+    }
+
+    private func category(for item: MessageResponseCard.BriefingCard.AgendaItem) -> String {
+        if item.day == "All day" { return "All day" }
+        if item.day == "Time unavailable" || item.time.isEmpty { return "Time unavailable" }
+        return "Timed"
+    }
+
+    private func calendarAgendaRow(
+        _ item: MessageResponseCard.BriefingCard.AgendaItem,
+        showCalendarAttribution: Bool
+    ) -> some View {
+        let calendarNames = item.calendars.reduce(into: [String]()) { names, name in
+            if !names.contains(name) { names.append(name) }
+        }
+        let timeLabel: String
+        if item.day == "All day" {
+            timeLabel = item.time.isEmpty ? "All day" : item.time
+        } else if item.day == "Time unavailable" || item.time.isEmpty {
+            timeLabel = "Time unavailable"
+        } else {
+            timeLabel = item.time
+        }
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(timeLabel)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+            }
+            Text(item.title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+                .fixedSize(horizontal: false, vertical: true)
+            if !item.location.isEmpty {
+                Text(item.location).font(.caption).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !item.note.isEmpty {
+                Text(item.note).font(.caption.weight(.medium)).foregroundStyle(AssistantTheme.accent(for: colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if showCalendarAttribution && !calendarNames.isEmpty {
+                Text(calendarNames.joined(separator: " · "))
+                    .font(.caption).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            calendarActions(item)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private func calendarActions(_ item: MessageResponseCard.BriefingCard.AgendaItem) -> some View {
+        if stacksRows {
+            VStack(alignment: .leading, spacing: 2) { calendarActionLinks(item) }
+        } else {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) { calendarActionLinks(item) }
+                VStack(alignment: .leading, spacing: 2) { calendarActionLinks(item) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func calendarActionLinks(_ item: MessageResponseCard.BriefingCard.AgendaItem) -> some View {
+        ForEach(Array(item.calendarLinks.enumerated()), id: \.offset) { _, link in
+            if let url = URL(string: link.url) {
+                Link(destination: url) {
+                    Label("Open event", systemImage: "calendar")
+                        .font(.caption.weight(.medium)).frame(minHeight: 44, alignment: .leading)
+                }
+                .accessibilityLabel("Open \(item.title) in \(link.label)")
+            }
+        }
+        if let meeting = item.meetingLink, let url = URL(string: meeting.url) {
+            Link(destination: url) {
+                Label(meeting.label.isEmpty ? "Join meeting" : meeting.label, systemImage: "video.fill")
+                    .font(.caption.weight(.medium)).frame(minHeight: 44, alignment: .leading)
+            }
+            .accessibilityLabel("Join meeting for \(item.title)")
+        }
+    }
+
+    private func attentionSection(
+        title: String,
+        items: [MessageResponseCard.BriefingCard.ListItem],
+        overlaps: [MessageResponseCard.BriefingCard.Overlap]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            heading(title)
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                if item.title == title {
+                    VStack(alignment: .leading, spacing: 2) {
+                        if !item.detail.isEmpty {
+                            Text(item.detail)
+                                .font(.caption)
+                                .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if !item.meta.isEmpty {
+                            Text(item.meta)
+                                .font(.caption2.monospaced().weight(.semibold))
+                                .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                        }
+                    }
+                } else {
+                    listRow(item)
+                }
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(overlaps.prefix(3).enumerated()), id: \.offset) { _, overlap in
+                    overlapRow(overlap)
+                }
+            }
+            if overlaps.count > 3 {
+                CardDisclosure(
+                    collapsedLabel: "Showing 3 of \(overlaps.count) · Show all overlaps",
+                    expandedLabel: "Show fewer",
+                    standalone: false
+                ) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(overlaps.dropFirst(3).enumerated()), id: \.offset) { _, overlap in
+                            overlapRow(overlap)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func overlapRow(_ overlap: MessageResponseCard.BriefingCard.Overlap) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(overlap.title)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+                .fixedSize(horizontal: false, vertical: true)
+            if !overlap.detail.isEmpty {
+                Text(overlap.detail)
+                    .font(.caption)
+                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
     @ViewBuilder
     private func sectionView(_ section: MessageResponseCard.BriefingCard.Section) -> some View {
         switch section {
@@ -82,7 +348,7 @@ struct BriefingCardView: View {
                 }
             }
             .accessibilityElement(children: .combine)
-        case let .list(_, title, items):
+        case let .list(_, title, items, _):
             VStack(alignment: .leading, spacing: 8) {
                 heading(title)
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in

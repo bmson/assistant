@@ -8,6 +8,7 @@ import {
   rendersAllCards,
   rendersSomeCards,
   responseCardPayloads,
+  visibleCalendarAgendaItems,
 } from './response-card.js';
 
 describe('generated card icon fallback', () => {
@@ -37,6 +38,178 @@ describe('generated card icon fallback', () => {
       expect(markup).toContain('lucide-sparkles');
     },
   );
+});
+
+describe('calendar agenda briefing', () => {
+  const makeCard = (count: number): Record<string, unknown> => ({
+    kind: 'briefing',
+    id: 'agenda-2026-10-22',
+    presentation: 'calendar-agenda',
+    date: 'Thursday, Oct 22 · America/Los_Angeles',
+    lead: 'Eight events across your checked calendars.',
+    sections: [
+      {
+        type: 'agenda',
+        title: 'Thursday, October 22',
+        complete: true,
+        items: Array.from({ length: count }, (_, index) => ({
+          id: `event-${index + 1}`,
+          day: index === 0 ? 'All day' : 'Timed',
+          time: index === 0 ? 'All day' : `${9 + index}:00 AM–${10 + index}:00 AM`,
+          title: `Agenda event ${index + 1}`,
+        })),
+      },
+    ],
+  });
+  const renderAgenda = (card: Record<string, unknown>) =>
+    renderToStaticMarkup(<ResponseCards cards={[card]} timeZone="UTC" />);
+
+  it.each([0, 1, 6, 7, 20])('renders %i event rows with a six-row default preview', (count) => {
+    const card = makeCard(count);
+    expect(rendersAllCards([card])).toBe(true);
+    const html = renderAgenda(card);
+    const visibleCount = Math.min(count, 6);
+    for (let index = 1; index <= visibleCount; index += 1)
+      expect(html).toContain(`Agenda event ${index}`);
+    if (count > 6) {
+      expect(html).not.toContain('Agenda event 7');
+      expect(html).toContain(`Show all ${count}`);
+      expect(html).toContain('aria-expanded="false"');
+    } else {
+      expect(html).not.toContain('Show all');
+    }
+  });
+
+  it('retains every payload row when expanded, including all twenty events', () => {
+    const card = makeCard(20);
+    const sections = card.sections as Array<Record<string, unknown>>;
+    const allRows = sections[0].items as Array<Record<string, unknown>>;
+    expect(visibleCalendarAgendaItems(allRows, false)).toHaveLength(6);
+    expect(visibleCalendarAgendaItems(allRows, true)).toHaveLength(20);
+    expect(visibleCalendarAgendaItems(allRows, true)).toEqual(allRows);
+  });
+
+  it('renders optional attention, merged calendars, and safe event actions without exposing metadata', () => {
+    const card = makeCard(1);
+    const sections = card.sections as Array<Record<string, unknown>>;
+    const agenda = sections[0];
+    const items = agenda.items as Array<Record<string, unknown>>;
+    items[0] = {
+      ...items[0],
+      location: 'Long location name that can wrap instead of making the card wider',
+      note: 'Needs response',
+      calendars: ['Work', 'Family'],
+      eventLink: { label: 'Ignored producer label', url: 'https://calendar.example/event/1' },
+      meetingLink: { label: 'Ignored producer label', url: 'https://meet.example/room' },
+      calendarLinks: [
+        { label: 'Work calendar', url: 'javascript:alert(1)' },
+        { label: 'Family calendar', url: 'https://calendar.example/family' },
+      ],
+    };
+    sections.push({
+      type: 'attention',
+      title: 'Conflicts',
+      items: [{ title: 'Review overlapping events', detail: 'Two meetings overlap.' }],
+    });
+    const html = renderAgenda(card);
+    expect(rendersAllCards([card])).toBe(true);
+    expect(html).toContain('Agenda · Thursday, Oct 22 · America/Los_Angeles');
+    expect(html).toContain('Thursday, October 22');
+    expect(html).toContain('All day');
+    expect(html).toContain('Work · Family');
+    expect(html).toContain('Needs response');
+    expect(html).toContain('Open event');
+    expect(html).toContain('Join meeting');
+    expect(html).toContain('Family calendar');
+    expect(html).not.toContain('javascript:');
+    expect(html).toContain('Review overlapping events');
+    expect(html).not.toContain('Sources');
+    expect(html).not.toContain('Details');
+  });
+
+  it('keeps an all-day span intact and omits calendar labels when the whole day uses one calendar', () => {
+    const card = makeCard(2);
+    const sections = card.sections as Array<Record<string, unknown>>;
+    const items = sections[0].items as Array<Record<string, unknown>>;
+    items[0] = {
+      ...items[0],
+      day: 'All day',
+      time: 'All day · through Saturday, Oct 24',
+      calendars: ['Family'],
+    };
+    items[1] = { ...items[1], day: 'Timed', calendars: ['Family'] };
+
+    const html = renderAgenda(card);
+    expect(html).toContain('All day · through Saturday, Oct 24');
+    expect(html).toContain('>All day</h4>');
+    expect(html).toContain('>Timed</h4>');
+    expect(html).not.toContain('Family</span>');
+  });
+
+  it('does not repeat a matching day and zone under the Agenda header', () => {
+    const card = makeCard(1);
+    const date = card.date as string;
+    const sections = card.sections as Array<Record<string, unknown>>;
+    sections[0].title = date;
+    const html = renderAgenda(card);
+    expect(html.split(date)).toHaveLength(2);
+  });
+
+  it('shows each event attribution when calendars are mixed within the day', () => {
+    const card = makeCard(2);
+    const sections = card.sections as Array<Record<string, unknown>>;
+    const items = sections[0].items as Array<Record<string, unknown>>;
+    items[0] = { ...items[0], calendars: ['Work'] };
+    items[1] = { ...items[1], calendars: ['Family'] };
+    const html = renderAgenda(card);
+    expect(html).toContain('>Work</span>');
+    expect(html).toContain('>Family</span>');
+  });
+
+  it('shows three overlap pairs by default and preserves the full count and caution', () => {
+    const card = makeCard(0);
+    const sections = card.sections as Array<Record<string, unknown>>;
+    sections.push({
+      type: 'attention',
+      title: '5 possible overlaps',
+      items: [
+        {
+          title: '5 possible overlaps',
+          detail: 'Calendar overlap does not confirm attendance.',
+        },
+      ],
+      overlaps: Array.from({ length: 5 }, (_, index) => ({
+        title: `Overlap pair ${index + 1}`,
+        detail: 'These events occur at the same time.',
+      })),
+    });
+    const html = renderAgenda(card);
+    expect(html).toContain('5 possible overlaps');
+    expect(html).toContain('Calendar overlap does not confirm attendance.');
+    expect(html).toContain('Overlap pair 1');
+    expect(html).toContain('Overlap pair 3');
+    expect(html).not.toContain('Overlap pair 4');
+    expect(html).toContain('Show all 5 overlaps');
+  });
+
+  it('preserves the historical briefing layout when the marker is absent', () => {
+    const card = {
+      kind: 'briefing',
+      date: 'Thursday, Oct 22',
+      lead: 'Your day is ready.',
+      sections: [
+        {
+          type: 'agenda',
+          title: 'Schedule',
+          items: [{ day: 'Today', time: '9 AM', title: 'Check-in' }],
+        },
+      ],
+    };
+    const html = renderAgenda(card);
+    expect(html).toContain('Briefing · Thursday, Oct 22');
+    expect(html).toContain('Today');
+    expect(html).not.toContain('Show all');
+  });
 });
 
 describe('responseCardPayloads', () => {

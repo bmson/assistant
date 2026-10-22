@@ -50,6 +50,11 @@ import {
 } from './family-birthday.js';
 import { detectFutureWatchIntent } from './future-watch-intent.js';
 import { requestedCalendarPerson } from './person-calendar.js';
+import {
+  ownerCalendarToolName,
+  requestedOwnerCalendarScope,
+  type OwnerCalendarScope,
+} from './calendar-scope.js';
 
 export type PersonalReadKind =
   | 'calendar'
@@ -100,6 +105,8 @@ export interface PersonalReadRequest {
   sourceReadBefore?: string;
   /** Literal named-person scope; calendar membership alone never proves attendance. */
   personCalendar?: { name: string };
+  /** Literal owner-named calendar scope; model-proposed calendar IDs are ignored. */
+  calendarScope?: OwnerCalendarScope;
   /** Deterministic review-only proposal requiring availability and event-list reads. */
   weeklyCalendarPlan?: boolean;
   calendarPlanOptions?: CalendarPlanOptions;
@@ -2198,6 +2205,9 @@ function explicitPrivateSourceRequest(
     const child: PersonalReadRequest = {
       kind: 'calendar',
       explicitSource: 'calendar',
+      ...(requestedOwnerCalendarScope(question)
+        ? { calendarScope: requestedOwnerCalendarScope(question) }
+        : {}),
       queryTerms: [topic],
       firstToolName: 'calendar.search_events',
       requiresThreadRead: false,
@@ -2283,7 +2293,7 @@ export function explicitSourceEvidence(
       (request.firstToolName === 'calendar.list_events'
         ? args?.query === undefined
         : args?.query === request.queryTerms.join(' ')) &&
-      !args?.calendarIds &&
+      calendarScopeMatchesArgs(request.calendarScope, args?.calendarIds) &&
       args?.timeMin === request.timeWindow?.timeMin &&
       args?.timeMax === (request.timeWindow?.timeMax ?? request.sourceReadBefore) &&
       Array.isArray(objectRecord(row.result)?.events)
@@ -2742,6 +2752,9 @@ function detectPersonalReadRequestInternal(
     const timeWindow = compoundTripWindow(options.now ?? new Date());
     return {
       kind: 'calendar_email',
+      ...(requestedOwnerCalendarScope(latest)
+        ? { calendarScope: requestedOwnerCalendarScope(latest) }
+        : {}),
       queryTerms: [],
       firstToolName: 'calendar.list_events',
       requiresThreadRead: true,
@@ -2942,6 +2955,18 @@ function detectPersonalReadRequestInternal(
     ...(includeCalendarLocations ? { includeCalendarLocations: true } : {}),
     ...(includeCalendarOverlapSummary ? { includeCalendarOverlapSummary: true } : {}),
   };
+  const calendarScope =
+    calendar && !calendarReadProhibited ? requestedOwnerCalendarScope(latest) : undefined;
+  if (calendarScope) {
+    request.calendarScope = calendarScope;
+    // Keep richer request flags intact, but move a named lookup off tools that
+    // cannot accept a calendar selector. The scoped event read remains first.
+    if (
+      request.firstToolName !== 'calendar.list_events' &&
+      request.firstToolName !== 'calendar.search_events'
+    )
+      request.firstToolName = terms.length > 0 ? 'calendar.search_events' : 'calendar.list_events';
+  }
   if (weeklyCalendarPlan && calendarPlanOptions) {
     request.timeWindow = calendarPlanWindow(options, calendarPlanOptions);
   } else if (upcomingFlightDiscovery) {
@@ -3053,10 +3078,22 @@ function calendarReadInterval(
     : undefined;
 }
 
+function calendarScopeMatchesArgs(
+  scope: OwnerCalendarScope | undefined,
+  calendarIds: unknown,
+): boolean {
+  if (!scope) return !Array.isArray(calendarIds) || calendarIds.length === 0;
+  return (
+    Array.isArray(calendarIds) &&
+    calendarIds.length === 1 &&
+    calendarIds[0] === ownerCalendarToolName(scope)
+  );
+}
+
 function matchingCalendarRead(row: ReadToolEvidence, request: PersonalReadRequest): boolean {
   if (!succeeded(row) || row.toolName !== request.firstToolName) return false;
   const args = argsRecord(row);
-  if (Array.isArray(args?.calendarIds) && args.calendarIds.length > 0) return false;
+  if (!calendarScopeMatchesArgs(request.calendarScope, args?.calendarIds)) return false;
   if (
     row.toolName === 'calendar.search_events' &&
     !queryIncludes(args?.query, request.queryTerms)
@@ -3084,7 +3121,7 @@ function calendarListPages(
       const result = objectRecord(row.result);
       const interval = calendarReadInterval(request);
       return (
-        (!Array.isArray(args?.calendarIds) || args.calendarIds.length === 0) &&
+        calendarScopeMatchesArgs(request.calendarScope, args?.calendarIds) &&
         Array.isArray(result?.events) &&
         (!interval || (args?.timeMin === interval.start && args?.timeMax === interval.endExclusive))
       );
@@ -3652,6 +3689,7 @@ export function nextRequiredReadTool(
         (row) =>
           row.fromCurrentTask !== false &&
           row.toolName === request.firstToolName &&
+          calendarScopeMatchesArgs(request.calendarScope, argsRecord(row)?.calendarIds) &&
           (request.firstToolName === 'calendar.list_events' ||
             argsRecord(row)?.query === request.queryTerms.join(' ')) &&
           argsRecord(row)?.timeMin === request.timeWindow?.timeMin &&
@@ -3661,6 +3699,31 @@ export function nextRequiredReadTool(
       return attempts.length < 2 ? request.firstToolName : undefined;
     }
     return undefined;
+  }
+  if (request.calendarScope) {
+    const matching = evidence.filter((row) => matchingCalendarRead(row, request));
+    const last = matching.at(-1);
+    const token = objectRecord(last?.result)?.nextPageToken;
+    if (typeof token === 'string' && token.length > 0 && matching.length < 3) {
+      const attempted = evidence.filter(
+        (row) =>
+          row.fromCurrentTask !== false &&
+          row.toolName === request.firstToolName &&
+          calendarScopeMatchesArgs(request.calendarScope, argsRecord(row)?.calendarIds) &&
+          argsRecord(row)?.pageToken === token,
+      ).length;
+      return attempted < 2 ? request.firstToolName : undefined;
+    }
+    if (!last) {
+      const attempted = evidence.filter(
+        (row) =>
+          row.fromCurrentTask !== false &&
+          row.toolName === request.firstToolName &&
+          calendarScopeMatchesArgs(request.calendarScope, argsRecord(row)?.calendarIds) &&
+          argsRecord(row)?.pageToken == null,
+      ).length;
+      return attempted < 2 ? request.firstToolName : undefined;
+    }
   }
   if (request.explicitSource === 'mail') {
     if (!explicitSourceEvidence(request, evidence).length)
@@ -3710,7 +3773,11 @@ export function nextRequiredReadTool(
   }
   if (request.weeklyCalendarPlan) {
     const availabilitySucceeded = evidence.some((row) => matchingCalendarRead(row, request));
-    if (!availabilitySucceeded && attempts(evidence, 'calendar.availability') < 2)
+    if (
+      !request.calendarScope &&
+      !availabilitySucceeded &&
+      attempts(evidence, 'calendar.availability') < 2
+    )
       return 'calendar.availability';
 
     const interval = calendarReadInterval(request);
@@ -3718,7 +3785,7 @@ export function nextRequiredReadTool(
       .filter((row) => {
         if (row.toolName !== 'calendar.list_events' || !succeeded(row)) return false;
         const args = argsRecord(row);
-        if (Array.isArray(args?.calendarIds) && args.calendarIds.length > 0) return false;
+        if (!calendarScopeMatchesArgs(request.calendarScope, args?.calendarIds)) return false;
         return (
           !interval || (args?.timeMin === interval.start && args?.timeMax === interval.endExclusive)
         );
@@ -3904,6 +3971,9 @@ export function groundReadToolInput(
     const pages = explicitCalendarPages(request, evidence);
     const token = objectRecord(pages.at(-1)?.result)?.nextPageToken;
     return {
+      ...(request.calendarScope
+        ? { calendarIds: [ownerCalendarToolName(request.calendarScope)] }
+        : {}),
       ...(request.firstToolName === 'calendar.search_events'
         ? { query: request.queryTerms.join(' ') }
         : {}),
@@ -3934,14 +4004,24 @@ export function groundReadToolInput(
     }
     const { calendarIds: _ignored, ...unboundCalendarArgs } = input;
     const allCalendars =
-      request.weeklyCalendarPlan || request.calendarEventAnalysis
+      request.weeklyCalendarPlan || request.calendarEventAnalysis || request.calendarScope
         ? (({ pageToken: _untrustedPageToken, ...args }) => args)(unboundCalendarArgs)
         : unboundCalendarArgs;
     const interval = calendarReadInterval(request);
+    const scopedPageToken = request.calendarScope
+      ? objectRecord(evidence.filter((row) => matchingCalendarRead(row, request)).at(-1)?.result)
+          ?.nextPageToken
+      : undefined;
     return {
       ...allCalendars,
+      ...(request.calendarScope
+        ? { calendarIds: [ownerCalendarToolName(request.calendarScope)] }
+        : {}),
       ...(interval ? { timeMin: interval.start, timeMax: interval.endExclusive } : {}),
       maxResults: request.maxResults ?? 50,
+      ...(request.calendarScope && typeof scopedPageToken === 'string' && scopedPageToken
+        ? { pageToken: scopedPageToken }
+        : {}),
       ...(hasTypedTripRead(request)
         ? { pageToken: compoundCalendarPageToken(request, evidence) }
         : request.weeklyCalendarPlan || request.calendarEventAnalysis
@@ -3954,12 +4034,25 @@ export function groundReadToolInput(
   }
   if (toolName === 'calendar.search_events') {
     const { calendarIds: _ignored, ...allCalendars } = input;
+    const scopedArgs = request.calendarScope
+      ? (({ pageToken: _untrustedPageToken, ...args }) => args)(allCalendars)
+      : allCalendars;
     const interval = calendarReadInterval(request);
+    const scopedPageToken = request.calendarScope
+      ? objectRecord(evidence.filter((row) => matchingCalendarRead(row, request)).at(-1)?.result)
+          ?.nextPageToken
+      : undefined;
     return {
-      ...allCalendars,
+      ...scopedArgs,
+      ...(request.calendarScope
+        ? { calendarIds: [ownerCalendarToolName(request.calendarScope)] }
+        : {}),
       ...(interval ? { timeMin: interval.start, timeMax: interval.endExclusive } : {}),
       ...(request.queryTerms.length > 0 ? { query: request.queryTerms.join(' ') } : {}),
       maxResults: request.maxResults ?? 50,
+      ...(request.calendarScope && typeof scopedPageToken === 'string' && scopedPageToken
+        ? { pageToken: scopedPageToken }
+        : {}),
     };
   }
   if (toolName === 'calendar.availability') {

@@ -1213,27 +1213,48 @@ enum MessageResponseCard: Identifiable {
     /// The daily briefing: a lead and labelled sections, all pre-formatted
     /// in the owner's zone by the server.
     struct BriefingCard: Hashable {
-        struct AgendaItem: Hashable {
+        enum Presentation: String, Hashable {
+            case calendarAgenda = "calendar-agenda"
+        }
+        struct CalendarLink: Hashable {
+            let label: String
+            let url: String
+        }
+        struct MeetingLink: Hashable {
+            let label: String
+            let url: String
+        }
+        struct AgendaItem: Hashable, Identifiable {
+            let id: String
             let day: String
             let time: String
             let title: String
             let location: String
             let flag: String
             let note: String
+            let calendars: [String]
+            let calendarLinks: [CalendarLink]
+            let meetingLink: MeetingLink?
         }
         struct ListItem: Hashable {
             let title: String
             let detail: String
             let meta: String
         }
+        struct Overlap: Hashable {
+            let title: String
+            let detail: String
+        }
         enum Section: Hashable {
             case agenda(title: String, complete: Bool, omittedCount: Int?, items: [AgendaItem])
             case weather(title: String, location: String, temperature: String, condition: String, symbol: String, detail: String)
-            case list(kind: String, title: String, items: [ListItem])
+            case list(kind: String, title: String, items: [ListItem], overlaps: [Overlap])
         }
         let id: String
         let date: String
         let lead: String
+        let title: String
+        let presentation: Presentation?
         let sections: [Section]
 
         init?(data: [String: JSONValue]) {
@@ -1249,8 +1270,26 @@ enum MessageResponseCard: Identifiable {
                     }()
                     switch text(section, "type") {
                     case "agenda":
-                        let rows = items.map { AgendaItem(day: text($0, "day"), time: text($0, "time"), title: text($0, "title"),
-                                                          location: text($0, "location"), flag: text($0, "flag"), note: text($0, "note")) }
+                        let rows = items.enumerated().map { index, row in
+                            let links: [CalendarLink] = {
+                                guard case let .array(values)? = row["calendarLinks"] else { return [] }
+                                return values.compactMap { value in
+                                    guard let object = value.objectValue,
+                                          let label = object["label"]?.string, !label.isEmpty,
+                                          let url = Self.safeActionURL(object["url"]?.string) else { return nil }
+                                    return CalendarLink(label: label, url: url)
+                                }
+                            }()
+                            let meeting: MeetingLink? = {
+                                guard let object = row["meetingLink"]?.objectValue,
+                                      let url = Self.safeActionURL(object["url"]?.string) else { return nil }
+                                return MeetingLink(label: object["label"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? "Join meeting", url: url)
+                            }()
+                            return AgendaItem(id: text(row, "id").isEmpty ? "agenda-\(index)-\(text(row, "title"))" : text(row, "id"),
+                                              day: text(row, "day"), time: text(row, "time"), title: text(row, "title"),
+                                              location: text(row, "location"), flag: text(row, "flag"), note: text(row, "note"),
+                                              calendars: row["calendars"]?.arrayStrings ?? [], calendarLinks: links, meetingLink: meeting)
+                        }
                             .filter { !$0.title.isEmpty }
                         if !rows.isEmpty {
                             let omittedCount = section["omittedCount"]?.integerValue.flatMap {
@@ -1268,7 +1307,18 @@ enum MessageResponseCard: Identifiable {
                     case let kind where !kind.isEmpty:
                         let rows = items.map { ListItem(title: text($0, "title"), detail: text($0, "detail"), meta: text($0, "meta")) }
                             .filter { !$0.title.isEmpty }
-                        if !rows.isEmpty { sections.append(.list(kind: kind, title: text(section, "title"), items: rows)) }
+                        let overlaps: [Overlap] = {
+                            guard case let .array(values)? = section["overlaps"] else { return [] }
+                            return values.compactMap { value in
+                                guard let object = value.objectValue else { return nil }
+                                let title = text(object, "title")
+                                guard !title.isEmpty else { return nil }
+                                return Overlap(title: title, detail: text(object, "detail"))
+                            }
+                        }()
+                        if !rows.isEmpty || !overlaps.isEmpty {
+                            sections.append(.list(kind: kind, title: text(section, "title"), items: rows, overlaps: overlaps))
+                        }
                     default:
                         continue
                     }
@@ -1279,7 +1329,16 @@ enum MessageResponseCard: Identifiable {
             self.id = id
             self.date = text(data, "date")
             self.lead = lead
+            self.title = text(data, "title")
+            self.presentation = Presentation(rawValue: text(data, "presentation"))
             self.sections = sections
+        }
+
+        private static func safeActionURL(_ raw: String?) -> String? {
+            guard let raw, let url = URL(string: raw),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  url.host != nil, url.user == nil, url.password == nil else { return nil }
+            return url.absoluteString
         }
     }
 

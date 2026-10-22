@@ -332,6 +332,42 @@ final class AssistantMarkdownTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testCalendarAgendaMarkedBriefingSnapshotsAllRowsAtNarrowAndAXSizes() throws {
+        let rows = (0..<8).map { index in
+            """
+            {"id":"review-\(index)","day":"\(index == 0 ? "All day" : "Timed")","time":"\(index == 0 ? "All day" : "9:\(index)0 AM")","title":"\(index == 0 ? "City holiday" : "Long planning session with the design team \(index)")","location":"\(index == 0 ? "" : "Conference room \(index)")","note":"\(index == 1 ? "Needs response" : "")","calendars":["Personal","Work"],"calendarLinks":[{"label":"Open in Work","url":"https://calendar.google.com/event/\(index)"}],"meetingLink":{"label":"Join meeting","url":"https://meet.google.com/review-\(index)"}}
+            """
+        }.joined(separator: ",")
+        let json = """
+        {"id":"agenda-review","role":"assistant","parts":[{"type":"data-card","data":{"kind":"briefing","id":"agenda-review","presentation":"calendar-agenda","title":"Agenda","date":"Tuesday, October 27 · Pacific Time","lead":"Eight events across Personal and Work; all calendars checked.","sections":[{"type":"agenda","title":"Tuesday, October 27","complete":true,"items":[\(rows)]}]}}]}
+        """
+        let message = try JSONDecoder().decode(ChatMessage.self, from: Data(json.utf8))
+        let cards = message.parts.compactMap(MessageResponseCard.init(part:))
+        guard case let .briefing(briefing)? = cards.first,
+              case let .agenda(_, _, _, items)? = briefing.sections.first else {
+            return XCTFail("Expected the marked calendar agenda")
+        }
+        XCTAssertEqual(items.count, 8)
+
+        for (name, scheme, size) in [
+            ("narrow-light", ColorScheme.light, DynamicTypeSize.large),
+            ("narrow-dark-accessibility3", .dark, .accessibility3),
+        ] {
+            let view = RichResponseCards(cards: [.briefing(briefing)])
+                .padding(12).frame(width: 320).background(AssistantTheme.stage)
+                .environment(\.colorScheme, scheme)
+                .environment(\.dynamicTypeSize, size)
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 2
+            let image = try XCTUnwrap(renderer.uiImage)
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "calendar-agenda-\(name)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+    }
+
     /// A scoreboard decodes both teams, keeps the reply above it, asks the
     /// live endpoint only for games that can still change, and renders.
     @MainActor
