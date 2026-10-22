@@ -3,7 +3,9 @@ import { readFile } from 'node:fs/promises';
 import {
   type PhoneCalendarSharingState,
   phoneCalendarCacheKey,
+  phoneCalendarCacheRecord,
   phoneCalendarCoverage,
+  phoneCalendarSnapshotSchema,
   readPhoneCalendars,
   savePhoneCalendars,
   transitionPhoneCalendarSharing,
@@ -79,8 +81,30 @@ async function seedState(db: Db, ownerId: string, state = stateFor(ownerId)) {
   await db.execute(
     sql`insert into phone_calendar_sharing(id,agent_id,state) values (${ownerId},${ownerId},${JSON.stringify(state)}::jsonb)`,
   );
+  const snapshot = phoneCalendarSnapshotSchema.parse({
+    ...legacy,
+    calendars: state.calendars,
+    selectionRevision: 4,
+    capturedAt: instant,
+    complete: true,
+    truncated: false,
+    sourceAvailability: [{ calendarId: 'work', status: 'available', complete: true }],
+    events: [
+      {
+        eventId: 'private-event',
+        calendarId: 'work',
+        summary: 'private-event-body',
+        location: 'Private clinic',
+        start: instant,
+        end: '2026-10-22T19:00:00.000Z',
+        allDay: false,
+        blocksTime: true,
+      },
+    ],
+  });
+  const record = phoneCalendarCacheRecord(ownerId, snapshot, new Date(instant));
   await db.execute(
-    sql`insert into tool_cache(cache_key,tool_name,result,expires_at) values (${phoneCalendarCacheKey(ownerId)},'phone-calendars.snapshot',${JSON.stringify({ ...legacy, selectionRevision: 4, capturedAt: instant, syncedAt: instant, events: [{ summary: 'private-event-body' }] })}::jsonb, now()+interval '7 days')`,
+    sql`insert into tool_cache(cache_key,tool_name,result,expires_at) values (${record.cacheKey},${record.toolName},${JSON.stringify(record.result)}::jsonb, ${record.expiresAt.toISOString()}::timestamptz)`,
   );
 }
 it('runs legacy reads, export, and full privacy erasure with table 129 absent', async () =>

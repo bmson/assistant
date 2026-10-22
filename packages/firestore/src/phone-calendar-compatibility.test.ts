@@ -1,7 +1,9 @@
 import {
   type PhoneCalendarSharingState,
   phoneCalendarCacheKey,
+  phoneCalendarCacheRecord,
   phoneCalendarCoverage,
+  phoneCalendarSnapshotSchema,
   readPhoneCalendars,
   savePhoneCalendars,
   transitionPhoneCalendarSharing,
@@ -64,6 +66,33 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore rollback sharin
         updatedAt: now,
       }),
     );
+    await cache.cachePut(
+      phoneCalendarCacheRecord(
+        ownerId,
+        phoneCalendarSnapshotSchema.parse({
+          ...legacy,
+          calendars: enabled.calendars,
+          selectionRevision: enabled.generation,
+          capturedAt: now.toISOString(),
+          complete: true,
+          truncated: false,
+          sourceAvailability: [{ calendarId: 'work', status: 'available', complete: true }],
+          events: [
+            {
+              eventId: 'private-event',
+              calendarId: 'work',
+              summary: 'Private cached event',
+              location: 'Private clinic',
+              start: now.toISOString(),
+              end: '2026-10-22T19:00:00.000Z',
+              allDay: false,
+              blocksTime: true,
+            },
+          ],
+        }),
+        now,
+      ),
+    );
     const read = await readPhoneCalendars(cache, ownerId);
     expect(read).toMatchObject({ events: [], complete: false, calendars: [{ id: 'work' }] });
     if (!read) throw new Error('Missing selected-source coverage');
@@ -77,7 +106,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore rollback sharin
     const exported = (await new FirestorePrivacyExportRepository(store).exportOwnerData())
       .phoneCalendarSharing;
     expect(exported?.state?.calendars).toEqual(enabled.calendars);
-    expect(JSON.stringify(exported)).not.toMatch(/replacement-publisher|private-publisher|events/);
+    expect(JSON.stringify(exported)).not.toMatch(
+      /replacement-publisher|private-publisher|Private cached event|Private clinic|events/,
+    );
     await new FirestorePrivacyErasureRepository(store).erase();
     await new FirestorePrivacyErasureRepository(store).complete();
     const record = decodeRecord<{ state: PhoneCalendarSharingState }>(
