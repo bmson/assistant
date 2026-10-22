@@ -58,6 +58,7 @@ describe('calendar sources through provider normalization and persisted agenda',
     { prompt: 'What does my calendar look like tomorrow?', named: false, variant: 'mixed' },
     { prompt: 'What does my calendar look like tomorrow?', named: false, variant: 'shifted' },
     { prompt: 'What does my calendar look like tomorrow?', named: false, variant: 'zone' },
+    { prompt: 'What does my calendar look like tomorrow?', named: false, variant: 'stale' },
     { prompt: 'Show my Family calendar tomorrow', named: true, variant: 'family' },
   ])(
     'persists the actual producer result for $prompt ($variant)',
@@ -135,6 +136,9 @@ describe('calendar sources through provider normalization and persisted agenda',
           timeMin: args.timeMin,
           timeMax: args.timeMax,
           timeZone: 'UTC',
+          ...(variant === 'stale'
+            ? { capturedAt: new Date(Date.now() - 31 * 60000).toISOString() }
+            : {}),
           calendars: [
             {
               id: 'work',
@@ -314,6 +318,11 @@ describe('calendar sources through provider normalization and persisted agenda',
         return;
       }
       expect(JSON.stringify(cards)).toContain('Family appointment');
+      if (variant === 'stale') {
+        expect(card).toMatchObject({ complete: false });
+        expect(JSON.stringify(cards)).toContain('Coverage is incomplete');
+        expect(JSON.stringify(cards)).toContain('Calendars not checked');
+      }
       if (canonicalDispute) {
         expect(JSON.stringify(cards)).toContain('Team planning');
         if (variant !== 'zone')
