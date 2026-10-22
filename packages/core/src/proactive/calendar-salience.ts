@@ -156,13 +156,32 @@ export function scoreCalendarEvent(
 
   const attendees = (event.attendees ?? []).map(parseAttendee);
   const mine = attendees.find((attendee) => self.has(attendee.email));
+  const participation = event.ownerParticipation;
+  const verifiedParticipation =
+    participation?.identityVerified === true && participation.basis === 'attendee-email'
+      ? participation.status
+      : undefined;
   if (
     event.status === 'cancelled' ||
-    event.ownerResponse === 'declined' ||
+    verifiedParticipation === 'declined' ||
     mine?.status === 'declined'
   )
     return { event, score: 0, reasons: [] };
-  if (mine && (mine.status === 'needsaction' || mine.status === '?' || mine.status === '')) {
+  // A reference calendar is visible as context, not proof that an event is
+  // the owner's commitment. Require a verified owner RSVP before sending an
+  // unsolicited personal nudge about one of its entries.
+  if (
+    event.calendarPurpose === 'reference' &&
+    verifiedParticipation !== 'accepted' &&
+    verifiedParticipation !== 'tentative' &&
+    verifiedParticipation !== 'needsAction' &&
+    !mine
+  )
+    return { event, score: 0, reasons: [] };
+  if (
+    verifiedParticipation === 'needsAction' ||
+    (mine && (mine.status === 'needsaction' || mine.status === '?' || mine.status === ''))
+  ) {
     score += WEIGHTS.unanswered;
     reasons.push('you have not replied to the invitation');
   }

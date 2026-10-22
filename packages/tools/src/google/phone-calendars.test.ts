@@ -307,6 +307,48 @@ describe('iPhone calendar access through normal calendar tools', () => {
     expect(result.events[0]).not.toHaveProperty('calendarTimeZone');
   });
 
+  it('keeps an event-specific source zone instead of replacing it with the calendar default', async () => {
+    const cache = cacheFixture();
+    const data = snapshot();
+    const first = data.events[0];
+    if (!first) throw new Error('Missing fixture event');
+    data.events[0] = {
+      ...first,
+      start: '2026-10-19',
+      end: '2026-10-20',
+      allDay: true,
+      calendarTimeZone: 'Pacific/Honolulu',
+    };
+    data.events.push({
+      ...first,
+      eventId: 'timed-honolulu',
+      iCalUID: 'timed-honolulu-uid',
+      start: '2026-10-19T09:00:00-10:00',
+      end: '2026-10-19T10:00:00-10:00',
+      allDay: false,
+      calendarTimeZone: 'Pacific/Honolulu',
+    });
+    await savePhoneCalendars(cache, 'owner', data, now);
+    const registry = new ToolRegistry();
+    registerPhoneCalendarFallback(registry, cache, 'secret', 'owner@example.com');
+
+    const result = await run(registry, 'calendar.list_events', window);
+    expect(result.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventId: 'phone-meeting',
+          allDay: true,
+          calendarTimeZone: 'Pacific/Honolulu',
+        }),
+        expect.objectContaining({
+          eventId: 'timed-honolulu',
+          allDay: false,
+          calendarTimeZone: 'Pacific/Honolulu',
+        }),
+      ]),
+    );
+  });
+
   it('paginates phone events without repeats or loss and binds the cursor to the request', async () => {
     const cache = cacheFixture();
     const data = snapshot();

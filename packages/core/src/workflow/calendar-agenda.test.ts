@@ -81,7 +81,7 @@ describe('calendarAgendaCards', () => {
       request: request(),
     });
     expect(complete).toHaveLength(1);
-    expect(complete[0]).toMatchObject({ complete: true, lead: '1 event from Work.' });
+    expect(complete[0]).toMatchObject({ complete: true, lead: '1 calendar entry from Work.' });
     expect(agenda(complete)[0]).toMatchObject({ complete: true });
 
     const partial = calendarAgendaCards({
@@ -200,7 +200,12 @@ describe('calendarAgendaCards', () => {
         `2026-10-22T${String(18 + Math.floor(index / 4)).padStart(2, '0')}:${String((index % 4) * 10 + 5).padStart(2, '0')}:00Z`,
       ),
     );
-    events.push(event('all-day', '2026-10-22', '2026-10-23', { allDay: true }));
+    events.push(
+      event('all-day', '2026-10-22', '2026-10-23', {
+        allDay: true,
+        calendarTimeZone: 'UTC',
+      }),
+    );
     const cards = calendarAgendaCards({ evidence: [evidence()], events, request: request() });
     const rows = items(cards);
     expect(rows).toHaveLength(13);
@@ -230,7 +235,10 @@ describe('calendarAgendaCards', () => {
       (section) => section.type === 'attention' && section.overlaps,
     );
     expect(overlapSection?.overlaps).toMatchObject([
-      { detail: 'overnight · overlap. Calendar overlap does not confirm attendance.' },
+      {
+        detail:
+          'overnight (Calendar) · overlap (Calendar). Calendar overlap does not confirm attendance.',
+      },
     ]);
   });
 
@@ -292,6 +300,65 @@ describe('calendarAgendaCards', () => {
     expect(firstDaySections.some((section) => section.overlaps)).toBe(false);
   });
 
+  it('keeps every agenda row while bounding dense overlap details and reporting the exact omitted count', () => {
+    const count = 2_000;
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: Array.from({ length: count }, (_, index) =>
+        event(`dense-${index}`, '2026-10-22T09:00:00Z', '2026-10-22T10:00:00Z', {
+          calendarId: `calendar-${index}`,
+          eventId: `event-${index}`,
+          title: `Dense meeting ${index}`,
+        }),
+      ),
+      request: request({ timeZone: 'UTC' }),
+    });
+    const sections = cards[0]?.sections as Array<Record<string, unknown>>;
+    const overlap = sections.find((section) => section.overlaps);
+    const details = overlap?.overlaps as unknown[];
+    expect(items(cards)).toHaveLength(count);
+    expect(details).toHaveLength(100);
+    expect(overlap).toMatchObject({
+      overlapCount: (count * (count - 1)) / 2,
+      overlapsTruncated: true,
+    });
+    expect(JSON.stringify(overlap?.items)).toContain('1998900 additional overlaps');
+    expect(JSON.stringify(cards).length).toBeLessThan(2_000_000);
+  });
+
+  it('caps formatted pair details across the whole response while preserving per-day counts', () => {
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: Array.from({ length: 120 }, (_, index) => {
+        const dayOffset = Math.floor(index / 10);
+        const date = new Date(Date.parse('2026-10-22T00:00:00Z') + dayOffset * 86_400_000)
+          .toISOString()
+          .slice(0, 10);
+        return event(`multi-day-${index}`, `${date}T09:00:00Z`, `${date}T10:00:00Z`, {
+          calendarId: `calendar-${index}`,
+          eventId: `event-${index}`,
+        });
+      }),
+      request: request({ timeZone: 'UTC' }),
+    });
+    const overlapSections = cards.flatMap((card) =>
+      (card.sections as Array<Record<string, unknown>>).filter((section) => section.overlaps),
+    );
+    expect(overlapSections.reduce((sum, section) => sum + Number(section.overlapCount), 0)).toBe(
+      540,
+    );
+    expect(
+      overlapSections.reduce((sum, section) => sum + (section.overlaps as unknown[]).length, 0),
+    ).toBe(100);
+    expect(
+      overlapSections.reduce(
+        (sum, section) =>
+          sum + Number(section.overlapCount) - (section.overlaps as unknown[]).length,
+        0,
+      ),
+    ).toBe(440);
+  });
+
   it('surfaces canonical source differences in the row note and attention section', () => {
     const card = event('canonical-planning', '2026-10-22T09:00:00Z', '2026-10-22T10:00:00Z', {
       title: 'Planning',
@@ -337,22 +404,23 @@ describe('calendarAgendaCards', () => {
     });
     expect(cards[0]?.date).toBe('Dates not verified');
     expect(items(cards)[0]).toMatchObject({
-      day: 'Type differs by source',
+      day: 'Time unavailable',
       title: 'Title differs by source',
-      time: 'Time differs by source',
+      time: 'Time unavailable',
     });
     const sections = cards[0]?.sections as Array<Record<string, unknown>>;
     const differences = sections.find((section) => section.title === 'Calendar source differences');
     expect(differences?.items).toMatchObject([
       {
-        title:
-          'Event title differs by source · title, time, event type, time zone, location, status, busy state, response metadata, calendar purpose',
+        title: 'Source titles differ · Planning',
       },
     ]);
     expect(JSON.stringify(differences?.items)).toContain('Work: title Planning');
     expect(JSON.stringify(differences?.items)).toContain('Family: title Planning hold');
     expect(JSON.stringify(differences?.items)).toContain('; time All day');
-    expect(JSON.stringify(differences?.items)).toContain('time 9:30 AM – 10:30 AM');
+    expect(JSON.stringify(differences?.items)).toContain(
+      'time Friday, Oct 23, 2026 9:30 AM – 10:30 AM (UTC)',
+    );
     expect(JSON.stringify(differences?.items)).toContain('location Office');
     expect(JSON.stringify(differences?.items)).toContain('calendar purpose commitments');
     expect(JSON.stringify(differences?.items)).toContain('provider copy asks for a response');
@@ -360,6 +428,90 @@ describe('calendarAgendaCards', () => {
     expect(items(cards)[0]?.note).toContain(
       'Calendar copies differ in title, time, event type, time zone, location, status, busy state, response metadata, calendar purpose.',
     );
+  });
+
+  it('shows a trusted UID time disagreement as an advisory, not a personal conflict', () => {
+    const accepted = {
+      status: 'accepted',
+      identityVerified: true,
+      basis: 'attendee-email',
+    } as const;
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: [
+        event('work-event', '2026-10-22T17:00:00Z', '2026-10-22T18:00:00Z', {
+          title: 'Planning',
+          calendarId: 'work',
+          eventId: 'work-event',
+          iCalUID: 'shared-uid',
+          blocksTime: true,
+          ownerParticipation: accepted,
+        }),
+        event('family-event', '2026-10-22T17:05:00Z', '2026-10-22T18:05:00Z', {
+          title: 'Planning',
+          calendarId: 'family',
+          eventId: 'family-event',
+          iCalUID: 'shared-uid',
+          blocksTime: true,
+          ownerParticipation: accepted,
+        }),
+      ],
+      request: request(),
+    });
+    const sections = cards.flatMap((card) =>
+      Array.isArray(card.sections) ? (card.sections as Record<string, unknown>[]) : [],
+    );
+    expect(sections.some((section) => String(section.title).includes('source identity'))).toBe(
+      true,
+    );
+    expect(sections.some((section) => Number(section.overlapCount) > 0)).toBe(false);
+    expect(JSON.stringify(sections)).toContain('trusted event UID');
+    expect(JSON.stringify(sections)).not.toContain('personal commitment conflict');
+  });
+
+  it('groups timed source instants in the owner display zone despite source-zone differences', () => {
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: [
+        event('source-zone-event', '2026-10-23T01:00:00Z', '2026-10-23T02:00:00Z', {
+          title: 'Late meeting',
+          sourceVariants: [
+            {
+              calendarId: 'work',
+              eventId: 'event',
+              start: '2026-10-23T01:00:00Z',
+              end: '2026-10-23T02:00:00Z',
+              allDay: false,
+              calendarTimeZone: 'UTC',
+            },
+            {
+              calendarId: 'family',
+              eventId: 'copy',
+              start: '2026-10-22T18:00:00-07:00',
+              end: '2026-10-22T19:00:00-07:00',
+              allDay: false,
+              calendarTimeZone: 'America/Los_Angeles',
+            },
+          ],
+        }),
+      ],
+      request: request(),
+    });
+    expect(cards[0]?.date).toContain('Thursday, Oct 22');
+    expect(JSON.stringify(cards[0]?.sections)).not.toContain('Dates not verified');
+    const sections = (cards[0]?.sections ?? []) as Array<Record<string, unknown>>;
+    const sourceDiffs = JSON.stringify(
+      sections.find((section) => section.title === 'Calendar source differences'),
+    );
+    expect(sourceDiffs).toContain('Friday, Oct 23, 2026 1:00 AM – 2:00 AM (UTC)');
+    expect(sourceDiffs).toContain('Thursday, Oct 22, 2026 6:00 PM – 7:00 PM (America/Los_Angeles)');
+    expect(sections).toMatchObject([
+      { type: 'agenda' },
+      {
+        title: 'Calendar source differences',
+      },
+    ]);
+    expect(JSON.stringify(sections)).not.toContain('differ in time zone, time');
   });
 
   it('separates probable phone mirrors and uses explicit arrival guidance', () => {
@@ -424,7 +576,11 @@ describe('calendarAgendaCards', () => {
       request: request({ timeZone: 'UTC' }),
     });
     const sections = cards[0]?.sections as Array<Record<string, unknown>>;
-    expect(sections.some((section) => section.title === 'Arrival guidance')).toBe(true);
+    expect(
+      String(
+        sections.find((section) => String(section.title).includes('arrival and start'))?.title,
+      ),
+    ).toContain('1 possible arrival and start pair');
     expect(sections.some((section) => String(section.title).includes('possible overlap'))).toBe(
       false,
     );

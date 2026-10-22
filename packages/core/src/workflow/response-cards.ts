@@ -1,10 +1,7 @@
-import {
-  type CalendarOccurrenceSource,
-  type CalendarOwnerParticipation,
-  sameCalendarOccurrence,
-} from '@assistant/persistence';
+import type { CalendarOccurrenceSource, CalendarOwnerParticipation } from '@assistant/persistence';
 import { calendarAgendaCards, calendarAgendaScopedEvidence } from './calendar-agenda.js';
 import { calendarSourceDateLabel, calendarWindowMembership } from './calendar-read-window.js';
+import { canonicalOccurrenceGroups } from './calendar-relationship.js';
 import { safeCalendarSourceUrl, safeVideoMeetingUrl } from './calendar-source-link.js';
 import type { LiveLookup } from './live-lookup.js';
 import type { PersonalReadRequest } from './read-intent.js';
@@ -13,6 +10,25 @@ import type { ActionEvidence } from './response-contract.js';
 
 type RecordValue = Record<string, unknown>;
 type EventGroup = [RecordValue, ...RecordValue[]];
+const calendarDateFormatters = new Map<string, Intl.DateTimeFormat>();
+const MAX_CALENDAR_DATE_FORMATTERS = 64;
+
+function calendarDateFormatter(options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+  const key = JSON.stringify(['en-US', options]);
+  const cached = calendarDateFormatters.get(key);
+  if (cached) {
+    calendarDateFormatters.delete(key);
+    calendarDateFormatters.set(key, cached);
+    return cached;
+  }
+  const formatter = new Intl.DateTimeFormat('en-US', options);
+  if (calendarDateFormatters.size >= MAX_CALENDAR_DATE_FORMATTERS) {
+    const oldest = calendarDateFormatters.keys().next().value;
+    if (oldest !== undefined) calendarDateFormatters.delete(oldest);
+  }
+  calendarDateFormatters.set(key, formatter);
+  return formatter;
+}
 
 export interface ResponseCard {
   kind:
@@ -147,7 +163,7 @@ function formatTime(value: string, timeZone?: string): string {
   }
   const date = new Date(value);
   if (Number.isNaN(date.valueOf())) return value;
-  return new Intl.DateTimeFormat('en-US', {
+  return calendarDateFormatter({
     hour: 'numeric',
     minute: '2-digit',
     timeZone,
@@ -158,7 +174,7 @@ function calendarDate(value: string, timeZone?: string): string {
   if (!timeZone) return value.slice(0, 10);
   const date = new Date(value);
   if (!Number.isFinite(date.valueOf())) return value.slice(0, 10);
-  return new Intl.DateTimeFormat('en-US', {
+  return calendarDateFormatter({
     timeZone,
     year: 'numeric',
     month: 'short',
@@ -245,20 +261,19 @@ export function calendarResponseCards(
           )
       : [];
   });
-  const groups: EventGroup[] = [];
-  for (const event of events) {
-    const group = groups.find((candidate) =>
-      candidate.every((member) => sameCalendarOccurrence(member, event)),
-    );
-    if (group) group.push(event);
-    else groups.push([event]);
-  }
+  const groups = canonicalOccurrenceGroups(events) as EventGroup[];
   return groups
     .map((group) => {
       const event = group[0];
       const start = string(event.start);
       const end = string(event.end);
-      const allDay = event.allDay === true || /^\d{4}-\d{2}-\d{2}$/.test(start);
+      const allDayValues = new Set(
+        group.map(
+          (entry) => entry.allDay === true || /^\d{4}-\d{2}-\d{2}$/.test(string(entry.start)),
+        ),
+      );
+      const eventTypeDiffers = allDayValues.size > 1;
+      const allDay = !eventTypeDiffers && allDayValues.has(true);
       const links = Array.isArray(event.links) ? event.links.map(record).filter(Boolean) : [];
       const calendarLink = links.find(
         (link) =>
@@ -266,9 +281,21 @@ export function calendarResponseCards(
           isSpecificCalendarLink(link) &&
           safeCalendarSourceUrl(string(link?.url)) !== undefined,
       );
-      const meetingLink = links.find(
-        (link) => isVideoMeetingLink(link) && safeVideoMeetingUrl(string(link?.url)) !== undefined,
-      );
+      const safeMeetingLinks = [
+        ...new Map(
+          group.flatMap((entry) =>
+            (Array.isArray(entry.links) ? entry.links.map(record).filter(Boolean) : []).flatMap(
+              (link) => {
+                const url = isVideoMeetingLink(link)
+                  ? safeVideoMeetingUrl(string(link?.url))
+                  : undefined;
+                return url ? [[url, { label: string(link?.label), url }] as const] : [];
+              },
+            ),
+          ),
+        ).values(),
+      ];
+      const meetingLink = safeMeetingLinks.length === 1 ? safeMeetingLinks[0] : undefined;
       const calendars = [...new Set(group.map((entry) => string(entry.calendar)).filter(Boolean))];
       const sourceLinks = group
         .flatMap((entry) => {
@@ -330,17 +357,6 @@ export function calendarResponseCards(
       const titleDiffers = canonicalValuesDiffer('summary');
       const timeDiffers = canonicalValuesDiffer('start') || canonicalValuesDiffer('end');
       const locationDiffers = canonicalValuesDiffer('location');
-      const differingFields = [
-        ...(titleDiffers ? ['title'] : []),
-        ...(timeDiffers ? ['time'] : []),
-        ...(canonicalValuesDiffer('allDay') ? ['event type'] : []),
-        ...(canonicalValuesDiffer('calendarTimeZone') ? ['time zone'] : []),
-        ...(locationDiffers ? ['location'] : []),
-        ...(canonicalValuesDiffer('status') ? ['status'] : []),
-        ...(canonicalValuesDiffer('blocksTime') ? ['busy state'] : []),
-        ...(canonicalValuesDiffer('calendarPurpose') ? ['calendar purpose'] : []),
-        ...(participationStatuses.length > 1 ? ['owner response'] : []),
-      ];
       const sourceIntegrity =
         titleDiffers ||
         locationDiffers ||
@@ -350,38 +366,52 @@ export function calendarResponseCards(
         canonicalValuesDiffer('status') ||
         canonicalValuesDiffer('blocksTime') ||
         canonicalValuesDiffer('calendarPurpose') ||
+        safeMeetingLinks.length > 1 ||
         participationStatuses.length > 1
           ? 'disputed'
           : 'consistent';
       return {
         kind: 'calendar-event' as const,
         id: `calendar-${group.map((entry) => `${string(entry.calendarId)}:${string(entry.eventId)}`).join('|')}`,
-        title: differingFields.length
-          ? `Calendar sources differ: ${differingFields.join(', ')}`
+        title: titleDiffers
+          ? `Calendar titles differ: ${group
+              .map(
+                (entry) =>
+                  `${string(entry.calendar) || string(entry.calendarId) || 'Calendar'}: ${string(entry.summary) || 'Untitled event'}`,
+              )
+              .join(' · ')}`
           : string(event.summary) || 'Untitled event',
         start: timeDiffers ? '' : start,
         end: timeDiffers ? '' : end,
         time: timeDiffers
           ? 'Time differs by calendar source'
-          : allDay
-            ? request?.timeWindow
-              ? `All day · ${calendarSourceDateLabel(event)}`
-              : 'All day'
-            : calendarTimeRange(start, end, request?.timeZone),
+          : eventTypeDiffers
+            ? 'Time unavailable'
+            : allDay
+              ? request?.timeWindow
+                ? `All day · ${calendarSourceDateLabel(event)}`
+                : 'All day'
+              : calendarTimeRange(start, end, request?.timeZone),
         allDay,
         ...(options?.includeUnresolvedDates
           ? { windowMembership: calendarWindowMembership(event, request) }
           : {}),
-        ...(string(event.calendarTimeZone)
+        ...(!canonicalValuesDiffer('calendarTimeZone') && string(event.calendarTimeZone)
           ? { calendarTimeZone: string(event.calendarTimeZone) }
           : {}),
-        ...(string(event.eventId) ? { eventId: string(event.eventId) } : {}),
-        ...(string(event.calendarId) ? { calendarId: string(event.calendarId) } : {}),
-        ...(string(event.iCalUID) ? { iCalUID: string(event.iCalUID) } : {}),
-        ...(string(event.recurringEventId)
+        ...(!canonicalValuesDiffer('eventId') && string(event.eventId)
+          ? { eventId: string(event.eventId) }
+          : {}),
+        ...(!canonicalValuesDiffer('calendarId') && string(event.calendarId)
+          ? { calendarId: string(event.calendarId) }
+          : {}),
+        ...(!canonicalValuesDiffer('iCalUID') && string(event.iCalUID)
+          ? { iCalUID: string(event.iCalUID) }
+          : {}),
+        ...(!canonicalValuesDiffer('recurringEventId') && string(event.recurringEventId)
           ? { recurringEventId: string(event.recurringEventId) }
           : {}),
-        ...(string(event.originalStartTime)
+        ...(!canonicalValuesDiffer('originalStartTime') && string(event.originalStartTime)
           ? { originalStartTime: string(event.originalStartTime) }
           : {}),
         ...(consolidatedParticipation && consolidatedParticipation.status !== 'unknown'
@@ -409,26 +439,28 @@ export function calendarResponseCards(
           : [],
         calendars,
         ...(calendarLinks.length ? { calendarLinks } : {}),
-        calendarLink: calendarLink
-          ? {
-              label: string(calendarLink.label) || 'Open event',
-              url: safeCalendarSourceUrl(string(calendarLink.url)) ?? '',
-            }
-          : undefined,
+        calendarLink:
+          calendarLink && calendarLinks.length === 1
+            ? {
+                label: string(calendarLink.label) || 'Open event',
+                url: safeCalendarSourceUrl(string(calendarLink.url)) ?? '',
+              }
+            : undefined,
         meetingLink: meetingLink
           ? {
-              label: string(meetingLink.label) || 'Join video meeting',
-              url: string(meetingLink.url),
+              label: meetingLink.label || 'Join video meeting',
+              url: meetingLink.url,
             }
           : undefined,
         // Retain the established field for older clients, but never point an
         // event affordance at the meeting itself.
-        link: calendarLink
-          ? {
-              label: string(calendarLink.label) || 'Open event',
-              url: safeCalendarSourceUrl(string(calendarLink.url)) ?? '',
-            }
-          : undefined,
+        link:
+          calendarLink && calendarLinks.length === 1
+            ? {
+                label: string(calendarLink.label) || 'Open event',
+                url: safeCalendarSourceUrl(string(calendarLink.url)) ?? '',
+              }
+            : undefined,
       };
     })
     .sort((a, b) => Date.parse(String(a.start)) - Date.parse(String(b.start)));

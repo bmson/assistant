@@ -1,11 +1,98 @@
 import type {
+  CalendarOccurrenceIdentity,
   CalendarOwnerParticipation,
   CalendarOwnerParticipationStatus,
 } from '@assistant/persistence';
-import { probablePhoneCalendarDuplicate } from '@assistant/persistence';
+import { probablePhoneCalendarDuplicate, sameCalendarOccurrence } from '@assistant/persistence';
 import type { BriefingCalendarEvent } from './briefing.js';
 
 export type CalendarRelationship = 'probable_duplicate' | 'compatible_time_roles' | 'unresolved';
+export type CalendarOverlapClassification =
+  | 'personal_commitment_conflict'
+  | 'commitments_policy_overlap'
+  | 'attendance_unconfirmed';
+
+/** A trusted shared UID with incomplete occurrence metadata can signal a copy,
+ * but it is never enough to merge sources or suppress an ordinary event row. */
+export function possibleCalendarIdentityDisagreement(
+  left: CalendarOccurrenceIdentity,
+  right: CalendarOccurrenceIdentity,
+): boolean {
+  const leftCalendar = typeof left.calendarId === 'string' ? left.calendarId : '';
+  const rightCalendar = typeof right.calendarId === 'string' ? right.calendarId : '';
+  const uid = typeof left.iCalUID === 'string' ? left.iCalUID : '';
+  if (
+    !leftCalendar ||
+    !rightCalendar ||
+    leftCalendar === rightCalendar ||
+    !uid ||
+    uid !== right.iCalUID ||
+    left.recurringEventId ||
+    right.recurringEventId
+  )
+    return false;
+  const leftOriginal = typeof left.originalStartTime === 'string' ? left.originalStartTime : '';
+  const rightOriginal = typeof right.originalStartTime === 'string' ? right.originalStartTime : '';
+  if (
+    leftOriginal &&
+    rightOriginal &&
+    Number.isFinite(Date.parse(leftOriginal)) &&
+    Number.isFinite(Date.parse(rightOriginal)) &&
+    Date.parse(leftOriginal) !== Date.parse(rightOriginal)
+  )
+    return false;
+  const leftStart = Date.parse(String(left.start ?? ''));
+  const rightStart = Date.parse(String(right.start ?? ''));
+  const leftEnd = Date.parse(String(left.end ?? ''));
+  const rightEnd = Date.parse(String(right.end ?? ''));
+  return (
+    Number.isFinite(leftStart) &&
+    Number.isFinite(rightStart) &&
+    Number.isFinite(leftEnd) &&
+    Number.isFinite(rightEnd) &&
+    (leftStart !== rightStart || leftEnd !== rightEnd)
+  );
+}
+
+/** Merge only pairwise-equivalent canonical components; ambiguous bridges stay separate. */
+export function canonicalOccurrenceGroups<T extends CalendarOccurrenceIdentity>(
+  events: readonly T[],
+): T[][] {
+  const visited = new Set<number>();
+  const groups: Array<{ first: number; values: T[][] }> = [];
+  for (let index = 0; index < events.length; index += 1) {
+    if (visited.has(index)) continue;
+    const component = new Set([index]);
+    const queue = [index];
+    visited.add(index);
+    while (queue.length) {
+      const current = queue.pop();
+      const event = current === undefined ? undefined : events[current];
+      if (!event) continue;
+      for (let candidateIndex = 0; candidateIndex < events.length; candidateIndex += 1) {
+        if (visited.has(candidateIndex)) continue;
+        const candidate = events[candidateIndex];
+        if (candidate && sameCalendarOccurrence(event, candidate)) {
+          visited.add(candidateIndex);
+          component.add(candidateIndex);
+          queue.push(candidateIndex);
+        }
+      }
+    }
+    const indexes = [...component].sort((a, b) => a - b);
+    const values = indexes.flatMap((memberIndex) => {
+      const event = events[memberIndex];
+      return event ? [event] : [];
+    });
+    const isClique = values.every((left, leftIndex) =>
+      values.every(
+        (right, rightIndex) => leftIndex === rightIndex || sameCalendarOccurrence(left, right),
+      ),
+    );
+    groups.push({ first: index, values: isClique ? [values] : values.map((value) => [value]) });
+  }
+  return groups.sort((left, right) => left.first - right.first).flatMap((group) => group.values);
+}
 
 export function parseCalendarOwnerParticipation(
   value: unknown,
@@ -110,6 +197,22 @@ export function verifiedPersonalCommitment(event: {
   return (
     verifiedOwnerParticipation(event) === 'accepted' || event.calendarPurpose === 'commitments'
   );
+}
+
+export function classifyCalendarOverlap(
+  left: Parameters<typeof verifiedPersonalCommitment>[0],
+  right: Parameters<typeof verifiedPersonalCommitment>[0],
+): CalendarOverlapClassification {
+  if (!verifiedPersonalCommitment(left) || !verifiedPersonalCommitment(right))
+    return 'attendance_unconfirmed';
+  if (
+    verifiedOwnerParticipation(left) === 'accepted' &&
+    verifiedOwnerParticipation(right) === 'accepted'
+  )
+    return 'personal_commitment_conflict';
+  if (left.calendarPurpose === 'commitments' || right.calendarPurpose === 'commitments')
+    return 'commitments_policy_overlap';
+  return 'attendance_unconfirmed';
 }
 
 /** Advisory only: independently reconcile a source's explicit early-arrival rule. */

@@ -2141,7 +2141,9 @@ describe('requested focus-plan variations', () => {
     });
 
     expect(result.text.length).toBeLessThan(6_000);
-    expect(result.text).toContain('additional overlaps or possible duplicate listings omitted');
+    expect(result.text).toContain(
+      'additional possible-overlap pairs or duplicate-entry comparisons omitted',
+    );
     expect(result.text).toContain('all were included in the planning check');
     expect(result.text).not.toContain('Calendar sources:');
     expect(result.text).not.toContain('additional source links omitted from this brief');
@@ -2244,7 +2246,9 @@ describe('requested focus-plan variations', () => {
       plan: threeDayPlan,
     });
 
-    expect(result.text).toContain('Possible duplicate listing: Alameda Soccer and Alameda Soccer');
+    expect(result.text).toContain(
+      'Possible matching calendar entries: sports-one · Alameda Soccer and sports-two · Alameda Soccer',
+    );
     expect(result.text).toContain('Next: verify whether these entries are one occurrence.');
     expect(result.text).not.toContain('Scheduling conflict: Alameda Soccer');
     expect(result.text).not.toContain('Possible overlap: Alameda Soccer');
@@ -2686,7 +2690,9 @@ it('does not report a phone mirror as a conflict but retains a separate accepted
       ],
     }) as never,
   });
-  expect(text).toContain('Possible duplicate listing: Team planning and Team planning');
+  expect(text).toContain(
+    'Possible matching calendar entries: google-work · Team planning and iphone:work · Team planning',
+  );
   expect(text).not.toContain('Scheduling conflict: Team planning and Team planning');
   expect(text).toContain('Scheduling conflict: Team planning and Dentist appointment');
 });

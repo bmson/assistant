@@ -44,7 +44,7 @@ describe('deterministic calendar agenda integration', () => {
       presentation: 'calendar-agenda',
       accompaniesProse: false,
       complete: true,
-      lead: '13 events from Work.',
+      lead: '13 calendar entries from Work.',
     });
     const sections = cards[0]?.sections as { type: string; items: unknown[] }[];
     expect(sections.find((s) => s.type === 'agenda')?.items).toHaveLength(13);

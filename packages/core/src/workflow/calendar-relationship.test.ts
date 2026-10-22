@@ -5,6 +5,9 @@ import {
   calendarArrivalLead,
   calendarRelationship,
   calendarRelationshipNote,
+  canonicalOccurrenceGroups,
+  classifyCalendarOverlap,
+  possibleCalendarIdentityDisagreement,
   verifiedOwnerParticipation,
   verifiedPersonalCommitment,
 } from './calendar-relationship.js';
@@ -31,6 +34,76 @@ const kickoff: BriefingCalendarEvent = {
   start: '2026-10-07T19:00:00Z',
 };
 describe('advisory calendar relationships', () => {
+  it('keeps UID bridges with same-calendar ID collisions separate in every input order', () => {
+    const a = {
+      calendarId: 'work',
+      eventId: 'work-a',
+      iCalUID: 'uid-collision',
+      originalStartTime: '2026-10-07T09:00:00Z',
+      start: '2026-10-07T09:00:00Z',
+      end: '2026-10-07T10:00:00Z',
+    };
+    const b = {
+      calendarId: 'work',
+      eventId: 'work-b',
+      iCalUID: 'uid-collision',
+      originalStartTime: '2026-10-07T09:00:00Z',
+      start: '2026-10-07T09:15:00Z',
+      end: '2026-10-07T10:15:00Z',
+    };
+    const c = {
+      calendarId: 'family',
+      eventId: 'family-copy',
+      iCalUID: 'uid-collision',
+      originalStartTime: '2026-10-07T09:00:00Z',
+      start: '2026-10-07T09:15:00Z',
+      end: '2026-10-07T10:15:00Z',
+    };
+    const orders = [
+      [a, b, c],
+      [a, c, b],
+      [b, a, c],
+      [b, c, a],
+      [c, a, b],
+      [c, b, a],
+    ];
+    const signatures = orders.map((order) =>
+      canonicalOccurrenceGroups(order)
+        .map((group) => group.map((row) => row.eventId).sort())
+        .sort(),
+    );
+    expect(new Set(signatures.map((signature) => JSON.stringify(signature))).size).toBe(1);
+    expect(signatures[0]).toHaveLength(3);
+  });
+
+  it('advises on same trusted UID with incomplete occurrence metadata and differing timed bounds', () => {
+    const left = {
+      calendarId: 'work',
+      eventId: 'a',
+      iCalUID: 'shared-uid',
+      start: '2026-10-07T10:00:00Z',
+      end: '2026-10-07T11:00:00Z',
+    };
+    expect(
+      possibleCalendarIdentityDisagreement(left, {
+        calendarId: 'family',
+        eventId: 'b',
+        iCalUID: 'shared-uid',
+        start: '2026-10-07T10:05:00Z',
+        end: '2026-10-07T11:05:00Z',
+      }),
+    ).toBe(true);
+    expect(
+      possibleCalendarIdentityDisagreement(left, {
+        calendarId: 'family',
+        eventId: 'b',
+        iCalUID: 'other-uid',
+        start: '2026-10-07T10:05:00Z',
+        end: '2026-10-07T11:05:00Z',
+      }),
+    ).toBe(false);
+  });
+
   it('reconciles an explicit arrival offset only with a matching street, end and title clock', () => {
     const early = {
       ...arrival,
@@ -246,4 +319,27 @@ it('requires verified human attendee evidence or explicit busy-commitments polic
       sourceVariants: [{ blocksTime: false, status: 'confirmed', calendarPurpose: 'commitments' }],
     }),
   ).toBe(false);
+});
+
+it('uses attendance proof and commitment policy as separate overlap classifications', () => {
+  const verifiedAccepted = {
+    blocksTime: true,
+    ownerParticipation: {
+      status: 'accepted',
+      identityVerified: true,
+      basis: 'attendee-email',
+    },
+  };
+  expect(classifyCalendarOverlap(verifiedAccepted, verifiedAccepted)).toBe(
+    'personal_commitment_conflict',
+  );
+  expect(
+    classifyCalendarOverlap(
+      { blocksTime: true, calendarPurpose: 'commitments' },
+      { blocksTime: true, calendarPurpose: 'commitments' },
+    ),
+  ).toBe('commitments_policy_overlap');
+  expect(classifyCalendarOverlap({ blocksTime: true }, { blocksTime: true })).toBe(
+    'attendance_unconfirmed',
+  );
 });

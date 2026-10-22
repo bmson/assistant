@@ -661,6 +661,14 @@ function calendarSourceReference(event: PlainRecord): string {
   return url ? `[${title}](<${url}>)` : `**${title}**`;
 }
 
+function calendarSourceName(event: PlainRecord): string {
+  return typeof event.calendar === 'string' && event.calendar.trim()
+    ? event.calendar.trim()
+    : typeof event.calendarId === 'string' && event.calendarId.trim()
+      ? event.calendarId.trim()
+      : 'Calendar';
+}
+
 export interface WeeklyCalendarPlanInput {
   timeMin: string;
   timeMax: string;
@@ -1116,7 +1124,12 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         left.event._canonicalIdentityAmbiguity === right.event._canonicalIdentityAmbiguity
       )
         continue;
-      const pair = `${eventTitle(left.event)} and ${eventTitle(right.event)}`;
+      const leftTitle = eventTitle(left.event);
+      const rightTitle = eventTitle(right.event);
+      const pair =
+        leftTitle === rightTitle
+          ? `${calendarSourceName(left.event)} · ${leftTitle} and ${calendarSourceName(right.event)} · ${rightTitle}`
+          : `${leftTitle} and ${rightTitle}`;
       const overlappingInterval = {
         start: Math.max(left.interval.start, right.interval.start, start),
         end: Math.min(left.interval.end, right.interval.end, end),
@@ -1138,7 +1151,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
         if (!probableDuplicatePairs.has(pairKey)) {
           probableDuplicatePairs.add(pairKey);
           duplicateListingPairs.push(
-            `Possible duplicate listing: ${pair} (${labelTime(overlappingInterval.start, input.timeZone)}); occurrence identity unverified. Sources: ${calendarSourceReference(left.event)}; ${calendarSourceReference(right.event)}.\n  - Next: verify whether these entries are one occurrence.`,
+            `Possible matching calendar entries: ${pair} (${labelTime(overlappingInterval.start, input.timeZone)}); occurrence identity unverified. Sources: ${calendarSourceReference(left.event)}; ${calendarSourceReference(right.event)}.\n  - Next: verify whether these entries are one occurrence.`,
           );
         }
         continue;
@@ -1358,7 +1371,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   }
   if (allConflictDetails.length > visibleConflictLimit)
     lines.push(
-      `${allConflictDetails.length - visibleConflictLimit} additional overlaps or possible duplicate listings omitted from this brief; all were included in the planning check.`,
+      `${allConflictDetails.length - visibleConflictLimit} additional possible-overlap pairs or duplicate-entry comparisons omitted from this brief; all were included in the planning check.`,
     );
   if (conflictPairs.length === 0 && duplicateListingPairs.length === 0 && complete)
     lines.push('Conflicts: none found in checked calendar data.');
