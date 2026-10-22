@@ -61,10 +61,10 @@ export function executorDeps(deps: AgentDeps): ExecutorDeps {
     calendarReader: async ({ timeMin, timeMax, agentId }) => {
       const client = calendarReadClient();
       if (!client.configured()) return { events: [], complete: false };
+      const phoneCache = deps.persistence?.toolExecution;
       const phoneCalendars =
-        agentId && deps.persistence
-          ? (ownerAgentId: string) =>
-              readPhoneCalendars(deps.persistence!.toolExecution, ownerAgentId)
+        agentId && phoneCache
+          ? (ownerAgentId: string) => readPhoneCalendars(phoneCache, ownerAgentId)
           : undefined;
       const res = await listEventsInWindow(
         client,

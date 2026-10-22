@@ -1507,11 +1507,34 @@ function uniqueRecords(
   });
 }
 
+const dateTimeFormatters = new Map<string, Intl.DateTimeFormat>();
+const MAX_DATE_TIME_FORMATTERS = 64;
+
+function cachedDateTimeFormatter(
+  locale: string | string[],
+  options: Intl.DateTimeFormatOptions,
+): Intl.DateTimeFormat {
+  const key = JSON.stringify([locale, options]);
+  const cached = dateTimeFormatters.get(key);
+  if (cached) {
+    dateTimeFormatters.delete(key);
+    dateTimeFormatters.set(key, cached);
+    return cached;
+  }
+  const formatter = new Intl.DateTimeFormat(locale, options);
+  if (dateTimeFormatters.size >= MAX_DATE_TIME_FORMATTERS) {
+    const oldest = dateTimeFormatters.keys().next().value;
+    if (oldest !== undefined) dateTimeFormatters.delete(oldest);
+  }
+  dateTimeFormatters.set(key, formatter);
+  return formatter;
+}
+
 function calendarTime(value: string, timeZone?: string): string {
   if (!value) return value;
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     const date = new Date(`${value}T12:00:00.000Z`);
-    return new Intl.DateTimeFormat('en-US', {
+    return cachedDateTimeFormatter('en-US', {
       timeZone: 'UTC',
       weekday: 'long',
       year: 'numeric',
@@ -1523,7 +1546,7 @@ function calendarTime(value: string, timeZone?: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   try {
-    return new Intl.DateTimeFormat('en-US', {
+    return cachedDateTimeFormatter('en-US', {
       timeZone,
       weekday: 'long',
       year: 'numeric',
@@ -1544,7 +1567,7 @@ function clockOnly(value: string, timeZone?: string): string {
   const ms = Date.parse(value);
   if (Number.isNaN(ms)) return '';
   try {
-    return new Intl.DateTimeFormat('en-GB', {
+    return cachedDateTimeFormatter('en-GB', {
       timeZone: timeZone ?? 'UTC',
       hour: '2-digit',
       minute: '2-digit',
@@ -1562,7 +1585,7 @@ function shortDate(value: string, timeZone?: string): string {
   const ms = Date.parse(isDateOnly ? `${value}T12:00:00.000Z` : value);
   if (Number.isNaN(ms)) return '';
   try {
-    return new Intl.DateTimeFormat('en-GB', {
+    return cachedDateTimeFormatter('en-GB', {
       timeZone: isDateOnly ? 'UTC' : (timeZone ?? 'UTC'),
       weekday: 'short',
       day: 'numeric',
@@ -1578,7 +1601,7 @@ function intervalDateTime(value: string, timeZone?: string): string {
   const ms = Date.parse(value);
   if (!Number.isFinite(ms)) return value;
   try {
-    return new Intl.DateTimeFormat('en-US', {
+    return cachedDateTimeFormatter('en-US', {
       timeZone: timeZone ?? 'UTC',
       weekday: 'short',
       month: 'short',
@@ -1594,7 +1617,7 @@ function intervalDateTime(value: string, timeZone?: string): string {
 
 function overlapClock(value: number, timeZone?: string): string {
   try {
-    return new Intl.DateTimeFormat('en-US', {
+    return cachedDateTimeFormatter('en-US', {
       timeZone: timeZone ?? 'UTC',
       hour: 'numeric',
       minute: '2-digit',
@@ -1607,7 +1630,7 @@ function overlapClock(value: number, timeZone?: string): string {
 /** Compact agendas use one readable 12-hour clock style for rows and overlaps. */
 function compactClock(value: number, timeZone?: string): string {
   try {
-    return new Intl.DateTimeFormat('en-US', {
+    return cachedDateTimeFormatter('en-US', {
       timeZone: timeZone ?? 'UTC',
       hour: 'numeric',
       minute: '2-digit',
@@ -2117,12 +2140,12 @@ function calendarAvailabilityLines(
   // turn an ISO timestamp into prose or imply a complete owner-local day.
   let timeZone = request.timeZone ?? 'UTC';
   try {
-    new Intl.DateTimeFormat('en-US', { timeZone }).format(0);
+    cachedDateTimeFormatter('en-US', { timeZone }).format(0);
   } catch {
     timeZone = 'UTC';
   }
-  const clock = new Intl.DateTimeFormat('en-US', { timeZone, hour: 'numeric', minute: '2-digit' });
-  const zonedTime = new Intl.DateTimeFormat('en-US', {
+  const clock = cachedDateTimeFormatter('en-US', { timeZone, hour: 'numeric', minute: '2-digit' });
+  const zonedTime = cachedDateTimeFormatter('en-US', {
     timeZone,
     hour: 'numeric',
     minute: '2-digit',
@@ -2132,7 +2155,7 @@ function calendarAvailabilityLines(
     Number.isFinite(ms)
       ? zonedTime.formatToParts(new Date(ms)).find((part) => part.type === 'timeZoneName')?.value
       : undefined;
-  const dateTime = new Intl.DateTimeFormat('en-US', {
+  const dateTime = cachedDateTimeFormatter('en-US', {
     timeZone,
     weekday: 'long',
     month: 'long',
@@ -2272,7 +2295,7 @@ function zonedClock(value: string, timeZone?: string): { day: string; minutes: n
   if (Number.isNaN(ms)) return null;
   try {
     const parts = Object.fromEntries(
-      new Intl.DateTimeFormat('en-CA', {
+      cachedDateTimeFormatter('en-CA', {
         timeZone: timeZone ?? 'UTC',
         year: 'numeric',
         month: '2-digit',
@@ -3188,7 +3211,7 @@ function timeZoneLabel(timeZone: string | undefined, instant: number): string {
   if (!timeZone) return 'your calendar time zone';
   try {
     return (
-      new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'long' })
+      cachedDateTimeFormatter('en-US', { timeZone, timeZoneName: 'long' })
         .formatToParts(new Date(instant))
         .find((part) => part.type === 'timeZoneName')?.value ?? 'your calendar time zone'
     );

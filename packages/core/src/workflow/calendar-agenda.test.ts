@@ -81,7 +81,7 @@ describe('calendarAgendaCards', () => {
       request: request(),
     });
     expect(complete).toHaveLength(1);
-    expect(complete[0]).toMatchObject({ complete: true, lead: '1 event from Work.' });
+    expect(complete[0]).toMatchObject({ complete: true, lead: '1 calendar entry from Work.' });
     expect(agenda(complete)[0]).toMatchObject({ complete: true });
 
     const partial = calendarAgendaCards({

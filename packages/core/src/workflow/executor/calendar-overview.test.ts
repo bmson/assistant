@@ -157,7 +157,7 @@ describe('executor calendar overview presentation', () => {
 
       expect(result.toolNames).toEqual(['calendar.list_events']);
       expect(gmailSearches).toBe(0);
-      expect(result.finalText).toBe('2 events from Work.');
+      expect(result.finalText).toBe('2 calendar entries from Work.');
       const persisted = await db.select().from(messages).where(eq(messages.taskId, result.taskId));
       const assistant = persisted.filter((message) => message.role === 'assistant').at(-1);
       const payload = JSON.stringify(assistant?.parts);

@@ -65,6 +65,8 @@ function relationshipEvent(event: ResponseCard): BriefingCalendarEvent {
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const validZones = new Map<string, boolean>();
 const formatters = new Map<string, Intl.DateTimeFormat>();
+const MAX_FORMATTERS = 64;
+const MAX_VALID_ZONES = 64;
 const validDate = (value: string) =>
   DATE.test(value) &&
   Number.isFinite(Date.parse(`${value}T12:00:00Z`)) &&
@@ -133,9 +135,17 @@ function validZone(value: unknown): string | undefined {
   if (cached === true) return zone;
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: zone }).format(0);
+    if (validZones.size >= MAX_VALID_ZONES) {
+      const oldest = validZones.keys().next().value;
+      if (oldest !== undefined) validZones.delete(oldest);
+    }
     validZones.set(zone, true);
     return zone;
   } catch {
+    if (validZones.size >= MAX_VALID_ZONES) {
+      const oldest = validZones.keys().next().value;
+      if (oldest !== undefined) validZones.delete(oldest);
+    }
     validZones.set(zone, false);
     return undefined;
   }
@@ -147,10 +157,17 @@ function formatter(
   options: Intl.DateTimeFormatOptions,
 ): Intl.DateTimeFormat {
   let value = formatters.get(key);
-  if (!value) {
-    value = new Intl.DateTimeFormat(locale, options);
+  if (value) {
+    formatters.delete(key);
     formatters.set(key, value);
+    return value;
   }
+  value = new Intl.DateTimeFormat(locale, options);
+  if (formatters.size >= MAX_FORMATTERS) {
+    const oldest = formatters.keys().next().value;
+    if (oldest !== undefined) formatters.delete(oldest);
+  }
+  formatters.set(key, value);
   return value;
 }
 
@@ -649,7 +666,7 @@ export function calendarAgendaCards(input: {
             ? `No matching events were verified in the checked subset. ${warning}`
             : `Couldn’t load ${scope}. Please retry the calendar lookup.`;
       const lead = events.length
-        ? `${events.length} ${events.length === 1 ? 'event' : 'events'} from ${scope}.${warning ? ` ${warning}` : ''}`
+        ? `${events.length} calendar ${events.length === 1 ? 'entry' : 'entries'} from ${scope}.${warning ? ` ${warning}` : ''}`
         : emptyLead;
       const items = events.map((event) => {
         const differences = sourceDifferences(event, zone);

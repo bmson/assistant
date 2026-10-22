@@ -10,6 +10,25 @@ import type { ActionEvidence } from './response-contract.js';
 
 type RecordValue = Record<string, unknown>;
 type EventGroup = [RecordValue, ...RecordValue[]];
+const calendarDateFormatters = new Map<string, Intl.DateTimeFormat>();
+const MAX_CALENDAR_DATE_FORMATTERS = 64;
+
+function calendarDateFormatter(options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+  const key = JSON.stringify(['en-US', options]);
+  const cached = calendarDateFormatters.get(key);
+  if (cached) {
+    calendarDateFormatters.delete(key);
+    calendarDateFormatters.set(key, cached);
+    return cached;
+  }
+  const formatter = new Intl.DateTimeFormat('en-US', options);
+  if (calendarDateFormatters.size >= MAX_CALENDAR_DATE_FORMATTERS) {
+    const oldest = calendarDateFormatters.keys().next().value;
+    if (oldest !== undefined) calendarDateFormatters.delete(oldest);
+  }
+  calendarDateFormatters.set(key, formatter);
+  return formatter;
+}
 
 export interface ResponseCard {
   kind:
@@ -144,7 +163,7 @@ function formatTime(value: string, timeZone?: string): string {
   }
   const date = new Date(value);
   if (Number.isNaN(date.valueOf())) return value;
-  return new Intl.DateTimeFormat('en-US', {
+  return calendarDateFormatter({
     hour: 'numeric',
     minute: '2-digit',
     timeZone,
@@ -155,7 +174,7 @@ function calendarDate(value: string, timeZone?: string): string {
   if (!timeZone) return value.slice(0, 10);
   const date = new Date(value);
   if (!Number.isFinite(date.valueOf())) return value.slice(0, 10);
-  return new Intl.DateTimeFormat('en-US', {
+  return calendarDateFormatter({
     timeZone,
     year: 'numeric',
     month: 'short',

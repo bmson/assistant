@@ -1,6 +1,8 @@
 import type { PersonalReadRequest } from './read-intent.js';
 
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+const boundaryFormatters = new Map<string, Intl.DateTimeFormat>();
+const MAX_BOUNDARY_FORMATTERS = 16;
 const field = (event: Record<string, unknown>, key: string) =>
   typeof event[key] === 'string' ? (event[key] as string) : '';
 
@@ -12,16 +14,27 @@ export function calendarCivilBoundary(day: string, timeZone: string): number | u
     return undefined;
   let candidate = target;
   try {
-    const formatter = new Intl.DateTimeFormat('en-CA', {
-      timeZone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hourCycle: 'h23',
-    });
+    let formatter = boundaryFormatters.get(timeZone);
+    if (formatter) {
+      boundaryFormatters.delete(timeZone);
+      boundaryFormatters.set(timeZone, formatter);
+    } else {
+      formatter = new Intl.DateTimeFormat('en-CA', {
+        timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23',
+      });
+      if (boundaryFormatters.size >= MAX_BOUNDARY_FORMATTERS) {
+        const oldest = boundaryFormatters.keys().next().value;
+        if (oldest !== undefined) boundaryFormatters.delete(oldest);
+      }
+      boundaryFormatters.set(timeZone, formatter);
+    }
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const parts = formatter.formatToParts(new Date(candidate));
       const part = (type: string) => Number(parts.find((item) => item.type === type)?.value);
