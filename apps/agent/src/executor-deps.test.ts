@@ -441,14 +441,26 @@ describe('calendar reader occurrence provenance', () => {
       calendars: [{ id: 'phone-work', name: 'Work iPhone', purpose: 'commitments' }],
       events: [
         {
-          eventId: 'phone-accepted', calendarId: 'phone-work', summary: 'Accepted phone event', location: '',
-          start: '2026-10-07T09:00:00-07:00', end: '2026-10-07T10:00:00-07:00',
-          allDay: false, blocksTime: true, ownerParticipant: { email: 'owner@example.com', responseStatus: 'accepted' },
+          eventId: 'phone-accepted',
+          calendarId: 'phone-work',
+          summary: 'Accepted phone event',
+          location: '',
+          start: '2026-10-07T09:00:00-07:00',
+          end: '2026-10-07T10:00:00-07:00',
+          allDay: false,
+          blocksTime: true,
+          ownerParticipant: { email: 'owner@example.com', responseStatus: 'accepted' },
         },
         {
-          eventId: 'phone-declined', calendarId: 'phone-work', summary: 'Declined phone event', location: '',
-          start: '2026-10-07T11:00:00-07:00', end: '2026-10-07T12:00:00-07:00',
-          allDay: false, blocksTime: true, ownerParticipant: { email: 'owner@example.com', responseStatus: 'declined' },
+          eventId: 'phone-declined',
+          calendarId: 'phone-work',
+          summary: 'Declined phone event',
+          location: '',
+          start: '2026-10-07T11:00:00-07:00',
+          end: '2026-10-07T12:00:00-07:00',
+          allDay: false,
+          blocksTime: true,
+          ownerParticipant: { email: 'owner@example.com', responseStatus: 'declined' },
         },
       ],
     });
@@ -456,7 +468,11 @@ describe('calendar reader occurrence provenance', () => {
       configured: () => true,
       api: async (url: string) =>
         url.includes('calendarList')
-          ? { items: [{ id: 'google-work', summary: 'Google Work', timeZone: 'America/Los_Angeles' }] }
+          ? {
+              items: [
+                { id: 'google-work', summary: 'Google Work', timeZone: 'America/Los_Angeles' },
+              ],
+            }
           : { items: [] },
     };
     const deps = {
@@ -473,14 +489,19 @@ describe('calendar reader occurrence provenance', () => {
       timeMax: new Date('2026-10-08T00:00:00Z'),
     });
     expect(result.events).toHaveLength(2);
-    expect(result.events.map((event) => event.eventId)).toEqual(['phone-accepted', 'phone-declined']);
+    expect(result.events.map((event) => event.eventId)).toEqual([
+      'phone-accepted',
+      'phone-declined',
+    ]);
     expect(result.events[0]).toMatchObject({
       calendar: 'Work iPhone (iPhone)',
       calendarPurpose: 'commitments',
       ownerParticipation: { status: 'accepted', identityVerified: true, basis: 'attendee-email' },
     });
     expect(result.events[1]?.ownerParticipation).toMatchObject({
-      status: 'declined', identityVerified: true, basis: 'attendee-email',
+      status: 'declined',
+      identityVerified: true,
+      basis: 'attendee-email',
     });
   });
 });

@@ -63,7 +63,8 @@ export function executorDeps(deps: AgentDeps): ExecutorDeps {
       if (!client.configured()) return { events: [], complete: false };
       const phoneCalendars =
         agentId && deps.persistence
-          ? (ownerAgentId: string) => readPhoneCalendars(deps.persistence!.toolExecution, ownerAgentId)
+          ? (ownerAgentId: string) =>
+              readPhoneCalendars(deps.persistence!.toolExecution, ownerAgentId)
           : undefined;
       const res = await listEventsInWindow(
         client,

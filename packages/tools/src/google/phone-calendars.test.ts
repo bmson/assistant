@@ -335,8 +335,16 @@ describe('iPhone calendar access through normal calendar tools', () => {
     const result = await run(registry, 'calendar.list_events', window);
     expect(result.events).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ eventId: 'phone-meeting', allDay: true, calendarTimeZone: 'Pacific/Honolulu' }),
-        expect.objectContaining({ eventId: 'timed-honolulu', allDay: false, calendarTimeZone: 'Pacific/Honolulu' }),
+        expect.objectContaining({
+          eventId: 'phone-meeting',
+          allDay: true,
+          calendarTimeZone: 'Pacific/Honolulu',
+        }),
+        expect.objectContaining({
+          eventId: 'timed-honolulu',
+          allDay: false,
+          calendarTimeZone: 'Pacific/Honolulu',
+        }),
       ]),
     );
   });
