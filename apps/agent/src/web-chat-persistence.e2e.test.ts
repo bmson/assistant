@@ -86,6 +86,39 @@ function messageView(row: {
   } as UIMessage;
 }
 
+function dataCards(row: { parts: unknown }): Record<string, unknown>[] {
+  if (!Array.isArray(row.parts)) return [];
+  return row.parts.flatMap((part) => {
+    if (!part || typeof part !== 'object') return [];
+    const value = part as { type?: unknown; data?: unknown };
+    return value.type === 'data-card' && value.data && typeof value.data === 'object'
+      ? [value.data as Record<string, unknown>]
+      : [];
+  });
+}
+
+function agendaItems(card: Record<string, unknown>): Record<string, unknown>[] {
+  if (!Array.isArray(card.sections)) return [];
+  return card.sections.flatMap((section) => {
+    if (!section || typeof section !== 'object') return [];
+    const value = section as { type?: unknown; items?: unknown };
+    return value.type === 'agenda' && Array.isArray(value.items)
+      ? value.items.filter(
+          (item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object',
+        )
+      : [];
+  });
+}
+
+function responseTextParts(row: { parts: unknown }): string[] {
+  if (!Array.isArray(row.parts)) return [];
+  return row.parts.flatMap((part) => {
+    if (!part || typeof part !== 'object') return [];
+    const value = part as { type?: unknown; text?: unknown };
+    return value.type === 'text' && typeof value.text === 'string' ? [value.text] : [];
+  });
+}
+
 function optimisticUser(operationId: string, durableMessageId?: string): UIMessage {
   return {
     id: operationId,
@@ -456,25 +489,34 @@ describe('WEB-12 persisted chat identity across interrupted card completion', ()
     const persisted = await chat.listMessages(ownerId, conversation.id, { limit: 50 });
     expect(persisted).not.toBeNull();
     const assistantRows = (persisted?.messages ?? []).filter((row) => row.role === 'assistant');
-    const eventCards = assistantRows.flatMap((row) =>
-      Array.isArray(row.parts)
-        ? row.parts.flatMap((part) =>
-            part && typeof part === 'object' && (part as { type?: unknown }).type === 'data-card'
-              ? [(part as { data?: unknown }).data]
-              : [],
-          )
-        : [],
-    );
-    const calendarCards = eventCards.filter(
-      (card): card is Record<string, unknown> =>
-        Boolean(card) &&
-        typeof card === 'object' &&
-        (card as { kind?: unknown }).kind === 'calendar-event',
-    );
-    expect(calendarCards).toHaveLength(2);
-    expect(calendarCards.map((card) => card.title)).toEqual(['Planning review', 'Planning review']);
-    expect(new Set(calendarCards.map((card) => card.id)).size).toBe(2);
-    expect(assistantRows.filter((row) => row.text === REPLY_TEXT)).toHaveLength(2);
+    expect(assistantRows).toHaveLength(2);
+    const assistantByTask = new Map(assistantRows.map((row) => [row.taskId, row]));
+    const assistantA = assistantByTask.get(admittedA.taskId);
+    const assistantB = assistantByTask.get(admittedB.taskId);
+    expect(assistantA).toBeDefined();
+    expect(assistantB).toBeDefined();
+    const briefingFor = (row: (typeof assistantRows)[number] | undefined) => {
+      const cards = row ? dataCards(row) : [];
+      expect(cards).toHaveLength(1);
+      expect(cards[0]).toMatchObject({ kind: 'briefing', presentation: 'calendar-agenda' });
+      return cards[0] as Record<string, unknown>;
+    };
+    const cardA = briefingFor(assistantA);
+    const cardB = briefingFor(assistantB);
+    const itemA = agendaItems(cardA);
+    const itemB = agendaItems(cardB);
+    expect(itemA).toHaveLength(1);
+    expect(itemB).toHaveLength(1);
+    expect(itemA[0]).toMatchObject({ title: 'Planning review' });
+    expect(itemB[0]).toMatchObject({ title: 'Planning review' });
+    expect(String(itemA[0]?.id)).toContain('event-a');
+    expect(String(itemB[0]?.id)).toContain('event-b');
+    expect(String(itemA[0]?.id)).not.toBe(String(itemB[0]?.id));
+    expect(new Set([cardA.id, cardB.id]).size).toBe(2);
+    expect(responseTextParts(assistantA ?? { parts: [] })).toEqual([cardA.lead]);
+    expect(responseTextParts(assistantB ?? { parts: [] })).toEqual([cardB.lead]);
+    expect(responseTextParts(assistantA ?? { parts: [] })).not.toContain(REPLY_TEXT);
+    expect(responseTextParts(assistantB ?? { parts: [] })).not.toContain(REPLY_TEXT);
     expect(assistantRows[0]?.taskId).not.toBe(assistantRows[1]?.taskId);
     const eventCardHash = (rows: typeof assistantRows) =>
       createHash('sha256')
@@ -679,8 +721,18 @@ describe('WEB-12 persisted chat identity across interrupted card completion', ()
       expect(assistantRowsWhileAIsDelayed).toHaveLength(1);
       expect(assistantRowsWhileAIsDelayed[0]).toMatchObject({
         taskId: acceptedB.taskId,
-        text: replyB,
       });
+      const delayedB = assistantRowsWhileAIsDelayed[0];
+      const delayedBCards = dataCards(delayedB ?? { parts: [] });
+      expect(delayedBCards).toHaveLength(1);
+      expect(delayedBCards[0]).toMatchObject({ kind: 'briefing', presentation: 'calendar-agenda' });
+      const delayedBLead = delayedBCards[0]?.lead;
+      expect(responseTextParts(delayedB ?? { parts: [] })).toEqual([delayedBLead]);
+      expect(responseTextParts(delayedB ?? { parts: [] })).not.toContain(replyB);
+      const delayedBItems = agendaItems(delayedBCards[0] as Record<string, unknown>);
+      expect(delayedBItems).toHaveLength(1);
+      expect(delayedBItems[0]).toMatchObject({ title: 'B planning review' });
+      expect(delayedBItems.map((item) => item.title)).not.toContain('A planning review');
       durableBId = assistantRowsWhileAIsDelayed[0]?.id;
       expect(
         whileAIsDelayed.some((row) => row.taskId === acceptedA.taskId && row.role === 'assistant'),
@@ -710,7 +762,7 @@ describe('WEB-12 persisted chat identity across interrupted card completion', ()
         mergedWhileAIsDelayed
           .filter((row) => row.role === 'assistant')
           .flatMap((row) => row.parts.flatMap((part) => (part.type === 'text' ? [part.text] : []))),
-      ).toEqual([replyA, replyB]);
+      ).toEqual([replyA, delayedBLead]);
     } finally {
       releaseA();
       if (workerA) {
@@ -748,13 +800,24 @@ describe('WEB-12 persisted chat identity across interrupted card completion', ()
     const finalA = assistantByTask.get(acceptedA.taskId);
     const finalB = assistantByTask.get(acceptedB.taskId);
     if (!finalA || !finalB) throw new Error('A completed operation has no durable reply');
-    expect(finalA).toMatchObject({
-      text: replyA,
-    });
-    expect(finalB).toMatchObject({
-      id: durableBId,
-      text: replyB,
-    });
+    expect(finalA.id).toBeDefined();
+    expect(finalB.id).toBe(durableBId);
+    const finalACards = dataCards(finalA);
+    const finalBCards = dataCards(finalB);
+    expect(finalACards).toHaveLength(1);
+    expect(finalBCards).toHaveLength(1);
+    expect(finalACards[0]).toMatchObject({ kind: 'briefing', presentation: 'calendar-agenda' });
+    expect(finalBCards[0]).toMatchObject({ kind: 'briefing', presentation: 'calendar-agenda' });
+    expect(responseTextParts(finalA)).toEqual([finalACards[0]?.lead]);
+    expect(responseTextParts(finalB)).toEqual([finalBCards[0]?.lead]);
+    expect(responseTextParts(finalA)).not.toContain(replyA);
+    expect(responseTextParts(finalB)).not.toContain(replyB);
+    expect(agendaItems(finalACards[0] as Record<string, unknown>)).toMatchObject([
+      { title: 'A planning review' },
+    ]);
+    expect(agendaItems(finalBCards[0] as Record<string, unknown>)).toMatchObject([
+      { title: 'B planning review' },
+    ]);
 
     const localReplyA: UIMessage = {
       id: `final-local-reply-a-${operationA}`,

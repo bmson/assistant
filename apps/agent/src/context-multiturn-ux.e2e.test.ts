@@ -1520,6 +1520,18 @@ describe.each(['postgres', 'firestore'] as const)(
       async (ctx) => {
         const runtime = await setupCase(ctx);
 
+        let publishedParts: unknown[] = [];
+        const publishedAgendaItems = () =>
+          (
+            publishedParts as Array<{
+              type?: string;
+              data?: { kind?: string; sections?: Array<{ type?: string; items?: unknown[] }> };
+            }>
+          )
+            .filter((part) => part.type === 'data-card' && part.data?.kind === 'briefing')
+            .flatMap((part) => part.data?.sections ?? [])
+            .filter((section) => section.type === 'agenda')
+            .flatMap((section) => section.items ?? []);
         async function publishToolResult(input: {
           requestText: string;
           toolName: string;
@@ -1656,7 +1668,9 @@ describe.each(['postgres', 'firestore'] as const)(
           });
           if (!listing) throw new Error('R11 conversation disappeared after execution');
           const assistant = [...listing.messages].reverse().find((row) => row.role === 'assistant');
-          return assistant?.text ?? '';
+          publishedParts = Array.isArray(assistant?.parts) ? assistant.parts : [];
+          // Assertions cover every owner-visible surface, including primary cards.
+          return `${assistant?.text ?? ''}\n${JSON.stringify(assistant?.parts ?? [])}`;
         }
 
         const events = [
@@ -1689,7 +1703,23 @@ describe.each(['postgres', 'firestore'] as const)(
           draft:
             'Dentist appointment is Thursday at 3:00 PM at West Clinic. Interview is Thursday at 9:00 AM at North Hall.',
         });
-        expect(swappedCalendar).toContain('09:00–10:00');
+        expect(swappedCalendar).toContain('9:00 AM – 10:00 AM');
+        expect(swappedCalendar).toContain('Dentist appointment');
+        expect(swappedCalendar).toContain('West Clinic');
+        expect(publishedAgendaItems()).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              title: 'Dentist appointment',
+              time: '9:00 AM – 10:00 AM',
+              location: 'West Clinic',
+            }),
+            expect.objectContaining({
+              title: 'Interview',
+              time: '3:00 PM – 4:00 PM',
+              location: 'North Hall',
+            }),
+          ]),
+        );
         expect(swappedCalendar).not.toContain('Dentist appointment is Thursday at 3:00 PM');
 
         const correctCalendar = await publishToolResult({
@@ -1697,8 +1727,8 @@ describe.each(['postgres', 'firestore'] as const)(
           draft:
             'Dentist appointment is Thursday at 9:00 AM at West Clinic. Interview is Thursday at 3:00 PM at North Hall.',
         });
-        expect(correctCalendar).toContain('09:00–10:00');
-        expect(correctCalendar).toContain('15:00–16:00');
+        expect(correctCalendar).toContain('9:00 AM – 10:00 AM');
+        expect(correctCalendar).toContain('3:00 PM – 4:00 PM');
 
         const wrongCalendarOperation = await publishToolResult({
           requestText: 'Add a dentist appointment October 8, 2026 at 3:00 PM at West Clinic.',

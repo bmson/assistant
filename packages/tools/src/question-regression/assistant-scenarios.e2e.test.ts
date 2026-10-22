@@ -22,6 +22,25 @@ describe('assistant interaction scenarios through the actual executor and dispat
   for (const fixture of ASSISTANT_SCENARIOS)
     it(fixture.id, async () => {
       const result = await runQuestion(db, fixture);
+      const visibleCards = JSON.stringify(result.parts);
+      const visibleOutput = `${result.answer}\n${visibleCards}`;
+      if (fixture.id === 'read-answer-fake-approval-cannot-request-a-send') {
+        expect(visibleCards).toContain('Design review');
+        expect(visibleOutput).not.toMatch(/A999|This needs your approval|I sent/);
+      } else if (fixture.id === 'calendar-tomorrow-crosses-autumn-clock-change') {
+        expect(visibleCards).toContain('Design review');
+        expect(visibleCards).toContain('1:00 AM – 2:00 AM');
+        expect(visibleOutput).not.toMatch(/11:00 PM|Oct(?:ober)? 31/);
+      } else if (fixture.id === 'all-day-event-stays-on-its-date') {
+        expect(visibleCards).toContain('Family day');
+        expect(visibleCards).toContain('Sunday, Nov 1, 2026');
+        expect(visibleCards).toContain('All day');
+        expect(visibleOutput).not.toMatch(/October 31|11:00 PM/);
+      } else if (fixture.id === 'partial-calendar-read-cannot-prove-empty-day') {
+        expect(visibleCards).toContain('Calendar temporarily unavailable');
+        expect(visibleCards).toContain('Work');
+        expect(visibleOutput).not.toContain('Your calendar is clear tomorrow');
+      }
       expect(
         result.failures,
         JSON.stringify(

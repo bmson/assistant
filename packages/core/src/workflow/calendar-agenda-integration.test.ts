@@ -115,4 +115,28 @@ describe('deterministic calendar agenda integration', () => {
     expect(payload).toContain('ends 2026-10-25 (exclusive)');
     expect(payload).toContain('Calendar time zone unavailable');
   });
+  it('keeps unavailable calendar names and reasons visible without claiming an empty day', () => {
+    const cards = responseCardsForFinal({
+      evidence: [
+        {
+          ...evidence([]),
+          result: {
+            complete: false,
+            calendarsSearched: ['Personal'],
+            events: [],
+            unavailable: [{ calendar: 'Work', reason: 'Permission denied' }],
+          },
+        },
+      ],
+      readRequest: request,
+      requestText: ownerText,
+    });
+    expect(cards[0]).toMatchObject({ complete: false });
+    expect(cards[0]?.lead).toContain('checked subset');
+    const payload = JSON.stringify(cards);
+    expect(payload).toContain('Calendars not checked');
+    expect(payload).toContain('Work');
+    expect(payload).toContain('Permission denied');
+    expect(payload).not.toContain('No events on');
+  });
 });

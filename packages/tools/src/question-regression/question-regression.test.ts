@@ -25,6 +25,11 @@ describe('audited owner questions through executor and dispatcher', () => {
   for (const fixture of QUESTION_CASES)
     it(fixture.id, async () => {
       const result = await runQuestion(db, fixture);
+      if (fixture.id === 'calendar-and-failed-weather') {
+        const visibleCards = JSON.stringify(result.parts);
+        expect(visibleCards).toContain('Design review');
+        expect(`${result.answer}\n${visibleCards}`).not.toMatch(/22°C|sunny/);
+      }
       expect(
         result.failures,
         JSON.stringify(

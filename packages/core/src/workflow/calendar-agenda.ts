@@ -277,6 +277,20 @@ export function calendarAgendaCards(input: {
       const sections: Record<string, unknown>[] = items.length
         ? [{ type: 'agenda', title: dateLabel(day, zone), complete: groupComplete, items }]
         : [];
+      const unavailable = [
+        ...new Map(
+          rows
+            .flatMap((row) => list(record(row.result).unavailable))
+            .map((value) => record(value))
+            .map((value) => ({
+              title: text(value.calendar) || text(value.name) || 'Calendar unavailable',
+              detail: text(value.reason) || 'This calendar could not be checked.',
+            }))
+            .map((item) => [JSON.stringify(item), item] as const),
+        ).values(),
+      ];
+      if (unavailable.length)
+        sections.push({ type: 'attention', title: 'Calendars not checked', items: unavailable });
       if (day === 'unverified' && items.length)
         sections.push({
           type: 'attention',
