@@ -810,7 +810,15 @@ struct WorkspaceView: View {
                     .accessibilityLabel(summary.joined(separator: ", "))
                 }
 
-                sectionHeading("Filed documents", count: listPresentation.loadedCount)
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    sectionHeading("Filed documents")
+                    if let loaded = listPresentation.loadedCount {
+                        Text("\(loaded) loaded")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 switch listPresentation {
                 case .loaded:
                     ForEach(documents.documents) { document in
