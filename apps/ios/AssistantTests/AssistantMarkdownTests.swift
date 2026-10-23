@@ -91,7 +91,6 @@ private struct LiftedTranscriptFixture: View {
                 }
                 .background(Color.green.ignoresSafeArea(.container))
                 .clipShape(RoundedRectangle(cornerRadius: 34))
-                .ignoresSafeArea(.container)
                 .offset(y: -state.reveal)
             }
         }
@@ -651,14 +650,44 @@ final class AssistantMarkdownTests: XCTestCase {
             let hasLabel: Bool
             let frame: CGRect
         }
-        func accessibilityReceipt(in root: UIView) -> (sendFrame: CGRect?, nodes: [AccessibilityNodeReceipt]) {
+        struct AccessibilityReceipt {
+            let sendFrame: CGRect?
+            let sendFrameSource: String?
+            let nodes: [AccessibilityNodeReceipt]
+            let visitedObjectCount: Int
+            let depthTruncated: Bool
+            let objectBudgetTruncated: Bool
+            let elementCountTruncated: Bool
+            let arrayCountTruncated: Bool
+            let nodeArrayTruncated: Bool
+            let missingDeclaredChildCount: Int
+            let unknownCountContainerCount: Int
+            var publicEnumerationComplete: Bool {
+                !depthTruncated && !objectBudgetTruncated && !elementCountTruncated
+                    && !arrayCountTruncated && !nodeArrayTruncated && missingDeclaredChildCount == 0
+            }
+        }
+        func accessibilityReceipt(in root: UIView) -> AccessibilityReceipt {
             var visited = Set<ObjectIdentifier>()
             var nodes: [AccessibilityNodeReceipt] = []
             var sendFrame: CGRect?
+            var sendFrameSource: String?
+            var depthTruncated = false
+            var objectBudgetTruncated = false
+            var elementCountTruncated = false
+            var arrayCountTruncated = false
+            var nodeArrayTruncated = false
+            var missingDeclaredChildCount = 0
+            var unknownCountContainerCount = 0
+            let objectBudget = 10_000
+            let childBudget = 2_000
 
-            func visit(_ object: AnyObject) {
-                guard visited.count < 2_000,
-                      visited.insert(ObjectIdentifier(object)).inserted else { return }
+            func visit(_ object: AnyObject, depth: Int) {
+                let objectID = ObjectIdentifier(object)
+                guard !visited.contains(objectID) else { return }
+                guard visited.count < objectBudget else { objectBudgetTruncated = true; return }
+                visited.insert(objectID)
+                guard depth < 32 else { depthTruncated = true; return }
 
                 if let view = object as? UIView {
                     let identifier = view.accessibilityIdentifier ?? ""
@@ -674,8 +703,9 @@ final class AssistantMarkdownTests: XCTestCase {
                     }
                     if identifier == "assistant.chat.send", !view.bounds.isEmpty {
                         sendFrame = frame
+                        sendFrameSource = "UIView"
                     }
-                    for child in view.subviews { visit(child) }
+                    for child in view.subviews { visit(child, depth: depth + 1) }
                 } else if let element = object as? UIAccessibilityElement {
                     let identifier = element.accessibilityIdentifier ?? ""
                     let frame = window.convert(element.accessibilityFrame, from: nil)
@@ -688,6 +718,22 @@ final class AssistantMarkdownTests: XCTestCase {
                     ))
                     if identifier == "assistant.chat.send", !element.accessibilityFrame.isEmpty {
                         sendFrame = frame
+                        sendFrameSource = "UIAccessibilityElement"
+                    }
+                } else if let generic = object as? NSObject,
+                          let identified = generic as? UIAccessibilityIdentification,
+                          let identifier = identified.accessibilityIdentifier, !identifier.isEmpty {
+                    let frame = window.convert(generic.accessibilityFrame, from: nil)
+                    nodes.append(.init(
+                        identifier: identifier,
+                        elementType: String(describing: type(of: generic)),
+                        isAccessibilityElement: generic.isAccessibilityElement,
+                        hasLabel: !(generic.accessibilityLabel ?? "").isEmpty,
+                        frame: frame
+                    ))
+                    if identifier == "assistant.chat.send", !generic.accessibilityFrame.isEmpty {
+                        sendFrame = frame
+                        sendFrameSource = "identified-NSObject"
                     }
                 }
 
@@ -698,23 +744,42 @@ final class AssistantMarkdownTests: XCTestCase {
                 if let container = object as? NSObject {
                     let count = container.accessibilityElementCount()
                     if count != NSNotFound {
-                        for index in 0..<min(max(count, 0), 2_000) {
+                        if count > childBudget { elementCountTruncated = true }
+                        for index in 0..<min(max(count, 0), childBudget) {
                             if let child = container.accessibilityElement(at: index) as AnyObject? {
-                                visit(child)
+                                visit(child, depth: depth + 1)
+                            } else {
+                                missingDeclaredChildCount += 1
                             }
                         }
+                    } else {
+                        unknownCountContainerCount += 1
                     }
-                    for child in (container.accessibilityElements ?? []).prefix(2_000) {
-                        visit(child as AnyObject)
+                    let elements = container.accessibilityElements ?? []
+                    if elements.count > childBudget { arrayCountTruncated = true }
+                    for child in elements.prefix(childBudget) {
+                        visit(child as AnyObject, depth: depth + 1)
                     }
-                    for child in (container.automationElements ?? []).prefix(2_000) {
-                        visit(child as AnyObject)
+                    let automationElements = container.automationElements ?? []
+                    if automationElements.count > childBudget { arrayCountTruncated = true }
+                    for child in automationElements.prefix(childBudget) {
+                        visit(child as AnyObject, depth: depth + 1)
                     }
                 }
             }
 
-            visit(root)
-            return (sendFrame, nodes)
+            visit(root, depth: 0)
+            nodeArrayTruncated = nodes.count > childBudget
+            return AccessibilityReceipt(
+                sendFrame: sendFrame, sendFrameSource: sendFrameSource, nodes: nodes,
+                visitedObjectCount: visited.count, depthTruncated: depthTruncated,
+                objectBudgetTruncated: objectBudgetTruncated,
+                elementCountTruncated: elementCountTruncated,
+                arrayCountTruncated: arrayCountTruncated,
+                nodeArrayTruncated: nodeArrayTruncated,
+                missingDeclaredChildCount: missingDeclaredChildCount,
+                unknownCountContainerCount: unknownCountContainerCount
+            )
         }
 
         // Wait briefly for SwiftUI to publish the nonempty-draft accessibility
@@ -727,8 +792,14 @@ final class AssistantMarkdownTests: XCTestCase {
             accessibility = accessibilityReceipt(in: window)
         }
         func rectReceipt(_ rect: CGRect) -> [String: CGFloat] {
-            ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height,
-             "maxX": rect.maxX, "maxY": rect.maxY]
+            guard !rect.isNull, !rect.isInfinite,
+                  rect.minX.isFinite, rect.minY.isFinite,
+                  rect.width.isFinite, rect.height.isFinite,
+                  rect.maxX.isFinite, rect.maxY.isFinite else {
+                return ["x": 0, "y": 0, "width": 0, "height": 0, "maxX": 0, "maxY": 0]
+            }
+            return ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height,
+                    "maxX": rect.maxX, "maxY": rect.maxY]
         }
         let accessibilityState: [String: Any] = [
             "windowFrame": rectReceipt(window.frame),
@@ -745,6 +816,20 @@ final class AssistantMarkdownTests: XCTestCase {
             "inputDraftLength": input.text?.count ?? 0,
             "messageCountUnchanged": model.messages.count == initialMessageCount,
             "isSending": model.isSending,
+            "accessibilityReceipt": [
+                "publicEnumerationComplete": accessibility.publicEnumerationComplete,
+                "sendFrameSource": accessibility.sendFrameSource ?? "",
+                "visitedObjectCount": accessibility.visitedObjectCount,
+                "objectBudget": 10_000,
+                "childBudget": 2_000,
+                "depthTruncated": accessibility.depthTruncated,
+                "objectBudgetTruncated": accessibility.objectBudgetTruncated,
+                "elementCountTruncated": accessibility.elementCountTruncated,
+                "arrayCountTruncated": accessibility.arrayCountTruncated,
+                "nodeArrayTruncated": accessibility.nodeArrayTruncated,
+                "missingDeclaredChildCount": accessibility.missingDeclaredChildCount,
+                "unknownCountContainerCount": accessibility.unknownCountContainerCount
+            ],
             "accessibilityNodes": accessibility.nodes.prefix(2_000).map { node in
                 ["identifier": node.identifier, "elementType": node.elementType,
                  "isAccessibilityElement": node.isAccessibilityElement, "hasLabel": node.hasLabel,
@@ -767,7 +852,7 @@ final class AssistantMarkdownTests: XCTestCase {
         add(accessibilityScreenshot)
 
         guard let sendFrame = accessibility.sendFrame else {
-            XCTFail("The public UIKit accessibility tree did not expose assistant.chat.send")
+            XCTFail("The bounded public UIKit enumeration did not expose assistant.chat.send; diagnostics: complete=\(accessibility.publicEnumerationComplete), visited=\(accessibility.visitedObjectCount), depthTruncated=\(accessibility.depthTruncated), objectBudgetTruncated=\(accessibility.objectBudgetTruncated), elementCountTruncated=\(accessibility.elementCountTruncated), arrayCountTruncated=\(accessibility.arrayCountTruncated), nodeArrayTruncated=\(accessibility.nodeArrayTruncated), missingDeclaredChildCount=\(accessibility.missingDeclaredChildCount), unknownCountContainerCount=\(accessibility.unknownCountContainerCount)")
             return
         }
         XCTAssertFalse(input.isDescendant(of: transcript),
@@ -999,6 +1084,8 @@ final class AssistantMarkdownTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(100))
             window.layoutIfNeeded()
             sampleLayout("lift-\(Int(distance))")
+            XCTAssertEqual(scroll.bounds.height, state.availableHeight, accuracy: 1,
+                "The actual native viewport must remain fixed while crossing the window safe-area edge")
             XCTAssertEqual(
                 state.composer.minY - state.lastCard.maxY, baseline, accuracy: 1,
                 "The gap must survive a \(distance)pt live lift")

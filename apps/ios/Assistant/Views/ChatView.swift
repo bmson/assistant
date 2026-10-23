@@ -679,13 +679,10 @@ struct ChatView: View {
                         radius: 28 * menuSurfaceProgress,
                         y: 14 * menuSurfaceProgress
                     )
-                    // Resolve the complete green surface edge-to-edge before it is
-                    // transformed. When `ignoresSafeArea` wrapped the offset view,
-                    // SwiftUI recomputed the ScrollView's bottom content inset as
-                    // the sheet crossed the device boundary; the transcript then
-                    // slid by roughly one home-indicator inset while the composer
-                    // stayed put. With offset outermost, this is one rigid layer.
-                    .ignoresSafeArea(.container)
+                    // The stationary root resolves container safe areas once.
+                    // Ignoring them again on this moving layer expands the native
+                    // scroll bounds as it crosses the window edge, then shifts
+                    // its content offset when that expansion disappears.
                     .offset(y: -conversationRevealDistance)
                     // At the largest accessibility sizes the destination row is
                     // horizontally scrollable, so the lifted conversation owns

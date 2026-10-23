@@ -5,6 +5,15 @@ import SwiftUI
 /// A page inventory, rendered by UIKit on an isolated simulator. No server,
 /// credentials, microphone, or provider inference is used. Attachments are
 /// review evidence, not pixel-perfect assertions or physical interaction QA.
+private struct NativeReviewAXSnapshot {
+    let elements: [[String: Any]]
+    let diagnostics: [String: Any]
+    // This means bounded public UIKit enumeration completed; it does not claim
+    // that every element VoiceOver may synthesize was exposed by the host.
+    var isComplete: Bool { diagnostics["complete"] as? Bool == true }
+    var jsonObject: [String: Any] { ["diagnostics": diagnostics, "elements": elements] }
+}
+
 final class NativeVisualReviewTests: XCTestCase {
     @MainActor
     func testOptimisticSaveFeedbackInLightDarkAndLargeText() async throws {
@@ -146,7 +155,7 @@ final class NativeVisualReviewTests: XCTestCase {
             }
             let newestOffset = transcript.contentOffset.y
             let newestAX = Self.publicAccessibilitySnapshot(in: window)
-            let recoveryAX = newestAX.first { row in
+            let recoveryAX = newestAX.elements.first { row in
                 (row["identifier"] as? String) == "assistant.chat.restore-unsent-message"
                     && ((row["isElement"] as? Bool) == true || (row["kind"] as? String) == "element")
             }
@@ -173,7 +182,7 @@ final class NativeVisualReviewTests: XCTestCase {
                     "bottomOffset": bottom,
                     "hasRecovery": model.hasComposerRecovery(in: scope),
                     "composerDraft": model.composerDraft(in: scope),
-                    "publicAccessibilityTree": Self.publicAccessibilitySnapshot(in: window)
+                    "publicAccessibilityTree": Self.publicAccessibilitySnapshot(in: window).jsonObject
                 ], options: [.prettyPrinted, .sortedKeys])
                 let jsonAttachment = XCTAttachment(data: stateData ?? Data("{}".utf8), uniformTypeIdentifier: "public.json")
                 jsonAttachment.name = "full-height-\(variant)-\(state)-state"
@@ -185,6 +194,7 @@ final class NativeVisualReviewTests: XCTestCase {
             // Attach the initial/newest state and its complete geometry/AX
             // record before assertions so a failing simulator run is reviewable.
             attach("newest-recovery")
+            XCTAssertTrue(newestAX.isComplete, "The public accessibility snapshot must not be truncated")
             XCTAssertLessThanOrEqual(abs(newestOffset - bottom), 1,
                 "The newest-state capture must begin at the actual transcript bottom")
             XCTAssertEqual(transcript.frame.height, viewport.height, accuracy: 1)
@@ -193,16 +203,16 @@ final class NativeVisualReviewTests: XCTestCase {
             XCTAssertTrue(model.hasComposerRecovery(in: scope))
             XCTAssertNotNil(recoveryAX, "The recovery action should be present in the public accessibility tree")
             XCTAssertGreaterThan(recoveryFrame.intersection(window.bounds).width, 0,
-                "Recovery control should have a visible accessibility frame")
+                "Recovery control should have a on-screen public accessibility frame")
             XCTAssertGreaterThan(recoveryFrame.intersection(window.bounds).height, 0,
-                "Recovery control should have a visible accessibility frame")
+                "Recovery control should have a on-screen public accessibility frame")
 
             transcript.setContentOffset(CGPoint(x: transcript.contentOffset.x, y: top), animated: false)
             try await Task.sleep(for: .milliseconds(350))
             window.layoutIfNeeded()
             let olderOffset = transcript.contentOffset.y
             let olderAX = Self.publicAccessibilitySnapshot(in: window)
-            let jumpAX = olderAX.first { row in
+            let jumpAX = olderAX.elements.first { row in
                 (row["identifier"] as? String) == "assistant.chat.jump-to-latest"
                     && ((row["isElement"] as? Bool) == true || (row["kind"] as? String) == "element")
             }
@@ -210,15 +220,16 @@ final class NativeVisualReviewTests: XCTestCase {
             let jumpFrame = CGRect(x: jumpFrameValues["x"] ?? 0, y: jumpFrameValues["y"] ?? 0,
                                    width: jumpFrameValues["width"] ?? 0, height: jumpFrameValues["height"] ?? 0)
             attach("older-recovery-jump")
+            XCTAssertTrue(olderAX.isComplete, "The older-message accessibility snapshot must not be truncated")
             XCTAssertEqual(transcript.frame.height, viewport.height, accuracy: 1,
                 "Floating recovery and Jump controls must not reserve a transcript viewport lane")
             XCTAssertLessThan(olderOffset, newestOffset - 2,
                 "The older capture must be a real scroll position away from newest")
             XCTAssertNotNil(jumpAX, "The public Jump to latest accessibility element should exist after scrolling older")
             XCTAssertGreaterThan(jumpFrame.intersection(window.bounds).width, 0,
-                "The Jump control should have a visible frame in the older-message capture")
+                "The Jump control should have an on-screen public frame in the older-message capture")
             XCTAssertGreaterThan(jumpFrame.intersection(window.bounds).height, 0,
-                "The Jump control should have a visible frame in the older-message capture")
+                "The Jump control should have an on-screen public frame in the older-message capture")
 
             if variant == "contrast-accessibility3" {
                 let composer = descendants(window).compactMap { $0 as? UITextView }
@@ -233,7 +244,8 @@ final class NativeVisualReviewTests: XCTestCase {
                 }
                 try await Task.sleep(for: .milliseconds(120))
                 window.layoutIfNeeded()
-                let enabledRecoveryAX = Self.publicAccessibilitySnapshot(in: window).first { row in
+                let enabledSnapshot = Self.publicAccessibilitySnapshot(in: window)
+                let enabledRecoveryAX = enabledSnapshot.elements.first { row in
                     (row["identifier"] as? String) == "assistant.chat.restore-unsent-message"
                         && ((row["isElement"] as? Bool) == true || (row["kind"] as? String) == "element")
                 }
@@ -241,12 +253,13 @@ final class NativeVisualReviewTests: XCTestCase {
                 let enabledFrame = CGRect(x: enabledFrameValues["x"] ?? 0, y: enabledFrameValues["y"] ?? 0,
                                           width: enabledFrameValues["width"] ?? 0, height: enabledFrameValues["height"] ?? 0)
                 attach("recovery-enabled")
+                XCTAssertTrue(enabledSnapshot.isComplete, "The recovery-enabled accessibility snapshot must not be truncated")
                 XCTAssertTrue(model.hasComposerRecovery(in: scope))
                 XCTAssertTrue(model.composerDraft(in: scope).isEmpty,
                     "Clearing the input should leave an empty draft and enable recovery")
                 XCTAssertNotNil(enabledRecoveryAX, "The enabled recovery button must remain in the public accessibility tree")
                 XCTAssertGreaterThan(enabledFrame.intersection(window.bounds).height, 0,
-                    "The enabled recovery action should have a visible public accessibility frame")
+                    "The enabled recovery action should have a on-screen public accessibility frame")
                 let traits = (enabledRecoveryAX?["traits"] as? NSNumber)?.uint64Value ?? 0
                 XCTAssertEqual(traits & UIAccessibilityTraits.notEnabled.rawValue, 0,
                     "After clearing the draft, recovery should be exposed as enabled")
@@ -280,9 +293,18 @@ final class NativeVisualReviewTests: XCTestCase {
         previousKeyWindow?.makeKey()
     }
 
-    @MainActor private static func publicAccessibilitySnapshot(in window: UIWindow) -> [[String: Any]] {
+    @MainActor private static func publicAccessibilitySnapshot(in window: UIWindow) -> NativeReviewAXSnapshot {
         var seen = Set<ObjectIdentifier>()
         var rows: [[String: Any]] = []
+        var depthTruncated = false
+        var objectBudgetTruncated = false
+        var elementCountTruncated = false
+        var arrayCountTruncated = false
+        var containersWithUnknownCount = 0
+        var missingDeclaredChildCount = 0
+        var deepestLevel = 0
+        let objectBudget = 10_000
+        let childBudget = 2_000
         func frameData(_ rect: CGRect) -> [String: CGFloat] {
             guard !rect.isNull, !rect.isInfinite,
                   rect.minX.isFinite, rect.minY.isFinite,
@@ -292,19 +314,41 @@ final class NativeVisualReviewTests: XCTestCase {
             return ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height]
         }
         func visit(_ object: AnyObject, depth: Int) {
-            guard depth < 32, rows.count < 2_000 else { return }
             let key = ObjectIdentifier(object)
-            guard seen.insert(key).inserted else { return }
+            guard !seen.contains(key) else { return }
+            guard seen.count < objectBudget else { objectBudgetTruncated = true; return }
+            seen.insert(key)
+            deepestLevel = max(deepestLevel, depth)
+            guard depth < 32 else { depthTruncated = true; return }
             if let view = object as? UIView {
                 let identifier = view.accessibilityIdentifier ?? ""
                 let label = view.accessibilityLabel ?? ""
                 if view.isAccessibilityElement || !identifier.isEmpty || !label.isEmpty {
-                    let frame = view.convert(view.bounds, to: window)
+                    let rawFrame = view.convert(view.bounds, to: window)
+                    let visibleFrame = rawFrame.intersection(window.bounds)
+                    var ancestor: UIView? = view
+                    var effectiveAlpha: CGFloat = 1
+                    var hasHiddenAncestor = false
+                    var reachesWindow = false
+                    while let current = ancestor {
+                        effectiveAlpha *= current.alpha
+                        hasHiddenAncestor = hasHiddenAncestor || current.isHidden
+                        if current === window { reachesWindow = true; break }
+                        ancestor = current.superview
+                    }
                     rows.append(["kind": "view", "identifier": identifier, "label": label,
                                  "isElement": view.isAccessibilityElement,
                                  "traits": view.accessibilityTraits.rawValue,
-                                 "frame": frameData(frame),
-                                 "visibleFrame": frameData(frame.intersection(window.bounds))])
+                                 "frame": frameData(rawFrame),
+                                 "visibleFrame": frameData(visibleFrame),
+                                 "visibilityKnown": true,
+                                 "attachedToWindow": reachesWindow,
+                                 "hasHiddenAncestor": hasHiddenAncestor,
+                                 "effectiveAlpha": effectiveAlpha,
+                                 "visibleIgnoringAncestorClipping": reachesWindow && !hasHiddenAncestor
+                                    && effectiveAlpha > 0.01 && !visibleFrame.isNull && !visibleFrame.isEmpty,
+                                 "visibilityLimitation": "Scroll/ancestor clipping and occlusion are not resolved.",
+                                 "occlusionChecked": false])
                 }
                 if let elements = view.accessibilityElements as? [AnyObject] {
                     for element in elements.prefix(2_000) { visit(element, depth: depth + 1) }
@@ -316,27 +360,66 @@ final class NativeVisualReviewTests: XCTestCase {
                              "label": element.accessibilityLabel ?? "",
                              "traits": element.accessibilityTraits.rawValue,
                              "frame": frameData(frame),
-                             "visibleFrame": frameData(frame.intersection(window.bounds))])
+                             "windowIntersection": frameData(frame.intersection(window.bounds)),
+                             "visibilityKnown": false,
+                             "visibilityLimitation": "UIKit virtual element; containing view ancestry and occlusion are not resolved."])
+            } else if let generic = object as? NSObject,
+                      let identified = generic as? UIAccessibilityIdentification,
+                      let identifier = identified.accessibilityIdentifier, !identifier.isEmpty {
+                let frame = window.convert(generic.accessibilityFrame, from: nil)
+                rows.append(["kind": "identified-object", "identifier": identifier,
+                             "label": generic.accessibilityLabel ?? "",
+                             "isElement": generic.isAccessibilityElement,
+                             "traits": generic.accessibilityTraits.rawValue,
+                             "frame": frameData(frame),
+                             "windowIntersection": frameData(frame.intersection(window.bounds)),
+                             "visibilityKnown": false,
+                             "visibilityLimitation": "Generic identified object; UIKit view ancestry and effective alpha are unavailable."])
             }
             if let container = object as? NSObject {
                 let count = container.accessibilityElementCount()
                 if count != NSNotFound {
-                    for index in 0..<min(max(count, 0), 2_000) {
+                    if count > childBudget { elementCountTruncated = true }
+                    for index in 0..<min(max(count, 0), childBudget) {
                         if let child = container.accessibilityElement(at: index) as AnyObject? {
                             visit(child, depth: depth + 1)
+                        } else {
+                            missingDeclaredChildCount += 1
                         }
                     }
+                } else {
+                    containersWithUnknownCount += 1
                 }
-                for child in (container.accessibilityElements ?? []).prefix(2_000) {
+                let elements = container.accessibilityElements ?? []
+                if elements.count > childBudget { arrayCountTruncated = true }
+                for child in elements.prefix(childBudget) {
                     visit(child as AnyObject, depth: depth + 1)
                 }
-                for child in (container.automationElements ?? []).prefix(2_000) {
+                let automationElements = container.automationElements ?? []
+                if automationElements.count > childBudget { arrayCountTruncated = true }
+                for child in automationElements.prefix(childBudget) {
                     visit(child as AnyObject, depth: depth + 1)
                 }
             }
         }
         visit(window, depth: 0)
-        return rows
+        let complete = !depthTruncated && !objectBudgetTruncated
+            && !elementCountTruncated && !arrayCountTruncated && missingDeclaredChildCount == 0
+        return NativeReviewAXSnapshot(elements: rows, diagnostics: [
+            "complete": complete,
+            "completedPublicEnumeration": complete,
+            "visitedObjectCount": seen.count,
+            "recordedElementCount": rows.count,
+            "objectBudget": objectBudget,
+            "childBudget": childBudget,
+            "deepestLevel": deepestLevel,
+            "depthTruncated": depthTruncated,
+            "objectBudgetTruncated": objectBudgetTruncated,
+            "elementCountTruncated": elementCountTruncated,
+            "arrayCountTruncated": arrayCountTruncated,
+            "containersWithUnknownCount": containersWithUnknownCount,
+            "missingDeclaredChildCount": missingDeclaredChildCount
+        ])
     }
 
     @MainActor
