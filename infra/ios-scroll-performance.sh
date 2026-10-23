@@ -71,9 +71,16 @@ xcodebuild -showsdks | grep -i 'iphoneos' | tee "$output_root/ios-sdks.txt" || t
 
 simulator_json="$output_root/simulators.json"
 xcrun simctl list devices available --json > "$simulator_json"
-simulator_udid="$(jq -r '[.devices | to_entries[] | select(.key | test("SimRuntime.iOS")) | .value[] | select(.name | startswith("iPhone"))] | last | .udid // empty' "$simulator_json")"
+simulator_udid="$(jq -r '[.devices | to_entries[]
+  | .key as $runtime
+  | select($runtime | test("SimRuntime.iOS-"))
+  | ($runtime | split("iOS-")[1] | split("-") | map(tonumber)) as $version
+  | select($version[0] >= 26)
+  | .value[] | select(.name | startswith("iPhone"))
+  | . + {runtimeVersion: $version}]
+  | sort_by(.runtimeVersion) | last | .udid // empty' "$simulator_json")"
 if [[ -z "$simulator_udid" ]]; then
-  echo "::error::No available iPhone simulator found on this runner."
+  echo "::error::No available iPhone simulator compatible with the iOS 26 deployment target found on this runner."
   xcrun simctl list devices available
   exit 1
 fi
