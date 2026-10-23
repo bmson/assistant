@@ -1741,7 +1741,14 @@ extension AssistantMarkdownTests {
         let initialHierarchy = ownedTranscriptControllerIdentities(root: root, containing: initialScroll)
         XCTAssertGreaterThanOrEqual(initialHierarchy.count, 3,
             "The root, owned container and child transcript host must all be present.")
-        let input = try XCTUnwrap(ownedTextField(in: window), "The transcript fixture must expose a native UITextField.")
+        let input = try XCTUnwrap(ownedTextField(in: window), "The test-owned transcript input must expose its UITextField.")
+        XCTAssertTrue(input.isDescendant(of: initialScroll), "The test-owned input must be inside the transcript host.")
+        XCTAssertTrue(input.window === window, "The test-owned input must belong to the measured window.")
+        let inputFrameBeforeFocus = input.convert(input.bounds, to: window)
+        XCTAssertTrue(inputFrameBeforeFocus.minX.isFinite && inputFrameBeforeFocus.minY.isFinite)
+        XCTAssertTrue(inputFrameBeforeFocus.maxX.isFinite && inputFrameBeforeFocus.maxY.isFinite)
+        XCTAssertGreaterThan(inputFrameBeforeFocus.width, 0)
+        XCTAssertGreaterThan(inputFrameBeforeFocus.height, 0)
         XCTAssertTrue(input.becomeFirstResponder(), "The native transcript field should focus before the parent update.")
         var previousFocusedGeometry: [CGFloat]?
         var stableFocusedGeometrySamples = 0
@@ -1762,6 +1769,18 @@ extension AssistantMarkdownTests {
             }
             return stableFocusedGeometrySamples >= 3
         }
+        let typedDraft = "Typed but unsent transcript draft"
+        input.text = typedDraft
+        input.sendActions(for: .editingChanged)
+        try await waitForTranscriptHostCondition("the native editing event updates the scoped draft") {
+            state.draft == typedDraft
+        }
+        XCTAssertEqual(input.text, typedDraft)
+        let selectionStart = try XCTUnwrap(input.position(from: input.beginningOfDocument, offset: 3))
+        let selectionEnd = try XCTUnwrap(input.position(from: input.beginningOfDocument, offset: 9))
+        input.selectedTextRange = input.textRange(from: selectionStart, to: selectionEnd)
+        let expectedSelection = [3, 9]
+        XCTAssertEqual(try XCTUnwrap(ownedTextSelectionOffsets(input)), expectedSelection)
         let outerComposer = try XCTUnwrap(ownedView(in: window, accessibilityIdentifier: "transcript-host.outer-composer"))
         XCTAssertFalse(outerComposer.isDescendant(of: initialScroll), "The sibling composer must remain outside the transcript scroll subtree.")
 
@@ -1837,6 +1856,10 @@ extension AssistantMarkdownTests {
             "The focused native transcript input must retain its UIKit identity.")
         XCTAssertTrue(input.window === window)
         XCTAssertTrue(input.isFirstResponder, "Environment and content updates must not discard focused native input.")
+        XCTAssertEqual(input.text, typedDraft, "The unsent draft must remain in the test-owned native input.")
+        XCTAssertEqual(state.draft, typedDraft, "The editingChanged draft binding must survive host updates.")
+        XCTAssertEqual(try XCTUnwrap(ownedTextSelectionOffsets(input)), expectedSelection,
+            "An unrelated host/environment update must preserve the native text selection.")
         XCTAssertTrue(outerComposer.isDescendant(of: window))
         XCTAssertFalse(outerComposer.isDescendant(of: updatedScroll))
         let updatedEnvironment = try XCTUnwrap(state.environmentSnapshots.last)
@@ -2028,8 +2051,8 @@ private struct OwnedTranscriptHostRegressionFixture: View {
                             cardFormTaskRevision: 0
                         )
                         .equatable()
-                        TextField("Transcript draft", text: $state.draft)
-                            .accessibilityIdentifier("transcript-host.native-input")
+                        OwnedTranscriptNativeInput(text: $state.draft)
+                            .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44, alignment: .leading)
                         Text("Transcript content revision \(state.contentRevision)")
                             // This value is built by the parent, without a
                             // child ObservableObject subscription. Its update
@@ -2112,6 +2135,43 @@ private struct OwnedTranscriptNativeComposer: UIViewRepresentable {
     func updateUIView(_ uiView: UIButton, context: Context) {}
 }
 
+private struct OwnedTranscriptNativeInput: UIViewRepresentable {
+    @Binding var text: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    func makeUIView(context: Context) -> UITextField {
+        let field = UITextField(frame: .zero)
+        field.borderStyle = .roundedRect
+        field.accessibilityIdentifier = "transcript-host.native-input"
+        field.text = text
+        field.addTarget(context.coordinator, action: #selector(Coordinator.editingChanged(_:)), for: .editingChanged)
+        return field
+    }
+
+    func updateUIView(_ uiView: UITextField, context: Context) {
+        context.coordinator.text = $text
+        if uiView.text != text {
+            uiView.text = text
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var text: Binding<String>
+
+        init(text: Binding<String>) {
+            self.text = text
+        }
+
+        @objc func editingChanged(_ sender: UITextField) {
+            text.wrappedValue = sender.text ?? ""
+        }
+    }
+}
+
 @MainActor
 private func ownedTranscriptScrollView(in root: UIView) -> UIScrollView? {
     if let scroll = root as? UIScrollView, !(scroll is UITextView) { return scroll }
@@ -2129,6 +2189,15 @@ private func ownedTextField(in root: UIView) -> UITextField? {
         if let found = ownedTextField(in: child) { return found }
     }
     return nil
+}
+
+@MainActor
+private func ownedTextSelectionOffsets(_ field: UITextField) -> [Int]? {
+    guard let selectedRange = field.selectedTextRange else { return nil }
+    return [
+        field.offset(from: field.beginningOfDocument, to: selectedRange.start),
+        field.offset(from: field.beginningOfDocument, to: selectedRange.end),
+    ]
 }
 
 @MainActor
