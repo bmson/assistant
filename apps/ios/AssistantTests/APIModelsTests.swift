@@ -431,6 +431,78 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(unrelated.standaloneResponseCards.count, 2)
     }
 
+    func testBubbleCardsDoNotInferLegacyAfterExplicitCardsArePairedAway() {
+        let message = ChatMessage(id: "paired-alert", role: .assistant, parts: [
+            .init(type: "text", text: "\"Annual Physical\" starts in 30 minutes at One Medical. Your appointment is coming up."),
+            RichMessageFixture.suggestion,
+            .init(type: "data-card", data: RichMessageFixture.alert),
+        ])
+        XCTAssertFalse(MessageResponseCard.inferredLegacy(from: message.text).isEmpty,
+                       "This fixture must expose an erroneous fallback if explicit cards are filtered too early")
+        XCTAssertTrue(message.bubbleResponseCards(formRendererAvailable: false).isEmpty,
+                      "A valid explicit card suppresses legacy inference even when pairing removes it")
+        XCTAssertTrue(message.standaloneResponseCards.isEmpty)
+    }
+
+    func testBubbleCardsInferLegacyOnlyWhenNoExplicitCardParses() {
+        let text = "\"Annual Physical\" starts in 30 minutes at One Medical. Your appointment is coming up."
+        let malformed = MessagePart(type: "data-card", data: .object(["kind": .string("unknown-card")]))
+        let message = ChatMessage(id: "legacy-alert", role: .assistant, parts: [
+            .init(type: "text", text: text), malformed,
+        ])
+        guard case let .proactiveAlert(_, category, _, title, _, _, _, details)? =
+            message.bubbleResponseCards(formRendererAvailable: false).first else {
+            return XCTFail("An unrecognized explicit payload must retain the supported historical alert fallback")
+        }
+        XCTAssertEqual(category, "event")
+        XCTAssertEqual(title, "Annual Physical")
+        XCTAssertEqual(details.first?.value, "One Medical")
+        XCTAssertTrue(message.standaloneResponseCards.isEmpty, "Standalone projection must remain explicit-only")
+
+        let explicit = ChatMessage(id: "explicit", role: .assistant, parts: [
+            .init(type: "text", text: text), RichMessageFixture.generated(),
+        ])
+        XCTAssertEqual(explicit.bubbleResponseCards(formRendererAvailable: false).map(\.id), ["saved-1"])
+    }
+
+    func testBubbleCardReusePreservesPairingAndFormRendererCapability() throws {
+        let cardID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let formPart = MessagePart(type: "data-card", data: .object([
+            "kind": .string("generated-card"), "id": .string(cardID),
+            "revisionId": .string("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            "spec": .object([
+                "version": .number(1), "title": .string("Visit plan"),
+                "sourceLabel": .string("Fixture"), "accessibilityLabel": .string("Visit plan"),
+                "facts": .array([.object([
+                    "id": .string("note"), "value": .string("A saved trip idea"),
+                    "label": .string("Trip"), "source": .string("Fixture"),
+                ])]),
+                "blocks": .array([
+                    .object([
+                        "type": .string("form"), "id": .string("visit"), "title": .string("Plan the visit"),
+                        "serverAction": .string("submit_owner_chat_turn"), "submitLabel": .string("Review"),
+                        "fields": .array([.object([
+                            "id": .string("destination"), "type": .string("text"),
+                            "label": .string("Destination"), "required": .bool(true),
+                        ])]),
+                    ]),
+                    .object(["type": .string("note"), "factId": .string("note")]),
+                ]),
+            ]),
+        ]))
+        let message = ChatMessage(id: "capability", role: .assistant, parts: [
+            RichMessageFixture.suggestion, .init(type: "data-card", data: RichMessageFixture.alert), formPart,
+        ])
+        for available in [false, true] {
+            let cards = message.bubbleResponseCards(formRendererAvailable: available)
+            XCTAssertEqual(cards.map(\.id), [cardID], "Pairing must suppress only its matching proactive card")
+            guard case let .generated(card)? = cards.first else { return XCTFail("Expected the generated form card") }
+            XCTAssertEqual(try XCTUnwrap(card.form).descriptor.formId, "visit")
+            XCTAssertEqual(card.hasCompleteNativeComposition, available,
+                           "An unavailable form renderer must retain the prose-backed compatibility fallback")
+        }
+    }
+
     func testCardFreshnessAndRefreshGuardPreserveOldDataUntilRevalidated() throws {
         let original = ChatMessage(id: "m", role: .assistant, parts: [RichMessageFixture.generated()])
         let marker = CardRefreshMarker(revisionId: "r1", updatedAt: "2026-09-19T18:00:00.000Z", taskId: "refresh-2")
@@ -1049,6 +1121,16 @@ final class APIModelsTests: XCTestCase {
         )
     }
 
+    private func assertCreatedAtParses(
+        _ messages: [ChatMessage],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        for message in messages {
+            XCTAssertNotNil(message.createdAt, "Expected timestamp to parse for \(message.id)", file: file, line: line)
+        }
+    }
+
     func testChatLogPutsDurableTwinsBackWhereTheyWereAsked() {
         var order = ChatLogOrder()
         // Three turns typed while the assistant worked. Their durable twins
@@ -1113,6 +1195,98 @@ final class APIModelsTests: XCTestCase {
             persisted("a", .user, "First", at: "2026-08-27T09:00:00.000Z"),
         ])
         XCTAssertEqual(log.map(\.id), ["a", "b"])
+    }
+
+    func testChatLogReparsesTimestampAfterInvalidValueBecomesValidForSameID() {
+        var order = ChatLogOrder()
+        let invalidTurn = persisted("turn", .user, "Question", at: "not a timestamp")
+        let initialReply = persisted("reply", .assistant, "Answer", at: "2026-10-03T09:00:00.000Z")
+        XCTAssertNil(invalidTurn.createdAt)
+        assertCreatedAtParses([initialReply])
+        let invalid = order.ordered([
+            invalidTurn,
+            initialReply,
+        ])
+        XCTAssertEqual(invalid.map(\.id), ["reply", "turn"])
+
+        let refreshedMessages = [
+            persisted("reply", .assistant, "Answer", at: "2026-10-03T09:00:00.000Z"),
+            persisted("turn", .user, "Question", at: "2026-10-03T08:59:00.000Z"),
+            persisted("later", .assistant, "Later", at: "2026-10-03T09:01:00.000Z"),
+        ]
+        assertCreatedAtParses(refreshedMessages)
+        let refreshed = order.ordered(refreshedMessages)
+        XCTAssertEqual(refreshed.map(\.id), ["turn", "reply", "later"])
+    }
+
+    func testChatLogTiesEquivalentTimestampSpellingsAndSharedRawValuesByID() {
+        var order = ChatLogOrder()
+        let messages = [
+            persisted("c", .assistant, "Shared raw value", at: "2026-10-03T01:30:00.000Z"),
+            persisted("b", .assistant, "Same instant", at: "2026-10-03T01:30:00.000+00:00"),
+            persisted("later", .assistant, "Fractional second later", at: "2026-10-03T01:30:00.250Z"),
+            persisted("aa", .assistant, "Equivalent offset", at: "2026-10-02T18:30:00.000-07:00"),
+            persisted("a", .user, "Same instant", at: "2026-10-03T01:30:00.000Z"),
+        ]
+        assertCreatedAtParses(messages)
+        let log = order.ordered(messages)
+        XCTAssertEqual(log.map(\.id), ["a", "aa", "b", "c", "later"])
+    }
+
+    func testChatLogOrderingPreservesDurableIDPositionAcrossAbsenceUntilReset() {
+        var order = ChatLogOrder()
+        let initialMessages = [
+            persisted("first", .user, "First", at: "2026-10-03T09:00:00.000Z"),
+            persisted("second", .assistant, "Second", at: "2026-10-03T09:01:00.000Z"),
+        ]
+        assertCreatedAtParses(initialMessages)
+        _ = order.ordered(initialMessages)
+        let absentMessages = [
+            persisted("second", .assistant, "Second", at: "2026-10-03T09:01:00.000Z"),
+        ]
+        assertCreatedAtParses(absentMessages)
+        XCTAssertEqual(order.ordered(absentMessages).map(\.id), ["second"], "The durable row is absent from this log update")
+
+        let readdedMessages = [
+            persisted("second", .assistant, "Second", at: "2026-10-03T09:01:00.000Z"),
+            persisted("first", .user, "First", at: "2026-10-03T09:02:00.000Z"),
+        ]
+        assertCreatedAtParses(readdedMessages)
+        let readded = order.ordered(readdedMessages)
+        XCTAssertEqual(readded.map(\.id), ["first", "second"],
+                       "A durable ID keeps its historical place when it reappears with a changed timestamp")
+
+        order.reset()
+        let afterResetMessages = [
+            persisted("second", .assistant, "Second", at: "2026-10-03T09:01:00.000Z"),
+            persisted("first", .user, "First", at: "2026-10-03T09:02:00.000Z"),
+        ]
+        assertCreatedAtParses(afterResetMessages)
+        let afterReset = order.ordered(afterResetMessages)
+        XCTAssertEqual(afterReset.map(\.id), ["second", "first"],
+                       "Reset discards historical positions and lets the new timestamps place rows")
+    }
+
+    func testChatLogOrderValueCopiesKeepIndependentPositionHistory() {
+        var original = ChatLogOrder()
+        let initialMessages = [
+            persisted("first", .user, "First", at: "2026-10-03T09:00:00.000Z"),
+            persisted("second", .assistant, "Second", at: "2026-10-03T09:01:00.000Z"),
+        ]
+        assertCreatedAtParses(initialMessages)
+        _ = original.ordered(initialMessages)
+        var resetCopy = original
+        resetCopy.reset()
+
+        let messages = [
+            persisted("second", .assistant, "Second", at: "2026-10-03T09:01:00.000Z"),
+            persisted("first", .user, "First", at: "2026-10-03T09:02:00.000Z"),
+        ]
+        assertCreatedAtParses(messages)
+        let copiedOrder = resetCopy.ordered(messages)
+        let originalOrder = original.ordered(messages)
+        XCTAssertEqual(copiedOrder.map(\.id), ["second", "first"])
+        XCTAssertEqual(originalOrder.map(\.id), ["first", "second"])
     }
 
     func testDecisionMessageUsesOnlyItsStructuredCardAndTracksResolution() throws {
