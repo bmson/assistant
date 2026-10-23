@@ -850,108 +850,204 @@ struct MessageBubble: View {
         }
         let shape = RoundedRectangle(cornerRadius: AssistantTheme.chatCardCornerRadius, style: .continuous)
         let diagnostics = kind == .responseContract ? [] : (compact?.diagnostics ?? (text == presentation.summary ? [] : [text]))
-        return VStack(alignment: .leading, spacing: 10) {
-            Label(presentation.label, systemImage: presentation.symbol)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(presentation.tint)
-            Text(kind == .responseContract ? presentation.headline : (compact?.headline ?? presentation.headline))
-                .font(.body.weight(.semibold))
-                .foregroundStyle(AssistantTheme.ink(for: colorScheme))
-            if kind == .responseContract {
-                // A checked partial answer still contains the assistant's
-                // lists and source links. Preserve the warning around it,
-                // while using the same renderer as a complete answer.
-                AssistantMarkdownView(
-                    source: text,
-                    baseFontSize: messageFontSize,
-                    ink: AssistantTheme.ink(for: colorScheme),
-                    mutedInk: AssistantTheme.inkMuted(for: colorScheme),
-                    codeSurface: AssistantTheme.sunken(for: colorScheme),
-                    accent: AssistantTheme.accent(for: colorScheme)
-                )
-                .textSelection(.enabled)
+        return Group {
+            if kind == .turnFailed || kind == .providerFailed {
+                recoveryNoticeCard(kind, headline: compact?.headline ?? presentation.headline,
+                    summary: presentation.summary, facts: compact?.facts ?? [],
+                    diagnostics: diagnostics, detailLabel: compact?.detailLabel ?? "Failure details", text: text)
             } else {
-                Text(presentation.summary)
+                VStack(alignment: .leading, spacing: 10) {
+                    Label(presentation.label, systemImage: presentation.symbol)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(presentation.tint)
+                    Text(kind == .responseContract ? presentation.headline : (compact?.headline ?? presentation.headline))
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+                    if kind == .responseContract {
+                        // A checked partial answer still contains the assistant's
+                        // lists and source links. Preserve the warning around it,
+                        // while using the same renderer as a complete answer.
+                        AssistantMarkdownView(
+                            source: text,
+                            baseFontSize: messageFontSize,
+                            ink: AssistantTheme.ink(for: colorScheme),
+                            mutedInk: AssistantTheme.inkMuted(for: colorScheme),
+                            codeSurface: AssistantTheme.sunken(for: colorScheme),
+                            accent: AssistantTheme.accent(for: colorScheme)
+                        )
+                        .textSelection(.enabled)
+                    } else {
+                        Text(presentation.summary)
+                            .font(.subheadline)
+                            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                            .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let facts = compact?.facts?.prefix(3), !facts.isEmpty {
+                        AssistantFlowLayout(spacing: 8) {
+                            ForEach(Array(facts.enumerated()), id: \.offset) { _, fact in
+                                Text("\(fact.label)  \(fact.value)")
+                                    .font(.caption)
+                                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                            }
+                        }
+                    }
+                    if kind == .turnFailed || kind == .providerFailed, let openActivity {
+                        Button("Review Activity", systemImage: "list.bullet", action: openActivity)
+                            .buttonStyle(AssistantActionButtonStyle(kind: .secondary, compact: true))
+                    }
+                    // Retry is deliberate: interruption can follow work already done.
+                    if kind == .turnFailed, let retry, let userPrompt {
+                        Button {
+                            retry(userPrompt)
+                        } label: {
+                            Text("Try again")
+                                .font(.footnote.weight(.medium))
+                                .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+                                .padding(.horizontal, 14)
+                                .frame(minHeight: 44)
+                                .background(
+                                    Capsule().strokeBorder(
+                                        AssistantTheme.accent(for: colorScheme).opacity(0.35),
+                                        lineWidth: 1
+                                    )
+                                )
+                                .contentShape(Capsule())
+                        }
+                        .buttonStyle(AssistantTactileButtonStyle(reduceMotion: reduceMotion, pressedScale: 0.97))
+                        .accessibilityHint("Sends the same message again")
+                    }
+                    if kind == .retracted {
+                        CardDisclosure(collapsedLabel: "View original response", expandedLabel: "Hide original response") {
+                            if let retractionReason {
+                                Text(retractionReason)
+                                    .font(.caption)
+                                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                            }
+                            if let originalText, !originalText.isEmpty {
+                                Text(originalText)
+                                    .font(.caption)
+                                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.top, 6)
+                            }
+                        }
+                        .font(.caption.weight(.medium))
+                    }
+                    if kind != .retracted,
+                       !diagnostics.isEmpty {
+                        CardDisclosure(collapsedLabel: compact?.detailLabel ?? "Details", expandedLabel: "Hide details") {
+                            Text(diagnostics.joined(separator: "\n\n"))
+                                .font(.caption)
+                                .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(12)
+                                .background(
+                                    AssistantTheme.sunken(for: colorScheme).opacity(0.58),
+                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                )
+                        }
+                        .font(.caption.weight(.medium))
+                    }
+                }
+                .padding(.horizontal, resolvedBubbleHorizontalInset)
+                .padding(.vertical, resolvedBubbleVerticalInset)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(AssistantTheme.bubblePaper(for: colorScheme), in: shape)
+                .overlay { shape.strokeBorder(presentation.tint.opacity(0.25), lineWidth: 0.9) }
+                .contextMenu { cardMenu(copyLabel: "Copy notice", copying: text) }
+            }
+        }
+    }
+
+    private func recoveryNoticeCard(_ kind: ChatNoticeKind, headline: String, summary: String,
+                                    facts: [ChatCardFact], diagnostics: [String], detailLabel: String,
+                                    text: String) -> some View {
+        let shape = RoundedRectangle(cornerRadius: AssistantTheme.chatCardCornerRadius, style: .continuous)
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "xmark.circle.fill")
                     .font(.subheadline)
                     .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                    .accessibilityHidden(true)
+                Text(headline)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(AssistantTheme.ink(for: colorScheme))
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
             }
-            if let facts = compact?.facts?.prefix(3), !facts.isEmpty {
+            Text(summary)
+                .font(.subheadline)
+                .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 8)
+            if !facts.isEmpty {
                 AssistantFlowLayout(spacing: 8) {
-                    ForEach(Array(facts.enumerated()), id: \.offset) { _, fact in
+                    ForEach(Array(facts.prefix(3).enumerated()), id: \.offset) { _, fact in
                         Text("\(fact.label)  \(fact.value)")
                             .font(.caption)
                             .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                     }
                 }
+                .padding(.top, 8)
             }
-            if kind == .turnFailed || kind == .providerFailed, let openActivity {
-                Button("Review Activity", systemImage: "list.bullet", action: openActivity)
-                    .buttonStyle(AssistantActionButtonStyle(kind: .secondary, compact: true))
-            }
-            // Retry is deliberate: interruption can follow work already done.
-            if kind == .turnFailed, let retry, let userPrompt {
-                Button {
-                    retry(userPrompt)
-                } label: {
-                    Text("Try again")
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(AssistantTheme.accent(for: colorScheme))
-                        .padding(.horizontal, 14)
-                        .frame(minHeight: 44)
-                        .background(
-                            Capsule().strokeBorder(
-                                AssistantTheme.accent(for: colorScheme).opacity(0.35),
-                                lineWidth: 1
-                            )
-                        )
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(AssistantTactileButtonStyle(reduceMotion: reduceMotion, pressedScale: 0.97))
-                .accessibilityHint("Sends the same message again")
-            }
-            if kind == .retracted {
-                CardDisclosure(collapsedLabel: "View original response", expandedLabel: "Hide original response") {
-                    if let retractionReason {
-                        Text(retractionReason)
-                            .font(.caption)
-                            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                    }
-                    if let originalText, !originalText.isEmpty {
-                        Text(originalText)
-                            .font(.caption)
-                            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.top, 6)
+            if (kind == .turnFailed && retry != nil && userPrompt != nil) || openActivity != nil {
+                Group {
+                    if dynamicTypeSize.isAccessibilitySize {
+                        VStack(alignment: .leading, spacing: 4) { recoveryActions(kind) }
+                    } else {
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 12) { recoveryActions(kind) }.fixedSize(horizontal: true, vertical: false)
+                            VStack(alignment: .leading, spacing: 4) { recoveryActions(kind) }
+                        }
                     }
                 }
-                .font(.caption.weight(.medium))
+                .padding(.top, 12)
             }
-            if kind != .retracted,
-               !diagnostics.isEmpty {
-                CardDisclosure(collapsedLabel: compact?.detailLabel ?? "Details", expandedLabel: "Hide details") {
+            if !diagnostics.isEmpty {
+                Divider()
+                    .overlay(AssistantTheme.inkMuted(for: colorScheme).opacity(0.18))
+                    .padding(.top, 10)
+                CardDisclosure(collapsedLabel: detailLabel, expandedLabel: "Hide details") {
                     Text(diagnostics.joined(separator: "\n\n"))
                         .font(.caption)
                         .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                         .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
-                        .background(
-                            AssistantTheme.sunken(for: colorScheme).opacity(0.58),
-                            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        )
                 }
-                .font(.caption.weight(.medium))
+                .padding(.top, 2)
             }
         }
-        .padding(.horizontal, resolvedBubbleHorizontalInset)
-        .padding(.vertical, resolvedBubbleVerticalInset)
+        .padding(.horizontal, AssistantTheme.ConversationSpacing.horizontalInset)
+        .padding(.vertical, AssistantTheme.ConversationSpacing.verticalInset)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(AssistantTheme.bubblePaper(for: colorScheme), in: shape)
-        .overlay { shape.strokeBorder(presentation.tint.opacity(0.25), lineWidth: 0.9) }
+        .overlay { shape.strokeBorder(AssistantTheme.inkMuted(for: colorScheme).opacity(0.25), lineWidth: 0.9) }
         .contextMenu { cardMenu(copyLabel: "Copy notice", copying: text) }
+    }
+
+    @ViewBuilder
+    private func recoveryActions(_ kind: ChatNoticeKind) -> some View {
+        // Preserve the existing tool-less failed-turn retry eligibility. An
+        // action task interrupted by a provider failure is Activity-only.
+        if kind == .turnFailed, let retry, let userPrompt {
+            Button("Try again") { retry(userPrompt) }
+                .buttonStyle(AssistantActionButtonStyle(kind: .primary, compact: true))
+                .accessibilityIdentifier("assistant.chat.notice.retry")
+                .accessibilityHint("Sends the same message again")
+        }
+        if let openActivity {
+            Button("View activity", action: openActivity)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("assistant.chat.notice.activity")
+        }
     }
 }
 

@@ -6,6 +6,11 @@ import SwiftUI
 /// credentials, microphone, or provider inference is used. Attachments are
 /// review evidence, not pixel-perfect assertions or physical interaction QA.
 final class NativeVisualReviewTests: XCTestCase {
+    private final class RecoveryActionCounts {
+        var retry = 0
+        var activity = 0
+    }
+
     @MainActor
     func testOptimisticSaveFeedbackInLightDarkAndLargeText() async throws {
         let fixture = try NativeReviewFixture()
@@ -113,6 +118,142 @@ final class NativeVisualReviewTests: XCTestCase {
                                   requiresScrolling: size.isAccessibilitySize && scene.coordinateSpace.bounds.width < 600)
             }
         }
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+    }
+
+    @MainActor
+    func testRecoveryNoticeCardsAcrossAppearanceAndAccessibilitySizes() async throws {
+        NativeReviewProtocol.install([:])
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+                               session: URLSession(configuration: sessionConfig))
+        let defaultsName = "assistant.recovery-notice-visual-review"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
+        defaults.removePersistentDomain(forName: defaultsName)
+        let model = AppModel(apiClient: client, defaults: defaults)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let actions = RecoveryActionCounts()
+
+        func message(_ id: String, kind: ChatNoticeKind, headline: String, summary: String,
+                     diagnostics: [String] = []) -> ChatMessage {
+            ChatMessage(id: id, role: .assistant, parts: [
+                .init(type: "notice", notice: kind.rawValue, presentation: .init(
+                    version: 1,
+                    headline: headline,
+                    summary: summary,
+                    facts: nil,
+                    detailLabel: "Failure details",
+                    diagnostics: diagnostics.isEmpty ? nil : diagnostics
+                ))
+            ])
+        }
+
+        let cases: [(name: String, message: ChatMessage, userPrompt: String?, retry: ((String) -> Void)?, activity: (() -> Void)?)] = [
+            (
+                "recovery-confirmed-no-effect",
+                message("recovery-no-effect", kind: .turnFailed,
+                        headline: "Nothing was changed",
+                        summary: "The request was confirmed as not applied. You can safely try again."),
+                "Save the draft",
+                { prompt in
+                    XCTAssertEqual(prompt, "Save the draft")
+                    actions.retry += 1
+                },
+                { actions.activity += 1 }
+            ),
+            (
+                "recovery-unknown-effect",
+                message("recovery-unknown-effect", kind: .providerFailed,
+                        headline: "Check before retrying",
+                        summary: "The connection ended after the request was sent, so its result is unknown. Review Activity to see whether the change completed before taking another action."),
+                "Update the calendar",
+                { _ in actions.retry += 1 },
+                { actions.activity += 1 }
+            ),
+            (
+                "recovery-provider-failed",
+                message("recovery-provider-failed", kind: .providerFailed,
+                        headline: "The model service stopped",
+                        summary: "No finished answer was received. Review Activity for the interruption details."),
+                "Retry this prompt",
+                { _ in actions.retry += 1 },
+                { actions.activity += 1 }
+            ),
+            (
+                "recovery-retry-unavailable-while-sending",
+                message("recovery-retry-unavailable", kind: .turnFailed,
+                        headline: "Reply not completed",
+                        summary: "This reply did not finish. Wait for the current response to settle before retrying."),
+                "Do not queue this yet",
+                nil,
+                { actions.activity += 1 }
+            ),
+            (
+                "recovery-long-diagnostics",
+                message("recovery-long-diagnostics", kind: .providerFailed,
+                        headline: "The request needs review",
+                        summary: "The server could not confirm whether the requested changes completed. Review the detailed request and response information below before deciding what to do next.",
+                        diagnostics: [
+                            "Request ID: request-7c0e9f5d. The client sent the operation and then lost its connection before receiving a terminal response. The server may have committed the operation; check the authoritative record before retrying.",
+                            "Transport detail: the response stream closed unexpectedly after the final request bytes were written. No automatic retry was attempted because repeating this operation could duplicate work."
+                        ]),
+                "Review the operation",
+                nil,
+                { actions.activity += 1 }
+            )
+        ]
+
+        func page(_ fixture: (name: String, message: ChatMessage, userPrompt: String?, retry: ((String) -> Void)?, activity: (() -> Void)?)) -> Page {
+            Page(fixture.name, ScrollView {
+                MessageBubble(message: fixture.message, userPrompt: fixture.userPrompt, isStreaming: false,
+                              openApprovals: {}, runForReal: nil, retry: fixture.retry, decideApproval: nil,
+                              openActivity: fixture.activity)
+                    .padding(20)
+            })
+        }
+
+        func validateControls(_ name: String) -> ((UIWindow) -> Void)? {
+            let retryID = "assistant.chat.notice.retry"
+            let activityID = "assistant.chat.notice.activity"
+            switch name {
+            case "recovery-confirmed-no-effect":
+                return { window in
+                    let identifiers = Self.accessibilityIdentifiers(in: window)
+                    XCTAssertTrue(identifiers.contains(retryID), "Confirmed no-effect notice should expose its eligible retry action")
+                    XCTAssertTrue(identifiers.contains(activityID), "Recovery notice should expose Activity")
+                }
+            case "recovery-unknown-effect", "recovery-provider-failed", "recovery-retry-unavailable-while-sending", "recovery-long-diagnostics":
+                return { window in
+                    let identifiers = Self.accessibilityIdentifiers(in: window)
+                    XCTAssertFalse(identifiers.contains(retryID), "This recovery state must not expose a retry action")
+                    XCTAssertTrue(identifiers.contains(activityID), "Recovery notice should expose Activity")
+                }
+            default:
+                return nil
+            }
+        }
+
+        for scheme in [ColorScheme.light, .dark] {
+            for fixture in cases {
+                try await capture(page(fixture), scheme: scheme, size: .large,
+                                  scene: scene, model: model,
+                                  validateAccessibility: validateControls(fixture.name))
+            }
+        }
+        for fixture in cases {
+            try await capture(page(fixture), scheme: .light, size: .accessibility3,
+                              scene: scene, model: model,
+                              validateAccessibility: validateControls(fixture.name))
+        }
+        let contrastFixture = try XCTUnwrap(cases.first { $0.name == "recovery-unknown-effect" })
+        try await capture(page(contrastFixture), scheme: .light, size: .accessibility3,
+                          scene: scene, model: model, increasedContrast: true,
+                          validateAccessibility: validateControls(contrastFixture.name))
+
+        XCTAssertEqual(actions.retry, 0, "Capturing recovery cards must not invoke retry callbacks")
+        XCTAssertEqual(actions.activity, 0, "Capturing recovery cards must not open Activity")
         XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
         XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
     }
@@ -471,9 +612,30 @@ final class NativeVisualReviewTests: XCTestCase {
         }
     }
 
+    @MainActor private static func accessibilityIdentifiers(in root: UIView) -> Set<String> {
+        var identifiers = Set<String>()
+        var visited = Set<ObjectIdentifier>()
+        func visit(_ view: UIView) {
+            guard visited.insert(ObjectIdentifier(view)).inserted else { return }
+            if let identifier = view.accessibilityIdentifier { identifiers.insert(identifier) }
+            for index in 0..<max(view.accessibilityElementCount(), 0) {
+                guard let element = view.accessibilityElement(at: index) else { continue }
+                if let identified = element as? UIAccessibilityIdentification,
+                   let identifier = identified.accessibilityIdentifier {
+                    identifiers.insert(identifier)
+                }
+                if let childView = element as? UIView, childView !== view { visit(childView) }
+            }
+            for child in view.subviews { visit(child) }
+        }
+        visit(root)
+        return identifiers
+    }
+
     @MainActor private func capture(_ page: Page, scheme: ColorScheme, size: DynamicTypeSize,
                                     scene: UIWindowScene, model: AppModel, requiresScrolling: Bool = false,
-                                    viewportWidth: CGFloat? = nil, increasedContrast: Bool = false) async throws {
+                                    viewportWidth: CGFloat? = nil, increasedContrast: Bool = false,
+                                    validateAccessibility: ((UIWindow) -> Void)? = nil) async throws {
         UserDefaults.standard.set((scheme == .light ? AssistantAppearance.light : .dark).rawValue,
                                   forKey: AssistantAppearance.defaultsKey)
         let window = UIWindow(windowScene: scene)
@@ -498,6 +660,7 @@ final class NativeVisualReviewTests: XCTestCase {
         defer { window.isHidden = true; window.rootViewController = nil }
         try await Task.sleep(for: .milliseconds(500))
         window.layoutIfNeeded()
+        validateAccessibility?(window)
         func record(_ position: String) {
             var rendered = false
             let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
