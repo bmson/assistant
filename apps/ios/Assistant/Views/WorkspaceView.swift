@@ -1697,7 +1697,7 @@ struct WorkspaceView: View {
                     currentWorkspacePath: currentSource?.workspacePath,
                     currentUpdatedAt: currentSource?.updatedAt
                 ) else {
-                    importSourceConfirmationFeedback = actionsUnavailable
+                    importSourceConfirmationFeedback = workspaceActionInFlight != nil
                         ? "Another update is in progress. Wait, then review this action again."
                         : "This source changed or is unavailable. Refresh and review it again before confirming."
                     importSourceActionSelection.cancel()
