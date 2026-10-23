@@ -329,6 +329,24 @@ final class ConversationPerformanceFixture {
         return counts
     }
 
+    /// Preserve bounded fixture state beside partial phase measurements even
+    /// when XCTest stops before the complete benchmark summary is written.
+    var diagnosticState: [String: Any] {
+        [
+            "messageCount": model.messages.count,
+            "isSending": model.isSending,
+            "hasUnresolvedTurn": model.hasUnresolvedTurn,
+            "modelError": model.errorMessage ?? "",
+            "lastMessageText": model.messages.last?.text ?? "",
+            "streamOperationObserved": streamOperationID != nil,
+            "streamReady": streamOperationID.map {
+                StubURLProtocol.isStreamReady(operationId: $0, authorization: "Bearer \(token)")
+            } ?? false,
+            "requestCountsByMethodAndPath": requestCountsByMethodAndPath,
+            "unexpectedRequests": Set(requestCountsByMethodAndPath.keys).subtracting(expectedRequests).sorted(),
+        ]
+    }
+
     func assertValidMeasurementBoundary(file: StaticString = #filePath, line: UInt = #line) {
         let unexpected = Set(requestCountsByMethodAndPath.keys).subtracting(expectedRequests)
         XCTAssertTrue(unexpected.isEmpty,

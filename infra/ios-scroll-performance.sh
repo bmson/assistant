@@ -7,10 +7,16 @@ worktree_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ios-scroll-performance-worktrees"
 baseline_ref="${BASELINE_REF:-14ba202b8c9593623f3fe3c817319c15e40f6ffa}"
 candidate_ref="${CANDIDATE_REF:-${GITHUB_SHA:-HEAD}}"
 repeats="${REPEATS:-5}"
+run_mode="${RUN_MODE:-diagnostic}"
 
 case "$repeats" in
   1|2|3|4|5) ;;
   *) echo "REPEATS must be an integer from 1 through 5" >&2; exit 2 ;;
+esac
+
+case "$run_mode" in
+  diagnostic|matrix) ;;
+  *) echo "RUN_MODE must be diagnostic or matrix" >&2; exit 2 ;;
 esac
 
 mkdir -p "$output_root" "$worktree_root"
@@ -49,6 +55,8 @@ same_production_tree=$same_production_tree
 repeats=$repeats
 benchmark_test_class=ConversationScrollPerformanceTests
 benchmark_methods=testFullChatView100RowColdMountBidirectionalStreamAndAppend,testFullChatView500RowColdMountBidirectionalStreamAndAppend
+diagnostic_methods=testFullChatView100RowSettledBidirectionalDiagnostic,testFullChatView500RowSettledBidirectionalDiagnostic
+run_mode=$run_mode
 cache_plan=one-warmup-per-variant-and-fixture; each-result-is-a-fresh-xcodebuild-test-invocation; phases-inside-a-test-share-one-app-process
 metric_note=CADisplayLink callback intervals are not presented-frame FPS; simulator results are comparative evidence only.
 EOF
@@ -57,7 +65,7 @@ echo "Runner: $(sw_vers -productName) $(sw_vers -productVersion) ($(uname -m))"
 echo "Baseline: $baseline_sha (production tree $baseline_production_tree)"
 echo "Candidate: $candidate_sha (production tree $candidate_production_tree)"
 echo "Benchmark harness source: $harness_sha"
-echo "Same production tree: $same_production_tree; repeats: $repeats"
+echo "Same production tree: $same_production_tree; mode: $run_mode; repeats: $repeats"
 
 latest_xcode="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)"
 if [[ -z "$latest_xcode" ]]; then
@@ -184,11 +192,24 @@ set_variant_common() {
 build_variant() {
   local label="$1"
   local log="$output_root/$label-build.log"
+  local derived="$RUNNER_TEMP/ios-scroll-derived/$label"
   set_variant_common "$label"
-  mkdir -p "$RUNNER_TEMP/ios-scroll-derived/$label"
+  mkdir -p "$derived"
   echo "Building $label once for testing."
   set -o pipefail
   xcodebuild "${common[@]}" build-for-testing 2>&1 | tee "$log"
+
+  # Keep matching debug symbols beside the raw trace so call trees can be
+  # symbolicated after artifact download, even when a test itself fails.
+  local symbol_root="$output_root/${label}-dsyms"
+  mkdir -p "$symbol_root"
+  local copied=0
+  while IFS= read -r -d '' symbol; do
+    ditto "$symbol" "$symbol_root/$(basename "$symbol")"
+    copied=$((copied + 1))
+  done < <(find "$derived/Build/Products" -maxdepth 5 -type d \
+    \( -name 'Assistant.app.dSYM' -o -name 'AssistantTests.xctest.dSYM' \) -print0 2>/dev/null || true)
+  echo "Archived $copied app/test dSYM bundle(s) for $label at $symbol_root."
 }
 
 run_xcode_bounded() {
@@ -269,6 +290,62 @@ run_case() {
     test-without-building
 }
 
+run_settled_diagnostic() {
+  local label="$1" count="$2" method="$3" iteration="diagnostic-00"
+  local result="$output_root/${label}-${count}rows-${iteration}.xcresult"
+  local log="$output_root/${label}-${count}rows-${iteration}.log"
+  set_variant_common "$label"
+
+  # Keep these runs independent of warmup and prior app/task state. Each one
+  # starts with a freshly terminated hosted app and has a hard 180s guard.
+  xcrun simctl terminate "$simulator_udid" com.baldvinsmarason.assistant >/dev/null 2>&1 || true
+  echo "Settled-scroll diagnostic: variant=$label fixture=${count}-rows device=$simulator_udid timeout=180s"
+  run_xcode_bounded 180 "$log" xcodebuild "${common[@]}" \
+    -resultBundlePath "$result" \
+    "-only-testing:AssistantTests/ConversationScrollPerformanceTests/$method" \
+    test-without-building
+}
+
+run_traced_settled_diagnostics() {
+  local label="$1"
+  local trace="$output_root/${label}-settled-100-and-500rows-time-profiler.trace"
+  local trace_log="$output_root/${label}-settled-time-profiler.log"
+  local failures=0
+
+  echo "Starting Time Profiler across settled 100- and 500-row diagnostics; scope=host-all-processes simulator=$simulator_udid. This is CPU diagnostic evidence, not presented-frame timing."
+  xcrun xctrace record --template 'Time Profiler' --all-processes \
+    --time-limit 5m --output "$trace" > "$trace_log" 2>&1 &
+  local trace_pid=$!
+  sleep 3
+  if ! kill -0 "$trace_pid" 2>/dev/null; then
+    wait "$trace_pid" 2>/dev/null || true
+    echo "Time Profiler did not start; continuing both settled-scroll diagnostics without a trace. See $trace_log."
+    run_settled_diagnostic "$label" 100 testFullChatView100RowSettledBidirectionalDiagnostic || failures=$((failures + 1))
+    run_settled_diagnostic "$label" 500 testFullChatView500RowSettledBidirectionalDiagnostic || failures=$((failures + 1))
+    return "$failures"
+  fi
+
+  # Keep the same trace alive through both cold scroll fixtures. Each xcodebuild
+  # call still has its own hard timeout and result bundle; an early failing
+  # assertion does not suppress the other row count.
+  run_settled_diagnostic "$label" 100 testFullChatView100RowSettledBidirectionalDiagnostic \
+    || failures=$((failures + 1))
+  run_settled_diagnostic "$label" 500 testFullChatView500RowSettledBidirectionalDiagnostic \
+    || failures=$((failures + 1))
+  kill -INT "$trace_pid" 2>/dev/null || true
+  wait "$trace_pid" 2>/dev/null || true
+  if [[ -f "$trace/Info.plist" || -d "$trace" ]]; then
+    echo "Preserved Time Profiler trace at $trace (settled diagnostic failures=$failures)."
+    xcrun xctrace export --input "$trace" --toc \
+      --output "$output_root/${label}-settled-time-profiler-toc.xml" \
+      > "$output_root/${label}-settled-time-profiler-export.log" 2>&1 || \
+      echo "Could not export the trace table of contents; raw trace and dSYMs are preserved."
+  else
+    echo "No finalized Time Profiler trace found; see $trace_log. Both diagnostic test results retained."
+  fi
+  return "$failures"
+}
+
 variants=(baseline)
 if [[ "$same_production_tree" != true ]]; then variants+=(candidate); fi
 
@@ -280,6 +357,38 @@ for label in "${variants[@]}"; do build_variant "$label"; done
 # that setup outside the per-test timeout and all measurement boundaries.
 run_xcode_bounded 300 "$output_root/simulator-boot.log" \
   xcrun simctl bootstatus "$simulator_udid" -b
+
+# Always begin with scroll-only diagnostics, before warmups or the stateful
+# keyboard/stream benchmark. Continue through both row counts after a failure
+# so the artifact still separates baseline rendering from interaction phases.
+diagnostic_failures=0
+for label in "${variants[@]}"; do
+  if [[ "$label" == "baseline" ]] && xcrun xctrace list templates 2>"$output_root/xctrace-templates.log" \
+      | grep -Fq 'Time Profiler'; then
+    run_traced_settled_diagnostics "$label" || diagnostic_failures=$((diagnostic_failures + 1))
+  else
+    run_settled_diagnostic "$label" 100 testFullChatView100RowSettledBidirectionalDiagnostic \
+      || diagnostic_failures=$((diagnostic_failures + 1))
+    run_settled_diagnostic "$label" 500 testFullChatView500RowSettledBidirectionalDiagnostic \
+      || diagnostic_failures=$((diagnostic_failures + 1))
+  fi
+done
+
+# One bounded reproduction keeps the former typing/stream/append measurements
+# available, but it runs only after both narrowed scroll-only cases finish.
+# Its failure is recorded and never prevents the other diagnostics above.
+run_case baseline 100 testFullChatView100RowColdMountBidirectionalStreamAndAppend updates-diagnostic 00 \
+  || diagnostic_failures=$((diagnostic_failures + 1))
+
+if [[ "$diagnostic_failures" -gt 0 ]]; then
+  echo "::error::$diagnostic_failures settled-scroll diagnostic(s) failed; preserving results and skipping the stateful/warmup matrix."
+  exit 1
+fi
+
+if [[ "$run_mode" == "diagnostic" ]]; then
+  echo "Narrowed settled-scroll diagnostics complete. The paired warmup/matrix is available with RUN_MODE=matrix after diagnostic review."
+  exit 0
+fi
 
 # Retain the original rows-only benchmark as supplemental historical evidence;
 # its callback cadence is separate from the controlled full-ChatView matrix.

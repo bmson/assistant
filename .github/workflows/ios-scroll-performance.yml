@@ -18,6 +18,12 @@ on:
         default: '5'
         type: choice
         options: ['1', '2', '3', '4', '5']
+      run_mode:
+        description: Run settled diagnostics only, or continue into the paired benchmark matrix
+        required: true
+        default: diagnostic
+        type: choice
+        options: [diagnostic, matrix]
   push:
     branches:
       - codex/ios-chat-scroll-performance
@@ -45,6 +51,7 @@ jobs:
           BASELINE_REF: ${{ inputs.baseline_ref || '14ba202b8c9593623f3fe3c817319c15e40f6ffa' }}
           CANDIDATE_REF: ${{ inputs.candidate_ref || github.sha }}
           REPEATS: ${{ inputs.repeats || '5' }}
+          RUN_MODE: ${{ inputs.run_mode || 'diagnostic' }}
           RUNNER_TEMP: ${{ runner.temp }}
         run: bash infra/ios-scroll-performance.sh
 

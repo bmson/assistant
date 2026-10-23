@@ -92,24 +92,99 @@ final class ConversationScrollPerformanceTests: XCTestCase {
     }
 
     @MainActor
-    private func runFullChatViewPerformance(messageCount: Int) async throws {
+    func testFullChatView100RowSettledBidirectionalDiagnostic() async throws {
+        try await runSettledBidirectionalDiagnostic(messageCount: 100)
+    }
+
+    @MainActor
+    func testFullChatView500RowSettledBidirectionalDiagnostic() async throws {
+        try await runSettledBidirectionalDiagnostic(messageCount: 500)
+    }
+
+    @MainActor
+    private func runSettledBidirectionalDiagnostic(messageCount: Int) async throws {
         let messages = Self.fixtureMessages(count: messageCount, includeCalendarAgenda: true)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let fixtureDigest = SHA256.hash(data: try encoder.encode(messages))
-            .map { String(format: "%02x", $0) }
-            .joined()
+        let fixtureDigest = try Self.fixtureDigest(messages)
         let setupStart = CACurrentMediaTime()
-        let fixture = try await ConversationPerformanceFixture.make(messages: messages)
-        let totalSetupSeconds = CACurrentMediaTime() - setupStart
+        let fixture: ConversationPerformanceFixture
+        do {
+            fixture = try await ConversationPerformanceFixture.make(messages: messages)
+        } catch {
+            emitFailureDiagnostic(
+                phase: "setup-full-chat-view-\(messageCount)", error: error,
+                fixtureDigest: fixtureDigest,
+                fixtureSetupSeconds: CACurrentMediaTime() - setupStart,
+                fixture: nil, scroll: nil
+            )
+            throw error
+        }
+        let setupSeconds = CACurrentMediaTime() - setupStart
         addTeardownBlock { await fixture.tearDown() }
+        let scroll = fixture.scrollView
+        let viewport = scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom
+        let bottom = Self.bottomOffset(of: scroll)
+        XCTAssertEqual(fixture.model.messages.count, messageCount)
+        XCTAssertGreaterThan(viewport, 100)
+        XCTAssertGreaterThan(bottom, viewport * 2)
+
+        let down = await FullChatViewScrollRecorder(scrollView: scroll, duration: 3.5)
+            .run(from: -scroll.adjustedContentInset.top, to: bottom)
+        emitPhaseDiagnostic(
+            name: "settled-top-to-bottom", result: down,
+            fixtureDigest: fixtureDigest, setupSeconds: setupSeconds,
+            fixture: fixture, scroll: scroll
+        )
+        XCTAssertFalse(down.timedOut, "top-to-bottom phase exceeded its bounded deadline")
+        XCTAssertGreaterThanOrEqual(down.intervals.count, 30, "top-to-bottom callback coverage was too sparse")
+        XCTAssertEqual(scroll.contentOffset.y, bottom, accuracy: 2)
         fixture.assertValidMeasurementBoundary()
 
+        let upStart = Self.bottomOffset(of: scroll)
+        let up = await FullChatViewScrollRecorder(scrollView: scroll, duration: 3.5)
+            .run(from: upStart, to: -scroll.adjustedContentInset.top)
+        emitPhaseDiagnostic(
+            name: "settled-bottom-to-top", result: up,
+            fixtureDigest: fixtureDigest, setupSeconds: setupSeconds,
+            fixture: fixture, scroll: scroll
+        )
+        XCTAssertFalse(up.timedOut, "bottom-to-top phase exceeded its bounded deadline")
+        XCTAssertGreaterThanOrEqual(up.intervals.count, 30, "bottom-to-top callback coverage was too sparse")
+        XCTAssertEqual(scroll.contentOffset.y, -scroll.adjustedContentInset.top, accuracy: 2)
+        fixture.assertValidMeasurementBoundary()
+    }
+
+    @MainActor
+    private func runFullChatViewPerformance(messageCount: Int) async throws {
+        let messages = Self.fixtureMessages(count: messageCount, includeCalendarAgenda: true)
+        let fixtureDigest = try Self.fixtureDigest(messages)
+        let setupStart = CACurrentMediaTime()
+        let fixture: ConversationPerformanceFixture
+        do {
+            fixture = try await ConversationPerformanceFixture.make(messages: messages)
+        } catch {
+            emitFailureDiagnostic(
+                phase: "setup-full-chat-view-\(messageCount)", error: error,
+                fixtureDigest: fixtureDigest,
+                fixtureSetupSeconds: CACurrentMediaTime() - setupStart,
+                fixture: nil, scroll: nil
+            )
+            throw error
+        }
+        let totalSetupSeconds = CACurrentMediaTime() - setupStart
+        addTeardownBlock { await fixture.tearDown() }
+
+        emitStateDiagnostic(
+            phase: "fixture-mounted",
+            fixtureDigest: fixtureDigest,
+            setupSeconds: totalSetupSeconds,
+            fixture: fixture, scroll: fixture.scrollView
+        )
         XCTAssertEqual(fixture.model.messages.count, messageCount)
         XCTAssertEqual(Set(fixture.model.messages.map(\.id)).count, messageCount)
         XCTAssertEqual(fixture.model.messages.first?.id, "scroll-bench-user-0")
         XCTAssertEqual(fixture.model.messages.last?.id, "scroll-bench-assistant-\(messageCount - 1)")
         XCTAssertFalse(UIAccessibility.isReduceMotionEnabled, "Use a simulator with Reduce Motion disabled for paired runs")
+        fixture.assertValidMeasurementBoundary()
         let agendaCardCount = fixture.model.messages.flatMap(\.parts).filter { part in
             guard case let .object(fields) = part.data else { return false }
             return fields["presentation"] == .string("calendar-agenda")
@@ -124,10 +199,16 @@ final class ConversationScrollPerformanceTests: XCTestCase {
 
         let down = await FullChatViewScrollRecorder(scrollView: scroll, duration: 3.5)
             .run(from: -scroll.adjustedContentInset.top, to: bottom)
+        emitPhaseDiagnostic(
+            name: "top-to-bottom", result: down,
+            fixtureDigest: fixtureDigest, setupSeconds: totalSetupSeconds,
+            fixture: fixture, scroll: scroll
+        )
         XCTAssertFalse(down.timedOut)
         XCTAssertGreaterThanOrEqual(down.intervals.count, 30)
         XCTAssertEqual(scroll.contentOffset.y, bottom, accuracy: 2)
         fixture.assertValidMeasurementBoundary()
+        guard !down.timedOut, down.intervals.count >= 30 else { return }
 
         let typeStart = CACurrentMediaTime()
         let typingStart = bottom * 0.55
@@ -136,38 +217,79 @@ final class ConversationScrollPerformanceTests: XCTestCase {
         let typingPhase = Task { @MainActor in
             await typingRecorder.run(from: typingStart, to: -scroll.adjustedContentInset.top)
         }
-        try await fixture.typeInComposer("Give me a concise update while I review the conversation.")
+        do {
+            try await fixture.typeInComposer("Give me a concise update while I review the conversation.")
+        } catch {
+            let partialTyping = await typingPhase.value
+            emitFailureDiagnostic(
+                phase: "synthetic-per-character-typing-stress-while-scrolling-up", error: error,
+                fixtureDigest: fixtureDigest, fixtureSetupSeconds: totalSetupSeconds,
+                fixture: fixture, scroll: scroll, partialPhase: partialTyping
+            )
+            throw error
+        }
         let composerTypingSeconds = CACurrentMediaTime() - typeStart
         let typing = await typingPhase.value
+        emitPhaseDiagnostic(
+            name: "synthetic-per-character-typing-stress-while-scrolling-up", result: typing,
+            fixtureDigest: fixtureDigest, setupSeconds: totalSetupSeconds,
+            fixture: fixture, scroll: scroll, additional: ["composerTypingSeconds": composerTypingSeconds]
+        )
         XCTAssertFalse(typing.timedOut)
         XCTAssertGreaterThanOrEqual(typing.intervals.count, 30)
         fixture.assertValidMeasurementBoundary()
+        guard !typing.timedOut, typing.intervals.count >= 30 else { return }
         fixture.window.endEditing(true)
         fixture.window.layoutIfNeeded()
         try await Task.sleep(for: .milliseconds(200))
 
         let streamedText = "The saved plan still leaves time to check the calendar and confirm the arrival window."
         let initialChunk = "The saved plan still leaves time "
-        try await fixture.beginStreamTurn(
-            text: "Summarize the saved plan and calendar details.",
-            initialChunk: initialChunk,
-            finalText: streamedText
-        )
+        do {
+            try await fixture.beginStreamTurn(
+                text: "Summarize the saved plan and calendar details.",
+                initialChunk: initialChunk,
+                finalText: streamedText
+            )
+        } catch {
+            emitFailureDiagnostic(
+                phase: "begin-stream-turn", error: error,
+                fixtureDigest: fixtureDigest, fixtureSetupSeconds: totalSetupSeconds,
+                fixture: fixture, scroll: scroll
+            )
+            throw error
+        }
         let streamStart = Self.bottomOffset(of: scroll) * 0.45
         scroll.setContentOffset(CGPoint(x: 0, y: streamStart), animated: false)
         let streamRecorder = FullChatViewScrollRecorder(scrollView: scroll, duration: 3.5)
         let streamPhase = Task { @MainActor in
             await streamRecorder.run(from: streamStart, to: bottom)
         }
-        for chunk in ["to check ", "the calendar ", "and confirm ", "the arrival window."] {
-            try await Task.sleep(for: .milliseconds(60))
-            try await fixture.appendStreamChunk(chunk)
+        do {
+            for chunk in ["to check ", "the calendar ", "and confirm ", "the arrival window."] {
+                try await Task.sleep(for: .milliseconds(60))
+                try await fixture.appendStreamChunk(chunk)
+            }
+            try await fixture.finishStreamAndPoll()
+        } catch {
+            let partialStreaming = await streamPhase.value
+            emitFailureDiagnostic(
+                phase: "stream-and-poll-settlement", error: error,
+                fixtureDigest: fixtureDigest, fixtureSetupSeconds: totalSetupSeconds,
+                fixture: fixture, scroll: scroll, partialPhase: partialStreaming
+            )
+            throw error
         }
-        try await fixture.finishStreamAndPoll()
         let streaming = await streamPhase.value
+        emitPhaseDiagnostic(
+            name: "streaming-while-scrolling-down", result: streaming,
+            fixtureDigest: fixtureDigest, setupSeconds: totalSetupSeconds,
+            fixture: fixture, scroll: scroll
+        )
         XCTAssertFalse(streaming.timedOut)
         XCTAssertGreaterThanOrEqual(streaming.intervals.count, 30)
         fixture.assertValidMeasurementBoundary()
+        guard !streaming.timedOut, streaming.intervals.count >= 30 else { return }
         XCTAssertNotNil(fixture.model.workspace, "Turn settlement must load its valid workspace projection")
         XCTAssertEqual(fixture.model.workspace?.memory.ownerName, "Performance Owner")
         XCTAssertEqual(fixture.model.workspace?.settings.agent.name, "Fixture Assistant")
@@ -179,15 +301,31 @@ final class ConversationScrollPerformanceTests: XCTestCase {
             await updateRecorder.run(from: midPoint, to: -scroll.adjustedContentInset.top)
         }
         try await Task.sleep(for: .milliseconds(900))
-        try await fixture.appendMessage(.init(
-            id: "ignored-fixture-id",
-            role: .assistant,
-            parts: [.init(type: "text", text: "A newly appended update arrived while you were reading earlier messages.")]
-        ))
+        do {
+            try await fixture.appendMessage(.init(
+                id: "ignored-fixture-id",
+                role: .assistant,
+                parts: [.init(type: "text", text: "A newly appended update arrived while you were reading earlier messages.")]
+            ))
+        } catch {
+            let partialUpdate = await updatePhase.value
+            emitFailureDiagnostic(
+                phase: "append-while-scrolling-up", error: error,
+                fixtureDigest: fixtureDigest, fixtureSetupSeconds: totalSetupSeconds,
+                fixture: fixture, scroll: scroll, partialPhase: partialUpdate
+            )
+            throw error
+        }
         let updating = await updatePhase.value
+        emitPhaseDiagnostic(
+            name: "append-while-scrolling-up", result: updating,
+            fixtureDigest: fixtureDigest, setupSeconds: totalSetupSeconds,
+            fixture: fixture, scroll: scroll
+        )
         XCTAssertFalse(updating.timedOut)
         XCTAssertGreaterThanOrEqual(updating.intervals.count, 30)
         fixture.assertValidMeasurementBoundary()
+        guard !updating.timedOut, updating.intervals.count >= 30 else { return }
 
         let requestPaths = fixture.interceptedRequestPaths
         XCTAssertTrue(requestPaths.contains("/api/mobile/v1/chat"), "The measured stream phase must exercise the real chat request path")
@@ -216,7 +354,7 @@ final class ConversationScrollPerformanceTests: XCTestCase {
             "scrollableDistancePoints": bottom,
             "phases": [
                 Self.phaseSummary("top-to-bottom", down),
-                Self.phaseSummary("composer-typing-while-scrolling-up", typing),
+                Self.phaseSummary("synthetic-per-character-typing-stress-while-scrolling-up", typing),
                 Self.phaseSummary("streaming-while-scrolling-down", streaming),
                 Self.phaseSummary("append-while-scrolling-up", updating),
             ],
@@ -229,6 +367,122 @@ final class ConversationScrollPerformanceTests: XCTestCase {
         attachment.lifetime = .keepAlways
         add(attachment)
         print("FULL_CHAT_VIEW_SCROLL_BENCHMARK \(String(decoding: data, as: UTF8.self))")
+    }
+
+    @MainActor
+    private func emitPhaseDiagnostic(
+        name: String,
+        result: FullChatViewScrollRecorder.Result,
+        fixtureDigest: String,
+        setupSeconds: TimeInterval,
+        fixture: ConversationPerformanceFixture,
+        scroll: UIScrollView,
+        additional: [String: Any] = [:]
+    ) {
+        var report = diagnosticBase(
+            phase: name, fixtureDigest: fixtureDigest,
+            setupSeconds: setupSeconds, fixture: fixture, scroll: scroll
+        )
+        report["phaseMeasurement"] = Self.phaseSummary(name, result)
+        var phaseErrors: [String] = []
+        if result.timedOut { phaseErrors.append("CADisplayLink phase exceeded its bounded deadline") }
+        if result.intervals.count < 30 {
+            phaseErrors.append("callback coverage \(result.intervals.count) is below the retained minimum of 30")
+        }
+        report["phaseErrorType"] = phaseErrors.isEmpty ? (NSNull() as Any) : ("ConversationScrollPhaseValidation" as Any)
+        report["phaseErrorDescription"] = phaseErrors.isEmpty ? (NSNull() as Any) : (phaseErrors.joined(separator: "; ") as Any)
+        report["additional"] = additional
+        attachDiagnostic(report, name: "full-chat-view-\(name)")
+    }
+
+    @MainActor
+    private func emitStateDiagnostic(
+        phase: String,
+        fixtureDigest: String,
+        setupSeconds: TimeInterval,
+        fixture: ConversationPerformanceFixture,
+        scroll: UIScrollView
+    ) {
+        let report = diagnosticBase(
+            phase: phase, fixtureDigest: fixtureDigest,
+            setupSeconds: setupSeconds, fixture: fixture, scroll: scroll
+        )
+        attachDiagnostic(report, name: "full-chat-view-\(phase)")
+    }
+
+    @MainActor
+    private func emitFailureDiagnostic(
+        phase: String,
+        error: Error,
+        fixtureDigest: String,
+        fixtureSetupSeconds: TimeInterval,
+        fixture: ConversationPerformanceFixture?,
+        scroll: UIScrollView?,
+        partialPhase: FullChatViewScrollRecorder.Result? = nil
+    ) {
+        var report = diagnosticBase(
+            phase: phase, fixtureDigest: fixtureDigest,
+            setupSeconds: fixtureSetupSeconds, fixture: fixture, scroll: scroll
+        )
+        let nsError = error as NSError
+        report["errorType"] = String(reflecting: type(of: error))
+        report["errorDescription"] = String(describing: error)
+        report["errorDomain"] = nsError.domain
+        report["errorCode"] = nsError.code
+        if let partialPhase {
+            report["partialPhaseMeasurement"] = Self.phaseSummary(phase, partialPhase)
+        }
+        attachDiagnostic(report, name: "full-chat-view-error-\(phase)")
+    }
+
+    @MainActor
+    private func diagnosticBase(
+        phase: String,
+        fixtureDigest: String,
+        setupSeconds: TimeInterval,
+        fixture: ConversationPerformanceFixture?,
+        scroll: UIScrollView?
+    ) -> [String: Any] {
+        let state = fixture?.diagnosticState ?? [:]
+        let unexpectedRequests = state["unexpectedRequests"] as? [String] ?? []
+        let modelError = fixture?.model.errorMessage
+        return [
+            "mode": "diagnostic-before-assertion",
+            "phase": phase,
+            "messageCount": fixture.map { $0.model.messages.count as Any } ?? NSNull(),
+            "fixtureSHA256": fixtureDigest,
+            "fixtureSetupSecondsIncludingBootstrap": setupSeconds,
+            "coldMountToScrollableSeconds": fixture.map { $0.hostMountToScrollableSeconds as Any } ?? NSNull(),
+            "reduceMotionEnabled": UIAccessibility.isReduceMotionEnabled,
+            "viewportHeightPoints": scroll.map { ($0.bounds.height - $0.adjustedContentInset.top - $0.adjustedContentInset.bottom) as Any } ?? NSNull(),
+            "contentHeightPoints": scroll.map { $0.contentSize.height as Any } ?? NSNull(),
+            "contentOffsetYPoints": scroll.map { $0.contentOffset.y as Any } ?? NSNull(),
+            "modelError": modelError ?? "",
+            "boundaryError": unexpectedRequests.isEmpty ? (modelError ?? "") : unexpectedRequests.joined(separator: ", "),
+            "requestState": state,
+        ]
+    }
+
+    @MainActor
+    private func attachDiagnostic(_ report: [String: Any], name: String) {
+        guard JSONSerialization.isValidJSONObject(report),
+              let data = try? JSONSerialization.data(withJSONObject: report, options: [.sortedKeys, .prettyPrinted]) else {
+            XCTFail("Could not serialize diagnostic report for \(name)")
+            return
+        }
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "\(name).json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        print("FULL_CHAT_VIEW_PHASE_DIAGNOSTIC \(String(decoding: data, as: UTF8.self))")
+    }
+
+    private static func fixtureDigest(_ messages: [ChatMessage]) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return SHA256.hash(data: try encoder.encode(messages))
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     private static func fixtureMessages(count: Int, includeCalendarAgenda: Bool = false) -> [ChatMessage] {
@@ -297,7 +551,8 @@ final class ConversationScrollPerformanceTests: XCTestCase {
         return [
             "name": name,
             "durationSeconds": phase.elapsed,
-            "callbackCount": phase.intervals.count + 1,
+            "requestedToFirstCallbackSeconds": phase.requestedToFirstCallbackSeconds as Any? ?? NSNull(),
+            "callbackCount": phase.intervals.count + (phase.requestedToFirstCallbackSeconds == nil ? 0 : 1),
             "timedOut": phase.timedOut,
             "fromOffsetPoints": phase.fromOffset,
             "toOffsetPoints": phase.toOffset,
@@ -407,6 +662,7 @@ private final class FullChatViewScrollRecorder: NSObject {
         let intervals: [Double]
         let elapsed: Double
         let timedOut: Bool
+        let requestedToFirstCallbackSeconds: Double?
     }
 
     private let scrollView: UIScrollView
@@ -415,12 +671,25 @@ private final class FullChatViewScrollRecorder: NSObject {
     private var completion: CheckedContinuation<Result, Never>?
     private var timeoutTask: Task<Void, Never>?
     private var startTime: CFTimeInterval = 0
+    private var requestedAt: CFTimeInterval = 0
+    private var requestedToFirstCallbackSeconds: Double?
     private var previousCallback: CFTimeInterval?
     private var fromOffset: CGFloat = 0
     private var toOffset: CGFloat = 0
     private var intervals: [Double] = []
     private var elapsed: Double = 0
     private var timedOut = false
+
+    var partialResult: Result {
+        Result(
+            fromOffset: fromOffset,
+            toOffset: toOffset,
+            intervals: intervals,
+            elapsed: elapsed,
+            timedOut: timedOut,
+            requestedToFirstCallbackSeconds: requestedToFirstCallbackSeconds
+        )
+    }
 
     init(scrollView: UIScrollView, duration: CFTimeInterval) {
         self.scrollView = scrollView
@@ -433,6 +702,7 @@ private final class FullChatViewScrollRecorder: NSObject {
             completion = continuation
             fromOffset = from
             toOffset = to
+            requestedAt = CACurrentMediaTime()
             scrollView.setContentOffset(CGPoint(x: 0, y: from), animated: false)
             timeoutTask = Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -450,7 +720,10 @@ private final class FullChatViewScrollRecorder: NSObject {
 
     @objc private func tick(_ link: CADisplayLink) {
         let now = CACurrentMediaTime()
-        if startTime == 0 { startTime = now }
+        if startTime == 0 {
+            startTime = now
+            requestedToFirstCallbackSeconds = max(0, now - requestedAt)
+        }
         if let previousCallback { intervals.append(now - previousCallback) }
         previousCallback = now
         elapsed = now - startTime
@@ -473,7 +746,8 @@ private final class FullChatViewScrollRecorder: NSObject {
             toOffset: toOffset,
             intervals: intervals,
             elapsed: elapsed,
-            timedOut: timedOut
+            timedOut: timedOut,
+            requestedToFirstCallbackSeconds: requestedToFirstCallbackSeconds
         ))
         completion = nil
     }
