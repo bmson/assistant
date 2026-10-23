@@ -7,6 +7,118 @@ import UIKit
 /// retention from a card's initial collapsed state.
 final class ConversationRowRetentionTests: XCTestCase {
     @MainActor
+    func testExpandedApprovedReceiptGroupSurvivesScrollingAwayAndBack() async throws {
+        let firstID = "retention-approved-first"
+        let secondID = "retention-approved-second"
+        let tailID = "retention-approved-tail"
+        let messages = [
+            ChatMessage(id: firstID, role: .assistant, parts: [
+                .init(type: "text", text: "The first request was approved."),
+                .init(type: "approval", approvalId: "retention-approval-first", shortCode: "R-51",
+                      summary: "Receipt detail: update Robin's arrival time", status: "approved"),
+            ]),
+            ChatMessage(id: secondID, role: .assistant, parts: [
+                .init(type: "text", text: "The second request was approved."),
+                .init(type: "approval", approvalId: "retention-approval-second", shortCode: "R-52",
+                      summary: "Receipt detail: confirm the family pickup", status: "approved"),
+            ]),
+        ] + (0..<36).map { index in
+            ChatMessage.optimistic(
+                role: .assistant,
+                text: "Approved receipt filler row \(index).",
+                id: "retention-approved-filler-\(index)"
+            )
+        } + [
+            ChatMessage.optimistic(
+                role: .assistant,
+                text: "Tail row used to move away from the receipt group.",
+                id: tailID
+            ),
+        ]
+
+        let transcript = messages.transcriptItems()
+        guard case let .approvedReceiptGroup(receiptMessages, _) = transcript.first else {
+            return XCTFail("The production transcript projection should group the adjacent approved receipts first")
+        }
+        XCTAssertEqual(receiptMessages.map(\.id), [firstID, secondID])
+
+        let fixture = try await ConversationPerformanceFixture.make(messages: messages)
+        addTeardownBlock { await fixture.tearDown() }
+
+        func moveTranscriptToTop() async throws {
+            fixture.scrollView.setContentOffset(
+                CGPoint(x: 0, y: -fixture.scrollView.adjustedContentInset.top),
+                animated: false
+            )
+            let settledAtTop = await waitUntil {
+                fixture.window.layoutIfNeeded()
+                return abs(fixture.scrollView.contentOffset.y + fixture.scrollView.adjustedContentInset.top) <= 1
+            }
+            XCTAssertTrue(settledAtTop, "The direct UIKit top offset did not settle")
+        }
+
+        func visibleReceiptGroupControl() -> AccessibilityProxy? {
+            Self.accessibilityElements(in: fixture.window).first { proxy in
+                proxy.label == "2 requests approved"
+                    && Self.accessibilityFrameIsMeaningfullyVisible(proxy.frame, in: fixture.scrollView)
+            }
+        }
+
+        try await moveTranscriptToTop()
+        let controlAppeared = await waitUntil { visibleReceiptGroupControl() != nil }
+        XCTAssertTrue(
+            controlAppeared,
+            "The actual approved-receipt-group control was not visible at the transcript top"
+        )
+        let control = try XCTUnwrap(visibleReceiptGroupControl())
+        XCTAssertTrue(
+            control.activate(),
+            "The production approved-receipt-group accessibility control refused accessibilityActivate()"
+        )
+
+        let expandedEvidence = [
+            "Receipt detail: update Robin's arrival time",
+            "Receipt detail: confirm the family pickup",
+        ]
+        let expandedContentAppeared = await waitUntil {
+            expandedEvidence.allSatisfy {
+                Self.hasVisibleEvidence($0, in: fixture.window, scrollView: fixture.scrollView)
+            }
+        }
+        XCTAssertTrue(
+            expandedContentAppeared,
+            "Activating the real group control did not reveal both receipt details"
+        )
+
+        _ = try await fixture.seekMessage(tailID, anchor: .bottom)
+        XCTAssertTrue(
+            Self.hasVisibleLabel(
+                "Tail row used to move away from the receipt group.",
+                in: fixture.window,
+                scrollView: fixture.scrollView
+            ),
+            "The away destination did not enter the actual transcript viewport"
+        )
+        let receiptGroupLeftViewport = await waitUntil {
+            visibleReceiptGroupControl() == nil
+                && expandedEvidence.allSatisfy {
+                    !Self.hasVisibleEvidence($0, in: fixture.window, scrollView: fixture.scrollView)
+                }
+        }
+        XCTAssertTrue(receiptGroupLeftViewport, "The expanded group and its receipt details remained visible while away")
+
+        try await moveTranscriptToTop()
+        let restored = await waitUntil { visibleReceiptGroupControl() != nil }
+        XCTAssertTrue(restored, "The actual approved-receipt-group control did not return to the viewport")
+        let retainedEvidence = await waitUntil {
+            expandedEvidence.allSatisfy {
+                Self.hasVisibleEvidence($0, in: fixture.window, scrollView: fixture.scrollView)
+            }
+        }
+        XCTAssertTrue(retainedEvidence, "The group returned collapsed; its previously expanded receipt details were lost")
+    }
+
+    @MainActor
     func testExpandedDisclosureRowsSurviveScrollingAwayAndBack() async throws {
         let receiptID = "retention-receipt"
         let agendaID = "retention-agenda"
