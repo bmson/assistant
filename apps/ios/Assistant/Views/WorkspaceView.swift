@@ -895,17 +895,32 @@ struct WorkspaceView: View {
 
     private func billingCoverageSummary(_ coverage: WorkspaceBillingCoverage) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label(coverage.title, systemImage: "exclamationmark.circle")
-                .font(.headline)
+            if usesAccessibilityLayout {
+                Text(coverage.title)
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityAddTraits(.isHeader)
+            } else {
+                Label(coverage.title, systemImage: "exclamationmark.circle")
+                    .font(.headline)
+            }
             Text(coverage.summary)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if let statusSummary = coverage.statusSummary {
-                Label(statusSummary, systemImage: "exclamationmark.triangle")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(AssistantTheme.warningInk(for: colorScheme))
-                    .fixedSize(horizontal: false, vertical: true)
+                if usesAccessibilityLayout {
+                    Text(statusSummary)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(AssistantTheme.warningInk(for: colorScheme))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Label(statusSummary, systemImage: "exclamationmark.triangle")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(AssistantTheme.warningInk(for: colorScheme))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             DisclosureGroup("Coverage details") {
                 VStack(alignment: .leading, spacing: 12) {
