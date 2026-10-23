@@ -1735,6 +1735,7 @@ extension AssistantMarkdownTests {
         try await waitForTranscriptHostCondition("initial environment and actual receipt geometry") {
             state.environmentSnapshots.last?.localeIdentifier == "en_US"
                 && state.receiptMeasurement?.frame(in: window) != nil
+                && state.systemEnvironmentSnapshots[0] != nil
         }
         let initialScroll = try XCTUnwrap(ownedTranscriptScrollView(in: window))
         let initialHierarchy = ownedTranscriptControllerIdentities(root: root, containing: initialScroll)
@@ -1766,9 +1767,10 @@ extension AssistantMarkdownTests {
 
         XCTAssertEqual(state.environmentSnapshots.last?.colorScheme, .light)
         XCTAssertEqual(state.environmentSnapshots.last?.dynamicTypeSize, .large)
-        XCTAssertEqual(state.environmentSnapshots.last?.contrast, .standard)
-        XCTAssertFalse(state.environmentSnapshots.last?.reduceMotion ?? true)
-        XCTAssertFalse(state.environmentSnapshots.last?.reduceTransparency ?? true)
+        let initialSystemEnvironment = try XCTUnwrap(state.systemEnvironmentSnapshots[0])
+        XCTAssertEqual(state.environmentSnapshots.last?.contrast, initialSystemEnvironment.contrast)
+        XCTAssertEqual(state.environmentSnapshots.last?.reduceMotion, initialSystemEnvironment.reduceMotion)
+        XCTAssertEqual(state.environmentSnapshots.last?.reduceTransparency, initialSystemEnvironment.reduceTransparency)
         XCTAssertEqual(state.environmentSnapshots.last?.layoutDirection, .leftToRight)
         XCTAssertEqual(state.environmentSnapshots.last?.scenePhase, .active)
         XCTAssertEqual(state.environmentSnapshots.last?.modelIdentity, ObjectIdentifier(state.model))
@@ -1808,9 +1810,6 @@ extension AssistantMarkdownTests {
             state.contentRevision += 1
             state.colorScheme = .dark
             state.dynamicTypeSize = .accessibility2
-            state.contrast = .increased
-            state.reduceMotion = true
-            state.reduceTransparency = true
             state.locale = Locale(identifier: "fr_FR")
             state.layoutDirection = .rightToLeft
             state.scenePhase = .inactive
@@ -1823,6 +1822,7 @@ extension AssistantMarkdownTests {
                 && state.environmentSnapshots.last?.modelRevision == 1
                 && state.transactionMarkers.contains(73)
                 && state.disclosureStates[state.contentRevision] == true
+                && state.systemEnvironmentSnapshots[state.contentRevision] != nil
                 && state.receiptMeasurement?.frame(in: window) != nil
         }
         state.openURLRequest += 1
@@ -1842,9 +1842,10 @@ extension AssistantMarkdownTests {
         let updatedEnvironment = try XCTUnwrap(state.environmentSnapshots.last)
         XCTAssertEqual(updatedEnvironment.colorScheme, .dark)
         XCTAssertEqual(updatedEnvironment.dynamicTypeSize, .accessibility2)
-        XCTAssertEqual(updatedEnvironment.contrast, .increased)
-        XCTAssertTrue(updatedEnvironment.reduceMotion)
-        XCTAssertTrue(updatedEnvironment.reduceTransparency)
+        let updatedSystemEnvironment = try XCTUnwrap(state.systemEnvironmentSnapshots[state.contentRevision])
+        XCTAssertEqual(updatedEnvironment.contrast, updatedSystemEnvironment.contrast)
+        XCTAssertEqual(updatedEnvironment.reduceMotion, updatedSystemEnvironment.reduceMotion)
+        XCTAssertEqual(updatedEnvironment.reduceTransparency, updatedSystemEnvironment.reduceTransparency)
         XCTAssertEqual(updatedEnvironment.localeIdentifier, "fr_FR")
         XCTAssertEqual(updatedEnvironment.layoutDirection, .rightToLeft)
         XCTAssertEqual(updatedEnvironment.scenePhase, .inactive)
@@ -1891,9 +1892,6 @@ private final class OwnedTranscriptHostRegressionState: ObservableObject {
     @Published var contentRevision = 0
     @Published var colorScheme: ColorScheme = .light
     @Published var dynamicTypeSize: DynamicTypeSize = .large
-    @Published var contrast: ColorSchemeContrast = .standard
-    @Published var reduceMotion = false
-    @Published var reduceTransparency = false
     @Published var locale = Locale(identifier: "en_US")
     @Published var layoutDirection: LayoutDirection = .leftToRight
     @Published var scenePhase: ScenePhase = .active
@@ -1905,6 +1903,7 @@ private final class OwnedTranscriptHostRegressionState: ObservableObject {
 
     let model = OwnedTranscriptHostRegressionModel()
     var environmentSnapshots: [OwnedTranscriptEnvironmentSnapshot] = []
+    var systemEnvironmentSnapshots: [Int: OwnedTranscriptSystemEnvironmentSnapshot] = [:]
     var transactionMarkers: [Int] = []
     var receiptMeasurement: TranscriptGeometryMeasurement?
     var viewportMeasurement: TranscriptGeometryMeasurement?
@@ -1925,6 +1924,31 @@ private struct OwnedTranscriptEnvironmentSnapshot: Equatable {
     let scenePhase: ScenePhase
     let modelIdentity: ObjectIdentifier
     let modelRevision: Int
+}
+
+private struct OwnedTranscriptSystemEnvironmentSnapshot: Equatable {
+    let contrast: ColorSchemeContrast
+    let reduceMotion: Bool
+    let reduceTransparency: Bool
+}
+
+private struct OwnedTranscriptSystemEnvironmentReader: View {
+    let contentRevision: Int
+    let report: (Int, OwnedTranscriptSystemEnvironmentSnapshot) -> Void
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    private var snapshot: OwnedTranscriptSystemEnvironmentSnapshot {
+        .init(contrast: contrast, reduceMotion: reduceMotion, reduceTransparency: reduceTransparency)
+    }
+
+    var body: some View {
+        Color.clear.frame(width: 1, height: 1)
+            .onAppear { report(contentRevision, snapshot) }
+            .onChange(of: contentRevision) { _, revision in report(revision, snapshot) }
+            .onChange(of: snapshot) { _, value in report(contentRevision, value) }
+    }
 }
 
 private struct OwnedTranscriptHostMarkerKey: TransactionKey {
@@ -2029,12 +2053,17 @@ private struct OwnedTranscriptHostRegressionFixture: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .offset(y: -state.reveal)
         }
+        .overlay(alignment: .topLeading) {
+            // These SDK values are system-owned and read-only. Observe the
+            // actual parent environment without changing system preferences.
+            OwnedTranscriptSystemEnvironmentReader(contentRevision: state.contentRevision) { revision, snapshot in
+                state.systemEnvironmentSnapshots[revision] = snapshot
+            }
+            .allowsHitTesting(false)
+        }
         .environment(state.model)
         .environment(\.colorScheme, state.colorScheme)
         .environment(\.dynamicTypeSize, state.dynamicTypeSize)
-        .environment(\.colorSchemeContrast, state.contrast)
-        .environment(\.accessibilityReduceMotion, state.reduceMotion)
-        .environment(\.accessibilityReduceTransparency, state.reduceTransparency)
         .environment(\.locale, state.locale)
         .environment(\.layoutDirection, state.layoutDirection)
         .environment(\.scenePhase, state.scenePhase)
