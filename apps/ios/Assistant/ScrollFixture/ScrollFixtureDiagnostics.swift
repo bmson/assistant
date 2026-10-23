@@ -11,6 +11,15 @@ struct ScrollFixtureGeometry: Equatable {
     var bottom: CGFloat { max(0, content - viewport + topInset + bottomInset) }
 }
 
+struct ScrollFixtureOwnership: Equatable {
+    let menuClosed: Bool
+    let menuOwnsSurface: Bool
+    let readerFollowsLatest: Bool
+    let positionedByUser: Bool
+    let unexpectedOverlay: Bool
+    let composerFocused: Bool
+}
+
 /// Not Observable: geometry only replaces a small value. Accessibility reads a
 /// snapshot on demand; no per-frame publications, JSON encoding or UI rebuilds.
 @MainActor
@@ -22,34 +31,43 @@ final class ScrollFixtureDiagnostics {
     var geometry = ScrollFixtureGeometry() {
         didSet { lastGeometryAt = ProcessInfo.processInfo.systemUptime }
     }
+    var viewportFrame = CGRect.zero
     private var phase = "idle"
-    private var interacted = false
-    private var decelerated = false
-    private var completed = false
-    private var gestureStart: Double?
-    private var gestureEnd: Double?
+    private var events: [(phase: String, uptime: Double)] = []
+    private var ownership: ScrollFixtureOwnership?
+    private var everMenuClaimed = false
+    private var everUnexpectedOverlay = false
+    private var everComposerFocused = false
     private var lastGeometryAt = ProcessInfo.processInfo.systemUptime
+
+    func recordOwnership(_ state: ScrollFixtureOwnership) {
+        ownership = state
+        everMenuClaimed = everMenuClaimed || !state.menuClosed || state.menuOwnsSurface
+        everUnexpectedOverlay = everUnexpectedOverlay || state.unexpectedOverlay
+        everComposerFocused = everComposerFocused || state.composerFocused
+    }
 
     func record(_ next: ScrollPhase) {
         phase = String(describing: next)
+        let expected: [String]
         switch next {
-        case .interacting:
-            if !interacted { gestureStart = ProcessInfo.processInfo.systemUptime }
-            interacted = true
-        case .decelerating:
-            decelerated = true
+        case .interacting: expected = []
+        case .decelerating: expected = ["interacting"]
         case .idle:
-            if interacted {
-                completed = true
-                gestureEnd = ProcessInfo.processInfo.systemUptime
-            }
-        default: break
+            guard !events.isEmpty else { return } // Initial programmatic anchor.
+            expected = ["interacting", "decelerating"]
+        default: return // Tracking/programmatic animation is not a measured phase.
         }
+        guard events.map(\.phase) == expected else {
+            failure = "Unexpected scroll phase order: \(events.map(\.phase)) → \(phase)"
+            return
+        }
+        events.append((phase, ProcessInfo.processInfo.systemUptime))
     }
 
     var snapshot: String {
         let now = ProcessInfo.processInfo.systemUptime
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "launchID": launchID,
             "fixtureRows": fixtureRows,
             "failure": failure ?? "",
@@ -58,16 +76,36 @@ final class ScrollFixtureDiagnostics {
             "bottom": Double(geometry.bottom),
             "viewport": Double(geometry.viewport),
             "content": Double(geometry.content),
+            "topInset": Double(geometry.topInset),
+            "bottomInset": Double(geometry.bottomInset),
+            "viewportTop": Double(viewportFrame.minY),
+            "viewportLeft": Double(viewportFrame.minX),
+            "viewportWidth": Double(viewportFrame.width),
+            "viewportFrameHeight": Double(viewportFrame.height),
+            "capturedAt": now,
             "settled": phase == "idle" && now - lastGeometryAt >= 0.3,
-            "interacted": interacted,
-            "decelerated": decelerated,
-            "completed": completed,
-            "gestureStart": gestureStart ?? -1,
-            "gestureEnd": gestureEnd ?? -1,
+            "completed": events.map(\.phase) == ["interacting", "decelerating", "idle"],
+            "phaseEvents": events.map { ["phase": $0.phase, "uptime": $0.uptime] as [String: Any] },
+            "ownershipReady": ownership != nil,
+            "everMenuClaimed": everMenuClaimed,
+            "everUnexpectedOverlay": everUnexpectedOverlay,
+            "everComposerFocused": everComposerFocused,
             "simulator": Self.isSimulator,
             "maximumFramesPerSecond": UIScreen.main.maximumFramesPerSecond,
             "thermalState": ProcessInfo.processInfo.thermalState.rawValue,
         ]
+        if let ownership {
+            payload["menuClosed"] = ownership.menuClosed
+            payload["menuOwnsSurface"] = ownership.menuOwnsSurface
+            payload["readerFollowsLatest"] = ownership.readerFollowsLatest
+            payload["positionedByUser"] = ownership.positionedByUser
+            payload["unexpectedOverlay"] = ownership.unexpectedOverlay
+            payload["composerFocused"] = ownership.composerFocused
+        }
+        // Absent pre-gesture timestamps remain absent, never a numeric sentinel.
+        if let start = events.first { payload["gestureStart"] = start.uptime }
+        if events.count > 1 { payload["decelerationStart"] = events[1].uptime }
+        if events.count == 3 { payload["gestureEnd"] = events[2].uptime }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
             return "{\"failure\":\"diagnostics serialization\"}"
         }

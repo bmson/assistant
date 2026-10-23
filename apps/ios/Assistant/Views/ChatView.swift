@@ -910,6 +910,15 @@ struct ChatView: View {
                 // Respect this viewport even while older rows remain mounted.
                 #if ASSISTANT_SCROLL_FIXTURE
                 .accessibilityIdentifier("assistant.scroll-fixture.transcript")
+                .onGeometryChange(for: CGRect.self) { geometry in
+                    geometry.frame(in: .global)
+                } action: { frame in
+                    ScrollFixtureDiagnostics.shared.viewportFrame = frame
+                }
+                .onAppear { ScrollFixtureDiagnostics.shared.recordOwnership(scrollFixtureOwnership) }
+                .onChange(of: scrollFixtureOwnership) { _, ownership in
+                    ScrollFixtureDiagnostics.shared.recordOwnership(ownership)
+                }
                 .onScrollGeometryChange(for: ScrollFixtureGeometry.self) { geometry in
                     ScrollFixtureGeometry(
                         offset: geometry.contentOffset.y + geometry.contentInsets.top,
@@ -2868,6 +2877,22 @@ struct ChatView: View {
         // from dropping its bottom anchor on the first pull sample.
         transcriptFollow.shouldPin(userIsDragging: userIsDraggingTranscript)
     }
+
+    #if ASSISTANT_SCROLL_FIXTURE
+    // Coarse state transitions only; no diagnostic observable state is added.
+    private var scrollFixtureOwnership: ScrollFixtureOwnership {
+        ScrollFixtureOwnership(
+            menuClosed: !menuOpen && !menuSurfaceActive && visibleMenuRevealDistance <= 0.001,
+            menuOwnsSurface: menuOwnsConversationSurface,
+            readerFollowsLatest: transcriptFollow.followsLatest,
+            positionedByUser: transcriptScrollPosition.isPositionedByUser,
+            unexpectedOverlay: showingTalk || model.showingConnection || !model.navigationPath.isEmpty
+                || model.errorNotice != nil || model.hiddenMessageUndo != nil
+                || model.edits.pendingCount > 0 || !model.edits.failures.isEmpty,
+            composerFocused: composerFocused
+        )
+    }
+    #endif
 
     private var menuOwnsConversationSurface: Bool {
         menuPullActive || menuOpen || menuCloseDragDistance > 0
