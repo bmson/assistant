@@ -22,6 +22,163 @@ extension APIModelsTests {
         XCTAssertEqual(current.billingCoverage?.entries.first?.period, "2026-10")
     }
 
+    func testDocumentListPresentationKeepsEmptyDistinctFromIncompleteAndUnloaded() throws {
+        func overview(
+            documents: [DocumentRecord] = [],
+            stats: DocumentStats = .init(total: 0, ready: 0, pending: 0, chunks: 0),
+            hasMore: Bool? = nil,
+            pagination: CursorPagination? = nil
+        ) -> DocumentsOverview {
+            DocumentsOverview(
+                documents: documents,
+                stats: stats,
+                primaryConversationId: "main",
+                hasMore: hasMore,
+                pagination: pagination
+            )
+        }
+
+        XCTAssertEqual(DocumentListPresentation(overview()), .confirmedEmpty)
+        for (version, consistency) in [(2, "live-keyset"), (1, "unknown")] {
+            XCTAssertEqual(DocumentListPresentation(overview(pagination: .init(
+                version: version, consistency: consistency, pageSize: 20,
+                hasMore: false, complete: true, nextCursor: nil
+            ))), .incomplete, "Unsupported pagination cannot establish an empty list.")
+        }
+        XCTAssertEqual(
+            DocumentListPresentation(overview(
+                pagination: .init(
+                    version: 1,
+                    consistency: "live-keyset",
+                    pageSize: 20,
+                    hasMore: true,
+                    complete: false,
+                    nextCursor: "next"
+                )
+            )),
+            .loadablePage
+        )
+        XCTAssertEqual(
+            DocumentListPresentation(overview(
+                pagination: .init(
+                    version: 1,
+                    consistency: "unknown",
+                    pageSize: 20,
+                    hasMore: true,
+                    complete: false,
+                    nextCursor: "next"
+                )
+            )),
+            .incomplete
+        )
+        XCTAssertEqual(
+            DocumentListPresentation(overview(
+                pagination: .init(
+                    version: 1,
+                    consistency: "live-keyset",
+                    pageSize: 20,
+                    hasMore: false,
+                    complete: false,
+                    nextCursor: nil
+                )
+            )),
+            .incomplete
+        )
+        XCTAssertEqual(
+            DocumentListPresentation(overview(stats: .init(total: 4, ready: 3, pending: 1, chunks: 12))),
+            .reportedButNotLoaded
+        )
+        XCTAssertEqual(DocumentListPresentation(overview(hasMore: true)), .incomplete)
+        let loaded = DocumentRecord(
+            id: "document-1",
+            title: "Weekend notes.txt",
+            mime: "text/plain",
+            source: "upload",
+            trust: "owner",
+            status: "ready",
+            extractor: "text",
+            chunkCount: 1,
+            charCount: 80,
+            bytes: 100,
+            error: nil,
+            createdAt: "2026-10-01T00:00:00Z"
+        )
+        XCTAssertEqual(
+            DocumentListPresentation(overview(documents: [loaded])).loadedCount,
+            1,
+            "A loaded row wins over inconsistent zero aggregate stats."
+        )
+    }
+
+    func testImportSourceMaintenanceConfirmationPreservesExactSourceAndDistinctActions() throws {
+        let source = "Family archive, 2018–2024"
+        let purge = ImportSourceActionConfirmation(
+            source: source,
+            workspacePath: "imports/family-archive",
+            updatedAt: "2026-10-01T00:00:00Z",
+            action: .purgeMemories
+        )
+        XCTAssertEqual(purge.id, "purgeMemories:\(source)")
+        XCTAssertEqual(purge.title, "Purge memories")
+        XCTAssertEqual(purge.command, .init(action: "purge", source: source))
+        XCTAssertTrue(purge.confirmationTitle.contains("Purge memories"))
+        XCTAssertTrue(purge.message.contains("memories learned from \(source)"))
+        XCTAssertTrue(purge.message.contains("import record and source archive are kept"))
+
+        let delete = ImportSourceActionConfirmation(
+            source: source,
+            workspacePath: "imports/family-archive",
+            updatedAt: "2026-10-01T00:00:00Z",
+            action: .deleteSource
+        )
+        XCTAssertEqual(delete.id, "deleteSource:\(source)")
+        XCTAssertEqual(delete.title, "Delete source")
+        XCTAssertEqual(delete.command, .init(action: "delete", source: source))
+        XCTAssertTrue(delete.confirmationTitle.contains("Delete this source"))
+        XCTAssertTrue(delete.message.contains("\(source), its imported memories, and its source file"))
+        XCTAssertNotEqual(purge.command.action, delete.command.action)
+    }
+
+    func testImportSourceMaintenanceSelectionRequiresExplicitConfirmationAndSupportsCancel() throws {
+        var selection = ImportSourceActionSelection()
+        selection.select(.deleteSource, source: "archive A", workspacePath: "imports/archive-a", updatedAt: "v1", actionsAvailable: true)
+        XCTAssertEqual(selection.pending?.source, "archive A")
+        XCTAssertEqual(selection.pending?.action, .deleteSource)
+
+        // A concurrent workspace mutation must not authorize this command.
+        XCTAssertNil(selection.confirm(actionsAvailable: false, currentWorkspacePath: "imports/archive-a", currentUpdatedAt: "v1"))
+        XCTAssertEqual(selection.pending?.source, "archive A")
+
+        // Same source label with a changed workspace target is stale too.
+        XCTAssertNil(selection.confirm(actionsAvailable: true, currentWorkspacePath: "imports/replaced-archive-a", currentUpdatedAt: "v1"))
+        XCTAssertNil(selection.pending, "A changed source target cancels the pending destructive action.")
+
+        selection.select(.deleteSource, source: "archive A", workspacePath: "imports/archive-a", updatedAt: "v1", actionsAvailable: true)
+        XCTAssertNil(selection.confirm(actionsAvailable: true, currentWorkspacePath: "imports/archive-a", currentUpdatedAt: "v2"))
+        XCTAssertNil(selection.pending, "A refreshed source state cancels the pending destructive action.")
+
+        selection.select(.deleteSource, source: "archive A", workspacePath: "imports/archive-a", updatedAt: "v1", actionsAvailable: true)
+        XCTAssertNil(selection.confirm(actionsAvailable: true, currentWorkspacePath: nil, currentUpdatedAt: nil))
+        XCTAssertNil(selection.pending, "A disappeared or unavailable source cannot remain confirmable.")
+
+        selection.cancel()
+        XCTAssertNil(selection.pending)
+        XCTAssertNil(selection.confirm(actionsAvailable: true, currentWorkspacePath: "imports/archive-a", currentUpdatedAt: "v1"))
+
+        // Choosing another source while a request is already in flight is inert.
+        selection.select(.purgeMemories, source: "archive B", workspacePath: "imports/archive-b", updatedAt: "v1", actionsAvailable: false)
+        XCTAssertNil(selection.pending)
+        XCTAssertNil(selection.confirm(actionsAvailable: true, currentWorkspacePath: "imports/archive-b", currentUpdatedAt: "v1"))
+
+        selection.select(.purgeMemories, source: "archive B", workspacePath: "imports/archive-b", updatedAt: "v1", actionsAvailable: true)
+        XCTAssertEqual(
+            selection.confirm(actionsAvailable: true, currentWorkspacePath: "imports/archive-b", currentUpdatedAt: "v1"),
+            .init(action: "purge", source: "archive B")
+        )
+        XCTAssertNil(selection.pending)
+        XCTAssertNil(selection.confirm(actionsAvailable: true, currentWorkspacePath: "imports/archive-b", currentUpdatedAt: "v1"), "A confirmation may only issue once.")
+    }
+
     func testChecklistCorrectionProjectionRequiresBoundedUniquePendingItemsAndRevision() throws {
         let valid = try JSONDecoder().decode(
             ChecklistCorrectionProjection.self,
