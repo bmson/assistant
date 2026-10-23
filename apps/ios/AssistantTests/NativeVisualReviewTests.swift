@@ -388,6 +388,86 @@ final class NativeVisualReviewTests: XCTestCase {
     }
 
     @MainActor
+    func testImprovementsRepairEvidenceStatesInLightDarkAndAccessibleText() async throws {
+        let stamp = "2026-10-22T19:00:00Z"
+        let cases: [(String, [String: Any])] = [
+            ("recorded-pr-old-review", [
+                "id": "repair-pr", "title": "The recorded pull request may have a newer revision",
+                "summary": "Saved independent review for an earlier commit.", "status": "pr_open",
+                "diagnosis": "The original issue is fixed in the proposed change.", "lastError": "",
+                "sourceTaskId": "3d60a0fb-3939-455a-9e36-b54073c3b4df",
+                "prUrl": "https://github.com/example/repo/pull/31",
+                "runUrl": "https://github.com/example/repo/actions/runs/41", "updatedAt": stamp,
+                "workerProvider": "github", "prNumber": 31,
+                "mergeSha": NSNull(), "codeReview": [
+                    "commitSha": "abcdef0123456789abcdef0123456789abcdef01", "approved": true,
+                    "modelId": "review-model", "summary": "The saved revision addresses the issue. Check the current pull request revision and checks before merging.",
+                    "reviewedAt": "2026-10-22T18:00:00Z",
+                ],
+                "history": [["status": "testing", "at": stamp, "detail": "Regression checks passed for the reviewed commit."],
+                            ["status": "pr_open", "at": stamp, "detail": "Pull request recorded; current head not checked."]],
+            ]),
+            ("provider-blocked-before-extra-attempt", [
+                "id": "repair-blocked", "title": "Publisher setup is required before another attempt",
+                "summary": "The attempted code fix could not be published.", "status": "blocked",
+                "diagnosis": "The publisher is not configured for this repository.",
+                "lastError": "Publisher settings are incomplete.", "updatedAt": stamp,
+                "workerProvider": "github", "prNumber": NSNull(),
+                "prUrl": NSNull(), "runUrl": NSNull(), "mergeSha": NSNull(),
+                "outcome": ["message": "The publisher is not configured.", "nextStep": "Check publisher settings before retrying."],
+                "waitingReason": "Repository publishing settings need attention.",
+                "history": [["status": "blocked", "at": stamp, "detail": "Publishing stopped before a pull request was created."]],
+            ]),
+            ("deployment-observed-needs-confirmation", [
+                "id": "repair-monitoring", "title": "The original behavior still needs checking",
+                "summary": "A deployment was observed for the merged revision.", "status": "monitoring",
+                "diagnosis": "Check the original behavior before confirming the fix.", "lastError": "",
+                "updatedAt": stamp, "prUrl": "https://github.com/example/repo/pull/32",
+                "runUrl": NSNull(), "mergeSha": "fedcba9876543210", "deploymentConfirmed": true,
+                "workerProvider": "github", "prNumber": 32,
+                "history": [["status": "merged", "at": stamp, "detail": "Merged revision fedcba9876543210."],
+                            ["status": "monitoring", "at": stamp, "detail": "Deployment observed. Owner confirmation remains pending."]],
+            ]),
+            ("closed-report-history", [
+                "id": "repair-closed", "title": "A dismissed report remains available in history",
+                "summary": "The report was closed without removing its recorded evidence.", "status": "dismissed",
+                "diagnosis": "The report was dismissed after review.", "lastError": "", "updatedAt": stamp,
+                "prUrl": NSNull(), "runUrl": NSNull(), "mergeSha": NSNull(),
+                "workerProvider": "github", "prNumber": NSNull(),
+                "history": [["status": "reported", "at": "2026-10-20T19:00:00Z", "detail": "Report saved."],
+                            ["status": "dismissed", "at": stamp, "detail": "Owner dismissed the report; history retained."]],
+            ]),
+        ]
+
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        for (name, repair) in cases {
+            let repairData = try JSONSerialization.data(withJSONObject: repair)
+            let decodedRepair = try JSONDecoder().decode(WorkspaceRepairIssue.self, from: repairData)
+            XCTAssertEqual(decodedRepair.id, repair["id"] as? String, "Repair fixture failed DTO decoding: \(name)")
+            let fixture = try NativeReviewFixture()
+            NativeReviewProtocol.install(try fixture.responsesByReplacingRepair(repair))
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [NativeReviewProtocol.self]
+            let client = APIClient(
+                configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+                session: URLSession(configuration: configuration)
+            )
+            let suite = "assistant.improvements-visual-review-\(name)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defaults.removePersistentDomain(forName: suite)
+            let model = AppModel(apiClient: client, defaults: defaults)
+            await model.refreshWorkspace()
+            XCTAssertNotNil(model.workspace?.repairs, "Repair fixture failed to decode: \(name)")
+            let page = Page("improvements-\(name)", WorkspaceView(area: .improvements))
+            try await capture(page, scheme: .light, size: .large, scene: scene, model: model)
+            try await capture(page, scheme: .dark, size: .large, scene: scene, model: model)
+            try await capture(page, scheme: .light, size: .accessibility3, scene: scene, model: model)
+            XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty, "Review fixture escaped the stub transport: \(name)")
+            XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty, "Review capture attempted a mutation: \(name)")
+        }
+    }
+
+    @MainActor
     func testEmptyAndRefreshFailurePages() async throws {
         let fixture = try NativeReviewFixture()
         let savedAppearance = UserDefaults.standard.string(forKey: AssistantAppearance.defaultsKey)
@@ -663,6 +743,17 @@ private struct NativeReviewFixture {
     let relation: KnowledgeRelation
     let responses: [String: Data]
     let overview: OverviewResponse
+    func responsesByReplacingRepair(_ repair: [String: Any]) throws -> [String: Data] {
+        var result = responses
+        let path = "/api/mobile/v1/workspace"
+        let original = try XCTUnwrap(result[path])
+        var workspace = try XCTUnwrap(JSONSerialization.jsonObject(with: original) as? [String: Any])
+        var repairs = workspace["repairs"] as? [String: Any] ?? [:]
+        repairs["issues"] = [repair]
+        workspace["repairs"] = repairs
+        result[path] = try JSONSerialization.data(withJSONObject: workspace)
+        return result
+    }
     init() throws {
         let encoder = JSONEncoder()
         func json(_ value: Any) throws -> Data { try JSONSerialization.data(withJSONObject: value) }
