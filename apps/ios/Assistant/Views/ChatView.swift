@@ -2774,10 +2774,6 @@ struct ChatView: View {
                 .accessibilityIdentifier("assistant.chat.send")
                 .accessibilityHint(primaryButtonHint)
                 .animation(
-                    reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.76),
-                    value: canSend
-                )
-                .animation(
                     reduceMotion ? nil : .easeOut(duration: 0.18),
                     value: model.isSending
                 )
