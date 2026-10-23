@@ -60,6 +60,12 @@ struct MessageBubble: View {
 
     @ViewBuilder
     var body: some View {
+        // Parse composed cards once for this render pass. The resulting value
+        // is shared by card/prose selection, rendering, and the sources footer;
+        // each of those paths used to decode the same explicit payload again.
+        let responseCards = message.role == .assistant
+            ? message.bubbleResponseCards(formRendererAvailable: cardFormActions != nil)
+            : []
         // The inner menus below cover the prose bubbles; this one catches every
         // other card the stream can draw — decisions, receipts, rich cards — so
         // a long press anywhere on a row offers the same thing. Attached only
@@ -68,9 +74,9 @@ struct MessageBubble: View {
         // bubble underneath the reply it is still writing.
         Group {
             if hide != nil {
-                card.contextMenu { cardMenu(copyLabel: "Copy message") }
+                card(responseCards: responseCards).contextMenu { cardMenu(copyLabel: "Copy message") }
             } else {
-                card
+                card(responseCards: responseCards)
             }
         }
         .onScrollVisibilityChange(threshold: 0.5) { visible in
@@ -97,7 +103,7 @@ struct MessageBubble: View {
         }
     }
 
-    private var card: some View {
+    private func card(responseCards: [MessageResponseCard]) -> some View {
         // Bubbles are full-width cards like every other surface in the
         // stream: a one-word message gets the same width as a paragraph
         // rather than shrink-wrapping its text.
@@ -114,8 +120,8 @@ struct MessageBubble: View {
                     originalText: message.retractedOriginalText,
                     retractionReason: message.retractionReason
                 )
-            } else if !message.text.isEmpty && !usesPrimaryCards && !message.visibleTextBubbles.isEmpty {
-                messageText
+            } else if !message.text.isEmpty && !usesPrimaryCards(responseCards: responseCards) && !message.visibleTextBubbles.isEmpty {
+                messageText(responseCards: responseCards)
                 if message.role == .assistant, !message.recallSources.isEmpty {
                     recallNote
                 }
@@ -250,7 +256,7 @@ struct MessageBubble: View {
     }
 
     @ViewBuilder
-    private var messageText: some View {
+    private func messageText(responseCards: [MessageResponseCard]) -> some View {
         if message.role == .assistant {
             // A reply split by [break] cues stacks as separate sheets, the way
             // separate texts from a person stack — one paper bubble per text
@@ -258,7 +264,8 @@ struct MessageBubble: View {
             ForEach(Array(message.visibleTextBubbles.enumerated()), id: \.offset) { index, bubble in
                 assistantBubble(
                     bubble,
-                    showsSources: message.hasSupportingResultCards && index == message.visibleTextBubbles.count - 1
+                    showsSources: message.hasSupportingResultCards && index == message.visibleTextBubbles.count - 1,
+                    responseCards: responseCards
                 )
             }
         } else {
@@ -340,7 +347,11 @@ struct MessageBubble: View {
 
     /// One assistant bubble's worth of paper. The whole reply remains the
     /// copy unit no matter how many bubbles it was split into.
-    private func assistantBubble(_ text: String, showsSources: Bool) -> some View {
+    private func assistantBubble(
+        _ text: String,
+        showsSources: Bool,
+        responseCards: [MessageResponseCard]
+    ) -> some View {
         let shape = RoundedRectangle(
             cornerRadius: AssistantTheme.conversationCornerRadius,
             style: .continuous
@@ -531,28 +542,7 @@ struct MessageBubble: View {
         message.decisionParts
     }
 
-    /// Cards arrive composed, from the one place that composes them. The phone
-    /// reads a card the runtime sent and draws it; it does not read the reply
-    /// and guess at one. The prose-to-card parsers that used to live here —
-    /// four hand-written kinds, a regex per fact, and an on-device pass to
-    /// pick between them — could only ever produce a shape someone had
-    /// already thought of, and re-derived it on every scroll.
-    private var responseCards: [MessageResponseCard] {
-        let formRendererAvailable = cardFormActions != nil
-        let explicit = message.parts.compactMap {
-            MessageResponseCard(part: $0, formRendererAvailable: formRendererAvailable)
-        }
-        guard explicit.isEmpty else {
-            return message.responseCards(formRendererAvailable: formRendererAvailable)
-        }
-
-        // One exception, and it is not prose interpretation: the proactive
-        // pulse still phrases an event alert as a sentence, in an exact
-        // format this build wrote itself.
-        return MessageResponseCard.inferredLegacy(from: message.text)
-    }
-
-    private var usesPrimaryCards: Bool {
+    private func usesPrimaryCards(responseCards: [MessageResponseCard]) -> Bool {
         // An answer card avoids a duplicate answer. Raw lookup results never
         // replace the explanation, and neither does a card read off the reply.
         guard message.role == .assistant, !message.hasSupportingResultCards else { return false }
@@ -997,10 +987,31 @@ extension ChatMessage {
     }
 
     func responseCards(formRendererAvailable: Bool) -> [MessageResponseCard] {
-        let paired = Set(suggestionParts.compactMap { $0.suggestionContext?.id })
-        return parts.compactMap {
+        let explicit = parts.compactMap {
             MessageResponseCard(part: $0, formRendererAvailable: formRendererAvailable)
-        }.filter { card in
+        }
+        return responseCards(from: explicit)
+    }
+
+    /// Resolve cards for an assistant bubble. Explicit parts suppress the
+    /// proactive legacy parser even when suggestion pairing filters them all.
+    func bubbleResponseCards(formRendererAvailable: Bool) -> [MessageResponseCard] {
+        let explicit = parts.compactMap {
+            MessageResponseCard(part: $0, formRendererAvailable: formRendererAvailable)
+        }
+        guard explicit.isEmpty else { return responseCards(from: explicit) }
+
+        // The proactive pulse still phrases an event alert as a sentence, in
+        // an exact format this build wrote itself.
+        return MessageResponseCard.inferredLegacy(from: text)
+    }
+
+    /// Apply the suggestion-pairing rule to cards that the caller already
+    /// decoded. This lets a rendered MessageBubble share one explicit-card
+    /// value across its layout decisions and all of its visible surfaces.
+    func responseCards(from explicitCards: [MessageResponseCard]) -> [MessageResponseCard] {
+        let paired = Set(suggestionParts.compactMap { $0.suggestionContext?.id })
+        return explicitCards.filter { card in
             if case .proactiveAlert = card { return !paired.contains(card.id) }
             return true
         }
