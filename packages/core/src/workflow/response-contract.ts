@@ -3652,16 +3652,9 @@ export function verifiedReadResponse(
   if (request.personCalendar) return personCalendarResponse(request, evidence).text;
   if (request.calendarEventAnalysis) {
     const rows = matchingCalendarRows(request, currentSuccessfulEvidence(evidence));
-    const events = uniqueRecords(
-      rows.flatMap((row) => resultItems(row, 'events')),
-      (event) =>
-        [
-          stringField(event, 'calendarId'),
-          stringField(event, 'eventId'),
-          stringField(event, 'start'),
-          stringField(event, 'summary'),
-        ].join('|'),
-    );
+    // Keep every raw row until occurrence-aware analysis. Deduplicating here by
+    // current start/title loses recurrence originalStartTime and source conflicts.
+    const events = rows.flatMap((row) => resultItems(row, 'events'));
     const coverageComplete = calendarEventAnalysisCoverageComplete(rows);
     return calendarEventAnalysisResponse({
       request: request.calendarEventAnalysis,
