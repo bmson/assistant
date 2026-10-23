@@ -26,12 +26,25 @@ final class ConversationTouchScrollTests: XCTestCase {
                 XCTFail("Fixture diagnostics did not mount")
                 return
             }
-            guard let before = waitForSnapshot(probe, timeout: 12, accepting: { receipt in
+            guard let before = waitForSnapshot(probe, timeout: 12, onFailure: {
+                // Preserve the mounted viewport and raw AX receipt before a
+                // failed initial gate returns, outside metric collection.
+                let raw = probe.value as? String
+                self.screenshot(app, name: "\(label)-initial-failure")
+                if let raw {
+                    let attachment = XCTAttachment(data: Data(raw.utf8), uniformTypeIdentifier: "public.json")
+                    attachment.name = "touch-scroll-\(label)-initial-failure-receipt.json"
+                    attachment.lifetime = .keepAlways
+                    self.add(attachment)
+                }
+            }, accepting: { receipt in
                 receipt.bool("ownershipReady") && receipt.bool("settled")
                     && receipt.number("fixtureRows") == 500 && receipt.number("viewport") > 100
                     && receipt.number("viewportWidth") > 100 && receipt.number("viewportFrameHeight") > 100
                     && receipt.number("bottom") > receipt.number("viewport") * 2
-                    && abs(receipt.number("bottom") - receipt.number("offset")) <= 3
+                    // Use the same native visible-edge contract as production,
+                    // retaining the strict three-point initial-anchor gate.
+                    && abs(receipt.number("bottomGap")) <= 3
             }) else { return }
             let transcript = app.scrollViews["assistant.scroll-fixture.transcript"]
             guard transcript.exists, transcript.frame.height > 100 else {
@@ -123,6 +136,7 @@ final class ConversationTouchScrollTests: XCTestCase {
     }
 
     private func waitForSnapshot(_ probe: XCUIElement, timeout: TimeInterval,
+                                 onFailure: (() -> Void)? = nil,
                                  accepting: @escaping (Receipt) -> Bool) -> Receipt? {
         var latest: Receipt?
         var invalid: String?
@@ -141,12 +155,13 @@ final class ConversationTouchScrollTests: XCTestCase {
             }
         }
         let result = XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: predicate, object: nil)], timeout: timeout)
-        guard invalid == nil else { XCTFail("Invalid fixture receipt: \(invalid!)"); return nil }
+        guard invalid == nil else { onFailure?(); XCTFail("Invalid fixture receipt: \(invalid!)"); return nil }
         guard result == .completed, let receipt = latest else {
+            onFailure?()
             XCTFail("Required anchor/complete interval absent: \(latest?.values.description ?? "no receipt")")
             return nil
         }
-        guard receipt.string("failure").isEmpty else { XCTFail(receipt.string("failure")); return nil }
+        guard receipt.string("failure").isEmpty else { onFailure?(); XCTFail(receipt.string("failure")); return nil }
         return receipt
     }
 
@@ -188,7 +203,7 @@ final class ConversationTouchScrollTests: XCTestCase {
                 return number.doubleValue
             }
             var numbers: [String: Double] = [:]
-            for key in ["fixtureRows", "offset", "bottom", "viewport", "content", "topInset", "bottomInset", "viewportTop", "viewportLeft", "viewportWidth", "viewportFrameHeight", "capturedAt", "maximumFramesPerSecond", "thermalState"] {
+            for key in ["fixtureRows", "offset", "rawOffset", "visibleMinY", "visibleMaxY", "visibleHeight", "bottomGap", "bottom", "viewport", "content", "topInset", "bottomInset", "viewportTop", "viewportLeft", "viewportWidth", "viewportFrameHeight", "capturedAt", "maximumFramesPerSecond", "thermalState"] {
                 numbers[key] = try numeric(values[key], key: key)
             }
             var bools: [String: Bool] = [:]

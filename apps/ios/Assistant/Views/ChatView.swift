@@ -922,6 +922,10 @@ struct ChatView: View {
                 .onScrollGeometryChange(for: ScrollFixtureGeometry.self) { geometry in
                     ScrollFixtureGeometry(
                         offset: geometry.contentOffset.y + geometry.contentInsets.top,
+                        rawOffset: geometry.contentOffset.y,
+                        visibleMinY: geometry.visibleRect.minY,
+                        visibleMaxY: geometry.visibleRect.maxY,
+                        visibleHeight: geometry.visibleRect.height,
                         viewport: geometry.containerSize.height,
                         content: geometry.contentSize.height,
                         bottomInset: geometry.contentInsets.bottom,

@@ -4,10 +4,15 @@ import UIKit
 
 struct ScrollFixtureGeometry: Equatable {
     var offset: CGFloat = 0
+    var rawOffset: CGFloat = 0
+    var visibleMinY: CGFloat = 0
+    var visibleMaxY: CGFloat = 0
+    var visibleHeight: CGFloat = 0
     var viewport: CGFloat = 0
     var content: CGFloat = 0
     var bottomInset: CGFloat = 0
     var topInset: CGFloat = 0
+    var bottomGap: CGFloat { content - visibleMaxY }
     var bottom: CGFloat { max(0, content - viewport + topInset + bottomInset) }
 }
 
@@ -73,6 +78,11 @@ final class ScrollFixtureDiagnostics {
             "failure": failure ?? "",
             "phase": phase,
             "offset": Double(geometry.offset),
+            "rawOffset": Double(geometry.rawOffset),
+            "visibleMinY": Double(geometry.visibleMinY),
+            "visibleMaxY": Double(geometry.visibleMaxY),
+            "visibleHeight": Double(geometry.visibleHeight),
+            "bottomGap": Double(geometry.bottomGap),
             "bottom": Double(geometry.bottom),
             "viewport": Double(geometry.viewport),
             "content": Double(geometry.content),
