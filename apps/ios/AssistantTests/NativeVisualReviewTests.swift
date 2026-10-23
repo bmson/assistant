@@ -6,6 +6,7 @@ final class NativeVisualReviewTests: XCTestCase {
     @MainActor
     func testOptimisticSaveFeedbackInLightDarkAndLargeText() async throws {
         let fixture = try NativeReviewFixture()
+        NativeReviewProtocol.install(fixture.responses)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [NativeReviewProtocol.self]
         let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
