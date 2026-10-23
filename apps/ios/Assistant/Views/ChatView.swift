@@ -35,7 +35,7 @@ private struct ConversationTranscriptHost<Content: View>: UIViewControllerRepres
             diagnosticContentRevision: context.environment.transcriptHostBoundaryProbe?.currentContentRevision ?? -1
         )
         context.environment.transcriptHostBoundaryProbe?.record(
-            "hosting-root-initialized", transaction: context.transaction, generation: 0,
+            "hosting-controller-initialized", transaction: context.transaction, generation: 0,
             contentRevision: context.environment.transcriptHostBoundaryProbe?.currentContentRevision
         )
 #else
@@ -87,40 +87,33 @@ private struct ConversationTranscriptSnapshot<Content: View> {
     let diagnosticContentRevision: Int
 }
 
-@MainActor
-private final class ConversationTranscriptSnapshotModel<Content: View>: ObservableObject {
-    @Published private(set) var snapshot: ConversationTranscriptSnapshot<Content>
-
-    init(content: Content, environment: EnvironmentValues, transaction: Transaction,
-         diagnosticContentRevision: Int) {
-        snapshot = ConversationTranscriptSnapshot(
-            content: content, environment: environment, transaction: transaction,
-            generation: 0, diagnosticContentRevision: diagnosticContentRevision
-        )
-    }
-
-    func publish(content: Content, environment: EnvironmentValues, transaction: Transaction,
-                 diagnosticContentRevision: Int,
-                 afterPublication: ((ConversationTranscriptSnapshot<Content>) -> Void)? = nil) {
-        let nextGeneration = snapshot.generation &+ 1
-        let nextSnapshot = ConversationTranscriptSnapshot(
-            content: content, environment: environment, transaction: transaction,
-            generation: nextGeneration, diagnosticContentRevision: diagnosticContentRevision
-        )
-        snapshot = nextSnapshot
-        afterPublication?(nextSnapshot)
-    }
-}
-
 private struct ConversationTranscriptRoot<Content: View>: View {
-    @ObservedObject var snapshotModel: ConversationTranscriptSnapshotModel<Content>
+    let snapshot: ConversationTranscriptSnapshot<Content>
 #if DEBUG
     let coordinates: TranscriptHostingCoordinates
 #endif
 
     var body: some View {
-        let snapshot = snapshotModel.snapshot
         snapshot.content
+            .transaction(value: snapshot.generation) {
+#if DEBUG
+                snapshot.environment.transcriptHostBoundaryProbe?.record(
+                    "content-transform-input", transaction: $0, generation: snapshot.generation,
+                    contentRevision: snapshot.diagnosticContentRevision
+                )
+                snapshot.environment.transcriptHostBoundaryProbe?.record(
+                    "content-transform-captured", transaction: snapshot.transaction, generation: snapshot.generation,
+                    contentRevision: snapshot.diagnosticContentRevision
+                )
+#endif
+                $0 = snapshot.transaction
+#if DEBUG
+                snapshot.environment.transcriptHostBoundaryProbe?.record(
+                    "content-transform-output", transaction: $0, generation: snapshot.generation,
+                    contentRevision: snapshot.diagnosticContentRevision
+                )
+#endif
+            }
 #if DEBUG
             .environment(\.transcriptHostingCoordinates, coordinates)
             .environment(\.transcriptHostSnapshotGeneration, snapshot.generation)
@@ -129,53 +122,35 @@ private struct ConversationTranscriptRoot<Content: View>: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .coordinateSpace(name: TranscriptCoordinateSpace.viewport)
             .environment(\.self, snapshot.environment)
-            .transaction(value: snapshot.generation) {
-#if DEBUG
-                snapshot.environment.transcriptHostBoundaryProbe?.record(
-                    "root-transform-input", transaction: $0, generation: snapshot.generation,
-                    contentRevision: snapshot.diagnosticContentRevision
-                )
-                snapshot.environment.transcriptHostBoundaryProbe?.record(
-                    "root-transform-captured", transaction: snapshot.transaction, generation: snapshot.generation,
-                    contentRevision: snapshot.diagnosticContentRevision
-                )
-#endif
-                $0 = snapshot.transaction
-#if DEBUG
-                snapshot.environment.transcriptHostBoundaryProbe?.record(
-                    "root-transform-output", transaction: $0, generation: snapshot.generation,
-                    contentRevision: snapshot.diagnosticContentRevision
-                )
-#endif
-            }
     }
 }
 
-/// The controller and its generic root keep their identity across draft,
-/// streaming, environment and reveal updates. SwiftUI owns the container frame;
-/// Auto Layout pins only the owned child to its bounds, never its safe area.
+/// The controller and generic root type stay stable across draft, streaming,
+/// environment and reveal updates. The root value carries an immutable snapshot.
+/// SwiftUI owns the container frame; Auto Layout pins only the owned child to
+/// its bounds, never its safe area.
 private final class ConversationTranscriptController<Content: View>: UIViewController {
-    private let snapshotModel: ConversationTranscriptSnapshotModel<Content>
+    private var snapshot: ConversationTranscriptSnapshot<Content>
     private let host: UIHostingController<ConversationTranscriptRoot<Content>>
 #if DEBUG
     private let coordinates: TranscriptHostingCoordinates
 #endif
-    var parentSnapshotGeneration: Int { snapshotModel.snapshot.generation }
+    var parentSnapshotGeneration: Int { snapshot.generation }
 
     init(content: Content, environment: EnvironmentValues, transaction: Transaction,
          diagnosticContentRevision: Int) {
-        let snapshotModel = ConversationTranscriptSnapshotModel(
+        let snapshot = ConversationTranscriptSnapshot(
             content: content, environment: environment, transaction: transaction,
-            diagnosticContentRevision: diagnosticContentRevision
+            generation: 0, diagnosticContentRevision: diagnosticContentRevision
         )
-        self.snapshotModel = snapshotModel
+        self.snapshot = snapshot
 #if DEBUG
         let coordinates = TranscriptHostingCoordinates()
         self.coordinates = coordinates
         host = UIHostingController(rootView: ConversationTranscriptRoot(
-            snapshotModel: snapshotModel, coordinates: coordinates))
+            snapshot: snapshot, coordinates: coordinates))
 #else
-        host = UIHostingController(rootView: ConversationTranscriptRoot(snapshotModel: snapshotModel))
+        host = UIHostingController(rootView: ConversationTranscriptRoot(snapshot: snapshot))
 #endif
         super.init(nibName: nil, bundle: nil)
         host.safeAreaRegions = []
@@ -213,25 +188,34 @@ private final class ConversationTranscriptController<Content: View>: UIViewContr
 #if DEBUG
     func update(content: Content, environment: EnvironmentValues,
                 boundaryProbe: TranscriptHostBoundaryProbe?, transaction: Transaction) {
-        snapshotModel.publish(
-            content: content, environment: environment, transaction: transaction,
-            diagnosticContentRevision: boundaryProbe?.currentContentRevision ?? -1,
-            afterPublication: { snapshot in
-                boundaryProbe?.record(
-                    "parent-snapshot-commit", transaction: snapshot.transaction,
-                    generation: snapshot.generation, contentRevision: snapshot.diagnosticContentRevision
-                )
-            }
-        )
+        replaceSnapshot(content: content, environment: environment, transaction: transaction,
+                        diagnosticContentRevision: boundaryProbe?.currentContentRevision ?? -1)
     }
 #else
     func update(content: Content, environment: EnvironmentValues, transaction: Transaction) {
-        snapshotModel.publish(
-            content: content, environment: environment, transaction: transaction,
-            diagnosticContentRevision: -1, afterPublication: nil
-        )
+        replaceSnapshot(content: content, environment: environment, transaction: transaction,
+                        diagnosticContentRevision: -1)
     }
 #endif
+
+    private func replaceSnapshot(content: Content, environment: EnvironmentValues,
+                                 transaction: Transaction, diagnosticContentRevision: Int) {
+        let next = ConversationTranscriptSnapshot(
+            content: content, environment: environment, transaction: transaction,
+            generation: snapshot.generation &+ 1, diagnosticContentRevision: diagnosticContentRevision
+        )
+        snapshot = next
+#if DEBUG
+        let probe = environment.transcriptHostBoundaryProbe
+        probe?.record("parent-snapshot-commit", transaction: next.transaction,
+                      generation: next.generation, contentRevision: next.diagnosticContentRevision)
+        host.rootView = ConversationTranscriptRoot(snapshot: next, coordinates: coordinates)
+        probe?.record("root-value-updated", transaction: next.transaction,
+                      generation: next.generation, contentRevision: next.diagnosticContentRevision)
+#else
+        host.rootView = ConversationTranscriptRoot(snapshot: next)
+#endif
+    }
 }
 
 #if DEBUG
@@ -244,7 +228,8 @@ final class TranscriptHostBoundaryProbe {
     private(set) var events: [[String: Any]] = []
     private(set) var parentSnapshotGeneration = 0
     private(set) var parentSnapshotCommitCount = 0
-    private(set) var hostingRootInitializationCount = 0
+    private(set) var hostingControllerInitializationCount = 0
+    private(set) var rootValueUpdateCount = 0
 
     var currentContentRevision: Int { contentRevision() }
 
@@ -258,8 +243,10 @@ final class TranscriptHostBoundaryProbe {
         if stage == "parent-snapshot-commit" {
             parentSnapshotGeneration = generation
             parentSnapshotCommitCount += 1
-        } else if stage == "hosting-root-initialized" {
-            hostingRootInitializationCount += 1
+        } else if stage == "hosting-controller-initialized" {
+            hostingControllerInitializationCount += 1
+        } else if stage == "root-value-updated" {
+            rootValueUpdateCount += 1
         }
         if events.count == 64 { events.removeFirst() }
         events.append([

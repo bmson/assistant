@@ -1743,10 +1743,12 @@ extension AssistantMarkdownTests {
                 && state.receiptMeasurement?.frame(in: window) != nil
                 && state.systemEnvironmentSnapshots[0] != nil
         }
-        XCTAssertEqual(boundaryProbe.hostingRootInitializationCount, 1,
-            "The UIHostingController root is constructed once for this owned host.")
+        XCTAssertEqual(boundaryProbe.hostingControllerInitializationCount, 1,
+            "The child UIHostingController is constructed once for this owned host.")
         XCTAssertEqual(boundaryProbe.parentSnapshotGeneration, boundaryProbe.parentSnapshotCommitCount,
-            "Snapshot generation counts committed parent updates, not rootView replacements.")
+            "Snapshot generation counts committed parent updates independently of root-value assignments.")
+        XCTAssertEqual(boundaryProbe.rootValueUpdateCount, boundaryProbe.parentSnapshotCommitCount,
+            "Each committed parent snapshot updates the root value once; initialization is counted separately.")
         let initialScroll = try XCTUnwrap(ownedTranscriptScrollView(in: window))
         let initialHierarchy = ownedTranscriptControllerIdentities(root: root, containing: initialScroll)
         XCTAssertGreaterThanOrEqual(initialHierarchy.count, 3,
@@ -1984,6 +1986,7 @@ extension AssistantMarkdownTests {
         )
         let generationBeforeLocalUpdates = boundaryProbe.parentSnapshotGeneration
         let commitsBeforeLocalUpdates = boundaryProbe.parentSnapshotCommitCount
+        let rootUpdatesBeforeLocalUpdates = boundaryProbe.rootValueUpdateCount
         let startingLocalRevision = try XCTUnwrap(state.childTransactionObservations.last?.localRevision)
         var childTransaction99 = Transaction(animation: nil)
         childTransaction99[OwnedTranscriptHostMarkerKey.self] = 99
@@ -2014,12 +2017,15 @@ extension AssistantMarkdownTests {
         XCTAssertEqual(observed99.snapshotGeneration, generationBeforeLocalUpdates)
         XCTAssertEqual(boundaryProbe.parentSnapshotGeneration, generationBeforeLocalUpdates)
         XCTAssertEqual(boundaryProbe.parentSnapshotCommitCount, commitsBeforeLocalUpdates,
-            "A child-local transaction must not publish a parent snapshot.")
-        XCTAssertEqual(boundaryProbe.hostingRootInitializationCount, 1,
-            "A child-local transaction must retain the single hosting root.")
+            "A child-local transaction must not commit a parent snapshot.")
+        XCTAssertEqual(boundaryProbe.rootValueUpdateCount, rootUpdatesBeforeLocalUpdates,
+            "A child-local transaction must not assign a new root value.")
+        XCTAssertEqual(boundaryProbe.hostingControllerInitializationCount, 1,
+            "A child-local transaction must retain the single hosting controller.")
 
         let generationBeforeDefaultLocalUpdate = boundaryProbe.parentSnapshotGeneration
         let commitsBeforeDefaultLocalUpdate = boundaryProbe.parentSnapshotCommitCount
+        let rootUpdatesBeforeDefaultLocalUpdate = boundaryProbe.rootValueUpdateCount
         var childDefaultTransaction = Transaction()
         childDefaultTransaction[OwnedTranscriptHostMarkerKey.self] = 0
         updateChildLocalState(childDefaultTransaction)
@@ -2048,12 +2054,15 @@ extension AssistantMarkdownTests {
         XCTAssertEqual(observedDefaultLocal.snapshotGeneration, generationBeforeDefaultLocalUpdate)
         XCTAssertEqual(boundaryProbe.parentSnapshotGeneration, generationBeforeDefaultLocalUpdate)
         XCTAssertEqual(boundaryProbe.parentSnapshotCommitCount, commitsBeforeDefaultLocalUpdate,
-            "A second child-local transaction must not publish a parent snapshot.")
-        XCTAssertEqual(boundaryProbe.hostingRootInitializationCount, 1,
-            "Child-local transactions must retain the single hosting root.")
+            "A second child-local transaction must not commit a parent snapshot.")
+        XCTAssertEqual(boundaryProbe.rootValueUpdateCount, rootUpdatesBeforeDefaultLocalUpdate,
+            "The default child-local transaction must not assign a new root value.")
+        XCTAssertEqual(boundaryProbe.hostingControllerInitializationCount, 1,
+            "Child-local transactions must retain the single hosting controller.")
 
         let generationBeforeDefaultParentUpdate = boundaryProbe.parentSnapshotGeneration
         let commitsBeforeDefaultParentUpdate = boundaryProbe.parentSnapshotCommitCount
+        let rootUpdatesBeforeDefaultParentUpdate = boundaryProbe.rootValueUpdateCount
         state.contentRevision += 1
         try await waitForTranscriptHostCondition("a later default parent transaction reaches the child leaf", onTimeout: {
             attachOwnedTranscriptBoundarySnapshot(
@@ -2078,11 +2087,13 @@ extension AssistantMarkdownTests {
         XCTAssertEqual(observedDefaultParent.marker, 0)
         XCTAssertGreaterThan(boundaryProbe.parentSnapshotGeneration, generationBeforeDefaultParentUpdate)
         XCTAssertGreaterThan(boundaryProbe.parentSnapshotCommitCount, commitsBeforeDefaultParentUpdate)
+        XCTAssertGreaterThan(boundaryProbe.rootValueUpdateCount, rootUpdatesBeforeDefaultParentUpdate)
+        XCTAssertEqual(boundaryProbe.rootValueUpdateCount, boundaryProbe.parentSnapshotCommitCount)
         XCTAssertEqual(observedDefaultParent.snapshotGeneration, boundaryProbe.parentSnapshotGeneration)
         XCTAssertEqual(observedDefaultParent.snapshotContentRevision, 3,
             "The leaf reports the content revision captured in its rendered parent snapshot.")
-        XCTAssertEqual(boundaryProbe.hostingRootInitializationCount, 1,
-            "Parent updates must retain the single hosting root.")
+        XCTAssertEqual(boundaryProbe.hostingControllerInitializationCount, 1,
+            "Parent updates must retain the single hosting controller.")
         XCTAssertTrue(ownedTranscriptScrollView(in: window) === initialScroll,
             "A default parent transaction must preserve the transcript scroll view identity")
         XCTAssertEqual(ownedTranscriptControllerIdentities(root: root, containing: initialScroll), initialHierarchy)
@@ -2532,7 +2543,8 @@ private func attachOwnedTranscriptBoundarySnapshot(
         "boundaryEvents": state.boundaryProbe?.events ?? [],
         "parentSnapshotGeneration": state.boundaryProbe?.parentSnapshotGeneration ?? -1,
         "parentSnapshotCommitCount": state.boundaryProbe?.parentSnapshotCommitCount ?? -1,
-        "hostingRootInitializationCount": state.boundaryProbe?.hostingRootInitializationCount ?? -1,
+        "hostingControllerInitializationCount": state.boundaryProbe?.hostingControllerInitializationCount ?? -1,
+        "rootValueUpdateCount": state.boundaryProbe?.rootValueUpdateCount ?? -1,
         "childTransactionObservations": state.childTransactionObservations.suffix(16).map {
             ["parentContentRevision": $0.parentContentRevision,
              "snapshotContentRevision": $0.snapshotContentRevision,
