@@ -12,7 +12,7 @@ import Foundation
 final class ConversationPerformanceFixture {
     static let ownerID = "11111111-1111-4111-8111-111111111111"
     static let conversationID = "22222222-2222-4222-8222-222222222222"
-    static let baseURL = URL(string: "https://conversation-performance.invalid")!
+    nonisolated static let baseURL = URL(string: "https://conversation-performance.invalid")!
 
     let model: AppModel
     let window: UIWindow
