@@ -4,6 +4,24 @@ import CoreLocation
 @testable import Assistant
 
 extension APIModelsTests {
+    func testWorkspaceCostsAcceptsAdditiveBillingCoverageAndLegacyPayloads() throws {
+        let decoder = JSONDecoder()
+        let legacy = try decoder.decode(
+            WorkspaceCosts.self,
+            from: Data(#"{"dailySpentUsd":0,"monthlySpentUsd":0,"heldUsd":0,"parkedTasks":0,"bySource":[],"byModel":[],"held":[],"topTasks":[],"recent":[]}"#.utf8)
+        )
+        XCTAssertNil(legacy.billingCoverage)
+
+        let current = try decoder.decode(
+            WorkspaceCosts.self,
+            from: Data(#"{"dailySpentUsd":0,"monthlySpentUsd":0,"heldUsd":0,"parkedTasks":0,"bySource":[],"byModel":[],"held":[],"topTasks":[],"recent":[],"billingCoverage":{"totalState":"unavailable","title":"Whole-app total unavailable","summary":"Missing coverage is unknown, not zero.","statusSummary":"Current feeds: Google Cloud stale. Missing costs remain unknown, not zero.","overlapWarning":"Keep the ledger separate.","entries":[{"id":"google-cloud","label":"Google Cloud","state":"partial","scope":"Project: assistant","detail":"Latest usage is not a completeness guarantee.","period":"2026-10","source":"Cloud Billing export"}]}}"#.utf8)
+        )
+        XCTAssertEqual(current.billingCoverage?.totalState, "unavailable")
+        XCTAssertEqual(current.billingCoverage?.statusSummary, "Current feeds: Google Cloud stale. Missing costs remain unknown, not zero.")
+        XCTAssertEqual(current.billingCoverage?.entries.first?.scope, "Project: assistant")
+        XCTAssertEqual(current.billingCoverage?.entries.first?.period, "2026-10")
+    }
+
     func testDocumentListPresentationKeepsEmptyDistinctFromIncompleteAndUnloaded() throws {
         func overview(
             documents: [DocumentRecord] = [],

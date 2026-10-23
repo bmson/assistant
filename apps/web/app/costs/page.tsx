@@ -1,10 +1,11 @@
 import { getCostsDashboard } from '@assistant/application/costs';
+import { billingCoverageProjection } from '@assistant/application/provider-billing';
 import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import { createInstallationStore, getFirestoreMobileCosts } from '@assistant/firestore';
 import { COST_BASIS_LABELS, costBasis } from '@assistant/persistence';
 import Link from 'next/link';
 import { BudgetCapsForm } from '@/app/costs/budget-caps-form';
-import { ProviderBillingCards } from '@/app/costs/provider-billing-cards';
+import { BillingCoverageSummary, ProviderBillingCards } from '@/app/costs/provider-billing-cards';
 import { requireOwner } from '@/auth';
 import { formatDateTime, formatUsd, truncate } from '@/lib/format';
 import { getBillingOverview, getDb } from '@/lib/server';
@@ -61,6 +62,7 @@ export default async function CostsPage() {
     taskDefaultLimit,
   } = dashboard;
   const billing = await getBillingOverview();
+  const billingCoverage = billingCoverageProjection(billing);
 
   return (
     <PageShell size="reading">
@@ -88,6 +90,7 @@ export default async function CostsPage() {
         </p>
       ) : null}
 
+      <BillingCoverageSummary coverage={billingCoverage} />
       <ProviderBillingCards reports={billing} />
       <h2 className="mt-8 text-lg font-semibold">Assistant usage ledger</h2>
       <p className="mt-1 text-sm text-muted">

@@ -2542,6 +2542,7 @@ struct WorkspacePolicy: Codable, Identifiable, Sendable {
 
 struct WorkspaceCosts: Codable, Sendable {
     var billing: [WorkspaceProviderBilling]? = nil
+    var billingCoverage: WorkspaceBillingCoverage? = nil
     var byEvidence: [WorkspaceCostEvidence]? = nil
     let dailySpentUsd: Double
     let monthlySpentUsd: Double
@@ -2555,6 +2556,25 @@ struct WorkspaceCosts: Codable, Sendable {
     let held: [WorkspaceHeldCost]
     let topTasks: [WorkspaceCostTask]
     let recent: [WorkspaceCostEvent]
+}
+
+struct WorkspaceBillingCoverage: Codable, Sendable {
+    let totalState: String
+    let title: String
+    let summary: String
+    var statusSummary: String? = nil
+    let overlapWarning: String
+    let entries: [WorkspaceBillingCoverageEntry]
+}
+
+struct WorkspaceBillingCoverageEntry: Codable, Identifiable, Sendable {
+    let id: String
+    let label: String
+    let state: String
+    let scope: String
+    let detail: String
+    var period: String? = nil
+    var source: String? = nil
 }
 
 struct WorkspaceCostEvidence: Codable, Identifiable, Sendable {

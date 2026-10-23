@@ -20,6 +20,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const before = process.argv.includes('--before');
 const chatStates = process.argv.includes('--chat-states');
 const hydrateChat = process.argv.includes('--hydrate-chat') || chatStates;
+const costStates = process.argv.includes('--cost-states');
 const repairStates = process.argv.includes('--repair-states');
 const longChat = process.argv.includes('--long-chat');
 const streamRecall = process.argv.includes('--stream-recall');
@@ -114,6 +115,7 @@ const fixture = process.argv.includes('--reuse-html')
         PRODUCT_VISUAL_QA_BEFORE: before ? '1' : '0',
         PRODUCT_VISUAL_QA_CHAT: hydrateChat ? '1' : '0',
         PRODUCT_VISUAL_QA_CHAT_STATES: chatStates ? '1' : '0',
+        PRODUCT_VISUAL_QA_COSTS: costStates ? '1' : '0',
         PRODUCT_VISUAL_QA_REPAIR_STATES: repairStates ? '1' : '0',
         PRODUCT_VISUAL_QA_LONG_CHAT: longChat ? '1' : '0',
         PRODUCT_VISUAL_QA_CARD_CHAT: cardChat,
@@ -347,6 +349,13 @@ const pages = allPages.filter(
     (!process.argv.includes('--forms-only') ||
       ['skills', 'improvements', 'writing-voice'].includes(entry.name)),
 );
+const missingRequestedCostsState = selectedPages?.find(
+  (name) => name.startsWith('costs-') && !allPages.some((entry) => entry.name === name),
+);
+if (missingRequestedCostsState)
+  throw new Error(
+    `Requested Costs fixture ${missingRequestedCostsState} is absent; regenerate HTML with --cost-states before using --reuse-html.`,
+  );
 const missingRequestedRepairState = selectedPages?.find(
   (name) => name.startsWith('improvements-') && !allPages.some((entry) => entry.name === name),
 );
@@ -368,6 +377,7 @@ const buildSha256 = visualHash(
     rootFontSize,
     hydrateChat,
     chatStates,
+    costStates,
     repairStates,
     longChat,
     cardChat,
@@ -387,6 +397,8 @@ const fixtureInputs = {
   before,
   hydrateChat,
   chatStates,
+  costStates,
+  repairStates,
   longChat,
   streamRecall,
   cardChat,
@@ -1441,6 +1453,63 @@ try {
         page.off('pageerror', onError);
       }
       if (!before && !hydrateChat && viewport.width === 390) {
+        if (costStates && (!selectedPages || selectedPages.includes('costs-mixed'))) {
+          await page.goto(`${origin}/fixture/costs-mixed`, { waitUntil: 'networkidle' });
+          const googleCloudCard = page
+            .locator('article')
+            .filter({ has: page.getByRole('heading', { name: 'Google Cloud', exact: true }) });
+          if ((await googleCloudCard.count()) !== 1)
+            throw new Error('Mixed Costs fixture is missing its Google Cloud report card');
+          const serviceDetails = googleCloudCard
+            .locator('details')
+            .filter({ hasText: 'Run rate and service details' });
+          if ((await serviceDetails.count()) !== 1)
+            throw new Error('Mixed Costs fixture is missing its provider service details');
+          await serviceDetails.getByText('Run rate and service details', { exact: true }).click();
+          if (!(await serviceDetails.evaluate((element) => element.hasAttribute('open'))))
+            throw new Error('Run rate and service details did not open through the DOM');
+
+          const coverageDetails = page
+            .locator('details')
+            .filter({ hasText: 'Coverage sources and gaps' });
+          if ((await coverageDetails.count()) !== 1)
+            throw new Error('Mixed Costs fixture is missing its coverage disclosure');
+          await coverageDetails
+            .getByText(/^Coverage sources and gaps \(\d+\)$/, { exact: false })
+            .click();
+          if (!(await coverageDetails.evaluate((element) => element.hasAttribute('open'))))
+            throw new Error('Coverage sources and gaps did not open through the DOM');
+          const staleCoverageEntry = coverageDetails
+            .locator('li')
+            .filter({ hasText: 'OpenRouter' });
+          if (
+            !(await serviceDetails.getByText('$12.00', { exact: true }).isVisible()) ||
+            !(await page
+              .getByText(
+                'Current feeds: OpenRouter stale. Missing costs remain unknown, not zero.',
+                { exact: true },
+              )
+              .isVisible()) ||
+            !(await staleCoverageEntry.isVisible()) ||
+            !/Stale/.test((await staleCoverageEntry.innerText()) ?? '')
+          )
+            throw new Error('Expanded Costs service or coverage details are not visible');
+          const writes = await page.evaluate(
+            () => (window as Window & { __qaWrites?: string[] }).__qaWrites ?? [],
+          );
+          if (writes.length)
+            throw new Error(`Costs details interaction invoked an action: ${writes.join(', ')}`);
+          await provenanceScreenshot(page, {
+            path: path.join(output, `costs-mixed-details-390-${scheme}.png`),
+            fullPage: true,
+            animations: 'disabled',
+          });
+          interactions.push({
+            scheme,
+            check:
+              'Actual local DOM opens run-rate/service and coverage-source details; representative service and source-gap evidence are visible; no action callback runs.',
+          });
+        }
         if (!selectedPages || selectedPages.includes('skills')) {
           await page.goto(`${origin}/fixture/skills`, { waitUntil: 'networkidle' });
           await page.getByRole('button', { name: 'Add skill', exact: true }).click();
@@ -1866,6 +1935,7 @@ try {
           longChat,
           cardChat,
           streamRecall,
+          costStates,
           repairStates,
         },
         captureInventory,
@@ -1905,6 +1975,7 @@ try {
           longChat,
           cardChat,
           streamRecall,
+          costStates,
           repairStates,
         },
         captureInventory,
