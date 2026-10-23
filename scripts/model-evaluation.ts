@@ -64,6 +64,18 @@ export function evaluationCoverage(rows: { status: EvaluationStatus }[], planned
   };
 }
 
+export function evaluationCompletionStatus(input: {
+  receiptCoverageComplete: boolean;
+  heldUsd: number;
+  statuses: readonly EvaluationStatus[];
+}): 'complete' | 'partial' {
+  return !input.receiptCoverageComplete ||
+    input.heldUsd > 0 ||
+    input.statuses.some((status) => status === 'not_run' || status === 'budget_interrupted')
+    ? 'partial'
+    : 'complete';
+}
+
 export type EvaluationReasoningVariant = 'production-policy' | 'default' | 'disabled';
 
 export interface PairedReasoningResult {
@@ -611,6 +623,245 @@ export function gradeEvaluationCase(test: EvaluationCase, output: unknown): stri
  * Failed/aborted requests retain their full hold: absence of billed usage is
  * uncertainty, not evidence that a provider request was free.
  */
+const MAX_ARCHIVED_RESERVATIONS = 4096;
+const MAX_ARCHIVED_COST_EVENTS = 4096;
+const SAFE_REASONS: Record<string, string> = {
+  'provider returned without complete usage or authoritative cost': 'provider_usage_missing',
+  'usage metering failed after provider success': 'metering_failed_after_provider_success',
+  'model provider attempt failed': 'model_provider_attempt_failed',
+  'stream provider attempt failed': 'stream_provider_attempt_failed',
+  'stream provider attempt aborted': 'stream_provider_attempt_aborted',
+  'stream provider call failed': 'stream_provider_call_failed',
+  'tool model attempt failed': 'tool_model_attempt_failed',
+  'structured model attempt failed': 'structured_model_attempt_failed',
+  'embedding provider attempt failed': 'embedding_provider_attempt_failed',
+};
+const COST_BASES = new Set([
+  'provider_reported',
+  'token_rate',
+  'preflight_estimate',
+  'component_ledger',
+  'unknown',
+]);
+const REASONING_MODES = new Set(['enabled', 'disabled', 'unsupported', 'unknown']);
+const SECRET_LIKE =
+  /(?:sk-[a-z0-9]{8,}|bearer\s+\S+|(?:api[_-]?key|access[_-]?token|secret)[ _:=-][^\s]{4,}|https?:\/\/)/i;
+
+type ReceiptField = { value: string | null; missing: boolean; truncated: boolean };
+type ReservationAttemptReceipt = {
+  provider: string | null;
+  model: string | null;
+  role: string | null;
+  requestDigest: string | null;
+  inputTokenEstimate: number | null;
+  outputTokenLimit: number | null;
+  reasoning: CostAttemptMetadata['reasoning'] | null;
+  missing: string[];
+  truncated: boolean;
+};
+type ReservationEvidenceReceipt = {
+  basis: string | null;
+  provider: string | null;
+  model: string | null;
+  requestId: string | null;
+  endpoint: string | null;
+  modelUsage: {
+    inputTokens: number | null;
+    outputTokens: number | null;
+    reasoningTokens: number | null;
+    cacheReadInputTokens: number | null;
+    cacheWriteInputTokens: number | null;
+    accounting: 'provider-reported' | 'usage-rate-estimate' | null;
+  } | null;
+  missing: string[];
+  truncated: boolean;
+};
+export type EvaluationReservationReceipt = {
+  reservationId: string | null;
+  estimatedUsd: number | null;
+  status: 'held' | 'dispatching' | 'unknown' | 'reconciled' | 'released_ceiling' | 'missing';
+  /** Ledger reconciliation amount; its evidence basis determines whether it is an estimate. */
+  reconciledUsd: number | null;
+  chargeOutcome: 'provider_reported' | 'estimated' | 'unknown' | 'ceiling_not_actual';
+  attempt: ReservationAttemptReceipt | null;
+  providerReceipt: { requestId: string | null; endpoint: string | null } | null;
+  unknownReason: string | null;
+  evidence: ReservationEvidenceReceipt | null;
+  missing: string[];
+  truncated: boolean;
+  complete: boolean;
+};
+export type EvaluationCostEventReceipt = {
+  reservationId: string | null;
+  usd: number;
+  evidence: ReservationEvidenceReceipt;
+  missing: string[];
+  truncated: boolean;
+};
+export type EvaluationAccountingSnapshot = {
+  complete: boolean;
+  omittedReservationCount: number;
+  omittedCostEventCount: number;
+  reservations: EvaluationReservationReceipt[];
+  uncorrelatedCostEvents: EvaluationCostEventReceipt[];
+  missing: string[];
+};
+type StoredReservationReceipt = Omit<EvaluationReservationReceipt, 'missing' | 'complete'> & {
+  unknownReasonOmitted: boolean;
+};
+
+function safeReceiptField(value: unknown, maxLength: number, digest = false): ReceiptField {
+  if (typeof value !== 'string' || !value) return { value: null, missing: true, truncated: false };
+  if (SECRET_LIKE.test(value)) return { value: null, missing: true, truncated: false };
+  if (digest && !/^[a-f\d]{64}$/i.test(value))
+    return { value: null, missing: true, truncated: false };
+  if (!digest && !/^[\p{L}\p{N} ._:/@+-]+$/u.test(value))
+    return { value: null, missing: true, truncated: false };
+  if (value.length > maxLength) return { value: null, missing: true, truncated: true };
+  return { value, missing: false, truncated: false };
+}
+
+function safeReceiptNumber(value: unknown, integer = false): number | null {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    (!integer || Number.isSafeInteger(value))
+    ? value
+    : null;
+}
+
+function safeAttemptReceipt(metadata: CostAttemptMetadata): ReservationAttemptReceipt {
+  const missing: string[] = [];
+  let truncated = false;
+  const field = (name: string, value: unknown, maxLength: number, digest = false) => {
+    const normalized = safeReceiptField(value, maxLength, digest);
+    if (normalized.missing) missing.push(name);
+    truncated ||= normalized.truncated;
+    return normalized.value;
+  };
+  const inputTokenEstimate = safeReceiptNumber(metadata.inputTokenEstimate, true);
+  const outputTokenLimit = safeReceiptNumber(metadata.outputTokenLimit, true);
+  if (inputTokenEstimate === null) missing.push('inputTokenEstimate');
+  if (outputTokenLimit === null) missing.push('outputTokenLimit');
+  const reasoning = REASONING_MODES.has(metadata.reasoning) ? metadata.reasoning : null;
+  if (reasoning === null) missing.push('reasoning');
+  return {
+    provider: field('provider', metadata.provider, 80),
+    model: field('model', metadata.model, 160),
+    role: field('role', metadata.role, 32),
+    requestDigest: field('requestDigest', metadata.requestDigest, 64, true),
+    inputTokenEstimate,
+    outputTokenLimit,
+    reasoning,
+    missing,
+    truncated,
+  };
+}
+
+function safeEvidenceReceipt(evidence: unknown): ReservationEvidenceReceipt {
+  const row = evidence && typeof evidence === 'object' ? (evidence as Record<string, unknown>) : {};
+  const missing: string[] = [];
+  let truncated = false;
+  const field = (name: string, value: unknown, maxLength: number) => {
+    const normalized = safeReceiptField(value, maxLength);
+    if (normalized.missing) missing.push(name);
+    truncated ||= normalized.truncated;
+    return normalized.value;
+  };
+  const basis = typeof row.basis === 'string' && COST_BASES.has(row.basis) ? row.basis : null;
+  if (basis === null) missing.push('basis');
+  else if (basis === 'unknown') missing.push('basis_unknown');
+  const rawUsage =
+    row.modelUsage && typeof row.modelUsage === 'object'
+      ? (row.modelUsage as Record<string, unknown>)
+      : null;
+  let modelUsage: ReservationEvidenceReceipt['modelUsage'] = null;
+  if (!rawUsage) missing.push('modelUsage');
+  else {
+    const token = (name: string) => {
+      const value = safeReceiptNumber(rawUsage[name], true);
+      if (value === null) missing.push(`modelUsage.${name}`);
+      return value;
+    };
+    const accounting =
+      rawUsage.accounting === 'provider-reported' || rawUsage.accounting === 'usage-rate-estimate'
+        ? rawUsage.accounting
+        : null;
+    if (accounting === null) missing.push('modelUsage.accounting');
+    modelUsage = {
+      inputTokens: token('inputTokens'),
+      outputTokens: token('outputTokens'),
+      reasoningTokens: rawUsage.reasoningTokens === undefined ? null : token('reasoningTokens'),
+      cacheReadInputTokens:
+        rawUsage.cacheReadInputTokens === undefined ? null : token('cacheReadInputTokens'),
+      cacheWriteInputTokens:
+        rawUsage.cacheWriteInputTokens === undefined ? null : token('cacheWriteInputTokens'),
+      accounting,
+    };
+  }
+  return {
+    basis,
+    provider: field('provider', row.provider, 80),
+    model: field('model', row.model, 160),
+    requestId: field('requestId', row.requestId, 200),
+    endpoint: field('endpoint', row.endpoint, 100),
+    modelUsage,
+    missing,
+    truncated,
+  };
+}
+
+function snapshotReservation(receipt: StoredReservationReceipt): EvaluationReservationReceipt {
+  const { unknownReasonOmitted: _unknownReasonOmitted, ...publicReceipt } =
+    structuredClone(receipt);
+  const missing: string[] = [];
+  if (!receipt.reservationId) missing.push('reservationId');
+  if (receipt.estimatedUsd === null) missing.push('estimatedUsd');
+  if (!receipt.attempt) missing.push('attempt');
+  else for (const field of receipt.attempt.missing) missing.push(`attempt.${field}`);
+  if (receipt.reconciledUsd === null) missing.push('reconciledUsd');
+  if (!receipt.evidence) missing.push('evidence');
+  else for (const field of receipt.evidence.missing) missing.push(`evidence.${field}`);
+  if (receipt.status === 'unknown') {
+    if (!receipt.unknownReason) missing.push('unknownReason');
+    if (!receipt.providerReceipt) missing.push('providerReceipt');
+    else {
+      if (!receipt.providerReceipt.requestId) missing.push('providerReceipt.requestId');
+      if (!receipt.providerReceipt.endpoint) missing.push('providerReceipt.endpoint');
+    }
+  }
+  if (receipt.unknownReasonOmitted) missing.push('unknownReason_unrecognized_or_unsafe');
+  if (receipt.truncated) missing.push('archive_field_truncated');
+  const uniqueMissing = [...new Set(missing)];
+  const complete =
+    receipt.status === 'reconciled' &&
+    receipt.chargeOutcome !== 'unknown' &&
+    uniqueMissing.length === 0;
+  return {
+    ...publicReceipt,
+    missing: uniqueMissing,
+    complete,
+  };
+}
+
+function missingReservationReceipt(reservationId: string): EvaluationReservationReceipt {
+  const id = safeReceiptField(reservationId, 64);
+  return {
+    reservationId: id.value,
+    estimatedUsd: null,
+    status: 'missing',
+    reconciledUsd: null,
+    chargeOutcome: 'unknown',
+    attempt: null,
+    providerReceipt: null,
+    unknownReason: null,
+    evidence: null,
+    missing: ['reservation_not_archived', 'estimatedUsd', 'attempt', 'reconciledUsd', 'evidence'],
+    truncated: id.truncated,
+    complete: false,
+  };
+}
+
 export class EvaluationLedger implements CostRepository {
   readonly kind = 'cost-repository' as const;
   readonly entries: { usd: number; basis: string }[] = [];
@@ -619,6 +870,12 @@ export class EvaluationLedger implements CostRepository {
   private reservationIds: string[] = [];
   private holds = new Map<string, number>();
   private attempts = new Map<string, CostAttemptMetadata>();
+  private reservationArchive = new Map<string, StoredReservationReceipt>();
+  private omittedReservationCount = 0;
+  private uncorrelatedCostEvents: EvaluationCostEventReceipt[] = [];
+  private uncorrelatedCostEventOrdinals: number[] = [];
+  private totalCostEventCount = 0;
+  private omittedCostEventCount = 0;
   readonly unknownLiabilities = new Map<
     string,
     { reason: string; providerReceipt?: { requestId?: string; endpoint?: string } }
@@ -637,6 +894,73 @@ export class EvaluationLedger implements CostRepository {
   }
   reservationsSince(index: number): string[] {
     return this.reservationIds.slice(index);
+  }
+  get uncorrelatedCostEventCount(): number {
+    return this.totalCostEventCount;
+  }
+  uncorrelatedCostEventsSince(index: number): {
+    complete: boolean;
+    omittedCount: number;
+    events: EvaluationCostEventReceipt[];
+  } {
+    if (!Number.isSafeInteger(index) || index < 0)
+      throw new RangeError('Cost event receipt index must be a non-negative safe integer');
+    const start = index;
+    const events = this.uncorrelatedCostEvents
+      .filter(
+        (_event, eventIndex) => (this.uncorrelatedCostEventOrdinals[eventIndex] ?? -1) >= start,
+      )
+      .map((event) => structuredClone(event));
+    const omittedCount = Math.max(
+      0,
+      this.totalCostEventCount - Math.max(start, MAX_ARCHIVED_COST_EVENTS),
+    );
+    return {
+      complete: omittedCount === 0 && events.every((event) => event.missing.length === 0),
+      omittedCount,
+      events,
+    };
+  }
+  receiptsForReservations(ids: readonly string[]): {
+    complete: boolean;
+    omittedReservationCount: number;
+    omittedQueryCount: number;
+    receipts: EvaluationReservationReceipt[];
+  } {
+    const boundedIds = ids.slice(0, MAX_ARCHIVED_RESERVATIONS);
+    const omittedQueryCount = Math.max(0, ids.length - boundedIds.length);
+    const receipts = boundedIds.map((id) => {
+      const receipt = this.reservationArchive.get(id);
+      return receipt ? snapshotReservation(receipt) : missingReservationReceipt(id);
+    });
+    return {
+      complete:
+        this.omittedReservationCount === 0 &&
+        omittedQueryCount === 0 &&
+        receipts.every((receipt) => receipt.complete),
+      omittedReservationCount: this.omittedReservationCount,
+      omittedQueryCount,
+      receipts: structuredClone(receipts),
+    };
+  }
+  get accountingSnapshot(): EvaluationAccountingSnapshot {
+    const reservations = [...this.reservationArchive.values()].map(snapshotReservation);
+    const uncorrelatedCostEvents = structuredClone(this.uncorrelatedCostEvents);
+    const missing: string[] = [];
+    if (this.omittedReservationCount > 0) missing.push('reservation_archive_limit_reached');
+    if (this.omittedCostEventCount > 0) missing.push('cost_event_archive_limit_reached');
+    if (reservations.some((receipt) => !receipt.complete))
+      missing.push('incomplete_reservation_receipts');
+    if (uncorrelatedCostEvents.some((event) => event.missing.length > 0))
+      missing.push('incomplete_uncorrelated_cost_events');
+    return {
+      complete: missing.length === 0,
+      omittedReservationCount: this.omittedReservationCount,
+      omittedCostEventCount: this.omittedCostEventCount,
+      reservations: structuredClone(reservations),
+      uncorrelatedCostEvents,
+      missing,
+    };
   }
   async getRate() {
     return null;
@@ -659,11 +983,34 @@ export class EvaluationLedger implements CostRepository {
     const reservationId = randomUUID();
     this.holds.set(reservationId, input.estimatedUsd);
     this.reservationIds.push(reservationId);
+    if (this.reservationArchive.size < MAX_ARCHIVED_RESERVATIONS) {
+      this.reservationArchive.set(reservationId, {
+        reservationId,
+        estimatedUsd: input.estimatedUsd,
+        status: 'held',
+        reconciledUsd: null,
+        chargeOutcome: 'unknown',
+        attempt: null,
+        providerReceipt: null,
+        unknownReason: null,
+        evidence: null,
+        truncated: false,
+        unknownReasonOmitted: false,
+      });
+    } else {
+      this.omittedReservationCount += 1;
+    }
     return { ok: true as const, reservationId };
   }
   async beginAttempt(reservationId: string, metadata: CostAttemptMetadata) {
     if (!this.holds.has(reservationId) || this.attempts.has(reservationId)) return false;
     this.attempts.set(reservationId, structuredClone(metadata));
+    const receipt = this.reservationArchive.get(reservationId);
+    if (receipt) {
+      receipt.attempt = safeAttemptReceipt(metadata);
+      receipt.status = 'dispatching';
+      receipt.truncated ||= receipt.attempt.truncated;
+    }
     this.reasoningAttempts.push(metadata.reasoning);
     return true;
   }
@@ -674,14 +1021,55 @@ export class EvaluationLedger implements CostRepository {
   ) {
     if (!this.holds.has(reservationId) || !this.attempts.has(reservationId))
       throw new Error('Evaluation attempt is not open');
+    const safeRequestId = safeReceiptField(providerReceipt?.requestId, 200);
+    const safeEndpoint = safeReceiptField(providerReceipt?.endpoint, 100);
+    const reasonCode = Object.hasOwn(SAFE_REASONS, reason) ? (SAFE_REASONS[reason] ?? null) : null;
     this.unknownLiabilities.set(reservationId, {
       reason: reason.slice(0, 500),
       ...(providerReceipt ? { providerReceipt: structuredClone(providerReceipt) } : {}),
     });
+    const receipt = this.reservationArchive.get(reservationId);
+    if (receipt) {
+      receipt.status = 'unknown';
+      receipt.unknownReason = reasonCode;
+      receipt.unknownReasonOmitted = reasonCode === null;
+      receipt.providerReceipt =
+        providerReceipt && (safeRequestId.value || safeEndpoint.value)
+          ? { requestId: safeRequestId.value, endpoint: safeEndpoint.value }
+          : null;
+      receipt.truncated ||= safeRequestId.truncated || safeEndpoint.truncated;
+    }
   }
   async record(input: CostEventInput) {
     if (!Number.isFinite(input.usd) || input.usd < 0) throw new Error('Invalid evaluation cost');
     this.entries.push({ usd: input.usd, basis: input.evidence?.basis ?? 'unknown' });
+    const ordinal = this.totalCostEventCount;
+    this.totalCostEventCount += 1;
+    if (this.uncorrelatedCostEvents.length < MAX_ARCHIVED_COST_EVENTS) {
+      const evidence = safeEvidenceReceipt(input.evidence);
+      const reservationId =
+        input.reservationId === undefined || input.reservationId === null
+          ? null
+          : safeReceiptField(input.reservationId, 64);
+      const missing = [...evidence.missing];
+      let truncated = evidence.truncated;
+      let safeId: string | null = null;
+      if (reservationId) {
+        safeId = reservationId.value;
+        truncated ||= reservationId.truncated;
+        if (reservationId.missing) missing.push('reservationId');
+      }
+      this.uncorrelatedCostEvents.push({
+        reservationId: safeId,
+        usd: input.usd,
+        evidence,
+        missing: [...new Set(missing)],
+        truncated,
+      });
+      this.uncorrelatedCostEventOrdinals.push(ordinal);
+    } else {
+      this.omittedCostEventCount += 1;
+    }
   }
   async reconcile(id: string, actual: ReservationActual) {
     if (!Number.isFinite(actual.usd) || actual.usd < 0) throw new Error('Invalid evaluation cost');
@@ -689,6 +1077,20 @@ export class EvaluationLedger implements CostRepository {
     this.attempts.delete(id);
     this.unknownLiabilities.delete(id);
     this.entries.push({ usd: actual.usd, basis: actual.evidence?.basis ?? 'unknown' });
+    const receipt = this.reservationArchive.get(id);
+    if (receipt) {
+      const evidence = safeEvidenceReceipt(actual.evidence);
+      receipt.status = 'reconciled';
+      receipt.reconciledUsd = actual.usd;
+      receipt.evidence = evidence;
+      receipt.chargeOutcome =
+        evidence.basis === 'provider_reported'
+          ? 'provider_reported'
+          : evidence.basis === 'token_rate' || evidence.basis === 'preflight_estimate'
+            ? 'estimated'
+            : 'unknown';
+      receipt.truncated ||= evidence.truncated;
+    }
   }
   async release(id: string) {
     // An ambiguous provider outcome keeps its original liability until an
@@ -701,6 +1103,11 @@ export class EvaluationLedger implements CostRepository {
     this.attempts.delete(id);
     this.unknownLiabilities.delete(id);
     this.entries.push({ usd: amount, basis: 'failed_request_ceiling' });
+    const receipt = this.reservationArchive.get(id);
+    if (receipt) {
+      receipt.status = 'released_ceiling';
+      receipt.chargeOutcome = 'ceiling_not_actual';
+    }
   }
   async releaseStale() {
     return 0;
