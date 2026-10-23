@@ -1034,6 +1034,9 @@ struct ChatView: View {
     @ScaledMetric(relativeTo: .subheadline) private var menuAccessibilityTextSize = 15.0
     @State private var draft = ""
     @State private var draftScope: ComposerDraftScope?
+    @State private var draftSnapshot: ComposerDraftSnapshot?
+    @State private var draftSubmission: ComposerDraftSubmissionProvenance?
+    @State private var composerIsVisible = false
     @State private var isAtBottom = true
     @State private var transcriptFollow = TranscriptFollowState()
     // Opening requires the actual bottom edge. `isAtBottom` deliberately has
@@ -1306,6 +1309,7 @@ struct ChatView: View {
                 settleCancelledMenuGestureAfterRelease()
             }
             .onAppear {
+                composerIsVisible = true
                 menuViewportWidth = viewport.size.width
                 synchronizeComposer()
                 #if DEBUG
@@ -1316,26 +1320,47 @@ struct ChatView: View {
                 menuViewportWidth = width
             }
             .onDisappear {
-                if let draftScope { model.saveComposerDraft(draft, in: draftScope) }
+                composerIsVisible = false
+                // A delayed teardown must not overwrite a newer view's draft.
+                // Keep the final local edit when storage has not changed.
+                if let draftScope, let draftSnapshot,
+                   let saved = model.saveComposerDraft(draft, in: draftScope, ifUnchangedFrom:
+                    draftSnapshot.lifecycleFlushSnapshot(localDraft: draft, submission: draftSubmission)) {
+                    self.draftSnapshot = saved
+                    draftSubmission = nil
+                }
                 dictationScope = nil
                 stopMicrophone(focusingComposer: false)
             }
             .onChange(of: model.composerDraftScope) { _, _ in synchronizeComposer() }
             .onChange(of: draft) { _, text in
+                // Read @State now, rather than persisting an obsolete callback
+                // value that was superseded by a restoration or another edit.
+                guard let draftScope,
+                      let saved = model.saveComposerDraftChange(text, currentDraft: draft, in: draftScope) else { return }
+                draftSnapshot = saved
+                draftSubmission = nil
 #if DEBUG
                 if composerPresentationProbe != nil {
                     composerDraftRevision &+= 1
                 }
 #endif
-                if let draftScope { model.saveComposerDraft(text, in: draftScope) }
             }
             .onChange(of: model.composerRecoveryRevision) { _, _ in
+                guard let draftScope, let previous = draftSnapshot,
+                      let current = model.composerDraftSnapshot(in: draftScope),
+                      let adopted = previous.adoptingRecoverySnapshot(current, localDraft: draft) else { return }
+                draftSnapshot = adopted
+                draft = adopted.text
                 restoreUnsentMessageIfPossible()
             }
             .onChange(of: model.calendarDraftRestoreRevision) { _, _ in
                 if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                   let draftScope, !model.composerDraft(in: draftScope).isEmpty {
-                    draft = model.composerDraft(in: draftScope)
+                   draft == draftSnapshot?.text,
+                   let draftScope, let current = model.composerDraftSnapshot(in: draftScope),
+                   !current.text.isEmpty {
+                    draftSnapshot = current
+                    draft = current.text
                 }
             }
             .onChange(of: model.packDiscussionDraft) { _, requested in
@@ -1426,7 +1451,7 @@ struct ChatView: View {
                                 messages: model.messages,
                                 isSending: model.isSending,
                                 openApprovals: { model.present(.approvals) },
-                                send: { model.send($0, force: $1) },
+                                send: { sendWithComposerContext($0, force: $1) },
                                 decideApproval: { await model.decideApproval(id: $0, decision: $1) },
                                 rememberApproval: { await model.approveAndRemember(id: $0) },
                                 decideSuggestion: { await model.decideSuggestion(id: $0, decision: $1) },
@@ -1648,7 +1673,7 @@ struct ChatView: View {
                         if let draftScope, model.hasComposerRecovery(in: draftScope) {
                             VStack(spacing: 5) {
                                 Button {
-                                    restoreUnsentMessageIfPossible()
+                                    restoreUnsentMessageByOwner()
                                     composerFocused = true
                                 } label: {
                                     Label("Restore unsent message", systemImage: "arrow.uturn.backward")
@@ -3229,7 +3254,7 @@ struct ChatView: View {
         if model.cardFormComposerBinding != nil {
             model.sendCardForm(text) {
                 draft = ""
-                if let draftScope { model.saveComposerDraft("", in: draftScope) }
+                if let draftScope { draftSnapshot = model.saveComposerDraft("", in: draftScope) }
                 dictationScope = nil
                 stopMicrophone(focusingComposer: false)
                 sendFeedback += 1
@@ -3239,7 +3264,7 @@ struct ChatView: View {
             return
         }
         draft = ""
-        if let draftScope { model.saveComposerDraft("", in: draftScope) }
+        if let draftScope { draftSnapshot = model.saveComposerDraft("", in: draftScope) }
         sendPreparedMessage(text, keepsComposerFocused: true)
     }
 
@@ -3258,17 +3283,45 @@ struct ChatView: View {
         sendFeedback += 1
         composerFocused = keepsComposerFocused
         requestScrollToBottom()
-        model.send(text)
+        sendWithComposerContext(text)
+    }
+
+    private func sendWithComposerContext(_ text: String, force: Bool = false) {
+        let context = draftSnapshot.map { ComposerDraftSubmissionContext(origin: $0, localDraft: draft) }
+        model.send(text, force: force, composerDraftContext: context, onComposerDraftStage: { submission in
+            guard let draftScope, let previous = draftSnapshot,
+                  let current = model.composerDraftSnapshot(in: draftScope),
+                  let captured = previous.capturingSubmissionStage(
+                    submission, current: current, localDraft: draft,
+                    activeScope: model.composerDraftScope, isVisible: composerIsVisible
+                  ) else { return }
+            draftSubmission = captured
+        }) { origin, cleared in
+            guard let draftScope, let previous = draftSnapshot,
+                  let current = model.composerDraftSnapshot(in: draftScope),
+                  let adopted = previous.adoptingSubmissionClear(
+                    cleared, from: origin, current: current, localDraft: draft,
+                    activeScope: model.composerDraftScope, isVisible: composerIsVisible
+                  ) else { return }
+            draftSnapshot = adopted
+            draftSubmission = nil
+            draft = adopted.text
+        }
     }
 
     private func synchronizeComposer() {
         let nextScope = model.composerDraftScope
         guard nextScope != draftScope else { return }
-        if let draftScope { model.saveComposerDraft(draft, in: draftScope) }
+        if let draftScope, let draftSnapshot {
+            model.saveComposerDraft(draft, in: draftScope, ifUnchangedFrom:
+                draftSnapshot.lifecycleFlushSnapshot(localDraft: draft, submission: draftSubmission))
+        }
+        draftSubmission = nil
         dictationScope = nil
         stopMicrophone(focusingComposer: false)
         draftScope = nextScope
-        draft = nextScope.map { model.composerDraft(in: $0) } ?? ""
+        draftSnapshot = nextScope.flatMap { model.composerDraftSnapshot(in: $0) }
+        draft = draftSnapshot?.text ?? ""
         draftBeforeDictation = ""
         hasUnseenMessages = false
         transcriptFollow.resume()
@@ -3278,9 +3331,19 @@ struct ChatView: View {
     }
 
     private func restoreUnsentMessageIfPossible() {
+        guard let draftScope, let draftSnapshot,
+              let restored = model.restoreComposerRecovery(
+                in: draftScope, replacing: draft, ifUnchangedFrom: draftSnapshot
+              ) else { return }
+        self.draftSnapshot = restored
+        draft = restored.text
+    }
+
+    private func restoreUnsentMessageByOwner() {
         guard let draftScope,
-              let restored = model.restoreComposerRecovery(in: draftScope, replacing: draft) else { return }
-        draft = restored
+              let restored = model.restoreComposerRecoveryByOwner(in: draftScope, replacing: draft) else { return }
+        draftSnapshot = restored
+        draft = restored.text
     }
 
     private var showsJumpToLatest: Bool {

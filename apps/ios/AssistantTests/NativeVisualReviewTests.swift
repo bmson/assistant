@@ -286,6 +286,7 @@ final class NativeVisualReviewTests: XCTestCase {
                 "sourceFile": observation.sourceFile,
                 "sourceFunction": observation.sourceFunction,
                 "sourceLine": observation.sourceLine,
+                "accepted": observation.accepted,
                 "scopeMatchesCurrent": observation.scopeMatchesCurrent,
                 "sessionMatchesCurrent": observation.sessionMatchesCurrent,
                 "requestedLength": observation.requestedLength,
