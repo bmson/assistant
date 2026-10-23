@@ -1743,6 +1743,10 @@ extension AssistantMarkdownTests {
                 && state.receiptMeasurement?.frame(in: window) != nil
                 && state.systemEnvironmentSnapshots[0] != nil
         }
+        XCTAssertEqual(boundaryProbe.hostingRootInitializationCount, 1,
+            "The UIHostingController root is constructed once for this owned host.")
+        XCTAssertEqual(boundaryProbe.parentSnapshotGeneration, boundaryProbe.parentSnapshotCommitCount,
+            "Snapshot generation counts committed parent updates, not rootView replacements.")
         let initialScroll = try XCTUnwrap(ownedTranscriptScrollView(in: window))
         let initialHierarchy = ownedTranscriptControllerIdentities(root: root, containing: initialScroll)
         XCTAssertGreaterThanOrEqual(initialHierarchy.count, 3,
@@ -1972,13 +1976,14 @@ extension AssistantMarkdownTests {
                 && !presentedSheet.isBeingPresented
                 && !presentedSheet.isBeingDismissed
                 && leaf?.parentContentRevision == 2
+                && leaf?.snapshotContentRevision == 2
         }
         attachOwnedTranscriptBoundarySnapshot(
             stage: "row-sheet-presentation-settle-result", state: state, root: root,
             window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
         )
-        let generationBeforeLocalUpdates = boundaryProbe.rootGeneration
-        let assignmentsBeforeLocalUpdates = boundaryProbe.rootAssignmentCount
+        let generationBeforeLocalUpdates = boundaryProbe.parentSnapshotGeneration
+        let commitsBeforeLocalUpdates = boundaryProbe.parentSnapshotCommitCount
         let startingLocalRevision = try XCTUnwrap(state.childTransactionObservations.last?.localRevision)
         var childTransaction99 = Transaction(animation: nil)
         childTransaction99[OwnedTranscriptHostMarkerKey.self] = 99
@@ -1992,9 +1997,10 @@ extension AssistantMarkdownTests {
         }) {
             guard let observation = state.childTransactionObservations.last else { return false }
             return observation.parentContentRevision == 2
+                && observation.snapshotContentRevision == 2
                 && observation.localRevision == startingLocalRevision + 1
                 && observation.marker == 99
-                && observation.rootGeneration == generationBeforeLocalUpdates
+                && observation.snapshotGeneration == generationBeforeLocalUpdates
         }
         attachOwnedTranscriptBoundarySnapshot(
             stage: "child-local-transaction-99-result", state: state, root: root,
@@ -2002,15 +2008,18 @@ extension AssistantMarkdownTests {
         )
         let observed99 = try XCTUnwrap(state.childTransactionObservations.last)
         XCTAssertEqual(observed99.parentContentRevision, 2)
+        XCTAssertEqual(observed99.snapshotContentRevision, 2)
         XCTAssertEqual(observed99.localRevision, startingLocalRevision + 1)
         XCTAssertEqual(observed99.marker, 99)
-        XCTAssertEqual(observed99.rootGeneration, generationBeforeLocalUpdates)
-        XCTAssertEqual(boundaryProbe.rootGeneration, generationBeforeLocalUpdates)
-        XCTAssertEqual(boundaryProbe.rootAssignmentCount, assignmentsBeforeLocalUpdates,
-            "A child-local transaction must not cause a parent root assignment")
+        XCTAssertEqual(observed99.snapshotGeneration, generationBeforeLocalUpdates)
+        XCTAssertEqual(boundaryProbe.parentSnapshotGeneration, generationBeforeLocalUpdates)
+        XCTAssertEqual(boundaryProbe.parentSnapshotCommitCount, commitsBeforeLocalUpdates,
+            "A child-local transaction must not publish a parent snapshot.")
+        XCTAssertEqual(boundaryProbe.hostingRootInitializationCount, 1,
+            "A child-local transaction must retain the single hosting root.")
 
-        let generationBeforeDefaultLocalUpdate = boundaryProbe.rootGeneration
-        let assignmentsBeforeDefaultLocalUpdate = boundaryProbe.rootAssignmentCount
+        let generationBeforeDefaultLocalUpdate = boundaryProbe.parentSnapshotGeneration
+        let commitsBeforeDefaultLocalUpdate = boundaryProbe.parentSnapshotCommitCount
         var childDefaultTransaction = Transaction()
         childDefaultTransaction[OwnedTranscriptHostMarkerKey.self] = 0
         updateChildLocalState(childDefaultTransaction)
@@ -2022,9 +2031,10 @@ extension AssistantMarkdownTests {
         }) {
             guard let observation = state.childTransactionObservations.last else { return false }
             return observation.parentContentRevision == 2
+                && observation.snapshotContentRevision == 2
                 && observation.localRevision == startingLocalRevision + 2
                 && observation.marker == 0
-                && observation.rootGeneration == generationBeforeDefaultLocalUpdate
+                && observation.snapshotGeneration == generationBeforeDefaultLocalUpdate
         }
         attachOwnedTranscriptBoundarySnapshot(
             stage: "child-local-default-transaction-result", state: state, root: root,
@@ -2032,15 +2042,18 @@ extension AssistantMarkdownTests {
         )
         let observedDefaultLocal = try XCTUnwrap(state.childTransactionObservations.last)
         XCTAssertEqual(observedDefaultLocal.parentContentRevision, 2)
+        XCTAssertEqual(observedDefaultLocal.snapshotContentRevision, 2)
         XCTAssertEqual(observedDefaultLocal.localRevision, startingLocalRevision + 2)
         XCTAssertEqual(observedDefaultLocal.marker, 0)
-        XCTAssertEqual(observedDefaultLocal.rootGeneration, generationBeforeDefaultLocalUpdate)
-        XCTAssertEqual(boundaryProbe.rootGeneration, generationBeforeDefaultLocalUpdate)
-        XCTAssertEqual(boundaryProbe.rootAssignmentCount, assignmentsBeforeDefaultLocalUpdate,
-            "A second child-local transaction must not cause a parent root assignment")
+        XCTAssertEqual(observedDefaultLocal.snapshotGeneration, generationBeforeDefaultLocalUpdate)
+        XCTAssertEqual(boundaryProbe.parentSnapshotGeneration, generationBeforeDefaultLocalUpdate)
+        XCTAssertEqual(boundaryProbe.parentSnapshotCommitCount, commitsBeforeDefaultLocalUpdate,
+            "A second child-local transaction must not publish a parent snapshot.")
+        XCTAssertEqual(boundaryProbe.hostingRootInitializationCount, 1,
+            "Child-local transactions must retain the single hosting root.")
 
-        let generationBeforeDefaultParentUpdate = boundaryProbe.rootGeneration
-        let assignmentsBeforeDefaultParentUpdate = boundaryProbe.rootAssignmentCount
+        let generationBeforeDefaultParentUpdate = boundaryProbe.parentSnapshotGeneration
+        let commitsBeforeDefaultParentUpdate = boundaryProbe.parentSnapshotCommitCount
         state.contentRevision += 1
         try await waitForTranscriptHostCondition("a later default parent transaction reaches the child leaf", onTimeout: {
             attachOwnedTranscriptBoundarySnapshot(
@@ -2050,9 +2063,10 @@ extension AssistantMarkdownTests {
         }) {
             guard let observation = state.childTransactionObservations.last else { return false }
             return observation.parentContentRevision == 3
+                && observation.snapshotContentRevision == 3
                 && observation.localRevision == startingLocalRevision + 2
                 && observation.marker == 0
-                && observation.rootGeneration > generationBeforeDefaultParentUpdate
+                && observation.snapshotGeneration > generationBeforeDefaultParentUpdate
         }
         attachOwnedTranscriptBoundarySnapshot(
             stage: "default-parent-transaction-result", state: state, root: root,
@@ -2062,9 +2076,13 @@ extension AssistantMarkdownTests {
         XCTAssertEqual(observedDefaultParent.parentContentRevision, 3)
         XCTAssertEqual(observedDefaultParent.localRevision, startingLocalRevision + 2)
         XCTAssertEqual(observedDefaultParent.marker, 0)
-        XCTAssertGreaterThan(boundaryProbe.rootGeneration, generationBeforeDefaultParentUpdate)
-        XCTAssertGreaterThan(boundaryProbe.rootAssignmentCount, assignmentsBeforeDefaultParentUpdate)
-        XCTAssertEqual(observedDefaultParent.rootGeneration, boundaryProbe.rootGeneration)
+        XCTAssertGreaterThan(boundaryProbe.parentSnapshotGeneration, generationBeforeDefaultParentUpdate)
+        XCTAssertGreaterThan(boundaryProbe.parentSnapshotCommitCount, commitsBeforeDefaultParentUpdate)
+        XCTAssertEqual(observedDefaultParent.snapshotGeneration, boundaryProbe.parentSnapshotGeneration)
+        XCTAssertEqual(observedDefaultParent.snapshotContentRevision, 3,
+            "The leaf reports the content revision captured in its rendered parent snapshot.")
+        XCTAssertEqual(boundaryProbe.hostingRootInitializationCount, 1,
+            "Parent updates must retain the single hosting root.")
         XCTAssertTrue(ownedTranscriptScrollView(in: window) === initialScroll,
             "A default parent transaction must preserve the transcript scroll view identity")
         XCTAssertEqual(ownedTranscriptControllerIdentities(root: root, containing: initialScroll), initialHierarchy)
@@ -2137,9 +2155,10 @@ private final class OwnedTranscriptHostRegressionState: ObservableObject {
 
 private struct OwnedTranscriptChildTransactionObservation: Equatable {
     let parentContentRevision: Int
+    let snapshotContentRevision: Int
     let localRevision: Int
     let marker: Int
-    let rootGeneration: Int
+    let snapshotGeneration: Int
 }
 
 private struct OwnedTranscriptEnvironmentSnapshot: Equatable {
@@ -2326,6 +2345,8 @@ private struct OwnedTranscriptDisclosureRow: View {
 private struct OwnedTranscriptTransactionLeaf: View {
     let state: OwnedTranscriptHostRegressionState
     let parentContentRevision: Int
+    @Environment(\.transcriptHostSnapshotGeneration) private var snapshotGeneration
+    @Environment(\.transcriptHostSnapshotContentRevision) private var snapshotContentRevision
     @State private var localRevision = 0
 
     var body: some View {
@@ -2335,13 +2356,17 @@ private struct OwnedTranscriptTransactionLeaf: View {
             // child's @State and does not publish a parent-state mutation.
             .transaction { transaction in
                 let marker = transaction[OwnedTranscriptHostMarkerKey.self]
-                let generation = state.boundaryProbe?.rootGeneration ?? -1
-                state.boundaryProbe?.record("child-leaf", transaction: transaction, generation: generation)
+                let generation = snapshotGeneration ?? -1
+                state.boundaryProbe?.record(
+                    "child-leaf", transaction: transaction, generation: generation,
+                    contentRevision: snapshotContentRevision ?? -1
+                )
                 state.recordChildTransactionObservation(.init(
                     parentContentRevision: parentContentRevision,
+                    snapshotContentRevision: snapshotContentRevision ?? -1,
                     localRevision: localRevision,
                     marker: marker,
-                    rootGeneration: generation
+                    snapshotGeneration: generation
                 ))
                 if state.transactionMarkers.last != marker {
                     state.transactionMarkers.append(marker)
@@ -2505,13 +2530,15 @@ private func attachOwnedTranscriptBoundarySnapshot(
         "windowIdentity": ObjectIdentifier(window).hashValue,
         "transactionMarkers": state.transactionMarkers,
         "boundaryEvents": state.boundaryProbe?.events ?? [],
-        "rootTransactionGeneration": state.boundaryProbe?.rootGeneration ?? -1,
-        "rootAssignmentCount": state.boundaryProbe?.rootAssignmentCount ?? -1,
+        "parentSnapshotGeneration": state.boundaryProbe?.parentSnapshotGeneration ?? -1,
+        "parentSnapshotCommitCount": state.boundaryProbe?.parentSnapshotCommitCount ?? -1,
+        "hostingRootInitializationCount": state.boundaryProbe?.hostingRootInitializationCount ?? -1,
         "childTransactionObservations": state.childTransactionObservations.suffix(16).map {
             ["parentContentRevision": $0.parentContentRevision,
+             "snapshotContentRevision": $0.snapshotContentRevision,
              "localRevision": $0.localRevision,
              "marker": $0.marker,
-             "rootGeneration": $0.rootGeneration]
+             "snapshotGeneration": $0.snapshotGeneration]
         },
         "predicateSamples": state.predicateSamples,
         "environmentSnapshots": state.environmentSnapshots.suffix(8).map {

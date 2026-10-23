@@ -27,15 +27,30 @@ private struct ConversationTranscriptHost<Content: View>: UIViewControllerRepres
     let content: Content
 
     func makeUIViewController(context: Context) -> ConversationTranscriptController<Content> {
-        ConversationTranscriptController(
-            content: content, environment: context.environment, transaction: context.transaction
+#if DEBUG
+        let controller = ConversationTranscriptController(
+            content: content,
+            environment: context.environment,
+            transaction: context.transaction,
+            diagnosticContentRevision: context.environment.transcriptHostBoundaryProbe?.currentContentRevision ?? -1
         )
+        context.environment.transcriptHostBoundaryProbe?.record(
+            "hosting-root-initialized", transaction: context.transaction, generation: 0,
+            contentRevision: context.environment.transcriptHostBoundaryProbe?.currentContentRevision
+        )
+#else
+        let controller = ConversationTranscriptController(
+            content: content, environment: context.environment, transaction: context.transaction,
+            diagnosticContentRevision: -1
+        )
+#endif
+        return controller
     }
 
     func updateUIViewController(_ controller: ConversationTranscriptController<Content>, context: Context) {
 #if DEBUG
         context.environment.transcriptHostBoundaryProbe?.record(
-            "representable-context", transaction: context.transaction, generation: controller.transactionGeneration
+            "representable-context", transaction: context.transaction, generation: controller.parentSnapshotGeneration
         )
 #endif
         withTransaction(context.transaction) {
@@ -64,36 +79,72 @@ private enum TranscriptCoordinateSpace: Hashable {
     case viewport
 }
 
-private struct ConversationTranscriptRoot<Content: View>: View {
+private struct ConversationTranscriptSnapshot<Content: View> {
     let content: Content
-    let inheritedEnvironment: EnvironmentValues
-    let inheritedTransaction: Transaction
-    let transactionGeneration: Int
+    let environment: EnvironmentValues
+    let transaction: Transaction
+    let generation: Int
+    let diagnosticContentRevision: Int
+}
+
+@MainActor
+private final class ConversationTranscriptSnapshotModel<Content: View>: ObservableObject {
+    @Published private(set) var snapshot: ConversationTranscriptSnapshot<Content>
+
+    init(content: Content, environment: EnvironmentValues, transaction: Transaction,
+         diagnosticContentRevision: Int) {
+        snapshot = ConversationTranscriptSnapshot(
+            content: content, environment: environment, transaction: transaction,
+            generation: 0, diagnosticContentRevision: diagnosticContentRevision
+        )
+    }
+
+    func publish(content: Content, environment: EnvironmentValues, transaction: Transaction,
+                 diagnosticContentRevision: Int,
+                 afterPublication: ((ConversationTranscriptSnapshot<Content>) -> Void)? = nil) {
+        let nextGeneration = snapshot.generation &+ 1
+        let nextSnapshot = ConversationTranscriptSnapshot(
+            content: content, environment: environment, transaction: transaction,
+            generation: nextGeneration, diagnosticContentRevision: diagnosticContentRevision
+        )
+        snapshot = nextSnapshot
+        afterPublication?(nextSnapshot)
+    }
+}
+
+private struct ConversationTranscriptRoot<Content: View>: View {
+    @ObservedObject var snapshotModel: ConversationTranscriptSnapshotModel<Content>
 #if DEBUG
     let coordinates: TranscriptHostingCoordinates
 #endif
 
     var body: some View {
-        content
+        let snapshot = snapshotModel.snapshot
+        snapshot.content
 #if DEBUG
             .environment(\.transcriptHostingCoordinates, coordinates)
+            .environment(\.transcriptHostSnapshotGeneration, snapshot.generation)
+            .environment(\.transcriptHostSnapshotContentRevision, snapshot.diagnosticContentRevision)
 #endif
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .coordinateSpace(name: TranscriptCoordinateSpace.viewport)
-            .environment(\.self, inheritedEnvironment)
-            .transaction(value: transactionGeneration) {
+            .environment(\.self, snapshot.environment)
+            .transaction(value: snapshot.generation) {
 #if DEBUG
-                inheritedEnvironment.transcriptHostBoundaryProbe?.record(
-                    "root-transform-input", transaction: $0, generation: transactionGeneration
+                snapshot.environment.transcriptHostBoundaryProbe?.record(
+                    "root-transform-input", transaction: $0, generation: snapshot.generation,
+                    contentRevision: snapshot.diagnosticContentRevision
                 )
-                inheritedEnvironment.transcriptHostBoundaryProbe?.record(
-                    "root-transform-captured", transaction: inheritedTransaction, generation: transactionGeneration
+                snapshot.environment.transcriptHostBoundaryProbe?.record(
+                    "root-transform-captured", transaction: snapshot.transaction, generation: snapshot.generation,
+                    contentRevision: snapshot.diagnosticContentRevision
                 )
 #endif
-                $0 = inheritedTransaction
+                $0 = snapshot.transaction
 #if DEBUG
-                inheritedEnvironment.transcriptHostBoundaryProbe?.record(
-                    "root-transform-output", transaction: $0, generation: transactionGeneration
+                snapshot.environment.transcriptHostBoundaryProbe?.record(
+                    "root-transform-output", transaction: $0, generation: snapshot.generation,
+                    contentRevision: snapshot.diagnosticContentRevision
                 )
 #endif
             }
@@ -104,23 +155,27 @@ private struct ConversationTranscriptRoot<Content: View>: View {
 /// streaming, environment and reveal updates. SwiftUI owns the container frame;
 /// Auto Layout pins only the owned child to its bounds, never its safe area.
 private final class ConversationTranscriptController<Content: View>: UIViewController {
+    private let snapshotModel: ConversationTranscriptSnapshotModel<Content>
     private let host: UIHostingController<ConversationTranscriptRoot<Content>>
 #if DEBUG
     private let coordinates: TranscriptHostingCoordinates
 #endif
-    private(set) var transactionGeneration = 0
+    var parentSnapshotGeneration: Int { snapshotModel.snapshot.generation }
 
-    init(content: Content, environment: EnvironmentValues, transaction: Transaction) {
+    init(content: Content, environment: EnvironmentValues, transaction: Transaction,
+         diagnosticContentRevision: Int) {
+        let snapshotModel = ConversationTranscriptSnapshotModel(
+            content: content, environment: environment, transaction: transaction,
+            diagnosticContentRevision: diagnosticContentRevision
+        )
+        self.snapshotModel = snapshotModel
 #if DEBUG
         let coordinates = TranscriptHostingCoordinates()
         self.coordinates = coordinates
         host = UIHostingController(rootView: ConversationTranscriptRoot(
-            content: content, inheritedEnvironment: environment,
-            inheritedTransaction: transaction, transactionGeneration: 0, coordinates: coordinates))
+            snapshotModel: snapshotModel, coordinates: coordinates))
 #else
-        host = UIHostingController(rootView: ConversationTranscriptRoot(
-            content: content, inheritedEnvironment: environment,
-            inheritedTransaction: transaction, transactionGeneration: 0))
+        host = UIHostingController(rootView: ConversationTranscriptRoot(snapshotModel: snapshotModel))
 #endif
         super.init(nibName: nil, bundle: nil)
         host.safeAreaRegions = []
@@ -158,18 +213,23 @@ private final class ConversationTranscriptController<Content: View>: UIViewContr
 #if DEBUG
     func update(content: Content, environment: EnvironmentValues,
                 boundaryProbe: TranscriptHostBoundaryProbe?, transaction: Transaction) {
-        transactionGeneration &+= 1
-        boundaryProbe?.record("root-assignment", transaction: transaction, generation: transactionGeneration)
-        host.rootView = ConversationTranscriptRoot(
-            content: content, inheritedEnvironment: environment, inheritedTransaction: transaction,
-            transactionGeneration: transactionGeneration, coordinates: coordinates)
+        snapshotModel.publish(
+            content: content, environment: environment, transaction: transaction,
+            diagnosticContentRevision: boundaryProbe?.currentContentRevision ?? -1,
+            afterPublication: { snapshot in
+                boundaryProbe?.record(
+                    "parent-snapshot-commit", transaction: snapshot.transaction,
+                    generation: snapshot.generation, contentRevision: snapshot.diagnosticContentRevision
+                )
+            }
+        )
     }
 #else
     func update(content: Content, environment: EnvironmentValues, transaction: Transaction) {
-        transactionGeneration &+= 1
-        host.rootView = ConversationTranscriptRoot(
-            content: content, inheritedEnvironment: environment, inheritedTransaction: transaction,
-            transactionGeneration: transactionGeneration)
+        snapshotModel.publish(
+            content: content, environment: environment, transaction: transaction,
+            diagnosticContentRevision: -1, afterPublication: nil
+        )
     }
 #endif
 }
@@ -182,8 +242,11 @@ final class TranscriptHostBoundaryProbe {
     private let marker: @MainActor (Transaction) -> Int
     private let contentRevision: @MainActor () -> Int
     private(set) var events: [[String: Any]] = []
-    private(set) var rootGeneration = 0
-    private(set) var rootAssignmentCount = 0
+    private(set) var parentSnapshotGeneration = 0
+    private(set) var parentSnapshotCommitCount = 0
+    private(set) var hostingRootInitializationCount = 0
+
+    var currentContentRevision: Int { contentRevision() }
 
     init(marker: @escaping @MainActor (Transaction) -> Int,
          contentRevision: @escaping @MainActor () -> Int) {
@@ -191,17 +254,19 @@ final class TranscriptHostBoundaryProbe {
         self.contentRevision = contentRevision
     }
 
-    func record(_ stage: String, transaction: Transaction, generation: Int) {
-        if stage == "root-assignment" {
-            rootGeneration = generation
-            rootAssignmentCount += 1
+    func record(_ stage: String, transaction: Transaction, generation: Int, contentRevision: Int? = nil) {
+        if stage == "parent-snapshot-commit" {
+            parentSnapshotGeneration = generation
+            parentSnapshotCommitCount += 1
+        } else if stage == "hosting-root-initialized" {
+            hostingRootInitializationCount += 1
         }
         if events.count == 64 { events.removeFirst() }
         events.append([
             "time": CACurrentMediaTime(),
             "stage": stage,
             "marker": marker(transaction),
-            "contentRevision": contentRevision(),
+            "contentRevision": contentRevision ?? self.contentRevision(),
             "generation": generation,
         ])
     }
@@ -211,10 +276,28 @@ private struct TranscriptHostBoundaryProbeKey: EnvironmentKey {
     static let defaultValue: TranscriptHostBoundaryProbe? = nil
 }
 
+private struct TranscriptHostSnapshotGenerationKey: EnvironmentKey {
+    static let defaultValue: Int? = nil
+}
+
+private struct TranscriptHostSnapshotContentRevisionKey: EnvironmentKey {
+    static let defaultValue: Int? = nil
+}
+
 extension EnvironmentValues {
     var transcriptHostBoundaryProbe: TranscriptHostBoundaryProbe? {
         get { self[TranscriptHostBoundaryProbeKey.self] }
         set { self[TranscriptHostBoundaryProbeKey.self] = newValue }
+    }
+
+    var transcriptHostSnapshotGeneration: Int? {
+        get { self[TranscriptHostSnapshotGenerationKey.self] }
+        set { self[TranscriptHostSnapshotGenerationKey.self] = newValue }
+    }
+
+    var transcriptHostSnapshotContentRevision: Int? {
+        get { self[TranscriptHostSnapshotContentRevisionKey.self] }
+        set { self[TranscriptHostSnapshotContentRevisionKey.self] = newValue }
     }
 }
 
