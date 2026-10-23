@@ -1404,26 +1404,35 @@ struct ActivityDiscoverySearchRow: View {
     let onSubmit: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.accessibilityContrast) private var accessibilityContrast
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     private var shape: RoundedRectangle {
         RoundedRectangle(cornerRadius: AssistantTheme.controlCornerRadius, style: .continuous)
     }
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                searchField
-                    .frame(minWidth: 220, maxWidth: .infinity)
-                searchButton
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                searchField
-                HStack {
-                    Spacer(minLength: 0)
+        if dynamicTypeSize.isAccessibilitySize {
+            stackedSearchRow
+        } else {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    searchField
+                        .frame(minWidth: 220, maxWidth: .infinity)
                     searchButton
                 }
+
+                stackedSearchRow
+            }
+        }
+    }
+
+    private var stackedSearchRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            searchField
+            HStack {
+                Spacer(minLength: 0)
+                searchButton
             }
         }
     }
@@ -1445,8 +1454,7 @@ struct ActivityDiscoverySearchRow: View {
             .font(.body)
             .foregroundStyle(AssistantTheme.ink(for: colorScheme))
             .tint(AssistantTheme.accent(for: colorScheme))
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
+            .focused($isFocused)
             .submitLabel(.search)
             .onSubmit(onSubmit)
             .accessibilityLabel("Search recorded work")
@@ -1476,11 +1484,11 @@ struct ActivityDiscoverySearchRow: View {
                 isFocused
                     ? AssistantTheme.accent(for: colorScheme)
                     : AssistantTheme.inkMuted(for: colorScheme).opacity(
-                        accessibilityContrast == .high ? 0.62 : 0.24
+                        colorSchemeContrast == .increased ? 0.62 : 0.24
                     ),
                 lineWidth: isFocused
-                    ? (accessibilityContrast == .high ? 2.5 : 1.5)
-                    : (accessibilityContrast == .high ? 1.5 : 1)
+                    ? (colorSchemeContrast == .increased ? 2.5 : 1.5)
+                    : (colorSchemeContrast == .increased ? 1.5 : 1)
             )
         }
     }
