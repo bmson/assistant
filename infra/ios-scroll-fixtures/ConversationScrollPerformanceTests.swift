@@ -3,6 +3,7 @@ import SwiftUI
 import UIKit
 import QuartzCore
 import CryptoKit
+import os
 @testable import Assistant
 
 /// Bounded synthetic simulator scrolling evidence for the production transcript.
@@ -229,6 +230,215 @@ final class ConversationScrollPerformanceTests: XCTestCase {
     }
 
     @MainActor
+    func testFullChatView500RowQuietScrollProfile() async throws {
+        let messageCount = 500
+        let messages = Self.fixtureMessages(count: messageCount, includeCalendarAgenda: true)
+        let fixtureDigest = try Self.fixtureDigest(messages)
+        let fixture = try await ConversationPerformanceFixture.make(messages: messages)
+        addTeardownBlock { await fixture.tearDown() }
+
+        XCTAssertEqual(fixture.model.messages.count, messageCount)
+        XCTAssertFalse(UIAccessibility.isReduceMotionEnabled)
+        XCTAssertFalse(ConversationRenderProbe.callSitesInstalled,
+                       "The quiet profile must not inject render-work probes")
+        fixture.assertValidMeasurementBoundary()
+
+        let scroll = fixture.scrollView
+        try await Task.sleep(for: .milliseconds(500))
+        let actualTop = -scroll.adjustedContentInset.top
+        let viewport = scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom
+        let target = actualTop + viewport * 5
+        let hasRoom = viewport > 100 && Self.bottomOffset(of: scroll) >= target + 2
+        XCTAssertTrue(hasRoom, "Transcript must contain five usable viewport lengths below its actual top")
+        guard hasRoom else { return }
+
+        func positionAndValidate(_ requested: CGFloat, stage: String) async throws {
+            scroll.setContentOffset(CGPoint(x: 0, y: requested), animated: false)
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            var stableSamples = 0
+            var previousHeight: CGFloat?
+            var previousViewport: CGFloat?
+            var samples: [[String: Double]] = []
+            while ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(60))
+                fixture.window.layoutIfNeeded()
+                let height = scroll.contentSize.height
+                let usableViewport = scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom
+                samples.append([
+                    "observedOffsetPoints": Double(scroll.contentOffset.y),
+                    "actualTopPoints": Double(-scroll.adjustedContentInset.top),
+                    "actualBottomPoints": Double(Self.bottomOffset(of: scroll)),
+                    "viewportHeightPoints": Double(usableViewport),
+                    "contentHeightPoints": Double(height),
+                ])
+                let stable = abs(scroll.contentOffset.y - requested) <= 2
+                    && previousHeight.map { abs(height - $0) <= 2 } == true
+                    && previousViewport.map { abs(usableViewport - $0) <= 2 } == true
+                stableSamples = stable ? stableSamples + 1 : 0
+                previousHeight = height
+                previousViewport = usableViewport
+                if stableSamples >= 4 { break }
+            }
+            let valid = stableSamples >= 4
+            attachDiagnostic([
+                "mode": "quiet-profile-setup",
+                "stage": stage,
+                "requestedOffsetPoints": Double(requested),
+                "setupValid": valid,
+                "fixtureSHA256": fixtureDigest,
+                "geometrySamples": samples,
+            ], name: "quiet-profile-setup-\(stage)")
+            XCTAssertTrue(valid, "Direct UIKit \(stage) positioning failed to settle within ±2pt")
+            guard valid else { throw QuietScrollProfileError.positioningFailed(stage) }
+        }
+
+        // Identical unmeasured prelude warms the same five-viewport region used
+        // in the matched fixed-window run before the external trace starts.
+        try await positionAndValidate(actualTop, stage: "prelude-top")
+        try await positionAndValidate(target, stage: "prelude-target")
+        try await positionAndValidate(actualTop, stage: "prelude-scored-start")
+        XCTAssertEqual(scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom,
+                       viewport, accuracy: 2)
+        XCTAssertEqual(-scroll.adjustedContentInset.top, actualTop, accuracy: 2)
+        XCTAssertGreaterThanOrEqual(Self.bottomOffset(of: scroll), target + 2)
+        fixture.assertValidMeasurementBoundary()
+
+        let handshake = try fixture.makeQuietScrollProfileHandshake(fixtureSHA256: fixtureDigest)
+        defer {
+            try? FileManager.default.removeItem(at: handshake.readyURL)
+            try? FileManager.default.removeItem(at: handshake.releaseURL)
+            try? FileManager.default.removeItem(at: handshake.abortURL)
+        }
+        attachDiagnostic([
+            "mode": "quiet-profile-ready",
+            "profileId": handshake.profileID,
+            "fixtureSHA256": handshake.fixtureSHA256,
+            "messageCount": handshake.messageCount,
+            "pid": ProcessInfo.processInfo.processIdentifier,
+            "bundleId": Bundle.main.bundleIdentifier ?? "",
+            "executablePath": Bundle.main.executablePath ?? "",
+            "readyPath": handshake.readyURL.path,
+            "releasePath": handshake.releaseURL.path,
+            "abortPath": handshake.abortURL.path,
+            "notifyKey": handshake.notifyKey,
+            "monotonicReadyUptime": handshake.monotonicReadyUptime,
+            "actualTopPoints": Double(actualTop),
+            "targetPoints": Double(target),
+            "viewportHeightPoints": Double(viewport),
+            "renderProbeInstrumented": false,
+            "driver": "CADisplayLink setContentOffset + layoutIfNeeded",
+            "physicalTouchProfile": false,
+        ], name: "quiet-profile-ready")
+
+        let controller = try await Self.awaitProfileController(handshake)
+        let profileLog = OSLog(subsystem: "com.baldvinsmarason.assistant.scroll-profile", category: .pointsOfInterest)
+        var completedPhases: [[String: Any]] = []
+        let phases: [(String, CGFloat, CGFloat)] = [
+            ("down-1", actualTop, target),
+            ("up-2", target, actualTop),
+            ("down-3", actualTop, target),
+        ]
+        for (phaseName, start, end) in phases {
+            // A single OS signpost interval per phase is exported by Points of
+            // Interest in the same trace as Time Profiler samples.
+            let signpostID = OSSignpostID(log: profileLog)
+            let phaseStart = ProcessInfo.processInfo.systemUptime
+            os_signpost(.begin, log: profileLog, name: "QuietScrollPhase", signpostID: signpostID,
+                        "phase=%{public}@ fixture=%{public}@", phaseName as NSString, handshake.profileID as NSString)
+            let result = await FullChatViewScrollRecorder(scrollView: scroll, duration: 3.5)
+                .run(from: start, to: end)
+            os_signpost(.end, log: profileLog, name: "QuietScrollPhase", signpostID: signpostID,
+                        "phase=%{public}@ fixture=%{public}@", phaseName as NSString, handshake.profileID as NSString)
+            let phaseEnd = ProcessInfo.processInfo.systemUptime
+            let phase = Self.phaseSummary(phaseName, result)
+            let report: [String: Any] = [
+                "mode": "quiet-500-row-scroll-profile",
+                "profileId": handshake.profileID,
+                "fixtureSHA256": fixtureDigest,
+                "messageCount": messageCount,
+                "phase": phaseName,
+                "phaseStartUptime": phaseStart,
+                "phaseEndUptime": phaseEnd,
+                "recordingStartedUptime": controller.recordingStartedUptime,
+                "actualTopPoints": Double(actualTop),
+                "targetPoints": Double(target),
+                "viewportHeightPoints": Double(viewport),
+                "contentHeightPoints": Double(scroll.contentSize.height),
+                "signpostSubsystem": "com.baldvinsmarason.assistant.scroll-profile",
+                "signpostCategory": "pointsOfInterest",
+                "signpostName": "QuietScrollPhase",
+                "signpostInterval": "phase=\(phaseName) fixture=\(handshake.profileID)",
+                "renderProbeInstrumented": false,
+                "driver": "CADisplayLink setContentOffset + layoutIfNeeded",
+                "physicalTouchProfile": false,
+                "requestCountsByMethodAndPath": fixture.requestCountsByMethodAndPath,
+                "phaseResult": phase,
+            ]
+            attachDiagnostic(report, name: "quiet-profile-\(phaseName)")
+            assertSamplesStayWithinLegalBounds(result, expectedTop: actualTop, expectedViewport: viewport)
+            XCTAssertFalse(result.timedOut, "Quiet profile phase \(phaseName) exceeded its bounded callback wait")
+            XCTAssertGreaterThanOrEqual(result.intervals.count, 30,
+                                        "Quiet profile phase \(phaseName) callback coverage was too sparse")
+            XCTAssertEqual(result.fromOffset, start, accuracy: 2)
+            XCTAssertEqual(result.toOffset, end, accuracy: 2)
+            XCTAssertEqual(result.offsetSamples.first?.observedYPoints ?? .nan, start, accuracy: 2)
+            XCTAssertEqual(result.offsetSamples.last?.observedYPoints ?? .nan, end, accuracy: 2)
+            XCTAssertEqual(scroll.contentOffset.y, end, accuracy: 2)
+            fixture.assertValidMeasurementBoundary()
+            completedPhases.append([
+                "name": phaseName,
+                "startUptime": phaseStart,
+                "endUptime": phaseEnd,
+                "callbackCount": result.offsetSamples.count,
+                "firstCallbackDelaySeconds": result.requestedToFirstCallbackSeconds as Any? ?? NSNull(),
+            ])
+        }
+
+        attachDiagnostic([
+            "mode": "quiet-500-row-scroll-profile-complete",
+            "profileId": handshake.profileID,
+            "fixtureSHA256": fixtureDigest,
+            "recordingStartedUptime": controller.recordingStartedUptime,
+            "profileCompletedUptime": ProcessInfo.processInfo.systemUptime,
+            "completedPhaseCount": completedPhases.count,
+            "phases": completedPhases,
+        ], name: "quiet-profile-complete")
+        XCTAssertEqual(completedPhases.count, 3)
+    }
+
+    private struct ProfileControllerReceipt {
+        let recordingStartedUptime: TimeInterval
+    }
+
+    @MainActor
+    private static func awaitProfileController(
+        _ handshake: QuietScrollProfileHandshake
+    ) async throws -> ProfileControllerReceipt {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+        while ContinuousClock.now < deadline {
+            if FileManager.default.fileExists(atPath: handshake.abortURL.path) {
+                let data = try Data(contentsOf: handshake.abortURL)
+                throw QuietScrollProfileError.controllerAborted(String(decoding: data, as: UTF8.self))
+            }
+            if FileManager.default.fileExists(atPath: handshake.releaseURL.path) {
+                let data = try Data(contentsOf: handshake.releaseURL)
+                let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                guard let object,
+                      object["profileId"] as? String == handshake.profileID,
+                      object["recordingStartedObserved"] as? Bool == true,
+                      object["recordingStarted"] as? Bool == true,
+                      object["recordingStartedNotifyKey"] as? String == handshake.notifyKey,
+                      let started = object["recordingStartedUptime"] as? NSNumber else {
+                    throw QuietScrollProfileError.invalidControllerReceipt
+                }
+                return ProfileControllerReceipt(recordingStartedUptime: started.doubleValue)
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw QuietScrollProfileError.controllerTimedOut
+    }
+
+    @MainActor
     private func emitFixedWindowPhase(
         name: String,
         phase: [String: Any],
@@ -443,6 +653,22 @@ final class ConversationScrollPerformanceTests: XCTestCase {
         guard !sorted.isEmpty else { return 0 }
         let index = min(sorted.count - 1, Int((Double(sorted.count - 1) * fraction).rounded()))
         return sorted[index]
+    }
+}
+
+private enum QuietScrollProfileError: LocalizedError {
+    case controllerAborted(String)
+    case invalidControllerReceipt
+    case controllerTimedOut
+    case positioningFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .controllerAborted(let payload): return "Profiler aborted the quiet-scroll profile: \(payload)"
+        case .invalidControllerReceipt: return "Profiler GO receipt did not match the ready profile and trace-start notification"
+        case .controllerTimedOut: return "Profiler did not publish GO or abort within 30 seconds"
+        case .positioningFailed(let stage): return "Quiet profile positioning failed at \(stage)"
+        }
     }
 }
 

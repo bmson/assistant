@@ -15,8 +15,8 @@ case "$repeats" in
 esac
 
 case "$run_mode" in
-  diagnostic|matrix|smoke|correctness) ;;
-  *) echo "RUN_MODE must be diagnostic, correctness, smoke, or matrix" >&2; exit 2 ;;
+  diagnostic|matrix|smoke|correctness|profile) ;;
+  *) echo "RUN_MODE must be diagnostic, correctness, smoke, matrix, or profile" >&2; exit 2 ;;
 esac
 
 case "$phase" in
@@ -230,6 +230,10 @@ resolve_commit() {
 baseline_sha="$(resolve_commit "$baseline_ref")"
 candidate_sha="$(resolve_commit "$candidate_ref")"
 harness_sha="$(resolve_commit "${GITHUB_SHA:-$candidate_sha}")"
+if [[ "$run_mode" == "profile" && "$baseline_sha" != "$candidate_sha" ]]; then
+  echo "::error::Profile mode requires identical baseline and candidate commits; this is one quiet-scroll trace, not a comparison."
+  exit 2
+fi
 baseline_production_tree="$(git -C "$repo_root" rev-parse "${baseline_sha}:apps/ios/Assistant")"
 candidate_production_tree="$(git -C "$repo_root" rev-parse "${candidate_sha}:apps/ios/Assistant")"
 same_production_tree=false
@@ -254,6 +258,7 @@ diagnostic_methods=testFullChatView100RowSettledBidirectionalDiagnostic,testFull
 correctness_method=APIClientRetryTests/testChatFollowsNewMessagesAndGrowingStreamWhileAtBottom
 matrix_method=testFullChatView500RowFixedWindowBidirectional
 run_mode=$run_mode
+profile_method=testFullChatView500RowQuietScrollProfile
 cache_plan=matrix-only: direct-UIKit-position-at-top-then-five-viewport-target-then-top-before-timing; each-result-is-a-fresh-xcodebuild-test-invocation
 metric_note=CADisplayLink callback intervals are not presented-frame FPS; simulator results are comparative evidence only.
 EOF
@@ -270,6 +275,7 @@ if [[ -z "$latest_xcode" ]]; then
   exit 1
 fi
 sudo xcode-select -s "$latest_xcode"
+export DEVELOPER_DIR="$latest_xcode/Contents/Developer"
 echo "Selected Xcode: $latest_xcode"
 xcodebuild -version | tee "$output_root/xcode-version.txt"
 xcodebuild -showsdks | grep -i 'iphoneos' | tee "$output_root/ios-sdks.txt" || true
@@ -291,6 +297,8 @@ if [[ -z "$simulator_udid" ]]; then
 fi
 jq -r --arg udid "$simulator_udid" '.devices[][] | select(.udid == $udid) | "Simulator: \(.name) (\(.udid)) runtime=\(.state)"' "$simulator_json"
 echo "simulator_udid=$simulator_udid" >> "$output_root/refs.txt"
+simulator_runtime="$(jq -r --arg udid "$simulator_udid" '.devices | to_entries[] | select(any(.value[]; .udid == $udid)) | .key' "$simulator_json")"
+printf 'developer_dir=%s\nsimulator_runtime=%s\n' "$DEVELOPER_DIR" "$simulator_runtime" >> "$output_root/refs.txt"
 
 fixture_test_source="infra/ios-scroll-fixtures/ConversationScrollPerformanceTests.swift"
 fixture_helper_source="infra/ios-scroll-fixtures/ConversationPerformanceFixture.swift"
@@ -766,6 +774,49 @@ run_card_semantics_case() {
   validate_xctest_case_results "$label" "$case_tag" "$phase_name" "$iteration" "$log" "$status" "${expected[@]}"
 }
 
+run_quiet_scroll_profile() {
+  local label="$1"
+  local instrument_log="$output_root/profile-instrument-options.log"
+  local instrument_json="$output_root/profile-instrument-options.json"
+  local result="$output_root/${label}-quiet-scroll-profile.xcresult"
+  local log="$output_root/${label}-quiet-scroll-profile.log"
+  local profile_trace="$output_root/quiet-scroll-profile.trace"
+
+  xcrun xctrace list instruments > "$output_root/profile-instruments.txt" 2> "$instrument_log"
+  if ! grep -Fxq 'Time Profiler' "$output_root/profile-instruments.txt" \
+      || ! grep -Fxq 'Points of Interest' "$output_root/profile-instruments.txt"; then
+    echo "::error::Selected Xcode lacks the required Time Profiler or Points of Interest instrument; profile was not started."
+    return 1
+  fi
+  if ! xcrun xctrace record --template 'Time Profiler' --instrument 'Points of Interest' \
+      --show-recording-options > "$instrument_json" 2> "$instrument_log"; then
+    echo "::error::Selected Xcode cannot configure Time Profiler and Points of Interest together; profile was not started."
+    return 1
+  fi
+  if ! jq -e 'has("Time Profiler") and has("Points of Interest")' "$instrument_json" >/dev/null; then
+    echo "::error::Combined recording options did not expose both required instruments; profile was not started."
+    return 1
+  fi
+
+  set_variant_common "$label"
+  xcrun simctl terminate "$simulator_udid" com.baldvinsmarason.assistant >/dev/null 2>&1 || true
+  echo "Quiet-scroll profile: one app-only 8s Time Profiler + Points of Interest capture on $simulator_udid."
+  python3 infra/ios-scroll-profile.py \
+    --udid "$simulator_udid" \
+    --output "$output_root" \
+    --compact "$compact_output" \
+    --result "$result" \
+    --log "$log" \
+    --trace "$profile_trace" \
+    --dsym-root "$output_root/${label}-dsyms" \
+    --xcode-version "$(cat "$output_root/xcode-version.txt")" \
+    --simulator-runtime "$simulator_runtime" \
+    -- "${common[@]}" \
+    -resultBundlePath "$result" \
+    "-only-testing:AssistantTests/ConversationScrollPerformanceTests/testFullChatView500RowQuietScrollProfile" \
+    test-without-building
+}
+
 run_settled_diagnostic() {
   local label="$1" count="$2" method="$3" iteration="diagnostic-00"
   local result="$output_root/${label}-${count}rows-${iteration}.xcresult"
@@ -993,6 +1044,17 @@ fi
 # that setup outside the per-test timeout and all measurement boundaries.
 run_xcode_bounded 300 "$output_root/simulator-boot.log" \
   xcrun simctl bootstatus "$simulator_udid" -b
+
+if [[ "$run_mode" == "profile" ]]; then
+  echo "Running exactly one quiet-scroll profile on identical ref $baseline_sha; no matrix or render probe will run."
+  if run_quiet_scroll_profile baseline; then
+    echo "Quiet-scroll trace capture finished; profile acceptance remains gated on same-trace PID/signpost/sample validation."
+    exit 0
+  else
+    echo "::error::Quiet-scroll profile capture failed or could not prove its target/phase evidence. Raw traces and receipts are preserved."
+    exit 1
+  fi
+fi
 
 if [[ "$run_mode" == "matrix" ]]; then
   # The fixed-window matched selector is the sole measured case in matrix

@@ -193,6 +193,59 @@ final class ConversationPerformanceFixture {
         XCTAssertNil(model.errorMessage, "A fixture error must invalidate the benchmark", file: file, line: line)
     }
 
+    /// Publishes a bounded rendezvous point for an external simulator profiler.
+    /// The controller owns recording startup and must publish GO only after it
+    /// has observed xctrace emit `notifyKey` to confirm recording is active.
+    func makeQuietScrollProfileHandshake(fixtureSHA256: String) throws -> QuietScrollProfileHandshake {
+        guard let bundleID = Bundle.main.bundleIdentifier else {
+            throw QuietScrollProfileHandshake.Error.missingBundleIdentifier
+        }
+        guard bundleID == "com.baldvinsmarason.assistant" else {
+            throw QuietScrollProfileHandshake.Error.unexpectedBundleIdentifier(bundleID)
+        }
+        guard let executablePath = Bundle.main.executablePath else {
+            throw QuietScrollProfileHandshake.Error.missingExecutablePath
+        }
+        let caches = try FileManager.default.url(
+            for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true
+        )
+        let profileID = UUID().uuidString.lowercased()
+        let readyURL = caches.appendingPathComponent("scroll-profile-\(profileID).ready.json")
+        let releaseURL = caches.appendingPathComponent("scroll-profile-\(profileID).release.json")
+        let abortURL = caches.appendingPathComponent("scroll-profile-\(profileID).abort.json")
+        let notifyKey = "com.baldvinsmarason.assistant.scroll-profile.\(profileID)"
+        let readyAt = ProcessInfo.processInfo.systemUptime
+        let ready: [String: Any] = [
+            "schemaVersion": 1,
+            "profileId": profileID,
+            "pid": ProcessInfo.processInfo.processIdentifier,
+            "bundleId": bundleID,
+            "executablePath": executablePath,
+            "fixtureSHA256": fixtureSHA256,
+            "messageCount": model.messages.count,
+            "readyPath": readyURL.path,
+            "releasePath": releaseURL.path,
+            "abortPath": abortURL.path,
+            "notifyKey": notifyKey,
+            "monotonicReadyUptime": readyAt,
+        ]
+        guard JSONSerialization.isValidJSONObject(ready) else {
+            throw QuietScrollProfileHandshake.Error.invalidReadyPayload
+        }
+        let data = try JSONSerialization.data(withJSONObject: ready, options: [.sortedKeys, .prettyPrinted])
+        try data.write(to: readyURL, options: .atomic)
+        return QuietScrollProfileHandshake(
+            profileID: profileID,
+            fixtureSHA256: fixtureSHA256,
+            messageCount: model.messages.count,
+            notifyKey: notifyKey,
+            readyURL: readyURL,
+            releaseURL: releaseURL,
+            abortURL: abortURL,
+            monotonicReadyUptime: readyAt
+        )
+    }
+
     func tearDown() async {
         guard !didTearDown else { return }
         didTearDown = true
@@ -300,4 +353,22 @@ final class ConversationPerformanceFixture {
         case bootstrapDidNotConfigureChat
         case chatTranscriptDidNotMount
     }
+}
+
+struct QuietScrollProfileHandshake {
+    enum Error: Swift.Error {
+        case missingBundleIdentifier
+        case unexpectedBundleIdentifier(String)
+        case missingExecutablePath
+        case invalidReadyPayload
+    }
+
+    let profileID: String
+    let fixtureSHA256: String
+    let messageCount: Int
+    let notifyKey: String
+    let readyURL: URL
+    let releaseURL: URL
+    let abortURL: URL
+    let monotonicReadyUptime: TimeInterval
 }
