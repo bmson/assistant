@@ -908,6 +908,23 @@ struct ChatView: View {
                 }
                 // The composer and navigation own separate layout slots.
                 // Respect this viewport even while older rows remain mounted.
+                #if ASSISTANT_SCROLL_FIXTURE
+                .accessibilityIdentifier("assistant.scroll-fixture.transcript")
+                .onScrollGeometryChange(for: ScrollFixtureGeometry.self) { geometry in
+                    ScrollFixtureGeometry(
+                        offset: geometry.contentOffset.y + geometry.contentInsets.top,
+                        viewport: geometry.containerSize.height,
+                        content: geometry.contentSize.height,
+                        bottomInset: geometry.contentInsets.bottom,
+                        topInset: geometry.contentInsets.top
+                    )
+                } action: { _, geometry in
+                    ScrollFixtureDiagnostics.shared.geometry = geometry
+                }
+                .onScrollPhaseChange { _, phase in
+                    ScrollFixtureDiagnostics.shared.record(phase)
+                }
+                #endif
                 .scrollClipDisabled(false)
                 .scrollIndicators(.hidden)
                 .scrollPosition($transcriptScrollPosition)

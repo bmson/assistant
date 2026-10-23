@@ -32,7 +32,12 @@ final class SpeechListener: ObservableObject {
     /// up. Written straight into the composer as it changes.
     @Published private(set) var transcript = ""
 
+    #if ASSISTANT_SCROLL_FIXTURE
+    // No audio engine is constructed by the touch-only fixture.
+    private lazy var engine = AVAudioEngine()
+    #else
     private let engine = AVAudioEngine()
+    #endif
     private let requestRecordPermission: () async -> Bool
     private var analyzer: SpeechAnalyzer?
     private var transcriber: SpeechTranscriber?
@@ -62,6 +67,9 @@ final class SpeechListener: ObservableObject {
     ///   without transcribing it. Talk mode needs that to be interruptible;
     ///   push-to-talk simply takes turns, and stops the speech instead.
     func start(cancellingEcho: Bool = false) async {
+        #if ASSISTANT_SCROLL_FIXTURE
+        preconditionFailure("Speech is unavailable in the touch scroll fixture")
+        #endif
         guard state != .listening, state != .preparing else { return }
         if !cancellingEcho {
             // Half duplex, on purpose: a phone listening to its own voice
@@ -157,7 +165,11 @@ final class SpeechListener: ObservableObject {
     }
 
     private var hasAudioResources: Bool {
+        #if ASSISTANT_SCROLL_FIXTURE
+        false
+        #else
         inputTapInstalled || engine.isRunning || input != nil || analyzer != nil || results != nil
+        #endif
     }
 
     private func consume(_ transcriber: SpeechTranscriber, generation: Int) async {

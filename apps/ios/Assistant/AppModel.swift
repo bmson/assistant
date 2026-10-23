@@ -447,6 +447,10 @@ final class AppModel {
         // and barred the launch screen for the whole round-trip — a saved
         // pairing saw the login page before landing on the conversation.
         isLoading = hasSavedConnection && client != nil
+        #if ASSISTANT_SCROLL_FIXTURE
+        // The dedicated fixture build never registers real service callbacks.
+        precondition(ScrollFixture.enabled)
+        #else
         // Approve/Deny straight from a notification. The handler goes through
         // the same client call as the in-app buttons, then refreshes so the
         // badge and the Approvals sheet agree with the server.
@@ -468,7 +472,22 @@ final class AppModel {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in self?.phoneCalendarEventsChanged() }
         }
+        #endif
     }
+
+    #if ASSISTANT_SCROLL_FIXTURE
+    /// Quiet-scroll bootstrap only: no account recovery, polling or device services.
+    func installScrollFixture(_ response: BootstrapResponse) {
+        precondition(ScrollFixture.enabled)
+        isSceneActive = false
+        bootstrap = response
+        activeConversation = response.conversation
+        cursor = response.conversation.cursor
+        messages = logOrder.ordered(response.conversation.messages)
+        ScrollFixtureDiagnostics.shared.fixtureRows = messages.count
+        isLoading = false
+    }
+    #endif
 
     deinit {
         pollTask?.cancel()

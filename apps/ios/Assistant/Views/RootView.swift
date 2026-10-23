@@ -166,6 +166,7 @@ struct RootView: View {
             reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.86),
             value: model.errorMessage
         )
+        #if !ASSISTANT_SCROLL_FIXTURE
         .task {
             model.scenePhaseDidChange(scenePhase)
             if model.hasSavedConnection && model.bootstrap == nil { await model.connect() }
@@ -186,6 +187,7 @@ struct RootView: View {
                 }
             }
         }
+        #endif
         .sheet(isPresented: Binding(
             get: { model.bootstrap != nil && model.showingConnection },
             set: { model.showingConnection = $0 }
@@ -212,12 +214,14 @@ struct RootView: View {
                 model.returnToChat()
             }
         }
+        #if !ASSISTANT_SCROLL_FIXTURE
         .onReceive(NotificationManager.shared.$pendingDestination.compactMap { $0 }) { destination in
             Task {
                 await model.openNotificationDestination(destination)
                 NotificationManager.shared.consumePendingDestination(destination)
             }
         }
+        #endif
     }
 
     @ViewBuilder

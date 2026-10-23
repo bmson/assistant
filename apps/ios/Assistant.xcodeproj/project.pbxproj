@@ -89,6 +89,10 @@
 		B000000000000000000000B5 /* PhoneCalendarStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B5 /* PhoneCalendarStoreTests.swift */; };
 		B000000000000000000000C2 /* Models/PhoneCalendarSharing.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000C2 /* Models/PhoneCalendarSharing.swift */; };
 		B000000000000000000000C3 /* System/PhoneCalendarSharingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000C3 /* System/PhoneCalendarSharingCoordinator.swift */; };
+		D9000000000000000000000B /* ScrollFixture/ScrollFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = D90000000000000000000001 /* ScrollFixture/ScrollFixture.swift */; };
+		D9000000000000000000000C /* ScrollFixture/ScrollFixtureData.swift in Sources */ = {isa = PBXBuildFile; fileRef = D90000000000000000000002 /* ScrollFixture/ScrollFixtureData.swift */; };
+		D9000000000000000000000D /* ScrollFixture/ScrollFixtureDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = D90000000000000000000003 /* ScrollFixture/ScrollFixtureDiagnostics.swift */; };
+		D9000000000000000000000E /* ConversationTouchScrollTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D90000000000000000000004; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -105,6 +109,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = A00000000000000000000030;
 			remoteInfo = AssistantActivityExtension;
+		};
+		D90000000000000000000019 = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A00000000000000000000001;
+			proxyType = 1;
+			remoteGlobalIDString = A00000000000000000000010;
+			remoteInfo = Assistant;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -209,6 +220,11 @@
 		C000000000000000000000B5 /* PhoneCalendarStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneCalendarStoreTests.swift; sourceTree = "<group>"; };
 		C000000000000000000000C2 /* Models/PhoneCalendarSharing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/PhoneCalendarSharing.swift; sourceTree = "<group>"; };
 		C000000000000000000000C3 /* System/PhoneCalendarSharingCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = System/PhoneCalendarSharingCoordinator.swift; sourceTree = "<group>"; };
+		D90000000000000000000001 /* ScrollFixture/ScrollFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollFixture/ScrollFixture.swift; sourceTree = "<group>"; };
+		D90000000000000000000002 /* ScrollFixture/ScrollFixtureData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollFixture/ScrollFixtureData.swift; sourceTree = "<group>"; };
+		D90000000000000000000003 /* ScrollFixture/ScrollFixtureDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollFixture/ScrollFixtureDiagnostics.swift; sourceTree = "<group>"; };
+		D90000000000000000000004 /* ConversationTouchScrollTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantScrollUITests/ConversationTouchScrollTests.swift; sourceTree = "<group>"; };
+		D90000000000000000000005 /* AssistantScrollUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AssistantScrollUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -233,12 +249,19 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D90000000000000000000017 = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		A00000000000000000000002 = {
 			isa = PBXGroup;
 			children = (
+				D90000000000000000000004,
 				D00000000000000000000001 /* Assistant */,
 				D00000000000000000000002 /* AssistantTests */,
 				D00000000000000000000003 /* AssistantActivityExtension */,
@@ -249,6 +272,7 @@
 		A00000000000000000000003 /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				D90000000000000000000005,
 				C00000000000000000000013 /* Assistant.app */,
 				C00000000000000000000019 /* AssistantActivityExtension.appex */,
 				C00000000000000000000021 /* AssistantTests.xctest */,
@@ -260,6 +284,9 @@
 			isa = PBXGroup;
 			children = (
 				C00000000000000000000001 /* AssistantApp.swift */,
+				D90000000000000000000003 /* ScrollFixture/ScrollFixtureDiagnostics.swift */,
+				D90000000000000000000002 /* ScrollFixture/ScrollFixtureData.swift */,
+				D90000000000000000000001 /* ScrollFixture/ScrollFixture.swift */,
 				C00000000000000000000002 /* AppModel.swift */,
 				C000000000000000000000B4 /* Views/PhoneCalendarsView.swift */,
 				C000000000000000000000B3 /* System/PhoneCalendarStore.swift */,
@@ -417,6 +444,17 @@
 			productReference = C00000000000000000000019 /* AssistantActivityExtension.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		D90000000000000000000014 /* AssistantScrollUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D90000000000000000000015;
+			buildPhases = (D90000000000000000000016, D90000000000000000000017, D90000000000000000000018,);
+			buildRules = ();
+			dependencies = (D9000000000000000000001A,);
+			name = AssistantScrollUITests;
+			productName = AssistantScrollUITests;
+			productReference = D90000000000000000000005;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -427,6 +465,10 @@
 				LastSwiftUpdateCheck = 2660;
 				LastUpgradeCheck = 2660;
 				TargetAttributes = {
+					D90000000000000000000014 = {
+						CreatedOnToolsVersion = 26.0;
+						TestTargetID = A00000000000000000000010;
+					};
 					A00000000000000000000010 = {
 						CreatedOnToolsVersion = 26.0;
 					};
@@ -452,6 +494,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				D90000000000000000000014,
 				A00000000000000000000010 /* Assistant */,
 				A00000000000000000000030 /* AssistantActivityExtension */,
 				A00000000000000000000020 /* AssistantTests */,
@@ -484,6 +527,12 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D90000000000000000000018 = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -492,6 +541,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				B00000000000000000000001 /* AssistantApp.swift in Sources */,
+				D9000000000000000000000D /* ScrollFixture/ScrollFixtureDiagnostics.swift in Sources */,
+				D9000000000000000000000C /* ScrollFixture/ScrollFixtureData.swift in Sources */,
+				D9000000000000000000000B /* ScrollFixture/ScrollFixture.swift in Sources */,
 				B00000000000000000000002 /* AppModel.swift in Sources */,
 				B000000000000000000000B4 /* Views/PhoneCalendarsView.swift in Sources */,
 				B000000000000000000000B3 /* System/PhoneCalendarStore.swift in Sources */,
@@ -586,6 +638,12 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D90000000000000000000016 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (D9000000000000000000000E,);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -598,6 +656,11 @@
 			isa = PBXTargetDependency;
 			target = A00000000000000000000030 /* AssistantActivityExtension */;
 			targetProxy = F00000000000000000000003 /* PBXContainerItemProxy */;
+		};
+		D9000000000000000000001A = {
+			isa = PBXTargetDependency;
+			target = A00000000000000000000010;
+			targetProxy = D90000000000000000000019;
 		};
 /* End PBXTargetDependency section */
 
@@ -771,12 +834,142 @@
 			};
 			name = Release;
 		};
+		D9000000000000000000001E /* ScrollPerformance */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) ASSISTANT_SCROLL_FIXTURE";
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = ScrollPerformance;
+		};
+		D9000000000000000000001F /* ScrollPerformance */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSISTANT_APNS_ENVIRONMENT = production;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = LY7X52447Z;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Assistant/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.baldvinsmarason.assistant.scrollfixture;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = ScrollPerformance;
+		};
+		D90000000000000000000020 /* ScrollPerformance */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.baldvinsmarason.assistant.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Assistant.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Assistant";
+			};
+			name = ScrollPerformance;
+		};
+		D90000000000000000000021 /* ScrollPerformance */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = LY7X52447Z;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AssistantActivityExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.baldvinsmarason.assistant.scrollfixture.AssistantActivityExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = ScrollPerformance;
+		};
+		D90000000000000000000028 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = LY7X52447Z;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.baldvinsmarason.assistant.scrollfixture.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Assistant;
+			};
+			name = Debug;
+		};
+		D90000000000000000000029 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = LY7X52447Z;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.baldvinsmarason.assistant.scrollfixture.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Assistant;
+			};
+			name = Release;
+		};
+		D9000000000000000000002A /* ScrollPerformance */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = LY7X52447Z;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.baldvinsmarason.assistant.scrollfixture.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Assistant;
+			};
+			name = ScrollPerformance;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
 		EA00000000000000000000001 /* Build configuration list for PBXProject "Assistant" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
+				D9000000000000000000001E /* ScrollPerformance */,
 				E00000000000000000000001 /* Debug */,
 				E00000000000000000000002 /* Release */,
 			);
@@ -786,6 +979,7 @@
 		EA00000000000000000000010 /* Build configuration list for PBXNativeTarget "Assistant" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
+				D9000000000000000000001F /* ScrollPerformance */,
 				E00000000000000000000011 /* Debug */,
 				E00000000000000000000012 /* Release */,
 			);
@@ -795,6 +989,7 @@
 		EA00000000000000000000020 /* Build configuration list for PBXNativeTarget "AssistantTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
+				D90000000000000000000020 /* ScrollPerformance */,
 				E00000000000000000000021 /* Debug */,
 				E00000000000000000000022 /* Release */,
 			);
@@ -804,11 +999,18 @@
 		EA00000000000000000000030 /* Build configuration list for PBXNativeTarget "AssistantActivityExtension" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
+				D90000000000000000000021 /* ScrollPerformance */,
 				E00000000000000000000031 /* Debug */,
 				E00000000000000000000032 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
+		};
+		D90000000000000000000015 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (D90000000000000000000028, D90000000000000000000029, D9000000000000000000002A,);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = ScrollPerformance;
 		};
 /* End XCConfigurationList section */
 	};
