@@ -1945,24 +1945,33 @@ struct WorkspaceView: View {
     }
 
     private var documentEmptyState: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Image(systemName: "doc.text")
-                .font(.title3)
-                .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 5) {
-                Text("No documents filed")
-                    .font(.headline)
-                Text("Add a file to give the assistant searchable context for your questions.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button("Add document", systemImage: "plus") {
-                    showingDocumentImporter = true
+        let icon = Image(systemName: "doc.text")
+            .font(.title3)
+            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+            .accessibilityHidden(true)
+        let details = VStack(alignment: .leading, spacing: 5) {
+            Text("No documents filed")
+                .font(.headline)
+            Text("Add a file to give the assistant searchable context for your questions.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Add document", systemImage: "plus") {
+                showingDocumentImporter = true
+            }
+            .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
+            .disabled(actionsUnavailable)
+            .padding(.top, 2)
+        }
+
+        return Group {
+            if usesAccessibilityLayout {
+                details
+            } else {
+                HStack(alignment: .center, spacing: 12) {
+                    icon
+                    details
                 }
-                .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
-                .disabled(actionsUnavailable)
-                .padding(.top, 2)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
