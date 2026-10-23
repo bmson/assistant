@@ -6519,23 +6519,86 @@ extension APIClientRetryTests {
     @MainActor
     func testAReplyStartedDuringAModelChangeKeepsItsStream() async throws {
         for slowPhase in ["write", "read"] {
-            let model = try await notificationModel()
-            let outcomes: [StubURLProtocol.Outcome] = slowPhase == "write"
-                ? [.delayed(after: 0.05, status: 200, body: Data(#"{"ok":true}"#.utf8)), .stream(body: Data())]
+            let iterationID = "\(testCaseID)-reply-model-change-\(slowPhase)-\(UUID().uuidString)"
+            StubURLProtocol.beginTestCase(iterationID)
+            let (client, session) = makeClient(requestScopeID: iterationID)
+            let model = AppModel(apiClient: client)
+            model.scenePhaseDidChange(.background)
+            StubURLProtocol.primeBootstrap(try notificationBootstrap())
+            await model.refreshAll(reportFailure: false)
+            XCTAssertNotNil(model.bootstrap)
+
+            let conversationPath = "/api/mobile/v1/chats/\(notificationPrimaryID)"
+            let chatPath = "/api/mobile/v1/chat"
+            let cancelPath = "/api/mobile/v1/chat/cancel"
+            let updateAndReadOutcomes: [StubURLProtocol.Outcome] = slowPhase == "write"
+                ? [.held(status: 200, body: Data(#"{"ok":true}"#.utf8))]
                 : [.success(status: 200, body: Data(#"{"ok":true}"#.utf8)),
-                   .delayed(after: 0.05, status: 200, body: try JSONEncoder().encode(notificationConversation(notificationPrimaryID))),
-                   .stream(body: Data())]
-            StubURLProtocol.prime(outcomes)
+                   .held(status: 200, body: try JSONEncoder().encode(notificationConversation(notificationPrimaryID)))]
+            StubURLProtocol.prime([], paths: [
+                conversationPath: updateAndReadOutcomes,
+                chatPath: [.stream(body: Data())],
+                cancelPath: [.terminalOperationCancellation(
+                    status: 200,
+                    outcome: "cancelled",
+                    taskId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+                    taskStatus: "cancelled",
+                    transitioned: true
+                )],
+            ])
+
             let changing = Task { await model.changeConversationModel("candidate-model") }
-            while StubURLProtocol.attempts.count < (slowPhase == "write" ? 1 : 2) { await Task.yield() }
+            let heldDeadline = ContinuousClock.now + .seconds(2)
+            while !StubURLProtocol.isHoldingResponse(path: conversationPath), ContinuousClock.now < heldDeadline {
+                await Task.yield()
+            }
+            XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: conversationPath), "The selected model-change phase must be held before the reply starts")
+
             model.send("A new request while the picker is waiting")
+
+            let streamDeadline = ContinuousClock.now + .seconds(2)
+            var readyStream: (operationID: String, authorization: String)?
+            while readyStream == nil, ContinuousClock.now < streamDeadline {
+                for request in StubURLProtocol.requests where request.1.path == chatPath {
+                    let payload = try? JSONSerialization.jsonObject(with: request.3) as? [String: Any]
+                    let operationID = payload?["clientOperationId"] as? String
+                    let authorization = request.2.first(where: { $0.key.caseInsensitiveCompare("authorization") == .orderedSame })?.value
+                    if let operationID, let authorization,
+                       StubURLProtocol.isStreamReady(operationId: operationID, authorization: authorization) {
+                        readyStream = (operationID, authorization)
+                        break
+                    }
+                }
+                if readyStream == nil { await Task.yield() }
+            }
+            XCTAssertNotNil(readyStream, "The new reply's stream must be ready before the older model-change response is released")
+            XCTAssertTrue(StubURLProtocol.requests.contains(where: {
+                $0.1.path == conversationPath && $0.0 == (slowPhase == "write" ? "POST" : "GET")
+            }))
+            XCTAssertTrue(StubURLProtocol.requests.contains(where: { $0.1.path == chatPath && $0.0 == "POST" }),
+                          "The streaming outcome must route to the chat endpoint")
+
+            StubURLProtocol.releaseHeldResponse(path: conversationPath)
             let changed = await changing.value
             XCTAssertFalse(changed)
             XCTAssertTrue(model.isSending)
             XCTAssertTrue(model.messages.contains(where: { $0.id.hasPrefix("stream-") }), "A late model refresh cannot throw away the new stream")
             XCTAssertTrue(model.messages.contains(where: { $0.role == .user && $0.text == "A new request while the picker is waiting" }))
             XCTAssertNil(model.errorMessage)
+
             model.cancelSend()
+            let cancellationDeadline = ContinuousClock.now + .seconds(2)
+            while model.hasUnresolvedTurn, ContinuousClock.now < cancellationDeadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertFalse(model.hasUnresolvedTurn, "The fixture's terminal cancellation receipt settles the turn before cleanup")
+            XCTAssertFalse(model.isSending)
+            if let readyStream {
+                StubURLProtocol.cancelStream(operationId: readyStream.operationID, authorization: readyStream.authorization)
+            }
+            let didDrain = await cancelAndDrain(session, invalidate: false)
+            XCTAssertTrue(didDrain, "The iteration's URLSession must drain before the next prime")
+            StubURLProtocol.endTestCase(iterationID)
         }
     }
 
