@@ -12,6 +12,7 @@ export interface BillingLine {
   cost: number;
   credits: number;
   net: number;
+  projectId?: string;
 }
 
 /** Provider statements and the operation ledger overlap. Never add them together. */
@@ -29,6 +30,162 @@ export interface ProviderBilling {
   lines: BillingLine[];
   includedIn?: string;
   forecast?: BillingForecast;
+}
+
+export type BillingCoverageState =
+  | 'partial'
+  | 'included'
+  | 'stale'
+  | 'not_configured'
+  | 'unsupported'
+  | 'ledger_only'
+  | 'not_imported'
+  | 'overlapping'
+  | 'unknown';
+
+export interface BillingCoverageEntry {
+  id: string;
+  label: string;
+  state: BillingCoverageState;
+  scope: string;
+  detail: string;
+  period?: string;
+  source?: string;
+}
+
+/** A source inventory, never a combined spend total. */
+export interface BillingCoverageProjection {
+  totalState: 'unavailable';
+  title: 'Whole-app total unavailable';
+  summary: string;
+  statusSummary?: string;
+  overlapWarning: string;
+  entries: BillingCoverageEntry[];
+}
+
+export function billingCoverageProjection(reports: ProviderBilling[]): BillingCoverageProjection {
+  const attentionStatuses = reports
+    .filter((report) => report.status !== 'reported' && report.status !== 'included')
+    .map((report) => {
+      const status =
+        report.status === 'not_configured'
+          ? 'not configured'
+          : report.status === 'stale'
+            ? 'stale'
+            : report.status === 'unsupported'
+              ? 'unsupported'
+              : 'unavailable';
+      return `${report.label} ${status}`;
+    });
+  const entries: BillingCoverageEntry[] = reports.map((report) => {
+    let state: BillingCoverageState;
+    if (report.id === 'vertex') {
+      if (report.includedIn === 'google-cloud') {
+        state = report.status === 'stale' ? 'stale' : 'included';
+      } else {
+        state = report.status === 'not_configured' ? 'not_configured' : 'unknown';
+      }
+    } else if (report.status === 'included') {
+      state = 'included';
+    } else if (report.status === 'reported') {
+      state = 'partial';
+    } else if (report.status === 'stale') {
+      state = 'stale';
+    } else if (report.status === 'not_configured') {
+      state = 'not_configured';
+    } else if (report.status === 'unsupported') {
+      state = 'ledger_only';
+    } else {
+      state = 'unknown';
+    }
+    const scopeWarning =
+      report.id === 'google-cloud' && report.scope.startsWith('Project: ')
+        ? ' Project scope can exclude unallocated account charges, including some taxes and adjustments.'
+        : '';
+    return {
+      id: report.id,
+      label: report.label,
+      state,
+      scope: report.scope,
+      detail: `${report.message}${scopeWarning}`,
+      period: report.period,
+      source: report.source,
+    };
+  });
+
+  entries.push(
+    {
+      id: 'assistant-ledger',
+      label: 'Assistant usage ledger',
+      state: 'overlapping',
+      scope: 'Assistant operations',
+      detail: [
+        'Includes provider-reported items and configured-rate estimates.',
+        'It can overlap provider charges and must stay separate; assistant limits do not cap cloud or provider bills.',
+      ].join(' '),
+    },
+    {
+      id: 'voice-calls',
+      label: 'Phone calls (if used)',
+      state: 'partial',
+      scope: 'Call ledger and Twilio connectivity receipts',
+      detail: [
+        'When phone calls are used, Twilio call prices cover connectivity only.',
+        'Media, model, transcription and answer-detection components may be estimates or unknown,',
+        'and shared runtime is not attributed to each call.',
+      ].join(' '),
+    },
+    {
+      id: 'direct-model-providers',
+      label: 'Direct OpenAI and custom model providers (if used)',
+      state: 'ledger_only',
+      scope: 'Model usage ledger',
+      detail: [
+        'When these providers are used, their invoices are not imported.',
+        'The usage ledger records provider-reported amounts when available and configured-rate estimates otherwise.',
+      ].join(' '),
+    },
+    {
+      id: 'search-maps',
+      label: 'Search and maps (if used)',
+      state: 'not_imported',
+      scope: 'External provider accounts',
+      detail: [
+        'When these services are used, provider invoices are not imported here.',
+        'Tool-ledger amounts, when present, are configured estimates; Google Cloud costs appear only when they are in the selected export scope.',
+      ].join(' '),
+    },
+    {
+      id: 'other-services',
+      label: 'Other accounts and services (if configured or used)',
+      state: 'not_imported',
+      scope: 'External accounts or unselected cloud scopes',
+      detail: [
+        'If used, email and SMS, Apple push and developer services, Workspace seats, external CI and other vendor accounts are not imported here.',
+        'Google Cloud storage and runtime costs appear only when they are in the selected export scope.',
+        'Missing costs are unknown, not zero.',
+      ].join(' '),
+    },
+  );
+
+  return {
+    totalState: 'unavailable',
+    title: 'Whole-app total unavailable',
+    summary: [
+      'The sources below cover different accounts, projects and usage.',
+      'Their amounts are not combined, and missing coverage is unknown rather than zero.',
+    ].join(' '),
+    ...(attentionStatuses.length > 0
+      ? {
+          statusSummary: `Current feeds: ${attentionStatuses.join('; ')}. Missing costs remain unknown, not zero.`,
+        }
+      : {}),
+    overlapWarning: [
+      'Assistant usage-ledger amounts may overlap provider bills.',
+      'Keep them separate; assistant spending limits do not cap provider or cloud bills.',
+    ].join(' '),
+    entries,
+  };
 }
 
 export interface BillingForecast {
@@ -394,7 +551,12 @@ export async function readGoogleBilling(
     if (page.jobComplete) {
       for (const row of page.rows ?? []) {
         const cells = row.f.map((cell) => cell.v);
-        if (cells.length !== 10 || typeof cells[0] !== 'string' || !/^[A-Z]{3}$/.test(cells[0]))
+        if (
+          cells.length !== 10 ||
+          typeof cells[0] !== 'string' ||
+          !/^[A-Z]{3}$/.test(cells[0]) ||
+          typeof cells[1] !== 'string'
+        )
           throw new Error('Invalid billing row');
         lines.push({
           currency: cells[0],
@@ -403,6 +565,7 @@ export async function readGoogleBilling(
           cost: amount(cells[5]),
           credits: amount(cells[6]),
           net: amount(cells[7]),
+          projectId: cells[1],
         });
         const exported = timestamp(cells[8]);
         const used = timestamp(cells[9]);
@@ -532,22 +695,39 @@ export async function getProviderBilling(ports: BillingPorts): Promise<ProviderB
     );
     if (connection.kind === 'vertex') {
       const project = connection.vertexProject || ports.models.config.VERTEX_PROJECT;
-      const covered =
+      const vertexUsageReported =
         Boolean(project) &&
-        (config.GCP_BILLING_SCOPE === 'billing_account'
-          ? googleReport.lines.some((line) => line.detail.startsWith(`${project} ·`))
-          : project === config.GCP_PROJECT);
-      const available = covered && ['reported', 'stale'].includes(googleReport.status);
+        googleReport.lines.some(
+          (line) => line.projectId === project && /\bvertex\b/i.test(line.service),
+        );
+      const available = vertexUsageReported && ['reported', 'stale'].includes(googleReport.status);
+      const status = available
+        ? googleReport.status === 'stale'
+          ? ('stale' as const)
+          : ('included' as const)
+        : ('unavailable' as const);
+      let message: string;
+      if (project && config.GCP_BILLING_SCOPE === 'project' && project !== config.GCP_PROJECT) {
+        message = `Vertex uses project ${project}, outside the selected Google Cloud billing scope. Its costs are not included above.`;
+      } else if (available) {
+        message = [
+          `A Vertex AI usage row for project ${project} is present in the Google Cloud export above.`,
+          'No separate Vertex amount is added. Model-level token costs below remain estimates.',
+        ].join(' ');
+      } else if (googleReport.status === 'reported' || googleReport.status === 'stale') {
+        message = [
+          `The Google Cloud export does not contain a Vertex AI usage row for project ${project || '(project not configured)'}.`,
+          'This does not establish zero Vertex cost or complete service coverage.',
+        ].join(' ');
+      } else {
+        message =
+          'Google Cloud billing data is unavailable for checking Vertex project coverage. Missing Vertex spend is unknown, not zero.';
+      }
       return {
         ...report,
-        status: available ? ('included' as const) : ('unavailable' as const),
+        status,
         ...(available ? { includedIn: 'google-cloud' } : {}),
-        message:
-          project && config.GCP_BILLING_SCOPE === 'project' && project !== config.GCP_PROJECT
-            ? `Vertex uses project ${project}, outside the selected Google Cloud billing scope. Its costs are not included above.`
-            : available
-              ? 'Vertex AI is covered by Google Cloud billing above. See its service breakdown; no separate bill is added. Model-level token costs below remain estimates.'
-              : 'Connect Google Cloud billing to track Vertex AI charges. Both use the same billing export. Model-level token costs below remain estimates.',
+        message,
       };
     }
     if (connection.kind !== 'openrouter')
