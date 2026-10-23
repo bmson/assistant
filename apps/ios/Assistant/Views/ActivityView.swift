@@ -659,6 +659,7 @@ struct ActivityView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @FocusState private var discoverySearchFocused: Bool
     @State private var filter: ActivityFilter = .all
     @State private var showingArchived = false
     @State private var activityActionInFlight: String?
@@ -681,15 +682,12 @@ struct ActivityView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 filterControl
-                HStack {
-                    TextField("Search recorded work", text: $discoveryQuery)
-                        .textFieldStyle(.roundedBorder)
-                        .submitLabel(.search)
-                        .onSubmit { loadDiscovery(reset: true) }
-                        .accessibilityIdentifier("activity-search")
-                    Button("Search") { loadDiscovery(reset: true) }
-                        .disabled(discoveryInFlight)
-                }
+                ActivityDiscoverySearchRow(
+                    query: $discoveryQuery,
+                    isFocused: $discoverySearchFocused,
+                    isLoading: discoveryInFlight,
+                    onSubmit: { loadDiscovery(reset: true) }
+                )
                 if let archiveProgress, !archiveProgress.complete {
                     Label(
                         "Archived \(archiveProgress.archivedTotal) older tasks. Continue to process the next batch.",
@@ -1396,6 +1394,114 @@ struct ActivityView: View {
         case "waiting_approval", "waiting_budget", "needs_attention", "stuck": AssistantTheme.warning(for: colorScheme)
         default: .secondary
         }
+    }
+}
+
+struct ActivityDiscoverySearchRow: View {
+    @Binding var query: String
+    @FocusState.Binding var isFocused: Bool
+    let isLoading: Bool
+    let onSubmit: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: AssistantTheme.controlCornerRadius, style: .continuous)
+    }
+
+    var body: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            stackedSearchRow
+        } else {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    searchField
+                        .frame(minWidth: 220, maxWidth: .infinity)
+                    searchButton
+                }
+
+                stackedSearchRow
+            }
+        }
+    }
+
+    private var stackedSearchRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            searchField
+            HStack {
+                Spacer(minLength: 0)
+                searchButton
+            }
+        }
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .font(.body)
+                .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                .accessibilityHidden(true)
+
+            TextField(
+                text: $query,
+                prompt: Text("Search recorded work")
+                    .foregroundColor(AssistantTheme.inkMuted(for: colorScheme))
+            ) {
+                Text("Search recorded work")
+            }
+            .font(.body)
+            .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+            .tint(AssistantTheme.accent(for: colorScheme))
+            .focused($isFocused)
+            .submitLabel(.search)
+            .onSubmit(onSubmit)
+            .accessibilityLabel("Search recorded work")
+            .accessibilityIdentifier("activity-search")
+
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.body)
+                        .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search text")
+                .accessibilityIdentifier("activity-search-clear")
+            }
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, query.isEmpty ? 12 : 4)
+        .frame(minHeight: 48)
+        .background(AssistantTheme.sunken(for: colorScheme), in: shape)
+        .overlay {
+            shape.stroke(
+                isFocused
+                    ? AssistantTheme.accent(for: colorScheme)
+                    : AssistantTheme.inkMuted(for: colorScheme).opacity(
+                        colorSchemeContrast == .increased ? 0.62 : 0.24
+                    ),
+                lineWidth: isFocused
+                    ? (colorSchemeContrast == .increased ? 2.5 : 1.5)
+                    : (colorSchemeContrast == .increased ? 1.5 : 1)
+            )
+        }
+    }
+
+    private var searchButton: some View {
+        Button(action: onSubmit) {
+            Text("Search")
+                .fixedSize()
+        }
+        .buttonStyle(AssistantActionButtonStyle(kind: .primary, compact: true))
+        .frame(minHeight: 44)
+        .disabled(isLoading)
+        .accessibilityIdentifier("activity-search-submit")
     }
 }
 
