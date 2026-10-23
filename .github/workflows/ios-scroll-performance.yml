@@ -1,0 +1,58 @@
+name: iOS scroll performance
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: Baseline commit or ref
+        required: true
+        default: 14ba202b8c9593623f3fe3c817319c15e40f6ffa
+        type: string
+      candidate_ref:
+        description: Candidate commit or ref (defaults to this dispatch SHA)
+        required: false
+        type: string
+      repeats:
+        description: Test repeats per variant (1–5)
+        required: true
+        default: '5'
+        type: choice
+        options: ['1', '2', '3', '4', '5']
+  push:
+    branches:
+      - codex/ios-chat-scroll-performance
+    paths:
+      - 'apps/ios/**'
+      - '.github/workflows/ios-scroll-performance.yml'
+      - 'infra/ios-scroll-performance.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: Compare iOS conversation scrolling
+    runs-on: macos-latest
+    timeout-minutes: 100
+    steps:
+      - name: Check out benchmark source and refs
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Run paired simulator benchmark
+        env:
+          BASELINE_REF: ${{ inputs.baseline_ref || '14ba202b8c9593623f3fe3c817319c15e40f6ffa' }}
+          CANDIDATE_REF: ${{ inputs.candidate_ref || github.sha }}
+          REPEATS: ${{ inputs.repeats || '5' }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: bash infra/ios-scroll-performance.sh
+
+      - name: Upload logs and xcresults
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: ios-scroll-performance-${{ github.run_id }}
+          path: ${{ runner.temp }}/ios-scroll-performance
+          retention-days: 14
+          if-no-files-found: warn

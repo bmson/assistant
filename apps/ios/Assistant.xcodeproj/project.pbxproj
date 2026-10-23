@@ -75,6 +75,7 @@
 		B000000000000000000000A2 /* ConversationDraftsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A2 /* ConversationDraftsTests.swift */; };
 		B000000000000000000000A3 /* NativeVisualReviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A3 /* NativeVisualReviewTests.swift */; };
 		B000000000000000000000C1 /* ConversationScrollPerformanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000C1 /* ConversationScrollPerformanceTests.swift */; };
+		B000000000000000000000C4 /* ConversationPerformanceFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000C4 /* ConversationPerformanceFixture.swift */; };
 		B000000000000000000000A4 /* EncryptedCardFormDraftStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A4 /* EncryptedCardFormDraftStorage.swift */; };
 		B000000000000000000000A5 /* CardFormDrafts.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A5 /* CardFormDrafts.swift */; };
 		B000000000000000000000A6 /* EncryptedCardFormDraftStorageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A6 /* EncryptedCardFormDraftStorageTests.swift */; };
@@ -195,6 +196,7 @@
 		C000000000000000000000A2 /* ConversationDraftsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationDraftsTests.swift; sourceTree = "<group>"; };
 		C000000000000000000000A3 /* NativeVisualReviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeVisualReviewTests.swift; sourceTree = "<group>"; };
 		C000000000000000000000C1 /* ConversationScrollPerformanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationScrollPerformanceTests.swift; sourceTree = "<group>"; };
+		C000000000000000000000C4 /* ConversationPerformanceFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationPerformanceFixture.swift; sourceTree = "<group>"; };
 		C000000000000000000000A4 /* EncryptedCardFormDraftStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EncryptedCardFormDraftStorage.swift; sourceTree = "<group>"; };
 		C000000000000000000000A5 /* CardFormDrafts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CardFormDrafts.swift; sourceTree = "<group>"; };
 		C000000000000000000000A6 /* EncryptedCardFormDraftStorageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EncryptedCardFormDraftStorageTests.swift; sourceTree = "<group>"; };
@@ -339,6 +341,7 @@
 				C000000000000000000000A2 /* ConversationDraftsTests.swift */,
 				C000000000000000000000A3 /* NativeVisualReviewTests.swift */,
 				C000000000000000000000C1 /* ConversationScrollPerformanceTests.swift */,
+				C000000000000000000000C4 /* ConversationPerformanceFixture.swift */,
 				C000000000000000000000A7 /* CardFormDraftsTests.swift */,
 				C000000000000000000000A6 /* EncryptedCardFormDraftStorageTests.swift */,
 				C000000000000000000000B0 /* NativeCardFormParserTests.swift */,
@@ -566,6 +569,7 @@
 				B000000000000000000000A2 /* ConversationDraftsTests.swift in Sources */,
 				B000000000000000000000A3 /* NativeVisualReviewTests.swift in Sources */,
 				B000000000000000000000C1 /* ConversationScrollPerformanceTests.swift in Sources */,
+				B000000000000000000000C4 /* ConversationPerformanceFixture.swift in Sources */,
 				B000000000000000000000A7 /* CardFormDraftsTests.swift in Sources */,
 				B000000000000000000000A6 /* EncryptedCardFormDraftStorageTests.swift in Sources */,
 				B000000000000000000000B0 /* NativeCardFormParserTests.swift in Sources */,
