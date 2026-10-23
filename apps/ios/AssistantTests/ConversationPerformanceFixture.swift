@@ -34,6 +34,7 @@ final class ConversationPerformanceFixture {
     private var appendedMessageCount = 0
     private var requestHistory: [String: Int] = [:]
     private var didTearDown = false
+    private var expectedRequests: Set<String>
 
     private init(
         model: AppModel,
@@ -57,6 +58,8 @@ final class ConversationPerformanceFixture {
         self.hostMountToScrollableSeconds = hostMountToScrollableSeconds
         self.requestHistory = requestHistory
         self.previousKeyWindow = previousKeyWindow
+        self.expectedRequests = Set(Self.messageAcknowledgementPaths(for: model.messages).keys.map { "POST \($0)" })
+            .union(["GET /api/mobile/v1/bootstrap", "GET /api/mobile/v1/overview"])
     }
 
     /// Boots a realistic owner and primary conversation, then mounts the real
@@ -214,6 +217,10 @@ final class ConversationPerformanceFixture {
         var paths = Self.messageAcknowledgementPaths(for: model.messages + [final])
         paths["/api/mobile/v1/chat"] = [.stream(body: Self.sseDelta(initialChunk))]
         paths["/api/mobile/v1/chat/status"] = [.success(status: 200, body: statusBody)]
+        // A completed turn refreshes both projections before clearing its
+        // ordinary-turn state. Keep that normal work successful and measured.
+        paths["/api/mobile/v1/overview"] = [.success(status: 200, body: try Self.overview())]
+        paths["/api/mobile/v1/workspace"] = [.success(status: 200, body: try Self.workspace())]
         paths["/api/mobile/v1/chat/cancel"] = [
             .operationCancellation(status: 200, outcome: "cancelled_before_admission"),
         ]
@@ -259,7 +266,8 @@ final class ConversationPerformanceFixture {
             authorization: "Bearer \(token)"
         )
         try await waitUntil(timeout: timeout) {
-            !self.model.isSending && self.model.messages.contains(where: { $0.id == streamFinalMessage.id })
+            !self.model.isSending && !self.model.hasUnresolvedTurn
+                && self.model.messages.contains(where: { $0.id == streamFinalMessage.id })
         }
         self.streamOperationID = nil
         self.streamFinalMessage = nil
@@ -321,6 +329,13 @@ final class ConversationPerformanceFixture {
         return counts
     }
 
+    func assertValidMeasurementBoundary(file: StaticString = #filePath, line: UInt = #line) {
+        let unexpected = Set(requestCountsByMethodAndPath.keys).subtracting(expectedRequests)
+        XCTAssertTrue(unexpected.isEmpty,
+                      "Unexpected benchmark requests: \(unexpected.sorted())", file: file, line: line)
+        XCTAssertNil(model.errorMessage, "A fixture error must invalidate the benchmark", file: file, line: line)
+    }
+
     func tearDown() async {
         guard !didTearDown else { return }
         didTearDown = true
@@ -367,6 +382,11 @@ final class ConversationPerformanceFixture {
 
     private func prime(paths: [String: [StubURLProtocol.Outcome]]) {
         Self.recordRequests(StubURLProtocol.requests, into: &requestHistory)
+        expectedRequests.formUnion(paths.keys.map { path in
+            let isWrite = path == "/api/mobile/v1/chat" || path == "/api/mobile/v1/chat/cancel"
+                || path.contains("/messages/")
+            return "\(isWrite ? "POST" : "GET") \(path)"
+        })
         StubURLProtocol.prime([], paths: paths)
     }
 
@@ -427,6 +447,17 @@ final class ConversationPerformanceFixture {
             conversation: conversation
         )
         return try JSONEncoder().encode(response)
+    }
+
+    private static func workspace() throws -> Data {
+        let data = Data(#"""
+        {"generatedAt":"2026-10-22T12:00:00Z","chats":{"current":[],"archived":[]},
+        "memory":{"ownerName":"Performance Owner","ownerContactId":"11111111-1111-4111-8111-111111111111","health":{"totalUsable":0,"notYetOrganized":0,"awaitingReview":0,"ownerConfirmed":0},"facts":[],"awaitingReview":[],"peopleCount":0},
+        "skills":[],"settings":{"agent":{"name":"Fixture Assistant","timezone":"UTC","locale":"en-US","signature":""},"schedules":[],"reminders":[],"policies":[],"goalAutomationCount":0},
+        "costs":{"dailySpentUsd":0,"monthlySpentUsd":0,"heldUsd":0,"parkedTasks":0,"bySource":[],"byModel":[],"held":[],"topTasks":[],"recent":[]},"anomalies":[],"improvements":[]}
+        """#.utf8)
+        _ = try JSONDecoder().decode(WorkspaceResponse.self, from: data)
+        return data
     }
 
     private static func overview() throws -> Data {

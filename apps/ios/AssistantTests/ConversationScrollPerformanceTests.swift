@@ -103,6 +103,7 @@ final class ConversationScrollPerformanceTests: XCTestCase {
         let fixture = try await ConversationPerformanceFixture.make(messages: messages)
         let totalSetupSeconds = CACurrentMediaTime() - setupStart
         addTeardownBlock { await fixture.tearDown() }
+        fixture.assertValidMeasurementBoundary()
 
         XCTAssertEqual(fixture.model.messages.count, messageCount)
         XCTAssertEqual(Set(fixture.model.messages.map(\.id)).count, messageCount)
@@ -126,6 +127,7 @@ final class ConversationScrollPerformanceTests: XCTestCase {
         XCTAssertFalse(down.timedOut)
         XCTAssertGreaterThanOrEqual(down.intervals.count, 30)
         XCTAssertEqual(scroll.contentOffset.y, bottom, accuracy: 2)
+        fixture.assertValidMeasurementBoundary()
 
         let typeStart = CACurrentMediaTime()
         let typingStart = bottom * 0.55
@@ -139,6 +141,7 @@ final class ConversationScrollPerformanceTests: XCTestCase {
         let typing = await typingPhase.value
         XCTAssertFalse(typing.timedOut)
         XCTAssertGreaterThanOrEqual(typing.intervals.count, 30)
+        fixture.assertValidMeasurementBoundary()
         fixture.window.endEditing(true)
         fixture.window.layoutIfNeeded()
         try await Task.sleep(for: .milliseconds(200))
@@ -164,6 +167,10 @@ final class ConversationScrollPerformanceTests: XCTestCase {
         let streaming = await streamPhase.value
         XCTAssertFalse(streaming.timedOut)
         XCTAssertGreaterThanOrEqual(streaming.intervals.count, 30)
+        fixture.assertValidMeasurementBoundary()
+        XCTAssertNotNil(fixture.model.workspace, "Turn settlement must load its valid workspace projection")
+        XCTAssertEqual(fixture.model.workspace?.memory.ownerName, "Performance Owner")
+        XCTAssertEqual(fixture.model.workspace?.settings.agent.name, "Fixture Assistant")
 
         let midPoint = bottom * 0.52
         scroll.setContentOffset(CGPoint(x: 0, y: midPoint), animated: false)
@@ -180,6 +187,7 @@ final class ConversationScrollPerformanceTests: XCTestCase {
         let updating = await updatePhase.value
         XCTAssertFalse(updating.timedOut)
         XCTAssertGreaterThanOrEqual(updating.intervals.count, 30)
+        fixture.assertValidMeasurementBoundary()
 
         let requestPaths = fixture.interceptedRequestPaths
         XCTAssertTrue(requestPaths.contains("/api/mobile/v1/chat"), "The measured stream phase must exercise the real chat request path")

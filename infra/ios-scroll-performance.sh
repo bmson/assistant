@@ -276,6 +276,11 @@ if [[ "$same_production_tree" != true ]]; then variants+=(candidate); fi
 # first-build host load out of the baseline/candidate observation window.
 for label in "${variants[@]}"; do build_variant "$label"; done
 
+# First boot on a hosted image can spend minutes preparing the runtime. Keep
+# that setup outside the per-test timeout and all measurement boundaries.
+run_xcode_bounded 300 "$output_root/simulator-boot.log" \
+  xcrun simctl bootstatus "$simulator_udid" -b
+
 # Retain the original rows-only benchmark as supplemental historical evidence;
 # its callback cadence is separate from the controlled full-ChatView matrix.
 for label in "${variants[@]}"; do
