@@ -835,6 +835,9 @@ struct WorkspaceView: View {
 
     private func costs(_ costs: WorkspaceCosts) -> some View {
         VStack(alignment: .leading, spacing: 16) {
+            if let coverage = costs.billingCoverage {
+                billingCoverageSummary(coverage)
+            }
             if model.workspace?.isSectionAvailable("billing") == false {
                 WorkspaceAvailabilityNotice(title: "Provider billing")
             } else if let billing = costs.billing {
@@ -890,60 +893,88 @@ struct WorkspaceView: View {
         }
     }
 
+    private func billingCoverageSummary(_ coverage: WorkspaceBillingCoverage) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(coverage.title, systemImage: "exclamationmark.circle")
+                .font(.headline)
+            Text(coverage.summary)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let statusSummary = coverage.statusSummary {
+                Label(statusSummary, systemImage: "exclamationmark.triangle")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(AssistantTheme.warningInk(for: colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            DisclosureGroup("Coverage details") {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(coverage.entries) { entry in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(entry.label)
+                                .font(.subheadline.weight(.semibold))
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(billingCoverageStateLabel(entry.state))
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(entry.scope)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            let context = [entry.period, entry.source].compactMap { $0 }.joined(separator: " · ")
+                            if !context.isEmpty {
+                                Text(context)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Text(entry.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(.top, 8)
+            }
+            .font(.subheadline.weight(.medium))
+            Text(coverage.overlapWarning)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .assistantCard(in: colorScheme)
+    }
+
+    private func billingCoverageStateLabel(_ state: String) -> String {
+        switch state {
+        case "partial": "Partial"
+        case "included": "Included in provider report"
+        case "stale": "Stale"
+        case "not_configured": "Setup needed"
+        case "unsupported": "No billing feed"
+        case "ledger_only": "Ledger only"
+        case "not_imported": "Not imported"
+        case "overlapping": "Overlaps provider billing"
+        default: "Unknown"
+        }
+    }
+
     private func providerBillingCard(_ report: WorkspaceProviderBilling) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(report.label).font(.headline)
+            Text(report.label)
+                .font(.headline)
+                .fixedSize(horizontal: false, vertical: true)
+            providerBillingStatusAndAmount(report)
             Text("\(report.scope) · \(report.period) · \(report.source)").font(.caption).foregroundStyle(.secondary)
-            if report.lines.isEmpty {
-                Text(report.includedIn != nil ? "Included in Google Cloud" : report.status == "not_configured" ? "Setup needed" : "Unavailable").font(.title3.weight(.semibold))
-            } else {
-                let currencies = Dictionary(grouping: report.lines, by: \.currency)
-                ForEach(currencies.keys.sorted(), id: \.self) { code in
-                    let total = currencies[code, default: []].reduce(0) { $0 + $1.net }
-                    Text(total, format: .currency(code: code).precision(.fractionLength(2))).font(.title3.weight(.semibold)).monospacedDigit()
-                }
-                if let forecast = report.forecast {
-                    ForEach(forecast.totals, id: \.currency) { total in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Estimated month end").font(.caption).foregroundStyle(.secondary)
-                            Text(total.projected, format: .currency(code: total.currency).precision(.fractionLength(2)))
-                                .font(.title2.weight(.semibold)).monospacedDigit()
-                            Text("Average per day: \(total.dailyAverage.formatted(.currency(code: total.currency).precision(.fractionLength(2))))")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 6)
-                    }
-                    Text(forecast.message).font(.caption).foregroundStyle(.secondary)
-                } else if report.status == "reported" {
-                    Text("Month-end estimate needs at least three days of reported usage.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                DisclosureGroup("Services and credits") {
-                    ForEach(Array(report.lines.enumerated()), id: \.offset) { _, line in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(line.service).font(.subheadline)
-                            Text(line.detail).font(.caption).foregroundStyle(.secondary)
-                            Text(line.net, format: .currency(code: line.currency).precision(.fractionLength(2...8))).monospacedDigit()
-                            if line.credits != 0 {
-                                Text("Credits: \(line.credits.formatted(.currency(code: line.currency)))")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                        }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
-                    }
-                }
-            }
             if report.status == "stale" {
-                Label("Stale snapshot", systemImage: "clock.badge.exclamationmark").font(.subheadline)
-            }
-            Text(report.message).font(.footnote).foregroundStyle(.secondary)
-            if report.id == "google-cloud", report.status == "not_configured" {
-                Text("Enable standard usage export in Google Cloud Billing, then connect its BigQuery table and grant this installation read access. Initial data can take hours or days. Missing costs are not zero.")
-                    .font(.footnote).foregroundStyle(.secondary)
-                Link("Open Google Cloud Billing", destination: URL(string: "https://console.cloud.google.com/billing")!)
+                Label("Stale snapshot", systemImage: "clock.badge.exclamationmark")
                     .font(.subheadline)
-                Link("Export setup guide", destination: URL(string: "https://docs.cloud.google.com/billing/docs/how-to/export-data-bigquery-setup")!)
-                    .font(.subheadline)
+                    .foregroundStyle(AssistantTheme.warningInk(for: colorScheme))
             }
+            Text(report.message).font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if let fetched = report.fetchedAt {
                 Text("Fetched \(fetched)").font(.caption2).foregroundStyle(.secondary)
             }
@@ -953,10 +984,136 @@ struct WorkspaceView: View {
             if let used = report.latestUsageAt {
                 Text("Latest usage \(used)").font(.caption2).foregroundStyle(.secondary)
             }
+            if report.forecast != nil || !report.lines.isEmpty {
+                DisclosureGroup("Run rate and service details") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if let forecast = report.forecast {
+                            ForEach(forecast.totals, id: \.currency) { total in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Estimated month end")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Text(total.projected, format: .currency(code: total.currency).precision(.fractionLength(2)))
+                                        .font(.title2.weight(.semibold))
+                                        .monospacedDigit()
+                                    Text("Average per day: \(total.dailyAverage.formatted(.currency(code: total.currency).precision(.fractionLength(2))))")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.vertical, 6)
+                            }
+                            Text("\(forecast.message) Observed \(forecast.observedDays.formatted()) of \(forecast.daysInMonth.formatted()) days through \(forecast.through).")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else if report.status == "reported" {
+                            Text("Month-end estimate needs at least three days of reported usage.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(Array(report.lines.enumerated()), id: \.offset) { _, line in
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(line.service).font(.subheadline.weight(.medium))
+                                Text(line.detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                                Text("Currency: \(line.currency)").font(.caption2).foregroundStyle(.secondary)
+                                Text("Cost: \(line.cost.formatted(.currency(code: line.currency).precision(.fractionLength(2...8))))")
+                                    .monospacedDigit()
+                                Text("Credits: \(line.credits.formatted(.currency(code: line.currency)))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text("Net: \(line.net.formatted(.currency(code: line.currency).precision(.fractionLength(2...8))))")
+                                    .font(.subheadline.weight(.medium))
+                                    .monospacedDigit()
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 4)
+                        }
+                    }
+                    .padding(.top, 8)
+                }
+                .font(.subheadline.weight(.medium))
+            }
+            if report.id == "google-cloud", report.status == "not_configured" {
+                Text("Google Cloud costs are not available in this report. Missing costs are unknown, not zero.")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(AssistantTheme.warningInk(for: colorScheme))
+                Link("Open Google Cloud Billing", destination: URL(string: "https://console.cloud.google.com/billing")!)
+                    .font(.subheadline)
+                DisclosureGroup("Export setup steps and guide") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Enable standard usage export in Google Cloud Billing, then connect its BigQuery table and grant this installation read access. Initial data can take hours or days.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Link("Export setup guide", destination: URL(string: "https://docs.cloud.google.com/billing/docs/how-to/export-data-bigquery-setup")!)
+                            .font(.subheadline)
+                    }
+                    .padding(.top, 8)
+                }
+                .font(.subheadline.weight(.medium))
+            }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 16))
+        .assistantCard(in: colorScheme)
+    }
+
+    @ViewBuilder
+    private func providerBillingStatusAndAmount(_ report: WorkspaceProviderBilling) -> some View {
+        if usesAccessibilityLayout {
+            VStack(alignment: .leading, spacing: 4) {
+                providerBillingStatus(report)
+                providerBillingAmount(report)
+            }
+        } else {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    providerBillingStatus(report).fixedSize(horizontal: true, vertical: false)
+                    Spacer(minLength: 4)
+                    providerBillingAmount(report).fixedSize(horizontal: true, vertical: true)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    providerBillingStatus(report)
+                    providerBillingAmount(report)
+                }
+            }
+        }
+    }
+
+    private func providerBillingStatus(_ report: WorkspaceProviderBilling) -> some View {
+        Text(billingProviderStatusLabel(report.status))
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(report.status == "stale" ? AssistantTheme.warningInk(for: colorScheme) : Color.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder
+    private func providerBillingAmount(_ report: WorkspaceProviderBilling) -> some View {
+        if report.lines.isEmpty {
+            Text(report.includedIn != nil ? "In Google Cloud report" : "No amount reported")
+                .font(.title3.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            let currencies = Dictionary(grouping: report.lines, by: \.currency)
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(currencies.keys.sorted(), id: \.self) { code in
+                    let total = currencies[code, default: []].reduce(0) { $0 + $1.net }
+                    let fractionDigits: ClosedRange<Int> =
+                        total != 0 && abs(total) < 0.01 ? 2...8 : 2...2
+                    Text(total, format: .currency(code: code).precision(.fractionLength(fractionDigits)))
+                        .font(.title3.weight(.semibold))
+                        .monospacedDigit()
+                }
+            }
+        }
+    }
+
+    private func billingProviderStatusLabel(_ status: String) -> String {
+        switch status {
+        case "reported": "Reported"
+        case "included": "Included"
+        case "stale": "Stale"
+        case "not_configured": "Setup needed"
+        case "unsupported": "Unsupported"
+        default: "Unavailable"
+        }
     }
 
     private func anomalies(_ anomalies: [WorkspaceAnomaly]) -> some View {

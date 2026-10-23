@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ModelProviderPorts } from './model-providers.js';
 import {
   type BillingPorts,
+  billingCoverageProjection,
   billingForecast,
   getProviderBilling,
   googleBillingQuery,
@@ -339,13 +340,139 @@ describe('month-end run rate', () => {
 
 it('marks covered Vertex billing as included without duplicating Google charges', async () => {
   const p = ports();
+  p.config.GCP_BILLING_SCOPE = 'billing_account';
   p.models.config.VERTEX_PROJECT = 'assistant';
-  p.fetch = vi.fn(async () => response({ jobComplete: true, rows: [row()] }));
+  const vertexRow = row('USD', '0', '0', '0');
+  vertexRow.f[2] = { v: 'Vertex AI' };
+  p.fetch = vi.fn(async () => response({ jobComplete: true, rows: [vertexRow] }));
   const reports = await getProviderBilling(p);
   const vertex = reports.find((report) => report.id === 'vertex');
   expect(vertex?.status).toBe('included');
   expect(vertex?.includedIn).toBe('google-cloud');
   expect(vertex?.lines).toEqual([]);
   expect(vertex?.forecast).toBeUndefined();
-  expect(reports[0]?.forecast?.totals[0]?.spent).toBe(7);
+  expect(reports[0]?.lines[0]?.net).toBe(0);
+});
+
+it('does not infer zero or included Vertex coverage from a project export without a Vertex row', async () => {
+  const p = ports();
+  p.models.config.VERTEX_PROJECT = 'assistant';
+  p.fetch = vi.fn(async () => response({ jobComplete: true, rows: [row()] }));
+  const reports = await getProviderBilling(p);
+  const vertex = reports.find((report) => report.id === 'vertex');
+  expect(vertex?.status).toBe('unavailable');
+  expect(vertex?.includedIn).toBeUndefined();
+  expect(vertex?.message).toContain('does not establish zero Vertex cost');
+});
+
+it('does not infer Vertex coverage from an account export that lacks the project service row', async () => {
+  const p = ports();
+  p.config.GCP_BILLING_SCOPE = 'billing_account';
+  p.models.config.VERTEX_PROJECT = 'assistant';
+  p.fetch = vi.fn(async () => response({ jobComplete: true, rows: [row()] }));
+  const vertex = (await getProviderBilling(p)).find((report) => report.id === 'vertex');
+  expect(vertex?.status).toBe('unavailable');
+  expect(vertex?.includedIn).toBeUndefined();
+  expect(vertex?.message).toContain('does not contain a Vertex AI usage row');
+});
+
+it('projects partial coverage without calculating a whole-app total or merging overlapping sources', () => {
+  const coverage = billingCoverageProjection([
+    {
+      ...base,
+      status: 'reported',
+      scope: 'Project: assistant',
+      message: 'Exported usage.',
+      lines: [
+        {
+          service: 'Cloud Run',
+          detail: 'assistant · cpu',
+          currency: 'USD',
+          cost: 1,
+          credits: 0,
+          net: 1,
+        },
+      ],
+    },
+    {
+      ...base,
+      id: 'openrouter',
+      label: 'OpenRouter',
+      status: 'reported',
+      scope: 'Connection: OpenRouter',
+      message: 'Connected key.',
+      lines: [
+        {
+          service: 'OpenRouter',
+          detail: 'Current API key',
+          currency: 'USD',
+          cost: 2,
+          credits: 0,
+          net: 2,
+        },
+      ],
+    },
+    {
+      ...base,
+      id: 'custom',
+      label: 'Custom provider',
+      status: 'unsupported',
+      scope: 'Connection: Custom',
+      message: 'Ledger estimates only.',
+      lines: [],
+    },
+    {
+      ...base,
+      id: 'vertex',
+      label: 'Google Vertex AI',
+      status: 'unavailable',
+      scope: 'Connection: Google Vertex AI',
+      message: 'No Vertex row.',
+      lines: [],
+    },
+  ]);
+  expect(coverage.totalState).toBe('unavailable');
+  expect(coverage.title).toBe('Whole-app total unavailable');
+  expect(coverage.statusSummary).toContain('Google Vertex AI unavailable');
+  expect(coverage.statusSummary).toContain('Custom provider unsupported');
+  expect(coverage.statusSummary).not.toContain('Phone calls');
+  expect(coverage.entries.find((item) => item.id === 'google-cloud')).toMatchObject({
+    state: 'partial',
+    scope: 'Project: assistant',
+    period: '2026-09',
+    source: 'test',
+    detail: expect.stringContaining('some taxes and adjustments'),
+  });
+  expect(coverage.entries.find((item) => item.id === 'openrouter')).toMatchObject({
+    state: 'partial',
+    scope: 'Connection: OpenRouter',
+  });
+  expect(coverage.entries.find((item) => item.id === 'vertex')?.state).toBe('unknown');
+  expect(coverage.entries.find((item) => item.id === 'custom')?.state).toBe('ledger_only');
+  expect(coverage.entries.find((item) => item.id === 'assistant-ledger')?.state).toBe(
+    'overlapping',
+  );
+  expect(
+    coverage.entries.some((item) => item.id === 'other-services' && item.state === 'not_imported'),
+  ).toBe(true);
+  expect(JSON.stringify(coverage)).not.toContain('3.00');
+});
+
+it('summarizes current missing and stale providers without using hypothetical gaps', () => {
+  const coverage = billingCoverageProjection([
+    { ...base, label: 'Google Cloud', status: 'stale', message: 'Export delayed.', lines: [] },
+    {
+      ...base,
+      id: 'openrouter',
+      label: 'OpenRouter',
+      status: 'not_configured',
+      message: 'No key connected.',
+      lines: [],
+    },
+  ]);
+
+  expect(coverage.statusSummary).toBe(
+    'Current feeds: Google Cloud stale; OpenRouter not configured. Missing costs remain unknown, not zero.',
+  );
+  expect(coverage.statusSummary).not.toContain('Phone calls');
 });

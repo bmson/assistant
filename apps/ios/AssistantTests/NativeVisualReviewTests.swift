@@ -455,6 +455,150 @@ final class NativeVisualReviewTests: XCTestCase {
         XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
     }
 
+    @MainActor
+    func testCostsCoverageNoticeAndSourceGapsInCompactAndAccessibleLayouts() async throws {
+        let fixture = try NativeReviewFixture()
+        var responses = fixture.responses
+        let workspacePath = "/api/mobile/v1/workspace"
+        var workspace = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(responses[workspacePath])) as? [String: Any])
+        var costs = try XCTUnwrap(workspace["costs"] as? [String: Any])
+        costs["billing"] = [
+            [
+                "id": "google-cloud",
+                "label": "Google Cloud",
+                "status": "reported",
+                "period": "2026-10",
+                "scope": "Project: assistant",
+                "source": "Cloud Billing export",
+                "message": "Latest usage is not a completeness guarantee.",
+                "fetchedAt": "2026-10-22T08:00:00Z",
+                "latestExportAt": "2026-10-21T03:00:00Z",
+                "latestUsageAt": "2026-10-20T00:00:00Z",
+                "lines": [
+                    ["service": "Cloud Run", "detail": "regional compute", "currency": "USD", "cost": 12.0, "credits": -3.0, "net": 9.0],
+                    ["service": "Vertex AI", "detail": "project model usage", "currency": "USD", "cost": 3.0, "credits": 0.0, "net": 3.0],
+                    ["service": "Cloud Storage", "detail": "regional storage", "currency": "EUR", "cost": 4.0, "credits": 0.0, "net": 4.0]
+                ],
+                "forecast": [
+                    "through": "2026-10-20T00:00:00Z",
+                    "observedDays": 19.0,
+                    "daysInMonth": 31.0,
+                    "totals": [
+                        ["currency": "USD", "spent": 12.0, "dailyAverage": 0.63, "projected": 19.58],
+                        ["currency": "EUR", "spent": 4.0, "dailyAverage": 0.21, "projected": 6.53]
+                    ],
+                    "message": "Run rate assumes similar use; not an invoice forecast."
+                ]
+            ],
+            [
+                "id": "openrouter",
+                "label": "OpenRouter",
+                "status": "stale",
+                "period": "2026-10",
+                "scope": "Connected API key",
+                "source": "Provider key endpoint",
+                "message": "Stale snapshot; usage for this key may include other apps.",
+                "fetchedAt": "2026-10-22T08:00:00Z",
+                "latestExportAt": "2026-10-21T03:00:00Z",
+                "latestUsageAt": "2026-10-20T00:00:00Z",
+                "lines": [["service": "Key usage", "detail": "reported monthly spend", "currency": "USD", "cost": 0.0004, "credits": 0.0, "net": 0.0004]]
+            ],
+            [
+                "id": "vertex",
+                "label": "Google Vertex AI",
+                "status": "included",
+                "period": "2026-10",
+                "scope": "Project: assistant",
+                "source": "Google Cloud export",
+                "message": "Matching project usage is included above.",
+                "fetchedAt": NSNull(),
+                "lines": [],
+                "includedIn": "google-cloud"
+            ]
+        ]
+        costs["billingCoverage"] = [
+            "totalState": "unavailable",
+            "title": "Whole-app total unavailable",
+            "summary": "The sources below cover different accounts, projects and usage. Their amounts are not combined, and missing coverage is unknown rather than zero.",
+            "statusSummary": "Current feeds: OpenRouter stale. Missing costs remain unknown, not zero.",
+            "overlapWarning": "Assistant usage-ledger amounts may overlap provider bills. Keep them separate; assistant spending limits do not cap provider or cloud bills.",
+            "entries": [
+                ["id": "google-cloud", "label": "Google Cloud", "state": "partial", "scope": "Project: assistant", "detail": "Latest usage is not a completeness guarantee.", "period": "2026-10", "source": "Cloud Billing export"],
+                ["id": "openrouter", "label": "OpenRouter", "state": "stale", "scope": "Connected API key", "detail": "Stale snapshot; usage for this key may include other apps.", "period": "2026-10", "source": "Provider key endpoint"]
+            ]
+        ]
+        workspace["costs"] = costs
+        responses[workspacePath] = try JSONSerialization.data(withJSONObject: workspace)
+        NativeReviewProtocol.install(responses)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+                               session: URLSession(configuration: configuration))
+        let suite = "assistant.cost-coverage-visual-review"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        let model = AppModel(apiClient: client, defaults: defaults)
+        await model.refreshAll()
+        _ = await model.refreshWorkspace()
+        XCTAssertEqual(model.workspace?.costs.billing?.count, 3)
+        let googleReport = model.workspace?.costs.billing?.first(where: { $0.id == "google-cloud" })
+        XCTAssertEqual(googleReport?.status, "reported")
+        XCTAssertNotNil(googleReport?.forecast)
+        XCTAssertTrue(googleReport?.lines.contains(where: { $0.service == "Vertex AI" }) == true)
+        let openRouterReport = model.workspace?.costs.billing?.first(where: { $0.id == "openrouter" })
+        XCTAssertEqual(openRouterReport?.status, "stale")
+        XCTAssertEqual(openRouterReport?.lines.first?.net, 0.0004)
+        XCTAssertNil(openRouterReport?.forecast)
+        XCTAssertEqual(model.workspace?.costs.billing?.first(where: { $0.id == "vertex" })?.includedIn, "google-cloud")
+        XCTAssertEqual(model.workspace?.costs.billingCoverage?.statusSummary, "Current feeds: OpenRouter stale. Missing costs remain unknown, not zero.")
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let page = Page("cost-coverage", WorkspaceView(area: .costs))
+        try await capture(page, scheme: .light, size: .large, scene: scene, model: model, viewportWidth: 320)
+        try await capture(page, scheme: .dark, size: .large, scene: scene, model: model, viewportWidth: 320)
+        try await capture(page, scheme: .light, size: .accessibility3, scene: scene, model: model, viewportWidth: 320)
+
+        var setupWorkspace = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(responses[workspacePath])) as? [String: Any])
+        var setupCosts = try XCTUnwrap(setupWorkspace["costs"] as? [String: Any])
+        setupCosts["billing"] = [[
+            "id": "google-cloud",
+            "label": "Google Cloud",
+            "status": "not_configured",
+            "period": "2026-10",
+            "scope": "Project: assistant",
+            "source": "Cloud Billing export",
+            "message": "Connect a Cloud Billing BigQuery export to see Google Cloud costs.",
+            "fetchedAt": NSNull(),
+            "latestExportAt": NSNull(),
+            "latestUsageAt": NSNull(),
+            "lines": []
+        ]]
+        setupCosts["billingCoverage"] = [
+            "totalState": "unavailable",
+            "title": "Whole-app total unavailable",
+            "summary": "The sources below cover different accounts, projects and usage. Their amounts are not combined.",
+            "statusSummary": "Current feeds: Google Cloud not configured. Missing costs remain unknown, not zero.",
+            "overlapWarning": "Assistant usage-ledger amounts may overlap provider bills.",
+            "entries": []
+        ]
+        setupWorkspace["costs"] = setupCosts
+        responses[workspacePath] = try JSONSerialization.data(withJSONObject: setupWorkspace)
+        NativeReviewProtocol.install(responses)
+        _ = await model.refreshWorkspace()
+        XCTAssertEqual(model.workspace?.costs.billing?.count, 1)
+        XCTAssertEqual(model.workspace?.costs.billing?.first?.status, "not_configured")
+        XCTAssertEqual(model.workspace?.costs.billingCoverage?.statusSummary, "Current feeds: Google Cloud not configured. Missing costs remain unknown, not zero.")
+        try await capture(
+            Page("cost-google-cloud-setup", WorkspaceView(area: .costs)),
+            scheme: .light,
+            size: .large,
+            scene: scene,
+            model: model,
+            viewportWidth: 320
+        )
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+    }
+
     private struct Page {
         let name: String
         var ownsNavigation = false
