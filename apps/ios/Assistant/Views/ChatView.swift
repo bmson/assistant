@@ -300,7 +300,7 @@ struct ChatTranscriptRows: View, Equatable {
     var body: some View {
         let items = messages.transcriptItems()
         let context = TranscriptContext(messages: messages)
-        VStack(spacing: AssistantTheme.ConversationSpacing.surfaceGap) {
+        LazyVStack(spacing: AssistantTheme.ConversationSpacing.surfaceGap) {
             ForEach(items) { item in
                 row(item, context: context)
                     .transition(
