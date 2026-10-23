@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 50
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.0.app/Contents/Developer
-      PINNED_SOURCE_SHA: fce662c7c32f213ef60b95084f78cffc9ce4a1b0
+      PINNED_SOURCE_SHA: e22ceb7cd630d12e930592913a408f4373a26a4b
     steps:
       # Keep the workflow revision (for provenance) separate from the exact app
       # source under test. The latter is deliberately immutable for this run.
@@ -34,7 +34,7 @@ jobs:
       - name: Checkout pinned app source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: fce662c7c32f213ef60b95084f78cffc9ce4a1b0
+          ref: e22ceb7cd630d12e930592913a408f4373a26a4b
           path: app-source
 
       - name: Build and run the single touch smoke
@@ -68,7 +68,8 @@ jobs:
               "host_architecture": platform.machine(),
               "host_platform": platform.platform(),
               "started_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-              "budgets_seconds": {"build": 1800, "boot_total": 300, "test": 300, "metrics_export": 30},
+              "budgets_seconds": {"build": 1800, "boot_total": 300, "test": 600, "metrics_export": 30},
+              "test_command_budget_rationale": "Observed 95.904s command overhead + 2 * 130.808s prior warmup = 357.520s before added AX checks; setup and gesture waits unchanged.",
               "metric_acceptance": False,
               "capture_status": "starting",
               "raw_result_bundle": str(result_bundle),
@@ -192,9 +193,10 @@ jobs:
               build_code, _ = run("build-for-testing", common + ["build-for-testing"], 1800, cwd=app)
               if build_code != 0:
                   raise RuntimeError("Dedicated ScrollPerformance build-for-testing failed")
+              # Whole-command automation allowance; not a gesture or metric tolerance.
               test_code, test_output = run("test-without-building", common + ["-resultBundlePath", str(result_bundle),
                                        "-only-testing:AssistantScrollUITests/ConversationTouchScrollTests/testOneDragAndDeceleration",
-                                       "test-without-building"], 300, cwd=app, capture=True)
+                                       "test-without-building"], 600, cwd=app, capture=True)
               metadata["xcode_test_exit_code"] = test_code
               test_lines = [line for line in test_output.decode(errors="replace").splitlines()
                             if "testOneDragAndDeceleration" in line and "Test Case" in line]
