@@ -1,5 +1,6 @@
 import XCTest
 import SwiftUI
+import QuartzCore
 @testable import Assistant
 
 /// Stubbed page renders support visual review. They do not establish control
@@ -8,6 +9,182 @@ final class NativeVisualReviewTests: XCTestCase {
     private final class RecoveryActionCounts {
         var retry = 0
         var activity = 0
+    }
+
+    @MainActor
+    private final class ComposerPresentationSampler: NSObject {
+        struct Sample {
+            let timestamp: CFTimeInterval
+            let draftIsEmpty: Bool
+            let draftRevision: Int
+            let targetBounds: [ComposerPresentationTarget: CGRect]
+            let presentationFrames: [ComposerPresentationTarget: CGRect]
+            let missingPresentation: [ComposerPresentationTarget]
+            let presentationLayerHasWindowAncestor: [ComposerPresentationTarget: Bool]
+            let windowPresentationAvailable: Bool
+        }
+
+        private weak var window: UIWindow?
+        private let probe: ComposerPresentationProbe
+        private var displayLink: CADisplayLink?
+        private(set) var samples: [Sample] = []
+
+        init(window: UIWindow, probe: ComposerPresentationProbe) {
+            self.window = window
+            self.probe = probe
+        }
+
+        func start() {
+            guard displayLink == nil else { return }
+            let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
+            link.add(to: .main, forMode: .common)
+            displayLink = link
+        }
+
+        func stop() {
+            displayLink?.invalidate()
+            displayLink = nil
+        }
+
+        @objc private func tick(_ link: CADisplayLink) {
+            guard let window, window.windowScene != nil else {
+                samples.append(Sample(
+                    timestamp: CACurrentMediaTime(), draftIsEmpty: false, draftRevision: -1,
+                    targetBounds: [:], presentationFrames: [:],
+                    missingPresentation: ComposerPresentationTarget.allCases,
+                    presentationLayerHasWindowAncestor: [:],
+                    windowPresentationAvailable: false
+                ))
+                return
+            }
+            guard let windowPresentation = window.layer.presentation() else {
+                samples.append(Sample(
+                    timestamp: CACurrentMediaTime(), draftIsEmpty: false, draftRevision: -1,
+                    targetBounds: [:], presentationFrames: [:],
+                    missingPresentation: ComposerPresentationTarget.allCases,
+                    presentationLayerHasWindowAncestor: [:],
+                    windowPresentationAvailable: false
+                ))
+                return
+            }
+            var bounds: [ComposerPresentationTarget: CGRect] = [:]
+            var frames: [ComposerPresentationTarget: CGRect] = [:]
+            var missing: [ComposerPresentationTarget] = []
+            var layerAncestry: [ComposerPresentationTarget: Bool] = [:]
+            var empty = true
+            var revision = 0
+            for target in ComposerPresentationTarget.allCases {
+                guard let marker = probe.marker(target), marker.view.window === window,
+                      marker.view.isDescendant(of: window),
+                      let presentation = marker.view.layer.presentation() else {
+                    missing.append(target)
+                    continue
+                }
+                var layerAncestor: CALayer? = presentation
+                var hasWindowAncestor = false
+                while let layer = layerAncestor {
+                    if layer === windowPresentation {
+                        hasWindowAncestor = true
+                        break
+                    }
+                    layerAncestor = layer.superlayer
+                }
+                layerAncestry[target] = hasWindowAncestor
+                guard hasWindowAncestor else {
+                    missing.append(target)
+                    continue
+                }
+                empty = empty && marker.draftIsEmpty
+                revision = max(revision, marker.draftRevision)
+                bounds[target] = marker.view.bounds
+                frames[target] = presentation.convert(presentation.bounds, to: windowPresentation)
+            }
+            samples.append(Sample(
+                timestamp: CACurrentMediaTime(), draftIsEmpty: empty,
+                draftRevision: revision, targetBounds: bounds,
+                presentationFrames: frames, missingPresentation: missing,
+                presentationLayerHasWindowAncestor: layerAncestry,
+                windowPresentationAvailable: true
+            ))
+        }
+
+        func wait(until predicate: () -> Bool, timeout: TimeInterval) async throws {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
+            while !predicate(), ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(16))
+            }
+        }
+
+        func stableTail(after timestamp: CFTimeInterval, emptyRevision: Int? = nil) -> [Sample]? {
+            let tail = Array(samples.suffix(4))
+            guard tail.count == 4,
+                  tail.allSatisfy({
+                $0.timestamp >= timestamp && $0.missingPresentation.isEmpty
+                    && (emptyRevision == nil || ($0.draftIsEmpty && $0.draftRevision >= emptyRevision!))
+                  }) else { return nil }
+            guard tail.allSatisfy({ framesAreStable(tail[0].presentationFrames, $0.presentationFrames) }) else {
+                return nil
+            }
+            return tail
+        }
+
+        func maximumMotion(from baseline: Sample, after timestamp: CFTimeInterval) -> CGFloat {
+            samples.filter { $0.timestamp >= timestamp }.reduce(CGFloat.zero) { current, sample in
+                let displacement = ComposerPresentationTarget.allCases.compactMap { target -> CGFloat? in
+                    guard let before = baseline.presentationFrames[target],
+                          let after = sample.presentationFrames[target] else { return nil }
+                    return max(
+                        max(abs(before.minX - after.minX), abs(before.minY - after.minY)),
+                        max(abs(before.width - after.width), abs(before.height - after.height))
+                    )
+                }.max() ?? 0
+                return max(current, displacement)
+            }
+        }
+
+        func jsonSamples() -> [[String: Any]] {
+            samples.map { sample in
+                let targetBounds = Dictionary(uniqueKeysWithValues: sample.targetBounds.map {
+                    ($0.key.rawValue, Self.rectJSON($0.value))
+                })
+                let frames = Dictionary(uniqueKeysWithValues: sample.presentationFrames.map {
+                    ($0.key.rawValue, Self.rectJSON($0.value))
+                })
+                let ancestry = Dictionary(uniqueKeysWithValues: sample.presentationLayerHasWindowAncestor.map {
+                    ($0.key.rawValue, $0.value)
+                })
+                return [
+                    "time": sample.timestamp,
+                    "draftIsEmpty": sample.draftIsEmpty,
+                    "draftRevision": sample.draftRevision,
+                    "targetBounds": targetBounds,
+                    "presentationFrames": frames,
+                    "missingPresentation": sample.missingPresentation.map(\.rawValue),
+                    "presentationLayerHasWindowAncestor": ancestry,
+                    "windowPresentationAvailable": sample.windowPresentationAvailable
+                ]
+            }
+        }
+
+        private func framesAreStable(
+            _ lhs: [ComposerPresentationTarget: CGRect],
+            _ rhs: [ComposerPresentationTarget: CGRect]
+        ) -> Bool {
+            ComposerPresentationTarget.allCases.allSatisfy { target in
+                guard let a = lhs[target], let b = rhs[target] else { return false }
+                return max(
+                    max(abs(a.minX - b.minX), abs(a.minY - b.minY)),
+                    max(abs(a.width - b.width), abs(a.height - b.height))
+                ) <= 1
+            }
+        }
+
+        fileprivate static func rectJSON(_ rect: CGRect) -> [String: Any] {
+            func number(_ value: CGFloat) -> Any { value.isFinite ? value as Any : NSNull() }
+            return ["x": number(rect.minX), "y": number(rect.minY),
+                    "width": number(rect.width), "height": number(rect.height),
+                    "isNull": rect.isNull, "isInfinite": rect.isInfinite]
+        }
     }
 
     @MainActor
@@ -123,12 +300,14 @@ final class NativeVisualReviewTests: XCTestCase {
             ("dark-accessibility3", .dark, .accessibility3, false),
             ("contrast-accessibility3", .light, .accessibility3, true)
         ]
+        let presentationProbe = ComposerPresentationProbe()
         for (variant, scheme, size, increasedContrast) in variants {
             let window = UIWindow(windowScene: scene)
             window.frame = scene.coordinateSpace.bounds
             let host = UIHostingController(rootView:
                 RootView().environment(model).environment(\.dynamicTypeSize, size)
-                    .environment(\.colorScheme, scheme).environment(\.scenePhase, .inactive))
+                    .environment(\.colorScheme, scheme).environment(\.scenePhase, .inactive)
+                    .environment(\.composerPresentationProbe, increasedContrast ? presentationProbe : nil))
             window.rootViewController = host
             if increasedContrast {
                 host.traitOverrides.accessibilityContrast = .high
@@ -184,6 +363,56 @@ final class NativeVisualReviewTests: XCTestCase {
                 add(jsonAttachment)
                 XCTAssertTrue(rendered, "UIKit did not render full-height capture \(variant)/\(state)")
             }
+            func attachPresentationReceipt(_ value: [String: Any], name: String) {
+                let data: Data
+                do {
+                    data = try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
+                } catch {
+                    let fallback = Data("Presentation receipt serialization failed: \(error)\n\(String(describing: value))".utf8)
+                    let failedAttachment = XCTAttachment(data: fallback, uniformTypeIdentifier: "public.plain-text")
+                    failedAttachment.name = "full-height-\(variant)-\(name)-serialization-error"
+                    failedAttachment.lifetime = .keepAlways
+                    add(failedAttachment)
+                    XCTFail("Could not serialize presentation receipt \(name): \(error)")
+                    return
+                }
+                let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                attachment.name = "full-height-\(variant)-\(name)"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+            }
+            func contains(_ outer: CGRect, _ inner: CGRect, tolerance: CGFloat = 1) -> Bool {
+                outer.insetBy(dx: -tolerance, dy: -tolerance).contains(inner)
+            }
+            func roundedContains(_ outer: CGRect, _ inner: CGRect, radius: CGFloat, tolerance: CGFloat = 1) -> Bool {
+                guard contains(outer, inner, tolerance: tolerance) else { return false }
+                let r = min(radius, min(outer.width, outer.height) / 2)
+                let corners = [
+                    CGPoint(x: inner.minX, y: inner.minY), CGPoint(x: inner.maxX, y: inner.minY),
+                    CGPoint(x: inner.minX, y: inner.maxY), CGPoint(x: inner.maxX, y: inner.maxY)
+                ]
+                return corners.allSatisfy { point in
+                    var center: CGPoint?
+                    if point.x < outer.minX + r && point.y < outer.minY + r {
+                        center = CGPoint(x: outer.minX + r, y: outer.minY + r)
+                    } else if point.x > outer.maxX - r && point.y < outer.minY + r {
+                        center = CGPoint(x: outer.maxX - r, y: outer.minY + r)
+                    } else if point.x < outer.minX + r && point.y > outer.maxY - r {
+                        center = CGPoint(x: outer.minX + r, y: outer.maxY - r)
+                    } else if point.x > outer.maxX - r && point.y > outer.maxY - r {
+                        center = CGPoint(x: outer.maxX - r, y: outer.maxY - r)
+                    }
+                    guard let center else { return true }
+                    return hypot(point.x - center.x, point.y - center.y) <= r + tolerance
+                }
+            }
+            func finite(_ rect: CGRect?) -> Bool {
+                guard let rect else { return false }
+                return !rect.isNull && !rect.isInfinite && !rect.isEmpty
+                    && rect.minX.isFinite && rect.minY.isFinite
+                    && rect.width.isFinite && rect.height.isFinite
+                    && rect.maxX.isFinite && rect.maxY.isFinite
+            }
 
             // Attach the initial/newest state and its geometry before assertions
             // so a failing simulator run remains reviewable.
@@ -220,6 +449,82 @@ final class NativeVisualReviewTests: XCTestCase {
                 }
                 XCTAssertEqual(model.composerDraft(in: scope), typedDraft,
                     "The UIKit composer delegate must write through to this paired conversation scope")
+                let sampler = ComposerPresentationSampler(window: window, probe: presentationProbe)
+                sampler.start()
+                defer { sampler.stop() }
+                func stableBaselineTail() -> [ComposerPresentationSampler.Sample]? {
+                    guard let first = sampler.samples.first,
+                          let tail = sampler.stableTail(after: first.timestamp),
+                          tail.allSatisfy({ !$0.draftIsEmpty }) else { return nil }
+                    return tail
+                }
+                func baselineIsStable() -> Bool { stableBaselineTail() != nil }
+                try await sampler.wait(until: baselineIsStable, timeout: 2)
+                let baselineSamples = sampler.samples
+                let baselineTail = stableBaselineTail()
+                let baseline = baselineTail?.last
+                let baselineRevision = baseline?.draftRevision ?? -1
+                let markerDrafts = ComposerPresentationTarget.allCases.compactMap { presentationProbe.marker($0) }
+                let baselineReceipt: [String: Any] = [
+                    "phase": "typed-nonempty-stable-baseline",
+                    "stable": baselineIsStable(),
+                    "markerCount": markerDrafts.count,
+                    "markersDraftNonempty": markerDrafts.allSatisfy { !$0.draftIsEmpty },
+                    "markerDraftRevisions": markerDrafts.map(\.draftRevision),
+                    "draftRevision": baseline?.draftRevision ?? -1,
+                    "sampleCount": baselineSamples.count,
+                    "samples": sampler.jsonSamples()
+                ]
+                attachPresentationReceipt(baselineReceipt, name: "composer-presentation-baseline")
+                XCTAssertEqual(markerDrafts.count, ComposerPresentationTarget.allCases.count,
+                    "The opt-in probe must register the actual capsule and both button targets")
+                XCTAssertTrue(markerDrafts.allSatisfy { !$0.draftIsEmpty && $0.draftRevision == baselineRevision },
+                    "Every target must report the same typed-draft revision")
+                XCTAssertTrue(baselineIsStable(), "Typed geometry must be stable before clearing text")
+                let baselineSample = try XCTUnwrap(baseline)
+                let baselineCapsule = baselineSample.presentationFrames[.capsule]
+                let baselineMic = baselineSample.presentationFrames[.microphone]
+                let baselineSend = baselineSample.presentationFrames[.send]
+                let baselineTargetBounds = baselineSample.targetBounds
+                let baselineLayoutTargetsValid = [ComposerPresentationTarget.microphone, .send].allSatisfy {
+                    guard let rect = baselineTargetBounds[$0] else { return false }
+                    return rect.width >= 44 && rect.height >= 44
+                }
+                let baselinePresentationValid = finite(baselineCapsule) && finite(baselineMic) && finite(baselineSend)
+                    && finite(window.bounds)
+                    && roundedContains(baselineCapsule ?? .zero, baselineMic ?? .infinite,
+                                       radius: AssistantTheme.conversationCornerRadius)
+                    && roundedContains(baselineCapsule ?? .zero, baselineSend ?? .infinite,
+                                       radius: AssistantTheme.conversationCornerRadius)
+                    && contains(window.bounds, baselineCapsule ?? .infinite)
+                    && contains(window.bounds, baselineMic ?? .infinite)
+                    && contains(window.bounds, baselineSend ?? .infinite)
+                    && baselineSample.presentationLayerHasWindowAncestor.count == ComposerPresentationTarget.allCases.count
+                    && baselineSample.presentationLayerHasWindowAncestor.values.allSatisfy { $0 }
+                    && baselineSample.windowPresentationAvailable
+                let baselineTargetBoundsJSON = Dictionary(uniqueKeysWithValues: baselineTargetBounds.map {
+                    ($0.key.rawValue, ComposerPresentationSampler.rectJSON($0.value))
+                })
+                let baselineFramesJSON = Dictionary(uniqueKeysWithValues: baselineSample.presentationFrames.map {
+                    ($0.key.rawValue, ComposerPresentationSampler.rectJSON($0.value))
+                })
+                attachPresentationReceipt([
+                    "phase": "typed-nonempty-stable-baseline-geometry",
+                    "presentationGeometryValid": baselinePresentationValid,
+                    "layoutTargetBoundsAtLeast44Points": baselineLayoutTargetsValid,
+                    "presentationLayerHasWindowAncestor": Dictionary(uniqueKeysWithValues:
+                        baselineSample.presentationLayerHasWindowAncestor.map { ($0.key.rawValue, $0.value) }),
+                    "targetBounds": baselineTargetBoundsJSON,
+                    "presentationFrames": baselineFramesJSON,
+                    "windowBounds": ["x": window.bounds.minX, "y": window.bounds.minY,
+                                     "width": window.bounds.width, "height": window.bounds.height]
+                ], name: "composer-presentation-baseline-geometry")
+                XCTAssertTrue(baselinePresentationValid,
+                    "The stable typed baseline must have finite same-window presentation geometry within the capsule")
+                XCTAssertTrue(baselineLayoutTargetsValid,
+                    "The measured mic and Button layout target bounds must remain at least 44 points")
+
+                let transitionID = presentationProbe.requestEmptyDraft(afterRevision: baselineRevision)
                 composerTextView.text = ""
                 composerDelegate.textViewDidChange?(composerTextView)
                 let emptyDeadline = ContinuousClock.now.advanced(by: .seconds(2))
@@ -228,7 +533,138 @@ final class NativeVisualReviewTests: XCTestCase {
                 }
                 try await Task.sleep(for: .milliseconds(120))
                 window.layoutIfNeeded()
+                // Preserve the original screenshot timing as the reference
+                // capture; it may still fall inside the existing spring.
                 attach("recovery-enabled")
+                func stablePostChangeTail() -> [ComposerPresentationSampler.Sample]? {
+                    guard let transition = presentationProbe.emptyTransition,
+                          transition.id == transitionID,
+                          let emptyRevision = transition.observedEmptyRevision,
+                          let observedAt = transition.observedEmptyAt,
+                          sampler.maximumMotion(from: baselineSample, after: transition.requestedAt) > 1 else {
+                        return nil
+                    }
+                    return sampler.stableTail(
+                        after: observedAt,
+                        emptyRevision: emptyRevision
+                    )
+                }
+                try await sampler.wait(until: { stablePostChangeTail() != nil }, timeout: 3)
+                let transition = presentationProbe.emptyTransition
+                let postChangeStableTail = stablePostChangeTail()
+                let observedSample = postChangeStableTail?.last
+                let capsule = observedSample?.presentationFrames[.capsule]
+                let mic = observedSample?.presentationFrames[.microphone]
+                let send = observedSample?.presentationFrames[.send]
+                let windowBounds = window.bounds
+                let stableMarkers = ComposerPresentationTarget.allCases.compactMap { presentationProbe.marker($0) }
+                let targetBounds = observedSample?.targetBounds ?? [:]
+                let layoutTargetBoundsAtLeast44 = [ComposerPresentationTarget.microphone, .send].allSatisfy {
+                    guard let rect = targetBounds[$0] else { return false }
+                    return rect.width >= 44 && rect.height >= 44
+                }
+                let presentationGeometryValid = finite(capsule) && finite(mic) && finite(send)
+                    && finite(windowBounds)
+                    && roundedContains(capsule ?? .zero, mic ?? .infinite,
+                                       radius: AssistantTheme.conversationCornerRadius)
+                    && roundedContains(capsule ?? .zero, send ?? .infinite,
+                                       radius: AssistantTheme.conversationCornerRadius)
+                    && contains(windowBounds, capsule ?? .infinite)
+                    && contains(windowBounds, mic ?? .infinite)
+                    && contains(windowBounds, send ?? .infinite)
+                let motion = sampler.maximumMotion(from: baselineSample, after: transition?.requestedAt ?? 0)
+                let postRequestSamples = sampler.samples.filter { $0.timestamp >= (transition?.requestedAt ?? .infinity) }
+                let noMissingPresentationAfterRequest = !postRequestSamples.isEmpty
+                    && postRequestSamples.allSatisfy {
+                        $0.windowPresentationAvailable && $0.missingPresentation.isEmpty
+                            && $0.presentationLayerHasWindowAncestor.count == ComposerPresentationTarget.allCases.count
+                            && $0.presentationLayerHasWindowAncestor.values.allSatisfy { $0 }
+                    }
+                let targetBoundsJSON = Dictionary(uniqueKeysWithValues: targetBounds.map {
+                    ($0.key.rawValue, ComposerPresentationSampler.rectJSON($0.value))
+                })
+                let observedFramesJSON = Dictionary(uniqueKeysWithValues: (observedSample?.presentationFrames ?? [:]).map {
+                    ($0.key.rawValue, ComposerPresentationSampler.rectJSON($0.value))
+                })
+                let receipt: [String: Any] = [
+                    "variant": variant,
+                    "state": "composer-clear-observed-post-change-stable-samples",
+                    "instrumented": true,
+                    "measurementLimit": "Presentation frames cover the capsule and actual mic/send Button overlay targets; target bounds are untransformed layout bounds. Stable samples are observations only; this is not proof that every animation completed. It does not prove glyph bounds, hit-region behavior, touch activation, or VoiceOver activation.",
+                    "requestedAt": transition?.requestedAt ?? 0,
+                    "baselineDraftRevision": baselineRevision,
+                    "observedEmptyRevision": transition?.observedEmptyRevision ?? -1,
+                    "observedEmptyAt": transition?.observedEmptyAt ?? 0,
+                    "transactionRemovedCompletionHintAt": transition?.animationCompletionAt.map { $0 as Any } ?? NSNull(),
+                    "completionHintScope": "Recorded transaction callback only; not treated as proof that nested control animations completed.",
+                    "maximumPresentationMotionPoints": motion,
+                    "postChangeStableSampleCount": postChangeStableTail?.count ?? 0,
+                    "postChangeStableSampleTimes": postChangeStableTail?.map(\.timestamp) ?? [],
+                    "targetBounds": targetBoundsJSON,
+                    "observedPresentationFrames": observedFramesJSON,
+                    "windowBounds": ["x": windowBounds.minX, "y": windowBounds.minY, "width": windowBounds.width, "height": windowBounds.height],
+                    "allMarkersRegisteredAtEnd": stableMarkers.count == ComposerPresentationTarget.allCases.count,
+                    "layoutTargetBoundsAtLeast44Points": layoutTargetBoundsAtLeast44,
+                    "observedFrameContainmentDiagnosticOnly": presentationGeometryValid,
+                    "noMissingPresentationAfterRequest": noMissingPresentationAfterRequest,
+                    "samples": sampler.jsonSamples()
+                ]
+                attachPresentationReceipt(receipt, name: "composer-presentation-transition")
+                attach("recovery-enabled-observed-post-change-stable-instrumented")
+                XCTAssertNotNil(transition?.observedEmptyRevision,
+                    "The probe must observe the scoped empty-draft revision")
+                XCTAssertGreaterThan(motion, 1, "The public presentation geometry must record actual movement")
+                XCTAssertEqual(postChangeStableTail?.count, 4,
+                    "Require four consecutive post-change stable presentation samples after movement")
+                XCTAssertEqual(stableMarkers.count, ComposerPresentationTarget.allCases.count)
+                XCTAssertTrue(noMissingPresentationAfterRequest,
+                    "Missing presentation layers or same-window ancestry must fail closed")
+
+                let instrumentedViewport = transcript.frame
+                let instrumentedContentSize = transcript.contentSize
+                let instrumentedOffset = transcript.contentOffset
+                host.rootView = RootView().environment(model).environment(\.dynamicTypeSize, size)
+                    .environment(\.colorScheme, scheme).environment(\.scenePhase, .inactive)
+                    .environment(\.composerPresentationProbe, nil)
+                window.layoutIfNeeded()
+                let removalDeadline = ContinuousClock.now.advanced(by: .seconds(1))
+                while ComposerPresentationTarget.allCases.contains(where: { presentationProbe.marker($0) != nil }),
+                      ContinuousClock.now < removalDeadline {
+                    try await Task.sleep(for: .milliseconds(16))
+                }
+                window.layoutIfNeeded()
+                attach("recovery-enabled-post-change-uninstrumented")
+                let markersRemoved = ComposerPresentationTarget.allCases.allSatisfy {
+                    presentationProbe.marker($0) == nil
+                }
+                let currentTranscript = descendants(window).compactMap { $0 as? UIScrollView }
+                    .filter { !($0 is UITextView) }.max { $0.bounds.height < $1.bounds.height }
+                let transcriptStillAttached = transcript.window === window && transcript.isDescendant(of: window)
+                let transcriptReacquiredSame = currentTranscript === transcript
+                attachPresentationReceipt([
+                    "state": "post-change-uninstrumented-geometry",
+                    "allMarkersRemoved": markersRemoved,
+                    "transcriptStillAttached": transcriptStillAttached,
+                    "transcriptReacquiredSameIdentity": transcriptReacquiredSame,
+                    "reacquiredTranscriptFrame": currentTranscript.map { ComposerPresentationSampler.rectJSON($0.frame) } ?? [:],
+                    "viewport": ["x": transcript.frame.minX, "y": transcript.frame.minY,
+                                 "width": transcript.frame.width, "height": transcript.frame.height],
+                    "contentSize": ["width": transcript.contentSize.width, "height": transcript.contentSize.height],
+                    "contentOffset": ["x": transcript.contentOffset.x, "y": transcript.contentOffset.y]
+                ], name: "composer-presentation-uninstrumented")
+                XCTAssertTrue(markersRemoved, "The final post-change capture must remove every opt-in overlay")
+                XCTAssertTrue(transcriptStillAttached,
+                    "The original transcript scroll view must remain in this window after removing the probe")
+                XCTAssertTrue(transcriptReacquiredSame,
+                    "Reacquire the current transcript after removing the probe and verify its identity is retained")
+                XCTAssertEqual(transcript.frame.minX, instrumentedViewport.minX, accuracy: 1)
+                XCTAssertEqual(transcript.frame.minY, instrumentedViewport.minY, accuracy: 1)
+                XCTAssertEqual(transcript.frame.width, instrumentedViewport.width, accuracy: 1)
+                XCTAssertEqual(transcript.frame.height, instrumentedViewport.height, accuracy: 1)
+                XCTAssertEqual(transcript.contentSize.width, instrumentedContentSize.width, accuracy: 1)
+                XCTAssertEqual(transcript.contentSize.height, instrumentedContentSize.height, accuracy: 1)
+                XCTAssertEqual(transcript.contentOffset.x, instrumentedOffset.x, accuracy: 1)
+                XCTAssertEqual(transcript.contentOffset.y, instrumentedOffset.y, accuracy: 1)
                 XCTAssertTrue(model.hasComposerRecovery(in: scope))
                 XCTAssertTrue(model.composerDraft(in: scope).isEmpty,
                     "Clearing the input should leave an empty draft in the same scope")
@@ -236,6 +672,174 @@ final class NativeVisualReviewTests: XCTestCase {
             window.isHidden = true
             window.rootViewController = nil
         }
+
+        // Static-only AX3 capture: the real RootView mounts with a local
+        // SwiftUI transaction that disables animations from its first render.
+        // It verifies the empty-state geometry, not transition behavior.
+        let staticProbe = ComposerPresentationProbe()
+        let staticWindow = UIWindow(windowScene: scene)
+        staticWindow.frame = scene.coordinateSpace.bounds
+        let staticHost = UIHostingController(rootView:
+            RootView().environment(model).environment(\.dynamicTypeSize, .accessibility3)
+                .environment(\.colorScheme, .light).environment(\.scenePhase, .inactive)
+                .environment(\.composerPresentationProbe, staticProbe)
+                .transaction { transaction in
+                    transaction.animation = nil
+                    transaction.disablesAnimations = true
+                })
+        staticHost.traitOverrides.accessibilityContrast = .high
+        staticWindow.rootViewController = staticHost
+        staticWindow.overrideUserInterfaceStyle = .light
+        staticWindow.makeKeyAndVisible()
+        defer { staticWindow.isHidden = true; staticWindow.rootViewController = nil }
+        let staticSampler = ComposerPresentationSampler(window: staticWindow, probe: staticProbe)
+        staticSampler.start()
+        defer { staticSampler.stop() }
+        func staticHasStableFrames() -> Bool {
+            guard let first = staticSampler.samples.first else { return false }
+            guard let tail = staticSampler.stableTail(after: first.timestamp) else { return false }
+            return tail.allSatisfy(\.draftIsEmpty)
+        }
+        try await staticSampler.wait(until: staticHasStableFrames, timeout: 2)
+        let staticTail = staticHasStableFrames()
+            ? staticSampler.stableTail(after: staticSampler.samples.first?.timestamp ?? .infinity) : nil
+        let staticSample = staticTail?.last
+        let staticCapsule = staticSample?.presentationFrames[.capsule]
+        let staticMic = staticSample?.presentationFrames[.microphone]
+        let staticSend = staticSample?.presentationFrames[.send]
+        let staticBounds = staticSample?.targetBounds ?? [:]
+        func staticDescendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(staticDescendants) }
+        let staticTranscript = staticDescendants(staticWindow).compactMap { $0 as? UIScrollView }
+            .filter { !($0 is UITextView) }.max { $0.bounds.height < $1.bounds.height }
+        let staticTranscriptAttached = staticTranscript.map { $0.window === staticWindow && $0.isDescendant(of: staticWindow) } ?? false
+        func staticFinite(_ rect: CGRect?) -> Bool {
+            guard let rect else { return false }
+            return !rect.isNull && !rect.isInfinite && !rect.isEmpty
+                && rect.minX.isFinite && rect.minY.isFinite
+                && rect.width.isFinite && rect.height.isFinite
+                && rect.maxX.isFinite && rect.maxY.isFinite
+        }
+        func staticContains(_ outer: CGRect, _ inner: CGRect, tolerance: CGFloat = 1) -> Bool {
+            outer.insetBy(dx: -tolerance, dy: -tolerance).contains(inner)
+        }
+        func staticRoundedContains(_ outer: CGRect, _ inner: CGRect, radius: CGFloat, tolerance: CGFloat = 1) -> Bool {
+            guard staticContains(outer, inner, tolerance: tolerance) else { return false }
+            let r = min(radius, min(outer.width, outer.height) / 2)
+            let corners = [
+                CGPoint(x: inner.minX, y: inner.minY), CGPoint(x: inner.maxX, y: inner.minY),
+                CGPoint(x: inner.minX, y: inner.maxY), CGPoint(x: inner.maxX, y: inner.maxY)
+            ]
+            return corners.allSatisfy { point in
+                var center: CGPoint?
+                if point.x < outer.minX + r && point.y < outer.minY + r {
+                    center = CGPoint(x: outer.minX + r, y: outer.minY + r)
+                } else if point.x > outer.maxX - r && point.y < outer.minY + r {
+                    center = CGPoint(x: outer.maxX - r, y: outer.minY + r)
+                } else if point.x < outer.minX + r && point.y > outer.maxY - r {
+                    center = CGPoint(x: outer.minX + r, y: outer.maxY - r)
+                } else if point.x > outer.maxX - r && point.y > outer.maxY - r {
+                    center = CGPoint(x: outer.maxX - r, y: outer.maxY - r)
+                }
+                guard let center else { return true }
+                return hypot(point.x - center.x, point.y - center.y) <= r + tolerance
+            }
+        }
+        let staticMarkers = ComposerPresentationTarget.allCases.compactMap { staticProbe.marker($0) }
+        let staticSameWindowHierarchy = staticMarkers.count == ComposerPresentationTarget.allCases.count
+            && staticMarkers.allSatisfy { $0.view.window === staticWindow && $0.view.isDescendant(of: staticWindow) }
+            && staticTranscriptAttached
+        let staticTargetsHave44PointLayout = [ComposerPresentationTarget.microphone, .send].allSatisfy {
+            guard let rect = staticBounds[$0] else { return false }
+            return rect.width >= 44 && rect.height >= 44
+        }
+        let staticGeometryValid = staticFinite(staticCapsule) && staticFinite(staticMic) && staticFinite(staticSend)
+            && staticFinite(staticWindow.bounds)
+            && staticFinite(staticTranscript?.frame)
+            && staticRoundedContains(staticCapsule ?? .zero, staticMic ?? .infinite,
+                                     radius: AssistantTheme.conversationCornerRadius)
+            && staticRoundedContains(staticCapsule ?? .zero, staticSend ?? .infinite,
+                                     radius: AssistantTheme.conversationCornerRadius)
+            && staticContains(staticWindow.bounds, staticCapsule ?? .infinite)
+            && staticContains(staticWindow.bounds, staticMic ?? .infinite)
+            && staticContains(staticWindow.bounds, staticSend ?? .infinite)
+            && staticSample?.presentationLayerHasWindowAncestor.count == ComposerPresentationTarget.allCases.count
+            && staticSample?.presentationLayerHasWindowAncestor.values.allSatisfy { $0 } == true
+            && staticSample?.windowPresentationAvailable == true
+            && staticSameWindowHierarchy
+        let staticSourceBounds = Dictionary(uniqueKeysWithValues: staticBounds.map {
+            ($0.key.rawValue, ComposerPresentationSampler.rectJSON($0.value))
+        })
+        let staticFrames = Dictionary(uniqueKeysWithValues: (staticSample?.presentationFrames ?? [:]).map {
+            ($0.key.rawValue, ComposerPresentationSampler.rectJSON($0.value))
+        })
+        var staticRendered = false
+        let staticImage = UIGraphicsImageRenderer(bounds: staticWindow.bounds).image { _ in
+            staticRendered = staticWindow.drawHierarchy(in: staticWindow.bounds, afterScreenUpdates: true)
+        }
+        let staticImageAttachment = XCTAttachment(image: staticImage)
+        staticImageAttachment.name = "full-height-contrast-accessibility3-empty-animation-disabled-static"
+        staticImageAttachment.lifetime = .keepAlways
+        add(staticImageAttachment)
+        let staticReceipt: [String: Any] = [
+            "state": "empty-AX3-animation-disabled-static-only",
+            "animationPolicy": "RootView mounted with transaction.animation=nil and transaction.disablesAnimations=true; no global setting changed.",
+            "configuredSwiftUIDynamicTypeSize": String(describing: DynamicTypeSize.accessibility3),
+            "observedUIKitPreferredContentSizeCategory": staticWindow.traitCollection.preferredContentSizeCategory.rawValue,
+            "observedUIKitUserInterfaceStyle": String(describing: staticWindow.traitCollection.userInterfaceStyle),
+            "observedUIKitAccessibilityContrast": String(describing: staticWindow.traitCollection.accessibilityContrast),
+            "rootObservedUIKitPreferredContentSizeCategory": staticHost.traitCollection.preferredContentSizeCategory.rawValue,
+            "rootObservedUIKitUserInterfaceStyle": String(describing: staticHost.traitCollection.userInterfaceStyle),
+            "rootObservedUIKitAccessibilityContrast": String(describing: staticHost.traitCollection.accessibilityContrast),
+            "transcriptObservedUIKitPreferredContentSizeCategory": staticTranscript?.traitCollection.preferredContentSizeCategory.rawValue ?? "none",
+            "transcriptObservedUIKitAccessibilityContrast": String(describing: staticTranscript?.traitCollection.accessibilityContrast ?? .normal),
+            "notTransitionEvidence": true,
+            "rendered": staticRendered,
+            "modelDraftEmpty": model.composerDraft(in: scope).isEmpty,
+            "hasRecovery": model.hasComposerRecovery(in: scope),
+            "markerCount": staticMarkers.count,
+            "allMarkerDraftsEmpty": staticMarkers.allSatisfy(\.draftIsEmpty),
+            "sameWindowHierarchy": staticSameWindowHierarchy,
+            "transcriptFrame": staticTranscript.map { ["x": $0.frame.minX, "y": $0.frame.minY,
+                                                        "width": $0.frame.width, "height": $0.frame.height] } ?? [:],
+            "presentationLayerHasWindowAncestor": Dictionary(uniqueKeysWithValues:
+                (staticSample?.presentationLayerHasWindowAncestor ?? [:]).map { ($0.key.rawValue, $0.value) }),
+            "sourceLayoutBoundsAtLeast44Points": staticTargetsHave44PointLayout,
+            "presentationGeometryValid": staticGeometryValid,
+            "targetBounds": staticSourceBounds,
+            "presentationFrames": staticFrames,
+            "windowBounds": ["x": staticWindow.bounds.minX, "y": staticWindow.bounds.minY,
+                             "width": staticWindow.bounds.width, "height": staticWindow.bounds.height],
+            "sampleCount": staticSampler.samples.count,
+            "stableSampleTailCount": staticTail?.count ?? 0,
+            "samples": staticSampler.jsonSamples(),
+            "measurementLimit": "Static empty-state geometry only; does not establish transition behavior, glyph bounds, hit activation, or VoiceOver activation."
+        ]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: staticReceipt, options: [.prettyPrinted, .sortedKeys])
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "full-height-contrast-accessibility3-empty-animation-disabled-static-state"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        } catch {
+            let attachment = XCTAttachment(data: Data("Static receipt serialization failed: \(error)\n\(String(describing: staticReceipt))".utf8),
+                                           uniformTypeIdentifier: "public.plain-text")
+            attachment.name = "full-height-contrast-accessibility3-static-serialization-error"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            XCTFail("Could not serialize AX3 static geometry receipt: \(error)")
+        }
+        XCTAssertTrue(staticRendered, "The static AX3 RootView capture must render")
+        XCTAssertTrue(model.composerDraft(in: scope).isEmpty)
+        XCTAssertTrue(model.hasComposerRecovery(in: scope))
+        XCTAssertTrue(staticMarkers.allSatisfy(\.draftIsEmpty))
+        XCTAssertTrue(staticSameWindowHierarchy, "Static RootView transcript and markers must belong to the captured window")
+        XCTAssertEqual(staticMarkers.count, ComposerPresentationTarget.allCases.count)
+        XCTAssertTrue(staticTail?.count == 4, "Static geometry requires four consecutive presentation samples")
+        XCTAssertTrue(staticTargetsHave44PointLayout,
+            "The static mic and Button layout target bounds must remain at least 44 points")
+        XCTAssertTrue(staticGeometryValid,
+            "Static presentation frames must be finite, same-window, and contained within the capsule/window")
+        staticSampler.stop()
 
         // Verify the one-shot model lifecycle after all rendered states are
         // captured. Recovery is exercised through the model lifecycle only;

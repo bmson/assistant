@@ -1,5 +1,8 @@
 import SwiftUI
 import UIKit
+#if DEBUG
+import QuartzCore
+#endif
 
 /// Keep controls outside the scroll view’s gesture subtree while the transcript
 /// draws through the complete stage behind them. Both lift as one menu surface.
@@ -28,8 +31,20 @@ private struct ConversationTranscriptHost<Content: View>: UIViewControllerRepres
     }
 
     func updateUIViewController(_ controller: ConversationTranscriptController<Content>, context: Context) {
+#if DEBUG
+        context.environment.transcriptHostBoundaryProbe?.record("representable-context", transaction: context.transaction)
+#endif
         withTransaction(context.transaction) {
+#if DEBUG
+            controller.update(
+                content: content,
+                environment: context.environment,
+                boundaryProbe: context.environment.transcriptHostBoundaryProbe,
+                transaction: context.transaction
+            )
+#else
             controller.update(content: content, environment: context.environment)
+#endif
         }
     }
 
@@ -115,17 +130,57 @@ private final class ConversationTranscriptController<Content: View>: UIViewContr
         host.didMove(toParent: self)
     }
 
-    func update(content: Content, environment: EnvironmentValues) {
 #if DEBUG
+    func update(content: Content, environment: EnvironmentValues,
+                boundaryProbe: TranscriptHostBoundaryProbe?, transaction: Transaction) {
+        boundaryProbe?.record("root-assignment", transaction: transaction)
         host.rootView = ConversationTranscriptRoot(
             content: content, inheritedEnvironment: environment, coordinates: coordinates)
-#else
-        host.rootView = ConversationTranscriptRoot(content: content, inheritedEnvironment: environment)
-#endif
     }
+#else
+    func update(content: Content, environment: EnvironmentValues) {
+        host.rootView = ConversationTranscriptRoot(content: content, inheritedEnvironment: environment)
+    }
+#endif
 }
 
 #if DEBUG
+/// Opt-in diagnostic for tests that need to distinguish transaction loss at
+/// the representable boundary from state loss inside the hosted child.
+@MainActor
+final class TranscriptHostBoundaryProbe {
+    private let marker: @MainActor (Transaction) -> Int
+    private let contentRevision: @MainActor () -> Int
+    private(set) var events: [[String: Any]] = []
+
+    init(marker: @escaping @MainActor (Transaction) -> Int,
+         contentRevision: @escaping @MainActor () -> Int) {
+        self.marker = marker
+        self.contentRevision = contentRevision
+    }
+
+    func record(_ stage: String, transaction: Transaction) {
+        if events.count == 64 { events.removeFirst() }
+        events.append([
+            "time": CACurrentMediaTime(),
+            "stage": stage,
+            "marker": marker(transaction),
+            "contentRevision": contentRevision(),
+        ])
+    }
+}
+
+private struct TranscriptHostBoundaryProbeKey: EnvironmentKey {
+    static let defaultValue: TranscriptHostBoundaryProbe? = nil
+}
+
+extension EnvironmentValues {
+    var transcriptHostBoundaryProbe: TranscriptHostBoundaryProbe? {
+        get { self[TranscriptHostBoundaryProbeKey.self] }
+        set { self[TranscriptHostBoundaryProbeKey.self] = newValue }
+    }
+}
+
 /// A child-root measurement is converted through its owned native host at read
 /// time. A pure parent translation need not trigger a SwiftUI geometry callback.
 @MainActor
@@ -155,6 +210,177 @@ struct TranscriptGeometryMeasurement {
             && frame.minX.isFinite && frame.minY.isFinite
             && frame.width.isFinite && frame.height.isFinite
             && frame.maxX.isFinite && frame.maxY.isFinite
+    }
+}
+
+enum ComposerPresentationTarget: String, CaseIterable {
+    case capsule
+    case microphone
+    case send
+}
+
+/// Opt-in visual-test registry. Normal app rendering has no probe value and
+/// therefore installs no marker views or sampling work.
+@MainActor
+final class ComposerPresentationProbe {
+    private final class Registration {
+        weak var view: UIView?
+        let target: ComposerPresentationTarget
+        let draftIsEmpty: Bool
+        let draftRevision: Int
+
+        init(view: UIView, target: ComposerPresentationTarget, draftIsEmpty: Bool, draftRevision: Int) {
+            self.view = view
+            self.target = target
+            self.draftIsEmpty = draftIsEmpty
+            self.draftRevision = draftRevision
+        }
+    }
+
+    struct MarkerState {
+        let view: UIView
+        let draftIsEmpty: Bool
+        let draftRevision: Int
+    }
+
+    struct EmptyTransition {
+        let id: Int
+        let requestedAt: CFTimeInterval
+        let baselineDraftRevision: Int
+        fileprivate(set) var observedEmptyRevision: Int?
+        fileprivate(set) var observedEmptyAt: CFTimeInterval?
+        fileprivate(set) var animationCompletionAt: CFTimeInterval?
+    }
+
+    private var registrations: [ComposerPresentationTarget: Registration] = [:]
+    private(set) var emptyTransition: EmptyTransition?
+    private var nextTransitionID = 0
+
+    func register(
+        _ view: UIView,
+        target: ComposerPresentationTarget,
+        draftIsEmpty: Bool,
+        draftRevision: Int
+    ) {
+        registrations[target] = Registration(
+            view: view,
+            target: target,
+            draftIsEmpty: draftIsEmpty,
+            draftRevision: draftRevision
+        )
+        if var transition = emptyTransition,
+           draftIsEmpty,
+           draftRevision > transition.baselineDraftRevision,
+           transition.observedEmptyRevision == nil {
+            transition.observedEmptyRevision = draftRevision
+            transition.observedEmptyAt = CACurrentMediaTime()
+            emptyTransition = transition
+        }
+    }
+
+    func remove(_ view: UIView, target: ComposerPresentationTarget) {
+        guard registrations[target]?.view === view else { return }
+        registrations.removeValue(forKey: target)
+    }
+
+    func marker(_ target: ComposerPresentationTarget) -> MarkerState? {
+        guard let registration = registrations[target], let view = registration.view else { return nil }
+        return MarkerState(
+            view: view,
+            draftIsEmpty: registration.draftIsEmpty,
+            draftRevision: registration.draftRevision
+        )
+    }
+
+    @discardableResult
+    func requestEmptyDraft(afterRevision revision: Int) -> Int {
+        nextTransitionID &+= 1
+        emptyTransition = EmptyTransition(
+            id: nextTransitionID,
+            requestedAt: CACurrentMediaTime(),
+            baselineDraftRevision: revision,
+            observedEmptyRevision: nil,
+            observedEmptyAt: nil,
+            animationCompletionAt: nil
+        )
+        return nextTransitionID
+    }
+
+    var pendingTransitionID: Int? { emptyTransition?.id }
+
+    func recordAnimationCompletion(transitionID: Int, at timestamp: CFTimeInterval) {
+        guard var transition = emptyTransition,
+              transition.id == transitionID,
+              transition.animationCompletionAt == nil else { return }
+        transition.animationCompletionAt = timestamp
+        emptyTransition = transition
+    }
+}
+
+private struct ComposerPresentationProbeKey: EnvironmentKey {
+    static let defaultValue: ComposerPresentationProbe? = nil
+}
+
+extension EnvironmentValues {
+    var composerPresentationProbe: ComposerPresentationProbe? {
+        get { self[ComposerPresentationProbeKey.self] }
+        set { self[ComposerPresentationProbeKey.self] = newValue }
+    }
+}
+
+@MainActor
+private final class ComposerPresentationMarkerView: UIView {
+    weak var probeRegistry: ComposerPresentationProbe?
+    var probeTarget: ComposerPresentationTarget?
+
+    override var intrinsicContentSize: CGSize { .zero }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque = false
+        isUserInteractionEnabled = false
+        isAccessibilityElement = false
+        accessibilityElementsHidden = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+}
+
+@MainActor
+private struct ComposerPresentationMarker: UIViewRepresentable {
+    let target: ComposerPresentationTarget
+    let draftIsEmpty: Bool
+    let draftRevision: Int
+    let registry: ComposerPresentationProbe
+
+    func makeUIView(context: Context) -> ComposerPresentationMarkerView {
+        let view = ComposerPresentationMarkerView(frame: .zero)
+        view.probeRegistry = registry
+        view.probeTarget = target
+        registry.register(view, target: target, draftIsEmpty: draftIsEmpty, draftRevision: draftRevision)
+        return view
+    }
+
+    func updateUIView(_ view: ComposerPresentationMarkerView, context: Context) {
+        view.probeRegistry = registry
+        view.probeTarget = target
+        registry.register(view, target: target, draftIsEmpty: draftIsEmpty, draftRevision: draftRevision)
+    }
+
+    static func dismantleUIView(_ view: ComposerPresentationMarkerView, coordinator: ()) {
+        if let registry = view.probeRegistry, let target = view.probeTarget {
+            registry.remove(view, target: target)
+        }
+        view.probeRegistry = nil
+        view.probeTarget = nil
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: ComposerPresentationMarkerView, context: Context) -> CGSize? {
+        guard let width = proposal.width, let height = proposal.height,
+              width.isFinite, height.isFinite, width >= 0, height >= 0 else { return .zero }
+        return CGSize(width: width, height: height)
     }
 }
 
@@ -675,6 +901,10 @@ struct ChatView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.scenePhase) private var scenePhase
+#if DEBUG
+    @Environment(\.composerPresentationProbe) private var composerPresentationProbe
+    @State private var composerDraftRevision = 0
+#endif
     @ScaledMetric(relativeTo: .body) private var composerFontSize = 16.0
     // The directory labels need the same legibility as the content cards.
     // Scaling from subheadline keeps the two-column sheet readable before it
@@ -972,6 +1202,11 @@ struct ChatView: View {
             }
             .onChange(of: model.composerDraftScope) { _, _ in synchronizeComposer() }
             .onChange(of: draft) { _, text in
+#if DEBUG
+                if composerPresentationProbe != nil {
+                    composerDraftRevision &+= 1
+                }
+#endif
                 if let draftScope { model.saveComposerDraft(text, in: draftScope) }
             }
             .onChange(of: model.composerRecoveryRevision) { _, _ in
@@ -995,6 +1230,18 @@ struct ChatView: View {
         // Resolve the full container before reading `viewport.size`; the
         // keyboard is a separate safe-area region and remains respected.
         .ignoresSafeArea(.container)
+#if DEBUG
+        .transaction { transaction in
+            guard let probe = composerPresentationProbe,
+                  let transitionID = probe.pendingTransitionID else { return }
+            transaction.addAnimationCompletion(criteria: .removed) {
+                let timestamp = CACurrentMediaTime()
+                Task { @MainActor in
+                    probe.recordAnimationCompletion(transitionID: transitionID, at: timestamp)
+                }
+            }
+        }
+#endif
     }
 
     /// The transcript’s opening content and root error banner clear the Island
@@ -2497,6 +2744,9 @@ struct ChatView: View {
                     )
                 }
                 .buttonStyle(.plain)
+#if DEBUG
+                .overlay { composerPresentationMarker(.send) }
+#endif
                 .disabled(!primarySendEnabled && !primaryIsStop)
                 .accessibilityLabel(primaryButtonLabel)
                 .accessibilityIdentifier("assistant.chat.send")
@@ -2579,6 +2829,9 @@ struct ChatView: View {
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
+#if DEBUG
+        .overlay { composerPresentationMarker(.microphone) }
+#endif
         .simultaneousGesture(
             DragGesture(minimumDistance: 0)
                 .updating($micTouchDown) { _, down, _ in down = true }
@@ -2746,6 +2999,20 @@ struct ChatView: View {
     private var conversationControlGlassTintOpacity: Double { 0.04 }
     private var conversationControlBackgroundOpacity: Double { 1 }
 
+#if DEBUG
+    @ViewBuilder
+    private func composerPresentationMarker(_ target: ComposerPresentationTarget) -> some View {
+        if let composerPresentationProbe {
+            ComposerPresentationMarker(
+                target: target,
+                draftIsEmpty: draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                draftRevision: composerDraftRevision,
+                registry: composerPresentationProbe
+            )
+        }
+    }
+#endif
+
     @ViewBuilder
     private func composerInputSurface(
         @ViewBuilder content: () -> AnyView
@@ -2767,6 +3034,9 @@ struct ChatView: View {
                         lineWidth: 1
                     )
                 }
+#if DEBUG
+                .overlay { composerPresentationMarker(.capsule) }
+#endif
         } else if #available(iOS 26.0, *) {
             content()
                 .background {
@@ -2795,6 +3065,9 @@ struct ChatView: View {
                         ),
                     in: shape
                 )
+#if DEBUG
+                .overlay { composerPresentationMarker(.capsule) }
+#endif
         } else {
             content()
                 .background {
@@ -2819,6 +3092,9 @@ struct ChatView: View {
                         lineWidth: 1
                     )
                 }
+#if DEBUG
+                .overlay { composerPresentationMarker(.capsule) }
+#endif
         }
     }
 
