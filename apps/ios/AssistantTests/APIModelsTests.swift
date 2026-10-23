@@ -433,7 +433,7 @@ final class APIModelsTests: XCTestCase {
 
     func testBubbleCardsDoNotInferLegacyAfterExplicitCardsArePairedAway() {
         let message = ChatMessage(id: "paired-alert", role: .assistant, parts: [
-            .init(type: "text", text: "\"Annual Physical\" starts in 30 minutes at One Medical."),
+            .init(type: "text", text: "\"Annual Physical\" starts in 30 minutes at One Medical. Your appointment is coming up."),
             RichMessageFixture.suggestion,
             .init(type: "data-card", data: RichMessageFixture.alert),
         ])
@@ -445,7 +445,7 @@ final class APIModelsTests: XCTestCase {
     }
 
     func testBubbleCardsInferLegacyOnlyWhenNoExplicitCardParses() {
-        let text = "\"Annual Physical\" starts in 30 minutes at One Medical."
+        let text = "\"Annual Physical\" starts in 30 minutes at One Medical. Your appointment is coming up."
         let malformed = MessagePart(type: "data-card", data: .object(["kind": .string("unknown-card")]))
         let message = ChatMessage(id: "legacy-alert", role: .assistant, parts: [
             .init(type: "text", text: text), malformed,
