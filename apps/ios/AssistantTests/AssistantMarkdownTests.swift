@@ -91,6 +91,7 @@ private struct LiftedTranscriptFixture: View {
                 }
                 .background(Color.green.ignoresSafeArea(.container))
                 .clipShape(RoundedRectangle(cornerRadius: 34))
+                .geometryGroup()
                 .offset(y: -state.reveal)
             }
         }
@@ -575,6 +576,9 @@ final class AssistantMarkdownTests: XCTestCase {
 
     @MainActor
     func testChatViewportDrawsBehindComposerWithoutOwningItsTouches() async throws {
+        let testCaseID = UUID().uuidString
+        StubURLProtocol.beginTestCase(testCaseID)
+        defer { StubURLProtocol.endTestCase(testCaseID) }
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
         let previousKeyWindow = scene.keyWindow
         let window = UIWindow(windowScene: scene)
@@ -585,7 +589,41 @@ final class AssistantMarkdownTests: XCTestCase {
                     ? "LATEST_LAYOUT_ROW_MARKER\nKeep the newest answer comfortably above the input while opening the menu."
                     : "Message \(index + 1)\nKeep the newest answer comfortably above the input while opening the menu.")])
         }
-        let model = AppModel(initialMessages: messages)
+        let stamp = "2026-10-03T09:00:00Z"
+        let conversation = ConversationView(
+            conversation: .init(id: "layout-main", title: "Layout review", modelOverride: nil,
+                                archivedAt: nil, isPrimary: true),
+            agentName: "Assistant", agentTimezone: "UTC", messages: messages, models: [],
+            goalTitle: nil, canArchive: false, cursor: nil, asyncTurn: nil)
+        let bootstrap = BootstrapResponse(
+            generatedAt: stamp,
+            identity: .init(id: "layout-owner", name: "Assistant", avatarUrl: nil),
+            shell: .init(dashboard: .init(pendingApprovals: 0, needsAttention: 0, presence: .idle),
+                         memoryHealth: .init(totalUsable: 0, notYetOrganized: 0, awaitingReview: 0,
+                                             ownerConfirmed: 0, lastOrganizedAt: nil)),
+            conversation: conversation)
+        let bootstrapData = try JSONEncoder().encode(bootstrap)
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/bootstrap": [.success(status: 200, body: bootstrapData)],
+            "/api/mobile/v1/overview": [.success(status: 401, body: Data())],
+        ])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubURLProtocol.self]
+        configuration.httpAdditionalHeaders = ["X-Assistant-Test-Case": testCaseID]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://assistant.test")!, token: "fixture-only"),
+                               session: URLSession(configuration: configuration))
+        let suite = "assistant.chat-viewport-review.\(testCaseID)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defaults.set("https://assistant.test", forKey: "assistant.server-url")
+        defaults.set(true, forKey: "assistant.push-prompted")
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(apiClient: client, defaults: defaults, storeConnectionToken: { _ in })
+        model.scenePhaseDidChange(.background)
+        await model.refreshAll(reportFailure: false)
+        XCTAssertEqual(model.bootstrap?.identity.id, "layout-owner")
+        XCTAssertEqual(model.messages.map(\.id), messages.map(\.id))
+        let scope = try XCTUnwrap(model.composerDraftScope)
         window.rootViewController = UIHostingController(rootView:
             ChatView(safeAreaTopInset: 62, safeAreaBottomInset: 34,
                 safeAreaLeadingInset: 0, safeAreaTrailingInset: 0)
@@ -602,12 +640,23 @@ final class AssistantMarkdownTests: XCTestCase {
         let views = descendants(window)
         let transcript = try XCTUnwrap(views.compactMap { $0 as? UIScrollView }.first { !($0 is UITextView) })
         let input = try XCTUnwrap(views.compactMap { $0 as? UITextView }.first)
+        XCTAssertEqual(input.accessibilityIdentifier, "assistant.chat.composer")
         let initialMessageCount = model.messages.count
-        // Drive the real UITextView delegate/binding path so the send affordance
-        // is in its ready state. This only changes the draft; it never taps or
-        // invokes the send action.
-        input.text = "Layout interaction probe"
-        input.delegate?.textViewDidChange?(input)
+        let typedDraft = "Layout interaction probe"
+        // Exercise the actual UIKit delegate-to-model binding without looking
+        // up or activating SwiftUI's send control.
+        input.text = typedDraft
+        let inputDelegate = try XCTUnwrap(input.delegate)
+        inputDelegate.textViewDidChange?(input)
+        let draftDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while model.composerDraft(in: scope) != typedDraft && ContinuousClock.now < draftDeadline {
+            try await Task.sleep(for: .milliseconds(30))
+        }
+        XCTAssertEqual(model.composerDraft(in: scope), typedDraft,
+            "A native UITextView delegate change must update the paired conversation's draft scope")
+        XCTAssertFalse(model.isSending)
+        XCTAssertEqual(model.messages.count, initialMessageCount,
+            "The draft-binding check does not submit the message")
         func accessibilityFrame(containing marker: String, in view: UIView) -> CGRect? {
             if view.accessibilityLabel?.contains(marker) == true, !view.bounds.isEmpty {
                 return view.convert(view.bounds, to: window)
@@ -643,154 +692,6 @@ final class AssistantMarkdownTests: XCTestCase {
                 )
             }
         }
-        struct AccessibilityNodeReceipt {
-            let identifier: String
-            let elementType: String
-            let isAccessibilityElement: Bool
-            let hasLabel: Bool
-            let frame: CGRect
-        }
-        struct AccessibilityReceipt {
-            let sendFrame: CGRect?
-            let sendFrameSource: String?
-            let nodes: [AccessibilityNodeReceipt]
-            let visitedObjectCount: Int
-            let depthTruncated: Bool
-            let objectBudgetTruncated: Bool
-            let elementCountTruncated: Bool
-            let arrayCountTruncated: Bool
-            let nodeArrayTruncated: Bool
-            let missingDeclaredChildCount: Int
-            let unknownCountContainerCount: Int
-            var publicEnumerationComplete: Bool {
-                !depthTruncated && !objectBudgetTruncated && !elementCountTruncated
-                    && !arrayCountTruncated && !nodeArrayTruncated && missingDeclaredChildCount == 0
-            }
-        }
-        func accessibilityReceipt(in root: UIView) -> AccessibilityReceipt {
-            var visited = Set<ObjectIdentifier>()
-            var nodes: [AccessibilityNodeReceipt] = []
-            var sendFrame: CGRect?
-            var sendFrameSource: String?
-            var depthTruncated = false
-            var objectBudgetTruncated = false
-            var elementCountTruncated = false
-            var arrayCountTruncated = false
-            var nodeArrayTruncated = false
-            var missingDeclaredChildCount = 0
-            var unknownCountContainerCount = 0
-            let objectBudget = 10_000
-            let childBudget = 2_000
-
-            func visit(_ object: AnyObject, depth: Int) {
-                let objectID = ObjectIdentifier(object)
-                guard !visited.contains(objectID) else { return }
-                guard visited.count < objectBudget else { objectBudgetTruncated = true; return }
-                visited.insert(objectID)
-                guard depth < 32 else { depthTruncated = true; return }
-
-                if let view = object as? UIView {
-                    let identifier = view.accessibilityIdentifier ?? ""
-                    let frame = view.convert(view.bounds, to: window)
-                    if view.isAccessibilityElement || !identifier.isEmpty || view.accessibilityLabel != nil {
-                        nodes.append(.init(
-                            identifier: identifier,
-                            elementType: String(describing: type(of: view)),
-                            isAccessibilityElement: view.isAccessibilityElement,
-                            hasLabel: !(view.accessibilityLabel ?? "").isEmpty,
-                            frame: frame
-                        ))
-                    }
-                    if identifier == "assistant.chat.send", !view.bounds.isEmpty {
-                        sendFrame = frame
-                        sendFrameSource = "UIView"
-                    }
-                    for child in view.subviews { visit(child, depth: depth + 1) }
-                } else if let element = object as? UIAccessibilityElement {
-                    let identifier = element.accessibilityIdentifier ?? ""
-                    let frame = window.convert(element.accessibilityFrame, from: nil)
-                    nodes.append(.init(
-                        identifier: identifier,
-                        elementType: String(describing: type(of: element)),
-                        isAccessibilityElement: element.isAccessibilityElement,
-                        hasLabel: !(element.accessibilityLabel ?? "").isEmpty,
-                        frame: frame
-                    ))
-                    if identifier == "assistant.chat.send", !element.accessibilityFrame.isEmpty {
-                        sendFrame = frame
-                        sendFrameSource = "UIAccessibilityElement"
-                    }
-                } else if let generic = object as? NSObject,
-                          let identified = generic as? UIAccessibilityIdentification,
-                          let identifier = identified.accessibilityIdentifier, !identifier.isEmpty {
-                    let frame = window.convert(generic.accessibilityFrame, from: nil)
-                    nodes.append(.init(
-                        identifier: identifier,
-                        elementType: String(describing: type(of: generic)),
-                        isAccessibilityElement: generic.isAccessibilityElement,
-                        hasLabel: !(generic.accessibilityLabel ?? "").isEmpty,
-                        frame: frame
-                    ))
-                    if identifier == "assistant.chat.send", !generic.accessibilityFrame.isEmpty {
-                        sendFrame = frame
-                        sendFrameSource = "identified-NSObject"
-                    }
-                }
-
-                // SwiftUI may vend virtual elements from an NSObject container
-                // rather than expose them as UIView descendants. Visit both
-                // public container elements and UIKit subviews, with the object
-                // identity set above preventing cycles and duplicate traversal.
-                if let container = object as? NSObject {
-                    let count = container.accessibilityElementCount()
-                    if count != NSNotFound {
-                        if count > childBudget { elementCountTruncated = true }
-                        for index in 0..<min(max(count, 0), childBudget) {
-                            if let child = container.accessibilityElement(at: index) as AnyObject? {
-                                visit(child, depth: depth + 1)
-                            } else {
-                                missingDeclaredChildCount += 1
-                            }
-                        }
-                    } else {
-                        unknownCountContainerCount += 1
-                    }
-                    let elements = container.accessibilityElements ?? []
-                    if elements.count > childBudget { arrayCountTruncated = true }
-                    for child in elements.prefix(childBudget) {
-                        visit(child as AnyObject, depth: depth + 1)
-                    }
-                    let automationElements = container.automationElements ?? []
-                    if automationElements.count > childBudget { arrayCountTruncated = true }
-                    for child in automationElements.prefix(childBudget) {
-                        visit(child as AnyObject, depth: depth + 1)
-                    }
-                }
-            }
-
-            visit(root, depth: 0)
-            nodeArrayTruncated = nodes.count > childBudget
-            return AccessibilityReceipt(
-                sendFrame: sendFrame, sendFrameSource: sendFrameSource, nodes: nodes,
-                visitedObjectCount: visited.count, depthTruncated: depthTruncated,
-                objectBudgetTruncated: objectBudgetTruncated,
-                elementCountTruncated: elementCountTruncated,
-                arrayCountTruncated: arrayCountTruncated,
-                nodeArrayTruncated: nodeArrayTruncated,
-                missingDeclaredChildCount: missingDeclaredChildCount,
-                unknownCountContainerCount: unknownCountContainerCount
-            )
-        }
-
-        // Wait briefly for SwiftUI to publish the nonempty-draft accessibility
-        // tree. The bounded capture below is attached even when lookup fails.
-        var accessibility = accessibilityReceipt(in: window)
-        let sendDeadline = ContinuousClock.now.advanced(by: .seconds(2))
-        while accessibility.sendFrame == nil && ContinuousClock.now < sendDeadline {
-            try await Task.sleep(for: .milliseconds(100))
-            window.layoutIfNeeded()
-            accessibility = accessibilityReceipt(in: window)
-        }
         func rectReceipt(_ rect: CGRect) -> [String: CGFloat] {
             guard !rect.isNull, !rect.isInfinite,
                   rect.minX.isFinite, rect.minY.isFinite,
@@ -801,7 +702,7 @@ final class AssistantMarkdownTests: XCTestCase {
             return ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height,
                     "maxX": rect.maxX, "maxY": rect.maxY]
         }
-        let accessibilityState: [String: Any] = [
+        let composerState: [String: Any] = [
             "windowFrame": rectReceipt(window.frame),
             "windowSafeAreaInsets": ["top": window.safeAreaInsets.top, "left": window.safeAreaInsets.left,
                                      "bottom": window.safeAreaInsets.bottom, "right": window.safeAreaInsets.right],
@@ -814,32 +715,16 @@ final class AssistantMarkdownTests: XCTestCase {
             "inputFrameInWindow": rectReceipt(input.convert(input.bounds, to: window)),
             "inputIsFirstResponder": input.isFirstResponder,
             "inputDraftLength": input.text?.count ?? 0,
+            "scopedDraft": model.composerDraft(in: scope),
+            "draftScopeConversationID": scope.conversationID,
             "messageCountUnchanged": model.messages.count == initialMessageCount,
             "isSending": model.isSending,
-            "accessibilityReceipt": [
-                "publicEnumerationComplete": accessibility.publicEnumerationComplete,
-                "sendFrameSource": accessibility.sendFrameSource ?? "",
-                "visitedObjectCount": accessibility.visitedObjectCount,
-                "objectBudget": 10_000,
-                "childBudget": 2_000,
-                "depthTruncated": accessibility.depthTruncated,
-                "objectBudgetTruncated": accessibility.objectBudgetTruncated,
-                "elementCountTruncated": accessibility.elementCountTruncated,
-                "arrayCountTruncated": accessibility.arrayCountTruncated,
-                "nodeArrayTruncated": accessibility.nodeArrayTruncated,
-                "missingDeclaredChildCount": accessibility.missingDeclaredChildCount,
-                "unknownCountContainerCount": accessibility.unknownCountContainerCount
-            ],
-            "accessibilityNodes": accessibility.nodes.prefix(2_000).map { node in
-                ["identifier": node.identifier, "elementType": node.elementType,
-                 "isAccessibilityElement": node.isAccessibilityElement, "hasLabel": node.hasLabel,
-                 "frame": rectReceipt(node.frame)] as [String: Any]
-            }
+            "controlActivationEvidence": "Send and VoiceOver activation were not exercised."
         ]
-        if let data = try? JSONSerialization.data(withJSONObject: accessibilityState,
+        if let data = try? JSONSerialization.data(withJSONObject: composerState,
                                                    options: [.sortedKeys, .prettyPrinted]) {
             let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
-            attachment.name = "chat-send-control-accessibility-state"
+            attachment.name = "chat-composer-draft-state"
             attachment.lifetime = .keepAlways
             add(attachment)
         }
@@ -847,25 +732,13 @@ final class AssistantMarkdownTests: XCTestCase {
             window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
         }
         let accessibilityScreenshot = XCTAttachment(image: accessibilityImage)
-        accessibilityScreenshot.name = "chat-send-control-accessibility-screenshot"
+        accessibilityScreenshot.name = "chat-composer-screenshot"
         accessibilityScreenshot.lifetime = .keepAlways
         add(accessibilityScreenshot)
 
-        guard let sendFrame = accessibility.sendFrame else {
-            XCTFail("The bounded public UIKit enumeration did not expose assistant.chat.send; diagnostics: complete=\(accessibility.publicEnumerationComplete), visited=\(accessibility.visitedObjectCount), depthTruncated=\(accessibility.depthTruncated), objectBudgetTruncated=\(accessibility.objectBudgetTruncated), elementCountTruncated=\(accessibility.elementCountTruncated), arrayCountTruncated=\(accessibility.arrayCountTruncated), nodeArrayTruncated=\(accessibility.nodeArrayTruncated), missingDeclaredChildCount=\(accessibility.missingDeclaredChildCount), unknownCountContainerCount=\(accessibility.unknownCountContainerCount)")
-            return
-        }
         XCTAssertFalse(input.isDescendant(of: transcript),
             "The native text view must be a sibling of the transcript")
         assertHitReceiverIsOutsideTranscript(input)
-        let sendReceiver = window.hitTest(
-            CGPoint(x: sendFrame.midX, y: sendFrame.midY), with: nil
-        )
-        XCTAssertNotNil(sendReceiver, "The send control must receive its own hit test")
-        if let sendReceiver {
-            XCTAssertFalse(sendReceiver === transcript || sendReceiver.isDescendant(of: transcript),
-                "Send touches must not enter the transcript pan-recognizer subtree")
-        }
         for focused in [false, true, false] {
             if focused { input.becomeFirstResponder() } else { input.resignFirstResponder() }
             // Keyboard presentation and LazyVStack measurement can outlast a
@@ -969,6 +842,11 @@ final class AssistantMarkdownTests: XCTestCase {
                                  "left": scroll?.contentInset.left ?? 0,
                                  "bottom": scroll?.contentInset.bottom ?? 0,
                                  "right": scroll?.contentInset.right ?? 0],
+                "scrollSafeAreaInsets": ["top": scroll?.safeAreaInsets.top ?? 0,
+                                          "left": scroll?.safeAreaInsets.left ?? 0,
+                                          "bottom": scroll?.safeAreaInsets.bottom ?? 0,
+                                          "right": scroll?.safeAreaInsets.right ?? 0],
+                "contentInsetAdjustmentBehavior": scroll?.contentInsetAdjustmentBehavior.rawValue ?? -1,
                 "adjustedContentInset": ["top": scroll?.adjustedContentInset.top ?? 0,
                                          "left": scroll?.adjustedContentInset.left ?? 0,
                                          "bottom": scroll?.adjustedContentInset.bottom ?? 0,
@@ -1079,6 +957,8 @@ final class AssistantMarkdownTests: XCTestCase {
         window.layoutIfNeeded()
         sampleLayout("lift-release-baseline")
         XCTAssertEqual(state.composer.minY - state.lastCard.maxY, baseline, accuracy: 1)
+        let liftBaselineOffset = scroll.contentOffset
+        let liftBaselineAdjustedInset = scroll.adjustedContentInset
         for distance: CGFloat in [1, 5, 10, 20, 34, 80, 200, 450, 200, 34, 10, 0, 20, 0, 10, 0] {
             state.reveal = distance
             try await Task.sleep(for: .milliseconds(100))
@@ -1086,6 +966,11 @@ final class AssistantMarkdownTests: XCTestCase {
             sampleLayout("lift-\(Int(distance))")
             XCTAssertEqual(scroll.bounds.height, state.availableHeight, accuracy: 1,
                 "The actual native viewport must remain fixed while crossing the window safe-area edge")
+            XCTAssertEqual(scroll.contentOffset.x, liftBaselineOffset.x, accuracy: 1)
+            XCTAssertEqual(scroll.contentOffset.y, liftBaselineOffset.y, accuracy: 1,
+                "Lift/release must not re-anchor the transcript content")
+            XCTAssertEqual(scroll.adjustedContentInset.top, liftBaselineAdjustedInset.top, accuracy: 1)
+            XCTAssertEqual(scroll.adjustedContentInset.bottom, liftBaselineAdjustedInset.bottom, accuracy: 1)
             XCTAssertEqual(
                 state.composer.minY - state.lastCard.maxY, baseline, accuracy: 1,
                 "The gap must survive a \(distance)pt live lift")

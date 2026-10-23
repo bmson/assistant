@@ -679,10 +679,9 @@ struct ChatView: View {
                         radius: 28 * menuSurfaceProgress,
                         y: 14 * menuSurfaceProgress
                     )
-                    // The stationary root resolves container safe areas once.
-                    // Ignoring them again on this moving layer expands the native
-                    // scroll bounds as it crosses the window edge, then shifts
-                    // its content offset when that expansion disappears.
+                    // Resolve one surface transform before propagating geometry
+                    // to the native scroll view and sibling composer.
+                    .geometryGroup()
                     .offset(y: -conversationRevealDistance)
                     // At the largest accessibility sizes the destination row is
                     // horizontally scrollable, so the lifted conversation owns
@@ -837,9 +836,8 @@ struct ChatView: View {
         return Group {
             ConversationColumn {
                 ScrollView {
-                    // Keep rows mounted while the reader scrolls. The viewport
-                    // ends before navigation and input, so message text cannot
-                    // draw behind those controls.
+                    // Keep rows mounted while the reader scrolls through the
+                    // full viewport behind navigation and input.
                     Group {
                         if model.messages.isEmpty {
                             VStack(spacing: 0) { emptyConversation }

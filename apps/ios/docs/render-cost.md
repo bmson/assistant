@@ -183,6 +183,16 @@ The existing bottom-follow regression must also pass when new messages arrive
 and streamed replies grow. Runtime validation must cover scrolling away from
 the bottom and preserving row state and interactions.
 
+Full-height layout tests measure the native scroll viewport, insets, offset,
+rendered row clearance and sibling UIKit input ownership. A paired stub
+bootstrap establishes the composer's actual draft scope, and delegate input
+must reach that scoped draft. Unit-host UIKit accessibility enumeration does
+not reliably expose SwiftUI send, recovery or Jump controls; those lookups are
+not a control-presence oracle. The eleven RootView captures require separate
+visual review. Send, recovery and Jump activation, VoiceOver, and finger-driven
+menu gestures still require interaction validation; screenshots do not prove
+those behaviors.
+
 None of it measures frames. Message changes still require linear transcript
 grouping/context work and one equality comparison per row. Typing/menu changes
 now compare the transcript's inputs before that work is offered. Profile a long
