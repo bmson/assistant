@@ -113,69 +113,13 @@ final class ConversationScrollPerformanceTests: XCTestCase {
             boundary: "Mount window: fixture creation and initial mount settling."
         )
 
-        func positionAndValidate(_ target: CGFloat, stage: String) async throws -> Bool {
-            scroll.setContentOffset(CGPoint(x: 0, y: target), animated: false)
-            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
-            var samples: [[String: Double]] = []
-            var stableSamples = 0
-            var previousHeight: CGFloat?
-            var previousViewport: CGFloat?
-            while ContinuousClock.now < deadline {
-                try await Task.sleep(for: .milliseconds(60))
-                fixture.window.layoutIfNeeded()
-                let viewport = scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom
-                let height = scroll.contentSize.height
-                samples.append([
-                    "observedOffsetPoints": Double(scroll.contentOffset.y),
-                    "actualTopPoints": Double(-scroll.adjustedContentInset.top),
-                    "actualBottomPoints": Double(Self.bottomOffset(of: scroll)),
-                    "viewportHeightPoints": Double(viewport),
-                    "contentHeightPoints": Double(height),
-                ])
-                let stable = abs(scroll.contentOffset.y - target) <= 2
-                    && previousHeight.map { abs(height - $0) <= 2 } == true
-                    && previousViewport.map { abs(viewport - $0) <= 2 } == true
-                stableSamples = stable ? stableSamples + 1 : 0
-                previousHeight = height
-                previousViewport = viewport
-                if stableSamples >= 4 { break }
-            }
-            let valid = stableSamples >= 4
-            // Emit before asserting: failed setup must still leave a compact
-            // receipt instead of disappearing before the first timed phase.
-            attachDiagnostic([
-                "mode": "fixed-window-setup",
-                "phase": stage,
-                "positioningProtocol": "direct-UIKit-top-target-top",
-                "canonicalFixtureSHA256": fixtureDigest,
-                "messageCount": fixture.model.messages.count,
-                "requestedOffsetPoints": Double(target),
-                "setupValid": valid,
-                "geometrySamples": samples,
-                "fixtureState": fixture.diagnosticState,
-                "renderProbeInstrumented": ConversationRenderProbe.callSitesInstalled,
-                "notScoredPerformance": ConversationRenderProbe.callSitesInstalled,
-            ], name: "fixed-window-setup-\(stage)")
-            XCTAssertTrue(valid, "Direct UIKit \(stage) positioning failed to settle within ±2pt")
-            return valid
-        }
-
-        let actualTop = -scroll.adjustedContentInset.top
-        guard try await positionAndValidate(actualTop, stage: "initial-top") else { return }
-        let viewport = scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom
-        let target = actualTop + viewport * 5
-        let hasRoom = viewport > 100 && Self.bottomOffset(of: scroll) >= target + 2
-        XCTAssertTrue(hasRoom, "Transcript must contain five usable viewport lengths below its actual top")
-        guard hasRoom else { return }
-
-        // Identical untimed endpoint positioning warms this fixed window on
-        // both variants. This is not a full-history traversal or cold-pass claim.
-        guard try await positionAndValidate(target, stage: "warm-target") else { return }
-        guard try await positionAndValidate(actualTop, stage: "scored-start") else { return }
-        XCTAssertEqual(scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom,
-                       viewport, accuracy: 2)
-        XCTAssertEqual(-scroll.adjustedContentInset.top, actualTop, accuracy: 2)
-        XCTAssertGreaterThanOrEqual(Self.bottomOffset(of: scroll), target + 2)
+        // Common, unmeasured setup settles the mounted transcript first, then
+        // derives the real five-viewport window from stable UIKit geometry.
+        let prepared = try await prepareFixedWindow(fixture: fixture, fixtureDigest: fixtureDigest,
+                                                    mode: "fixed-window-setup")
+        let actualTop = prepared.actualTop
+        let viewport = prepared.viewport
+        let target = prepared.target
         fixture.assertValidMeasurementBoundary()
         emitRenderWorkCounter(
             phase: "after-scored-start",
@@ -266,14 +210,11 @@ final class ConversationScrollPerformanceTests: XCTestCase {
         fixture.assertValidMeasurementBoundary()
 
         let scroll = fixture.scrollView
-        let usableViewport = scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom
-        let actualTop = -scroll.adjustedContentInset.top
-        let target = actualTop + usableViewport * 5
-        XCTAssertGreaterThan(usableViewport, 100)
-        XCTAssertGreaterThanOrEqual(ConversationScrollPerformanceTests.bottomOffset(of: scroll), target + 2)
-        try await Self.settleOffset(actualTop, scrollView: scroll, window: fixture.window)
-        try await Self.settleOffset(target, scrollView: scroll, window: fixture.window)
-        try await Self.settleOffset(actualTop, scrollView: scroll, window: fixture.window)
+        let prepared = try await prepareFixedWindow(fixture: fixture, fixtureDigest: fixtureDigest,
+                                                    mode: "controlled-overlap-setup")
+        let usableViewport = prepared.viewport
+        let actualTop = prepared.actualTop
+        let target = prepared.target
 
         let initialIDs = fixture.model.messages.map(\.id)
         let warmBody = try Self.emptyUpdates(nextCursor: "overlap-warm")
@@ -513,63 +454,13 @@ final class ConversationScrollPerformanceTests: XCTestCase {
         fixture.assertValidMeasurementBoundary()
 
         let scroll = fixture.scrollView
-        try await Task.sleep(for: .milliseconds(500))
-        let actualTop = -scroll.adjustedContentInset.top
-        let viewport = scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom
-        let target = actualTop + viewport * 5
-        let hasRoom = viewport > 100 && Self.bottomOffset(of: scroll) >= target + 2
-        XCTAssertTrue(hasRoom, "Transcript must contain five usable viewport lengths below its actual top")
-        guard hasRoom else { return }
-
-        func positionAndValidate(_ requested: CGFloat, stage: String) async throws {
-            scroll.setContentOffset(CGPoint(x: 0, y: requested), animated: false)
-            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
-            var stableSamples = 0
-            var previousHeight: CGFloat?
-            var previousViewport: CGFloat?
-            var samples: [[String: Double]] = []
-            while ContinuousClock.now < deadline {
-                try await Task.sleep(for: .milliseconds(60))
-                fixture.window.layoutIfNeeded()
-                let height = scroll.contentSize.height
-                let usableViewport = scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom
-                samples.append([
-                    "observedOffsetPoints": Double(scroll.contentOffset.y),
-                    "actualTopPoints": Double(-scroll.adjustedContentInset.top),
-                    "actualBottomPoints": Double(Self.bottomOffset(of: scroll)),
-                    "viewportHeightPoints": Double(usableViewport),
-                    "contentHeightPoints": Double(height),
-                ])
-                let stable = abs(scroll.contentOffset.y - requested) <= 2
-                    && previousHeight.map { abs(height - $0) <= 2 } == true
-                    && previousViewport.map { abs(usableViewport - $0) <= 2 } == true
-                stableSamples = stable ? stableSamples + 1 : 0
-                previousHeight = height
-                previousViewport = usableViewport
-                if stableSamples >= 4 { break }
-            }
-            let valid = stableSamples >= 4
-            attachDiagnostic([
-                "mode": "quiet-profile-setup",
-                "stage": stage,
-                "requestedOffsetPoints": Double(requested),
-                "setupValid": valid,
-                "fixtureSHA256": fixtureDigest,
-                "geometrySamples": samples,
-            ], name: "quiet-profile-setup-\(stage)")
-            XCTAssertTrue(valid, "Direct UIKit \(stage) positioning failed to settle within ±2pt")
-            guard valid else { throw QuietScrollProfileError.positioningFailed(stage) }
-        }
-
         // Identical unmeasured prelude warms the same five-viewport region used
         // in the matched fixed-window run before the external trace starts.
-        try await positionAndValidate(actualTop, stage: "prelude-top")
-        try await positionAndValidate(target, stage: "prelude-target")
-        try await positionAndValidate(actualTop, stage: "prelude-scored-start")
-        XCTAssertEqual(scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom,
-                       viewport, accuracy: 2)
-        XCTAssertEqual(-scroll.adjustedContentInset.top, actualTop, accuracy: 2)
-        XCTAssertGreaterThanOrEqual(Self.bottomOffset(of: scroll), target + 2)
+        let prepared = try await prepareFixedWindow(fixture: fixture, fixtureDigest: fixtureDigest,
+                                                    mode: "quiet-profile-setup")
+        let actualTop = prepared.actualTop
+        let viewport = prepared.viewport
+        let target = prepared.target
         fixture.assertValidMeasurementBoundary()
 
         let handshake = try fixture.makeQuietScrollProfileHandshake(fixtureSHA256: fixtureDigest)
@@ -707,6 +598,300 @@ final class ConversationScrollPerformanceTests: XCTestCase {
         throw QuietScrollProfileError.controllerTimedOut
     }
 
+    private struct FixedWindowGeometry {
+        let offset: CGFloat
+        let top: CGFloat
+        let bottom: CGFloat
+        let viewport: CGFloat
+        let contentWidth: CGFloat
+        let contentHeight: CGFloat
+        let boundsWidth: CGFloat
+        let boundsHeight: CGFloat
+        let insetTop: CGFloat
+        let insetBottom: CGFloat
+        let insetLeft: CGFloat
+        let insetRight: CGFloat
+        let adjustedInsetTop: CGFloat
+        let adjustedInsetBottom: CGFloat
+        let adjustedInsetLeft: CGFloat
+        let adjustedInsetRight: CGFloat
+        let sampledAt: TimeInterval
+
+        var diagnostic: [String: Double] {
+            [
+                "observedOffsetPoints": Double(offset),
+                "actualTopPoints": Double(top),
+                "actualBottomPoints": Double(bottom),
+                "viewportHeightPoints": Double(viewport),
+                "contentWidthPoints": Double(contentWidth),
+                "contentHeightPoints": Double(contentHeight),
+                "boundsWidthPoints": Double(boundsWidth),
+                "boundsHeightPoints": Double(boundsHeight),
+                "contentInsetTopPoints": Double(insetTop),
+                "contentInsetBottomPoints": Double(insetBottom),
+                "contentInsetLeftPoints": Double(insetLeft),
+                "contentInsetRightPoints": Double(insetRight),
+                "adjustedInsetTopPoints": Double(adjustedInsetTop),
+                "adjustedInsetBottomPoints": Double(adjustedInsetBottom),
+                "adjustedInsetLeftPoints": Double(adjustedInsetLeft),
+                "adjustedInsetRightPoints": Double(adjustedInsetRight),
+                "sampledAtCACurrentMediaTime": sampledAt,
+            ]
+        }
+
+        func matchesGeometry(_ other: FixedWindowGeometry, tolerance: CGFloat = 2) -> Bool {
+            abs(top - other.top) <= tolerance
+                && abs(bottom - other.bottom) <= tolerance
+                && abs(viewport - other.viewport) <= tolerance
+                && abs(contentWidth - other.contentWidth) <= tolerance
+                && abs(contentHeight - other.contentHeight) <= tolerance
+                && abs(boundsWidth - other.boundsWidth) <= tolerance
+                && abs(boundsHeight - other.boundsHeight) <= tolerance
+                && abs(insetTop - other.insetTop) <= tolerance
+                && abs(insetBottom - other.insetBottom) <= tolerance
+                && abs(insetLeft - other.insetLeft) <= tolerance
+                && abs(insetRight - other.insetRight) <= tolerance
+                && abs(adjustedInsetTop - other.adjustedInsetTop) <= tolerance
+                && abs(adjustedInsetBottom - other.adjustedInsetBottom) <= tolerance
+                && abs(adjustedInsetLeft - other.adjustedInsetLeft) <= tolerance
+                && abs(adjustedInsetRight - other.adjustedInsetRight) <= tolerance
+        }
+    }
+
+    private struct PreparedFixedWindow {
+        let actualTop: CGFloat
+        let viewport: CGFloat
+        let target: CGFloat
+        let contentHeight: CGFloat
+    }
+
+    private enum FixedWindowPreparationError: LocalizedError {
+        case initialGeometryDidNotSettle
+        case unusableViewport
+        case insufficientScrollRoom
+        case stageDidNotSettle(String)
+        case geometryChanged(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .initialGeometryDidNotSettle: return "Initial scroll geometry did not settle within 3 seconds."
+            case .unusableViewport: return "The settled usable viewport was too small for fixed-window measurement."
+            case .insufficientScrollRoom: return "The settled transcript did not contain five usable viewport lengths."
+            case .stageDidNotSettle(let stage): return "The \(stage) offset did not settle within ±2 points."
+            case .geometryChanged(let stage): return "Scroll geometry changed from its settled anchor during \(stage)."
+            }
+        }
+    }
+
+    /// Shared bounded, unmeasured setup for every five-viewport run. It waits
+    /// for the mounted content, insets, bounds, and viewport to settle before
+    /// deriving the target, then records all three direct-UIKit positions.
+    @MainActor
+    private func prepareFixedWindow(
+        fixture: ConversationPerformanceFixture,
+        fixtureDigest: String,
+        mode: String
+    ) async throws -> PreparedFixedWindow {
+        let scroll = fixture.scrollView
+        let window = fixture.window
+        let preparationStarted = CACurrentMediaTime()
+        try await Task.sleep(for: .milliseconds(500))
+
+        func sample() -> FixedWindowGeometry {
+            window.setNeedsLayout()
+            window.layoutIfNeeded()
+            scroll.layoutIfNeeded()
+            let adjusted = scroll.adjustedContentInset
+            let viewport = scroll.bounds.height - adjusted.top - adjusted.bottom
+            return FixedWindowGeometry(
+                offset: scroll.contentOffset.y,
+                top: -adjusted.top,
+                bottom: Self.bottomOffset(of: scroll),
+                viewport: viewport,
+                contentWidth: scroll.contentSize.width,
+                contentHeight: scroll.contentSize.height,
+                boundsWidth: scroll.bounds.width,
+                boundsHeight: scroll.bounds.height,
+                insetTop: scroll.contentInset.top,
+                insetBottom: scroll.contentInset.bottom,
+                insetLeft: scroll.contentInset.left,
+                insetRight: scroll.contentInset.right,
+                adjustedInsetTop: adjusted.top,
+                adjustedInsetBottom: adjusted.bottom,
+                adjustedInsetLeft: adjusted.left,
+                adjustedInsetRight: adjusted.right,
+                sampledAt: CACurrentMediaTime()
+            )
+        }
+
+        let initialDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        var initialAnchor: FixedWindowGeometry?
+        var initialStableSamples = 0
+        var initialSamples: [[String: Double]] = []
+        var settled: FixedWindowGeometry?
+        while ContinuousClock.now < initialDeadline {
+            let current = sample()
+            initialSamples.append(current.diagnostic)
+            if let initialAnchor, current.matchesGeometry(initialAnchor) {
+                initialStableSamples += 1
+            } else {
+                initialAnchor = current
+                initialStableSamples = 1
+            }
+            if initialStableSamples >= 4 {
+                settled = current
+                break
+            }
+            try await Task.sleep(for: .milliseconds(60))
+        }
+        guard let settled else {
+            attachDiagnostic([
+                "mode": mode == "fixed-window-setup"
+                    ? "fixed-window-geometry-settle" : "\(mode)-initial-geometry",
+                "phase": "initial-geometry",
+                "setupValid": false,
+                "failure": "initial-geometry-did-not-settle",
+                "fixtureSHA256": fixtureDigest,
+                "messageCount": fixture.model.messages.count,
+                "initialMountQuiescenceSeconds": CACurrentMediaTime() - preparationStarted,
+                "stableSampleCount": initialStableSamples,
+                "geometrySamples": initialSamples,
+                "fixtureState": fixture.diagnosticState,
+            ], name: "\(mode)-initial-geometry")
+            throw FixedWindowPreparationError.initialGeometryDidNotSettle
+        }
+        let initialGeometrySettledAt = CACurrentMediaTime()
+
+        let actualTop = settled.top
+        let viewport = settled.viewport
+        guard viewport > 100 else {
+            attachDiagnostic([
+                "mode": mode == "fixed-window-setup"
+                    ? "fixed-window-geometry-settle" : "\(mode)-initial-geometry",
+                "phase": "initial-geometry", "setupValid": false,
+                "failure": "unusable-viewport", "fixtureSHA256": fixtureDigest,
+                "initialMountQuiescenceSeconds": initialGeometrySettledAt - preparationStarted,
+                "settledGeometry": settled.diagnostic, "geometrySamples": initialSamples,
+            ], name: "\(mode)-initial-geometry")
+            throw FixedWindowPreparationError.unusableViewport
+        }
+        let target = actualTop + viewport * 5
+        guard settled.bottom >= target + 2 else {
+            attachDiagnostic([
+                "mode": mode == "fixed-window-setup"
+                    ? "fixed-window-geometry-settle" : "\(mode)-initial-geometry",
+                "phase": "initial-geometry", "setupValid": false,
+                "failure": "insufficient-scroll-room", "fixtureSHA256": fixtureDigest,
+                "initialMountQuiescenceSeconds": initialGeometrySettledAt - preparationStarted,
+                "targetOffsetPoints": Double(target), "settledGeometry": settled.diagnostic,
+                "geometrySamples": initialSamples,
+            ], name: "\(mode)-initial-geometry")
+            throw FixedWindowPreparationError.insufficientScrollRoom
+        }
+        attachDiagnostic([
+            "mode": mode == "fixed-window-setup"
+                ? "fixed-window-geometry-settle" : "\(mode)-initial-geometry",
+            "phase": "initial-geometry", "setupValid": true,
+            "fixtureSHA256": fixtureDigest, "messageCount": fixture.model.messages.count,
+            "initialMountQuiescenceSeconds": initialGeometrySettledAt - preparationStarted,
+            "targetOffsetPoints": Double(target), "stableSampleCount": initialStableSamples,
+            "settledGeometry": settled.diagnostic, "geometrySamples": initialSamples,
+        ], name: "\(mode)-initial-geometry")
+
+        let stages: [(name: String, reportName: String, offset: CGFloat)]
+        switch mode {
+        case "fixed-window-setup":
+            stages = [("top", "initial-top", actualTop),
+                      ("target", "warm-target", target),
+                      ("scored-start", "scored-start", actualTop)]
+        case "quiet-profile-setup":
+            stages = [("top", "prelude-top", actualTop),
+                      ("target", "prelude-target", target),
+                      ("scored-start", "prelude-scored-start", actualTop)]
+        default:
+            stages = [("top", "top", actualTop), ("target", "target", target),
+                      ("scored-start", "scored-start", actualTop)]
+        }
+        for (stage, reportName, requested) in stages {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            var anchor: FixedWindowGeometry?
+            var stableSamples = 0
+            var samples: [[String: Double]] = []
+            var finalSample: FixedWindowGeometry?
+            var geometryStayedFixed = true
+            var offsetStayedLegal = true
+            scroll.setContentOffset(CGPoint(x: 0, y: requested), animated: false)
+            while ContinuousClock.now < deadline {
+                // Observe after a full settling interval. Never set the offset
+                // immediately before sampling, which could hide a competing
+                // layout correction between consecutive observations.
+                try await Task.sleep(for: .milliseconds(60))
+                let current = sample()
+                var diagnostic = current.diagnostic
+                diagnostic["requestedOffsetPoints"] = Double(requested)
+                let sameSettledGeometry = current.matchesGeometry(settled)
+                geometryStayedFixed = geometryStayedFixed && sameSettledGeometry
+                let offsetSettled = abs(current.offset - requested) <= 2
+                let offsetLegal = requested >= current.top - 2 && requested <= current.bottom + 2
+                offsetStayedLegal = offsetStayedLegal && offsetLegal
+                diagnostic["requestedOffsetLegal"] = offsetLegal ? 1 : 0
+                samples.append(diagnostic)
+                if !sameSettledGeometry {
+                    stableSamples = 0
+                    anchor = nil
+                } else if offsetSettled {
+                    if let anchor, current.matchesGeometry(anchor), abs(current.offset - anchor.offset) <= 2 {
+                        stableSamples += 1
+                    } else {
+                        anchor = current
+                        stableSamples = 1
+                    }
+                } else {
+                    stableSamples = 0
+                    anchor = nil
+                }
+                finalSample = current
+                if stableSamples >= 4 { break }
+                if !offsetSettled && offsetLegal {
+                    // A single bounded reassertion follows the diagnostic
+                    // sample; the next stability observation is delayed.
+                    scroll.setContentOffset(CGPoint(x: 0, y: requested), animated: false)
+                }
+            }
+            let valid = stableSamples >= 4 && geometryStayedFixed && offsetStayedLegal
+            var report: [String: Any] = [
+                "mode": mode, "phase": reportName, "stage": reportName, "setupValid": valid,
+                "failure": valid ? "" : (!geometryStayedFixed ? "settled-geometry-changed"
+                    : !offsetStayedLegal ? "requested-offset-out-of-bounds" : "offset-did-not-settle"),
+                "positioningProtocol": "direct-UIKit-top-target-top",
+                "fixtureSHA256": fixtureDigest, "messageCount": fixture.model.messages.count,
+                "requestedOffsetPoints": Double(requested),
+                "actualTopPoints": Double(actualTop), "targetOffsetPoints": Double(target),
+                "viewportHeightPoints": Double(viewport),
+                "initialMountQuiescenceSeconds": initialGeometrySettledAt - preparationStarted,
+                "settledGeometry": settled.diagnostic,
+                "finalGeometry": finalSample?.diagnostic ?? [:],
+                "stableSampleCount": stableSamples, "offsetStayedLegal": offsetStayedLegal,
+                "geometrySamples": samples,
+                "fixtureState": fixture.diagnosticState,
+            ]
+            if mode == "fixed-window-setup" {
+                report["canonicalFixtureSHA256"] = fixtureDigest
+                report["renderProbeInstrumented"] = ConversationRenderProbe.callSitesInstalled
+                report["notScoredPerformance"] = ConversationRenderProbe.callSitesInstalled
+            }
+            attachDiagnostic(report, name: "\(mode)-\(reportName)")
+            guard valid else {
+                if !geometryStayedFixed { throw FixedWindowPreparationError.geometryChanged(stage) }
+                if !offsetStayedLegal { throw FixedWindowPreparationError.insufficientScrollRoom }
+                throw FixedWindowPreparationError.stageDidNotSettle(stage)
+            }
+        }
+
+        return PreparedFixedWindow(actualTop: actualTop, viewport: viewport,
+                                   target: target, contentHeight: settled.contentHeight)
+    }
+
     @MainActor
     private func emitFixedWindowPhase(
         name: String,
@@ -826,22 +1011,6 @@ final class ConversationScrollPerformanceTests: XCTestCase {
     }
 
     @MainActor
-    private static func settleOffset(
-        _ offset: CGFloat, scrollView: UIScrollView, window: UIWindow
-    ) async throws {
-        scrollView.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
-        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
-        var stable = 0
-        while ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(50))
-            window.layoutIfNeeded()
-            stable = abs(scrollView.contentOffset.y - offset) <= 2 ? stable + 1 : 0
-            if stable >= 3 { return }
-        }
-        throw ControlledOverlapError.offsetDidNotSettle
-    }
-
-    @MainActor
     private static func waitUntil(timeout: TimeInterval, predicate: () -> Bool) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
         while ContinuousClock.now < deadline {
@@ -853,7 +1022,6 @@ final class ConversationScrollPerformanceTests: XCTestCase {
 
     private enum ControlledOverlapError: Error {
         case invalidTimestampBase
-        case offsetDidNotSettle
         case timedOutWaitingForRequest
     }
 
@@ -984,14 +1152,12 @@ private enum QuietScrollProfileError: LocalizedError {
     case controllerAborted(String)
     case invalidControllerReceipt
     case controllerTimedOut
-    case positioningFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .controllerAborted(let payload): return "Profiler aborted the quiet-scroll profile: \(payload)"
         case .invalidControllerReceipt: return "Profiler GO receipt did not match the ready profile and trace-start notification"
         case .controllerTimedOut: return "Profiler did not publish GO or abort within 30 seconds"
-        case .positioningFailed(let stage): return "Quiet profile positioning failed at \(stage)"
         }
     }
 }

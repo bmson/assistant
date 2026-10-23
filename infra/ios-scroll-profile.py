@@ -129,14 +129,75 @@ def run_bounded(command: list[str], timeout: float, **kwargs) -> subprocess.Comp
     return subprocess.run(command, timeout=timeout, **kwargs)
 
 
+def clock_snapshot() -> dict:
+    return {"wallTimeEpochSeconds": time.time(), "monotonicSeconds": time.monotonic()}
+
+
+def estimated_fixture_barrier_remaining(age_seconds: float | None) -> float | None:
+    if not isinstance(age_seconds, (int, float)) or not math.isfinite(age_seconds) or age_seconds < 0:
+        return None
+    return max(0.0, 30.0 - age_seconds)
+
+
+def process_pid_snapshot(pid: int, expected_executable: str | None = None) -> dict:
+    snapshot = {"pid": pid, "pidCheckDomain": "controller host process namespace", "observationStarted": clock_snapshot()}
+    try:
+        os.kill(pid, 0)
+        snapshot["killZero"] = {"status": "alive"}
+    except ProcessLookupError as error:
+        snapshot["killZero"] = {"status": "not-found", "errno": error.errno, "error": str(error)}
+    except PermissionError as error:
+        snapshot["killZero"] = {"status": "access-denied", "errno": error.errno, "error": str(error)}
+    except OSError as error:
+        snapshot["killZero"] = {"status": "error", "errno": error.errno, "error": str(error)}
+
+    try:
+        executable_path = process_executable_path(pid)
+        snapshot["procPidpath"] = {"status": "resolved", "path": executable_path}
+        if expected_executable is not None:
+            try:
+                matches = Path(executable_path).resolve(strict=True) == Path(expected_executable).resolve(strict=True)
+                snapshot["procPidpath"]["matchesReadyExecutable"] = matches
+            except OSError as error:
+                snapshot["procPidpath"]["matchesReadyExecutable"] = False
+                snapshot["procPidpath"]["comparisonError"] = {"errno": error.errno, "error": str(error)}
+    except OSError as error:
+        status = "not-found" if isinstance(error, ProcessLookupError) else "access-denied" if isinstance(error, PermissionError) else "error"
+        snapshot["procPidpath"] = {"status": status, "errno": error.errno, "error": str(error)}
+    except RuntimeError as error:
+        snapshot["procPidpath"] = {"status": "lookup-error", "error": str(error)}
+    snapshot["observationCompleted"] = clock_snapshot()
+    return snapshot
+
+
+def safe_process_pid_snapshot(pid: int, expected_executable: str | None = None) -> dict:
+    started = clock_snapshot()
+    try:
+        return process_pid_snapshot(pid, expected_executable)
+    except Exception as error:
+        return {
+            "pid": pid,
+            "pidCheckDomain": "controller host process namespace",
+            "observationStarted": started,
+            "observationCompleted": clock_snapshot(),
+            "snapshotError": {"type": type(error).__name__, "error": str(error)},
+        }
+
+
 def process_executable_path(pid: int) -> str:
-    proc = ctypes.CDLL("/usr/lib/libproc.dylib")
+    proc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
     proc.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
     proc.proc_pidpath.restype = ctypes.c_int
     buffer = ctypes.create_string_buffer(4096)
+    ctypes.set_errno(0)
     length = proc.proc_pidpath(pid, buffer, len(buffer))
     if length <= 0:
-        raise RuntimeError(f"Could not resolve executable path for app PID {pid}")
+        error_number = ctypes.get_errno()
+        if error_number == 3:  # ESRCH
+            raise ProcessLookupError(error_number, os.strerror(error_number), pid)
+        if error_number in (1, 13):  # EPERM / EACCES
+            raise PermissionError(error_number, os.strerror(error_number), pid)
+        raise OSError(error_number or None, f"proc_pidpath failed for app PID {pid}")
     return os.fsdecode(buffer.raw[:length])
 
 
@@ -304,6 +365,15 @@ def main() -> int:
         "simulatorUDID": args.udid,
         "requestedInstruments": ["Time Profiler", "Points of Interest"],
         "recordingLimitSeconds": 8,
+        "xcodebuildArguments": ["xcodebuild", *args.xcodebuild_args],
+        "xcodebuildPID": None,
+        "xcodebuildSpawnStarted": None,
+        "xcodebuildSpawnCompleted": None,
+        "readyObservation": None,
+        "preAttachObservation": None,
+        "xctraceArguments": None,
+        "xctraceSpawnStarted": None,
+        "xctraceSpawnCompleted": None,
         "profileAccepted": False,
         "status": "starting",
     }
@@ -325,8 +395,27 @@ def main() -> int:
     release_sent = False
     trace_started_at = None
     log_file = args.log.open("wb", buffering=0)
-    xcode_started = time.monotonic()
-    xcode_started_wall = time.time()
+    spawn_started = clock_snapshot()
+    xcode_started = spawn_started["monotonicSeconds"]
+    xcode_started_wall = spawn_started["wallTimeEpochSeconds"]
+    report["xcodebuildSpawnStarted"] = spawn_started
+    atomic_json(report_path, report)
+
+    def persist_report_best_effort(context: str) -> None:
+        try:
+            atomic_json(report_path, report)
+        except Exception as error:
+            report.setdefault("observabilityWriteErrors", []).append({
+                "context": context,
+                "type": type(error).__name__,
+                "error": str(error),
+                "observedAt": clock_snapshot(),
+            })
+            try:
+                log_file.write(f"Could not persist {context} diagnostic snapshot: {type(error).__name__}: {error}\n".encode())
+                log_file.flush()
+            except Exception:
+                pass
 
     def abort_ready(reason: str) -> None:
         if not ready or release_sent:
@@ -347,6 +436,9 @@ def main() -> int:
 
     try:
         xcode = subprocess.Popen(["xcodebuild", *args.xcodebuild_args], stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
+        report["xcodebuildPID"] = xcode.pid
+        report["xcodebuildSpawnCompleted"] = clock_snapshot()
+        atomic_json(report_path, report)
         app_container = None
         container_deadline = xcode_started + 180
         while time.monotonic() < container_deadline:
@@ -391,6 +483,31 @@ def main() -> int:
         if not ready_path or not ready:
             raise RuntimeError("Profile fixture readiness did not arrive within 180s")
 
+        ready_observed = clock_snapshot()
+        ready_stat = ready_path.stat()
+        ready_uptime_for_age = ready.get("monotonicReadyUptime")
+        host_ready_delta = (
+            ready_observed["monotonicSeconds"] - ready_uptime_for_age
+            if isinstance(ready_uptime_for_age, (int, float)) and math.isfinite(ready_uptime_for_age)
+            else None
+        )
+        report["readyObservation"] = {
+            "path": str(ready_path),
+            "fileModificationTimeEpochSeconds": ready_stat.st_mtime,
+            "fileSizeBytes": ready_stat.st_size,
+            "hostObserved": ready_observed,
+            "readyRecord": ready,
+            "hostMinusReadyMonotonicDeltaSeconds": host_ready_delta,
+            "fixtureBarrierBudgetSeconds": 30,
+            "estimatedFixtureBarrierSecondsRemaining": estimated_fixture_barrier_remaining(host_ready_delta),
+            "clockNote": "Remaining time is an estimate using the same app uptime/host monotonic comparison used by readiness validation; it is not the test's directly observed deadline.",
+        }
+        if isinstance(ready.get("pid"), int) and not isinstance(ready.get("pid"), bool) and ready["pid"] > 0:
+            report["readyObservation"]["hostPIDSnapshot"] = safe_process_pid_snapshot(
+                ready["pid"], ready.get("executablePath") if isinstance(ready.get("executablePath"), str) else None
+            )
+        persist_report_best_effort("ready observation")
+
         profile_id = ready.get("profileId", "")
         uuid.UUID(profile_id)
         expected_ready = cache / f"scroll-profile-{profile_id}.ready.json"
@@ -403,18 +520,21 @@ def main() -> int:
         ready_executable = ready.get("executablePath")
         if not isinstance(ready_executable, str) or not ready_executable:
             raise RuntimeError("Readiness did not include the hosted Assistant executable path")
-        executable_path = process_executable_path(ready["pid"])
+        ready_pid_snapshot = report["readyObservation"].get("hostPIDSnapshot", {})
+        if ready_pid_snapshot.get("killZero", {}).get("status") != "alive":
+            raise RuntimeError(f"Ready app PID was not live at host verification: {ready_pid_snapshot.get('killZero')}")
+        proc_path_result = ready_pid_snapshot.get("procPidpath", {})
+        if proc_path_result.get("status") != "resolved":
+            raise RuntimeError(f"Could not resolve ready app PID through host proc_pidpath: {proc_path_result}")
+        executable_path = proc_path_result["path"]
         executable = Path(executable_path)
         if executable.name != "Assistant" or executable.parent.name != "Assistant.app":
             raise RuntimeError(f"Ready PID is not the hosted Assistant executable: {executable_path}")
-        try:
-            if executable.resolve(strict=True) != Path(ready_executable).resolve(strict=True):
-                raise RuntimeError(
-                    "Readiness executablePath does not match the live PID executable "
-                    f"({ready_executable!r} != {executable_path!r})"
-                )
-        except OSError as error:
-            raise RuntimeError(f"Could not resolve readiness/PID executable paths: {error}") from error
+        if proc_path_result.get("matchesReadyExecutable") is not True:
+            raise RuntimeError(
+                "Readiness executablePath does not match the live PID executable "
+                f"({ready_executable!r} != {executable_path!r})"
+            )
         if ready.get("messageCount") != 500 or not re.fullmatch(r"[0-9a-fA-F]{64}", ready.get("fixtureSHA256", "")):
             raise RuntimeError("Readiness fixture identity is invalid")
         if not isinstance(ready.get("monotonicReadyUptime"), (int, float)) or not math.isfinite(ready["monotonicReadyUptime"]):
@@ -433,16 +553,102 @@ def main() -> int:
         trace_path = args.trace.with_name(f"{profile_id}-{args.trace.name}")
         trace_log_path = trace_path.with_suffix(".log")
         trace_log_file = trace_log_path.open("wb", buffering=0)
-        trace_proc = subprocess.Popen(
-            ["xcrun", "xctrace", "record", "--template", "Time Profiler",
-             "--instrument", "Points of Interest", "--device", args.udid,
-             "--attach", str(ready["pid"]), "--time-limit", "8s",
-             "--notify-tracing-started", signal_key.decode(), "--output", str(trace_path)],
-            stdout=trace_log_file, stderr=subprocess.STDOUT, start_new_session=True,
+        xctrace_command = [
+            "xcrun", "xctrace", "record", "--template", "Time Profiler",
+            "--instrument", "Points of Interest", "--device", args.udid,
+            "--attach", str(ready["pid"]), "--time-limit", "8s",
+            "--notify-tracing-started", signal_key.decode(), "--output", str(trace_path),
+        ]
+        pre_attach_started = clock_snapshot()
+        pre_attach_pid = safe_process_pid_snapshot(ready["pid"], ready_executable)
+        ready_uptime = ready.get("monotonicReadyUptime")
+        pre_attach_ready_age = (
+            pre_attach_started["monotonicSeconds"] - ready_uptime
+            if isinstance(ready_uptime, (int, float)) and math.isfinite(ready_uptime)
+            else None
         )
+        report["preAttachObservation"] = {
+            "observedAt": pre_attach_started,
+            "hostPIDSnapshot": pre_attach_pid,
+            "deviceUDID": args.udid,
+            "simulatorRuntime": args.simulator_runtime,
+            "developerDir": os.environ.get("DEVELOPER_DIR"),
+            "xcodeVersion": args.xcode_version,
+            "xcodebuildPID": xcode.pid if xcode is not None else None,
+            "xcodebuildExitStatus": xcode.poll() if xcode is not None else None,
+            "xctraceArguments": xctrace_command,
+            "readyAgeSecondsUsingComparedMonotonicClocks": pre_attach_ready_age,
+            "fixtureBarrierBudgetSeconds": 30,
+            "estimatedFixtureBarrierSecondsRemaining": estimated_fixture_barrier_remaining(pre_attach_ready_age),
+            "clockNote": "Barrier remaining time is an estimate based on the same app uptime/host monotonic comparison used by readiness validation.",
+        }
+        report["xctraceArguments"] = xctrace_command
+        report["xctraceSpawnStarted"] = clock_snapshot()
+        persist_report_best_effort("pre-attach observation")
+
+        if pre_attach_pid.get("killZero", {}).get("status") != "alive":
+            raise RuntimeError(f"Ready app PID was not live immediately before xctrace spawn: {pre_attach_pid.get('killZero')}")
+        if pre_attach_pid.get("procPidpath", {}).get("status") != "resolved":
+            raise RuntimeError(f"Could not resolve ready app PID immediately before xctrace spawn: {pre_attach_pid.get('procPidpath')}")
+        if pre_attach_pid.get("procPidpath", {}).get("matchesReadyExecutable") is not True:
+            raise RuntimeError("Ready app PID executable changed before xctrace spawn")
+
+        try:
+            trace_proc = subprocess.Popen(
+                xctrace_command,
+                stdout=trace_log_file, stderr=subprocess.STDOUT, start_new_session=True,
+            )
+        except Exception as error:
+            report["xctraceSpawnFailure"] = {
+                "observedAt": clock_snapshot(),
+                "type": type(error).__name__,
+                "error": str(error),
+                "hostPIDSnapshot": safe_process_pid_snapshot(ready["pid"], ready_executable),
+            }
+            persist_report_best_effort("xctrace spawn failure")
+            raise
+        report["xctraceChildPID"] = trace_proc.pid
+        report["xctraceSpawnCompleted"] = clock_snapshot()
+        persist_report_best_effort("xctrace spawned")
         start_deadline = time.monotonic() + 30
         while time.monotonic() < start_deadline:
             if trace_proc.poll() is not None:
+                failure_observed = clock_snapshot()
+                ready_age = (
+                    failure_observed["monotonicSeconds"] - ready_uptime
+                    if isinstance(ready_uptime, (int, float)) and math.isfinite(ready_uptime)
+                    else None
+                )
+                if trace_log_file is not None:
+                    trace_log_file.flush()
+                report["xctraceAttachFailureObservation"] = {
+                    "observedAt": failure_observed,
+                    "profileId": profile_id,
+                    "readyPath": str(ready_path),
+                    "deviceUDID": args.udid,
+                    "simulatorRuntime": args.simulator_runtime,
+                    "developerDir": os.environ.get("DEVELOPER_DIR"),
+                    "xcodeVersion": args.xcode_version,
+                    "xcodebuildArguments": ["xcodebuild", *args.xcodebuild_args],
+                    "xctraceExitStatus": trace_proc.returncode,
+                    "xctraceChildPID": trace_proc.pid,
+                    "xctraceArguments": xctrace_command,
+                    "xctraceSpawnStarted": report.get("xctraceSpawnStarted"),
+                    "xctraceSpawnCompleted": report.get("xctraceSpawnCompleted"),
+                    "secondsFromSpawnToExitObservation": (
+                        failure_observed["monotonicSeconds"] - report["xctraceSpawnStarted"]["monotonicSeconds"]
+                        if report.get("xctraceSpawnStarted") else None
+                    ),
+                    "hostPIDSnapshot": safe_process_pid_snapshot(ready["pid"], ready_executable),
+                    "xcodebuildPID": xcode.pid if xcode is not None else None,
+                    "xcodebuildExitStatus": xcode.poll() if xcode is not None else None,
+                    "readyAgeSecondsUsingComparedMonotonicClocks": ready_age,
+                    "fixtureBarrierBudgetSeconds": 30,
+                    "estimatedFixtureBarrierSecondsRemaining": estimated_fixture_barrier_remaining(ready_age),
+                    "clockNote": "Barrier remaining time is an estimate; no test-side deadline timestamp is exported.",
+                    "traceLogPath": str(trace_log_path),
+                }
+                persist_report_best_effort("xctrace attach failure")
                 raise RuntimeError(f"xctrace exited before its tracing-started notification (status {trace_proc.returncode})")
             ready_fds, _, _ = select.select([listener_fd], [], [], 0.1)
             if ready_fds:
@@ -489,12 +695,25 @@ def main() -> int:
         report["status"] = "trace-finished"
         atomic_json(report_path, report)
 
-        remaining = max(0.0, 180 - (time.monotonic() - xcode_started))
+        xcode_wait_started = clock_snapshot()
+        remaining = max(0.0, 180 - (xcode_wait_started["monotonicSeconds"] - xcode_started))
+        report["xcodebuildWaitStarted"] = xcode_wait_started
+        report["xcodebuildWaitTimeoutSeconds"] = remaining
+        persist_report_best_effort("xcodebuild wait started")
         try:
             xcode_status = xcode.wait(timeout=remaining)
         except subprocess.TimeoutExpired:
+            report["xcodebuildTimeoutObservation"] = {
+                "observedAt": clock_snapshot(),
+                "timeoutSeconds": remaining,
+                "xcodebuildPID": xcode.pid,
+                "xcodebuildExitStatusBeforeCleanup": xcode.poll(),
+                "hostPIDSnapshot": safe_process_pid_snapshot(ready["pid"], ready_executable),
+            }
+            persist_report_best_effort("xcodebuild timeout before cleanup")
             kill_xcode(xcode, log_file, "quiet-scroll XCTest exceeded its 180s bound")
             xcode_status = xcode.poll() if xcode.poll() is not None else 124
+        report["xcodebuildExitObservation"] = {"observedAt": clock_snapshot(), "exitStatus": xcode_status, "xcodebuildPID": xcode.pid}
         report["xcodebuildExitStatus"] = xcode_status
         log_file.flush()
         log_file.close()
@@ -563,6 +782,48 @@ def main() -> int:
     except Exception as error:
         report["status"] = "failed"
         report["error"] = f"{type(error).__name__}: {error}"
+        failure_observed = clock_snapshot()
+        failure_pid_snapshot = None
+        if ready and isinstance(ready.get("pid"), int) and not isinstance(ready.get("pid"), bool) and ready["pid"] > 0:
+            failure_pid_snapshot = safe_process_pid_snapshot(
+                ready["pid"], ready.get("executablePath") if isinstance(ready.get("executablePath"), str) else None
+            )
+        ready_uptime = ready.get("monotonicReadyUptime") if isinstance(ready, dict) else None
+        ready_age = (
+            failure_observed["monotonicSeconds"] - ready_uptime
+            if isinstance(ready_uptime, (int, float)) and math.isfinite(ready_uptime)
+            else None
+        )
+        report["failureObservationBeforeCleanup"] = {
+            "observedAt": failure_observed,
+            "profileId": ready.get("profileId") if isinstance(ready, dict) else None,
+            "readyPath": report.get("readyObservation", {}).get("path"),
+            "deviceUDID": args.udid,
+            "simulatorRuntime": args.simulator_runtime,
+            "developerDir": os.environ.get("DEVELOPER_DIR"),
+            "xcodeVersion": args.xcode_version,
+            "xcodebuildArguments": ["xcodebuild", *args.xcodebuild_args],
+            "xcodebuildPID": xcode.pid if xcode is not None else None,
+            "xcodebuildExitStatus": xcode.poll() if xcode is not None else None,
+            "xctraceChildPID": trace_proc.pid if trace_proc is not None else None,
+            "xctraceExitStatus": trace_proc.poll() if trace_proc is not None else None,
+            "xctraceArguments": report.get("xctraceArguments"),
+            "hostPIDSnapshot": failure_pid_snapshot,
+            "readyAgeSecondsUsingComparedMonotonicClocks": ready_age,
+            "fixtureBarrierBudgetSeconds": 30 if ready else None,
+            "estimatedFixtureBarrierSecondsRemaining": estimated_fixture_barrier_remaining(ready_age),
+            "clockNote": "Barrier remaining time is an estimate based on app ready uptime and host monotonic time; no test-side deadline timestamp is exported.",
+        }
+        if trace_log_file is not None:
+            try:
+                trace_log_file.flush()
+                report["failureObservationBeforeCleanup"]["traceLogPath"] = str(trace_log_file.name)
+                report["failureObservationBeforeCleanup"]["traceLogBytes"] = Path(trace_log_file.name).stat().st_size
+            except Exception as snapshot_error:
+                report["failureObservationBeforeCleanup"]["traceLogSnapshotError"] = {
+                    "type": type(snapshot_error).__name__, "error": str(snapshot_error)
+                }
+        persist_report_best_effort("failure observation before cleanup")
         if ready and not release_sent:
             try:
                 abort_ready(str(error))
