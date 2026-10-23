@@ -75,7 +75,7 @@ finish_runner() {
 trap finish_runner EXIT
 
 validate_matrix_warmups() {
-  python3 - "$compact_output" "${variants[@]}" <<'PY'
+  python3 - "$compact_output" "$run_mode" "${variants[@]}" <<'PY'
 import json
 import math
 import pathlib
@@ -83,7 +83,9 @@ import re
 import sys
 
 directory = pathlib.Path(sys.argv[1])
-variants = sys.argv[2:]
+run_mode = sys.argv[2]
+variants = sys.argv[3:]
+expected_probe = run_mode == "smoke"
 errors = []
 setups = {}
 
@@ -116,6 +118,10 @@ for variant in variants:
         errors.append(f"{variant}: setup record has no canonical fixture SHA-256")
     viewports = []
     for setup in stage_records:
+        if setup.get("renderProbeInstrumented") is not expected_probe:
+            errors.append(f"{variant}: {setup.get('phase')} setup probe instrumentation does not match {run_mode} mode")
+        if setup.get("notScoredPerformance") is not expected_probe:
+            errors.append(f"{variant}: {setup.get('phase')} setup score label does not match {run_mode} mode")
         if setup.get("canonicalFixtureSHA256") != digest or setup.get("messageCount") != 500:
             errors.append(f"{variant}: {setup.get('phase')} setup record fixture identity is invalid")
         if setup.get("setupValid") is not True or setup.get("positioningProtocol") != "direct-UIKit-top-target-top":
@@ -153,6 +159,10 @@ for variant in variants:
             continue
         if record.get("messageCount") != 500 or record.get("canonicalFixtureSHA256") != digest:
             errors.append(f"{variant}: {phase_name} fixture identity does not match its setup record")
+        if record.get("renderProbeInstrumented") is not expected_probe:
+            errors.append(f"{variant}: {phase_name} probe instrumentation does not match {run_mode} mode")
+        if record.get("notScoredPerformance") is not expected_probe:
+            errors.append(f"{variant}: {phase_name} score label does not match {run_mode} mode")
         phase_viewport = record.get("viewportHeightPoints")
         if not number(phase_viewport) or not number(viewport) or abs(phase_viewport - viewport) > 2:
             errors.append(f"{variant}: {phase_name} viewport differs from its setup viewport by more than 2 points")
@@ -178,6 +188,8 @@ if len(variants) > 1 and len(setups) == len(variants):
 
 report = {
     "gate": "matrix-warmup",
+    "runMode": run_mode,
+    "expectedRenderProbeInstrumented": expected_probe,
     "variants": variants,
     "status": "failed" if errors else "passed",
     "errors": errors,
@@ -192,7 +204,7 @@ if [[ "${1:-}" == "--validate-warmups" ]]; then
   shift
   variants=("$@")
   if [[ -z "${WARMUP_RECEIPTS_DIR:-}" || "${#variants[@]}" -lt 1 ]]; then
-    echo "Usage: WARMUP_RECEIPTS_DIR=/path/to/receipts bash infra/ios-scroll-performance.sh --validate-warmups baseline [candidate]" >&2
+    echo "Usage: RUN_MODE=matrix|smoke WARMUP_RECEIPTS_DIR=/path/to/receipts bash infra/ios-scroll-performance.sh --validate-warmups baseline [candidate]" >&2
     trap - EXIT
     exit 2
   fi
@@ -280,6 +292,9 @@ fi
 jq -r --arg udid "$simulator_udid" '.devices[][] | select(.udid == $udid) | "Simulator: \(.name) (\(.udid)) runtime=\(.state)"' "$simulator_json"
 echo "simulator_udid=$simulator_udid" >> "$output_root/refs.txt"
 
+fixture_test_source="infra/ios-scroll-fixtures/ConversationScrollPerformanceTests.swift"
+fixture_helper_source="infra/ios-scroll-fixtures/ConversationPerformanceFixture.swift"
+render_probe_source="infra/ios-scroll-fixtures/ConversationRenderProbe.swift"
 fixture_test="apps/ios/AssistantTests/ConversationScrollPerformanceTests.swift"
 fixture_helper="apps/ios/AssistantTests/ConversationPerformanceFixture.swift"
 project_file="apps/ios/Assistant.xcodeproj/project.pbxproj"
@@ -288,10 +303,53 @@ git -C "$repo_root" show "${harness_sha}:${project_file}" > "$candidate_project_
 
 overlay_harness() {
   local tree="$1"
-  for path in "$fixture_test" "$fixture_helper"; do
-    mkdir -p "$tree/$(dirname "$path")"
-    git -C "$repo_root" show "${harness_sha}:${path}" > "$tree/$path"
-  done
+  mkdir -p "$tree/$(dirname "$fixture_test")"
+  git -C "$repo_root" show "${harness_sha}:${fixture_test_source}" > "$tree/$fixture_test"
+  git -C "$repo_root" show "${harness_sha}:${fixture_helper_source}" > "$tree/$fixture_helper"
+  local message_bubble="$tree/apps/ios/Assistant/Components/MessageBubble.swift"
+  local render_probe="$output_root/ConversationRenderProbe.swift"
+  git -C "$tree" show "HEAD:apps/ios/Assistant/Components/MessageBubble.swift" > "$message_bubble"
+  git -C "$repo_root" show "${harness_sha}:${render_probe_source}" > "$render_probe"
+  python3 - "$message_bubble" "$render_probe" "$run_mode" <<'PY'
+from pathlib import Path
+import sys
+
+target, probe_path = map(Path, sys.argv[1:3])
+run_mode = sys.argv[3]
+text = target.read_text()
+body_anchor = "        // The inner menus below cover the prose bubbles;"
+parse_anchor = "    init?(part: MessagePart, formRendererAvailable: Bool) {\n"
+if "ConversationRenderProbe" in text:
+    raise SystemExit("MessageBubble already contains the test-only render probe")
+if text.count(body_anchor) != 1:
+    raise SystemExit(f"Expected exactly one MessageBubble body anchor, found {text.count(body_anchor)}")
+if text.count(parse_anchor) != 1:
+    raise SystemExit(f"Expected exactly one explicit card parser anchor, found {text.count(parse_anchor)}")
+
+probe_text = probe_path.read_text()
+instrumentation_flag = "    static let callSitesInstalled = false\n"
+if probe_text.count(instrumentation_flag) != 1:
+    raise SystemExit("Expected exactly one render-probe instrumentation flag")
+if run_mode == "smoke":
+    probe_text = probe_text.replace(
+        instrumentation_flag,
+        "    static let callSitesInstalled = true\n",
+        1,
+    )
+    text = text.replace(
+        body_anchor,
+        "#if DEBUG\n        let _ = ConversationRenderProbe.shared.recordBodyEvaluation()\n        #endif\n" + body_anchor,
+        1,
+    )
+    text = text.replace(
+        parse_anchor,
+        parse_anchor + "#if DEBUG\n        if part.type == \"data-card\" {\n            ConversationRenderProbe.shared.recordExplicitCardParseAttempt()\n        }\n        #endif\n",
+        1,
+    )
+probe_path.write_text(probe_text)
+text += probe_text
+target.write_text(text)
+PY
 
   # The test fixture is the only build-registration change allowed in a source
   # tree. Copy just its four PBX records; never overlay the candidate project,
@@ -336,6 +394,9 @@ PY
 
   printf 'test_sha256=%s\n' "$(shasum -a 256 "$tree/$fixture_test" | awk '{print $1}')"
   printf 'fixture_sha256=%s\n' "$(shasum -a 256 "$tree/$fixture_helper" | awk '{print $1}')"
+  printf 'messagebubble_sha256=%s\n' "$(shasum -a 256 "$message_bubble" | awk '{print $1}')"
+  printf 'overlay_script_sha256=%s\n' "$(shasum -a 256 "$repo_root/infra/ios-scroll-performance.sh" | awk '{print $1}')"
+  printf 'render_probe_sha256=%s\n' "$(shasum -a 256 "$render_probe" | awk '{print $1}')"
   printf 'project_fixture_registered=%s\n' "$(grep -q 'ConversationPerformanceFixture.swift' "$tree/$project_file" && echo yes || echo no)"
 }
 
@@ -371,6 +432,8 @@ build_state="$output_root/build-state.txt"
 expected_build_state="baseline_sha=$baseline_sha
 candidate_sha=$candidate_sha
 harness_sha=$harness_sha
+run_mode=$run_mode
+render_probe_protocol=smoke-messagebubble-body-and-explicit-card-parser-v1
 baseline_production_tree=$baseline_production_tree
 candidate_production_tree=$candidate_production_tree"
 if [[ "$phase" == "runtime" ]]; then
@@ -510,6 +573,8 @@ while True:
         "runPhase": run_phase,
         "iteration": iteration,
         "mode": record.get("mode"),
+        "renderProbeInstrumented": record.get("renderProbeInstrumented"),
+        "notScoredPerformance": record.get("notScoredPerformance"),
         "phase": record.get("phase"),
         "messageCount": record.get("messageCount"),
         "canonicalFixtureSHA256": record.get("canonicalFixtureSHA256") or record.get("fixtureSHA256"),
@@ -627,6 +692,78 @@ run_case() {
     "$label" "$count" "$phase" "$iteration"
   write_case_receipt "$label" "$case_tag" "$count" "$phase" "$iteration" "$status"
   return "$status"
+}
+
+validate_xctest_case_results() {
+  local label="$1" case_tag="$2" phase_name="$3" iteration="$4" log="$5" xcode_status="$6"
+  shift 6
+  python3 - "$label" "$case_tag" "$phase_name" "$iteration" "$log" "$xcode_status" "$compact_output/${label}-${case_tag}-${phase_name}-${iteration}-test-gate.json" "$@" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+label, case_tag, phase, iteration, log_path, xcode_status, output_path, *expected = sys.argv[1:]
+text = pathlib.Path(log_path).read_text(errors="replace") if pathlib.Path(log_path).exists() else ""
+pattern = re.compile(r"Test Case '-\[AssistantTests\.([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]' (passed|failed|skipped)(?:\s|$)")
+observed = {}
+for test_class, test_name, status in pattern.findall(text):
+    observed.setdefault(f"{test_class}/{test_name}", []).append(status)
+
+errors = []
+if xcode_status != "0":
+    errors.append(f"xcodebuild exited with status {xcode_status}")
+if not expected:
+    errors.append("no expected XCTest cases were supplied")
+for selector in expected:
+    statuses = observed.get(selector, [])
+    if statuses != ["passed"]:
+        errors.append(f"{selector}: expected exactly one completed pass, observed {statuses or 'no completion'}")
+unexpected = sorted(set(observed) - set(expected))
+if unexpected:
+    errors.append(f"unexpected completed XCTest cases: {unexpected}")
+
+passed = sum(status == "passed" for statuses in observed.values() for status in statuses)
+failed = sum(status == "failed" for statuses in observed.values() for status in statuses)
+skipped = sum(status == "skipped" for statuses in observed.values() for status in statuses)
+report = {
+    "variant": label,
+    "case": case_tag,
+    "phase": phase,
+    "iteration": iteration,
+    "xcodebuildExitStatus": int(xcode_status),
+    "expectedSelectors": expected,
+    "completedPassCount": passed,
+    "failedCount": failed,
+    "skippedCount": skipped,
+    "observed": observed,
+    "status": "passed" if not errors else "failed",
+    "errors": errors,
+}
+pathlib.Path(output_path).write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
+print(json.dumps(report, sort_keys=True))
+sys.exit(1 if errors else 0)
+PY
+}
+
+run_card_semantics_case() {
+  local label="$1"
+  shift
+  local case_tag="card-semantics"
+  local phase_name="preflight"
+  local iteration="00"
+  local result="$output_root/${label}-${case_tag}-${phase_name}-${iteration}.xcresult"
+  local log="$output_root/${label}-${case_tag}-${phase_name}-${iteration}.log"
+  local selectors=() selector status=0
+  for selector in "$@"; do selectors+=("-only-testing:AssistantTests/APIModelsTests/$selector"); done
+  set_variant_common "$label"
+  xcrun simctl terminate "$simulator_udid" com.baldvinsmarason.assistant >/dev/null 2>&1 || true
+  echo "Run: variant=$label case=$case_tag selectedTests=${#selectors[@]} device=$simulator_udid"
+  run_xcode_bounded 180 "$log" xcodebuild "${common[@]}" \
+    -resultBundlePath "$result" "${selectors[@]}" test-without-building || status=$?
+  local expected=()
+  for selector in "$@"; do expected+=("APIModelsTests/$selector"); done
+  validate_xctest_case_results "$label" "$case_tag" "$phase_name" "$iteration" "$log" "$status" "${expected[@]}"
 }
 
 run_settled_diagnostic() {
@@ -837,7 +974,7 @@ run_traced_settled_diagnostics() {
 
 
 variants=(baseline)
-if [[ "$same_production_tree" != true ]]; then variants+=(candidate); fi
+if [[ "$same_production_tree" != true || "$run_mode" == "smoke" ]]; then variants+=(candidate); fi
 
 # Compile every source variant before collecting any measurements. This keeps
 # first-build host load out of the baseline/candidate observation window.
@@ -912,10 +1049,45 @@ fi
 
 if [[ "$run_mode" == "smoke" ]]; then
   smoke_failures=0
-  echo "Running bounded bottom-follow correctness smoke plus one fixed-window warmup; no recorded performance pairs will run."
+  echo "Running explicit card-semantics preflight on baseline and candidate before bottom-follow or timing."
   for label in "${variants[@]}"; do
+    if [[ "$label" == "baseline" ]]; then
+      run_card_semantics_case "$label" \
+        testSuggestionContextOnlySuppressesItsExplicitMatchingAlert \
+        testLegacyTextCardsReformatSuppliedCalendarExamplesConservatively \
+        || smoke_failures=$((smoke_failures + 1))
+    else
+      run_card_semantics_case "$label" \
+        testSuggestionContextOnlySuppressesItsExplicitMatchingAlert \
+        testLegacyTextCardsReformatSuppliedCalendarExamplesConservatively \
+        testBubbleCardsDoNotInferLegacyAfterExplicitCardsArePairedAway \
+        testBubbleCardsInferLegacyOnlyWhenNoExplicitCardParses \
+        testBubbleCardReusePreservesPairingAndFormRendererCapability \
+        || smoke_failures=$((smoke_failures + 1))
+    fi
+  done
+  if [[ "$smoke_failures" -gt 0 ]]; then
+    echo "::error::$smoke_failures card-semantics preflight(s) failed; bottom-follow and fixed-window cases were skipped."
+    exit 1
+  fi
+
+  echo "Card semantics passed with exact 2/5 completed cases. Running bottom-follow correctness on both variants."
+  for label in "${variants[@]}"; do
+    local_status=0
     run_case "$label" bottom-follow - testChatFollowsNewMessagesAndGrowingStreamWhileAtBottom correctness-smoke 00 APIClientRetryTests \
+      || local_status=$?
+    validate_xctest_case_results "$label" bottom-follow correctness-smoke 00 \
+      "$output_root/${label}-bottom-follow-correctness-smoke-00.log" "$local_status" \
+      APIClientRetryTests/testChatFollowsNewMessagesAndGrowingStreamWhileAtBottom \
       || smoke_failures=$((smoke_failures + 1))
+  done
+  if [[ "$smoke_failures" -gt 0 ]]; then
+    echo "::error::$smoke_failures bottom-follow correctness case(s) failed; fixed-window cases were skipped."
+    exit 1
+  fi
+
+  echo "Bottom-follow correctness passed on all variants; running one fixed-window setup case per variant."
+  for label in "${variants[@]}"; do
     run_case "$label" 500rows 500 testFullChatView500RowFixedWindowBidirectional warmup 00 \
       || smoke_failures=$((smoke_failures + 1))
   done

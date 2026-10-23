@@ -19,11 +19,11 @@ on:
         type: choice
         options: ['1', '2', '3', '4', '5']
       run_mode:
-        description: Run diagnostics, bottom-follow correctness, smoke, or the untraced fixed-window paired matrix
+        description: Run bottom-follow correctness, gated smoke, or the untraced fixed-window paired matrix
         required: true
-        default: diagnostic
+        default: smoke
         type: choice
-        options: [diagnostic, correctness, smoke, matrix]
+        options: [correctness, smoke, matrix]
   push:
     branches:
       - codex/ios-chat-scroll-performance
@@ -33,6 +33,7 @@ on:
       - 'apps/ios/AssistantTests/ConversationPerformanceFixture.swift'
       - '.github/workflows/ios-scroll-performance.yml'
       - 'infra/ios-scroll-performance.sh'
+      - 'infra/ios-scroll-fixtures/**'
 
 permissions:
   contents: read
@@ -51,9 +52,9 @@ jobs:
       - name: Prepare worktrees and build benchmark tests
         env:
           BASELINE_REF: ${{ inputs.baseline_ref || '14ba202b8c9593623f3fe3c817319c15e40f6ffa' }}
-          CANDIDATE_REF: ${{ inputs.candidate_ref || github.sha }}
+          CANDIDATE_REF: ${{ inputs.candidate_ref || (github.event_name == 'push' && 'f9c3e387ba94ce4c335f2f5eba229d7da1cecedb') || github.sha }}
           REPEATS: ${{ inputs.repeats || '5' }}
-          RUN_MODE: ${{ (github.event_name == 'push' && 'correctness') || inputs.run_mode || 'diagnostic' }}
+          RUN_MODE: ${{ (github.event_name == 'push' && 'smoke') || inputs.run_mode || 'diagnostic' }}
           PHASE: build
           RUNNER_TEMP: ${{ runner.temp }}
         run: bash infra/ios-scroll-performance.sh
@@ -61,9 +62,9 @@ jobs:
       - name: Run benchmark tests
         env:
           BASELINE_REF: ${{ inputs.baseline_ref || '14ba202b8c9593623f3fe3c817319c15e40f6ffa' }}
-          CANDIDATE_REF: ${{ inputs.candidate_ref || github.sha }}
+          CANDIDATE_REF: ${{ inputs.candidate_ref || (github.event_name == 'push' && 'f9c3e387ba94ce4c335f2f5eba229d7da1cecedb') || github.sha }}
           REPEATS: ${{ inputs.repeats || '5' }}
-          RUN_MODE: ${{ (github.event_name == 'push' && 'correctness') || inputs.run_mode || 'diagnostic' }}
+          RUN_MODE: ${{ (github.event_name == 'push' && 'smoke') || inputs.run_mode || 'diagnostic' }}
           PHASE: runtime
           RUNNER_TEMP: ${{ runner.temp }}
         run: bash infra/ios-scroll-performance.sh
