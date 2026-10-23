@@ -522,7 +522,13 @@ export const MODEL_EVALUATION_CASES: readonly EvaluationCase[] = [
     critical: true,
     prompt:
       'Old owner preference: aisle. Later explicit correction: I now prefer window seats. Return only the current seat preference as one exact fact string: window. Other fields are null or false; action is answer.',
-    expected: { action: 'answer', facts: ['window'] },
+    expected: {
+      action: 'answer',
+      facts: ['window'],
+      requiresApproval: false,
+      date: null,
+      recipient: null,
+    },
   },
   {
     id: 'calendar-tool-selection',
