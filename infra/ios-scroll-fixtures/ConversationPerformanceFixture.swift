@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import XCTest
 import QuartzCore
+import Foundation
 @testable import Assistant
 
 /// A fully hosted production `ChatView` with deterministic model/network inputs.
@@ -61,9 +62,15 @@ final class ConversationPerformanceFixture {
     static func make(
         messages: [ChatMessage],
         width: CGFloat = 393,
-        height: CGFloat = 852
+        height: CGFloat = 852,
+        controlledIdleUpdates: Bool = false,
+        disabledCalendarSharingRead: Data? = nil
     ) async throws -> ConversationPerformanceFixture {
         let requestScopeID = UUID().uuidString.lowercased()
+        if controlledIdleUpdates {
+            guard let disabledCalendarSharingRead else { throw FixtureError.missingDisabledCalendarRead }
+            ControlledIdleUpdatesURLProtocol.configure(scopeID: requestScopeID, calendarBody: disabledCalendarSharingRead)
+        }
         let defaultsSuite = "assistant.conversation-performance.\(requestScopeID)"
         guard let defaults = UserDefaults(suiteName: defaultsSuite),
               let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else {
@@ -75,7 +82,9 @@ final class ConversationPerformanceFixture {
         let safeMessages = messages
 
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [StubURLProtocol.self]
+        configuration.protocolClasses = controlledIdleUpdates
+            ? [ControlledIdleUpdatesURLProtocol.self, StubURLProtocol.self]
+            : [StubURLProtocol.self]
         configuration.httpAdditionalHeaders = ["X-Assistant-Test-Case": requestScopeID]
         let session = URLSession(configuration: configuration)
         let client = APIClient(
@@ -105,6 +114,7 @@ final class ConversationPerformanceFixture {
               model.conversationId == conversationID else {
             session.invalidateAndCancel()
             StubURLProtocol.endTestCase(requestScopeID)
+            ControlledIdleUpdatesURLProtocol.clear(scopeID: requestScopeID)
             defaults.removePersistentDomain(forName: defaultsSuite)
             throw FixtureError.bootstrapDidNotConfigureChat
         }
@@ -147,6 +157,7 @@ final class ConversationPerformanceFixture {
             window.rootViewController = nil
             session.invalidateAndCancel()
             StubURLProtocol.endTestCase(requestScopeID)
+            ControlledIdleUpdatesURLProtocol.clear(scopeID: requestScopeID)
             defaults.removePersistentDomain(forName: defaultsSuite)
             throw FixtureError.chatTranscriptDidNotMount
         }
@@ -256,6 +267,7 @@ final class ConversationPerformanceFixture {
         window.rootViewController = nil
         session.invalidateAndCancel()
         StubURLProtocol.endTestCase(requestScopeID)
+        ControlledIdleUpdatesURLProtocol.clear(scopeID: requestScopeID)
         defaults.removePersistentDomain(forName: defaultsSuite)
         previousKeyWindow?.makeKey()
     }
@@ -350,6 +362,7 @@ final class ConversationPerformanceFixture {
 
     private enum FixtureError: Error {
         case missingWindowScene
+        case missingDisabledCalendarRead
         case bootstrapDidNotConfigureChat
         case chatTranscriptDidNotMount
     }
@@ -371,4 +384,168 @@ struct QuietScrollProfileHandshake {
     let releaseURL: URL
     let abortURL: URL
     let monotonicReadyUptime: TimeInterval
+}
+
+/// Opt-in status-only protocol used by the controlled idle-refresh overlap
+/// test. All other fixture routes continue through StubURLProtocol.
+final class ControlledIdleUpdatesURLProtocol: URLProtocol {
+    struct Observation: Sendable {
+        let method: String
+        let path: String
+        let query: [String: String]
+        let requestStartedUptime: TimeInterval
+        let responseDeliveredUptime: TimeInterval?
+        let responseCompletedUptime: TimeInterval?
+        let phase: String
+    }
+
+    private struct Plan {
+        let phase: String
+        let body: Data
+        let held: Bool
+    }
+
+    private static let lock = NSLock()
+    private static var scopeID: String?
+    private static var calendarBody: Data?
+    private static var plans: [String: Plan] = [:]
+    private static var observations: [Observation] = []
+    private static var held: [String: ControlledIdleUpdatesURLProtocol] = [:]
+
+    private var phase: String?
+    private var plan: Plan?
+    private var completed = false
+    private var stopped = false
+    private let stateLock = NSLock()
+
+    static func configure(scopeID: String, calendarBody: Data) {
+        lock.withLock {
+            self.scopeID = scopeID
+            self.calendarBody = calendarBody
+            plans = [:]
+            observations = []
+            held = [:]
+        }
+    }
+
+    static func prime(cursor: String, phase: String, body: Data, held: Bool) {
+        lock.withLock { plans[cursor] = Plan(phase: phase, body: body, held: held) }
+    }
+
+    static var snapshot: [Observation] { lock.withLock { observations } }
+
+    static func release(_ phase: String) {
+        let protocolInstance = lock.withLock { held.removeValue(forKey: phase) }
+        protocolInstance?.deliver()
+    }
+
+    static func clear(scopeID: String) {
+        lock.withLock {
+            guard self.scopeID == scopeID else { return }
+            self.scopeID = nil
+            calendarBody = nil
+            plans = [:]
+            held = [:]
+        }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        guard request.httpMethod == "GET",
+              request.url?.scheme == ConversationPerformanceFixture.baseURL.scheme,
+              request.url?.host == ConversationPerformanceFixture.baseURL.host,
+              ["/api/mobile/v1/chat/status", "/api/mobile/v1/calendars"].contains(request.url?.path ?? ""),
+              let value = request.value(forHTTPHeaderField: "X-Assistant-Test-Case") else { return false }
+        return lock.withLock { scopeID == value }
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let started = CACurrentMediaTime()
+        guard let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let query = Dictionary(queryItems.map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { _, last in last })
+        if url.path == "/api/mobile/v1/calendars" {
+            guard let body = Self.lock.withLock({ Self.calendarBody }) else {
+                client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+                return
+            }
+            let calendarPlan = Plan(phase: "calendar", body: body, held: false)
+            phase = calendarPlan.phase
+            plan = calendarPlan
+            Self.lock.withLock {
+                Self.observations.append(Observation(
+                    method: request.httpMethod ?? "GET", path: url.path, query: query,
+                    requestStartedUptime: started, responseDeliveredUptime: nil,
+                    responseCompletedUptime: nil, phase: calendarPlan.phase
+                ))
+            }
+            deliver()
+            return
+        }
+        let cursor = query["cursor"] ?? "<nil>"
+        let selected = Self.lock.withLock { Self.plans.removeValue(forKey: cursor) }
+        if selected == nil {
+            let unexpected = Observation(
+                method: request.httpMethod ?? "GET", path: url.path, query: query,
+                requestStartedUptime: started, responseDeliveredUptime: nil,
+                responseCompletedUptime: nil, phase: "UNPLANNED"
+            )
+            Self.lock.withLock { Self.observations.append(unexpected) }
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        guard let selected else { return }
+        phase = selected.phase
+        plan = selected
+        Self.lock.withLock {
+            Self.observations.append(Observation(
+                method: request.httpMethod ?? "GET", path: url.path, query: query,
+                requestStartedUptime: started, responseDeliveredUptime: nil,
+                responseCompletedUptime: nil, phase: selected.phase
+            ))
+            if selected.held { Self.held[selected.phase] = self }
+        }
+        if !selected.held { deliver() }
+    }
+
+    override func stopLoading() {
+        stateLock.withLock { stopped = true }
+        guard let phase else { return }
+        Self.lock.withLock { _ = Self.held.removeValue(forKey: phase) }
+    }
+
+    private func deliver() {
+        guard let plan, let phase, let url = request.url else { return }
+        let shouldDeliver = stateLock.withLock {
+            guard !completed, !stopped else { return false }
+            completed = true
+            return true
+        }
+        guard shouldDeliver else { return }
+        let currentScope = Self.lock.withLock {
+            Self.scopeID == request.value(forHTTPHeaderField: "X-Assistant-Test-Case")
+        }
+        guard currentScope else { return }
+        let delivered = CACurrentMediaTime()
+        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                                       headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: plan.body)
+        client?.urlProtocolDidFinishLoading(self)
+        let finished = CACurrentMediaTime()
+        Self.lock.withLock {
+            guard let index = Self.observations.lastIndex(where: { $0.phase == phase }) else { return }
+            let old = Self.observations[index]
+            Self.observations[index] = Observation(
+                method: old.method, path: old.path, query: old.query,
+                requestStartedUptime: old.requestStartedUptime,
+                responseDeliveredUptime: delivered, responseCompletedUptime: finished,
+                phase: old.phase
+            )
+        }
+    }
 }

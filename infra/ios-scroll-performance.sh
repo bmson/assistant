@@ -15,8 +15,8 @@ case "$repeats" in
 esac
 
 case "$run_mode" in
-  diagnostic|matrix|smoke|correctness|profile) ;;
-  *) echo "RUN_MODE must be diagnostic, correctness, smoke, matrix, or profile" >&2; exit 2 ;;
+  diagnostic|matrix|smoke|correctness|profile|overlap) ;;
+  *) echo "RUN_MODE must be diagnostic, correctness, smoke, matrix, profile, or overlap" >&2; exit 2 ;;
 esac
 
 case "$phase" in
@@ -234,6 +234,12 @@ if [[ "$run_mode" == "profile" && "$baseline_sha" != "$candidate_sha" ]]; then
   echo "::error::Profile mode requires identical baseline and candidate commits; this is one quiet-scroll trace, not a comparison."
   exit 2
 fi
+if [[ "$run_mode" == "overlap" \
+    && ("$baseline_sha" != "5c55c0d138abaf84f5b8baf11f1ba3eee38cf205" \
+      || "$candidate_sha" != "6e74006c53c0524a33509a829ef0b04d3d330333") ]]; then
+  echo "::error::Overlap mode is pinned to baseline 5c55c0d138abaf84f5b8baf11f1ba3eee38cf205 and candidate 6e74006c53c0524a33509a829ef0b04d3d330333."
+  exit 2
+fi
 baseline_production_tree="$(git -C "$repo_root" rev-parse "${baseline_sha}:apps/ios/Assistant")"
 candidate_production_tree="$(git -C "$repo_root" rev-parse "${candidate_sha}:apps/ios/Assistant")"
 same_production_tree=false
@@ -430,7 +436,7 @@ add_worktree() {
 }
 
 add_worktree baseline "$baseline_sha"
-if [[ "$same_production_tree" != true ]]; then
+if [[ "$same_production_tree" != true || "$run_mode" == "overlap" ]]; then
   add_worktree candidate "$candidate_sha"
 else
   echo "Skipping a redundant candidate build: apps/ios/Assistant production trees match."
@@ -700,6 +706,251 @@ run_case() {
     "$label" "$count" "$phase" "$iteration"
   write_case_receipt "$label" "$case_tag" "$count" "$phase" "$iteration" "$status"
   return "$status"
+}
+
+validate_controlled_overlap_receipt() {
+  local label="$1"
+  local log="$output_root/${label}-idle-refresh-overlap-controlled-00.log"
+  local receipt="$compact_output/${label}-idle-refresh-overlap-controlled-00-overlap-receipt.json"
+  local gate="$compact_output/${label}-idle-refresh-overlap-controlled-00-overlap-gate.json"
+  python3 - "$label" "$log" "$receipt" "$gate" <<'PY'
+import json
+import math
+import pathlib
+import re
+import sys
+
+label, log_path, receipt_path, gate_path = sys.argv[1:]
+text = pathlib.Path(log_path).read_text(errors="replace") if pathlib.Path(log_path).exists() else ""
+marker = "CONTROLLED_IDLE_REFRESH_OVERLAP "
+errors = []
+records = []
+cursor = 0
+decoder = json.JSONDecoder()
+while True:
+    at = text.find(marker, cursor)
+    if at < 0:
+        break
+    start = at + len(marker)
+    try:
+        record, end = decoder.raw_decode(text, start)
+    except json.JSONDecodeError as error:
+        errors.append(f"marker JSON is invalid: {error}")
+        cursor = start + 1
+        continue
+    cursor = end
+    if isinstance(record, dict):
+        records.append(record)
+
+if len(records) != 1:
+    errors.append(f"expected exactly one overlap receipt, found {len(records)}")
+record = records[0] if len(records) == 1 else {}
+pathlib.Path(receipt_path).write_text(json.dumps(record, sort_keys=True, indent=2) + "\n")
+
+def finite(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+def require(condition, message):
+    if not condition:
+        errors.append(message)
+
+require(record.get("schema_version") == 1, "schema_version must be 1")
+require(record.get("mode") == "controlled-idle-refresh-overlap", "mode is not the controlled overlap fixture")
+require(isinstance(record.get("test_case_id"), str) and re.fullmatch(r"[0-9a-fA-F-]{36}", record.get("test_case_id", "")), "test_case_id must be the fixture request-scope UUID")
+for key in ("fixture_sha256", "timestamped_fixture_sha256"):
+    require(isinstance(record.get(key), str) and re.fullmatch(r"[0-9a-fA-F]{64}", record.get(key, "")), f"{key} is not a SHA-256 digest")
+require(record.get("timestamped_fixture_sha256") == record.get("fixture_sha256"), "timestamped dataset digest does not match its canonical fixture digest")
+require(record.get("message_count") == 500, "message_count must be 500")
+require(record.get("durable_timestamp_count") == 500, "all 500 durable fixture rows must carry parseable timestamps")
+require(isinstance(record.get("owner_id"), str) and bool(record.get("owner_id")), "owner_id is missing")
+conversation_id = record.get("conversation_id")
+require(isinstance(conversation_id, str) and bool(conversation_id), "conversation_id is missing")
+require(record.get("scene_active") is True, "scene was not active for the measured refresh")
+require(record.get("scene_active_during_measured") is True, "measured refresh was not performed while the scene was active")
+require(finite(record.get("active_duration_seconds")) and record.get("active_duration_seconds", 99) < 12, "controlled active phase exceeded the idle-poll boundary")
+require(record.get("calendar_sync_get_count") == 1, "expected exactly one calendar sync GET")
+require(record.get("status_request_count") == 3, "expected exactly three status requests")
+require(record.get("warm_result_exactly_false") is True, "warm refresh result must be the Boolean false")
+require(record.get("measured_result_exactly_false") is True, "measured refresh result must be the Boolean false")
+require(record.get("verification_result_is_nil") is True, "post-window verification result must be nil")
+require(record.get("accepted_in_window_count") == 1, "expected exactly one accepted refresh in the measured window")
+require(record.get("expected_refresh_ids") == [], "fixture unexpectedly included pending decision refresh IDs")
+require(record.get("unexpected_requests") == [], "unexpected protocol requests were observed")
+require(record.get("driver") == "CADisplayLink setContentOffset", "unexpected scroll driver")
+for key in ("physical_touch_profile", "production_cadence", "profiler"):
+    require(record.get(key) is False, f"{key} must be false for this controlled, unprofiled test")
+
+before_ids, after_ids = record.get("before_message_ids"), record.get("after_message_ids")
+require(isinstance(before_ids, list) and len(before_ids) == 500, "before_message_ids must contain all 500 ordered rows")
+require(isinstance(after_ids, list) and len(after_ids) == 500, "after_message_ids must contain all 500 ordered rows")
+require(before_ids == after_ids, "ordered message IDs changed during idle refresh")
+require(record.get("before_message_count") == record.get("after_message_count") == 500, "message count changed during idle refresh")
+
+routes = record.get("status_routes")
+require(isinstance(routes, list) and len(routes) == 3, "status_routes must contain all three URLProtocol observations")
+if isinstance(routes, list) and len(routes) == 3:
+    cursors = ("performance-start", "overlap-warm", "overlap-measured")
+    phases = ("warm", "measured", "verification")
+    shared_refresh_ids = None
+    for index, route in enumerate(routes):
+        require(isinstance(route, dict), f"status_routes[{index}] is not an object")
+        if not isinstance(route, dict):
+            continue
+        require(route.get("method") == "GET", f"status_routes[{index}] method must be GET")
+        require(route.get("path") == "/api/mobile/v1/chat/status", f"status_routes[{index}] path is unexpected")
+        require(route.get("conversation_id") == conversation_id, f"status_routes[{index}] conversation does not match")
+        require(route.get("cursor") == cursors[index], f"status_routes[{index}] cursor is unexpected")
+        require(route.get("phase") == phases[index], f"status_routes[{index}] phase is unexpected")
+        require(route.get("wait_ms") == 20000, f"status_routes[{index}] wait query must be 20000ms")
+        require("task_id" in route and route.get("task_id") is None, f"status_routes[{index}] must explicitly confirm taskId was absent")
+        refresh_ids = route.get("refresh_ids")
+        require(refresh_ids == [], f"status_routes[{index}] unexpectedly included refresh IDs")
+        if isinstance(refresh_ids, list):
+            require(all(isinstance(value, str) and value for value in refresh_ids), f"status_routes[{index}] refresh IDs are invalid")
+            if shared_refresh_ids is None:
+                shared_refresh_ids = refresh_ids
+            else:
+                require(refresh_ids == shared_refresh_ids, "status request refresh ID queries differ")
+        query = route.get("query")
+        expected_query = {"conversationId": conversation_id, "cursor": cursors[index], "wait": "20000"}
+        require(query == expected_query, f"status_routes[{index}] query must contain only conversationId, cursor, and wait")
+        times = [route.get("request_started_uptime"), route.get("response_delivered_uptime"), route.get("response_completed_uptime")]
+        require(all(finite(value) for value in times), f"status_routes[{index}] timestamps are incomplete")
+        if all(finite(value) for value in times):
+            require(times[0] <= times[1] <= times[2], f"status_routes[{index}] timestamps are out of order")
+
+warm_cursor = record.get("warm_cursor")
+measured_cursor = record.get("measured_cursor")
+next_cursor = record.get("measured_response_next_cursor")
+verification_cursor = record.get("verification_request_cursor")
+require(warm_cursor == "performance-start", "warm request did not use the initial cursor")
+require(measured_cursor == "overlap-warm", "measured request did not use the warmed cursor")
+require(next_cursor == "overlap-measured", "measured response did not advance the cursor")
+require(verification_cursor == next_cursor, "verification request did not use the measured next cursor")
+
+require(record.get("clock") == "CACurrentMediaTime", "receipt timestamps must use CACurrentMediaTime")
+recorder_request = record.get("recorder_request_started_uptime")
+recorder_invoked = record.get("recorder_invoked_uptime")
+recorder_returned = record.get("recorder_returned_uptime")
+callback_first = record.get("callback_first_uptime")
+callback_last = record.get("callback_last_uptime")
+first_callback_delay = record.get("requested_to_first_callback_seconds")
+recorder_elapsed = record.get("recorder_elapsed_seconds")
+invoked, returned = record.get("refresh_invoked_uptime"), record.get("refresh_returned_uptime")
+require(all(finite(value) for value in (recorder_request, recorder_invoked, recorder_returned, callback_first, callback_last)), "recorder/callback timestamps are incomplete")
+if all(finite(value) for value in (recorder_request, recorder_invoked, recorder_returned, callback_first, callback_last)):
+    require(recorder_request <= recorder_invoked < callback_first <= callback_last <= recorder_returned, "recorder/callback timestamps are out of order")
+require(finite(first_callback_delay) and first_callback_delay >= 0, "requested-to-first-callback delay is invalid")
+require(finite(recorder_elapsed) and recorder_elapsed > 0, "recorder elapsed duration is invalid")
+if finite(first_callback_delay) and finite(recorder_invoked) and finite(callback_first):
+    require(abs((recorder_invoked + first_callback_delay) - callback_first) <= 0.02, "first callback time does not match the recorded first-callback delay")
+if finite(recorder_elapsed) and finite(callback_first) and finite(callback_last):
+    require(abs((callback_first + recorder_elapsed) - callback_last) <= 0.02, "last callback time does not match the recorder elapsed duration")
+require(finite(invoked) and finite(returned) and returned >= invoked, "refresh invocation/return interval is invalid")
+if isinstance(routes, list) and len(routes) == 3 and isinstance(routes[1], dict) and finite(callback_first) and finite(callback_last):
+    measured = routes[1]
+    request_start, delivered, completed = (measured.get("request_started_uptime"), measured.get("response_delivered_uptime"), measured.get("response_completed_uptime"))
+    require(all(finite(value) for value in (invoked, returned, request_start, delivered, completed)), "measured timing fields are incomplete")
+    if all(finite(value) for value in (invoked, returned, request_start, delivered, completed)):
+        require(callback_first <= invoked <= request_start <= delivered <= completed <= returned <= callback_last, "measured refresh did not complete inside the actual callback slice")
+        overlap_ms = (min(callback_last, completed) - max(callback_first, request_start)) * 1000
+        reported_overlap = record.get("measured_response_overlap_ms")
+        require(finite(reported_overlap) and overlap_ms > 0 and abs(reported_overlap - overlap_ms) <= 5, "reported response overlap does not match measured timestamps")
+if isinstance(routes, list) and len(routes) == 3 and isinstance(routes[0], dict) and finite(recorder_request):
+    require(routes[0].get("response_completed_uptime", recorder_request) < recorder_request, "warm status refresh did not complete before the measured window")
+if isinstance(routes, list) and len(routes) == 3 and isinstance(routes[2], dict) and finite(recorder_returned):
+    require(routes[2].get("request_started_uptime", 0) >= recorder_returned, "verification request did not start after the recorder returned")
+
+calendar_routes = record.get("calendar_routes")
+require(isinstance(calendar_routes, list) and len(calendar_routes) == 1, "calendar_routes must contain the single active-scene calendar read")
+if isinstance(calendar_routes, list) and len(calendar_routes) == 1 and isinstance(calendar_routes[0], dict):
+    calendar_route = calendar_routes[0]
+    require(calendar_route.get("method") == "GET", "calendar sync must be a GET")
+    require(calendar_route.get("path") == "/api/mobile/v1/calendars", "calendar sync path is unexpected")
+    require(calendar_route.get("query") == {}, "calendar sync must use the expected no-query request")
+    calendar_times = [calendar_route.get("request_started_uptime"), calendar_route.get("response_delivered_uptime"), calendar_route.get("response_completed_uptime")]
+    require(all(finite(value) for value in calendar_times), "calendar sync timestamps are incomplete")
+    if all(finite(value) for value in calendar_times) and finite(recorder_request):
+        require(calendar_times[0] <= calendar_times[1] <= calendar_times[2] < recorder_request, "calendar sync did not complete before the measured refresh window")
+        if isinstance(routes, list) and len(routes) == 3 and isinstance(routes[0], dict):
+            require(calendar_times[2] < routes[0].get("request_started_uptime", 0), "calendar sync did not complete before the warm status request")
+        if finite(callback_first):
+            require(calendar_times[2] < callback_first, "calendar sync did not complete before the measured scroll callback window")
+
+phase = record.get("recorder_phase_summary")
+require(isinstance(phase, dict), "recorder_phase_summary is missing")
+if isinstance(phase, dict):
+    require(phase.get("timedOut") is False, "recorder phase timed out")
+    require(phase.get("callbackCount", 0) >= 30, "phase summary has fewer than 30 callbacks")
+    require(finite(phase.get("durationSeconds")) and finite(recorder_elapsed) and abs(phase["durationSeconds"] - recorder_elapsed) <= 0.001, "phase summary duration differs from the recorder result")
+    intervals = phase.get("callbackIntervalMilliseconds")
+    require(isinstance(intervals, dict) and all(finite(intervals.get(key)) for key in ("p50", "p95", "max")), "phase callback interval summary is incomplete")
+    samples = phase.get("offsetSamples")
+    require(isinstance(samples, list) and len(samples) >= 30, "phase offset samples are missing")
+    if isinstance(samples, list) and samples:
+        require(all(isinstance(sample, dict) and all(finite(sample.get(key)) for key in ("timeSeconds", "requestedYPoints", "observedYPoints", "actualTopPoints", "actualBottomPoints", "viewportHeightPoints")) for sample in samples), "phase offset samples contain invalid geometry")
+        valid_samples = all(isinstance(sample, dict) and all(finite(sample.get(key)) for key in ("timeSeconds", "actualTopPoints", "actualBottomPoints", "observedYPoints", "viewportHeightPoints")) for sample in samples)
+        if valid_samples:
+            require(finite(record.get("viewport_height_points")) and all(abs(sample["viewportHeightPoints"] - record["viewport_height_points"]) <= 2 for sample in samples), "phase viewport changed during the measured scroll")
+            require(all(sample["actualTopPoints"] - 2 <= sample["observedYPoints"] <= sample["actualBottomPoints"] + 2 for sample in samples), "phase observed offset left the legal content bounds")
+            require(all(samples[index]["timeSeconds"] < samples[index + 1]["timeSeconds"] for index in range(len(samples) - 1)), "phase callback sample times are not strictly increasing")
+            if finite(phase.get("durationSeconds")):
+                require(abs(samples[-1]["timeSeconds"] - phase["durationSeconds"]) <= 0.05, "last phase sample does not match the recorder duration")
+
+require(finite(record.get("viewport_height_points")) and record.get("viewport_height_points", 0) > 100, "viewport height is invalid")
+for key in ("actual_top_points", "target_points", "measured_from_points", "measured_to_points"):
+    require(finite(record.get(key)), f"{key} is missing or invalid")
+if all(finite(record.get(key)) for key in ("actual_top_points", "target_points", "measured_from_points", "measured_to_points", "viewport_height_points")):
+    require(abs(record["measured_from_points"] - record["actual_top_points"]) <= 2, "measured scroll did not begin at the actual top offset")
+    require(abs(record["measured_to_points"] - record["target_points"]) <= 2, "measured scroll did not finish at the requested target")
+    require(abs((record["target_points"] - record["actual_top_points"]) - 5 * record["viewport_height_points"]) <= 2, "target was not five usable viewports from the actual top")
+require(record.get("recorder_sample_count", 0) >= 30, "recorder captured fewer than 30 samples")
+require(record.get("scroll_result_valid") is True, "scroll recorder validity check failed")
+
+report = {"variant": label, "receiptPath": receipt_path, "status": "passed" if not errors else "failed", "errors": errors}
+pathlib.Path(gate_path).write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
+print(json.dumps(report, sort_keys=True))
+sys.exit(1 if errors else 0)
+PY
+}
+
+validate_controlled_overlap_pair() {
+  local baseline="$compact_output/baseline-idle-refresh-overlap-controlled-00-overlap-receipt.json"
+  local candidate="$compact_output/candidate-idle-refresh-overlap-controlled-00-overlap-receipt.json"
+  local gate="$compact_output/idle-refresh-overlap-pair-gate.json"
+  python3 - "$baseline" "$candidate" "$gate" <<'PY'
+import json
+import pathlib
+import sys
+
+baseline_path, candidate_path, gate_path = map(pathlib.Path, sys.argv[1:])
+errors = []
+records = []
+for path in (baseline_path, candidate_path):
+    try:
+        records.append(json.loads(path.read_text()))
+    except Exception as error:
+        errors.append(f"{path.name}: cannot read receipt ({error})")
+if len(records) == 2:
+    for key in (
+        "fixture_sha256", "timestamped_fixture_sha256", "message_count", "durable_timestamp_count",
+        "before_message_ids", "after_message_ids", "owner_id", "conversation_id",
+    ):
+        if records[0].get(key) != records[1].get(key):
+            errors.append(f"baseline/candidate {key} differs")
+    for index in range(3):
+        baseline_routes = records[0].get("status_routes") or []
+        candidate_routes = records[1].get("status_routes") or []
+        if len(baseline_routes) != 3 or len(candidate_routes) != 3:
+            errors.append("baseline/candidate status route evidence is incomplete")
+            break
+        if baseline_routes[index].get("refresh_ids") != candidate_routes[index].get("refresh_ids"):
+            errors.append(f"baseline/candidate status route {index} refresh IDs differ")
+report = {"status": "passed" if not errors else "failed", "errors": errors}
+gate_path.write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
+print(json.dumps(report, sort_keys=True))
+sys.exit(1 if errors else 0)
+PY
 }
 
 validate_xctest_case_results() {
@@ -1031,7 +1282,7 @@ run_traced_settled_diagnostics() {
 
 
 variants=(baseline)
-if [[ "$same_production_tree" != true || "$run_mode" == "smoke" ]]; then variants+=(candidate); fi
+if [[ "$same_production_tree" != true || "$run_mode" == "smoke" || "$run_mode" == "overlap" ]]; then variants+=(candidate); fi
 
 # Compile every source variant before collecting any measurements. This keeps
 # first-build host load out of the baseline/candidate observation window.
@@ -1060,6 +1311,30 @@ if [[ "$run_mode" == "profile" ]]; then
     echo "::error::Quiet-scroll profile capture failed or could not prove its target/phase evidence. Raw traces and receipts are preserved."
     exit 1
   fi
+fi
+
+if [[ "$run_mode" == "overlap" ]]; then
+  overlap_failures=0
+  overlap_method=testFullChatView500RowControlledIdleRefreshOverlap
+  echo "Running exactly one controlled idle-refresh overlap case per variant; no profiler, render probe, or timing matrix will run."
+  for label in "${variants[@]}"; do
+    local_status=0
+    run_case "$label" idle-refresh-overlap 500 "$overlap_method" controlled 00 \
+      || local_status=$?
+    validate_xctest_case_results "$label" idle-refresh-overlap controlled 00 \
+      "$output_root/${label}-idle-refresh-overlap-controlled-00.log" "$local_status" \
+      "ConversationScrollPerformanceTests/$overlap_method" \
+      || overlap_failures=$((overlap_failures + 1))
+    validate_controlled_overlap_receipt "$label" \
+      || overlap_failures=$((overlap_failures + 1))
+  done
+  validate_controlled_overlap_pair || overlap_failures=$((overlap_failures + 1))
+  if [[ "$overlap_failures" -gt 0 ]]; then
+    echo "::error::$overlap_failures controlled overlap case(s) or receipts failed validation."
+    exit 1
+  fi
+  echo "Controlled idle-refresh overlap case passed for both variants."
+  exit 0
 fi
 
 if [[ "$run_mode" == "matrix" ]]; then

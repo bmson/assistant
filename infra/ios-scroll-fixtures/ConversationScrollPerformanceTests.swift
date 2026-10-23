@@ -230,6 +230,275 @@ final class ConversationScrollPerformanceTests: XCTestCase {
     }
 
     @MainActor
+    func testFullChatView500RowControlledIdleRefreshOverlap() async throws {
+        let baseMessages = Self.fixtureMessages(count: 500, includeCalendarAgenda: true)
+        let timestampedMessages = try Self.timestampedFixtureMessages(baseMessages)
+        let fixtureDigest = try Self.fixtureDigest(timestampedMessages)
+        for (original, dated) in zip(baseMessages, timestampedMessages) {
+            XCTAssertEqual(original.id, dated.id)
+            XCTAssertEqual(original.role, dated.role)
+            XCTAssertEqual(original.parts, dated.parts)
+            var originalMetadata = original.metadata ?? [:]
+            var datedMetadata = dated.metadata ?? [:]
+            originalMetadata.removeValue(forKey: "createdAt")
+            datedMetadata.removeValue(forKey: "createdAt")
+            XCTAssertEqual(originalMetadata, datedMetadata)
+        }
+        let parsedDates = timestampedMessages.compactMap(\.createdAt)
+        XCTAssertEqual(parsedDates.count, timestampedMessages.count)
+        XCTAssertTrue(zip(parsedDates, parsedDates.dropFirst()).allSatisfy { pair in pair.0 <= pair.1 })
+        let calendarResponse = try JSONEncoder().encode(PhoneCalendarSharingRead(
+            ownerId: ConversationPerformanceFixture.ownerID,
+            ownerEmail: "owner@example.invalid", timeZone: "UTC", state: nil
+        ))
+        let durableTimestampCount = timestampedMessages.filter(\.isDurableLogRow).filter { $0.createdAt != nil }.count
+        XCTAssertEqual(durableTimestampCount, timestampedMessages.filter(\.isDurableLogRow).count)
+        XCTAssertEqual(durableTimestampCount, 500, "Every fixture row must be durable and timestamped")
+        XCTAssertTrue(timestampedMessages.filter(\.isDurableLogRow).allSatisfy { $0.createdAt != nil })
+
+        let fixture = try await ConversationPerformanceFixture.make(
+            messages: timestampedMessages, controlledIdleUpdates: true,
+            disabledCalendarSharingRead: calendarResponse
+        )
+        addTeardownBlock { await fixture.tearDown() }
+        XCTAssertEqual(fixture.model.messages.count, 500)
+        XCTAssertFalse(UIAccessibility.isReduceMotionEnabled)
+        fixture.assertValidMeasurementBoundary()
+
+        let scroll = fixture.scrollView
+        let usableViewport = scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom
+        let actualTop = -scroll.adjustedContentInset.top
+        let target = actualTop + usableViewport * 5
+        XCTAssertGreaterThan(usableViewport, 100)
+        XCTAssertGreaterThanOrEqual(ConversationScrollPerformanceTests.bottomOffset(of: scroll), target + 2)
+        try await Self.settleOffset(actualTop, scrollView: scroll, window: fixture.window)
+        try await Self.settleOffset(target, scrollView: scroll, window: fixture.window)
+        try await Self.settleOffset(actualTop, scrollView: scroll, window: fixture.window)
+
+        let initialIDs = fixture.model.messages.map(\.id)
+        let warmBody = try Self.emptyUpdates(nextCursor: "overlap-warm")
+        let measuredBody = try Self.emptyUpdates(nextCursor: "overlap-measured")
+        let verificationBody = try Self.emptyUpdates(nextCursor: "overlap-verified")
+        ControlledIdleUpdatesURLProtocol.prime(cursor: "performance-start", phase: "warm", body: warmBody, held: false)
+        ControlledIdleUpdatesURLProtocol.prime(cursor: "overlap-warm", phase: "measured", body: measuredBody, held: true)
+        ControlledIdleUpdatesURLProtocol.prime(cursor: "overlap-measured", phase: "verification", body: verificationBody, held: true)
+
+        let activeStarted = CACurrentMediaTime()
+        fixture.model.scenePhaseDidChange(.active)
+        try await Self.waitUntil(timeout: 2.0) {
+            let calendar = ControlledIdleUpdatesURLProtocol.snapshot.first { $0.phase == "calendar" }
+            return calendar?.responseCompletedUptime != nil
+                && !fixture.model.phoneCalendarSharing.isWorking
+                && fixture.model.phoneCalendarSharing.isOwnerVerified
+                && fixture.model.phoneCalendarSharing.errorMessage == nil
+        }
+        let calendarRead = try XCTUnwrap(ControlledIdleUpdatesURLProtocol.snapshot.first { $0.phase == "calendar" })
+        let calendarReadCount = ControlledIdleUpdatesURLProtocol.snapshot.filter { $0.path == "/api/mobile/v1/calendars" }.count
+        XCTAssertEqual(calendarReadCount, 1, "Active scene must settle one typed disabled-sharing read")
+        XCTAssertEqual(calendarRead.method, "GET")
+        XCTAssertEqual(calendarRead.path, "/api/mobile/v1/calendars")
+        XCTAssertNotNil(calendarRead.responseCompletedUptime, "Typed calendar read must complete before warm refresh")
+        XCTAssertEqual(fixture.model.phoneCalendarSharing.serverState, nil, "Fixture calendar response represents disabled sharing")
+        XCTAssertFalse(fixture.model.phoneCalendarSharing.isSharingEnabled)
+        XCTAssertTrue(fixture.model.phoneCalendarSharing.isOwnerVerified)
+        XCTAssertNil(fixture.model.phoneCalendarSharing.errorMessage)
+
+        let warmChanged = await fixture.model.refreshIdleConversation()
+        XCTAssertEqual(warmChanged, false, "The accepted empty warm response must return false, not nil")
+        let warmObservation = try XCTUnwrap(ControlledIdleUpdatesURLProtocol.snapshot.first { $0.phase == "warm" })
+        XCTAssertEqual(warmObservation.query["cursor"], "performance-start")
+        XCTAssertEqual(warmObservation.query["wait"], "20000")
+        XCTAssertEqual(warmObservation.query["conversationId"], ConversationPerformanceFixture.conversationID)
+        XCTAssertEqual(warmObservation.method, "GET")
+        XCTAssertEqual(warmObservation.path, "/api/mobile/v1/chat/status")
+        XCTAssertNil(warmObservation.query["taskId"])
+        XCTAssertNil(warmObservation.query["refresh"], "Fixture has no pending decision refresh IDs")
+
+        let recorder = FullChatViewScrollRecorder(scrollView: scroll, duration: 3.5)
+        let recorderRequestStarted = CACurrentMediaTime()
+        let recorderTask = Task {
+            let invoked = CACurrentMediaTime()
+            let result = await recorder.run(from: actualTop, to: target)
+            return (invoked, result, CACurrentMediaTime())
+        }
+        try await Task.sleep(for: .milliseconds(500))
+        let measuredTask = Task {
+            let invoked = CACurrentMediaTime()
+            let changed = await fixture.model.refreshIdleConversation()
+            return (invoked, changed, CACurrentMediaTime())
+        }
+        try await Self.waitUntil(timeout: 2.0) {
+            ControlledIdleUpdatesURLProtocol.snapshot.contains { $0.phase == "measured" }
+        }
+        try await Task.sleep(for: .milliseconds(1_500))
+        ControlledIdleUpdatesURLProtocol.release("measured")
+        let (recorderInvoked, scrollResult, recorderReturned) = await recorderTask.value
+        let recorderFirstCallback = try XCTUnwrap(scrollResult.firstCallbackUptime)
+        let recorderLastCallback = try XCTUnwrap(scrollResult.lastCallbackUptime)
+        let (refreshInvoked, measuredChanged, refreshReturned) = await measuredTask.value
+        let measuredObservation = try XCTUnwrap(ControlledIdleUpdatesURLProtocol.snapshot.first { $0.phase == "measured" })
+        let idsAfterMeasured = fixture.model.messages.map(\.id)
+
+        XCTAssertEqual(measuredChanged, false, "The accepted empty measured response must return false, not nil")
+        XCTAssertEqual(idsAfterMeasured, initialIDs, "Cursor-only refresh must preserve ordered message IDs")
+        XCTAssertEqual(fixture.model.messages.count, initialIDs.count)
+        XCTAssertEqual(fixture.model.bootstrap?.identity.id, ConversationPerformanceFixture.ownerID)
+        XCTAssertEqual(fixture.model.conversationId, ConversationPerformanceFixture.conversationID)
+        XCTAssertFalse(fixture.model.isSending)
+        XCTAssertEqual(measuredObservation.query["cursor"], "overlap-warm")
+        XCTAssertEqual(measuredObservation.query["wait"], "20000")
+        XCTAssertEqual(measuredObservation.query["conversationId"], ConversationPerformanceFixture.conversationID)
+        XCTAssertEqual(measuredObservation.method, "GET")
+        XCTAssertEqual(measuredObservation.path, "/api/mobile/v1/chat/status")
+        XCTAssertNil(measuredObservation.query["taskId"])
+        XCTAssertNil(measuredObservation.query["refresh"], "Fixture has no pending decision refresh IDs")
+        XCTAssertGreaterThanOrEqual(scrollResult.intervals.count, 30)
+        XCTAssertFalse(scrollResult.timedOut)
+        XCTAssertGreaterThanOrEqual(scrollResult.elapsed, 3.0)
+        XCTAssertEqual(scrollResult.fromOffset, actualTop, accuracy: 2)
+        XCTAssertEqual(scrollResult.toOffset, target, accuracy: 2)
+        XCTAssertEqual(scrollResult.offsetSamples.first?.observedYPoints ?? .nan, actualTop, accuracy: 2)
+        XCTAssertEqual(scrollResult.offsetSamples.last?.observedYPoints ?? .nan, target, accuracy: 2)
+        XCTAssertEqual(scrollResult.offsetSamples.first?.viewportHeightPoints ?? .nan, usableViewport, accuracy: 2)
+        XCTAssertEqual(scrollResult.offsetSamples.last?.viewportHeightPoints ?? .nan, usableViewport, accuracy: 2)
+        XCTAssertGreaterThanOrEqual(ConversationScrollPerformanceTests.bottomOffset(of: scroll), target + 2)
+
+        let measuredDelivery = try XCTUnwrap(measuredObservation.responseDeliveredUptime)
+        let measuredCompletion = try XCTUnwrap(measuredObservation.responseCompletedUptime)
+        XCTAssertGreaterThanOrEqual(recorderInvoked, recorderRequestStarted)
+        XCTAssertGreaterThanOrEqual(recorderFirstCallback, recorderInvoked)
+        XCTAssertGreaterThanOrEqual(recorderLastCallback, recorderFirstCallback)
+        XCTAssertGreaterThanOrEqual(recorderReturned, recorderLastCallback)
+        XCTAssertGreaterThanOrEqual(refreshInvoked, recorderFirstCallback)
+        XCTAssertLessThan(refreshInvoked, recorderLastCallback)
+        XCTAssertGreaterThanOrEqual(measuredObservation.requestStartedUptime, recorderFirstCallback)
+        XCTAssertGreaterThanOrEqual(measuredDelivery, measuredObservation.requestStartedUptime)
+        XCTAssertLessThanOrEqual(measuredDelivery, recorderLastCallback)
+        XCTAssertLessThanOrEqual(measuredCompletion, recorderLastCallback)
+        XCTAssertGreaterThanOrEqual(refreshReturned, measuredCompletion)
+        XCTAssertLessThanOrEqual(refreshReturned, recorderLastCallback)
+        XCTAssertEqual(scrollResult.fromOffset, actualTop, accuracy: 2)
+        assertSamplesStayWithinLegalBounds(scrollResult, expectedTop: actualTop, expectedViewport: usableViewport)
+        let verificationTask = Task { await fixture.model.refreshIdleConversation() }
+        try await Self.waitUntil(timeout: 2.0) {
+            ControlledIdleUpdatesURLProtocol.snapshot.contains { $0.phase == "verification" }
+        }
+        let verificationObservation = try XCTUnwrap(ControlledIdleUpdatesURLProtocol.snapshot.first { $0.phase == "verification" })
+        XCTAssertEqual(verificationObservation.query["cursor"], "overlap-measured")
+        XCTAssertEqual(verificationObservation.query["wait"], "20000")
+        XCTAssertEqual(verificationObservation.method, "GET")
+        XCTAssertEqual(verificationObservation.path, "/api/mobile/v1/chat/status")
+        XCTAssertNil(verificationObservation.query["taskId"])
+        XCTAssertNil(verificationObservation.query["refresh"])
+        fixture.model.scenePhaseDidChange(.background)
+        let backgroundedAt = CACurrentMediaTime()
+        ControlledIdleUpdatesURLProtocol.release("verification")
+        let verificationChanged = await verificationTask.value
+        XCTAssertNil(verificationChanged, "Background fence must reject the verification response")
+        XCTAssertEqual(fixture.model.messages.map(\.id), initialIDs)
+
+        let observations = ControlledIdleUpdatesURLProtocol.snapshot
+        let setupCalendarCount = observations.filter { $0.path == "/api/mobile/v1/calendars" }.count
+        let statusObservations = observations.filter { $0.path == "/api/mobile/v1/chat/status" }
+        XCTAssertEqual(statusObservations.count, 3, "Expected warm, measured, and one post-window verification request")
+        XCTAssertEqual(statusObservations.filter { $0.phase == "measured" }.count, 1)
+        XCTAssertEqual(statusObservations.map(\.phase), ["warm", "measured", "verification"])
+        XCTAssertFalse(statusObservations.contains { $0.phase == "UNPLANNED" }, "Unexpected status requests invalidate this run")
+        XCTAssertEqual(setupCalendarCount, 1, "Active scene must settle one typed disabled-sharing read")
+        XCTAssertLessThan(backgroundedAt - activeStarted, 12, "Controlled active fixture must finish before the first idle poll timer")
+        fixture.assertValidMeasurementBoundary()
+
+        func routeJSON(_ observation: ControlledIdleUpdatesURLProtocol.Observation) -> [String: Any] {
+            [
+                "method": observation.method,
+                "path": observation.path,
+                "query": observation.query,
+                "conversation_id": observation.query["conversationId"] ?? "",
+                "cursor": observation.query["cursor"] ?? "",
+                "wait_ms": Int(observation.query["wait"] ?? "0") ?? 0,
+                "task_id": observation.query["taskId"].map { $0 as Any } ?? NSNull(),
+                "refresh_ids": (observation.query["refresh"] ?? "").split(separator: ",").map(String.init),
+                "request_started_uptime": observation.requestStartedUptime,
+                "response_delivered_uptime": observation.responseDeliveredUptime.map { NSNumber(value: $0) as Any } ?? NSNull(),
+                "response_completed_uptime": observation.responseCompletedUptime.map { NSNumber(value: $0) as Any } ?? NSNull(),
+                "phase": observation.phase,
+            ]
+        }
+        let acceptedRoutes = statusObservations.filter { $0.phase != "verification" }
+        let measuredOverlap = max(0, min(measuredCompletion, recorderLastCallback) - max(measuredObservation.requestStartedUptime, recorderFirstCallback))
+        let phaseReport = Self.phaseSummary("controlled-idle-refresh-overlap", scrollResult)
+        let summary: [String: Any] = [
+            "schema_version": 1,
+            "mode": "controlled-idle-refresh-overlap",
+            "test_case_id": fixture.requestScopeID,
+            "fixture_sha256": fixtureDigest,
+            "timestamped_fixture_sha256": fixtureDigest,
+            "message_count": timestampedMessages.count,
+            "durable_timestamp_count": durableTimestampCount,
+            "owner_id": ConversationPerformanceFixture.ownerID,
+            "conversation_id": ConversationPerformanceFixture.conversationID,
+            "scene_active": true,
+            "scene_active_during_measured": true,
+            "scene_active_after_window": false,
+            "active_duration_seconds": backgroundedAt - activeStarted,
+            "calendar_sync_get_count": setupCalendarCount,
+            "status_request_count": statusObservations.count,
+            "status_routes": statusObservations.map(routeJSON),
+            "calendar_routes": observations.filter { $0.path == "/api/mobile/v1/calendars" }.map(routeJSON),
+            "warm_cursor": warmObservation.query["cursor"] ?? "",
+            "measured_cursor": measuredObservation.query["cursor"] ?? "",
+            "measured_response_next_cursor": "overlap-measured",
+            "verification_request_cursor": verificationObservation.query["cursor"] ?? "",
+            "warm_result_changed": warmChanged.map { NSNumber(value: $0) as Any } ?? NSNull(),
+            "measured_result_changed": measuredChanged.map { NSNumber(value: $0) as Any } ?? NSNull(),
+            "warm_result_exactly_false": warmChanged == false,
+            "measured_result_exactly_false": measuredChanged == false,
+            "verification_result_is_nil": verificationChanged == nil,
+            "accepted_in_window_count": acceptedRoutes.filter { $0.phase == "measured" }.count,
+            "before_message_ids": initialIDs,
+            "after_message_ids": fixture.model.messages.map(\.id),
+            "before_message_count": initialIDs.count,
+            "after_message_count": fixture.model.messages.count,
+            "viewport_height_points": usableViewport,
+            "actual_top_points": actualTop,
+            "target_points": target,
+            "measured_from_points": scrollResult.fromOffset,
+            "measured_to_points": scrollResult.toOffset,
+            "clock": "CACurrentMediaTime",
+            "recorder_request_started_uptime": recorderRequestStarted,
+            "recorder_invoked_uptime": recorderInvoked,
+            "recorder_returned_uptime": recorderReturned,
+            "callback_first_uptime": recorderFirstCallback,
+            "callback_last_uptime": recorderLastCallback,
+            "requested_to_first_callback_seconds": scrollResult.requestedToFirstCallbackSeconds as Any? ?? NSNull(),
+            "recorder_phase_summary": phaseReport,
+            "refresh_invoked_uptime": refreshInvoked,
+            "refresh_returned_uptime": refreshReturned,
+            "measured_response_overlap_ms": measuredOverlap * 1_000,
+            "recorder_elapsed_seconds": scrollResult.elapsed,
+            "recorder_sample_count": scrollResult.intervals.count,
+            "scroll_result_valid": !scrollResult.timedOut && scrollResult.intervals.count >= 30
+                && scrollResult.elapsed >= 3.0 && usableViewport > 100
+                && abs(scrollResult.fromOffset - actualTop) <= 2 && abs(scrollResult.toOffset - target) <= 2
+                && abs((scrollResult.offsetSamples.first?.observedYPoints ?? .greatestFiniteMagnitude) - actualTop) <= 2
+                && abs((scrollResult.offsetSamples.last?.observedYPoints ?? .greatestFiniteMagnitude) - target) <= 2
+                && ConversationScrollPerformanceTests.bottomOffset(of: scroll) >= target + 2,
+            "expected_refresh_ids": (measuredObservation.query["refresh"] ?? "").split(separator: ",").map(String.init),
+            "unexpected_requests": fixture.diagnosticState["unexpectedRequests"] ?? [],
+            "driver": "CADisplayLink setContentOffset",
+            "physical_touch_profile": false,
+            "production_cadence": false,
+            "profiler": false,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys, .prettyPrinted])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "controlled-idle-refresh-overlap.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        print("CONTROLLED_IDLE_REFRESH_OVERLAP \(String(decoding: data, as: UTF8.self))")
+    }
+
+    @MainActor
     func testFullChatView500RowQuietScrollProfile() async throws {
         let messageCount = 500
         let messages = Self.fixtureMessages(count: messageCount, includeCalendarAgenda: true)
@@ -533,6 +802,61 @@ final class ConversationScrollPerformanceTests: XCTestCase {
             .joined()
     }
 
+    private static func timestampedFixtureMessages(_ messages: [ChatMessage]) throws -> [ChatMessage] {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        guard let base = formatter.date(from: "2026-10-01T00:00:00.000Z") else {
+            throw ControlledOverlapError.invalidTimestampBase
+        }
+        return messages.enumerated().map { index, original in
+            var message = original
+            var metadata = message.metadata ?? [:]
+            metadata["createdAt"] = .string(formatter.string(from: base.addingTimeInterval(TimeInterval(index))))
+            message.metadata = metadata
+            return message
+        }
+    }
+
+    private static func emptyUpdates(nextCursor: String) throws -> Data {
+        try JSONEncoder().encode(ChatUpdates(
+            taskStatus: nil, messages: [], refreshed: [], superseded: [],
+            nextCursor: nextCursor, hasMore: false, activity: []
+        ))
+    }
+
+    @MainActor
+    private static func settleOffset(
+        _ offset: CGFloat, scrollView: UIScrollView, window: UIWindow
+    ) async throws {
+        scrollView.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        var stable = 0
+        while ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+            stable = abs(scrollView.contentOffset.y - offset) <= 2 ? stable + 1 : 0
+            if stable >= 3 { return }
+        }
+        throw ControlledOverlapError.offsetDidNotSettle
+    }
+
+    @MainActor
+    private static func waitUntil(timeout: TimeInterval, predicate: () -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
+        while ContinuousClock.now < deadline {
+            if predicate() { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        throw ControlledOverlapError.timedOutWaitingForRequest
+    }
+
+    private enum ControlledOverlapError: Error {
+        case invalidTimestampBase
+        case offsetDidNotSettle
+        case timedOutWaitingForRequest
+    }
+
     private static func fixtureMessages(count: Int, includeCalendarAgenda: Bool = false) -> [ChatMessage] {
         let sources = [
             MessageRecallSource(date: "2026-10-18", label: "A previous conversation about the weekend plan and the confirmed arrival details", kind: "chat", hops: 1, surfaceKey: nil, sourceRevision: nil),
@@ -750,6 +1074,8 @@ private final class FullChatViewScrollRecorder: NSObject {
         let elapsed: Double
         let timedOut: Bool
         let requestedToFirstCallbackSeconds: Double?
+        let firstCallbackUptime: CFTimeInterval?
+        let lastCallbackUptime: CFTimeInterval?
     }
 
     private let scrollView: UIScrollView
@@ -783,7 +1109,9 @@ private final class FullChatViewScrollRecorder: NSObject {
             offsetSamples: offsetSamples,
             elapsed: elapsed,
             timedOut: timedOut,
-            requestedToFirstCallbackSeconds: requestedToFirstCallbackSeconds
+            requestedToFirstCallbackSeconds: requestedToFirstCallbackSeconds,
+            firstCallbackUptime: startTime == 0 ? nil : startTime,
+            lastCallbackUptime: previousCallback
         )
     }
 
@@ -860,7 +1188,9 @@ private final class FullChatViewScrollRecorder: NSObject {
             offsetSamples: offsetSamples,
             elapsed: elapsed,
             timedOut: timedOut,
-            requestedToFirstCallbackSeconds: requestedToFirstCallbackSeconds
+            requestedToFirstCallbackSeconds: requestedToFirstCallbackSeconds,
+            firstCallbackUptime: startTime == 0 ? nil : startTime,
+            lastCallbackUptime: previousCallback
         ))
         completion = nil
     }

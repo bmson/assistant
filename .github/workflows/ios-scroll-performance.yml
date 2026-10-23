@@ -19,11 +19,11 @@ on:
         type: choice
         options: ['1', '2', '3', '4', '5']
       run_mode:
-        description: Run bottom-follow correctness, gated smoke, an untraced matrix, or one quiet-scroll profile
+        description: Run bottom-follow correctness, gated smoke, an untraced matrix, one quiet-scroll profile, or controlled idle-refresh overlap
         required: true
         default: smoke
         type: choice
-        options: [correctness, smoke, matrix, profile]
+        options: [correctness, smoke, matrix, profile, overlap]
   push:
     branches:
       - codex/ios-chat-scroll-performance
@@ -52,20 +52,20 @@ jobs:
 
       - name: Prepare worktrees and build benchmark tests
         env:
-          BASELINE_REF: ${{ ((github.event_name == 'push' || inputs.run_mode == 'profile') && '5c55c0d138abaf84f5b8baf11f1ba3eee38cf205') || inputs.baseline_ref || '14ba202b8c9593623f3fe3c817319c15e40f6ffa' }}
-          CANDIDATE_REF: ${{ ((github.event_name == 'push' || inputs.run_mode == 'profile') && '5c55c0d138abaf84f5b8baf11f1ba3eee38cf205') || inputs.candidate_ref || github.sha }}
+          BASELINE_REF: ${{ ((github.event_name == 'push' || inputs.run_mode == 'profile' || inputs.run_mode == 'overlap') && '5c55c0d138abaf84f5b8baf11f1ba3eee38cf205') || inputs.baseline_ref || '14ba202b8c9593623f3fe3c817319c15e40f6ffa' }}
+          CANDIDATE_REF: ${{ ((github.event_name == 'push' || inputs.run_mode == 'overlap') && '6e74006c53c0524a33509a829ef0b04d3d330333') || (inputs.run_mode == 'profile' && '5c55c0d138abaf84f5b8baf11f1ba3eee38cf205') || inputs.candidate_ref || github.sha }}
           REPEATS: ${{ inputs.repeats || '5' }}
-          RUN_MODE: ${{ (github.event_name == 'push' && 'profile') || inputs.run_mode || 'diagnostic' }}
+          RUN_MODE: ${{ (github.event_name == 'push' && 'overlap') || inputs.run_mode || 'diagnostic' }}
           PHASE: build
           RUNNER_TEMP: ${{ runner.temp }}
         run: bash infra/ios-scroll-performance.sh
 
       - name: Run benchmark tests
         env:
-          BASELINE_REF: ${{ ((github.event_name == 'push' || inputs.run_mode == 'profile') && '5c55c0d138abaf84f5b8baf11f1ba3eee38cf205') || inputs.baseline_ref || '14ba202b8c9593623f3fe3c817319c15e40f6ffa' }}
-          CANDIDATE_REF: ${{ ((github.event_name == 'push' || inputs.run_mode == 'profile') && '5c55c0d138abaf84f5b8baf11f1ba3eee38cf205') || inputs.candidate_ref || github.sha }}
+          BASELINE_REF: ${{ ((github.event_name == 'push' || inputs.run_mode == 'profile' || inputs.run_mode == 'overlap') && '5c55c0d138abaf84f5b8baf11f1ba3eee38cf205') || inputs.baseline_ref || '14ba202b8c9593623f3fe3c817319c15e40f6ffa' }}
+          CANDIDATE_REF: ${{ ((github.event_name == 'push' || inputs.run_mode == 'overlap') && '6e74006c53c0524a33509a829ef0b04d3d330333') || (inputs.run_mode == 'profile' && '5c55c0d138abaf84f5b8baf11f1ba3eee38cf205') || inputs.candidate_ref || github.sha }}
           REPEATS: ${{ inputs.repeats || '5' }}
-          RUN_MODE: ${{ (github.event_name == 'push' && 'profile') || inputs.run_mode || 'diagnostic' }}
+          RUN_MODE: ${{ (github.event_name == 'push' && 'overlap') || inputs.run_mode || 'diagnostic' }}
           PHASE: runtime
           RUNNER_TEMP: ${{ runner.temp }}
         run: bash infra/ios-scroll-performance.sh
