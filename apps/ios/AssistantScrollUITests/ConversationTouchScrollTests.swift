@@ -52,7 +52,11 @@ final class ConversationTouchScrollTests: XCTestCase {
                 return
             }
             let beforeFrame = transcript.frame
+            let beforeControls = PublicControls(app: app)
             screenshot(app, name: "\(label)-before")
+            attach(before: before, after: nil, beforeFrame: beforeFrame, afterFrame: nil,
+                   beforeControls: beforeControls, afterControls: nil, label: "\(label)-initial")
+            XCTAssertEqual(beforeControls.jumpCount, 0, "Jump must be absent at the newest edge")
             assertPublicUI(app, transcript: transcript)
             assertOwnership(before)
             XCTAssertTrue(before.bool("readerFollowsLatest"), "Initial newest-edge anchor lost")
@@ -71,6 +75,10 @@ final class ConversationTouchScrollTests: XCTestCase {
             screenshot(app, name: "\(label)-after")
             guard let after else { return }
             let afterFrame = transcript.frame
+            let afterControls = PublicControls(app: app)
+            // Retain geometry evidence before any post-gesture assertion can stop the test.
+            attach(before: before, after: after, beforeFrame: beforeFrame, afterFrame: afterFrame,
+                   beforeControls: beforeControls, afterControls: afterControls, label: label)
             assertPublicUI(app, transcript: transcript)
             assertOwnership(after)
             XCTAssertFalse(after.bool("readerFollowsLatest"), "Reader did not release newest-edge following")
@@ -87,11 +95,36 @@ final class ConversationTouchScrollTests: XCTestCase {
             XCTAssertLessThanOrEqual(ended, after.number("capturedAt"))
             XCTAssertEqual(after.string("phase"), "idle")
             XCTAssertGreaterThan(before.number("offset") - after.number("offset"), 80, "No meaningful movement toward older messages")
-            for key in ["content", "viewport", "topInset", "bottomInset", "viewportTop", "viewportLeft", "viewportWidth", "viewportFrameHeight"] {
+            for key in ["content", "topInset", "bottomInset", "viewportTop", "viewportLeft", "viewportWidth"] {
                 XCTAssertEqual(before.number(key), after.number(key), accuracy: 1, "Geometry drift: \(key)")
             }
-            assertFrame(beforeFrame, equals: afterFrame)
-            attach(before: before, after: after, beforeFrame: beforeFrame, afterFrame: afterFrame, label: label)
+            for (name, first, second) in [("left", beforeFrame.minX, afterFrame.minX),
+                                          ("top", beforeFrame.minY, afterFrame.minY),
+                                          ("width", beforeFrame.width, afterFrame.width)] {
+                XCTAssertTrue(first.isFinite && second.isFinite, "Non-finite public viewport \(name)")
+                XCTAssertEqual(first, second, accuracy: 1, "Public viewport drift: \(name)")
+            }
+            assertFrame(beforeControls.composerFrame, equals: afterControls.composerFrame)
+            XCTAssertEqual(afterControls.jumpCount, 1, "Exactly one Jump must appear after reading older rows")
+            XCTAssertTrue(afterControls.jumpHittable, "Jump must be visible and hittable")
+            guard let jump = afterControls.jumpFrame else { return } // Count assertion already failed.
+            XCTAssertTrue([jump.minX, jump.minY, jump.width, jump.height,
+                           beforeFrame.height, afterFrame.height].allSatisfy { $0.isFinite })
+            XCTAssertGreaterThan(jump.width, 0)
+            XCTAssertGreaterThan(jump.height, 0)
+            let reservation = Double(jump.height + Self.jumpStackSpacing)
+            for (name, reduction) in [
+                ("scroll viewport", before.number("viewport") - after.number("viewport")),
+                ("fixture frame", before.number("viewportFrameHeight") - after.number("viewportFrameHeight")),
+                ("public frame", Double(beforeFrame.height - afterFrame.height)),
+                ("public bottom rise", Double(beforeFrame.maxY - afterFrame.maxY)),
+            ] {
+                XCTAssertEqual(reduction, reservation, accuracy: 1, "Jump reservation mismatch: \(name)")
+            }
+            XCTAssertGreaterThanOrEqual(jump.minY, afterFrame.maxY - 1, "Jump overlaps clipped transcript")
+            XCTAssertLessThanOrEqual(jump.maxY, afterControls.composerFrame.minY + 1, "Jump overlaps input")
+            XCTAssertGreaterThanOrEqual(jump.minX, afterFrame.minX - 1)
+            XCTAssertLessThanOrEqual(jump.maxX, afterFrame.maxX + 1)
         }
     }
 
@@ -165,18 +198,58 @@ final class ConversationTouchScrollTests: XCTestCase {
         return receipt
     }
 
-    private func attach(before: Receipt, after: Receipt, beforeFrame: CGRect, afterFrame: CGRect, label: String) {
-        func frame(_ rect: CGRect) -> [String: CGFloat] {
-            ["left": rect.minX, "top": rect.minY, "width": rect.width, "height": rect.height]
+    // Matches the existing composer VStack spacing, not a device-specific height.
+    private static let jumpStackSpacing: CGFloat = 8
+
+    @MainActor
+    private struct PublicControls {
+        let composerFrame: CGRect
+        let jumpCount: Int
+        let jumpHittable: Bool
+        let jumpFrame: CGRect?
+
+        init(app: XCUIApplication) {
+            composerFrame = app.textViews["assistant.chat.composer"].frame
+            let matches = app.buttons.matching(identifier: "assistant.chat.jump-to-latest")
+            jumpCount = matches.count
+            let jump = matches.firstMatch
+            jumpHittable = jump.exists && jump.isHittable
+            jumpFrame = jump.exists ? jump.frame : nil
         }
-        let payload: [String: Any] = [
+
+        var payload: [String: Any] {
+            var value: [String: Any] = [
+                "composerFrame": ConversationTouchScrollTests.framePayload(composerFrame),
+                "jumpCount": jumpCount, "jumpHittable": jumpHittable,
+            ]
+            if let jumpFrame { value["jumpFrame"] = ConversationTouchScrollTests.framePayload(jumpFrame) }
+            return value
+        }
+    }
+
+    private static func framePayload(_ rect: CGRect) -> [String: CGFloat] {
+        ["left": rect.minX, "top": rect.minY, "width": rect.width, "height": rect.height]
+    }
+
+    private func attach(before: Receipt, after: Receipt?, beforeFrame: CGRect, afterFrame: CGRect?,
+                        beforeControls: PublicControls, afterControls: PublicControls?, label: String) {
+        var payload: [String: Any] = [
             "mode": "public-touch-one-fling-per-invocation", "invocation": label,
             "measuredGestureCount": 1, "discardedWarmupGestureCount": 1,
-            "before": before.values, "after": after.values,
-            "publicViewportBefore": frame(beforeFrame), "publicViewportAfter": frame(afterFrame),
+            "before": before.values, "publicViewportBefore": Self.framePayload(beforeFrame),
+            "publicControlsBefore": beforeControls.payload,
+            "jumpStackSpacing": Self.jumpStackSpacing,
             "nativeSelectionScreenshotReviewRequired": true,
             "metricSamplesRequireXCResultAudit": true, "physical60fpsProven": false,
         ]
+        if let after { payload["after"] = after.values }
+        if let afterFrame { payload["publicViewportAfter"] = Self.framePayload(afterFrame) }
+        if let afterControls {
+            payload["publicControlsAfter"] = afterControls.payload
+            if let jump = afterControls.jumpFrame {
+                payload["expectedJumpReservation"] = jump.height + Self.jumpStackSpacing
+            }
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .prettyPrinted]) else {
             XCTFail("Could not encode smoke receipt")
             return
