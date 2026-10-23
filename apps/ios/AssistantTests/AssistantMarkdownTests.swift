@@ -8,7 +8,11 @@ private final class LiftedTranscriptFixtureState: ObservableObject {
     @Published var composerHeight: CGFloat = 60
     @Published var availableHeight: CGFloat = 852
     @Published var jumpRequest = 0
+    @Published var noticeHeight: CGFloat = 0
+    @Published var showsJumpChrome = false
+    var transcriptViewport: CGRect = .zero
     var composer: CGRect = .zero
+    var notice: CGRect = .zero
     var lastCard: CGRect = .zero
 }
 
@@ -22,8 +26,9 @@ private struct LiftedTranscriptFixture: View {
                 ConversationColumn {
                     Group {
                         ScrollView {
-                            // Eager, as the transcript is: the strip under the
-                            // composer can only show a row that exists.
+                            // Eager, as the transcript is: content can draw
+                            // behind the chrome while its final row keeps a
+                            // real clearance above the composer.
                             VStack(spacing: 0) {
                                 ForEach(0..<20) { _ in Color.white.frame(height: 200) }
                                 Color.red.frame(height: 100)
@@ -33,7 +38,10 @@ private struct LiftedTranscriptFixture: View {
                                         state.lastCard = $0
                                     }
                             }
+                            .padding(.bottom, state.composerHeight + 30
+                                + (state.noticeHeight > 0 ? state.noticeHeight + 8 : 0))
                         }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .scrollClipDisabled()
                         .scrollPosition($position)
                         .transaction {
@@ -42,6 +50,11 @@ private struct LiftedTranscriptFixture: View {
                             }
                         }
                         .defaultScrollAnchor(.bottom)
+                        .onGeometryChange(for: CGRect.self) {
+                            $0.frame(in: .global)
+                        } action: {
+                            state.transcriptViewport = $0
+                        }
                         .onChange(of: state.jumpRequest) { _, _ in
                             position.scrollTo(edge: .bottom)
                         }
@@ -56,6 +69,26 @@ private struct LiftedTranscriptFixture: View {
                         }
                 }
                 .frame(width: viewport.size.width, height: viewport.size.height)
+                .overlay(alignment: .bottom) {
+                    if state.noticeHeight > 0 {
+                        Color.purple
+                            .frame(height: state.noticeHeight)
+                            .padding(.bottom, state.composerHeight + 20)
+                            .onGeometryChange(for: CGRect.self) {
+                                $0.frame(in: .global)
+                            } action: {
+                                state.notice = $0
+                            }
+                    }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if state.showsJumpChrome {
+                        Color.orange
+                            .frame(width: 120, height: 44)
+                            .padding(.bottom, state.composerHeight + 30
+                                + (state.noticeHeight > 0 ? state.noticeHeight : 0))
+                    }
+                }
                 .background(Color.green.ignoresSafeArea(.container))
                 .clipShape(RoundedRectangle(cornerRadius: 34))
                 .ignoresSafeArea(.container)
@@ -542,14 +575,16 @@ final class AssistantMarkdownTests: XCTestCase {
     }
 
     @MainActor
-    func testChatViewportKeepsLatestAboveFocusedComposer() async throws {
+    func testChatViewportDrawsBehindComposerWithoutOwningItsTouches() async throws {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
         let previousKeyWindow = scene.keyWindow
         let window = UIWindow(windowScene: scene)
         window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
         let messages = (0..<16).map { index in
             ChatMessage(id: "layout-\(index)", role: .assistant,
-                parts: [.init(type: "text", text: "Message \(index + 1)\nKeep the newest answer comfortably above the input while opening the menu.")])
+                parts: [.init(type: "text", text: index == 15
+                    ? "LATEST_LAYOUT_ROW_MARKER\nKeep the newest answer comfortably above the input while opening the menu."
+                    : "Message \(index + 1)\nKeep the newest answer comfortably above the input while opening the menu.")])
         }
         let model = AppModel(initialMessages: messages)
         window.rootViewController = UIHostingController(rootView:
@@ -568,6 +603,73 @@ final class AssistantMarkdownTests: XCTestCase {
         let views = descendants(window)
         let transcript = try XCTUnwrap(views.compactMap { $0 as? UIScrollView }.first { !($0 is UITextView) })
         let input = try XCTUnwrap(views.compactMap { $0 as? UITextView }.first)
+        func accessibilityFrame(containing marker: String, in view: UIView) -> CGRect? {
+            if view.accessibilityLabel?.contains(marker) == true, !view.bounds.isEmpty {
+                return view.convert(view.bounds, to: window)
+            }
+            for index in 0..<max(view.accessibilityElementCount(), 0) {
+                guard let element = view.accessibilityElement(at: index) else { continue }
+                if let childView = element as? UIView {
+                    if childView !== view,
+                       let frame = accessibilityFrame(containing: marker, in: childView) {
+                        return frame
+                    }
+                } else if let element = element as? UIAccessibilityElement,
+                          element.accessibilityLabel?.contains(marker) == true,
+                          !element.accessibilityFrame.isEmpty {
+                    return window.convert(element.accessibilityFrame, from: nil)
+                }
+            }
+            for childView in view.subviews {
+                if let frame = accessibilityFrame(containing: marker, in: childView) { return frame }
+            }
+            return nil
+        }
+        func assertHitReceiverIsOutsideTranscript(_ control: UIView, file: StaticString = #filePath, line: UInt = #line) {
+            let center = control.convert(CGPoint(x: control.bounds.midX, y: control.bounds.midY), to: window)
+            let receiver = window.hitTest(center, with: nil)
+            XCTAssertNotNil(receiver, "The overlaid control must receive its own hit test", file: file, line: line)
+            if let receiver {
+                XCTAssertFalse(
+                    receiver === transcript || receiver.isDescendant(of: transcript),
+                    "Composer and send touches must not enter the transcript pan-recognizer subtree",
+                    file: file,
+                    line: line
+                )
+            }
+        }
+        func sendButtonFrame(in view: UIView) -> CGRect? {
+            if view.accessibilityIdentifier == "assistant.chat.send", !view.bounds.isEmpty {
+                return view.convert(view.bounds, to: window)
+            }
+            for index in 0..<max(view.accessibilityElementCount(), 0) {
+                guard let element = view.accessibilityElement(at: index) else { continue }
+                if let childView = element as? UIView {
+                    if childView !== view, let frame = sendButtonFrame(in: childView) { return frame }
+                } else if let element = element as? UIAccessibilityElement,
+                          element.accessibilityIdentifier == "assistant.chat.send",
+                          !element.accessibilityFrame.isEmpty {
+                    return window.convert(element.accessibilityFrame, from: nil)
+                }
+            }
+            for childView in view.subviews {
+                if let frame = sendButtonFrame(in: childView) { return frame }
+            }
+            return nil
+        }
+        let sendFrame = try XCTUnwrap(sendButtonFrame(in: window),
+            "Find the send control through either SwiftUI's backing view or accessibility container")
+        XCTAssertFalse(input.isDescendant(of: transcript),
+            "The native text view must be a sibling of the transcript")
+        assertHitReceiverIsOutsideTranscript(input)
+        let sendReceiver = window.hitTest(
+            CGPoint(x: sendFrame.midX, y: sendFrame.midY), with: nil
+        )
+        XCTAssertNotNil(sendReceiver, "The send control must receive its own hit test")
+        if let sendReceiver {
+            XCTAssertFalse(sendReceiver === transcript || sendReceiver.isDescendant(of: transcript),
+                "Send touches must not enter the transcript pan-recognizer subtree")
+        }
         for focused in [false, true, false] {
             if focused { input.becomeFirstResponder() } else { input.resignFirstResponder() }
             // Keyboard presentation and LazyVStack measurement can outlast a
@@ -579,22 +681,36 @@ final class AssistantMarkdownTests: XCTestCase {
                 try await Task.sleep(for: .milliseconds(100))
                 window.layoutIfNeeded()
                 let inputFrame = input.convert(input.bounds, to: window)
-                let end = transcript.convert(CGPoint(x: 0, y: transcript.contentSize.height), to: window)
+                let viewportFrame = transcript.convert(transcript.bounds, to: window)
                 let bottomError = abs(transcript.contentOffset.y + transcript.bounds.height
                     - transcript.contentSize.height - transcript.adjustedContentInset.bottom)
-                let settled = bottomError <= 2 && inputFrame.minY > end.y
+                let settled = bottomError <= 2
+                    && viewportFrame.intersects(inputFrame)
                     && inputFrame.maxY <= window.bounds.maxY && input.isFirstResponder == focused
                 settledSamples = settled ? settledSamples + 1 : 0
             } while settledSamples < 3 && ContinuousClock.now < deadline
             window.layoutIfNeeded()
             let inputFrame = input.convert(input.bounds, to: window)
+            let viewportFrame = transcript.convert(transcript.bounds, to: window)
+            let actualLastRowFrame = try XCTUnwrap(
+                accessibilityFrame(containing: "LATEST_LAYOUT_ROW_MARKER", in: window),
+                "Measure the actual final transcript row, not contentSize's composer clearance"
+            )
+            // The transcript owns the whole drawing viewport; the composer
+            // sits over its lower region as a sibling hit target.
+            XCTAssertGreaterThan(viewportFrame.height, inputFrame.height)
+            XCTAssertGreaterThan(viewportFrame.maxY, inputFrame.minY)
+            XCTAssertTrue(viewportFrame.intersects(inputFrame))
+            XCTAssertTrue(viewportFrame.intersects(actualLastRowFrame))
+            XCTAssertLessThan(actualLastRowFrame.maxY, inputFrame.minY,
+                "The real newest message must remain clear of the overlaid input")
+            XCTAssertFalse(input.isDescendant(of: transcript),
+                "Composer text and send touches must stay outside the transcript pan-recognizer subtree")
             // Verify the actual ChatView remains at its canonical bottom,
             // not a stale offset from before the composer was measured.
             XCTAssertEqual(transcript.contentOffset.y + transcript.bounds.height,
                 transcript.contentSize.height + transcript.adjustedContentInset.bottom, accuracy: 2,
-                "The newest message and its reserved input clearance must remain visible")
-            let end = transcript.convert(CGPoint(x: 0, y: transcript.contentSize.height), to: window)
-            XCTAssertGreaterThan(inputFrame.minY - end.y, 0)
+                "The newest message and its composer clearance must remain visible")
             XCTAssertLessThanOrEqual(inputFrame.maxY, window.bounds.maxY)
             XCTAssertEqual(input.isFirstResponder, focused)
             let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
@@ -608,7 +724,7 @@ final class AssistantMarkdownTests: XCTestCase {
     }
 
     @MainActor
-    func testLiftedTranscriptKeepsComposerGap() async throws {
+    func testLiftedTranscriptKeepsFullViewportAndComposerClearance() async throws {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
         let previousKeyWindow = scene.keyWindow
         let window = UIWindow(windowScene: scene)
@@ -628,6 +744,9 @@ final class AssistantMarkdownTests: XCTestCase {
         func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
         let scroll = try XCTUnwrap(descendants(window).compactMap { $0 as? UIScrollView }.first)
         XCTAssertEqual(baseline, 18, accuracy: 1)
+        XCTAssertEqual(state.transcriptViewport.height, 852, accuracy: 1,
+            "The composer overlays the viewport instead of reducing its height")
+        XCTAssertGreaterThan(state.transcriptViewport.maxY, state.composer.minY)
         func centerColumn() throws -> [(red: UInt8, green: UInt8, blue: UInt8)] {
             let format = UIGraphicsImageRendererFormat()
             format.scale = 1
@@ -659,6 +778,49 @@ final class AssistantMarkdownTests: XCTestCase {
             return (CGFloat(try XCTUnwrap(red.last)) + 1, CGFloat(try XCTUnwrap(blue.first)))
         }
         let renderedBaseline = try renderedEdges()
+        for noticeHeight: CGFloat in [0, 36, 120] {
+            state.noticeHeight = noticeHeight
+            state.jumpRequest += 1
+            try await Task.sleep(for: .milliseconds(180))
+            window.layoutIfNeeded()
+
+            let transcriptViewport = state.transcriptViewport
+            let latestCard = state.lastCard
+            let notice = state.notice
+            let offset = scroll.contentOffset
+            let clearanceTarget = noticeHeight > 0 ? notice.minY : state.composer.minY
+            XCTAssertEqual(transcriptViewport.height, 852, accuracy: 1,
+                "Notice height must change content clearance, never viewport height")
+            XCTAssertEqual(clearanceTarget - latestCard.maxY, 18, accuracy: 1,
+                "The newest row keeps 18pt of clearance below the notice stack or composer")
+            if noticeHeight > 0 {
+                XCTAssertEqual(notice.height, noticeHeight, accuracy: 1)
+            }
+
+            state.showsJumpChrome = true
+            try await Task.sleep(for: .milliseconds(150))
+            window.layoutIfNeeded()
+            XCTAssertEqual(state.transcriptViewport, transcriptViewport,
+                "Showing Jump must not shorten the transcript viewport")
+            XCTAssertEqual(state.lastCard, latestCard,
+                "Showing Jump must not move the reader's current content")
+            XCTAssertEqual(state.notice, notice,
+                "Jump must not change the notice stack's measured clearance")
+            XCTAssertEqual(scroll.contentOffset, offset,
+                "Showing Jump must not change the transcript offset")
+
+            state.showsJumpChrome = false
+            try await Task.sleep(for: .milliseconds(120))
+            window.layoutIfNeeded()
+            XCTAssertEqual(state.transcriptViewport, transcriptViewport)
+            XCTAssertEqual(state.lastCard, latestCard)
+            XCTAssertEqual(scroll.contentOffset, offset)
+        }
+        state.noticeHeight = 0
+        state.jumpRequest += 1
+        try await Task.sleep(for: .milliseconds(180))
+        window.layoutIfNeeded()
+        XCTAssertEqual(state.composer.minY - state.lastCard.maxY, baseline, accuracy: 1)
         for distance: CGFloat in [1, 5, 10, 20, 34, 80, 200, 450, 200, 34, 10, 0, 20, 0, 10, 0] {
             state.reveal = distance
             try await Task.sleep(for: .milliseconds(100))
@@ -666,6 +828,8 @@ final class AssistantMarkdownTests: XCTestCase {
             XCTAssertEqual(
                 state.composer.minY - state.lastCard.maxY, baseline, accuracy: 1,
                 "The gap must survive a \(distance)pt live lift")
+            XCTAssertEqual(state.transcriptViewport.height, 852, accuracy: 1,
+                "Moving the shared surface must not resize the transcript viewport")
             XCTAssertEqual(state.lastCard.maxY, cardBottom - distance, accuracy: 1)
             let edges = try renderedEdges()
             XCTAssertEqual(edges.input - edges.card, 18, accuracy: 1)
@@ -684,18 +848,16 @@ final class AssistantMarkdownTests: XCTestCase {
                 state.reveal = distance
                 try await Task.sleep(for: .milliseconds(100))
                 XCTAssertEqual(state.composer.minY - state.lastCard.maxY, baseline, accuracy: 1)
+                XCTAssertEqual(state.transcriptViewport.height, height, accuracy: 1,
+                    "Changing composer/chrome height must not reserve space out of the viewport")
             }
         }
         // Reading an older message must not be turned into a jump to latest.
         scroll.setContentOffset(CGPoint(x: 0, y: scroll.contentOffset.y - 160), animated: false)
         try await Task.sleep(for: .milliseconds(100))
         let readingOffset = scroll.contentOffset.y
-        // 160pt of reading sends the newest card past the transcript's own
-        // viewport, which ends 18pt above the input — and that is exactly where
-        // a bubble used to disappear, because a lazily built row stops existing
-        // once it leaves that viewport and `scrollClipDisabled` has nothing to
-        // draw. Read the strip the composer's bottom spacing leaves clear: the
-        // log must still be painting there, not the stage.
+        // Reading upward moves the newest row behind the composer's transparent
+        // lower gutter. The full-height scroll view must continue drawing there.
         window.layoutIfNeeded()
         let underComposer = try centerColumn()
         for y in (Int(state.composer.maxY) - 10)..<(Int(state.composer.maxY) - 2) {

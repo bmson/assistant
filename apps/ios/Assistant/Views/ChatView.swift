@@ -1,15 +1,16 @@
 import SwiftUI
 import UIKit
 
-/// Give the transcript and composer separate layout slots before lifting the
-/// stage. Clearance must not depend on a later input measurement or scroll inset.
+/// Keep controls outside the scroll view’s gesture subtree while the transcript
+/// draws through the complete stage behind them. Both lift as one menu surface.
 struct ConversationColumn<Transcript: View, Composer: View>: View {
     @ViewBuilder var transcript: Transcript
     @ViewBuilder var composer: Composer
 
     var body: some View {
-        VStack(spacing: PullMenuMotion.transcriptComposerSpacing) {
+        ZStack(alignment: .bottom) {
             transcript
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             composer
         }
     }
@@ -475,6 +476,7 @@ struct ChatView: View {
     @State private var isAtMenuOpeningEdge = true
     @State private var hasUnseenMessages = false
     @State private var composerHeight: CGFloat = 0
+    @State private var floatingNoticeHeight: CGFloat = 0
     @State private var scrollRequest = 0
     // A direct "Jump to latest" owns the scroll position until it has had a
     // chance to supersede an automatic scroll that may already be in flight.
@@ -786,8 +788,8 @@ struct ChatView: View {
         .ignoresSafeArea(.container)
     }
 
-    /// The transcript viewport and root error banner clear the Island by the
-    /// same distance from the edge-to-edge stage origin.
+    /// The transcript’s opening content and root error banner clear the Island
+    /// by the same distance; the transcript itself still draws edge-to-edge.
     private var crownContentTopInset: CGFloat {
         if isLandscape { return 0 }
         return ActivityCrown.overlayTopInset(
@@ -903,12 +905,18 @@ struct ChatView: View {
                             .equatable()
                         }
                     }
+                    // Clearance belongs to the scroll content, not the drawing
+                    // viewport: endpoints rest clear of chrome while older rows
+                    // can travel behind it. Jump visibility never changes this.
+                    .padding(.top, crownContentTopInset)
+                    .padding(.bottom, composerHeight + PullMenuMotion.transcriptComposerSpacing
+                        + (floatingNoticeHeight > 0 ? floatingNoticeHeight + 8 : 0))
                     .padding(.leading, AssistantTheme.compactGutter + (crownOnLeadingEdge ? landscapeCrownClearance : 0))
                     .padding(.trailing, AssistantTheme.compactGutter + (crownOnLeadingEdge ? 0 : landscapeCrownClearance))
                 }
-                // The composer and navigation own separate layout slots.
-                // Respect this viewport even while older rows remain mounted.
-                .scrollClipDisabled(false)
+                // Only the complete lifted surface clips. Rows can draw behind
+                // the crown, navigation and input throughout a drag.
+                .scrollClipDisabled()
                 .scrollIndicators(.hidden)
                 .scrollPosition($transcriptScrollPosition)
                 // Menu reveal is a transform of the parent surface. SwiftUI's
@@ -922,15 +930,6 @@ struct ChatView: View {
                         transaction.scrollContentOffsetAdjustmentBehavior = .disabled
                     }
                 }
-                // UIKit's scroll view can extend its drawing region into the
-                // safe-area overhang when the whole chat surface ignores the
-                // top inset. Reassert the SwiftUI viewport here before the
-                // crown clearance is added outside the scroll view.
-                .clipped()
-                // Constrain the viewport below the crown, rather than only
-                // offsetting the first content row. With clipping above, older
-                // text stays below the status area at every scroll position.
-                .padding(.top, crownContentTopInset)
                 // Never toggle `scrollDisabled` as the menu moves. That cancels
                 // UIScrollView's active pan by changing its environment and makes
                 // SwiftUI re-anchor the transcript inside the moving surface.
@@ -1041,25 +1040,15 @@ struct ChatView: View {
                 }
 
             } composer: {
-                // Keep the transcript and composer as siblings. When the
-                // composer was a ScrollView overlay, UIKit's pan recognizer
-                // still received pulls that began on the input and shifted the
-                // transcript before the menu gesture took over.
-                // Reserve space for navigation alongside the composer so the
-                // control cannot cover a message the owner is reading.
-                VStack(spacing: 8) {
-                    if showsJumpToLatest {
-                        jumpToLatestButton {
-                            jumpFeedback += 1
-                            jumpToLatest()
-                        }
-                        .transition(.opacity)
-                    }
-                    composer
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                // This is a sibling of ScrollView, so input/selection/menu
+                // touches never enter the transcript’s pan-recognizer subtree.
+                composer
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: isLandscape ? 680 : .infinity)
                     .frame(maxWidth: .infinity)
+                    // Keep the input footprint a concrete sibling hit surface,
+                    // including its empty gutters, without intercepting rows above.
+                    .background(Color.black.opacity(0.001).contentShape(Rectangle()))
                     // A plain, explicit padding is deliberate. Safe-area
                     // padding is recomputed when this transformed surface
                     // crosses the device safe-area boundary, and an offset
@@ -1075,40 +1064,57 @@ struct ChatView: View {
 
             }
             .overlay(alignment: .bottom) {
-                VStack(spacing: 10) {
-                    if let undo = model.hiddenMessageUndo {
-                        hiddenMessageUndoBar(undo)
-                            .transition(.opacity)
-                    }
-                    if let draftScope, model.hasComposerRecovery(in: draftScope) {
-                        VStack(spacing: 5) {
-                            Button {
-                                restoreUnsentMessageIfPossible()
-                                composerFocused = true
-                            } label: {
-                                Label("Restore unsent message", systemImage: "arrow.uturn.backward")
-                                    .font(.subheadline.weight(.medium))
-                                    .padding(.horizontal, 14)
-                                    .frame(minHeight: 44)
-                                    .background(AssistantTheme.bubblePaper(for: colorScheme), in: Capsule())
-                                    .foregroundStyle(AssistantTheme.bubblePaperInk(for: colorScheme))
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            .accessibilityHint("Send or clear your current draft before restoring the message that did not send.")
-                            if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                Text("Send or clear this draft to restore your earlier message.")
-                                    .font(.caption)
-                                    .foregroundStyle(AssistantTheme.stageSecondary)
-                                    .multilineTextAlignment(.center)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 4)
-                                    .background(AssistantTheme.stageWell(for: colorScheme), in: Capsule())
+                VStack(spacing: 0) {
+                    VStack(spacing: 10) {
+                        if let undo = model.hiddenMessageUndo {
+                            hiddenMessageUndoBar(undo)
+                                .transition(.opacity)
+                        }
+                        if let draftScope, model.hasComposerRecovery(in: draftScope) {
+                            VStack(spacing: 5) {
+                                Button {
+                                    restoreUnsentMessageIfPossible()
+                                    composerFocused = true
+                                } label: {
+                                    Label("Restore unsent message", systemImage: "arrow.uturn.backward")
+                                        .font(.subheadline.weight(.medium))
+                                        .padding(.horizontal, 14)
+                                        .frame(minHeight: 44)
+                                        .background(AssistantTheme.bubblePaper(for: colorScheme), in: Capsule())
+                                        .foregroundStyle(AssistantTheme.bubblePaperInk(for: colorScheme))
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                .accessibilityHint("Send or clear your current draft before restoring the message that did not send.")
+                                if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    Text("Send or clear this draft to restore your earlier message.")
+                                        .font(.caption)
+                                        .foregroundStyle(AssistantTheme.stageSecondary)
+                                        .multilineTextAlignment(.center)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 4)
+                                        .background(AssistantTheme.stageWell(for: colorScheme), in: Capsule())
+                                }
                             }
                         }
                     }
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                        floatingNoticeHeight = height
+                    }
+                    if showsJumpToLatest {
+                        jumpToLatestButton {
+                            jumpFeedback += 1
+                            jumpToLatest()
+                        }
+                        .padding(.top, floatingNoticeHeight > 0 ? 10 : 0)
+                        .transition(.opacity)
+                    }
                 }
-                .padding(.bottom, composerHeight + 12)
+                // Floating controls share a stack so Undo/recovery cannot
+                // overlap Jump. Their footprint never resizes the transcript
+                // itself. Only notices (which can remain at the newest edge)
+                // contribute to content clearance; Jump never does.
+                .padding(.bottom, composerHeight + 8)
             }
             .allowsHitTesting(!menuOpen)
             // Match the visual modal state for assistive navigation: the

@@ -8,14 +8,21 @@ rendering work and the correctness constraints on further changes.
 ## Why the transcript is unusual
 
 `ChatTranscriptRows` builds the log into a plain `VStack`. The current
-`ChatView` clips the transcript with `.scrollClipDisabled(false)` and gives the
-composer and navigation separate sibling layout slots. Rows do not depend on
-drawing beneath the composer.
+`ChatView` lets the transcript draw through the full conversation surface,
+behind the crown, navigation and composer. Controls are siblings of the scroll
+view in a `ZStack`, keeping their gestures outside its pan-recognizer subtree.
+The first and last messages have scroll-content clearance for the crown and
+measured composer; this spacing does not create a clipped viewport. Jump to
+latest shares a floating stack with Undo and draft recovery above the composer,
+so controls cannot overlap or change transcript height. Measured Undo/recovery
+height contributes to endpoint content clearance because those notices can
+remain at the newest edge; Jump never changes that clearance.
+Only the complete conversation surface clips at its outer rounded edge.
 
 The eager stack keeps every row mounted. Any change to that behavior must
 preserve bottom-follow as messages arrive and streamed replies grow, the
 reader's position when browsing older messages, and row state and interactions.
-Clipping alone does not establish that a lazy replacement is correct.
+Drawing behind chrome does not establish that a lazy replacement is correct.
 
 The cost of that choice is that every row must exist when the log is first
 opened. `ChatTranscriptRows` now owns the eager stack behind an equatable
@@ -60,8 +67,9 @@ concurrent reads by path, rather than relying on network arrival order.
 and `cardFormTaskRevision`. If you add another content input, include it in
 equality. Do not pass closures whose behavior changes with unrepresented
 state: the equality boundary would retain the old
-behavior. The transcript keeps its existing eager stack and viewport geometry;
-this boundary changes ownership of derivation work, not scroll behavior.
+behavior. The transcript keeps its eager stack; this equality boundary changes
+ownership of derivation work, not scroll behavior. Full-height drawing and
+content clearance are owned by `ChatView`, outside that boundary.
 
 `MessageBubble` and `ApprovedReceiptGroup` are `Equatable`, and the transcript
 attaches `.equatable()` to each. A token landing in the newest reply changes

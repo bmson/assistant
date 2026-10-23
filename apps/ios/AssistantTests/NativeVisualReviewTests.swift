@@ -77,6 +77,68 @@ final class NativeVisualReviewTests: XCTestCase {
     }
 
     @MainActor
+    func testFullHeightChatWithRecoveryAndJump() async throws {
+        let fixture = try NativeReviewFixture()
+        NativeReviewProtocol.install(fixture.responses)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+                               session: URLSession(configuration: configuration))
+        let suite = "assistant.full-height-review.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(apiClient: client, defaults: defaults)
+        await model.refreshAll()
+        let scope = try XCTUnwrap(model.composerDraftScope)
+        // The fixture rejects every POST locally with405: exercise real draft
+        // recovery without admitting any task or reaching an external service.
+        model.send("Keep this unsent fixture draft available for recovery.")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while model.isSending, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertFalse(model.isSending)
+        XCTAssertTrue(model.hasComposerRecovery(in: scope))
+        model.errorMessage = nil
+        model.saveComposerDraft("A different draft is already in the input.", in: scope)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let previousKeyWindow = scene.keyWindow
+        for size in [DynamicTypeSize.large, .accessibility3] {
+            let window = UIWindow(windowScene: scene)
+            window.frame = scene.coordinateSpace.bounds
+            window.rootViewController = UIHostingController(rootView:
+                RootView().environment(model).environment(\.dynamicTypeSize, size)
+                    .environment(\.colorScheme, .light).environment(\.scenePhase, .inactive))
+            window.makeKeyAndVisible()
+            defer { window.isHidden = true; window.rootViewController = nil; previousKeyWindow?.makeKey() }
+            try await Task.sleep(for: .milliseconds(600))
+            window.layoutIfNeeded()
+            func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
+            let transcript = try XCTUnwrap(descendants(window).compactMap { $0 as? UIScrollView }
+                .filter { !($0 is UITextView) }.max { $0.bounds.height < $1.bounds.height })
+            let viewport = transcript.frame
+            for state in ["newest-recovery", "older-recovery-jump"] {
+                if state == "older-recovery-jump" {
+                    transcript.setContentOffset(CGPoint(x: transcript.contentOffset.x,
+                        y: -transcript.adjustedContentInset.top), animated: false)
+                    try await Task.sleep(for: .milliseconds(300))
+                    window.layoutIfNeeded()
+                }
+                XCTAssertEqual(transcript.frame.height, viewport.height, accuracy: 1,
+                    "Jump/recovery controls must not reserve a transcript viewport lane")
+                let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                    window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+                }
+                let attachment = XCTAttachment(image: image)
+                attachment.name = "full-height-\(state)\(size.isAccessibilitySize ? "-accessible" : "")"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+            }
+        }
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+    }
+
+    @MainActor
     func testPartialAnswerNoticeFormatting() async throws {
         let fixture = try NativeReviewFixture()
         NativeReviewProtocol.install(fixture.responses)
