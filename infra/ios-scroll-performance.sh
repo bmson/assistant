@@ -777,7 +777,7 @@ run_card_semantics_case() {
 run_quiet_scroll_profile() {
   local label="$1"
   local instrument_log="$output_root/profile-instrument-options.log"
-  local instrument_json="$output_root/profile-instrument-options.json"
+  local record_help="$output_root/profile-record-help.txt"
   local result="$output_root/${label}-quiet-scroll-profile.xcresult"
   local log="$output_root/${label}-quiet-scroll-profile.log"
   local profile_trace="$output_root/quiet-scroll-profile.trace"
@@ -788,15 +788,21 @@ run_quiet_scroll_profile() {
     echo "::error::Selected Xcode lacks the required Time Profiler or Points of Interest instrument; profile was not started."
     return 1
   fi
-  if ! xcrun xctrace record --template 'Time Profiler' --instrument 'Points of Interest' \
-      --show-recording-options > "$instrument_json" 2> "$instrument_log"; then
-    echo "::error::Selected Xcode cannot configure Time Profiler and Points of Interest together; profile was not started."
+  # Read the selected hosted tool's own usage before starting the fixture.
+  # Xcode 26.6 rejects the Xcode 27 recording-options query; no recording is
+  # needed to verify the documented flags used by the controller.
+  if ! run_optional_bounded 10 "$record_help" xcrun xctrace help record; then
+    echo "::error::Selected Xcode could not provide record usage; profile was not started."
     return 1
   fi
-  if ! jq -e 'has("Time Profiler") and has("Points of Interest")' "$instrument_json" >/dev/null; then
-    echo "::error::Combined recording options did not expose both required instruments; profile was not started."
-    return 1
-  fi
+  local required_flag
+  for required_flag in --template --instrument --device --attach --time-limit --notify-tracing-started --output; do
+    if ! grep -Fq -- "$required_flag" "$record_help"; then
+      echo "::error::Selected Xcode record usage lacks $required_flag; profile was not started."
+      return 1
+    fi
+  done
+  xcrun xctrace version > "$output_root/profile-xctrace-version.txt" 2>&1
 
   set_variant_common "$label"
   xcrun simctl terminate "$simulator_udid" com.baldvinsmarason.assistant >/dev/null 2>&1 || true
