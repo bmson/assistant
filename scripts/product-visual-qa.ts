@@ -20,6 +20,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const before = process.argv.includes('--before');
 const chatStates = process.argv.includes('--chat-states');
 const hydrateChat = process.argv.includes('--hydrate-chat') || chatStates;
+const repairStates = process.argv.includes('--repair-states');
 const longChat = process.argv.includes('--long-chat');
 const streamRecall = process.argv.includes('--stream-recall');
 if (streamRecall && (!hydrateChat || chatStates))
@@ -113,6 +114,7 @@ const fixture = process.argv.includes('--reuse-html')
         PRODUCT_VISUAL_QA_BEFORE: before ? '1' : '0',
         PRODUCT_VISUAL_QA_CHAT: hydrateChat ? '1' : '0',
         PRODUCT_VISUAL_QA_CHAT_STATES: chatStates ? '1' : '0',
+        PRODUCT_VISUAL_QA_REPAIR_STATES: repairStates ? '1' : '0',
         PRODUCT_VISUAL_QA_LONG_CHAT: longChat ? '1' : '0',
         PRODUCT_VISUAL_QA_CARD_CHAT: cardChat,
       },
@@ -345,6 +347,13 @@ const pages = allPages.filter(
     (!process.argv.includes('--forms-only') ||
       ['skills', 'improvements', 'writing-voice'].includes(entry.name)),
 );
+const missingRequestedRepairState = selectedPages?.find(
+  (name) => name.startsWith('improvements-') && !allPages.some((entry) => entry.name === name),
+);
+if (missingRequestedRepairState)
+  throw new Error(
+    `Requested repair fixture ${missingRequestedRepairState} is absent; regenerate HTML with --repair-states before using --reuse-html.`,
+  );
 if ((await componentInputHash()) !== componentSha256)
   throw new Error('Source changed during fixture generation; repeat the capture');
 const buildSha256 = visualHash(
@@ -359,6 +368,7 @@ const buildSha256 = visualHash(
     rootFontSize,
     hydrateChat,
     chatStates,
+    repairStates,
     longChat,
     cardChat,
     streamRecall,
@@ -1525,6 +1535,53 @@ try {
               'Report disclosure exposes expanded state, moves focus to title, retains failed draft, and returns focus on cancel.',
           });
         }
+        if (
+          repairStates &&
+          (!selectedPages || selectedPages.includes('improvements-pr-recorded'))
+        ) {
+          await page.goto(`${origin}/fixture/improvements-pr-recorded`, {
+            waitUntil: 'networkidle',
+          });
+          const savedReviewDetails = page
+            .locator('details')
+            .filter({ hasText: 'Saved independent review' });
+          const savedReviewSummary = savedReviewDetails.getByText('Diagnosis and history', {
+            exact: true,
+          });
+          if (!(await savedReviewDetails.count()))
+            throw new Error('Recorded PR fixture is missing its saved independent review');
+          await savedReviewSummary.click();
+          if (!(await savedReviewDetails.evaluate((element) => element.hasAttribute('open'))))
+            throw new Error('Saved review/history disclosure did not open through the DOM');
+          if (
+            !(await savedReviewDetails
+              .getByText('This saved review may not describe the current pull request revision.', {
+                exact: true,
+              })
+              .isVisible()) ||
+            !(await savedReviewDetails
+              .getByText('Reviewed the synthetic issue evidence.', {
+                exact: false,
+              })
+              .isVisible())
+          )
+            throw new Error('Expanded saved review/history details are not visible');
+          const writes = await page.evaluate(
+            () => (window as Window & { __qaWrites?: string[] }).__qaWrites ?? [],
+          );
+          if (writes.length)
+            throw new Error(`Review/history disclosure invoked an action: ${writes.join(', ')}`);
+          await provenanceScreenshot(page, {
+            path: path.join(output, `improvements-pr-recorded-history-390-${scheme}.png`),
+            fullPage: true,
+            animations: 'disabled',
+          });
+          interactions.push({
+            scheme,
+            check:
+              'Actual local DOM opens the recorded PR saved-review/history disclosure; stale-review qualification and earlier history are visible; no external/action callback runs.',
+          });
+        }
         if (!selectedPages || selectedPages.includes('writing-voice')) {
           await page.goto(`${origin}/fixture/writing-voice`, { waitUntil: 'networkidle' });
           await page
@@ -1803,7 +1860,14 @@ try {
           : staticLargeText
             ? 'non-conversation-product-states; use hydrated chat for enlarged conversation'
             : 'all-product-states',
-        captureProfile: { widths: captureWidths, rootFontSize, longChat, cardChat, streamRecall },
+        captureProfile: {
+          widths: captureWidths,
+          rootFontSize,
+          longChat,
+          cardChat,
+          streamRecall,
+          repairStates,
+        },
         captureInventory,
         missingCurrentScreenshots,
         staleOrUnknownScreenshots: combined
@@ -1835,7 +1899,14 @@ try {
           : staticLargeText
             ? 'non-conversation-product-states; use hydrated chat for enlarged conversation'
             : 'all-product-states',
-        captureProfile: { widths: captureWidths, rootFontSize, longChat, cardChat, streamRecall },
+        captureProfile: {
+          widths: captureWidths,
+          rootFontSize,
+          longChat,
+          cardChat,
+          streamRecall,
+          repairStates,
+        },
         captureInventory,
         missingCurrentScreenshots,
         provenancePolicy:

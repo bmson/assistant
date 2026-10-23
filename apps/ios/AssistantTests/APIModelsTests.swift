@@ -471,11 +471,14 @@ extension APIModelsTests {
             XCTAssertFalse(state.canRetry)
         }
         XCTAssertEqual(RepairPresentation(status: "testing").title, "Testing")
+        XCTAssertEqual(RepairPresentation(status: "pr_open").title, "Pull request recorded")
+        XCTAssertTrue(RepairPresentation(status: "pr_open").detail.contains("does not verify"))
         XCTAssertEqual(RepairPresentation(status: "merged").title, "Awaiting deployment")
         XCTAssertFalse(RepairPresentation(status: "merged").canConfirmFixed)
         XCTAssertFalse(RepairPresentation(status: "monitoring").canConfirmFixed)
+        XCTAssertEqual(RepairPresentation(status: "monitoring").title, "Deployment evidence unavailable")
         let deployed = RepairPresentation(status: "monitoring", deploymentConfirmed: true)
-        XCTAssertEqual(deployed.title, "Deployed · needs confirmation")
+        XCTAssertEqual(deployed.title, "Deployment observed · needs confirmation")
         XCTAssertTrue(deployed.canConfirmFixed)
         XCTAssertFalse(deployed.isClosed)
         let confirmed = RepairPresentation(status: "resolved")
@@ -498,14 +501,40 @@ extension APIModelsTests {
         var issue = try JSONDecoder().decode(WorkspaceRepairIssue.self, from: data)
         XCTAssertNil(issue.history)
         XCTAssertNil(issue.mergeSha)
+        XCTAssertNil(issue.codeReview)
+        XCTAssertFalse(issue.hasBlockingGitHubPullRequest)
+        XCTAssertFalse(issue.hasRecordedPullRequestArtifact)
         let oldRevision = issue.actionRevision
         issue.manualRunRequested = true
         XCTAssertNotEqual(issue.actionRevision, oldRevision, "A saved manual request changes action availability before investigation starts")
-        let enriched = Data(#"{"id":"issue","title":"Broken behavior","summary":"What happened","status":"monitoring","diagnosis":"Verified deployed revision","lastError":"","sourceTaskId":null,"prUrl":null,"runUrl":null,"updatedAt":"2026-10-03T19:00:00.000Z","mergeSha":"abc123","history":[{"status":"merged","at":"2026-10-03T18:00:00.000Z","detail":"Merged code"}]}"#.utf8)
+        let enriched = Data(#"{"id":"issue","title":"Broken behavior","summary":"What happened","status":"monitoring","diagnosis":"Verified deployed revision","lastError":"","sourceTaskId":null,"prUrl":null,"runUrl":null,"updatedAt":"2026-10-03T19:00:00.000Z","mergeSha":"abc123","codeReview":{"commitSha":"def456","approved":true,"modelId":"review-model","summary":"Looks sound","reviewedAt":"2026-10-03T18:30:00.000Z"},"history":[{"status":"merged","at":"2026-10-03T18:00:00.000Z","detail":"Merged code"}]}"#.utf8)
         let projected = try JSONDecoder().decode(WorkspaceRepairIssue.self, from: enriched)
         XCTAssertEqual(projected.mergeSha, "abc123")
+        XCTAssertEqual(projected.codeReview?.commitSha, "def456")
+        XCTAssertEqual(projected.codeReview?.summary, "Looks sound")
         XCTAssertEqual(projected.history?.first?.status, "merged")
         XCTAssertEqual(projected.history?.first?.detail, "Merged code")
+
+        let githubPR = try JSONDecoder().decode(
+            WorkspaceRepairIssue.self,
+            from: Data(#"{"id":"github-pr","title":"Failed retry","summary":"Original issue","status":"failed","diagnosis":"","lastError":"","sourceTaskId":null,"prUrl":"https://github.com/example/repo/pull/42","runUrl":null,"updatedAt":"2026-10-03T19:00:00.000Z","workerProvider":"github","prNumber":42}"#.utf8)
+        )
+        XCTAssertTrue(githubPR.hasBlockingGitHubPullRequest)
+        XCTAssertTrue(githubPR.hasRecordedPullRequestArtifact)
+
+        let hostedPR = try JSONDecoder().decode(
+            WorkspaceRepairIssue.self,
+            from: Data(#"{"id":"hosted-pr","title":"Failed hosted attempt","summary":"Original issue","status":"failed","diagnosis":"","lastError":"","sourceTaskId":null,"prUrl":"https://github.com/example/repo/pull/43","runUrl":null,"updatedAt":"2026-10-03T19:00:00.000Z","workerProvider":"openai_hosted","prNumber":43}"#.utf8)
+        )
+        XCTAssertFalse(hostedPR.hasBlockingGitHubPullRequest)
+        XCTAssertTrue(hostedPR.hasRecordedPullRequestArtifact)
+
+        let legacyPR = try JSONDecoder().decode(
+            WorkspaceRepairIssue.self,
+            from: Data(#"{"id":"legacy-pr","title":"Legacy payload","summary":"Original issue","status":"failed","diagnosis":"","lastError":"","sourceTaskId":null,"prUrl":"https://github.com/example/repo/pull/44","runUrl":null,"updatedAt":"2026-10-03T19:00:00.000Z"}"#.utf8)
+        )
+        XCTAssertFalse(legacyPR.hasBlockingGitHubPullRequest)
+        XCTAssertTrue(legacyPR.hasRecordedPullRequestArtifact)
     }
 }
 

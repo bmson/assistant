@@ -45,6 +45,8 @@ export function projectRepairIssue(issue: RepairIssue) {
       : null,
     deploymentConfirmed: Boolean(issue.data.mergeSha && issue.data.monitoringAt),
     sourceTaskId: issue.data.sourceTaskId ?? null,
+    workerProvider: issue.data.workerProvider ?? 'github',
+    prNumber: issue.data.prNumber ?? null,
     manualRunRequested: Boolean(issue.data.manualRunRequestedAt),
     prUrl: githubLink(issue.data.prUrl),
     runUrl: githubLink(issue.data.runUrl),
