@@ -52,7 +52,7 @@ jobs:
       - name: Prepare worktrees and build benchmark tests
         env:
           BASELINE_REF: ${{ inputs.baseline_ref || '14ba202b8c9593623f3fe3c817319c15e40f6ffa' }}
-          CANDIDATE_REF: ${{ inputs.candidate_ref || (github.event_name == 'push' && 'f9c3e387ba94ce4c335f2f5eba229d7da1cecedb') || github.sha }}
+          CANDIDATE_REF: ${{ inputs.candidate_ref || (github.event_name == 'push' && '5c55c0d138abaf84f5b8baf11f1ba3eee38cf205') || github.sha }}
           REPEATS: ${{ inputs.repeats || '5' }}
           RUN_MODE: ${{ (github.event_name == 'push' && 'smoke') || inputs.run_mode || 'diagnostic' }}
           PHASE: build
@@ -62,7 +62,7 @@ jobs:
       - name: Run benchmark tests
         env:
           BASELINE_REF: ${{ inputs.baseline_ref || '14ba202b8c9593623f3fe3c817319c15e40f6ffa' }}
-          CANDIDATE_REF: ${{ inputs.candidate_ref || (github.event_name == 'push' && 'f9c3e387ba94ce4c335f2f5eba229d7da1cecedb') || github.sha }}
+          CANDIDATE_REF: ${{ inputs.candidate_ref || (github.event_name == 'push' && '5c55c0d138abaf84f5b8baf11f1ba3eee38cf205') || github.sha }}
           REPEATS: ${{ inputs.repeats || '5' }}
           RUN_MODE: ${{ (github.event_name == 'push' && 'smoke') || inputs.run_mode || 'diagnostic' }}
           PHASE: runtime
