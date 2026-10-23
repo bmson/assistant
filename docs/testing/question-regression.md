@@ -61,3 +61,61 @@ Native rendering, keyboard, scrolling, accessibility and physical-device perform
 3. Include a failed-provider or incomplete-work case when applicable. Declare expected failed tools explicitly rather than accepting any tool attempt as success.
 4. Run `pnpm test:questions`, then a scoped live run. Inspect its answer, card parts, ledger and saved details.
 5. Run repository validation before shipping runtime changes uncovered by a case. Retain failed reports as the baseline; do not overwrite them with a passing rerun.
+
+
+## Calendar diagnostic preparation
+
+Prepare the six diagnostic cases or six separate, development-exposed holdouts
+without credentials, database setup, tool execution, or inference:
+
+```sh
+pnpm eval:questions --suite calendar-diagnostic --prepare --output /tmp/calendar-diagnostic-run
+pnpm eval:questions --suite calendar-diagnostic --partition holdout --prepare --output /tmp/calendar-holdout-run
+```
+
+Each new private directory contains `preparation.json`; existing evidence is
+never overwritten. Requests, history, frozen time/owner zone, synthetic outcomes,
+actual registered read schemas/policy, expected evidence and independent rubrics,
+and source/configuration hashes are recorded. Selected seam hashes are scoped;
+the immutable commit plus dirty code inventory and diff hash identify additional
+local source changes without claiming an exhaustive dependency manifest. All cases are `not_run`, with null
+calls, latency, tokens and cost. Pagination cursors and causal markers survive
+sanitization. Preparation success is not a behavioral pass; no paid inference
+was run for this implementation. These source-reviewed holdouts are not blind.
+
+The pack covers combined Google/iPhone reads, partial/unavailable sources,
+canonical copies versus distinct overlaps, attendance uncertainty, and autumn/
+spring clock changes with untrusted descriptions and irrelevant prior context.
+Prior-chat or fixture-ledger privacy checks do not establish memory-retrieval
+quality. Actual calendars, writes, cooperative cancellation, approval actions and
+broad recall relevance remain outside this read-only pack; existing safety
+regressions retain their separate coverage.
+
+Future authorized `--live` execution uses the existing captured configuration,
+budget, deadline and rolled-back dispatcher. It supplies no preset fixture plan:
+production routing runs, including intentional deterministic private-read gates.
+Only observed router calls are model evidence. Raw drafts/tool proposals, final
+answers, response checks and available accounting are separate. Exact grounding
+fallback reasons are not persisted by the current runtime and remain explicitly
+unavailable; a changed draft alone does not prove contract rescue. Unknown tools
+have no live-provider fallback. Captures over 64 KiB per input/output retain a
+hash and preview rather than silently claiming completeness.
+
+Missing/zero-default token usage and unsettled charges are incomplete telemetry,
+not free work. This pack stops further cases after incomplete accounting because
+transaction rollback would discard reservations. Reported and estimated cost
+bases remain distinct. Diagnostic mutation tests check structured evidence,
+forbidden proposals, privacy markers and narrow prose contradictions; they do
+not certify semantic utility. Holdouts receive common safety/structure checks
+and their independent rubric, not diagnostic-specific automatic credit. Every
+automated pass leaves usefulness review pending. Before/after inference requires
+frozen inputs/tool schedules, the same exact model/configuration and rubric, and
+an agreed budget; preserve failures, not-run cases and per-case latency/cost.
+
+Router traces omit the exact model-visible tool set, tool choice and provider
+options; registered fixture schema hashes do not prove exact provider-request
+parity. Router calls also do not identify every provider retry or fallback
+attempt. Partial ledger coverage is incomplete. A thrown or aborted case retains
+an interrupted receipt with unknown charge and null usage/cost, stops subsequent
+cases, and remains in the summary even if cleanup fails. Budget preflight skips
+retain a specific not-run reason. No unknown charge is treated as free allowance.
