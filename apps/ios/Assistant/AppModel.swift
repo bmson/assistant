@@ -5,6 +5,44 @@ import SwiftUI
 import UIKit
 import CoreLocation
 
+#if DEBUG
+/// Opt-in metadata for a scoped draft save. Draft text and owner identifiers
+/// never enter this receipt; unknown callers have no raw-location fallback.
+struct ComposerDraftSaveObservation {
+    let sourceFile: String
+    let sourceFunction: String
+    let sourceLine: Int
+    let accepted: Bool
+    let scopeMatchesCurrent: Bool
+    let sessionMatchesCurrent: Bool
+    let requestedLength: Int
+    let requestedEmpty: Bool
+    let beforeLength: Int
+    let beforeEmpty: Bool
+    let afterLength: Int
+    let afterEmpty: Bool
+    let beforeRecovery: Bool
+    let afterRecovery: Bool
+
+    static func safeSource(file: String, function: String, line: Int) -> (String, String, Int) {
+        let filename = file.split(separator: "/").last.map(String.init) ?? ""
+        let allowed: [String: Set<String>] = [
+            "ChatView.swift": ["body", "sendDraft()", "synchronizeComposer()", "restoreUnsentMessageIfPossible()"],
+            "AppModel.swift": [
+                "send(_:autonomous:force:spoken:calendarContextReady:composerDraftContext:onComposerDraftStage:onComposerDraftClear:)",
+                "restoreComposerRecoveryByOwner(in:replacing:)",
+                "saveComposerDraftChange(_:currentDraft:in:)"
+            ],
+            "NativeVisualReviewTests.swift": ["testFullHeightChatWithRecoveryAndJump()"],
+        ]
+        guard allowed[filename]?.contains(function) == true, line > 0 else {
+            return ("unknown", "unknown", 0)
+        }
+        return (filename, function, line)
+    }
+}
+#endif
+
 enum AssistantRoute: String, Hashable, Identifiable, CaseIterable, Sendable {
     case chat
     case chats
@@ -281,6 +319,9 @@ final class AppModel {
     // Its session and recovery are read through composerDraftScope/helpers.
     // Keep this tracked even though the storage itself is private.
     private var conversationDrafts = ConversationDrafts()
+#if DEBUG
+    @ObservationIgnored var composerDraftSaveObserver: (@MainActor (ComposerDraftSaveObservation) -> Void)? = nil
+#endif
     private(set) var packDiscussionDraft: String?
     var showingConnection = false
     /// One-shot intent shared by every user-facing way to send a message,
@@ -498,13 +539,87 @@ final class AppModel {
         return conversationDrafts.scope(conversationID: conversationId)
     }
 
+    func composerDraftSnapshot(in scope: ComposerDraftScope) -> ComposerDraftSnapshot? {
+        conversationDrafts.snapshot(in: scope)
+    }
+
     func composerDraft(in scope: ComposerDraftScope) -> String {
         conversationDrafts.draft(in: scope)
     }
 
-    func saveComposerDraft(_ text: String, in scope: ComposerDraftScope) {
+    @discardableResult
+    func saveComposerDraftChange(_ callbackText: String, currentDraft: String,
+                                 in scope: ComposerDraftScope) -> ComposerDraftSnapshot? {
+        guard callbackText == currentDraft else { return nil }
+        return saveComposerDraft(callbackText, in: scope)
+    }
+
+#if DEBUG
+    @discardableResult
+    func saveComposerDraft(_ text: String, in scope: ComposerDraftScope,
+                           sourceFile: String = #fileID, sourceLine: Int = #line,
+                           sourceFunction: String = #function) -> ComposerDraftSnapshot? {
+        guard composerDraftSaveObserver != nil else {
+            return conversationDrafts.save(text, in: scope)
+        }
+        let before = conversationDrafts.snapshot(in: scope)
+        let beforeRecovery = conversationDrafts.hasRecovery(in: scope)
+        let saved = conversationDrafts.save(text, in: scope)
+        observeComposerDraftSave(text, scope: scope, before: before, after: saved,
+                                 beforeRecovery: beforeRecovery,
+                                 sourceFile: sourceFile, sourceLine: sourceLine,
+                                 sourceFunction: sourceFunction)
+        return saved
+    }
+
+    @discardableResult
+    func saveComposerDraft(_ text: String, in scope: ComposerDraftScope,
+                           ifUnchangedFrom snapshot: ComposerDraftSnapshot,
+                           sourceFile: String = #fileID, sourceLine: Int = #line,
+                           sourceFunction: String = #function) -> ComposerDraftSnapshot? {
+        guard composerDraftSaveObserver != nil else {
+            return conversationDrafts.save(text, in: scope, ifUnchangedFrom: snapshot)
+        }
+        let before = conversationDrafts.snapshot(in: scope)
+        let beforeRecovery = conversationDrafts.hasRecovery(in: scope)
+        let saved = conversationDrafts.save(text, in: scope, ifUnchangedFrom: snapshot)
+        observeComposerDraftSave(text, scope: scope, before: before, after: saved,
+                                 beforeRecovery: beforeRecovery,
+                                 sourceFile: sourceFile, sourceLine: sourceLine,
+                                 sourceFunction: sourceFunction)
+        return saved
+    }
+
+    private func observeComposerDraftSave(_ text: String, scope: ComposerDraftScope,
+                                          before: ComposerDraftSnapshot?, after: ComposerDraftSnapshot?,
+                                          beforeRecovery: Bool,
+                                          sourceFile: String, sourceLine: Int, sourceFunction: String) {
+        guard let observer = composerDraftSaveObserver else { return }
+        let actualAfter = conversationDrafts.snapshot(in: scope)
+        let source = ComposerDraftSaveObservation.safeSource(
+            file: sourceFile, function: sourceFunction, line: sourceLine)
+        observer(ComposerDraftSaveObservation(
+            sourceFile: source.0, sourceFunction: source.1, sourceLine: source.2,
+            accepted: after != nil, scopeMatchesCurrent: composerDraftScope == scope,
+            sessionMatchesCurrent: conversationDrafts.session == scope.session,
+            requestedLength: text.count, requestedEmpty: text.isEmpty,
+            beforeLength: before?.text.count ?? 0, beforeEmpty: before?.text.isEmpty ?? true,
+            afterLength: actualAfter?.text.count ?? 0, afterEmpty: actualAfter?.text.isEmpty ?? true,
+            beforeRecovery: beforeRecovery,
+            afterRecovery: conversationDrafts.hasRecovery(in: scope)))
+    }
+#else
+    @discardableResult
+    func saveComposerDraft(_ text: String, in scope: ComposerDraftScope) -> ComposerDraftSnapshot? {
         conversationDrafts.save(text, in: scope)
     }
+
+    @discardableResult
+    func saveComposerDraft(_ text: String, in scope: ComposerDraftScope,
+                           ifUnchangedFrom snapshot: ComposerDraftSnapshot) -> ComposerDraftSnapshot? {
+        conversationDrafts.save(text, in: scope, ifUnchangedFrom: snapshot)
+    }
+#endif
 
     func hasComposerRecovery(in scope: ComposerDraftScope) -> Bool {
         conversationDrafts.hasRecovery(in: scope)
@@ -516,6 +631,57 @@ final class AppModel {
         composerRecoveryRevision += 1
         return restored
     }
+
+    /// An explicit owner action may use the current empty snapshot. Automatic
+    /// recovery continues to require the editor's previously accepted token.
+    func restoreComposerRecoveryByOwner(in scope: ComposerDraftScope,
+                                       replacing draft: String) -> ComposerDraftSnapshot? {
+        guard composerDraftScope == scope,
+              draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let current = conversationDrafts.snapshot(in: scope),
+              current.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return restoreComposerRecovery(in: scope, replacing: draft, ifUnchangedFrom: current)
+    }
+
+#if DEBUG
+    func restoreComposerRecovery(in scope: ComposerDraftScope, replacing draft: String,
+                                 ifUnchangedFrom snapshot: ComposerDraftSnapshot,
+                                 sourceFile: String = #fileID, sourceLine: Int = #line,
+                                 sourceFunction: String = #function) -> ComposerDraftSnapshot? {
+        guard composerDraftSaveObserver != nil else {
+            guard let restored = conversationDrafts.restore(
+                in: scope, replacing: draft, ifUnchangedFrom: snapshot
+            ) else { return nil }
+            restorableDraft = nil
+            composerRecoveryRevision += 1
+            return restored
+        }
+        let before = conversationDrafts.snapshot(in: scope)
+        let beforeRecovery = conversationDrafts.hasRecovery(in: scope)
+        let restored = conversationDrafts.restore(
+            in: scope, replacing: draft, ifUnchangedFrom: snapshot
+        )
+        if restored != nil {
+            restorableDraft = nil
+            composerRecoveryRevision += 1
+        }
+        observeComposerDraftSave(draft, scope: scope, before: before, after: restored,
+                                 beforeRecovery: beforeRecovery,
+                                 sourceFile: sourceFile, sourceLine: sourceLine,
+                                 sourceFunction: sourceFunction)
+        return restored
+    }
+#else
+    func restoreComposerRecovery(in scope: ComposerDraftScope, replacing draft: String,
+                                 ifUnchangedFrom snapshot: ComposerDraftSnapshot) -> ComposerDraftSnapshot? {
+        guard let restored = conversationDrafts.restore(
+            in: scope, replacing: draft, ifUnchangedFrom: snapshot
+        ) else { return nil }
+        restorableDraft = nil
+        composerRecoveryRevision += 1
+        return restored
+    }
+#endif
 
     private func connectionIsCurrent(_ client: APIClient, version: Int) -> Bool {
         !Task.isCancelled && connectionIdentityIsCurrent(client, version: version)
@@ -3881,7 +4047,11 @@ final class AppModel {
     /// `spoken` says this turn will be heard rather than read, and asks the
     /// server for a reply shaped for the ear: short, no tables, no Markdown to
     /// pronounce.
-    func send(_ rawText: String, autonomous override: Bool? = nil, force: Bool = false, spoken: Bool = false, calendarContextReady: Bool = false) {
+    func send(_ rawText: String, autonomous override: Bool? = nil, force: Bool = false,
+              spoken: Bool = false, calendarContextReady: Bool = false,
+              composerDraftContext: ComposerDraftSubmissionContext? = nil,
+              onComposerDraftStage: (@MainActor (ComposerDraftSubmissionProvenance) -> Void)? = nil,
+              onComposerDraftClear: (@MainActor (ComposerDraftSnapshot, ComposerDraftSnapshot) -> Void)? = nil) {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isSending,
               let client,
@@ -3909,7 +4079,20 @@ final class AppModel {
             isPreparingCalendarContext = true
             calendarPreflightRevision += 1
             let preflightRevision = calendarPreflightRevision
-            saveComposerDraft(text, in: draftScope)
+            // Prepared actions can coexist with another draft. Only stage an
+            // initiating empty composer, or retain the model-only caller's
+            // existing staging behavior. Capture the result before the await.
+            let submissionSnapshot: ComposerDraftSnapshot?
+            if let context = composerDraftContext {
+                submissionSnapshot = context.mayStageSubmittedText && context.origin.scope == draftScope
+                    ? saveComposerDraft(text, in: draftScope, ifUnchangedFrom: context.origin)
+                    : nil
+            } else {
+                submissionSnapshot = saveComposerDraft(text, in: draftScope)
+            }
+            if let context = composerDraftContext, let submissionSnapshot {
+                onComposerDraftStage?(.init(origin: context.origin, staged: submissionSnapshot))
+            }
             errorMessage = "Checking the shared calendar snapshot before sending…"
             let version = connectionVersion
             Task { [weak self] in
@@ -3925,17 +4108,21 @@ final class AppModel {
                 }
                 self.isPreparingCalendarContext = false
                 guard self.composerDraftScope == draftScope else { return }
+                if !ready && !self.phoneCalendarSharing.matchesBinding(client: client, expectedOwnerID: ownerID) {
+                    self.errorMessage = "The assistant account or server changed while calendar sharing was being checked. Review the connection before sending this message."
+                    self.calendarDraftRestoreRevision += 1
+                    return
+                }
+                if let submissionSnapshot,
+                   let cleared = self.saveComposerDraft("", in: draftScope, ifUnchangedFrom: submissionSnapshot) {
+                    if let context = composerDraftContext {
+                        onComposerDraftClear?(context.origin, cleared)
+                    }
+                }
                 if ready {
-                    self.saveComposerDraft("", in: draftScope)
                     self.errorMessage = nil
                     self.send(text, autonomous: override, force: force, spoken: spoken, calendarContextReady: true)
                 } else {
-                    guard self.phoneCalendarSharing.matchesBinding(client: client, expectedOwnerID: ownerID) else {
-                        self.errorMessage = "The assistant account or server changed while calendar sharing was being checked. Review the connection before sending this message."
-                        self.calendarDraftRestoreRevision += 1
-                        return
-                    }
-                    self.saveComposerDraft("", in: draftScope)
                     self.send(text, autonomous: override, force: force, spoken: spoken, calendarContextReady: true)
                     self.errorMessage = self.phoneCalendarSharing.hasPendingRemoval
                         ? "Calendar removal is still pending; the server may still have the last uploaded snapshot."

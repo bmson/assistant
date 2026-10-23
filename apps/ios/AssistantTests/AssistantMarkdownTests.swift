@@ -1,5 +1,6 @@
 import XCTest
 import SwiftUI
+import Observation
 @testable import Assistant
 
 @MainActor
@@ -8,8 +9,12 @@ private final class LiftedTranscriptFixtureState: ObservableObject {
     @Published var composerHeight: CGFloat = 60
     @Published var availableHeight: CGFloat = 852
     @Published var jumpRequest = 0
+    @Published var noticeHeight: CGFloat = 0
+    @Published var showsJumpChrome = false
+    var transcriptViewport: TranscriptGeometryMeasurement?
     var composer: CGRect = .zero
-    var lastCard: CGRect = .zero
+    var notice: CGRect = .zero
+    var lastCard: TranscriptGeometryMeasurement?
 }
 
 private struct LiftedTranscriptFixture: View {
@@ -22,19 +27,23 @@ private struct LiftedTranscriptFixture: View {
                 ConversationColumn {
                     Group {
                         ScrollView {
-                            // Eager, as the transcript is: the strip under the
-                            // composer can only show a row that exists.
+                            // Eager, as the transcript is: content can draw
+                            // behind the chrome while its final row keeps a
+                            // real clearance above the composer.
                             VStack(spacing: 0) {
                                 ForEach(0..<20) { _ in Color.white.frame(height: 200) }
                                 Color.red.frame(height: 100)
-                                    .onGeometryChange(for: CGRect.self) {
-                                        $0.frame(in: .global)
-                                    } action: {
-                                        state.lastCard = $0
+                                    .onTranscriptGeometryChange { measurement in
+                                        state.lastCard = measurement
                                     }
                             }
+                            .padding(.bottom, state.composerHeight + 30
+                                + (state.noticeHeight > 0 ? state.noticeHeight + 8 : 0))
                         }
-                        .scrollClipDisabled()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .onTranscriptGeometryChange { measurement in
+                            state.transcriptViewport = measurement
+                        }
                         .scrollPosition($position)
                         .transaction {
                             if state.reveal > 0 {
@@ -56,9 +65,28 @@ private struct LiftedTranscriptFixture: View {
                         }
                 }
                 .frame(width: viewport.size.width, height: viewport.size.height)
+                .overlay(alignment: .bottom) {
+                    if state.noticeHeight > 0 {
+                        Color.purple
+                            .frame(height: state.noticeHeight)
+                            .onGeometryChange(for: CGRect.self) {
+                                $0.frame(in: .global)
+                            } action: {
+                                state.notice = $0
+                            }
+                            .padding(.bottom, state.composerHeight + 20)
+                    }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if state.showsJumpChrome {
+                        Color.orange
+                            .frame(width: 120, height: 44)
+                            .padding(.bottom, state.composerHeight + 30
+                                + (state.noticeHeight > 0 ? state.noticeHeight : 0))
+                    }
+                }
                 .background(Color.green.ignoresSafeArea(.container))
                 .clipShape(RoundedRectangle(cornerRadius: 34))
-                .ignoresSafeArea(.container)
                 .offset(y: -state.reveal)
             }
         }
@@ -542,20 +570,67 @@ final class AssistantMarkdownTests: XCTestCase {
     }
 
     @MainActor
-    func testChatViewportKeepsLatestAboveFocusedComposer() async throws {
+    func testChatViewportDrawsBehindComposerWithoutOwningItsTouches() async throws {
+        let testCaseID = UUID().uuidString
+        StubURLProtocol.beginTestCase(testCaseID)
+        defer { StubURLProtocol.endTestCase(testCaseID) }
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
         let previousKeyWindow = scene.keyWindow
         let window = UIWindow(windowScene: scene)
         window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
         let messages = (0..<16).map { index in
             ChatMessage(id: "layout-\(index)", role: .assistant,
-                parts: [.init(type: "text", text: "Message \(index + 1)\nKeep the newest answer comfortably above the input while opening the menu.")])
+                parts: [.init(type: "text", text: index == 15
+                    ? "LATEST_LAYOUT_ROW_MARKER\nKeep the newest answer comfortably above the input while opening the menu."
+                    : "Message \(index + 1)\nKeep the newest answer comfortably above the input while opening the menu.")])
         }
-        let model = AppModel(initialMessages: messages)
+        let stamp = "2026-10-03T09:00:00Z"
+        let conversation = ConversationView(
+            conversation: .init(id: "layout-main", title: "Layout review", modelOverride: nil,
+                                archivedAt: nil, isPrimary: true),
+            agentName: "Assistant", agentTimezone: "UTC", messages: messages, models: [],
+            goalTitle: nil, canArchive: false, cursor: nil, asyncTurn: nil)
+        let bootstrap = BootstrapResponse(
+            generatedAt: stamp,
+            identity: .init(id: "layout-owner", name: "Assistant", avatarUrl: nil),
+            shell: .init(dashboard: .init(pendingApprovals: 0, needsAttention: 0, presence: .idle),
+                         memoryHealth: .init(totalUsable: 0, notYetOrganized: 0, awaitingReview: 0,
+                                             ownerConfirmed: 0, lastOrganizedAt: nil)),
+            conversation: conversation)
+        let bootstrapData = try JSONEncoder().encode(bootstrap)
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/bootstrap": [.success(status: 200, body: bootstrapData)],
+            "/api/mobile/v1/overview": [.success(status: 401, body: Data())],
+        ])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubURLProtocol.self]
+        configuration.httpAdditionalHeaders = ["X-Assistant-Test-Case": testCaseID]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://assistant.test")!, token: "fixture-only"),
+                               session: URLSession(configuration: configuration))
+        let suite = "assistant.chat-viewport-review.\(testCaseID)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defaults.set("https://assistant.test", forKey: "assistant.server-url")
+        defaults.set(true, forKey: "assistant.push-prompted")
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(apiClient: client, defaults: defaults, storeConnectionToken: { _ in })
+        model.scenePhaseDidChange(.background)
+        await model.refreshAll(reportFailure: false)
+        XCTAssertEqual(model.bootstrap?.identity.id, "layout-owner")
+        XCTAssertEqual(model.messages.map(\.id), messages.map(\.id))
+        let scope = try XCTUnwrap(model.composerDraftScope)
+        var actualLastRowMeasurement: TranscriptGeometryMeasurement?
+        var rowGeometryReportCount = 0
         window.rootViewController = UIHostingController(rootView:
             ChatView(safeAreaTopInset: 62, safeAreaBottomInset: 34,
                 safeAreaLeadingInset: 0, safeAreaTrailingInset: 0)
-                .environment(model).environment(\.colorScheme, .light))
+                .environment(model)
+                .environment(\.colorScheme, .light)
+                .environment(\.chatTranscriptRowGeometryProbe,
+                    ChatTranscriptRowGeometryProbe(messageID: messages[messages.count - 1].id) { measurement in
+                        actualLastRowMeasurement = measurement
+                        rowGeometryReportCount += 1
+                    }))
         window.makeKeyAndVisible()
         defer {
             window.endEditing(true)
@@ -568,7 +643,93 @@ final class AssistantMarkdownTests: XCTestCase {
         let views = descendants(window)
         let transcript = try XCTUnwrap(views.compactMap { $0 as? UIScrollView }.first { !($0 is UITextView) })
         let input = try XCTUnwrap(views.compactMap { $0 as? UITextView }.first)
-        for focused in [false, true, false] {
+        XCTAssertEqual(input.accessibilityIdentifier, "assistant.chat.composer")
+        let initialMessageCount = model.messages.count
+        let typedDraft = "Layout interaction probe"
+        // Exercise the actual UIKit delegate-to-model binding without looking
+        // up or activating SwiftUI's send control.
+        input.text = typedDraft
+        let inputDelegate = try XCTUnwrap(input.delegate)
+        inputDelegate.textViewDidChange?(input)
+        let draftDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while model.composerDraft(in: scope) != typedDraft && ContinuousClock.now < draftDeadline {
+            try await Task.sleep(for: .milliseconds(30))
+        }
+        XCTAssertEqual(model.composerDraft(in: scope), typedDraft,
+            "A native UITextView delegate change must update the paired conversation's draft scope")
+        XCTAssertFalse(model.isSending)
+        XCTAssertEqual(model.messages.count, initialMessageCount,
+            "The draft-binding check does not submit the message")
+        func assertHitReceiverIsOutsideTranscript(_ control: UIView, file: StaticString = #filePath, line: UInt = #line) {
+            let center = control.convert(CGPoint(x: control.bounds.midX, y: control.bounds.midY), to: window)
+            let receiver = window.hitTest(center, with: nil)
+            XCTAssertNotNil(receiver, "The overlaid control must receive its own hit test", file: file, line: line)
+            if let receiver {
+                XCTAssertFalse(
+                    receiver === transcript || receiver.isDescendant(of: transcript),
+                    "Composer and send touches must not enter the transcript pan-recognizer subtree",
+                    file: file,
+                    line: line
+                )
+            }
+        }
+        func rectReceipt(_ rect: CGRect) -> [String: CGFloat] {
+            guard !rect.isNull, !rect.isInfinite,
+                  rect.minX.isFinite, rect.minY.isFinite,
+                  rect.width.isFinite, rect.height.isFinite,
+                  rect.maxX.isFinite, rect.maxY.isFinite else {
+                return ["x": 0, "y": 0, "width": 0, "height": 0, "maxX": 0, "maxY": 0]
+            }
+            return ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height,
+                    "maxX": rect.maxX, "maxY": rect.maxY]
+        }
+        let composerState: [String: Any] = [
+            "windowFrame": rectReceipt(window.frame),
+            "windowSafeAreaInsets": ["top": window.safeAreaInsets.top, "left": window.safeAreaInsets.left,
+                                     "bottom": window.safeAreaInsets.bottom, "right": window.safeAreaInsets.right],
+            "rootSafeAreaInsets": ["top": window.rootViewController?.view.safeAreaInsets.top ?? 0,
+                                   "left": window.rootViewController?.view.safeAreaInsets.left ?? 0,
+                                   "bottom": window.rootViewController?.view.safeAreaInsets.bottom ?? 0,
+                                   "right": window.rootViewController?.view.safeAreaInsets.right ?? 0],
+            "transcriptFrameInWindow": rectReceipt(transcript.convert(transcript.bounds, to: window)),
+            "transcriptContentOffset": ["x": transcript.contentOffset.x, "y": transcript.contentOffset.y],
+            "inputFrameInWindow": rectReceipt(input.convert(input.bounds, to: window)),
+            "inputIsFirstResponder": input.isFirstResponder,
+            "inputDraftLength": input.text?.count ?? 0,
+            "scopedDraft": model.composerDraft(in: scope),
+            "draftScopeConversationID": scope.conversationID,
+            "messageCountUnchanged": model.messages.count == initialMessageCount,
+            "isSending": model.isSending,
+            "controlActivationEvidence": "Send and VoiceOver activation were not exercised."
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: composerState,
+                                                   options: [.sortedKeys, .prettyPrinted]) {
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "chat-composer-draft-state"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        let accessibilityImage = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        let accessibilityScreenshot = XCTAttachment(image: accessibilityImage)
+        accessibilityScreenshot.name = "chat-composer-screenshot"
+        accessibilityScreenshot.lifetime = .keepAlways
+        add(accessibilityScreenshot)
+
+        XCTAssertFalse(input.isDescendant(of: transcript),
+            "The native text view must be a sibling of the transcript")
+        assertHitReceiverIsOutsideTranscript(input)
+        for (stage, focused) in [false, true, false].enumerated() {
+            let stageStartingReportCount = rowGeometryReportCount
+            let stageStartingInputFrame = input.convert(input.bounds, to: window)
+            let stageStartingViewportFrame = transcript.convert(transcript.bounds, to: window)
+            let stageStartingViewportSize = transcript.bounds.size
+            let stageStartingContentSize = transcript.contentSize
+            let stageStartingInputSize = input.bounds.size
+            var childViewportSizeChanged = false
+            var contentSizeChanged = false
+            var inputSizeChanged = false
             if focused { input.becomeFirstResponder() } else { input.resignFirstResponder() }
             // Keyboard presentation and LazyVStack measurement can outlast a
             // fixed animation delay on a cold CI simulator. Wait for the actual
@@ -579,22 +740,83 @@ final class AssistantMarkdownTests: XCTestCase {
                 try await Task.sleep(for: .milliseconds(100))
                 window.layoutIfNeeded()
                 let inputFrame = input.convert(input.bounds, to: window)
-                let end = transcript.convert(CGPoint(x: 0, y: transcript.contentSize.height), to: window)
+                let viewportFrame = transcript.convert(transcript.bounds, to: window)
+                childViewportSizeChanged = childViewportSizeChanged
+                    || transcript.bounds.size != stageStartingViewportSize
+                contentSizeChanged = contentSizeChanged || transcript.contentSize != stageStartingContentSize
+                inputSizeChanged = inputSizeChanged || input.bounds.size != stageStartingInputSize
+                let actualLayoutChanged = childViewportSizeChanged || contentSizeChanged || inputSizeChanged
+                let rowMeasurementIsCurrent = actualLastRowMeasurement != nil
+                    && (!actualLayoutChanged || rowGeometryReportCount > stageStartingReportCount)
                 let bottomError = abs(transcript.contentOffset.y + transcript.bounds.height
                     - transcript.contentSize.height - transcript.adjustedContentInset.bottom)
-                let settled = bottomError <= 2 && inputFrame.minY > end.y
+                let settled = bottomError <= 2
+                    && viewportFrame.intersects(inputFrame)
                     && inputFrame.maxY <= window.bounds.maxY && input.isFirstResponder == focused
+                    && rowMeasurementIsCurrent
                 settledSamples = settled ? settledSamples + 1 : 0
             } while settledSamples < 3 && ContinuousClock.now < deadline
             window.layoutIfNeeded()
+            let rowFrameDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while (actualLastRowMeasurement == nil
+                || ((childViewportSizeChanged || contentSizeChanged || inputSizeChanged)
+                    && rowGeometryReportCount <= stageStartingReportCount))
+                && ContinuousClock.now < rowFrameDeadline {
+                try await Task.sleep(for: .milliseconds(30))
+                window.layoutIfNeeded()
+            }
             let inputFrame = input.convert(input.bounds, to: window)
+            let viewportFrame = transcript.convert(transcript.bounds, to: window)
+            let rowMeasurementWindowFrame = actualLastRowMeasurement?.frame(in: window)
+            let rowState: [String: Any] = [
+                "stage": stage, "focused": focused,
+                "messageID": messages[messages.count - 1].id,
+                "rowObserved": actualLastRowMeasurement != nil,
+                "stageStartingReportCount": stageStartingReportCount,
+                "childViewportSizeChanged": childViewportSizeChanged,
+                "contentSizeChanged": contentSizeChanged,
+                "inputSizeChanged": inputSizeChanged,
+                "contentSizeAtStageStart": ["width": stageStartingContentSize.width,
+                                             "height": stageStartingContentSize.height],
+                "inputSizeAtStageStart": ["width": stageStartingInputSize.width,
+                                           "height": stageStartingInputSize.height],
+                "rowGeometryReportCount": rowGeometryReportCount,
+                "childViewportSizeAtStageStart": ["width": stageStartingViewportSize.width,
+                                                   "height": stageStartingViewportSize.height],
+                "inputFrameAtStageStart": rectReceipt(stageStartingInputFrame),
+                "viewportFrameAtStageStart": rectReceipt(stageStartingViewportFrame),
+                "actualRowFrameInWindow": rowMeasurementWindowFrame.map(rectReceipt) ?? [:],
+                "inputFrameInWindow": rectReceipt(inputFrame),
+                "viewportFrameInWindow": rectReceipt(viewportFrame)
+            ]
+            let rowData = try JSONSerialization.data(withJSONObject: rowState, options: [.sortedKeys])
+            let rowAttachment = XCTAttachment(data: rowData, uniformTypeIdentifier: "public.json")
+            rowAttachment.name = "chat-clearance-row-stage-\(stage)"
+            rowAttachment.lifetime = .keepAlways
+            add(rowAttachment)
+            if childViewportSizeChanged || contentSizeChanged || inputSizeChanged {
+                XCTAssertGreaterThan(rowGeometryReportCount, stageStartingReportCount,
+                    "A transcript viewport, content or native-input size change requires a new actual-row measurement")
+            }
+            let rowMeasurement = try XCTUnwrap(actualLastRowMeasurement,
+                "The opt-in SwiftUI observer must report the actual final transcript row")
+            let actualLastRowFrame = try XCTUnwrap(rowMeasurement.frame(in: window),
+                "The owned transcript host must still convert the actual row into this window")
+            // The transcript owns the whole drawing viewport; the composer
+            // sits over its lower region as a sibling hit target.
+            XCTAssertGreaterThan(viewportFrame.height, inputFrame.height)
+            XCTAssertGreaterThan(viewportFrame.maxY, inputFrame.minY)
+            XCTAssertTrue(viewportFrame.intersects(inputFrame))
+            XCTAssertTrue(viewportFrame.intersects(actualLastRowFrame))
+            XCTAssertLessThan(actualLastRowFrame.maxY, inputFrame.minY,
+                "The real newest message must remain clear of the overlaid input")
+            XCTAssertFalse(input.isDescendant(of: transcript),
+                "Composer text and send touches must stay outside the transcript pan-recognizer subtree")
             // Verify the actual ChatView remains at its canonical bottom,
             // not a stale offset from before the composer was measured.
             XCTAssertEqual(transcript.contentOffset.y + transcript.bounds.height,
                 transcript.contentSize.height + transcript.adjustedContentInset.bottom, accuracy: 2,
-                "The newest message and its reserved input clearance must remain visible")
-            let end = transcript.convert(CGPoint(x: 0, y: transcript.contentSize.height), to: window)
-            XCTAssertGreaterThan(inputFrame.minY - end.y, 0)
+                "The newest message and its composer clearance must remain visible")
             XCTAssertLessThanOrEqual(inputFrame.maxY, window.bounds.maxY)
             XCTAssertEqual(input.isFirstResponder, focused)
             let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
@@ -608,7 +830,7 @@ final class AssistantMarkdownTests: XCTestCase {
     }
 
     @MainActor
-    func testLiftedTranscriptKeepsComposerGap() async throws {
+    func testLiftedTranscriptKeepsFullViewportAndComposerClearance() async throws {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
         let previousKeyWindow = scene.keyWindow
         let window = UIWindow(windowScene: scene)
@@ -617,17 +839,92 @@ final class AssistantMarkdownTests: XCTestCase {
         window.rootViewController = UIHostingController(
             rootView: LiftedTranscriptFixture(state: state))
         window.makeKeyAndVisible()
+        var diagnosticScroll: UIScrollView?
+        var layoutSamples: [[String: Any]] = []
+        func rectReceipt(_ rect: CGRect) -> [String: CGFloat] {
+            ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height,
+             "maxX": rect.maxX, "maxY": rect.maxY]
+        }
+        func measuredFrame(_ measurement: TranscriptGeometryMeasurement?, _ label: String) throws -> CGRect {
+            let measurement = try XCTUnwrap(measurement, "Missing owned-host geometry measurement: \(label)")
+            return try XCTUnwrap(measurement.frame(in: window),
+                "Owned-host geometry measurement is invalid for this window: \(label)")
+        }
+        func sampleLayout(_ phase: String) throws {
+            let scroll = diagnosticScroll
+            let superview = scroll?.superview
+            let transcriptViewport = try measuredFrame(state.transcriptViewport, "\(phase) viewport")
+            let lastCard = try measuredFrame(state.lastCard, "\(phase) latest row")
+            layoutSamples.append([
+                "phase": phase,
+                "reveal": state.reveal,
+                "availableHeight": state.availableHeight,
+                "composerHeight": state.composerHeight,
+                "noticeHeight": state.noticeHeight,
+                "windowFrame": rectReceipt(window.frame),
+                "windowSafeAreaInsets": ["top": window.safeAreaInsets.top,
+                                         "left": window.safeAreaInsets.left,
+                                         "bottom": window.safeAreaInsets.bottom,
+                                         "right": window.safeAreaInsets.right],
+                "rootSafeAreaInsets": ["top": window.rootViewController?.view.safeAreaInsets.top ?? 0,
+                                       "left": window.rootViewController?.view.safeAreaInsets.left ?? 0,
+                                       "bottom": window.rootViewController?.view.safeAreaInsets.bottom ?? 0,
+                                       "right": window.rootViewController?.view.safeAreaInsets.right ?? 0],
+                "transcriptViewport": rectReceipt(transcriptViewport),
+                "composerFrameInWindow": rectReceipt(state.composer),
+                "latestRowFrameInWindow": rectReceipt(lastCard),
+                "noticeFrameInWindow": rectReceipt(state.notice),
+                "scrollSuperviewType": superview.map { String(describing: type(of: $0)) } ?? "missing",
+                "scrollFrameInSuperview": scroll.map { rectReceipt($0.frame) } ?? [:],
+                "scrollFrameInWindow": scroll.map { rectReceipt($0.convert($0.bounds, to: window)) } ?? [:],
+                "scrollBounds": scroll.map { rectReceipt($0.bounds) } ?? [:],
+                "contentSize": ["width": scroll?.contentSize.width ?? 0,
+                                "height": scroll?.contentSize.height ?? 0],
+                "contentOffset": ["x": scroll?.contentOffset.x ?? 0,
+                                  "y": scroll?.contentOffset.y ?? 0],
+                "contentInset": ["top": scroll?.contentInset.top ?? 0,
+                                 "left": scroll?.contentInset.left ?? 0,
+                                 "bottom": scroll?.contentInset.bottom ?? 0,
+                                 "right": scroll?.contentInset.right ?? 0],
+                "scrollSafeAreaInsets": ["top": scroll?.safeAreaInsets.top ?? 0,
+                                          "left": scroll?.safeAreaInsets.left ?? 0,
+                                          "bottom": scroll?.safeAreaInsets.bottom ?? 0,
+                                          "right": scroll?.safeAreaInsets.right ?? 0],
+                "contentInsetAdjustmentBehavior": scroll?.contentInsetAdjustmentBehavior.rawValue ?? -1,
+                "adjustedContentInset": ["top": scroll?.adjustedContentInset.top ?? 0,
+                                         "left": scroll?.adjustedContentInset.left ?? 0,
+                                         "bottom": scroll?.adjustedContentInset.bottom ?? 0,
+                                         "right": scroll?.adjustedContentInset.right ?? 0],
+            ])
+        }
         defer {
+            let receipt: [String: Any] = ["test": "lifted-transcript-layout-diagnostics",
+                                          "sampleCount": layoutSamples.count,
+                                          "samples": layoutSamples]
+            if let data = try? JSONSerialization.data(withJSONObject: receipt,
+                                                       options: [.sortedKeys, .prettyPrinted]) {
+                let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                attachment.name = "lifted-transcript-layout-samples"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+            }
             window.isHidden = true
             window.rootViewController = nil
             previousKeyWindow?.makeKey()
         }
         try await Task.sleep(for: .milliseconds(400))
-        let baseline = state.composer.minY - state.lastCard.maxY
-        let cardBottom = state.lastCard.maxY
+        let initialLastCard = try measuredFrame(state.lastCard, "initial latest row")
+        let initialViewport = try measuredFrame(state.transcriptViewport, "initial viewport")
+        let baseline = state.composer.minY - initialLastCard.maxY
+        let cardBottom = initialLastCard.maxY
         func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
         let scroll = try XCTUnwrap(descendants(window).compactMap { $0 as? UIScrollView }.first)
+        diagnosticScroll = scroll
+        try sampleLayout("baseline")
         XCTAssertEqual(baseline, 18, accuracy: 1)
+        XCTAssertEqual(initialViewport.height, 852, accuracy: 1,
+            "The composer overlays the viewport instead of reducing its height")
+        XCTAssertGreaterThan(initialViewport.maxY, state.composer.minY)
         func centerColumn() throws -> [(red: UInt8, green: UInt8, blue: UInt8)] {
             let format = UIGraphicsImageRendererFormat()
             format.scale = 1
@@ -659,14 +956,78 @@ final class AssistantMarkdownTests: XCTestCase {
             return (CGFloat(try XCTUnwrap(red.last)) + 1, CGFloat(try XCTUnwrap(blue.first)))
         }
         let renderedBaseline = try renderedEdges()
+        for noticeHeight: CGFloat in [0, 36, 120] {
+            state.noticeHeight = noticeHeight
+            state.jumpRequest += 1
+            try await Task.sleep(for: .milliseconds(180))
+            window.layoutIfNeeded()
+
+            let transcriptViewport = try measuredFrame(state.transcriptViewport, "notice baseline viewport")
+            let latestCard = try measuredFrame(state.lastCard, "notice baseline latest row")
+            let notice = state.notice
+            let offset = scroll.contentOffset
+            try sampleLayout("notice-\(Int(noticeHeight))-baseline")
+            let clearanceTarget = noticeHeight > 0 ? notice.minY : state.composer.minY
+            XCTAssertEqual(transcriptViewport.height, 852, accuracy: 1,
+                "Notice height must change content clearance, never viewport height")
+            XCTAssertEqual(clearanceTarget - latestCard.maxY, 18, accuracy: 1,
+                "The newest row keeps 18pt of clearance below the notice stack or composer")
+            if noticeHeight > 0 {
+                XCTAssertEqual(notice.height, noticeHeight, accuracy: 1)
+            }
+
+            state.showsJumpChrome = true
+            try await Task.sleep(for: .milliseconds(150))
+            window.layoutIfNeeded()
+            try sampleLayout("notice-\(Int(noticeHeight))-jump-visible")
+            let viewportWithJump = try measuredFrame(state.transcriptViewport, "notice with Jump viewport")
+            let cardWithJump = try measuredFrame(state.lastCard, "notice with Jump latest row")
+            XCTAssertEqual(viewportWithJump, transcriptViewport,
+                "Showing Jump must not shorten the transcript viewport")
+            XCTAssertEqual(cardWithJump, latestCard,
+                "Showing Jump must not move the reader's current content")
+            XCTAssertEqual(state.notice, notice,
+                "Jump must not change the notice stack's measured clearance")
+            XCTAssertEqual(scroll.contentOffset, offset,
+                "Showing Jump must not change the transcript offset")
+
+            state.showsJumpChrome = false
+            try await Task.sleep(for: .milliseconds(120))
+            window.layoutIfNeeded()
+            try sampleLayout("notice-\(Int(noticeHeight))-jump-hidden")
+            XCTAssertEqual(try measuredFrame(state.transcriptViewport, "notice after Jump viewport"), transcriptViewport)
+            XCTAssertEqual(try measuredFrame(state.lastCard, "notice after Jump latest row"), latestCard)
+            XCTAssertEqual(scroll.contentOffset, offset)
+        }
+        state.noticeHeight = 0
+        state.jumpRequest += 1
+        try await Task.sleep(for: .milliseconds(180))
+        window.layoutIfNeeded()
+        try sampleLayout("lift-release-baseline")
+        let releaseBaselineLastCard = try measuredFrame(state.lastCard, "lift release latest row")
+        XCTAssertEqual(state.composer.minY - releaseBaselineLastCard.maxY, baseline, accuracy: 1)
+        let liftBaselineOffset = scroll.contentOffset
+        let liftBaselineAdjustedInset = scroll.adjustedContentInset
         for distance: CGFloat in [1, 5, 10, 20, 34, 80, 200, 450, 200, 34, 10, 0, 20, 0, 10, 0] {
             state.reveal = distance
             try await Task.sleep(for: .milliseconds(100))
             window.layoutIfNeeded()
+            try sampleLayout("lift-\(Int(distance))")
+            let viewportFrame = try measuredFrame(state.transcriptViewport, "lift viewport")
+            let latestCardFrame = try measuredFrame(state.lastCard, "lift latest row")
+            XCTAssertEqual(scroll.bounds.height, state.availableHeight, accuracy: 1,
+                "The actual native viewport must remain fixed while crossing the window safe-area edge")
+            XCTAssertEqual(scroll.contentOffset.x, liftBaselineOffset.x, accuracy: 1)
+            XCTAssertEqual(scroll.contentOffset.y, liftBaselineOffset.y, accuracy: 1,
+                "Lift/release must not re-anchor the transcript content")
+            XCTAssertEqual(scroll.adjustedContentInset.top, liftBaselineAdjustedInset.top, accuracy: 1)
+            XCTAssertEqual(scroll.adjustedContentInset.bottom, liftBaselineAdjustedInset.bottom, accuracy: 1)
             XCTAssertEqual(
-                state.composer.minY - state.lastCard.maxY, baseline, accuracy: 1,
+                state.composer.minY - latestCardFrame.maxY, baseline, accuracy: 1,
                 "The gap must survive a \(distance)pt live lift")
-            XCTAssertEqual(state.lastCard.maxY, cardBottom - distance, accuracy: 1)
+            XCTAssertEqual(viewportFrame.height, 852, accuracy: 1,
+                "Moving the shared surface must not resize the transcript viewport")
+            XCTAssertEqual(latestCardFrame.maxY, cardBottom - distance, accuracy: 1)
             let edges = try renderedEdges()
             XCTAssertEqual(edges.input - edges.card, 18, accuracy: 1)
             XCTAssertEqual(edges.card, renderedBaseline.card - distance, accuracy: 1,
@@ -683,20 +1044,23 @@ final class AssistantMarkdownTests: XCTestCase {
             for distance: CGFloat in [10, 450, 0] {
                 state.reveal = distance
                 try await Task.sleep(for: .milliseconds(100))
-                XCTAssertEqual(state.composer.minY - state.lastCard.maxY, baseline, accuracy: 1)
+                window.layoutIfNeeded()
+                try sampleLayout("available-\(Int(height))-composer-\(Int(input))-lift-\(Int(distance))")
+                let latestCardFrame = try measuredFrame(state.lastCard, "available-size latest row")
+                let viewportFrame = try measuredFrame(state.transcriptViewport, "available-size viewport")
+                XCTAssertEqual(state.composer.minY - latestCardFrame.maxY, baseline, accuracy: 1)
+                XCTAssertEqual(viewportFrame.height, height, accuracy: 1,
+                    "Changing composer/chrome height must not reserve space out of the viewport")
             }
         }
         // Reading an older message must not be turned into a jump to latest.
         scroll.setContentOffset(CGPoint(x: 0, y: scroll.contentOffset.y - 160), animated: false)
         try await Task.sleep(for: .milliseconds(100))
         let readingOffset = scroll.contentOffset.y
-        // 160pt of reading sends the newest card past the transcript's own
-        // viewport, which ends 18pt above the input — and that is exactly where
-        // a bubble used to disappear, because a lazily built row stops existing
-        // once it leaves that viewport and `scrollClipDisabled` has nothing to
-        // draw. Read the strip the composer's bottom spacing leaves clear: the
-        // log must still be painting there, not the stage.
+        // Reading upward moves the newest row behind the composer's transparent
+        // lower gutter. The full-height scroll view must continue drawing there.
         window.layoutIfNeeded()
+        try sampleLayout("reading-older-before-lift")
         let underComposer = try centerColumn()
         for y in (Int(state.composer.maxY) - 10)..<(Int(state.composer.maxY) - 2) {
             XCTAssertTrue(
@@ -706,13 +1070,16 @@ final class AssistantMarkdownTests: XCTestCase {
         for distance: CGFloat in [20, 80, 450, 80, 0] {
             state.reveal = distance
             try await Task.sleep(for: .milliseconds(100))
+            window.layoutIfNeeded()
+            try sampleLayout("reading-older-lift-\(Int(distance))")
             XCTAssertEqual(scroll.contentOffset.y, readingOffset, accuracy: 1)
         }
         // Repeated requests share the same native bottom edge.
         for _ in 0..<3 {
             state.jumpRequest += 1
             try await Task.sleep(for: .milliseconds(150))
-            XCTAssertEqual(state.composer.minY - state.lastCard.maxY, baseline, accuracy: 1)
+            let latestCardFrame = try measuredFrame(state.lastCard, "repeated jump latest row")
+            XCTAssertEqual(state.composer.minY - latestCardFrame.maxY, baseline, accuracy: 1)
         }
     }
 
@@ -1337,5 +1704,921 @@ final class AssistantMarkdownTests: XCTestCase {
         let kickoff = try XCTUnwrap(game.startsAt)
         XCTAssertFalse(game.canChange(at: kickoff.addingTimeInterval(-601)))
         XCTAssertTrue(game.canChange(at: kickoff.addingTimeInterval(-600)))
+    }
+}
+
+extension AssistantMarkdownTests {
+    @MainActor
+    func testOwnedTranscriptHostPreservesIdentityStateAndInheritedUpdates() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let previousKeyWindow = scene.keyWindow
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+        let state = OwnedTranscriptHostRegressionState()
+        let boundaryProbe = TranscriptHostBoundaryProbe(
+            marker: { $0[OwnedTranscriptHostMarkerKey.self] },
+            contentRevision: { [weak state] in state?.contentRevision ?? -1 }
+        )
+        state.boundaryProbe = boundaryProbe
+        let rowID = "approved-receipts-receipt-one-receipt-two"
+        let probe = ChatTranscriptRowGeometryProbe(messageID: rowID) { measurement in
+            state.receiptMeasurement = measurement
+        }
+        let root = UIHostingController(
+            rootView: OwnedTranscriptHostRegressionFixture(state: state)
+                .environment(\.chatTranscriptRowGeometryProbe, probe)
+                .environment(\.transcriptHostBoundaryProbe, boundaryProbe)
+        )
+        window.rootViewController = root
+        window.makeKeyAndVisible()
+        defer {
+            window.endEditing(true)
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+
+        try await waitForTranscriptHostCondition("initial environment and actual receipt geometry") {
+            state.environmentSnapshots.last?.localeIdentifier == "en_US"
+                && state.receiptMeasurement?.frame(in: window) != nil
+                && state.systemEnvironmentSnapshots[0] != nil
+        }
+        XCTAssertEqual(boundaryProbe.hostingControllerInitializationCount, 1,
+            "The child UIHostingController is constructed once for this owned host.")
+        XCTAssertEqual(boundaryProbe.parentSnapshotGeneration, boundaryProbe.parentSnapshotCommitCount,
+            "Snapshot generation counts committed parent updates independently of root-value assignments.")
+        XCTAssertEqual(boundaryProbe.rootValueUpdateCount, boundaryProbe.parentSnapshotCommitCount,
+            "Each committed parent snapshot updates the root value once; initialization is counted separately.")
+        let initialScroll = try XCTUnwrap(ownedTranscriptScrollView(in: window))
+        let initialHierarchy = ownedTranscriptControllerIdentities(root: root, containing: initialScroll)
+        XCTAssertGreaterThanOrEqual(initialHierarchy.count, 3,
+            "The root, owned container and child transcript host must all be present.")
+        let input = try XCTUnwrap(ownedTextField(in: window), "The test-owned transcript input must expose its UITextField.")
+        XCTAssertTrue(input.isDescendant(of: initialScroll), "The test-owned input must be inside the transcript host.")
+        XCTAssertTrue(input.window === window, "The test-owned input must belong to the measured window.")
+        let inputFrameBeforeFocus = input.convert(input.bounds, to: window)
+        XCTAssertTrue(inputFrameBeforeFocus.minX.isFinite && inputFrameBeforeFocus.minY.isFinite)
+        XCTAssertTrue(inputFrameBeforeFocus.maxX.isFinite && inputFrameBeforeFocus.maxY.isFinite)
+        XCTAssertGreaterThan(inputFrameBeforeFocus.width, 0)
+        XCTAssertGreaterThan(inputFrameBeforeFocus.height, 0)
+        XCTAssertTrue(input.becomeFirstResponder(), "The native transcript field should focus before the parent update.")
+        var previousFocusedGeometry: [CGFloat]?
+        var stableFocusedGeometrySamples = 0
+        try await waitForTranscriptHostCondition("focused keyboard geometry to settle") {
+            let inputFrame = input.convert(input.bounds, to: window)
+            let geometry: [CGFloat] = [
+                initialScroll.bounds.width, initialScroll.bounds.height,
+                initialScroll.contentSize.width, initialScroll.contentSize.height,
+                initialScroll.adjustedContentInset.top, initialScroll.adjustedContentInset.bottom,
+                initialScroll.contentOffset.x, initialScroll.contentOffset.y,
+                inputFrame.minY, inputFrame.width, inputFrame.height,
+            ]
+            if geometry == previousFocusedGeometry {
+                stableFocusedGeometrySamples += 1
+            } else {
+                previousFocusedGeometry = geometry
+                stableFocusedGeometrySamples = 0
+            }
+            return stableFocusedGeometrySamples >= 3
+        }
+        let typedDraft = "Typed but unsent transcript draft"
+        input.text = typedDraft
+        input.sendActions(for: .editingChanged)
+        try await waitForTranscriptHostCondition("the native editing event updates the scoped draft") {
+            state.draft == typedDraft
+        }
+        XCTAssertEqual(input.text, typedDraft)
+        let selectionStart = try XCTUnwrap(input.position(from: input.beginningOfDocument, offset: 3))
+        let selectionEnd = try XCTUnwrap(input.position(from: input.beginningOfDocument, offset: 9))
+        input.selectedTextRange = input.textRange(from: selectionStart, to: selectionEnd)
+        let expectedSelection = [3, 9]
+        XCTAssertEqual(try XCTUnwrap(ownedTextSelectionOffsets(input)), expectedSelection)
+        let outerComposer = try XCTUnwrap(ownedView(in: window, accessibilityIdentifier: "transcript-host.outer-composer"))
+        XCTAssertFalse(outerComposer.isDescendant(of: initialScroll), "The sibling composer must remain outside the transcript scroll subtree.")
+
+        XCTAssertEqual(state.environmentSnapshots.last?.colorScheme, .light)
+        XCTAssertEqual(state.environmentSnapshots.last?.dynamicTypeSize, .large)
+        let initialSystemEnvironment = try XCTUnwrap(state.systemEnvironmentSnapshots[0])
+        XCTAssertEqual(state.environmentSnapshots.last?.contrast, initialSystemEnvironment.contrast)
+        XCTAssertEqual(state.environmentSnapshots.last?.reduceMotion, initialSystemEnvironment.reduceMotion)
+        XCTAssertEqual(state.environmentSnapshots.last?.reduceTransparency, initialSystemEnvironment.reduceTransparency)
+        XCTAssertEqual(state.environmentSnapshots.last?.layoutDirection, .leftToRight)
+        XCTAssertEqual(state.environmentSnapshots.last?.scenePhase, .active)
+        XCTAssertEqual(state.environmentSnapshots.last?.modelIdentity, ObjectIdentifier(state.model))
+
+        let collapsedDisclosureHeight = try XCTUnwrap(state.disclosureHeight)
+        XCTAssertGreaterThan(try XCTUnwrap(state.receiptMeasurement?.localFrame.height), 0)
+        state.disclosureRequest += 1
+        try await waitForTranscriptHostCondition("the row-local disclosure expands") {
+            (state.disclosureHeight ?? 0) > collapsedDisclosureHeight + 24
+        }
+        state.openURLRequest += 1
+        try await waitForTranscriptHostCondition("the child receives the inherited OpenURL action") {
+            state.openedURLs.last == URL(string: "https://transcript-host.test/child")
+        }
+
+        let viewportBeforeReveal = try XCTUnwrap(state.viewportMeasurement?.frame(in: window))
+        let boundsBeforeReveal = initialScroll.bounds
+        let insetBeforeReveal = initialScroll.adjustedContentInset
+        let offsetBeforeReveal = initialScroll.contentOffset
+
+        var updateTransaction = Transaction(animation: nil)
+        updateTransaction[OwnedTranscriptHostMarkerKey.self] = 73
+        attachOwnedTranscriptBoundarySnapshot(
+            stage: "reveal-update-start", state: state, root: root,
+            window: window, scroll: initialScroll, input: input
+        )
+        withTransaction(updateTransaction) {
+            state.reveal = 18
+        }
+        try await waitForTranscriptHostCondition("the owned viewport follows the parent reveal") {
+            guard let frame = state.viewportMeasurement?.frame(in: window) else { return false }
+            return abs(frame.minY - (viewportBeforeReveal.minY - 18)) < 1
+        }
+        let viewportAfterReveal = try XCTUnwrap(state.viewportMeasurement?.frame(in: window))
+        XCTAssertEqual(viewportAfterReveal.minY, viewportBeforeReveal.minY - 18, accuracy: 1)
+        XCTAssertEqual(initialScroll.bounds, boundsBeforeReveal)
+        XCTAssertEqual(initialScroll.adjustedContentInset, insetBeforeReveal)
+        XCTAssertEqual(initialScroll.contentOffset, offsetBeforeReveal)
+
+        attachOwnedTranscriptBoundarySnapshot(
+            stage: "updated-child-environment-start", state: state, root: root,
+            window: window, scroll: initialScroll, input: input
+        )
+        withTransaction(updateTransaction) {
+            state.contentRevision += 1
+            state.colorScheme = .dark
+            state.dynamicTypeSize = .accessibility2
+            state.locale = Locale(identifier: "fr_FR")
+            state.layoutDirection = .rightToLeft
+            state.scenePhase = .inactive
+            state.model.revision += 1
+            state.openURLGeneration = 1
+        }
+
+        attachOwnedTranscriptBoundarySnapshot(
+            stage: "updated-child-environment-requested", state: state, root: root,
+            window: window, scroll: initialScroll, input: input
+        )
+        try await waitForTranscriptHostCondition("updated child environment reaches the owned host", onTimeout: {
+            attachOwnedTranscriptBoundarySnapshot(
+                stage: "updated-child-environment", state: state, root: root,
+                window: window, scroll: initialScroll, input: input, includeScreenshot: true
+            )
+        }) {
+            let environment = state.environmentSnapshots.last
+            let checks: [String: Bool] = [
+                "locale": environment?.localeIdentifier == "fr_FR",
+                "modelRevision": environment?.modelRevision == 1,
+                "marker73": state.transactionMarkers.contains(73),
+                "disclosure": state.disclosureStates[state.contentRevision] == true,
+                "systemEnvironment": state.systemEnvironmentSnapshots[state.contentRevision] != nil,
+                "measurement": state.receiptMeasurement?.frame(in: window) != nil,
+            ]
+            state.recordPredicateSample(stage: "updated-child-environment", checks: checks)
+            return checks.values.allSatisfy { $0 }
+        }
+        attachOwnedTranscriptBoundarySnapshot(
+            stage: "updated-child-environment-result", state: state, root: root,
+            window: window, scroll: initialScroll, input: input
+        )
+        state.openURLRequest += 1
+        try await waitForTranscriptHostCondition("the replacement inherited OpenURL action is used") {
+            state.openedURLGenerations.last == 1
+        }
+        let updatedScroll = try XCTUnwrap(ownedTranscriptScrollView(in: window))
+        XCTAssertTrue(updatedScroll === initialScroll, "The production transcript UIScrollView must retain identity.")
+        XCTAssertEqual(ownedTranscriptControllerIdentities(root: root, containing: updatedScroll), initialHierarchy,
+            "The public controller ancestry hosting the scroll view must retain identity.")
+        XCTAssertTrue(ownedTextField(in: window) === input,
+            "The focused native transcript input must retain its UIKit identity.")
+        XCTAssertTrue(input.window === window)
+        XCTAssertTrue(input.isFirstResponder, "Environment and content updates must not discard focused native input.")
+        XCTAssertEqual(input.text, typedDraft, "The unsent draft must remain in the test-owned native input.")
+        XCTAssertEqual(state.draft, typedDraft, "The editingChanged draft binding must survive host updates.")
+        XCTAssertEqual(try XCTUnwrap(ownedTextSelectionOffsets(input)), expectedSelection,
+            "An unrelated host/environment update must preserve the native text selection.")
+        XCTAssertTrue(outerComposer.isDescendant(of: window))
+        XCTAssertFalse(outerComposer.isDescendant(of: updatedScroll))
+        let updatedEnvironment = try XCTUnwrap(state.environmentSnapshots.last)
+        XCTAssertEqual(updatedEnvironment.colorScheme, .dark)
+        XCTAssertEqual(updatedEnvironment.dynamicTypeSize, .accessibility2)
+        let updatedSystemEnvironment = try XCTUnwrap(state.systemEnvironmentSnapshots[state.contentRevision])
+        XCTAssertEqual(updatedEnvironment.contrast, updatedSystemEnvironment.contrast)
+        XCTAssertEqual(updatedEnvironment.reduceMotion, updatedSystemEnvironment.reduceMotion)
+        XCTAssertEqual(updatedEnvironment.reduceTransparency, updatedSystemEnvironment.reduceTransparency)
+        XCTAssertEqual(updatedEnvironment.localeIdentifier, "fr_FR")
+        XCTAssertEqual(updatedEnvironment.layoutDirection, .rightToLeft)
+        XCTAssertEqual(updatedEnvironment.scenePhase, .inactive)
+        XCTAssertEqual(updatedEnvironment.modelIdentity, ObjectIdentifier(state.model))
+        XCTAssertEqual(updatedEnvironment.modelRevision, 1)
+        XCTAssertTrue(state.receiptMeasurement?.frame(in: window) != nil,
+            "The DEBUG row-probe environment must continue converting the real grouped receipt through its current host.")
+        XCTAssertGreaterThan(state.receiptMeasurement?.localFrame.height ?? 0, 0,
+            "The actual receipt row must remain measurable through the same debug probe.")
+        XCTAssertEqual(state.disclosureStates[state.contentRevision], true,
+            "The child must report its expanded state for the updated parent content revision.")
+
+        state.rowSheetRequest += 1
+        try await waitForTranscriptHostCondition("the row-local sheet presents") {
+            ownedPresentedController(in: root) != nil
+        }
+        let presentedSheet = try XCTUnwrap(ownedPresentedController(in: root))
+        updateTransaction[OwnedTranscriptHostMarkerKey.self] = 74
+        attachOwnedTranscriptBoundarySnapshot(
+            stage: "row-sheet-update-start", state: state, root: root,
+            window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+        )
+        withTransaction(updateTransaction) {
+            state.contentRevision += 1
+        }
+        attachOwnedTranscriptBoundarySnapshot(
+            stage: "row-sheet-update-requested", state: state, root: root,
+            window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+        )
+        try await waitForTranscriptHostCondition("the row-local sheet survives a later content update", onTimeout: {
+            attachOwnedTranscriptBoundarySnapshot(
+                stage: "row-sheet-after-update", state: state, root: root,
+                window: window, scroll: initialScroll, input: input,
+                expectedSheet: presentedSheet, includeScreenshot: true
+            )
+        }) {
+            let current = ownedPresentedController(in: root)
+            let checks: [String: Bool] = [
+                "sameController": current === presentedSheet,
+                "marker74": state.transactionMarkers.contains(74),
+                "rootPresentsController": root.presentedViewController === current,
+                "controllerWindow": current?.viewIfLoaded?.window === window,
+                "contentRevision": state.contentRevision == 2,
+            ]
+            state.recordPredicateSample(stage: "row-sheet-after-update", checks: checks)
+            return checks["sameController"]! && checks["marker74"]!
+        }
+        attachOwnedTranscriptBoundarySnapshot(
+            stage: "row-sheet-after-update-result", state: state, root: root,
+            window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+        )
+        XCTAssertTrue(ownedTranscriptScrollView(in: window) === initialScroll)
+        XCTAssertEqual(ownedTranscriptControllerIdentities(root: root, containing: initialScroll), initialHierarchy)
+
+        try await waitForTranscriptHostCondition("the parent 74 transaction reaches the child-local leaf") {
+            guard let observation = state.childTransactionObservations.last else { return false }
+            return observation.parentContentRevision == 2 && observation.marker == 74
+        }
+        try await waitForTranscriptHostCondition("the row-local sheet finishes presenting before child-local updates", onTimeout: {
+            attachOwnedTranscriptBoundarySnapshot(
+                stage: "row-sheet-presentation-settle-timeout", state: state, root: root,
+                window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+            )
+        }) {
+            let currentSheet = ownedPresentedController(in: root)
+            let leaf = state.childTransactionObservations.last
+            return currentSheet === presentedSheet
+                && presentedSheet.viewIfLoaded?.window === window
+                && !presentedSheet.isBeingPresented
+                && !presentedSheet.isBeingDismissed
+                && leaf?.parentContentRevision == 2
+                && leaf?.snapshotContentRevision == 2
+        }
+        attachOwnedTranscriptBoundarySnapshot(
+            stage: "row-sheet-presentation-settle-result", state: state, root: root,
+            window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+        )
+        let generationBeforeLocalUpdates = boundaryProbe.parentSnapshotGeneration
+        let commitsBeforeLocalUpdates = boundaryProbe.parentSnapshotCommitCount
+        let rootUpdatesBeforeLocalUpdates = boundaryProbe.rootValueUpdateCount
+        let startingLocalRevision = try XCTUnwrap(state.childTransactionObservations.last?.localRevision)
+        var childTransaction99 = Transaction(animation: nil)
+        childTransaction99[OwnedTranscriptHostMarkerKey.self] = 99
+        let updateChildLocalState = try XCTUnwrap(state.updateChildLocalTransaction)
+        updateChildLocalState(childTransaction99)
+        try await waitForTranscriptHostCondition("the child-local state observes transaction 99", onTimeout: {
+            attachOwnedTranscriptBoundarySnapshot(
+                stage: "child-local-transaction-99-timeout", state: state, root: root,
+                window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+            )
+        }) {
+            guard let observation = state.childTransactionObservations.last else { return false }
+            return observation.parentContentRevision == 2
+                && observation.snapshotContentRevision == 2
+                && observation.localRevision == startingLocalRevision + 1
+                && observation.marker == 99
+                && observation.snapshotGeneration == generationBeforeLocalUpdates
+        }
+        attachOwnedTranscriptBoundarySnapshot(
+            stage: "child-local-transaction-99-result", state: state, root: root,
+            window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+        )
+        let observed99 = try XCTUnwrap(state.childTransactionObservations.last)
+        XCTAssertEqual(observed99.parentContentRevision, 2)
+        XCTAssertEqual(observed99.snapshotContentRevision, 2)
+        XCTAssertEqual(observed99.localRevision, startingLocalRevision + 1)
+        XCTAssertEqual(observed99.marker, 99)
+        XCTAssertEqual(observed99.snapshotGeneration, generationBeforeLocalUpdates)
+        XCTAssertEqual(boundaryProbe.parentSnapshotGeneration, generationBeforeLocalUpdates)
+        XCTAssertEqual(boundaryProbe.parentSnapshotCommitCount, commitsBeforeLocalUpdates,
+            "A child-local transaction must not commit a parent snapshot.")
+        XCTAssertEqual(boundaryProbe.rootValueUpdateCount, rootUpdatesBeforeLocalUpdates,
+            "A child-local transaction must not assign a new root value.")
+        XCTAssertEqual(boundaryProbe.hostingControllerInitializationCount, 1,
+            "A child-local transaction must retain the single hosting controller.")
+
+        let generationBeforeDefaultLocalUpdate = boundaryProbe.parentSnapshotGeneration
+        let commitsBeforeDefaultLocalUpdate = boundaryProbe.parentSnapshotCommitCount
+        let rootUpdatesBeforeDefaultLocalUpdate = boundaryProbe.rootValueUpdateCount
+        var childDefaultTransaction = Transaction()
+        childDefaultTransaction[OwnedTranscriptHostMarkerKey.self] = 0
+        updateChildLocalState(childDefaultTransaction)
+        try await waitForTranscriptHostCondition("the child-local state observes default transaction 0", onTimeout: {
+            attachOwnedTranscriptBoundarySnapshot(
+                stage: "child-local-default-transaction-timeout", state: state, root: root,
+                window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+            )
+        }) {
+            guard let observation = state.childTransactionObservations.last else { return false }
+            return observation.parentContentRevision == 2
+                && observation.snapshotContentRevision == 2
+                && observation.localRevision == startingLocalRevision + 2
+                && observation.marker == 0
+                && observation.snapshotGeneration == generationBeforeDefaultLocalUpdate
+        }
+        attachOwnedTranscriptBoundarySnapshot(
+            stage: "child-local-default-transaction-result", state: state, root: root,
+            window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+        )
+        let observedDefaultLocal = try XCTUnwrap(state.childTransactionObservations.last)
+        XCTAssertEqual(observedDefaultLocal.parentContentRevision, 2)
+        XCTAssertEqual(observedDefaultLocal.snapshotContentRevision, 2)
+        XCTAssertEqual(observedDefaultLocal.localRevision, startingLocalRevision + 2)
+        XCTAssertEqual(observedDefaultLocal.marker, 0)
+        XCTAssertEqual(observedDefaultLocal.snapshotGeneration, generationBeforeDefaultLocalUpdate)
+        XCTAssertEqual(boundaryProbe.parentSnapshotGeneration, generationBeforeDefaultLocalUpdate)
+        XCTAssertEqual(boundaryProbe.parentSnapshotCommitCount, commitsBeforeDefaultLocalUpdate,
+            "A second child-local transaction must not commit a parent snapshot.")
+        XCTAssertEqual(boundaryProbe.rootValueUpdateCount, rootUpdatesBeforeDefaultLocalUpdate,
+            "The default child-local transaction must not assign a new root value.")
+        XCTAssertEqual(boundaryProbe.hostingControllerInitializationCount, 1,
+            "Child-local transactions must retain the single hosting controller.")
+
+        let generationBeforeDefaultParentUpdate = boundaryProbe.parentSnapshotGeneration
+        let commitsBeforeDefaultParentUpdate = boundaryProbe.parentSnapshotCommitCount
+        let rootUpdatesBeforeDefaultParentUpdate = boundaryProbe.rootValueUpdateCount
+        state.contentRevision += 1
+        try await waitForTranscriptHostCondition("a later default parent transaction reaches the child leaf", onTimeout: {
+            attachOwnedTranscriptBoundarySnapshot(
+                stage: "default-parent-transaction-timeout", state: state, root: root,
+                window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+            )
+        }) {
+            guard let observation = state.childTransactionObservations.last else { return false }
+            return observation.parentContentRevision == 3
+                && observation.snapshotContentRevision == 3
+                && observation.localRevision == startingLocalRevision + 2
+                && observation.marker == 0
+                && observation.snapshotGeneration > generationBeforeDefaultParentUpdate
+        }
+        attachOwnedTranscriptBoundarySnapshot(
+            stage: "default-parent-transaction-result", state: state, root: root,
+            window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+        )
+        let observedDefaultParent = try XCTUnwrap(state.childTransactionObservations.last)
+        XCTAssertEqual(observedDefaultParent.parentContentRevision, 3)
+        XCTAssertEqual(observedDefaultParent.localRevision, startingLocalRevision + 2)
+        XCTAssertEqual(observedDefaultParent.marker, 0)
+        XCTAssertGreaterThan(boundaryProbe.parentSnapshotGeneration, generationBeforeDefaultParentUpdate)
+        XCTAssertGreaterThan(boundaryProbe.parentSnapshotCommitCount, commitsBeforeDefaultParentUpdate)
+        XCTAssertGreaterThan(boundaryProbe.rootValueUpdateCount, rootUpdatesBeforeDefaultParentUpdate)
+        XCTAssertEqual(boundaryProbe.rootValueUpdateCount, boundaryProbe.parentSnapshotCommitCount)
+        XCTAssertEqual(observedDefaultParent.snapshotGeneration, boundaryProbe.parentSnapshotGeneration)
+        XCTAssertEqual(observedDefaultParent.snapshotContentRevision, 3,
+            "The leaf reports the content revision captured in its rendered parent snapshot.")
+        XCTAssertEqual(boundaryProbe.hostingControllerInitializationCount, 1,
+            "Parent updates must retain the single hosting controller.")
+        XCTAssertTrue(ownedTranscriptScrollView(in: window) === initialScroll,
+            "A default parent transaction must preserve the transcript scroll view identity")
+        XCTAssertEqual(ownedTranscriptControllerIdentities(root: root, containing: initialScroll), initialHierarchy)
+        XCTAssertTrue(ownedPresentedController(in: root) === presentedSheet,
+            "Child-local and default parent transaction checks must preserve the row-local sheet")
+
+        state.rowSheetRequest += 1
+        try await waitForTranscriptHostCondition("the row-local sheet dismisses") {
+            ownedPresentedController(in: root) == nil
+        }
+    }
+}
+
+@Observable @MainActor
+private final class OwnedTranscriptHostRegressionModel {
+    var revision = 0
+}
+
+@MainActor
+private final class OwnedTranscriptHostRegressionState: ObservableObject {
+    @Published var reveal: CGFloat = 0
+    @Published var contentRevision = 0
+    @Published var colorScheme: ColorScheme = .light
+    @Published var dynamicTypeSize: DynamicTypeSize = .large
+    @Published var locale = Locale(identifier: "en_US")
+    @Published var layoutDirection: LayoutDirection = .leftToRight
+    @Published var scenePhase: ScenePhase = .active
+    @Published var disclosureRequest = 0
+    @Published var rowSheetRequest = 0
+    @Published var openURLRequest = 0
+    @Published var openURLGeneration = 0
+    @Published var draft = "Unsent transcript draft"
+
+    let model = OwnedTranscriptHostRegressionModel()
+    var environmentSnapshots: [OwnedTranscriptEnvironmentSnapshot] = []
+    var systemEnvironmentSnapshots: [Int: OwnedTranscriptSystemEnvironmentSnapshot] = [:]
+    var transactionMarkers: [Int] = []
+    var receiptMeasurement: TranscriptGeometryMeasurement?
+    var viewportMeasurement: TranscriptGeometryMeasurement?
+    var disclosureHeight: CGFloat?
+    var disclosureStates: [Int: Bool] = [:]
+    var openedURLs: [URL] = []
+    var openedURLGenerations: [Int] = []
+    var boundaryProbe: TranscriptHostBoundaryProbe?
+    var predicateSamples: [[String: Any]] = []
+    var childTransactionObservations: [OwnedTranscriptChildTransactionObservation] = []
+    var updateChildLocalTransaction: (@MainActor (Transaction) -> Void)?
+
+    func recordChildTransactionObservation(_ observation: OwnedTranscriptChildTransactionObservation) {
+        childTransactionObservations.append(observation)
+        if childTransactionObservations.count > 96 { childTransactionObservations.removeFirst() }
+    }
+
+    func recordPredicateSample(stage: String, checks: [String: Bool]) {
+        if let last = predicateSamples.last,
+           last["stage"] as? String == stage,
+           last["checks"] as? [String: Bool] == checks,
+           last["contentRevision"] as? Int == contentRevision {
+            return
+        }
+        predicateSamples.append([
+            "time": CACurrentMediaTime(),
+            "stage": stage,
+            "contentRevision": contentRevision,
+            "checks": checks,
+        ])
+        if predicateSamples.count > 96 { predicateSamples.removeFirst() }
+    }
+}
+
+private struct OwnedTranscriptChildTransactionObservation: Equatable {
+    let parentContentRevision: Int
+    let snapshotContentRevision: Int
+    let localRevision: Int
+    let marker: Int
+    let snapshotGeneration: Int
+}
+
+private struct OwnedTranscriptEnvironmentSnapshot: Equatable {
+    let colorScheme: ColorScheme
+    let dynamicTypeSize: DynamicTypeSize
+    let contrast: ColorSchemeContrast
+    let reduceMotion: Bool
+    let reduceTransparency: Bool
+    let localeIdentifier: String
+    let layoutDirection: LayoutDirection
+    let scenePhase: ScenePhase
+    let modelIdentity: ObjectIdentifier
+    let modelRevision: Int
+}
+
+private struct OwnedTranscriptSystemEnvironmentSnapshot: Equatable {
+    let contrast: ColorSchemeContrast
+    let reduceMotion: Bool
+    let reduceTransparency: Bool
+}
+
+private struct OwnedTranscriptSystemEnvironmentReader: View {
+    let contentRevision: Int
+    let report: (Int, OwnedTranscriptSystemEnvironmentSnapshot) -> Void
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    private var snapshot: OwnedTranscriptSystemEnvironmentSnapshot {
+        .init(contrast: contrast, reduceMotion: reduceMotion, reduceTransparency: reduceTransparency)
+    }
+
+    var body: some View {
+        Color.clear.frame(width: 1, height: 1)
+            .onAppear { report(contentRevision, snapshot) }
+            .onChange(of: contentRevision) { _, revision in report(revision, snapshot) }
+            .onChange(of: snapshot) { _, value in report(contentRevision, value) }
+    }
+}
+
+private struct OwnedTranscriptHostMarkerKey: TransactionKey {
+    static var defaultValue: Int { 0 }
+}
+
+private struct OwnedTranscriptEnvironmentReader: View {
+    @ObservedObject var state: OwnedTranscriptHostRegressionState
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.locale) private var locale
+    @Environment(\.layoutDirection) private var layoutDirection
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
+    @Environment(OwnedTranscriptHostRegressionModel.self) private var model
+
+    private var snapshot: OwnedTranscriptEnvironmentSnapshot {
+        .init(colorScheme: colorScheme, dynamicTypeSize: dynamicTypeSize, contrast: contrast,
+              reduceMotion: reduceMotion, reduceTransparency: reduceTransparency,
+              localeIdentifier: locale.identifier, layoutDirection: layoutDirection,
+              scenePhase: scenePhase, modelIdentity: ObjectIdentifier(model), modelRevision: model.revision)
+    }
+
+    var body: some View {
+        Color.clear.frame(width: 1, height: 1)
+        .onAppear { state.environmentSnapshots.append(snapshot) }
+        .onChange(of: snapshot) { _, value in state.environmentSnapshots.append(value) }
+        .onChange(of: state.openURLRequest) { _, _ in
+            _ = openURL(URL(string: "https://transcript-host.test/child")!)
+        }
+    }
+}
+
+private struct OwnedTranscriptHostRegressionFixture: View {
+    @ObservedObject var state: OwnedTranscriptHostRegressionState
+
+    private var receipts: [ChatMessage] {
+        [
+            ChatMessage(id: "receipt-one", role: .assistant, parts: [
+                .init(type: "approval", approvalId: "approval-one", shortCode: "A21",
+                      summary: "Confirm the first approved request", purpose: "Transcript host regression", status: "approved")
+            ]),
+            ChatMessage(id: "receipt-two", role: .assistant, parts: [
+                .init(type: "approval", approvalId: "approval-two", shortCode: "A22",
+                      summary: "Confirm the second approved request", purpose: "Transcript host regression", status: "approved")
+            ]),
+        ]
+    }
+
+    var body: some View {
+        let openURLGeneration = state.openURLGeneration
+        ZStack(alignment: .bottom) {
+            ConversationColumn {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        OwnedTranscriptEnvironmentReader(state: state)
+                        OwnedTranscriptDisclosureRow(state: state)
+                        ChatTranscriptRows(
+                            messages: receipts,
+                            isSending: false,
+                            openApprovals: {},
+                            send: { _, _ in },
+                            decideApproval: { _, _ in true },
+                            rememberApproval: { _ in true },
+                            decideSuggestion: { _, _ in nil },
+                            openActivity: {},
+                            refreshCard: { _, _ in nil },
+                            hideMessage: { _ in },
+                            setRecallSourceSuppressed: { _, _, _ in .discarded },
+                            recallSourceSuppressed: { _, _ in nil },
+                            acknowledgeMessageDelivery: { _ in false },
+                            cardFormActions: nil,
+                            cardFormStateRevision: 0,
+                            cardFormTaskRevision: 0
+                        )
+                        .equatable()
+                        OwnedTranscriptNativeInput(text: $state.draft)
+                            .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44, alignment: .leading)
+                        OwnedTranscriptTransactionLeaf(
+                            state: state, parentContentRevision: state.contentRevision
+                        )
+                    }
+                    .padding(.bottom, 100)
+                }
+                .scrollIndicators(.hidden)
+                .onTranscriptGeometryChange { state.viewportMeasurement = $0 }
+            } composer: {
+                OwnedTranscriptNativeComposer()
+                    .accessibilityIdentifier("transcript-host.outer-composer")
+                    .frame(height: 52)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .offset(y: -state.reveal)
+        }
+        .overlay(alignment: .topLeading) {
+            // These SDK values are system-owned and read-only. Observe the
+            // actual parent environment without changing system preferences.
+            OwnedTranscriptSystemEnvironmentReader(contentRevision: state.contentRevision) { revision, snapshot in
+                state.systemEnvironmentSnapshots[revision] = snapshot
+            }
+            .allowsHitTesting(false)
+        }
+        .environment(state.model)
+        .environment(\.colorScheme, state.colorScheme)
+        .environment(\.dynamicTypeSize, state.dynamicTypeSize)
+        .environment(\.locale, state.locale)
+        .environment(\.layoutDirection, state.layoutDirection)
+        .environment(\.scenePhase, state.scenePhase)
+        .environment(\.openURL, OpenURLAction { url in
+            state.openedURLs.append(url)
+            state.openedURLGenerations.append(openURLGeneration)
+            return .handled
+        })
+    }
+}
+
+private struct OwnedTranscriptDisclosureRow: View {
+    @ObservedObject var state: OwnedTranscriptHostRegressionState
+    @State private var isExpanded = false
+    @State private var isSheetPresented = false
+
+    var body: some View {
+        DisclosureGroup("Row-local details", isExpanded: $isExpanded) {
+            Text("Expanded row-local state survives the parent update.")
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .onAppear { state.disclosureStates[state.contentRevision] = isExpanded }
+        .onChange(of: state.disclosureRequest) { _, _ in isExpanded.toggle() }
+        .onChange(of: isExpanded) { _, expanded in
+            state.disclosureStates[state.contentRevision] = expanded
+        }
+        .onChange(of: state.contentRevision) { _, revision in
+            state.disclosureStates[revision] = isExpanded
+        }
+        .onChange(of: state.rowSheetRequest) { _, _ in isSheetPresented.toggle() }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { state.disclosureHeight = $0 }
+        .sheet(isPresented: $isSheetPresented) {
+            Text("Row-local sheet survives transcript updates.")
+        }
+    }
+}
+
+private struct OwnedTranscriptTransactionLeaf: View {
+    let state: OwnedTranscriptHostRegressionState
+    let parentContentRevision: Int
+    @Environment(\.transcriptHostSnapshotGeneration) private var snapshotGeneration
+    @Environment(\.transcriptHostSnapshotContentRevision) private var snapshotContentRevision
+    @State private var localRevision = 0
+
+    var body: some View {
+        Text("Transcript content revision \(parentContentRevision), child revision \(localRevision)")
+            // This parent-owned leaf records the transaction actually reaching
+            // the hosted content. The registered update changes only this
+            // child's @State and does not publish a parent-state mutation.
+            .transaction { transaction in
+                let marker = transaction[OwnedTranscriptHostMarkerKey.self]
+                let generation = snapshotGeneration ?? -1
+                state.boundaryProbe?.record(
+                    "child-leaf", transaction: transaction, generation: generation,
+                    contentRevision: snapshotContentRevision ?? -1
+                )
+                state.recordChildTransactionObservation(.init(
+                    parentContentRevision: parentContentRevision,
+                    snapshotContentRevision: snapshotContentRevision ?? -1,
+                    localRevision: localRevision,
+                    marker: marker,
+                    snapshotGeneration: generation
+                ))
+                if state.transactionMarkers.last != marker {
+                    state.transactionMarkers.append(marker)
+                }
+            }
+            .onAppear {
+                let localRevisionBinding = $localRevision
+                state.updateChildLocalTransaction = { transaction in
+                    withTransaction(transaction) {
+                        localRevisionBinding.wrappedValue += 1
+                    }
+                }
+            }
+            .onDisappear { state.updateChildLocalTransaction = nil }
+    }
+}
+
+private struct OwnedTranscriptNativeComposer: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIButton {
+        let button = UIButton(type: .system)
+        button.setTitle("Outer composer", for: .normal)
+        button.accessibilityIdentifier = "transcript-host.outer-composer"
+        return button
+    }
+
+    func updateUIView(_ uiView: UIButton, context: Context) {}
+}
+
+private struct OwnedTranscriptNativeInput: UIViewRepresentable {
+    @Binding var text: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    func makeUIView(context: Context) -> UITextField {
+        let field = UITextField(frame: .zero)
+        field.borderStyle = .roundedRect
+        field.accessibilityIdentifier = "transcript-host.native-input"
+        field.text = text
+        field.addTarget(context.coordinator, action: #selector(Coordinator.editingChanged(_:)), for: .editingChanged)
+        return field
+    }
+
+    func updateUIView(_ uiView: UITextField, context: Context) {
+        context.coordinator.text = $text
+        if uiView.text != text {
+            uiView.text = text
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var text: Binding<String>
+
+        init(text: Binding<String>) {
+            self.text = text
+        }
+
+        @objc func editingChanged(_ sender: UITextField) {
+            text.wrappedValue = sender.text ?? ""
+        }
+    }
+}
+
+@MainActor
+private func ownedTranscriptScrollView(in root: UIView) -> UIScrollView? {
+    if let scroll = root as? UIScrollView, !(scroll is UITextView) { return scroll }
+    for child in root.subviews {
+        if let found = ownedTranscriptScrollView(in: child) { return found }
+    }
+    return nil
+}
+
+@MainActor
+private func ownedTextField(in root: UIView) -> UITextField? {
+    if let field = root as? UITextField,
+       field.accessibilityIdentifier == "transcript-host.native-input" { return field }
+    for child in root.subviews {
+        if let found = ownedTextField(in: child) { return found }
+    }
+    return nil
+}
+
+@MainActor
+private func ownedTextSelectionOffsets(_ field: UITextField) -> [Int]? {
+    guard let selectedRange = field.selectedTextRange else { return nil }
+    return [
+        field.offset(from: field.beginningOfDocument, to: selectedRange.start),
+        field.offset(from: field.beginningOfDocument, to: selectedRange.end),
+    ]
+}
+
+@MainActor
+private func ownedView(in root: UIView, accessibilityIdentifier: String) -> UIView? {
+    if root.accessibilityIdentifier == accessibilityIdentifier { return root }
+    for child in root.subviews {
+        if let found = ownedView(in: child, accessibilityIdentifier: accessibilityIdentifier) { return found }
+    }
+    return nil
+}
+
+@MainActor
+private func ownedTranscriptControllerIdentities(root: UIViewController, containing scroll: UIScrollView) -> [ObjectIdentifier] {
+    func containsScroll(_ controller: UIViewController) -> Bool {
+        guard controller.isViewLoaded else { return false }
+        return ownedTranscriptScrollView(in: controller.view) === scroll
+    }
+    var result = [ObjectIdentifier(root)]
+    var current = root
+    while let child = current.children.first(where: containsScroll) {
+        result.append(ObjectIdentifier(child))
+        current = child
+    }
+    return result
+}
+
+@MainActor
+private func ownedPresentedController(in root: UIViewController) -> UIViewController? {
+    if let presented = root.presentedViewController { return presented }
+    for child in root.children {
+        if let presented = ownedPresentedController(in: child) { return presented }
+    }
+    return nil
+}
+
+@MainActor
+private func waitForTranscriptHostCondition(
+    _ label: String,
+    timeout: Duration = .seconds(3),
+    onTimeout: (() -> Void)? = nil,
+    condition: @escaping @MainActor () -> Bool
+) async throws {
+    let deadline = ContinuousClock.now.advanced(by: timeout)
+    while !condition(), ContinuousClock.now < deadline {
+        try await Task.sleep(for: .milliseconds(25))
+    }
+    let succeeded = condition()
+    if !succeeded { onTimeout?() }
+    XCTAssertTrue(succeeded, "Timed out waiting for \(label)")
+}
+
+@MainActor
+private func attachOwnedTranscriptBoundarySnapshot(
+    stage: String,
+    state: OwnedTranscriptHostRegressionState,
+    root: UIViewController,
+    window: UIWindow,
+    scroll: UIScrollView,
+    input: UITextField,
+    expectedSheet: UIViewController? = nil,
+    includeScreenshot: Bool = false
+) {
+    let presented = ownedPresentedController(in: root)
+    let currentScroll = root.isViewLoaded ? ownedTranscriptScrollView(in: root.view) : nil
+    let traits = root.viewIfLoaded?.traitCollection
+    let payload: [String: Any] = [
+        "stage": stage,
+        "contentRevision": state.contentRevision,
+        "rootControllerIdentity": ObjectIdentifier(root).hashValue,
+        "windowIdentity": ObjectIdentifier(window).hashValue,
+        "transactionMarkers": state.transactionMarkers,
+        "boundaryEvents": state.boundaryProbe?.events ?? [],
+        "parentSnapshotGeneration": state.boundaryProbe?.parentSnapshotGeneration ?? -1,
+        "parentSnapshotCommitCount": state.boundaryProbe?.parentSnapshotCommitCount ?? -1,
+        "hostingControllerInitializationCount": state.boundaryProbe?.hostingControllerInitializationCount ?? -1,
+        "rootValueUpdateCount": state.boundaryProbe?.rootValueUpdateCount ?? -1,
+        "childTransactionObservations": state.childTransactionObservations.suffix(16).map {
+            ["parentContentRevision": $0.parentContentRevision,
+             "snapshotContentRevision": $0.snapshotContentRevision,
+             "localRevision": $0.localRevision,
+             "marker": $0.marker,
+             "snapshotGeneration": $0.snapshotGeneration]
+        },
+        "predicateSamples": state.predicateSamples,
+        "environmentSnapshots": state.environmentSnapshots.suffix(8).map {
+            ["locale": $0.localeIdentifier, "scheme": String(describing: $0.colorScheme),
+             "dynamicType": String(describing: $0.dynamicTypeSize), "modelRevision": $0.modelRevision,
+             "modelIdentity": $0.modelIdentity.hashValue,
+             "layoutDirection": String(describing: $0.layoutDirection), "scenePhase": String(describing: $0.scenePhase)]
+        },
+        "systemEnvironmentSnapshots": Dictionary(uniqueKeysWithValues: state.systemEnvironmentSnapshots.map { revision, snapshot in
+            (String(revision), ["contrast": String(describing: snapshot.contrast),
+                                "reduceMotion": snapshot.reduceMotion,
+                                "reduceTransparency": snapshot.reduceTransparency] as [String: Any])
+        }),
+        "disclosureStates": Dictionary(uniqueKeysWithValues: state.disclosureStates.map { (String($0.key), $0.value) }),
+        "disclosureHeight": state.disclosureHeight ?? -1,
+        "receiptLocalFrame": String(describing: state.receiptMeasurement?.localFrame),
+        "receiptWindowFrameValid": state.receiptMeasurement?.frame(in: window) != nil,
+        "scrollIdentity": ObjectIdentifier(scroll).hashValue,
+        "currentScrollSameIdentity": currentScroll === scroll,
+        "currentScrollAttached": currentScroll?.isDescendant(of: window) ?? false,
+        "scrollWindow": scroll.window === window,
+        "scrollBounds": String(describing: scroll.bounds),
+        "scrollOffset": String(describing: scroll.contentOffset),
+        "controllerHierarchy": ownedTranscriptControllerIdentities(root: root, containing: scroll).map(\.hashValue),
+        "inputIdentity": ObjectIdentifier(input).hashValue,
+        "inputInWindow": input.window === window,
+        "inputFocused": input.isFirstResponder,
+        "inputText": input.text ?? "",
+        "inputSelection": ownedTextSelectionOffsets(input) ?? [],
+        "presentedControllerExists": presented != nil,
+        "presentedControllerMatchesExpected": expectedSheet.map { presented === $0 } ?? false,
+        "presentedControllerIdentity": presented.map { ObjectIdentifier($0).hashValue } ?? -1,
+        "expectedControllerIdentity": expectedSheet.map { ObjectIdentifier($0).hashValue } ?? -1,
+        "rootPresentsCurrentController": root.presentedViewController === presented,
+        "currentControllerPresentedByRoot": presented?.presentingViewController === root,
+        "currentControllerInWindow": presented?.viewIfLoaded?.window === window,
+        "currentControllerBeingPresented": presented?.isBeingPresented ?? false,
+        "currentControllerBeingDismissed": presented?.isBeingDismissed ?? false,
+        "currentControllerType": presented.map { String(describing: type(of: $0)) } ?? "none",
+        "currentControllerPresenterType": presented?.presentingViewController.map { String(describing: type(of: $0)) } ?? "none",
+        "expectedControllerInWindow": expectedSheet?.viewIfLoaded?.window === window,
+        "expectedControllerBeingPresented": expectedSheet?.isBeingPresented ?? false,
+        "expectedControllerBeingDismissed": expectedSheet?.isBeingDismissed ?? false,
+        "expectedControllerPresenterType": expectedSheet?.presentingViewController.map { String(describing: type(of: $0)) } ?? "none",
+        "windowSceneSession": window.windowScene?.session.persistentIdentifier ?? "none",
+        "windowAccessibilityContrast": String(describing: window.traitCollection.accessibilityContrast),
+        "rootAccessibilityContrast": String(describing: traits?.accessibilityContrast ?? .normal),
+        "rootUserInterfaceStyle": String(describing: traits?.userInterfaceStyle ?? .unspecified),
+        "rootPreferredContentSizeCategory": traits?.preferredContentSizeCategory.rawValue ?? "none",
+    ]
+    do {
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "Owned transcript host boundary snapshot — \(stage)"
+        attachment.lifetime = .keepAlways
+        XCTContext.runActivity(named: "Owned transcript host boundary snapshot") { activity in
+            activity.add(attachment)
+            if includeScreenshot {
+                let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                    window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+                }
+                let screenshot = XCTAttachment(image: image)
+                screenshot.name = "Owned transcript host failure — \(stage)"
+                screenshot.lifetime = .keepAlways
+                activity.add(screenshot)
+            }
+        }
+    } catch {
+        XCTFail("Could not serialize owned transcript boundary receipt: \(error)")
     }
 }

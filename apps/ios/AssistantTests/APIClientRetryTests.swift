@@ -8215,3 +8215,399 @@ extension APIClientRetryTests {
                        ["/api/mobile/v1/memory/people/removed"])
     }
 }
+
+extension APIClientRetryTests {
+    private enum CalendarPreflightDraftEdit: Equatable {
+        case none
+        case followUp
+        case pendingFollowUp
+        case pendingWhitespace
+        case sameTextWrite
+        case deferredEmpty
+    }
+
+    private func calendarPreflightState(owner: String, generation: Int) -> PhoneCalendarSharingState {
+        let now = Date()
+        var ownerCalendar = Calendar(identifier: .gregorian)
+        ownerCalendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        let today = ownerCalendar.startOfDay(for: now)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let roster = [SharedPhoneCalendar(id: "work", name: "Work", purpose: .commitments, timeZone: nil)]
+        return PhoneCalendarSharingState(
+            version: 1, ownerId: owner, publisherId: "publisher-\(owner)", generation: generation,
+            enabled: true, consentVersion: 1, calendars: roster,
+            updatedAt: formatter.string(from: now), capturedAt: formatter.string(from: now),
+            receivedAt: formatter.string(from: now),
+            timeMin: formatter.string(from: ownerCalendar.date(byAdding: .day, value: -7, to: today)!),
+            timeMax: formatter.string(from: ownerCalendar.date(byAdding: .day, value: 46, to: today)!),
+            complete: true, truncated: false, mutationId: nil
+        )
+    }
+
+    @MainActor
+    func testCalendarPreflightPreservesComposerDraftAndRecoversSubmittedText() async throws {
+        enum ReadOutcome: Equatable { case ready, fallback, bindingLost }
+
+        func exercise(
+            _ label: String,
+            outcome: ReadOutcome,
+            edit: CalendarPreflightDraftEdit,
+            initialStoredDraft: String = "",
+            initialLocalDraft: String? = nil,
+            holdChatFailure: Bool = false
+        ) async throws {
+            let owner = "calendar-draft-\(UUID().uuidString.lowercased())"
+            let pauseKey = "assistant.phoneCalendarSharing.permissionPause.\(phoneCalendarScope(owner: owner))"
+            defer { UserDefaults.standard.removeObject(forKey: pauseKey) }
+            let suiteName = "assistant.calendar-draft-tests.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+
+            let initialState = calendarPreflightState(owner: owner, generation: 1)
+            let acknowledgedState = calendarPreflightState(owner: owner, generation: 2)
+            let store = PhoneCalendarSharingMemoryRecordStore()
+            let scopeKey = phoneCalendarScope(owner: owner)
+            _ = store.save(.init(
+                publisherId: "publisher-\(owner)", generation: 1,
+                pendingMutation: nil, pendingRevocation: nil, lastRead: nil, lastState: initialState
+            ), scope: scopeKey)
+            let source = PhoneCalendarSharingFixtureSource()
+            let coordinator = PhoneCalendarSharingCoordinator(source: source, recordStore: store)
+            let client = makeClient()
+            defer {
+                StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/calendars")
+                StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/chat")
+            }
+            let chatFailure = Data(#"{"error":"Synthetic definite rejection"}"#.utf8)
+            var calendarResponses: [StubURLProtocol.Outcome] = [
+                .success(status: 200, body: try phoneCalendarRead(initialState, owner: owner)),
+                .held(
+                    status: outcome == .fallback ? 503 : 200,
+                    body: outcome == .ready
+                        ? try phoneCalendarRead(initialState, owner: owner)
+                        : outcome == .bindingLost
+                            ? try phoneCalendarRead(
+                                calendarPreflightState(owner: "different-owner-\(owner)", generation: 1),
+                                owner: "different-owner-\(owner)"
+                            )
+                            : Data(#"{"error":"Synthetic calendar read failure"}"#.utf8)
+                )
+            ]
+            if outcome == .ready {
+                calendarResponses.append(.success(
+                    status: 200, body: try phoneCalendarMutation(acknowledgedState)
+                ))
+            }
+            StubURLProtocol.prime([], paths: [
+                "/api/mobile/v1/bootstrap": [.success(status: 200, body: try notificationBootstrap(owner: owner))],
+                "/api/mobile/v1/overview": [.success(status: 401, body: Data())],
+                "/api/mobile/v1/calendars": calendarResponses,
+                "/api/mobile/v1/chat": [
+                    holdChatFailure ? .held(status: 400, body: chatFailure) : .success(status: 400, body: chatFailure)
+                ]
+            ])
+            let model = AppModel(
+                apiClient: client,
+                defaults: defaults,
+                storeConnectionToken: { _ in },
+                scheduleLocalNotification: { _, _, _, _, _, _ in true },
+                phoneCalendarSharing: coordinator
+            )
+            model.scenePhaseDidChange(.background)
+            await model.refreshAll(reportFailure: false)
+            XCTAssertEqual(model.bootstrap?.identity.id, owner, "\(label): AppModel must have the owner-bound session")
+            await coordinator.refresh(client: client, expectedOwnerID: owner, publishIfEnabled: false)
+            XCTAssertTrue(coordinator.matchesBinding(client: client, expectedOwnerID: owner), "\(label): fixture must establish the real verified calendar binding")
+
+            let draftScope = try XCTUnwrap(model.composerDraftScope)
+            if !initialStoredDraft.isEmpty { model.saveComposerDraft(initialStoredDraft, in: draftScope) }
+            let origin = try XCTUnwrap(model.composerDraftSnapshot(in: draftScope))
+            var editorText = initialLocalDraft ?? initialStoredDraft
+            var editorSnapshot = origin
+            var editorIsVisible = true
+            var stagedSubmission: ComposerDraftSubmissionProvenance?
+            let context = ComposerDraftSubmissionContext(origin: origin, localDraft: editorText)
+            XCTAssertEqual(context.mayStageSubmittedText, editorText.isEmpty && origin.text.isEmpty,
+                           "\(label): only an actually empty local and stored composer is eligible for staging")
+            var clearCallbacks = 0
+            var clearWasAdopted = false
+            let submittedText = "Original calendar question: what is on Work tomorrow?"
+            model.send(
+                submittedText,
+                composerDraftContext: context,
+                onComposerDraftStage: { submission in
+                    guard let current = model.composerDraftSnapshot(in: draftScope),
+                          let captured = origin.capturingSubmissionStage(
+                            submission,
+                            current: current,
+                            localDraft: editorText,
+                            activeScope: model.composerDraftScope,
+                            isVisible: editorIsVisible
+                          ) else { return }
+                    stagedSubmission = captured
+                },
+                onComposerDraftClear: { callbackOrigin, cleared in
+                    clearCallbacks += 1
+                    guard let current = model.composerDraftSnapshot(in: draftScope) else { return }
+                    guard let adopted = editorSnapshot.adoptingSubmissionClear(
+                        cleared,
+                        from: callbackOrigin,
+                        current: current,
+                        localDraft: editorText,
+                        activeScope: model.composerDraftScope,
+                        isVisible: editorIsVisible
+                    ), callbackOrigin == origin else { return }
+                    editorSnapshot = adopted
+                    editorText = adopted.text
+                    clearWasAdopted = true
+                }
+            )
+            try await waitForHeldCalendarRequest()
+            XCTAssertTrue(model.isPreparingCalendarContext, "\(label): send must wait on the held calendar preflight")
+            XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 0, "\(label): no chat POST may start before preflight settles")
+            XCTAssertEqual(model.composerDraft(in: draftScope), context.mayStageSubmittedText ? submittedText : initialStoredDraft,
+                           "\(label): the real model stages only an empty initiating composer")
+            if context.mayStageSubmittedText {
+                let staged = try XCTUnwrap(stagedSubmission, "\(label): the visible initiating composer captures the real staging provenance")
+                XCTAssertEqual(staged.origin, origin)
+                XCTAssertEqual(staged.staged, model.composerDraftSnapshot(in: draftScope))
+                XCTAssertEqual(staged.staged.text, submittedText)
+            } else {
+                XCTAssertNil(stagedSubmission, "\(label): a nonempty initiating composer has no staging provenance")
+            }
+            let competingOrigin = try XCTUnwrap(model.composerDraftSnapshot(in: draftScope))
+            var competingClearCallbacks = 0
+            model.send("Competing submission while preflight is held", composerDraftContext: .init(
+                origin: competingOrigin, localDraft: competingOrigin.text
+            )) { _, _ in competingClearCallbacks += 1 }
+            XCTAssertEqual(competingClearCallbacks, 0, "\(label): a rejected competing submission cannot receive the initiating clear callback")
+            XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 0,
+                           "\(label): the held preflight admits only its initiating POST")
+
+            switch edit {
+            case .none:
+                break
+            case .followUp:
+                editorText = "Follow-up typed while the calendar read is pending"
+                editorSnapshot = try XCTUnwrap(
+                    model.saveComposerDraftChange(editorText, currentDraft: editorText, in: draftScope),
+                    "\(label): current follow-up is accepted by the real composer onChange path"
+                )
+                if let stagedSubmission {
+                    let lifecycleBase = origin.lifecycleFlushSnapshot(localDraft: editorText, submission: stagedSubmission)
+                    XCTAssertEqual(lifecycleBase, stagedSubmission.staged)
+                    let currentBeforeRejectedFlush = try XCTUnwrap(model.composerDraftSnapshot(in: draftScope))
+                    XCTAssertNil(model.saveComposerDraft(editorText, in: draftScope, ifUnchangedFrom: lifecycleBase),
+                                 "\(label): lifecycle flush cannot overwrite a newer stored edit")
+                    XCTAssertEqual(try XCTUnwrap(model.composerDraftSnapshot(in: draftScope)), currentBeforeRejectedFlush,
+                                   "\(label): a rejected lifecycle flush leaves the newer storage snapshot untouched")
+                }
+            case .pendingFollowUp, .pendingWhitespace:
+                editorText = edit == .pendingWhitespace ? " \n" : "Follow-up typed before onChange while calendar is pending"
+                // This is the ChatView disappearance path: the final editor
+                // value is local but its ordinary onChange has not reached the
+                // model, so the lifecycle flush owns the only write.
+                editorIsVisible = false
+                let lifecycleBase = origin.lifecycleFlushSnapshot(localDraft: editorText, submission: stagedSubmission)
+                XCTAssertEqual(lifecycleBase, stagedSubmission?.staged,
+                               "\(label): pending nonempty local text selects only its own staged snapshot")
+                let flushed = try XCTUnwrap(
+                    model.saveComposerDraft(editorText, in: draftScope, ifUnchangedFrom: lifecycleBase),
+                    "\(label): the real lifecycle CAS persists a pending edit before preflight settles"
+                )
+                editorSnapshot = flushed
+                XCTAssertEqual(flushed.text, editorText)
+                XCTAssertNil(model.saveComposerDraft(editorText, in: draftScope, ifUnchangedFrom: lifecycleBase),
+                             "\(label): the same stage token cannot flush twice")
+            case .sameTextWrite:
+                editorText = submittedText
+                let sameTextWrite = try XCTUnwrap(
+                    model.saveComposerDraftChange(submittedText, currentDraft: submittedText, in: draftScope),
+                    "\(label): a same-text store write still advances the real snapshot revision"
+                )
+                editorSnapshot = sameTextWrite
+                XCTAssertEqual(sameTextWrite.text, submittedText)
+                let lifecycleBase = origin.lifecycleFlushSnapshot(localDraft: editorText, submission: stagedSubmission)
+                XCTAssertNil(model.saveComposerDraft(editorText, in: draftScope, ifUnchangedFrom: lifecycleBase),
+                             "\(label): a same-text newer write rejects the stale lifecycle token")
+                XCTAssertEqual(try XCTUnwrap(model.composerDraftSnapshot(in: draftScope)), sameTextWrite,
+                               "\(label): same-text CAS rejection leaves its newer revision untouched")
+            case .deferredEmpty:
+                // Models the composer onChange empty write arriving after send staged
+                // the original text but before the held preflight returns.
+                editorText = ""
+                editorSnapshot = try XCTUnwrap(
+                    model.saveComposerDraftChange(editorText, currentDraft: editorText, in: draftScope),
+                    "\(label): current deferred empty write is accepted by the real composer onChange path"
+                )
+            }
+            let draftAfterEdit = edit == .followUp ? editorText
+                : edit == .pendingFollowUp || edit == .pendingWhitespace ? editorText
+                : edit == .sameTextWrite ? submittedText
+                : edit == .deferredEmpty ? ""
+                : context.mayStageSubmittedText ? submittedText : initialStoredDraft
+            XCTAssertEqual(model.composerDraft(in: draftScope), draftAfterEdit,
+                           "\(label): the test edit reaches the real model draft store before preflight completes")
+            let snapshotAfterEdit = try XCTUnwrap(model.composerDraftSnapshot(in: draftScope))
+
+            StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/calendars")
+            let preflightDeadline = ContinuousClock.now + .seconds(5)
+            while model.isPreparingCalendarContext, ContinuousClock.now < preflightDeadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertFalse(model.isPreparingCalendarContext, "\(label): preflight must settle")
+
+            if outcome == .bindingLost {
+                XCTAssertFalse(coordinator.isOwnerVerified, "\(label): a valid read for a different owner clears the verified binding")
+                XCTAssertEqual(model.composerDraftScope, draftScope, "\(label): losing the calendar binding must not reset the AppModel draft session")
+                XCTAssertEqual(model.composerDraft(in: draftScope), draftAfterEdit,
+                               "\(label): the early exit leaves the staged request or lifecycle-flushed edit intact")
+                XCTAssertEqual(model.composerDraftSnapshot(in: draftScope), snapshotAfterEdit,
+                               "\(label): owner-binding loss does not mutate the draft snapshot")
+                XCTAssertEqual(clearCallbacks, 0, "\(label): no clear callback runs when coordinator identity is lost")
+                XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 0,
+                               "\(label): binding loss before readiness must not post the original message")
+                XCTAssertEqual(StubURLProtocol.requests.filter { $0.1.path == "/api/mobile/v1/calendars" }.map { $0.0 },
+                               ["GET", "GET"], "\(label): the public owner-verification refresh is the only preflight request")
+                return
+            }
+
+            if edit == .none, let stagedSubmission {
+                XCTAssertEqual(origin.lifecycleFlushSnapshot(localDraft: "", submission: stagedSubmission), origin,
+                               "\(label): an untouched empty composer cannot use the staging token to flush submitted text")
+                XCTAssertNil(model.saveComposerDraft("", in: draftScope, ifUnchangedFrom: origin),
+                             "\(label): the untouched editor's origin is stale after staging and cannot clear the staged text")
+            }
+
+            if holdChatFailure {
+                let chatDeadline = ContinuousClock.now + .seconds(3)
+                while !StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/chat"), ContinuousClock.now < chatDeadline {
+                    await Task.yield()
+                }
+                XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: "/api/mobile/v1/chat"), "\(label): chat failure must be held after preflight has completed")
+                XCTAssertEqual(clearCallbacks, 1, "\(label): the successful clear CAS reports once")
+                XCTAssertTrue(clearWasAdopted, "\(label): the visible composer adopts the production clear snapshot")
+                let clearSnapshot = try XCTUnwrap(model.composerDraftSnapshot(in: draftScope))
+                XCTAssertEqual(clearSnapshot.text, "")
+                // A delayed onChange of the already-empty editor may follow the
+                // clear callback. It must not replace the submitted message or
+                // the separately tracked recovery when the POST fails.
+                if let saved = model.saveComposerDraftChange("", currentDraft: editorText, in: draftScope) {
+                    editorSnapshot = saved
+                }
+                XCTAssertEqual(model.composerDraft(in: draftScope), "")
+                XCTAssertNotEqual(editorSnapshot, clearSnapshot,
+                                  "\(label): the late empty onChange is a distinct CAS revision even though its text matches")
+                StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/chat")
+            }
+
+            let settlementDeadline = ContinuousClock.now + .seconds(5)
+            while model.isSending, ContinuousClock.now < settlementDeadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertFalse(model.isSending, "\(label): a definite 400 must settle without retry")
+            XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 1, "\(label): the original message is posted exactly once")
+            let chatIndex = try XCTUnwrap(StubURLProtocol.urls.firstIndex { $0.path == "/api/mobile/v1/chat" })
+            let request = try XCTUnwrap(JSONSerialization.jsonObject(with: StubURLProtocol.bodies[chatIndex]) as? [String: Any])
+            let messages = try XCTUnwrap(request["messages"] as? [[String: Any]])
+            let parts = try XCTUnwrap(messages.first?["parts"] as? [[String: Any]])
+            XCTAssertEqual(parts.first?["text"] as? String, submittedText, "\(label): draft changes cannot rewrite the in-flight request")
+            XCTAssertEqual(model.messages.filter { $0.role == .user && $0.text == submittedText }.count, 1)
+            XCTAssertTrue(model.hasComposerRecovery(in: draftScope), "\(label): recovery is retained in the real draft store")
+            let expectedStoredAfterSettlement = edit == .followUp || edit == .pendingFollowUp || edit == .pendingWhitespace ? editorText
+                : edit == .sameTextWrite ? submittedText
+                : context.mayStageSubmittedText ? "" : initialStoredDraft
+            XCTAssertEqual(model.composerDraft(in: draftScope), expectedStoredAfterSettlement,
+                           "\(label): the in-flight turn preserves the current unrelated stored draft")
+            XCTAssertEqual(clearCallbacks, origin.text.isEmpty && editorText.isEmpty && edit != .deferredEmpty ? 1 : 0,
+                           "\(label): the callback is emitted only when the original empty snapshot was successfully cleared")
+            if clearCallbacks > 0 {
+                XCTAssertTrue(clearWasAdopted, "\(label): the app-level callback must pass the same visible-scope CAS adoption used by ChatView")
+            }
+
+            let recoverySnapshot = try XCTUnwrap(model.composerDraftSnapshot(in: draftScope))
+            XCTAssertEqual(editorSnapshot.scope, recoverySnapshot.scope)
+            XCTAssertEqual(editorSnapshot.revision, recoverySnapshot.revision,
+                           "\(label): own-clear handoff or current edit must retain the actual draft revision")
+            XCTAssertEqual(editorSnapshot.text, recoverySnapshot.text)
+            if !editorIsVisible {
+                // The test models the editor as gone after its lifecycle flush.
+                // It checks AppModel recovery retention only; it does not claim
+                // SwiftUI cannot deliver a queued onChange after onDisappear.
+                XCTAssertTrue(model.hasComposerRecovery(in: draftScope),
+                              "\(label): the failed submitted message remains recoverable after its editor disappears")
+                XCTAssertEqual(model.composerDraft(in: draftScope), expectedStoredAfterSettlement,
+                               "\(label): disappearance does not run a later visible-editor recovery adoption")
+            } else {
+                let adoptedRecovery = editorSnapshot.adoptingRecoverySnapshot(recoverySnapshot, localDraft: editorText)
+                let shouldAdoptRecovery = editorText == recoverySnapshot.text
+                XCTAssertEqual(adoptedRecovery != nil, shouldAdoptRecovery,
+                               "\(label): real editor state adopts recovery only when its local text still matches the prior snapshot")
+                let shouldRestoreRecovery = shouldAdoptRecovery
+                    && editorText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                if let adoptedRecovery {
+                    editorSnapshot = adoptedRecovery
+                    if let restored = model.restoreComposerRecovery(
+                        in: draftScope, replacing: editorText, ifUnchangedFrom: adoptedRecovery
+                    ) {
+                        editorSnapshot = restored
+                        editorText = restored.text
+                        if let persisted = model.saveComposerDraftChange(editorText, currentDraft: editorText, in: draftScope) {
+                            editorSnapshot = persisted
+                        }
+                    }
+                }
+
+                if shouldRestoreRecovery {
+                    XCTAssertEqual(editorText, submittedText, "\(label): blank editor restores the failed message through the snapshot CAS")
+                    XCTAssertEqual(model.composerDraft(in: draftScope), submittedText)
+                    XCTAssertFalse(model.hasComposerRecovery(in: draftScope), "\(label): successful recovery restore consumes the saved copy once")
+                    XCTAssertNil(model.restoreComposerRecovery(
+                        in: draftScope, replacing: editorText, ifUnchangedFrom: editorSnapshot
+                    ), "\(label): a consumed recovery cannot be restored twice")
+                } else {
+                    XCTAssertEqual(model.composerDraft(in: draftScope), expectedStoredAfterSettlement,
+                                   "\(label): nonempty or stale local editor text is not overwritten by recovery")
+                    XCTAssertTrue(model.hasComposerRecovery(in: draftScope), "\(label): rejected automatic restore keeps the recovery available")
+                    XCTAssertEqual(model.composerDraftSnapshot(in: draftScope), recoverySnapshot)
+                    if let initialLocalDraft {
+                        XCTAssertEqual(editorText, initialLocalDraft)
+                        let closed = try XCTUnwrap(model.saveComposerDraft(
+                            editorText, in: draftScope, ifUnchangedFrom: editorSnapshot
+                        ))
+                        XCTAssertEqual(closed.text, initialLocalDraft)
+                        XCTAssertEqual(closed.recoveryRevision, recoverySnapshot.recoveryRevision)
+                        XCTAssertTrue(model.hasComposerRecovery(in: draftScope))
+                    }
+                }
+            }
+            if outcome == .ready {
+                XCTAssertEqual(source.shareQueryCount, 1, "\(label): the ready path publishes using the synthetic EventKit source once")
+                XCTAssertEqual(StubURLProtocol.requests.filter { $0.1.path == "/api/mobile/v1/calendars" }.map { $0.0 },
+                               ["GET", "GET", "PUT"], "\(label): the ready preflight publishes its refreshed snapshot")
+            } else {
+                XCTAssertEqual(source.shareQueryCount, 0, "\(label): a failed read must not publish calendar contents")
+                XCTAssertEqual(StubURLProtocol.requests.filter { $0.1.path == "/api/mobile/v1/calendars" }.map { $0.0 },
+                               ["GET", "GET"], "\(label): failed preflight must not publish calendar contents")
+            }
+        }
+
+        for outcome in [ReadOutcome.ready, .fallback] {
+            try await exercise("\(outcome)-no-edit", outcome: outcome, edit: .none)
+            try await exercise("\(outcome)-follow-up", outcome: outcome, edit: .followUp)
+            try await exercise("\(outcome)-deferred-empty", outcome: outcome, edit: .deferredEmpty)
+        }
+        try await exercise("ready-after-completion-empty-write", outcome: .ready, edit: .none, holdChatFailure: true)
+        try await exercise("ready-preset-nonempty", outcome: .ready, edit: .none,
+                           initialStoredDraft: "Existing local draft")
+        try await exercise("ready-pending-whitespace", outcome: .ready, edit: .none,
+                           initialLocalDraft: "   \n")
+        try await exercise("ready-pending-unsaved-follow-up", outcome: .ready, edit: .pendingFollowUp)
+        try await exercise("ready-pending-unsaved-whitespace", outcome: .ready, edit: .pendingWhitespace)
+        try await exercise("ready-same-text-concurrent-write", outcome: .ready, edit: .sameTextWrite)
+        try await exercise("ready-binding-lost", outcome: .bindingLost, edit: .none)
+        try await exercise("binding-lost-pending-unsaved-follow-up", outcome: .bindingLost, edit: .pendingFollowUp)
+        try await exercise("binding-lost-pending-unsaved-whitespace", outcome: .bindingLost, edit: .pendingWhitespace)
+    }
+}

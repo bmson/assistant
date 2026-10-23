@@ -1,19 +1,530 @@
 import SwiftUI
 import UIKit
+#if DEBUG
+import QuartzCore
+#endif
 
-/// Give the transcript and composer separate layout slots before lifting the
-/// stage. Clearance must not depend on a later input measurement or scroll inset.
+/// Keep controls outside the scroll view’s gesture subtree while the transcript
+/// draws through the complete stage behind them. Both lift as one menu surface.
 struct ConversationColumn<Transcript: View, Composer: View>: View {
     @ViewBuilder var transcript: Transcript
     @ViewBuilder var composer: Composer
 
     var body: some View {
-        VStack(spacing: PullMenuMotion.transcriptComposerSpacing) {
-            transcript
+        ZStack(alignment: .bottom) {
+            ConversationTranscriptHost(content: transcript)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             composer
         }
     }
 }
+
+/// Own only the transcript's hosting boundary. The parent supplies the complete
+/// keyboard-aware viewport and moves it together with the sibling composer.
+/// The child omits both safe-area regions so its SwiftUI layout does not add a
+/// second container or keyboard inset. Native scroll behavior is tested below.
+private struct ConversationTranscriptHost<Content: View>: UIViewControllerRepresentable {
+    let content: Content
+
+    func makeUIViewController(context: Context) -> ConversationTranscriptController<Content> {
+#if DEBUG
+        let controller = ConversationTranscriptController(
+            content: content,
+            environment: context.environment,
+            transaction: context.transaction,
+            diagnosticContentRevision: context.environment.transcriptHostBoundaryProbe?.currentContentRevision ?? -1
+        )
+        context.environment.transcriptHostBoundaryProbe?.record(
+            "hosting-controller-initialized", transaction: context.transaction, generation: 0,
+            contentRevision: context.environment.transcriptHostBoundaryProbe?.currentContentRevision
+        )
+#else
+        let controller = ConversationTranscriptController(
+            content: content, environment: context.environment, transaction: context.transaction,
+            diagnosticContentRevision: -1
+        )
+#endif
+        return controller
+    }
+
+    func updateUIViewController(_ controller: ConversationTranscriptController<Content>, context: Context) {
+#if DEBUG
+        context.environment.transcriptHostBoundaryProbe?.record(
+            "representable-context", transaction: context.transaction, generation: controller.parentSnapshotGeneration
+        )
+#endif
+        withTransaction(context.transaction) {
+#if DEBUG
+            controller.update(
+                content: content,
+                environment: context.environment,
+                boundaryProbe: context.environment.transcriptHostBoundaryProbe,
+                transaction: context.transaction
+            )
+#else
+            controller.update(content: content, environment: context.environment, transaction: context.transaction)
+#endif
+        }
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize,
+                     uiViewController: ConversationTranscriptController<Content>, context: Context) -> CGSize? {
+        guard let width = proposal.width, let height = proposal.height,
+              width.isFinite, height.isFinite else { return nil }
+        return CGSize(width: max(width, 0), height: max(height, 0))
+    }
+}
+
+private enum TranscriptCoordinateSpace: Hashable {
+    case viewport
+}
+
+private struct ConversationTranscriptSnapshot<Content: View> {
+    let content: Content
+    let environment: EnvironmentValues
+    let transaction: Transaction
+    let generation: Int
+    let diagnosticContentRevision: Int
+}
+
+private struct ConversationTranscriptRoot<Content: View>: View {
+    let snapshot: ConversationTranscriptSnapshot<Content>
+#if DEBUG
+    let coordinates: TranscriptHostingCoordinates
+#endif
+
+    var body: some View {
+        snapshot.content
+            .transaction(value: snapshot.generation) {
+#if DEBUG
+                snapshot.environment.transcriptHostBoundaryProbe?.record(
+                    "content-transform-input", transaction: $0, generation: snapshot.generation,
+                    contentRevision: snapshot.diagnosticContentRevision
+                )
+                snapshot.environment.transcriptHostBoundaryProbe?.record(
+                    "content-transform-captured", transaction: snapshot.transaction, generation: snapshot.generation,
+                    contentRevision: snapshot.diagnosticContentRevision
+                )
+#endif
+                $0 = snapshot.transaction
+#if DEBUG
+                snapshot.environment.transcriptHostBoundaryProbe?.record(
+                    "content-transform-output", transaction: $0, generation: snapshot.generation,
+                    contentRevision: snapshot.diagnosticContentRevision
+                )
+#endif
+            }
+#if DEBUG
+            .environment(\.transcriptHostingCoordinates, coordinates)
+            .environment(\.transcriptHostSnapshotGeneration, snapshot.generation)
+            .environment(\.transcriptHostSnapshotContentRevision, snapshot.diagnosticContentRevision)
+#endif
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .coordinateSpace(name: TranscriptCoordinateSpace.viewport)
+            .environment(\.self, snapshot.environment)
+    }
+}
+
+/// The controller and generic root type stay stable across draft, streaming,
+/// environment and reveal updates. The root value carries an immutable snapshot.
+/// SwiftUI owns the container frame; Auto Layout pins only the owned child to
+/// its bounds, never its safe area.
+private final class ConversationTranscriptController<Content: View>: UIViewController {
+    private var snapshot: ConversationTranscriptSnapshot<Content>
+    private let host: UIHostingController<ConversationTranscriptRoot<Content>>
+#if DEBUG
+    private let coordinates: TranscriptHostingCoordinates
+#endif
+    var parentSnapshotGeneration: Int { snapshot.generation }
+
+    init(content: Content, environment: EnvironmentValues, transaction: Transaction,
+         diagnosticContentRevision: Int) {
+        let snapshot = ConversationTranscriptSnapshot(
+            content: content, environment: environment, transaction: transaction,
+            generation: 0, diagnosticContentRevision: diagnosticContentRevision
+        )
+        self.snapshot = snapshot
+#if DEBUG
+        let coordinates = TranscriptHostingCoordinates()
+        self.coordinates = coordinates
+        host = UIHostingController(rootView: ConversationTranscriptRoot(
+            snapshot: snapshot, coordinates: coordinates))
+#else
+        host = UIHostingController(rootView: ConversationTranscriptRoot(snapshot: snapshot))
+#endif
+        super.init(nibName: nil, bundle: nil)
+        host.safeAreaRegions = []
+        host.sizingOptions = []
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func loadView() {
+        view = UIView()
+        view.backgroundColor = .clear
+        view.isOpaque = false
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        addChild(host)
+        host.view.backgroundColor = .clear
+        host.view.isOpaque = false
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+#if DEBUG
+        coordinates.view = host.view
+#endif
+        view.addSubview(host.view)
+        NSLayoutConstraint.activate([
+            host.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            host.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            host.view.topAnchor.constraint(equalTo: view.topAnchor),
+            host.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        host.didMove(toParent: self)
+    }
+
+#if DEBUG
+    func update(content: Content, environment: EnvironmentValues,
+                boundaryProbe: TranscriptHostBoundaryProbe?, transaction: Transaction) {
+        replaceSnapshot(content: content, environment: environment, transaction: transaction,
+                        diagnosticContentRevision: boundaryProbe?.currentContentRevision ?? -1)
+    }
+#else
+    func update(content: Content, environment: EnvironmentValues, transaction: Transaction) {
+        replaceSnapshot(content: content, environment: environment, transaction: transaction,
+                        diagnosticContentRevision: -1)
+    }
+#endif
+
+    private func replaceSnapshot(content: Content, environment: EnvironmentValues,
+                                 transaction: Transaction, diagnosticContentRevision: Int) {
+        let next = ConversationTranscriptSnapshot(
+            content: content, environment: environment, transaction: transaction,
+            generation: snapshot.generation &+ 1, diagnosticContentRevision: diagnosticContentRevision
+        )
+        snapshot = next
+#if DEBUG
+        let probe = environment.transcriptHostBoundaryProbe
+        probe?.record("parent-snapshot-commit", transaction: next.transaction,
+                      generation: next.generation, contentRevision: next.diagnosticContentRevision)
+        host.rootView = ConversationTranscriptRoot(snapshot: next, coordinates: coordinates)
+        probe?.record("root-value-updated", transaction: next.transaction,
+                      generation: next.generation, contentRevision: next.diagnosticContentRevision)
+#else
+        host.rootView = ConversationTranscriptRoot(snapshot: next)
+#endif
+    }
+}
+
+#if DEBUG
+/// Opt-in diagnostic for tests that need to distinguish transaction loss at
+/// the representable boundary from state loss inside the hosted child.
+@MainActor
+final class TranscriptHostBoundaryProbe {
+    private let marker: @MainActor (Transaction) -> Int
+    private let contentRevision: @MainActor () -> Int
+    private(set) var events: [[String: Any]] = []
+    private(set) var parentSnapshotGeneration = 0
+    private(set) var parentSnapshotCommitCount = 0
+    private(set) var hostingControllerInitializationCount = 0
+    private(set) var rootValueUpdateCount = 0
+
+    var currentContentRevision: Int { contentRevision() }
+
+    init(marker: @escaping @MainActor (Transaction) -> Int,
+         contentRevision: @escaping @MainActor () -> Int) {
+        self.marker = marker
+        self.contentRevision = contentRevision
+    }
+
+    func record(_ stage: String, transaction: Transaction, generation: Int, contentRevision: Int? = nil) {
+        if stage == "parent-snapshot-commit" {
+            parentSnapshotGeneration = generation
+            parentSnapshotCommitCount += 1
+        } else if stage == "hosting-controller-initialized" {
+            hostingControllerInitializationCount += 1
+        } else if stage == "root-value-updated" {
+            rootValueUpdateCount += 1
+        }
+        if events.count == 64 { events.removeFirst() }
+        events.append([
+            "time": CACurrentMediaTime(),
+            "stage": stage,
+            "marker": marker(transaction),
+            "contentRevision": contentRevision ?? self.contentRevision(),
+            "generation": generation,
+        ])
+    }
+}
+
+private struct TranscriptHostBoundaryProbeKey: EnvironmentKey {
+    static let defaultValue: TranscriptHostBoundaryProbe? = nil
+}
+
+private struct TranscriptHostSnapshotGenerationKey: EnvironmentKey {
+    static let defaultValue: Int? = nil
+}
+
+private struct TranscriptHostSnapshotContentRevisionKey: EnvironmentKey {
+    static let defaultValue: Int? = nil
+}
+
+extension EnvironmentValues {
+    var transcriptHostBoundaryProbe: TranscriptHostBoundaryProbe? {
+        get { self[TranscriptHostBoundaryProbeKey.self] }
+        set { self[TranscriptHostBoundaryProbeKey.self] = newValue }
+    }
+
+    var transcriptHostSnapshotGeneration: Int? {
+        get { self[TranscriptHostSnapshotGenerationKey.self] }
+        set { self[TranscriptHostSnapshotGenerationKey.self] = newValue }
+    }
+
+    var transcriptHostSnapshotContentRevision: Int? {
+        get { self[TranscriptHostSnapshotContentRevisionKey.self] }
+        set { self[TranscriptHostSnapshotContentRevisionKey.self] = newValue }
+    }
+}
+
+/// A child-root measurement is converted through its owned native host at read
+/// time. A pure parent translation need not trigger a SwiftUI geometry callback.
+@MainActor
+fileprivate final class TranscriptHostingCoordinates {
+    weak var view: UIView?
+}
+
+struct TranscriptGeometryMeasurement {
+    let localFrame: CGRect
+    private let coordinates: TranscriptHostingCoordinates
+
+    fileprivate init(localFrame: CGRect, coordinates: TranscriptHostingCoordinates) {
+        self.localFrame = localFrame
+        self.coordinates = coordinates
+    }
+
+    @MainActor
+    func frame(in window: UIWindow) -> CGRect? {
+        guard let view = coordinates.view, view.window === window,
+              view.isDescendant(of: window), Self.isValid(localFrame) else { return nil }
+        let frame = view.convert(localFrame, to: window)
+        return Self.isValid(frame) ? frame : nil
+    }
+
+    private static func isValid(_ frame: CGRect) -> Bool {
+        !frame.isNull && !frame.isInfinite && !frame.isEmpty
+            && frame.minX.isFinite && frame.minY.isFinite
+            && frame.width.isFinite && frame.height.isFinite
+            && frame.maxX.isFinite && frame.maxY.isFinite
+    }
+}
+
+enum ComposerPresentationTarget: String, CaseIterable {
+    case capsule
+    case microphone
+    case send
+}
+
+/// Opt-in visual-test registry. Normal app rendering has no probe value and
+/// therefore installs no marker views or sampling work.
+@MainActor
+final class ComposerPresentationProbe {
+    private final class Registration {
+        weak var view: UIView?
+        let target: ComposerPresentationTarget
+        let draftIsEmpty: Bool
+        let draftRevision: Int
+
+        init(view: UIView, target: ComposerPresentationTarget, draftIsEmpty: Bool, draftRevision: Int) {
+            self.view = view
+            self.target = target
+            self.draftIsEmpty = draftIsEmpty
+            self.draftRevision = draftRevision
+        }
+    }
+
+    struct MarkerState {
+        let view: UIView
+        let draftIsEmpty: Bool
+        let draftRevision: Int
+    }
+
+    struct EmptyTransition {
+        let id: Int
+        let requestedAt: CFTimeInterval
+        let baselineDraftRevision: Int
+        fileprivate(set) var observedEmptyRevision: Int?
+        fileprivate(set) var observedEmptyAt: CFTimeInterval?
+        fileprivate(set) var animationCompletionAt: CFTimeInterval?
+    }
+
+    private var registrations: [ComposerPresentationTarget: Registration] = [:]
+    private(set) var emptyTransition: EmptyTransition?
+    private var nextTransitionID = 0
+
+    func register(
+        _ view: UIView,
+        target: ComposerPresentationTarget,
+        draftIsEmpty: Bool,
+        draftRevision: Int
+    ) {
+        registrations[target] = Registration(
+            view: view,
+            target: target,
+            draftIsEmpty: draftIsEmpty,
+            draftRevision: draftRevision
+        )
+        if var transition = emptyTransition,
+           draftIsEmpty,
+           draftRevision > transition.baselineDraftRevision,
+           transition.observedEmptyRevision == nil {
+            transition.observedEmptyRevision = draftRevision
+            transition.observedEmptyAt = CACurrentMediaTime()
+            emptyTransition = transition
+        }
+    }
+
+    func remove(_ view: UIView, target: ComposerPresentationTarget) {
+        guard registrations[target]?.view === view else { return }
+        registrations.removeValue(forKey: target)
+    }
+
+    func marker(_ target: ComposerPresentationTarget) -> MarkerState? {
+        guard let registration = registrations[target], let view = registration.view else { return nil }
+        return MarkerState(
+            view: view,
+            draftIsEmpty: registration.draftIsEmpty,
+            draftRevision: registration.draftRevision
+        )
+    }
+
+    @discardableResult
+    func requestEmptyDraft(afterRevision revision: Int) -> Int {
+        nextTransitionID &+= 1
+        emptyTransition = EmptyTransition(
+            id: nextTransitionID,
+            requestedAt: CACurrentMediaTime(),
+            baselineDraftRevision: revision,
+            observedEmptyRevision: nil,
+            observedEmptyAt: nil,
+            animationCompletionAt: nil
+        )
+        return nextTransitionID
+    }
+
+    var pendingTransitionID: Int? { emptyTransition?.id }
+
+    func recordAnimationCompletion(transitionID: Int, at timestamp: CFTimeInterval) {
+        guard var transition = emptyTransition,
+              transition.id == transitionID,
+              transition.animationCompletionAt == nil else { return }
+        transition.animationCompletionAt = timestamp
+        emptyTransition = transition
+    }
+}
+
+private struct ComposerPresentationProbeKey: EnvironmentKey {
+    static let defaultValue: ComposerPresentationProbe? = nil
+}
+
+extension EnvironmentValues {
+    var composerPresentationProbe: ComposerPresentationProbe? {
+        get { self[ComposerPresentationProbeKey.self] }
+        set { self[ComposerPresentationProbeKey.self] = newValue }
+    }
+}
+
+@MainActor
+private final class ComposerPresentationMarkerView: UIView {
+    weak var probeRegistry: ComposerPresentationProbe?
+    var probeTarget: ComposerPresentationTarget?
+
+    override var intrinsicContentSize: CGSize { .zero }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque = false
+        isUserInteractionEnabled = false
+        isAccessibilityElement = false
+        accessibilityElementsHidden = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+}
+
+@MainActor
+private struct ComposerPresentationMarker: UIViewRepresentable {
+    let target: ComposerPresentationTarget
+    let draftIsEmpty: Bool
+    let draftRevision: Int
+    let registry: ComposerPresentationProbe
+
+    func makeUIView(context: Context) -> ComposerPresentationMarkerView {
+        let view = ComposerPresentationMarkerView(frame: .zero)
+        view.probeRegistry = registry
+        view.probeTarget = target
+        registry.register(view, target: target, draftIsEmpty: draftIsEmpty, draftRevision: draftRevision)
+        return view
+    }
+
+    func updateUIView(_ view: ComposerPresentationMarkerView, context: Context) {
+        view.probeRegistry = registry
+        view.probeTarget = target
+        registry.register(view, target: target, draftIsEmpty: draftIsEmpty, draftRevision: draftRevision)
+    }
+
+    static func dismantleUIView(_ view: ComposerPresentationMarkerView, coordinator: ()) {
+        if let registry = view.probeRegistry, let target = view.probeTarget {
+            registry.remove(view, target: target)
+        }
+        view.probeRegistry = nil
+        view.probeTarget = nil
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: ComposerPresentationMarkerView, context: Context) -> CGSize? {
+        guard let width = proposal.width, let height = proposal.height,
+              width.isFinite, height.isFinite, width >= 0, height >= 0 else { return .zero }
+        return CGSize(width: width, height: height)
+    }
+}
+
+private struct TranscriptHostingCoordinatesKey: EnvironmentKey {
+    static let defaultValue: TranscriptHostingCoordinates? = nil
+}
+
+private extension EnvironmentValues {
+    var transcriptHostingCoordinates: TranscriptHostingCoordinates? {
+        get { self[TranscriptHostingCoordinatesKey.self] }
+        set { self[TranscriptHostingCoordinatesKey.self] = newValue }
+    }
+}
+
+private struct TranscriptGeometryObserver: ViewModifier {
+    @Environment(\.transcriptHostingCoordinates) private var coordinates
+    let report: @MainActor (TranscriptGeometryMeasurement) -> Void
+
+    func body(content: Content) -> some View {
+        content.onGeometryChange(for: CGRect.self) {
+            $0.frame(in: .named(TranscriptCoordinateSpace.viewport))
+        } action: { frame in
+            if let coordinates {
+                report(TranscriptGeometryMeasurement(localFrame: frame, coordinates: coordinates))
+            }
+        }
+    }
+}
+
+extension View {
+    func onTranscriptGeometryChange(
+        _ report: @escaping @MainActor (TranscriptGeometryMeasurement) -> Void
+    ) -> some View {
+        modifier(TranscriptGeometryObserver(report: report))
+    }
+}
+#endif
 
 enum PullMenuMotion {
     /// The menu's touch target must fit entirely in the empty layout gap.
@@ -268,6 +779,26 @@ struct TranscriptContext {
     }
 }
 
+#if DEBUG
+/// Opt-in geometry receipt for one real transcript row in visual review tests.
+/// The normal app has no observer installed and pays no per-row geometry cost.
+struct ChatTranscriptRowGeometryProbe {
+    let messageID: String
+    let report: @MainActor (TranscriptGeometryMeasurement) -> Void
+}
+
+private struct ChatTranscriptRowGeometryProbeKey: EnvironmentKey {
+    static let defaultValue: ChatTranscriptRowGeometryProbe? = nil
+}
+
+extension EnvironmentValues {
+    var chatTranscriptRowGeometryProbe: ChatTranscriptRowGeometryProbe? {
+        get { self[ChatTranscriptRowGeometryProbeKey.self] }
+        set { self[ChatTranscriptRowGeometryProbeKey.self] = newValue }
+    }
+}
+#endif
+
 /// The eager transcript has a boundary of its own: typing and pulling the menu
 /// must not regroup receipts, resolve prompts, or visit every row builder.
 /// Actions capture the same AppModel and state bindings for this screen's life;
@@ -290,6 +821,9 @@ struct ChatTranscriptRows: View, Equatable {
     let cardFormStateRevision: Int
     let cardFormTaskRevision: Int
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+#if DEBUG
+    @Environment(\.chatTranscriptRowGeometryProbe) private var rowGeometryProbe
+#endif
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.messages == rhs.messages && lhs.isSending == rhs.isSending
@@ -302,7 +836,7 @@ struct ChatTranscriptRows: View, Equatable {
         let context = TranscriptContext(messages: messages)
         VStack(spacing: AssistantTheme.ConversationSpacing.surfaceGap) {
             ForEach(items) { item in
-                row(item, context: context)
+                observedRow(item, context: context)
                     .transition(
                         reduceMotion ? .opacity : .asymmetric(
                             insertion: .opacity
@@ -317,6 +851,22 @@ struct ChatTranscriptRows: View, Equatable {
         // Token growth changes content, not this identity list. New messages
         // reveal once without restarting geometry animation for each token.
         .animation(reduceMotion ? nil : .snappy(duration: 0.3, extraBounce: 0.02), value: messages.map(\.id))
+    }
+
+    @ViewBuilder
+    private func observedRow(_ item: ChatTranscriptItem, context: TranscriptContext) -> some View {
+#if DEBUG
+        if let probe = rowGeometryProbe, item.id == probe.messageID {
+            row(item, context: context)
+                .onTranscriptGeometryChange { measurement in
+                    probe.report(measurement)
+                }
+        } else {
+            row(item, context: context)
+        }
+#else
+        row(item, context: context)
+#endif
     }
 
     @ViewBuilder
@@ -458,6 +1008,10 @@ struct ChatView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.scenePhase) private var scenePhase
+#if DEBUG
+    @Environment(\.composerPresentationProbe) private var composerPresentationProbe
+    @State private var composerDraftRevision = 0
+#endif
     @ScaledMetric(relativeTo: .body) private var composerFontSize = 16.0
     // The directory labels need the same legibility as the content cards.
     // Scaling from subheadline keeps the two-column sheet readable before it
@@ -467,6 +1021,9 @@ struct ChatView: View {
     @ScaledMetric(relativeTo: .subheadline) private var menuAccessibilityTextSize = 15.0
     @State private var draft = ""
     @State private var draftScope: ComposerDraftScope?
+    @State private var draftSnapshot: ComposerDraftSnapshot?
+    @State private var draftSubmission: ComposerDraftSubmissionProvenance?
+    @State private var composerIsVisible = false
     @State private var isAtBottom = true
     @State private var transcriptFollow = TranscriptFollowState()
     // Opening requires the actual bottom edge. `isAtBottom` deliberately has
@@ -475,6 +1032,7 @@ struct ChatView: View {
     @State private var isAtMenuOpeningEdge = true
     @State private var hasUnseenMessages = false
     @State private var composerHeight: CGFloat = 0
+    @State private var floatingNoticeHeight: CGFloat = 0
     @State private var scrollRequest = 0
     // A direct "Jump to latest" owns the scroll position until it has had a
     // chance to supersede an automatic scroll that may already be in flight.
@@ -677,13 +1235,6 @@ struct ChatView: View {
                         radius: 28 * menuSurfaceProgress,
                         y: 14 * menuSurfaceProgress
                     )
-                    // Resolve the complete green surface edge-to-edge before it is
-                    // transformed. When `ignoresSafeArea` wrapped the offset view,
-                    // SwiftUI recomputed the ScrollView's bottom content inset as
-                    // the sheet crossed the device boundary; the transcript then
-                    // slid by roughly one home-indicator inset while the composer
-                    // stayed put. With offset outermost, this is one rigid layer.
-                    .ignoresSafeArea(.container)
                     .offset(y: -conversationRevealDistance)
                     // At the largest accessibility sizes the destination row is
                     // horizontally scrollable, so the lifted conversation owns
@@ -745,6 +1296,7 @@ struct ChatView: View {
                 settleCancelledMenuGestureAfterRelease()
             }
             .onAppear {
+                composerIsVisible = true
                 menuViewportWidth = viewport.size.width
                 synchronizeComposer()
                 #if DEBUG
@@ -755,21 +1307,47 @@ struct ChatView: View {
                 menuViewportWidth = width
             }
             .onDisappear {
-                if let draftScope { model.saveComposerDraft(draft, in: draftScope) }
+                composerIsVisible = false
+                // A delayed teardown must not overwrite a newer view's draft.
+                // Keep the final local edit when storage has not changed.
+                if let draftScope, let draftSnapshot,
+                   let saved = model.saveComposerDraft(draft, in: draftScope, ifUnchangedFrom:
+                    draftSnapshot.lifecycleFlushSnapshot(localDraft: draft, submission: draftSubmission)) {
+                    self.draftSnapshot = saved
+                    draftSubmission = nil
+                }
                 dictationScope = nil
                 stopMicrophone(focusingComposer: false)
             }
             .onChange(of: model.composerDraftScope) { _, _ in synchronizeComposer() }
             .onChange(of: draft) { _, text in
-                if let draftScope { model.saveComposerDraft(text, in: draftScope) }
+                // Read @State now, rather than persisting an obsolete callback
+                // value that was superseded by a restoration or another edit.
+                guard let draftScope,
+                      let saved = model.saveComposerDraftChange(text, currentDraft: draft, in: draftScope) else { return }
+                draftSnapshot = saved
+                draftSubmission = nil
+#if DEBUG
+                if composerPresentationProbe != nil {
+                    composerDraftRevision &+= 1
+                }
+#endif
             }
             .onChange(of: model.composerRecoveryRevision) { _, _ in
+                guard let draftScope, let previous = draftSnapshot,
+                      let current = model.composerDraftSnapshot(in: draftScope),
+                      let adopted = previous.adoptingRecoverySnapshot(current, localDraft: draft) else { return }
+                draftSnapshot = adopted
+                draft = adopted.text
                 restoreUnsentMessageIfPossible()
             }
             .onChange(of: model.calendarDraftRestoreRevision) { _, _ in
                 if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                   let draftScope, !model.composerDraft(in: draftScope).isEmpty {
-                    draft = model.composerDraft(in: draftScope)
+                   draft == draftSnapshot?.text,
+                   let draftScope, let current = model.composerDraftSnapshot(in: draftScope),
+                   !current.text.isEmpty {
+                    draftSnapshot = current
+                    draft = current.text
                 }
             }
             .onChange(of: model.packDiscussionDraft) { _, requested in
@@ -784,10 +1362,22 @@ struct ChatView: View {
         // Resolve the full container before reading `viewport.size`; the
         // keyboard is a separate safe-area region and remains respected.
         .ignoresSafeArea(.container)
+#if DEBUG
+        .transaction { transaction in
+            guard let probe = composerPresentationProbe,
+                  let transitionID = probe.pendingTransitionID else { return }
+            transaction.addAnimationCompletion(criteria: .removed) {
+                let timestamp = CACurrentMediaTime()
+                Task { @MainActor in
+                    probe.recordAnimationCompletion(transitionID: transitionID, at: timestamp)
+                }
+            }
+        }
+#endif
     }
 
-    /// The transcript viewport and root error banner clear the Island by the
-    /// same distance from the edge-to-edge stage origin.
+    /// The transcript’s opening content and root error banner clear the Island
+    /// by the same distance; the transcript itself still draws edge-to-edge.
     private var crownContentTopInset: CGFloat {
         if isLandscape { return 0 }
         return ActivityCrown.overlayTopInset(
@@ -838,9 +1428,8 @@ struct ChatView: View {
         return Group {
             ConversationColumn {
                 ScrollView {
-                    // Keep rows mounted while the reader scrolls. The viewport
-                    // ends before navigation and input, so message text cannot
-                    // draw behind those controls.
+                    // Keep rows mounted while the reader scrolls through the
+                    // full viewport behind navigation and input.
                     Group {
                         if model.messages.isEmpty {
                             VStack(spacing: 0) { emptyConversation }
@@ -849,7 +1438,7 @@ struct ChatView: View {
                                 messages: model.messages,
                                 isSending: model.isSending,
                                 openApprovals: { model.present(.approvals) },
-                                send: { model.send($0, force: $1) },
+                                send: { sendWithComposerContext($0, force: $1) },
                                 decideApproval: { await model.decideApproval(id: $0, decision: $1) },
                                 rememberApproval: { await model.approveAndRemember(id: $0) },
                                 decideSuggestion: { await model.decideSuggestion(id: $0, decision: $1) },
@@ -903,12 +1492,18 @@ struct ChatView: View {
                             .equatable()
                         }
                     }
+                    // Clearance belongs to the scroll content, not the drawing
+                    // viewport: endpoints rest clear of chrome while older rows
+                    // can travel behind it. Jump visibility never changes this.
+                    .padding(.top, crownContentTopInset)
+                    .padding(.bottom, composerHeight + PullMenuMotion.transcriptComposerSpacing
+                        + (floatingNoticeHeight > 0 ? floatingNoticeHeight + 8 : 0))
                     .padding(.leading, AssistantTheme.compactGutter + (crownOnLeadingEdge ? landscapeCrownClearance : 0))
                     .padding(.trailing, AssistantTheme.compactGutter + (crownOnLeadingEdge ? 0 : landscapeCrownClearance))
                 }
-                // The composer and navigation own separate layout slots.
-                // Respect this viewport even while older rows remain mounted.
-                .scrollClipDisabled(false)
+                // The full-stage viewport includes the crown and composer.
+                // Native clipping at its bounds still lets rows draw behind
+                // those sibling controls without overflow outside the stage.
                 .scrollIndicators(.hidden)
                 .scrollPosition($transcriptScrollPosition)
                 // Menu reveal is a transform of the parent surface. SwiftUI's
@@ -922,15 +1517,6 @@ struct ChatView: View {
                         transaction.scrollContentOffsetAdjustmentBehavior = .disabled
                     }
                 }
-                // UIKit's scroll view can extend its drawing region into the
-                // safe-area overhang when the whole chat surface ignores the
-                // top inset. Reassert the SwiftUI viewport here before the
-                // crown clearance is added outside the scroll view.
-                .clipped()
-                // Constrain the viewport below the crown, rather than only
-                // offsetting the first content row. With clipping above, older
-                // text stays below the status area at every scroll position.
-                .padding(.top, crownContentTopInset)
                 // Never toggle `scrollDisabled` as the menu moves. That cancels
                 // UIScrollView's active pan by changing its environment and makes
                 // SwiftUI re-anchor the transcript inside the moving surface.
@@ -1041,25 +1627,15 @@ struct ChatView: View {
                 }
 
             } composer: {
-                // Keep the transcript and composer as siblings. When the
-                // composer was a ScrollView overlay, UIKit's pan recognizer
-                // still received pulls that began on the input and shifted the
-                // transcript before the menu gesture took over.
-                // Reserve space for navigation alongside the composer so the
-                // control cannot cover a message the owner is reading.
-                VStack(spacing: 8) {
-                    if showsJumpToLatest {
-                        jumpToLatestButton {
-                            jumpFeedback += 1
-                            jumpToLatest()
-                        }
-                        .transition(.opacity)
-                    }
-                    composer
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                // This is a sibling of ScrollView, so input/selection/menu
+                // touches never enter the transcript’s pan-recognizer subtree.
+                composer
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: isLandscape ? 680 : .infinity)
                     .frame(maxWidth: .infinity)
+                    // Keep the input footprint a concrete sibling hit surface,
+                    // including its empty gutters, without intercepting rows above.
+                    .background(Color.black.opacity(0.001).contentShape(Rectangle()))
                     // A plain, explicit padding is deliberate. Safe-area
                     // padding is recomputed when this transformed surface
                     // crosses the device safe-area boundary, and an offset
@@ -1075,40 +1651,61 @@ struct ChatView: View {
 
             }
             .overlay(alignment: .bottom) {
-                VStack(spacing: 10) {
-                    if let undo = model.hiddenMessageUndo {
-                        hiddenMessageUndoBar(undo)
-                            .transition(.opacity)
-                    }
-                    if let draftScope, model.hasComposerRecovery(in: draftScope) {
-                        VStack(spacing: 5) {
-                            Button {
-                                restoreUnsentMessageIfPossible()
-                                composerFocused = true
-                            } label: {
-                                Label("Restore unsent message", systemImage: "arrow.uturn.backward")
-                                    .font(.subheadline.weight(.medium))
-                                    .padding(.horizontal, 14)
-                                    .frame(minHeight: 44)
-                                    .background(AssistantTheme.bubblePaper(for: colorScheme), in: Capsule())
-                                    .foregroundStyle(AssistantTheme.bubblePaperInk(for: colorScheme))
+                VStack(spacing: 0) {
+                    VStack(spacing: 10) {
+                        if let undo = model.hiddenMessageUndo {
+                            hiddenMessageUndoBar(undo)
+                                .transition(.opacity)
+                        }
+                        if let draftScope, model.hasComposerRecovery(in: draftScope) {
+                            VStack(spacing: 5) {
+                                Button {
+                                    restoreUnsentMessageByOwner()
+                                    composerFocused = true
+                                } label: {
+                                    Label("Restore unsent message", systemImage: "arrow.uturn.backward")
+                                        .font(.subheadline.weight(.medium))
+                                        .frame(minHeight: 44)
+                                        .foregroundStyle(AssistantTheme.bubblePaperInk(for: colorScheme))
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                .accessibilityIdentifier("assistant.chat.restore-unsent-message")
+                                .accessibilityHint("Send or clear your current draft before restoring the message that did not send.")
+                                if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    Text("Send or clear your current draft first")
+                                        .font(.caption)
+                                        .foregroundStyle(AssistantTheme.bubblePaperInk(for: colorScheme))
+                                        .multilineTextAlignment(.center)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
                             }
-                            .buttonStyle(.plain)
-                            .disabled(!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            .accessibilityHint("Send or clear your current draft before restoring the message that did not send.")
-                            if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                Text("Send or clear this draft to restore your earlier message.")
-                                    .font(.caption)
-                                    .foregroundStyle(AssistantTheme.stageSecondary)
-                                    .multilineTextAlignment(.center)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 4)
-                                    .background(AssistantTheme.stageWell(for: colorScheme), in: Capsule())
-                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            // Keep the complete recovery surface opaque when the
+                            // button is disabled above a still-visible transcript.
+                            .background(AssistantTheme.bubblePaper(for: colorScheme),
+                                        in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                            .padding(.horizontal, 16)
                         }
                     }
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                        floatingNoticeHeight = height
+                    }
+                    if showsJumpToLatest {
+                        jumpToLatestButton {
+                            jumpFeedback += 1
+                            jumpToLatest()
+                        }
+                        .padding(.top, floatingNoticeHeight > 0 ? 10 : 0)
+                        .transition(.opacity)
+                    }
                 }
-                .padding(.bottom, composerHeight + 12)
+                // Floating controls share a stack so Undo/recovery cannot
+                // overlap Jump. Their footprint never resizes the transcript
+                // itself. Only notices (which can remain at the newest edge)
+                // contribute to content clearance; Jump never does.
+                .padding(.bottom, composerHeight + 8)
             }
             .allowsHitTesting(!menuOpen)
             // Match the visual modal state for assistive navigation: the
@@ -2279,14 +2876,13 @@ struct ChatView: View {
                     )
                 }
                 .buttonStyle(.plain)
+#if DEBUG
+                .overlay { composerPresentationMarker(.send) }
+#endif
                 .disabled(!primarySendEnabled && !primaryIsStop)
                 .accessibilityLabel(primaryButtonLabel)
                 .accessibilityIdentifier("assistant.chat.send")
                 .accessibilityHint(primaryButtonHint)
-                .animation(
-                    reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.76),
-                    value: canSend
-                )
                 .animation(
                     reduceMotion ? nil : .easeOut(duration: 0.18),
                     value: model.isSending
@@ -2361,6 +2957,9 @@ struct ChatView: View {
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
+#if DEBUG
+        .overlay { composerPresentationMarker(.microphone) }
+#endif
         .simultaneousGesture(
             DragGesture(minimumDistance: 0)
                 .updating($micTouchDown) { _, down, _ in down = true }
@@ -2528,6 +3127,20 @@ struct ChatView: View {
     private var conversationControlGlassTintOpacity: Double { 0.04 }
     private var conversationControlBackgroundOpacity: Double { 1 }
 
+#if DEBUG
+    @ViewBuilder
+    private func composerPresentationMarker(_ target: ComposerPresentationTarget) -> some View {
+        if let composerPresentationProbe {
+            ComposerPresentationMarker(
+                target: target,
+                draftIsEmpty: draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                draftRevision: composerDraftRevision,
+                registry: composerPresentationProbe
+            )
+        }
+    }
+#endif
+
     @ViewBuilder
     private func composerInputSurface(
         @ViewBuilder content: () -> AnyView
@@ -2549,6 +3162,9 @@ struct ChatView: View {
                         lineWidth: 1
                     )
                 }
+#if DEBUG
+                .overlay { composerPresentationMarker(.capsule) }
+#endif
         } else if #available(iOS 26.0, *) {
             content()
                 .background {
@@ -2577,6 +3193,9 @@ struct ChatView: View {
                         ),
                     in: shape
                 )
+#if DEBUG
+                .overlay { composerPresentationMarker(.capsule) }
+#endif
         } else {
             content()
                 .background {
@@ -2601,6 +3220,9 @@ struct ChatView: View {
                         lineWidth: 1
                     )
                 }
+#if DEBUG
+                .overlay { composerPresentationMarker(.capsule) }
+#endif
         }
     }
 
@@ -2619,7 +3241,7 @@ struct ChatView: View {
         if model.cardFormComposerBinding != nil {
             model.sendCardForm(text) {
                 draft = ""
-                if let draftScope { model.saveComposerDraft("", in: draftScope) }
+                if let draftScope { draftSnapshot = model.saveComposerDraft("", in: draftScope) }
                 dictationScope = nil
                 stopMicrophone(focusingComposer: false)
                 sendFeedback += 1
@@ -2629,7 +3251,7 @@ struct ChatView: View {
             return
         }
         draft = ""
-        if let draftScope { model.saveComposerDraft("", in: draftScope) }
+        if let draftScope { draftSnapshot = model.saveComposerDraft("", in: draftScope) }
         sendPreparedMessage(text, keepsComposerFocused: true)
     }
 
@@ -2648,17 +3270,45 @@ struct ChatView: View {
         sendFeedback += 1
         composerFocused = keepsComposerFocused
         requestScrollToBottom()
-        model.send(text)
+        sendWithComposerContext(text)
+    }
+
+    private func sendWithComposerContext(_ text: String, force: Bool = false) {
+        let context = draftSnapshot.map { ComposerDraftSubmissionContext(origin: $0, localDraft: draft) }
+        model.send(text, force: force, composerDraftContext: context, onComposerDraftStage: { submission in
+            guard let draftScope, let previous = draftSnapshot,
+                  let current = model.composerDraftSnapshot(in: draftScope),
+                  let captured = previous.capturingSubmissionStage(
+                    submission, current: current, localDraft: draft,
+                    activeScope: model.composerDraftScope, isVisible: composerIsVisible
+                  ) else { return }
+            draftSubmission = captured
+        }) { origin, cleared in
+            guard let draftScope, let previous = draftSnapshot,
+                  let current = model.composerDraftSnapshot(in: draftScope),
+                  let adopted = previous.adoptingSubmissionClear(
+                    cleared, from: origin, current: current, localDraft: draft,
+                    activeScope: model.composerDraftScope, isVisible: composerIsVisible
+                  ) else { return }
+            draftSnapshot = adopted
+            draftSubmission = nil
+            draft = adopted.text
+        }
     }
 
     private func synchronizeComposer() {
         let nextScope = model.composerDraftScope
         guard nextScope != draftScope else { return }
-        if let draftScope { model.saveComposerDraft(draft, in: draftScope) }
+        if let draftScope, let draftSnapshot {
+            model.saveComposerDraft(draft, in: draftScope, ifUnchangedFrom:
+                draftSnapshot.lifecycleFlushSnapshot(localDraft: draft, submission: draftSubmission))
+        }
+        draftSubmission = nil
         dictationScope = nil
         stopMicrophone(focusingComposer: false)
         draftScope = nextScope
-        draft = nextScope.map { model.composerDraft(in: $0) } ?? ""
+        draftSnapshot = nextScope.flatMap { model.composerDraftSnapshot(in: $0) }
+        draft = draftSnapshot?.text ?? ""
         draftBeforeDictation = ""
         hasUnseenMessages = false
         transcriptFollow.resume()
@@ -2668,9 +3318,19 @@ struct ChatView: View {
     }
 
     private func restoreUnsentMessageIfPossible() {
+        guard let draftScope, let draftSnapshot,
+              let restored = model.restoreComposerRecovery(
+                in: draftScope, replacing: draft, ifUnchangedFrom: draftSnapshot
+              ) else { return }
+        self.draftSnapshot = restored
+        draft = restored.text
+    }
+
+    private func restoreUnsentMessageByOwner() {
         guard let draftScope,
-              let restored = model.restoreComposerRecovery(in: draftScope, replacing: draft) else { return }
-        draft = restored
+              let restored = model.restoreComposerRecoveryByOwner(in: draftScope, replacing: draft) else { return }
+        draftSnapshot = restored
+        draft = restored.text
     }
 
     private var showsJumpToLatest: Bool {
