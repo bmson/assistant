@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-repo_root="$(git rev-parse --show-toplevel)"
 output_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ios-scroll-performance"
 worktree_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ios-scroll-performance-worktrees"
 baseline_ref="${BASELINE_REF:-14ba202b8c9593623f3fe3c817319c15e40f6ffa}"
@@ -16,8 +15,8 @@ case "$repeats" in
 esac
 
 case "$run_mode" in
-  diagnostic|matrix) ;;
-  *) echo "RUN_MODE must be diagnostic or matrix" >&2; exit 2 ;;
+  diagnostic|matrix|smoke|correctness) ;;
+  *) echo "RUN_MODE must be diagnostic, correctness, smoke, or matrix" >&2; exit 2 ;;
 esac
 
 case "$phase" in
@@ -26,7 +25,184 @@ case "$phase" in
 esac
 
 mkdir -p "$output_root" "$worktree_root"
+compact_output="$output_root/compact-diagnostics"
+mkdir -p "$compact_output"
 exec > >(tee -a "$output_root/driver.log") 2>&1
+
+package_raw_bundles() {
+  local original_status="$1"
+  local archive="$output_root/raw-xcresults.tar.gz"
+  local temporary_archive="$archive.tmp"
+  local package_receipt="$compact_output/package-receipt.json"
+  local bundle_paths=() bundle_names=()
+  rm -f "$archive" "$temporary_archive"
+  while IFS= read -r -d '' bundle; do
+    bundle_paths+=("$bundle")
+    bundle_names+=("${bundle##*/}")
+  done < <(find "$output_root" -mindepth 1 -maxdepth 1 -type d \
+    \( -name '*.xcresult' -o -name '*.trace' -o -name '*-dsyms' \) -print0)
+
+  if [[ "${#bundle_paths[@]}" -eq 0 ]]; then
+    printf '{"archive":"raw-xcresults.tar.gz","bundleCount":0,"status":"no-result-bundles","scriptExitStatus":%s}\n' \
+      "$original_status" > "$package_receipt"
+    return 0
+  fi
+
+  rm -f "$temporary_archive"
+  if run_optional_bounded 180 "$output_root/package-raw-xcresults.log" \
+      tar -czf "$temporary_archive" -C "$output_root" "${bundle_names[@]}" \
+      && [[ -s "$temporary_archive" ]]; then
+    mv "$temporary_archive" "$archive"
+    printf '{"archive":"raw-xcresults.tar.gz","bundleCount":%s,"status":"complete","scriptExitStatus":%s}\n' \
+      "${#bundle_paths[@]}" "$original_status" > "$package_receipt"
+    echo "Packaged ${#bundle_paths[@]} raw result/profiling bundle(s) into $archive; originals remain on disk."
+  else
+    rm -f "$temporary_archive"
+    printf '{"archive":"raw-xcresults.tar.gz","bundleCount":%s,"status":"failed-or-timed-out","scriptExitStatus":%s,"note":"Raw result bundles were preserved; see package-raw-xcresults.log."}\n' \
+      "${#bundle_paths[@]}" "$original_status" > "$package_receipt"
+    echo "::warning::Could not package xcresult bundles within 180s; originals remain on disk."
+  fi
+}
+
+finish_runner() {
+  local original_status=$?
+  trap - EXIT
+  printf '{"phase":"%s","scriptExitStatus":%s}\n' "$phase" "$original_status" \
+    > "$compact_output/runner-exit.json"
+  if [[ "$phase" != "build" ]]; then package_raw_bundles "$original_status" || true; fi
+  exit "$original_status"
+}
+trap finish_runner EXIT
+
+validate_matrix_warmups() {
+  python3 - "$compact_output" "${variants[@]}" <<'PY'
+import json
+import math
+import pathlib
+import re
+import sys
+
+directory = pathlib.Path(sys.argv[1])
+variants = sys.argv[2:]
+errors = []
+setups = {}
+
+def read_json(path):
+    try:
+        return json.loads(path.read_text())
+    except Exception as error:
+        errors.append(f"{path.name}: cannot read JSON receipt ({error})")
+        return None
+
+def number(value):
+    return isinstance(value, (int, float)) and math.isfinite(value)
+
+for variant in variants:
+    stem = f"{variant}-500rows-warmup-00"
+    receipt = read_json(directory / f"{stem}-receipt.json")
+    if not receipt or receipt.get("xcodebuildExitStatus") != 0:
+        errors.append(f"{variant}: 500-row warmup did not exit successfully")
+
+    setup_receipt = read_json(directory / f"{stem}-setup.json")
+    stage_records = setup_receipt.get("setups", []) if setup_receipt else []
+    expected_stages = {"initial-top", "warm-target", "scored-start"}
+    actual_stages = {record.get("phase") for record in stage_records if isinstance(record, dict)}
+    if not setup_receipt or setup_receipt.get("setupMarkerCount") != 3 or actual_stages != expected_stages:
+        errors.append(f"{variant}: expected setup records for initial-top, warm-target, and scored-start")
+        continue
+    digests = {record.get("canonicalFixtureSHA256") for record in stage_records}
+    digest = next(iter(digests)) if len(digests) == 1 else None
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+        errors.append(f"{variant}: setup record has no canonical fixture SHA-256")
+    viewports = []
+    for setup in stage_records:
+        if setup.get("canonicalFixtureSHA256") != digest or setup.get("messageCount") != 500:
+            errors.append(f"{variant}: {setup.get('phase')} setup record fixture identity is invalid")
+        if setup.get("setupValid") is not True or setup.get("positioningProtocol") != "direct-UIKit-top-target-top":
+            errors.append(f"{variant}: {setup.get('phase')} setup positioning did not pass")
+        if setup.get("geometrySampleCount", 0) < 4:
+            errors.append(f"{variant}: {setup.get('phase')} setup has too few geometry samples")
+        viewport = setup.get("viewportHeightPoints")
+        observed, requested = setup.get("observedOffsetPoints"), setup.get("requestedOffsetPoints")
+        if not number(viewport) or viewport <= 100:
+            errors.append(f"{variant}: {setup.get('phase')} setup viewport is missing or implausible")
+        else:
+            viewports.append(viewport)
+        if not number(observed) or not number(requested) or abs(observed - requested) > 2:
+            errors.append(f"{variant}: {setup.get('phase')} setup endpoint is outside ±2 points")
+    if len(viewports) != 3 or max(viewports, default=0) - min(viewports, default=0) > 2:
+        errors.append(f"{variant}: setup viewports differ by more than 2 points")
+    viewport = viewports[-1] if viewports else None
+    setups[variant] = (digest, viewport)
+
+    records_path = directory / f"{stem}.jsonl"
+    try:
+        records = [json.loads(line) for line in records_path.read_text().splitlines() if line.strip()]
+    except Exception as error:
+        errors.append(f"{variant}: cannot read phase records ({error})")
+        continue
+    timed_records = [record for record in records
+                     if record.get("mode") == "full-chat-view-fixed-five-usable-viewports"]
+    if len(timed_records) != 2:
+        errors.append(f"{variant}: expected exactly two timed phase JSON records, found {len(timed_records)}")
+    phases = {record.get("phase"): record for record in timed_records}
+    for phase_name in ("fixed-five-viewports-down", "fixed-five-viewports-up"):
+        record = phases.get(phase_name)
+        if not record:
+            errors.append(f"{variant}: missing {phase_name} phase record")
+            continue
+        if record.get("messageCount") != 500 or record.get("canonicalFixtureSHA256") != digest:
+            errors.append(f"{variant}: {phase_name} fixture identity does not match its setup record")
+        phase_viewport = record.get("viewportHeightPoints")
+        if not number(phase_viewport) or not number(viewport) or abs(phase_viewport - viewport) > 2:
+            errors.append(f"{variant}: {phase_name} viewport differs from its setup viewport by more than 2 points")
+        if record.get("timedOut") is not False or not isinstance(record.get("callbackCount"), int) or record["callbackCount"] < 30:
+            errors.append(f"{variant}: {phase_name} did not produce a valid timed phase")
+        endpoints = (
+            record.get("observedStartOffsetPoints"), record.get("observedEndOffsetPoints"),
+            record.get("requestedFromOffsetPoints"), record.get("requestedToOffsetPoints"),
+        )
+        if not all(number(value) for value in endpoints):
+            errors.append(f"{variant}: {phase_name} is missing observed/requested endpoints")
+        elif abs(endpoints[0] - endpoints[2]) > 2 or abs(endpoints[1] - endpoints[3]) > 2:
+            errors.append(f"{variant}: {phase_name} observed endpoints are more than 2 points from requested endpoints")
+
+if len(variants) > 1 and len(setups) == len(variants):
+    baseline_digest, baseline_viewport = setups[variants[0]]
+    for variant in variants[1:]:
+        digest, viewport = setups[variant]
+        if digest != baseline_digest:
+            errors.append(f"{variant}: canonical fixture SHA differs from {variants[0]}")
+        if number(viewport) and number(baseline_viewport) and abs(viewport - baseline_viewport) > 2:
+            errors.append(f"{variant}: setup viewport differs from {variants[0]} by more than 2 points")
+
+report = {
+    "gate": "matrix-warmup",
+    "variants": variants,
+    "status": "failed" if errors else "passed",
+    "errors": errors,
+}
+(directory / "matrix-warmup-gate.json").write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
+print(json.dumps(report, sort_keys=True))
+sys.exit(1 if errors else 0)
+PY
+}
+
+if [[ "${1:-}" == "--validate-warmups" ]]; then
+  shift
+  variants=("$@")
+  if [[ -z "${WARMUP_RECEIPTS_DIR:-}" || "${#variants[@]}" -lt 1 ]]; then
+    echo "Usage: WARMUP_RECEIPTS_DIR=/path/to/receipts bash infra/ios-scroll-performance.sh --validate-warmups baseline [candidate]" >&2
+    trap - EXIT
+    exit 2
+  fi
+  compact_output="$WARMUP_RECEIPTS_DIR"
+  if validate_matrix_warmups; then validation_status=0; else validation_status=$?; fi
+  trap - EXIT
+  exit "$validation_status"
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
 
 resolve_commit() {
   local ref="$1"
@@ -63,9 +239,10 @@ phase=$phase
 benchmark_test_class=ConversationScrollPerformanceTests
 benchmark_methods=testFullChatView100RowColdMountBidirectionalStreamAndAppend,testFullChatView500RowColdMountBidirectionalStreamAndAppend
 diagnostic_methods=testFullChatView100RowSettledBidirectionalDiagnostic,testFullChatView500RowSettledBidirectionalDiagnostic
+correctness_method=APIClientRetryTests/testChatFollowsNewMessagesAndGrowingStreamWhileAtBottom
 matrix_method=testFullChatView500RowFixedWindowBidirectional
 run_mode=$run_mode
-cache_plan=one-warmup-per-variant-and-fixture; each-result-is-a-fresh-xcodebuild-test-invocation; phases-inside-a-test-share-one-app-process
+cache_plan=matrix-only: direct-UIKit-position-at-top-then-five-viewport-target-then-top-before-timing; each-result-is-a-fresh-xcodebuild-test-invocation
 metric_note=CADisplayLink callback intervals are not presented-frame FPS; simulator results are comparative evidence only.
 EOF
 
@@ -292,6 +469,123 @@ PY
   return "$status"
 }
 
+extract_phase_diagnostics() {
+  local log="$1" output="$2" label="$3" count="$4" phase_name="$5" iteration="$6"
+  python3 - "$log" "$output" "$label" "$count" "$phase_name" "$iteration" <<'PY'
+import json
+import pathlib
+import sys
+
+log_path, output_path, variant, fixture_rows, run_phase, iteration = sys.argv[1:]
+fixture_rows_requested = int(fixture_rows) if fixture_rows.isdigit() else None
+text = pathlib.Path(log_path).read_text(errors="replace") if pathlib.Path(log_path).exists() else ""
+marker = "FULL_CHAT_VIEW_PHASE_DIAGNOSTIC"
+decoder = json.JSONDecoder()
+records = []
+raw_records = []
+cursor = 0
+while True:
+    marker_at = text.find(marker, cursor)
+    if marker_at < 0:
+        break
+    start = marker_at + len(marker)
+    while start < len(text) and text[start].isspace():
+        start += 1
+    try:
+        record, end = decoder.raw_decode(text, start)
+    except json.JSONDecodeError:
+        cursor = start + 1
+        continue
+    cursor = end
+    if not isinstance(record, dict):
+        continue
+    raw_records.append(record)
+
+    samples = record.get("requestedAndObservedOffsetSamples") or []
+    first = samples[0] if samples else {}
+    last = samples[-1] if samples else {}
+    compact = {
+        "variant": variant,
+        "fixtureRowsRequested": fixture_rows_requested,
+        "runPhase": run_phase,
+        "iteration": iteration,
+        "mode": record.get("mode"),
+        "phase": record.get("phase"),
+        "messageCount": record.get("messageCount"),
+        "canonicalFixtureSHA256": record.get("canonicalFixtureSHA256") or record.get("fixtureSHA256"),
+        "viewportHeightPoints": record.get("viewportHeightPoints"),
+        "contentHeightPoints": record.get("contentHeightPoints"),
+        "reduceMotionEnabled": record.get("reduceMotionEnabled"),
+        "requestedFromOffsetPoints": record.get("requestedFromOffsetPoints"),
+        "requestedToOffsetPoints": record.get("requestedToOffsetPoints"),
+        "observedStartOffsetPoints": first.get("observedYPoints"),
+        "observedEndOffsetPoints": last.get("observedYPoints"),
+        "callbackCount": record.get("callbackCount"),
+        "timedOut": record.get("timedOut"),
+        "phaseErrorType": record.get("phaseErrorType"),
+        "phaseErrorDescription": record.get("phaseErrorDescription"),
+    }
+    if isinstance(record.get("phaseMeasurement"), dict):
+        measurement = record["phaseMeasurement"]
+        compact.update({
+            "phase": record.get("phase") or measurement.get("name"),
+            "callbackCount": record.get("callbackCount", measurement.get("callbackCount")),
+            "timedOut": record.get("timedOut", measurement.get("timedOut")),
+            "requestedFromOffsetPoints": record.get("requestedFromOffsetPoints", measurement.get("fromOffsetPoints")),
+            "requestedToOffsetPoints": record.get("requestedToOffsetPoints", measurement.get("toOffsetPoints")),
+            "observedStartOffsetPoints": measurement.get("observedStartOffsetPoints", compact["observedStartOffsetPoints"]),
+            "observedEndOffsetPoints": measurement.get("observedEndOffsetPoints", compact["observedEndOffsetPoints"]),
+        })
+    if record.get("mode") == "fixed-window-setup":
+        geometry = record.get("geometrySamples") or []
+        final_geometry = geometry[-1] if geometry else {}
+        compact.update({
+            "phase": record.get("phase"),
+            "positioningProtocol": record.get("positioningProtocol"),
+            "setupValid": record.get("setupValid"),
+            "requestedOffsetPoints": record.get("requestedOffsetPoints"),
+            "viewportHeightPoints": final_geometry.get("viewportHeightPoints"),
+            "contentHeightPoints": final_geometry.get("contentHeightPoints"),
+            "observedOffsetPoints": final_geometry.get("observedOffsetPoints"),
+            "geometrySampleCount": len(geometry),
+        })
+    records.append(compact)
+
+with open(output_path, "w", encoding="utf-8") as output:
+    for record in records:
+        output.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+raw_output_path = output_path.removesuffix(".jsonl") + "-phase-reports.jsonl"
+with open(raw_output_path, "w", encoding="utf-8") as output:
+    for record in raw_records:
+        output.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+setup_records = [record for record in records if record.get("mode") == "fixed-window-setup"]
+raw_setup_records = [record for record in raw_records if record.get("mode") == "fixed-window-setup"]
+setup_path = output_path.removesuffix(".jsonl") + "-setup.json"
+setup_receipt = {
+    "variant": variant,
+    "fixtureRowsRequested": fixture_rows_requested,
+    "runPhase": run_phase,
+    "iteration": iteration,
+    "setupMarkerCount": len(setup_records),
+    "setups": setup_records,
+    "rawSetups": raw_setup_records,
+}
+pathlib.Path(setup_path).write_text(json.dumps(setup_receipt, sort_keys=True, separators=(",", ":")) + "\n")
+print(f"Extracted {len(records)} compact benchmark record(s) to {output_path}")
+print(f"Preserved {len(raw_records)} full benchmark report(s) to {raw_output_path}")
+print(f"Wrote setup receipt to {setup_path}")
+PY
+}
+
+write_case_receipt() {
+  local label="$1" case_tag="$2" count="$3" phase_name="$4" iteration="$5" exit_status="$6"
+  local expected_count="null"
+  [[ "$count" =~ ^[0-9]+$ ]] && expected_count="$count"
+  local receipt="$compact_output/${label}-${case_tag}-${phase_name}-${iteration}-receipt.json"
+  printf '{"variant":"%s","messageCountExpected":%s,"phase":"%s","iteration":"%s","xcodebuildExitStatus":%s}\n' \
+    "$label" "$expected_count" "$phase_name" "$iteration" "$exit_status" > "$receipt"
+}
+
 variant_common() {
   local label="$1" tree="$worktree_root/$1" derived="$RUNNER_TEMP/ios-scroll-derived/$1"
   printf '%s\n' \
@@ -311,9 +605,10 @@ variant_common() {
 }
 
 run_case() {
-  local label="$1" count="$2" method="$3" phase="$4" iteration="$5"
-  local result="$output_root/${label}-${count}rows-${phase}-${iteration}.xcresult"
-  local log="$output_root/${label}-${count}rows-${phase}-${iteration}.log"
+  local label="$1" case_tag="$2" count="$3" method="$4" phase="$5" iteration="$6"
+  local test_class="${7:-ConversationScrollPerformanceTests}"
+  local result="$output_root/${label}-${case_tag}-${phase}-${iteration}.xcresult"
+  local log="$output_root/${label}-${case_tag}-${phase}-${iteration}.log"
   set_variant_common "$label"
 
   # UIAccessibility's Reduce Motion value is get-only on supported SDKs.
@@ -321,11 +616,17 @@ run_case() {
   # Terminating the hosted app before every result gives Swift's process-local
   # render memos the same cold-start boundary on both sides.
   xcrun simctl terminate "$simulator_udid" com.baldvinsmarason.assistant >/dev/null 2>&1 || true
-  echo "Run: variant=$label fixture=${count}-rows phase=$phase iteration=$iteration cache=fresh-app-process device=$simulator_udid"
+  echo "Run: variant=$label case=$case_tag phase=$phase iteration=$iteration cache=fresh-app-process device=$simulator_udid"
+  local status=0
   run_xcode_bounded 180 "$log" xcodebuild "${common[@]}" \
     -resultBundlePath "$result" \
-    "-only-testing:AssistantTests/ConversationScrollPerformanceTests/$method" \
-    test-without-building
+    "-only-testing:AssistantTests/$test_class/$method" \
+    test-without-building || status=$?
+  extract_phase_diagnostics "$log" \
+    "$compact_output/${label}-${case_tag}-${phase}-${iteration}.jsonl" \
+    "$label" "$count" "$phase" "$iteration"
+  write_case_receipt "$label" "$case_tag" "$count" "$phase" "$iteration" "$status"
+  return "$status"
 }
 
 run_settled_diagnostic() {
@@ -338,10 +639,16 @@ run_settled_diagnostic() {
   # starts with a freshly terminated hosted app and has a hard 180s guard.
   xcrun simctl terminate "$simulator_udid" com.baldvinsmarason.assistant >/dev/null 2>&1 || true
   echo "Settled-scroll diagnostic: variant=$label fixture=${count}-rows device=$simulator_udid timeout=180s"
+  local status=0
   run_xcode_bounded 180 "$log" xcodebuild "${common[@]}" \
     -resultBundlePath "$result" \
     "-only-testing:AssistantTests/ConversationScrollPerformanceTests/$method" \
-    test-without-building
+    test-without-building || status=$?
+  extract_phase_diagnostics "$log" \
+    "$compact_output/${label}-${count}rows-settled-diagnostic-00.jsonl" \
+    "$label" "$count" settled-diagnostic 00
+  write_case_receipt "$label" "${count}rows" "$count" settled-diagnostic 00 "$status"
+  return "$status"
 }
 
 start_time_profiler() {
@@ -528,6 +835,7 @@ run_traced_settled_diagnostics() {
   return "$failures"
 }
 
+
 variants=(baseline)
 if [[ "$same_production_tree" != true ]]; then variants+=(candidate); fi
 
@@ -556,9 +864,15 @@ if [[ "$run_mode" == "matrix" ]]; then
   echo "Running untraced matched 500-row fixed-window matrix; variants=${variants[*]} repeats=$repeats."
   matrix_failures=0
   for label in "${variants[@]}"; do
-    run_case "$label" 500 testFullChatView500RowFixedWindowBidirectional warmup 00 \
+    run_case "$label" 500rows 500 testFullChatView500RowFixedWindowBidirectional warmup 00 \
       || matrix_failures=$((matrix_failures + 1))
   done
+  warmup_validation_status=0
+  validate_matrix_warmups || warmup_validation_status=$?
+  if [[ "$matrix_failures" -gt 0 || "$warmup_validation_status" -gt 0 ]]; then
+    echo "::error::At least one matrix warmup failed validation; recorded pairs were skipped. Warmup logs and compact receipts are preserved."
+    exit 1
+  fi
   for ((run = 1; run <= repeats; run++)); do
     if [[ "${#variants[@]}" -eq 1 ]]; then
       order=(baseline)
@@ -569,7 +883,7 @@ if [[ "$run_mode" == "matrix" ]]; then
     fi
     printf -v run_label '%02d' "$run"
     for label in "${order[@]}"; do
-      run_case "$label" 500 testFullChatView500RowFixedWindowBidirectional recorded "$run_label" \
+      run_case "$label" 500rows 500 testFullChatView500RowFixedWindowBidirectional recorded "$run_label" \
         || matrix_failures=$((matrix_failures + 1))
     done
   done
@@ -578,6 +892,39 @@ if [[ "$run_mode" == "matrix" ]]; then
     exit 1
   fi
   echo "Untraced fixed-window matrix complete. CADisplayLink intervals are simulator callbacks, not presented-frame FPS."
+  exit 0
+fi
+
+if [[ "$run_mode" == "correctness" ]]; then
+  correctness_failures=0
+  echo "Running only the bottom-follow streaming correctness case on ${variants[*]}; no fixed-window warmup or performance matrix will run."
+  for label in "${variants[@]}"; do
+    run_case "$label" bottom-follow - testChatFollowsNewMessagesAndGrowingStreamWhileAtBottom correctness 00 APIClientRetryTests \
+      || correctness_failures=$((correctness_failures + 1))
+  done
+  if [[ "$correctness_failures" -gt 0 ]]; then
+    echo "::error::$correctness_failures bottom-follow correctness case(s) failed."
+    exit 1
+  fi
+  echo "Bottom-follow correctness passed on all variants. No performance matrix was run."
+  exit 0
+fi
+
+if [[ "$run_mode" == "smoke" ]]; then
+  smoke_failures=0
+  echo "Running bounded bottom-follow correctness smoke plus one fixed-window warmup; no recorded performance pairs will run."
+  for label in "${variants[@]}"; do
+    run_case "$label" bottom-follow - testChatFollowsNewMessagesAndGrowingStreamWhileAtBottom correctness-smoke 00 APIClientRetryTests \
+      || smoke_failures=$((smoke_failures + 1))
+    run_case "$label" 500rows 500 testFullChatView500RowFixedWindowBidirectional warmup 00 \
+      || smoke_failures=$((smoke_failures + 1))
+  done
+  if ! validate_matrix_warmups; then smoke_failures=$((smoke_failures + 1)); fi
+  if [[ "$smoke_failures" -gt 0 ]]; then
+    echo "::error::$smoke_failures smoke case(s) or fixed-window setup validation failed; no recorded performance pairs were run."
+    exit 1
+  fi
+  echo "Correctness smoke and fixed-window setup passed; no recorded performance pairs were run."
   exit 0
 fi
 
@@ -601,7 +948,7 @@ done
 # One bounded reproduction keeps the former typing/stream/append measurements
 # available, but it runs only after both narrowed scroll-only cases finish.
 # Its failure is recorded and never prevents the other diagnostics above.
-run_case baseline 100 testFullChatView100RowColdMountBidirectionalStreamAndAppend updates-diagnostic 00 \
+run_case baseline 100rows 100 testFullChatView100RowColdMountBidirectionalStreamAndAppend updates-diagnostic 00 \
   || diagnostic_failures=$((diagnostic_failures + 1))
 
 if [[ "$diagnostic_failures" -gt 0 ]]; then

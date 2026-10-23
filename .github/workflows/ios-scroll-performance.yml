@@ -19,11 +19,11 @@ on:
         type: choice
         options: ['1', '2', '3', '4', '5']
       run_mode:
-        description: Run narrowed diagnostics or the untraced fixed-window paired matrix
+        description: Run diagnostics, bottom-follow correctness, smoke, or the untraced fixed-window paired matrix
         required: true
         default: diagnostic
         type: choice
-        options: [diagnostic, matrix]
+        options: [diagnostic, correctness, smoke, matrix]
   push:
     branches:
       - codex/ios-chat-scroll-performance
@@ -53,7 +53,7 @@ jobs:
           BASELINE_REF: ${{ inputs.baseline_ref || '14ba202b8c9593623f3fe3c817319c15e40f6ffa' }}
           CANDIDATE_REF: ${{ inputs.candidate_ref || github.sha }}
           REPEATS: ${{ inputs.repeats || '5' }}
-          RUN_MODE: ${{ (github.event_name == 'push' && 'matrix') || inputs.run_mode || 'diagnostic' }}
+          RUN_MODE: ${{ (github.event_name == 'push' && 'correctness') || inputs.run_mode || 'diagnostic' }}
           PHASE: build
           RUNNER_TEMP: ${{ runner.temp }}
         run: bash infra/ios-scroll-performance.sh
@@ -63,16 +63,30 @@ jobs:
           BASELINE_REF: ${{ inputs.baseline_ref || '14ba202b8c9593623f3fe3c817319c15e40f6ffa' }}
           CANDIDATE_REF: ${{ inputs.candidate_ref || github.sha }}
           REPEATS: ${{ inputs.repeats || '5' }}
-          RUN_MODE: ${{ (github.event_name == 'push' && 'matrix') || inputs.run_mode || 'diagnostic' }}
+          RUN_MODE: ${{ (github.event_name == 'push' && 'correctness') || inputs.run_mode || 'diagnostic' }}
           PHASE: runtime
           RUNNER_TEMP: ${{ runner.temp }}
         run: bash infra/ios-scroll-performance.sh
 
-      - name: Upload logs and xcresults
+      - name: Upload archived raw test and profiler bundles
         if: always()
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
         with:
-          name: ios-scroll-performance-${{ github.run_id }}
-          path: ${{ runner.temp }}/ios-scroll-performance
+          name: ios-scroll-performance-raw-${{ github.run_id }}
+          path: ${{ runner.temp }}/ios-scroll-performance/raw-xcresults.tar.gz
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload compact diagnostics and logs
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: ios-scroll-performance-diagnostics-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/ios-scroll-performance/*.log
+            ${{ runner.temp }}/ios-scroll-performance/*.txt
+            ${{ runner.temp }}/ios-scroll-performance/*.xml
+            ${{ runner.temp }}/ios-scroll-performance/*.json
+            ${{ runner.temp }}/ios-scroll-performance/compact-diagnostics/**
           retention-days: 14
           if-no-files-found: warn
