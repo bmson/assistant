@@ -15,6 +15,7 @@ import {
   approvals,
   conversations,
   costEvents,
+  costReservations,
   type Db,
   messages,
   modelCalls,
@@ -27,6 +28,11 @@ import { z } from 'zod';
 import { ToolDispatcher } from '../dispatcher.js';
 import { ToolRegistry } from '../registry.js';
 import type { ToolFlags } from '../types.js';
+import {
+  buildDiagnosticAccounting,
+  type DiagnosticAccounting,
+} from './calendar-diagnostic-accounting.js';
+import { type DiagnosticModelTrace, traceDiagnosticRouter } from './calendar-diagnostic-trace.js';
 import type { QuestionCase } from './corpus.js';
 
 export function assertReplayDatabaseUrl(raw: string): string {
@@ -63,6 +69,36 @@ export interface QuestionResult {
   executions?: Array<{ name: string; args: Record<string, unknown> }>;
   modelContexts?: string[];
   failures: string[];
+  diagnostic?: {
+    executionPath: 'production-routing';
+    productionPlan: unknown;
+    modelTrace: DiagnosticModelTrace[];
+    plannerAttribution: 'model-call-observed' | 'no-model-planning-call-observed';
+    qualityReview: 'pending';
+    finalization: {
+      rawStepTexts: string[];
+      deliveredText: string;
+      differsFromLastRawStep: boolean | null;
+      fallbackReasons: null;
+      limitation: string;
+    };
+    accounting: DiagnosticAccounting;
+  };
+}
+
+/** A production-routing diagnostic must not substitute a fixture-authored plan. */
+export function questionPlan(fixture: QuestionCase) {
+  if (fixture.executionPath === 'production-routing' || fixture.plan === 'clarify')
+    return undefined;
+  return {
+    action: fixture.plan ?? 'workflow',
+    reasoning: 'Answer the owner request using available evidence and perform requested work.',
+    steps: [
+      'Resolve the request using available tools and evidence',
+      'Return the verified result and disclose incomplete work',
+    ],
+    missingInfo: [],
+  };
 }
 
 /**
@@ -572,7 +608,7 @@ function replayRegistry(
     registry.register(
       {
         name: local.name,
-        description: `Local scenario fixture for ${local.name}`,
+        description: local.description ?? `Local scenario fixture for ${local.name}`,
         inputSchema: local.schema,
         risk: local.risk ?? 'autonomous',
         acceptsUntrustedInput: local.acceptsUntrustedInput ?? !local.flags?.writesMemory,
@@ -684,6 +720,10 @@ export async function runQuestion(
   fixture: QuestionCase,
   options: { router?: (db: Db) => ModelRouter; taskLimitUsd?: number } = {},
 ): Promise<QuestionResult> {
+  if (fixture.executionPath === 'production-routing' && !options.router)
+    throw new Error(
+      'Production-routing diagnostics require an explicit router; scripted replay is not model evidence',
+    );
   const host = db.$client.options.host;
   const database = db.$client.options.database;
   if (
@@ -762,20 +802,7 @@ export async function runQuestion(
         },
         type: 'chat_turn',
         maxSteps: 12,
-        ...(fixture.plan === 'clarify'
-          ? {}
-          : {
-              plan: {
-                action: fixture.plan ?? 'workflow',
-                reasoning:
-                  'Answer the owner request using available evidence and perform requested work.',
-                steps: [
-                  'Resolve the request using available tools and evidence',
-                  'Return the verified result and disclose incomplete work',
-                ],
-                missingInfo: [],
-              },
-            }),
+        ...(questionPlan(fixture) ? { plan: questionPlan(fixture) } : {}),
       });
       await replayDb
         .update(tasks)
@@ -786,7 +813,12 @@ export async function runQuestion(
       const started = performance.now();
       const dispatcher = new ToolDispatcher(replayDb, replayRegistry(fixture, saved, executions));
       const scripted = new ScriptedRouter(fixture);
-      const router = options.router?.(replayDb) ?? (scripted as unknown as ModelRouter);
+      const suppliedRouter = options.router?.(replayDb) ?? (scripted as unknown as ModelRouter);
+      const modelTrace: DiagnosticModelTrace[] = [];
+      const router =
+        fixture.executionPath === 'production-routing'
+          ? traceDiagnosticRouter(suppliedRouter, modelTrace)
+          : suppliedRouter;
       let executionError: string | undefined;
       const statusSequence: string[] = [];
       try {
@@ -852,11 +884,13 @@ export async function runQuestion(
           model: modelCalls.model,
           latencyMs: modelCalls.latencyMs,
           costUsd: modelCalls.costUsd,
+          inputTokens: modelCalls.inputTokens,
+          outputTokens: modelCalls.outputTokens,
         })
         .from(modelCalls)
         .where(eq(modelCalls.taskId, task.id));
       const costs = await replayDb
-        .select({ usd: costEvents.usd })
+        .select({ usd: costEvents.usd, evidence: costEvents.evidence })
         .from(costEvents)
         .where(eq(costEvents.taskId, task.id));
       const checks = await replayDb
@@ -867,6 +901,18 @@ export async function runQuestion(
         finished?.state as { pendingFinal?: { text?: string; responseCards?: unknown[] } } | null
       )?.pendingFinal;
       const reply = delivered.filter((message) => message.role === 'assistant').at(-1);
+      const diagnosticReservations =
+        fixture.executionPath === 'production-routing'
+          ? await replayDb
+              .select({
+                status: costReservations.status,
+                estimatedUsd: costReservations.estimatedUsd,
+                actualUsd: costReservations.actualUsd,
+                unknownReason: costReservations.unknownReason,
+              })
+              .from(costReservations)
+              .where(eq(costReservations.taskId, task.id))
+          : [];
       const result: Omit<QuestionResult, 'failures'> = {
         id: fixture.id,
         records: fixture.records,
@@ -890,6 +936,40 @@ export async function runQuestion(
         executions,
         modelContexts: options.router ? undefined : scripted.contexts,
       };
+      if (fixture.executionPath === 'production-routing') {
+        const rawStepTexts = modelTrace
+          .filter((entry) => entry.method === 'step')
+          .flatMap((entry) => {
+            const output = entry.output as { text?: unknown } | null;
+            return typeof output?.text === 'string' && output.text ? [output.text] : [];
+          });
+        result.diagnostic = {
+          executionPath: 'production-routing',
+          productionPlan: finished?.plan ?? null,
+          modelTrace,
+          plannerAttribution: modelTrace.some((entry) => entry.role === 'plan')
+            ? 'model-call-observed'
+            : 'no-model-planning-call-observed',
+          qualityReview: 'pending',
+          finalization: {
+            rawStepTexts,
+            deliveredText: result.answer,
+            differsFromLastRawStep: rawStepTexts.length
+              ? rawStepTexts.at(-1) !== result.answer
+              : null,
+            fallbackReasons: null,
+            limitation:
+              'Existing runtime does not persist exact grounding-fallback reasons. A changed draft alone does not identify contract rescue; inspect response checks and trace. Owner-private-read routing can be deterministic.',
+          },
+          accounting: buildDiagnosticAccounting({
+            routerInvocations: modelTrace.length,
+            ...(executionError ? { executionError } : {}),
+            modelRows,
+            costRows: costs,
+            reservations: diagnosticReservations,
+          }),
+        };
+      }
       throw new RollbackResult({
         ...result,
         failures: [

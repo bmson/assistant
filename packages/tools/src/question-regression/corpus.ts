@@ -4,6 +4,8 @@ import type { RiskTier, ToolFlags } from '../types.js';
 /** Local evidence fixtures; no live adapter or arbitrary network implementation. */
 export interface QuestionToolFixture {
   name: string;
+  /** Preserve the actual registered description for schema-faithful diagnostics. */
+  description?: string;
   schema: ZodType;
   risk?: RiskTier;
   flags?: ToolFlags;
@@ -30,6 +32,8 @@ export interface QuestionCase {
   mailbox?: 'hotel' | 'empty';
   memory?: boolean;
   plan?: 'reply' | 'workflow' | 'clarify';
+  /** Traverse production planning, including its deterministic private-read gate. */
+  executionPath?: 'production-routing';
   missingInfo?: string[];
   /** Behavioral checks cannot grade open-ended quality; an independent reviewer must use these criteria. */
   independentRubric?: string[];
