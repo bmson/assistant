@@ -17,7 +17,9 @@ latest shares a floating stack with Undo and draft recovery above the composer,
 so controls cannot overlap or change transcript height. Measured Undo/recovery
 height contributes to endpoint content clearance because those notices can
 remain at the newest edge; Jump never changes that clearance.
-Only the complete conversation surface clips at its outer rounded edge.
+The native transcript clips at the full-stage viewport bounds, which include
+the area behind the controls. The complete surface also clips at its outer
+rounded edge; drawing outside the transcript's full-stage bounds is unnecessary.
 
 The eager stack keeps every row mounted. Any change to that behavior must
 preserve bottom-follow as messages arrive and streamed replies grow, the
@@ -186,7 +188,9 @@ the bottom and preserving row state and interactions.
 Full-height layout tests measure the native scroll viewport, insets, offset,
 rendered row clearance and sibling UIKit input ownership. A paired stub
 bootstrap establishes the composer's actual draft scope, and delegate input
-must reach that scoped draft. Unit-host UIKit accessibility enumeration does
+must reach that scoped draft. An opt-in debug probe measures the actual final
+renderer row by its stable message ID; the normal app installs no row geometry
+observer. Unit-host UIKit accessibility enumeration does
 not reliably expose SwiftUI send, recovery or Jump controls; those lookups are
 not a control-presence oracle. The eleven RootView captures require separate
 visual review. Send, recovery and Jump activation, VoiceOver, and finger-driven

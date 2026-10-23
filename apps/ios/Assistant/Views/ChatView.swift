@@ -269,6 +269,26 @@ struct TranscriptContext {
     }
 }
 
+#if DEBUG
+/// Opt-in geometry receipt for one real transcript row in visual review tests.
+/// The normal app has no observer installed and pays no per-row geometry cost.
+struct ChatTranscriptRowGeometryProbe {
+    let messageID: String
+    let report: @MainActor (CGRect) -> Void
+}
+
+private struct ChatTranscriptRowGeometryProbeKey: EnvironmentKey {
+    static let defaultValue: ChatTranscriptRowGeometryProbe? = nil
+}
+
+extension EnvironmentValues {
+    var chatTranscriptRowGeometryProbe: ChatTranscriptRowGeometryProbe? {
+        get { self[ChatTranscriptRowGeometryProbeKey.self] }
+        set { self[ChatTranscriptRowGeometryProbeKey.self] = newValue }
+    }
+}
+#endif
+
 /// The eager transcript has a boundary of its own: typing and pulling the menu
 /// must not regroup receipts, resolve prompts, or visit every row builder.
 /// Actions capture the same AppModel and state bindings for this screen's life;
@@ -291,6 +311,9 @@ struct ChatTranscriptRows: View, Equatable {
     let cardFormStateRevision: Int
     let cardFormTaskRevision: Int
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+#if DEBUG
+    @Environment(\.chatTranscriptRowGeometryProbe) private var rowGeometryProbe
+#endif
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.messages == rhs.messages && lhs.isSending == rhs.isSending
@@ -303,7 +326,7 @@ struct ChatTranscriptRows: View, Equatable {
         let context = TranscriptContext(messages: messages)
         VStack(spacing: AssistantTheme.ConversationSpacing.surfaceGap) {
             ForEach(items) { item in
-                row(item, context: context)
+                observedRow(item, context: context)
                     .transition(
                         reduceMotion ? .opacity : .asymmetric(
                             insertion: .opacity
@@ -318,6 +341,22 @@ struct ChatTranscriptRows: View, Equatable {
         // Token growth changes content, not this identity list. New messages
         // reveal once without restarting geometry animation for each token.
         .animation(reduceMotion ? nil : .snappy(duration: 0.3, extraBounce: 0.02), value: messages.map(\.id))
+    }
+
+    @ViewBuilder
+    private func observedRow(_ item: ChatTranscriptItem, context: TranscriptContext) -> some View {
+#if DEBUG
+        if let probe = rowGeometryProbe, item.id == probe.messageID {
+            row(item, context: context)
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+                    probe.report(frame)
+                }
+        } else {
+            row(item, context: context)
+        }
+#else
+        row(item, context: context)
+#endif
     }
 
     @ViewBuilder
@@ -679,9 +718,6 @@ struct ChatView: View {
                         radius: 28 * menuSurfaceProgress,
                         y: 14 * menuSurfaceProgress
                     )
-                    // Resolve one surface transform before propagating geometry
-                    // to the native scroll view and sibling composer.
-                    .geometryGroup()
                     .offset(y: -conversationRevealDistance)
                     // At the largest accessibility sizes the destination row is
                     // horizontally scrollable, so the lifted conversation owns
@@ -909,9 +945,9 @@ struct ChatView: View {
                     .padding(.leading, AssistantTheme.compactGutter + (crownOnLeadingEdge ? landscapeCrownClearance : 0))
                     .padding(.trailing, AssistantTheme.compactGutter + (crownOnLeadingEdge ? 0 : landscapeCrownClearance))
                 }
-                // Only the complete lifted surface clips. Rows can draw behind
-                // the crown, navigation and input throughout a drag.
-                .scrollClipDisabled()
+                // The full-stage viewport includes the crown and composer.
+                // Native clipping at its bounds still lets rows draw behind
+                // those sibling controls without overflow outside the stage.
                 .scrollIndicators(.hidden)
                 .scrollPosition($transcriptScrollPosition)
                 // Menu reveal is a transform of the parent surface. SwiftUI's

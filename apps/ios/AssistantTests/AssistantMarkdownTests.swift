@@ -42,7 +42,6 @@ private struct LiftedTranscriptFixture: View {
                                 + (state.noticeHeight > 0 ? state.noticeHeight + 8 : 0))
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .scrollClipDisabled()
                         .scrollPosition($position)
                         .transaction {
                             if state.reveal > 0 {
@@ -91,7 +90,6 @@ private struct LiftedTranscriptFixture: View {
                 }
                 .background(Color.green.ignoresSafeArea(.container))
                 .clipShape(RoundedRectangle(cornerRadius: 34))
-                .geometryGroup()
                 .offset(y: -state.reveal)
             }
         }
@@ -624,10 +622,18 @@ final class AssistantMarkdownTests: XCTestCase {
         XCTAssertEqual(model.bootstrap?.identity.id, "layout-owner")
         XCTAssertEqual(model.messages.map(\.id), messages.map(\.id))
         let scope = try XCTUnwrap(model.composerDraftScope)
+        var actualLastRowFrame: CGRect?
+        var rowGeometryReportCount = 0
         window.rootViewController = UIHostingController(rootView:
             ChatView(safeAreaTopInset: 62, safeAreaBottomInset: 34,
                 safeAreaLeadingInset: 0, safeAreaTrailingInset: 0)
-                .environment(model).environment(\.colorScheme, .light))
+                .environment(model)
+                .environment(\.colorScheme, .light)
+                .environment(\.chatTranscriptRowGeometryProbe,
+                    ChatTranscriptRowGeometryProbe(messageID: messages[messages.count - 1].id) { frame in
+                        actualLastRowFrame = frame
+                        rowGeometryReportCount += 1
+                    }))
         window.makeKeyAndVisible()
         defer {
             window.endEditing(true)
@@ -657,28 +663,6 @@ final class AssistantMarkdownTests: XCTestCase {
         XCTAssertFalse(model.isSending)
         XCTAssertEqual(model.messages.count, initialMessageCount,
             "The draft-binding check does not submit the message")
-        func accessibilityFrame(containing marker: String, in view: UIView) -> CGRect? {
-            if view.accessibilityLabel?.contains(marker) == true, !view.bounds.isEmpty {
-                return view.convert(view.bounds, to: window)
-            }
-            for index in 0..<max(view.accessibilityElementCount(), 0) {
-                guard let element = view.accessibilityElement(at: index) else { continue }
-                if let childView = element as? UIView {
-                    if childView !== view,
-                       let frame = accessibilityFrame(containing: marker, in: childView) {
-                        return frame
-                    }
-                } else if let element = element as? UIAccessibilityElement,
-                          element.accessibilityLabel?.contains(marker) == true,
-                          !element.accessibilityFrame.isEmpty {
-                    return window.convert(element.accessibilityFrame, from: nil)
-                }
-            }
-            for childView in view.subviews {
-                if let frame = accessibilityFrame(containing: marker, in: childView) { return frame }
-            }
-            return nil
-        }
         func assertHitReceiverIsOutsideTranscript(_ control: UIView, file: StaticString = #filePath, line: UInt = #line) {
             let center = control.convert(CGPoint(x: control.bounds.midX, y: control.bounds.midY), to: window)
             let receiver = window.hitTest(center, with: nil)
@@ -739,7 +723,11 @@ final class AssistantMarkdownTests: XCTestCase {
         XCTAssertFalse(input.isDescendant(of: transcript),
             "The native text view must be a sibling of the transcript")
         assertHitReceiverIsOutsideTranscript(input)
-        for focused in [false, true, false] {
+        for (stage, focused) in [false, true, false].enumerated() {
+            let stageStartingReportCount = rowGeometryReportCount
+            let stageStartingInputFrame = input.convert(input.bounds, to: window)
+            let stageStartingViewportFrame = transcript.convert(transcript.bounds, to: window)
+            var nativeGeometryChanged = false
             if focused { input.becomeFirstResponder() } else { input.resignFirstResponder() }
             // Keyboard presentation and LazyVStack measurement can outlast a
             // fixed animation delay on a cold CI simulator. Wait for the actual
@@ -751,20 +739,50 @@ final class AssistantMarkdownTests: XCTestCase {
                 window.layoutIfNeeded()
                 let inputFrame = input.convert(input.bounds, to: window)
                 let viewportFrame = transcript.convert(transcript.bounds, to: window)
+                nativeGeometryChanged = nativeGeometryChanged
+                    || inputFrame != stageStartingInputFrame || viewportFrame != stageStartingViewportFrame
+                let rowMeasurementIsCurrent = actualLastRowFrame != nil
+                    && (!nativeGeometryChanged || rowGeometryReportCount > stageStartingReportCount)
                 let bottomError = abs(transcript.contentOffset.y + transcript.bounds.height
                     - transcript.contentSize.height - transcript.adjustedContentInset.bottom)
                 let settled = bottomError <= 2
                     && viewportFrame.intersects(inputFrame)
                     && inputFrame.maxY <= window.bounds.maxY && input.isFirstResponder == focused
+                    && rowMeasurementIsCurrent
                 settledSamples = settled ? settledSamples + 1 : 0
             } while settledSamples < 3 && ContinuousClock.now < deadline
             window.layoutIfNeeded()
+            let rowFrameDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while (actualLastRowFrame == nil
+                || (nativeGeometryChanged && rowGeometryReportCount <= stageStartingReportCount))
+                && ContinuousClock.now < rowFrameDeadline {
+                try await Task.sleep(for: .milliseconds(30))
+                window.layoutIfNeeded()
+            }
             let inputFrame = input.convert(input.bounds, to: window)
             let viewportFrame = transcript.convert(transcript.bounds, to: window)
-            let actualLastRowFrame = try XCTUnwrap(
-                accessibilityFrame(containing: "LATEST_LAYOUT_ROW_MARKER", in: window),
-                "Measure the actual final transcript row, not contentSize's composer clearance"
-            )
+            let rowState: [String: Any] = [
+                "stage": stage, "focused": focused,
+                "messageID": messages[messages.count - 1].id,
+                "rowObserved": actualLastRowFrame != nil,
+                "stageStartingReportCount": stageStartingReportCount,
+                "nativeGeometryChanged": nativeGeometryChanged,
+                "rowGeometryReportCount": rowGeometryReportCount,
+                "actualRowFrameInGlobalSpace": actualLastRowFrame.map(rectReceipt) ?? [:],
+                "inputFrameInWindow": rectReceipt(inputFrame),
+                "viewportFrameInWindow": rectReceipt(viewportFrame)
+            ]
+            let rowData = try JSONSerialization.data(withJSONObject: rowState, options: [.sortedKeys])
+            let rowAttachment = XCTAttachment(data: rowData, uniformTypeIdentifier: "public.json")
+            rowAttachment.name = "chat-clearance-row-stage-\(stage)"
+            rowAttachment.lifetime = .keepAlways
+            add(rowAttachment)
+            if nativeGeometryChanged {
+                XCTAssertGreaterThan(rowGeometryReportCount, stageStartingReportCount,
+                    "A keyboard or viewport geometry change requires a new actual-row measurement")
+            }
+            let actualLastRowFrame = try XCTUnwrap(actualLastRowFrame,
+                "The opt-in SwiftUI observer must report the actual final transcript row")
             // The transcript owns the whole drawing viewport; the composer
             // sits over its lower region as a sibling hit target.
             XCTAssertGreaterThan(viewportFrame.height, inputFrame.height)
