@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 50
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.0.app/Contents/Developer
-      PINNED_SOURCE_SHA: 257e278e07c56c4310b0fcae747e5f082fb73d2f
+      PINNED_SOURCE_SHA: fce662c7c32f213ef60b95084f78cffc9ce4a1b0
     steps:
       # Keep the workflow revision (for provenance) separate from the exact app
       # source under test. The latter is deliberately immutable for this run.
@@ -34,7 +34,7 @@ jobs:
       - name: Checkout pinned app source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: 257e278e07c56c4310b0fcae747e5f082fb73d2f
+          ref: fce662c7c32f213ef60b95084f78cffc9ce4a1b0
           path: app-source
 
       - name: Build and run the single touch smoke
