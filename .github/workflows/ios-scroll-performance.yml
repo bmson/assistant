@@ -19,7 +19,7 @@ on:
         type: choice
         options: ['1', '2', '3', '4', '5']
       run_mode:
-        description: Run settled diagnostics only, or continue into the paired benchmark matrix
+        description: Run narrowed diagnostics or the untraced fixed-window paired matrix
         required: true
         default: diagnostic
         type: choice
@@ -28,7 +28,9 @@ on:
     branches:
       - codex/ios-chat-scroll-performance
     paths:
-      - 'apps/ios/**'
+      - 'apps/ios/Assistant/**'
+      - 'apps/ios/AssistantTests/ConversationScrollPerformanceTests.swift'
+      - 'apps/ios/AssistantTests/ConversationPerformanceFixture.swift'
       - '.github/workflows/ios-scroll-performance.yml'
       - 'infra/ios-scroll-performance.sh'
 
@@ -46,12 +48,23 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Run paired simulator benchmark
+      - name: Prepare worktrees and build benchmark tests
         env:
           BASELINE_REF: ${{ inputs.baseline_ref || '14ba202b8c9593623f3fe3c817319c15e40f6ffa' }}
           CANDIDATE_REF: ${{ inputs.candidate_ref || github.sha }}
           REPEATS: ${{ inputs.repeats || '5' }}
-          RUN_MODE: ${{ inputs.run_mode || 'diagnostic' }}
+          RUN_MODE: ${{ (github.event_name == 'push' && 'matrix') || inputs.run_mode || 'diagnostic' }}
+          PHASE: build
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: bash infra/ios-scroll-performance.sh
+
+      - name: Run benchmark tests
+        env:
+          BASELINE_REF: ${{ inputs.baseline_ref || '14ba202b8c9593623f3fe3c817319c15e40f6ffa' }}
+          CANDIDATE_REF: ${{ inputs.candidate_ref || github.sha }}
+          REPEATS: ${{ inputs.repeats || '5' }}
+          RUN_MODE: ${{ (github.event_name == 'push' && 'matrix') || inputs.run_mode || 'diagnostic' }}
+          PHASE: runtime
           RUNNER_TEMP: ${{ runner.temp }}
         run: bash infra/ios-scroll-performance.sh
 

@@ -4,6 +4,11 @@ import XCTest
 import QuartzCore
 @testable import Assistant
 
+@MainActor
+private final class TranscriptScrollProxy {
+    var value: ScrollViewProxy?
+}
+
 /// A fully hosted production `ChatView` with deterministic model/network inputs.
 /// Every request is intercepted by `StubURLProtocol`; the fixture uses a fake
 /// bearer token and never reads the app's saved connection credentials.
@@ -25,6 +30,7 @@ final class ConversationPerformanceFixture {
     /// scrollable, including the bounded run-loop mount wait; excludes bootstrap.
     let hostMountToScrollableSeconds: TimeInterval
     private let previousKeyWindow: UIWindow?
+    private let scrollProxy: TranscriptScrollProxy
 
     private var streamOperationID: String?
     private var streamFinalMessage: ChatMessage?
@@ -46,6 +52,7 @@ final class ConversationPerformanceFixture {
         scrollView: UIScrollView,
         hostMountToScrollableSeconds: TimeInterval,
         requestHistory: [String: Int],
+        scrollProxy: TranscriptScrollProxy,
         previousKeyWindow: UIWindow?
     ) {
         self.model = model
@@ -58,6 +65,7 @@ final class ConversationPerformanceFixture {
         self.hostMountToScrollableSeconds = hostMountToScrollableSeconds
         self.requestHistory = requestHistory
         self.previousKeyWindow = previousKeyWindow
+        self.scrollProxy = scrollProxy
         self.expectedRequests = Set(Self.messageAcknowledgementPaths(for: model.messages).keys.map { "POST \($0)" })
             .union(["GET /api/mobile/v1/bootstrap", "GET /api/mobile/v1/overview"])
     }
@@ -124,14 +132,18 @@ final class ConversationPerformanceFixture {
         let previousKeyWindow = scene.keyWindow
         let mountStarted = CACurrentMediaTime()
         let window = UIWindow(windowScene: scene)
+        let scrollProxy = TranscriptScrollProxy()
         window.frame = CGRect(x: 0, y: 0, width: width, height: height)
         window.rootViewController = UIHostingController(rootView:
-            ChatView(
-                safeAreaTopInset: 62,
-                safeAreaBottomInset: 34,
-                safeAreaLeadingInset: 0,
-                safeAreaTrailingInset: 0
-            )
+            ScrollViewReader { proxy in
+                ChatView(
+                    safeAreaTopInset: 62,
+                    safeAreaBottomInset: 34,
+                    safeAreaLeadingInset: 0,
+                    safeAreaTrailingInset: 0
+                )
+                .onAppear { scrollProxy.value = proxy }
+            }
             .environment(model)
             .environment(\.scenePhase, .active)
             .environment(\.colorScheme, .light)
@@ -166,8 +178,39 @@ final class ConversationPerformanceFixture {
             scrollView: scrollView,
             hostMountToScrollableSeconds: CACurrentMediaTime() - mountStarted,
             requestHistory: requestHistory,
+            scrollProxy: scrollProxy,
             previousKeyWindow: previousKeyWindow
         )
+    }
+
+    func deliveryAcknowledgementAttempts(for messageID: String) -> Int {
+        requestCountsByMethodAndPath[
+            "POST /api/mobile/v1/chats/\(Self.conversationID)/messages/\(messageID)"
+        ] ?? 0
+    }
+
+    /// A real production row must cross the visibility threshold before its
+    /// delivery callback emits this intercepted request. No onAppear shortcut.
+    @discardableResult
+    func seekMessage(_ id: String, anchor: UnitPoint = .center) async throws -> CGFloat {
+        guard let proxy = scrollProxy.value,
+              model.messages.contains(where: { $0.id == id && $0.role == .assistant }) else {
+            throw FixtureError.scrollTargetUnavailable
+        }
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { proxy.scrollTo(id, anchor: anchor) }
+        try await waitUntil {
+            self.window.layoutIfNeeded()
+            return self.deliveryAcknowledgementAttempts(for: id) > 0
+        }
+        // Allow the visibility acknowledgement and geometry callbacks to settle
+        // outside the measured window, then report the actual UIKit offset.
+        for _ in 0..<3 {
+            try await Task.sleep(for: .milliseconds(40))
+            window.layoutIfNeeded()
+        }
+        return scrollView.contentOffset.y
     }
 
     /// Drive the actual composer binding and UIKit delegate path, one inserted
@@ -523,6 +566,7 @@ final class ConversationPerformanceFixture {
     }
 
     private enum FixtureError: Error {
+        case scrollTargetUnavailable
         case missingWindowScene
         case bootstrapDidNotConfigureChat
         case chatTranscriptDidNotMount

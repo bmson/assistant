@@ -8,6 +8,7 @@ baseline_ref="${BASELINE_REF:-14ba202b8c9593623f3fe3c817319c15e40f6ffa}"
 candidate_ref="${CANDIDATE_REF:-${GITHUB_SHA:-HEAD}}"
 repeats="${REPEATS:-5}"
 run_mode="${RUN_MODE:-diagnostic}"
+phase="${PHASE:-all}"
 
 case "$repeats" in
   1|2|3|4|5) ;;
@@ -17,6 +18,11 @@ esac
 case "$run_mode" in
   diagnostic|matrix) ;;
   *) echo "RUN_MODE must be diagnostic or matrix" >&2; exit 2 ;;
+esac
+
+case "$phase" in
+  build|runtime|all) ;;
+  *) echo "PHASE must be build, runtime, or all" >&2; exit 2 ;;
 esac
 
 mkdir -p "$output_root" "$worktree_root"
@@ -53,9 +59,11 @@ candidate_production_tree=$candidate_production_tree
 harness_sha=$harness_sha
 same_production_tree=$same_production_tree
 repeats=$repeats
+phase=$phase
 benchmark_test_class=ConversationScrollPerformanceTests
 benchmark_methods=testFullChatView100RowColdMountBidirectionalStreamAndAppend,testFullChatView500RowColdMountBidirectionalStreamAndAppend
 diagnostic_methods=testFullChatView100RowSettledBidirectionalDiagnostic,testFullChatView500RowSettledBidirectionalDiagnostic
+matrix_method=testFullChatView500RowFixedWindowBidirectional
 run_mode=$run_mode
 cache_plan=one-warmup-per-variant-and-fixture; each-result-is-a-fresh-xcodebuild-test-invocation; phases-inside-a-test-share-one-app-process
 metric_note=CADisplayLink callback intervals are not presented-frame FPS; simulator results are comparative evidence only.
@@ -65,7 +73,7 @@ echo "Runner: $(sw_vers -productName) $(sw_vers -productVersion) ($(uname -m))"
 echo "Baseline: $baseline_sha (production tree $baseline_production_tree)"
 echo "Candidate: $candidate_sha (production tree $candidate_production_tree)"
 echo "Benchmark harness source: $harness_sha"
-echo "Same production tree: $same_production_tree; mode: $run_mode; repeats: $repeats"
+echo "Same production tree: $same_production_tree; mode: $run_mode; phase: $phase; repeats: $repeats"
 
 latest_xcode="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)"
 if [[ -z "$latest_xcode" ]]; then
@@ -156,7 +164,21 @@ PY
 
 add_worktree() {
   local label="$1" sha="$2" path="$worktree_root/$1"
-  git -C "$repo_root" worktree add --detach "$path" "$sha" >/dev/null
+  if git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    local existing_sha
+    existing_sha="$(git -C "$path" rev-parse HEAD)"
+    if [[ "$existing_sha" != "$sha" ]]; then
+      echo "::error::Existing $label worktree is at $existing_sha, expected $sha."
+      return 1
+    fi
+    echo "Reusing $label worktree at $sha"
+  else
+    if [[ -e "$path" ]]; then
+      echo "::error::$label worktree path exists but is not a Git worktree: $path"
+      return 1
+    fi
+    git -C "$repo_root" worktree add --detach "$path" "$sha" >/dev/null
+  fi
   overlay_harness "$path" > "$output_root/$label-fixtures.txt"
   echo "Prepared $label worktree at $sha"
 }
@@ -166,6 +188,19 @@ if [[ "$same_production_tree" != true ]]; then
   add_worktree candidate "$candidate_sha"
 else
   echo "Skipping a redundant candidate build: apps/ios/Assistant production trees match."
+fi
+
+build_state="$output_root/build-state.txt"
+expected_build_state="baseline_sha=$baseline_sha
+candidate_sha=$candidate_sha
+harness_sha=$harness_sha
+baseline_production_tree=$baseline_production_tree
+candidate_production_tree=$candidate_production_tree"
+if [[ "$phase" == "runtime" ]]; then
+  if [[ ! -f "$build_state" ]] || [[ "$(cat "$build_state")" != "$expected_build_state" ]]; then
+    echo "::error::Runtime phase has no matching completed build state; run PHASE=build first with the same refs."
+    exit 1
+  fi
 fi
 
 set_variant_common() {
@@ -196,8 +231,7 @@ build_variant() {
   set_variant_common "$label"
   mkdir -p "$derived"
   echo "Building $label once for testing."
-  set -o pipefail
-  xcodebuild "${common[@]}" build-for-testing 2>&1 | tee "$log"
+  run_xcode_bounded 1800 "$log" xcodebuild "${common[@]}" build-for-testing
 
   # Keep matching debug symbols beside the raw trace so call trees can be
   # symbolicated after artifact download, even when a test itself fails.
@@ -243,7 +277,11 @@ with open(log_path, "wb") as log:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            process.wait()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                log.write(b"xcodebuild did not reap after SIGKILL before the final 5s bound.\n")
+                status = 124
         status = 124
 sys.exit(status)
 PY
@@ -306,6 +344,152 @@ run_settled_diagnostic() {
     test-without-building
 }
 
+start_time_profiler() {
+  local trace="$1" trace_log="$2"
+  python3 - "$trace" "$trace_log" <<'PY' &
+import os
+import signal
+import subprocess
+import sys
+import time
+
+trace, log_path = sys.argv[1:]
+state_path = trace + ".state"
+
+def mark_state(value):
+    with open(state_path, "w", encoding="utf-8") as state_file:
+        state_file.write(value + "\n")
+
+with open(log_path, "wb", buffering=0) as log:
+    child = subprocess.Popen(
+        ["xcrun", "xctrace", "record", "--template", "Time Profiler", "--all-processes",
+         "--time-limit", "5m", "--output", trace],
+        stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+    )
+    with open(trace + ".pid", "w", encoding="utf-8") as pid_file:
+        pid_file.write(str(child.pid))
+
+    def stop(_signal, _frame):
+        log.write(b"\nStopping trace supervisor; signaling xctrace process group with SIGINT.\n")
+        try:
+            os.killpg(child.pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass
+        try:
+            status = child.wait(timeout=30)
+            log.write(f"xctrace exited after SIGINT with status {status}.\n".encode())
+            mark_state("complete-after-interrupt" if status == 0 else f"incomplete-after-interrupt-exit-{status}")
+            return
+        except subprocess.TimeoutExpired:
+            log.write(b"xctrace did not stop within 30s; escalating to SIGTERM.\n")
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            status = child.wait(timeout=10)
+            log.write(f"xctrace exited after SIGTERM with status {status}.\n".encode())
+            mark_state(f"incomplete-after-term-exit-{status}")
+            return
+        except subprocess.TimeoutExpired:
+            log.write(b"xctrace did not stop within 10s; escalating to SIGKILL.\n")
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            status = child.wait(timeout=5)
+            log.write(f"xctrace reaped after SIGKILL with status {status}.\n".encode())
+        except subprocess.TimeoutExpired:
+            log.write(b"xctrace did not reap after SIGKILL; trace may be incomplete.\n")
+        mark_state("incomplete-after-kill")
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGUSR1, stop)
+    while child.poll() is None:
+        time.sleep(0.25)
+    log.write(f"xctrace exited on its own with status {child.returncode}.\n".encode())
+    mark_state("complete" if child.returncode == 0 else f"incomplete-exit-{child.returncode}")
+PY
+  trace_supervisor_pid=$!
+  sleep 3
+  if ! kill -0 "$trace_supervisor_pid" 2>/dev/null; then
+    wait "$trace_supervisor_pid" 2>/dev/null || true
+    trace_supervisor_pid=""
+    return 1
+  fi
+  return 0
+}
+
+stop_time_profiler() {
+  local supervisor_pid="$1" trace="$2"
+  [[ -n "$supervisor_pid" ]] || return 0
+  kill -USR1 "$supervisor_pid" 2>/dev/null || true
+  for _ in {1..50}; do
+    local state
+    state="$(ps -o stat= -p "$supervisor_pid" 2>/dev/null | tr -d '[:space:]')"
+    if [[ -z "$state" || "$state" == Z* ]]; then
+      wait "$supervisor_pid" 2>/dev/null || true
+      rm -f "$trace.pid"
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Trace supervisor exceeded 50s shutdown bound; killing it and the recorded xctrace process group."
+  if [[ -s "$trace.pid" ]]; then
+    local child_pid
+    child_pid="$(cat "$trace.pid")"
+    kill -KILL "-$child_pid" 2>/dev/null || true
+  fi
+  printf 'incomplete-supervisor-shutdown-timeout\n' > "$trace.state"
+  kill -KILL "$supervisor_pid" 2>/dev/null || true
+  wait "$supervisor_pid" 2>/dev/null || true
+  rm -f "$trace.pid"
+  echo "Trace may be incomplete; test xcresults and logs remain preserved."
+}
+
+run_optional_bounded() {
+  local timeout_seconds="$1" log="$2"
+  shift 2
+  python3 - "$timeout_seconds" "$log" "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+timeout_seconds = int(sys.argv[1])
+log_path = sys.argv[2]
+command = sys.argv[3:]
+with open(log_path, "wb") as log:
+    process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        status = process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        log.write(f"\nOptional command timed out after {timeout_seconds}s; escalating to SIGTERM.\n".encode())
+        log.flush()
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            status = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            log.write(b"Optional command did not stop after SIGTERM; escalating to SIGKILL.\n")
+            log.flush()
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                status = process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                log.write(b"Optional command was killed but not reaped before the bound.\n")
+                status = 124
+sys.exit(status)
+PY
+}
+
 run_traced_settled_diagnostics() {
   local label="$1"
   local trace="$output_root/${label}-settled-100-and-500rows-time-profiler.trace"
@@ -313,17 +497,14 @@ run_traced_settled_diagnostics() {
   local failures=0
 
   echo "Starting Time Profiler across settled 100- and 500-row diagnostics; scope=host-all-processes simulator=$simulator_udid. This is CPU diagnostic evidence, not presented-frame timing."
-  xcrun xctrace record --template 'Time Profiler' --all-processes \
-    --time-limit 5m --output "$trace" > "$trace_log" 2>&1 &
-  local trace_pid=$!
-  sleep 3
-  if ! kill -0 "$trace_pid" 2>/dev/null; then
-    wait "$trace_pid" 2>/dev/null || true
+  local trace_pid=""
+  if ! start_time_profiler "$trace" "$trace_log"; then
     echo "Time Profiler did not start; continuing both settled-scroll diagnostics without a trace. See $trace_log."
     run_settled_diagnostic "$label" 100 testFullChatView100RowSettledBidirectionalDiagnostic || failures=$((failures + 1))
     run_settled_diagnostic "$label" 500 testFullChatView500RowSettledBidirectionalDiagnostic || failures=$((failures + 1))
     return "$failures"
   fi
+  trace_pid="$trace_supervisor_pid"
 
   # Keep the same trace alive through both cold scroll fixtures. Each xcodebuild
   # call still has its own hard timeout and result bundle; an early failing
@@ -332,14 +513,15 @@ run_traced_settled_diagnostics() {
     || failures=$((failures + 1))
   run_settled_diagnostic "$label" 500 testFullChatView500RowSettledBidirectionalDiagnostic \
     || failures=$((failures + 1))
-  kill -INT "$trace_pid" 2>/dev/null || true
-  wait "$trace_pid" 2>/dev/null || true
+  stop_time_profiler "$trace_pid" "$trace"
   if [[ -f "$trace/Info.plist" || -d "$trace" ]]; then
-    echo "Preserved Time Profiler trace at $trace (settled diagnostic failures=$failures)."
-    xcrun xctrace export --input "$trace" --toc \
+    local trace_state="unknown"
+    [[ -f "$trace.state" ]] && trace_state="$(cat "$trace.state")"
+    echo "Preserved Time Profiler trace at $trace state=$trace_state (settled diagnostic failures=$failures)."
+    run_optional_bounded 60 "$output_root/${label}-settled-time-profiler-export.log" \
+      xcrun xctrace export --input "$trace" --toc \
       --output "$output_root/${label}-settled-time-profiler-toc.xml" \
-      > "$output_root/${label}-settled-time-profiler-export.log" 2>&1 || \
-      echo "Could not export the trace table of contents; raw trace and dSYMs are preserved."
+      || echo "Could not export the trace table of contents within 60s; raw trace and dSYMs are preserved."
   else
     echo "No finalized Time Profiler trace found; see $trace_log. Both diagnostic test results retained."
   fi
@@ -351,19 +533,61 @@ if [[ "$same_production_tree" != true ]]; then variants+=(candidate); fi
 
 # Compile every source variant before collecting any measurements. This keeps
 # first-build host load out of the baseline/candidate observation window.
-for label in "${variants[@]}"; do build_variant "$label"; done
+if [[ "$phase" != "runtime" ]]; then
+  for label in "${variants[@]}"; do build_variant "$label"; done
+  printf '%s\n' "$expected_build_state" > "$build_state"
+  echo "Saved build state for a separate runtime step at $build_state."
+fi
+
+if [[ "$phase" == "build" ]]; then
+  echo "Build phase complete; no simulator tests were run."
+  exit 0
+fi
 
 # First boot on a hosted image can spend minutes preparing the runtime. Keep
 # that setup outside the per-test timeout and all measurement boundaries.
 run_xcode_bounded 300 "$output_root/simulator-boot.log" \
   xcrun simctl bootstatus "$simulator_udid" -b
 
+if [[ "$run_mode" == "matrix" ]]; then
+  # The fixed-window matched selector is the sole measured case in matrix
+  # mode. It is deliberately untraced: no profiler startup/shutdown affects
+  # these paired samples.
+  echo "Running untraced matched 500-row fixed-window matrix; variants=${variants[*]} repeats=$repeats."
+  matrix_failures=0
+  for label in "${variants[@]}"; do
+    run_case "$label" 500 testFullChatView500RowFixedWindowBidirectional warmup 00 \
+      || matrix_failures=$((matrix_failures + 1))
+  done
+  for ((run = 1; run <= repeats; run++)); do
+    if [[ "${#variants[@]}" -eq 1 ]]; then
+      order=(baseline)
+    elif ((run % 2 == 1)); then
+      order=(baseline candidate)
+    else
+      order=(candidate baseline)
+    fi
+    printf -v run_label '%02d' "$run"
+    for label in "${order[@]}"; do
+      run_case "$label" 500 testFullChatView500RowFixedWindowBidirectional recorded "$run_label" \
+        || matrix_failures=$((matrix_failures + 1))
+    done
+  done
+  if [[ "$matrix_failures" -gt 0 ]]; then
+    echo "::error::$matrix_failures matrix case(s) failed; all paired cases were still collected."
+    exit 1
+  fi
+  echo "Untraced fixed-window matrix complete. CADisplayLink intervals are simulator callbacks, not presented-frame FPS."
+  exit 0
+fi
+
 # Always begin with scroll-only diagnostics, before warmups or the stateful
 # keyboard/stream benchmark. Continue through both row counts after a failure
 # so the artifact still separates baseline rendering from interaction phases.
 diagnostic_failures=0
 for label in "${variants[@]}"; do
-  if [[ "$label" == "baseline" ]] && xcrun xctrace list templates 2>"$output_root/xctrace-templates.log" \
+  if [[ "$run_mode" == "diagnostic" && "$label" == "baseline" ]] \
+      && xcrun xctrace list templates 2>"$output_root/xctrace-templates.log" \
       | grep -Fq 'Time Profiler'; then
     run_traced_settled_diagnostics "$label" || diagnostic_failures=$((diagnostic_failures + 1))
   else
@@ -385,83 +609,4 @@ if [[ "$diagnostic_failures" -gt 0 ]]; then
   exit 1
 fi
 
-if [[ "$run_mode" == "diagnostic" ]]; then
-  echo "Narrowed settled-scroll diagnostics complete. The paired warmup/matrix is available with RUN_MODE=matrix after diagnostic review."
-  exit 0
-fi
-
-# Retain the original rows-only benchmark as supplemental historical evidence;
-# its callback cadence is separate from the controlled full-ChatView matrix.
-for label in "${variants[@]}"; do
-  run_case "$label" original100 testSyntheticTranscriptScrollFrameIntervals supplemental 00
-done
-
-# Warm the simulator and test installation separately for each fixture size;
-# warmup xcresults are named and excluded from the five recorded observations.
-for label in "${variants[@]}"; do
-  run_case "$label" 100 testFullChatView100RowColdMountBidirectionalStreamAndAppend warmup 00
-  run_case "$label" 500 testFullChatView500RowColdMountBidirectionalStreamAndAppend warmup 00
-done
-
-# Pair baseline and candidate per fixture and alternate their order by repeat
-# to reduce systematic host-temperature / simulator-load drift.
-for ((run = 1; run <= repeats; run++)); do
-  if [[ "${#variants[@]}" -eq 1 ]]; then
-    order=(baseline)
-  elif ((run % 2 == 1)); then
-    order=(baseline candidate)
-  else
-    order=(candidate baseline)
-  fi
-  printf -v run_label '%02d' "$run"
-  for count in 100 500; do
-    if [[ "$count" == 100 ]]; then
-      method=testFullChatView100RowColdMountBidirectionalStreamAndAppend
-    else
-      method=testFullChatView500RowColdMountBidirectionalStreamAndAppend
-    fi
-    for label in "${order[@]}"; do run_case "$label" "$count" "$method" recorded "$run_label"; done
-  done
-done
-
-# One optional diagnostic sample per variant, separate from the paired matrix.
-# xctrace's all-process mode is host-wide CPU evidence, not simulator hitches or
-# presented-frame timing; the device identity is included for context. It is
-# deliberately best-effort and cannot invalidate the recorded benchmark runs.
-if xctrace_templates="$(xcrun xctrace list templates 2>"$output_root/xctrace-templates.log")"; then
-  trace_template=""
-  if grep -Fq 'Time Profiler' <<< "$xctrace_templates"; then trace_template='Time Profiler'
-  elif grep -Fq 'Animation Hitches' <<< "$xctrace_templates"; then trace_template='Animation Hitches'
-  fi
-  if [[ -n "$trace_template" ]]; then
-    for label in "${variants[@]}"; do
-      trace="$output_root/${label}-hostwide-${trace_template// /-}.trace"
-      trace_log="$output_root/${label}-hostwide-trace.log"
-      trace_run_log="$output_root/${label}-hostwide-trace-run.log"
-      echo "Optional diagnostic: template=$trace_template scope=host-all-processes simulator=$simulator_udid variant=$label (not benchmark data)."
-      xcrun xctrace record --template "$trace_template" --all-processes \
-        --time-limit 5m --output "$trace" > "$trace_log" 2>&1 &
-      trace_pid=$!
-      sleep 3
-      if kill -0 "$trace_pid" 2>/dev/null; then
-        set +e
-        run_case "$label" 100 testFullChatView100RowColdMountBidirectionalStreamAndAppend diagnostic 00 \
-          > "$trace_run_log" 2>&1
-        trace_case_status=$?
-        kill -INT "$trace_pid" 2>/dev/null || true
-        wait "$trace_pid" 2>/dev/null || true
-        set -e
-        echo "Optional host-wide $label trace test exit: $trace_case_status; recorded matrix remains authoritative."
-      else
-        wait "$trace_pid" 2>/dev/null || true
-        echo "Optional host-wide trace did not start; see $trace_log."
-      fi
-    done
-  else
-    echo "No supported Time Profiler or Animation Hitches template; retained XCTest measurements and xcresults."
-  fi
-else
-  echo "xctrace is unavailable; retained XCTest measurements and xcresults."
-fi
-
-echo "Benchmark runs complete. CADisplayLink samples are simulator callback intervals, not presented-frame FPS."
+echo "Settled-scroll diagnostics complete. CADisplayLink intervals are simulator callbacks, not presented-frame FPS."

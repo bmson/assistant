@@ -102,6 +102,124 @@ final class ConversationScrollPerformanceTests: XCTestCase {
     }
 
     @MainActor
+    func testFullChatView500RowFixedWindowBidirectional() async throws {
+        let messageCount = 500
+        let messages = Self.fixtureMessages(count: messageCount, includeCalendarAgenda: true)
+        let fixtureDigest = try Self.fixtureDigest(messages)
+        let fixture = try await ConversationPerformanceFixture.make(messages: messages)
+        addTeardownBlock { await fixture.tearDown() }
+
+        XCTAssertEqual(fixture.model.messages.count, messageCount)
+        XCTAssertFalse(UIAccessibility.isReduceMotionEnabled)
+        fixture.assertValidMeasurementBoundary()
+
+        // Seek to real top, middle, and tail rows before timing so lazy row
+        // creation and delivery acknowledgements are validated outside the
+        // scored fixed-window phases.
+        let firstID = "scroll-bench-assistant-3"
+        let middleID = "scroll-bench-assistant-249"
+        let tailID = "scroll-bench-assistant-499"
+        let firstAckBaseline = fixture.deliveryAcknowledgementAttempts(for: firstID)
+        let firstOffset = try await fixture.seekMessage(firstID, anchor: .center)
+        let firstAckCount = fixture.deliveryAcknowledgementAttempts(for: firstID)
+        XCTAssertGreaterThan(firstAckCount, 0,
+                             "First durable assistant row must use the real visibility acknowledgement path")
+        if firstAckBaseline == 0 {
+            XCTAssertGreaterThan(firstAckCount, firstAckBaseline,
+                                 "Seeking to a previously unacknowledged first row must issue its acknowledgement")
+        }
+        let middleAckBaseline = fixture.deliveryAcknowledgementAttempts(for: middleID)
+        let middleOffset = try await fixture.seekMessage(middleID, anchor: .center)
+        let middleAckCount = fixture.deliveryAcknowledgementAttempts(for: middleID)
+        XCTAssertGreaterThan(middleAckCount, 0,
+                             "Middle durable assistant row must use the real visibility acknowledgement path")
+        if middleAckBaseline == 0 {
+            XCTAssertGreaterThan(middleAckCount, middleAckBaseline,
+                                 "Seeking to a previously unacknowledged middle row must issue its acknowledgement")
+        }
+        let tailAckBaseline = fixture.deliveryAcknowledgementAttempts(for: tailID)
+        let tailOffset = try await fixture.seekMessage(tailID, anchor: .center)
+        let tailAckCount = fixture.deliveryAcknowledgementAttempts(for: tailID)
+        XCTAssertGreaterThanOrEqual(firstAckCount, 1, "First durable assistant row must reach its real delivery acknowledgement path")
+        XCTAssertGreaterThanOrEqual(middleAckCount, 1, "Middle durable assistant row must reach its real delivery acknowledgement path")
+        XCTAssertGreaterThanOrEqual(tailAckCount, 1, "Tail durable assistant row must reach its real delivery acknowledgement path")
+        XCTAssertLessThan(firstOffset, middleOffset)
+        XCTAssertLessThan(middleOffset, tailOffset)
+
+        for (messageID, acknowledgedCount) in [
+            (firstID, firstAckCount), (middleID, middleAckCount), (tailID, tailAckCount),
+        ] {
+            _ = try await fixture.seekMessage(messageID, anchor: .center)
+            XCTAssertEqual(fixture.deliveryAcknowledgementAttempts(for: messageID), acknowledgedCount,
+                           "Returning to a previously acknowledged row must not issue another delivery acknowledgement")
+        }
+
+        let scroll = fixture.scrollView
+        let viewport = scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom
+        let actualTop = -scroll.adjustedContentInset.top
+        let actualBottom = Self.bottomOffset(of: scroll)
+        let target = actualTop + viewport * 5
+        XCTAssertGreaterThan(viewport, 100)
+        XCTAssertGreaterThanOrEqual(actualBottom, target + 2,
+                                     "Transcript must contain at least five usable viewport lengths below its actual top")
+        XCTAssertLessThanOrEqual(firstOffset, actualTop + viewport,
+                                 "First-row seek must be near the transcript top")
+        XCTAssertGreaterThanOrEqual(tailOffset, actualBottom - viewport,
+                                    "Tail-row seek must be near the transcript bottom")
+        XCTAssertLessThanOrEqual(tailOffset, actualBottom + 2)
+
+        // Return to the actual transcript top and settle before timing; seek
+        // movements above are validation setup, not part of this score.
+        _ = try await fixture.seekMessage(firstID, anchor: .top)
+        scroll.setContentOffset(CGPoint(x: 0, y: actualTop), animated: false)
+        try await Task.sleep(for: .milliseconds(250))
+        XCTAssertEqual(scroll.contentOffset.y, actualTop, accuracy: 2)
+        fixture.assertValidMeasurementBoundary()
+
+        let down = await FullChatViewScrollRecorder(scrollView: scroll, duration: 3.5)
+            .run(from: actualTop, to: target)
+        let downJSON = Self.phaseSummary("fixed-five-viewports-down", down)
+        emitFixedWindowPhase(
+            name: "fixed-five-viewports-down", phase: downJSON,
+            fixtureDigest: fixtureDigest, viewport: viewport,
+            contentHeight: scroll.contentSize.height,
+            visibilitySeekOffsets: [firstID: firstOffset, middleID: middleOffset, tailID: tailOffset],
+            acknowledgementBaselines: [firstID: firstAckBaseline, middleID: middleAckBaseline, tailID: tailAckBaseline],
+            acknowledgementCounts: [firstID: firstAckCount, middleID: middleAckCount, tailID: tailAckCount],
+            fixture: fixture
+        )
+        XCTAssertFalse(down.timedOut)
+        XCTAssertGreaterThanOrEqual(down.intervals.count, 30)
+        XCTAssertEqual(down.fromOffset, actualTop, accuracy: 2)
+        XCTAssertEqual(down.toOffset, target, accuracy: 2)
+        XCTAssertEqual(down.offsetSamples.first?.observedYPoints ?? .nan, actualTop, accuracy: 2)
+        XCTAssertEqual(down.offsetSamples.last?.observedYPoints ?? .nan, target, accuracy: 2)
+        XCTAssertEqual(scroll.contentOffset.y, target, accuracy: 2)
+        fixture.assertValidMeasurementBoundary()
+
+        let up = await FullChatViewScrollRecorder(scrollView: scroll, duration: 3.5)
+            .run(from: target, to: actualTop)
+        let upJSON = Self.phaseSummary("fixed-five-viewports-up", up)
+        emitFixedWindowPhase(
+            name: "fixed-five-viewports-up", phase: upJSON,
+            fixtureDigest: fixtureDigest, viewport: viewport,
+            contentHeight: scroll.contentSize.height,
+            visibilitySeekOffsets: [firstID: firstOffset, middleID: middleOffset, tailID: tailOffset],
+            acknowledgementBaselines: [firstID: firstAckBaseline, middleID: middleAckBaseline, tailID: tailAckBaseline],
+            acknowledgementCounts: [firstID: firstAckCount, middleID: middleAckCount, tailID: tailAckCount],
+            fixture: fixture
+        )
+        XCTAssertFalse(up.timedOut)
+        XCTAssertGreaterThanOrEqual(up.intervals.count, 30)
+        XCTAssertEqual(up.fromOffset, down.toOffset, accuracy: 2)
+        XCTAssertEqual(up.toOffset, down.fromOffset, accuracy: 2)
+        XCTAssertEqual(up.offsetSamples.first?.observedYPoints ?? .nan, target, accuracy: 2)
+        XCTAssertEqual(up.offsetSamples.last?.observedYPoints ?? .nan, actualTop, accuracy: 2)
+        XCTAssertEqual(scroll.contentOffset.y, actualTop, accuracy: 2)
+        fixture.assertValidMeasurementBoundary()
+    }
+
+    @MainActor
     private func runSettledBidirectionalDiagnostic(messageCount: Int) async throws {
         let messages = Self.fixtureMessages(count: messageCount, includeCalendarAgenda: true)
         let fixtureDigest = try Self.fixtureDigest(messages)
@@ -396,6 +514,45 @@ final class ConversationScrollPerformanceTests: XCTestCase {
     }
 
     @MainActor
+    private func emitFixedWindowPhase(
+        name: String,
+        phase: [String: Any],
+        fixtureDigest: String,
+        viewport: CGFloat,
+        contentHeight: CGFloat,
+        visibilitySeekOffsets: [String: CGFloat],
+        acknowledgementBaselines: [String: Int],
+        acknowledgementCounts: [String: Int],
+        fixture: ConversationPerformanceFixture
+    ) {
+        let report: [String: Any] = [
+            "mode": "full-chat-view-fixed-five-usable-viewports",
+            "phase": name,
+            "messageCount": fixture.model.messages.count,
+            "canonicalFixtureSHA256": fixtureDigest,
+            "durationSeconds": phase["durationSeconds"] ?? NSNull(),
+            "requestedFromOffsetPoints": phase["fromOffsetPoints"] ?? NSNull(),
+            "requestedToOffsetPoints": phase["toOffsetPoints"] ?? NSNull(),
+            "viewportHeightPoints": Double(viewport),
+            "contentHeightPoints": Double(contentHeight),
+            "requestedDistancePoints": phase["requestedDistancePoints"] ?? NSNull(),
+            "observedDistancePoints": phase["observedDistancePoints"] ?? NSNull(),
+            "requestedToFirstCallbackSeconds": phase["requestedToFirstCallbackSeconds"] ?? NSNull(),
+            "callbackCount": phase["callbackCount"] ?? NSNull(),
+            "timedOut": phase["timedOut"] ?? NSNull(),
+            "callbackIntervalMilliseconds": phase["callbackIntervalMilliseconds"] ?? NSNull(),
+            "requestedAndObservedOffsetSamples": phase["offsetSamples"] ?? [],
+            "visibilitySeekOffsetsPoints": visibilitySeekOffsets.mapValues(Double.init),
+            "deliveryAcknowledgementBaselines": acknowledgementBaselines,
+            "deliveryAcknowledgementAttempts": acknowledgementCounts,
+            "requestCountsByMethodAndPath": fixture.requestCountsByMethodAndPath,
+            "unexpectedRequests": fixture.diagnosticState["unexpectedRequests"] ?? [],
+            "modelError": fixture.model.errorMessage ?? "",
+        ]
+        attachDiagnostic(report, name: "fixed-window-\(name)")
+    }
+
+    @MainActor
     private func emitStateDiagnostic(
         phase: String,
         fixtureDigest: String,
@@ -548,14 +705,21 @@ final class ConversationScrollPerformanceTests: XCTestCase {
 
     private static func phaseSummary(_ name: String, _ phase: FullChatViewScrollRecorder.Result) -> [String: Any] {
         let sorted = phase.intervals.sorted()
+        let observedStart = phase.offsetSamples.first?.observedYPoints
+        let observedEnd = phase.offsetSamples.last?.observedYPoints
         return [
             "name": name,
             "durationSeconds": phase.elapsed,
             "requestedToFirstCallbackSeconds": phase.requestedToFirstCallbackSeconds as Any? ?? NSNull(),
-            "callbackCount": phase.intervals.count + (phase.requestedToFirstCallbackSeconds == nil ? 0 : 1),
+            "callbackCount": phase.offsetSamples.count,
             "timedOut": phase.timedOut,
             "fromOffsetPoints": phase.fromOffset,
             "toOffsetPoints": phase.toOffset,
+            "requestedDistancePoints": phase.toOffset - phase.fromOffset,
+            "observedStartOffsetPoints": observedStart as Any? ?? NSNull(),
+            "observedEndOffsetPoints": observedEnd as Any? ?? NSNull(),
+            "observedDistancePoints": (observedStart != nil && observedEnd != nil)
+                ? (observedEnd! - observedStart!) as Any : NSNull(),
             "callbackIntervalMilliseconds": [
                 "p50": Self.percentile(sorted, 0.50) * 1_000,
                 "p95": Self.percentile(sorted, 0.95) * 1_000,
@@ -565,6 +729,11 @@ final class ConversationScrollPerformanceTests: XCTestCase {
                 "over100ms": phase.intervals.filter { $0 > 0.100 }.count,
             ],
             "intervalsMilliseconds": phase.intervals.map { $0 * 1_000 },
+            "offsetSamples": phase.offsetSamples.map { [
+                "timeSeconds": $0.timeSeconds,
+                "requestedYPoints": Double($0.requestedYPoints),
+                "observedYPoints": Double($0.observedYPoints),
+            ] },
         ]
     }
 
@@ -660,6 +829,7 @@ private final class FullChatViewScrollRecorder: NSObject {
         let fromOffset: CGFloat
         let toOffset: CGFloat
         let intervals: [Double]
+        let offsetSamples: [(timeSeconds: Double, requestedYPoints: CGFloat, observedYPoints: CGFloat)]
         let elapsed: Double
         let timedOut: Bool
         let requestedToFirstCallbackSeconds: Double?
@@ -677,6 +847,7 @@ private final class FullChatViewScrollRecorder: NSObject {
     private var fromOffset: CGFloat = 0
     private var toOffset: CGFloat = 0
     private var intervals: [Double] = []
+    private var offsetSamples: [(timeSeconds: Double, requestedYPoints: CGFloat, observedYPoints: CGFloat)] = []
     private var elapsed: Double = 0
     private var timedOut = false
 
@@ -685,6 +856,7 @@ private final class FullChatViewScrollRecorder: NSObject {
             fromOffset: fromOffset,
             toOffset: toOffset,
             intervals: intervals,
+            offsetSamples: offsetSamples,
             elapsed: elapsed,
             timedOut: timedOut,
             requestedToFirstCallbackSeconds: requestedToFirstCallbackSeconds
@@ -731,8 +903,10 @@ private final class FullChatViewScrollRecorder: NSObject {
         let progress = min(1, elapsed / duration)
         let offset = fromOffset + (toOffset - fromOffset) * progress
         scrollView.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
+        offsetSamples.append((timeSeconds: elapsed, requestedYPoints: offset, observedYPoints: scrollView.contentOffset.y))
         guard elapsed >= duration else { return }
         scrollView.setContentOffset(CGPoint(x: 0, y: toOffset), animated: false)
+        offsetSamples.append((timeSeconds: elapsed, requestedYPoints: toOffset, observedYPoints: scrollView.contentOffset.y))
         finish()
     }
 
@@ -745,6 +919,7 @@ private final class FullChatViewScrollRecorder: NSObject {
             fromOffset: fromOffset,
             toOffset: toOffset,
             intervals: intervals,
+            offsetSamples: offsetSamples,
             elapsed: elapsed,
             timedOut: timedOut,
             requestedToFirstCallbackSeconds: requestedToFirstCallbackSeconds
