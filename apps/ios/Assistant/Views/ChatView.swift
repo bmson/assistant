@@ -27,12 +27,16 @@ private struct ConversationTranscriptHost<Content: View>: UIViewControllerRepres
     let content: Content
 
     func makeUIViewController(context: Context) -> ConversationTranscriptController<Content> {
-        ConversationTranscriptController(content: content, environment: context.environment)
+        ConversationTranscriptController(
+            content: content, environment: context.environment, transaction: context.transaction
+        )
     }
 
     func updateUIViewController(_ controller: ConversationTranscriptController<Content>, context: Context) {
 #if DEBUG
-        context.environment.transcriptHostBoundaryProbe?.record("representable-context", transaction: context.transaction)
+        context.environment.transcriptHostBoundaryProbe?.record(
+            "representable-context", transaction: context.transaction, generation: controller.transactionGeneration
+        )
 #endif
         withTransaction(context.transaction) {
 #if DEBUG
@@ -43,7 +47,7 @@ private struct ConversationTranscriptHost<Content: View>: UIViewControllerRepres
                 transaction: context.transaction
             )
 #else
-            controller.update(content: content, environment: context.environment)
+            controller.update(content: content, environment: context.environment, transaction: context.transaction)
 #endif
         }
     }
@@ -63,6 +67,8 @@ private enum TranscriptCoordinateSpace: Hashable {
 private struct ConversationTranscriptRoot<Content: View>: View {
     let content: Content
     let inheritedEnvironment: EnvironmentValues
+    let inheritedTransaction: Transaction
+    let transactionGeneration: Int
 #if DEBUG
     let coordinates: TranscriptHostingCoordinates
 #endif
@@ -75,6 +81,7 @@ private struct ConversationTranscriptRoot<Content: View>: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .coordinateSpace(name: TranscriptCoordinateSpace.viewport)
             .environment(\.self, inheritedEnvironment)
+            .transaction(value: transactionGeneration) { $0 = inheritedTransaction }
     }
 }
 
@@ -86,16 +93,19 @@ private final class ConversationTranscriptController<Content: View>: UIViewContr
 #if DEBUG
     private let coordinates: TranscriptHostingCoordinates
 #endif
+    private(set) var transactionGeneration = 0
 
-    init(content: Content, environment: EnvironmentValues) {
+    init(content: Content, environment: EnvironmentValues, transaction: Transaction) {
 #if DEBUG
         let coordinates = TranscriptHostingCoordinates()
         self.coordinates = coordinates
         host = UIHostingController(rootView: ConversationTranscriptRoot(
-            content: content, inheritedEnvironment: environment, coordinates: coordinates))
+            content: content, inheritedEnvironment: environment,
+            inheritedTransaction: transaction, transactionGeneration: 0, coordinates: coordinates))
 #else
         host = UIHostingController(rootView: ConversationTranscriptRoot(
-            content: content, inheritedEnvironment: environment))
+            content: content, inheritedEnvironment: environment,
+            inheritedTransaction: transaction, transactionGeneration: 0))
 #endif
         super.init(nibName: nil, bundle: nil)
         host.safeAreaRegions = []
@@ -133,13 +143,18 @@ private final class ConversationTranscriptController<Content: View>: UIViewContr
 #if DEBUG
     func update(content: Content, environment: EnvironmentValues,
                 boundaryProbe: TranscriptHostBoundaryProbe?, transaction: Transaction) {
-        boundaryProbe?.record("root-assignment", transaction: transaction)
+        transactionGeneration &+= 1
+        boundaryProbe?.record("root-assignment", transaction: transaction, generation: transactionGeneration)
         host.rootView = ConversationTranscriptRoot(
-            content: content, inheritedEnvironment: environment, coordinates: coordinates)
+            content: content, inheritedEnvironment: environment, inheritedTransaction: transaction,
+            transactionGeneration: transactionGeneration, coordinates: coordinates)
     }
 #else
-    func update(content: Content, environment: EnvironmentValues) {
-        host.rootView = ConversationTranscriptRoot(content: content, inheritedEnvironment: environment)
+    func update(content: Content, environment: EnvironmentValues, transaction: Transaction) {
+        transactionGeneration &+= 1
+        host.rootView = ConversationTranscriptRoot(
+            content: content, inheritedEnvironment: environment, inheritedTransaction: transaction,
+            transactionGeneration: transactionGeneration)
     }
 #endif
 }
@@ -152,6 +167,8 @@ final class TranscriptHostBoundaryProbe {
     private let marker: @MainActor (Transaction) -> Int
     private let contentRevision: @MainActor () -> Int
     private(set) var events: [[String: Any]] = []
+    private(set) var rootGeneration = 0
+    private(set) var rootAssignmentCount = 0
 
     init(marker: @escaping @MainActor (Transaction) -> Int,
          contentRevision: @escaping @MainActor () -> Int) {
@@ -159,13 +176,18 @@ final class TranscriptHostBoundaryProbe {
         self.contentRevision = contentRevision
     }
 
-    func record(_ stage: String, transaction: Transaction) {
+    func record(_ stage: String, transaction: Transaction, generation: Int) {
+        if stage == "root-assignment" {
+            rootGeneration = generation
+            rootAssignmentCount += 1
+        }
         if events.count == 64 { events.removeFirst() }
         events.append([
             "time": CACurrentMediaTime(),
             "stage": stage,
             "marker": marker(transaction),
             "contentRevision": contentRevision(),
+            "generation": generation,
         ])
     }
 }

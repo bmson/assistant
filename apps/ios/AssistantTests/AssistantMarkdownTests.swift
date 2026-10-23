@@ -1955,6 +1955,122 @@ extension AssistantMarkdownTests {
         XCTAssertTrue(ownedTranscriptScrollView(in: window) === initialScroll)
         XCTAssertEqual(ownedTranscriptControllerIdentities(root: root, containing: initialScroll), initialHierarchy)
 
+        try await waitForTranscriptHostCondition("the parent 74 transaction reaches the child-local leaf") {
+            guard let observation = state.childTransactionObservations.last else { return false }
+            return observation.parentContentRevision == 2 && observation.marker == 74
+        }
+        try await waitForTranscriptHostCondition("the row-local sheet finishes presenting before child-local updates", onTimeout: {
+            attachOwnedTranscriptBoundarySnapshot(
+                stage: "row-sheet-presentation-settle-timeout", state: state, root: root,
+                window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+            )
+        }) {
+            let currentSheet = ownedPresentedController(in: root)
+            let leaf = state.childTransactionObservations.last
+            return currentSheet === presentedSheet
+                && presentedSheet.viewIfLoaded?.window === window
+                && !presentedSheet.isBeingPresented
+                && !presentedSheet.isBeingDismissed
+                && leaf?.parentContentRevision == 2
+        }
+        attachOwnedTranscriptBoundarySnapshot(
+            stage: "row-sheet-presentation-settle-result", state: state, root: root,
+            window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+        )
+        let generationBeforeLocalUpdates = boundaryProbe.rootGeneration
+        let assignmentsBeforeLocalUpdates = boundaryProbe.rootAssignmentCount
+        let startingLocalRevision = try XCTUnwrap(state.childTransactionObservations.last?.localRevision)
+        var childTransaction99 = Transaction(animation: nil)
+        childTransaction99[OwnedTranscriptHostMarkerKey.self] = 99
+        let updateChildLocalState = try XCTUnwrap(state.updateChildLocalTransaction)
+        updateChildLocalState(childTransaction99)
+        try await waitForTranscriptHostCondition("the child-local state observes transaction 99", onTimeout: {
+            attachOwnedTranscriptBoundarySnapshot(
+                stage: "child-local-transaction-99-timeout", state: state, root: root,
+                window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+            )
+        }) {
+            guard let observation = state.childTransactionObservations.last else { return false }
+            return observation.parentContentRevision == 2
+                && observation.localRevision == startingLocalRevision + 1
+                && observation.marker == 99
+                && observation.rootGeneration == generationBeforeLocalUpdates
+        }
+        attachOwnedTranscriptBoundarySnapshot(
+            stage: "child-local-transaction-99-result", state: state, root: root,
+            window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+        )
+        let observed99 = try XCTUnwrap(state.childTransactionObservations.last)
+        XCTAssertEqual(observed99.parentContentRevision, 2)
+        XCTAssertEqual(observed99.localRevision, startingLocalRevision + 1)
+        XCTAssertEqual(observed99.marker, 99)
+        XCTAssertEqual(observed99.rootGeneration, generationBeforeLocalUpdates)
+        XCTAssertEqual(boundaryProbe.rootGeneration, generationBeforeLocalUpdates)
+        XCTAssertEqual(boundaryProbe.rootAssignmentCount, assignmentsBeforeLocalUpdates,
+            "A child-local transaction must not cause a parent root assignment")
+
+        let generationBeforeDefaultLocalUpdate = boundaryProbe.rootGeneration
+        let assignmentsBeforeDefaultLocalUpdate = boundaryProbe.rootAssignmentCount
+        var childDefaultTransaction = Transaction()
+        childDefaultTransaction[OwnedTranscriptHostMarkerKey.self] = 0
+        updateChildLocalState(childDefaultTransaction)
+        try await waitForTranscriptHostCondition("the child-local state observes default transaction 0", onTimeout: {
+            attachOwnedTranscriptBoundarySnapshot(
+                stage: "child-local-default-transaction-timeout", state: state, root: root,
+                window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+            )
+        }) {
+            guard let observation = state.childTransactionObservations.last else { return false }
+            return observation.parentContentRevision == 2
+                && observation.localRevision == startingLocalRevision + 2
+                && observation.marker == 0
+                && observation.rootGeneration == generationBeforeDefaultLocalUpdate
+        }
+        attachOwnedTranscriptBoundarySnapshot(
+            stage: "child-local-default-transaction-result", state: state, root: root,
+            window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+        )
+        let observedDefaultLocal = try XCTUnwrap(state.childTransactionObservations.last)
+        XCTAssertEqual(observedDefaultLocal.parentContentRevision, 2)
+        XCTAssertEqual(observedDefaultLocal.localRevision, startingLocalRevision + 2)
+        XCTAssertEqual(observedDefaultLocal.marker, 0)
+        XCTAssertEqual(observedDefaultLocal.rootGeneration, generationBeforeDefaultLocalUpdate)
+        XCTAssertEqual(boundaryProbe.rootGeneration, generationBeforeDefaultLocalUpdate)
+        XCTAssertEqual(boundaryProbe.rootAssignmentCount, assignmentsBeforeDefaultLocalUpdate,
+            "A second child-local transaction must not cause a parent root assignment")
+
+        let generationBeforeDefaultParentUpdate = boundaryProbe.rootGeneration
+        let assignmentsBeforeDefaultParentUpdate = boundaryProbe.rootAssignmentCount
+        state.contentRevision += 1
+        try await waitForTranscriptHostCondition("a later default parent transaction reaches the child leaf", onTimeout: {
+            attachOwnedTranscriptBoundarySnapshot(
+                stage: "default-parent-transaction-timeout", state: state, root: root,
+                window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+            )
+        }) {
+            guard let observation = state.childTransactionObservations.last else { return false }
+            return observation.parentContentRevision == 3
+                && observation.localRevision == startingLocalRevision + 2
+                && observation.marker == 0
+                && observation.rootGeneration > generationBeforeDefaultParentUpdate
+        }
+        attachOwnedTranscriptBoundarySnapshot(
+            stage: "default-parent-transaction-result", state: state, root: root,
+            window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
+        )
+        let observedDefaultParent = try XCTUnwrap(state.childTransactionObservations.last)
+        XCTAssertEqual(observedDefaultParent.parentContentRevision, 3)
+        XCTAssertEqual(observedDefaultParent.localRevision, startingLocalRevision + 2)
+        XCTAssertEqual(observedDefaultParent.marker, 0)
+        XCTAssertGreaterThan(boundaryProbe.rootGeneration, generationBeforeDefaultParentUpdate)
+        XCTAssertGreaterThan(boundaryProbe.rootAssignmentCount, assignmentsBeforeDefaultParentUpdate)
+        XCTAssertEqual(observedDefaultParent.rootGeneration, boundaryProbe.rootGeneration)
+        XCTAssertTrue(ownedTranscriptScrollView(in: window) === initialScroll,
+            "A default parent transaction must preserve the transcript scroll view identity")
+        XCTAssertEqual(ownedTranscriptControllerIdentities(root: root, containing: initialScroll), initialHierarchy)
+        XCTAssertTrue(ownedPresentedController(in: root) === presentedSheet,
+            "Child-local and default parent transaction checks must preserve the row-local sheet")
+
         state.rowSheetRequest += 1
         try await waitForTranscriptHostCondition("the row-local sheet dismisses") {
             ownedPresentedController(in: root) == nil
@@ -1994,6 +2110,13 @@ private final class OwnedTranscriptHostRegressionState: ObservableObject {
     var openedURLGenerations: [Int] = []
     var boundaryProbe: TranscriptHostBoundaryProbe?
     var predicateSamples: [[String: Any]] = []
+    var childTransactionObservations: [OwnedTranscriptChildTransactionObservation] = []
+    var updateChildLocalTransaction: (@MainActor (Transaction) -> Void)?
+
+    func recordChildTransactionObservation(_ observation: OwnedTranscriptChildTransactionObservation) {
+        childTransactionObservations.append(observation)
+        if childTransactionObservations.count > 96 { childTransactionObservations.removeFirst() }
+    }
 
     func recordPredicateSample(stage: String, checks: [String: Bool]) {
         if let last = predicateSamples.last,
@@ -2010,6 +2133,13 @@ private final class OwnedTranscriptHostRegressionState: ObservableObject {
         ])
         if predicateSamples.count > 96 { predicateSamples.removeFirst() }
     }
+}
+
+private struct OwnedTranscriptChildTransactionObservation: Equatable {
+    let parentContentRevision: Int
+    let localRevision: Int
+    let marker: Int
+    let rootGeneration: Int
 }
 
 private struct OwnedTranscriptEnvironmentSnapshot: Equatable {
@@ -2129,17 +2259,9 @@ private struct OwnedTranscriptHostRegressionFixture: View {
                         .equatable()
                         OwnedTranscriptNativeInput(text: $state.draft)
                             .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44, alignment: .leading)
-                        Text("Transcript content revision \(state.contentRevision)")
-                            // This value is built by the parent, without a
-                            // child ObservableObject subscription. Its update
-                            // must carry the transaction through rootView.
-                            .transaction { transaction in
-                                state.boundaryProbe?.record("child-leaf", transaction: transaction)
-                                let marker = transaction[OwnedTranscriptHostMarkerKey.self]
-                                if state.transactionMarkers.last != marker {
-                                    state.transactionMarkers.append(marker)
-                                }
-                            }
+                        OwnedTranscriptTransactionLeaf(
+                            state: state, parentContentRevision: state.contentRevision
+                        )
                     }
                     .padding(.bottom, 100)
                 }
@@ -2198,6 +2320,42 @@ private struct OwnedTranscriptDisclosureRow: View {
         .sheet(isPresented: $isSheetPresented) {
             Text("Row-local sheet survives transcript updates.")
         }
+    }
+}
+
+private struct OwnedTranscriptTransactionLeaf: View {
+    let state: OwnedTranscriptHostRegressionState
+    let parentContentRevision: Int
+    @State private var localRevision = 0
+
+    var body: some View {
+        Text("Transcript content revision \(parentContentRevision), child revision \(localRevision)")
+            // This parent-owned leaf records the transaction actually reaching
+            // the hosted content. The registered update changes only this
+            // child's @State and does not publish a parent-state mutation.
+            .transaction { transaction in
+                let marker = transaction[OwnedTranscriptHostMarkerKey.self]
+                let generation = state.boundaryProbe?.rootGeneration ?? -1
+                state.boundaryProbe?.record("child-leaf", transaction: transaction, generation: generation)
+                state.recordChildTransactionObservation(.init(
+                    parentContentRevision: parentContentRevision,
+                    localRevision: localRevision,
+                    marker: marker,
+                    rootGeneration: generation
+                ))
+                if state.transactionMarkers.last != marker {
+                    state.transactionMarkers.append(marker)
+                }
+            }
+            .onAppear {
+                let localRevisionBinding = $localRevision
+                state.updateChildLocalTransaction = { transaction in
+                    withTransaction(transaction) {
+                        localRevisionBinding.wrappedValue += 1
+                    }
+                }
+            }
+            .onDisappear { state.updateChildLocalTransaction = nil }
     }
 }
 
@@ -2347,6 +2505,14 @@ private func attachOwnedTranscriptBoundarySnapshot(
         "windowIdentity": ObjectIdentifier(window).hashValue,
         "transactionMarkers": state.transactionMarkers,
         "boundaryEvents": state.boundaryProbe?.events ?? [],
+        "rootTransactionGeneration": state.boundaryProbe?.rootGeneration ?? -1,
+        "rootAssignmentCount": state.boundaryProbe?.rootAssignmentCount ?? -1,
+        "childTransactionObservations": state.childTransactionObservations.suffix(16).map {
+            ["parentContentRevision": $0.parentContentRevision,
+             "localRevision": $0.localRevision,
+             "marker": $0.marker,
+             "rootGeneration": $0.rootGeneration]
+        },
         "predicateSamples": state.predicateSamples,
         "environmentSnapshots": state.environmentSnapshots.suffix(8).map {
             ["locale": $0.localeIdentifier, "scheme": String(describing: $0.colorScheme),
