@@ -2,10 +2,14 @@ import XCTest
 import SwiftUI
 @testable import Assistant
 
-/// A page inventory, rendered by UIKit on an isolated simulator. No server,
-/// credentials, microphone, or provider inference is used. Attachments are
-/// review evidence, not pixel-perfect assertions or physical interaction QA.
+/// Stubbed page renders support visual review. They do not establish control
+/// activation, VoiceOver behavior or physical gesture correctness.
 final class NativeVisualReviewTests: XCTestCase {
+    private final class RecoveryActionCounts {
+        var retry = 0
+        var activity = 0
+    }
+
     @MainActor
     func testOptimisticSaveFeedbackInLightDarkAndLargeText() async throws {
         let fixture = try NativeReviewFixture()
@@ -115,6 +119,188 @@ final class NativeVisualReviewTests: XCTestCase {
         }
         XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
         XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+    }
+
+    // Public UIKit accessibility enumeration in this unit host did not expose
+    // the rendered controls (bc835011: 38 lookup/frame failures). Policy tests
+    // and reviewed images cover separate contracts; activation, VoiceOver and
+    // hit behavior remain unverified.
+    @MainActor
+    func testRecoveryNoticeCardsAcrossAppearanceAndAccessibilitySizes() async throws {
+        NativeReviewProtocol.install([:])
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+                               session: URLSession(configuration: sessionConfig))
+        let defaultsName = "assistant.recovery-notice-visual-review"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
+        defaults.removePersistentDomain(forName: defaultsName)
+        let model = AppModel(apiClient: client, defaults: defaults)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let actions = RecoveryActionCounts()
+
+        func message(_ id: String, kind: ChatNoticeKind, headline: String, summary: String,
+                     diagnostics: [String] = []) -> ChatMessage {
+            ChatMessage(id: id, role: .assistant, parts: [
+                .init(type: "notice", notice: kind.rawValue, presentation: .init(
+                    version: 1,
+                    headline: headline,
+                    summary: summary,
+                    facts: nil,
+                    detailLabel: "Failure details",
+                    diagnostics: diagnostics.isEmpty ? nil : diagnostics
+                ))
+            ])
+        }
+
+        let cases: [(name: String, message: ChatMessage, userPrompt: String?, retry: ((String) -> Void)?, activity: (() -> Void)?)] = [
+            (
+                "recovery-confirmed-no-effect",
+                message("recovery-no-effect", kind: .turnFailed,
+                        headline: "Nothing was changed",
+                        summary: "The request was confirmed as not applied. You can safely try again."),
+                "Save the draft",
+                { prompt in
+                    XCTAssertEqual(prompt, "Save the draft")
+                    actions.retry += 1
+                },
+                { actions.activity += 1 }
+            ),
+            (
+                "recovery-unknown-effect",
+                message("recovery-unknown-effect", kind: .providerFailed,
+                        headline: "Check before retrying",
+                        summary: "The connection ended after the request was sent, so its result is unknown. Review Activity to see whether the change completed before taking another action."),
+                "Update the calendar",
+                { _ in actions.retry += 1 },
+                { actions.activity += 1 }
+            ),
+            (
+                "recovery-provider-failed",
+                message("recovery-provider-failed", kind: .providerFailed,
+                        headline: "The model service stopped",
+                        summary: "No finished answer was received. Review Activity for the interruption details."),
+                "Retry this prompt",
+                { _ in actions.retry += 1 },
+                { actions.activity += 1 }
+            ),
+            (
+                "recovery-retry-unavailable-while-sending",
+                message("recovery-retry-unavailable", kind: .turnFailed,
+                        headline: "Reply not completed",
+                        summary: "This reply did not finish. Wait for the current response to settle before retrying."),
+                "Do not queue this yet",
+                nil,
+                { actions.activity += 1 }
+            ),
+            (
+                "recovery-whitespace-diagnostics",
+                message("recovery-whitespace-diagnostics", kind: .providerFailed,
+                        headline: "The model service stopped",
+                        summary: "No finished answer was received. Review Activity before deciding what to do next.",
+                        diagnostics: ["", " \n\t "]),
+                "Review this request",
+                nil,
+                { actions.activity += 1 }
+            ),
+            (
+                "recovery-long-diagnostics",
+                message("recovery-long-diagnostics", kind: .providerFailed,
+                        headline: "The request needs review",
+                        summary: "The server could not confirm whether the requested changes completed. Review the detailed request and response information below before deciding what to do next.",
+                        diagnostics: [
+                            "Request ID: request-7c0e9f5d. The client sent the operation and then lost its connection before receiving a terminal response. The server may have committed the operation; check the authoritative record before retrying.",
+                            "Transport detail: the response stream closed unexpectedly after the final request bytes were written. No automatic retry was attempted because repeating this operation could duplicate work."
+                        ]),
+                "Review the operation",
+                nil,
+                { actions.activity += 1 }
+            )
+        ]
+
+        func page(_ fixture: (name: String, message: ChatMessage, userPrompt: String?, retry: ((String) -> Void)?, activity: (() -> Void)?)) -> Page {
+            Page(fixture.name, ScrollView {
+                MessageBubble(message: fixture.message, userPrompt: fixture.userPrompt, isStreaming: false,
+                              openApprovals: {}, runForReal: nil, retry: fixture.retry, decideApproval: nil,
+                              openActivity: fixture.activity)
+                    .padding(20)
+            })
+        }
+
+        for scheme in [ColorScheme.light, .dark] {
+            for fixture in cases {
+                try await capture(page(fixture), scheme: scheme, size: .large,
+                                  scene: scene, model: model)
+            }
+        }
+        for fixture in cases {
+            try await capture(page(fixture), scheme: .light, size: .accessibility3,
+                              scene: scene, model: model)
+        }
+        let contrastFixture = try XCTUnwrap(cases.first { $0.name == "recovery-unknown-effect" })
+        try await capture(page(contrastFixture), scheme: .light, size: .accessibility3,
+                          scene: scene, model: model, increasedContrast: true)
+
+        XCTAssertEqual(actions.retry, 0, "Capturing recovery cards must not invoke retry callbacks")
+        XCTAssertEqual(actions.activity, 0, "Capturing recovery cards must not open Activity")
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+    }
+
+    func testRecoveryNoticePresentationKeepsRetryAndActivityEligibilityConservative() {
+        let eligible = RecoveryNoticePresentation(
+            kind: .turnFailed, userPrompt: "  exact original prompt  ", retryAvailable: true,
+            activityAvailable: true, diagnostics: []
+        )
+        XCTAssertEqual(eligible.retryPrompt, "  exact original prompt  ")
+        XCTAssertTrue(eligible.showsActivity)
+        XCTAssertTrue(eligible.hasActions)
+
+        let providerFailure = RecoveryNoticePresentation(
+            kind: .providerFailed, userPrompt: "Retry text", retryAvailable: true,
+            activityAvailable: true, diagnostics: []
+        )
+        XCTAssertNil(providerFailure.retryPrompt, "An unknown-effect provider failure must not gain retry eligibility")
+        XCTAssertTrue(providerFailure.showsActivity)
+        XCTAssertTrue(providerFailure.hasActions)
+
+        let inFlight = RecoveryNoticePresentation(
+            kind: .turnFailed, userPrompt: "Prompt", retryAvailable: false,
+            activityAvailable: false, diagnostics: []
+        )
+        XCTAssertNil(inFlight.retryPrompt, "A missing retry callback must keep retry unavailable")
+        XCTAssertFalse(inFlight.showsActivity)
+        XCTAssertFalse(inFlight.hasActions)
+        let activityOnly = RecoveryNoticePresentation(
+            kind: .turnFailed, userPrompt: "Prompt", retryAvailable: false,
+            activityAvailable: true, diagnostics: []
+        )
+        XCTAssertNil(activityOnly.retryPrompt)
+        XCTAssertTrue(activityOnly.showsActivity)
+        XCTAssertTrue(activityOnly.hasActions)
+
+        let missingPrompt = RecoveryNoticePresentation(
+            kind: .turnFailed, userPrompt: nil, retryAvailable: true,
+            activityAvailable: false, diagnostics: []
+        )
+        XCTAssertNil(missingPrompt.retryPrompt)
+        XCTAssertFalse(missingPrompt.hasActions)
+    }
+
+    func testRecoveryNoticePresentationFiltersOnlyBlankDiagnosticsAndPreservesOrder() {
+        let blankCases: [[String]] = [[], [""], [" \n\t "]]
+        for diagnostics in blankCases {
+            XCTAssertTrue(RecoveryNoticePresentation(
+                kind: .providerFailed, userPrompt: nil, retryAvailable: false,
+                activityAvailable: false, diagnostics: diagnostics
+            ).diagnostics.isEmpty)
+        }
+        let presentation = RecoveryNoticePresentation(
+            kind: .providerFailed, userPrompt: nil, retryAvailable: false,
+            activityAvailable: false,
+            diagnostics: ["", " \n\t ", "  first detail  ", "second\nline", "\n"]
+        )
+        XCTAssertEqual(presentation.diagnostics, ["  first detail  ", "second\nline"])
     }
 
     @MainActor
@@ -385,6 +571,86 @@ final class NativeVisualReviewTests: XCTestCase {
         }
         XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty, "Every read must remain in the fixture transport")
         XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty, "Screenshots must not perform mutations")
+    }
+
+    @MainActor
+    func testImprovementsRepairEvidenceStatesInLightDarkAndAccessibleText() async throws {
+        let stamp = "2026-10-22T19:00:00Z"
+        let cases: [(String, [String: Any])] = [
+            ("recorded-pr-old-review", [
+                "id": "repair-pr", "title": "The recorded pull request may have a newer revision",
+                "summary": "Saved independent review for an earlier commit.", "status": "pr_open",
+                "diagnosis": "The original issue is fixed in the proposed change.", "lastError": "",
+                "sourceTaskId": "3d60a0fb-3939-455a-9e36-b54073c3b4df",
+                "prUrl": "https://github.com/example/repo/pull/31",
+                "runUrl": "https://github.com/example/repo/actions/runs/41", "updatedAt": stamp,
+                "workerProvider": "github", "prNumber": 31,
+                "mergeSha": NSNull(), "codeReview": [
+                    "commitSha": "abcdef0123456789abcdef0123456789abcdef01", "approved": true,
+                    "modelId": "review-model", "summary": "The saved revision addresses the issue. Check the current pull request revision and checks before merging.",
+                    "reviewedAt": "2026-10-22T18:00:00Z",
+                ],
+                "history": [["status": "testing", "at": stamp, "detail": "Regression checks passed for the reviewed commit."],
+                            ["status": "pr_open", "at": stamp, "detail": "Pull request recorded; current head not checked."]],
+            ]),
+            ("provider-blocked-before-extra-attempt", [
+                "id": "repair-blocked", "title": "Publisher setup is required before another attempt",
+                "summary": "The attempted code fix could not be published.", "status": "blocked",
+                "diagnosis": "The publisher is not configured for this repository.",
+                "lastError": "Publisher settings are incomplete.", "updatedAt": stamp,
+                "workerProvider": "github", "prNumber": NSNull(),
+                "prUrl": NSNull(), "runUrl": NSNull(), "mergeSha": NSNull(),
+                "outcome": ["message": "The publisher is not configured.", "nextStep": "Check publisher settings before retrying."],
+                "waitingReason": "Repository publishing settings need attention.",
+                "history": [["status": "blocked", "at": stamp, "detail": "Publishing stopped before a pull request was created."]],
+            ]),
+            ("deployment-observed-needs-confirmation", [
+                "id": "repair-monitoring", "title": "The original behavior still needs checking",
+                "summary": "A deployment was observed for the merged revision.", "status": "monitoring",
+                "diagnosis": "Check the original behavior before confirming the fix.", "lastError": "",
+                "updatedAt": stamp, "prUrl": "https://github.com/example/repo/pull/32",
+                "runUrl": NSNull(), "mergeSha": "fedcba9876543210", "deploymentConfirmed": true,
+                "workerProvider": "github", "prNumber": 32,
+                "history": [["status": "merged", "at": stamp, "detail": "Merged revision fedcba9876543210."],
+                            ["status": "monitoring", "at": stamp, "detail": "Deployment observed. Owner confirmation remains pending."]],
+            ]),
+            ("closed-report-history", [
+                "id": "repair-closed", "title": "A dismissed report remains available in history",
+                "summary": "The report was closed without removing its recorded evidence.", "status": "dismissed",
+                "diagnosis": "The report was dismissed after review.", "lastError": "", "updatedAt": stamp,
+                "prUrl": NSNull(), "runUrl": NSNull(), "mergeSha": NSNull(),
+                "workerProvider": "github", "prNumber": NSNull(),
+                "history": [["status": "reported", "at": "2026-10-20T19:00:00Z", "detail": "Report saved."],
+                            ["status": "dismissed", "at": stamp, "detail": "Owner dismissed the report; history retained."]],
+            ]),
+        ]
+
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        for (name, repair) in cases {
+            let repairData = try JSONSerialization.data(withJSONObject: repair)
+            let decodedRepair = try JSONDecoder().decode(WorkspaceRepairIssue.self, from: repairData)
+            XCTAssertEqual(decodedRepair.id, repair["id"] as? String, "Repair fixture failed DTO decoding: \(name)")
+            let fixture = try NativeReviewFixture()
+            NativeReviewProtocol.install(try fixture.responsesByReplacingRepair(repair))
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [NativeReviewProtocol.self]
+            let client = APIClient(
+                configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+                session: URLSession(configuration: configuration)
+            )
+            let suite = "assistant.improvements-visual-review-\(name)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defaults.removePersistentDomain(forName: suite)
+            let model = AppModel(apiClient: client, defaults: defaults)
+            await model.refreshWorkspace()
+            XCTAssertNotNil(model.workspace?.repairs, "Repair fixture failed to decode: \(name)")
+            let page = Page("improvements-\(name)", WorkspaceView(area: .improvements))
+            try await capture(page, scheme: .light, size: .large, scene: scene, model: model)
+            try await capture(page, scheme: .dark, size: .large, scene: scene, model: model)
+            try await capture(page, scheme: .light, size: .accessibility3, scene: scene, model: model)
+            XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty, "Review fixture escaped the stub transport: \(name)")
+            XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty, "Review capture attempted a mutation: \(name)")
+        }
     }
 
     @MainActor
@@ -956,6 +1222,17 @@ private struct NativeReviewFixture {
     let relation: KnowledgeRelation
     let responses: [String: Data]
     let overview: OverviewResponse
+    func responsesByReplacingRepair(_ repair: [String: Any]) throws -> [String: Data] {
+        var result = responses
+        let path = "/api/mobile/v1/workspace"
+        let original = try XCTUnwrap(result[path])
+        var workspace = try XCTUnwrap(JSONSerialization.jsonObject(with: original) as? [String: Any])
+        var repairs = workspace["repairs"] as? [String: Any] ?? [:]
+        repairs["issues"] = [repair]
+        workspace["repairs"] = repairs
+        result[path] = try JSONSerialization.data(withJSONObject: workspace)
+        return result
+    }
     init(emptyDocuments: Bool = false) throws {
         let encoder = JSONEncoder()
         func json(_ value: Any) throws -> Data { try JSONSerialization.data(withJSONObject: value) }

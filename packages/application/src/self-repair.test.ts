@@ -42,6 +42,22 @@ it('does not expose untrusted executable links', () => {
   expect(projectRepairIssue(issue)).toMatchObject({ prUrl: null, runUrl: null });
 });
 
+it('projects provider and pull request identity for client action eligibility', () => {
+  const github = projectRepairIssue({
+    ...issue,
+    data: { ...issue.data, workerProvider: 'github', prNumber: 42 },
+  });
+  expect(github).toMatchObject({ workerProvider: 'github', prNumber: 42 });
+
+  const hosted = projectRepairIssue({
+    ...issue,
+    data: { ...issue.data, workerProvider: 'openai_hosted', prNumber: 42 },
+  });
+  expect(hosted).toMatchObject({ workerProvider: 'openai_hosted', prNumber: 42 });
+
+  expect(projectRepairIssue(issue)).toMatchObject({ workerProvider: 'github', prNumber: null });
+});
+
 it('makes the saved independent review readable in existing native diagnosis views', () => {
   const reviewed = {
     ...issue,
