@@ -966,6 +966,11 @@ struct MessageBubble: View {
                                     facts: [ChatCardFact], diagnostics: [String], detailLabel: String,
                                     text: String) -> some View {
         let shape = RoundedRectangle(cornerRadius: AssistantTheme.chatCardCornerRadius, style: .continuous)
+        // Empty transport text is not a diagnostic. Keep every meaningful
+        // entry intact, including its original whitespace and full detail.
+        let meaningfulDiagnostics = diagnostics.filter {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
         return VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: "xmark.circle.fill")
@@ -1006,12 +1011,12 @@ struct MessageBubble: View {
                 }
                 .padding(.top, 12)
             }
-            if !diagnostics.isEmpty {
+            if !meaningfulDiagnostics.isEmpty {
                 Divider()
                     .overlay(AssistantTheme.inkMuted(for: colorScheme).opacity(0.18))
                     .padding(.top, 10)
                 CardDisclosure(collapsedLabel: detailLabel, expandedLabel: "Hide details") {
-                    Text(diagnostics.joined(separator: "\n\n"))
+                    Text(meaningfulDiagnostics.joined(separator: "\n\n"))
                         .font(.caption)
                         .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                         .textSelection(.enabled)
@@ -1019,6 +1024,7 @@ struct MessageBubble: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.top, 2)
+                .accessibilityIdentifier("assistant.chat.notice.details")
             }
         }
         .padding(.horizontal, AssistantTheme.ConversationSpacing.horizontalInset)

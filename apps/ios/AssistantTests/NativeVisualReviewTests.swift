@@ -200,6 +200,16 @@ final class NativeVisualReviewTests: XCTestCase {
                 { actions.activity += 1 }
             ),
             (
+                "recovery-whitespace-diagnostics",
+                message("recovery-whitespace-diagnostics", kind: .providerFailed,
+                        headline: "The model service stopped",
+                        summary: "No finished answer was received. Review Activity before deciding what to do next.",
+                        diagnostics: ["", " \n\t "]),
+                "Review this request",
+                nil,
+                { actions.activity += 1 }
+            ),
+            (
                 "recovery-long-diagnostics",
                 message("recovery-long-diagnostics", kind: .providerFailed,
                         headline: "The request needs review",
@@ -232,12 +242,16 @@ final class NativeVisualReviewTests: XCTestCase {
                     let identifiers = self.recordRecoveryAccessibility(in: window, name: name)
                     XCTAssertTrue(identifiers.contains(retryID), "Confirmed no-effect notice should expose its eligible retry action")
                     XCTAssertTrue(identifiers.contains(activityID), "Recovery notice should expose Activity")
+                    XCTAssertFalse(identifiers.contains("assistant.chat.notice.details"),
+                        "A recovery notice without meaningful diagnostics must not offer an empty disclosure")
                 }
-            case "recovery-unknown-effect", "recovery-provider-failed", "recovery-retry-unavailable-while-sending", "recovery-long-diagnostics":
+            case "recovery-unknown-effect", "recovery-provider-failed", "recovery-retry-unavailable-while-sending", "recovery-whitespace-diagnostics", "recovery-long-diagnostics":
                 return { window in
                     let identifiers = self.recordRecoveryAccessibility(in: window, name: name)
                     XCTAssertFalse(identifiers.contains(retryID), "This recovery state must not expose a retry action")
                     XCTAssertTrue(identifiers.contains(activityID), "Recovery notice should expose Activity")
+                    XCTAssertEqual(identifiers.contains("assistant.chat.notice.details"), name == "recovery-long-diagnostics",
+                        "Only meaningful diagnostics should expose the details disclosure; long diagnostic content must remain available")
                 }
             default:
                 return nil
