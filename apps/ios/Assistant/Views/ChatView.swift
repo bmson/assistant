@@ -9,12 +9,189 @@ struct ConversationColumn<Transcript: View, Composer: View>: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            transcript
+            ConversationTranscriptHost(content: transcript)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             composer
         }
     }
 }
+
+/// Own only the transcript's hosting boundary. The parent supplies the complete
+/// keyboard-aware viewport and moves it together with the sibling composer.
+/// The child omits both safe-area regions so its SwiftUI layout does not add a
+/// second container or keyboard inset. Native scroll behavior is tested below.
+private struct ConversationTranscriptHost<Content: View>: UIViewControllerRepresentable {
+    let content: Content
+
+    func makeUIViewController(context: Context) -> ConversationTranscriptController<Content> {
+        ConversationTranscriptController(content: content, environment: context.environment)
+    }
+
+    func updateUIViewController(_ controller: ConversationTranscriptController<Content>, context: Context) {
+        withTransaction(context.transaction) {
+            controller.update(content: content, environment: context.environment)
+        }
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize,
+                     uiViewController: ConversationTranscriptController<Content>, context: Context) -> CGSize? {
+        guard let width = proposal.width, let height = proposal.height,
+              width.isFinite, height.isFinite else { return nil }
+        return CGSize(width: max(width, 0), height: max(height, 0))
+    }
+}
+
+private enum TranscriptCoordinateSpace: Hashable {
+    case viewport
+}
+
+private struct ConversationTranscriptRoot<Content: View>: View {
+    let content: Content
+    let inheritedEnvironment: EnvironmentValues
+#if DEBUG
+    let coordinates: TranscriptHostingCoordinates
+#endif
+
+    var body: some View {
+        content
+#if DEBUG
+            .environment(\.transcriptHostingCoordinates, coordinates)
+#endif
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .coordinateSpace(name: TranscriptCoordinateSpace.viewport)
+            .environment(\.self, inheritedEnvironment)
+    }
+}
+
+/// The controller and its generic root keep their identity across draft,
+/// streaming, environment and reveal updates. SwiftUI owns the container frame;
+/// Auto Layout pins only the owned child to its bounds, never its safe area.
+private final class ConversationTranscriptController<Content: View>: UIViewController {
+    private let host: UIHostingController<ConversationTranscriptRoot<Content>>
+#if DEBUG
+    private let coordinates: TranscriptHostingCoordinates
+#endif
+
+    init(content: Content, environment: EnvironmentValues) {
+#if DEBUG
+        let coordinates = TranscriptHostingCoordinates()
+        self.coordinates = coordinates
+        host = UIHostingController(rootView: ConversationTranscriptRoot(
+            content: content, inheritedEnvironment: environment, coordinates: coordinates))
+#else
+        host = UIHostingController(rootView: ConversationTranscriptRoot(
+            content: content, inheritedEnvironment: environment))
+#endif
+        super.init(nibName: nil, bundle: nil)
+        host.safeAreaRegions = []
+        host.sizingOptions = []
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func loadView() {
+        view = UIView()
+        view.backgroundColor = .clear
+        view.isOpaque = false
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        addChild(host)
+        host.view.backgroundColor = .clear
+        host.view.isOpaque = false
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+#if DEBUG
+        coordinates.view = host.view
+#endif
+        view.addSubview(host.view)
+        NSLayoutConstraint.activate([
+            host.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            host.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            host.view.topAnchor.constraint(equalTo: view.topAnchor),
+            host.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        host.didMove(toParent: self)
+    }
+
+    func update(content: Content, environment: EnvironmentValues) {
+#if DEBUG
+        host.rootView = ConversationTranscriptRoot(
+            content: content, inheritedEnvironment: environment, coordinates: coordinates)
+#else
+        host.rootView = ConversationTranscriptRoot(content: content, inheritedEnvironment: environment)
+#endif
+    }
+}
+
+#if DEBUG
+/// A child-root measurement is converted through its owned native host at read
+/// time. A pure parent translation need not trigger a SwiftUI geometry callback.
+@MainActor
+fileprivate final class TranscriptHostingCoordinates {
+    weak var view: UIView?
+}
+
+struct TranscriptGeometryMeasurement {
+    let localFrame: CGRect
+    private let coordinates: TranscriptHostingCoordinates
+
+    fileprivate init(localFrame: CGRect, coordinates: TranscriptHostingCoordinates) {
+        self.localFrame = localFrame
+        self.coordinates = coordinates
+    }
+
+    @MainActor
+    func frame(in window: UIWindow) -> CGRect? {
+        guard let view = coordinates.view, view.window === window,
+              view.isDescendant(of: window), Self.isValid(localFrame) else { return nil }
+        let frame = view.convert(localFrame, to: window)
+        return Self.isValid(frame) ? frame : nil
+    }
+
+    private static func isValid(_ frame: CGRect) -> Bool {
+        !frame.isNull && !frame.isInfinite && !frame.isEmpty
+            && frame.minX.isFinite && frame.minY.isFinite
+            && frame.width.isFinite && frame.height.isFinite
+            && frame.maxX.isFinite && frame.maxY.isFinite
+    }
+}
+
+private struct TranscriptHostingCoordinatesKey: EnvironmentKey {
+    static let defaultValue: TranscriptHostingCoordinates? = nil
+}
+
+private extension EnvironmentValues {
+    var transcriptHostingCoordinates: TranscriptHostingCoordinates? {
+        get { self[TranscriptHostingCoordinatesKey.self] }
+        set { self[TranscriptHostingCoordinatesKey.self] = newValue }
+    }
+}
+
+private struct TranscriptGeometryObserver: ViewModifier {
+    @Environment(\.transcriptHostingCoordinates) private var coordinates
+    let report: @MainActor (TranscriptGeometryMeasurement) -> Void
+
+    func body(content: Content) -> some View {
+        content.onGeometryChange(for: CGRect.self) {
+            $0.frame(in: .named(TranscriptCoordinateSpace.viewport))
+        } action: { frame in
+            if let coordinates {
+                report(TranscriptGeometryMeasurement(localFrame: frame, coordinates: coordinates))
+            }
+        }
+    }
+}
+
+extension View {
+    func onTranscriptGeometryChange(
+        _ report: @escaping @MainActor (TranscriptGeometryMeasurement) -> Void
+    ) -> some View {
+        modifier(TranscriptGeometryObserver(report: report))
+    }
+}
+#endif
 
 enum PullMenuMotion {
     /// The menu's touch target must fit entirely in the empty layout gap.
@@ -274,7 +451,7 @@ struct TranscriptContext {
 /// The normal app has no observer installed and pays no per-row geometry cost.
 struct ChatTranscriptRowGeometryProbe {
     let messageID: String
-    let report: @MainActor (CGRect) -> Void
+    let report: @MainActor (TranscriptGeometryMeasurement) -> Void
 }
 
 private struct ChatTranscriptRowGeometryProbeKey: EnvironmentKey {
@@ -348,8 +525,8 @@ struct ChatTranscriptRows: View, Equatable {
 #if DEBUG
         if let probe = rowGeometryProbe, item.id == probe.messageID {
             row(item, context: context)
-                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
-                    probe.report(frame)
+                .onTranscriptGeometryChange { measurement in
+                    probe.report(measurement)
                 }
         } else {
             row(item, context: context)

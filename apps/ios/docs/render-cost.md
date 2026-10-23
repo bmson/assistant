@@ -21,6 +21,18 @@ The native transcript clips at the full-stage viewport bounds, which include
 the area behind the controls. The complete surface also clips at its outer
 rounded edge; drawing outside the transcript's full-stage bounds is unnecessary.
 
+`ConversationColumn` gives only the transcript a stable owned child
+`UIHostingController`, pinned to the container bounds with `safeAreaRegions = []`.
+The outer `ChatView` remains responsible for keyboard-aware available height,
+the composer, notices, scroll bindings and the shared menu transform. The child
+receives the complete current representable environment and updates its generic
+root inside the current transaction; it does not own a second keyboard inset,
+scroll delegate, or offset correction. This is a bounded candidate for the
+partial-lift native safe-area defect, pending exact-source native validation.
+Earlier modifier/clipping candidates did not fix that defect: the 393 × 852
+fixture grew its native viewport at 1/5/10pt lifts and retained a 10pt offset
+change after returning to rest. Keep this reproducer and its assertions.
+
 The eager stack keeps every row mounted. Any change to that behavior must
 preserve bottom-follow as messages arrive and streamed replies grow, the
 reader's position when browsing older messages, and row state and interactions.
@@ -190,12 +202,25 @@ rendered row clearance and sibling UIKit input ownership. A paired stub
 bootstrap establishes the composer's actual draft scope, and delegate input
 must reach that scoped draft. An opt-in debug probe measures the actual final
 renderer row by its stable message ID; the normal app installs no row geometry
-observer. Unit-host UIKit accessibility enumeration does
-not reliably expose SwiftUI send, recovery or Jump controls; those lookups are
+observer. Hosted row and fixture measurements use the child root's named bounds
+space, retaining their unchanged local rectangle and a weak owned native host.
+Every assertion converts through that host into the shared UIWindow at read
+time, so parent translation does not depend on another geometry callback or
+reveal arithmetic. Missing ownership, window attachment, or a finite nonempty
+measurement fails the test. Keyboard/layout changes still require fresh row
+measurement. Focused host regressions cover identity, inherited environment,
+transactions and dummy local input/presentation; these are automated container
+checks, not physical gesture or caret-selection evidence. Unit-host UIKit
+accessibility enumeration does not reliably expose SwiftUI send, recovery or Jump controls; those lookups are
 not a control-presence oracle. The eleven RootView captures require separate
 visual review. Send, recovery and Jump activation, VoiceOver, and finger-driven
 menu gestures still require interaction validation; screenshots do not prove
-those behaviors.
+those behaviors. The added hosting boundary makes parent pull arbitration,
+horizontal quick replies, row form focus, and sheet/confirmation presentation
+explicit acceptance risks. The rows have local TextFields, confirmation dialogs
+and a calendar sheet, but no row NavigationLink or cross-root FocusState binding
+was found in the scoped source audit. Complete EnvironmentValues forwarding
+does not itself prove those interactions.
 
 None of it measures frames. Message changes still require linear transcript
 grouping/context work and one equality comparison per row. Typing/menu changes
