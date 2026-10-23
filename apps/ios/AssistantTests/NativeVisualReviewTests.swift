@@ -455,6 +455,68 @@ final class NativeVisualReviewTests: XCTestCase {
         XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
     }
 
+    @MainActor
+    func testDocumentsAndImportCardsWrapAtCompactAndAccessibleWidths() async throws {
+        let fixture = try NativeReviewFixture()
+        var responses = fixture.responses
+        let workspacePath = "/api/mobile/v1/workspace"
+        var workspace = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(responses[workspacePath])) as? [String: Any])
+        workspace["imports"] = [
+            "sources": [
+                [
+                    "source": "Family archive — weekend plans, receipts, and confirmations (2018–2024)",
+                    "workspacePath": "imports/family-archive.zip",
+                    "kind": "archive",
+                    "status": "importing",
+                    "itemsTotal": 120,
+                    "itemsProcessed": 63,
+                    "memoriesSaved": 18,
+                    "quarantinedNow": 4,
+                    "taskId": "task-import",
+                    "error": "Some entries need review because their dates and source details could not be matched confidently.",
+                    "updatedAt": "2026-10-03T09:00:00Z"
+                ],
+                [
+                    "source": "A very long failed backup source with a descriptive title",
+                    "workspacePath": "imports/failed-backup.zip",
+                    "kind": "archive",
+                    "status": "failed",
+                    "itemsTotal": 8,
+                    "itemsProcessed": 3,
+                    "memoriesSaved": 0,
+                    "quarantinedNow": 0,
+                    "taskId": NSNull(),
+                    "error": "The archive could not be read. Try importing the original file again after checking that it is complete.",
+                    "updatedAt": "2026-10-03T09:00:00Z"
+                ]
+            ],
+            "unstartedFiles": [
+                ["name": "Trip planning notes — family weekend (final revised copy).md", "dir": false]
+            ],
+            "sourceAvailability": ["status": "available", "version": 1],
+            "filesAvailability": ["status": "available", "version": 1]
+        ]
+        responses[workspacePath] = try JSONSerialization.data(withJSONObject: workspace)
+        NativeReviewProtocol.install(responses)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+                               session: URLSession(configuration: configuration))
+        let suite = "assistant.documents-compact-visual-review"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        let model = AppModel(apiClient: client, defaults: defaults)
+        await model.refreshAll()
+        _ = await model.refreshWorkspace()
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let page = Page("documents-and-imports", WorkspaceView(area: .documents))
+        try await capture(page, scheme: .light, size: .large, scene: scene, model: model, viewportWidth: 320)
+        try await capture(page, scheme: .dark, size: .large, scene: scene, model: model, viewportWidth: 320)
+        try await capture(page, scheme: .light, size: .accessibility3, scene: scene, model: model, viewportWidth: 320)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty, "Visual fixtures must not run import actions.")
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty, "Every visual read must stay in the fixture transport.")
+    }
+
     private struct Page {
         let name: String
         var ownsNavigation = false
