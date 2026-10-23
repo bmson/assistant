@@ -1,0 +1,275 @@
+name: iOS touch scroll smoke
+
+on:
+  push:
+    branches:
+      - codex/ios-touch-scroll-smoke
+    paths:
+      - .github/workflows/ios-touch-scroll-smoke.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-touch-scroll-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  touch-scroll-smoke:
+    name: Capture one public-touch scroll smoke
+    runs-on: macos-latest
+    timeout-minutes: 50
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.0.app/Contents/Developer
+      PINNED_SOURCE_SHA: 257e278e07c56c4310b0fcae747e5f082fb73d2f
+      OUTPUT_DIR: ${{ runner.temp }}/ios-touch-scroll-smoke
+    steps:
+      # Keep the workflow revision (for provenance) separate from the exact app
+      # source under test. The latter is deliberately immutable for this run.
+      - name: Checkout workflow revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: workflow-source
+
+      - name: Checkout pinned app source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: 257e278e07c56c4310b0fcae747e5f082fb73d2f
+          path: app-source
+
+      - name: Build and run the single touch smoke
+        id: smoke
+        shell: bash
+        run: |
+          mkdir -p "$OUTPUT_DIR"
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+          import platform
+          import re
+          import signal
+          import subprocess
+          import sys
+          import time
+          from pathlib import Path
+
+          output = Path(os.environ["OUTPUT_DIR"])
+          app = Path(os.environ["GITHUB_WORKSPACE"]) / "app-source"
+          source_sha = os.environ["PINNED_SOURCE_SHA"]
+          developer_dir = Path(os.environ["DEVELOPER_DIR"])
+          result_bundle = output / "AssistantTouchScroll.xcresult"
+          metadata = {
+              "workflow_sha": os.environ.get("GITHUB_SHA"),
+              "source_sha_expected": source_sha,
+              "developer_dir": str(developer_dir),
+              "host_architecture": platform.machine(),
+              "host_platform": platform.platform(),
+              "started_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "budgets_seconds": {"build": 1800, "boot_total": 300, "test": 300, "metrics_export": 30},
+              "metric_acceptance": False,
+              "capture_status": "starting",
+              "raw_result_bundle": str(result_bundle),
+          }
+          def save():
+              metadata["updated_at_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+              (output / "capture-metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+
+          def run(label, argv, timeout, cwd=None, capture=False):
+              log_path = output / f"{label}.log"
+              cmd = [str(part) for part in argv]
+              header = "$ " + " ".join(cmd) + "\n"
+              print(header, end="", flush=True)
+              started = time.monotonic()
+              timed_out = False
+              with log_path.open("w+b") as log:
+                  proc = subprocess.Popen(cmd, cwd=cwd, stdout=log, stderr=subprocess.STDOUT,
+                                          start_new_session=True)
+                  try:
+                      code = proc.wait(timeout=timeout)
+                  except subprocess.TimeoutExpired:
+                      timed_out = True
+                      metadata.setdefault("timed_out_commands", []).append(label)
+                      save()
+                      try:
+                          os.killpg(proc.pid, signal.SIGTERM)
+                      except ProcessLookupError:
+                          pass
+                      try:
+                          proc.wait(timeout=10)
+                      except subprocess.TimeoutExpired:
+                          pass
+                      # Terminate any descendants even if the process-group
+                      # leader exited in response to SIGTERM.
+                      try:
+                          os.killpg(proc.pid, signal.SIGKILL)
+                      except ProcessLookupError:
+                          pass
+                      try:
+                          code = proc.wait(timeout=5)
+                      except subprocess.TimeoutExpired:
+                          code = None
+                          metadata.setdefault("reap_failures", []).append(label)
+                  log.flush()
+                  log.seek(0)
+                  contents = log.read()
+              elapsed = round(time.monotonic() - started, 3)
+              metadata.setdefault("commands", {})[label] = {
+                  "argv": cmd, "exit_code": code, "timed_out": timed_out, "elapsed_seconds": elapsed,
+                  "log": str(log_path),
+              }
+              save()
+              excerpt = contents[-16000:].decode(errors="replace")
+              print(excerpt, end="" if excerpt.endswith("\n") or not excerpt else "\n", flush=True)
+              return (124 if timed_out else code), contents if capture else b""
+
+          try:
+              if not developer_dir.is_dir():
+                  raise RuntimeError(f"Required Xcode is missing: {developer_dir}")
+              metadata["xcode_select_path"] = str(developer_dir)
+              version_code, version_out = run("xcode-version", ["xcodebuild", "-version"], 30, capture=True)
+              metadata["xcode_version_exit_code"] = version_code
+              sdk_code, sdk_out = run("simulator-sdk-path", ["xcrun", "--sdk", "iphonesimulator", "--show-sdk-path"], 30, capture=True)
+              sdk_version_code, sdk_version_out = run("simulator-sdk-version", ["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"], 30, capture=True)
+              if version_code != 0 or sdk_code != 0 or sdk_version_code != 0:
+                  raise RuntimeError("Selected Xcode could not report its version or simulator SDK")
+              metadata["xcode_version_output"] = version_out.decode(errors="replace")
+              sdk_path = sdk_out.decode(errors="replace").strip().splitlines()[-1]
+              metadata["simulator_sdk_path"] = sdk_path
+              metadata["simulator_sdk_version"] = sdk_version_out.decode(errors="replace").strip().splitlines()[-1]
+              sdk_major = int(metadata["simulator_sdk_version"].split(".", 1)[0])
+              if sdk_major < 26:
+                  raise RuntimeError(f"Selected simulator SDK is older than iOS 26: {metadata['simulator_sdk_version']}")
+              preflight_code, _ = run("sdk-preflight", ["sh", "infra/ios-touch-scroll/verify-sdk.sh", "iphonesimulator"],
+                                      60, cwd=app)
+              if preflight_code != 0:
+                  raise RuntimeError("Selected simulator SDK failed the public XCTest API preflight")
+
+              source_code, source_out = run("source-revision", ["git", "rev-parse", "HEAD"], 30, cwd=app, capture=True)
+              if source_code != 0 or source_out.decode().strip() != source_sha:
+                  raise RuntimeError("Checked-out app source does not match the pinned SHA")
+              metadata["source_sha_actual"] = source_out.decode().strip()
+
+              devices_code, devices_out = run("available-simulators", ["xcrun", "simctl", "list", "devices", "available", "--json"],
+                                              30, capture=True)
+              if devices_code != 0:
+                  raise RuntimeError("Could not enumerate available simulators")
+              device_data = json.loads(devices_out)
+              candidates = []
+              for runtime, devices in device_data.get("devices", {}).items():
+                  match = re.search(r"SimRuntime\.iOS-([0-9]+(?:-[0-9]+)*)", runtime)
+                  if not match:
+                      continue
+                  version_parts = tuple(int(part) for part in match.group(1).split("-"))
+                  if version_parts < (26,):
+                      continue
+                  for device in devices:
+                      if device.get("isAvailable") and device.get("name", "").startswith("iPhone"):
+                          candidates.append((version_parts, device.get("name", ""), runtime, device))
+              if not candidates:
+                  raise RuntimeError("No available iPhone simulator with iOS 26 or later was found")
+              _, _, runtime, device = sorted(candidates, key=lambda item: (item[0], item[1]))[-1]
+              udid = device["udid"]
+              metadata["simulator"] = {"runtime_identifier": runtime, "runtime_version": runtime.split("iOS-")[-1].replace("-", "."),
+                                        "name": device["name"], "udid": udid,
+                                        "device_type_identifier": device.get("deviceTypeIdentifier"),
+                                        "state_before_boot": device.get("state")}
+              if device.get("state") != "Booted":
+                  boot_code, _ = run("simulator-boot", ["xcrun", "simctl", "boot", udid], 60)
+                  if boot_code != 0:
+                      raise RuntimeError("Selected simulator failed to boot")
+              bootstatus_code, _ = run("simulator-bootstatus", ["xcrun", "simctl", "bootstatus", udid, "-b"], 240)
+              if bootstatus_code != 0:
+                  raise RuntimeError("Selected simulator did not finish booting within five minutes")
+
+              derived_data = output / "DerivedData"
+              common = ["xcodebuild", "-project", "apps/ios/Assistant.xcodeproj", "-scheme", "AssistantScrollPerformance",
+                        "-configuration", "ScrollPerformance", "-destination", f"id={udid}",
+                        "-derivedDataPath", str(derived_data), "-parallel-testing-enabled", "NO",
+                        "CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO", "CODE_SIGN_IDENTITY="]
+              build_code, _ = run("build-for-testing", common + ["build-for-testing"], 1800, cwd=app)
+              if build_code != 0:
+                  raise RuntimeError("Dedicated ScrollPerformance build-for-testing failed")
+              test_code, test_output = run("test-without-building", common + ["-resultBundlePath", str(result_bundle),
+                                       "-only-testing:AssistantScrollUITests/ConversationTouchScrollTests/testOneDragAndDeceleration",
+                                       "test-without-building"], 300, cwd=app, capture=True)
+              metadata["xcode_test_exit_code"] = test_code
+              test_lines = [line for line in test_output.decode(errors="replace").splitlines()
+                            if "testOneDragAndDeceleration" in line and "Test Case" in line]
+              passed_lines = [line for line in test_lines if " passed (" in line]
+              skipped_lines = [line for line in test_lines if " skipped" in line]
+              metadata["selected_test_terminal_lines"] = test_lines
+              metadata["test_passed"] = test_code == 0 and len(passed_lines) == 1 and not skipped_lines
+              if not metadata["test_passed"]:
+                  raise RuntimeError("The single touch scroll UI test did not complete exactly once as passed")
+
+              metrics_path = output / "metrics.json"
+              metrics_code, metrics_bytes = run("export-metrics", ["xcrun", "xcresulttool", "get", "test-results", "metrics",
+                                        "--path", str(result_bundle)], 30, capture=True)
+              metadata["metrics_export_exit_code"] = metrics_code
+              try:
+                  parsed_metrics = json.loads(metrics_bytes) if metrics_code == 0 else None
+              except (json.JSONDecodeError, UnicodeDecodeError):
+                  parsed_metrics = None
+              if metrics_code == 0 and parsed_metrics is not None:
+                  metrics_path.write_text(json.dumps(parsed_metrics, indent=2) + "\n")
+                  audit_code, _ = run("metrics-inventory", ["python3", "infra/ios-touch-scroll/audit-metrics.py", str(metrics_path)],
+                                      30, cwd=app)
+                  metadata["metrics_inventory_exit_code"] = audit_code
+                  metadata["metric_acceptance"] = False
+                  metadata["metric_acceptance_note"] = "Inventory only; no identifiers or units inferred. Requires human metric, receipt, and screenshot review."
+              else:
+                  help_code, _ = run("metrics-command-help", ["xcrun", "xcresulttool", "get", "test-results", "metrics", "--help"],
+                                     30, capture=True)
+                  metadata["metrics_help_exit_code"] = help_code
+                  metadata["metric_acceptance_note"] = "Metrics export failed or was not valid JSON on selected xcresulttool; raw xcresult retained for manual inspection."
+                  raise RuntimeError("Metrics were not exported as valid JSON; raw xcresult is retained for inspection")
+              metadata["capture_status"] = "test-passed-awaiting-human-review"
+          except Exception as error:
+              metadata["capture_status"] = "failed"
+              metadata["failure"] = f"{type(error).__name__}: {error}"
+              print(f"::error::{metadata['failure']}", flush=True)
+          finally:
+              metadata["raw_result_bundle_exists"] = result_bundle.exists()
+              save()
+              if result_bundle.exists():
+                  archive = output / "AssistantTouchScroll.xcresult.tar.gz"
+                  try:
+                      archive_code, _ = run("archive-xcresult", ["tar", "-czf", str(archive), "-C", str(output), result_bundle.name],
+                                            180)
+                      metadata["raw_result_archive"] = str(archive) if archive_code == 0 and archive.exists() else None
+                      metadata["archive_exit_code"] = archive_code
+                      if archive_code == 0 and archive.exists():
+                          with open(os.environ["GITHUB_OUTPUT"], "a") as output_file:
+                              output_file.write("archive_ready=true\n")
+                  except Exception as error:
+                      metadata["archive_error"] = f"{type(error).__name__}: {error}"
+              metadata["finished_at_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+              save()
+
+          if metadata.get("capture_status") != "test-passed-awaiting-human-review":
+              sys.exit(1)
+          PY
+
+      - name: Upload complete raw result and logs
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: ios-touch-scroll-smoke-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/ios-touch-scroll-smoke/capture-metadata.json
+            ${{ runner.temp }}/ios-touch-scroll-smoke/*.log
+            ${{ runner.temp }}/ios-touch-scroll-smoke/metrics.json
+            ${{ runner.temp }}/ios-touch-scroll-smoke/AssistantTouchScroll.xcresult.tar.gz
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload raw xcresult fallback if archiving failed
+        if: always() && steps.smoke.outputs.archive_ready != 'true'
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: ios-touch-scroll-smoke-raw-xcresult-${{ github.run_id }}
+          path: ${{ runner.temp }}/ios-touch-scroll-smoke/AssistantTouchScroll.xcresult
+          if-no-files-found: warn
+          retention-days: 14
