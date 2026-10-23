@@ -51,6 +51,7 @@ export {
   createPostgresOwnerContextRepository,
   listEligibleOwnerCommitments,
 } from './owner-context-repository.js';
+export { createPostgresPhoneCalendarSharingRepository } from './phone-calendar-sharing-repository.js';
 export {
   assertPostgresPrivacyObservationFence,
   createPostgresPrivacyErasureRepository,

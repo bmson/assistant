@@ -4,6 +4,8 @@ import type {
   CachedToolCallInput,
   ClaimApprovedToolCallInput,
   ClaimApprovedToolCallResult,
+  PhoneCalendarCompatibilityRepository,
+  PhoneCalendarSharingRepository,
   Records,
   ToolExecutionOutcome,
   ToolExecutionRepository,
@@ -20,6 +22,7 @@ import {
   toolCallReplayKeysForStart,
 } from '@assistant/persistence';
 import { createFirestorePhoneCalendarCompatibilityRepository } from './phone-calendar-compatibility.js';
+import { createFirestorePhoneCalendarSharingRepository } from './phone-calendar-sharing.js';
 import { assertPrivacyErasureInactiveInTransaction } from './privacy-erasure.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
@@ -69,8 +72,10 @@ function linked(
 
 export class FirestoreToolExecutionRepository implements ToolExecutionRepository {
   readonly kind = 'tool-execution-repository' as const;
-  readonly phoneCalendarCompatibility;
+  readonly phoneCalendarSharing: PhoneCalendarSharingRepository;
+  readonly phoneCalendarCompatibility: PhoneCalendarCompatibilityRepository;
   constructor(readonly store: InstallationStore) {
+    this.phoneCalendarSharing = createFirestorePhoneCalendarSharingRepository(store);
     this.phoneCalendarCompatibility = createFirestorePhoneCalendarCompatibilityRepository(store);
   }
 

@@ -47,17 +47,25 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore rollback sharin
   });
   afterEach(async () => disposeStore(store));
   it('keeps absent-protocol legacy reads, but fences a replaced publisher state and exports only consent metadata', async () => {
-    const cache = new FirestoreToolExecutionRepository(store);
+    const repository = new FirestoreToolExecutionRepository(store);
+    // The rollback bridge is the compatibility-only binary shape: it has the
+    // live cache ports and schema detector, but no atomic sharing port. Current
+    // B reads are separately asserted to fail closed below.
+    const cache = {
+      cacheGet: repository.cacheGet.bind(repository),
+      cachePut: repository.cachePut.bind(repository),
+      phoneCalendarCompatibility: repository.phoneCalendarCompatibility,
+    };
+    const legacyWriter = {
+      cacheGet: repository.cacheGet.bind(repository),
+      cachePut: repository.cachePut.bind(repository),
+    };
     await expect(savePhoneCalendars(cache, ownerId, legacy, now)).rejects.toThrow(
       'Legacy calendar writes',
     );
-    await savePhoneCalendars(
-      { cacheGet: cache.cacheGet.bind(cache), cachePut: cache.cachePut.bind(cache) },
-      ownerId,
-      legacy,
-      now,
-    );
+    await savePhoneCalendars(legacyWriter, ownerId, legacy, now);
     expect((await readPhoneCalendars(cache, ownerId))?.calendars).toEqual(legacy.calendars);
+    expect(await readPhoneCalendars(repository, ownerId)).toBeNull();
     await store.doc('phoneCalendarSharing', ownerId).set(
       encodeRecord({
         id: ownerId,
@@ -154,8 +162,16 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore rollback sharin
     await store
       .doc('phoneCalendarSharing', ownerId)
       .set({ id: ownerId, agentId: 'foreign', state: enabled });
+    const repository = new FirestoreToolExecutionRepository(store);
     await expect(
-      readPhoneCalendars(new FirestoreToolExecutionRepository(store), ownerId),
+      readPhoneCalendars(
+        {
+          cacheGet: repository.cacheGet.bind(repository),
+          cachePut: repository.cachePut.bind(repository),
+          phoneCalendarCompatibility: repository.phoneCalendarCompatibility,
+        },
+        ownerId,
+      ),
     ).rejects.toThrow('ownership or state');
   });
 });

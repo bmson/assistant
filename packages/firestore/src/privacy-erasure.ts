@@ -256,6 +256,13 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
     }
   }
 
+  private async erasePhoneCalendarSharing(agentId: string, generation: string): Promise<void> {
+    await this.store.db.runTransaction(async (tx) => {
+      await this.activeJob(tx, agentId, generation);
+      await eraseFirestorePhoneCalendarSharing(tx, this.store, agentId, this.store.now());
+    });
+  }
+
   private async eraseMemories(agentId: string, generation: string): Promise<void> {
     for (;;) {
       const removed = await this.store.db.runTransaction(async (tx) => {
@@ -1403,10 +1410,7 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
     await this.deleteOwned(agentId, job.generation, 'importSourceDeletionJobs');
     await this.deleteOwned(agentId, job.generation, 'toolCallReceipts');
     await this.deleteOwned(agentId, job.generation, 'toolCallReceiptKeys');
-    await this.store.db.runTransaction(async (tx) => {
-      await this.activeJob(tx, agentId, job.generation);
-      await eraseFirestorePhoneCalendarSharing(tx, this.store, agentId, this.store.now());
-    });
+    await this.erasePhoneCalendarSharing(agentId, job.generation);
     await this.eraseSituationPacks(agentId, job.generation);
     await this.deleteOwned(agentId, job.generation, 'selfRepairIssues');
     await this.eraseMissionReportText(agentId, job.generation);

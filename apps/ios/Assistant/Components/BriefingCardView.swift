@@ -79,9 +79,17 @@ struct BriefingCardView: View {
                 switch section {
                 case let .agenda(title, complete, omittedCount, items):
                     calendarAgendaSection(title: title, complete: complete, omittedCount: omittedCount, items: items)
-                case let .list(kind, title, items, overlaps):
-                    if kind == "attention" && !overlaps.isEmpty {
-                        attentionSection(title: title, items: items, overlaps: overlaps)
+                case let .list(kind, title, items, overlaps, overlapCount, overlapsTruncated, itemCount, itemsTruncated):
+                    if kind == "attention" && (!overlaps.isEmpty || itemCount != nil) {
+                        attentionSection(
+                            title: title,
+                            items: items,
+                            overlaps: overlaps,
+                            overlapCount: overlapCount,
+                            overlapsTruncated: overlapsTruncated,
+                            itemCount: itemCount,
+                            itemsTruncated: itemsTruncated
+                        )
                     } else {
                         VStack(alignment: .leading, spacing: 8) {
                             heading(title)
@@ -164,25 +172,20 @@ struct BriefingCardView: View {
         _ items: [MessageResponseCard.BriefingCard.AgendaItem],
         showCalendarAttribution: Bool
     ) -> some View {
-        let groups = ["All day", "Timed", "Time unavailable"].filter { group in
-            items.contains { category(for: $0) == group }
+        let groups: [MessageResponseCard.BriefingCard.AgendaItem.TimeCategory] = [.allDay, .timed, .timeUnavailable]
+            .filter { group in
+                items.contains { $0.timeCategory == group }
         }
         return VStack(alignment: .leading, spacing: 8) {
             ForEach(groups, id: \.self) { group in
                 VStack(alignment: .leading, spacing: 8) {
-                    heading(group)
-                    ForEach(items.filter { category(for: $0) == group }) { item in
+                    heading(group.title)
+                    ForEach(items.filter { $0.timeCategory == group }) { item in
                         calendarAgendaRow(item, showCalendarAttribution: showCalendarAttribution)
                     }
                 }
             }
         }
-    }
-
-    private func category(for item: MessageResponseCard.BriefingCard.AgendaItem) -> String {
-        if item.day == "All day" { return "All day" }
-        if item.day == "Time unavailable" || item.time.isEmpty { return "Time unavailable" }
-        return "Timed"
     }
 
     private func calendarAgendaRow(
@@ -193,9 +196,9 @@ struct BriefingCardView: View {
             if !names.contains(name) { names.append(name) }
         }
         let timeLabel: String
-        if item.day == "All day" {
+        if item.timeCategory == .allDay {
             timeLabel = item.time.isEmpty ? "All day" : item.time
-        } else if item.day == "Time unavailable" || item.time.isEmpty {
+        } else if item.timeCategory == .timeUnavailable {
             timeLabel = "Time unavailable"
         } else {
             timeLabel = item.time
@@ -264,12 +267,18 @@ struct BriefingCardView: View {
     private func attentionSection(
         title: String,
         items: [MessageResponseCard.BriefingCard.ListItem],
-        overlaps: [MessageResponseCard.BriefingCard.Overlap]
+        overlaps: [MessageResponseCard.BriefingCard.Overlap],
+        overlapCount: Int?,
+        overlapsTruncated: Bool,
+        itemCount: Int?,
+        itemsTruncated: Bool
     ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let availableItems = itemsTruncated && !items.isEmpty ? Array(items.dropLast()) : items
+        let limitNotice = itemsTruncated ? items.last : nil
+        return VStack(alignment: .leading, spacing: 8) {
             heading(title)
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                if item.title == title {
+                if item.title == title && itemCount == nil {
                     VStack(alignment: .leading, spacing: 2) {
                         if !item.detail.isEmpty {
                             Text(item.detail)
@@ -283,8 +292,34 @@ struct BriefingCardView: View {
                                 .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                         }
                     }
-                } else {
+                } else if itemCount == nil {
                     listRow(item)
+                }
+            }
+            if itemCount != nil {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(availableItems.prefix(3).enumerated()), id: \.offset) { _, item in
+                        listRow(item)
+                    }
+                }
+                if availableItems.count > 3 {
+                    CardDisclosure(
+                        collapsedLabel: "Show \(availableItems.count) available details",
+                        expandedLabel: "Show fewer",
+                        standalone: false
+                    ) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(Array(availableItems.dropFirst(3).enumerated()), id: \.offset) { _, item in
+                                listRow(item)
+                            }
+                        }
+                    }
+                }
+                if let limitNotice {
+                    Text(limitNotice.title)
+                        .font(.caption)
+                        .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             VStack(alignment: .leading, spacing: 8) {
@@ -294,7 +329,7 @@ struct BriefingCardView: View {
             }
             if overlaps.count > 3 {
                 CardDisclosure(
-                    collapsedLabel: "Showing 3 of \(overlaps.count) · Show all overlaps",
+                    collapsedLabel: "Show \(overlaps.count) available details",
                     expandedLabel: "Show fewer",
                     standalone: false
                 ) {
@@ -304,6 +339,13 @@ struct BriefingCardView: View {
                         }
                     }
                 }
+            }
+            if overlapsTruncated {
+                let total = overlapCount ?? overlaps.count
+                Text("\(overlaps.count) overlap details available of \(total) possible overlaps.")
+                    .font(.caption)
+                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -348,7 +390,7 @@ struct BriefingCardView: View {
                 }
             }
             .accessibilityElement(children: .combine)
-        case let .list(_, title, items, _):
+        case let .list(_, title, items, _, _, _, _, _):
             VStack(alignment: .leading, spacing: 8) {
                 heading(title)
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in

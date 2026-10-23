@@ -5,13 +5,13 @@
     "packages/config/src/index.ts": "d65963a4a350f41242da86910f085d60909f13b584aa710e4a0423f60437fe9b",
     "apps/agent/src/deps.ts": "fb30df8600bbcf24da0d5cfa9ef1c92e28700b663429cdbbe37d65ecee0ea655",
     "apps/agent/src/index.ts": "6da57b60f853ca6622142a12b70bb31a73e8155eac30dd7d905218c19ca2fd56",
-    "apps/web/lib/server.ts": "d178fa1a8285f3fea7bd89c573d4860af6e5a2f8816a6d1041277234603002ac",
-    "apps/web/proxy.ts": "272a503b301d93bb9690b8ad579d073997081023570bc7138848efc0acec007d",
-    "packages/db/drizzle/meta/_journal.json": "f7dee0462df8ea55a23c293fb451da52f8433098c1761c549c84a9916c5236da",
-    "infra/gcp/release-contracts.json": "0816aeff566d434b39bb20128ec0f23b8505225ae61d6a624eef8505fc47aefc"
+    "apps/web/lib/server.ts": "c7134fe07612b8653ef7ee73f92076bbdea5a27fb665c8efb3d843f960d49211",
+    "apps/web/proxy.ts": "93a75f2e8459877898c920d5a9560255f90771b98d6ff584aed16a2898b5485a",
+    "packages/db/drizzle/meta/_journal.json": "6aaf30195d32ffcffca7dd36fa138c7d82a37d7249fa59ced46a1d2975ca42d6",
+    "infra/gcp/release-contracts.json": "bf1237ceb69f5656c0529bee0c652d9a69957a5a2f18f7baa27144e72e9c7c2a"
   },
-  "latestPostgresMigration": "0128_connected_calendar_accounts",
-  "postgresSchemaVersion": 128,
+  "latestPostgresMigration": "0129_slow_archangel",
+  "postgresSchemaVersion": 129,
   "releaseContracts": {
     "agent": {
       "apiContract": 1,
@@ -20,7 +20,7 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 128,
+        "min": 129,
         "max": 129
       },
       "currentPostgresSchemaCompatible": true
@@ -32,7 +32,7 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 128,
+        "min": 129,
         "max": 129
       },
       "currentPostgresSchemaCompatible": true
@@ -154,8 +154,8 @@
       "sha256": "114f4f3803727c84617b59c30df2679159257e8bba5b9135ef0ba953d312123a"
     },
     "apps/web/app/api/mobile/v1/calendars/route.ts": {
-      "methods": ["DELETE", "PUT"],
-      "sha256": "2996392fe44301be286ba4b82da6e2be81aa4ce85f78d9f6d04f83f0a0467893"
+      "methods": ["DELETE", "GET", "POST", "PUT"],
+      "sha256": "25f1c93c91adbce3edb75c03f1634485998d6f5e518578f4c986af9d71a0ad3a"
     },
     "apps/web/app/api/mobile/v1/calls/[id]/route.ts": {
       "methods": ["GET", "POST"],

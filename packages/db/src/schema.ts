@@ -1968,6 +1968,23 @@ export const toolCache = pgTable(
   (t) => [index('tool_cache_expires_idx').on(t.expiresAt)],
 );
 
+/** Current iPhone calendar sharing consent and publisher generation. */
+export const phoneCalendarSharing = pgTable(
+  'phone_calendar_sharing',
+  {
+    id: uuid('id').primaryKey(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    state: jsonb('state').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('phone_calendar_sharing_agent_idx').on(t.agentId),
+    check('phone_calendar_sharing_owner_id_check', sql`${t.id} = ${t.agentId}`),
+  ],
+);
+
 export const rateLimits = pgTable('rate_limits', {
   /** 'tool:gmail.send' | 'task' | 'channel:sms' | ... */
   scope: text('scope').primaryKey(),

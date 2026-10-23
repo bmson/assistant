@@ -19,6 +19,11 @@ final class PhoneCalendarStoreTests: XCTestCase {
         return (store, source, defaults)
     }
 
+    private func appModel() -> AppModel {
+        AppModel(defaults: UserDefaults(suiteName: "calendar-view-model-tests-\(UUID().uuidString)")!,
+                 captureCurrentPlace: { nil })
+    }
+
     func testOpeningDoesNotRequestPermissionOrReadBeforeOptIn() {
         let (store, source, _) = fixture()
         store.refresh()
@@ -227,6 +232,7 @@ final class PhoneCalendarStoreTests: XCTestCase {
                     source.access = access
                     source.records = [event(store, id: "meeting")]
                     let view = NavigationStack { PhoneCalendarsView(store: store) }
+                        .environment(appModel())
                         .environment(\.scenePhase, .active)
                         .environment(\.colorScheme, scheme).environment(\.dynamicTypeSize, size)
                         .preferredColorScheme(scheme)
@@ -255,7 +261,8 @@ final class PhoneCalendarStoreTests: XCTestCase {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
         let (store, source, _) = fixture(enabled: true, selected: ["work"])
         let controller = UIHostingController(rootView:
-            NavigationStack { PhoneCalendarsView(store: store) }.environment(\.scenePhase, .background))
+            NavigationStack { PhoneCalendarsView(store: store) }
+                .environment(appModel()).environment(\.scenePhase, .background))
         let window = UIWindow(windowScene: scene)
         window.frame = scene.coordinateSpace.bounds
         window.rootViewController = controller
@@ -273,7 +280,8 @@ final class PhoneCalendarStoreTests: XCTestCase {
         let initialRead = expectation(description: "The visible calendar loads")
         source.didReadEvents = { initialRead.fulfill() }
         let controller = UIHostingController(rootView:
-            NavigationStack { PhoneCalendarsView(store: store) }.environment(\.scenePhase, .active))
+            NavigationStack { PhoneCalendarsView(store: store) }
+                .environment(appModel()).environment(\.scenePhase, .active))
         let window = UIWindow(windowScene: scene)
         window.frame = scene.coordinateSpace.bounds
         window.rootViewController = controller

@@ -184,6 +184,53 @@ struct APIClient: Sendable {
         try await get("api/mobile/v1/bootstrap")
     }
 
+    func phoneCalendarSharing() async throws -> PhoneCalendarSharingRead {
+        try await get("api/mobile/v1/calendars")
+    }
+
+    func configurePhoneCalendarSharing(_ body: PhoneCalendarSharingCommandBody) async throws -> PhoneCalendarSharingMutationResult {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/calendars"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(body)
+        return try await phoneCalendarSharingMutation(request)
+    }
+
+    func publishPhoneCalendarSnapshot(
+        ownerId: String,
+        publisherId: String,
+        generation: Int,
+        snapshot: PhoneCalendarSnapshotInput
+    ) async throws -> PhoneCalendarSharingMutationResult {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/calendars"))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(
+            PhoneCalendarSnapshotUploadBody(ownerId: ownerId, publisherId: publisherId, generation: generation, snapshot: snapshot)
+        )
+        return try await phoneCalendarSharingMutation(request)
+    }
+
+    func revokePhoneCalendarSharing(_ body: PhoneCalendarRevocationBody) async throws -> PhoneCalendarSharingMutationResult {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/calendars"))
+        request.httpMethod = "DELETE"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(body)
+        return try await phoneCalendarSharingMutation(request)
+    }
+
+    private func phoneCalendarSharingMutation(_ request: URLRequest) async throws -> PhoneCalendarSharingMutationResult {
+        let (data, response) = try await load(request)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        if http.statusCode == 409 {
+            do { return try JSONDecoder().decode(PhoneCalendarSharingMutationResult.self, from: data) }
+            catch { throw APIError.decodeFailure(error, as: PhoneCalendarSharingMutationResult.self) }
+        }
+        try await validate(http, data: data)
+        do { return try JSONDecoder().decode(PhoneCalendarSharingMutationResult.self, from: data) }
+        catch { throw APIError.decodeFailure(error, as: PhoneCalendarSharingMutationResult.self) }
+    }
+
     func overview() async throws -> OverviewResponse {
         try await get("api/mobile/v1/overview")
     }

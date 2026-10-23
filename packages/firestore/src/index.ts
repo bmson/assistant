@@ -121,6 +121,7 @@ export {
 } from './people-directory.js';
 export { getFirestorePersonGraph } from './person-graph-read.js';
 export { getFirestorePersonTemporalDetails } from './person-temporal-details.js';
+export { createFirestorePhoneCalendarSharingRepository } from './phone-calendar-sharing.js';
 export {
   assertPrivacyErasureFenceUnchanged,
   assertPrivacyErasureInactiveInTransaction,

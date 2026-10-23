@@ -43,6 +43,19 @@ const stateFor = (ownerId: string): PhoneCalendarSharingState => ({
   complete: true,
   truncated: false,
 });
+function compatibilityCache(db: Db) {
+  const repository = createPostgresToolExecutionRepository(db);
+  const cache = {
+    cacheGet: repository.cacheGet.bind(repository),
+    cachePut: repository.cachePut.bind(repository),
+    phoneCalendarCompatibility: repository.phoneCalendarCompatibility,
+  };
+  const legacyWriter = {
+    cacheGet: repository.cacheGet.bind(repository),
+    cachePut: repository.cachePut.bind(repository),
+  };
+  return { cache, legacyWriter, repository };
+}
 async function rolledBack(body: (db: Db, ownerId: string) => Promise<void>) {
   assertAllocatedTestTarget({
     databaseUrl: process.env.DATABASE_URL,
@@ -58,6 +71,10 @@ async function rolledBack(body: (db: Db, ownerId: string) => Promise<void>) {
         const owners = await tx.query.agents.findMany({ columns: { id: true }, limit: 2 });
         if (owners.length !== 1 || !owners[0])
           throw new Error('Requires the isolated seeded owner');
+        // The allocated database is migrated through schema 129 before Vitest.
+        // Hide it only inside this transaction so both rollback protocol states
+        // can be exercised without changing the durable test schema.
+        await tx.execute(sql`drop table if exists public.phone_calendar_sharing`);
         await body(tx as unknown as Db, owners[0].id);
         throw new Error('rollback bridge fixture');
       }),
@@ -113,7 +130,7 @@ it('runs legacy reads, export, and full privacy erasure with table 129 absent', 
       (await db.execute(sql`select to_regclass('public.phone_calendar_sharing') as relation`))[0]
         ?.relation,
     ).toBeNull();
-    const cache = createPostgresToolExecutionRepository(db);
+    const { cache, legacyWriter } = compatibilityCache(db);
     expect(await cache.phoneCalendarCompatibility?.read(ownerId)).toEqual({
       schema: 'legacy',
       state: null,
@@ -121,11 +138,7 @@ it('runs legacy reads, export, and full privacy erasure with table 129 absent', 
     await expect(savePhoneCalendars(cache, ownerId, legacy)).rejects.toThrow(
       'Legacy calendar writes',
     );
-    await savePhoneCalendars(
-      { cacheGet: cache.cacheGet.bind(cache), cachePut: cache.cachePut.bind(cache) },
-      ownerId,
-      legacy,
-    );
+    await savePhoneCalendars(legacyWriter, ownerId, legacy);
     expect((await readPhoneCalendars(cache, ownerId))?.calendars).toEqual(legacy.calendars);
     expect(
       (await createPostgresPrivacyExportRepository(db).exportOwnerData()).phoneCalendarSharing
@@ -144,7 +157,7 @@ it('safely rolls back over populated schema 129, exports consent, erases data, a
   rolledBack(async (db, ownerId) => {
     await add129(db);
     await seedState(db, ownerId);
-    const cache = createPostgresToolExecutionRepository(db);
+    const { cache } = compatibilityCache(db);
     const snapshot = await readPhoneCalendars(cache, ownerId);
     expect(snapshot).toMatchObject({
       calendars: [{ id: 'work', name: 'Work' }],

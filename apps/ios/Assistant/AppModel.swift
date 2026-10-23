@@ -1,4 +1,5 @@
 import Foundation
+import EventKit
 import Observation
 import SwiftUI
 import UIKit
@@ -154,6 +155,7 @@ final class AppModel {
         }
     }
     private(set) var bootstrap: BootstrapResponse?
+    let phoneCalendarSharing: PhoneCalendarSharingCoordinator
     let edits = OptimisticEditStore()
     @ObservationIgnored private var memoryErasureToken: UUID? {
         didSet { edits.retryBlockedResources = memoryErasureToken == nil ? [] : [.memory] }
@@ -274,6 +276,8 @@ final class AppModel {
     /// words are never lost to a network or server failure. ChatView consumes it.
     private(set) var restorableDraft: String?
     private(set) var composerRecoveryRevision = 0
+    private(set) var calendarDraftRestoreRevision = 0
+    private(set) var isPreparingCalendarContext = false
     // Its session and recovery are read through composerDraftScope/helpers.
     // Keep this tracked even though the storage itself is private.
     private var conversationDrafts = ConversationDrafts()
@@ -336,6 +340,12 @@ final class AppModel {
     /// revision reuses its server idempotency key.
     @ObservationIgnored private var cardRefreshOperations: [String: String] = [:]
     @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var phoneCalendarSyncTask: Task<Void, Never>?
+    @ObservationIgnored private var phoneCalendarSyncRevision = 0
+    @ObservationIgnored private var phoneCalendarEventDebounceTask: Task<Void, Never>?
+    @ObservationIgnored private var phoneCalendarEventDebounceRevision = PhoneCalendarEventRefreshRevision()
+    @ObservationIgnored private var phoneCalendarEventStoreObserver: NSObjectProtocol?
+    @ObservationIgnored private var calendarPreflightRevision = 0
     @ObservationIgnored private var idleTask: Task<Void, Never>?
     @ObservationIgnored private var idlePollingVersion = 0
     /// The turn in flight, kept so returning to the foreground can pick the
@@ -403,11 +413,13 @@ final class AppModel {
             SpeechPlayer.shared.enqueue(SpeakableText.passages(for: message), for: message.id)
         },
         scheduleLocalNotification: LocalNotificationScheduler? = nil,
+        phoneCalendarSharing: PhoneCalendarSharingCoordinator? = nil,
         captureCurrentPlace: @escaping @MainActor () async -> (location: CLLocation, label: String)? = {
             await LocationManager.shared.captureCurrentPlace()
         }
     ) {
         self.defaults = defaults
+        self.phoneCalendarSharing = phoneCalendarSharing ?? PhoneCalendarSharingCoordinator()
         self.storeConnectionToken = storeConnectionToken
         self.enqueueAutomaticSpeech = enqueueAutomaticSpeech
         self.scheduleLocalNotification = scheduleLocalNotification ?? { title, body, route, approvalId, agentID, conversationID in
@@ -450,6 +462,11 @@ final class AppModel {
                   let apnsEnvironment = self.apnsEnvironment,
                   let client = self.client else { throw APIError.invalidResponse }
             try await client.postDeviceToken(DeviceTokenBody(token: token, environment: apnsEnvironment))
+        }
+        phoneCalendarEventStoreObserver = NotificationCenter.default.addObserver(
+            forName: .EKEventStoreChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.phoneCalendarEventsChanged() }
         }
     }
 
@@ -789,6 +806,7 @@ final class AppModel {
             try await prepareCardFormSession(for: client, ownerId: response.identity.id, pairingAttempt: pairingAttempt)
             guard connectionIsCurrent(client, version: version), pairingAttempt == pairingAttemptVersion else { return }
             apply(response)
+            schedulePhoneCalendarSync(using: client, ownerID: response.identity.id)
             version = connectionVersion
             clearRecoveredError(from: .bootstrap)
             await resolvePendingNotificationDestination()
@@ -1520,6 +1538,7 @@ final class AppModel {
             defaults.set(normalized, forKey: serverKey)
             client = candidate
             apply(verified, preservingLocalMessages: keepsCurrentSession && isSending)
+            schedulePhoneCalendarSync(using: candidate, ownerID: verified.identity.id)
             showingConnection = false
             let version = connectionVersion
             await refreshConversationForNewlyEnabledForms(
@@ -1546,6 +1565,15 @@ final class AppModel {
     }
 
     private func resetConnectedState(preserveCardFormRecoveryFence: Bool = false) {
+        phoneCalendarSyncRevision += 1
+        phoneCalendarSyncTask?.cancel()
+        phoneCalendarSyncTask = nil
+        phoneCalendarEventDebounceTask?.cancel()
+        phoneCalendarEventDebounceTask = nil
+        _ = phoneCalendarEventDebounceRevision.advance()
+        calendarPreflightRevision += 1
+        isPreparingCalendarContext = false
+        phoneCalendarSharing.cancelInFlightBinding()
         NotificationManager.shared.setRegistrationScope(nil)
         stopIdlePolling()
         pollTask?.cancel()
@@ -1755,10 +1783,105 @@ final class AppModel {
         if isNowActive {
             edits.refreshConfirmed()
             discardStaleConnectionsIfNeeded()
-            if bootstrap != nil { startIdlePolling() }
+            if let bootstrap {
+                startIdlePolling()
+                schedulePhoneCalendarSync(using: client, ownerID: bootstrap.identity.id)
+            }
             resumeInterruptedTurn()
         } else {
             stopIdlePolling()
+        }
+    }
+
+    func loadPhoneCalendarSharing() async {
+        guard let client, let ownerID = bootstrap?.identity.id else {
+            phoneCalendarSharing.cancelInFlightBinding()
+            return
+        }
+        await phoneCalendarSharing.refresh(client: client, expectedOwnerID: ownerID, publishIfEnabled: false)
+    }
+
+    func refreshPhoneCalendarSharingSnapshot() async {
+        guard let client, let ownerID = bootstrap?.identity.id else {
+            phoneCalendarSharing.cancelInFlightBinding()
+            return
+        }
+        await phoneCalendarSharing.refresh(client: client, expectedOwnerID: ownerID, publishIfEnabled: true)
+    }
+
+    func phoneCalendarEventsChanged() {
+        phoneCalendarEventDebounceTask?.cancel()
+        guard let client, let ownerID = bootstrap?.identity.id,
+              isSceneActive, phoneCalendarSharing.isSharingEnabled else { return }
+        let eventRevision = phoneCalendarEventDebounceRevision.advance()
+        let version = connectionVersion
+        phoneCalendarEventDebounceTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(700))
+            guard !Task.isCancelled, let self else { return }
+            defer {
+                if self.phoneCalendarEventDebounceRevision.owns(eventRevision) {
+                    self.phoneCalendarEventDebounceTask = nil
+                }
+            }
+            guard self.phoneCalendarEventDebounceRevision.owns(eventRevision),
+                  self.connectionIdentityIsCurrent(client, version: version),
+                  self.bootstrap?.identity.id == ownerID,
+                  self.phoneCalendarSharing.isSharingEnabled else { return }
+            let deadline = ContinuousClock.now + .seconds(5)
+            while self.phoneCalendarSharing.isWorking, ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(50))
+                guard !Task.isCancelled,
+                      self.phoneCalendarEventDebounceRevision.owns(eventRevision),
+                      self.connectionIdentityIsCurrent(client, version: version),
+                      self.bootstrap?.identity.id == ownerID,
+                      self.phoneCalendarSharing.isSharingEnabled else { return }
+            }
+            guard !self.phoneCalendarEventDebounceTaskIsCancelledOrStale(eventRevision: eventRevision),
+                  self.connectionIdentityIsCurrent(client, version: version),
+                  self.bootstrap?.identity.id == ownerID,
+                  !self.phoneCalendarSharing.isWorking else { return }
+            await self.phoneCalendarSharing.refresh(client: client, expectedOwnerID: ownerID, publishIfEnabled: true)
+        }
+    }
+
+    private func phoneCalendarEventDebounceTaskIsCancelledOrStale(eventRevision: Int) -> Bool {
+        Task.isCancelled || !phoneCalendarEventDebounceRevision.owns(eventRevision)
+    }
+
+    func startPhoneCalendarSharing(with calendars: [SharedPhoneCalendar], replace: Bool = false) async {
+        guard let client, let ownerID = bootstrap?.identity.id else {
+            phoneCalendarSharing.cancelInFlightBinding()
+            return
+        }
+        if !phoneCalendarSharing.isOwnerVerified {
+            await phoneCalendarSharing.refresh(client: client, expectedOwnerID: ownerID, publishIfEnabled: false)
+        }
+        await phoneCalendarSharing.enable(
+            client: client, expectedOwnerID: ownerID,
+            command: replace ? "replace" : "enable", selectedCalendars: calendars
+        )
+    }
+
+    func stopPhoneCalendarSharing() async {
+        guard let client, let ownerID = bootstrap?.identity.id else {
+            phoneCalendarSharing.cancelInFlightBinding()
+            return
+        }
+        if !phoneCalendarSharing.isOwnerVerified {
+            await phoneCalendarSharing.refresh(client: client, expectedOwnerID: ownerID, publishIfEnabled: false)
+        }
+        await phoneCalendarSharing.disable(client: client, expectedOwnerID: ownerID)
+    }
+
+    private func schedulePhoneCalendarSync(using client: APIClient?, ownerID: String) {
+        guard let client, !Task.isCancelled, phoneCalendarSyncTask == nil else { return }
+        phoneCalendarSyncRevision += 1
+        let revision = phoneCalendarSyncRevision
+        phoneCalendarSyncTask = Task { [weak self] in
+            guard let self else { return }
+            await self.phoneCalendarSharing.refresh(client: client, expectedOwnerID: ownerID, publishIfEnabled: true)
+            guard revision == self.phoneCalendarSyncRevision else { return }
+            self.phoneCalendarSyncTask = nil
         }
     }
 
@@ -3758,7 +3881,7 @@ final class AppModel {
     /// `spoken` says this turn will be heard rather than read, and asks the
     /// server for a reply shaped for the ear: short, no tables, no Markdown to
     /// pronounce.
-    func send(_ rawText: String, autonomous override: Bool? = nil, force: Bool = false, spoken: Bool = false) {
+    func send(_ rawText: String, autonomous override: Bool? = nil, force: Bool = false, spoken: Bool = false, calendarContextReady: Bool = false) {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isSending,
               let client,
@@ -3776,6 +3899,53 @@ final class AppModel {
         }
         guard resumableTurn == nil, ordinaryTurn == nil else {
             errorMessage = "The previous turn’s status is still unknown. Reconnect to check it before starting another turn."
+            return
+        }
+        if !calendarContextReady,
+           (phoneCalendarSharing.isSharingEnabled || phoneCalendarSharing.hasPendingMutation
+            || phoneCalendarSharing.hasPendingRemoval || phoneCalendarSharing.requiresPermissionReview),
+           let ownerID = bootstrap?.identity.id {
+            guard !isPreparingCalendarContext else { return }
+            isPreparingCalendarContext = true
+            calendarPreflightRevision += 1
+            let preflightRevision = calendarPreflightRevision
+            saveComposerDraft(text, in: draftScope)
+            errorMessage = "Checking the shared calendar snapshot before sending…"
+            let version = connectionVersion
+            Task { [weak self] in
+                guard let self else { return }
+                let ready = await self.phoneCalendarSharing.synchronizeBeforeChat(
+                    client: client, expectedOwnerID: ownerID, timeout: .seconds(5)
+                )
+                guard self.calendarPreflightRevision == preflightRevision else { return }
+                guard self.connectionIdentityIsCurrent(client, version: version),
+                      self.bootstrap?.identity.id == ownerID else {
+                    self.isPreparingCalendarContext = false
+                    return
+                }
+                self.isPreparingCalendarContext = false
+                guard self.composerDraftScope == draftScope else { return }
+                if ready {
+                    self.saveComposerDraft("", in: draftScope)
+                    self.errorMessage = nil
+                    self.send(text, autonomous: override, force: force, spoken: spoken, calendarContextReady: true)
+                } else {
+                    guard self.phoneCalendarSharing.matchesBinding(client: client, expectedOwnerID: ownerID) else {
+                        self.errorMessage = "The assistant account or server changed while calendar sharing was being checked. Review the connection before sending this message."
+                        self.calendarDraftRestoreRevision += 1
+                        return
+                    }
+                    self.saveComposerDraft("", in: draftScope)
+                    self.send(text, autonomous: override, force: force, spoken: spoken, calendarContextReady: true)
+                    self.errorMessage = self.phoneCalendarSharing.hasPendingRemoval
+                        ? "Calendar removal is still pending; the server may still have the last uploaded snapshot."
+                        : self.phoneCalendarSharing.requiresPermissionReview
+                            ? "Calendar uploads are paused for review; answers may use the last uploaded snapshot."
+                        : self.phoneCalendarSharing.isSharingEnabled || self.phoneCalendarSharing.hasPendingMutation
+                            ? "Calendar sync did not finish; answers may use the last uploaded snapshot."
+                            : "Calendar sharing is off; this answer may not include iPhone calendar details."
+                }
+            }
             return
         }
         let version = connectionVersion

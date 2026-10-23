@@ -87,6 +87,8 @@
 		B000000000000000000000B3 /* System/PhoneCalendarStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B3 /* System/PhoneCalendarStore.swift */; };
 		B000000000000000000000B4 /* Views/PhoneCalendarsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B4 /* Views/PhoneCalendarsView.swift */; };
 		B000000000000000000000B5 /* PhoneCalendarStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B5 /* PhoneCalendarStoreTests.swift */; };
+		B000000000000000000000C2 /* Models/PhoneCalendarSharing.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000C2 /* Models/PhoneCalendarSharing.swift */; };
+		B000000000000000000000C3 /* System/PhoneCalendarSharingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000C3 /* System/PhoneCalendarSharingCoordinator.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -205,6 +207,8 @@
 		C000000000000000000000B3 /* System/PhoneCalendarStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = System/PhoneCalendarStore.swift; sourceTree = "<group>"; };
 		C000000000000000000000B4 /* Views/PhoneCalendarsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/PhoneCalendarsView.swift; sourceTree = "<group>"; };
 		C000000000000000000000B5 /* PhoneCalendarStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneCalendarStoreTests.swift; sourceTree = "<group>"; };
+		C000000000000000000000C2 /* Models/PhoneCalendarSharing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/PhoneCalendarSharing.swift; sourceTree = "<group>"; };
+		C000000000000000000000C3 /* System/PhoneCalendarSharingCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = System/PhoneCalendarSharingCoordinator.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -259,8 +263,10 @@
 				C00000000000000000000002 /* AppModel.swift */,
 				C000000000000000000000B4 /* Views/PhoneCalendarsView.swift */,
 				C000000000000000000000B3 /* System/PhoneCalendarStore.swift */,
+				C000000000000000000000C3 /* System/PhoneCalendarSharingCoordinator.swift */,
 				C00000000000000000000003 /* Design/AssistantTheme.swift */,
 				C00000000000000000000004 /* Models/APIModels.swift */,
+				C000000000000000000000C2 /* Models/PhoneCalendarSharing.swift */,
 				C000000000000000000000BC /* OptimisticEdits.swift */,
 				C00000000000000000000055 /* Models/PollingPolicy.swift */,
 				C000000000000000000000A1 /* Models/ConversationDrafts.swift */,
@@ -489,8 +495,10 @@
 				B00000000000000000000002 /* AppModel.swift in Sources */,
 				B000000000000000000000B4 /* Views/PhoneCalendarsView.swift in Sources */,
 				B000000000000000000000B3 /* System/PhoneCalendarStore.swift in Sources */,
+				B000000000000000000000C3 /* System/PhoneCalendarSharingCoordinator.swift in Sources */,
 				B00000000000000000000003 /* Design/AssistantTheme.swift in Sources */,
 				B00000000000000000000004 /* Models/APIModels.swift in Sources */,
+				B000000000000000000000C2 /* Models/PhoneCalendarSharing.swift in Sources */,
 				B000000000000000000000BC /* OptimisticEdits.swift in Sources */,
 				B00000000000000000000055 /* Models/PollingPolicy.swift in Sources */,
 				B000000000000000000000A1 /* Models/ConversationDrafts.swift in Sources */,

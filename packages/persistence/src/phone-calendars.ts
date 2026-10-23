@@ -1,9 +1,13 @@
 import { z } from 'zod';
 import type { ToolExecutionRepository } from './dispatch.js';
 import { unavailableSharedPhoneCalendars } from './phone-calendar-compatibility.js';
+import type {
+  PhoneCalendarSharingRepository,
+  PhoneCalendarSharingState,
+} from './phone-calendar-sharing.js';
 
 const instant = z.string().datetime({ offset: true });
-const timeZone = z
+export const phoneCalendarTimeZoneSchema = z
   .string()
   .min(1)
   .max(100)
@@ -37,7 +41,7 @@ export const phoneCalendarSnapshotSchema = z
       )
       .max(100)
       .optional(),
-    timeZone,
+    timeZone: phoneCalendarTimeZoneSchema,
     calendars: z
       .array(
         z
@@ -45,7 +49,7 @@ export const phoneCalendarSnapshotSchema = z
             id: z.string().min(1).max(200),
             name: z.string().max(300),
             purpose: z.enum(['unspecified', 'commitments', 'reference']).optional(),
-            timeZone: timeZone.optional(),
+            timeZone: phoneCalendarTimeZoneSchema.optional(),
           })
           .strict(),
       )
@@ -58,7 +62,7 @@ export const phoneCalendarSnapshotSchema = z
             calendarId: z.string().min(1).max(200),
             providerExternalIdentifier: z.string().max(1024).optional(),
             status: z.enum(['confirmed', 'tentative', 'cancelled']).optional(),
-            calendarTimeZone: timeZone.optional(),
+            calendarTimeZone: phoneCalendarTimeZoneSchema.optional(),
             ownerParticipant: z
               .object({
                 email: z.string().email().max(320),
@@ -103,7 +107,7 @@ export type PhoneCalendarSnapshot = PhoneCalendarSnapshotInput & { syncedAt: str
 export type PhoneCalendarCache = Pick<
   ToolExecutionRepository,
   'cacheGet' | 'cachePut' | 'phoneCalendarCompatibility'
->;
+> & { phoneCalendarSharing?: PhoneCalendarSharingRepository };
 const key = (agentId: string) => `phone-calendars:v1:${agentId}`;
 
 /** Transient device snapshot, on the same portable expiring store as provider reads. */
@@ -115,7 +119,7 @@ export async function savePhoneCalendars(
 ) {
   // The bridge is read-only even before table 129 exists. Do not probe then
   // write: consent could change between those operations. B writes atomically.
-  if (cache.phoneCalendarCompatibility)
+  if (cache.phoneCalendarCompatibility || cache.phoneCalendarSharing)
     throw new Error('Legacy calendar writes are disabled by the schema compatibility bridge');
   const snapshot =
     input === null
@@ -132,7 +136,44 @@ export async function savePhoneCalendars(
 export async function readPhoneCalendars(
   cache: PhoneCalendarCache,
   agentId: string,
+  now = new Date(),
 ): Promise<PhoneCalendarSnapshot | null> {
+  const unavailableSnapshot = (
+    sharing: PhoneCalendarSharingState | null,
+  ): PhoneCalendarSnapshot | null =>
+    sharing
+      ? {
+          calendars: sharing.calendars,
+          events: [],
+          timeMin: sharing.timeMin ?? now.toISOString(),
+          timeMax: sharing.timeMax ?? new Date(now.getTime() + 1000).toISOString(),
+          timeZone: sharing.calendars.find((calendar) => calendar.timeZone)?.timeZone ?? 'UTC',
+          selectionRevision: sharing.generation,
+          capturedAt: sharing.capturedAt,
+          syncedAt: sharing.receivedAt ?? new Date(0).toISOString(),
+          complete: false,
+          truncated: false,
+          sourceAvailability: sharing.calendars.map((calendar) => ({
+            calendarId: calendar.id,
+            status: 'missing',
+            complete: false,
+            reason: sharing.receivedAt
+              ? 'The shared calendar snapshot expired or no longer matches the selected calendars.'
+              : 'No shared calendar snapshot has been received yet.',
+          })),
+        }
+      : null;
+  const sharingRepository = cache.phoneCalendarSharing;
+  if (sharingRepository) {
+    // A production sharing port without an atomic read capability is not
+    // allowed to fall back to an independently read cache row.
+    if (!sharingRepository.readSnapshot) return null;
+    const { state, snapshot } = await sharingRepository.readSnapshot(agentId, now);
+    if (!state?.enabled || !state.calendars.length) return null;
+    return snapshot ?? unavailableSnapshot(state);
+  }
+
+  // Legacy cache rows remain readable only when no consent repository exists.
   const compatibility = await cache.phoneCalendarCompatibility?.read(agentId);
   if (compatibility?.schema === 'sharing')
     return unavailableSharedPhoneCalendars(compatibility.state);
@@ -145,6 +186,26 @@ export async function readPhoneCalendars(
   return snapshot.success && typeof syncedAt === 'string' && Number.isFinite(Date.parse(syncedAt))
     ? { ...snapshot.data, syncedAt }
     : null;
+}
+
+function formatCoverageTime(value: string, timeZone: string): string | null {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZone,
+      timeZoneName: 'short',
+    }).format(date);
+  } catch {
+    // The ISO value still carries its known offset when a historical or
+    // malformed zone identifier cannot be formatted.
+    return date.toISOString();
+  }
 }
 
 export function phoneCalendarCoverage(
@@ -179,6 +240,19 @@ export function phoneCalendarCoverage(
       Date.parse(timeMin) >= Date.parse(snapshot.timeMin) &&
       Date.parse(timeMax) <= Date.parse(snapshot.timeMax),
   );
+  const capturedAt = snapshot.capturedAt
+    ? formatCoverageTime(snapshot.capturedAt, snapshot.timeZone)
+    : null;
+  // readPhoneCalendars uses the epoch only as an internal marker for an
+  // enabled source that has never uploaded; it is not a recorded share time.
+  const receivedAt =
+    Date.parse(snapshot.syncedAt) === 0
+      ? null
+      : formatCoverageTime(snapshot.syncedAt, snapshot.timeZone);
+  const knownTimes = [
+    capturedAt ? `Captured on the sharing iPhone: ${capturedAt}.` : null,
+    receivedAt ? `Last shared with Assistant: ${receivedAt}.` : null,
+  ].filter((value): value is string => value !== null);
   return {
     complete: complete && covered,
     ...(snapshot.capturedAt ? { capturedAt: snapshot.capturedAt } : {}),
@@ -190,7 +264,11 @@ export function phoneCalendarCoverage(
     timeMax: snapshot.timeMax,
     ...(!complete || !covered
       ? {
-          note: 'Shared iPhone calendar coverage is incomplete. Open Assistant on the sharing iPhone and refresh. Only the last sent date window and available selected calendars can be checked; missing coverage does not establish a free or empty calendar.',
+          note: [
+            'iPhone calendar coverage is incomplete.',
+            ...knownTimes,
+            'Phone calendars may have changed since the last shared snapshot. On the iPhone where you enabled calendar sharing for this Assistant account, open iPhone calendars and choose Sync now. That phone can refresh the family calendars it shares. Missing coverage does not show a free or empty calendar.',
+          ].join(' '),
         }
       : {}),
   };

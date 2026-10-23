@@ -118,6 +118,9 @@ it('keeps portable record types compatible with all PostgreSQL tables', () => {
   expectTypeOf<Records['rateTable']>().toEqualTypeOf<typeof schema.rateTable.$inferSelect>();
   expectTypeOf<Records['budgets']>().toEqualTypeOf<typeof schema.budgets.$inferSelect>();
   expectTypeOf<Records['toolCache']>().toEqualTypeOf<typeof schema.toolCache.$inferSelect>();
+  expectTypeOf<Records['phoneCalendarSharing']>().toEqualTypeOf<
+    typeof schema.phoneCalendarSharing.$inferSelect
+  >();
   expectTypeOf<Records['rateLimits']>().toEqualTypeOf<typeof schema.rateLimits.$inferSelect>();
   expectTypeOf<Records['writingSamples']>().toEqualTypeOf<
     typeof schema.writingSamples.$inferSelect

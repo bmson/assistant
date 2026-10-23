@@ -43,6 +43,7 @@ import {
   situationPacks,
   situationPreviews,
   tasks,
+  toolCache,
   toolCallReceiptKeys,
   toolCallReceipts,
   voiceProfile,

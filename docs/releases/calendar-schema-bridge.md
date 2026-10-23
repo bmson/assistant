@@ -1,5 +1,12 @@
 # Calendar sharing compatibility bridge
 
+These notes describe the frozen C bridge release `a9b493383a3ff5077e156df04c527401497ea8b9`.
+The subsequent B sharing release adds migration 129, requires 129 for agent/web,
+and replaces the bridge HTTP mutation rejection with the owner-, publisher-, and
+generation-checked protocol. It retains the bridge privacy/export and rollback
+protection, along with 129-compatible selected-worker ranges. B must not merge
+until C is verified serving through the normal automatic pipeline.
+
 This release keeps the PostgreSQL journal at 128. Migration 129 belongs to the
 later calendar-sharing release. Its reviewed SQL only adds
 `phone_calendar_sharing` with an owner foreign key, check, and unique index.

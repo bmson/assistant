@@ -5,6 +5,12 @@ import type { DocumentExtractionMetadata } from './document-extraction-metadata.
 import type { KnowledgeGraphAssertion } from './knowledge-graph-sync.js';
 
 export interface Records {
+  phoneCalendarSharing: {
+    id: string;
+    agentId: string;
+    state: unknown;
+    updatedAt: Date;
+  };
   calendarAccounts: CalendarAccount;
   selfRepairIssues: {
     id: string;

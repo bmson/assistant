@@ -3,6 +3,7 @@ import { classifyCalendarOccurrence } from '@assistant/persistence';
 import type { BriefingCalendarEvent } from './briefing.js';
 import {
   calendarArrivalLead,
+  calendarOverlapAttendanceNote,
   calendarRelationship,
   classifyCalendarOverlap,
   parseCalendarOwnerParticipation,
@@ -375,7 +376,32 @@ function sourceDifferences(
       return `${calendar}: ${detailFields.map((field) => `${field.label} ${field.value(source)}`).join('; ')}`;
     })
     .join(' · ');
-  return { fields: differing.map((field) => field.label), detail, titleDiffers, timeDiffers };
+  const sameTimedMeetingInDifferentZones =
+    !timeDiffers &&
+    timeZoneDisplayDiffers &&
+    sources.every((source) => {
+      const start = text(source.start);
+      const end = text(source.end);
+      const startInstant = Date.parse(start);
+      const endInstant = Date.parse(end);
+      return (
+        source.allDay === false &&
+        INSTANT.test(start) &&
+        INSTANT.test(end) &&
+        Number.isFinite(startInstant) &&
+        Number.isFinite(endInstant) &&
+        endInstant > startInstant &&
+        Boolean(validZone(source.calendarTimeZone))
+      );
+    });
+  return {
+    fields: differing.map((field) => field.label),
+    detail: sameTimedMeetingInDifferentZones
+      ? `${detail}. These entries show the same meeting time in different calendar time zones.`
+      : detail,
+    titleDiffers,
+    timeDiffers,
+  };
 }
 
 /** Only the final followed page can close a paginated read; missing metadata is not complete. */
@@ -500,8 +526,8 @@ function calendarPairAttentionByDay(
           attention.arrivalGuidance.push({
             title: 'Possible arrival and start records',
             detail: lead
-              ? `${text(left.event.title)} and ${text(right.event.title)} may describe one event; the source asks for arrival ${lead} minutes early. Both records remain visible.`
-              : `${text(left.event.title)} and ${text(right.event.title)} may describe one event. Both records remain visible because identity is unverified.`,
+              ? `${text(left.event.title)} and ${text(right.event.title)} may be listings for one event; the invitation asks for arrival ${lead} minutes early. Both entries remain visible.`
+              : `${text(left.event.title)} and ${text(right.event.title)} may be listings for one event. Both entries remain visible; check the invitation to confirm.`,
           });
         }
         continue;
@@ -516,9 +542,9 @@ function calendarPairAttentionByDay(
         if (formattedDetails < MAX_PAIR_DETAILS) {
           formattedDetails += 1;
           attention.sourceIdentityDisagreements.push({
-            title: `Possible same event with different source times: ${text(left.event.title)} (${sourceNames(left.sources).join(', ')}) · ${text(right.event.title)} (${sourceNames(right.sources).join(', ')})`,
+            title: `Possible copies with different times: ${text(left.event.title)} (${sourceNames(left.sources).join(', ')}) · ${text(right.event.title)} (${sourceNames(right.sources).join(', ')})`,
             detail:
-              'The calendars share a trusted event UID but lack enough occurrence metadata to match these records. Both times remain visible; this is a source comparison, not a confirmed distinct-event conflict.',
+              'Assistant cannot confirm whether these are the same event or which time is current. Both entries stay visible; check each invitation.',
           });
         }
         continue;
@@ -536,9 +562,9 @@ function calendarPairAttentionByDay(
         if (formattedDetails < MAX_PAIR_DETAILS) {
           formattedDetails += 1;
           attention.duplicateListings.push({
-            title: `Possible matching calendar entries: ${text(left.event.title)} (${sourceNames(left.sources).join(', ')}) · ${text(right.event.title)} (${sourceNames(right.sources).join(', ')})`,
+            title: `Possible copies: ${text(left.event.title)} (${sourceNames(left.sources).join(', ')}) · ${text(right.event.title)} (${sourceNames(right.sources).join(', ')})`,
             detail:
-              'These listings may describe the same occurrence. Both remain visible; attendance is unverified.',
+              'These listings may be copies of one event. Both remain visible; check the invitation to confirm whether they are copies.',
           });
         }
         continue;
@@ -560,15 +586,18 @@ function calendarPairAttentionByDay(
             : classification === 'commitments_policy_overlap'
               ? `Possible commitments overlap: ${label}`
               : `Possible overlap: ${label}`;
-        const qualification =
-          classification === 'personal_commitment_conflict'
-            ? 'Your verified accepted commitments overlap and both block time.'
-            : classification === 'commitments_policy_overlap'
-              ? 'Your calendar settings mark these as commitments; acceptance is not confirmed for both.'
-              : 'Calendar overlap does not confirm attendance.';
+        const leftLabel = `${text(left.event.title)} (${sourceNames(left.sources).join(', ')})`;
+        const rightLabel = `${text(right.event.title)} (${sourceNames(right.sources).join(', ')})`;
+        const qualification = calendarOverlapAttendanceNote(
+          left.event,
+          right.event,
+          leftLabel,
+          rightLabel,
+          classification,
+        );
         attention.conflicts.push({
           title: overlapTitle,
-          detail: `${text(left.event.title)} (${sourceNames(left.sources).join(', ')}) · ${text(right.event.title)} (${sourceNames(right.sources).join(', ')}). ${qualification}`,
+          detail: `${leftLabel} · ${rightLabel}. ${qualification}`,
           classification,
         });
       }
@@ -665,8 +694,11 @@ export function calendarAgendaCards(input: {
           : usable.length
             ? `No matching events were verified in the checked subset. ${warning}`
             : `Couldn’t load ${scope}. Please retry the calendar lookup.`;
+      const hasPossibleCopies =
+        (pairAttention.get(day)?.duplicateCount ?? 0) > 0 ||
+        (pairAttention.get(day)?.sourceIdentityDisagreementCount ?? 0) > 0;
       const lead = events.length
-        ? `${events.length} calendar ${events.length === 1 ? 'entry' : 'entries'} from ${scope}.${warning ? ` ${warning}` : ''}`
+        ? `${events.length} calendar ${events.length === 1 ? 'entry' : 'entries'} from ${scope}.${hasPossibleCopies ? ' Some listings may be copies; both remain visible.' : ''}${warning ? ` ${warning}` : ''}`
         : emptyLead;
       const items = events.map((event) => {
         const differences = sourceDifferences(event, zone);
@@ -764,30 +796,57 @@ export function calendarAgendaCards(input: {
         duplicateCount,
         arrivalCount,
       } = pairAttention.get(day) ?? emptyPairAttention();
-      if (conflictCount)
+      if (conflictCount) {
+        const truncated = conflictCount > conflicts.length;
+        let summary: string;
+        if (truncated) {
+          summary = `${conflictCount.toLocaleString('en-US')} calendar-entry pairs overlap in time; ${(conflictCount - conflicts.length).toLocaleString('en-US')} additional pairs counted but not expanded; ${conflicts.length} detail previews are available.`;
+        } else {
+          const personalCount = conflicts.filter(
+            (conflict) => conflict.classification === 'personal_commitment_conflict',
+          ).length;
+          const policyCount = conflicts.filter(
+            (conflict) => conflict.classification === 'commitments_policy_overlap',
+          ).length;
+          const otherCount = conflictCount - personalCount - policyCount;
+          summary = [
+            personalCount
+              ? `${personalCount} accepted commitment conflict${personalCount === 1 ? '' : 's'}`
+              : '',
+            policyCount
+              ? `${policyCount} configured commitment overlap${policyCount === 1 ? '' : 's'} (acceptance unconfirmed)`
+              : '',
+            otherCount ? `${otherCount} other overlap${otherCount === 1 ? '' : 's'}` : '',
+          ]
+            .filter(Boolean)
+            .join(' · ');
+        }
         sections.push({
           type: 'attention',
-          title: `${conflictCount} possible ${conflictCount === 1 ? 'overlap' : 'overlaps'}`,
+          title: truncated ? 'Many overlapping listings' : summary,
           items: [
             {
-              title: `${conflictCount} possible ${conflictCount === 1 ? 'overlap' : 'overlaps'}`,
-              detail: `Calendar overlap does not confirm attendance.${conflictCount > conflicts.length ? ` ${conflictCount - conflicts.length} additional overlaps were counted but not expanded; ${conflicts.length} detail previews are available.` : ''}`,
+              title: truncated ? 'Many overlapping listings' : summary,
+              detail: truncated
+                ? `${summary} Calendar timing alone does not confirm attendance.${hasPossibleCopies ? ' Counts compare pairs of calendar listings; possible copies can repeat a warning.' : ''}`
+                : `${hasPossibleCopies ? 'Counts compare pairs of calendar listings; possible copies can repeat a warning. ' : ''}Each pair below states whether attendance is confirmed or remains unconfirmed.`,
             },
           ],
           overlaps: conflicts,
           overlapCount: conflictCount,
-          overlapsTruncated: conflictCount > conflicts.length,
+          overlapsTruncated: truncated,
         });
+      }
       if (sourceIdentityDisagreementCount)
         sections.push({
           type: 'attention',
-          title: `${sourceIdentityDisagreementCount} possible source identity ${sourceIdentityDisagreementCount === 1 ? 'difference' : 'differences'}`,
+          title: `${sourceIdentityDisagreementCount} possible copy pair${sourceIdentityDisagreementCount === 1 ? '' : 's'} with different times`,
           items: [
             ...sourceIdentityDisagreements,
             ...(sourceIdentityDisagreementCount > sourceIdentityDisagreements.length
               ? [
                   {
-                    title: `${sourceIdentityDisagreementCount - sourceIdentityDisagreements.length} additional identity comparisons counted but not expanded.`,
+                    title: `${sourceIdentityDisagreementCount - sourceIdentityDisagreements.length} more possible-copy or different-time pairs counted but not expanded.`,
                   },
                 ]
               : []),
@@ -798,13 +857,13 @@ export function calendarAgendaCards(input: {
       if (duplicateCount)
         sections.push({
           type: 'attention',
-          title: `${duplicateCount} possible duplicate listing ${duplicateCount === 1 ? 'pair' : 'pairs'}`,
+          title: `${duplicateCount} possible copy ${duplicateCount === 1 ? 'pair' : 'pairs'}`,
           items: [
             ...duplicateListings,
             ...(duplicateCount > duplicateListings.length
               ? [
                   {
-                    title: `${duplicateCount - duplicateListings.length} additional possible duplicate listings counted but not expanded.`,
+                    title: `${duplicateCount - duplicateListings.length} more possible-copy pairs counted but not expanded.`,
                   },
                 ]
               : []),

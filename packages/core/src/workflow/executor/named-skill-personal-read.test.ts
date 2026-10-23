@@ -352,7 +352,9 @@ describe('named saved skill use during a personal read', () => {
         },
       };
       const projection = verifiedReadResponse(readRequest, f.rows as never);
-      expect(projection).toContain('Calendar overlap does not confirm attendance.');
+      expect(projection).toContain(
+        'Some comparisons involve possible copies or entries whose attendance is unconfirmed.',
+      );
       expect(projection).not.toContain('Next step:');
       f.router.object.mockClear();
       f.router.object.mockImplementation(async () => {
@@ -390,7 +392,9 @@ describe('named saved skill use during a personal read', () => {
       expect(cards.match(/Planning guidance/g)).toHaveLength(1);
       expect(cards).toContain('Saved skill');
       expect(cards).toContain('Next step:');
-      expect(cards).toContain('Calendar overlap does not confirm attendance.');
+      expect(cards).toContain(
+        'Your attendance at Design review (work) and Planning hold (shared) isn’t confirmed.',
+      );
       expect(final).toContain('Next step:');
       expect(final).toContain('attend both');
       expect(final + JSON.stringify(f.state.pendingFinal?.responseCards ?? [])).not.toContain(
@@ -611,7 +615,9 @@ describe('named saved skill use during a personal read', () => {
     expect(cards).toContain('North Hall');
     expect(cards).toContain('South Hall');
     expect(cards).toContain('Possible overlap: 10:05 AM – 11:25 AM');
-    expect(cards).toContain('Calendar overlap does not confirm attendance.');
+    expect(cards).toContain(
+      'Your attendance at Strategy review (Work) and Partner briefing (Shared) isn’t confirmed.',
+    );
     expect(cards).toContain('https://calendar.google.com/event?eid=fixture-flight');
     expect(final + JSON.stringify(f.state.pendingFinal?.responseCards ?? [])).not.toContain(
       '1:15 AM',

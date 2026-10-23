@@ -190,6 +190,75 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain(
       'Your accepted commitments overlap **Thu 15 Oct 9:30 AM–10:00 AM**: Work · Project review + Work · Planning hold.',
     );
+    expect(response).toContain('You accepted both invitations, and the times overlap.');
+    expect(response).not.toContain('For the pairs marked unconfirmed');
+  });
+
+  it('scopes the compact attendance caveat to mixed accepted and unconfirmed pairs', () => {
+    const compact = { ...request, compactCalendarBriefing: true };
+    const accepted = {
+      ...timed,
+      ownerResponse: 'accepted',
+    };
+    const acceptedSecond = {
+      ...accepted,
+      eventId: 'accepted-second',
+      summary: 'Planning hold',
+      start: '2026-10-15T09:30:00-07:00',
+      end: '2026-10-15T10:30:00-07:00',
+    };
+    const unconfirmed = {
+      ...timed,
+      eventId: 'shared-hold',
+      summary: 'Shared hold',
+      start: '2026-10-15T09:45:00-07:00',
+      end: '2026-10-15T10:45:00-07:00',
+      calendar: 'Shared',
+    };
+    const response = verifiedReadResponse(
+      compact,
+      evidence([accepted, acceptedSecond, unconfirmed], true, compact),
+    );
+
+    expect(response).toContain('You accepted both invitations, and the times overlap.');
+    expect(response).toContain(
+      'You accepted Project review (Work). Your attendance at Shared hold (Shared) isn’t confirmed.',
+    );
+    expect(response).toContain(
+      'Some comparisons involve possible copies or entries whose attendance is unconfirmed.',
+    );
+  });
+
+  it('keeps the compact uncertainty caveat accurate when unconfirmed pairs are beyond the visible preview', () => {
+    const compact = { ...request, compactCalendarBriefing: true };
+    const accepted = {
+      ...timed,
+      ownerResponse: 'accepted',
+    };
+    const acceptedEvents = Array.from({ length: 4 }, (_, index) => ({
+      ...accepted,
+      eventId: `accepted-${index}`,
+      summary: `Accepted appointment ${index}`,
+    }));
+    const unconfirmed = {
+      ...timed,
+      eventId: 'unconfirmed-fourth',
+      summary: 'Unconfirmed fourth appointment',
+      start: '2026-10-15T09:45:00-07:00',
+      end: '2026-10-15T10:45:00-07:00',
+      calendar: 'Shared',
+    };
+    const response = verifiedReadResponse(
+      compact,
+      evidence([...acceptedEvents, unconfirmed], true, compact),
+    );
+
+    expect(response.match(/Your accepted commitments overlap/g)).toHaveLength(3);
+    expect(response).not.toContain('Possible overlap **');
+    expect(response).toContain(
+      'Some comparisons involve possible copies or entries whose attendance is unconfirmed.',
+    );
+    expect(response).not.toContain('For the pairs marked unconfirmed');
   });
 
   it('keeps official event IDs but omits credentialed hotel-management links in calendar briefs', () => {
@@ -410,7 +479,9 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain(
       'Possible overlap **Thu 15 Oct 9:50 AM–10:00 AM**: Work · Project review + Work · Planning hold.',
     );
-    expect(response).toContain('Calendar overlap does not confirm attendance.');
+    expect(response).toContain(
+      'Some comparisons involve possible copies or entries whose attendance is unconfirmed.',
+    );
     expect(response).not.toContain('Next:');
     expect(response).not.toContain('Lodging context:');
     expect(response).toContain(
@@ -620,7 +691,7 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain(
       'Travel context overlap **Sat 17 Oct 12:00 AM–2:00 AM**: Hotel stay + BER → SFO flight (busy stay block).',
     );
-    expect(response).toContain('Calendar overlap does not confirm attendance.');
+    expect(response).not.toContain('attendance is not confirmed');
     expect(response).not.toMatch(
       /^\s*-\s*(?:Possible overlap|Scheduling conflict|Conflict)(?::|\s)/m,
     );
@@ -736,10 +807,14 @@ describe('calendar day and practical briefing fidelity', () => {
     const response = verifiedReadResponse(request, evidence(events));
     expect(response.match(/Possible overlap:/g)).toHaveLength(3);
     expect(response).toContain(
-      '- 6 overlapping pairs found; further pair details are not expanded.',
+      '- 6 calendar-entry pairs overlap in time; further pair details are not expanded.',
     );
     expect(response).not.toContain('additional overlapping pairs were found');
-    expect(response.match(/do not establish that you must attend both/g)).toHaveLength(1);
+    expect(
+      response.match(
+        /Some comparisons involve possible copies or entries whose attendance is unconfirmed\./g,
+      ),
+    ).toHaveLength(1);
   });
 
   it('dates events in short windows that cross local midnight', () => {
@@ -775,10 +850,47 @@ describe('calendar day and practical briefing fidelity', () => {
     const response = verifiedReadResponse(request, evidence(events));
     expect(response.match(/Possible overlap:/g)).toHaveLength(3);
     expect(response).toContain(
-      '- 1,225 overlapping pairs found; further pair details are not expanded.',
+      '- 1,225 calendar-entry pairs overlap in time; further pair details are not expanded.',
     );
     expect(response).not.toContain('Appointment 49**');
-    expect(response.match(/do not establish that you must attend both/g)).toHaveLength(1);
+    expect(
+      response.match(
+        /Some comparisons involve possible copies or entries whose attendance is unconfirmed\./g,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('does not imply hidden overlap pairs were classified after the detail cap', () => {
+    const compact = { ...request, compactCalendarBriefing: true };
+    const acceptedEvents = Array.from({ length: 15 }, (_, index) => ({
+      ...timed,
+      eventId: `accepted-${index}`,
+      summary: `Accepted appointment ${index}`,
+      ownerResponse: 'accepted',
+      links: link(`accepted-${index}`),
+    }));
+    const unconfirmedEvents = Array.from({ length: 2 }, (_, index) => ({
+      ...timed,
+      eventId: `unconfirmed-${index}`,
+      summary: `Unconfirmed appointment ${index}`,
+      start: '2026-10-15T11:00:00-07:00',
+      end: '2026-10-15T12:00:00-07:00',
+      calendar: 'Shared',
+      links: link(`unconfirmed-${index}`),
+    }));
+    const response = verifiedReadResponse(
+      compact,
+      evidence([...acceptedEvents, ...unconfirmedEvents], true, compact),
+    );
+
+    expect(response).toContain(
+      '- 106 calendar-entry pairs overlap in time; further pair details are not expanded.',
+    );
+    expect(response).toContain(
+      'Additional calendar-entry comparisons were not expanded; copy and attendance status were not verified for those pairs.',
+    );
+    expect(response).not.toContain('Some comparisons involve possible copies');
+    expect(response).not.toContain('Possible overlap **');
   });
 
   it('checks appended practical advice without permitting fake free-time or executed actions', () => {
@@ -908,7 +1020,9 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(response).toContain(
       'Possible overlap: **Work · Conference hold** and **Work · Project review**',
     );
-    expect(response).toContain('do not establish that you must attend both');
+    expect(response).toContain(
+      'Your attendance at Conference hold (Work) and Project review (Work) isn’t confirmed.',
+    );
   });
 });
 

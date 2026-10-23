@@ -1,14 +1,59 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { Records } from '@assistant/persistence';
-import { notificationDashboardMessageId } from '@assistant/persistence';
+import type { PhoneCalendarSharingCommand, Records } from '@assistant/persistence';
+import { notificationDashboardMessageId, phoneCalendarCacheKey } from '@assistant/persistence';
 import { afterEach, describe, expect, it } from 'vitest';
 import { FirestoreMemoryRepository } from './memory.js';
 import { FirestorePrivacyErasureRepository } from './privacy-erasure.js';
 import { disposeStore, emulatorStore } from './test-store.js';
+import { FirestoreToolExecutionRepository } from './tool-execution.js';
 
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore privacy erasure', () => {
   const stores: ReturnType<typeof emulatorStore>[] = [];
   afterEach(async () => Promise.all(stores.splice(0).map(disposeStore)));
+
+  it('creates a scrubbed phone-sharing tombstone when no publisher row existed', async () => {
+    const store = emulatorStore();
+    stores.push(store);
+    const agentId = randomUUID();
+    await store.doc('agents', agentId).set({ id: agentId });
+    const repository = new FirestorePrivacyErasureRepository(store);
+
+    await repository.erase();
+    expect(await repository.pendingAssets()).toEqual([]);
+    await repository.complete();
+
+    const tombstone = await store.doc('phoneCalendarSharing', agentId).get();
+    expect(tombstone.data()?.state).toMatchObject({
+      version: 1,
+      ownerId: agentId,
+      publisherId: null,
+      generation: 1,
+      enabled: false,
+      consentVersion: 0,
+      calendars: [],
+    });
+    const sharing = new FirestoreToolExecutionRepository(store).phoneCalendarSharing;
+    const delayedEnable: PhoneCalendarSharingCommand = {
+      command: 'enable',
+      publisherId: 'late-device',
+      expectedGeneration: 0,
+      mutationId: 'pre-erasure-enable',
+      consentVersion: 1,
+      calendars: [{ id: 'work', name: 'Private Work', purpose: 'commitments' }],
+    };
+    expect(await sharing.apply(agentId, delayedEnable)).toMatchObject({
+      ok: false,
+      error: 'stale_generation',
+    });
+
+    await repository.erase();
+    expect((await store.doc('phoneCalendarSharing', agentId).get()).get('state')).toMatchObject({
+      generation: 1,
+      enabled: false,
+      calendars: [],
+    });
+    await repository.complete();
+  });
 
   it('erases all owner domains, retains tombstones, and resumes after interruption', async () => {
     const store = emulatorStore();
@@ -70,6 +115,34 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore privacy erasure
     const now = new Date('2026-09-22T12:00:00Z');
     await Promise.all([
       store.doc('agents', agentId).set({ id: agentId }),
+      store.doc('phoneCalendarSharing', agentId).set({
+        id: agentId,
+        agentId,
+        state: {
+          version: 1,
+          ownerId: agentId,
+          publisherId: 'old-device',
+          generation: 1,
+          enabled: true,
+          consentVersion: 1,
+          calendars: [{ id: 'work', name: 'Private Work', purpose: 'commitments' }],
+          mutationId: 'old-enable',
+          capturedAt: '2026-09-21T00:00:00.000Z',
+          receivedAt: '2026-09-21T00:01:00.000Z',
+          timeMin: '2026-09-20T00:00:00.000Z',
+          timeMax: '2026-10-01T00:00:00.000Z',
+          complete: true,
+          truncated: false,
+          updatedAt: now.toISOString(),
+        },
+        updatedAt: now,
+      }),
+      store.doc('toolCache', phoneCalendarCacheKey(agentId)).set({
+        cacheKey: phoneCalendarCacheKey(agentId),
+        toolName: 'phone-calendars.snapshot',
+        result: { private: true },
+        expiresAt: new Date(now.getTime() + 60_000),
+      }),
       store.doc('missionReports', reportId).set({
         id: reportId,
         agentId,
@@ -391,6 +464,27 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore privacy erasure
       'content-erased',
     );
     expect((await store.doc('recallSurfaces', recallSurfaceId).get()).exists).toBe(false);
+    const scrubbedPhoneSharing = await store.doc('phoneCalendarSharing', agentId).get();
+    expect(scrubbedPhoneSharing.data()?.state).toMatchObject({
+      version: 1,
+      ownerId: agentId,
+      publisherId: null,
+      generation: 2,
+      enabled: false,
+      consentVersion: 0,
+      calendars: [],
+    });
+    expect(Object.keys(scrubbedPhoneSharing.get('state')).sort()).toEqual([
+      'calendars',
+      'consentVersion',
+      'enabled',
+      'generation',
+      'ownerId',
+      'publisherId',
+      'updatedAt',
+      'version',
+    ]);
+    expect((await store.doc('toolCache', phoneCalendarCacheKey(agentId)).get()).exists).toBe(false);
     expect((await store.doc('recallSurfaces', foreignRecallSurfaceId).get()).exists).toBe(true);
     expect((await store.doc('knowledgeGraphEntities', entityId).get()).exists).toBe(false);
     expect((await store.doc('knowledgeGraphAssertions', assertionId).get()).exists).toBe(false);
@@ -474,6 +568,40 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore privacy erasure
     await repository.assetDeleted(voiceAsset.id);
     await repository.complete();
     expect((await store.doc('privacyErasureJobs', agentId).get()).get('status')).toBe('complete');
+    const sharing = new FirestoreToolExecutionRepository(store).phoneCalendarSharing;
+    const delayedEnable: PhoneCalendarSharingCommand = {
+      command: 'enable',
+      publisherId: 'old-device',
+      expectedGeneration: 0,
+      mutationId: 'old-enable',
+      consentVersion: 1,
+      calendars: [{ id: 'work', name: 'Private Work', purpose: 'commitments' }],
+    };
+    expect(await sharing.apply(agentId, delayedEnable, now)).toMatchObject({
+      ok: false,
+      error: 'stale_generation',
+    });
+    const delayedSnapshot: PhoneCalendarSharingCommand = {
+      command: 'snapshot',
+      publisherId: 'old-device',
+      expectedGeneration: 1,
+      snapshot: {
+        capturedAt: now.toISOString(),
+        selectionRevision: 1,
+        complete: true,
+        truncated: false,
+        timeMin: '2026-10-21T00:00:00Z',
+        timeMax: '2026-10-29T00:00:00Z',
+        timeZone: 'UTC',
+        calendars: [{ id: 'work', name: 'Private Work', purpose: 'commitments' }],
+        sourceAvailability: [{ calendarId: 'work', status: 'available', complete: true }],
+        events: [],
+      },
+    };
+    expect(await sharing.apply(agentId, delayedSnapshot, now)).toMatchObject({
+      ok: false,
+      error: 'publisher_conflict',
+    });
   });
 
   it('removes observer dashboard messages through the owner erasure lifecycle and keeps an invoked provider leg unknown', async () => {

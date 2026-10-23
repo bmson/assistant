@@ -285,10 +285,18 @@ export async function getPhoneCalendarPorts() {
       config.FIRESTORE_AGENT_ID,
     ).settings.getOwner();
     if (!owner) throw new Error('Configured calendar owner is missing');
-    return { agentId: owner.id, cache: new FirestoreToolExecutionRepository(store) };
+    return {
+      agentId: owner.id,
+      ownerEmail: config.OWNER_EMAIL,
+      timeZone: owner.timezone,
+      cache: new FirestoreToolExecutionRepository(store),
+    };
   }
+  const owner = await getAgent(getDb());
   return {
-    agentId: (await getAgent(getDb())).id,
+    agentId: owner.id,
+    ownerEmail: config.OWNER_EMAIL,
+    timeZone: owner.timezone,
     cache: createPostgresToolExecutionRepository(getDb()),
   };
 }

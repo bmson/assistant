@@ -1,4 +1,8 @@
-import { approvalPolicyFingerprint } from '@assistant/persistence';
+import {
+  approvalPolicyFingerprint,
+  type PhoneCalendarSnapshotInput,
+  readPhoneCalendars,
+} from '@assistant/persistence';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { InstallationStore } from './store.js';
 import { disposeStore, emulatorStore } from './test-store.js';
@@ -133,6 +137,218 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
         status: 'succeeded',
         result: { deliveryStatus: 'unknown', retrySuppressed: true },
       },
+    });
+  });
+
+  it('atomically persists sharing consent and event data and fences stale device writes after revoke', async () => {
+    const ownerId = 'owner';
+    const publisherId = 'device-publisher';
+    const now = store.now();
+    const enabled = await repository.phoneCalendarSharing?.apply(
+      ownerId,
+      {
+        command: 'enable',
+        publisherId,
+        expectedGeneration: 0,
+        mutationId: 'enable-1',
+        consentVersion: 1,
+        calendars: [{ id: 'work', name: 'Work', purpose: 'commitments' }],
+      },
+      now,
+    );
+    expect(enabled).toMatchObject({ ok: true, state: { generation: 1, enabled: true } });
+
+    const snapshot: PhoneCalendarSnapshotInput = {
+      capturedAt: now.toISOString(),
+      selectionRevision: 1,
+      complete: true,
+      truncated: false,
+      timeMin: new Date(now.getTime() - 86_400_000).toISOString(),
+      timeMax: new Date(now.getTime() + 7 * 86_400_000).toISOString(),
+      timeZone: 'UTC',
+      calendars: [{ id: 'work', name: 'Work', purpose: 'commitments' }],
+      sourceAvailability: [{ calendarId: 'work', status: 'available', complete: true }],
+      events: [],
+    };
+    const applied = await repository.phoneCalendarSharing?.apply(
+      ownerId,
+      { command: 'snapshot', publisherId, expectedGeneration: 1, snapshot },
+      now,
+    );
+    expect(applied).toMatchObject({ ok: true, state: { generation: 1 } });
+    expect(await readPhoneCalendars(repository, ownerId)).toMatchObject({
+      capturedAt: now.toISOString(),
+      calendars: [{ id: 'work', purpose: 'commitments' }],
+    });
+    expect(await repository.phoneCalendarSharing?.readSnapshot?.(ownerId, now)).toMatchObject({
+      state: { enabled: true, generation: 1 },
+      snapshot: { selectionRevision: 1, calendars: [{ id: 'work', purpose: 'commitments' }] },
+    });
+
+    const revoked = await repository.phoneCalendarSharing?.apply(
+      ownerId,
+      { command: 'revoke', publisherId, expectedGeneration: 1 },
+      now,
+    );
+    expect(revoked).toMatchObject({ ok: true, state: { generation: 2, enabled: false } });
+    const lateSnapshot = await repository.phoneCalendarSharing?.apply(
+      ownerId,
+      { command: 'snapshot', publisherId, expectedGeneration: 1, snapshot },
+      now,
+    );
+    expect(lateSnapshot).toMatchObject({ ok: false, error: 'stale_generation' });
+
+    const restarted = new FirestoreToolExecutionRepository(store);
+    expect(await restarted.phoneCalendarSharing.get(ownerId)).toMatchObject({
+      generation: 2,
+      enabled: false,
+    });
+    expect(await readPhoneCalendars(restarted, ownerId)).toBeNull();
+    expect(await restarted.phoneCalendarSharing.readSnapshot?.(ownerId, now)).toMatchObject({
+      state: { enabled: false, generation: 2 },
+      snapshot: null,
+    });
+
+    const pendingOwner = 'owner-pending';
+    const pendingEnable = await repository.phoneCalendarSharing?.apply(
+      pendingOwner,
+      {
+        command: 'enable',
+        publisherId,
+        expectedGeneration: 0,
+        mutationId: 'pending-enable',
+        consentVersion: 1,
+        calendars: [{ id: 'work', name: 'Work', purpose: 'commitments' }],
+      },
+      now,
+    );
+    expect(pendingEnable?.ok).toBe(true);
+    const cancellation = await repository.phoneCalendarSharing?.apply(
+      pendingOwner,
+      {
+        command: 'revoke',
+        publisherId,
+        expectedGeneration: 0,
+        cancelPendingMutationId: 'pending-enable',
+      },
+      now,
+    );
+    expect(cancellation).toMatchObject({
+      ok: true,
+      state: { generation: 2, enabled: false },
+    });
+  });
+
+  it('guards sharing state and snapshot reads against an active privacy erasure', async () => {
+    await store.doc('privacyErasureJobs', 'owner').set({
+      agentId: 'owner',
+      generation: 'active-generation',
+      status: 'active',
+    });
+    await expect(repository.phoneCalendarSharing?.get('owner')).rejects.toThrow(/privacy erasure/i);
+    await expect(repository.phoneCalendarSharing?.readSnapshot?.('owner')).rejects.toThrow(
+      /privacy erasure/i,
+    );
+    await expect(readPhoneCalendars(repository, 'owner')).rejects.toThrow(/privacy erasure/i);
+    await store.doc('privacyErasureJobs', 'owner').delete();
+  });
+
+  it('returns a coherent snapshot during a concurrent selection scheduling smoke test', async () => {
+    const ownerId = 'owner';
+    const publisherId = 'device-publisher';
+    const now = store.now();
+    const work = [{ id: 'work', name: 'Work', purpose: 'commitments' as const }];
+    await repository.phoneCalendarSharing?.apply(
+      ownerId,
+      {
+        command: 'enable',
+        publisherId,
+        expectedGeneration: 0,
+        mutationId: 'select-race-enable',
+        consentVersion: 1,
+        calendars: work,
+      },
+      now,
+    );
+    const snapshot: PhoneCalendarSnapshotInput = {
+      capturedAt: now.toISOString(),
+      selectionRevision: 1,
+      complete: true,
+      truncated: false,
+      timeMin: new Date(now.getTime() - 86_400_000).toISOString(),
+      timeMax: new Date(now.getTime() + 7 * 86_400_000).toISOString(),
+      timeZone: 'UTC',
+      calendars: work,
+      sourceAvailability: [{ calendarId: 'work', status: 'available', complete: true }],
+      events: [],
+    };
+    await repository.phoneCalendarSharing?.apply(
+      ownerId,
+      { command: 'snapshot', publisherId, expectedGeneration: 1, snapshot },
+      now,
+    );
+
+    // Promise.all exercises contention; either transaction may linearize first.
+    const [changed, observed] = await Promise.all([
+      repository.phoneCalendarSharing?.apply(
+        ownerId,
+        {
+          command: 'select',
+          publisherId,
+          expectedGeneration: 1,
+          mutationId: 'select-race-2',
+          consentVersion: 1,
+          calendars: [{ id: 'family', name: 'Family', purpose: 'unspecified' }],
+        },
+        now,
+      ),
+      repository.phoneCalendarSharing?.readSnapshot?.(ownerId, now),
+    ]);
+    expect(changed).toMatchObject({ ok: true, state: { generation: 2 } });
+    expect([1, 2]).toContain(observed?.state?.generation);
+    if (observed?.state?.generation === 1) {
+      expect(observed.snapshot).toMatchObject({ selectionRevision: 1, calendars: work });
+    } else {
+      expect(observed?.snapshot).toBeNull();
+      expect(observed?.state?.calendars).toEqual([
+        { id: 'family', name: 'Family', purpose: 'unspecified' },
+      ]);
+    }
+    expect(await repository.phoneCalendarSharing?.readSnapshot?.(ownerId, now)).toMatchObject({
+      state: { generation: 2 },
+      snapshot: null,
+    });
+
+    const family = [{ id: 'family', name: 'Family', purpose: 'unspecified' as const }];
+    const familySnapshot: PhoneCalendarSnapshotInput = {
+      ...snapshot,
+      selectionRevision: 2,
+      calendars: family,
+      sourceAvailability: [{ calendarId: 'family', status: 'available', complete: true }],
+    };
+    await repository.phoneCalendarSharing?.apply(
+      ownerId,
+      { command: 'snapshot', publisherId, expectedGeneration: 2, snapshot: familySnapshot },
+      now,
+    );
+    const [revoked, revokeRead] = await Promise.all([
+      repository.phoneCalendarSharing?.apply(
+        ownerId,
+        { command: 'revoke', publisherId, expectedGeneration: 2 },
+        now,
+      ),
+      repository.phoneCalendarSharing?.readSnapshot?.(ownerId, now),
+    ]);
+    expect(revoked).toMatchObject({ ok: true, state: { generation: 3, enabled: false } });
+    expect([2, 3]).toContain(revokeRead?.state?.generation);
+    if (revokeRead?.state?.generation === 2) {
+      expect(revokeRead.snapshot).toMatchObject({ selectionRevision: 2, calendars: family });
+    } else {
+      expect(revokeRead?.snapshot).toBeNull();
+    }
+    expect(await repository.phoneCalendarSharing?.readSnapshot?.(ownerId, now)).toMatchObject({
+      state: { generation: 3, enabled: false },
+      snapshot: null,
     });
   });
 
