@@ -142,7 +142,7 @@ jobs:
               sdk_major = int(metadata["simulator_sdk_version"].split(".", 1)[0])
               if sdk_major < 26:
                   raise RuntimeError(f"Selected simulator SDK is older than iOS 26: {metadata['simulator_sdk_version']}")
-              preflight_code, _ = run("sdk-preflight", ["sh", "infra/ios-touch-scroll/verify-sdk.sh", "iphonesimulator"],
+              preflight_code, _ = run("sdk-preflight", ["sh", str(Path(os.environ["GITHUB_WORKSPACE"]) / "workflow-source/infra/ios-touch-scroll/verify-sdk.sh"), "iphonesimulator"],
                                       60, cwd=app)
               if preflight_code != 0:
                   raise RuntimeError("Selected simulator SDK failed the public XCTest API preflight")
