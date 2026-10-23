@@ -15,6 +15,7 @@ import {
   classifyEvaluationResult,
   EvaluationLedger,
   type EvaluationStatus,
+  evaluationCompletionStatus,
   evaluationCoverage,
   evaluationDecisionSchema,
   evaluationRoutingRepository,
@@ -248,6 +249,8 @@ const results: {
   costUsd: number;
   heldUsd: number;
   costEvidence: string[];
+  accountingReceipts: ReturnType<EvaluationLedger['receiptsForReservations']>;
+  uncorrelatedCostEvents: ReturnType<EvaluationLedger['uncorrelatedCostEventsSince']>;
   critical: boolean;
   requestedReasoning: 'production-policy';
   effectiveReasoningModes: Array<'enabled' | 'disabled' | 'unsupported' | 'unknown'>;
@@ -321,6 +324,7 @@ for (let repeat = 1; repeat <= repeats; repeat++) {
       const callsBefore = calls.length;
       const reasoningAttemptsBefore = ledger.reasoningAttempts.length;
       const reservationsBefore = ledger.reservationsSince(0).length;
+      const uncorrelatedEventsBefore = ledger.uncorrelatedCostEventCount;
       let firstTextMs: number | null = null;
       let output: unknown = null;
       let errors: string[] = [];
@@ -426,6 +430,10 @@ for (let repeat = 1; repeat <= repeats; repeat++) {
         costUsd: ledger.spentUsd - spendBefore,
         heldUsd: ledger.heldForReservations(ledger.reservationsSince(reservationsBefore)),
         costEvidence: ledger.entries.slice(entriesBefore).map((entry) => entry.basis),
+        accountingReceipts: ledger.receiptsForReservations(
+          ledger.reservationsSince(reservationsBefore),
+        ),
+        uncorrelatedCostEvents: ledger.uncorrelatedCostEventsSince(uncorrelatedEventsBefore),
         calls: calls.slice(callsBefore),
         output,
       };
@@ -446,6 +454,9 @@ await save(
       accountedUsd: ledger.spentUsd,
       heldUsd: ledger.heldUsd,
       accounting: ledger.entries,
+      accountingSnapshot: ledger.accountingSnapshot,
+      receiptScope:
+        'Safe existing accounting callback evidence only. Missing endpoint/request identity remains unknown; provider-side attempts/retries and exact request parity are not reconstructed. Reconciled estimates and historical released ceilings are not verified invoice charges.',
       results,
     },
     null,
@@ -473,6 +484,8 @@ report.push(
   '',
   `Accounted total: $${ledger.spentUsd.toFixed(6)}; unresolved held liability: $${ledger.heldUsd.toFixed(6)}. Failed/aborted requests retain their reservation ceiling; this can exceed eventual invoice cost. Missing usage is never reported as free.`,
   '',
+  `Safe accounting receipt coverage complete: ${ledger.accountingSnapshot.complete}. Missing identities, omitted/truncated evidence, and historical released ceilings remain explicit; receipt coverage is not provider invoice reconciliation.`,
+  '',
   'The report checks narrow synthetic contracts. It does not establish conversational warmth, long-context recall, vision/speech quality, durable task correctness, provider-wide p95 latency, or real integration performance. A single repetition is a screening sample. All critical cases must pass repeatedly before proposing a role change; pair finalists with the question-regression harness and manual blind response review.',
   '',
 );
@@ -482,11 +495,12 @@ await save(
   JSON.stringify(
     {
       completedAt: new Date().toISOString(),
-      status:
-        ledger.heldUsd > 0 ||
-        results.some((row) => ['not_run', 'budget_interrupted'].includes(row.status))
-          ? 'partial'
-          : 'complete',
+      status: evaluationCompletionStatus({
+        receiptCoverageComplete: ledger.accountingSnapshot.complete,
+        heldUsd: ledger.heldUsd,
+        statuses: results.map((row) => row.status),
+      }),
+      accountingReceiptCoverageComplete: ledger.accountingSnapshot.complete,
       attempted: results.filter((row) => row.status !== 'not_run').length,
       planned: ids.length * cases.length * repeats,
     },

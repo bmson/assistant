@@ -1,9 +1,11 @@
+import type { CostAttemptMetadata } from '@assistant/persistence';
 import { describe, expect, it } from 'vitest';
 import {
   classifyEvaluationResult,
   comparePairedReasoningRuns,
   EvaluationLedger,
   type EvaluationStatus,
+  evaluationCompletionStatus,
   evaluationCoverage,
   gradeEvaluationCase,
   MODEL_EVALUATION_CASES,
@@ -104,6 +106,315 @@ describe('isolated evaluation accounting', () => {
 
   it.each([0, -1, NaN, Infinity])('refuses an unsafe run budget %s', (budget) => {
     expect(() => new EvaluationLedger(budget)).toThrow();
+  });
+});
+
+describe('bounded evaluation attempt archive', () => {
+  const metadata = (overrides: Partial<CostAttemptMetadata> = {}): CostAttemptMetadata => ({
+    provider: 'openrouter',
+    model: 'openai/gpt-6.1-sol',
+    role: 'reason',
+    requestDigest: 'a'.repeat(64),
+    inputTokenEstimate: 100,
+    outputTokenLimit: 200,
+    reasoning: 'disabled',
+    ...overrides,
+  });
+  const evidence = (basis = 'provider_reported', overrides: Record<string, unknown> = {}) => ({
+    basis,
+    provider: 'openrouter',
+    model: 'openai/gpt-6.1-sol',
+    requestId: 'generation-1',
+    endpoint: 'Provider A',
+    modelUsage: {
+      inputTokens: 100,
+      outputTokens: 20,
+      reasoningTokens: 3,
+      cacheReadInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      accounting: basis === 'provider_reported' ? 'provider-reported' : 'usage-rate-estimate',
+    },
+    ...overrides,
+  });
+  const reserve = async (ledger: EvaluationLedger) => {
+    const result = await ledger.reserve({ source: 'model', estimatedUsd: 0.7 });
+    if (!result.ok) throw new Error('fixture reservation failed');
+    return result.reservationId;
+  };
+  const receiptFor = (ledger: EvaluationLedger, id: string) => {
+    const receipt = ledger.receiptsForReservations([id]).receipts[0];
+    if (!receipt) throw new Error(`receipt missing for ${id}`);
+    return receipt;
+  };
+
+  it('preserves unknown attempt metadata through reconciliation without changing ledger economics', async () => {
+    const ledger = new EvaluationLedger(2);
+    const id = await reserve(ledger);
+    expect(await ledger.beginAttempt(id, metadata())).toBe(true);
+    await ledger.markAttemptUnknown(id, 'stream provider attempt aborted', {
+      requestId: 'generation-1',
+      endpoint: 'Provider A',
+    });
+    await ledger.release(id);
+    expect(ledger.heldUsd).toBe(0.7);
+    expect(ledger.spentUsd).toBe(0);
+
+    await ledger.reconcile(id, { usd: 0.2, evidence: evidence() as never });
+    expect(ledger.heldUsd).toBe(0);
+    expect(ledger.spentUsd).toBe(0.2);
+    const archive = ledger.receiptsForReservations([id]);
+    expect(archive).toMatchObject({ complete: true, omittedReservationCount: 0 });
+    const archivedReceipt = archive.receipts[0];
+    if (!archivedReceipt) throw new Error('archived receipt missing');
+    expect(archivedReceipt).toMatchObject({
+      reservationId: id,
+      estimatedUsd: 0.7,
+      status: 'reconciled',
+      reconciledUsd: 0.2,
+      chargeOutcome: 'provider_reported',
+      unknownReason: 'stream_provider_attempt_aborted',
+      providerReceipt: { requestId: 'generation-1', endpoint: 'Provider A' },
+      evidence: { basis: 'provider_reported', requestId: 'generation-1' },
+      complete: true,
+    });
+    const beforeRepeat = archivedReceipt;
+    await ledger.release(id);
+    expect(ledger.receiptsForReservations([id]).receipts[0]).toEqual(beforeRepeat);
+    await expect(ledger.reconcile(id, { usd: 0.1, evidence: evidence() as never })).rejects.toThrow(
+      'already settled',
+    );
+    expect(ledger.receiptsForReservations([id]).receipts[0]).toEqual(beforeRepeat);
+  });
+
+  it('labels token-rate settlement estimated and never calls it provider actual', async () => {
+    const ledger = new EvaluationLedger(2);
+    const id = await reserve(ledger);
+    await ledger.beginAttempt(id, metadata());
+    await ledger.reconcile(id, { usd: 0.05, evidence: evidence('token_rate') as never });
+    expect(receiptFor(ledger, id)).toMatchObject({
+      status: 'reconciled',
+      reconciledUsd: 0.05,
+      chargeOutcome: 'estimated',
+    });
+  });
+
+  it('archives pre-dispatch release as an estimated ceiling, not a charge or current liability', async () => {
+    const ledger = new EvaluationLedger(2);
+    const id = await reserve(ledger);
+    await ledger.release(id);
+    const afterFirstRelease = receiptFor(ledger, id);
+    await ledger.release(id);
+    expect(ledger.spentUsd).toBe(0.7);
+    expect(ledger.heldUsd).toBe(0);
+    expect(ledger.receiptsForReservations([id]).receipts[0]).toEqual(afterFirstRelease);
+    expect(afterFirstRelease).toMatchObject({
+      estimatedUsd: 0.7,
+      status: 'released_ceiling',
+      reconciledUsd: null,
+      chargeOutcome: 'ceiling_not_actual',
+      attempt: null,
+      complete: false,
+    });
+    expect(afterFirstRelease.missing).toEqual(
+      expect.arrayContaining(['attempt', 'reconciledUsd', 'evidence']),
+    );
+  });
+
+  it('keeps dispatched aborts unknown on repeated release and emits explicit missing IDs/metadata', async () => {
+    const ledger = new EvaluationLedger(2);
+    const id = await reserve(ledger);
+    await ledger.beginAttempt(id, metadata());
+    await ledger.markAttemptUnknown(id, 'stream provider attempt aborted');
+    await ledger.release(id);
+    await ledger.release(id);
+    expect(ledger.heldUsd).toBe(0.7);
+    expect(receiptFor(ledger, id)).toMatchObject({
+      status: 'unknown',
+      reconciledUsd: null,
+      chargeOutcome: 'unknown',
+      unknownReason: 'stream_provider_attempt_aborted',
+      providerReceipt: null,
+      complete: false,
+    });
+    expect(receiptFor(ledger, 'unarchived-id')).toMatchObject({
+      reservationId: 'unarchived-id',
+      estimatedUsd: null,
+      status: 'missing',
+      reconciledUsd: null,
+      attempt: null,
+      evidence: null,
+      complete: false,
+    });
+    expect(receiptFor(ledger, 'unarchived-id').missing).toContain('reservation_not_archived');
+    const heldId = await reserve(ledger);
+    const heldReceipt = receiptFor(ledger, heldId);
+    expect(heldReceipt).toMatchObject({ attempt: null, reconciledUsd: null, evidence: null });
+    expect(heldReceipt.missing).toEqual(
+      expect.arrayContaining(['attempt', 'reconciledUsd', 'evidence']),
+    );
+  });
+
+  it('drops credential-like known fields, raw error text, and unknown extras while marking evidence incomplete', async () => {
+    const ledger = new EvaluationLedger(2);
+    const id = await reserve(ledger);
+    await ledger.beginAttempt(
+      id,
+      metadata({
+        provider: 'sk-secretcredentialvalue12345',
+        model: 'https://provider.invalid/model?token=secret',
+        requestDigest: 'raw synthetic prompt text',
+        inputTokenEstimate: Number.NaN,
+        outputTokenLimit: -1,
+        reasoning: 'raw secret reasoning value',
+      } as never),
+    );
+    await ledger.markAttemptUnknown(id, 'provider attempt failed with token=secret', {
+      requestId: 'Bearer secret-token',
+      endpoint: 'https://provider.invalid/?api_key=secret',
+    });
+    await ledger.reconcile(id, {
+      usd: 0.1,
+      evidence: evidence('provider_reported', {
+        provider: 'sk-secretcredentialvalue12345',
+        apiKey: 'sk-do-not-serialize-this-secret',
+      }) as never,
+    });
+    const serialized = JSON.stringify(ledger.receiptsForReservations([id]));
+    expect(serialized).not.toContain('secretcredentialvalue');
+    expect(serialized).not.toContain('do-not-serialize-this-secret');
+    expect(serialized).not.toContain('token=secret');
+    const receipt = ledger.receiptsForReservations([id]).receipts[0];
+    expect(receipt?.attempt).toMatchObject({
+      provider: null,
+      model: null,
+      requestDigest: null,
+      inputTokenEstimate: null,
+      outputTokenLimit: null,
+      reasoning: null,
+    });
+    expect(receipt?.evidence?.provider).toBeNull();
+    expect(receipt?.unknownReason).toBeNull();
+    expect(receipt?.missing).toContain('unknownReason_unrecognized_or_unsafe');
+    expect(receipt?.attempt?.missing).toEqual(
+      expect.arrayContaining(['inputTokenEstimate', 'outputTokenLimit', 'reasoning']),
+    );
+    expect(receipt?.complete).toBe(false);
+  });
+
+  it('does not interpret object-prototype names as allowlisted reason codes', async () => {
+    const ledger = new EvaluationLedger(2);
+    const id = await reserve(ledger);
+    await ledger.beginAttempt(id, metadata());
+    await ledger.markAttemptUnknown(id, 'toString');
+    const receipt = ledger.receiptsForReservations([id]).receipts[0];
+    expect(receipt?.unknownReason).toBeNull();
+    expect(receipt?.missing).toContain('unknownReason_unrecognized_or_unsafe');
+    expect(JSON.stringify(receipt)).not.toContain('function');
+  });
+
+  it('keeps standalone record evidence separate without inventing reservation linkage', async () => {
+    const ledger = new EvaluationLedger(2);
+    const eventBoundary = ledger.uncorrelatedCostEventCount;
+    await ledger.record({ source: 'model', usd: 0.01, evidence: evidence() as never });
+    const snapshot = ledger.accountingSnapshot;
+    expect(snapshot.uncorrelatedCostEvents).toHaveLength(1);
+    expect(snapshot.uncorrelatedCostEvents[0]).toMatchObject({ reservationId: null, usd: 0.01 });
+    expect(snapshot.reservations).toEqual([]);
+    expect(ledger.uncorrelatedCostEventsSince(eventBoundary)).toMatchObject({
+      complete: true,
+      omittedCount: 0,
+      events: [{ reservationId: null, usd: 0.01 }],
+    });
+  });
+
+  it.each([0, 0.0123])(
+    'keeps unknown-basis standalone amount %s unverified without inventing a hold',
+    async (usd) => {
+      const ledger = new EvaluationLedger(2);
+      const eventBoundary = ledger.uncorrelatedCostEventCount;
+      await ledger.record({ source: 'model', usd, evidence: evidence('unknown') as never });
+      expect(ledger.spentUsd).toBe(usd);
+      expect(ledger.heldUsd).toBe(0);
+      expect(ledger.reservationsSince(0)).toEqual([]);
+
+      const eventSlice = ledger.uncorrelatedCostEventsSince(eventBoundary);
+      expect(eventSlice.complete).toBe(false);
+      expect(eventSlice.events[0]).toMatchObject({
+        reservationId: null,
+        usd,
+        evidence: { basis: 'unknown' },
+        missing: ['basis_unknown'],
+      });
+      const snapshot = ledger.accountingSnapshot;
+      expect(snapshot.complete).toBe(false);
+      expect(snapshot.missing).toContain('incomplete_uncorrelated_cost_events');
+      expect(snapshot.uncorrelatedCostEvents[0]?.usd).toBe(usd);
+      expect(snapshot.reservations).toEqual([]);
+      expect(
+        evaluationCompletionStatus({
+          receiptCoverageComplete: snapshot.complete,
+          heldUsd: ledger.heldUsd,
+          statuses: ['passed'],
+        }),
+      ).toBe('partial');
+    },
+  );
+
+  it('returns mutation-isolated snapshots and reports bounded archive omissions', async () => {
+    const ledger = new EvaluationLedger(5000);
+    const firstId = await reserve(ledger);
+    await ledger.beginAttempt(firstId, metadata());
+    const first = ledger.receiptsForReservations([firstId]).receipts[0];
+    if (!first?.attempt) throw new Error('attempt receipt missing');
+    first.attempt.provider = 'mutated';
+    first.missing.push('mutated');
+    expect(ledger.receiptsForReservations([firstId]).receipts[0]?.attempt?.provider).toBe(
+      'openrouter',
+    );
+    expect(ledger.receiptsForReservations([firstId]).receipts[0]?.missing).not.toContain('mutated');
+
+    const ids = [firstId];
+    for (let index = 1; index < 4097; index += 1) ids.push(await reserve(ledger));
+    const bounded = ledger.receiptsForReservations(ids);
+    expect(bounded.complete).toBe(false);
+    expect(bounded.omittedReservationCount).toBe(1);
+    expect(bounded.omittedQueryCount).toBe(1);
+    expect(bounded.receipts).toHaveLength(4096);
+
+    const queryBounded = new EvaluationLedger(1).receiptsForReservations(
+      Array.from({ length: 4097 }, (_value, index) => `unknown-${index}`),
+    );
+    expect(queryBounded.complete).toBe(false);
+    expect(queryBounded.omittedReservationCount).toBe(0);
+    expect(queryBounded.omittedQueryCount).toBe(1);
+    expect(queryBounded.receipts).toHaveLength(4096);
+    expect(queryBounded.receipts.at(-1)).toMatchObject({ status: 'missing', estimatedUsd: null });
+
+    for (let index = 0; index < 4097; index += 1)
+      await ledger.record({ source: 'model', usd: 0, evidence: evidence() as never });
+    const snapshot = ledger.accountingSnapshot;
+    expect(snapshot.omittedCostEventCount).toBe(1);
+    expect(snapshot.uncorrelatedCostEvents).toHaveLength(4096);
+    expect(snapshot.complete).toBe(false);
+    expect(ledger.uncorrelatedCostEventsSince(4096)).toMatchObject({
+      complete: false,
+      omittedCount: 1,
+      events: [],
+    });
+    expect(() => ledger.uncorrelatedCostEventsSince(-1)).toThrow(RangeError);
+    expect(() => ledger.uncorrelatedCostEventsSince(Number.NaN)).toThrow(RangeError);
+  });
+
+  it('omits oversized known values instead of leaking a truncated prefix', async () => {
+    const ledger = new EvaluationLedger(2);
+    const id = await reserve(ledger);
+    await ledger.beginAttempt(id, metadata({ model: `model-${'x'.repeat(300)}` }));
+    const receipt = ledger.receiptsForReservations([id]).receipts[0];
+    expect(receipt?.attempt?.model).toBeNull();
+    expect(receipt?.attempt?.truncated).toBe(true);
+    expect(receipt?.truncated).toBe(true);
+    expect(receipt?.missing).toContain('archive_field_truncated');
+    expect(JSON.stringify(receipt)).not.toContain('model-xxxxxxxx');
   });
 });
 
