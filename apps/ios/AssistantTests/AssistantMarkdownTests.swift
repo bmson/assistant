@@ -73,12 +73,12 @@ private struct LiftedTranscriptFixture: View {
                     if state.noticeHeight > 0 {
                         Color.purple
                             .frame(height: state.noticeHeight)
-                            .padding(.bottom, state.composerHeight + 20)
                             .onGeometryChange(for: CGRect.self) {
                                 $0.frame(in: .global)
                             } action: {
                                 state.notice = $0
                             }
+                            .padding(.bottom, state.composerHeight + 20)
                     }
                 }
                 .overlay(alignment: .bottomTrailing) {
@@ -603,6 +603,12 @@ final class AssistantMarkdownTests: XCTestCase {
         let views = descendants(window)
         let transcript = try XCTUnwrap(views.compactMap { $0 as? UIScrollView }.first { !($0 is UITextView) })
         let input = try XCTUnwrap(views.compactMap { $0 as? UITextView }.first)
+        let initialMessageCount = model.messages.count
+        // Drive the real UITextView delegate/binding path so the send affordance
+        // is in its ready state. This only changes the draft; it never taps or
+        // invokes the send action.
+        input.text = "Layout interaction probe"
+        input.delegate?.textViewDidChange?(input)
         func accessibilityFrame(containing marker: String, in view: UIView) -> CGRect? {
             if view.accessibilityLabel?.contains(marker) == true, !view.bounds.isEmpty {
                 return view.convert(view.bounds, to: window)
@@ -638,27 +644,132 @@ final class AssistantMarkdownTests: XCTestCase {
                 )
             }
         }
-        func sendButtonFrame(in view: UIView) -> CGRect? {
-            if view.accessibilityIdentifier == "assistant.chat.send", !view.bounds.isEmpty {
-                return view.convert(view.bounds, to: window)
-            }
-            for index in 0..<max(view.accessibilityElementCount(), 0) {
-                guard let element = view.accessibilityElement(at: index) else { continue }
-                if let childView = element as? UIView {
-                    if childView !== view, let frame = sendButtonFrame(in: childView) { return frame }
-                } else if let element = element as? UIAccessibilityElement,
-                          element.accessibilityIdentifier == "assistant.chat.send",
-                          !element.accessibilityFrame.isEmpty {
-                    return window.convert(element.accessibilityFrame, from: nil)
+        struct AccessibilityNodeReceipt {
+            let identifier: String
+            let elementType: String
+            let isAccessibilityElement: Bool
+            let hasLabel: Bool
+            let frame: CGRect
+        }
+        func accessibilityReceipt(in root: UIView) -> (sendFrame: CGRect?, nodes: [AccessibilityNodeReceipt]) {
+            var visited = Set<ObjectIdentifier>()
+            var nodes: [AccessibilityNodeReceipt] = []
+            var sendFrame: CGRect?
+
+            func visit(_ object: AnyObject) {
+                guard visited.count < 2_000,
+                      visited.insert(ObjectIdentifier(object)).inserted else { return }
+
+                if let view = object as? UIView {
+                    let identifier = view.accessibilityIdentifier ?? ""
+                    let frame = view.convert(view.bounds, to: window)
+                    if view.isAccessibilityElement || !identifier.isEmpty || view.accessibilityLabel != nil {
+                        nodes.append(.init(
+                            identifier: identifier,
+                            elementType: String(describing: type(of: view)),
+                            isAccessibilityElement: view.isAccessibilityElement,
+                            hasLabel: !(view.accessibilityLabel ?? "").isEmpty,
+                            frame: frame
+                        ))
+                    }
+                    if identifier == "assistant.chat.send", !view.bounds.isEmpty {
+                        sendFrame = frame
+                    }
+                    for child in view.subviews { visit(child) }
+                } else if let element = object as? UIAccessibilityElement {
+                    let identifier = element.accessibilityIdentifier ?? ""
+                    let frame = window.convert(element.accessibilityFrame, from: nil)
+                    nodes.append(.init(
+                        identifier: identifier,
+                        elementType: String(describing: type(of: element)),
+                        isAccessibilityElement: element.isAccessibilityElement,
+                        hasLabel: !(element.accessibilityLabel ?? "").isEmpty,
+                        frame: frame
+                    ))
+                    if identifier == "assistant.chat.send", !element.accessibilityFrame.isEmpty {
+                        sendFrame = frame
+                    }
+                }
+
+                // SwiftUI may vend virtual elements from an NSObject container
+                // rather than expose them as UIView descendants. Visit both
+                // public container elements and UIKit subviews, with the object
+                // identity set above preventing cycles and duplicate traversal.
+                if let container = object as? NSObject {
+                    let count = container.accessibilityElementCount()
+                    if count != NSNotFound {
+                        for index in 0..<min(max(count, 0), 2_000) {
+                            if let child = container.accessibilityElement(at: index) as AnyObject? {
+                                visit(child)
+                            }
+                        }
+                    }
+                    for child in (container.accessibilityElements ?? []).prefix(2_000) {
+                        visit(child as AnyObject)
+                    }
+                    for child in (container.automationElements ?? []).prefix(2_000) {
+                        visit(child as AnyObject)
+                    }
                 }
             }
-            for childView in view.subviews {
-                if let frame = sendButtonFrame(in: childView) { return frame }
-            }
-            return nil
+
+            visit(root)
+            return (sendFrame, nodes)
         }
-        let sendFrame = try XCTUnwrap(sendButtonFrame(in: window),
-            "Find the send control through either SwiftUI's backing view or accessibility container")
+
+        // Wait briefly for SwiftUI to publish the nonempty-draft accessibility
+        // tree. The bounded capture below is attached even when lookup fails.
+        var accessibility = accessibilityReceipt(in: window)
+        let sendDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while accessibility.sendFrame == nil && ContinuousClock.now < sendDeadline {
+            try await Task.sleep(for: .milliseconds(100))
+            window.layoutIfNeeded()
+            accessibility = accessibilityReceipt(in: window)
+        }
+        func rectReceipt(_ rect: CGRect) -> [String: CGFloat] {
+            ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height,
+             "maxX": rect.maxX, "maxY": rect.maxY]
+        }
+        let accessibilityState: [String: Any] = [
+            "windowFrame": rectReceipt(window.frame),
+            "windowSafeAreaInsets": ["top": window.safeAreaInsets.top, "left": window.safeAreaInsets.left,
+                                     "bottom": window.safeAreaInsets.bottom, "right": window.safeAreaInsets.right],
+            "rootSafeAreaInsets": ["top": window.rootViewController?.view.safeAreaInsets.top ?? 0,
+                                   "left": window.rootViewController?.view.safeAreaInsets.left ?? 0,
+                                   "bottom": window.rootViewController?.view.safeAreaInsets.bottom ?? 0,
+                                   "right": window.rootViewController?.view.safeAreaInsets.right ?? 0],
+            "transcriptFrameInWindow": rectReceipt(transcript.convert(transcript.bounds, to: window)),
+            "transcriptContentOffset": ["x": transcript.contentOffset.x, "y": transcript.contentOffset.y],
+            "inputFrameInWindow": rectReceipt(input.convert(input.bounds, to: window)),
+            "inputIsFirstResponder": input.isFirstResponder,
+            "inputDraftLength": input.text?.count ?? 0,
+            "messageCountUnchanged": model.messages.count == initialMessageCount,
+            "isSending": model.isSending,
+            "accessibilityNodes": accessibility.nodes.prefix(2_000).map { node in
+                ["identifier": node.identifier, "elementType": node.elementType,
+                 "isAccessibilityElement": node.isAccessibilityElement, "hasLabel": node.hasLabel,
+                 "frame": rectReceipt(node.frame)] as [String: Any]
+            }
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: accessibilityState,
+                                                   options: [.sortedKeys, .prettyPrinted]) {
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "chat-send-control-accessibility-state"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        let accessibilityImage = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        let accessibilityScreenshot = XCTAttachment(image: accessibilityImage)
+        accessibilityScreenshot.name = "chat-send-control-accessibility-screenshot"
+        accessibilityScreenshot.lifetime = .keepAlways
+        add(accessibilityScreenshot)
+
+        guard let sendFrame = accessibility.sendFrame else {
+            XCTFail("The public UIKit accessibility tree did not expose assistant.chat.send")
+            return
+        }
         XCTAssertFalse(input.isDescendant(of: transcript),
             "The native text view must be a sibling of the transcript")
         assertHitReceiverIsOutsideTranscript(input)
@@ -733,7 +844,63 @@ final class AssistantMarkdownTests: XCTestCase {
         window.rootViewController = UIHostingController(
             rootView: LiftedTranscriptFixture(state: state))
         window.makeKeyAndVisible()
+        var diagnosticScroll: UIScrollView?
+        var layoutSamples: [[String: Any]] = []
+        func rectReceipt(_ rect: CGRect) -> [String: CGFloat] {
+            ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height,
+             "maxX": rect.maxX, "maxY": rect.maxY]
+        }
+        func sampleLayout(_ phase: String) {
+            let scroll = diagnosticScroll
+            let superview = scroll?.superview
+            layoutSamples.append([
+                "phase": phase,
+                "reveal": state.reveal,
+                "availableHeight": state.availableHeight,
+                "composerHeight": state.composerHeight,
+                "noticeHeight": state.noticeHeight,
+                "windowFrame": rectReceipt(window.frame),
+                "windowSafeAreaInsets": ["top": window.safeAreaInsets.top,
+                                         "left": window.safeAreaInsets.left,
+                                         "bottom": window.safeAreaInsets.bottom,
+                                         "right": window.safeAreaInsets.right],
+                "rootSafeAreaInsets": ["top": window.rootViewController?.view.safeAreaInsets.top ?? 0,
+                                       "left": window.rootViewController?.view.safeAreaInsets.left ?? 0,
+                                       "bottom": window.rootViewController?.view.safeAreaInsets.bottom ?? 0,
+                                       "right": window.rootViewController?.view.safeAreaInsets.right ?? 0],
+                "transcriptViewport": rectReceipt(state.transcriptViewport),
+                "composerFrameInWindow": rectReceipt(state.composer),
+                "latestRowFrameInWindow": rectReceipt(state.lastCard),
+                "noticeFrameInWindow": rectReceipt(state.notice),
+                "scrollSuperviewType": superview.map { String(describing: type(of: $0)) } ?? "missing",
+                "scrollFrameInSuperview": scroll.map { rectReceipt($0.frame) } ?? [:],
+                "scrollFrameInWindow": scroll.map { rectReceipt($0.convert($0.bounds, to: window)) } ?? [:],
+                "scrollBounds": scroll.map { rectReceipt($0.bounds) } ?? [:],
+                "contentSize": ["width": scroll?.contentSize.width ?? 0,
+                                "height": scroll?.contentSize.height ?? 0],
+                "contentOffset": ["x": scroll?.contentOffset.x ?? 0,
+                                  "y": scroll?.contentOffset.y ?? 0],
+                "contentInset": ["top": scroll?.contentInset.top ?? 0,
+                                 "left": scroll?.contentInset.left ?? 0,
+                                 "bottom": scroll?.contentInset.bottom ?? 0,
+                                 "right": scroll?.contentInset.right ?? 0],
+                "adjustedContentInset": ["top": scroll?.adjustedContentInset.top ?? 0,
+                                         "left": scroll?.adjustedContentInset.left ?? 0,
+                                         "bottom": scroll?.adjustedContentInset.bottom ?? 0,
+                                         "right": scroll?.adjustedContentInset.right ?? 0],
+            ])
+        }
         defer {
+            let receipt: [String: Any] = ["test": "lifted-transcript-layout-diagnostics",
+                                          "sampleCount": layoutSamples.count,
+                                          "samples": layoutSamples]
+            if let data = try? JSONSerialization.data(withJSONObject: receipt,
+                                                       options: [.sortedKeys, .prettyPrinted]) {
+                let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                attachment.name = "lifted-transcript-layout-samples"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+            }
             window.isHidden = true
             window.rootViewController = nil
             previousKeyWindow?.makeKey()
@@ -743,6 +910,8 @@ final class AssistantMarkdownTests: XCTestCase {
         let cardBottom = state.lastCard.maxY
         func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
         let scroll = try XCTUnwrap(descendants(window).compactMap { $0 as? UIScrollView }.first)
+        diagnosticScroll = scroll
+        sampleLayout("baseline")
         XCTAssertEqual(baseline, 18, accuracy: 1)
         XCTAssertEqual(state.transcriptViewport.height, 852, accuracy: 1,
             "The composer overlays the viewport instead of reducing its height")
@@ -788,6 +957,7 @@ final class AssistantMarkdownTests: XCTestCase {
             let latestCard = state.lastCard
             let notice = state.notice
             let offset = scroll.contentOffset
+            sampleLayout("notice-\(Int(noticeHeight))-baseline")
             let clearanceTarget = noticeHeight > 0 ? notice.minY : state.composer.minY
             XCTAssertEqual(transcriptViewport.height, 852, accuracy: 1,
                 "Notice height must change content clearance, never viewport height")
@@ -800,6 +970,7 @@ final class AssistantMarkdownTests: XCTestCase {
             state.showsJumpChrome = true
             try await Task.sleep(for: .milliseconds(150))
             window.layoutIfNeeded()
+            sampleLayout("notice-\(Int(noticeHeight))-jump-visible")
             XCTAssertEqual(state.transcriptViewport, transcriptViewport,
                 "Showing Jump must not shorten the transcript viewport")
             XCTAssertEqual(state.lastCard, latestCard,
@@ -812,6 +983,7 @@ final class AssistantMarkdownTests: XCTestCase {
             state.showsJumpChrome = false
             try await Task.sleep(for: .milliseconds(120))
             window.layoutIfNeeded()
+            sampleLayout("notice-\(Int(noticeHeight))-jump-hidden")
             XCTAssertEqual(state.transcriptViewport, transcriptViewport)
             XCTAssertEqual(state.lastCard, latestCard)
             XCTAssertEqual(scroll.contentOffset, offset)
@@ -820,11 +992,13 @@ final class AssistantMarkdownTests: XCTestCase {
         state.jumpRequest += 1
         try await Task.sleep(for: .milliseconds(180))
         window.layoutIfNeeded()
+        sampleLayout("lift-release-baseline")
         XCTAssertEqual(state.composer.minY - state.lastCard.maxY, baseline, accuracy: 1)
         for distance: CGFloat in [1, 5, 10, 20, 34, 80, 200, 450, 200, 34, 10, 0, 20, 0, 10, 0] {
             state.reveal = distance
             try await Task.sleep(for: .milliseconds(100))
             window.layoutIfNeeded()
+            sampleLayout("lift-\(Int(distance))")
             XCTAssertEqual(
                 state.composer.minY - state.lastCard.maxY, baseline, accuracy: 1,
                 "The gap must survive a \(distance)pt live lift")
@@ -847,6 +1021,8 @@ final class AssistantMarkdownTests: XCTestCase {
             for distance: CGFloat in [10, 450, 0] {
                 state.reveal = distance
                 try await Task.sleep(for: .milliseconds(100))
+                window.layoutIfNeeded()
+                sampleLayout("available-\(Int(height))-composer-\(Int(input))-lift-\(Int(distance))")
                 XCTAssertEqual(state.composer.minY - state.lastCard.maxY, baseline, accuracy: 1)
                 XCTAssertEqual(state.transcriptViewport.height, height, accuracy: 1,
                     "Changing composer/chrome height must not reserve space out of the viewport")
@@ -859,6 +1035,7 @@ final class AssistantMarkdownTests: XCTestCase {
         // Reading upward moves the newest row behind the composer's transparent
         // lower gutter. The full-height scroll view must continue drawing there.
         window.layoutIfNeeded()
+        sampleLayout("reading-older-before-lift")
         let underComposer = try centerColumn()
         for y in (Int(state.composer.maxY) - 10)..<(Int(state.composer.maxY) - 2) {
             XCTAssertTrue(
@@ -868,6 +1045,8 @@ final class AssistantMarkdownTests: XCTestCase {
         for distance: CGFloat in [20, 80, 450, 80, 0] {
             state.reveal = distance
             try await Task.sleep(for: .milliseconds(100))
+            window.layoutIfNeeded()
+            sampleLayout("reading-older-lift-\(Int(distance))")
             XCTAssertEqual(scroll.contentOffset.y, readingOffset, accuracy: 1)
         }
         // Repeated requests share the same native bottom edge.

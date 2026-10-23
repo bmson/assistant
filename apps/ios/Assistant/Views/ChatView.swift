@@ -1078,24 +1078,28 @@ struct ChatView: View {
                                 } label: {
                                     Label("Restore unsent message", systemImage: "arrow.uturn.backward")
                                         .font(.subheadline.weight(.medium))
-                                        .padding(.horizontal, 14)
                                         .frame(minHeight: 44)
-                                        .background(AssistantTheme.bubblePaper(for: colorScheme), in: Capsule())
                                         .foregroundStyle(AssistantTheme.bubblePaperInk(for: colorScheme))
                                 }
                                 .buttonStyle(.plain)
                                 .disabled(!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                .accessibilityIdentifier("assistant.chat.restore-unsent-message")
                                 .accessibilityHint("Send or clear your current draft before restoring the message that did not send.")
                                 if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                    Text("Send or clear this draft to restore your earlier message.")
+                                    Text("Send or clear your current draft first")
                                         .font(.caption)
-                                        .foregroundStyle(AssistantTheme.stageSecondary)
+                                        .foregroundStyle(AssistantTheme.bubblePaperInk(for: colorScheme))
                                         .multilineTextAlignment(.center)
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 4)
-                                        .background(AssistantTheme.stageWell(for: colorScheme), in: Capsule())
+                                        .fixedSize(horizontal: false, vertical: true)
                                 }
                             }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            // Keep the complete recovery surface opaque when the
+                            // button is disabled above a still-visible transcript.
+                            .background(AssistantTheme.bubblePaper(for: colorScheme),
+                                        in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                            .padding(.horizontal, 16)
                         }
                     }
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
