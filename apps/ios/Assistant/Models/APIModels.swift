@@ -791,6 +791,10 @@ enum ChatTranscriptItem: Identifiable, Hashable {
 /// turns re-homed all four to the bottom of the log, under the replies that
 /// had already answered them.
 struct ChatLogOrder {
+    private struct CachedCreatedAt {
+        let date: Date?
+    }
+
     private struct Position {
         let sentAt: Date
         let arrival: Int
@@ -798,15 +802,34 @@ struct ChatLogOrder {
     }
 
     private var positions: [String: Position] = [:]
+    private var createdAtByRawTimestamp: [String: CachedCreatedAt] = [:]
 
     /// Forget every assigned place. A different conversation's ids have no
     /// order to agree with these.
-    mutating func reset() { positions.removeAll() }
+    mutating func reset() {
+        positions.removeAll()
+        createdAtByRawTimestamp.removeAll()
+    }
 
     mutating func ordered(_ messages: [ChatMessage]) -> [ChatMessage] {
-        // One send-time read per message: parsing it is the expensive part,
-        // and this runs on every poll.
-        let sendTimes = messages.map { (id: $0.id, sentAt: $0.createdAt) }
+        // Retain parsed dates only for raw timestamp strings in this read.
+        // Reuse duplicates within the pass before consulting the prior cache.
+        let previousDates = createdAtByRawTimestamp
+        var nextDates: [String: CachedCreatedAt] = [:]
+        let sendTimes = messages.map { message -> (id: String, sentAt: Date?) in
+            guard let raw = message.metadata?["createdAt"]?.string else {
+                return (id: message.id, sentAt: message.createdAt)
+            }
+            let cached: CachedCreatedAt
+            if let current = nextDates[raw] ?? previousDates[raw] {
+                cached = current
+            } else {
+                cached = CachedCreatedAt(date: message.createdAt)
+            }
+            nextDates[raw] = cached
+            return (id: message.id, sentAt: cached.date)
+        }
+        createdAtByRawTimestamp = nextDates
         let newest = sendTimes.compactMap(\.sentAt).max() ?? .distantPast
         for message in sendTimes {
             assign(id: message.id, sentAt: message.sentAt, anchoredTo: newest)

@@ -1,29 +1,32 @@
 # What the transcript costs per frame
 
-The chat transcript is the one screen in this app that has to hold 60fps while
-something else is happening — a reply streaming in, a finger dragging the pull
-menu open, a word being typed into the composer. This is what makes that
-affordable, and the rules to keep it that way.
+The chat transcript targets consistent 60fps while a reply streams in, a finger
+drags the pull menu open, or text is typed into the composer. That target has
+not been established by the checks below. This document describes the current
+rendering work and the correctness constraints on further changes.
 
 ## Why the transcript is unusual
 
-`ChatView.conversationSurface` builds the log into a plain `VStack`, not a
-`LazyVStack`. That is deliberate and the comment there explains it: the
-transcript's viewport ends 18pt above the composer and `scrollClipDisabled()`
-is what lets the strip under the input keep showing the log. A lazy stack stops
-vending a row once it leaves the viewport, so a bubble on its way down was
-built, drawn under the glass, then dropped — blinking out a whole composer
-above the bottom of the screen.
+`ChatTranscriptRows` builds the log into a plain `VStack`. The current
+`ChatView` clips the transcript with `.scrollClipDisabled(false)` and gives the
+composer and navigation separate sibling layout slots. Rows do not depend on
+drawing beneath the composer.
+
+The eager stack keeps every row mounted. Any change to that behavior must
+preserve bottom-follow as messages arrive and streamed replies grow, the
+reader's position when browsing older messages, and row state and interactions.
+Clipping alone does not establish that a lazy replacement is correct.
 
 The cost of that choice is that every row must exist when the log is first
 opened. `ChatTranscriptRows` now owns the eager stack behind an equatable
 boundary. Draft text, pull distance, and composer geometry stay in `ChatView`;
 they no longer regroup receipts or resolve preceding prompts in the rows view.
-The rows view changes when messages or send availability change, and directly
-observes Reduce Motion. Its action closures capture the same model and state
-bindings throughout a screen's lifetime.
+The rows view changes when messages, send availability, or card-form state/task
+revisions change, and directly observes Reduce Motion. Its action closures
+capture the same model and state bindings throughout a screen's lifetime.
 
-That is the whole shape of the problem. Three things keep it in budget.
+The following boundaries reduce repeated work; their presence does not prove
+a frame-time budget.
 
 ## 0. The model is observed per property
 
@@ -53,9 +56,10 @@ concurrent reads by path, rather than relying on network arrival order.
 
 ## 1. A row that has not changed is not rebuilt
 
-`ChatTranscriptRows` compares messages and `isSending`. If you add another
-content input, include it in equality. Do not pass closures whose behavior
-changes with unrepresented state: the equality boundary would retain the old
+`ChatTranscriptRows` compares messages, `isSending`, `cardFormStateRevision`
+and `cardFormTaskRevision`. If you add another content input, include it in
+equality. Do not pass closures whose behavior changes with unrepresented
+state: the equality boundary would retain the old
 behavior. The transcript keeps its existing eager stack and viewport geometry;
 this boundary changes ownership of derivation work, not scroll behavior.
 
@@ -134,6 +138,30 @@ relaunches an app when the region changes, which is what makes that acceptable.
 Anything keyed to a fixed wire format pins `en_US_POSIX` and must not be given
 the device's locale.
 
+## Timestamp parsing during log ordering
+
+`ChatLogOrder` reuses parsed send times by the full raw `createdAt` string.
+It uses the unchanged fixed wire-format parser behind `ChatMessage.createdAt`;
+invalid strings cache a nil result, and equivalent instants expressed as
+separate raw strings remain separate keys. Duplicate strings within one input
+are parsed at most once.
+
+After each ordering call, only timestamp keys present in that input remain in
+the parsed-date cache. `reset()` clears it. This pruning does not remove the
+existing assigned message positions: hiding and re-adding a durable row keeps
+its place, and provisional rows still gain authoritative placement when their
+send time arrives. The position assignment and comparator are unchanged.
+
+The cache avoids repeated parsing on warm reads and adds dictionary work on a
+cold read. Optimized host benchmarks are evidence about that ordering work,
+not iOS frame times, scroll performance, or production polling overlap. A
+cache hit still requires a linear input pass and the existing sort. In three
+alternating optimized host runs on an M4 Pro, the 500-row warm-call median fell
+from 21.10ms to 0.21ms; cold fill was 21.12ms versus 21.50ms. With 3,000 rows and
+entirely different raw timestamps each pass, medians were 127.90ms versus
+129.39ms. These isolated timings exclude input construction and process startup
+and do not establish a scroll improvement.
+
 ## What is covered, and what a device still has to confirm
 
 `AssistantTests/RenderCostTests.swift` covers the correctness claims, not the
@@ -142,6 +170,10 @@ speed: that the memo computes once per key and stays within its limit, that
 did, that `TranscriptContext` agrees with the scans it replaced for every row,
 and that a row compares equal only while its content holds still — including
 that a landing token still makes it unequal.
+
+The existing bottom-follow regression must also pass when new messages arrive
+and streamed replies grow. Runtime validation must cover scrolling away from
+the bottom and preserving row state and interactions.
 
 None of it measures frames. Message changes still require linear transcript
 grouping/context work and one equality comparison per row. Typing/menu changes

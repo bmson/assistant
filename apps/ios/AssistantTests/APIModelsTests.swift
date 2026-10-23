@@ -1121,6 +1121,16 @@ final class APIModelsTests: XCTestCase {
         )
     }
 
+    private func assertCreatedAtParses(
+        _ messages: [ChatMessage],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        for message in messages {
+            XCTAssertNotNil(message.createdAt, "Expected timestamp to parse for \(message.id)", file: file, line: line)
+        }
+    }
+
     func testChatLogPutsDurableTwinsBackWhereTheyWereAsked() {
         var order = ChatLogOrder()
         // Three turns typed while the assistant worked. Their durable twins
@@ -1185,6 +1195,98 @@ final class APIModelsTests: XCTestCase {
             persisted("a", .user, "First", at: "2026-08-27T09:00:00.000Z"),
         ])
         XCTAssertEqual(log.map(\.id), ["a", "b"])
+    }
+
+    func testChatLogReparsesTimestampAfterInvalidValueBecomesValidForSameID() {
+        var order = ChatLogOrder()
+        let invalidTurn = persisted("turn", .user, "Question", at: "not a timestamp")
+        let initialReply = persisted("reply", .assistant, "Answer", at: "2026-10-03T09:00:00.000Z")
+        XCTAssertNil(invalidTurn.createdAt)
+        assertCreatedAtParses([initialReply])
+        let invalid = order.ordered([
+            invalidTurn,
+            initialReply,
+        ])
+        XCTAssertEqual(invalid.map(\.id), ["reply", "turn"])
+
+        let refreshedMessages = [
+            persisted("reply", .assistant, "Answer", at: "2026-10-03T09:00:00.000Z"),
+            persisted("turn", .user, "Question", at: "2026-10-03T08:59:00.000Z"),
+            persisted("later", .assistant, "Later", at: "2026-10-03T09:01:00.000Z"),
+        ]
+        assertCreatedAtParses(refreshedMessages)
+        let refreshed = order.ordered(refreshedMessages)
+        XCTAssertEqual(refreshed.map(\.id), ["turn", "reply", "later"])
+    }
+
+    func testChatLogTiesEquivalentTimestampSpellingsAndSharedRawValuesByID() {
+        var order = ChatLogOrder()
+        let messages = [
+            persisted("c", .assistant, "Shared raw value", at: "2026-10-03T01:30:00.000Z"),
+            persisted("b", .assistant, "Same instant", at: "2026-10-03T01:30:00.000+00:00"),
+            persisted("later", .assistant, "Fractional second later", at: "2026-10-03T01:30:00.250Z"),
+            persisted("aa", .assistant, "Equivalent offset", at: "2026-10-02T18:30:00.000-07:00"),
+            persisted("a", .user, "Same instant", at: "2026-10-03T01:30:00.000Z"),
+        ]
+        assertCreatedAtParses(messages)
+        let log = order.ordered(messages)
+        XCTAssertEqual(log.map(\.id), ["a", "aa", "b", "c", "later"])
+    }
+
+    func testChatLogOrderingPreservesDurableIDPositionAcrossAbsenceUntilReset() {
+        var order = ChatLogOrder()
+        let initialMessages = [
+            persisted("first", .user, "First", at: "2026-10-03T09:00:00.000Z"),
+            persisted("second", .assistant, "Second", at: "2026-10-03T09:01:00.000Z"),
+        ]
+        assertCreatedAtParses(initialMessages)
+        _ = order.ordered(initialMessages)
+        let absentMessages = [
+            persisted("second", .assistant, "Second", at: "2026-10-03T09:01:00.000Z"),
+        ]
+        assertCreatedAtParses(absentMessages)
+        XCTAssertEqual(order.ordered(absentMessages).map(\.id), ["second"], "The durable row is absent from this log update")
+
+        let readdedMessages = [
+            persisted("second", .assistant, "Second", at: "2026-10-03T09:01:00.000Z"),
+            persisted("first", .user, "First", at: "2026-10-03T09:02:00.000Z"),
+        ]
+        assertCreatedAtParses(readdedMessages)
+        let readded = order.ordered(readdedMessages)
+        XCTAssertEqual(readded.map(\.id), ["first", "second"],
+                       "A durable ID keeps its historical place when it reappears with a changed timestamp")
+
+        order.reset()
+        let afterResetMessages = [
+            persisted("second", .assistant, "Second", at: "2026-10-03T09:01:00.000Z"),
+            persisted("first", .user, "First", at: "2026-10-03T09:02:00.000Z"),
+        ]
+        assertCreatedAtParses(afterResetMessages)
+        let afterReset = order.ordered(afterResetMessages)
+        XCTAssertEqual(afterReset.map(\.id), ["second", "first"],
+                       "Reset discards historical positions and lets the new timestamps place rows")
+    }
+
+    func testChatLogOrderValueCopiesKeepIndependentPositionHistory() {
+        var original = ChatLogOrder()
+        let initialMessages = [
+            persisted("first", .user, "First", at: "2026-10-03T09:00:00.000Z"),
+            persisted("second", .assistant, "Second", at: "2026-10-03T09:01:00.000Z"),
+        ]
+        assertCreatedAtParses(initialMessages)
+        _ = original.ordered(initialMessages)
+        var resetCopy = original
+        resetCopy.reset()
+
+        let messages = [
+            persisted("second", .assistant, "Second", at: "2026-10-03T09:01:00.000Z"),
+            persisted("first", .user, "First", at: "2026-10-03T09:02:00.000Z"),
+        ]
+        assertCreatedAtParses(messages)
+        let copiedOrder = resetCopy.ordered(messages)
+        let originalOrder = original.ordered(messages)
+        XCTAssertEqual(copiedOrder.map(\.id), ["second", "first"])
+        XCTAssertEqual(originalOrder.map(\.id), ["first", "second"])
     }
 
     func testDecisionMessageUsesOnlyItsStructuredCardAndTracksResolution() throws {
