@@ -424,6 +424,38 @@ final class NativeVisualReviewTests: XCTestCase {
         for scheme in [ColorScheme.light, .dark] {
             for page in emptyPages { try await capture(page, scheme: scheme, size: .large, scene: scene, model: model) }
         }
+        let searchStates: [(String, String, Bool, Bool, Bool)] = [
+            ("activity-search-empty", "", false, false, false),
+            ("activity-search-typed", "calendar planning", false, false, false),
+            ("activity-search-focused", "calendar planning", false, true, false),
+            ("activity-search-clear-high-contrast", "calendar planning", false, true, true),
+            ("activity-search-loading", "calendar planning", true, false, false),
+        ]
+        for scheme in [ColorScheme.light, .dark] {
+            for (name, query, loading, focused, highContrast) in searchStates {
+                try await capture(
+                    Page(name, ActivitySearchRowReviewFixture(query: query, isLoading: loading, startsFocused: focused)),
+                    scheme: scheme,
+                    size: .large,
+                    scene: scene,
+                    model: model,
+                    increasedContrast: highContrast
+                )
+            }
+        }
+        try await capture(
+            Page("activity-search-narrow-accessibility", ActivitySearchRowReviewFixture(
+                query: "calendar planning",
+                isLoading: false,
+                startsFocused: false
+            )),
+            scheme: .light,
+            size: .accessibility3,
+            scene: scene,
+            model: model,
+            viewportWidth: 320,
+            increasedContrast: true
+        )
         // Keep previous projections, then make reads fail. These are the real
         // pages' refresh/recovery UI, with their normal mutation guards intact.
         NativeReviewProtocol.install(fixture.responses)
@@ -650,6 +682,36 @@ private final class NativeReviewProtocol: URLProtocol {
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
+    }
+}
+
+private struct ActivitySearchRowReviewFixture: View {
+    @State private var query: String
+    @FocusState private var focused: Bool
+    @Environment(\.colorScheme) private var colorScheme
+
+    let isLoading: Bool
+    let startsFocused: Bool
+
+    init(query: String, isLoading: Bool, startsFocused: Bool) {
+        _query = State(initialValue: query)
+        self.isLoading = isLoading
+        self.startsFocused = startsFocused
+    }
+
+    var body: some View {
+        ActivityDiscoverySearchRow(
+            query: $query,
+            isFocused: $focused,
+            isLoading: isLoading,
+            onSubmit: {}
+        )
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AssistantTheme.canvas(for: colorScheme))
+        .onAppear {
+            if startsFocused { focused = true }
+        }
     }
 }
 
