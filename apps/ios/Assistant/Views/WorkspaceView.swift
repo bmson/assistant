@@ -810,15 +810,7 @@ struct WorkspaceView: View {
                     .accessibilityLabel(summary.joined(separator: ", "))
                 }
 
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    sectionHeading("Filed documents")
-                    if let loaded = listPresentation.loadedCount {
-                        Text("\(loaded) loaded")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
+                countedSectionHeading("Filed documents", count: listPresentation.loadedCount.map { "\($0) loaded" })
                 switch listPresentation {
                 case .loaded:
                     ForEach(documents.documents) { document in
@@ -1837,15 +1829,7 @@ struct WorkspaceView: View {
 
     private func backstoryImportHeader(_ imports: WorkspaceImports) -> some View {
         let count = importSourceCountLabel(imports)
-        let heading = HStack(alignment: .firstTextBaseline, spacing: 8) {
-            sectionHeading("Backstory imports")
-            if let count {
-                Text(count)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
+        let heading = countedSectionHeading("Backstory imports", count: count)
         let upload = Button("Upload", systemImage: "tray.and.arrow.down") {
             showingBackstoryImporter = true
         }
@@ -1873,6 +1857,39 @@ struct WorkspaceView: View {
                 }
             }
         }
+    }
+
+    private func countedSectionHeading(_ title: String, count: String?) -> some View {
+        let titleView = sectionHeading(title)
+        return Group {
+            if usesAccessibilityLayout {
+                VStack(alignment: .leading, spacing: 6) {
+                    titleView.frame(maxWidth: .infinity, alignment: .leading)
+                    if let count { sectionCountLabel(count) }
+                }
+            } else if let count {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        titleView.fixedSize(horizontal: true, vertical: false)
+                        sectionCountLabel(count).fixedSize(horizontal: true, vertical: false)
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        titleView.frame(maxWidth: .infinity, alignment: .leading)
+                        sectionCountLabel(count)
+                    }
+                }
+            } else {
+                titleView.frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func sectionCountLabel(_ count: String) -> some View {
+        Text(count)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func unstartedImportFileRow(_ file: WorkspaceImportFile, vertical: Bool) -> some View {
