@@ -673,6 +673,93 @@ final class NativeVisualReviewTests: XCTestCase {
         XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
     }
 
+    @MainActor
+    func testDocumentsAndImportCardsWrapAtCompactAndAccessibleWidths() async throws {
+        let fixture = try NativeReviewFixture()
+        var responses = fixture.responses
+        let workspacePath = "/api/mobile/v1/workspace"
+        var workspace = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(responses[workspacePath])) as? [String: Any])
+        workspace["imports"] = [
+            "sources": [
+                [
+                    "source": "Family archive — weekend plans, receipts, and confirmations (2018–2024)",
+                    "workspacePath": "imports/family-archive.zip",
+                    "kind": "archive",
+                    "status": "importing",
+                    "itemsTotal": 120,
+                    "itemsProcessed": 63,
+                    "memoriesSaved": 18,
+                    "quarantinedNow": 4,
+                    "taskId": "task-import",
+                    "error": "Some entries need review because their dates and source details could not be matched confidently.",
+                    "updatedAt": "2026-10-03T09:00:00Z"
+                ],
+                [
+                    "source": "A very long failed backup source with a descriptive title",
+                    "workspacePath": "imports/failed-backup.zip",
+                    "kind": "archive",
+                    "status": "failed",
+                    "itemsTotal": 8,
+                    "itemsProcessed": 3,
+                    "memoriesSaved": 0,
+                    "quarantinedNow": 0,
+                    "taskId": NSNull(),
+                    "error": "The archive could not be read. Try importing the original file again after checking that it is complete.",
+                    "updatedAt": "2026-10-03T09:00:00Z"
+                ]
+            ],
+            "unstartedFiles": [
+                ["name": "Trip planning notes — family weekend (final revised copy).md", "dir": false]
+            ],
+            "sourceAvailability": ["status": "available", "version": 1],
+            "filesAvailability": ["status": "available", "version": 1]
+        ]
+        responses[workspacePath] = try JSONSerialization.data(withJSONObject: workspace)
+        NativeReviewProtocol.install(responses)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+                               session: URLSession(configuration: configuration))
+        let suite = "assistant.documents-compact-visual-review"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        let model = AppModel(apiClient: client, defaults: defaults)
+        await model.refreshAll()
+        _ = await model.refreshWorkspace()
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let page = Page("documents-and-imports", WorkspaceView(area: .documents))
+        try await capture(page, scheme: .light, size: .large, scene: scene, model: model, viewportWidth: 320)
+        try await capture(page, scheme: .dark, size: .large, scene: scene, model: model, viewportWidth: 320)
+        try await capture(page, scheme: .light, size: .accessibility3, scene: scene, model: model, viewportWidth: 320)
+
+        let emptyFixture = try NativeReviewFixture(emptyDocuments: true)
+        var emptyResponses = emptyFixture.responses
+        emptyResponses[workspacePath] = try JSONSerialization.data(withJSONObject: workspace)
+        NativeReviewProtocol.install(emptyResponses)
+        let emptyConfiguration = URLSessionConfiguration.ephemeral
+        emptyConfiguration.protocolClasses = [NativeReviewProtocol.self]
+        let emptyClient = APIClient(
+            configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+            session: URLSession(configuration: emptyConfiguration))
+        let emptySuite = "assistant.documents-empty-imports-visual-review"
+        let emptyDefaults = try XCTUnwrap(UserDefaults(suiteName: emptySuite))
+        emptyDefaults.removePersistentDomain(forName: emptySuite)
+        let emptyModel = AppModel(apiClient: emptyClient, defaults: emptyDefaults)
+        await emptyModel.refreshAll()
+        _ = await emptyModel.refreshWorkspace()
+        let emptyDocuments = try XCTUnwrap(emptyModel.overview?.documents)
+        XCTAssertEqual(DocumentListPresentation(emptyDocuments), .confirmedEmpty)
+        XCTAssertEqual(emptyDocuments.stats.total, 0)
+        XCTAssertEqual(emptyModel.workspace?.imports?.sources.count, 2,
+            "The true-empty documents fixture must retain the existing Backstory imports rows")
+        let emptyPage = Page("documents-empty-with-imports", WorkspaceView(area: .documents))
+        try await capture(emptyPage, scheme: .light, size: .large, scene: scene, model: emptyModel, viewportWidth: 320)
+        try await capture(emptyPage, scheme: .dark, size: .large, scene: scene, model: emptyModel, viewportWidth: 320)
+        try await capture(emptyPage, scheme: .light, size: .accessibility3, scene: scene, model: emptyModel, viewportWidth: 320)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty, "Visual fixtures must not run import actions.")
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty, "Every visual read must stay in the fixture transport.")
+    }
+
     private struct Page {
         let name: String
         var ownsNavigation = false
@@ -911,7 +998,7 @@ private struct NativeReviewFixture {
     let relation: KnowledgeRelation
     let responses: [String: Data]
     let overview: OverviewResponse
-    init() throws {
+    init(emptyDocuments: Bool = false) throws {
         let encoder = JSONEncoder()
         func json(_ value: Any) throws -> Data { try JSONSerialization.data(withJSONObject: value) }
         let stamp = "2026-10-03T09:00:00Z"
@@ -922,7 +1009,11 @@ private struct NativeReviewFixture {
         ], models: [.init(id: "review-model", label: "Default assistant model")], goalTitle: nil, canArchive: false, cursor: nil, asyncTurn: nil)
         let bootstrap = BootstrapResponse(generatedAt: stamp, identity: .init(id: "fixture-owner", name: "Assistant", avatarUrl: nil), shell: .init(dashboard: .init(pendingApprovals: 1, needsAttention: 1, presence: .idle), memoryHealth: health), conversation: conversation)
         let pending = PendingApproval(approval: .init(id: "approval", taskId: "task", shortCode: "A12", summary: "Send Robin the confirmed arrival time", payload: .object(["to": .string("robin@example.test"), "subject": .string("Weekend arrival"), "body": .string("I’ll arrive at 4:30 PM on Friday.")]), resolutionPayload: nil, status: "pending", requestedAt: stamp, resolvedAt: nil, resolvedVia: nil, expiresAt: "2026-10-04T09:00:00Z"), taskType: "chat_turn", taskTrust: "owner", toolName: "gmail.send", decision: .object([:]))
-        let docs = DocumentsOverview(documents: [.init(id: "document", title: "Weekend booking confirmation.pdf", mime: "application/pdf", source: "upload", trust: "owner", status: "ready", extractor: "pdf", chunkCount: 4, charCount: 2100, bytes: 31840, error: nil, createdAt: stamp)], stats: .init(total: 1, ready: 1, pending: 0, chunks: 4), primaryConversationId: "main")
+        let docs = DocumentsOverview(
+            documents: emptyDocuments ? [] : [.init(id: "document", title: "Weekend booking confirmation.pdf", mime: "application/pdf", source: "upload", trust: "owner", status: "ready", extractor: "pdf", chunkCount: 4, charCount: 2100, bytes: 31840, error: nil, createdAt: stamp)],
+            stats: emptyDocuments ? .init(total: 0, ready: 0, pending: 0, chunks: 0)
+                : .init(total: 1, ready: 1, pending: 0, chunks: 4),
+            primaryConversationId: "main")
         overview = OverviewResponse(generatedAt: stamp, activity: .init(items: [
             .init(id: "task", type: "chat_turn", status: "waiting_approval", title: "Share the arrival plan", progress: "Your message is ready. Waiting for your approval before sending.", trust: "owner", spentUsd: "0.012", budgetUsdLimit: "0.50", updatedAt: stamp, archivedAt: nil, hasPendingApproval: true),
             .init(id: "completed", type: "scheduled", status: "done", title: "Check the weekend forecast", progress: "Expect mild weather with some rain on Sunday.", trust: "owner", spentUsd: "0.006", budgetUsdLimit: "0.10", updatedAt: stamp, archivedAt: nil, hasPendingApproval: false)
