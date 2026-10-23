@@ -745,6 +745,37 @@ while True:
 if len(records) != 1:
     errors.append(f"expected exactly one overlap receipt, found {len(records)}")
 record = records[0] if len(records) == 1 else {}
+# Exposure includes the intentionally held response; it is not processing time.
+# Derive scoped intervals from the raw, same-clock observations after the run.
+status_routes = record.get("status_routes") or []
+measured = next((route for route in status_routes
+                 if isinstance(route, dict) and route.get("phase") == "measured"), {})
+started = measured.get("request_started_uptime")
+delivered = measured.get("response_delivered_uptime")
+completed = measured.get("response_completed_uptime")
+invocation = record.get("refresh_invoked_uptime")
+returned = record.get("refresh_returned_uptime")
+def interval_ms(start, end):
+    if all(isinstance(value, (int, float)) and not isinstance(value, bool)
+           and math.isfinite(value) for value in (start, end)):
+        return (end - start) * 1000
+    return None
+record["derived_timing_ms"] = {
+    "heldMs": interval_ms(started, delivered),
+    "protocolDeliveryMs": interval_ms(delivered, completed),
+    "postDeliveryReturnMs": interval_ms(delivered, returned),
+    "postProtocolReturnMs": interval_ms(completed, returned),
+    "totalRefreshMs": interval_ms(invocation, returned),
+}
+record["timing_scope"] = {
+    "heldMs": "Request start to delivery; includes the artificial 1500ms hold and scheduling.",
+    "protocolDeliveryMs": "URLProtocol response callback delivery, not app processing CPU.",
+    "postDeliveryReturnMs": "Delivery to refresh return; includes URLSession, decode, and UI scheduling.",
+    "postProtocolReturnMs": "Protocol completion to refresh return; includes decode and UI scheduling.",
+    "totalRefreshMs": "Full refresh invocation to return, including the artificial hold.",
+    "measured_response_overlap_ms": "Controlled response exposure inside scrolling, not processing latency.",
+    "limits": "One controlled pair validates the path; these intervals are not pure ordering CPU, production cadence, or FPS.",
+}
 pathlib.Path(receipt_path).write_text(json.dumps(record, sort_keys=True, indent=2) + "\n")
 
 def finite(value):
