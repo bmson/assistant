@@ -1,6 +1,25 @@
 import SwiftUI
 import UIKit
 
+/// The recovery renderer's data-only decisions. Callback availability carries
+/// the existing in-flight gate; this value never infers whether tools ran.
+struct RecoveryNoticePresentation {
+    let retryPrompt: String?
+    let showsActivity: Bool
+    let diagnostics: [String]
+
+    var hasActions: Bool { retryPrompt != nil || showsActivity }
+
+    init(kind: ChatNoticeKind, userPrompt: String?, retryAvailable: Bool,
+         activityAvailable: Bool, diagnostics: [String]) {
+        retryPrompt = kind == .turnFailed && retryAvailable ? userPrompt : nil
+        showsActivity = activityAvailable
+        self.diagnostics = diagnostics.filter {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+}
+
 struct MessageBubble: View {
     let message: ChatMessage
     let userPrompt: String?
@@ -966,11 +985,9 @@ struct MessageBubble: View {
                                     facts: [ChatCardFact], diagnostics: [String], detailLabel: String,
                                     text: String) -> some View {
         let shape = RoundedRectangle(cornerRadius: AssistantTheme.chatCardCornerRadius, style: .continuous)
-        // Empty transport text is not a diagnostic. Keep every meaningful
-        // entry intact, including its original whitespace and full detail.
-        let meaningfulDiagnostics = diagnostics.filter {
-            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
+        let recovery = RecoveryNoticePresentation(
+            kind: kind, userPrompt: userPrompt, retryAvailable: retry != nil,
+            activityAvailable: openActivity != nil, diagnostics: diagnostics)
         return VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: "xmark.circle.fill")
@@ -998,25 +1015,25 @@ struct MessageBubble: View {
                 }
                 .padding(.top, 8)
             }
-            if (kind == .turnFailed && retry != nil && userPrompt != nil) || openActivity != nil {
+            if recovery.hasActions {
                 Group {
                     if dynamicTypeSize.isAccessibilitySize {
-                        VStack(alignment: .leading, spacing: 4) { recoveryActions(kind) }
+                        VStack(alignment: .leading, spacing: 4) { recoveryActions(recovery) }
                     } else {
                         ViewThatFits(in: .horizontal) {
-                            HStack(spacing: 12) { recoveryActions(kind) }.fixedSize(horizontal: true, vertical: false)
-                            VStack(alignment: .leading, spacing: 4) { recoveryActions(kind) }
+                            HStack(spacing: 12) { recoveryActions(recovery) }.fixedSize(horizontal: true, vertical: false)
+                            VStack(alignment: .leading, spacing: 4) { recoveryActions(recovery) }
                         }
                     }
                 }
                 .padding(.top, 12)
             }
-            if !meaningfulDiagnostics.isEmpty {
+            if !recovery.diagnostics.isEmpty {
                 Divider()
                     .overlay(AssistantTheme.inkMuted(for: colorScheme).opacity(0.18))
                     .padding(.top, 10)
                 CardDisclosure(collapsedLabel: detailLabel, expandedLabel: "Hide details") {
-                    Text(meaningfulDiagnostics.joined(separator: "\n\n"))
+                    Text(recovery.diagnostics.joined(separator: "\n\n"))
                         .font(.caption)
                         .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                         .textSelection(.enabled)
@@ -1036,16 +1053,16 @@ struct MessageBubble: View {
     }
 
     @ViewBuilder
-    private func recoveryActions(_ kind: ChatNoticeKind) -> some View {
+    private func recoveryActions(_ recovery: RecoveryNoticePresentation) -> some View {
         // Preserve the existing tool-less failed-turn retry eligibility. An
         // action task interrupted by a provider failure is Activity-only.
-        if kind == .turnFailed, let retry, let userPrompt {
-            Button("Try again") { retry(userPrompt) }
+        if let prompt = recovery.retryPrompt, let retry {
+            Button("Try again") { retry(prompt) }
                 .buttonStyle(AssistantActionButtonStyle(kind: .primary, compact: true))
                 .accessibilityIdentifier("assistant.chat.notice.retry")
                 .accessibilityHint("Sends the same message again")
         }
-        if let openActivity {
+        if recovery.showsActivity, let openActivity {
             Button("View activity", action: openActivity)
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(AssistantTheme.accent(for: colorScheme))
