@@ -6562,6 +6562,11 @@ extension APIClientRetryTests {
                 StubURLProtocol.prime([], paths: [
                     oldPath: [.held(status: status, body: body)],
                     chatPath: [.stream(body: Data())],
+                    "/api/mobile/v1/chat/cancel": [
+                        .terminalOperationCancellation(status: 200, outcome: "cancelled",
+                            taskId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+                            taskStatus: "cancelled", transitioned: true)
+                    ],
                 ])
                 let opening = Task {
                     action == "open" ? await model.openConversation(id: notificationSideID) : await model.createConversation()
@@ -6601,11 +6606,19 @@ extension APIClientRetryTests {
                 XCTAssertTrue(model.messages.contains(where: { $0.role == .user && $0.text == "Keep this reply in the original conversation" }))
                 XCTAssertNil(model.errorMessage, "An older success or failure cannot interrupt the new reply")
                 model.cancelSend()
-                StubURLProtocol.endTestCase(iterationID)
-                // Cancellation can enqueue a later request through the retained client.
-                // Keep its session valid; the ended scope rejects those late requests.
+                let cancellationDeadline = ContinuousClock.now + .seconds(2)
+                while model.hasUnresolvedTurn, ContinuousClock.now < cancellationDeadline {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                XCTAssertFalse(model.hasUnresolvedTurn, "The fixture's terminal cancellation receipt settles the turn before cleanup")
+                XCTAssertFalse(model.isSending)
+                if let readyStream {
+                    StubURLProtocol.cancelStream(operationId: readyStream.operationID,
+                                                 authorization: readyStream.authorization)
+                }
                 let didDrain = await cancelAndDrain(session, invalidate: false)
                 XCTAssertTrue(didDrain, "The iteration's URLSession must drain before the next prime")
+                StubURLProtocol.endTestCase(iterationID)
             }
         }
     }
