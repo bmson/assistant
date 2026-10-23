@@ -293,6 +293,7 @@ final class NativeVisualReviewTests: XCTestCase {
         model.saveComposerDraft("A different draft is already in the input.", in: scope)
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
         let previousKeyWindow = scene.keyWindow
+        defer { previousKeyWindow?.makeKey() }
         let variants: [(String, ColorScheme, DynamicTypeSize, Bool)] = [
             ("light-large", .light, .large, false),
             ("dark-large", .dark, .large, false),
@@ -301,6 +302,8 @@ final class NativeVisualReviewTests: XCTestCase {
             ("contrast-accessibility3", .light, .accessibility3, true)
         ]
         let presentationProbe = ComposerPresentationProbe()
+        var blockerCaptureWindow: UIWindow?
+        var blockerComposerTextView: UITextView?
         for (variant, scheme, size, increasedContrast) in variants {
             let window = UIWindow(windowScene: scene)
             window.frame = scene.coordinateSpace.bounds
@@ -574,6 +577,29 @@ final class NativeVisualReviewTests: XCTestCase {
                     && contains(windowBounds, send ?? .infinite)
                 let motion = sampler.maximumMotion(from: baselineSample, after: transition?.requestedAt ?? 0)
                 let postRequestSamples = sampler.samples.filter { $0.timestamp >= (transition?.requestedAt ?? .infinity) }
+                let postRequestPresentationGeometryValid = !postRequestSamples.isEmpty
+                    && postRequestSamples.allSatisfy { sample in
+                        guard sample.windowPresentationAvailable,
+                              sample.missingPresentation.isEmpty,
+                              sample.presentationLayerHasWindowAncestor.count == ComposerPresentationTarget.allCases.count,
+                              sample.presentationLayerHasWindowAncestor.values.allSatisfy({ $0 }),
+                              let sampleCapsule = sample.presentationFrames[.capsule],
+                              let sampleMic = sample.presentationFrames[.microphone],
+                              let sampleSend = sample.presentationFrames[.send],
+                              finite(sampleCapsule), finite(sampleMic), finite(sampleSend) else { return false }
+                        return roundedContains(sampleCapsule, sampleMic,
+                                               radius: AssistantTheme.conversationCornerRadius)
+                            && roundedContains(sampleCapsule, sampleSend,
+                                               radius: AssistantTheme.conversationCornerRadius)
+                            && contains(windowBounds, sampleCapsule)
+                            && contains(windowBounds, sampleMic)
+                            && contains(windowBounds, sampleSend)
+                    }
+                let maximumPostRequestSampleGap = zip(postRequestSamples, postRequestSamples.dropFirst())
+                    .map { $1.timestamp - $0.timestamp }.max() ?? 0
+                let firstPostRequestObservationGap = postRequestSamples.first.map {
+                    max(0, $0.timestamp - (transition?.requestedAt ?? $0.timestamp))
+                } ?? 0
                 let noMissingPresentationAfterRequest = !postRequestSamples.isEmpty
                     && postRequestSamples.allSatisfy {
                         $0.windowPresentationAvailable && $0.missingPresentation.isEmpty
@@ -590,7 +616,7 @@ final class NativeVisualReviewTests: XCTestCase {
                     "variant": variant,
                     "state": "composer-clear-observed-post-change-stable-samples",
                     "instrumented": true,
-                    "measurementLimit": "Presentation frames cover the capsule and actual mic/send Button overlay targets; target bounds are untransformed layout bounds. Stable samples are observations only; this is not proof that every animation completed. It does not prove glyph bounds, hit-region behavior, touch activation, or VoiceOver activation.",
+                    "measurementLimit": "Presentation frames cover the capsule and actual mic/send Button overlay targets; target bounds are untransformed layout bounds. These are display-link observations only, not continuous geometry proof or evidence every animation completed. They do not prove glyph bounds, hit-region behavior, touch activation, or VoiceOver activation.",
                     "requestedAt": transition?.requestedAt ?? 0,
                     "baselineDraftRevision": baselineRevision,
                     "observedEmptyRevision": transition?.observedEmptyRevision ?? -1,
@@ -607,6 +633,9 @@ final class NativeVisualReviewTests: XCTestCase {
                     "layoutTargetBoundsAtLeast44Points": layoutTargetBoundsAtLeast44,
                     "observedFrameContainmentDiagnosticOnly": presentationGeometryValid,
                     "noMissingPresentationAfterRequest": noMissingPresentationAfterRequest,
+                    "allPostRequestPresentationFramesFiniteAndContained": postRequestPresentationGeometryValid,
+                    "firstPostRequestObservationGapSeconds": firstPostRequestObservationGap,
+                    "maximumPostRequestSampleGapSeconds": maximumPostRequestSampleGap,
                     "samples": sampler.jsonSamples()
                 ]
                 attachPresentationReceipt(receipt, name: "composer-presentation-transition")
@@ -619,6 +648,8 @@ final class NativeVisualReviewTests: XCTestCase {
                 XCTAssertEqual(stableMarkers.count, ComposerPresentationTarget.allCases.count)
                 XCTAssertTrue(noMissingPresentationAfterRequest,
                     "Missing presentation layers or same-window ancestry must fail closed")
+                XCTAssertTrue(postRequestPresentationGeometryValid,
+                    "Every observed post-request sample must have finite same-window control frames contained by the capsule and window")
 
                 let instrumentedViewport = transcript.frame
                 let instrumentedContentSize = transcript.contentSize
@@ -668,10 +699,73 @@ final class NativeVisualReviewTests: XCTestCase {
                 XCTAssertTrue(model.hasComposerRecovery(in: scope))
                 XCTAssertTrue(model.composerDraft(in: scope).isEmpty,
                     "Clearing the input should leave an empty draft in the same scope")
+
+                blockerCaptureWindow = window
+                blockerComposerTextView = composerTextView
             }
             window.isHidden = true
             window.rootViewController = nil
         }
+
+        let originalDetachDeadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while (blockerCaptureWindow?.rootViewController != nil
+            || blockerComposerTextView?.window != nil
+            || ComposerPresentationTarget.allCases.contains(where: { presentationProbe.marker($0) != nil }))
+            && ContinuousClock.now < originalDetachDeadline {
+            try await Task.sleep(for: .milliseconds(16))
+        }
+        let detachedCaptureWindow = blockerCaptureWindow
+        let detachedOriginalComposer = blockerComposerTextView
+        let originalHostDetached = detachedCaptureWindow != nil
+            && detachedOriginalComposer != nil
+            && detachedCaptureWindow?.rootViewController == nil
+            && detachedOriginalComposer?.window == nil
+            && ComposerPresentationTarget.allCases.allSatisfy { presentationProbe.marker($0) == nil }
+        let detachedReceipt: [String: Any] = [
+            "phase": "original-host-detached-before-static-mount",
+            "windowWasCaptured": detachedCaptureWindow != nil,
+            "windowRootControllerRemoved": detachedCaptureWindow?.rootViewController == nil,
+            "composerWasCaptured": detachedOriginalComposer != nil,
+            "actualComposerDetachedFromWindow": detachedOriginalComposer?.window == nil,
+            "allOriginalMarkersRemoved": ComposerPresentationTarget.allCases.allSatisfy { presentationProbe.marker($0) == nil },
+            "sameDraftScope": model.composerDraftScope == scope,
+            "draftStillEmptyBeforeBlockerSeed": model.composerDraft(in: scope).isEmpty,
+            "recoveryStillAvailable": model.hasComposerRecovery(in: scope)
+        ]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: detachedReceipt, options: [.prettyPrinted, .sortedKeys])
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "full-height-original-host-detached-before-static-mount"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        } catch {
+            XCTFail("Could not serialize original-host teardown receipt: \(error)")
+        }
+        XCTAssertTrue(originalHostDetached,
+            "The original host, composer input, and presentation markers must be detached before seeding the static host")
+        guard originalHostDetached else { return }
+        XCTAssertEqual(model.composerDraftScope, scope)
+        XCTAssertTrue(model.composerDraft(in: scope).isEmpty)
+        XCTAssertTrue(model.hasComposerRecovery(in: scope))
+        let blockerText = "Keep recovery available while mounting static AX3."
+        model.saveComposerDraft(blockerText, in: scope)
+        let blockerSeedReceipt: [String: Any] = [
+            "phase": "same-scope-blocker-seeded-after-original-host-detach",
+            "sameDraftScope": model.composerDraftScope == scope,
+            "modelDraft": model.composerDraft(in: scope),
+            "recoveryStillAvailable": model.hasComposerRecovery(in: scope)
+        ]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: blockerSeedReceipt, options: [.prettyPrinted, .sortedKeys])
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "full-height-static-blocker-seeded-after-original-host-detach"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        } catch {
+            XCTFail("Could not serialize static blocker seed receipt: \(error)")
+        }
+        XCTAssertEqual(model.composerDraft(in: scope), blockerText)
+        XCTAssertTrue(model.hasComposerRecovery(in: scope))
 
         // Static-only AX3 capture: the real RootView mounts with a local
         // SwiftUI transaction that disables animations from its first render.
@@ -693,8 +787,106 @@ final class NativeVisualReviewTests: XCTestCase {
         staticWindow.makeKeyAndVisible()
         defer { staticWindow.isHidden = true; staticWindow.rootViewController = nil }
         let staticSampler = ComposerPresentationSampler(window: staticWindow, probe: staticProbe)
-        staticSampler.start()
         defer { staticSampler.stop() }
+        func staticDescendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(staticDescendants) }
+        func staticComposer() -> UITextView? {
+            staticDescendants(staticWindow).compactMap { $0 as? UITextView }
+                .first { $0.accessibilityIdentifier == "assistant.chat.composer" }
+        }
+        let staticBlockerDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        func staticBlockerReady() -> Bool {
+            guard let composer = staticComposer() else { return false }
+            let markers = ComposerPresentationTarget.allCases.compactMap { staticProbe.marker($0) }
+            guard let revision = markers.first?.draftRevision else { return false }
+            return model.composerDraftScope == scope
+                && model.composerDraft(in: scope) == "Keep recovery available while mounting static AX3."
+                && model.hasComposerRecovery(in: scope)
+                && composer.window === staticWindow
+                && composer.text == "Keep recovery available while mounting static AX3."
+                && markers.count == ComposerPresentationTarget.allCases.count
+                && markers.allSatisfy { !$0.draftIsEmpty && $0.draftRevision == revision }
+        }
+        while !staticBlockerReady(), ContinuousClock.now < staticBlockerDeadline {
+            try await Task.sleep(for: .milliseconds(40))
+        }
+        let staticBlockerComposer = try XCTUnwrap(staticComposer())
+        let staticBlockerMarkers = ComposerPresentationTarget.allCases.compactMap { staticProbe.marker($0) }
+        let staticBlockerRevision = staticBlockerMarkers.first?.draftRevision ?? -1
+        let blockerReceipt: [String: Any] = [
+            "phase": "static-host-mounted-with-nonempty-same-scope-blocker",
+            "sameDraftScope": model.composerDraftScope == scope,
+            "modelDraft": model.composerDraft(in: scope),
+            "actualInputText": staticBlockerComposer.text ?? "",
+            "actualInputInStaticWindow": staticBlockerComposer.window === staticWindow,
+            "staticWindowIsKeyWindow": staticWindow.isKeyWindow,
+            "staticWindowSceneSession": staticWindow.windowScene?.session.persistentIdentifier ?? "none",
+            "hasRecovery": model.hasComposerRecovery(in: scope),
+            "markerCount": staticBlockerMarkers.count,
+            "markersAllNonemptyAtSameRevision": staticBlockerMarkers.count == ComposerPresentationTarget.allCases.count
+                && staticBlockerMarkers.allSatisfy { !$0.draftIsEmpty && $0.draftRevision == staticBlockerRevision },
+            "draftRevision": staticBlockerRevision
+        ]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: blockerReceipt, options: [.prettyPrinted, .sortedKeys])
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "full-height-static-host-blocker-before-clear"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        } catch {
+            XCTFail("Could not serialize static-host blocker receipt: \(error)")
+        }
+        XCTAssertTrue(staticBlockerReady(),
+            "Static RootView must preserve the original nonempty scoped draft and recovery before clearing the actual input")
+        XCTAssertTrue(model.hasComposerRecovery(in: scope))
+        guard staticBlockerReady() else { return }
+
+        staticSampler.start()
+        staticBlockerComposer.text = ""
+        let staticClearDelegate = try XCTUnwrap(staticBlockerComposer.delegate)
+        staticClearDelegate.textViewDidChange?(staticBlockerComposer)
+        let staticClearDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        func staticClearObserved() -> Bool {
+            let markers = ComposerPresentationTarget.allCases.compactMap { staticProbe.marker($0) }
+            return model.composerDraftScope == scope
+                && model.composerDraft(in: scope).isEmpty
+                && model.hasComposerRecovery(in: scope)
+                && staticComposer() === staticBlockerComposer
+                && staticBlockerComposer.window === staticWindow
+                && staticBlockerComposer.text?.isEmpty == true
+                && markers.count == ComposerPresentationTarget.allCases.count
+                && markers.allSatisfy { $0.draftIsEmpty && $0.draftRevision == markers[0].draftRevision }
+        }
+        while !staticClearObserved(), ContinuousClock.now < staticClearDeadline {
+            try await Task.sleep(for: .milliseconds(40))
+        }
+        let markersAfterStaticClear = ComposerPresentationTarget.allCases.compactMap { staticProbe.marker($0) }
+        let clearReceipt: [String: Any] = [
+            "phase": "static-host-actual-input-cleared-through-delegate",
+            "sameDraftScope": model.composerDraftScope == scope,
+            "modelDraftEmpty": model.composerDraft(in: scope).isEmpty,
+            "actualInputEmpty": staticBlockerComposer.text?.isEmpty == true,
+            "currentInputReacquiredSameIdentity": staticComposer() === staticBlockerComposer,
+            "actualInputInStaticWindow": staticBlockerComposer.window === staticWindow,
+            "staticWindowIsKeyWindow": staticWindow.isKeyWindow,
+            "staticWindowSceneSession": staticWindow.windowScene?.session.persistentIdentifier ?? "none",
+            "hasRecovery": model.hasComposerRecovery(in: scope),
+            "markerCount": markersAfterStaticClear.count,
+            "markersAllEmpty": markersAfterStaticClear.count == ComposerPresentationTarget.allCases.count
+                && markersAfterStaticClear.allSatisfy { $0.draftIsEmpty && $0.draftRevision == markersAfterStaticClear[0].draftRevision },
+            "markerRevisions": markersAfterStaticClear.map(\.draftRevision)
+        ]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: clearReceipt, options: [.prettyPrinted, .sortedKeys])
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "full-height-static-host-empty-input-before-sampling"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        } catch {
+            XCTFail("Could not serialize static-host clear receipt: \(error)")
+        }
+        XCTAssertTrue(staticClearObserved(),
+            "The actual static-host UITextView delegate must clear the same scoped draft while recovery remains available")
+        guard staticClearObserved() else { return }
         func staticHasStableFrames() -> Bool {
             guard let first = staticSampler.samples.first else { return false }
             guard let tail = staticSampler.stableTail(after: first.timestamp) else { return false }
@@ -708,7 +900,6 @@ final class NativeVisualReviewTests: XCTestCase {
         let staticMic = staticSample?.presentationFrames[.microphone]
         let staticSend = staticSample?.presentationFrames[.send]
         let staticBounds = staticSample?.targetBounds ?? [:]
-        func staticDescendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(staticDescendants) }
         let staticTranscript = staticDescendants(staticWindow).compactMap { $0 as? UIScrollView }
             .filter { !($0 is UITextView) }.max { $0.bounds.height < $1.bounds.height }
         let staticTranscriptAttached = staticTranscript.map { $0.window === staticWindow && $0.isDescendant(of: staticWindow) } ?? false
@@ -841,6 +1032,57 @@ final class NativeVisualReviewTests: XCTestCase {
             "Static presentation frames must be finite, same-window, and contained within the capsule/window")
         staticSampler.stop()
 
+        staticHost.rootView = RootView().environment(model).environment(\.dynamicTypeSize, .accessibility3)
+            .environment(\.colorScheme, .light).environment(\.scenePhase, .inactive)
+            .environment(\.composerPresentationProbe, nil)
+            .transaction { transaction in
+                transaction.animation = nil
+                transaction.disablesAnimations = true
+            }
+        staticWindow.layoutIfNeeded()
+        let staticMarkerRemovalDeadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while ComposerPresentationTarget.allCases.contains(where: { staticProbe.marker($0) != nil }),
+              ContinuousClock.now < staticMarkerRemovalDeadline {
+            try await Task.sleep(for: .milliseconds(16))
+        }
+        staticWindow.rootViewController = nil
+        staticWindow.isHidden = true
+        let staticDetachDeadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while (staticBlockerComposer.window != nil
+            || ComposerPresentationTarget.allCases.contains(where: { staticProbe.marker($0) != nil }))
+            && ContinuousClock.now < staticDetachDeadline {
+            try await Task.sleep(for: .milliseconds(16))
+        }
+        let staticHostDetached = staticWindow.rootViewController == nil
+            && staticBlockerComposer.window == nil
+            && ComposerPresentationTarget.allCases.allSatisfy { staticProbe.marker($0) == nil }
+        let postDetachState: [String: Any] = [
+            "phase": "static-host-detached-before-one-shot-model-restore",
+            "hostRootRemoved": staticWindow.rootViewController == nil,
+            "actualInputDetachedFromWindow": staticBlockerComposer.window == nil,
+            "allStaticMarkersRemoved": ComposerPresentationTarget.allCases.allSatisfy { staticProbe.marker($0) == nil },
+            "staticWindowIsKeyWindowAfterDetach": staticWindow.isKeyWindow,
+            "staticWindowSceneSession": staticWindow.windowScene?.session.persistentIdentifier ?? "none",
+            "sameDraftScope": model.composerDraftScope == scope,
+            "modelDraftEmpty": model.composerDraft(in: scope).isEmpty,
+            "recoveryStillAvailable": model.hasComposerRecovery(in: scope)
+        ]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: postDetachState, options: [.prettyPrinted, .sortedKeys])
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "full-height-static-host-detached-before-model-restore"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        } catch {
+            XCTFail("Could not serialize static-host teardown receipt: \(error)")
+        }
+        XCTAssertTrue(staticHostDetached,
+            "The static host, input, and markers must be detached before one-shot recovery restoration")
+        guard staticHostDetached else { return }
+        XCTAssertEqual(model.composerDraftScope, scope)
+        XCTAssertTrue(model.composerDraft(in: scope).isEmpty)
+        XCTAssertTrue(model.hasComposerRecovery(in: scope))
+
         // Verify the one-shot model lifecycle after all rendered states are
         // captured. Recovery is exercised through the model lifecycle only;
         // this suite does not activate Send, Restore, Jump, or VoiceOver.
@@ -863,7 +1105,6 @@ final class NativeVisualReviewTests: XCTestCase {
         XCTAssertFalse(model.hasComposerRecovery(in: scope))
         XCTAssertEqual(model.composerDraft(in: scope), recoveryText)
         XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
-        previousKeyWindow?.makeKey()
     }
 
     @MainActor
