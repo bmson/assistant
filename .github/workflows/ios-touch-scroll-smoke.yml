@@ -22,7 +22,6 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.0.app/Contents/Developer
       PINNED_SOURCE_SHA: 257e278e07c56c4310b0fcae747e5f082fb73d2f
-      OUTPUT_DIR: ${{ runner.temp }}/ios-touch-scroll-smoke
     steps:
       # Keep the workflow revision (for provenance) separate from the exact app
       # source under test. The latter is deliberately immutable for this run.
@@ -40,6 +39,8 @@ jobs:
 
       - name: Build and run the single touch smoke
         id: smoke
+        env:
+          OUTPUT_DIR: ${{ runner.temp }}/ios-touch-scroll-smoke
         shell: bash
         run: |
           mkdir -p "$OUTPUT_DIR"
