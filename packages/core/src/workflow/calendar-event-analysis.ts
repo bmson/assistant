@@ -1,4 +1,9 @@
+import { sameCalendarOccurrence } from '@assistant/persistence';
+import { canonicalOccurrenceGroups } from './calendar-relationship.js';
 import { safeCalendarSourceUrl } from './calendar-source-link.js';
+
+// The governed read path permits three pages of at most fifty source rows.
+const MAX_ANALYSIS_RECORDS = 3 * 50;
 
 export interface CalendarEventAnalysisRequest {
   weekdayCount: number;
@@ -95,12 +100,25 @@ export function requestedCalendarEventAnalysis(
 }
 
 interface TimedEvent {
-  source: Record<string, unknown>;
+  sources: Record<string, unknown>[];
   title: string;
   start: number;
   end: number;
   location: string;
   explicitlyInPerson: boolean;
+  sourceDetails?: string;
+}
+
+interface AnalyzedOccurrence {
+  sources: Record<string, unknown>[];
+  start?: number;
+  end?: number;
+  title: string;
+  location: string;
+  durationResolved: boolean;
+  identityResolved: boolean;
+  gapEligible: boolean;
+  sourceDetails?: string;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -277,8 +295,135 @@ function title(event: TimedEvent): string {
   return plainText(event.title).slice(0, 140) || 'Untitled event';
 }
 
+function sourceLabel(source: Record<string, unknown>, index: number): string {
+  return plainText(text(source.calendar) || text(source.calendarId) || `Source ${index + 1}`);
+}
+
+function sourceTitle(source: Record<string, unknown>): string {
+  const value = text(source.summary);
+  return value ? `“${plainText(value).slice(0, 140)}”` : 'Untitled event';
+}
+
+function sourceStatus(source: Record<string, unknown>): string {
+  const status = text(source.status).toLowerCase();
+  if (status === 'cancelled') return 'cancelled';
+  if (status === 'confirmed') return 'confirmed';
+  if (status === 'tentative') return 'tentative';
+  return status ? 'status unspecified' : 'status not provided';
+}
+
+function sourceAttendanceMode(source: Record<string, unknown>): string {
+  if (isExplicitlyInPerson(source)) return 'in person';
+  const value = text(source.attendanceMode ?? source.eventMode ?? source.mode).toLowerCase();
+  if (/^(?:in[-_ ]?person|on[-_ ]?site|face[-_ ]?to[-_ ]?face)$/.test(value)) return 'in person';
+  if (/^(?:online|virtual|remote)$/.test(value)) return 'online';
+  return value ? 'mode unspecified' : 'mode not provided';
+}
+
+function eventBounds(source: Record<string, unknown>): { start: number; end: number } | undefined {
+  const rawStart = text(source.start);
+  const rawEnd = text(source.end);
+  if (
+    !rawStart ||
+    !rawEnd ||
+    /^\d{4}-\d{2}-\d{2}$/.test(rawStart) ||
+    /^\d{4}-\d{2}-\d{2}$/.test(rawEnd)
+  )
+    return undefined;
+  const start = Date.parse(rawStart);
+  const end = Date.parse(rawEnd);
+  return Number.isFinite(start) && Number.isFinite(end) && end > start ? { start, end } : undefined;
+}
+
+function identityIsUnresolved(source: Record<string, unknown>): boolean {
+  const calendarId = text(source.calendarId);
+  const eventId = text(source.eventId);
+  const recurring = Boolean(text(source.recurringEventId));
+  const rawOriginal = text(source.originalStartTime);
+  if (!calendarId || !eventId) return true;
+  if (rawOriginal && !Number.isFinite(Date.parse(rawOriginal))) return true;
+  return recurring && !rawOriginal;
+}
+
+function ambiguousIdentitySources(
+  events: ReadonlyArray<Record<string, unknown>>,
+  groups: Record<string, unknown>[][],
+): Set<Record<string, unknown>> {
+  const groupForSource = new Map<Record<string, unknown>, number>();
+  groups.forEach((group, groupIndex) => {
+    for (const source of group) groupForSource.set(source, groupIndex);
+  });
+
+  const ambiguous = new Set<Record<string, unknown>>();
+  for (let leftIndex = 0; leftIndex < events.length; leftIndex += 1) {
+    const left = events[leftIndex];
+    if (!left) continue;
+    for (let rightIndex = leftIndex + 1; rightIndex < events.length; rightIndex += 1) {
+      const right = events[rightIndex];
+      if (!right || groupForSource.get(left) === groupForSource.get(right)) continue;
+
+      const sameOccurrence = sameCalendarOccurrence(left, right);
+      const leftUid = text(left.iCalUID);
+      const rightUid = text(right.iCalUID);
+      const crossCalendarUid =
+        leftUid !== '' &&
+        leftUid === rightUid &&
+        text(left.calendarId) !== '' &&
+        text(right.calendarId) !== '' &&
+        text(left.calendarId) !== text(right.calendarId);
+      const leftOriginal = text(left.originalStartTime);
+      const rightOriginal = text(right.originalStartTime);
+      const leftHasValidOriginal = leftOriginal !== '' && Number.isFinite(Date.parse(leftOriginal));
+      const rightHasValidOriginal =
+        rightOriginal !== '' && Number.isFinite(Date.parse(rightOriginal));
+      const asymmetricOriginal = crossCalendarUid && leftHasValidOriginal !== rightHasValidOriginal;
+
+      if (sameOccurrence || asymmetricOriginal) {
+        ambiguous.add(left);
+        ambiguous.add(right);
+      }
+    }
+  }
+  return ambiguous;
+}
+
+function sourceComparison(
+  sources: Record<string, unknown>[],
+  timeZone: string,
+  differences: string[],
+): string | undefined {
+  if (sources.length === 1 && differences.length === 0) return undefined;
+  const details = sources.map((source, index) => {
+    const bounds = eventBounds(source);
+    const time = bounds
+      ? `${eventTimeRange({ sources: [source], title: '', ...bounds, location: '', explicitlyInPerson: false }, timeZone)}`
+      : 'time unavailable';
+    const location = text(source.location);
+    const metadata = [
+      sourceTitle(source),
+      time,
+      sourceStatus(source),
+      sourceAttendanceMode(source),
+      location ? plainText(location).slice(0, 100) : 'location not provided',
+    ].join('; ');
+    const links = sourceLinks([source]);
+    return `${sourceLabel(source, index)} — ${metadata}${links ? ` ${links}` : ''}`;
+  });
+  const suffix = differences.length > 0 ? ` ${differences.join(' ')}` : '';
+  return `Source comparison: ${details.join(' · ')}.${suffix}`;
+}
+
+function sourceLinks(sources: Record<string, unknown>[]): string {
+  const links = new Set<string>();
+  for (const source of sources) {
+    const value = safeLink(source);
+    if (value) links.add(value);
+  }
+  return [...links].join(' ');
+}
+
 function linkSuffix(event: TimedEvent): string {
-  const link = safeLink(event.source);
+  const link = sourceLinks(event.sources);
   return link ? ` ${link}` : '';
 }
 
@@ -307,55 +452,150 @@ export function calendarEventAnalysisResponse(input: {
   if (days.length !== input.request.weekdayCount)
     return 'I couldn’t safely resolve all requested weekdays in the configured owner time zone.';
 
-  const seen = new Set<string>();
+  if (input.events.length > MAX_ANALYSIS_RECORDS) {
+    const lines = [
+      'Too many calendar listings were returned to complete this analysis safely. Narrow the date window and try again.',
+    ];
+    if (!input.coverageComplete)
+      lines.push(
+        'Calendar coverage was incomplete, so the returned listings may not include every calendar entry in the requested window.',
+      );
+    return lines.join('\n');
+  }
+
+  const occurrenceGroups = canonicalOccurrenceGroups(input.events);
+  const ambiguousIdentities = ambiguousIdentitySources(input.events, occurrenceGroups);
+  const occurrences: AnalyzedOccurrence[] = [];
   const timed: TimedEvent[] = [];
   let missingTimeCount = 0;
-  for (const source of input.events) {
-    if (text(source.status).toLowerCase() === 'cancelled') continue;
-    const eventId = text(source.eventId);
-    const calendarId = text(source.calendarId);
-    const stableId = eventId && calendarId ? `${calendarId}\0${eventId}` : '';
-    if (stableId && seen.has(stableId)) continue;
-    if (stableId) seen.add(stableId);
-    const rawStart = text(source.start);
-    const rawEnd = text(source.end);
-    const start = Date.parse(rawStart);
-    const end = Date.parse(rawEnd);
-    if (
-      !rawStart ||
-      !rawEnd ||
-      /^\d{4}-\d{2}-\d{2}$/.test(rawStart) ||
-      /^\d{4}-\d{2}-\d{2}$/.test(rawEnd) ||
-      !Number.isFinite(start) ||
-      !Number.isFinite(end) ||
-      end <= start
-    ) {
-      missingTimeCount += 1;
-      continue;
-    }
-    timed.push({
-      source,
-      title: text(source.summary),
-      start,
-      end,
-      location: text(source.location),
-      explicitlyInPerson: isExplicitlyInPerson(source),
+  let unresolvedIdentityCount = 0;
+  let unresolvedSourceCount = 0;
+  let hasUnknownPlacement = false;
+  for (const sources of occurrenceGroups) {
+    if (sources.every((source) => text(source.status).toLowerCase() === 'cancelled')) continue;
+    const bounds = sources.map(eventBounds);
+    const knownBounds = bounds.filter((value): value is NonNullable<typeof value> =>
+      Boolean(value),
+    );
+    const boundMismatch =
+      knownBounds.length !== sources.length ||
+      knownBounds.some(
+        (value) => value.start !== knownBounds[0]?.start || value.end !== knownBounds[0]?.end,
+      );
+    const statuses = new Set(sources.map((source) => text(source.status).toLowerCase()));
+    const titles = new Set(sources.map((source) => text(source.summary)));
+    const locations = new Set(sources.map((source) => text(source.location)));
+    const modes = new Set(sources.map(sourceAttendanceMode));
+    const statusMismatch = statuses.size > 1;
+    const titleMismatch = titles.size > 1;
+    const locationMismatch = locations.size > 1;
+    const modeMismatch = modes.size > 1;
+    const durationResolved = !boundMismatch && !statusMismatch;
+    const identityResolved = sources.every(
+      (source) => !identityIsUnresolved(source) && !ambiguousIdentities.has(source),
+    );
+    const allInPerson = sources.every(isExplicitlyInPerson);
+    const gapEligible =
+      durationResolved && identityResolved && allInPerson && !modeMismatch && !locationMismatch;
+    const validDates = knownBounds;
+    const start =
+      validDates.length > 0 ? Math.min(...validDates.map((value) => value.start)) : undefined;
+    const end =
+      validDates.length > 0 ? Math.max(...validDates.map((value) => value.end)) : undefined;
+    const distinctTitles = [...titles].filter(Boolean);
+    const displayTitle = titleMismatch
+      ? 'Calendar sources list different titles'
+      : (distinctTitles[0] ?? 'Untitled event');
+    const differences = [
+      ...(boundMismatch ? ['Source times disagree.'] : []),
+      ...(statusMismatch ? ['Source status differs.'] : []),
+      ...(modeMismatch ? ['Attendance mode differs by source.'] : []),
+      ...(locationMismatch ? ['Location differs by source.'] : []),
+      ...(titleMismatch ? ['Source titles differ.'] : []),
+      ...(!identityResolved ? ['Unique occurrence count is unresolved.'] : []),
+    ];
+    const sourceDetails =
+      sources.length > 1 || differences.length > 0
+        ? sourceComparison(sources, timeZone, differences)
+        : undefined;
+    const location = locationMismatch ? '' : sources[0] ? text(sources[0].location) : '';
+    occurrences.push({
+      sources,
+      ...(start !== undefined ? { start } : {}),
+      ...(end !== undefined ? { end } : {}),
+      title: displayTitle,
+      location,
+      durationResolved,
+      identityResolved,
+      gapEligible,
+      ...(sourceDetails ? { sourceDetails } : {}),
     });
+
+    if (!identityResolved) unresolvedIdentityCount += sources.length;
+    if (!durationResolved) unresolvedSourceCount += 1;
+    const invalidBoundsCount = sources.length - knownBounds.length;
+    if (invalidBoundsCount > 0) {
+      missingTimeCount += invalidBoundsCount;
+      hasUnknownPlacement = true;
+    }
+
+    if (boundMismatch) {
+      for (const boundsValue of knownBounds) {
+        timed.push({
+          sources,
+          title: displayTitle,
+          ...boundsValue,
+          location: '',
+          explicitlyInPerson: false,
+          ...(sourceDetails ? { sourceDetails } : {}),
+        });
+      }
+    } else if (start !== undefined && end !== undefined) {
+      timed.push({
+        sources,
+        title: displayTitle,
+        start,
+        end,
+        location,
+        explicitlyInPerson: gapEligible,
+        ...(sourceDetails ? { sourceDetails } : {}),
+      });
+    }
   }
 
   const lines = [
     `Calendar review for the next ${input.request.weekdayCount} weekdays, using the configured owner time zone (${timeZone}). The event data does not identify a separate calendar time zone.`,
   ];
-  const countsComplete = input.coverageComplete && missingTimeCount === 0;
+  const countsComplete =
+    input.coverageComplete &&
+    missingTimeCount === 0 &&
+    unresolvedSourceCount === 0 &&
+    unresolvedIdentityCount === 0;
   const durationThreshold = input.request.minimumDurationMinutes;
+  const emittedSourceDetails = new Set<string>();
   if (durationThreshold !== undefined) {
     const dailyMatches = days.map((day) => ({
       day,
-      matching: timed.filter(
-        (event) =>
-          event.end > day.start &&
-          event.start < day.end &&
-          (event.end - event.start) / 60_000 >= durationThreshold,
+      matching: occurrences.filter(
+        (occurrence) =>
+          occurrence.durationResolved &&
+          occurrence.start !== undefined &&
+          occurrence.end !== undefined &&
+          occurrence.end > day.start &&
+          occurrence.start < day.end &&
+          (occurrence.end - occurrence.start) / 60_000 >= durationThreshold,
+      ),
+      unresolved: occurrences.filter(
+        (occurrence) =>
+          !occurrence.durationResolved &&
+          occurrence.start !== undefined &&
+          occurrence.end !== undefined &&
+          occurrence.end > day.start &&
+          occurrence.start < day.end &&
+          occurrence.sources.some((source) => {
+            const bounds = eventBounds(source);
+            return bounds && (bounds.end - bounds.start) / 60_000 >= durationThreshold;
+          }),
       ),
     }));
     if (input.request.durationCountMode === 'days') {
@@ -368,29 +608,57 @@ export function calendarEventAnalysisResponse(input: {
     lines.push(
       `Events lasting at least ${durationThreshold} minutes (counted on each local day they overlap):`,
     );
-    for (const { day, matching } of dailyMatches) {
-      const countText = countsComplete
-        ? `${matching.length}`
-        : `at least ${matching.length} in the checked subset`;
-      lines.push(
-        `- ${displayDay(day.date)}: ${countText} qualifying ${matching.length === 1 ? 'event' : 'events'}.`,
-      );
+    for (const { day, matching, unresolved } of dailyMatches) {
+      const identityUncertainListings = matching
+        .filter((occurrence) => !occurrence.identityResolved)
+        .reduce((count, occurrence) => count + occurrence.sources.length, 0);
+      const resolvedCount = matching.filter((occurrence) => occurrence.identityResolved).length;
+      const listingCount =
+        matching.length -
+        matching.filter((occurrence) => !occurrence.identityResolved).length +
+        identityUncertainListings;
+      const countText =
+        identityUncertainListings > 0
+          ? `at least ${listingCount} qualifying returned listings; unique occurrence count unresolved.`
+          : countsComplete
+            ? `${matching.length} qualifying ${matching.length === 1 ? 'event' : 'events'}.`
+            : `at least ${resolvedCount} qualifying ${resolvedCount === 1 ? 'event' : 'events'} in the checked subset${unresolved.length > 0 ? '; additional source times or statuses remain unresolved' : ''}.`;
+      lines.push(`- ${displayDay(day.date)}: ${countText}`);
       for (const event of matching) {
         const location = event.location ? ` — ${plainText(event.location)}` : '';
+        const start = event.start;
+        const end = event.end;
+        if (start === undefined || end === undefined) continue;
         lines.push(
-          `  ${title(event)} (${eventTimeRange(event, timeZone)})${location}${linkSuffix(event)}`,
+          `  ${plainText(event.title).slice(0, 140) || 'Untitled event'} (${eventTimeRange({ sources: event.sources, title: event.title, start, end, location: event.location, explicitlyInPerson: event.gapEligible }, timeZone)})${location}${sourceLinks(event.sources) ? ` ${sourceLinks(event.sources)}` : ''}`,
         );
+        if (event.sourceDetails) {
+          lines.push(`    ${event.sourceDetails}`);
+          emittedSourceDetails.add(event.sourceDetails);
+        }
+      }
+      for (const unresolvedOccurrence of unresolved) {
+        if (unresolvedOccurrence.sourceDetails) {
+          lines.push(`  ${unresolvedOccurrence.sourceDetails}`);
+          emittedSourceDetails.add(unresolvedOccurrence.sourceDetails);
+        }
       }
     }
   }
 
   const gapThreshold = input.request.minimumInPersonGapMinutes;
+  for (const occurrence of occurrences) {
+    if (occurrence.sourceDetails && !emittedSourceDetails.has(occurrence.sourceDetails)) {
+      lines.push(`- ${occurrence.sourceDetails}`);
+      emittedSourceDetails.add(occurrence.sourceDetails);
+    }
+  }
   if (gapThreshold !== undefined) {
     lines.push(
       `Gaps of at least ${gapThreshold} minutes between consecutive events explicitly marked in person:`,
     );
     let gapCount = 0;
-    for (const day of days) {
+    for (const day of hasUnknownPlacement ? [] : days) {
       const onDay = timed
         .filter((event) => event.start < day.end && event.end > day.start)
         .sort((left, right) => left.start - right.start || left.end - right.end);
@@ -439,9 +707,11 @@ export function calendarEventAnalysisResponse(input: {
     }
     if (gapCount === 0)
       lines.push(
-        countsComplete
-          ? '- No qualifying gaps were found among events explicitly marked in person.'
-          : '- No qualifying gaps appeared among the timed events explicitly marked in person; missing times or incomplete calendar coverage may conceal additional gaps.',
+        hasUnknownPlacement
+          ? '- No positive gap is reported because at least one returned listing has an unknown time or placement.'
+          : countsComplete
+            ? '- No qualifying gaps were found among events explicitly marked in person.'
+            : '- No qualifying gaps appeared among the timed events explicitly marked in person; missing times or incomplete calendar coverage may conceal additional gaps.',
       );
     lines.push(
       'A location alone was not treated as evidence that an event is in person. No travel time was inferred.',
