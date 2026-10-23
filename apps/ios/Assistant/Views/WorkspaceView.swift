@@ -275,6 +275,124 @@ struct WorkspaceAvailabilityNotice: View {
     }
 }
 
+struct ImportSourceActionConfirmation: Equatable, Identifiable {
+    enum Action: String, Equatable {
+        case purgeMemories
+        case deleteSource
+
+        var command: String {
+            switch self {
+            case .purgeMemories: "purge"
+            case .deleteSource: "delete"
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .purgeMemories: "Purge memories"
+            case .deleteSource: "Delete source"
+            }
+        }
+
+        var confirmationTitle: String {
+            switch self {
+            case .purgeMemories: "Purge memories from this source?"
+            case .deleteSource: "Delete this source?"
+            }
+        }
+
+        func message(source: String) -> String {
+            switch self {
+            case .purgeMemories:
+                "This removes memories learned from \(source). The import record and source archive are kept."
+            case .deleteSource:
+                "This removes \(source), its imported memories, and its source file."
+            }
+        }
+    }
+
+    struct Command: Equatable {
+        let action: String
+        let source: String
+    }
+
+    let source: String
+    let workspacePath: String
+    let updatedAt: String
+    let action: Action
+
+    var id: String { "\(action.rawValue):\(source)" }
+    var command: Command { .init(action: action.command, source: source) }
+    var title: String { action.title }
+    var confirmationTitle: String { action.confirmationTitle }
+    var message: String { action.message(source: source) }
+}
+
+struct ImportSourceActionSelection: Equatable {
+    private(set) var pending: ImportSourceActionConfirmation?
+
+    mutating func select(
+        _ action: ImportSourceActionConfirmation.Action,
+        source: String,
+        workspacePath: String,
+        updatedAt: String,
+        actionsAvailable: Bool
+    ) {
+        guard actionsAvailable else { return }
+        pending = .init(source: source, workspacePath: workspacePath, updatedAt: updatedAt, action: action)
+    }
+
+    mutating func cancel() {
+        pending = nil
+    }
+
+    mutating func confirm(
+        actionsAvailable: Bool,
+        currentWorkspacePath: String?,
+        currentUpdatedAt: String?
+    ) -> ImportSourceActionConfirmation.Command? {
+        guard let pending else { return nil }
+        guard currentWorkspacePath == pending.workspacePath, currentUpdatedAt == pending.updatedAt else {
+            self.pending = nil
+            return nil
+        }
+        guard actionsAvailable else { return nil }
+        self.pending = nil
+        return pending.command
+    }
+}
+
+enum DocumentListPresentation: Equatable {
+    case loaded(count: Int)
+    case confirmedEmpty
+    case loadablePage
+    case reportedButNotLoaded
+    case incomplete
+
+    init(_ overview: DocumentsOverview) {
+        if !overview.documents.isEmpty {
+            self = .loaded(count: overview.documents.count)
+        } else if let pagination = overview.pagination, !pagination.isSupported {
+            self = .incomplete
+        } else if overview.stats.total == 0 && overview.stats.ready == 0 &&
+                    overview.stats.pending == 0 && overview.stats.chunks == 0 && overview.hasMore != true &&
+                    overview.pagination?.hasMore != true && overview.pagination?.complete != false {
+            self = .confirmedEmpty
+        } else if overview.pagination?.isSupported == true && overview.pagination?.hasMore == true {
+            self = .loadablePage
+        } else if overview.stats.total > 0 {
+            self = .reportedButNotLoaded
+        } else {
+            self = .incomplete
+        }
+    }
+
+    var loadedCount: Int? {
+        guard case let .loaded(count) = self else { return nil }
+        return count
+    }
+}
+
 struct WorkspaceView: View {
     let area: WorkspaceArea
 
@@ -282,6 +400,7 @@ struct WorkspaceView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showingDocumentImporter = false
@@ -294,6 +413,8 @@ struct WorkspaceView: View {
     @State private var showingIssueReporter = false
     @State private var issueReported = false
     @State private var workspaceActionInFlight: String?
+    @State private var importSourceActionSelection = ImportSourceActionSelection()
+    @State private var importSourceConfirmationFeedback: String?
     @State private var fileImportTask: Task<Void, Never>?
     @State private var fileImportID: UUID?
     @State private var fileImportStage: String?
@@ -373,6 +494,8 @@ struct WorkspaceView: View {
             repairAcknowledgedRevisions = [:]
             repairConfirmation = nil
             workspaceActionInFlight = nil
+            importSourceActionSelection.cancel()
+            importSourceConfirmationFeedback = nil
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -682,19 +805,43 @@ struct WorkspaceView: View {
     private var documentsContent: some View {
         VStack(alignment: .leading, spacing: 16) {
             if let documents = model.overview?.documents {
-                metricGrid([
-                    ("Filed", documents.stats.total, "doc", AssistantTheme.accent(for: colorScheme)),
-                    ("Ready", documents.stats.ready, "checkmark.circle", AssistantTheme.success(for: colorScheme)),
-                    ("Reading", documents.stats.pending, "clock.arrow.circlepath", AssistantTheme.warning(for: colorScheme)),
-                ])
+                let listPresentation = DocumentListPresentation(documents)
+                if let summary = documentCountSummary(documents) {
+                    AssistantFlowLayout(spacing: 10) {
+                        ForEach(summary, id: \.self) { item in
+                            Text(item)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(summary.joined(separator: ", "))
+                }
 
-                sectionHeading("Filed documents", count: documents.documents.count)
-                if documents.documents.isEmpty {
-                    emptyState("No documents filed", symbol: "doc")
-                } else {
+                countedSectionHeading("Filed documents", count: listPresentation.loadedCount.map { "\($0) loaded" })
+                switch listPresentation {
+                case .loaded:
                     ForEach(documents.documents) { document in
                         documentCard(document)
                     }
+                case .confirmedEmpty:
+                    documentEmptyState
+                case .loadablePage:
+                    Text("No documents are loaded yet. Load the next page to continue.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .reportedButNotLoaded:
+                    Text("The server reports saved documents, but none are loaded here yet.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .incomplete:
+                    Text("The document list is incomplete. Refresh before treating it as empty.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let pagination = documents.pagination, pagination.isSupported, pagination.hasMore {
                     VStack(spacing: 8) {
@@ -1601,39 +1748,29 @@ struct WorkspaceView: View {
     }
 
     private func backstoryImports(_ imports: WorkspaceImports) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                sectionHeading("Backstory imports", count: imports.sources.count)
-                Spacer()
-                Button("Upload", systemImage: "tray.and.arrow.down") {
-                    showingBackstoryImporter = true
-                }
-                .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
+        VStack(alignment: .leading, spacing: 16) {
+            backstoryImportHeader(imports)
+            if let importSourceConfirmationFeedback {
+                Text(importSourceConfirmationFeedback)
+                    .font(.subheadline)
+                    .foregroundStyle(AssistantTheme.warning(for: colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("assistant.imports.confirmation-feedback")
             }
             if imports.filesAvailability?.isAvailable == false {
                 WorkspaceAvailabilityNotice(title: "Workspace files")
             }
             ForEach(imports.filesAvailability?.isAvailable == false ? [] : imports.unstartedFiles) { file in
-                HStack {
-                    Text(file.name)
-                        .font(.subheadline)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer()
-                    Button("Start") {
-                        updateImport(
-                            action: "start",
-                            source: file.name.replacingOccurrences(
-                                of: #"\.[A-Za-z0-9]+$"#,
-                                with: "",
-                                options: .regularExpression
-                            ).lowercased(),
-                            workspacePath: "import/\(file.name)"
-                        )
+                Group {
+                    if usesAccessibilityLayout {
+                        unstartedImportFileRow(file, vertical: true)
+                    } else {
+                        ViewThatFits(in: .horizontal) {
+                            unstartedImportFileRow(file, vertical: false)
+                            unstartedImportFileRow(file, vertical: true)
+                        }
                     }
-                    .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
                 }
-                .assistantCard(in: colorScheme)
             }
             if let pagination = model.workspace?.sectionPagination?.importFiles {
                 loadMoreButton(section: .importFiles, pagination: pagination)
@@ -1642,24 +1779,23 @@ struct WorkspaceView: View {
                 WorkspaceAvailabilityNotice(title: "Import history")
             }
             ForEach(imports.sources) { source in
-                VStack(alignment: .leading, spacing: 9) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(source.source).font(.headline)
-                            Text("\(source.memoriesSaved) saved · \(source.itemsProcessed) processed")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        StatusPill(status: source.status)
-                    }
+                VStack(alignment: .leading, spacing: 10) {
+                    importSourceHeader(source)
+                    Text(importSourceProgressLabel(source))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     if source.quarantinedNow > 0 {
                         Text("\(source.quarantinedNow) memories are waiting for review.")
                             .font(.caption)
                             .foregroundStyle(AssistantTheme.warning(for: colorScheme))
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     if let error = source.error, !error.isEmpty {
-                        Text(error).font(.caption).foregroundStyle(.red)
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(AssistantTheme.errorInk(for: colorScheme))
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     importActions(source)
                 }
@@ -1669,33 +1805,49 @@ struct WorkspaceView: View {
                 loadMoreButton(section: .importSources, pagination: pagination)
             }
         }
+        .confirmationDialog(
+            importSourceActionSelection.pending?.confirmationTitle ?? "Confirm import action",
+            isPresented: Binding(
+                get: { importSourceActionSelection.pending != nil },
+                set: { if !$0 { importSourceActionSelection.cancel() } }
+            ),
+            titleVisibility: .visible,
+            presenting: importSourceActionSelection.pending
+        ) { selection in
+            Button(selection.title, role: .destructive) {
+                let currentSource = currentImportSource(for: selection)
+                guard let command = importSourceActionSelection.confirm(
+                    actionsAvailable: !actionsUnavailable,
+                    currentWorkspacePath: currentSource?.workspacePath,
+                    currentUpdatedAt: currentSource?.updatedAt
+                ) else {
+                    importSourceConfirmationFeedback = workspaceActionInFlight != nil
+                        ? "Another update is in progress. Wait, then review this action again."
+                        : "This source changed or is unavailable. Refresh and review it again before confirming."
+                    importSourceActionSelection.cancel()
+                    return
+                }
+                importSourceConfirmationFeedback = nil
+                updateImport(action: command.action, source: command.source)
+            }
+            Button("Cancel", role: .cancel) {
+                importSourceActionSelection.cancel()
+            }
+        } message: { selection in
+            Text(selection.message)
+        }
     }
 
-    /// Controls for one import source.
-    ///
-    /// "Purge memories" and "Delete source" name two different destructive
-    /// acts on the same card, so neither can be shortened into the other
-    /// without becoming ambiguous, and the three of them will not share a line
-    /// at any type size. They used to wrap as one undifferentiated run, which
-    /// is what made the wrap read as an accident: a pending review sat in the
-    /// same row as a deletion. Reviewing the quarantine is a separate decision
-    /// from maintaining the source, so it gets its own row.
-    ///
-    /// Both rows stay `AssistantFlowLayout` rather than becoming stacks. It is
-    /// the only layout here that measures per item, so a row that outgrows the
-    /// card at large type wraps instead of squeezing its labels.
+    /// Review decisions stay visible; maintenance actions are intentionally
+    /// grouped behind a named, source-specific menu and a separate confirmation.
     private func importActions(_ source: WorkspaceImportSource) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: 8) {
             if source.quarantinedNow > 0 {
                 AssistantFlowLayout(spacing: 9) {
                     importReviewButtons(source)
                 }
             }
-            AssistantFlowLayout(spacing: 9) {
-                importOverflowMenu(source)
-                importPurgeButton(source)
-                importDeleteButton(source)
-            }
+            importOverflowMenu(source)
         }
         .disabled(actionsUnavailable)
     }
@@ -1723,22 +1875,239 @@ struct WorkspaceView: View {
                     workspacePath: source.workspacePath
                 )
             }
+            Button("Purge memories", role: .destructive) {
+                importSourceConfirmationFeedback = nil
+                importSourceActionSelection.select(
+                    .purgeMemories,
+                    source: source.source,
+                    workspacePath: source.workspacePath,
+                    updatedAt: source.updatedAt,
+                    actionsAvailable: !actionsUnavailable
+                )
+            }
+            Button("Delete source", role: .destructive) {
+                importSourceConfirmationFeedback = nil
+                importSourceActionSelection.select(
+                    .deleteSource,
+                    source: source.source,
+                    workspacePath: source.workspacePath,
+                    updatedAt: source.updatedAt,
+                    actionsAvailable: !actionsUnavailable
+                )
+            }
         } label: {
             Label("More", systemImage: "ellipsis.circle")
+                .frame(minWidth: 44, minHeight: 44)
         }
         .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
+        .accessibilityLabel("More actions for \(source.source)")
+        .accessibilityHint("Run this import again, purge its memories, or delete the source.")
     }
 
-    private func importPurgeButton(_ source: WorkspaceImportSource) -> some View {
-        AssistantConfirmationButton("Purge memories") {
-            updateImport(action: "purge", source: source.source)
+    private func importSourceHeader(_ source: WorkspaceImportSource) -> some View {
+        let title = Text(source.source)
+            .font(.headline)
+            .fixedSize(horizontal: false, vertical: true)
+
+        return Group {
+            if usesAccessibilityLayout || horizontalSizeClass == .compact {
+                VStack(alignment: .leading, spacing: 8) {
+                    title
+                    StatusPill(status: source.status)
+                }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: 8) {
+                        title
+                        Spacer(minLength: 8)
+                        StatusPill(status: source.status)
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        title
+                        StatusPill(status: source.status)
+                    }
+                }
+            }
         }
     }
 
-    private func importDeleteButton(_ source: WorkspaceImportSource) -> some View {
-        AssistantConfirmationButton("Delete source") {
-            updateImport(action: "delete", source: source.source)
+    private func currentImportSource(for selection: ImportSourceActionConfirmation) -> WorkspaceImportSource? {
+        guard model.workspace?.isSectionAvailable("imports") != false,
+              let imports = model.workspace?.imports,
+              imports.sourceAvailability?.isAvailable != false,
+              let currentSource = imports.sources.first(where: { $0.source == selection.source })
+        else {
+            return nil
         }
+        return currentSource
+    }
+
+    private func importSourceProgressLabel(_ source: WorkspaceImportSource) -> String {
+        let progress = source.itemsTotal.map { "\(source.itemsProcessed) of \($0) processed" }
+            ?? "\(source.itemsProcessed) processed"
+        return "\(source.memoriesSaved) saved · \(progress)"
+    }
+
+    private func importSourceCountLabel(_ imports: WorkspaceImports) -> String? {
+        guard imports.sourceAvailability?.isAvailable != false else { return nil }
+        let pagination = model.workspace?.sectionPagination?.importSources
+        let loaded = max(pagination?.loaded ?? imports.sources.count, imports.sources.count)
+        guard loaded > 0 || pagination?.hasMore == true else { return nil }
+        if pagination?.hasMore == true || pagination?.complete == false {
+            return "\(loaded) loaded"
+        }
+        return "\(loaded) sources"
+    }
+
+    private func backstoryImportHeader(_ imports: WorkspaceImports) -> some View {
+        let count = importSourceCountLabel(imports)
+        let heading = countedSectionHeading("Backstory imports", count: count)
+        let upload = Button("Upload", systemImage: "tray.and.arrow.down") {
+            showingBackstoryImporter = true
+        }
+        .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
+        .disabled(actionsUnavailable)
+        .accessibilityHint("Choose a file to import as backstory.")
+
+        return Group {
+            if usesAccessibilityLayout || horizontalSizeClass == .compact {
+                VStack(alignment: .leading, spacing: 8) {
+                    heading
+                    upload
+                }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        heading
+                        Spacer(minLength: 8)
+                        upload
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        heading
+                        upload
+                    }
+                }
+            }
+        }
+    }
+
+    private func countedSectionHeading(_ title: String, count: String?) -> some View {
+        let titleView = sectionHeading(title)
+        return Group {
+            if usesAccessibilityLayout {
+                VStack(alignment: .leading, spacing: 6) {
+                    titleView.frame(maxWidth: .infinity, alignment: .leading)
+                    if let count { sectionCountLabel(count) }
+                }
+            } else if let count {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        titleView.fixedSize(horizontal: true, vertical: false)
+                        sectionCountLabel(count).fixedSize(horizontal: true, vertical: false)
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        titleView.frame(maxWidth: .infinity, alignment: .leading)
+                        sectionCountLabel(count)
+                    }
+                }
+            } else {
+                titleView.frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func sectionCountLabel(_ count: String) -> some View {
+        Text(count)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func unstartedImportFileRow(_ file: WorkspaceImportFile, vertical: Bool) -> some View {
+        let filename = Text(file.name)
+            .font(.subheadline)
+            .fixedSize(horizontal: false, vertical: true)
+        let start = Button("Start") {
+            updateImport(
+                action: "start",
+                source: file.name.replacingOccurrences(
+                    of: #"\.[A-Za-z0-9]+$"#,
+                    with: "",
+                    options: .regularExpression
+                ).lowercased(),
+                workspacePath: "import/\(file.name)"
+            )
+        }
+        .frame(minWidth: 44, minHeight: 44)
+        .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
+        .disabled(actionsUnavailable)
+
+        return Group {
+            if vertical {
+                VStack(alignment: .leading, spacing: 8) {
+                    filename
+                    start
+                }
+            } else {
+                HStack(spacing: 8) {
+                    filename
+                    Spacer(minLength: 8)
+                    start
+                }
+            }
+        }
+        .assistantCard(in: colorScheme)
+    }
+
+    private func documentCountSummary(_ documents: DocumentsOverview) -> [String]? {
+        let stats = documents.stats
+        guard stats.total > 0 || stats.ready > 0 || stats.pending > 0 || !documents.documents.isEmpty else {
+            return nil
+        }
+        var summary: [String] = []
+        if stats.total > 0 {
+            summary.append("\(stats.total) filed")
+        } else if !documents.documents.isEmpty {
+            summary.append("\(documents.documents.count) loaded")
+        }
+        if stats.ready > 0 { summary.append("\(stats.ready) ready") }
+        if stats.pending > 0 { summary.append("\(stats.pending) reading") }
+        return summary
+    }
+
+    private var documentEmptyState: some View {
+        let icon = Image(systemName: "doc.text")
+            .font(.title3)
+            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+            .accessibilityHidden(true)
+        let details = VStack(alignment: .leading, spacing: 5) {
+            Text("No documents filed")
+                .font(.headline)
+            Text("Add a file to give the assistant searchable context for your questions.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Add document", systemImage: "plus") {
+                showingDocumentImporter = true
+            }
+            .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
+            .disabled(actionsUnavailable)
+            .padding(.top, 2)
+        }
+
+        return Group {
+            if usesAccessibilityLayout {
+                details
+            } else {
+                HStack(alignment: .center, spacing: 12) {
+                    icon
+                    details
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .assistantCard(in: colorScheme)
     }
 
     @ViewBuilder
@@ -2354,6 +2723,7 @@ struct WorkspaceView: View {
         verdict: String? = nil,
         workspacePath: String? = nil
     ) {
+        guard !actionsUnavailable else { return }
         workspaceActionInFlight = source
         Task {
             _ = await model.updateImport(
