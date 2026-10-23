@@ -326,7 +326,7 @@ final class ConversationScrollPerformanceTests: XCTestCase {
             "targetPoints": Double(target),
             "viewportHeightPoints": Double(viewport),
             "renderProbeInstrumented": false,
-            "driver": "CADisplayLink setContentOffset + layoutIfNeeded",
+            "driver": "CADisplayLink setContentOffset",
             "physicalTouchProfile": false,
         ], name: "quiet-profile-ready")
 
@@ -369,7 +369,7 @@ final class ConversationScrollPerformanceTests: XCTestCase {
                 "signpostName": "QuietScrollPhase",
                 "signpostInterval": "phase=\(phaseName) fixture=\(handshake.profileID)",
                 "renderProbeInstrumented": false,
-                "driver": "CADisplayLink setContentOffset + layoutIfNeeded",
+                "driver": "CADisplayLink setContentOffset",
                 "physicalTouchProfile": false,
                 "requestCountsByMethodAndPath": fixture.requestCountsByMethodAndPath,
                 "phaseResult": phase,
