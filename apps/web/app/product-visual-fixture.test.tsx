@@ -1,5 +1,6 @@
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import type { ProviderBilling } from '@assistant/application/provider-billing';
 import type { UIMessage } from 'ai';
 import { type ComponentType, createElement, type ReactNode } from 'react';
 import { renderToString } from 'react-dom/server';
@@ -7,13 +8,130 @@ import { expect, it, vi } from 'vitest';
 import { createProductVisualData, visualId, visualNow } from './product-visual-data';
 
 /** Actual retained pages, with only their authenticated I/O seams replaced. */
+type RepairVisualState =
+  | 'pr-recorded'
+  | 'deployment-observed'
+  | 'failed-retry-eligible'
+  | 'failed-pr-recorded';
+
 const state = vi.hoisted(() => ({
   empty: false,
   path: '/goals',
   firestore: false,
   chatState: null as 'stage' | 'paper' | null,
+  costScenario: null as 'mixed' | 'gcp-unconfigured' | null,
+  repairState: null as RepairVisualState | null,
 }));
 const data = () => createProductVisualData(state.empty);
+const billingForVisualFixture = (): ProviderBilling[] => {
+  if (state.costScenario === 'gcp-unconfigured')
+    return [
+      {
+        id: 'google-cloud',
+        label: 'Google Cloud',
+        status: 'not_configured',
+        period: '2026-10',
+        scope: 'Project: assistant',
+        source: 'Cloud Billing export',
+        message: 'Connect a Cloud Billing BigQuery export to see Google Cloud costs.',
+        fetchedAt: null,
+        latestExportAt: null,
+        latestUsageAt: null,
+        lines: [],
+      },
+    ];
+
+  if (state.costScenario === 'mixed')
+    return [
+      {
+        id: 'google-cloud',
+        label: 'Google Cloud',
+        status: 'reported',
+        period: '2026-10',
+        scope: 'Project: assistant',
+        source: 'Cloud Billing export',
+        message: 'Latest usage is not a completeness guarantee.',
+        fetchedAt: '2026-10-22T08:00:00Z',
+        latestExportAt: '2026-10-21T03:00:00Z',
+        latestUsageAt: '2026-10-20T00:00:00Z',
+        lines: [
+          {
+            service: 'Cloud Run',
+            detail: 'regional compute',
+            currency: 'USD',
+            cost: 12,
+            credits: -3,
+            net: 9,
+          },
+          {
+            service: 'Vertex AI',
+            detail: 'project model usage',
+            currency: 'USD',
+            cost: 3,
+            credits: 0,
+            net: 3,
+            projectId: 'assistant',
+          },
+          {
+            service: 'Cloud Storage',
+            detail: 'regional storage',
+            currency: 'EUR',
+            cost: 4,
+            credits: 0,
+            net: 4,
+          },
+        ],
+        forecast: {
+          through: '2026-10-20T00:00:00Z',
+          observedDays: 19,
+          daysInMonth: 31,
+          totals: [
+            { currency: 'USD', spent: 12, dailyAverage: 0.63, projected: 19.58 },
+            { currency: 'EUR', spent: 4, dailyAverage: 0.21, projected: 6.53 },
+          ],
+          message: 'Run rate assumes similar use; not an invoice forecast.',
+        },
+      },
+      {
+        id: 'openrouter',
+        label: 'OpenRouter',
+        status: 'stale',
+        period: '2026-10',
+        scope: 'Connected API key',
+        source: 'Provider key endpoint',
+        message: 'Stale snapshot; usage for this key may include other apps.',
+        fetchedAt: '2026-10-22T08:00:00Z',
+        latestExportAt: '2026-10-21T03:00:00Z',
+        latestUsageAt: '2026-10-20T00:00:00Z',
+        lines: [
+          {
+            service: 'Key usage',
+            detail: 'reported monthly spend',
+            currency: 'USD',
+            cost: 0.0004,
+            credits: 0,
+            net: 0.0004,
+          },
+        ],
+      },
+      {
+        id: 'vertex',
+        label: 'Google Vertex AI',
+        status: 'included',
+        period: '2026-10',
+        scope: 'Project: assistant',
+        source: 'Google Cloud export',
+        message: 'Matching project usage is included above.',
+        fetchedAt: null,
+        latestExportAt: null,
+        latestUsageAt: null,
+        lines: [],
+        includedIn: 'google-cloud',
+      },
+    ];
+
+  return data().billing;
+};
 const chatMessages = (): UIMessage[] => {
   const messages = data().messages;
   const cardMode = process.env.PRODUCT_VISUAL_QA_CARD_CHAT ?? '';
@@ -289,7 +407,7 @@ vi.mock('@/lib/server', () => ({
   getAgentIdentity: async () => ({ id: visualId, name: 'Assistant' }),
   getGeneratedCards: () => ({}),
   getCallsPorts: async () => ({}),
-  getBillingOverview: async () => data().billing,
+  getBillingOverview: async () => billingForVisualFixture(),
   getApplication: () => ({
     listClosedCommitments: async () =>
       state.empty
@@ -448,6 +566,12 @@ vi.mock('@assistant/application/calls', () => ({
 vi.mock('@assistant/application/costs', () => ({
   getCostsDashboard: async () => data().costs,
 }));
+vi.mock('@assistant/application/provider-billing', async () => {
+  const actual = await vi.importActual<
+    typeof import('../../../packages/application/src/provider-billing.js')
+  >('../../../packages/application/src/provider-billing.js');
+  return { billingCoverageProjection: actual.billingCoverageProjection };
+});
 vi.mock('@assistant/application/goals', () => ({
   listGoalsDashboard: async () => data().goals,
 }));
@@ -535,13 +659,84 @@ vi.mock('@/lib/self-repair-server', () => ({
             title: 'Keep a hotel card after a partial lookup failure',
             summary:
               'A completed calendar read should remain visible when another source is unavailable.',
-            status: 'testing',
+            status:
+              state.repairState === 'pr-recorded'
+                ? 'pr_open'
+                : state.repairState === 'deployment-observed'
+                  ? 'monitoring'
+                  : state.repairState?.startsWith('failed-')
+                    ? 'failed'
+                    : 'testing',
             diagnosis: 'Preserve validated source cards in the recovery path.',
-            lastError: '',
+            lastError: state.repairState?.startsWith('failed-')
+              ? 'The coding attempt stopped before the fix was confirmed.'
+              : '',
+            workerProvider: 'github',
+            prNumber:
+              state.repairState === 'pr-recorded' || state.repairState === 'deployment-observed'
+                ? 1042
+                : state.repairState === 'failed-pr-recorded'
+                  ? 1043
+                  : null,
             sourceTaskId: null,
-            prUrl: null,
-            runUrl: null,
-            history: [],
+            prUrl:
+              state.repairState === 'pr-recorded' || state.repairState === 'deployment-observed'
+                ? 'https://github.com/visual-qa-fixtures/assistant/pull/1042'
+                : state.repairState === 'failed-pr-recorded'
+                  ? 'https://github.com/visual-qa-fixtures/assistant/pull/1043'
+                  : null,
+            runUrl: state.repairState?.startsWith('failed-')
+              ? 'https://github.com/visual-qa-fixtures/assistant/actions/runs/2048'
+              : null,
+            mergeSha: state.repairState === 'deployment-observed' ? 'a'.repeat(40) : null,
+            updatedAt: visualNow,
+            codeReview:
+              state.repairState === 'pr-recorded'
+                ? {
+                    commitSha: 'b'.repeat(40),
+                    approved: true,
+                    modelId: 'visual-review-fixture',
+                    summary:
+                      'The saved review approved this older revision. Verify the current pull request before merging.',
+                    reviewedAt: '2026-10-02T17:00:00.000Z',
+                  }
+                : null,
+            outcome:
+              state.repairState === 'deployment-observed'
+                ? undefined
+                : state.repairState?.startsWith('failed-')
+                  ? {
+                      message: 'The fix attempt failed before a verified result was recorded.',
+                      nextStep: 'Review the saved evidence before choosing another action.',
+                    }
+                  : undefined,
+            deploymentConfirmed: state.repairState === 'deployment-observed',
+            history: state.repairState
+              ? [
+                  {
+                    status: 'investigating',
+                    at: '2026-10-02T16:10:00.000Z',
+                    detail: 'Reviewed the synthetic issue evidence.',
+                  },
+                  {
+                    status:
+                      state.repairState === 'pr-recorded'
+                        ? 'pr_open'
+                        : state.repairState === 'deployment-observed'
+                          ? 'monitoring'
+                          : 'failed',
+                    at: visualNow,
+                    detail:
+                      state.repairState === 'pr-recorded'
+                        ? 'Recorded synthetic pull request #1042 for owner review.'
+                        : state.repairState === 'deployment-observed'
+                          ? 'Observed the synthetic deployment; behavior still needs owner confirmation.'
+                          : state.repairState === 'failed-pr-recorded'
+                            ? 'Attempt stopped after recording pull request #1043.'
+                            : 'Attempt stopped before recording a pull request.',
+                  },
+                ]
+              : [],
           },
         ],
   }),
@@ -598,6 +793,8 @@ type PageEntry = {
   query?: Record<string, string>;
   empty?: boolean;
   chatState?: 'stage' | 'paper';
+  costMode?: 'mixed' | 'gcp-unconfigured';
+  repairState?: RepairVisualState;
 };
 const products: PageEntry[] = [
   { name: 'anomalies', route: '/anomalies', module: './anomalies/page' },
@@ -691,12 +888,70 @@ const afterOnlyChatStates: PageEntry[] =
         },
       ]
     : [];
-const fixtureStates = [...products, ...afterOnlyChatStates].flatMap((page) =>
+const afterOnlyCostStates: PageEntry[] =
+  process.env.PRODUCT_VISUAL_QA_COSTS === '1'
+    ? [
+        {
+          name: 'costs-mixed',
+          route: '/costs',
+          module: './costs/page',
+          empty: false,
+          costMode: 'mixed',
+        },
+        {
+          name: 'costs-gcp-unconfigured',
+          route: '/costs',
+          module: './costs/page',
+          empty: false,
+          costMode: 'gcp-unconfigured',
+        },
+      ]
+    : [];
+const afterOnlyRepairStates: PageEntry[] =
+  process.env.PRODUCT_VISUAL_QA_REPAIR_STATES === '1'
+    ? [
+        {
+          name: 'improvements-pr-recorded',
+          route: '/improvements',
+          module: './improvements/page',
+          empty: false,
+          repairState: 'pr-recorded',
+        },
+        {
+          name: 'improvements-deployment-observed',
+          route: '/improvements',
+          module: './improvements/page',
+          empty: false,
+          repairState: 'deployment-observed',
+        },
+        {
+          name: 'improvements-failed-retry-eligible',
+          route: '/improvements',
+          module: './improvements/page',
+          empty: false,
+          repairState: 'failed-retry-eligible',
+        },
+        {
+          name: 'improvements-failed-pr-recorded',
+          route: '/improvements',
+          module: './improvements/page',
+          empty: false,
+          repairState: 'failed-pr-recorded',
+        },
+      ]
+    : [];
+const fixtureStates = [
+  ...products,
+  ...afterOnlyChatStates,
+  ...afterOnlyCostStates,
+  ...afterOnlyRepairStates,
+].flatMap((page) =>
   (page.empty === false ? [false] : [false, true]).map((empty) => ({
     ...page,
     empty,
-    name: `${page.name}${empty ? '-empty' : ''}`,
-    productName: page.name,
+    name: page.repairState ? page.name : `${page.name}${empty ? '-empty' : ''}`,
+    productName:
+      page.route === '/improvements' ? 'improvements' : page.costMode ? 'costs' : page.name,
   })),
 );
 
@@ -708,6 +963,8 @@ it.each(fixtureStates)(
     state.path = page.route.split('?')[0];
     state.firestore = page.productName === 'memory-read-only';
     state.chatState = page.chatState ?? null;
+    state.costScenario = page.costMode ?? null;
+    state.repairState = page.repairState ?? null;
     if (directory) process.stdout.write(`Rendering ${page.name}\n`);
     const { default: Page } = await import(page.module);
     const child = await Page({
@@ -715,6 +972,36 @@ it.each(fixtureStates)(
       searchParams: Promise.resolve(page.query ?? {}),
     });
     const html = renderToString(await fixtureLayout(child));
+    if (page.productName === 'costs' && page.costMode === 'mixed') {
+      expect(html).toContain('Run rate and service details');
+      expect(html).toContain(
+        'Current feeds: OpenRouter stale. Missing costs remain unknown, not zero.',
+      );
+      expect(html).toContain('Google Cloud');
+      expect(html).toContain('OpenRouter');
+      expect(html).toContain('Google Vertex AI');
+      expect(html).toContain('$12.00');
+      expect(html).toContain('€4.00');
+      expect(html).toContain('$0.0004');
+      expect(html).toContain('Latest usage is not a completeness guarantee.');
+      expect(html).toContain('Stale snapshot; usage for this key may include other apps.');
+      expect(html).toContain('2026-10-21T03:00:00Z');
+      expect(html.replaceAll(/<!--.*?-->/g, '')).toContain('Latest usage 2026-10-20T00:00:00Z');
+      expect(html).toContain('In Google Cloud report');
+      expect(html).toContain('Their amounts are not combined');
+      expect(html).toContain('-$3.00');
+      expect(html).toContain('Run rate assumes similar use; not an invoice forecast.');
+      expect(html).toContain('Coverage sources and gaps');
+    }
+    if (page.productName === 'costs' && page.costMode === 'gcp-unconfigured') {
+      expect(html).toContain(
+        'Current feeds: Google Cloud not configured. Missing costs remain unknown, not zero.',
+      );
+      expect(html).toContain('Open Google Cloud Billing');
+      expect(html).toContain('Export setup steps and guide');
+      expect(html).toContain('Missing costs are unknown, not zero.');
+      expect(html).toContain('Coverage sources and gaps');
+    }
     expect(html, page.name).toContain('id="main-content"');
     if (
       process.env.PRODUCT_VISUAL_QA_CHAT === '1' &&
@@ -746,9 +1033,7 @@ it('accounts for all 34 source routes and asserts the legacy person redirect', a
     source: `apps/web/app/${page.module.slice(2)}.tsx`,
     state: page.chatState
       ? `${page.chatState}-recall-with-failed-stop`
-      : page.empty
-        ? 'empty'
-        : 'loaded',
+      : (page.repairState ?? (page.empty ? 'empty' : 'loaded')),
     availability: page.route.startsWith('/chat')
       ? 'owner-chat-route'
       : 'retained-product-redirected-by-proxy',

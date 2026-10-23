@@ -2542,6 +2542,7 @@ struct WorkspacePolicy: Codable, Identifiable, Sendable {
 
 struct WorkspaceCosts: Codable, Sendable {
     var billing: [WorkspaceProviderBilling]? = nil
+    var billingCoverage: WorkspaceBillingCoverage? = nil
     var byEvidence: [WorkspaceCostEvidence]? = nil
     let dailySpentUsd: Double
     let monthlySpentUsd: Double
@@ -2555,6 +2556,25 @@ struct WorkspaceCosts: Codable, Sendable {
     let held: [WorkspaceHeldCost]
     let topTasks: [WorkspaceCostTask]
     let recent: [WorkspaceCostEvent]
+}
+
+struct WorkspaceBillingCoverage: Codable, Sendable {
+    let totalState: String
+    let title: String
+    let summary: String
+    var statusSummary: String? = nil
+    let overlapWarning: String
+    let entries: [WorkspaceBillingCoverageEntry]
+}
+
+struct WorkspaceBillingCoverageEntry: Codable, Identifiable, Sendable {
+    let id: String
+    let label: String
+    let state: String
+    let scope: String
+    let detail: String
+    var period: String? = nil
+    var source: String? = nil
 }
 
 struct WorkspaceCostEvidence: Codable, Identifiable, Sendable {
@@ -3330,22 +3350,40 @@ struct WorkspaceRepairIssue: Codable, Identifiable, Sendable {
     let sourceTaskId: String?
     let prUrl: String?
     let runUrl: String?
+    var workerProvider: String? = nil
+    var prNumber: Int? = nil
     var manualRunRequested: Bool? = nil
     var queuePosition: Int? = nil
     var waitingReason: String? = nil
     let updatedAt: String
     var mergeSha: String? = nil
+    var codeReview: WorkspaceRepairCodeReview? = nil
     var history: [WorkspaceRepairHistory]? = nil
     var outcome: WorkspaceRepairOutcome? = nil
     var deploymentConfirmed: Bool? = nil
     var createdAt: String? = nil
 
     var actionRevision: String { "\(status)|\(updatedAt)|\(manualRunRequested == true)" }
+    var hasBlockingGitHubPullRequest: Bool {
+        (workerProvider ?? "github") == "github" && prNumber != nil
+    }
+    var hasRecordedPullRequestArtifact: Bool {
+        if workerProvider != nil || prNumber != nil { return prNumber != nil }
+        return prUrl != nil
+    }
 }
 
 struct WorkspaceRepairOutcome: Codable, Sendable {
     let message: String
     let nextStep: String
+}
+
+struct WorkspaceRepairCodeReview: Codable, Sendable {
+    let commitSha: String
+    let approved: Bool
+    let modelId: String
+    let summary: String
+    let reviewedAt: String
 }
 
 struct WorkspaceRepairHistory: Codable, Sendable {
@@ -3385,14 +3423,14 @@ struct RepairPresentation: Equatable, Sendable {
             title = "Testing"
             detail = "Checks are in progress. Results are not yet confirmed."
         case "pr_open":
-            title = "Pull request ready for review"
-            detail = "Review the proposed code and its checks before merging."
+            title = "Pull request recorded"
+            detail = "Review the linked pull request’s current revision and checks before merging. This card does not verify that they are unchanged."
         case "merged":
             title = "Awaiting deployment"
             detail = "The code was merged. Deployment has not yet been observed."
         case "monitoring":
-            title = deploymentConfirmed ? "Deployed · needs confirmation" : "Deployment evidence unavailable"
-            detail = deploymentConfirmed ? "Deployment was detected. Check the original problem before confirming it is fixed." : "A monitoring status alone does not prove deployment. Review the recorded release evidence."
+            title = deploymentConfirmed ? "Deployment observed · needs confirmation" : "Deployment evidence unavailable"
+            detail = deploymentConfirmed ? "A deployment was observed for the merged revision. Check the original problem before confirming it is fixed." : "A monitoring status alone does not prove deployment. Review the recorded release evidence."
         case "resolved":
             title = "Confirmed fixed"
             detail = "The owner marked the original problem as fixed."

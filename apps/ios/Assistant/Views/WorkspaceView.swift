@@ -426,6 +426,14 @@ struct WorkspaceView: View {
     @State private var recordedImprovementIDs: Set<String> = []
     @State private var repairFailureID: String?
     @State private var repairAcknowledgedRevisions: [String: String] = [:]
+    @State private var repairConfirmation: PendingRepairConfirmation?
+
+    private struct PendingRepairConfirmation: Identifiable {
+        let issue: WorkspaceRepairIssue
+        let action: String
+
+        var id: String { "\(issue.id):\(action)" }
+    }
 
     var body: some View {
         ScrollView {
@@ -484,6 +492,7 @@ struct WorkspaceView: View {
             recordedImprovementIDs = []
             repairFailureID = nil
             repairAcknowledgedRevisions = [:]
+            repairConfirmation = nil
             workspaceActionInFlight = nil
             importSourceActionSelection.cancel()
             importSourceConfirmationFeedback = nil
@@ -982,6 +991,9 @@ struct WorkspaceView: View {
 
     private func costs(_ costs: WorkspaceCosts) -> some View {
         VStack(alignment: .leading, spacing: 16) {
+            if let coverage = costs.billingCoverage {
+                billingCoverageSummary(coverage)
+            }
             if model.workspace?.isSectionAvailable("billing") == false {
                 WorkspaceAvailabilityNotice(title: "Provider billing")
             } else if let billing = costs.billing {
@@ -1037,60 +1049,103 @@ struct WorkspaceView: View {
         }
     }
 
+    private func billingCoverageSummary(_ coverage: WorkspaceBillingCoverage) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if usesAccessibilityLayout {
+                Text(coverage.title)
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityAddTraits(.isHeader)
+            } else {
+                Label(coverage.title, systemImage: "exclamationmark.circle")
+                    .font(.headline)
+            }
+            Text(coverage.summary)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let statusSummary = coverage.statusSummary {
+                if usesAccessibilityLayout {
+                    Text(statusSummary)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(AssistantTheme.warningInk(for: colorScheme))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Label(statusSummary, systemImage: "exclamationmark.triangle")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(AssistantTheme.warningInk(for: colorScheme))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            DisclosureGroup("Coverage details") {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(coverage.entries) { entry in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(entry.label)
+                                .font(.subheadline.weight(.semibold))
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(billingCoverageStateLabel(entry.state))
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(entry.scope)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            let context = [entry.period, entry.source].compactMap { $0 }.joined(separator: " · ")
+                            if !context.isEmpty {
+                                Text(context)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Text(entry.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(.top, 8)
+            }
+            .font(.subheadline.weight(.medium))
+            Text(coverage.overlapWarning)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .assistantCard(in: colorScheme)
+    }
+
+    private func billingCoverageStateLabel(_ state: String) -> String {
+        switch state {
+        case "partial": "Partial"
+        case "included": "Included in provider report"
+        case "stale": "Stale"
+        case "not_configured": "Setup needed"
+        case "unsupported": "No billing feed"
+        case "ledger_only": "Ledger only"
+        case "not_imported": "Not imported"
+        case "overlapping": "Overlaps provider billing"
+        default: "Unknown"
+        }
+    }
+
     private func providerBillingCard(_ report: WorkspaceProviderBilling) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(report.label).font(.headline)
+            Text(report.label)
+                .font(.headline)
+                .fixedSize(horizontal: false, vertical: true)
+            providerBillingStatusAndAmount(report)
             Text("\(report.scope) · \(report.period) · \(report.source)").font(.caption).foregroundStyle(.secondary)
-            if report.lines.isEmpty {
-                Text(report.includedIn != nil ? "Included in Google Cloud" : report.status == "not_configured" ? "Setup needed" : "Unavailable").font(.title3.weight(.semibold))
-            } else {
-                let currencies = Dictionary(grouping: report.lines, by: \.currency)
-                ForEach(currencies.keys.sorted(), id: \.self) { code in
-                    let total = currencies[code, default: []].reduce(0) { $0 + $1.net }
-                    Text(total, format: .currency(code: code).precision(.fractionLength(2))).font(.title3.weight(.semibold)).monospacedDigit()
-                }
-                if let forecast = report.forecast {
-                    ForEach(forecast.totals, id: \.currency) { total in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Estimated month end").font(.caption).foregroundStyle(.secondary)
-                            Text(total.projected, format: .currency(code: total.currency).precision(.fractionLength(2)))
-                                .font(.title2.weight(.semibold)).monospacedDigit()
-                            Text("Average per day: \(total.dailyAverage.formatted(.currency(code: total.currency).precision(.fractionLength(2))))")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 6)
-                    }
-                    Text(forecast.message).font(.caption).foregroundStyle(.secondary)
-                } else if report.status == "reported" {
-                    Text("Month-end estimate needs at least three days of reported usage.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                DisclosureGroup("Services and credits") {
-                    ForEach(Array(report.lines.enumerated()), id: \.offset) { _, line in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(line.service).font(.subheadline)
-                            Text(line.detail).font(.caption).foregroundStyle(.secondary)
-                            Text(line.net, format: .currency(code: line.currency).precision(.fractionLength(2...8))).monospacedDigit()
-                            if line.credits != 0 {
-                                Text("Credits: \(line.credits.formatted(.currency(code: line.currency)))")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                        }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
-                    }
-                }
-            }
             if report.status == "stale" {
-                Label("Stale snapshot", systemImage: "clock.badge.exclamationmark").font(.subheadline)
-            }
-            Text(report.message).font(.footnote).foregroundStyle(.secondary)
-            if report.id == "google-cloud", report.status == "not_configured" {
-                Text("Enable standard usage export in Google Cloud Billing, then connect its BigQuery table and grant this installation read access. Initial data can take hours or days. Missing costs are not zero.")
-                    .font(.footnote).foregroundStyle(.secondary)
-                Link("Open Google Cloud Billing", destination: URL(string: "https://console.cloud.google.com/billing")!)
+                Label("Stale snapshot", systemImage: "clock.badge.exclamationmark")
                     .font(.subheadline)
-                Link("Export setup guide", destination: URL(string: "https://docs.cloud.google.com/billing/docs/how-to/export-data-bigquery-setup")!)
-                    .font(.subheadline)
+                    .foregroundStyle(AssistantTheme.warningInk(for: colorScheme))
             }
+            Text(report.message).font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if let fetched = report.fetchedAt {
                 Text("Fetched \(fetched)").font(.caption2).foregroundStyle(.secondary)
             }
@@ -1100,10 +1155,136 @@ struct WorkspaceView: View {
             if let used = report.latestUsageAt {
                 Text("Latest usage \(used)").font(.caption2).foregroundStyle(.secondary)
             }
+            if report.forecast != nil || !report.lines.isEmpty {
+                DisclosureGroup("Run rate and service details") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if let forecast = report.forecast {
+                            ForEach(forecast.totals, id: \.currency) { total in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Estimated month end")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Text(total.projected, format: .currency(code: total.currency).precision(.fractionLength(2)))
+                                        .font(.title2.weight(.semibold))
+                                        .monospacedDigit()
+                                    Text("Average per day: \(total.dailyAverage.formatted(.currency(code: total.currency).precision(.fractionLength(2))))")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.vertical, 6)
+                            }
+                            Text("\(forecast.message) Observed \(forecast.observedDays.formatted()) of \(forecast.daysInMonth.formatted()) days through \(forecast.through).")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else if report.status == "reported" {
+                            Text("Month-end estimate needs at least three days of reported usage.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(Array(report.lines.enumerated()), id: \.offset) { _, line in
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(line.service).font(.subheadline.weight(.medium))
+                                Text(line.detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                                Text("Currency: \(line.currency)").font(.caption2).foregroundStyle(.secondary)
+                                Text("Cost: \(line.cost.formatted(.currency(code: line.currency).precision(.fractionLength(2...8))))")
+                                    .monospacedDigit()
+                                Text("Credits: \(line.credits.formatted(.currency(code: line.currency)))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text("Net: \(line.net.formatted(.currency(code: line.currency).precision(.fractionLength(2...8))))")
+                                    .font(.subheadline.weight(.medium))
+                                    .monospacedDigit()
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 4)
+                        }
+                    }
+                    .padding(.top, 8)
+                }
+                .font(.subheadline.weight(.medium))
+            }
+            if report.id == "google-cloud", report.status == "not_configured" {
+                Text("Google Cloud costs are not available in this report. Missing costs are unknown, not zero.")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(AssistantTheme.warningInk(for: colorScheme))
+                Link("Open Google Cloud Billing", destination: URL(string: "https://console.cloud.google.com/billing")!)
+                    .font(.subheadline)
+                DisclosureGroup("Export setup steps and guide") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Enable standard usage export in Google Cloud Billing, then connect its BigQuery table and grant this installation read access. Initial data can take hours or days.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Link("Export setup guide", destination: URL(string: "https://docs.cloud.google.com/billing/docs/how-to/export-data-bigquery-setup")!)
+                            .font(.subheadline)
+                    }
+                    .padding(.top, 8)
+                }
+                .font(.subheadline.weight(.medium))
+            }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 16))
+        .assistantCard(in: colorScheme)
+    }
+
+    @ViewBuilder
+    private func providerBillingStatusAndAmount(_ report: WorkspaceProviderBilling) -> some View {
+        if usesAccessibilityLayout {
+            VStack(alignment: .leading, spacing: 4) {
+                providerBillingStatus(report)
+                providerBillingAmount(report)
+            }
+        } else {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    providerBillingStatus(report).fixedSize(horizontal: true, vertical: false)
+                    Spacer(minLength: 4)
+                    providerBillingAmount(report).fixedSize(horizontal: true, vertical: true)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    providerBillingStatus(report)
+                    providerBillingAmount(report)
+                }
+            }
+        }
+    }
+
+    private func providerBillingStatus(_ report: WorkspaceProviderBilling) -> some View {
+        Text(billingProviderStatusLabel(report.status))
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(report.status == "stale" ? AssistantTheme.warningInk(for: colorScheme) : Color.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder
+    private func providerBillingAmount(_ report: WorkspaceProviderBilling) -> some View {
+        if report.lines.isEmpty {
+            Text(report.includedIn != nil ? "In Google Cloud report" : "No amount reported")
+                .font(.title3.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            let currencies = Dictionary(grouping: report.lines, by: \.currency)
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(currencies.keys.sorted(), id: \.self) { code in
+                    let total = currencies[code, default: []].reduce(0) { $0 + $1.net }
+                    let fractionDigits: ClosedRange<Int> =
+                        total != 0 && abs(total) < 0.01 ? 2...8 : 2...2
+                    Text(total, format: .currency(code: code).precision(.fractionLength(fractionDigits)))
+                        .font(.title3.weight(.semibold))
+                        .monospacedDigit()
+                }
+            }
+        }
+    }
+
+    private func billingProviderStatusLabel(_ status: String) -> String {
+        switch status {
+        case "reported": "Reported"
+        case "included": "Included"
+        case "stale": "Stale"
+        case "not_configured": "Setup needed"
+        case "unsupported": "Unsupported"
+        default: "Unavailable"
+        }
     }
 
     private func anomalies(_ anomalies: [WorkspaceAnomaly]) -> some View {
@@ -1245,7 +1426,7 @@ struct WorkspaceView: View {
         return VStack(alignment: .leading, spacing: 12) {
             sectionHeading("Code fixes", count: active.count)
             Text(repairs.enabled && repairs.configured
-                 ? "Investigation is on. Review code before merging, then confirm the original problem is fixed."
+                 ? "Investigation is on. Up to \(repairs.dailyLimit) coding attempts per day. Review changes before merging, then confirm the original problem is fixed."
                  : "Automatic coding is not configured yet. Reports are saved for review.")
                 .font(.subheadline).foregroundStyle(.secondary)
             if active.isEmpty {
@@ -1272,82 +1453,179 @@ struct WorkspaceView: View {
 
     private func repairIssueCard(_ issue: WorkspaceRepairIssue, repairs: WorkspaceRepairs) -> some View {
         let presentation = RepairPresentation(status: issue.status, manualRunRequested: issue.manualRunRequested == true, deploymentConfirmed: issue.deploymentConfirmed == true)
+        let recordedPullRequest = issue.prUrl.flatMap { rawValue -> URL? in
+            guard let url = URL(string: rawValue), url.scheme == "https", url.host == "github.com" else { return nil }
+            return url
+        }
+        let primaryPullRequestReview = issue.status == "pr_open" && recordedPullRequest != nil
+        let canRetry = presentation.canRetry && repairs.enabled && repairs.configured && !issue.hasBlockingGitHubPullRequest
+        let canRequestManualRun = presentation.canRequestManualRun && repairs.enabled && repairs.configured && !issue.hasBlockingGitHubPullRequest
+        let primaryRetry = issue.status == "failed" && !issue.hasRecordedPullRequestArtifact
+        let secondaryRetry = canRetry && !primaryRetry
         let waitingForRefresh = repairAcknowledgedRevisions[issue.id] == issue.actionRevision
         return VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 10) {
+                    Text(presentation.title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     if workspaceActionInFlight == issue.id {
                         ProgressView("Updating report").font(.caption)
-                    } else {
-                        Text(presentation.title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     }
                     Text(issue.title).font(.headline)
-                        .accessibilityAddTraits(.isHeader)
-                    Text(presentation.detail).font(.subheadline).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text(issue.diagnosis.isEmpty ? issue.summary : issue.diagnosis).font(.subheadline)
-                    Text("Updated \(relative(issue.updatedAt))").font(.caption).foregroundStyle(.secondary)
+                        .accessibilityAddTraits(.isHeader)
+                    let summary = repairSummary(issue, fallback: presentation.detail)
+                    Text(summary.message).font(.subheadline).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !summary.nextStep.isEmpty {
+                        Text(summary.nextStep).font(.subheadline)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text("Last recorded update · \(relative(issue.updatedAt))")
+                        .font(.caption).foregroundStyle(.secondary)
                     if let position = issue.queuePosition {
                         Text("Queue position: \(position)").font(.caption).foregroundStyle(.secondary)
                     }
                     if let reason = issue.waitingReason {
                         Text(reason).font(.caption).foregroundStyle(.secondary)
                     }
-                    if let outcome = issue.outcome { Text("\(outcome.message) \(outcome.nextStep)").font(.subheadline).foregroundStyle(.secondary) }
-                    else if !issue.lastError.isEmpty { AssistantInlineFailure(message: issue.lastError) }
+                    if canRequestManualRun {
+                        Text("Starting an extra attempt from More is beyond the daily allowance and may incur provider charges.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if repairFailureID == issue.id {
-                        AssistantInlineFailure(message: "Couldn’t confirm that request. Refresh the report before trying again.")
+                        AssistantInlineFailure(message: "Couldn’t confirm the current report state. Refresh before trying again.")
                     }
                     if waitingForRefresh {
                         Text("Request saved. Refresh to see the report’s current state.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    if let link = issue.prUrl, let url = URL(string: link), url.scheme == "https", url.host == "github.com" {
-                        Link("Review pull request", destination: url).font(.subheadline.weight(.semibold))
+                    if let url = recordedPullRequest {
+                        Link(primaryPullRequestReview ? "Review recorded pull request" : "Open recorded pull request", destination: url)
+                            .font(.subheadline.weight(.semibold))
+                            .buttonStyle(primaryPullRequestReview ? AssistantActionButtonStyle(kind: .primary) : AssistantActionButtonStyle(kind: .secondary))
                     }
                     if let link = issue.runUrl, let url = URL(string: link), url.scheme == "https", url.host == "github.com" {
                         Link("View coding run", destination: url).font(.subheadline)
                     }
-                    Group {
-                    if presentation.canRetry && repairs.enabled && repairs.configured {
+                    if primaryRetry && canRetry {
                         Button("Retry within daily allowance", systemImage: "arrow.clockwise") {
                             updateRepair(issue, action: "retry")
                         }
-                        .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
-                    }
-                    if repairs.enabled && repairs.configured && presentation.canRequestManualRun {
-                        AssistantConfirmationButton("Run now", confirmationTitle: "Start an extra coding attempt?", systemImage: "play",
-                            kind: .primary, hint: "Authorizes one manual attempt beyond the automatic daily coding allowance. Provider usage may be billed.") {
-                            updateRepair(issue, action: "run_now")
-                        }
+                        .buttonStyle(AssistantActionButtonStyle(kind: .primary))
+                        .disabled(actionsUnavailable || waitingForRefresh)
                     }
                     if presentation.canConfirmFixed {
                         AssistantConfirmationButton("Confirm fixed", confirmationTitle: "Is the original problem fixed?", systemImage: "checkmark",
                             kind: .primary, hint: "Confirm after checking the original behavior. Deployment alone does not confirm the fix.") {
                             updateRepair(issue, action: "resolve")
                         }
+                        .disabled(actionsUnavailable || waitingForRefresh)
                     }
-                    if presentation.canDismiss {
-                        AssistantConfirmationButton("Dismiss report", hint: "Removes this report from the active queue.") {
-                            updateRepair(issue, action: "dismiss")
+                    if canRequestManualRun || secondaryRetry || presentation.canDismiss {
+                        Menu {
+                            if secondaryRetry {
+                                Button("Retry within daily allowance", systemImage: "arrow.clockwise") {
+                                    updateRepair(issue, action: "retry")
+                                }
+                            }
+                            if canRequestManualRun {
+                                Button("Start extra attempt…", systemImage: "play") {
+                                    repairConfirmation = PendingRepairConfirmation(issue: issue, action: "run_now")
+                                }
+                            }
+                            if presentation.canDismiss {
+                                Button("Dismiss report", systemImage: "xmark", role: .destructive) {
+                                    repairConfirmation = PendingRepairConfirmation(issue: issue, action: "dismiss")
+                                }
+                            }
+                        } label: {
+                            AssistantActionMenuLabel(isUpdating: workspaceActionInFlight == issue.id)
                         }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("More code-fix actions")
+                        .accessibilityHint("Opens alternate actions for this report")
+                        .disabled(actionsUnavailable || waitingForRefresh)
                     }
-                    }
-                    .disabled(actionsUnavailable || waitingForRefresh)
                     repairEvidence(issue)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .assistantCard(in: colorScheme)
         }
+        .confirmationDialog(
+            repairConfirmation?.action == "run_now" ? "Start an extra coding attempt?" : "Dismiss this report?",
+            isPresented: Binding(
+                get: { repairConfirmation?.issue.id == issue.id },
+                set: { if !$0, repairConfirmation?.issue.id == issue.id { repairConfirmation = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: repairConfirmation?.issue.id == issue.id ? repairConfirmation : nil
+        ) { confirmation in
+            Button(
+                confirmation.action == "run_now" ? "Start extra attempt" : "Dismiss report",
+                role: confirmation.action == "dismiss" ? .destructive : nil
+            ) {
+                repairConfirmation = nil
+                updateRepair(confirmation.issue, action: confirmation.action)
+            }
+            Button("Cancel", role: .cancel) { repairConfirmation = nil }
+        } message: { confirmation in
+            Text(confirmation.action == "run_now"
+                ? "This starts one attempt beyond the automatic daily allowance. Provider usage may be billed."
+                : "This removes the report from the active queue. Its recorded history remains available.")
+        }
+    }
+
+    private func repairSummary(_ issue: WorkspaceRepairIssue, fallback: String) -> (message: String, nextStep: String) {
+        if issue.status == "pr_open" {
+            if let review = issue.codeReview {
+                let result = review.approved ? "approved" : "flagged"
+                return (
+                    "A saved independent review \(result) commit \(String(review.commitSha.prefix(12))). The pull request may have changed since that review.",
+                    "Open the pull request and verify its current revision and checks before merging."
+                )
+            }
+            return (
+                "A pull request is recorded. Its current revision and checks are not verified here.",
+                "Open the pull request and inspect its current state before merging."
+            )
+        }
+        if issue.status == "monitoring", issue.deploymentConfirmed == true {
+            return (
+                "A deployment was observed for the merged revision. The original behavior still needs verification.",
+                "Check the original problem before confirming it is fixed."
+            )
+        }
+        if let outcome = issue.outcome { return (outcome.message, outcome.nextStep) }
+        if !issue.lastError.isEmpty { return (issue.lastError, "Review the recorded evidence before taking another action.") }
+        return (fallback, "Review the recorded evidence before taking another action.")
     }
 
     @ViewBuilder
     private func repairEvidence(_ issue: WorkspaceRepairIssue) -> some View {
-        if issue.mergeSha != nil || !(issue.history ?? []).isEmpty {
-            DisclosureGroup("Evidence and history") {
+        DisclosureGroup("Diagnosis and history") {
                 VStack(alignment: .leading, spacing: 10) {
+                    Text(issue.diagnosis.isEmpty ? issue.summary : issue.diagnosis)
+                        .font(.subheadline)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let review = issue.codeReview {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Saved independent review · \(review.approved ? "approved" : "needs changes")")
+                                .font(.caption.weight(.semibold))
+                            Text("Commit \(review.commitSha)").font(.caption.monospaced()).textSelection(.enabled)
+                            Text("\(review.modelId) · \(relative(review.reviewedAt))")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Text(review.summary).font(.caption).textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text("This saved review may not describe the current pull request revision.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                     if let sha = issue.mergeSha, !sha.isEmpty {
-                        LabeledContent("Merged revision", value: String(sha.prefix(12)))
+                        Text("Merged revision · \(sha)")
                             .font(.caption.monospaced())
+                            .textSelection(.enabled)
                     }
                     ForEach(Array((issue.history ?? []).enumerated()), id: \.offset) { _, entry in
                         VStack(alignment: .leading, spacing: 3) {
@@ -1363,21 +1641,47 @@ struct WorkspaceView: View {
                 .padding(.top, 8)
             }
             .font(.subheadline)
-        }
     }
 
     private func updateRepair(_ issue: WorkspaceRepairIssue, action: String) {
-        guard !actionsUnavailable, repairAcknowledgedRevisions[issue.id] != issue.actionRevision else { return }
+        guard !actionsUnavailable else {
+            repairFailureID = issue.id
+            return
+        }
+        guard repairAcknowledgedRevisions[issue.id] != issue.actionRevision else { return }
+        guard let latestRepairs = model.workspace?.repairs,
+              let current = latestRepairs.issues.first(where: { $0.id == issue.id }),
+              current.actionRevision == issue.actionRevision,
+              repairActionIsAllowed(action, issue: current, repairs: latestRepairs)
+        else {
+            repairFailureID = issue.id
+            return
+        }
         repairFailureID = nil
-        workspaceActionInFlight = issue.id
+        workspaceActionInFlight = current.id
         let session = model.composerDraftScope?.session
         Task {
-            let confirmed = await model.updateRepair(issue, action: action)
+            let confirmed = await model.updateRepair(current, action: action)
             guard model.composerDraftScope?.session == session else { return }
-            if confirmed { repairAcknowledgedRevisions[issue.id] = issue.actionRevision }
-            else { repairFailureID = issue.id }
+            if confirmed { repairAcknowledgedRevisions[current.id] = current.actionRevision }
+            else { repairFailureID = current.id }
             workspaceActionInFlight = nil
             AccessibilityNotification.Announcement(confirmed ? "Request saved" : "Request couldn’t be confirmed").post()
+        }
+    }
+
+    private func repairActionIsAllowed(_ action: String, issue: WorkspaceRepairIssue, repairs: WorkspaceRepairs) -> Bool {
+        let presentation = RepairPresentation(
+            status: issue.status,
+            manualRunRequested: issue.manualRunRequested == true,
+            deploymentConfirmed: issue.deploymentConfirmed == true
+        )
+        switch action {
+        case "retry": return repairs.enabled && repairs.configured && presentation.canRetry && !issue.hasBlockingGitHubPullRequest
+        case "run_now": return repairs.enabled && repairs.configured && presentation.canRequestManualRun && !issue.hasBlockingGitHubPullRequest
+        case "dismiss": return presentation.canDismiss
+        case "resolve": return presentation.canConfirmFixed
+        default: return false
         }
     }
 

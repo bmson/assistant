@@ -1,4 +1,5 @@
 import { visibleWorkspaceCapabilityModules } from '@assistant/application';
+import { billingCoverageProjection } from '@assistant/application/provider-billing';
 import { loadConfig } from '@assistant/config';
 import { assistantModuleMetas } from '@assistant/modules/meta';
 import { policyLabels, policyScope, scheduleLabels } from '@/app/settings/labels';
@@ -349,6 +350,7 @@ export async function GET(request: Request): Promise<Response> {
             },
         costs: {
           billing: billing ?? [],
+          billingCoverage: billingCoverageProjection(billing ?? []),
           byEvidence: costs?.byEvidence ?? [],
           dailySpentUsd: costs?.totals.dailySpentUsd ?? 0,
           monthlySpentUsd: costs?.totals.monthlySpentUsd ?? 0,
