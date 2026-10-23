@@ -440,8 +440,8 @@ export function RepairPanel({ overview }: { overview: RepairOverview }) {
             </div>
             {canRunExtra && (
               <p className="text-xs text-muted">
-                One manual attempt is beyond the automatic daily allowance and may incur provider
-                charges.
+                Starting an extra attempt from More is beyond the daily allowance and may incur
+                provider charges.
               </p>
             )}
             <details className="text-xs text-muted">

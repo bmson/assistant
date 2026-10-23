@@ -173,7 +173,7 @@ it('keeps daily retry primary and separately explains the extra billable attempt
   expect(markup).toContain('Retry within daily allowance');
   expect(markup).toContain('Start extra attempt…');
   expect(markup).toContain(
-    'One manual attempt is beyond the automatic daily allowance and may incur provider charges.',
+    'Starting an extra attempt from More is beyond the daily allowance and may incur provider charges.',
   );
   expect(markup).toContain('More');
   expect(markup).toContain('Dismiss report');

@@ -1170,7 +1170,7 @@ struct WorkspaceView: View {
                         Text(reason).font(.caption).foregroundStyle(.secondary)
                     }
                     if canRequestManualRun {
-                        Text("An extra attempt is beyond the automatic daily allowance and may incur provider charges.")
+                        Text("Starting an extra attempt from More is beyond the daily allowance and may incur provider charges.")
                             .font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }

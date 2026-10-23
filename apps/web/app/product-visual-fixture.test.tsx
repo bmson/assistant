@@ -7,11 +7,18 @@ import { expect, it, vi } from 'vitest';
 import { createProductVisualData, visualId, visualNow } from './product-visual-data';
 
 /** Actual retained pages, with only their authenticated I/O seams replaced. */
+type RepairVisualState =
+  | 'pr-recorded'
+  | 'deployment-observed'
+  | 'failed-retry-eligible'
+  | 'failed-pr-recorded';
+
 const state = vi.hoisted(() => ({
   empty: false,
   path: '/goals',
   firestore: false,
   chatState: null as 'stage' | 'paper' | null,
+  repairState: null as RepairVisualState | null,
 }));
 const data = () => createProductVisualData(state.empty);
 const chatMessages = (): UIMessage[] => {
@@ -535,13 +542,84 @@ vi.mock('@/lib/self-repair-server', () => ({
             title: 'Keep a hotel card after a partial lookup failure',
             summary:
               'A completed calendar read should remain visible when another source is unavailable.',
-            status: 'testing',
+            status:
+              state.repairState === 'pr-recorded'
+                ? 'pr_open'
+                : state.repairState === 'deployment-observed'
+                  ? 'monitoring'
+                  : state.repairState?.startsWith('failed-')
+                    ? 'failed'
+                    : 'testing',
             diagnosis: 'Preserve validated source cards in the recovery path.',
-            lastError: '',
+            lastError: state.repairState?.startsWith('failed-')
+              ? 'The coding attempt stopped before the fix was confirmed.'
+              : '',
+            workerProvider: 'github',
+            prNumber:
+              state.repairState === 'pr-recorded' || state.repairState === 'deployment-observed'
+                ? 1042
+                : state.repairState === 'failed-pr-recorded'
+                  ? 1043
+                  : null,
             sourceTaskId: null,
-            prUrl: null,
-            runUrl: null,
-            history: [],
+            prUrl:
+              state.repairState === 'pr-recorded' || state.repairState === 'deployment-observed'
+                ? 'https://github.com/visual-qa-fixtures/assistant/pull/1042'
+                : state.repairState === 'failed-pr-recorded'
+                  ? 'https://github.com/visual-qa-fixtures/assistant/pull/1043'
+                  : null,
+            runUrl: state.repairState?.startsWith('failed-')
+              ? 'https://github.com/visual-qa-fixtures/assistant/actions/runs/2048'
+              : null,
+            mergeSha: state.repairState === 'deployment-observed' ? 'a'.repeat(40) : null,
+            updatedAt: visualNow,
+            codeReview:
+              state.repairState === 'pr-recorded'
+                ? {
+                    commitSha: 'b'.repeat(40),
+                    approved: true,
+                    modelId: 'visual-review-fixture',
+                    summary:
+                      'The saved review approved this older revision. Verify the current pull request before merging.',
+                    reviewedAt: '2026-10-02T17:00:00.000Z',
+                  }
+                : null,
+            outcome:
+              state.repairState === 'deployment-observed'
+                ? undefined
+                : state.repairState?.startsWith('failed-')
+                  ? {
+                      message: 'The fix attempt failed before a verified result was recorded.',
+                      nextStep: 'Review the saved evidence before choosing another action.',
+                    }
+                  : undefined,
+            deploymentConfirmed: state.repairState === 'deployment-observed',
+            history: state.repairState
+              ? [
+                  {
+                    status: 'investigating',
+                    at: '2026-10-02T16:10:00.000Z',
+                    detail: 'Reviewed the synthetic issue evidence.',
+                  },
+                  {
+                    status:
+                      state.repairState === 'pr-recorded'
+                        ? 'pr_open'
+                        : state.repairState === 'deployment-observed'
+                          ? 'monitoring'
+                          : 'failed',
+                    at: visualNow,
+                    detail:
+                      state.repairState === 'pr-recorded'
+                        ? 'Recorded synthetic pull request #1042 for owner review.'
+                        : state.repairState === 'deployment-observed'
+                          ? 'Observed the synthetic deployment; behavior still needs owner confirmation.'
+                          : state.repairState === 'failed-pr-recorded'
+                            ? 'Attempt stopped after recording pull request #1043.'
+                            : 'Attempt stopped before recording a pull request.',
+                  },
+                ]
+              : [],
           },
         ],
   }),
@@ -598,6 +676,7 @@ type PageEntry = {
   query?: Record<string, string>;
   empty?: boolean;
   chatState?: 'stage' | 'paper';
+  repairState?: RepairVisualState;
 };
 const products: PageEntry[] = [
   { name: 'anomalies', route: '/anomalies', module: './anomalies/page' },
@@ -691,13 +770,47 @@ const afterOnlyChatStates: PageEntry[] =
         },
       ]
     : [];
-const fixtureStates = [...products, ...afterOnlyChatStates].flatMap((page) =>
-  (page.empty === false ? [false] : [false, true]).map((empty) => ({
-    ...page,
-    empty,
-    name: `${page.name}${empty ? '-empty' : ''}`,
-    productName: page.name,
-  })),
+const afterOnlyRepairStates: PageEntry[] =
+  process.env.PRODUCT_VISUAL_QA_REPAIR_STATES === '1'
+    ? [
+        {
+          name: 'improvements-pr-recorded',
+          route: '/improvements',
+          module: './improvements/page',
+          empty: false,
+          repairState: 'pr-recorded',
+        },
+        {
+          name: 'improvements-deployment-observed',
+          route: '/improvements',
+          module: './improvements/page',
+          empty: false,
+          repairState: 'deployment-observed',
+        },
+        {
+          name: 'improvements-failed-retry-eligible',
+          route: '/improvements',
+          module: './improvements/page',
+          empty: false,
+          repairState: 'failed-retry-eligible',
+        },
+        {
+          name: 'improvements-failed-pr-recorded',
+          route: '/improvements',
+          module: './improvements/page',
+          empty: false,
+          repairState: 'failed-pr-recorded',
+        },
+      ]
+    : [];
+const fixtureStates = [...products, ...afterOnlyChatStates, ...afterOnlyRepairStates].flatMap(
+  (page) =>
+    (page.empty === false ? [false] : [false, true]).map((empty) => ({
+      ...page,
+      empty,
+      name: page.repairState ? page.name : `${page.name}${empty ? '-empty' : ''}`,
+      productName: page.route === '/improvements' ? 'improvements' : page.name,
+    })),
 );
 
 it.each(fixtureStates)(
@@ -708,6 +821,7 @@ it.each(fixtureStates)(
     state.path = page.route.split('?')[0];
     state.firestore = page.productName === 'memory-read-only';
     state.chatState = page.chatState ?? null;
+    state.repairState = page.repairState ?? null;
     if (directory) process.stdout.write(`Rendering ${page.name}\n`);
     const { default: Page } = await import(page.module);
     const child = await Page({
@@ -746,9 +860,7 @@ it('accounts for all 34 source routes and asserts the legacy person redirect', a
     source: `apps/web/app/${page.module.slice(2)}.tsx`,
     state: page.chatState
       ? `${page.chatState}-recall-with-failed-stop`
-      : page.empty
-        ? 'empty'
-        : 'loaded',
+      : (page.repairState ?? (page.empty ? 'empty' : 'loaded')),
     availability: page.route.startsWith('/chat')
       ? 'owner-chat-route'
       : 'retained-product-redirected-by-proxy',
