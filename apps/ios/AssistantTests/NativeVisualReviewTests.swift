@@ -273,6 +273,49 @@ final class NativeVisualReviewTests: XCTestCase {
         defaults.set(true, forKey: "assistant.push-prompted")
         defer { defaults.removePersistentDomain(forName: suite) }
         let model = AppModel(apiClient: client, defaults: defaults, storeConnectionToken: { _ in })
+        var draftSavePhase = "model-setup"
+#if DEBUG
+        var draftSaveSequence = 0
+        var draftSaveOmittedCount = 0
+        var draftSaveHistory: [[String: Any]] = []
+        model.composerDraftSaveObserver = { observation in
+            draftSaveSequence += 1
+            draftSaveHistory.append([
+                "sequence": draftSaveSequence,
+                "phase": draftSavePhase,
+                "sourceFile": observation.sourceFile,
+                "sourceFunction": observation.sourceFunction,
+                "sourceLine": observation.sourceLine,
+                "scopeMatchesCurrent": observation.scopeMatchesCurrent,
+                "sessionMatchesCurrent": observation.sessionMatchesCurrent,
+                "requestedLength": observation.requestedLength,
+                "requestedEmpty": observation.requestedEmpty,
+                "beforeLength": observation.beforeLength,
+                "beforeEmpty": observation.beforeEmpty,
+                "afterLength": observation.afterLength,
+                "afterEmpty": observation.afterEmpty,
+                "beforeRecovery": observation.beforeRecovery,
+                "afterRecovery": observation.afterRecovery,
+            ])
+            if draftSaveHistory.count > 64 {
+                draftSaveHistory.removeFirst()
+                draftSaveOmittedCount += 1
+            }
+        }
+        defer { model.composerDraftSaveObserver = nil }
+#endif
+        func draftSaveReceiptFields() -> [String: Any] {
+#if DEBUG
+            return [
+                "draftSaveObserverInstalled": model.composerDraftSaveObserver != nil,
+                "draftSaveObservationCount": draftSaveSequence,
+                "draftSaveOmittedCount": draftSaveOmittedCount,
+                "draftSaveHistory": draftSaveHistory,
+            ]
+#else
+            return ["draftSaveObserverInstalled": false, "draftSaveHistory": []]
+#endif
+        }
         model.scenePhaseDidChange(.background)
         await model.refreshAll(reportFailure: false)
         _ = await model.refreshWorkspace(reportFailure: false)
@@ -282,6 +325,7 @@ final class NativeVisualReviewTests: XCTestCase {
         // The fixture rejects every POST locally with405: exercise real draft
         // recovery without admitting any task or reaching an external service.
         let recoveryText = "Unsent arrival note."
+        draftSavePhase = "initial-send"
         model.send(recoveryText)
         let deadline = ContinuousClock.now.advanced(by: .seconds(3))
         while model.isSending, ContinuousClock.now < deadline {
@@ -290,6 +334,7 @@ final class NativeVisualReviewTests: XCTestCase {
         XCTAssertFalse(model.isSending)
         XCTAssertTrue(model.hasComposerRecovery(in: scope))
         model.errorMessage = nil
+        draftSavePhase = "preexisting-draft-seed"
         model.saveComposerDraft("A different draft is already in the input.", in: scope)
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
         let previousKeyWindow = scene.keyWindow
@@ -305,6 +350,7 @@ final class NativeVisualReviewTests: XCTestCase {
         var blockerCaptureWindow: UIWindow?
         var blockerComposerTextView: UITextView?
         for (variant, scheme, size, increasedContrast) in variants {
+            draftSavePhase = "original-host-mount-\(variant)"
             let window = UIWindow(windowScene: scene)
             window.frame = scene.coordinateSpace.bounds
             let host = UIHostingController(rootView:
@@ -317,7 +363,11 @@ final class NativeVisualReviewTests: XCTestCase {
             }
             window.overrideUserInterfaceStyle = scheme == .light ? .light : .dark
             window.makeKeyAndVisible()
-            defer { window.isHidden = true; window.rootViewController = nil }
+            defer {
+                draftSavePhase = "original-host-teardown-\(variant)"
+                window.isHidden = true
+                window.rootViewController = nil
+            }
             try await Task.sleep(for: .milliseconds(600))
             window.layoutIfNeeded()
             try await Task.sleep(for: .milliseconds(150))
@@ -357,6 +407,7 @@ final class NativeVisualReviewTests: XCTestCase {
                     "bottomOffset": bottom,
                     "hasRecovery": model.hasComposerRecovery(in: scope),
                     "composerDraft": model.composerDraft(in: scope),
+                    "draftSaveEvidence": draftSaveReceiptFields(),
                     "controlActivationEvidence": "Send, recovery, Jump and VoiceOver activation were not exercised.",
                     "voiceOverEvidence": "Not tested by this fixture."
                 ], options: [.prettyPrinted, .sortedKeys])
@@ -367,11 +418,13 @@ final class NativeVisualReviewTests: XCTestCase {
                 XCTAssertTrue(rendered, "UIKit did not render full-height capture \(variant)/\(state)")
             }
             func attachPresentationReceipt(_ value: [String: Any], name: String) {
+                var receipt = value
+                receipt["draftSaveEvidence"] = draftSaveReceiptFields()
                 let data: Data
                 do {
-                    data = try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
+                    data = try JSONSerialization.data(withJSONObject: receipt, options: [.prettyPrinted, .sortedKeys])
                 } catch {
-                    let fallback = Data("Presentation receipt serialization failed: \(error)\n\(String(describing: value))".utf8)
+                    let fallback = Data("Presentation receipt serialization failed: \(error)\n\(String(describing: receipt))".utf8)
                     let failedAttachment = XCTAttachment(data: fallback, uniformTypeIdentifier: "public.plain-text")
                     failedAttachment.name = "full-height-\(variant)-\(name)-serialization-error"
                     failedAttachment.lifetime = .keepAlways
@@ -443,6 +496,7 @@ final class NativeVisualReviewTests: XCTestCase {
                     .first
                 let composerTextView = try XCTUnwrap(composer)
                 let typedDraft = "Native editor updated this conversation draft."
+                draftSavePhase = "original-host-native-input-typed"
                 composerTextView.text = typedDraft
                 let composerDelegate = try XCTUnwrap(composerTextView.delegate)
                 composerDelegate.textViewDidChange?(composerTextView)
@@ -528,6 +582,7 @@ final class NativeVisualReviewTests: XCTestCase {
                     "The measured mic and Button layout target bounds must remain at least 44 points")
 
                 let transitionID = presentationProbe.requestEmptyDraft(afterRevision: baselineRevision)
+                draftSavePhase = "original-host-native-input-cleared"
                 composerTextView.text = ""
                 composerDelegate.textViewDidChange?(composerTextView)
                 let emptyDeadline = ContinuousClock.now.advanced(by: .seconds(2))
@@ -703,6 +758,7 @@ final class NativeVisualReviewTests: XCTestCase {
                 blockerCaptureWindow = window
                 blockerComposerTextView = composerTextView
             }
+            draftSavePhase = "original-host-teardown-\(variant)"
             window.isHidden = true
             window.rootViewController = nil
         }
@@ -730,7 +786,8 @@ final class NativeVisualReviewTests: XCTestCase {
             "allOriginalMarkersRemoved": ComposerPresentationTarget.allCases.allSatisfy { presentationProbe.marker($0) == nil },
             "sameDraftScope": model.composerDraftScope == scope,
             "draftStillEmptyBeforeBlockerSeed": model.composerDraft(in: scope).isEmpty,
-            "recoveryStillAvailable": model.hasComposerRecovery(in: scope)
+            "recoveryStillAvailable": model.hasComposerRecovery(in: scope),
+            "draftSaveEvidence": draftSaveReceiptFields()
         ]
         do {
             let data = try JSONSerialization.data(withJSONObject: detachedReceipt, options: [.prettyPrinted, .sortedKeys])
@@ -748,12 +805,14 @@ final class NativeVisualReviewTests: XCTestCase {
         XCTAssertTrue(model.composerDraft(in: scope).isEmpty)
         XCTAssertTrue(model.hasComposerRecovery(in: scope))
         let blockerText = "Keep recovery available while mounting static AX3."
+        draftSavePhase = "static-blocker-seed"
         model.saveComposerDraft(blockerText, in: scope)
         let blockerSeedReceipt: [String: Any] = [
             "phase": "same-scope-blocker-seeded-after-original-host-detach",
             "sameDraftScope": model.composerDraftScope == scope,
             "modelDraft": model.composerDraft(in: scope),
-            "recoveryStillAvailable": model.hasComposerRecovery(in: scope)
+            "recoveryStillAvailable": model.hasComposerRecovery(in: scope),
+            "draftSaveEvidence": draftSaveReceiptFields()
         ]
         do {
             let data = try JSONSerialization.data(withJSONObject: blockerSeedReceipt, options: [.prettyPrinted, .sortedKeys])
@@ -782,6 +841,7 @@ final class NativeVisualReviewTests: XCTestCase {
                     transaction.disablesAnimations = true
                 })
         staticHost.traitOverrides.accessibilityContrast = .high
+        draftSavePhase = "static-host-mount"
         staticWindow.rootViewController = staticHost
         staticWindow.overrideUserInterfaceStyle = .light
         staticWindow.makeKeyAndVisible()
@@ -824,7 +884,8 @@ final class NativeVisualReviewTests: XCTestCase {
             "markerCount": staticBlockerMarkers.count,
             "markersAllNonemptyAtSameRevision": staticBlockerMarkers.count == ComposerPresentationTarget.allCases.count
                 && staticBlockerMarkers.allSatisfy { !$0.draftIsEmpty && $0.draftRevision == staticBlockerRevision },
-            "draftRevision": staticBlockerRevision
+            "draftRevision": staticBlockerRevision,
+            "draftSaveEvidence": draftSaveReceiptFields()
         ]
         do {
             let data = try JSONSerialization.data(withJSONObject: blockerReceipt, options: [.prettyPrinted, .sortedKeys])
@@ -841,6 +902,7 @@ final class NativeVisualReviewTests: XCTestCase {
         guard staticBlockerReady() else { return }
 
         staticSampler.start()
+        draftSavePhase = "static-host-native-input-cleared"
         staticBlockerComposer.text = ""
         let staticClearDelegate = try XCTUnwrap(staticBlockerComposer.delegate)
         staticClearDelegate.textViewDidChange?(staticBlockerComposer)
@@ -870,6 +932,7 @@ final class NativeVisualReviewTests: XCTestCase {
             "staticWindowIsKeyWindow": staticWindow.isKeyWindow,
             "staticWindowSceneSession": staticWindow.windowScene?.session.persistentIdentifier ?? "none",
             "hasRecovery": model.hasComposerRecovery(in: scope),
+            "draftSaveEvidence": draftSaveReceiptFields(),
             "markerCount": markersAfterStaticClear.count,
             "markersAllEmpty": markersAfterStaticClear.count == ComposerPresentationTarget.allCases.count
                 && markersAfterStaticClear.allSatisfy { $0.draftIsEmpty && $0.draftRevision == markersAfterStaticClear[0].draftRevision },
@@ -1003,6 +1066,7 @@ final class NativeVisualReviewTests: XCTestCase {
             "sampleCount": staticSampler.samples.count,
             "stableSampleTailCount": staticTail?.count ?? 0,
             "samples": staticSampler.jsonSamples(),
+            "draftSaveEvidence": draftSaveReceiptFields(),
             "measurementLimit": "Static empty-state geometry only; does not establish transition behavior, glyph bounds, hit activation, or VoiceOver activation."
         ]
         do {
@@ -1032,6 +1096,7 @@ final class NativeVisualReviewTests: XCTestCase {
             "Static presentation frames must be finite, same-window, and contained within the capsule/window")
         staticSampler.stop()
 
+        draftSavePhase = "static-host-teardown"
         staticHost.rootView = RootView().environment(model).environment(\.dynamicTypeSize, .accessibility3)
             .environment(\.colorScheme, .light).environment(\.scenePhase, .inactive)
             .environment(\.composerPresentationProbe, nil)
@@ -1065,7 +1130,8 @@ final class NativeVisualReviewTests: XCTestCase {
             "staticWindowSceneSession": staticWindow.windowScene?.session.persistentIdentifier ?? "none",
             "sameDraftScope": model.composerDraftScope == scope,
             "modelDraftEmpty": model.composerDraft(in: scope).isEmpty,
-            "recoveryStillAvailable": model.hasComposerRecovery(in: scope)
+            "recoveryStillAvailable": model.hasComposerRecovery(in: scope),
+            "draftSaveEvidence": draftSaveReceiptFields()
         ]
         do {
             let data = try JSONSerialization.data(withJSONObject: postDetachState, options: [.prettyPrinted, .sortedKeys])
@@ -1092,10 +1158,12 @@ final class NativeVisualReviewTests: XCTestCase {
         }
         XCTAssertTrue(model.composerDraft(in: scope).isEmpty)
         XCTAssertTrue(model.hasComposerRecovery(in: scope))
+        draftSavePhase = "model-recovery-restore"
         let restored = model.restoreComposerRecovery(in: scope, replacing: "")
         let restoredState = try JSONSerialization.data(withJSONObject: [
             "state": "model-recovery-restored", "hasRecovery": model.hasComposerRecovery(in: scope),
-            "draft": model.composerDraft(in: scope), "returnedText": restored ?? ""
+            "draft": model.composerDraft(in: scope), "returnedText": restored ?? "",
+            "draftSaveEvidence": draftSaveReceiptFields()
         ], options: [.prettyPrinted, .sortedKeys])
         let restoredAttachment = XCTAttachment(data: restoredState, uniformTypeIdentifier: "public.json")
         restoredAttachment.name = "full-height-model-recovery-restored"

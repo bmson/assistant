@@ -5,6 +5,39 @@ import SwiftUI
 import UIKit
 import CoreLocation
 
+#if DEBUG
+/// Opt-in metadata for a scoped draft save. Draft text and owner identifiers
+/// never enter this receipt; unknown callers have no raw-location fallback.
+struct ComposerDraftSaveObservation {
+    let sourceFile: String
+    let sourceFunction: String
+    let sourceLine: Int
+    let scopeMatchesCurrent: Bool
+    let sessionMatchesCurrent: Bool
+    let requestedLength: Int
+    let requestedEmpty: Bool
+    let beforeLength: Int
+    let beforeEmpty: Bool
+    let afterLength: Int
+    let afterEmpty: Bool
+    let beforeRecovery: Bool
+    let afterRecovery: Bool
+
+    static func safeSource(file: String, function: String, line: Int) -> (String, String, Int) {
+        let filename = file.split(separator: "/").last.map(String.init) ?? ""
+        let allowed: [String: Set<String>] = [
+            "ChatView.swift": ["body", "sendDraft()", "synchronizeComposer()"],
+            "AppModel.swift": ["send(_:autonomous:force:spoken:calendarContextReady:)"],
+            "NativeVisualReviewTests.swift": ["testFullHeightChatWithRecoveryAndJump()"],
+        ]
+        guard allowed[filename]?.contains(function) == true, line > 0 else {
+            return ("unknown", "unknown", 0)
+        }
+        return (filename, function, line)
+    }
+}
+#endif
+
 enum AssistantRoute: String, Hashable, Identifiable, CaseIterable, Sendable {
     case chat
     case chats
@@ -281,6 +314,9 @@ final class AppModel {
     // Its session and recovery are read through composerDraftScope/helpers.
     // Keep this tracked even though the storage itself is private.
     private var conversationDrafts = ConversationDrafts()
+#if DEBUG
+    @ObservationIgnored var composerDraftSaveObserver: (@MainActor (ComposerDraftSaveObservation) -> Void)? = nil
+#endif
     private(set) var packDiscussionDraft: String?
     var showingConnection = false
     /// One-shot intent shared by every user-facing way to send a message,
@@ -502,9 +538,35 @@ final class AppModel {
         conversationDrafts.draft(in: scope)
     }
 
+#if DEBUG
+    func saveComposerDraft(_ text: String, in scope: ComposerDraftScope,
+                           sourceFile: String = #fileID, sourceLine: Int = #line,
+                           sourceFunction: String = #function) {
+        guard let observer = composerDraftSaveObserver else {
+            conversationDrafts.save(text, in: scope)
+            return
+        }
+        let before = conversationDrafts.draft(in: scope)
+        let beforeRecovery = conversationDrafts.hasRecovery(in: scope)
+        let scopeMatchesCurrent = composerDraftScope == scope
+        let sessionMatchesCurrent = conversationDrafts.session == scope.session
+        conversationDrafts.save(text, in: scope)
+        let after = conversationDrafts.draft(in: scope)
+        let source = ComposerDraftSaveObservation.safeSource(
+            file: sourceFile, function: sourceFunction, line: sourceLine)
+        observer(ComposerDraftSaveObservation(
+            sourceFile: source.0, sourceFunction: source.1, sourceLine: source.2,
+            scopeMatchesCurrent: scopeMatchesCurrent, sessionMatchesCurrent: sessionMatchesCurrent,
+            requestedLength: text.count, requestedEmpty: text.isEmpty,
+            beforeLength: before.count, beforeEmpty: before.isEmpty,
+            afterLength: after.count, afterEmpty: after.isEmpty,
+            beforeRecovery: beforeRecovery, afterRecovery: conversationDrafts.hasRecovery(in: scope)))
+    }
+#else
     func saveComposerDraft(_ text: String, in scope: ComposerDraftScope) {
         conversationDrafts.save(text, in: scope)
     }
+#endif
 
     func hasComposerRecovery(in scope: ComposerDraftScope) -> Bool {
         conversationDrafts.hasRecovery(in: scope)

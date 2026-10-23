@@ -81,7 +81,22 @@ private struct ConversationTranscriptRoot<Content: View>: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .coordinateSpace(name: TranscriptCoordinateSpace.viewport)
             .environment(\.self, inheritedEnvironment)
-            .transaction(value: transactionGeneration) { $0 = inheritedTransaction }
+            .transaction(value: transactionGeneration) {
+#if DEBUG
+                inheritedEnvironment.transcriptHostBoundaryProbe?.record(
+                    "root-transform-input", transaction: $0, generation: transactionGeneration
+                )
+                inheritedEnvironment.transcriptHostBoundaryProbe?.record(
+                    "root-transform-captured", transaction: inheritedTransaction, generation: transactionGeneration
+                )
+#endif
+                $0 = inheritedTransaction
+#if DEBUG
+                inheritedEnvironment.transcriptHostBoundaryProbe?.record(
+                    "root-transform-output", transaction: $0, generation: transactionGeneration
+                )
+#endif
+            }
     }
 }
 
