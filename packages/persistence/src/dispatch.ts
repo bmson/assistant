@@ -75,9 +75,12 @@ export interface StartAutonomousToolCallInput {
   args: Record<string, unknown>;
   idempotencyKey: string | null;
   decision: Record<string, unknown>;
+  /** Bounded snapshot of every owner/tool policy row used for this risk decision. */
+  expectedPolicyFingerprint: string;
   startedAt?: Date;
 }
-export interface CachedToolCallInput extends StartAutonomousToolCallInput {
+export interface CachedToolCallInput
+  extends Omit<StartAutonomousToolCallInput, 'expectedPolicyFingerprint'> {
   result: unknown;
 }
 

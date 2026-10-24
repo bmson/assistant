@@ -67,6 +67,74 @@ describe.skipIf(!enabled)('F19 Firestore chat Stop at tool boundaries', () => {
     );
   }
 
+  function gatedStart(
+    mode: 'before' | 'after',
+    onReached: () => void,
+    gate: Promise<void>,
+  ): ToolExecutionRepository {
+    return new Proxy(tools, {
+      get(target, property) {
+        if (property === 'start')
+          return async (input: Parameters<typeof tools.start>[0]) => {
+            if (mode === 'before') {
+              onReached();
+              await gate;
+            }
+            const row = await tools.start(input);
+            if (!row) return null;
+            if (mode === 'after') {
+              onReached();
+              await gate;
+            }
+            return row;
+          };
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as ToolExecutionRepository;
+  }
+
+  async function policyTask(name: string) {
+    const admitted = await admittedTurn(`Run ${name}.`);
+    const policyId = randomUUID();
+    await store.doc('approvalPolicies', policyId).set({
+      id: policyId,
+      agentId,
+      toolName: name,
+      templateKey: 'calendar.self_only_events',
+      match: {},
+      effect: 'allow',
+      enabled: true,
+      version: 1,
+      createdVia: 'settings',
+      createdAt: store.now(),
+      updatedAt: store.now(),
+    });
+    return { admitted, policyId };
+  }
+
+  function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  async function waitBounded(promise: Promise<void>, label: string) {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), 5_000);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
   function context(taskId: string, conversationId: string): ToolContext {
     return {
       taskId,
@@ -201,6 +269,83 @@ describe.skipIf(!enabled)('F19 Firestore chat Stop at tool boundaries', () => {
       expect(replayCalls.size).toBe(1);
     } finally {
       releaseStart();
+      await pending.catch(() => {});
+    }
+  });
+
+  it('does not invoke a dispatcher effect when policy deletion wins before durable start', async () => {
+    const name = `test.policy-race-before-${randomUUID()}`;
+    const { admitted, policyId } = await policyTask(name);
+    const policies = new FirestoreApprovalPolicyRepository(store);
+    const atStart = deferred();
+    const gate = deferred();
+    let invocations = 0;
+    const registry = registryFor(name, 'autonomous', async () => {
+      invocations += 1;
+      return { completed: true };
+    });
+    const run = dispatcher(gatedStart('before', atStart.resolve, gate.promise), registry);
+    const pending = run.dispatch({
+      task: admitted.task,
+      step: 1,
+      toolName: name,
+      args: { value: 'mutation-wins' },
+      modelToolCallId: randomUUID(),
+      ctx: context(admitted.task.id, admitted.conversation.id),
+      provenance: { plannerVersion: 1, promptVersion: 1, model: 'synthetic/no-provider' },
+    });
+    try {
+      await waitBounded(atStart.promise, 'dispatcher pre-start barrier');
+      expect(await policies.delete(agentId, policyId)).toBe(true);
+      gate.resolve();
+      await expect(pending).resolves.toMatchObject({ kind: 'rejected' });
+      expect(invocations).toBe(0);
+      const calls = await store
+        .collection('toolCalls')
+        .where('taskId', '==', admitted.task.id)
+        .get();
+      expect(calls.size).toBe(0);
+    } finally {
+      gate.resolve();
+      await pending.catch(() => {});
+    }
+  });
+
+  it('keeps one committed dispatcher start when a real policy revoke follows it', async () => {
+    const name = `test.policy-race-after-${randomUUID()}`;
+    const { admitted, policyId } = await policyTask(name);
+    const policies = new FirestoreApprovalPolicyRepository(store);
+    const afterStart = deferred();
+    const gate = deferred();
+    let invocations = 0;
+    const registry = registryFor(name, 'autonomous', async () => {
+      invocations += 1;
+      return { completed: true };
+    });
+    const run = dispatcher(gatedStart('after', afterStart.resolve, gate.promise), registry);
+    const pending = run.dispatch({
+      task: admitted.task,
+      step: 1,
+      toolName: name,
+      args: { value: 'start-wins' },
+      modelToolCallId: randomUUID(),
+      ctx: context(admitted.task.id, admitted.conversation.id),
+      provenance: { plannerVersion: 1, promptVersion: 1, model: 'synthetic/no-provider' },
+    });
+    try {
+      await waitBounded(afterStart.promise, 'durable dispatcher start');
+      expect(await policies.setEnabled(agentId, policyId, false)).toBe(true);
+      gate.resolve();
+      await expect(pending).resolves.toMatchObject({ kind: 'executed' });
+      expect(invocations).toBe(1);
+      const calls = await store
+        .collection('toolCalls')
+        .where('taskId', '==', admitted.task.id)
+        .get();
+      expect(calls.size).toBe(1);
+      expect(calls.docs[0]?.get('status')).toBe('succeeded');
+    } finally {
+      gate.resolve();
       await pending.catch(() => {});
     }
   });

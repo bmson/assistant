@@ -468,6 +468,7 @@ export function createPostgresToolExecutionRepository(db: Db): ToolExecutionRepo
       if (!keys) throw new Error('Tool replay identity is invalid');
       return db.transaction(async (tx) => {
         await lockPostgresPrivacyObservationFence(tx as unknown as Db, input.agentId);
+        if (!/^[a-f0-9]{64}$/.test(input.expectedPolicyFingerprint)) return null;
         const [task] = await tx
           .select({ id: tasks.id, status: tasks.status })
           .from(tasks)
@@ -475,6 +476,25 @@ export function createPostgresToolExecutionRepository(db: Db): ToolExecutionRepo
           .for('update')
           .limit(1);
         if (!task || ['done', 'failed', 'cancelled'].includes(task.status)) return null;
+        const policyRows = await tx
+          .select()
+          .from(approvalPolicies)
+          .where(
+            and(
+              eq(approvalPolicies.agentId, input.agentId),
+              eq(approvalPolicies.toolName, input.toolName),
+            ),
+          )
+          .orderBy(approvalPolicies.id)
+          .limit(MAX_APPROVAL_POLICY_SNAPSHOT_ROWS + 1)
+          .for('update');
+        if (policyRows.length > MAX_APPROVAL_POLICY_SNAPSHOT_ROWS) return null;
+        try {
+          if (approvalPolicyFingerprint(policyRows) !== input.expectedPolicyFingerprint)
+            return null;
+        } catch {
+          return null;
+        }
         await lockPostgresToolCallReceiptKeys(tx as unknown as Db, keys);
         for (const key of keys) {
           const [existing] = await tx
