@@ -445,25 +445,38 @@ final class NativeTranscriptViewportExperimentTests: XCTestCase {
         attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
     }
     @MainActor private func attachDiagnostics(_ session: NativeTranscriptExperimentSession, stage: String) throws {
+        func number(_ value: CGFloat) -> Any { NativeExperimentDiagnostic.number(value) }
         func rect(_ value: CGRect?) -> Any {
             guard let r = value else { return NSNull() }
-            return ["x": r.minX, "y": r.minY, "width": r.width, "height": r.height]
+            return ["x": number(r.minX), "y": number(r.minY), "width": number(r.width), "height": number(r.height)]
         }
         let restorations: [[String: Any]] = session.restorations.map { value in
             ["selectedItem": value.anchor.itemID as Any? ?? NSNull(), "preFrame": rect(value.anchor.preFrame),
-             "preOffset": value.anchor.preOffset, "preViewportHeight": value.anchor.preHeight,
-             "unclampedTopFraction": value.anchor.fraction as Any? ?? NSNull(), "newFrame": rect(value.newFrame),
-             "newViewportHeight": value.viewportHeight, "newContentHeight": value.contentHeight,
-             "requestedOffset": value.requested, "clampedOffset": value.clamped, "actualOffset": value.actual,
-             "clampDelta": value.clampDelta, "clampReason": value.clampReason, "selectionReason": value.reason,
+             "preOffset": number(value.anchor.preOffset), "preViewportHeight": number(value.anchor.preHeight),
+             "unclampedTopFraction": value.anchor.fraction.map(number) ?? NSNull(), "newFrame": rect(value.newFrame),
+             "newViewportHeight": number(value.viewportHeight), "newContentHeight": number(value.contentHeight),
+             "requestedOffset": number(value.requested), "clampedOffset": number(value.clamped), "actualOffset": number(value.actual),
+             "clampDelta": number(value.clampDelta), "clampReason": value.clampReason, "selectionReason": value.reason,
              "gesturePolicySuppressed": value.suppressedByGesture]
         }
-        let data = try JSONSerialization.data(withJSONObject: [
+        let data = try JSONSerialization.data(withJSONObject: diagnosticJSON([
             "stage": stage, "events": session.events, "restorations": restorations,
+            "readinessDiagnostics": session.readinessDiagnosticSnapshot(),
             "proofLimits": "Authored tests only until executed. Phase injection is not a physical gesture. Revision73/74 is VALUE delivery, not generic Transaction equivalence.",
-        ], options: [.prettyPrinted, .sortedKeys])
+        ]), options: [.prettyPrinted, .sortedKeys])
         let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
         attachment.name = "native-experiment-stage-anchor-lifecycle-receipt"; attachment.lifetime = .keepAlways; add(attachment)
+    }
+    @MainActor private func diagnosticJSON(_ value: Any) -> Any {
+        if let scalar = value as? NativeExperimentDiagnostic.Scalar {
+            if scalar.value.isFinite { return scalar.value }
+            let bits = String(scalar.value.bitPattern, radix: 16)
+            return ["nonfinite": scalar.value.isNaN ? "NaN" : scalar.value.sign == .minus ? "-Infinity" : "+Infinity",
+                    "ieee754Bits": "0x" + String(repeating: "0", count: 16 - bits.count) + bits]
+        }
+        if let object = value as? [String: Any] { return object.mapValues { self.diagnosticJSON($0) } }
+        if let array = value as? [Any] { return array.map { self.diagnosticJSON($0) } }
+        return value
     }
 }
 

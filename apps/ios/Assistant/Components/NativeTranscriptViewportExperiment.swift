@@ -118,6 +118,11 @@ final class NativeTranscriptExperimentSession {
     private(set) var contextReceipts: [String: ContextReceipt] = [:]
     private(set) var mountTokens: [String: UUID] = [:]
     private(set) var completionValues: [Key: String] = [:]
+    private var diagnosticSequence = 0
+    private var configureDiagnosticCount = 0
+    private var captureDiagnosticCount = 0
+    private var configureDiagnostics: [[String: Any]] = []
+    private var captureDiagnostics: [[String: Any]] = []
     var acknowledge: ((String) async -> Bool)?
     weak var controller: NativeTranscriptExperimentController?
     var setReveal: ((CGFloat) -> Void)?
@@ -126,6 +131,34 @@ final class NativeTranscriptExperimentSession {
     var noticeView: UIView?
     init(snapshot: Snapshot) { self.snapshot = snapshot }
     func event(_ value: String) { events.append(value) }
+    enum DiagnosticCall { case configure, capture }
+    func observe(_ call: DiagnosticCall, values: [String: Any]) {
+        diagnosticSequence += 1
+        var sample = values
+        sample["sequence"] = diagnosticSequence
+        switch call {
+        case .configure:
+            configureDiagnosticCount += 1
+            configureDiagnostics.append(sample)
+            configureDiagnostics = Array(configureDiagnostics.suffix(8))
+        case .capture:
+            captureDiagnosticCount += 1
+            captureDiagnostics.append(sample)
+            captureDiagnostics = Array(captureDiagnostics.suffix(8))
+        }
+    }
+    /// Passive observation only: never asks UIKit to lay out or capture again.
+    func readinessDiagnosticSnapshot() -> [String: Any] {
+        ["schema": "native-experiment-readiness-diagnostics/v1", "sampleKind": "final-passive",
+         "session": ["scope": NativeExperimentDiagnostic.scope(snapshot.scope), "revision": snapshot.revision,
+                     "actionRevision": snapshot.actionRevision, "expectedRowIDs": snapshot.rows.map(\.id),
+                     "controllerID": NativeExperimentDiagnostic.identity(controller),
+                     "geometry": NativeExperimentDiagnostic.geometry(geometry)],
+         "controller": controller?.passiveDiagnosticSnapshot() as Any? ?? NSNull(),
+         "readiness": NativeExperimentDiagnostic.readiness(geometry),
+         "configure": ["total": configureDiagnosticCount, "last8": configureDiagnostics],
+         "capture": ["total": captureDiagnosticCount, "last8": captureDiagnostics]]
+    }
     func apply(_ value: Snapshot) {
         guard value.scope != snapshot.scope || value.revision > snapshot.revision else {
             event("stale-snapshot-rejected"); return
@@ -194,6 +227,67 @@ final class NativeTranscriptExperimentSession {
             }
         }
         return pieces.reduce(0) { $0 + $1.width * $1.height } / (row.width * row.height)
+    }
+}
+
+/// Value copies only. Histories never retain views/windows or request layout.
+@MainActor
+enum NativeExperimentDiagnostic {
+    struct Scalar { let value: Double }
+    static func number(_ value: CGFloat) -> Scalar { Scalar(value: Double(value)) }
+    static func nullable<T>(_ value: T?) -> Any { value.map { $0 as Any } ?? NSNull() }
+    static func identity(_ object: AnyObject?) -> Any {
+        guard let object else { return NSNull() }
+        return String(describing: ObjectIdentifier(object))
+    }
+    static func scope(_ value: NativeTranscriptExperimentSession.Scope?) -> Any {
+        guard let value else { return NSNull() }
+        return ["ownerID": value.ownerID, "serverIdentity": value.serverIdentity,
+                "connectionEpoch": value.connectionEpoch, "conversationID": value.conversationID] as [String: Any]
+    }
+    static func rect(_ value: CGRect) -> [String: Any] {
+        ["x": number(value.origin.x), "y": number(value.origin.y),
+         "width": number(value.size.width), "height": number(value.size.height)]
+    }
+    static func size(_ value: CGSize) -> [String: Any] { ["width": number(value.width), "height": number(value.height)] }
+    static func point(_ value: CGPoint) -> [String: Any] { ["x": number(value.x), "y": number(value.y)] }
+    static func insets(_ value: UIEdgeInsets) -> [String: Any] {
+        ["top": number(value.top), "left": number(value.left), "bottom": number(value.bottom), "right": number(value.right)]
+    }
+    static func window(_ value: UIWindow?) -> Any {
+        guard let value else { return NSNull() }
+        return ["id": identity(value), "hidden": value.isHidden, "bounds": rect(value.bounds)] as [String: Any]
+    }
+    static func view(_ value: UIView?) -> [String: Any] {
+        guard let value else { return ["present": false, "objectID": NSNull(), "windowID": NSNull(),
+                                        "windowHidden": NSNull(), "bounds": NSNull(), "frame": NSNull()] }
+        return ["present": true, "objectID": identity(value), "windowID": identity(value.window),
+                "windowHidden": nullable(value.window?.isHidden), "bounds": rect(value.bounds), "frame": rect(value.frame)]
+    }
+    static func geometry(_ value: NativeTranscriptExperimentSession.Geometry?) -> Any {
+        guard let value else { return NSNull() }
+        return ["scope": scope(value.scope), "bounds": rect(value.bounds), "frame": rect(value.frame),
+                "viewportInWindow": rect(value.viewportInWindow), "stationaryInWindow": rect(value.stationaryInWindow),
+                "composerInWindow": rect(value.composerInWindow), "noticeInWindow": value.noticeInWindow.map { rect($0) as Any } ?? NSNull(),
+                "rowFramesInWindow": value.rowFramesInWindow.mapValues { rect($0) }, "contentInset": insets(value.contentInset),
+                "adjustedInset": insets(value.adjustedInset), "offset": point(value.offset), "contentSize": size(value.contentSize),
+                "windowBounds": rect(value.windowBounds), "windowSafeArea": insets(value.windowSafeArea),
+                "header": number(value.header), "footer": number(value.footer), "reveal": number(value.reveal)] as [String: Any]
+    }
+    static func readiness(_ value: NativeTranscriptExperimentSession.Geometry?) -> [String: Any] {
+        guard let value else {
+            return ["A_geometryAvailable": false, "B_rowCountExactly3": NSNull(), "C_composerHeightPositive": NSNull(),
+                    "D_footerDifferenceBelowHalfPoint": NSNull(), "overall": false, "rowIDs": NSNull(),
+                    "rowCount": NSNull(), "composerHeight": NSNull(), "footer": NSNull(), "footerDifference": NSNull()]
+        }
+        let b = value.rowFramesInWindow.count == 3
+        let c = value.composerInWindow.height > 0
+        let delta = value.footer - value.composerInWindow.height - 18
+        let d = abs(delta) < 0.5
+        return ["A_geometryAvailable": true, "B_rowCountExactly3": b, "C_composerHeightPositive": c,
+                "D_footerDifferenceBelowHalfPoint": d, "overall": b && c && d,
+                "rowIDs": value.rowFramesInWindow.keys.sorted(), "rowCount": value.rowFramesInWindow.count,
+                "composerHeight": number(value.composerInWindow.height), "footer": number(value.footer), "footerDifference": number(delta)]
     }
 }
 
@@ -446,6 +540,47 @@ final class NativeTranscriptExperimentController: UIViewController, UICollection
     var applyingSnapshot: Bool { applying }
     var renderedRevision: Int? { snapshot?.revision }
     var retainedHostCount: Int { records.count }
+    /// Raw property reads only; no view load, conversion or layout queries.
+    func passiveDiagnosticSnapshot() -> [String: Any] {
+        let window = collection.window
+        let stationary = session.stationaryView
+        let composer = session.composerView
+        let checks: [String: Any] = [
+            "sessionControllerIdentityMatches": session.controller === self,
+            "snapshotPresent": snapshot != nil,
+            "snapshotScopeMatches": NativeExperimentDiagnostic.nullable(snapshot.map { $0.scope == session.snapshot.scope }),
+            "viewLoaded": isViewLoaded, "collectionWindowPresent": window != nil,
+            "stationaryPresent": stationary != nil, "windowNotHidden": NativeExperimentDiagnostic.nullable(window.map { !$0.isHidden }),
+            "stationarySameWindow": window != nil && stationary != nil ? (stationary?.window === window) as Any : NSNull(),
+            "composerPresent": composer != nil,
+            "composerSameWindow": window != nil && composer != nil ? (composer?.window === window) as Any : NSNull(),
+            "widthFinite": collection.bounds.width.isFinite, "heightFinite": collection.bounds.height.isFinite,
+            "widthPositive": collection.bounds.width > 0, "heightPositive": collection.bounds.height > 0]
+        return ["objectID": NativeExperimentDiagnostic.identity(self), "sessionControllerID": NativeExperimentDiagnostic.identity(session.controller),
+                "sessionScope": NativeExperimentDiagnostic.scope(session.snapshot.scope), "sessionRevision": session.snapshot.revision,
+                "sessionActionRevision": session.snapshot.actionRevision,
+                "isViewLoaded": isViewLoaded, "snapshotScope": NativeExperimentDiagnostic.scope(snapshot?.scope),
+                "snapshotRevision": NativeExperimentDiagnostic.nullable(snapshot?.revision),
+                "snapshotActionRevision": NativeExperimentDiagnostic.nullable(snapshot?.actionRevision),
+                "orderIDs": order.map(\.itemID), "hostCount": records.count, "applying": applying,
+                "pendingScope": NativeExperimentDiagnostic.scope(pendingSnapshot?.scope),
+                "pendingRevision": NativeExperimentDiagnostic.nullable(pendingSnapshot?.revision),
+                "suppliedSize": NativeExperimentDiagnostic.size(suppliedSize), "header": NativeExperimentDiagnostic.number(header),
+                "footer": NativeExperimentDiagnostic.number(footer), "leading": NativeExperimentDiagnostic.number(leading),
+                "trailing": NativeExperimentDiagnostic.number(trailing), "reveal": NativeExperimentDiagnostic.number(reveal),
+                "revealInProgress": revealInProgress, "alignShort": alignShort,
+                "native": ["collectionFrame": NativeExperimentDiagnostic.rect(collection.frame),
+                           "collectionBounds": NativeExperimentDiagnostic.rect(collection.bounds),
+                           "contentSize": NativeExperimentDiagnostic.size(collection.contentSize),
+                           "offset": NativeExperimentDiagnostic.point(collection.contentOffset),
+                           "contentInset": NativeExperimentDiagnostic.insets(collection.contentInset),
+                           "adjustedInset": NativeExperimentDiagnostic.insets(collection.adjustedContentInset),
+                           "collectionWindow": NativeExperimentDiagnostic.window(window),
+                           "controllerViewIfLoaded": NativeExperimentDiagnostic.view(viewIfLoaded)],
+                "markers": ["stationary": NativeExperimentDiagnostic.view(stationary),
+                            "composer": NativeExperimentDiagnostic.view(composer), "notice": NativeExperimentDiagnostic.view(session.noticeView)],
+                "rawCaptureChecks": checks]
+    }
     /// Policy fixture input, explicitly NOT a physical gesture or UIKit phase proof.
     func exerciseReaderPhase(_ value: ReaderPhase?) {
         let wasReaderDriven = policyPhaseOverride.map { $0 != .idle } ?? false
@@ -501,10 +636,21 @@ final class NativeTranscriptExperimentController: UIViewController, UICollection
     }
     fileprivate func configure(size: CGSize, header: CGFloat, footer: CGFloat, leading: CGFloat, trailing: CGFloat,
                                reveal: CGFloat, inProgress: Bool, alignShort: Bool, presentation: NativeExperimentPresentation) {
+        var diagnosticAccepted = false
+        defer {
+            session.observe(.configure, values: ["sampleKind": "configure-exit", "accepted": diagnosticAccepted,
+                "incoming": ["size": NativeExperimentDiagnostic.size(size), "header": NativeExperimentDiagnostic.number(header),
+                             "footer": NativeExperimentDiagnostic.number(footer), "leading": NativeExperimentDiagnostic.number(leading),
+                             "trailing": NativeExperimentDiagnostic.number(trailing), "reveal": NativeExperimentDiagnostic.number(reveal),
+                             "inProgress": inProgress, "alignShort": alignShort],
+                "sessionScope": NativeExperimentDiagnostic.scope(session.snapshot.scope), "sessionRevision": session.snapshot.revision,
+                "sessionActionRevision": session.snapshot.actionRevision, "exitState": passiveDiagnosticSnapshot()])
+        }
         guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0,
               [header, footer, leading, trailing, reveal].allSatisfy({ $0.isFinite && $0 >= 0 }) else {
             session.event("STOP-invalid-root-layout-input"); session.invalidateGeometry(); return
         }
+        diagnosticAccepted = true
         self.presentation = presentation
         let layoutChanged = suppliedSize != size || self.header != header || self.footer != footer
             || self.leading != leading || self.trailing != trailing || self.alignShort != alignShort
@@ -763,8 +909,23 @@ final class NativeTranscriptExperimentController: UIViewController, UICollection
         session.event("end-display:\(indexPath.item)"); recomputeVisibility()
     }
     func captureGeometry() {
+        let diagnosticGeometryPresentBefore = session.geometry != nil
+        let diagnosticScopeBefore = session.geometry?.scope
+        var diagnosticInvalidated = false
+        var diagnosticOutcome = "controller-mismatch"
+        var diagnosticAttributeRows: [String: CGRect]?
+        defer {
+            session.observe(.capture, values: ["sampleKind": "capture-exit", "outcome": diagnosticOutcome,
+                "invalidatedGeometry": diagnosticInvalidated, "geometryPresentBefore": diagnosticGeometryPresentBefore,
+                "geometryScopeBefore": NativeExperimentDiagnostic.scope(diagnosticScopeBefore),
+                "geometryAfter": NativeExperimentDiagnostic.geometry(session.geometry),
+                "existingAttributeRows": diagnosticAttributeRows.map { rows in rows.mapValues { NativeExperimentDiagnostic.rect($0) } as Any } ?? NSNull(),
+                "exitState": passiveDiagnosticSnapshot()])
+        }
         guard session.controller === self else { return }
         session.invalidateGeometry()
+        diagnosticInvalidated = true
+        diagnosticOutcome = "guard-rejected"
         guard let snapshot, snapshot.scope == session.snapshot.scope,
               isViewLoaded, let window = collection.window, let stationary = session.stationaryView,
               !window.isHidden, stationary.window === window,
@@ -777,6 +938,7 @@ final class NativeTranscriptExperimentController: UIViewController, UICollection
                 rowFrames[key.itemID] = collection.convert(attributes.frame, to: window)
             }
         }
+        diagnosticAttributeRows = rowFrames
         let notice = session.noticeView.flatMap { $0.window === window && $0.bounds.height > 0 ? $0.convert($0.bounds, to: window) : nil }
         session.record(.init(scope: snapshot.scope, bounds: collection.bounds, frame: collection.frame,
                              viewportInWindow: collection.convert(collection.bounds, to: window),
@@ -786,6 +948,7 @@ final class NativeTranscriptExperimentController: UIViewController, UICollection
                              adjustedInset: collection.adjustedContentInset, offset: collection.contentOffset,
                              contentSize: collection.contentSize, windowBounds: window.bounds, windowSafeArea: window.safeAreaInsets,
                              header: actualHeader, footer: footer, reveal: reveal))
+        diagnosticOutcome = "recorded"
     }
     private func deliveryIsAdmissible(_ key: NativeTranscriptExperimentSession.Key,
                                       lease: NativeTranscriptExperimentSession.Lease? = nil) -> Bool {
