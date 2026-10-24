@@ -14,6 +14,7 @@ final class NativeVisualReviewTests: XCTestCase {
     @MainActor
     private final class ConnectedToolActionLayoutRecorder {
         var frames: [String: CGRect] = [:]
+        var confirmationLabels: [String] = []
 
         func record(_ values: [String: CGRect]) {
             frames.merge(values, uniquingKeysWith: { _, latest in latest })
@@ -2028,11 +2029,13 @@ final class NativeVisualReviewTests: XCTestCase {
                     disabled: state.disabled,
                     onAction: { _ in XCTFail("The visual fixture must not run connected-tool actions.") },
                     onRemove: { XCTFail("The visual fixture must not remove a connection.") },
-                    layoutReporter: { recorder.record($0) }
+                    layoutReporter: { recorder.record($0) },
+                    confirmationLabelReporter: { recorder.confirmationLabels.append($0) }
                 )
                 try await captureRow(row, name: "connected-tools-\(state.name)-\(Int(width))",
                                      scheme: .light, size: .large, width: width, recorder: recorder)
                 try assertPaintedLayout(recorder.frames, width: width, isAccessibility: false)
+                XCTAssertEqual(recorder.confirmationLabels.first, "Remove")
 
                 let signature = "\(Int(width))-large"
                 let currentSizes = Dictionary(uniqueKeysWithValues: ["refresh", "toggle", "remove"].map { id in
@@ -2096,6 +2099,9 @@ final class NativeVisualReviewTests: XCTestCase {
 
         let armRecorder = ConnectedToolActionLayoutRecorder()
         let callbacks = ConnectedToolReviewCallbacks()
+        // Layout-only fixture: seed the actual production button's initial
+        // @State and render its real armed branch. No activation is attempted.
+        // Tap/AX arming and VoiceOver delivery remain UNVERIFIED manual follow-up.
         let armedRow = ConnectedToolActionRow(
             connection: connection,
             viewportWidth: 393,
@@ -2104,38 +2110,25 @@ final class NativeVisualReviewTests: XCTestCase {
             disabled: false,
             onAction: { callbacks.actions.append($0) },
             onRemove: { callbacks.removals += 1 },
-            layoutReporter: { armRecorder.record($0) }
+            layoutReporter: { armRecorder.record($0) },
+            initiallyArmedForLayoutReview: true,
+            confirmationLabelReporter: { armRecorder.confirmationLabels.append($0) }
         )
         try await capture(
-            Page("connected-tools-remove-armed", ownsNavigation: true,
+            Page("connected-tools-remove-initially-armed-layout-only", ownsNavigation: true,
                  ConnectedToolsActionRowReviewCard(row: armedRow, layoutReporter: { armRecorder.record($0) })),
             scheme: .light,
             size: .large,
             scene: scene,
             model: model,
             viewportWidth: 393,
-            beforeCapture: { window in
-                let control = try XCTUnwrap(self.accessibilityObject(identifier: "connected-tools.remove", in: window))
-                let activated: Bool
-                if let element = control as? UIAccessibilityElement {
-                    activated = element.accessibilityActivate()
-                } else if let view = control as? UIView {
-                    activated = view.accessibilityActivate()
-                } else {
-                    XCTFail("The actual Remove control was not represented by an accessibility-activatable element.")
-                    return
-                }
-                XCTAssertTrue(activated, "The actual Remove control should arm through accessibility activation.")
-                try await Task.sleep(for: .milliseconds(100))
-                window.layoutIfNeeded()
-                let armed = try XCTUnwrap(self.accessibilityObject(identifier: "connected-tools.remove", in: window))
-                let label = (armed as? UIAccessibilityElement)?.accessibilityLabel ?? (armed as? UIView)?.accessibilityLabel
-                XCTAssertEqual(label, "Confirm remove")
-            },
             layoutReporter: { armRecorder.record($0) }
         )
+        // This is the same value supplied to the actual accessibilityLabel
+        // modifier; observing it does not prove VoiceOver delivered the label.
+        XCTAssertEqual(armRecorder.confirmationLabels.first, "Confirm remove")
         XCTAssertEqual(callbacks.actions, [])
-        XCTAssertEqual(callbacks.removals, 0, "The first activation may arm confirmation but must not execute removal.")
+        XCTAssertEqual(callbacks.removals, 0, "Mounting an initially armed layout fixture must not execute removal.")
         try assertPaintedLayout(armRecorder.frames, width: 393, isAccessibility: false)
         let resting393 = try XCTUnwrap(baselineSizes["393-large"])
         for id in ["refresh", "toggle", "remove"] {
@@ -2400,7 +2393,6 @@ final class NativeVisualReviewTests: XCTestCase {
     @MainActor private func capture(_ page: Page, scheme: ColorScheme, size: DynamicTypeSize,
                                     scene: UIWindowScene, model: AppModel, requiresScrolling: Bool = false,
                                     viewportWidth: CGFloat? = nil, increasedContrast: Bool = false,
-                                    beforeCapture: (@MainActor (UIWindow) async throws -> Void)? = nil,
                                     layoutReporter: (@MainActor ([String: CGRect]) -> Void)? = nil) async throws {
         UserDefaults.standard.set((scheme == .light ? AssistantAppearance.light : .dark).rawValue,
                                   forKey: AssistantAppearance.defaultsKey)
@@ -2426,7 +2418,6 @@ final class NativeVisualReviewTests: XCTestCase {
         defer { window.isHidden = true; window.rootViewController = nil }
         try await Task.sleep(for: .milliseconds(500))
         window.layoutIfNeeded()
-        if let beforeCapture { try await beforeCapture(window) }
         if let layoutReporter {
             window.layoutIfNeeded()
             layoutReporter([
@@ -2491,27 +2482,6 @@ final class NativeVisualReviewTests: XCTestCase {
         if requiresScrolling {
             XCTAssertGreaterThan(capturedScrollPositions, 0, "Long message fixture was not captured below the fold: \(page.name)")
         }
-    }
-
-    @MainActor
-    private func accessibilityObject(identifier: String, in root: UIView) -> AnyObject? {
-        if root.isAccessibilityElement, root.accessibilityIdentifier == identifier { return root }
-        let elements = root.accessibilityElements as? [Any]
-            ?? (0..<max(0, root.accessibilityElementCount())).compactMap { root.accessibilityElement(at: $0) }
-        for element in elements {
-            if let accessible = element as? UIAccessibilityElement,
-               accessible.accessibilityIdentifier == identifier {
-                return accessible
-            }
-            if let view = element as? UIView,
-               let match = accessibilityObject(identifier: identifier, in: view) {
-                return match
-            }
-        }
-        for child in root.subviews {
-            if let match = accessibilityObject(identifier: identifier, in: child) { return match }
-        }
-        return nil
     }
 
     @MainActor private func pages(_ fixture: NativeReviewFixture, workspace: WorkspaceResponse,

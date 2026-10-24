@@ -919,6 +919,7 @@ struct AssistantConfirmationButton: View {
     var prepare: (() async -> Bool)?
 #if DEBUG
     var debugLayoutReporter: (@MainActor (String, CGRect) -> Void)? = nil
+    var debugConfirmationLabelReporter: (@MainActor (String) -> Void)? = nil
 #endif
     let action: () async -> Void
 
@@ -956,6 +957,20 @@ struct AssistantConfirmationButton: View {
         copy.debugLayoutReporter = report
         return copy
     }
+
+    /// Layout fixture only: mount the real armed branch without a gesture or
+    /// action. This does not establish tap or accessibility activation behavior.
+    func initiallyArmedForLayoutReview() -> Self {
+        var copy = self
+        copy._confirmation = State(initialValue: AssistantConfirmationState(expiresAt: .distantFuture))
+        return copy
+    }
+
+    func reportingConfirmationLabel(_ report: (@MainActor (String) -> Void)?) -> Self {
+        var copy = self
+        copy.debugConfirmationLabelReporter = report
+        return copy
+    }
 #endif
 
     static let defaultConfirmationTitle = "Confirm?"
@@ -971,6 +986,9 @@ struct AssistantConfirmationButton: View {
     }
 
     var body: some View {
+#if DEBUG
+        let debugAccessibilityLabel = working ? "Working" : armed ? spokenConfirmation : title
+#endif
         Button {
             guard !working, isEnabled else { return }
             if !armed, let prepare {
@@ -1064,7 +1082,13 @@ struct AssistantConfirmationButton: View {
         .buttonStyle(AssistantActionButtonStyle(kind: kind, compact: compact, fillsWidth: fillsWidth,
             confirming: armed && kind == .destructive, minimumHeight: minimumHeight))
         .disabled(working)
+#if DEBUG
+        .accessibilityLabel(debugAccessibilityLabel)
+        .onAppear { debugConfirmationLabelReporter?(debugAccessibilityLabel) }
+        .onChange(of: debugAccessibilityLabel) { _, label in debugConfirmationLabelReporter?(label) }
+#else
         .accessibilityLabel(working ? "Working" : armed ? spokenConfirmation : title)
+#endif
         .accessibilityHint(armed ? "Tap again to confirm. \(hint)" : "Requires two taps. \(hint)")
         .accessibilityAction(.escape) { confirmation.reset() }
         .task(id: confirmation.expiresAt) {

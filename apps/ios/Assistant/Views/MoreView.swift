@@ -1070,6 +1070,8 @@ struct ConnectedToolActionRow: View {
     let onRemove: () async -> Void
 #if DEBUG
     let layoutReporter: (@MainActor ([String: CGRect]) -> Void)?
+    let initiallyArmedForLayoutReview: Bool
+    let confirmationLabelReporter: (@MainActor (String) -> Void)?
 
     init(
         connection: McpConnection,
@@ -1079,7 +1081,9 @@ struct ConnectedToolActionRow: View {
         disabled: Bool,
         onAction: @escaping (String) -> Void,
         onRemove: @escaping () async -> Void,
-        layoutReporter: (@MainActor ([String: CGRect]) -> Void)? = nil
+        layoutReporter: (@MainActor ([String: CGRect]) -> Void)? = nil,
+        initiallyArmedForLayoutReview: Bool = false,
+        confirmationLabelReporter: (@MainActor (String) -> Void)? = nil
     ) {
         self.connection = connection
         self.viewportWidth = viewportWidth
@@ -1089,6 +1093,8 @@ struct ConnectedToolActionRow: View {
         self.onAction = onAction
         self.onRemove = onRemove
         self.layoutReporter = layoutReporter
+        self.initiallyArmedForLayoutReview = initiallyArmedForLayoutReview
+        self.confirmationLabelReporter = confirmationLabelReporter
     }
 #else
     init(
@@ -1239,9 +1245,12 @@ struct ConnectedToolActionRow: View {
             await onRemove()
         }
 #if DEBUG
-        let observedButton = button.reportingLayout(layoutReporter.map { report in
-            { component, frame in report(["remove.\(component)": frame]) }
-        })
+        let seededButton = initiallyArmedForLayoutReview ? button.initiallyArmedForLayoutReview() : button
+        let observedButton = seededButton
+            .reportingConfirmationLabel(confirmationLabelReporter)
+            .reportingLayout(layoutReporter.map { report in
+                { component, frame in report(["remove.\(component)": frame]) }
+            })
 #else
         let observedButton = button
 #endif
