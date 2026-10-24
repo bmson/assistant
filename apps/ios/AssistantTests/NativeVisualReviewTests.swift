@@ -1739,6 +1739,10 @@ final class NativeVisualReviewTests: XCTestCase {
 
     @MainActor
     func testEventRhythmProductionRows() async throws {
+        let eventLedger = EventCaptureLedger()
+        defer { eventLedger.finishMethod(self) }
+        do {
+        try eventLedger.check("method setup")
         NativeReviewProtocol.install([:])
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [NativeReviewProtocol.self]
@@ -1824,6 +1828,7 @@ final class NativeVisualReviewTests: XCTestCase {
         }
         func verify(_ recorder: EventRhythmFrameRecorder, width: CGFloat, size: DynamicTypeSize,
                     inheritedWidth: CGFloat?, expanded: Bool, scheme: ColorScheme = .light) throws {
+            try eventLedger.check("before painted verification")
             let frames = recorder.frames
             func frame(_ id: String) throws -> CGRect {
                 let value = try XCTUnwrap(frames[id], "Missing actual production geometry: \(id)")
@@ -2007,41 +2012,54 @@ final class NativeVisualReviewTests: XCTestCase {
                 let rect = frames[id]!
                 return ["id": id, "x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height]
             }
+            try eventLedger.check("painted receipt serialization")
             let data = try JSONSerialization.data(withJSONObject: ["scheme": scheme == .light ? "light" : "dark", "viewport": width, "inheritedViewport": inheritedWidth.map { $0 as Any } ?? NSNull(),
                 "accessibility": size.isAccessibilitySize, "expanded": expanded, "stacked": stacked, "paintedBounds": receipt,
                 "briefingPaperHorizontalInset": expectedPaperInset, "briefingPaperInnerWidth": expectedPaperInnerWidth,
                 "nativeClockText": nativeTextReceipt,
                 "reviewLimits": "Native TextRenderer reports truncation and raw line/run typographic bounds, not terminal Unicode/source-character or pixel-ink coverage. Public CharacterIndex has no validated terminal String mapping. Original PNG review MUST confirm the full time and Pacific Time suffix; VoiceOver reading/focus order also remains unproved."], options: [.prettyPrinted, .sortedKeys])
+            try eventLedger.check("painted receipt serialization completed")
+            try eventLedger.allowJSON(data.count)
             let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
             attachment.name = "event-rhythm-\(scheme == .light ? "light" : "dark")-\(Int(width))-\(size.isAccessibilitySize ? "AX3" : "large")-\(inheritedWidth == nil ? "missing" : "known")-\(expanded ? "expanded" : "collapsed")-painted-bounds"
             attachment.lifetime = .keepAlways; add(attachment)
+            try eventLedger.check("painted receipt attachment completed")
         }
         for width in [CGFloat(320), 360, 390, 430] {
             for size in [DynamicTypeSize.large, .accessibility3] {
+                try eventLedger.beginCase(self)
                 let recorder = EventRhythmFrameRecorder()
                 try await capture(reviewPage(recorder, width: width, expanded: true), scheme: .light, size: size,
-                                  scene: scene, model: model, requiresScrolling: true, viewportWidth: width)
+                                  scene: scene, model: model, requiresScrolling: true, viewportWidth: width, eventCapturePolicy: eventLedger)
                 try verify(recorder, width: width, size: size, inheritedWidth: width, expanded: true)
             }
         }
         for size in [DynamicTypeSize.large, .accessibility3] {
+            try eventLedger.beginCase(self)
             let recorder = EventRhythmFrameRecorder()
             try await capture(reviewPage(recorder, width: nil, expanded: true), scheme: .light, size: size,
-                              scene: scene, model: model, requiresScrolling: true, viewportWidth: 390)
+                              scene: scene, model: model, requiresScrolling: true, viewportWidth: 390, eventCapturePolicy: eventLedger)
             try verify(recorder, width: 390, size: size, inheritedWidth: nil, expanded: true)
         }
+        try eventLedger.beginCase(self)
         let collapsed = EventRhythmFrameRecorder()
         try await capture(reviewPage(collapsed, width: 390, expanded: false), scheme: .light, size: .large,
-                          scene: scene, model: model, requiresScrolling: true, viewportWidth: 390)
+                          scene: scene, model: model, requiresScrolling: true, viewportWidth: 390, eventCapturePolicy: eventLedger)
         try verify(collapsed, width: 390, size: .large, inheritedWidth: 390, expanded: false)
         for (width, size) in [(CGFloat(390), DynamicTypeSize.large), (CGFloat(320), .accessibility3)] {
+            try eventLedger.beginCase(self)
             let recorder = EventRhythmFrameRecorder()
             try await capture(reviewPage(recorder, width: width, expanded: true), scheme: .dark, size: size,
-                              scene: scene, model: model, requiresScrolling: true, viewportWidth: width)
+                              scene: scene, model: model, requiresScrolling: true, viewportWidth: width, eventCapturePolicy: eventLedger)
             try verify(recorder, width: width, size: size, inheritedWidth: width, expanded: true, scheme: .dark)
         }
+        XCTAssertEqual(eventLedger.ordinal, 13, "All thirteen existing event cases share one ledger")
         XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
         XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+        } catch {
+            if !eventLedger.minimalEmitted { eventLedger.emitMinimal(self, reason: String(describing: error)) }
+            throw error
+        }
     }
 
 #endif
@@ -2582,11 +2600,436 @@ final class NativeVisualReviewTests: XCTestCase {
         }
     }
 
+
+    // Event-only resource policy. The default capture path below is intentionally
+    // untouched; these ceilings stop with failure and never prove content fits.
+    @MainActor private final class EventCaptureLedger {
+        struct Stop: Error { let reason: String }
+        let clock = ContinuousClock()
+        let methodStart: ContinuousClock.Instant
+        let runID = UUID().uuidString
+        var caseStart: ContinuousClock.Instant
+        var ordinal = 0
+        var attemptedPNG = 0, retainedPNG = 0, caseAttemptedPNG = 0, caseRetainedPNG = 0
+        var retainedJSON = 0, caseJSON = 0
+        var failures: [String] = []
+        var minimalEmitted = false
+        var minimalUsed = 0
+        var lastRejectedPNG: [String: Any] = [:]
+        static let minimalBytes = 4096
+        init() { let now = clock.now; methodStart = now; caseStart = now }
+        var caseID: String { "\(runID)-case-\(ordinal)" }
+        func seconds(_ start: ContinuousClock.Instant) -> Double {
+            let d = start.duration(to: clock.now).components
+            return Double(d.seconds) + Double(d.attoseconds) / 1e18
+        }
+        func check(_ operation: String) throws {
+            if seconds(methodStart) >= 480 || (ordinal > 0 && seconds(caseStart) >= 60) {
+                throw Stop(reason: "wall-cap: \(operation)")
+            }
+        }
+        func beginCase(_ test: NativeVisualReviewTests) throws {
+            // Includes preceding case verification/cleanup in the old case clock.
+            do { try check("before case setup") }
+            catch { emitMinimal(test, reason: String(describing: error)); throw error }
+            ordinal += 1; caseStart = clock.now
+            caseAttemptedPNG = 0; caseRetainedPNG = 0; caseJSON = 0
+            minimalEmitted = false; minimalUsed = 0; lastRejectedPNG = [:]
+            try check("case setup")
+        }
+        func recordAttemptedPNG(_ bytes: Int) {
+            attemptedPNG += bytes; caseAttemptedPNG += bytes
+        }
+        func allowPNG(_ bytes: Int) throws {
+            let reason: String?
+            if bytes > 8 * 1024 * 1024 { reason = "PNG-each-cap" }
+            else if caseRetainedPNG + bytes > 96 * 1024 * 1024 { reason = "PNG-case-cap" }
+            else if retainedPNG + bytes > 512 * 1024 * 1024 { reason = "PNG-method-cap" }
+            else { reason = nil }
+            if let reason { throw Stop(reason: reason) }
+            try check("before PNG attachment")
+        }
+        func recordAttachedPNG(_ bytes: Int) {
+            // Only synchronous add(attachment) returning establishes retention.
+            retainedPNG += bytes; caseRetainedPNG += bytes
+        }
+        func recordRejectedPNG(_ bytes: Int, error: Error) {
+            lastRejectedPNG = ["actualBytes": bytes, "reason": String(describing: error), "attached": false]
+        }
+        func allowJSON(_ bytes: Int) throws {
+            // Reserve all thirteen minimal failure records, including this case.
+            let reserve = max(0, 14 - ordinal) * Self.minimalBytes
+            guard caseJSON + bytes <= 1024 * 1024 - Self.minimalBytes,
+                  retainedJSON + bytes <= 16 * 1024 * 1024 - reserve else {
+                throw Stop(reason: "diagnostic-cap-overflow")
+            }
+            try check("before JSON attachment")
+            retainedJSON += bytes; caseJSON += bytes
+        }
+        var totals: [String: Any] {
+            ["methodSeconds": seconds(methodStart), "caseSeconds": seconds(caseStart),
+             "attemptedPNGBytes": attemptedPNG, "retainedPNGBytes": retainedPNG,
+             "caseAttemptedPNGBytes": caseAttemptedPNG, "caseRetainedPNGBytes": caseRetainedPNG,
+             "retainedJSONBytesBeforeThisAttachment": retainedJSON, "caseJSONBytesBeforeThisAttachment": caseJSON]
+        }
+        // Observed nonfinite numbers are not replaced with plausible zeros.
+        static func safe(_ object: Any) -> Any {
+            if let dictionary = object as? [String: Any] { return dictionary.mapValues(safe) }
+            if let array = object as? [Any] { return array.map(safe) }
+            if let number = object as? NSNumber, !number.doubleValue.isFinite {
+                let value = number.doubleValue
+                return ["value": NSNull(), "observed": true,
+                        "invalidNumeric": value.isNaN ? "NaN" : (value > 0 ? "+Inf" : "-Inf")] as [String: Any]
+            }
+            return object
+        }
+        func emitMinimal(_ test: NativeVisualReviewTests, reason: String,
+                         attemptedFullBytes: Int? = nil, candidates: Int = 0, steps: Int = 0,
+                         final: [String: Any]? = nil, lastRequest: [String: Any]? = nil,
+                         restoration: String? = nil) {
+            failures.append(reason)
+            // A second failure after full diagnostics (e.g. cleanup) still gets a
+            // bounded record; no full trace is claimed by this reserved header.
+            var header: [String: Any] = ["runID": runID, "caseID": caseID, "caseOrdinal": ordinal,
+                "status": "STOP", "reason": String(reason.prefix(256)), "reasonAbbreviated": reason.count > 256, "fullRawTraceRetained": false,
+                "units": ["geometry": "pt", "elapsed": "s", "size": "B"],
+                "attemptedFullJSONBytes": attemptedFullBytes.map { $0 as Any } ?? NSNull(),
+                "omittedCandidateCount": candidates, "omittedStepCount": steps,
+                "totals": totals, "rejectedPNG": lastRejectedPNG,
+                "limits": ["steps": 64, "caseSeconds": 60, "methodSeconds": 480,
+                           "PNGEachBytes": 8388608, "PNGCaseBytes": 100663296,
+                           "PNGMethodBytes": 536870912, "JSONCaseBytes": 1048576,
+                           "JSONMethodBytes": 16777216, "minimalBytes": 4096]]
+            if let restoration { header["restorationStatusBeforeExit"] = restoration }
+            if let final { header["selectedFinalBeforeRestore"] = final }
+            if let lastRequest { header["lastAttemptedScrollRequest"] = lastRequest }
+            var data = try? JSONSerialization.data(withJSONObject: Self.safe(header), options: [.sortedKeys])
+            if data == nil || data!.count > Self.minimalBytes / 2 {
+                header.removeValue(forKey: "selectedFinalBeforeRestore")
+                header["omittedFields"] = ["selectedFinalBeforeRestore"]
+                data = try? JSONSerialization.data(withJSONObject: Self.safe(header), options: [.sortedKeys])
+            }
+            if data == nil || data!.count > Self.minimalBytes / 2 {
+                // Fixed scalar-only fallback, not a silently truncated raw trace.
+                header = ["runID": runID, "caseID": caseID, "caseOrdinal": ordinal,
+                          "status": "STOP", "reason": String(reason.prefix(128)), "reasonAbbreviated": reason.count > 128,
+                          "fullRawTraceRetained": false, "omittedFields": "all optional raw fields and totals; minimal-header-size fallback",
+                          "attemptedFullJSONBytes": attemptedFullBytes.map { $0 as Any } ?? NSNull(),
+                          "omittedCandidateCount": candidates, "omittedStepCount": steps,
+                          "caseAttemptedPNGBytes": caseAttemptedPNG, "methodAttemptedPNGBytes": attemptedPNG,
+                          "rejectedPNG": lastRejectedPNG,
+                          "caseRetainedPNGBytes": caseRetainedPNG, "methodRetainedPNGBytes": retainedPNG,
+                          "units": ["size": "B", "elapsed": "s", "geometry": "pt"]]
+                if let lastRequest { header["lastAttemptedScrollRequest"] = lastRequest }
+                if let restoration { header["restorationStatusBeforeExit"] = restoration }
+                data = try? JSONSerialization.data(withJSONObject: Self.safe(header), options: [.sortedKeys])
+            }
+            guard let data, data.count <= Self.minimalBytes / 2,
+                  minimalUsed + data.count <= Self.minimalBytes,
+                  caseJSON + data.count <= 1024 * 1024,
+                  retainedJSON + data.count <= 16 * 1024 * 1024 else {
+                XCTFail("Reserved event STOP diagnostic could not be retained: \(reason)"); return
+            }
+            retainedJSON += data.count; caseJSON += data.count; minimalUsed += data.count; minimalEmitted = true
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "event-\(caseID)-STOP"; attachment.lifetime = .keepAlways; test.add(attachment)
+        }
+        func finishMethod(_ test: NativeVisualReviewTests) {
+            do {
+                try check("method cleanup completed / before ledger serialization")
+                let data = try JSONSerialization.data(withJSONObject: [
+                    "runID": runID, "caseCount": ordinal, "totalsBeforeThisAttachment": totals,
+                    "units": ["geometry": "pt", "elapsed": "s", "size": "B"],
+                    "status": failures.isEmpty ? "method-returned" : "STOP",
+                    "limit": "Helper PNG/JSON bytes exclude xcresult container overhead; no physical gesture or full-time PNG acceptance claim."
+                ], options: [.sortedKeys])
+                try check("method ledger serialization completed")
+                try allowJSON(data.count)
+                let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                attachment.name = "event-\(runID)-method-ledger"; attachment.lifetime = .keepAlways; test.add(attachment)
+                try check("method ledger attachment completed")
+            } catch {
+                if !minimalEmitted { emitMinimal(test, reason: String(describing: error)) }
+                XCTFail("\(error)")
+            }
+        }
+    }
+
+    @MainActor private func captureEvent(_ page: Page, scheme: ColorScheme, size: DynamicTypeSize,
+                                         scene: UIWindowScene, model: AppModel, requiresScrolling: Bool,
+                                         viewportWidth: CGFloat?, ledger: EventCaptureLedger) async throws {
+        var stop: Error?
+        var steps: [[String: Any]] = []
+        var candidates: [UIScrollView] = []
+        var initialDiagnostics: [[String: Any]] = []
+        var inventoryObserved = false
+        var selected: UIScrollView?
+        var initial: CGPoint?
+        var observedOriginalOffset: CGPoint?
+        var restorationStatus = "not-performed: no selected scroll observed"
+        var finalSample: [String: Any]?
+        var finalGap: CGFloat?
+        var capturedScrollPositions = 0
+        var window: UIWindow?
+        func check(_ operation: String) throws { try ledger.check(operation) }
+        func measure(_ scroll: UIScrollView) -> [String: Any] {
+            let viewport = scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom
+            let bottom = max(-scroll.adjustedContentInset.top,
+                             scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+            let frame = window.map { scroll.convert(scroll.bounds, to: $0) }
+            return ["candidateID": "\(ledger.caseID)-\(ObjectIdentifier(scroll))",
+                    "class": String(describing: type(of: scroll)), "accessibilityIdentifier": scroll.accessibilityIdentifier ?? "",
+                    "bounds": ["x": scroll.bounds.minX, "y": scroll.bounds.minY, "width": scroll.bounds.width, "height": scroll.bounds.height],
+                    "frameInWindow": frame.map { ["x": $0.minX, "y": $0.minY, "width": $0.width, "height": $0.height] as Any } ?? NSNull(),
+                    "contentSize": ["width": scroll.contentSize.width, "height": scroll.contentSize.height],
+                    "contentInset": ["top": scroll.contentInset.top, "left": scroll.contentInset.left, "bottom": scroll.contentInset.bottom, "right": scroll.contentInset.right],
+                    "adjustedContentInset": ["top": scroll.adjustedContentInset.top, "left": scroll.adjustedContentInset.left, "bottom": scroll.adjustedContentInset.bottom, "right": scroll.adjustedContentInset.right],
+                    "offset": ["x": scroll.contentOffset.x, "y": scroll.contentOffset.y],
+                    "effectiveViewportHeight": viewport, "computedBottom": bottom,
+                    "remaining": max(0, bottom - scroll.contentOffset.y), "selected": scroll === selected]
+        }
+        func valid(_ scroll: UIScrollView) -> Bool {
+            let values = [scroll.bounds.minX, scroll.bounds.minY, scroll.bounds.width, scroll.bounds.height,
+                          scroll.contentSize.width, scroll.contentSize.height, scroll.contentOffset.x, scroll.contentOffset.y,
+                          scroll.contentInset.top, scroll.contentInset.left, scroll.contentInset.bottom, scroll.contentInset.right,
+                          scroll.adjustedContentInset.top, scroll.adjustedContentInset.left, scroll.adjustedContentInset.bottom, scroll.adjustedContentInset.right]
+            return values.allSatisfy(\.isFinite) && scroll.bounds.width > 0 && scroll.bounds.height > 0 &&
+                scroll.contentSize.width >= 0 && scroll.contentSize.height >= 0 &&
+                scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom > 0
+        }
+        defer {
+            // Mandatory single original restoration, even on STOP/cancellation.
+            if let selected, let initial { selected.setContentOffset(initial, animated: false) }
+            window?.isHidden = true; window?.rootViewController = nil
+            do { try check("case cleanup completed") }
+            catch { ledger.emitMinimal(self, reason: String(describing: error)); XCTFail("\(error)") }
+        }
+        do {
+            try check("window setup")
+            UserDefaults.standard.set((scheme == .light ? AssistantAppearance.light : .dark).rawValue,
+                                      forKey: AssistantAppearance.defaultsKey)
+            let nativeWindow = UIWindow(windowScene: scene); window = nativeWindow
+            nativeWindow.frame = scene.coordinateSpace.bounds
+            if let viewportWidth { nativeWindow.frame.size.width = viewportWidth }
+            nativeWindow.overrideUserInterfaceStyle = scheme == .light ? .light : .dark
+            let host = UIHostingController(rootView: Group {
+                if page.ownsNavigation { page.content }
+                else if page.isModal { NavigationStack { page.content } }
+                else {
+                    NavigationStack(path: .constant(["review"])) {
+                        Color.clear.navigationTitle("Assistant")
+                            .navigationDestination(for: String.self) { _ in page.content }
+                    }
+                }
+            }.environment(model).environment(\.colorScheme, scheme)
+                .environment(\.dynamicTypeSize, size).transaction { $0.animation = nil; $0.disablesAnimations = true }
+                .environment(\.scenePhase, .active))
+            nativeWindow.rootViewController = host
+            guard [nativeWindow.bounds.minX, nativeWindow.bounds.minY, nativeWindow.bounds.width, nativeWindow.bounds.height].allSatisfy(\.isFinite),
+                  nativeWindow.bounds.width > 0, nativeWindow.bounds.height > 0 else {
+                throw EventCaptureLedger.Stop(reason: "invalid-initial-window-geometry")
+            }
+            try check("window setup completed"); try check("window presentation")
+            nativeWindow.makeKeyAndVisible()
+            try check("window presentation completed"); try check("initial sleep")
+            try await Task.sleep(for: .milliseconds(500))
+            try check("initial sleep completed"); try check("initial layout")
+            nativeWindow.layoutIfNeeded()
+            try check("initial layout completed")
+            func record(_ position: String) throws {
+                try check("render")
+                var rendered = false
+                let image = UIGraphicsImageRenderer(bounds: nativeWindow.bounds).image { _ in
+                    rendered = nativeWindow.drawHierarchy(in: nativeWindow.bounds, afterScreenUpdates: true)
+                }
+                try check("render completed")
+                XCTAssertTrue(rendered, "UIKit failed to render \(page.name)")
+                try check("PNG encoding")
+                guard let data = image.pngData() else { throw EventCaptureLedger.Stop(reason: "PNG encoding failed") }
+                // Encoding completion is an attempt, not an attached artifact.
+                ledger.recordAttemptedPNG(data.count)
+                do {
+                    try check("PNG encoding completed")
+                    try ledger.allowPNG(data.count)
+                    XCTAssertGreaterThan(data.count, 15_000, "Blank capture: \(page.name)")
+                    let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.png")
+                    attachment.name = "\(page.name)-phone-\(scheme == .light ? "light" : "dark")-\(Int(nativeWindow.bounds.width))\(size.isAccessibilitySize ? "-accessible" : "")-\(position)"
+                    attachment.lifetime = .keepAlways
+                    try check("PNG attachment prepared / before add")
+                    add(attachment)
+                    ledger.recordAttachedPNG(data.count)
+                } catch {
+                    ledger.recordRejectedPNG(data.count, error: error)
+                    throw error
+                }
+                try check("PNG attachment completed")
+            }
+            try record("top")
+            try check("native candidate inventory")
+            func scrollViews(in view: UIView) -> [UIScrollView] {
+                ((view as? UIScrollView).map { [$0] } ?? []) + view.subviews.flatMap { scrollViews(in: $0) }
+            }
+            candidates = scrollViews(in: nativeWindow)
+            inventoryObserved = true
+            selected = candidates.filter({ scroll in
+                let viewportHeight = max(0, scroll.bounds.height
+                                         - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom)
+                return scroll.bounds.width >= nativeWindow.bounds.width * 0.7 && scroll.bounds.height >= nativeWindow.bounds.height * 0.35 &&
+                    scroll.contentSize.height > viewportHeight + 2
+            }).max(by: { $0.bounds.height < $1.bounds.height })
+            initialDiagnostics = candidates.map { scroll in
+                var sample = measure(scroll)
+                let viewport = max(0, scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom)
+                sample["meetsWidthPredicate"] = scroll.bounds.width >= nativeWindow.bounds.width * 0.7
+                sample["meetsHeightPredicate"] = scroll.bounds.height >= nativeWindow.bounds.height * 0.35
+                sample["meetsOverflowPredicate"] = scroll.contentSize.height > viewport + 2
+                return sample
+            }
+            try check("native candidate inventory completed")
+            guard let scroll = selected else { throw EventCaptureLedger.Stop(reason: "no-selected-candidate") }
+            let originalOffset = scroll.contentOffset
+            observedOriginalOffset = originalOffset
+            guard originalOffset.x.isFinite && originalOffset.y.isFinite else {
+                restorationStatus = "not-performed: invalid original offset; no scroll issued"
+                throw EventCaptureLedger.Stop(reason: "nonfinite-original-offset-no-scroll-no-restore")
+            }
+            initial = originalOffset
+            restorationStatus = "one original-offset restoration scheduled in defer; not yet performed"
+            guard valid(scroll) else { throw EventCaptureLedger.Stop(reason: "invalid-initial-geometry") }
+            var offset = max(scroll.contentOffset.y, -scroll.adjustedContentInset.top)
+            var smallestPositive: CGFloat?
+            var stalled = 0
+            while true {
+                try check("scroll planning")
+                guard valid(scroll) else { throw EventCaptureLedger.Stop(reason: "invalid-geometry") }
+                let bottom = max(-scroll.adjustedContentInset.top,
+                                 scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+                guard offset < bottom - 2 else { break }
+                let viewportHeight = max(1, scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom)
+                let planned = viewportHeight * 0.72
+                let quantum = min(planned, smallestPositive ?? planned)
+                let required = ceil(max(bottom - offset - 2, 0) / quantum)
+                guard required.isFinite, quantum.isFinite, quantum > 0 else {
+                    throw EventCaptureLedger.Stop(reason: "invalid-planning-quantum")
+                }
+                guard steps.count < 64, required <= CGFloat(64 - steps.count) else {
+                    throw EventCaptureLedger.Stop(reason: "adaptive-step-cap")
+                }
+                let before = scroll.contentOffset.y
+                let previousContentHeight = scroll.contentSize.height
+                let requested = min(bottom, offset + viewportHeight * 0.72)
+                let stepIndex = steps.count
+                var sample: [String: Any] = ["index": stepIndex + 1, "phase": "request-prepared",
+                    "requestedOffsetY": requested, "preOffsetY": before, "preSnapshot": measure(scroll),
+                    "planningQuantum": quantum, "requiredAdditionalStepsBeforeStep": required,
+                    "immediateOffsetY": ["value": NSNull(), "observed": false],
+                    "settledOffsetY": ["value": NSNull(), "observed": false], "totals": ledger.totals]
+                steps.append(sample)
+                try check("forward scroll")
+                steps[stepIndex]["phase"] = "requested"
+                scroll.setContentOffset(CGPoint(x: initial!.x, y: requested), animated: false)
+                // Observe the synchronous return BEFORE a budget check can throw.
+                steps[stepIndex]["phase"] = "immediate-unsettled"
+                steps[stepIndex]["immediateOffsetY"] = scroll.contentOffset.y
+                steps[stepIndex]["immediateSnapshot"] = measure(scroll)
+                try check("forward scroll completed"); try check("step sleep")
+                try await Task.sleep(for: .milliseconds(130))
+                steps[stepIndex]["phase"] = "sleep-returned-unsettled"
+                steps[stepIndex]["postSleepSnapshot"] = measure(scroll)
+                try check("step sleep completed"); try check("step layout")
+                nativeWindow.layoutIfNeeded()
+                offset = scroll.contentOffset.y
+                let delta = offset - before
+                sample = steps[stepIndex]
+                sample["phase"] = "settled"
+                sample["settledOffsetY"] = offset; sample["settledSnapshot"] = measure(scroll)
+                sample["contentHeightChange"] = scroll.contentSize.height - previousContentHeight
+                sample["actualProgress"] = delta; sample["totals"] = ledger.totals
+                steps[stepIndex] = sample; capturedScrollPositions += 1
+                try check("step layout completed")
+                guard valid(scroll), delta.isFinite else { throw EventCaptureLedger.Stop(reason: "invalid-settled-geometry") }
+                guard delta >= 0 else { throw EventCaptureLedger.Stop(reason: "negative-progress") }
+                if delta > 0 { smallestPositive = min(smallestPositive ?? delta, delta); stalled = 0 }
+                else { stalled += 1 }
+                if stalled >= 2 { throw EventCaptureLedger.Stop(reason: "stalled-two-forward-steps") }
+                try record("scroll-\(String(format: "%02d", steps.count))")
+            }
+        } catch { stop = error }
+        // Final observation and reserved diagnostic exit are mandatory even if a
+        // resource expired. No new wait/layout/scroll is introduced here.
+        if let selected {
+            finalSample = measure(selected)
+            let bottom = max(-selected.adjustedContentInset.top,
+                             selected.contentSize.height - selected.bounds.height + selected.adjustedContentInset.bottom)
+            let gap = bottom - selected.contentOffset.y
+            if gap.isFinite { finalGap = gap }
+            else if stop == nil { stop = EventCaptureLedger.Stop(reason: "nonfinite-final-gap") }
+        }
+        var raw: [String: Any] = ["runID": ledger.runID, "caseID": ledger.caseID, "caseOrdinal": ledger.ordinal,
+            "page": page.name, "scheme": scheme == .light ? "light" : "dark",
+            "dynamicType": size.isAccessibilitySize ? "accessibility3" : "large",
+            "sourceIdentity": ["head": NSNull(), "tree": NSNull(), "reason": "not supplied to native process"],
+            "units": ["geometry": "pt", "elapsed": "s", "size": "B"],
+            "status": stop == nil ? "EOF-observed" : "STOP", "reason": stop.map { String(describing: $0) } ?? "EOF",
+            "selectedCandidateID": selected.map { "\(ledger.caseID)-\(ObjectIdentifier($0))" as Any } ?? NSNull(),
+            "candidateInventoryObserved": inventoryObserved,
+            "restorationStatusBeforeExit": restorationStatus,
+            "originalOffset": observedOriginalOffset.map { ["x": $0.x, "y": $0.y] as Any } ?? ["value": NSNull(), "observed": false],
+            "selectionObservation": inventoryObserved ? "observed" : "unobserved: native inventory not reached",
+            "allInitialNativeScrollCandidates": initialDiagnostics, "scrollSteps": steps,
+            "selectedFinalBeforeRestore": finalSample.map { $0 as Any } ?? ["value": NSNull(), "observed": false, "reason": "no observed selected scroll"],
+            "capturedScrollPositions": capturedScrollPositions, "totals": ledger.totals,
+            "rejectedPNG": ledger.lastRejectedPNG, "fullRawTraceRetained": true,
+            "selectionRule": "Existing70percentwidth/35percentheight/overflow>effectiveviewport+2; greatest bounds.height. No fallback."]
+        if let window {
+            raw["windowFrame"] = ["x": window.frame.minX, "y": window.frame.minY, "width": window.frame.width, "height": window.frame.height]
+            raw["windowBounds"] = ["x": window.bounds.minX, "y": window.bounds.minY, "width": window.bounds.width, "height": window.bounds.height]
+            if let safe = window.rootViewController?.view.safeAreaInsets {
+                raw["hostSafeAreaInsets"] = ["top": safe.top, "left": safe.left, "bottom": safe.bottom, "right": safe.right]
+            }
+        }
+        var attemptedBytes: Int?
+        do {
+            try check("diagnostic serialization")
+            let data = try JSONSerialization.data(withJSONObject: EventCaptureLedger.safe(raw), options: [.sortedKeys])
+            attemptedBytes = data.count
+            try check("diagnostic serialization completed")
+            try ledger.allowJSON(data.count)
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "event-\(ledger.caseID)-native-scroll-diagnostics"
+            attachment.lifetime = .keepAlways; add(attachment)
+            try check("diagnostic attachment completed")
+        } catch {
+            if stop == nil { stop = error }
+            let lastRequest = steps.last.map { step in
+                ["index": step["index"]!, "phase": step["phase"]!,
+                 "requestedOffsetY": step["requestedOffsetY"]!, "preOffsetY": step["preOffsetY"]!,
+                 "immediateOffsetY": step["immediateOffsetY"]!, "settledOffsetY": step["settledOffsetY"]!]
+            }
+            ledger.emitMinimal(self, reason: String(describing: error), attemptedFullBytes: attemptedBytes,
+                               candidates: candidates.count, steps: steps.count, final: finalSample, lastRequest: lastRequest,
+                               restoration: restorationStatus)
+        }
+        if let finalGap {
+            XCTAssertLessThanOrEqual(finalGap, 2, "Incomplete below-fold capture: \(page.name)")
+        } else if selected != nil { XCTFail("Unobservable/nonfinite final EOF metric: \(page.name)") }
+        if requiresScrolling {
+            XCTAssertGreaterThan(capturedScrollPositions, 0, "Long message fixture was not captured below the fold: \(page.name)")
+        }
+        if let stop { throw stop }
+    }
+
     @MainActor private func capture(_ page: Page, scheme: ColorScheme, size: DynamicTypeSize,
                                     scene: UIWindowScene, model: AppModel, requiresScrolling: Bool = false,
                                     viewportWidth: CGFloat? = nil, increasedContrast: Bool = false,
                                     additionalSafeAreaInsets: UIEdgeInsets? = nil,
+                                    eventCapturePolicy: EventCaptureLedger? = nil,
                                     viewportRecorder: ConversationViewportRecorder? = nil) async throws {
+        if let eventCapturePolicy {
+            try await captureEvent(page, scheme: scheme, size: size, scene: scene, model: model,
+                                   requiresScrolling: requiresScrolling, viewportWidth: viewportWidth, ledger: eventCapturePolicy)
+            return
+        }
         viewportRecorder?.reset()
         UserDefaults.standard.set((scheme == .light ? AssistantAppearance.light : .dark).rawValue,
                                   forKey: AssistantAppearance.defaultsKey)
