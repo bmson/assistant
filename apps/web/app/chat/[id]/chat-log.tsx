@@ -54,6 +54,7 @@ import {
   stampLabel,
 } from './message-view';
 import { OffCourseCard } from './off-course-card';
+import { ReplyContextFooter } from './reply-context-footer';
 import {
   cardsReplaceProse,
   ResponseCards,
@@ -252,6 +253,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
         />
       ) : notificationMode && message.role === 'assistant' && hasText ? (
         <AssistantUpdate
+          sessionScope={formSessionScope}
           text={fullText}
           sources={recallSources}
           messageId={message.id}
@@ -270,11 +272,14 @@ const ChatMessageRow = memo(function ChatMessageRow({
             // as its own sheet, the way separate texts from a
             // person stack.
             <div className="group/msg min-w-0 w-full max-w-none">
-              <RecallNote
-                sources={recallSources}
-                messageId={message.id}
-                onFeedback={recordRecallFeedbackAction}
-              />
+              {date === null || streamingCaret ? (
+                <RecallNote
+                  sources={recallSources}
+                  messageId={message.id}
+                  onFeedback={recordRecallFeedbackAction}
+                  sessionScope={formSessionScope}
+                />
+              ) : null}
               <div className="flex min-w-0 flex-col gap-2">
                 {renderedTextParts.map((part, index) => (
                   <div
@@ -284,6 +289,17 @@ const ChatMessageRow = memo(function ChatMessageRow({
                     }`}
                   >
                     <MessageMarkdown text={part.text} />
+                    {date !== null && !streamingCaret && index === renderedTextParts.length - 1 ? (
+                      <ReplyContextFooter
+                        key={JSON.stringify([formSessionScope, conversationId, message.id])}
+                        sources={recallSources}
+                        sessionScope={formSessionScope}
+                        messageId={message.id}
+                        conversationId={conversationId}
+                        now={renderedNow}
+                        onFeedback={recordRecallFeedbackAction}
+                      />
+                    ) : null}
                   </div>
                 ))}
               </div>
