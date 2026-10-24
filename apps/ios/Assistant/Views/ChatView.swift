@@ -7,7 +7,7 @@ import QuartzCore
 func normalizedConversationViewportSize(_ size: CGSize) -> CGSize {
     guard size.width.isFinite, size.height.isFinite, size.width >= 0, size.height >= 0 else {
 #if DEBUG
-        NSLog("ConversationColumn received an invalid explicit viewport size: %@", NSStringFromCGSize(size))
+        NSLog("ConversationColumn received an invalid explicit viewport size: %@", "width=\(size.width), height=\(size.height)")
 #endif
         return .zero
     }
