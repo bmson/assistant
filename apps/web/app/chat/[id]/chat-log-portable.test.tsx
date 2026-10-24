@@ -47,12 +47,13 @@ const messages = [
   },
 ] as unknown as UIMessage[];
 
-function render(log = messages, notificationMode = false) {
+function render(log = messages, notificationMode = false, streaming = false) {
   return renderToStaticMarkup(
     <ChatLog
       log={log}
-      busy={false}
-      streaming={false}
+      formSessionScope="verified-browser-session"
+      busy={streaming}
+      streaming={streaming}
       notificationMode={notificationMode}
       agentTimezone="UTC"
       renderedNow={new Date('2026-09-22T12:01:00.000Z')}
@@ -99,25 +100,60 @@ describe('chat transcript controls', () => {
       ] as unknown as UIMessage[];
       const html = render(recalled, notificationMode);
       expect(html).toContain('Sam prefers an easy walk.');
-      expect(html).toContain('Drawing on knowledge graph and earlier chats');
-      expect(html).toContain('Sep 12 — Weekend preferences');
-      expect(html).toContain('From 2026-09-12 · 2-hop connection — Weekend preferences');
-      expect(html).toContain('Sep 20 — Earlier trip chat');
-      expect(html).toContain('This recalled context was useful');
-      expect(html).toContain('This recalled context was not useful');
-      if (notificationMode) expect(html).toContain('data-decision-card="true"');
+      if (notificationMode) {
+        expect(html).toContain('Drawing on knowledge graph and earlier chats');
+        expect(html).toContain('Sep 12 — Weekend preferences');
+        expect(html).toContain('From 2026-09-12 · 2-hop connection — Weekend preferences');
+        expect(html).toContain('Sep 20 — Earlier trip chat');
+        expect(html).toContain('This recalled context was useful');
+        expect(html).toContain('This recalled context was not useful');
+        expect(html).toContain('data-decision-card="true"');
+        expect(html).not.toContain('data-reply-context-footer');
+      } else {
+        expect(html).toContain('Context for this reply');
+        expect(html).toContain('2 items');
+        expect(html).not.toContain('Weekend preferences');
+        expect(html).not.toContain('Earlier trip chat');
+        expect(html).not.toContain('Helpful');
+      }
     },
   );
 
-  it('offers decision controls and recall feedback', () => {
+  it('offers decision controls and closed recall disclosure', () => {
     const html = render();
     expect(html).toContain('Send the invoice');
-    expect(html).toContain('Earlier discussion');
-    expect(html).toContain('Helpful');
+    expect(html).toContain('Context for this reply');
+    expect(html).not.toContain('Earlier discussion');
+    expect(html).not.toContain('Helpful');
     expect(html).toContain('Stop task');
     expect(html).toContain('Start task');
     expect(html).toContain('Review all');
     expect(html).not.toContain('Decision controls are unavailable');
+  });
+
+  it('attaches once inside the final rendered prose paper, after its complete text', () => {
+    const split = structuredClone(messages);
+    split[0].parts.unshift({ type: 'text', text: 'First paper.' }, { type: 'text', text: '   ' });
+    const html = render(split);
+    const marker = 'data-reply-context-footer="true"';
+    expect(html.split(marker)).toHaveLength(2);
+    expect(html.indexOf(marker)).toBeGreaterThan(html.indexOf('Here is context for the request.'));
+    const paperStart = html.lastIndexOf('<div class="bubble-assistant', html.indexOf(marker));
+    const openDivs = [
+      ...html.slice(paperStart, html.indexOf(marker)).matchAll(/<div\b[^>]*>|<\/div>/g),
+    ].reduce((depth, [tag]) => depth + (tag.startsWith('</') ? -1 : 1), 0);
+    expect(paperStart).toBeGreaterThan(-1);
+    expect(openDivs).toBe(1); // Final prose paper remains open; Markdown's own wrapper is closed.
+  });
+
+  it('does not infer durable provenance ownership from an arbitrary message id', () => {
+    const provisional = structuredClone(messages);
+    provisional[0].metadata = undefined;
+    expect(render(provisional)).not.toContain('data-reply-context-footer');
+  });
+
+  it('does not mount the durable footer on the currently streamed reply', () => {
+    expect(render(messages, false, true)).not.toContain('data-reply-context-footer');
   });
 
   it('offers refresh on a refreshable saved card', () => {
@@ -125,8 +161,10 @@ describe('chat transcript controls', () => {
       {
         id: 'assistant-card',
         role: 'assistant',
+        metadata: { createdAt: '2026-09-22T12:00:00Z' },
         parts: [
           { type: 'text', text: 'Your saved card.' },
+          { type: 'recall', sources: [{ date: '2026-09-01', label: 'Private card context' }] },
           {
             type: 'data-card',
             data: {
@@ -148,5 +186,6 @@ describe('chat transcript controls', () => {
     const html = render(card);
     expect(html).toContain('Grand Hotel');
     expect(html).toContain('>Refresh</button>');
+    expect(html).not.toContain('data-reply-context-footer');
   });
 });
