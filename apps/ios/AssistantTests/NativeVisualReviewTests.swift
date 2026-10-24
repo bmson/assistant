@@ -2114,7 +2114,6 @@ final class NativeVisualReviewTests: XCTestCase {
             scene: scene,
             model: model,
             viewportWidth: 393,
-            layoutReporter: { armRecorder.record($0) },
             beforeCapture: { window in
                 let control = try XCTUnwrap(accessibilityObject(identifier: "connected-tools.remove", in: window))
                 let activated: Bool
@@ -2132,7 +2131,8 @@ final class NativeVisualReviewTests: XCTestCase {
                 let armed = try XCTUnwrap(accessibilityObject(identifier: "connected-tools.remove", in: window))
                 let label = (armed as? UIAccessibilityElement)?.accessibilityLabel ?? (armed as? UIView)?.accessibilityLabel
                 XCTAssertEqual(label, "Confirm remove")
-            }
+            },
+            layoutReporter: { armRecorder.record($0) }
         )
         XCTAssertEqual(callbacks.actions, [])
         XCTAssertEqual(callbacks.removals, 0, "The first activation may arm confirmation but must not execute removal.")
