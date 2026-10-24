@@ -12,10 +12,36 @@ vi.mock('@/lib/agent-readiness-source', () => ({
   getAgentReadinessSource: () => ({ read: async () => null }),
 }));
 
-vi.mock('@assistant/application/provider-billing', () => ({ getProviderBilling: async () => [] }));
+vi.mock('@assistant/application/provider-billing', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@assistant/application/provider-billing')>()),
+  getProviderBilling: async () => [],
+}));
 
 const emulatorHost = process.env.FIRESTORE_EMULATOR_HOST ?? '';
 const localEmulator = /^(?:127\.0\.0\.1|localhost):\d+$/.test(emulatorHost);
+
+it('retains the real billing capability projection while mocking provider reads', async () => {
+  const { projectBillingForMobile } = await import('@assistant/application/provider-billing');
+  const report = {
+    id: 'openai-billing',
+    label: 'OpenAI',
+    status: 'reported' as const,
+    amountBasis: 'provider_reported_cost' as const,
+    period: '2026-10',
+    scope: 'Selected project',
+    source: 'OpenAI Costs API',
+    message: 'Reported cost',
+    fetchedAt: null,
+    latestExportAt: null,
+    latestUsageAt: null,
+    lines: [{ service: 'API', detail: 'Usage', currency: 'USD', cost: 2, credits: 0, net: 2 }],
+  };
+  expect(projectBillingForMobile([report], false)[0]).toMatchObject({
+    status: 'unavailable',
+    lines: [],
+  });
+  expect(projectBillingForMobile([report], true)).toEqual([report]);
+});
 
 describe.skipIf(!localEmulator)('Firestore mobile workspace with PostgreSQL offline', () => {
   const installationId = `mobile-workspace-${randomUUID()}`;
