@@ -125,6 +125,10 @@ struct ApprovalsView: View {
             Divider()
                 .overlay(AssistantTheme.warning(for: colorScheme).opacity(0.18))
             approvalMetadata(item)
+            if item.ownerNumberGrantAvailable == true {
+                OwnerCallNumberPermissionReview(approvalID: item.id, source: item.approval.payload, sourceFingerprint: item.ownerCallSourceFingerprint, connectionRevision: model.activityConnectionRevision)
+                    .id(OwnerCallReviewSourceIdentity(approvalID: item.id, source: item.approval.payload, sourceFingerprint: item.ownerCallSourceFingerprint, connectionRevision: model.activityConnectionRevision))
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -348,5 +352,238 @@ private struct ApprovalPayloadEditor: View {
 #if DEBUG
 extension ApprovalsView {
     @MainActor static func visualReviewEditor(_ item: PendingApproval) -> AnyView { AnyView(ApprovalPayloadEditor(item: item)) }
+}
+#endif
+
+
+/// Exact current-model origin, also used as the SwiftUI subtree identity.
+struct OwnerCallReviewSourceIdentity: Hashable {
+    let approvalID: String
+    let source: JSONValue
+    let sourceFingerprint: String?
+    let connectionRevision: Int
+}
+
+/// A reference lease survives value-type View copies. Every asynchronous publication
+/// additionally checks the current model, so retirement does not wait for onChange.
+@MainActor
+final class OwnerCallReviewPublicationLease {
+    struct Operation: Equatable {
+        let nonce: UUID
+        let source: OwnerCallReviewSourceIdentity
+        let validityChoice: String
+    }
+    private var active: Operation?
+    func begin(source: OwnerCallReviewSourceIdentity, validityChoice: String) -> Operation {
+        let operation = Operation(nonce: UUID(), source: source, validityChoice: validityChoice)
+        active = operation
+        return operation
+    }
+    func invalidate() { active = nil }
+    @discardableResult
+    func publish(_ operation: Operation, currentSource: () -> Bool, changes: () -> Void) -> Bool {
+        guard active == operation, currentSource() else { return false }
+        changes()
+        return true
+    }
+}
+
+private struct OwnerCallNumberPermissionReview: View {
+    let approvalID: String
+    let source: JSONValue
+    let sourceFingerprint: String?
+    let connectionRevision: Int
+    @Environment(AppModel.self) private var model
+    @State private var validityChoice = "7d"
+    @State private var preview: OwnerCallNumberGrantPreview?
+    @State private var acknowledged = false
+    @State private var working = false
+    @State private var saved = false
+    @State private var publicationLease = OwnerCallReviewPublicationLease()
+    @State private var error: String?
+#if DEBUG
+    private var fixtureMode = false
+#endif
+
+    init(approvalID: String, source: JSONValue, sourceFingerprint: String?, connectionRevision: Int) {
+        self.approvalID = approvalID; self.source = source; self.sourceFingerprint = sourceFingerprint; self.connectionRevision = connectionRevision
+    }
+
+#if DEBUG
+    init(fixtureStage: String, preview: OwnerCallNumberGrantPreview) {
+        self.approvalID = preview.approvalId; self.source = .object([:]); self.sourceFingerprint = "fixture-source"
+        self.fixtureMode = true
+        self.connectionRevision = 0
+        _preview = State(initialValue: ["review", "other-active"].contains(fixtureStage) ? preview : nil)
+        _acknowledged = State(initialValue: fixtureStage == "other-active")
+        _saved = State(initialValue: fixtureStage == "saved")
+        _error = State(initialValue: fixtureStage == "ambiguous" ? "Could not confirm result. Refresh to check this call and saved permission before trying again." : nil)
+    }
+#endif
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Permission for future calls").font(.headline)
+            if saved {
+                Text("This call is approved, not yet completed. Future permission is saved.")
+            } else {
+                Text("This new permission is not created until you approve. This also approves the current call.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                Picker("Permission duration", selection: $validityChoice) {
+                    Text("24 hours").tag("24h")
+                    Text("7 days").tag("7d")
+                    Text("30 days").tag("30d")
+                }
+                .pickerStyle(.menu).frame(minHeight: 44)
+                .disabled(working)
+                Button { review() } label: {
+                    Text(working ? "Preparing review…" : "Review future permission").frame(maxWidth: .infinity, minHeight: 44).fixedSize(horizontal: false, vertical: true)
+                }.buttonStyle(.bordered).disabled(working)
+                if let preview {
+                    Text("Future permission").font(.headline)
+                    field("Exact number", preview.grant.recipientE164)
+                    Text("Simple requests such as “Call me now” or a call to this exact number may use this permission. Requests that add a topic, script, or other instructions require approval for that call. For “me”, “my phone”, or “my number”, your configured owner number must match this permission. A name alone still needs approval. Routing to this number does not verify who answers.")
+                    Text("Any topic or script when you directly ask for a call; anyone who answers. Future calls can use different topics, scripts and personal information from available context, including saved or retrieved information. We do not verify who controls this number or who answers.")
+                    Text("Up to \(preview.grant.maxMinutes) requested minutes per call. Configured system maximum: \(preview.configuredMaxMinutes) minutes. Existing rate and budget limits apply; this permission adds no call quota.")
+                    if !preview.existingActiveGrants.isEmpty {
+                        Text("Other permissions remain active. This adds a permission; it does not replace or narrow them.").fontWeight(.semibold)
+                        ForEach(preview.existingActiveGrants) { existing in
+                            Text("\(existing.match.recipientE164) · any topic or script when you directly ask for a call · anyone may answer · requested duration ceiling \(existing.match.maxMinutes) minutes · expires \(expiry(existing.match.expiresAt, zone: preview.ownerTimeZone))")
+                        }
+                    }
+                    field("Permission expires", expiry(preview.grant.expiresAt, zone: preview.ownerTimeZone))
+                    Text("Expiry stops new authorizations. A call already in flight may continue. Pause or delete each saved permission separately. A paused permission requires a fresh review from a pending owner call.")
+                    Text("This call’s instructions").font(.headline)
+                    Text("Instructions to the voice assistant are not guarantees of what it will say or agree to. Future calls do not have to repeat this brief.")
+                    field("Goal", preview.brief.goal)
+                    field("Contact label", preview.brief.contactName)
+                    field("Context it may share", preview.brief.context)
+                    field("What it may agree to", preview.brief.mayAgreeTo)
+                    field("What it must not do", preview.brief.mustNot)
+                    field("Language", preview.brief.language)
+                    field("Voicemail behavior", preview.brief.onVoicemail == "leave_message" ? "Leave a message" : "Hang up")
+                    field(preview.brief.onVoicemail == "hang_up" ? "Saved voicemail message (not used when hanging up)" : "Voicemail message", preview.brief.voicemailMessage)
+                    Text("The provider allows a 20-second introduction buffer beyond the configured maximum. Ending is asynchronous; this is not a precise hang-up guarantee. Approved does not mean completed.")
+                    field("Review expires", expiry(preview.reviewExpiresAt, zone: preview.ownerTimeZone))
+                    Toggle("I understand this permits future calls to this exact number about any topic or script when you directly ask for a call, may share personal information from available context including saved or retrieved information, and anyone may answer.", isOn: $acknowledged)
+                        .toggleStyle(.switch).frame(minHeight: 44).disabled(working)
+                    Button { approve(preview) } label: {
+                        Text(working ? "Saving permission…" : "Approve this call and future permission")
+                            .multilineTextAlignment(.center).frame(maxWidth: .infinity, minHeight: 48).fixedSize(horizontal: false, vertical: true)
+                    }.buttonStyle(.borderedProminent).disabled(!acknowledged || working)
+                    Button { resetReview() } label: {
+                        Text("Cancel review").frame(maxWidth: .infinity, minHeight: 44).fixedSize(horizontal: false, vertical: true)
+                    }.buttonStyle(.bordered).disabled(working)
+                }
+                if let error { Text(error).foregroundStyle(.red).accessibilityAddTraits(.updatesFrequently) }
+            }
+        }
+        .font(.subheadline)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onDisappear { resetReview() }
+        .onChange(of: model.activityConnectionRevision) { _, _ in resetReview(); error = "This review expired or changed. Review again." }
+        .onChange(of: validityChoice) { _, _ in resetReview() }
+        .onChange(of: sourceFingerprint) { _, _ in resetReview(); error = "This review expired or changed. Review again." }
+        .onChange(of: source) { _, _ in resetReview(); error = "This review expired or changed. Review again." }
+        .task(id: preview?.reviewToken) {
+            guard let preview, let deadline = date(preview.reviewExpiresAt) else { return }
+            let seconds = deadline.timeIntervalSinceNow
+            if seconds > 0 { try? await Task.sleep(for: .seconds(seconds)) }
+            guard !Task.isCancelled else { return }
+            resetReview()
+            error = "This review expired or changed. Review again."
+        }
+    }
+
+    private func field(_ title: String, _ value: String?) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.caption.weight(.semibold))
+            Text((value?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? "Not specified")
+                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func date(_ value: String) -> Date? {
+        ISO8601DateFormatter.assistant.date(from: value) ?? AssistantFormatters.internetDateTime.date(from: value)
+    }
+
+    private func expiry(_ value: String, zone: String) -> String {
+        guard let date = date(value) else { return value + " (UTC)" }
+        let formatter = DateFormatter()
+        formatter.timeZone = TimeZone(identifier: zone) ?? .gmt
+        formatter.dateStyle = .long
+        formatter.timeStyle = .short
+        return formatter.string(from: date) + " (" + zone + ")"
+    }
+
+    private var currentSourceIdentity: OwnerCallReviewSourceIdentity {
+        OwnerCallReviewSourceIdentity(approvalID: approvalID, source: source, sourceFingerprint: sourceFingerprint, connectionRevision: connectionRevision)
+    }
+    private func resetReview() { publicationLease.invalidate(); preview = nil; acknowledged = false; working = false; error = nil }
+    @discardableResult
+    private func publish(_ operation: OwnerCallReviewPublicationLease.Operation, changes: () -> Void) -> Bool {
+        publicationLease.publish(operation, currentSource: { model.ownerCallReviewSourceIsCurrent(operation.source) }, changes: changes)
+    }
+
+    private func review() {
+#if DEBUG
+        guard !fixtureMode else { return }
+#endif
+        resetReview()
+        let operation = publicationLease.begin(source: currentSourceIdentity, validityChoice: validityChoice)
+        guard publish(operation, changes: { working = true }) else { return }
+        Task {
+            do {
+                let prepared = try await model.previewOwnerCallNumberGrant(id: operation.source.approvalID, validityChoice: operation.validityChoice)
+                guard !Task.isCancelled else { return }
+                publish(operation) {
+                    if prepared.approvalId == operation.source.approvalID { preview = prepared }
+                    else { error = "This review expired or changed. Review again." }
+                    working = false
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                publish(operation) {
+                    error = "This review expired or changed. Review again."
+                    working = false
+                }
+            }
+        }
+    }
+
+    private func approve(_ review: OwnerCallNumberGrantPreview) {
+#if DEBUG
+        guard !fixtureMode else { return }
+#endif
+        guard acknowledged, let deadline = date(review.reviewExpiresAt), deadline > Date() else {
+            resetReview(); error = "This review expired or changed. Review again."; return
+        }
+        let operation = publicationLease.begin(source: currentSourceIdentity, validityChoice: validityChoice)
+        guard publish(operation, changes: { working = true }) else { return }
+        Task {
+            let failure = await model.approveOwnerCallNumberGrant(id: operation.source.approvalID, reviewToken: review.reviewToken)
+            guard !Task.isCancelled else { return }
+            publish(operation) {
+                resetReview()
+                if let failure { error = failure } else { saved = true }
+            }
+        }
+    }
+}
+
+
+#if DEBUG
+extension ApprovalsView {
+    /// Real review surface, isolated seed state. No fixture control can submit a mutation.
+    @MainActor static func visualReviewOwnerCallPermission(_ stage: String) -> AnyView {
+        let grant = OwnerCallNumberGrant(schemaVersion: 1, grantId: "11111111-1111-4111-8111-111111111111", recipientE164: "+14155550123", maxMinutes: 12, expiresAt: "2099-10-30T12:00:00.000Z")
+        let brief = OwnerCallNumberBrief(to: grant.recipientE164, contactName: "A deliberately long contact label for a narrow-screen review", goal: "Ask about the appointment and carefully confirm the details before making any commitment.", context: "The assistant may use personal information already available in context. This long fixture checks full wrapping without collapsing the reviewed scope.", mayAgreeTo: "Confirm the requested appointment time.", mustNot: "Do not agree to payments or a different appointment.", maxMinutes: 12, onVoicemail: "hang_up", voicemailMessage: "Retained message; not used when hanging up.", language: "English")
+        var preview = OwnerCallNumberGrantPreview(ok: true, reviewToken: "fixture-no-authority", approvalId: "22222222-2222-4222-8222-222222222222", brief: brief, grant: grant, reviewExpiresAt: "2099-10-23T12:10:00.000Z", ownerTimeZone: "America/Los_Angeles", configuredMaxMinutes: 15)
+        if stage == "other-active" { preview.existingActiveGrants = [.init(policyId: "older-permission", match: grant)] }
+        return AnyView(ScrollView {
+            OwnerCallNumberPermissionReview(fixtureStage: stage, preview: preview).padding(16)
+        }.navigationTitle("Review phone permission"))
+    }
 }
 #endif

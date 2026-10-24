@@ -1818,6 +1818,7 @@ describe('ToolDispatcher (integration)', () => {
     const dispatcher = new ToolDispatcher(db, registry);
     const task = await makeTask('owner');
     const granted = { ...task, autonomyGrant: grant };
+    await db.update(tasks).set({ autonomyGrant: grant }).where(eq(tasks.id, task.id));
 
     // Ordinary approval-gated outward call → autonomous under the grant.
     const outward = await dispatcher.dispatch({

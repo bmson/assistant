@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { configuredOwnerPhoneRecipientFingerprint } from '@assistant/config';
 import type {
   ApprovedToolCall,
   CachedToolCallInput,
@@ -13,14 +14,19 @@ import type {
 import {
   advanceExternalEffect,
   approvalPolicyFingerprint,
+  directOwnerCallRequestBinding,
   type ExternalEffectProgress,
   idempotencyIdentityDigest,
   MAX_APPROVAL_POLICY_SNAPSHOT_ROWS,
   mcpApprovalBindingFingerprint,
   modelToolCallIdentityDigest,
+  ownerAutonomyGrantBindingMatches,
+  phoneCallOwnerNumberGrantBindingMatches,
+  sameDirectOwnerCallRequestBinding,
   toolCallReceiptKeyId,
   toolCallReplayKeysForStart,
 } from '@assistant/persistence';
+import { readFirestoreOwnerCallRequest as ownerCallRequest } from './owner-call-request.js';
 import { createFirestorePhoneCalendarCompatibilityRepository } from './phone-calendar-compatibility.js';
 import { createFirestorePhoneCalendarSharingRepository } from './phone-calendar-sharing.js';
 import { assertPrivacyErasureInactiveInTransaction } from './privacy-erasure.js';
@@ -151,6 +157,10 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
   ): Promise<Records['toolCallReceipts'] | null> {
     const digest = idempotencyIdentityDigest(idempotencyKey);
     return digest ? this.receiptForKey({ agentId, taskId, kind: 'idempotency', digest }) : null;
+  }
+
+  async ownerCallRequest(agentId: string, taskId: string) {
+    return ownerCallRequest(this.store, agentId, taskId, 'running');
   }
 
   async load(
@@ -323,6 +333,8 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
       } catch {
         return markStaleAuthorization();
       }
+      if (input.expectedPhoneCallOwnerNumberGrant && current.task.trust !== 'owner')
+        return markStaleAuthorization();
 
       if (toolCall.toolName === 'mcp.call') {
         const binding = input.expectedMcpBinding;
@@ -358,6 +370,38 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
       }
 
       await assertPrivacyErasureInactiveInTransaction(tx, this.store, input.agentId);
+      const directOwnerRequest = input.expectedPhoneCallOwnerNumberGrant
+        ? await ownerCallRequest(this.store, input.agentId, input.taskId, 'running', tx)
+        : null;
+      const repositoryNow = this.store.now();
+      if (
+        !(repositoryNow instanceof Date) ||
+        !Number.isFinite(repositoryNow.getTime()) ||
+        (input.expectedPhoneCallOwnerNumberGrant &&
+          (process.env.PHONE_CALL_TO_OWNER_GRANT_ENABLED !== 'true' ||
+            !sameDirectOwnerCallRequestBinding(
+              input.expectedPhoneCallOwnerNumberGrant.directOwnerRequest,
+              directOwnerRequest,
+            ) ||
+            !phoneCallOwnerNumberGrantBindingMatches(
+              input.expectedPhoneCallOwnerNumberGrant,
+              policyRows.find(
+                (row) => row.id === input.expectedPhoneCallOwnerNumberGrant?.policyId,
+              ) ?? null,
+              input.agentId,
+              (input.args as { brief?: { to?: unknown; maxMinutes?: unknown } }).brief ?? {},
+              repositoryNow,
+              input.expectedPhoneCallOwnerNumberGrant.recipientAuthority.kind ===
+                'configured_owner_phone'
+                ? configuredOwnerPhoneRecipientFingerprint(
+                    input.expectedPhoneCallOwnerNumberGrant.match.recipientE164,
+                  )
+                : null,
+            ))) ||
+        (input.expectedOwnerAutonomyGrant &&
+          !ownerAutonomyGrantBindingMatches(input.expectedOwnerAutonomyGrant, task, repositoryNow))
+      )
+        return markStaleAuthorization();
       const startedAt = input.startedAt ?? this.store.now();
       // A write to the stable owner document serializes this claim with every
       // approval-policy writer. Firestore retries if either side raced.
@@ -501,6 +545,10 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
     });
     if (!placeholderKeys) throw new Error('Tool replay identity is invalid');
     return this.store.db.runTransaction(async (tx) => {
+      if (!/^[a-f0-9]{64}$/.test(input.expectedPolicyFingerprint)) return null;
+      const ownerRef = this.store.doc('agents', input.agentId);
+      const owner = await tx.get(ownerRef);
+      if (!owner.exists || owner.get('id') !== input.agentId) return null;
       await assertPrivacyErasureInactiveInTransaction(tx, this.store, input.agentId);
       const task = read<Records['tasks']>(
         await tx.get(this.store.doc('tasks', input.taskId)),
@@ -512,6 +560,37 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
         ['done', 'failed', 'cancelled'].includes(task.status)
       )
         return null;
+      const policySnapshots = await tx.get(
+        this.store
+          .collection('approvalPolicies')
+          .where('agentId', '==', input.agentId)
+          .where('toolName', '==', input.toolName)
+          .orderBy('id', 'asc')
+          .limit(MAX_APPROVAL_POLICY_SNAPSHOT_ROWS + 1),
+      );
+      if (policySnapshots.size > MAX_APPROVAL_POLICY_SNAPSHOT_ROWS) return null;
+      let malformedPolicy = false;
+      const policyRows = policySnapshots.docs.map((snapshot) => {
+        const row = decodeRecord<Records['approvalPolicies']>(snapshot.data());
+        if (
+          !row ||
+          typeof row !== 'object' ||
+          Array.isArray(row) ||
+          row.id !== snapshot.get('id') ||
+          documentKey(row.id) !== snapshot.id ||
+          row.agentId !== input.agentId ||
+          row.toolName !== input.toolName
+        )
+          malformedPolicy = true;
+        return row;
+      });
+      if (malformedPolicy) return null;
+      try {
+        if (approvalPolicyFingerprint(policyRows) !== input.expectedPolicyFingerprint) return null;
+      } catch {
+        return null;
+      }
+      if (input.expectedPhoneCallOwnerNumberGrant && task.trust !== 'owner') return null;
       const keyRefs = placeholderKeys.map((key) => this.store.doc('toolCallReceiptKeys', key.id));
       const existingKeys = keyRefs.length ? await tx.getAll(...keyRefs) : [];
       if (existingKeys.some((snapshot) => snapshot.exists)) return null;
@@ -534,12 +613,45 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
         const existing = await tx.get(mapping);
         if (existing.exists) return null;
       }
+      const directOwnerRequest = input.expectedPhoneCallOwnerNumberGrant
+        ? await ownerCallRequest(this.store, input.agentId, input.taskId, 'running', tx)
+        : null;
+      const now = this.store.now();
+      if (
+        !(now instanceof Date) ||
+        !Number.isFinite(now.getTime()) ||
+        (input.expectedPhoneCallOwnerNumberGrant &&
+          (process.env.PHONE_CALL_TO_OWNER_GRANT_ENABLED !== 'true' ||
+            !sameDirectOwnerCallRequestBinding(
+              input.expectedPhoneCallOwnerNumberGrant.directOwnerRequest,
+              directOwnerRequest,
+            ) ||
+            !phoneCallOwnerNumberGrantBindingMatches(
+              input.expectedPhoneCallOwnerNumberGrant,
+              policyRows.find(
+                (row) => row.id === input.expectedPhoneCallOwnerNumberGrant?.policyId,
+              ) ?? null,
+              input.agentId,
+              (input.args as { brief?: { to?: unknown; maxMinutes?: unknown } }).brief ?? {},
+              now,
+              input.expectedPhoneCallOwnerNumberGrant.recipientAuthority.kind ===
+                'configured_owner_phone'
+                ? configuredOwnerPhoneRecipientFingerprint(
+                    input.expectedPhoneCallOwnerNumberGrant.match.recipientE164,
+                  )
+                : null,
+            ))) ||
+        (input.expectedOwnerAutonomyGrant &&
+          !ownerAutonomyGrantBindingMatches(input.expectedOwnerAutonomyGrant, task, now))
+      )
+        return null;
+      tx.update(ownerRef, { updatedAt: now });
       const call = {
         id,
-        createdAt: this.store.now(),
+        createdAt: now,
         status: 'executing',
         taskId: input.taskId,
-        startedAt: input.startedAt ?? this.store.now(),
+        startedAt: input.startedAt ?? now,
         step: input.step,
         toolName: input.toolName,
         args: input.args,

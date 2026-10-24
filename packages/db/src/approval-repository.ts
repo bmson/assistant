@@ -9,6 +9,7 @@ import type {
   ApprovalWake,
   CreateApprovalInput,
   CreatedApproval,
+  OwnerCallNumberGrantReview,
   RememberableApproval,
   ResolveApprovalInput,
 } from '@assistant/persistence';
@@ -16,12 +17,25 @@ import {
   approvalInboxLimit,
   approvalIsResolved,
   approvalSweepBatch,
+  MAX_APPROVAL_POLICY_SNAPSHOT_ROWS,
   parkedApprovalIds,
+  parsePhoneCallToOwnerNumberGrantMatch,
+  phoneCallOwnerNumberGrantFinalizationMatches,
+  phoneCallOwnerNumberReviewSourceFingerprint,
+  phoneCallToOwnerNumberGrantIsLive,
 } from '@assistant/persistence';
 import { and, asc, eq, gt, inArray, lte, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
+import { readPostgresOwnerCallRequest } from './owner-call-request.js';
 import { lockPostgresPrivacyObservationFence } from './privacy-erasure-repository.js';
-import { approvalPolicies, approvals, maintenanceCursors, tasks, toolCalls } from './schema.js';
+import {
+  agents,
+  approvalPolicies,
+  approvals,
+  maintenanceCursors,
+  tasks,
+  toolCalls,
+} from './schema.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CODE_SUFFIX_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -75,6 +89,7 @@ export async function listApprovalInbox(
         taskTrust: tasks.trust,
         toolName: toolCalls.toolName,
         decision: toolCalls.decision,
+        reviewSourceArgs: toolCalls.args,
       })
       .from(approvals)
       .innerJoin(tasks, eq(approvals.taskId, tasks.id))
@@ -121,7 +136,27 @@ export async function listApprovalInbox(
       .limit(recentLimit),
   ]);
   return {
-    pending,
+    pending: await Promise.all(
+      pending.map(async ({ reviewSourceArgs, ...item }) => ({
+        ...item,
+        ownerCallAdmissionAvailable:
+          item.toolName === 'phone.call' &&
+          Boolean(
+            await readPostgresOwnerCallRequest(
+              db,
+              agentId,
+              item.approval.taskId,
+              'waiting_approval',
+            ),
+          ),
+        ownerCallSourceFingerprint: phoneCallOwnerNumberReviewSourceFingerprint({
+          args: reviewSourceArgs,
+          payload: item.approval.payload,
+          trust: item.taskTrust,
+          toolName: item.toolName,
+        }),
+      })),
+    ),
     resolved: resolved.map(({ taskType, ...approval }) => ({ approval, taskType })),
   };
 }
@@ -147,6 +182,77 @@ export async function getRememberableApproval(
     )
     .limit(1);
   return row ?? null;
+}
+
+export async function getOwnerCallNumberGrantReview(
+  db: Db,
+  agentId: string,
+  approvalId: string,
+): Promise<OwnerCallNumberGrantReview | null> {
+  const [row] = await db
+    .select({
+      approval: approvals,
+      toolCall: {
+        id: toolCalls.id,
+        taskId: toolCalls.taskId,
+        toolName: toolCalls.toolName,
+        args: toolCalls.args,
+        status: toolCalls.status,
+      },
+      task: {
+        id: tasks.id,
+        agentId: tasks.agentId,
+        trust: tasks.trust,
+        status: tasks.status,
+      },
+      ownerTimeZone: agents.timezone,
+      repositoryNow: sql<Date>`clock_timestamp()`,
+    })
+    .from(approvals)
+    .innerJoin(tasks, eq(approvals.taskId, tasks.id))
+    .innerJoin(toolCalls, eq(approvals.toolCallId, toolCalls.id))
+    .innerJoin(agents, eq(tasks.agentId, agents.id))
+    .where(
+      and(
+        eq(approvals.id, approvalId),
+        eq(approvals.status, 'pending'),
+        gt(approvals.expiresAt, sql`clock_timestamp()`),
+        eq(tasks.agentId, agentId),
+        eq(tasks.trust, 'owner'),
+        eq(tasks.status, 'waiting_approval'),
+        eq(toolCalls.taskId, approvals.taskId),
+        eq(toolCalls.toolName, 'phone.call'),
+        eq(toolCalls.status, 'awaiting_approval'),
+      ),
+    )
+    .limit(1);
+  if (!row) return null;
+  const directOwnerRequest = await readPostgresOwnerCallRequest(
+    db,
+    agentId,
+    row.task.id,
+    'waiting_approval',
+  );
+  if (!directOwnerRequest) return null;
+  const policies = await db
+    .select()
+    .from(approvalPolicies)
+    .where(and(eq(approvalPolicies.agentId, agentId), eq(approvalPolicies.toolName, 'phone.call')))
+    .limit(MAX_APPROVAL_POLICY_SNAPSHOT_ROWS + 1);
+  if (policies.length > MAX_APPROVAL_POLICY_SNAPSHOT_ROWS) return null;
+  const recipient = (row.toolCall.args as { brief?: { to?: unknown } })?.brief?.to;
+  const existingActiveGrants = policies.flatMap((policy) => {
+    const match = parsePhoneCallToOwnerNumberGrantMatch(policy.match);
+    return policy.enabled &&
+      policy.effect === 'allow' &&
+      policy.templateKey === 'phone.call.to_owner_number.v1' &&
+      match &&
+      match.recipientE164 === recipient &&
+      phoneCallToOwnerNumberGrantIsLive(match, row.repositoryNow)
+      ? [{ policyId: policy.id, match }]
+      : [];
+  });
+  return { ...row, existingActiveGrants, directOwnerRequest };
 }
 
 /** Atomically create the approval, its gated tool call, and their link. */
@@ -269,6 +375,19 @@ export async function resolveApproval(
   if (!input.approvalId && !input.shortCode) {
     return { ok: false, reason: 'approvalId or shortCode required' };
   }
+  const hasOwnerNumberGrantPolicy = input.policy?.templateKey === 'phone.call.to_owner_number.v1';
+  if (
+    hasOwnerNumberGrantPolicy !== Boolean(input.ownerCallNumberGrant) ||
+    (input.ownerCallNumberGrant &&
+      (input.decision !== 'approved' ||
+        input.via !== 'web' ||
+        !input.expectedAgentId ||
+        !input.approvalId ||
+        input.ownerCallNumberGrant.expectedAgentId !== input.expectedAgentId ||
+        input.ownerCallNumberGrant.expectedApprovalId !== input.approvalId ||
+        input.editedPayload !== undefined))
+  )
+    return { ok: false, reason: 'owner call grant review is invalid or changed' };
 
   const resolution = await db.transaction(async (tx) => {
     if (input.policy && input.via === 'web') {
@@ -298,11 +417,16 @@ export async function resolveApproval(
     // approval row. The initial lookup only discovers the task ID; all mutable
     // approval fields are re-read after both locks are held.
     const [task] = await tx
-      .select({ id: tasks.id, agentId: tasks.agentId })
+      .select({
+        id: tasks.id,
+        agentId: tasks.agentId,
+        trust: tasks.trust,
+        status: tasks.status,
+      })
       .from(tasks)
       .where(eq(tasks.id, candidate.taskId))
       .for('update');
-    if (!task) return null;
+    if (!task || (input.expectedAgentId && task.agentId !== input.expectedAgentId)) return null;
 
     const [pending] = await tx
       .select()
@@ -317,6 +441,76 @@ export async function resolveApproval(
       )
       .for('update');
     if (!pending) return null;
+
+    if (input.ownerCallNumberGrant) {
+      const [linked] = await tx
+        .select({
+          id: toolCalls.id,
+          taskId: toolCalls.taskId,
+          approvalId: toolCalls.approvalId,
+          toolName: toolCalls.toolName,
+          status: toolCalls.status,
+          args: toolCalls.args,
+        })
+        .from(toolCalls)
+        .where(and(eq(toolCalls.id, pending.toolCallId), eq(toolCalls.taskId, task.id)))
+        .for('update')
+        .limit(1);
+      const grant = parsePhoneCallToOwnerNumberGrantMatch(input.ownerCallNumberGrant.match);
+      if (
+        !linked ||
+        !grant ||
+        !input.policy ||
+        input.policy.agentId !== task.agentId ||
+        input.policy.toolName !== 'phone.call' ||
+        input.policy.templateKey !== 'phone.call.to_owner_number.v1' ||
+        input.policy.effect !== 'allow' ||
+        JSON.stringify(parsePhoneCallToOwnerNumberGrantMatch(input.policy.match)) !==
+          JSON.stringify(grant)
+      )
+        return null;
+      const directOwnerRequest = await readPostgresOwnerCallRequest(
+        tx as unknown as Db,
+        task.agentId,
+        task.id,
+        'waiting_approval',
+        true,
+      );
+      const [clock] = await tx.execute<{ now: Date | string }>(
+        sql`select clock_timestamp() as now`,
+      );
+      const ownerCallNumberGrantNow =
+        clock?.now instanceof Date ? clock.now : new Date(clock?.now ?? NaN);
+      if (!Number.isFinite(ownerCallNumberGrantNow.getTime())) return null;
+      if (
+        process.env.PHONE_CALL_TO_OWNER_GRANT_ENABLED !== 'true' ||
+        !phoneCallOwnerNumberGrantFinalizationMatches(
+          input.ownerCallNumberGrant,
+          {
+            approvalId: pending.id,
+            approvalStatus: pending.status,
+            approvalExpiresAt: pending.expiresAt,
+            agentId: task.agentId,
+            approvalTaskId: pending.taskId,
+            approvalToolCallId: pending.toolCallId,
+            taskId: task.id,
+            taskAgentId: task.agentId,
+            taskTrust: task.trust,
+            taskStatus: task.status,
+            toolCallId: linked.id,
+            toolTaskId: linked.taskId,
+            toolApprovalId: linked.approvalId,
+            toolName: linked.toolName,
+            toolStatus: linked.status,
+            toolArgs: linked.args,
+            approvalPayload: pending.payload,
+            directOwnerRequest,
+          },
+          ownerCallNumberGrantNow,
+        )
+      )
+        return null;
+    }
 
     // transaction_timestamp()/now() can be older than a deadline reached while
     // waiting for the task or approval lock. Use the strict wall-clock predicate
@@ -352,6 +546,9 @@ export async function resolveApproval(
           eq(approvals.id, pending.id),
           eq(approvals.status, 'pending'),
           gt(approvals.expiresAt, sql`clock_timestamp()`),
+          ...(input.ownerCallNumberGrant
+            ? [sql`${input.ownerCallNumberGrant.reviewExpiresAt}::timestamptz > clock_timestamp()`]
+            : []),
         ),
       )
       .returning();
@@ -362,6 +559,7 @@ export async function resolveApproval(
       .set({ status: input.decision })
       .where(eq(toolCalls.id, resolved.toolCallId));
 
+    let createdPolicyId: string | undefined;
     if (input.policy && input.via === 'web') {
       const [policy] = await tx
         .insert(approvalPolicies)
@@ -380,6 +578,7 @@ export async function resolveApproval(
         })
         .returning();
       if (policy) {
+        createdPolicyId = policy.id;
         await tx
           .update(approvals)
           .set({ createdPolicyId: policy.id })
@@ -402,7 +601,7 @@ export async function resolveApproval(
       .where(and(eq(tasks.id, resolved.taskId), eq(tasks.status, 'waiting_approval')))
       .returning({ id: tasks.id, queueGeneration: tasks.queueGeneration });
 
-    return { resolved, woken };
+    return { resolved, woken, createdPolicyId };
   });
 
   if (resolution && 'ambiguous' in resolution) {
@@ -411,12 +610,21 @@ export async function resolveApproval(
   if (!resolution) {
     return { ok: false, reason: 'no pending approval matched (already resolved or expired?)' };
   }
-  const { resolved, woken } = resolution;
+  const { resolved, woken, createdPolicyId } = resolution;
   return {
     ok: true,
     taskId: resolved.taskId,
     toolCallId: resolved.toolCallId,
     approvalId: resolved.id,
+    ...(input.ownerCallNumberGrant && createdPolicyId
+      ? {
+          ownerCallNumberGrant: {
+            policyId: createdPolicyId,
+            grantId: input.ownerCallNumberGrant.match.grantId,
+            expiresAt: input.ownerCallNumberGrant.match.expiresAt,
+          },
+        }
+      : {}),
     ...(woken ? { wake: { taskId: woken.id, generation: woken.queueGeneration } } : {}),
   };
 }
@@ -590,6 +798,8 @@ export function createPostgresApprovalRepository(db: Db): ApprovalRepository {
     kind: 'approval-repository',
     create: (input) => createApproval(db, input),
     getRememberable: (agentId, approvalId) => getRememberableApproval(db, agentId, approvalId),
+    getOwnerCallNumberGrantReview: (agentId, approvalId) =>
+      getOwnerCallNumberGrantReview(db, agentId, approvalId),
     listInbox: (agentId, options) => listApprovalInbox(db, agentId, options),
     listStalledNotices: (options) => listStalledNotices(db, options),
     markNotified: (approvalIds, channels) => markApprovalNotified(db, approvalIds, channels),

@@ -2080,6 +2080,44 @@ final class NativeVisualReviewTests: XCTestCase {
         XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty, "Every visual read must stay in the fixture transport.")
     }
 
+    @MainActor
+    func testOwnerCallPermissionReviewFixtures() async throws {
+        guard ProcessInfo.processInfo.environment["ASSISTANT_OWNER_CALL_GRANT_REVIEW_RENDER"] == "1" else {
+            throw XCTSkip("Opt-in, fixture-only owner-call review render; no runtime or activation proof.")
+        }
+        let fixture = try NativeReviewFixture()
+        NativeReviewProtocol.install(fixture.responses)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"), session: URLSession(configuration: configuration))
+        let suite = "assistant.owner-call-grant-visual-review"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        let model = AppModel(apiClient: client, defaults: defaults)
+        await model.refreshAll()
+        _ = await model.refreshWorkspace()
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        for stage in ["draft", "review", "other-active", "ambiguous", "saved"] {
+            try await capture(Page("owner-call-\(stage)", ApprovalsView.visualReviewOwnerCallPermission(stage)), scheme: .light, size: .large, scene: scene, model: model, viewportWidth: 320)
+        }
+        for (width, size) in [(CGFloat(390), DynamicTypeSize.large), (CGFloat(320), .accessibility3)] {
+            try await capture(Page("owner-call-other-active", ApprovalsView.visualReviewOwnerCallPermission("other-active")), scheme: .dark, size: size, scene: scene, model: model, requiresScrolling: true, viewportWidth: width)
+        }
+        for state in ["available", "disabled", "expired", "paused", "opaque"] {
+            var responses = fixture.responses
+            var workspace = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(responses["/api/mobile/v1/workspace"])) as? [String: Any])
+            var settings = try XCTUnwrap(workspace["settings"] as? [String: Any])
+            settings["policies"] = [["id": "fixture-\(state)", "toolName": "phone.call", "templateKey": "phone.call.to_owner_number.v1", "label": state == "opaque" ? "Stored phone permission" : "Future calls to an approved number", "effect": "allow", "enabled": state != "paused", "createdVia": "approval_dialog", "phonePermissionKind": state == "opaque" ? "opaque" : "owner_number", "scope": state == "opaque" ? "Stored permission details are unavailable." : "Exact number: +14155550123; requested duration ceiling 12 minutes; anyone may answer; expires October 30, 2099 (UTC).", "effectiveAvailability": state == "available" ? "Available for a matching direct request from you, subject to expiry and current checks." : state == "disabled" ? "Saved, but future owner-number calls are disabled by the system." : state == "expired" ? "Expired. A fresh review is required for new authorization." : state == "paused" ? "Paused. A fresh review creates a new permission." : "Stored permission details are unavailable.", "opaqueDetails": state == "opaque" ? "{\"futureSchema\":2,\"unknownScope\":\"uninterpreted\"}" : NSNull()]]
+            workspace["settings"] = settings
+            responses["/api/mobile/v1/workspace"] = try JSONSerialization.data(withJSONObject: workspace)
+            NativeReviewProtocol.install(responses)
+            _ = await model.refreshWorkspace()
+            try await capture(Page("owner-call-saved-\(state)", MoreView()), scheme: state == "disabled" || state == "paused" ? .dark : .light, size: state == "opaque" ? .accessibility3 : .large, scene: scene, model: model, viewportWidth: 320)
+            XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty, "Fixture renders never activate a call or permission.")
+            XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty, "Fixture transport rejects every external request.")
+        }
+    }
+
     private struct Page {
         let name: String
         var ownsNavigation = false

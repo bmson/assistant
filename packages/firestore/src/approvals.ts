@@ -12,7 +12,13 @@ import {
   approvalSweepBatch,
   type CreateApprovalInput,
   type CreatedApproval,
+  MAX_APPROVAL_POLICY_SNAPSHOT_ROWS,
+  type OwnerCallNumberGrantReview,
   parkedApprovalIds,
+  parsePhoneCallToOwnerNumberGrantMatch,
+  phoneCallOwnerNumberGrantFinalizationMatches,
+  phoneCallOwnerNumberReviewSourceFingerprint,
+  phoneCallToOwnerNumberGrantIsLive,
   type Records,
   type RememberableApproval,
   type ResolveApprovalInput,
@@ -20,6 +26,7 @@ import {
 } from '@assistant/persistence';
 import { type QueryDocumentSnapshot, Timestamp } from '@google-cloud/firestore';
 import { createWakeIntent } from './outbox.js';
+import { readFirestoreOwnerCallRequest } from './owner-call-request.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
 function canonical(value: unknown): unknown {
@@ -195,6 +202,95 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
     }
   }
 
+  async getOwnerCallNumberGrantReview(
+    agentId: string,
+    approvalId: string,
+  ): Promise<OwnerCallNumberGrantReview | null> {
+    if (!validDocumentIdentifier(agentId) || !validDocumentIdentifier(approvalId)) return null;
+    try {
+      const approvalSnapshot = await this.store.doc('approvals', approvalId).get();
+      if (!approvalSnapshot.exists) return null;
+      const approval = decodeRecord<Records['approvals']>(approvalSnapshot.data());
+      if (
+        approval.id !== approvalId ||
+        approval.status !== 'pending' ||
+        !validPersistedDate(approval.requestedAt) ||
+        !validPersistedDate(approval.expiresAt) ||
+        !validDocumentIdentifier(approval.taskId) ||
+        !validDocumentIdentifier(approval.toolCallId)
+      )
+        return null;
+      const [taskSnapshot, toolSnapshot, ownerSnapshot] = await Promise.all([
+        this.store.doc('tasks', approval.taskId).get(),
+        this.store.doc('toolCalls', approval.toolCallId).get(),
+        this.store.doc('agents', agentId).get(),
+      ]);
+      if (!taskSnapshot.exists || !toolSnapshot.exists || !ownerSnapshot.exists) return null;
+      const task = decodeRecord<Records['tasks']>(taskSnapshot.data());
+      const tool = decodeRecord<Records['toolCalls']>(toolSnapshot.data());
+      const owner = decodeRecord<Records['agents']>(ownerSnapshot.data());
+      const directOwnerRequest = await readFirestoreOwnerCallRequest(
+        this.store,
+        agentId,
+        task.id,
+        'waiting_approval',
+      );
+      if (!directOwnerRequest) return null;
+      const policies = await this.store
+        .collection('approvalPolicies')
+        .where('agentId', '==', agentId)
+        .where('toolName', '==', 'phone.call')
+        .limit(MAX_APPROVAL_POLICY_SNAPSHOT_ROWS + 1)
+        .get();
+      if (policies.size > MAX_APPROVAL_POLICY_SNAPSHOT_ROWS) return null;
+      const now = validDate(this.store.now(), 'Invalid owner-call review time');
+      if (
+        approval.expiresAt <= now ||
+        task.id !== approval.taskId ||
+        task.agentId !== agentId ||
+        task.trust !== 'owner' ||
+        task.status !== 'waiting_approval' ||
+        tool.id !== approval.toolCallId ||
+        tool.taskId !== approval.taskId ||
+        tool.status !== 'awaiting_approval' ||
+        tool.toolName !== 'phone.call' ||
+        owner.id !== agentId ||
+        typeof owner.timezone !== 'string'
+      )
+        return null;
+      return {
+        approval,
+        toolCall: {
+          id: tool.id,
+          taskId: tool.taskId,
+          toolName: tool.toolName,
+          args: tool.args,
+          status: tool.status,
+        },
+        task: { id: task.id, agentId: task.agentId, trust: task.trust, status: task.status },
+        ownerTimeZone: owner.timezone,
+        repositoryNow: now,
+        directOwnerRequest,
+        existingActiveGrants: policies.docs.flatMap((snapshot) => {
+          const policy = decodeRecord<Records['approvalPolicies']>(snapshot.data());
+          const match = parsePhoneCallToOwnerNumberGrantMatch(policy.match);
+          const recipient = (tool.args as { brief?: { to?: unknown } })?.brief?.to;
+          return policy.id === snapshot.id &&
+            policy.enabled &&
+            policy.effect === 'allow' &&
+            policy.templateKey === 'phone.call.to_owner_number.v1' &&
+            match &&
+            match.recipientE164 === recipient &&
+            phoneCallToOwnerNumberGrantIsLive(match, now)
+            ? [{ policyId: policy.id, match }]
+            : [];
+        }),
+      };
+    } catch {
+      return null;
+    }
+  }
+
   async listInbox(agentId: string, options: ApprovalInboxQuery = {}): Promise<ApprovalInbox> {
     const recentLimit = approvalInboxLimit(options.recentLimit);
     const now = inboxDate(options.now ?? this.store.now());
@@ -234,6 +330,17 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
           taskTrust: task.trust,
           toolName: tool.toolName,
           decision: tool.decision,
+          ownerCallAdmissionAvailable:
+            tool.toolName === 'phone.call' &&
+            Boolean(
+              await readFirestoreOwnerCallRequest(this.store, agentId, task.id, 'waiting_approval'),
+            ),
+          ownerCallSourceFingerprint: phoneCallOwnerNumberReviewSourceFingerprint({
+            args: tool.args,
+            payload: approval.payload,
+            trust: task.trust,
+            toolName: tool.toolName,
+          }),
         };
       },
       'Approval inbox pending scan exceeded its safety bound',
@@ -565,6 +672,19 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
   async resolve(input: ResolveApprovalInput): Promise<ApprovalResolution> {
     if (!input.approvalId && !input.shortCode)
       return { ok: false, reason: 'approvalId or shortCode required' };
+    const hasOwnerNumberGrantPolicy = input.policy?.templateKey === 'phone.call.to_owner_number.v1';
+    if (
+      hasOwnerNumberGrantPolicy !== Boolean(input.ownerCallNumberGrant) ||
+      (input.ownerCallNumberGrant &&
+        (input.decision !== 'approved' ||
+          input.via !== 'web' ||
+          !input.expectedAgentId ||
+          !input.approvalId ||
+          input.ownerCallNumberGrant.expectedAgentId !== input.expectedAgentId ||
+          input.ownerCallNumberGrant.expectedApprovalId !== input.approvalId ||
+          input.editedPayload !== undefined))
+    )
+      return { ok: false, reason: 'owner call grant review is invalid or changed' };
     const newPolicyId = randomUUID();
     return this.store.db.runTransaction(async (tx) => {
       const snapshot = input.approvalId
@@ -618,6 +738,21 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
       ) {
         throw new Error('Approval policy must match the task owner and tool');
       }
+
+      if (input.ownerCallNumberGrant) {
+        const policyMatch = parsePhoneCallToOwnerNumberGrantMatch(requestedPolicy?.match);
+        const grantMatch = parsePhoneCallToOwnerNumberGrantMatch(input.ownerCallNumberGrant.match);
+        if (
+          !policyMatch ||
+          !grantMatch ||
+          requestedPolicy?.agentId !== agentId ||
+          requestedPolicy.toolName !== 'phone.call' ||
+          requestedPolicy.templateKey !== 'phone.call.to_owner_number.v1' ||
+          requestedPolicy.effect !== 'allow' ||
+          JSON.stringify(policyMatch) !== JSON.stringify(grantMatch)
+        )
+          return { ok: false, reason: 'owner call grant review is invalid or changed' };
+      }
       const policyKey = requestedPolicy
         ? this.store.doc('approvalPolicyKeys', policyId(requestedPolicy))
         : null;
@@ -632,9 +767,50 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
       // Sample the installation clock only after every transactional read. A
       // slow task/tool/privacy/policy read must not let an answer cross its
       // deadline while retaining an earlier `now` value.
+      const directOwnerRequest = input.ownerCallNumberGrant
+        ? await readFirestoreOwnerCallRequest(
+            this.store,
+            agentId,
+            approval.taskId,
+            'waiting_approval',
+            tx,
+          )
+        : null;
       const now = validDate(this.store.now(), 'Invalid approval time');
       if (approval.expiresAt.getTime() <= now.getTime())
         return { ok: false, reason: 'no pending approval matched (already resolved or expired?)' };
+      if (input.ownerCallNumberGrant) {
+        const taskRecord = decodeRecord<Records['tasks']>(task.data());
+        const toolRecord = decodeRecord<Records['toolCalls']>(tool.data());
+        if (
+          process.env.PHONE_CALL_TO_OWNER_GRANT_ENABLED !== 'true' ||
+          !phoneCallOwnerNumberGrantFinalizationMatches(
+            input.ownerCallNumberGrant,
+            {
+              approvalId: approval.id,
+              approvalStatus: approval.status,
+              approvalExpiresAt: approval.expiresAt,
+              agentId,
+              approvalTaskId: approval.taskId,
+              approvalToolCallId: approval.toolCallId,
+              taskId: taskRecord.id,
+              taskAgentId: taskRecord.agentId,
+              taskTrust: taskRecord.trust,
+              taskStatus: taskRecord.status,
+              toolCallId: toolRecord.id,
+              toolTaskId: toolRecord.taskId,
+              toolApprovalId: toolRecord.approvalId,
+              toolName: toolRecord.toolName,
+              toolStatus: toolRecord.status,
+              toolArgs: toolRecord.args,
+              approvalPayload: approval.payload,
+              directOwnerRequest,
+            },
+            now,
+          )
+        )
+          return { ok: false, reason: 'owner call grant review is invalid or changed' };
+      }
       tx.update(
         selected.ref,
         encodeRecord({
@@ -686,6 +862,15 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
         taskId: approval.taskId,
         toolCallId: approval.toolCallId,
         approvalId: approval.id,
+        ...(input.ownerCallNumberGrant && policyRef
+          ? {
+              ownerCallNumberGrant: {
+                policyId: resolvedPolicyId,
+                grantId: input.ownerCallNumberGrant.match.grantId,
+                expiresAt: input.ownerCallNumberGrant.match.expiresAt,
+              },
+            }
+          : {}),
         ...(wake ? { wake: { taskId: approval.taskId, generation } } : {}),
       };
     });

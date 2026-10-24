@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { reloadConfig, resetConfigForTest } from '@assistant/config';
 import { extractOwnerIntent } from '@assistant/core';
 import type { Db } from '@assistant/db';
 import type {
@@ -10,14 +11,21 @@ import type {
   TaskLease,
   ToolExecutionRepository,
 } from '@assistant/persistence';
+import {
+  ownerPhoneRecipientRequest,
+  phoneCallOwnerNumberReviewSourceFingerprint,
+} from '@assistant/persistence';
 import { taskFixture } from '@assistant/persistence/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { ToolDispatcher } from './dispatcher.js';
+import { policyTemplates } from './policies.js';
 import { ToolRegistry } from './registry.js';
 import type { ToolContext } from './types.js';
 
-function toolCallRow(input: StartAutonomousToolCallInput): Records['toolCalls'] {
+function toolCallRow(
+  input: Omit<StartAutonomousToolCallInput, 'expectedPolicyFingerprint'>,
+): Records['toolCalls'] {
   return {
     id: randomUUID(),
     createdAt: new Date(),
@@ -329,6 +337,7 @@ function fixture(docsReplayKey = false, preparedDocumentId?: string) {
   };
   return {
     dispatch,
+    registry,
     makeApprovedCall,
     dispatcher,
     read,
@@ -1027,4 +1036,637 @@ describe('P03 owner intent at ToolDispatcher boundary (synthetic repositories on
     ).toMatchObject({ kind: 'rejected' });
     expect(send).not.toHaveBeenCalled();
   });
+});
+
+describe('owner call and autonomy authority snapshots', () => {
+  it('passes C admission provenance without manufacturing an autonomy grant; scheduled or missing provenance needs approval', async () => {
+    vi.stubEnv('PHONE_CALL_TO_OWNER_GRANT_ENABLED', 'true');
+    const repositories = makeRepositories();
+    const task = {
+      ...taskFixture({
+        id: randomUUID(),
+        agentId: randomUUID(),
+        conversationId: randomUUID(),
+        reminderId: randomUUID(),
+      }),
+      id: randomUUID(),
+      agentId: randomUUID(),
+      trigger: { source: 'chat', payload: { text: 'Call +14155550123 now.' } },
+      type: 'chat_turn',
+      status: 'running',
+      trust: 'owner',
+      lockedUntil: new Date(Date.now() + 60_000),
+      leaseToken: 'synthetic-lease',
+    };
+    repositories.setCurrentTask(task);
+    const request = {
+      agentId: task.agentId,
+      taskId: task.id,
+      conversationId: 'chat',
+      ownerMessageId: 'owner-message',
+      requestHash: 'a'.repeat(64),
+      clientOperationId: randomUUID(),
+      taskTriggerFingerprint: phoneCallOwnerNumberReviewSourceFingerprint(task.trigger)!,
+      recipientRequest: { kind: 'explicit_number' as const, recipientE164: '+14155550123' },
+      ownerMessageFingerprint: 'c'.repeat(64),
+    };
+    repositories.execution.ownerCallRequest = vi.fn(async () => request);
+    repositories.approvals.create = vi.fn(async () => ({
+      approvalId: randomUUID(),
+      toolCallId: randomUUID(),
+      shortCode: 'A1AA',
+      summary: 'Call',
+    }));
+    const match = {
+      schemaVersion: 1,
+      grantId: randomUUID(),
+      recipientE164: '+14155550123',
+      maxMinutes: 10,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    repositories.policies.list = vi.fn(async () => [
+      {
+        id: randomUUID(),
+        agentId: task.agentId,
+        toolName: 'phone.call',
+        templateKey: 'phone.call.to_owner_number.v1',
+        effect: 'allow',
+        enabled: true,
+        version: 1,
+        match,
+        createdVia: 'approval_dialog',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
+    const provider = vi.fn(async () => ({ ok: true }));
+    const registry = new ToolRegistry().register(
+      {
+        name: 'phone.call',
+        description: 'synthetic call',
+        inputSchema: z.object({
+          brief: z.object({ to: z.string(), maxMinutes: z.number(), goal: z.string() }),
+        }),
+        risk: 'approval',
+        acceptsUntrustedInput: false,
+        execute: provider,
+      },
+      {
+        outwardFacing: true,
+        networkEgress: true,
+        blanketAllowIneligible: true,
+        scopedAllowTemplates: ['phone.call.to_owner_number.v1', 'phone.call.same_brief'],
+      },
+    );
+    const dispatcher = new ToolDispatcher(
+      {} as Db,
+      registry,
+      repositories.execution,
+      repositories.costs,
+      repositories.approvals,
+      repositories.policies,
+    );
+    const ctx = {
+      taskId: task.id,
+      agentId: task.agentId,
+      trust: 'owner',
+      tainted: false,
+      ownerIntent: extractOwnerIntent({ trust: 'owner', text: 'Call +14155550123 now.' }),
+      now: () => new Date(),
+      signal: new AbortController().signal,
+      db: {} as Db,
+      log: async () => {},
+    } satisfies ToolContext;
+    const input = {
+      task,
+      ctx,
+      args: { brief: { to: match.recipientE164, maxMinutes: 8, goal: 'Discuss my appointment.' } },
+      toolName: 'phone.call',
+      step: 0,
+      provenance: { plannerVersion: 1, promptVersion: 1, model: 'synthetic' },
+    };
+    expect(await dispatcher.dispatch(input)).toMatchObject({ kind: 'executed' });
+    expect(repositories.started).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedPhoneCallOwnerNumberGrant: expect.objectContaining({
+          match,
+          directOwnerRequest: request,
+        }),
+      }),
+    );
+    expect(repositories.started.mock.calls[0]?.[0].expectedOwnerAutonomyGrant).toBeUndefined();
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(
+      (await dispatcher.dispatch({ ...input, task: { ...task, type: 'scheduled' }, step: 1 })).kind,
+    ).toBe('awaiting_approval');
+    for (const text of [
+      'Call Bob now.',
+      'Call Bob about +14155550123.',
+      'Call +14155550999 now.',
+    ]) {
+      const trigger = { source: 'chat', payload: { text } };
+      repositories.execution.ownerCallRequest = async () => ({
+        ...request,
+        recipientRequest: ownerPhoneRecipientRequest(text),
+        taskTriggerFingerprint: phoneCallOwnerNumberReviewSourceFingerprint(trigger)!,
+      });
+      expect(
+        (
+          await dispatcher.dispatch({
+            ...input,
+            task: { ...task, trigger },
+            ctx: { ...ctx, ownerIntent: extractOwnerIntent({ trust: 'owner', text }) },
+            step: 2,
+          })
+        ).kind,
+      ).toBe('awaiting_approval');
+    }
+    reloadConfig({ PHONE_CALL_TO_OWNER_GRANT_ENABLED: 'true', OWNER_PHONE: '+14155550123' });
+    const selfTrigger = { source: 'chat', payload: { text: 'Call me now.' } };
+    const selfTask = { ...task, trigger: selfTrigger };
+    repositories.setCurrentTask(selfTask);
+    repositories.execution.ownerCallRequest = async () => ({
+      ...request,
+      recipientRequest: { kind: 'owner_self' as const },
+      taskTriggerFingerprint: phoneCallOwnerNumberReviewSourceFingerprint(selfTrigger)!,
+    });
+    expect(
+      (
+        await dispatcher.dispatch({
+          ...input,
+          task: selfTask,
+          ctx: {
+            ...ctx,
+            ownerIntent: extractOwnerIntent({ trust: 'owner', text: 'Call me now.' }),
+          },
+          step: 2,
+        })
+      ).kind,
+    ).toBe('executed');
+    expect(
+      repositories.started.mock.calls.at(-1)?.[0].expectedPhoneCallOwnerNumberGrant
+        ?.recipientAuthority,
+    ).toMatchObject({ kind: 'configured_owner_phone', recipientE164: match.recipientE164 });
+    reloadConfig({ PHONE_CALL_TO_OWNER_GRANT_ENABLED: 'true', OWNER_PHONE: '+14155550999' });
+    expect(
+      (
+        await dispatcher.dispatch({
+          ...input,
+          task: selfTask,
+          ctx: {
+            ...ctx,
+            ownerIntent: extractOwnerIntent({ trust: 'owner', text: 'Call me now.' }),
+          },
+          step: 2,
+        })
+      ).kind,
+    ).toBe('awaiting_approval');
+    // Even a matching saved exact brief and an active autonomy grant cannot
+    // execute an ambiguous target; only the exact proposal may be approved.
+    expect(
+      policyTemplates['phone.call.same_brief']?.({ brief: input.args.brief }, input.args, ctx),
+    ).toBe(true);
+    const savedCPolicies = repositories.policies.list;
+    repositories.policies.list = async () => [
+      {
+        id: randomUUID(),
+        agentId: task.agentId,
+        toolName: 'phone.call',
+        templateKey: 'phone.call.same_brief',
+        effect: 'allow',
+        enabled: true,
+        version: 1,
+        match: { brief: input.args.brief },
+        createdVia: 'approval_dialog',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ];
+    const startedBeforeReview = repositories.started.mock.calls.length;
+    const claim = vi.fn(async () => {
+      throw new Error('Review-only proposals cannot claim');
+    });
+    repositories.execution.claim = claim;
+    for (const text of [
+      'Call Bob now.',
+      'Call Monday.',
+      'Phone Success.',
+      'Call me at my other number.',
+    ]) {
+      const trigger = { source: 'chat', payload: { text } };
+      const proposalTask = {
+        ...task,
+        trigger,
+        autonomyGrant: {
+          grantedAt: new Date(Date.now() - 1000).toISOString(),
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          revokedAt: null,
+          grantedVia: 'composer' as const,
+        },
+      };
+      repositories.setCurrentTask(proposalTask);
+      repositories.execution.ownerCallRequest = async () => ({
+        ...request,
+        recipientRequest: ownerPhoneRecipientRequest(text),
+        taskTriggerFingerprint: phoneCallOwnerNumberReviewSourceFingerprint(trigger)!,
+      });
+      expect(
+        (
+          await dispatcher.dispatch({
+            ...input,
+            task: proposalTask,
+            ctx: { ...ctx, ownerIntent: extractOwnerIntent({ trust: 'owner', text }) },
+            step: 5,
+          })
+        ).kind,
+      ).toBe('awaiting_approval');
+    }
+    expect(repositories.started.mock.calls.length).toBe(startedBeforeReview);
+    expect(claim).not.toHaveBeenCalled();
+    repositories.policies.list = savedCPolicies;
+    for (const text of [
+      'Call me now. Actually, do not call me.',
+      'Call +14155550123, but do not call me.',
+      'Call it done.',
+      'Call it a day.',
+      'Call this a success.',
+      'Phone it in.',
+      'Summarize "Call me now."',
+    ]) {
+      const trigger = { source: 'chat', payload: { text } };
+      repositories.execution.ownerCallRequest = async () => ({
+        ...request,
+        recipientRequest: ownerPhoneRecipientRequest(text),
+        taskTriggerFingerprint: phoneCallOwnerNumberReviewSourceFingerprint(trigger)!,
+      });
+      expect(
+        (
+          await dispatcher.dispatch({
+            ...input,
+            task: { ...task, trigger },
+            ctx: { ...ctx, ownerIntent: extractOwnerIntent({ trust: 'owner', text }) },
+            step: 6,
+          })
+        ).kind,
+      ).toBe('rejected');
+    }
+    const tailCases = [
+      'Call +14155550123 now, or don’t.',
+      'Call me now, or don’t.',
+      'Call me about lunch, but use +14155550999 instead.',
+      'Call +14155550123 about lunch, but use +14155550999 instead.',
+      'Call me. Actually, no call is needed.',
+      'Call +14155550123. Actually, no call is needed.',
+      "My note says 'I want you to call me now.'",
+      'If I am home, I want you to call me now.',
+      'Call me now, perhaps later.',
+      'Call +14155550123 now, perhaps later.',
+      'Call me and say "hello".',
+      'Call me about lunch. Forget that request.',
+      'Call me about lunch, Disregard that request.',
+      'Call me about lunch\nI changed my mind.',
+      'Call me about lunch\r\nForget that request.',
+      'Call me about lunch; Disregard that request.',
+      'Call +14155550123 about lunch. Disregard that request.',
+      'Call +14155550123 about lunch, I changed my mind.',
+      'Call +14155550123 about lunch\nForget that request.',
+      'Call +14155550123 about lunch\r\nDisregard that request.',
+      'Call +14155550123 about lunch; I changed my mind.',
+      'Call me and say hello. I changed my mind.',
+      'Call me and say hello, Forget that request.',
+      'Call me and say hello\nDisregard that request.',
+      'Call me and say hello\r\nI changed my mind.',
+      'Call me and say hello; Forget that request.',
+      'Call +14155550123 and say hello. Forget that request.',
+      'Call +14155550123 and say hello, Disregard that request.',
+      'Call +14155550123 and say hello\nI changed my mind.',
+      'Call +14155550123 and say hello\r\nForget that request.',
+      'Call +14155550123 and say hello; Disregard that request.',
+      'Call me about lunch. Disregard that request.',
+      'Call +14155550123 about lunch. Forget that request.',
+      'Call me about lunch. I changed my mind.',
+      'Call me about lunch and disregard that request.',
+      'Call +14155550123 about lunch then forget that request.',
+      'Call me and say hello and forget that request.',
+      'Call +14155550123 and say hello so I changed my mind.',
+      'Call me about lunch & disregard that request.',
+      'Call me about lunch..',
+      'Call +14155550123 and say hello!!',
+      'Call me\nat +14155550123.',
+      'Call me now,\r\non +14155550123.',
+      'Call\nme about lunch.',
+    ];
+    const startsBeforeTailCases = repositories.started.mock.calls.length;
+    const basePolicy = (await savedCPolicies(task.agentId, { toolName: 'phone.call' }))[0]!;
+    for (const templateKey of [
+      'phone.call.same_brief',
+      'phone.call.to_owner_number.v1',
+      'task-autonomy',
+    ]) {
+      repositories.policies.list = async () =>
+        templateKey === 'task-autonomy'
+          ? []
+          : [
+              {
+                ...basePolicy,
+                templateKey,
+                match:
+                  templateKey === 'phone.call.same_brief' ? { brief: input.args.brief } : match,
+              },
+            ];
+      for (const text of tailCases) {
+        const trigger = { source: 'chat', payload: { text } };
+        const sourceTask = {
+          ...task,
+          trigger,
+          autonomyGrant: {
+            grantedAt: new Date(Date.now() - 1000).toISOString(),
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            revokedAt: null,
+            grantedVia: 'composer' as const,
+          },
+        };
+        repositories.setCurrentTask(sourceTask);
+        repositories.execution.ownerCallRequest = async () => ({
+          ...request,
+          recipientRequest: ownerPhoneRecipientRequest(text),
+          taskTriggerFingerprint: phoneCallOwnerNumberReviewSourceFingerprint(trigger)!,
+        });
+        expect(
+          (
+            await dispatcher.dispatch({
+              ...input,
+              task: sourceTask,
+              ctx: { ...ctx, ownerIntent: extractOwnerIntent({ trust: 'owner', text }) },
+              step: 7,
+            })
+          ).kind,
+          templateKey + ': ' + text,
+        ).toBe('rejected');
+      }
+    }
+    for (const mode of [
+      'phone.call.same_brief',
+      'phone.call.to_owner_number.v1',
+      'task-autonomy',
+    ]) {
+      repositories.policies.list = async () =>
+        mode === 'task-autonomy'
+          ? []
+          : [
+              {
+                ...basePolicy,
+                templateKey: mode,
+                match: mode === 'phone.call.same_brief' ? { brief: input.args.brief } : match,
+              },
+            ];
+      for (const text of [
+        'Call me about lunch.',
+        'Call +14155550123 about lunch.',
+        'Call me and say hello.',
+        'Call +14155550123 and say hello.',
+        'Read the note, then call +14155550123 now.',
+        'Call me about lunch disregard that request',
+        'Call +14155550123 about lunch forget that request',
+        'Call me and say hello I changed my mind',
+        'Call +14155550123 and say hello forget that request',
+      ]) {
+        const trigger = { source: 'chat', payload: { text } };
+        const semanticTask = {
+          ...task,
+          trigger,
+          autonomyGrant: {
+            grantedAt: new Date(Date.now() - 1000).toISOString(),
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            revokedAt: null,
+            grantedVia: 'composer' as const,
+          },
+        };
+        repositories.setCurrentTask(semanticTask);
+        repositories.execution.ownerCallRequest = async () => ({
+          ...request,
+          recipientRequest: ownerPhoneRecipientRequest(text),
+          taskTriggerFingerprint: phoneCallOwnerNumberReviewSourceFingerprint(trigger)!,
+        });
+        expect(
+          (
+            await dispatcher.dispatch({
+              ...input,
+              task: semanticTask,
+              ctx: { ...ctx, ownerIntent: extractOwnerIntent({ trust: 'owner', text }) },
+              step: 9,
+            })
+          ).kind,
+          mode + ': ' + text,
+        ).toBe('awaiting_approval');
+      }
+      for (const text of [
+        'Call me disregard that request',
+        'Call +14155550123 forget that request',
+        'Call \u2028me now',
+        'Call me \u2029now',
+      ]) {
+        const trigger = { source: 'chat', payload: { text } };
+        repositories.execution.ownerCallRequest = async () => ({
+          ...request,
+          recipientRequest: ownerPhoneRecipientRequest(text),
+          taskTriggerFingerprint: phoneCallOwnerNumberReviewSourceFingerprint(trigger)!,
+        });
+        expect(
+          (
+            await dispatcher.dispatch({
+              ...input,
+              task: { ...task, trigger },
+              ctx: { ...ctx, ownerIntent: extractOwnerIntent({ trust: 'owner', text }) },
+              step: 10,
+            })
+          ).kind,
+        ).toBe('rejected');
+      }
+    }
+    expect(repositories.started.mock.calls.length).toBe(startsBeforeTailCases);
+    expect(claim).not.toHaveBeenCalled();
+    repositories.policies.list = savedCPolicies;
+    resetConfigForTest();
+    repositories.setCurrentTask(task);
+    const nonCallTrigger = { source: 'chat', payload: { text: 'Email Bob now.' } };
+    repositories.execution.ownerCallRequest = async () => ({
+      ...request,
+      taskTriggerFingerprint: phoneCallOwnerNumberReviewSourceFingerprint(nonCallTrigger)!,
+    });
+    expect(
+      (await dispatcher.dispatch({ ...input, task: { ...task, trigger: nonCallTrigger }, step: 2 }))
+        .kind,
+    ).toBe('awaiting_approval');
+    repositories.execution.ownerCallRequest = async () => null;
+    expect((await dispatcher.dispatch({ ...input, step: 2 })).kind).toBe('awaiting_approval');
+    expect(
+      (await dispatcher.dispatch({ ...input, step: 3, ctx: { ...ctx, tainted: true } })).kind,
+    ).toBe('awaiting_approval');
+    expect(provider).toHaveBeenCalledTimes(2);
+    for (const text of [
+      'Email Bob now.',
+      'Text Bob now.',
+      'Apply for the job.',
+      'Call it done.',
+      'Call it a day.',
+      'Call this a success.',
+      'Dial back the wording.',
+      'Phone it in.',
+    ]) {
+      const result = await dispatcher.dispatch({
+        ...input,
+        step: 4,
+        ctx: { ...ctx, ownerIntent: extractOwnerIntent({ trust: 'owner', text }) },
+      });
+      expect(result).toMatchObject({ kind: 'rejected' });
+      expect(result.kind === 'rejected' && result.reason).toContain('phone_call');
+    }
+    // Once that exact proposal is explicitly approved, the ordinary recorded-
+    // approval path remains usable without a saved C or autonomy dependency.
+    for (const namedText of ['Call Bob now.', 'Call me about lunch.']) {
+      const approvedTask = { ...task, trigger: { source: 'chat', payload: { text: namedText } } };
+      const approvedCall = toolCallRow({
+        agentId: task.agentId,
+        taskId: task.id,
+        step: 8,
+        toolName: 'phone.call',
+        args: input.args,
+        idempotencyKey: null,
+        decision: {},
+      });
+      approvedCall.status = 'approved';
+      approvedCall.approvalId = randomUUID();
+      const approval: Records['approvals'] = {
+        id: approvedCall.approvalId,
+        taskId: task.id,
+        toolCallId: approvedCall.id,
+        status: 'approved',
+        expiresAt: new Date(Date.now() + 60_000),
+        resolvedAt: new Date(),
+        requestedAt: new Date(),
+        summary: 'Explicitly reviewed named call',
+        shortCode: 'A1AA',
+        payload: input.args,
+        resolutionPayload: null,
+        resolvedVia: 'web',
+        notifiedChannels: [],
+        createdPolicyId: null,
+      };
+      repositories.setApprovedCall(approvedTask, approvedCall, approval);
+      const explicitClaim = vi.fn(
+        async (_input: Parameters<ToolExecutionRepository['claim']>[0]) => ({
+          task: approvedTask,
+          toolCall: { ...approvedCall, status: 'executing' as const },
+          approval,
+        }),
+      );
+      repositories.execution.claim = explicitClaim;
+      expect(
+        await dispatcher.executeApproved(approvedCall.id, {
+          ...ctx,
+          ownerIntent: extractOwnerIntent({ trust: 'owner', text: namedText }),
+        }),
+      ).toMatchObject({ kind: 'executed' });
+      expect(explicitClaim).toHaveBeenCalledWith(
+        expect.objectContaining({ expectedApprovalId: approval.id }),
+      );
+      expect(explicitClaim.mock.calls[0]?.[0]).not.toHaveProperty(
+        'expectedPhoneCallOwnerNumberGrant',
+      );
+    }
+    expect(provider).toHaveBeenCalledTimes(4);
+  });
+
+  it('captures the canonical actual owner autonomy grant only when it changes the risk decision', async () => {
+    const repositories = makeRepositories();
+    const grant = {
+      grantedAt: new Date(Date.now() - 1_000).toISOString(),
+      grantedVia: 'composer' as const,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      revokedAt: null,
+    };
+    const task = {
+      ...taskFixture({
+        id: randomUUID(),
+        agentId: randomUUID(),
+        conversationId: randomUUID(),
+        reminderId: randomUUID(),
+      }),
+      id: randomUUID(),
+      agentId: randomUUID(),
+      type: 'chat_turn',
+      status: 'running',
+      trust: 'owner',
+      lockedUntil: new Date(Date.now() + 60_000),
+      leaseToken: 'synthetic-lease',
+      autonomyGrant: grant,
+    };
+    repositories.setCurrentTask(task);
+    const registry = new ToolRegistry().register(
+      {
+        name: 'test.outward',
+        description: 'synthetic effect',
+        inputSchema: z.object({}),
+        risk: 'approval',
+        acceptsUntrustedInput: true,
+        execute: async () => ({ ok: true }),
+      },
+      { outwardFacing: true },
+    );
+    const dispatcher = new ToolDispatcher(
+      {} as Db,
+      registry,
+      repositories.execution,
+      repositories.costs,
+      repositories.approvals,
+      repositories.policies,
+    );
+    const ctx = {
+      taskId: task.id,
+      agentId: task.agentId,
+      trust: 'owner',
+      tainted: false,
+      ownerIntent: extractOwnerIntent({ trust: 'owner', text: 'Send a message now.' }),
+      now: () => new Date(),
+      signal: new AbortController().signal,
+      db: {} as Db,
+      log: async () => {},
+    } satisfies ToolContext;
+    expect(
+      await dispatcher.dispatch({
+        task,
+        ctx,
+        args: {},
+        toolName: 'test.outward',
+        step: 0,
+        provenance: { plannerVersion: 1, promptVersion: 1, model: 'synthetic' },
+      }),
+    ).toMatchObject({ kind: 'executed' });
+    expect(repositories.started).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedOwnerAutonomyGrant: { trust: 'owner', grant } }),
+    );
+  });
+});
+
+it('a phone request grants no Gmail, SMS, or calendar-invitation authority', async () => {
+  const f = fixture();
+  for (const name of ['sms.send', 'calendar.create_event'])
+    f.registry.register(
+      {
+        name,
+        description: 'synthetic outward tool',
+        inputSchema: z.object({}),
+        risk: 'autonomous',
+        acceptsUntrustedInput: true,
+        execute: f.send,
+      },
+      { outwardFacing: true, networkEgress: true },
+    );
+  for (const tool of ['gmail.send', 'sms.send', 'calendar.create_event']) {
+    const result = await f.dispatch('Call me now.', tool);
+    expect(result.kind).toBe('rejected');
+    expect(result.kind === 'rejected' && result.reason).toContain('external_send');
+  }
+  expect(f.send).not.toHaveBeenCalled();
 });

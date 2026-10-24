@@ -524,7 +524,29 @@ struct MoreView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
 
-        if usesAccessibilityLayout {
+        if policy.toolName == "phone.call" && policy.phonePermissionKind != "same_brief" {
+            VStack(alignment: .leading, spacing: 8) {
+                detail
+                Text("Stored setting: \(policy.enabled ? "On" : "Off")").font(.caption.weight(.semibold))
+                if let opaque = policy.opaqueDetails {
+                    DisclosureGroup("Stored permission details") {
+                        Text(opaque).font(.caption.monospaced()).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    }.font(.caption)
+                }
+                Text(policy.effectiveAvailability ?? "Availability unavailable. Refresh to check this saved permission.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if policy.phonePermissionKind == "owner_number" && !policy.enabled {
+                    Text("For a new future-call permission, review a pending owner call. This paused entry remains unchanged.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                if policy.enabled {
+                    Button { performSettingsAction(policy.id) { await model.setPolicy(policy, enabled: false) } } label: {
+                        Text("Pause this permission").frame(minHeight: 44).fixedSize(horizontal: false, vertical: true)
+                    }.buttonStyle(.bordered).disabled(settingsActionInFlight != nil)
+                }
+                policyActions(policy)
+            }
+        } else if usesAccessibilityLayout {
             VStack(alignment: .leading, spacing: 8) {
                 detail
                 HStack(spacing: 8) {

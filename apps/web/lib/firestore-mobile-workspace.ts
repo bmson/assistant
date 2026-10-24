@@ -15,7 +15,15 @@ import {
 } from '@assistant/firestore';
 import { assistantModuleMetas } from '@assistant/modules/meta';
 import type { AgentReadinessSource } from '@assistant/persistence';
-import { policyLabels, policyScope, scheduleLabels } from '@/app/settings/labels';
+import {
+  phonePermissionAvailability,
+  phonePermissionKind,
+  phonePermissionLabel,
+  phonePermissionOpaqueDetails,
+  policyLabels,
+  policyScope,
+  scheduleLabels,
+} from '@/app/settings/labels';
 import { getSelfRepairOverview } from '@/lib/self-repair-server';
 import { readMobileWorkspaceSection } from './mobile-workspace-sections';
 import {
@@ -291,8 +299,23 @@ export async function getFirestoreMobileWorkspace(
             id: policy.id,
             toolName: policy.toolName,
             templateKey: policy.templateKey,
-            label: policyLabels[policy.templateKey] ?? null,
+            label:
+              policy.toolName === 'phone.call'
+                ? phonePermissionLabel(policy.templateKey, policy.match)
+                : (policyLabels[policy.templateKey] ?? null),
+            phonePermissionKind:
+              policy.toolName === 'phone.call'
+                ? phonePermissionKind(policy.templateKey, policy.match)
+                : null,
+            opaqueDetails:
+              policy.toolName === 'phone.call'
+                ? phonePermissionOpaqueDetails(policy.templateKey, policy.match)
+                : null,
             scope: policyScope(policy.templateKey, policy.match),
+            effectiveAvailability: phonePermissionAvailability(
+              policy,
+              config.PHONE_CALL_TO_OWNER_GRANT_ENABLED,
+            ),
             effect: policy.effect,
             enabled: policy.enabled,
             createdVia: policy.createdVia,

@@ -2,7 +2,15 @@ import { visibleWorkspaceCapabilityModules } from '@assistant/application';
 import { billingCoverageProjection } from '@assistant/application/provider-billing';
 import { loadConfig } from '@assistant/config';
 import { assistantModuleMetas } from '@assistant/modules/meta';
-import { policyLabels, policyScope, scheduleLabels } from '@/app/settings/labels';
+import {
+  phonePermissionAvailability,
+  phonePermissionKind,
+  phonePermissionLabel,
+  phonePermissionOpaqueDetails,
+  policyLabels,
+  policyScope,
+  scheduleLabels,
+} from '@/app/settings/labels';
 import { getAgentReadinessSource } from '@/lib/agent-readiness-source';
 import { capabilityStatus, getCapabilityDiagnostics } from '@/lib/capabilities';
 import { getFirestoreMobileWorkspace } from '@/lib/firestore-mobile-workspace';
@@ -333,8 +341,23 @@ export async function GET(request: Request): Promise<Response> {
                 id: policy.id,
                 toolName: policy.toolName,
                 templateKey: policy.templateKey,
-                label: policyLabels[policy.templateKey] ?? null,
+                label:
+                  policy.toolName === 'phone.call'
+                    ? phonePermissionLabel(policy.templateKey, policy.match)
+                    : (policyLabels[policy.templateKey] ?? null),
+                phonePermissionKind:
+                  policy.toolName === 'phone.call'
+                    ? phonePermissionKind(policy.templateKey, policy.match)
+                    : null,
+                opaqueDetails:
+                  policy.toolName === 'phone.call'
+                    ? phonePermissionOpaqueDetails(policy.templateKey, policy.match)
+                    : null,
                 scope: policyScope(policy.templateKey, policy.match),
+                effectiveAvailability: phonePermissionAvailability(
+                  policy,
+                  loadConfig().PHONE_CALL_TO_OWNER_GRANT_ENABLED,
+                ),
                 effect: policy.effect,
                 enabled: policy.enabled,
                 createdVia: policy.createdVia,

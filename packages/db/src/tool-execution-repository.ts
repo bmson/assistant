@@ -1,3 +1,4 @@
+import { configuredOwnerPhoneRecipientFingerprint } from '@assistant/config';
 import type {
   ApprovedToolCall,
   CachedToolCallInput,
@@ -10,15 +11,20 @@ import type {
 import {
   advanceExternalEffect,
   approvalPolicyFingerprint,
+  directOwnerCallRequestBinding,
   idempotencyIdentityDigest,
   MAX_APPROVAL_POLICY_SNAPSHOT_ROWS,
   mcpApprovalBindingFingerprint,
   modelToolCallIdentityDigest,
+  ownerAutonomyGrantBindingMatches,
+  phoneCallOwnerNumberGrantBindingMatches,
+  sameDirectOwnerCallRequestBinding,
   toolCallReceiptKeyId,
   toolCallReplayKeysForStart,
 } from '@assistant/persistence';
-import { and, eq, isNull, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, lte, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
+import { readPostgresOwnerCallRequest as ownerCallRequest } from './owner-call-request.js';
 import { createPostgresPhoneCalendarCompatibilityRepository } from './phone-calendar-compatibility.js';
 import { createPostgresPhoneCalendarSharingRepository } from './phone-calendar-sharing-repository.js';
 import { lockPostgresPrivacyObservationFence } from './privacy-erasure-repository.js';
@@ -126,6 +132,7 @@ async function load(
 export function createPostgresToolExecutionRepository(db: Db): ToolExecutionRepository {
   return {
     kind: 'tool-execution-repository',
+    ownerCallRequest: (agentId, taskId) => ownerCallRequest(db, agentId, taskId, 'running'),
     phoneCalendarSharing: createPostgresPhoneCalendarSharingRepository(db),
     phoneCalendarCompatibility: createPostgresPhoneCalendarCompatibilityRepository(db),
     load: (agentId, taskId, toolCallId) => load(db, agentId, taskId, toolCallId),
@@ -199,6 +206,7 @@ export function createPostgresToolExecutionRepository(db: Db): ToolExecutionRepo
             id: tasks.id,
             agentId: tasks.agentId,
             trust: tasks.trust,
+            autonomyGrant: tasks.autonomyGrant,
             status: tasks.status,
           })
           .from(tasks)
@@ -301,6 +309,63 @@ export function createPostgresToolExecutionRepository(db: Db): ToolExecutionRepo
             return markStaleAuthorization();
         } catch {
           return markStaleAuthorization();
+        }
+        if (input.expectedPhoneCallOwnerNumberGrant || input.expectedOwnerAutonomyGrant) {
+          let directOwnerRequest: Awaited<ReturnType<typeof ownerCallRequest>> = null;
+          if (input.expectedPhoneCallOwnerNumberGrant)
+            directOwnerRequest = await ownerCallRequest(
+              tx as unknown as Db,
+              input.agentId,
+              input.taskId,
+              'running',
+              true,
+            );
+          const [clock] = await tx.execute<{ now: Date | string }>(
+            sql`select clock_timestamp() as now`,
+          );
+          const repositoryNow =
+            clock?.now instanceof Date ? clock.now : new Date(clock?.now ?? NaN);
+          if (!Number.isFinite(repositoryNow.getTime())) return markStaleAuthorization();
+          if (input.expectedPhoneCallOwnerNumberGrant) {
+            if (
+              !sameDirectOwnerCallRequestBinding(
+                input.expectedPhoneCallOwnerNumberGrant.directOwnerRequest,
+                directOwnerRequest,
+              )
+            )
+              return markStaleAuthorization();
+            if (lockedTask.trust !== 'owner') return markStaleAuthorization();
+            const selected = policyRows.find(
+              (row) => row.id === input.expectedPhoneCallOwnerNumberGrant?.policyId,
+            );
+            const brief = (input.args as { brief?: { to?: unknown; maxMinutes?: unknown } }).brief;
+            if (
+              process.env.PHONE_CALL_TO_OWNER_GRANT_ENABLED !== 'true' ||
+              !phoneCallOwnerNumberGrantBindingMatches(
+                input.expectedPhoneCallOwnerNumberGrant,
+                selected ?? null,
+                input.agentId,
+                brief ?? {},
+                repositoryNow,
+                input.expectedPhoneCallOwnerNumberGrant.recipientAuthority.kind ===
+                  'configured_owner_phone'
+                  ? configuredOwnerPhoneRecipientFingerprint(
+                      input.expectedPhoneCallOwnerNumberGrant.match.recipientE164,
+                    )
+                  : null,
+              )
+            )
+              return markStaleAuthorization();
+          }
+          if (
+            input.expectedOwnerAutonomyGrant &&
+            !ownerAutonomyGrantBindingMatches(
+              input.expectedOwnerAutonomyGrant,
+              lockedTask,
+              repositoryNow,
+            )
+          )
+            return markStaleAuthorization();
         }
         if (current.toolCall.toolName === 'mcp.call') {
           const binding = input.expectedMcpBinding;
@@ -468,13 +533,38 @@ export function createPostgresToolExecutionRepository(db: Db): ToolExecutionRepo
       if (!keys) throw new Error('Tool replay identity is invalid');
       return db.transaction(async (tx) => {
         await lockPostgresPrivacyObservationFence(tx as unknown as Db, input.agentId);
+        if (!/^[a-f0-9]{64}$/.test(input.expectedPolicyFingerprint)) return null;
         const [task] = await tx
-          .select({ id: tasks.id, status: tasks.status })
+          .select({
+            id: tasks.id,
+            status: tasks.status,
+            trust: tasks.trust,
+            autonomyGrant: tasks.autonomyGrant,
+          })
           .from(tasks)
           .where(and(eq(tasks.id, input.taskId), eq(tasks.agentId, input.agentId)))
           .for('update')
           .limit(1);
         if (!task || ['done', 'failed', 'cancelled'].includes(task.status)) return null;
+        const policyRows = await tx
+          .select()
+          .from(approvalPolicies)
+          .where(
+            and(
+              eq(approvalPolicies.agentId, input.agentId),
+              eq(approvalPolicies.toolName, input.toolName),
+            ),
+          )
+          .orderBy(approvalPolicies.id)
+          .limit(MAX_APPROVAL_POLICY_SNAPSHOT_ROWS + 1)
+          .for('update');
+        if (policyRows.length > MAX_APPROVAL_POLICY_SNAPSHOT_ROWS) return null;
+        try {
+          if (approvalPolicyFingerprint(policyRows) !== input.expectedPolicyFingerprint)
+            return null;
+        } catch {
+          return null;
+        }
         await lockPostgresToolCallReceiptKeys(tx as unknown as Db, keys);
         for (const key of keys) {
           const [existing] = await tx
@@ -496,6 +586,59 @@ export function createPostgresToolExecutionRepository(db: Db): ToolExecutionRepo
             )
             .limit(1);
           if (existing) return null;
+        }
+        if (input.expectedPhoneCallOwnerNumberGrant || input.expectedOwnerAutonomyGrant) {
+          let directOwnerRequest: Awaited<ReturnType<typeof ownerCallRequest>> = null;
+          if (input.expectedPhoneCallOwnerNumberGrant)
+            directOwnerRequest = await ownerCallRequest(
+              tx as unknown as Db,
+              input.agentId,
+              input.taskId,
+              'running',
+              true,
+            );
+          const [clock] = await tx.execute<{ now: Date | string }>(
+            sql`select clock_timestamp() as now`,
+          );
+          const repositoryNow =
+            clock?.now instanceof Date ? clock.now : new Date(clock?.now ?? NaN);
+          if (!Number.isFinite(repositoryNow.getTime())) return null;
+          if (input.expectedPhoneCallOwnerNumberGrant) {
+            if (
+              !sameDirectOwnerCallRequestBinding(
+                input.expectedPhoneCallOwnerNumberGrant.directOwnerRequest,
+                directOwnerRequest,
+              )
+            )
+              return null;
+            if (task.trust !== 'owner') return null;
+            const selected = policyRows.find(
+              (row) => row.id === input.expectedPhoneCallOwnerNumberGrant?.policyId,
+            );
+            const brief = (input.args as { brief?: { to?: unknown; maxMinutes?: unknown } }).brief;
+            if (
+              process.env.PHONE_CALL_TO_OWNER_GRANT_ENABLED !== 'true' ||
+              !phoneCallOwnerNumberGrantBindingMatches(
+                input.expectedPhoneCallOwnerNumberGrant,
+                selected ?? null,
+                input.agentId,
+                brief ?? {},
+                repositoryNow,
+                input.expectedPhoneCallOwnerNumberGrant.recipientAuthority.kind ===
+                  'configured_owner_phone'
+                  ? configuredOwnerPhoneRecipientFingerprint(
+                      input.expectedPhoneCallOwnerNumberGrant.match.recipientE164,
+                    )
+                  : null,
+              )
+            )
+              return null;
+          }
+          if (
+            input.expectedOwnerAutonomyGrant &&
+            !ownerAutonomyGrantBindingMatches(input.expectedOwnerAutonomyGrant, task, repositoryNow)
+          )
+            return null;
         }
         const [row] = await tx
           .insert(toolCalls)

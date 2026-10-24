@@ -31,6 +31,9 @@ export interface ToolContext {
   tainted: boolean;
   /** Typed owner-authored intent; external text never contributes authorized scopes. */
   ownerIntent?: OwnerIntent;
+  /** Server-derived admission provenance used only by the C policy matcher. */
+  ownerCallRequest?: import('@assistant/persistence').DirectOwnerCallRequestBinding;
+  ownerCallRecipient?: string;
   /**
    * Email addresses and phone numbers the owner/thread actually provided (from
    * the seed conversation window + trigger payload). The dispatcher treats a

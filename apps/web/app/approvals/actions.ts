@@ -5,7 +5,14 @@ import {
   decideApproval,
   decideApprovals,
 } from '@assistant/application/approvals';
+import {
+  approveOwnerCallNumberGrant,
+  OWNER_CALL_GRANT_ACKNOWLEDGEMENT,
+  type OwnerCallGrantPreviewResult,
+  previewOwnerCallNumberGrant,
+} from '@assistant/application/phone-call-owner-grants';
 import { revalidatePath } from 'next/cache';
+import { deletePolicy, setPolicyEnabled } from '@/app/settings/actions';
 import { requireOwner } from '@/auth';
 import { withApprovalDecisionStore } from '@/lib/approval-store';
 
@@ -106,4 +113,92 @@ export async function editAndApprove(
 
   revalidateApprovalViews();
   return { error: null };
+}
+
+export type OwnerCallGrantActionState = {
+  error: string | null;
+  preview: Extract<OwnerCallGrantPreviewResult, { ok: true }> | null;
+  completed: boolean;
+};
+
+const emptyOwnerCallGrantActionState: OwnerCallGrantActionState = {
+  error: null,
+  preview: null,
+  completed: false,
+};
+
+export async function ownerCallNumberGrantAction(
+  approvalId: string,
+  _previous: OwnerCallGrantActionState,
+  formData: FormData,
+): Promise<OwnerCallGrantActionState> {
+  await requireOwner();
+  const keys = [...new Set([...formData.keys()])];
+  const mode = String(formData.get('mode') ?? '');
+  if (keys.some((key) => formData.getAll(key).length !== 1))
+    return {
+      ...emptyOwnerCallGrantActionState,
+      error: 'This review expired or changed. Review again.',
+    };
+  if (mode === 'review') {
+    if (keys.some((key) => !['mode', 'action', 'validityChoice'].includes(key)))
+      return { ...emptyOwnerCallGrantActionState, error: 'Review this call again.' };
+    const choice = String(formData.get('validityChoice') ?? '');
+    const validityDays = ({ '24h': 1, '7d': 7, '30d': 30 } as const)[
+      choice as '24h' | '7d' | '30d'
+    ];
+    if (formData.get('action') !== 'preview_reusable_call_v1' || !validityDays)
+      return {
+        ...emptyOwnerCallGrantActionState,
+        error: 'Choose a supported permission duration.',
+      };
+    const result = await withApprovalDecisionStore((store) =>
+      previewOwnerCallNumberGrant(store, approvalId, validityDays),
+    );
+    return result.ok
+      ? { error: null, preview: result, completed: false }
+      : { ...emptyOwnerCallGrantActionState, error: result.reason };
+  }
+  if (
+    mode !== 'approve' ||
+    keys.some(
+      (key) => !['mode', 'action', 'reviewToken', 'acknowledgement', 'confirmation'].includes(key),
+    ) ||
+    String(formData.get('action') ?? '') !== 'approve_reusable_call_v1' ||
+    String(formData.get('acknowledgement') ?? '') !== OWNER_CALL_GRANT_ACKNOWLEDGEMENT ||
+    String(formData.get('confirmation') ?? '') !== 'confirmed'
+  )
+    return { ...emptyOwnerCallGrantActionState, error: 'Review this call again.' };
+  try {
+    const reviewToken = String(formData.get('reviewToken') ?? '');
+    const result = await withApprovalDecisionStore((store) =>
+      approveOwnerCallNumberGrant(store, approvalId, reviewToken, OWNER_CALL_GRANT_ACKNOWLEDGEMENT),
+    );
+    if (!result.ok)
+      return {
+        ...emptyOwnerCallGrantActionState,
+        error: result.reason.includes('expired or changed')
+          ? 'This review expired or changed. Review again.'
+          : 'Could not confirm result. Refresh to check this call and saved permission before trying again.',
+      };
+    revalidatePath('/settings');
+    revalidateApprovalViews();
+    return { error: null, preview: null, completed: true };
+  } catch {
+    return {
+      ...emptyOwnerCallGrantActionState,
+      error:
+        'Could not confirm result. Refresh to check this call and saved permission before trying again.',
+    };
+  }
+}
+
+export async function pauseSavedCallPermission(policyId: string): Promise<void> {
+  await setPolicyEnabled(policyId, false);
+  revalidateApprovalViews();
+}
+
+export async function deleteSavedCallPermission(policyId: string): Promise<void> {
+  await deletePolicy(policyId);
+  revalidateApprovalViews();
 }
