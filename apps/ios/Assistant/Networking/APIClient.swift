@@ -750,6 +750,7 @@ struct APIClient: Sendable {
     func workspace() async throws -> WorkspaceResponse {
         var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/workspace"))
         request.setValue("1", forHTTPHeaderField: "x-assistant-workspace-sections")
+        request.setValue("1", forHTTPHeaderField: "x-assistant-billing-amounts")
         return try await perform(request, as: WorkspaceResponse.self)
     }
 

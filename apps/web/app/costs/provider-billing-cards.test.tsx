@@ -15,6 +15,8 @@ const report: ProviderBilling = {
   source: 'Cloud Billing export',
   message: 'Export is not connected.',
   fetchedAt: null,
+  checkedAt: null,
+  periodTimezone: 'UTC',
   latestExportAt: null,
   latestUsageAt: null,
   lines: [],
@@ -58,6 +60,10 @@ describe('provider billing presentation', () => {
     expect(html).toContain('Open Google Cloud Billing');
     expect(html).toContain('Project: assistant');
     expect(html).toContain('Missing costs are unknown, not zero.');
+    expect(html).toContain('Last checked: time not reported');
+    expect(html).toContain('Fetched: time not reported');
+    expect(html).toContain('Latest export: time not reported');
+    expect(html).toContain('Latest usage: time not reported');
     const setupDetails = html.indexOf('<details');
     expect(html.indexOf('Open Google Cloud Billing')).toBeLessThan(setupDetails);
     expect(html.indexOf('Export setup steps and guide')).toBeGreaterThan(setupDetails);
@@ -95,6 +101,7 @@ describe('provider billing presentation', () => {
             ...report,
             status: 'stale',
             fetchedAt: '2026-09-26T00:00:00.000Z',
+            checkedAt: '2026-09-26T00:05:00.000Z',
             lines: [
               {
                 service: 'Cloud Firestore',
@@ -114,7 +121,8 @@ describe('provider billing presentation', () => {
     expect(html).toContain('€3.00');
     expect(html).toContain('-$2.00');
     expect(html).toContain('Stale');
-    expect(html).toContain('Fetched 2026-09-26');
+    expect(html).toContain('Fetched: Sep 26, 2026, 12:00 AM UTC');
+    expect(html).toContain('Last checked: Sep 26, 2026, 12:05 AM UTC');
     expect(html).not.toContain('$11.00');
   });
 
@@ -127,6 +135,7 @@ describe('provider billing presentation', () => {
             status: 'stale',
             message: 'Delayed export; latest usage is not complete.',
             fetchedAt: '2026-09-26T00:00:00.000Z',
+            checkedAt: '2026-09-26T00:05:00.000Z',
             latestExportAt: '2026-09-25T03:00:00Z',
             latestUsageAt: '2026-09-24T00:00:00Z',
             lines: [
@@ -158,6 +167,7 @@ describe('provider billing presentation', () => {
       '$9.00',
       'Project: assistant',
       '2026-09',
+      'UTC period',
       'Cloud Billing export',
       'Delayed export; latest usage is not complete.',
       'Latest export',
@@ -178,6 +188,73 @@ describe('provider billing presentation', () => {
     ]) {
       expect(html.indexOf(detailFact)).toBeGreaterThan(detailsStart);
     }
+  });
+
+  it('renders safe setup guidance and preserves project and API-key attribution', () => {
+    const html = renderToStaticMarkup(
+      <ProviderBillingCards
+        reports={[
+          {
+            ...report,
+            setup: {
+              code: 'Export setup · code BILLING_EXPORT',
+              steps: ['Create the standard export.', 'Grant this installation read access.'],
+            },
+            lines: [
+              {
+                service: 'Cloud Run',
+                detail: 'regional usage',
+                currency: 'USD',
+                cost: 2,
+                credits: 0,
+                net: 2,
+                projectId: 'assistant-prod',
+                apiKeyId: 'key-label-7',
+              },
+              {
+                service: 'Cloud Run',
+                detail: 'regional usage',
+                currency: 'USD',
+                cost: 3,
+                credits: 0,
+                net: 3,
+                projectId: 'assistant-staging',
+                apiKeyId: 'key-label-8',
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+    const detailsStart = html.indexOf('<details');
+    expect(detailsStart).toBeGreaterThan(-1);
+    expect(html.indexOf('Review billing setup')).toBeGreaterThan(detailsStart);
+    expect(html).not.toContain('BILLING_EXPORT');
+    expect(html.indexOf('Create the standard export.')).toBeGreaterThan(detailsStart);
+    expect(html.indexOf('Grant this installation read access.')).toBeGreaterThan(detailsStart);
+    expect(html.indexOf('Project: assistant-prod')).toBeGreaterThan(detailsStart);
+    expect(html.indexOf('API key ID: key-label-7')).toBeGreaterThan(detailsStart);
+    expect(html.indexOf('Project: assistant-staging')).toBeGreaterThan(detailsStart);
+    expect(html.indexOf('API key ID: key-label-8')).toBeGreaterThan(detailsStart);
+  });
+
+  it('does not imply a timezone or timestamp when the source omits them', () => {
+    const html = renderToStaticMarkup(
+      <ProviderBillingCards
+        reports={[
+          {
+            ...report,
+            periodTimezone: undefined,
+            checkedAt: '2026-09-26T00:05:00',
+            fetchedAt: null,
+          },
+        ]}
+      />,
+    );
+    expect(html).toContain('2026-09 · period timezone not reported · Cloud Billing export');
+    expect(html).toContain('Last checked: 2026-09-26T00:05:00 (timezone not provided)');
+    expect(html).toContain('Fetched: time not reported');
+    expect(html).not.toContain('Last checked: Sep 26, 2026');
   });
 });
 
@@ -246,4 +323,37 @@ it('preserves nonzero sub-cent totals and credits instead of displaying zero', (
   expect(html).toContain('$0.0006');
   expect(html).toContain('-$0.0002');
   expect(html).not.toMatch(/>\$0\.00</);
+});
+
+it('labels amount-only OpenAI costs without inventing credit or net breakdowns or an observed horizon', () => {
+  const html = renderToStaticMarkup(
+    <ProviderBillingCards
+      reports={[
+        {
+          ...report,
+          id: 'openai-billing',
+          label: 'OpenAI organization',
+          status: 'reported',
+          amountBasis: 'provider_reported_cost',
+          latestExportAt: null,
+          latestUsageAt: null,
+          lines: [
+            {
+              service: 'OpenAI',
+              detail: 'Text input',
+              currency: 'USD',
+              cost: 1,
+              credits: 0,
+              net: 1,
+            },
+          ],
+        },
+      ]}
+    />,
+  );
+  expect(html).toContain('Reported cost');
+  expect(html.match(/Not reported/g)).toHaveLength(2);
+  expect(html).not.toContain('$0.00');
+  expect(html).toContain('source usage freshness is not reported');
+  expect(html).not.toContain('Observed');
 });

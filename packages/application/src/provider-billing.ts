@@ -13,6 +13,7 @@ export interface BillingLine {
   credits: number;
   net: number;
   projectId?: string;
+  apiKeyId?: string;
 }
 
 /** Provider statements and the operation ledger overlap. Never add them together. */
@@ -25,11 +26,42 @@ export interface ProviderBilling {
   source: string;
   message: string;
   fetchedAt: string | null;
+  /** Time the provider feed was checked, including a failed refresh attempt. */
+  checkedAt?: string | null;
+  /** Timezone used for the reporting period boundaries. */
+  periodTimezone?: 'UTC';
+  /** Amount-only sources do not report a separate credit or net-after-credits breakdown. */
+  amountBasis?: 'provider_reported_cost';
+  /** Safe, actionable configuration guidance; never includes credential values. */
+  setup?: { code: string; steps: string[] };
   latestExportAt: string | null;
   latestUsageAt: string | null;
   lines: BillingLine[];
   includedIn?: string;
   forecast?: BillingForecast;
+}
+
+/**
+ * Older mobile clients model reported amounts as cost, credits, and net.
+ * Those DTO fields cannot represent an unreported breakdown without inventing
+ * zeros, so hide amount-only feeds unless the client advertises support.
+ */
+export function projectBillingForMobile(
+  reports: ProviderBilling[],
+  supportsAmountOnly: boolean,
+): ProviderBilling[] {
+  if (supportsAmountOnly) return reports;
+  return reports.map((report) =>
+    report.amountBasis === 'provider_reported_cost'
+      ? {
+          ...report,
+          status: 'unavailable' as const,
+          lines: [],
+          forecast: undefined,
+          message: `${report.message} Update the app to view the reported-cost breakdown.`,
+        }
+      : report,
+  );
 }
 
 export type BillingCoverageState =
@@ -137,12 +169,12 @@ export function billingCoverageProjection(reports: ProviderBilling[]): BillingCo
     },
     {
       id: 'direct-model-providers',
-      label: 'Direct OpenAI and custom model providers (if used)',
+      label: 'Unverified model-provider coverage',
       state: 'ledger_only',
-      scope: 'Model usage ledger',
+      scope: 'Selected OpenAI organization scope and custom provider gateways',
       detail: [
-        'When these providers are used, their invoices are not imported.',
-        'The usage ledger records provider-reported amounts when available and configured-rate estimates otherwise.',
+        'The OpenAI organization Costs feed reports only its selected project and API-key filters; it does not prove every model connection is covered.',
+        'Custom provider gateway invoices are not imported. The usage ledger records provider-reported amounts when available and configured-rate estimates otherwise; those can overlap provider bills.',
       ].join(' '),
     },
     {
@@ -199,7 +231,10 @@ export interface BillingForecast {
 /** A transparent run rate, never an invoice prediction or an extrapolated stale snapshot. */
 export function billingForecast(report: ProviderBilling): BillingForecast | undefined {
   if (report.status !== 'reported' || !report.lines.length) return;
-  const through = report.id === 'google-cloud' ? report.latestUsageAt : report.fetchedAt;
+  const through =
+    report.id === 'google-cloud' || report.id === 'openai-billing'
+      ? report.latestUsageAt
+      : report.fetchedAt;
   if (!through || !/^\d{4}-\d{2}$/.test(report.period)) return;
   const start = Date.parse(`${report.period}-01T00:00:00Z`);
   const end = new Date(start);
@@ -233,7 +268,16 @@ export type BillingConfig = Pick<
   | 'GCP_BILLING_LOCATION'
   | 'GCP_BILLING_SCOPE'
   | 'GCP_BILLING_MAX_BYTES'
->;
+> &
+  Partial<
+    Pick<
+      Config,
+      | 'OPENAI_BILLING_ADMIN_KEY_ENCRYPTED'
+      | 'OPENAI_BILLING_PROJECT_IDS'
+      | 'OPENAI_BILLING_API_KEY_IDS'
+      | 'OPENAI_BILLING_ACCOUNT_LABEL'
+    >
+  >;
 export type BillingCache = Pick<ToolExecutionRepository, 'cacheGet' | 'cachePut'>;
 export interface BillingPorts {
   models: ModelProviderPorts;
@@ -274,6 +318,8 @@ function empty(
     status: 'unavailable',
     message: '',
     fetchedAt: null,
+    checkedAt: null,
+    periodTimezone: 'UTC',
     latestExportAt: null,
     latestUsageAt: null,
     lines: [],
@@ -337,6 +383,7 @@ async function cached(
     let report: ProviderBilling;
     try {
       report = await load();
+      report = { ...report, checkedAt: now.toISOString() };
     } catch {
       // Never forward HTTP/auth errors: they may contain a request credential.
       const previous =
@@ -345,12 +392,14 @@ async function cached(
         ? {
             ...previous,
             status: 'stale',
+            checkedAt: now.toISOString(),
             message:
               'Refresh failed. Showing the last successful provider snapshot; check credentials, permissions and export settings.',
           }
         : {
             ...base,
             status: 'unavailable',
+            checkedAt: now.toISOString(),
             message:
               'Provider data could not be loaded. Check credentials, permissions and export settings. Missing spend is not zero.',
           };
@@ -411,6 +460,216 @@ const openrouterKey = z.object({
     byok_usage_monthly: z.number().finite().nonnegative().optional(),
   }),
 });
+
+const BILLING_AMOUNT_LIMIT = Number.MAX_SAFE_INTEGER / 1_000_000;
+
+const openAICostResult = z.object({
+  object: z.literal('organization.costs.result'),
+  amount: z.object({
+    value: z.number().finite().min(-BILLING_AMOUNT_LIMIT).max(BILLING_AMOUNT_LIMIT),
+    currency: z.string().regex(/^[A-Za-z]{3}$/),
+  }),
+  line_item: z.string().nullable().optional(),
+  project_id: z.string().nullable().optional(),
+  api_key_id: z.string().nullable().optional(),
+});
+
+const openAICostPage = z.object({
+  data: z.array(
+    z.object({
+      object: z.literal('bucket').optional(),
+      start_time: z.number().finite().int(),
+      end_time: z.number().finite().int(),
+      results: z.array(openAICostResult),
+    }),
+  ),
+  has_more: z.boolean(),
+  next_page: z.string().nullable().optional(),
+});
+
+const OPENAI_BILLING_PAGE_LIMIT = 32;
+const OPENAI_BILLING_RESULT_LIMIT = 20_000;
+
+function validateIds(values: string[], prefix: 'proj_' | 'key_'): string[] {
+  const ids = [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+  if (
+    ids.length > 25 ||
+    ids.some(
+      (id) =>
+        !id.startsWith(prefix) ||
+        id.length <= prefix.length ||
+        id.length > 128 ||
+        !/^[A-Za-z0-9_-]+$/.test(id),
+    )
+  )
+    throw new Error('Invalid OpenAI billing filter');
+  return ids;
+}
+
+function configuredIds(value: string, prefix: 'proj_' | 'key_'): string[] {
+  return validateIds(value.split(','), prefix);
+}
+
+function safeOpenAIAccountLabel(value: string | undefined): string {
+  const label = (value ?? '').trim().slice(0, 80);
+  // Avoid echoing pasted API credentials in a decorative label or report scope.
+  if (/\bsk[-_][A-Za-z0-9_-]{8,}/i.test(label)) return '';
+  return label;
+}
+
+function isOpenAIAdminKey(value: string): boolean {
+  return /^sk-admin-[A-Za-z0-9_-]{8,512}$/.test(value.trim());
+}
+
+/** Fetches only official organization Costs data inside an explicitly selected project/key scope. */
+export async function readOpenAIBilling(
+  request: typeof fetch,
+  adminKey: string,
+  base: ProviderBilling,
+  now: Date,
+  projectIds: string[],
+  apiKeyIds: string[],
+): Promise<ProviderBilling> {
+  // Keep this exported boundary safe even when called outside getProviderBilling.
+  if (!isOpenAIAdminKey(adminKey)) throw new Error('Invalid OpenAI billing credential');
+  adminKey = adminKey.trim();
+  projectIds = validateIds(projectIds, 'proj_');
+  apiKeyIds = validateIds(apiKeyIds, 'key_');
+  if (!projectIds.length && !apiKeyIds.length) throw new Error('Missing OpenAI billing scope');
+  const start = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1) / 1_000);
+  const end = Math.floor(now.getTime() / 1_000);
+  if (!Number.isFinite(end) || end < start) throw new Error('Invalid OpenAI billing period');
+
+  const grouped = new Map<
+    string,
+    { projectId?: string; apiKeyId?: string; lineItem: string; currency: string; amount: number }
+  >();
+  const seenCursors = new Set<string>();
+  const seenBuckets: Array<{ start: number; end: number }> = [];
+  let cursor: string | undefined;
+  let resultCount = 0;
+
+  for (let pageIndex = 0; pageIndex < OPENAI_BILLING_PAGE_LIMIT; pageIndex++) {
+    const query = new URLSearchParams({
+      start_time: String(start),
+      end_time: String(end),
+      bucket_width: '1d',
+      limit: '31',
+    });
+    for (const field of ['project_id', 'api_key_id', 'line_item']) query.append('group_by', field);
+    for (const projectId of projectIds) query.append('project_ids', projectId);
+    for (const apiKeyId of apiKeyIds) query.append('api_key_ids', apiKeyId);
+    if (cursor) query.set('page', cursor);
+
+    const page = openAICostPage.parse(
+      await json(request, `https://api.openai.com/v1/organization/costs?${query}`, {
+        headers: { Authorization: `Bearer ${adminKey}` },
+      }),
+    );
+    for (const bucket of page.data) {
+      if (
+        bucket.start_time < start ||
+        bucket.start_time >= end ||
+        bucket.end_time <= bucket.start_time
+      )
+        throw new Error('OpenAI billing bucket is outside the selected period');
+      if (
+        seenBuckets.some(
+          (existing) => bucket.start_time < existing.end && bucket.end_time > existing.start,
+        )
+      )
+        throw new Error('OpenAI billing pages contain overlapping buckets');
+      seenBuckets.push({ start: bucket.start_time, end: bucket.end_time });
+      for (const result of bucket.results) {
+        resultCount += 1;
+        if (resultCount > OPENAI_BILLING_RESULT_LIMIT)
+          throw new Error('OpenAI billing result limit exceeded');
+        const projectId = result.project_id ?? undefined;
+        const apiKeyId = result.api_key_id ?? undefined;
+        // A filtered response with missing or out-of-scope identities is not safe to publish.
+        if (
+          (projectIds.length && (!projectId || !projectIds.includes(projectId))) ||
+          (apiKeyIds.length && (!apiKeyId || !apiKeyIds.includes(apiKeyId)))
+        )
+          throw new Error('OpenAI billing row is outside the selected scope');
+        const lineItem = result.line_item?.trim() || 'Unclassified cost';
+        const key = JSON.stringify([
+          projectId ?? null,
+          apiKeyId ?? null,
+          lineItem,
+          result.amount.currency.toUpperCase(),
+        ]);
+        const existing = grouped.get(key);
+        if (existing) {
+          existing.amount += result.amount.value;
+          if (!Number.isFinite(existing.amount) || Math.abs(existing.amount) > BILLING_AMOUNT_LIMIT)
+            throw new Error('OpenAI billing amount overflow');
+        } else
+          grouped.set(key, {
+            ...(projectId ? { projectId } : {}),
+            ...(apiKeyId ? { apiKeyId } : {}),
+            lineItem,
+            currency: result.amount.currency.toUpperCase(),
+            amount: result.amount.value,
+          });
+      }
+    }
+    if (!page.has_more) {
+      const lines: BillingLine[] = [...grouped.values()].map((row) => ({
+        service: 'OpenAI',
+        detail: [row.projectId, row.apiKeyId, row.lineItem].filter(Boolean).join(' · '),
+        currency: row.currency,
+        cost: row.amount,
+        // Numeric aliases retain compatibility with older mobile decoders.
+        // amountBasis explicitly marks credits/net breakdown as unreported.
+        credits: 0,
+        net: row.amount,
+        ...(row.projectId ? { projectId: row.projectId } : {}),
+        ...(row.apiKeyId ? { apiKeyId: row.apiKeyId } : {}),
+      }));
+      return {
+        ...base,
+        status: lines.length ? 'reported' : 'unavailable',
+        fetchedAt: now.toISOString(),
+        checkedAt: now.toISOString(),
+        amountBasis: 'provider_reported_cost',
+        // Costs buckets are daily boundaries, not source-update timestamps.
+        latestExportAt: null,
+        latestUsageAt: null,
+        lines,
+        message: lines.length
+          ? 'OpenAI reported usage cost for the selected project and API-key filters, grouped by line item, for this UTC month. Separate credits and net-after-credits amounts are not reported. This organization feed does not prove that every configured OpenAI connection is covered.'
+          : 'The selected OpenAI Costs scope returned no priced rows for this UTC month. Spend is unavailable, not zero.',
+      };
+    }
+    if (!page.next_page?.trim() || seenCursors.has(page.next_page))
+      throw new Error('OpenAI billing pagination is incomplete');
+    seenCursors.add(page.next_page);
+    cursor = page.next_page;
+  }
+  throw new Error('OpenAI billing results exceed the supported page limit');
+}
+
+function googleBillingSetup(config: BillingConfig): ProviderBilling['setup'] | undefined {
+  if (!config.GCP_BILLING_EXPORT_TABLE)
+    return {
+      code: 'google_billing_export_missing',
+      steps: [
+        'Create a Google Cloud Billing BigQuery export.',
+        'Set the export table and grant the web service query and dataset read access.',
+      ],
+    };
+  if (!/^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+$/.test(config.GCP_BILLING_EXPORT_TABLE))
+    return {
+      code: 'google_billing_export_table_invalid',
+      steps: ['Set the export table as project.dataset.table using valid BigQuery identifiers.'],
+    };
+  if (config.GCP_BILLING_SCOPE === 'project' && !config.GCP_PROJECT)
+    return {
+      code: 'google_billing_project_missing',
+      steps: ['Set the Google Cloud project used as the billing filter or choose account scope.'],
+    };
+}
 
 export async function readOpenRouterBilling(
   request: typeof fetch,
@@ -504,7 +763,7 @@ function amount(value: unknown): number {
   if (typeof value !== 'string' || !/^-?\d+(?:\.\d+)?$/.test(value))
     throw new Error('Invalid billing amount');
   const result = Number(value);
-  if (!Number.isFinite(result) || Math.abs(result) > Number.MAX_SAFE_INTEGER / 1_000_000)
+  if (!Number.isFinite(result) || Math.abs(result) > BILLING_AMOUNT_LIMIT)
     throw new Error('Billing amount overflow');
   return result;
 }
@@ -627,14 +886,149 @@ export async function getProviderBilling(ports: BillingPorts): Promise<ProviderB
       : 'Billing export account (all projects)',
     'Google Cloud Billing export',
   );
-  const google = config.GCP_BILLING_EXPORT_TABLE
-    ? cached(ports, base, ['google', config], () => readGoogleBilling(ports, base, now))
-    : Promise.resolve({
+  const googleSetup = googleBillingSetup(config);
+  const google = googleSetup
+    ? Promise.resolve({
         ...base,
-        status: 'not_configured' as const,
+        status:
+          googleSetup.code === 'google_billing_export_missing' ||
+          googleSetup.code === 'google_billing_project_missing'
+            ? ('not_configured' as const)
+            : ('unavailable' as const),
+        setup: googleSetup,
         message:
-          'Connect a Cloud Billing BigQuery export to see database, models, hosting, storage and other Google Cloud services.',
-      });
+          'Google Cloud billing export setup is incomplete. Missing spend is unknown, not zero.',
+      })
+    : cached(
+        ports,
+        base,
+        [
+          'google',
+          config.GCP_PROJECT,
+          config.GCP_BILLING_EXPORT_TABLE,
+          config.GCP_BILLING_QUERY_PROJECT,
+          config.GCP_BILLING_LOCATION,
+          config.GCP_BILLING_SCOPE,
+          config.GCP_BILLING_MAX_BYTES,
+        ],
+        () => readGoogleBilling(ports, base, now),
+      );
+
+  const openAIBillingFieldsPresent = Boolean(
+    config.OPENAI_BILLING_ADMIN_KEY_ENCRYPTED ||
+      config.OPENAI_BILLING_PROJECT_IDS ||
+      config.OPENAI_BILLING_API_KEY_IDS ||
+      config.OPENAI_BILLING_ACCOUNT_LABEL,
+  );
+  const openAIBillingBase = (): ProviderBilling => {
+    const accountLabel = safeOpenAIAccountLabel(config.OPENAI_BILLING_ACCOUNT_LABEL);
+    const projectIds = (() => {
+      try {
+        return configuredIds(config.OPENAI_BILLING_PROJECT_IDS ?? '', 'proj_');
+      } catch {
+        return [];
+      }
+    })();
+    const apiKeyIds = (() => {
+      try {
+        return configuredIds(config.OPENAI_BILLING_API_KEY_IDS ?? '', 'key_');
+      } catch {
+        return [];
+      }
+    })();
+    const filterDescription = [
+      projectIds.length ? `Projects: ${projectIds.join(', ')}` : '',
+      apiKeyIds.length ? `API keys: ${apiKeyIds.join(', ')}` : '',
+    ]
+      .filter(Boolean)
+      .join('; ');
+    return empty(
+      'openai-billing',
+      accountLabel ? `OpenAI · ${accountLabel}` : 'OpenAI organization',
+      period,
+      filterDescription
+        ? `Configured organization scope · ${filterDescription}`
+        : 'Organization scope not selected',
+      'OpenAI Costs API',
+    );
+  };
+  const openAIBilling = (hasOpenAIConnection: boolean): Promise<ProviderBilling> => {
+    const hasAnySetup = openAIBillingFieldsPresent || hasOpenAIConnection;
+    if (!hasAnySetup) return Promise.resolve(openAIBillingBase());
+    const report = openAIBillingBase();
+    const setupResult = (
+      code: string,
+      steps: string[],
+      status: ProviderBilling['status'] = 'not_configured',
+    ) => ({
+      ...report,
+      status,
+      setup: { code, steps },
+      message:
+        'OpenAI organization spend is not reported until the selected project or API-key scope and billing credential are configured. OpenAI connection costs remain unknown, not zero.',
+    });
+    const encryptedKey = config.OPENAI_BILLING_ADMIN_KEY_ENCRYPTED;
+    if (!encryptedKey)
+      return Promise.resolve(
+        setupResult('openai_admin_key_missing', [
+          'Configure a dedicated OpenAI organization admin key for billing; do not reuse a model API key.',
+          'Set one or more OpenAI project IDs or API-key IDs to define the billing scope.',
+        ]),
+      );
+
+    let projectIds: string[];
+    let apiKeyIds: string[];
+    try {
+      projectIds = configuredIds(config.OPENAI_BILLING_PROJECT_IDS ?? '', 'proj_');
+      apiKeyIds = configuredIds(config.OPENAI_BILLING_API_KEY_IDS ?? '', 'key_');
+    } catch {
+      return Promise.resolve(
+        setupResult('openai_scope_invalid', [
+          'Use comma-separated OpenAI project IDs and/or API-key IDs containing only letters, numbers, underscores, or hyphens.',
+        ]),
+      );
+    }
+    if (!projectIds.length && !apiKeyIds.length)
+      return Promise.resolve(
+        setupResult('openai_scope_missing', [
+          'Set one or more OpenAI project IDs or API-key IDs; unfiltered organization-wide costs are not queried.',
+        ]),
+      );
+
+    let adminKey: string;
+    try {
+      adminKey = ports.models.open(encryptedKey);
+    } catch {
+      return Promise.resolve(
+        setupResult(
+          'openai_admin_key_unavailable',
+          ['Re-enter the dedicated OpenAI organization admin billing key in server configuration.'],
+          'unavailable',
+        ),
+      );
+    }
+    if (!isOpenAIAdminKey(adminKey))
+      return Promise.resolve(
+        setupResult(
+          'openai_admin_key_unavailable',
+          ['Re-enter the dedicated OpenAI organization admin billing key in server configuration.'],
+          'unavailable',
+        ),
+      );
+
+    return cached(
+      ports,
+      report,
+      [
+        'openai-costs-v1',
+        adminKey,
+        projectIds,
+        apiKeyIds,
+        config.OPENAI_BILLING_ACCOUNT_LABEL ?? '',
+      ],
+      () => readOpenAIBilling(ports.fetch ?? fetch, adminKey, report, now, projectIds, apiKeyIds),
+    );
+  };
   if (connectionsUnavailable)
     return [
       await google,
@@ -648,6 +1042,7 @@ export async function getProviderBilling(ports: BillingPorts): Promise<ProviderB
         ),
         message: 'Model provider connections could not be loaded. Billing coverage is unavailable.',
       },
+      ...(openAIBillingFieldsPresent ? [await openAIBilling(false)] : []),
     ];
   if (
     !connections.some((row) => row.id === 'openrouter') &&
@@ -730,6 +1125,13 @@ export async function getProviderBilling(ports: BillingPorts): Promise<ProviderB
         message,
       };
     }
+    if (connection.kind === 'openai')
+      return {
+        ...report,
+        status: 'unavailable' as const,
+        message:
+          'This OpenAI connection is not separately attributed. See the OpenAI organization billing feed for its selected project and API-key scope; that feed does not prove every connection is covered.',
+      };
     if (connection.kind !== 'openrouter')
       return {
         ...report,
@@ -755,6 +1157,12 @@ export async function getProviderBilling(ports: BillingPorts): Promise<ProviderB
       readOpenRouterBilling(ports.fetch ?? fetch, key, report, now),
     );
   });
-  const result = await Promise.all([googleReport, ...reports]);
+  const hasOpenAIConnection = connections.some((connection) => connection.kind === 'openai');
+  const includeOpenAIFeed = hasOpenAIConnection || openAIBillingFieldsPresent;
+  const result = await Promise.all([
+    googleReport,
+    ...reports,
+    ...(includeOpenAIFeed ? [openAIBilling(hasOpenAIConnection)] : []),
+  ]);
   return result.map((report) => ({ ...report, forecast: billingForecast(report) }));
 }

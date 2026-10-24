@@ -7,7 +7,9 @@ import {
   getProviderBilling,
   googleBillingQuery,
   type ProviderBilling,
+  projectBillingForMobile,
   readGoogleBilling,
+  readOpenAIBilling,
   readOpenRouterBilling,
 } from './provider-billing.js';
 
@@ -36,6 +38,10 @@ function ports(): BillingPorts {
       GCP_BILLING_LOCATION: 'US',
       GCP_BILLING_SCOPE: 'project',
       GCP_BILLING_MAX_BYTES: 1_000_000_000,
+      OPENAI_BILLING_ADMIN_KEY_ENCRYPTED: '',
+      OPENAI_BILLING_PROJECT_IDS: '',
+      OPENAI_BILLING_API_KEY_IDS: '',
+      OPENAI_BILLING_ACCOUNT_LABEL: '',
     },
     models: {
       config: {
@@ -314,6 +320,430 @@ describe('month-end run rate', () => {
     ]);
   });
 
+  it('queries only the explicitly filtered OpenAI Costs scope and aggregates all daily pages', async () => {
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    p.config.OPENAI_BILLING_ADMIN_KEY_ENCRYPTED = 'sealed-admin-key';
+    p.config.OPENAI_BILLING_PROJECT_IDS = 'proj_a, proj_b';
+    p.config.OPENAI_BILLING_API_KEY_IDS = 'key_a';
+    p.models.open = vi.fn(() => 'sk-admin-test-secretvalue');
+    const bucket = (amount: number, currency = 'usd', day = 1) => ({
+      object: 'bucket',
+      start_time: Math.floor(Date.parse(`2026-09-0${day}T00:00:00Z`) / 1_000),
+      end_time: Math.floor(Date.parse(`2026-09-0${day + 1}T00:00:00Z`) / 1_000),
+      results: [
+        {
+          object: 'organization.costs.result',
+          amount: { value: amount, currency },
+          line_item: 'Text input',
+          project_id: 'proj_a',
+          api_key_id: 'key_a',
+        },
+      ],
+    });
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response({ data: [bucket(0.25)], has_more: true, next_page: 'cursor-1' }),
+      )
+      .mockResolvedValueOnce(
+        response({ data: [bucket(0.75, 'usd', 2)], has_more: false, next_page: null }),
+      );
+    p.fetch = request;
+
+    const report = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(report).toMatchObject({
+      status: 'reported',
+      periodTimezone: 'UTC',
+      checkedAt: now.toISOString(),
+      latestUsageAt: null,
+      latestExportAt: null,
+      lines: [
+        {
+          currency: 'USD',
+          cost: 1,
+          credits: 0,
+          net: 1,
+          projectId: 'proj_a',
+          apiKeyId: 'key_a',
+          detail: 'proj_a · key_a · Text input',
+        },
+      ],
+    });
+    expect(report?.message).toContain(
+      'does not prove that every configured OpenAI connection is covered',
+    );
+    expect(report?.scope).toBe(
+      'Configured organization scope · Projects: proj_a, proj_b; API keys: key_a',
+    );
+    expect(report?.amountBasis).toBe('provider_reported_cost');
+    expect(report?.forecast).toBeUndefined();
+    expect(report?.message).toContain(
+      'Separate credits and net-after-credits amounts are not reported',
+    );
+    expect(request).toHaveBeenCalledTimes(2);
+    const [firstUrl, firstInit] = request.mock.calls[0] as [string, RequestInit];
+    const query = new URL(firstUrl).searchParams;
+    expect(new URL(firstUrl).origin + new URL(firstUrl).pathname).toBe(
+      'https://api.openai.com/v1/organization/costs',
+    );
+    expect(query.get('start_time')).toBe(
+      String(Math.floor(Date.parse('2026-09-01T00:00:00Z') / 1_000)),
+    );
+    expect(query.get('end_time')).toBe(String(Math.floor(now.getTime() / 1_000)));
+    expect(query.getAll('group_by')).toEqual(['project_id', 'api_key_id', 'line_item']);
+    expect(query.getAll('project_ids')).toEqual(['proj_a', 'proj_b']);
+    expect(query.getAll('api_key_ids')).toEqual(['key_a']);
+    expect(query.get('bucket_width')).toBe('1d');
+    expect(query.get('limit')).toBe('31');
+    expect(query.get('page')).toBeNull();
+    expect(firstInit.headers).toEqual({ Authorization: 'Bearer sk-admin-test-secretvalue' });
+    expect(new URL(request.mock.calls[1]?.[0] as string).searchParams.get('page')).toBe('cursor-1');
+    expect(JSON.stringify(report)).not.toContain('sk-admin-test-secretvalue');
+  });
+
+  it('requires an explicit project or API-key filter and never uses the model connection host or key', async () => {
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    p.config.OPENAI_BILLING_ADMIN_KEY_ENCRYPTED = 'sealed-admin-key';
+    vi.mocked(p.models.connections.list).mockResolvedValue([
+      {
+        id: 'openai-models',
+        kind: 'openai',
+        label: 'OpenAI models',
+        apiKeyEncrypted: 'model-key-sealed',
+        baseUrl: 'https://custom-model-host.example/v1',
+        enabled: true,
+        vertexLocation: null,
+        vertexProject: null,
+        lastTestedAt: null,
+        lastError: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]);
+    p.models.open = vi.fn((sealed) =>
+      sealed === 'sealed-admin-key' ? 'sk-admin-test-secretvalue' : 'model-api-secret',
+    );
+    const request = vi.fn();
+    p.fetch = request;
+    const missing = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(missing?.status).toBe('not_configured');
+    expect(missing?.setup?.code).toBe('openai_scope_missing');
+    expect(request).not.toHaveBeenCalled();
+
+    p.config.OPENAI_BILLING_PROJECT_IDS = 'proj_a';
+    request.mockResolvedValue(
+      response({
+        data: [
+          {
+            start_time: Math.floor(Date.parse('2026-09-01T00:00:00Z') / 1_000),
+            end_time: Math.floor(Date.parse('2026-09-02T00:00:00Z') / 1_000),
+            results: [
+              {
+                object: 'organization.costs.result',
+                amount: { value: 1, currency: 'USD' },
+                project_id: 'proj_a',
+                api_key_id: null,
+                line_item: 'Inference',
+              },
+            ],
+          },
+        ],
+        has_more: false,
+        next_page: null,
+      }),
+    );
+    await getProviderBilling(p);
+    expect(request).toHaveBeenCalledTimes(1);
+    const [url, init] = request.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain('https://api.openai.com/v1/organization/costs?');
+    expect(url).not.toContain('custom-model-host');
+    expect(init.headers).toEqual({ Authorization: 'Bearer sk-admin-test-secretvalue' });
+    expect(p.models.open).toHaveBeenCalledExactlyOnceWith('sealed-admin-key');
+    expect(JSON.stringify(request.mock.calls)).not.toContain('model-api-secret');
+  });
+
+  it('fails closed on invalid scope, out-of-scope rows, null money, and repeated cursors', async () => {
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    p.config.OPENAI_BILLING_ADMIN_KEY_ENCRYPTED = 'sealed-admin-key';
+    p.config.OPENAI_BILLING_PROJECT_IDS = 'proj_a';
+    p.models.open = vi.fn(() => 'sk-admin-test-secretvalue');
+    p.fetch = vi.fn(async () => response({ data: [], has_more: false, next_page: null }));
+    const accidentalSecret = 'sk-admin-secretvalue';
+    p.config.OPENAI_BILLING_PROJECT_IDS = `proj_a, ${accidentalSecret}`;
+    p.config.OPENAI_BILLING_ACCOUNT_LABEL = accidentalSecret;
+    const invalid = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(invalid?.status).toBe('not_configured');
+    expect(invalid?.setup?.code).toBe('openai_scope_invalid');
+    expect(p.fetch).not.toHaveBeenCalled();
+    expect(JSON.stringify(invalid)).not.toContain(accidentalSecret);
+
+    await expect(
+      readOpenAIBilling(p.fetch ?? fetch, 'admin', base, now, [accidentalSecret], []),
+    ).rejects.toThrow();
+    await expect(
+      readOpenAIBilling(p.fetch ?? fetch, 'sk-admin-validfakekey', base, now, ['proj_'], []),
+    ).rejects.toThrow();
+
+    p.config.OPENAI_BILLING_PROJECT_IDS = 'proj_';
+    p.config.OPENAI_BILLING_ACCOUNT_LABEL = '';
+    const emptySuffix = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(emptySuffix?.setup?.code).toBe('openai_scope_invalid');
+    expect(p.fetch).not.toHaveBeenCalled();
+
+    p.config.OPENAI_BILLING_PROJECT_IDS = 'proj_a';
+    const wrongScope = {
+      data: [
+        {
+          start_time: Math.floor(Date.parse('2026-09-01T00:00:00Z') / 1_000),
+          end_time: Math.floor(Date.parse('2026-09-02T00:00:00Z') / 1_000),
+          results: [
+            {
+              object: 'organization.costs.result',
+              amount: { value: 2, currency: 'usd' },
+              project_id: 'proj_b',
+              api_key_id: null,
+            },
+          ],
+        },
+      ],
+      has_more: false,
+      next_page: null,
+    };
+    p.fetch = vi.fn(async () => response(wrongScope));
+    const mismatch = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(mismatch?.status).toBe('unavailable');
+    expect(mismatch?.lines).toEqual([]);
+
+    p.config.OPENAI_BILLING_PROJECT_IDS = 'proj_c';
+    const nullMoney = structuredClone(wrongScope);
+    const nullMoneyResult = nullMoney.data[0]?.results[0];
+    if (!nullMoneyResult) throw new Error('Missing billing test row');
+    nullMoneyResult.project_id = 'proj_c';
+    nullMoneyResult.amount.value = null as unknown as number;
+    p.fetch = vi.fn(async () => response(nullMoney));
+    const invalidMoney = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(invalidMoney?.status).toBe('unavailable');
+    expect(invalidMoney?.lines).toEqual([]);
+
+    p.config.OPENAI_BILLING_PROJECT_IDS = 'proj_c';
+    const excessiveMoney = structuredClone(wrongScope);
+    const excessiveMoneyResult = excessiveMoney.data[0]?.results[0];
+    if (!excessiveMoneyResult) throw new Error('Missing billing test row');
+    excessiveMoneyResult.project_id = 'proj_c';
+    excessiveMoneyResult.amount.value = Number.MAX_SAFE_INTEGER;
+    p.fetch = vi.fn(async () => response(excessiveMoney));
+    const excessive = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(excessive?.status).toBe('unavailable');
+    expect(excessive?.lines).toEqual([]);
+
+    const excessiveAggregate = structuredClone(wrongScope);
+    const aggregateBucket = excessiveAggregate.data[0];
+    const aggregateResult = aggregateBucket?.results[0];
+    if (!aggregateBucket || !aggregateResult) throw new Error('Missing billing test row');
+    aggregateResult.project_id = 'proj_c';
+    aggregateResult.amount.value = Number.MAX_SAFE_INTEGER / 1_000_000;
+    aggregateBucket.results.push(structuredClone(aggregateResult));
+    p.fetch = vi.fn(async () => response(excessiveAggregate));
+    const overflow = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(overflow?.status).toBe('unavailable');
+    expect(overflow?.lines).toEqual([]);
+
+    p.config.OPENAI_BILLING_PROJECT_IDS = 'proj_d';
+    p.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(response({ data: [], has_more: true, next_page: 'repeat' }))
+      .mockResolvedValueOnce(response({ data: [], has_more: true, next_page: 'repeat' }));
+    const repeated = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(repeated?.status).toBe('unavailable');
+    expect(repeated?.lines).toEqual([]);
+
+    p.config.OPENAI_BILLING_PROJECT_IDS = 'proj_e';
+    const wrongObject = structuredClone(wrongScope);
+    const wrongObjectResult = wrongObject.data[0]?.results[0];
+    if (!wrongObjectResult) throw new Error('Missing billing test row');
+    wrongObjectResult.project_id = 'proj_e';
+    wrongObjectResult.object = 'organization.usage.completions.result';
+    p.fetch = vi.fn(async () => response(wrongObject));
+    const malformed = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(malformed?.status).toBe('unavailable');
+    expect(malformed?.lines).toEqual([]);
+
+    p.config.OPENAI_BILLING_PROJECT_IDS = 'proj_f';
+    const duplicateBucket = structuredClone(wrongScope);
+    const duplicateBucketResult = duplicateBucket.data[0]?.results[0];
+    if (!duplicateBucketResult) throw new Error('Missing billing test row');
+    duplicateBucketResult.project_id = 'proj_f';
+    p.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response({ data: duplicateBucket.data, has_more: true, next_page: 'page-two' }),
+      )
+      .mockResolvedValueOnce(response(duplicateBucket));
+    const overlap = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(overlap?.status).toBe('unavailable');
+    expect(overlap?.lines).toEqual([]);
+  });
+
+  it('distinguishes currency-qualified zero from an empty response and preserves key rotation scope', async () => {
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    p.config.OPENAI_BILLING_ADMIN_KEY_ENCRYPTED = 'sealed-admin-key-one';
+    p.config.OPENAI_BILLING_API_KEY_IDS = 'key_a';
+    p.models.open = vi.fn((sealed) =>
+      sealed === 'sealed-admin-key-one' ? 'sk-admin-test-one' : 'sk-admin-test-two',
+    );
+    const zero = {
+      data: [
+        {
+          start_time: Math.floor(Date.parse('2026-09-01T00:00:00Z') / 1_000),
+          end_time: Math.floor(Date.parse('2026-09-02T00:00:00Z') / 1_000),
+          results: [
+            {
+              object: 'organization.costs.result',
+              amount: { value: 0, currency: 'USD' },
+              api_key_id: 'key_a',
+              line_item: 'Inference',
+            },
+          ],
+        },
+      ],
+      has_more: false,
+      next_page: null,
+    };
+    const request = vi.fn(async () => response(zero));
+    p.fetch = request;
+    const first = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(first?.status).toBe('reported');
+    expect(first?.lines[0]?.net).toBe(0);
+
+    p.config.OPENAI_BILLING_API_KEY_IDS = 'key_b';
+    p.fetch = vi.fn(async () => response({ data: [], has_more: false, next_page: null }));
+    const emptyResponse = (await getProviderBilling(p)).find(
+      (item) => item.id === 'openai-billing',
+    );
+    expect(emptyResponse?.status).toBe('unavailable');
+    expect(emptyResponse?.lines).toEqual([]);
+
+    // Rotating the sealed credential changes the hashed cache identity.
+    p.config.OPENAI_BILLING_ADMIN_KEY_ENCRYPTED = 'sealed-admin-key-two';
+    const rotatedKeyZero = structuredClone(zero);
+    const rotatedKeyResult = rotatedKeyZero.data[0]?.results[0];
+    if (!rotatedKeyResult) throw new Error('Missing billing test row');
+    rotatedKeyResult.api_key_id = 'key_b';
+    p.fetch = vi.fn(async () => response(rotatedKeyZero));
+    await getProviderBilling(p);
+    expect(p.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not infer per-connection OpenAI coverage and includes a single setup feed', async () => {
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    vi.mocked(p.models.connections.list).mockResolvedValue([
+      {
+        id: 'openai-models',
+        kind: 'openai',
+        label: 'OpenAI models',
+        apiKeyEncrypted: 'model-key-sealed',
+        baseUrl: null,
+        enabled: true,
+        vertexLocation: null,
+        vertexProject: null,
+        lastTestedAt: null,
+        lastError: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]);
+    p.models.open = vi.fn((sealed) => sealed);
+    const reports = await getProviderBilling(p);
+    const feed = reports.find((item) => item.id === 'openai-billing');
+    const connection = reports.find((item) => item.id === 'openai-models');
+    expect(feed?.status).toBe('not_configured');
+    expect(feed?.setup?.code).toBe('openai_admin_key_missing');
+    expect(connection?.status).toBe('unavailable');
+    expect(connection?.includedIn).toBeUndefined();
+    expect(connection?.message).toContain('organization billing feed');
+    expect(p.models.open).not.toHaveBeenCalled();
+    expect(p.fetch).toBeUndefined();
+    expect(JSON.stringify(reports)).not.toContain('model-key-sealed');
+  });
+
+  it('keeps OpenAI admin decryption failures and provider errors secret-safe', async () => {
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    p.config.OPENAI_BILLING_ADMIN_KEY_ENCRYPTED = 'ciphertext-should-not-appear';
+    p.config.OPENAI_BILLING_PROJECT_IDS = 'proj_a';
+    p.models.open = vi.fn(() => {
+      throw new Error('secret plaintext should not appear');
+    });
+    p.fetch = vi.fn();
+    const failedToOpen = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(failedToOpen?.status).toBe('unavailable');
+    expect(failedToOpen?.setup?.code).toBe('openai_admin_key_unavailable');
+    expect(p.fetch).not.toHaveBeenCalled();
+    expect(JSON.stringify(failedToOpen)).not.toContain('ciphertext-should-not-appear');
+    expect(JSON.stringify(failedToOpen)).not.toContain('secret plaintext');
+
+    p.models.open = vi.fn(() => 'sk-proj-modelcredential');
+    p.fetch = vi.fn();
+    const wrongKeyType = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(wrongKeyType?.status).toBe('unavailable');
+    expect(wrongKeyType?.setup?.code).toBe('openai_admin_key_unavailable');
+    expect(p.fetch).not.toHaveBeenCalled();
+    expect(JSON.stringify(wrongKeyType)).not.toContain('sk-proj-modelcredential');
+
+    p.models.open = vi.fn(() => 'sk-admin-test-secretvalue');
+    p.fetch = vi.fn(async () => new Response('credential leak body', { status: 403 }));
+    const failedRequest = (await getProviderBilling(p)).find(
+      (item) => item.id === 'openai-billing',
+    );
+    expect(failedRequest?.status).toBe('unavailable');
+    expect(JSON.stringify(failedRequest)).not.toContain('sk-admin-test-secretvalue');
+    expect(JSON.stringify(failedRequest)).not.toContain('credential leak body');
+  });
+
+  it('does not echo credential-shaped account labels into the billing feed', async () => {
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    p.config.OPENAI_BILLING_ADMIN_KEY_ENCRYPTED = 'sealed-admin-key';
+    p.config.OPENAI_BILLING_PROJECT_IDS = 'proj_a';
+    const accidentalSecret = 'sk-admin-secretvalue';
+    p.config.OPENAI_BILLING_ACCOUNT_LABEL = accidentalSecret;
+    p.models.open = vi.fn(() => 'sk-admin-test-secretvalue');
+    p.fetch = vi.fn(async () => response({ data: [], has_more: false, next_page: null }));
+
+    const report = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(report?.label).toBe('OpenAI organization');
+    expect(report?.scope).toContain('Projects: proj_a');
+    expect(JSON.stringify(report)).not.toContain(accidentalSecret);
+  });
+
+  it('returns actionable static GCP setup diagnostics without starting a query', async () => {
+    const p = ports();
+    p.fetch = vi.fn();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    const missing = (await getProviderBilling(p))[0];
+    expect(missing?.status).toBe('not_configured');
+    expect(missing?.setup?.code).toBe('google_billing_export_missing');
+    expect(p.fetch).not.toHaveBeenCalled();
+
+    p.config.GCP_BILLING_EXPORT_TABLE = 'project.dataset.table;DROP';
+    const invalid = (await getProviderBilling(p))[0];
+    expect(invalid?.status).toBe('unavailable');
+    expect(invalid?.setup?.code).toBe('google_billing_export_table_invalid');
+    expect(p.fetch).not.toHaveBeenCalled();
+
+    p.config.GCP_BILLING_EXPORT_TABLE = 'billing.data.export';
+    p.config.GCP_PROJECT = '';
+    const missingProject = (await getProviderBilling(p))[0];
+    expect(missingProject?.status).toBe('not_configured');
+    expect(missingProject?.setup?.code).toBe('google_billing_project_missing');
+    expect(p.fetch).not.toHaveBeenCalled();
+  });
+
   it('withholds estimates for stale, missing, early or wrong-month data', () => {
     for (const change of [
       { status: 'stale' as const },
@@ -430,6 +860,17 @@ it('projects partial coverage without calculating a whole-app total or merging o
       message: 'No Vertex row.',
       lines: [],
     },
+    {
+      ...base,
+      id: 'openai-billing',
+      label: 'OpenAI organization',
+      status: 'reported',
+      scope: 'Projects: proj_a; API keys: key_a',
+      source: 'OpenAI Costs API',
+      message:
+        'OpenAI Costs API amounts for the selected project and API-key filters. This organization feed does not prove that every configured OpenAI connection is covered.',
+      lines: [],
+    },
   ]);
   expect(coverage.totalState).toBe('unavailable');
   expect(coverage.title).toBe('Whole-app total unavailable');
@@ -446,6 +887,10 @@ it('projects partial coverage without calculating a whole-app total or merging o
   expect(coverage.entries.find((item) => item.id === 'openrouter')).toMatchObject({
     state: 'partial',
     scope: 'Connection: OpenRouter',
+  });
+  expect(coverage.entries.find((item) => item.id === 'direct-model-providers')).toMatchObject({
+    label: 'Unverified model-provider coverage',
+    detail: expect.stringContaining('does not prove every model connection is covered'),
   });
   expect(coverage.entries.find((item) => item.id === 'vertex')?.state).toBe('unknown');
   expect(coverage.entries.find((item) => item.id === 'custom')?.state).toBe('ledger_only');
@@ -475,4 +920,69 @@ it('summarizes current missing and stale providers without using hypothetical ga
     'Current feeds: Google Cloud stale; OpenRouter not configured. Missing costs remain unknown, not zero.',
   );
   expect(coverage.statusSummary).not.toContain('Phone calls');
+});
+
+describe('mobile amount-only billing compatibility', () => {
+  const amountOnly: ProviderBilling = {
+    ...base,
+    id: 'openai-billing',
+    label: 'OpenAI organization',
+    status: 'reported',
+    amountBasis: 'provider_reported_cost',
+    message: 'Provider-reported cost for the selected project.',
+    forecast: {
+      through: '2026-09-16',
+      observedDays: 15,
+      daysInMonth: 30,
+      totals: [{ currency: 'USD', spent: 1.25, dailyAverage: 0.08, projected: 2.5 }],
+      message: 'Observed-period run rate only.',
+    },
+    lines: [
+      {
+        service: 'OpenAI',
+        detail: 'proj_demo · Text input',
+        currency: 'USD',
+        cost: 1.25,
+        credits: 0,
+        net: 1.25,
+        projectId: 'proj_demo',
+      },
+    ],
+  };
+  const legacyReport: ProviderBilling = {
+    ...base,
+    id: 'openrouter',
+    label: 'OpenRouter',
+    status: 'reported',
+    lines: [
+      {
+        service: 'OpenRouter',
+        detail: 'Model usage',
+        currency: 'USD',
+        cost: 0.4,
+        credits: 0,
+        net: 0.4,
+      },
+    ],
+  };
+
+  it('keeps amount-only numbers and forecast away from clients without exact capability support', () => {
+    const projected = projectBillingForMobile([amountOnly, legacyReport], false);
+
+    expect(projected[0]).toMatchObject({
+      id: 'openai-billing',
+      status: 'unavailable',
+      amountBasis: 'provider_reported_cost',
+      lines: [],
+      message: expect.stringContaining('Update the app to view the reported-cost breakdown.'),
+    });
+    expect(projected[0]?.forecast).toBeUndefined();
+    expect(JSON.stringify(projected[0])).not.toContain('1.25');
+    expect(projected[1]).toEqual(legacyReport);
+  });
+
+  it('leaves reports untouched when the client explicitly supports amount-only billing', () => {
+    const reports = [amountOnly, legacyReport];
+    expect(projectBillingForMobile(reports, true)).toBe(reports);
+  });
 });
