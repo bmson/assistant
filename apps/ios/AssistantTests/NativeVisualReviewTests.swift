@@ -17,6 +17,7 @@ final class NativeVisualReviewTests: XCTestCase {
     private final class ConversationViewportRecorder {
         struct Measurement: Equatable {
             let rawRootWidth: CGFloat
+            let outerAvailableWidth: CGFloat
             let leadingSafeArea: CGFloat
             let trailingSafeArea: CGFloat
             let inheritedWidth: CGFloat?
@@ -40,11 +41,13 @@ final class NativeVisualReviewTests: XCTestCase {
         let recorder: ConversationViewportRecorder
         let messageID: String
         let rawRootWidth: CGFloat
+        let outerAvailableWidth: CGFloat
         let leadingSafeArea: CGFloat
         let trailingSafeArea: CGFloat
 
         private var measurement: ConversationViewportRecorder.Measurement {
-            .init(rawRootWidth: rawRootWidth, leadingSafeArea: leadingSafeArea,
+            .init(rawRootWidth: rawRootWidth, outerAvailableWidth: outerAvailableWidth,
+                  leadingSafeArea: leadingSafeArea,
                   trailingSafeArea: trailingSafeArea, inheritedWidth: inheritedWidth,
                   accessibility: dynamicTypeSize.isAccessibilitySize)
         }
@@ -1606,25 +1609,28 @@ final class NativeVisualReviewTests: XCTestCase {
         ]
         let viewportRecorder = ConversationViewportRecorder(messageIDs: Set(surfaceMessages.map(\.id)))
         let paddingPage = Page("conversation-surface-padding", ownsNavigation: true,
-            GeometryReader { viewport in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: AssistantTheme.ConversationSpacing.surfaceGap) {
-                        ForEach(surfaceMessages) { message in
-                            MessageBubble(message: message, userPrompt: nil, isStreaming: false,
-                                openApprovals: {}, runForReal: nil, retry: nil, decideApproval: nil)
-                                .background(ConversationViewportReader(
-                                    recorder: viewportRecorder, messageID: message.id,
-                                    rawRootWidth: viewport.size.width,
-                                    leadingSafeArea: viewport.safeAreaInsets.leading,
-                                    trailingSafeArea: viewport.safeAreaInsets.trailing))
+            GeometryReader { available in
+                GeometryReader { viewport in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: AssistantTheme.ConversationSpacing.surfaceGap) {
+                            ForEach(surfaceMessages) { message in
+                                MessageBubble(message: message, userPrompt: nil, isStreaming: false,
+                                    openApprovals: {}, runForReal: nil, retry: nil, decideApproval: nil)
+                                    .background(ConversationViewportReader(
+                                        recorder: viewportRecorder, messageID: message.id,
+                                        rawRootWidth: viewport.size.width,
+                                        outerAvailableWidth: available.size.width,
+                                        leadingSafeArea: available.safeAreaInsets.leading,
+                                        trailingSafeArea: available.safeAreaInsets.trailing))
+                            }
                         }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
                 }
-                .environment(\.conversationViewportWidth, max(0, viewport.size.width
-                    - viewport.safeAreaInsets.leading - viewport.safeAreaInsets.trailing))
-            }.ignoresSafeArea(.container).background(AssistantTheme.stage))
+                .ignoresSafeArea(.container)
+                .environment(\.conversationViewportWidth, available.size.width)
+            }.background(AssistantTheme.stage))
         for width in [CGFloat(320), 360, 390, 430] {
             for scheme in [ColorScheme.light, .dark] {
                 for size in [DynamicTypeSize.large, .accessibility3] {
@@ -1634,15 +1640,20 @@ final class NativeVisualReviewTests: XCTestCase {
                 }
             }
         }
-        // The root stays 390pt wide while its 40pt horizontal safe area makes
-        // the inherited viewport 350pt. This crosses the 360pt policy boundary
-        // and catches either skipping the safe area or subtracting it twice.
+        // The outer geometry is already a 350pt safe viewport. The ignored
+        // inner stage stays 390pt wide, and both inherit the outer width without
+        // subtracting its 20pt + 20pt safe-area metadata again.
         let safeAreaPage = Page("conversation-surface-padding-horizontal-safe-area", ownsNavigation: true,
                                 paddingPage.content)
         try await capture(safeAreaPage, scheme: .light, size: .large, scene: scene, model: model,
                           requiresScrolling: true, viewportWidth: 390,
                           additionalSafeAreaInsets: UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20),
                           viewportRecorder: viewportRecorder)
+        for message in surfaceMessages {
+            let measured = try XCTUnwrap(viewportRecorder.measurements[message.id])
+            XCTAssertEqual(measured.outerAvailableWidth, 350, accuracy: 0.5,
+                           "The 390pt host with 20pt safe areas on both sides supplies a 350pt outer viewport")
+        }
         // Exercise the same standalone overflow composition in its expanded
         // state; the first three results remain outside this disclosure.
         let cards = try [alert, event, briefing, RichMessageFixture.generated()].map {
@@ -2294,6 +2305,7 @@ final class NativeVisualReviewTests: XCTestCase {
                 guard let measured = viewportRecorder.measurements[id] else { return nil }
                 return [
                     "messageID": id, "rawRootWidth": measured.rawRootWidth,
+                    "outerAvailableWidth": measured.outerAvailableWidth,
                     "leadingSafeArea": measured.leadingSafeArea, "trailingSafeArea": measured.trailingSafeArea,
                     "effectiveInheritedWidth": measured.inheritedWidth.map { $0 as Any } ?? NSNull(),
                     "accessibility": measured.accessibility,
@@ -2323,11 +2335,13 @@ final class NativeVisualReviewTests: XCTestCase {
                 let measured = try XCTUnwrap(viewportRecorder.measurements[id], "Missing viewport receipt: \(id)")
                 let inheritedWidth = try XCTUnwrap(measured.inheritedWidth, "Bubble did not inherit its viewport: \(id)")
                 XCTAssertEqual(measured.rawRootWidth, window.bounds.width, accuracy: 0.5,
-                               "The producer measures the full root before safe-area subtraction and transcript gutters")
+                               "The ignored inner stage measures the full window before transcript gutters")
+                XCTAssertEqual(measured.outerAvailableWidth, expectedWidth, accuracy: 0.5,
+                               "The outer pre-ignore producer already measures the available horizontal safe viewport")
                 XCTAssertEqual(measured.leadingSafeArea, safeArea.left, accuracy: 0.5)
                 XCTAssertEqual(measured.trailingSafeArea, safeArea.right, accuracy: 0.5)
                 XCTAssertEqual(inheritedWidth, expectedWidth, accuracy: 0.5,
-                               "The bubble inherits the root width minus horizontal safe area exactly once")
+                               "The bubble inherits the outer available width directly without a second safe-area subtraction")
                 XCTAssertEqual(measured.accessibility, size.isAccessibilitySize)
                 let inset = AssistantTheme.ConversationSpacing.horizontalInset(
                     viewportWidth: inheritedWidth, accessibility: measured.accessibility)

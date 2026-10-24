@@ -19,6 +19,10 @@ struct RootView: View {
                 safeAreaTrailingInset: geometry.safeAreaInsets.trailing,
                 isLandscape: geometry.size.width > geometry.size.height
             )
+            // This outer geometry is already constrained by horizontal safe
+            // areas, before rootContent and ChatView ignore container edges.
+            // Standalone ChatView has no known viewport and keeps the 20pt fallback.
+            .environment(\.conversationViewportWidth, geometry.size.width)
         }
         // Scoreboard cards anywhere below re-read live games through this.
         .environment(\.liveScoreboard) { [model] leagues in

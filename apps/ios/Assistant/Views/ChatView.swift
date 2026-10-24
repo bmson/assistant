@@ -1212,8 +1212,6 @@ struct ChatView: View {
                 pullMenu
 
                 conversationSurface
-                    .environment(\.conversationViewportWidth, max(0, viewport.size.width
-                        - viewport.safeAreaInsets.leading - viewport.safeAreaInsets.trailing))
                     // Resolve a stable viewport before the surface is
                     // transformed. A flexible max-height frame was recomputed
                     // as the lifted surface crossed the root safe area, shrinking
