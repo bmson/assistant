@@ -8,6 +8,7 @@
     "./approvals": "./src/approvals.ts",
     "./phone-call-owner-grants": "./src/phone-call-owner-grants.ts",
     "./approval-rule": "./src/approval-rule.ts",
+    "./approval-policy-presentation": "./src/approval-policy-presentation.ts",
     "./calls": "./src/calls.ts",
     "./chat": "./src/chat.ts",
     "./cards": "./src/cards.ts",

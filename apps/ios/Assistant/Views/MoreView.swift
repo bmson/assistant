@@ -515,22 +515,22 @@ struct MoreView: View {
 
     @ViewBuilder
     private func policyRow(_ policy: WorkspacePolicy) -> some View {
-        let detail = VStack(alignment: .leading, spacing: 4) {
-            Text(policy.displayName)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(policy.scope ?? policy.toolName.sentenceCaseIdentifier)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-
-        if policy.toolName == "phone.call" && policy.phonePermissionKind != "same_brief" {
+        if policy.toolName == "phone.call" && policy.phoneCallPresentation?.kind != "same_brief" {
             VStack(alignment: .leading, spacing: 8) {
-                detail
+                Text(policy.displayName)
+                    .font(.body.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(policy.scope ?? "Stored phone-call scope is not interpreted.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text("Stored setting: \(policy.enabled ? "On" : "Off")").font(.caption.weight(.semibold))
-                if let opaque = policy.opaqueDetails {
-                    DisclosureGroup("Stored permission details") {
-                        Text(opaque).font(.caption.monospaced()).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                if let raw = policy.opaqueDetails ?? policy.phoneCallPresentation?.details {
+                    DisclosureGroup {
+                        Text(raw).font(.caption.monospaced()).textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } label: {
+                        Text("Stored permission details").frame(minHeight: 44)
+                            .fixedSize(horizontal: false, vertical: true)
                     }.font(.caption)
                 }
                 Text(policy.effectiveAvailability ?? "Availability unavailable. Refresh to check this saved permission.")
@@ -542,23 +542,49 @@ struct MoreView: View {
                 if policy.enabled {
                     Button { performSettingsAction(policy.id) { await model.setPolicy(policy, enabled: false) } } label: {
                         Text("Pause this permission").frame(minHeight: 44).fixedSize(horizontal: false, vertical: true)
-                    }.buttonStyle(.bordered).disabled(settingsActionInFlight != nil)
+                    }.buttonStyle(.bordered).disabled(settingsActionInFlight != nil || model.workspace == nil)
                 }
                 policyActions(policy)
             }
         } else if usesAccessibilityLayout {
             VStack(alignment: .leading, spacing: 8) {
-                detail
+                Text(policy.displayName)
+                    .font(.body.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Allow automatically")
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 HStack(spacing: 8) {
                     policyToggle(policy) { Text("Allow automatically") }
+                        .labelsHidden()
+                    Spacer(minLength: 0)
                     policyActions(policy)
                 }
+                policyScopeDetails(policy)
             }
         } else {
-            HStack(alignment: .center, spacing: 8) {
-                policyToggle(policy) { detail }
-                policyActions(policy)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .center, spacing: 8) {
+                    policyToggle(policy) {
+                        Text(policy.displayName)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    policyActions(policy)
+                }
+                policyScopeDetails(policy)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func policyScopeDetails(_ policy: WorkspacePolicy) -> some View {
+        if let presentation = policy.phoneCallPresentation {
+            PhoneCallPolicyScopePresentation(policyId: policy.id, presentation: presentation)
+        } else {
+            Text(policy.scope ?? policy.toolName.sentenceCaseIdentifier)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -573,8 +599,39 @@ struct MoreView: View {
             }
         ), label: label)
         .accessibilityLabel(policy.displayName)
-        .accessibilityHint(policy.scope ?? policy.toolName.sentenceCaseIdentifier)
+        .accessibilityHint(policyAccessibilityHint(policy))
         .disabled(settingsActionInFlight != nil || model.workspace == nil)
+    }
+
+    private func policyAccessibilityHint(_ policy: WorkspacePolicy) -> String {
+        guard let presentation = policy.phoneCallPresentation else {
+            return policy.scope ?? policy.toolName.sentenceCaseIdentifier
+        }
+        guard presentation.kind == "same_brief" else {
+            return "Saved phone-call scope is not interpreted. Expand to read the saved rule data."
+        }
+        let duration = presentation.maxMinutes.map { "up to \($0) minutes" } ?? "duration unavailable"
+        let context = presentation.mayShare ?? "Not specified"
+        let goal = presentation.goal ?? "Not specified"
+        let mayAgreeTo = presentation.mayAgreeTo ?? "Not specified"
+        let instructions = presentation.mustNot ?? "Not specified"
+        let language = presentation.language ?? "Not specified"
+        let voicemail: String
+        switch presentation.voicemailMode {
+        case "leave_message": voicemail = "leave a voicemail"
+        case "hang_up": voicemail = "hang up on voicemail"
+        default: voicemail = "voicemail condition unavailable"
+        }
+        let savedMessage: String
+        if presentation.voicemailMode == "hang_up",
+           let message = presentation.voicemailMessage,
+           !message.isEmpty
+        {
+            savedMessage = " Saved voicemail message (not used when hanging up): \(message)."
+        } else {
+            savedMessage = ""
+        }
+        return "\(presentation.recipient ?? "Recipient unavailable"), \(duration), exact approved brief. Goal: \(goal). Context from the approved brief: \(context). May agree to: \(mayAgreeTo). Instructions in approved brief: \(instructions). Language: \(language). Voicemail: \(voicemail).\(savedMessage)"
     }
 
     private func policyActions(_ policy: WorkspacePolicy) -> some View {
@@ -590,6 +647,128 @@ struct MoreView: View {
         .disabled(settingsActionInFlight != nil || model.workspace == nil)
     }
 
+}
+
+struct PhoneCallPolicyScopePresentation: View {
+    let policyId: String
+    let presentation: WorkspacePhoneCallPolicyPresentation
+    @State private var callBriefExpanded: Bool
+
+    init(
+        policyId: String,
+        presentation: WorkspacePhoneCallPolicyPresentation,
+        initiallyExpanded: Bool = false
+    ) {
+        self.policyId = policyId
+        self.presentation = presentation
+        _callBriefExpanded = State(initialValue: initiallyExpanded)
+    }
+
+    private func value(_ field: String?) -> String {
+        guard let field, !field.isEmpty else { return "Not specified" }
+        return field
+    }
+
+    private var voicemailLabel: String {
+        switch presentation.voicemailMode {
+        case "leave_message": "Leave a voicemail"
+        case "hang_up": "Hang up on voicemail"
+        default: "Voicemail condition unavailable"
+        }
+    }
+
+    private var durationLabel: String {
+        presentation.maxMinutes.map { "up to \($0) min" } ?? "duration unavailable"
+    }
+
+    private var compactLabel: String {
+        let contact = presentation.contactName.flatMap { $0.isEmpty ? nil : "\($0) · " } ?? ""
+        return "\(contact)\(value(presentation.recipient)) · \(durationLabel) · Exact approved brief"
+    }
+
+    private var contextLabel: String {
+        presentation.mayShare?.isEmpty == false
+            ? "Context from the approved brief"
+            : "Context: Not specified"
+    }
+
+    var body: some View {
+        Group {
+            if presentation.kind == "same_brief" {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(compactLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(contextLabel)
+                        Text("May agree to: \(value(presentation.mayAgreeTo))")
+                        Text("Instructions in approved brief: \(value(presentation.mustNot))")
+                        Text("Voicemail: \(voicemailLabel)\(presentation.voicemailMode == "leave_message" && (presentation.voicemailMessage?.isEmpty ?? true) ? " · exact message: Not specified" : "")")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    DisclosureGroup("Exact call brief", isExpanded: $callBriefExpanded) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            policyCondition("Recipient", value(presentation.recipient))
+                            policyCondition("Goal", value(presentation.goal))
+                            policyCondition("Maximum duration", presentation.maxMinutes.map { "\($0) minutes" } ?? "Unavailable")
+                            policyCondition("Context from the approved brief", value(presentation.mayShare))
+                            policyCondition("May agree to", value(presentation.mayAgreeTo))
+                            policyCondition("Instructions in approved brief", value(presentation.mustNot))
+                            policyCondition("Language", value(presentation.language))
+                            policyCondition("Voicemail", voicemailLabel)
+                            if presentation.voicemailMode == "leave_message" {
+                                policyCondition("Exact voicemail message", value(presentation.voicemailMessage))
+                            } else if presentation.voicemailMode == "hang_up",
+                                      !(presentation.voicemailMessage?.isEmpty ?? true) {
+                                policyCondition(
+                                    "Saved voicemail message (not used when hanging up)",
+                                    value(presentation.voicemailMessage)
+                                )
+                            }
+                        }
+                        .padding(.top, 6)
+                    }
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(minHeight: 44, alignment: .leading)
+                    .accessibilityIdentifier("assistant.settings.policy.\(policyId).callBrief")
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Saved phone-call scope (not interpreted)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
+                    DisclosureGroup("Show saved rule data") {
+                        Text(presentation.details ?? "No saved rule data is available.")
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 6)
+                    }
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(minHeight: 44, alignment: .leading)
+                    .accessibilityIdentifier("assistant.settings.policy.\(policyId).opaqueDetails")
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func policyCondition(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label).font(.caption2.weight(.semibold))
+            Text(value).font(.caption).textSelection(.enabled)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 }
 
 private struct RemindersView: View {

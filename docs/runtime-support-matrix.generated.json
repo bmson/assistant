@@ -399,7 +399,7 @@
     },
     "apps/web/app/api/mobile/v1/workspace/route.ts": {
       "methods": ["GET"],
-      "sha256": "2f7dbe6986f16c2408655ef63697b50950adea4a9b06de3481637fb2376943dd"
+      "sha256": "e14739ef7dbc4a22e095a290d93886cc189ed7a2a9fcf4bedb98947087e932fe"
     },
     "apps/web/app/api/mobile/v1/workspace/sections/[section]/route.ts": {
       "methods": ["GET"],
