@@ -12,6 +12,15 @@ final class NativeVisualReviewTests: XCTestCase {
     }
 
     @MainActor
+    private final class ConnectedToolActionLayoutRecorder {
+        var frames: [String: CGRect] = [:]
+
+        func record(_ values: [String: CGRect]) {
+            frames.merge(values, uniquingKeysWith: { _, latest in latest })
+        }
+    }
+
+    @MainActor
     private final class ComposerPresentationSampler: NSObject {
         struct Sample {
             let timestamp: CFTimeInterval
@@ -1850,6 +1859,298 @@ final class NativeVisualReviewTests: XCTestCase {
     }
 
     @MainActor
+    func testConnectedToolActionRowPaintedTargetsAcrossResponsiveStates() async throws {
+        let connection = McpConnection(
+            id: "review-tool-server",
+            name: "Home Assistant",
+            endpoint: "https://home.example.test/mcp",
+            status: "ready",
+            enabled: true,
+            hasBearerToken: false,
+            serverName: "Home Assistant",
+            serverVersion: "1.2",
+            instructions: nil,
+            tools: [McpConnectionTool(name: "get_lights", description: "Read lights", inputSchema: .object([:]))],
+            lastCheckedAt: "2026-10-23T18:00:00Z",
+            lastError: nil
+        )
+        let fixture = try NativeReviewFixture()
+        var responses = fixture.responses
+        responses["/api/mobile/v1/mcp"] = try JSONEncoder().encode(McpConnectionsResponse(connections: [connection]))
+        NativeReviewProtocol.install(responses)
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(
+            configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+            session: URLSession(configuration: configuration)
+        )
+        let suite = "assistant.connected-tools-action-geometry-review"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        let model = AppModel(apiClient: client, defaults: defaults)
+        await model.refreshAll()
+        _ = await model.refreshWorkspace()
+        _ = await model.refreshMcpConnections()
+        let workspace = try XCTUnwrap(model.workspace)
+        XCTAssertEqual(model.mcpConnections.map(\.id), [connection.id])
+
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let productionScreen = try XCTUnwrap(MoreView.visualReviewScreen("connected-tools", workspace: workspace))
+        try await capture(
+            Page("connected-tools-production-get-fixture", productionScreen),
+            scheme: .light,
+            size: .large,
+            scene: scene,
+            model: model,
+            viewportWidth: 393
+        )
+        try await capture(
+            Page("connected-tools-production-get-fixture-dark", productionScreen),
+            scheme: .dark,
+            size: .large,
+            scene: scene,
+            model: model,
+            viewportWidth: 393
+        )
+
+        struct RowState {
+            let name: String
+            let enabled: Bool
+            let working: Bool
+            let disabled: Bool
+        }
+        let states = [
+            RowState(name: "pause", enabled: true, working: false, disabled: false),
+            RowState(name: "enable", enabled: false, working: false, disabled: false),
+            RowState(name: "working", enabled: true, working: true, disabled: false),
+            RowState(name: "disabled", enabled: false, working: false, disabled: true)
+        ]
+        let widths: [CGFloat] = [320, 360, 390, 393, 430]
+        var baselineSizes: [String: [String: CGSize]] = [:]
+
+        func makeConnection(enabled: Bool) -> McpConnection {
+            McpConnection(
+                id: connection.id,
+                name: connection.name,
+                endpoint: connection.endpoint,
+                status: connection.status,
+                enabled: enabled,
+                hasBearerToken: connection.hasBearerToken,
+                serverName: connection.serverName,
+                serverVersion: connection.serverVersion,
+                instructions: connection.instructions,
+                tools: connection.tools,
+                lastCheckedAt: connection.lastCheckedAt,
+                lastError: connection.lastError
+            )
+        }
+
+        func assertPaintedLayout(_ frames: [String: CGRect], width: CGFloat, isAccessibility: Bool) throws {
+            let safeArea = try XCTUnwrap(frames["window.safe-area.available"], "Missing actual UIWindow safe-area frame")
+            let window = try XCTUnwrap(frames["window.bounds"], "Missing actual UIWindow bounds")
+            let card = try XCTUnwrap(frames["card.surface"], "Missing painted assistant-card bounds")
+            let row = try XCTUnwrap(frames["row.container"], "Missing actual connected-tool row bounds")
+            func contains(_ outer: CGRect, _ inner: CGRect, tolerance: CGFloat = 1) -> Bool {
+                inner.minX >= outer.minX - tolerance && inner.minY >= outer.minY - tolerance &&
+                    inner.maxX <= outer.maxX + tolerance && inner.maxY <= outer.maxY + tolerance
+            }
+            XCTAssertTrue(contains(window, safeArea), "The safe-area frame must be inside the actual window.")
+            XCTAssertTrue(contains(safeArea, card), "The painted card must stay inside the available safe-area frame.")
+            XCTAssertTrue(contains(card, row), "The action row must stay inside its painted card.")
+
+            for id in ["refresh", "toggle", "remove"] {
+                let surface = try XCTUnwrap(frames["\(id).button"], "Missing painted action surface for \(id)")
+                let group = try XCTUnwrap(frames["\(id).group"], "Missing visible icon-label group for \(id)")
+                let glyph = try XCTUnwrap(frames["\(id).glyph"], "Missing visible icon slot for \(id)")
+                let text = try XCTUnwrap(frames["\(id).text"], "Missing visible text for \(id)")
+                XCTAssertTrue(surface.minX.isFinite && surface.minY.isFinite && surface.width.isFinite && surface.height.isFinite)
+                XCTAssertGreaterThanOrEqual(surface.height, 48, "The connected-tool target must retain its 48pt baseline; Dynamic Type may grow it.")
+                XCTAssertGreaterThanOrEqual(group.minX, surface.minX - 1)
+                XCTAssertLessThanOrEqual(group.maxX, surface.maxX + 1)
+                XCTAssertGreaterThanOrEqual(group.minY, surface.minY - 1)
+                XCTAssertLessThanOrEqual(group.maxY, surface.maxY + 1)
+                XCTAssertTrue(contains(row, surface), "The \(id) painted target overflowed its actual row.")
+                XCTAssertTrue(contains(card, surface), "The \(id) painted target overflowed its card.")
+                XCTAssertTrue(contains(safeArea, surface), "The \(id) painted target overflowed the available safe area.")
+                XCTAssertTrue(contains(window, surface), "The \(id) painted target overflowed the actual window.")
+                XCTAssertEqual(group.midX, surface.midX, accuracy: 1, "The complete visible label group must be centered.")
+                XCTAssertEqual(text.minX - glyph.maxX, 8, accuracy: 1, "The visible glyph and text must keep an 8pt gap.")
+                XCTAssertEqual(text.midY, glyph.midY, accuracy: 1)
+            }
+
+            let refresh = frames["refresh.button"]!
+            let toggle = frames["toggle.button"]!
+            let remove = frames["remove.button"]!
+            XCTAssertEqual(refresh.width, toggle.width, accuracy: 1)
+            XCTAssertEqual(toggle.width, remove.width, accuracy: 1)
+            XCTAssertEqual(refresh.height, toggle.height, accuracy: 1)
+            XCTAssertEqual(toggle.height, remove.height, accuracy: 1)
+
+            let horizontal = abs(refresh.midY - toggle.midY) < 1 && abs(toggle.midY - remove.midY) < 1
+            if width <= 360 || isAccessibility {
+                XCTAssertFalse(horizontal, "Narrow and Accessibility layouts must stack the complete controls.")
+                XCTAssertEqual(refresh.minX, toggle.minX, accuracy: 1)
+                XCTAssertEqual(toggle.minX, remove.minX, accuracy: 1)
+            } else if horizontal {
+                XCTAssertEqual(toggle.minX - refresh.maxX, 8, accuracy: 1)
+                XCTAssertEqual(remove.minX - toggle.maxX, 8, accuracy: 1)
+            } else {
+                XCTAssertEqual(refresh.minX, toggle.minX, accuracy: 1)
+                XCTAssertEqual(toggle.minX, remove.minX, accuracy: 1)
+                XCTAssertEqual(toggle.minY - refresh.maxY, 8, accuracy: 1)
+                XCTAssertEqual(remove.minY - toggle.maxY, 8, accuracy: 1)
+            }
+        }
+
+        func captureRow(_ row: ConnectedToolActionRow, name: String, scheme: ColorScheme, size: DynamicTypeSize,
+                        width: CGFloat, recorder: ConnectedToolActionLayoutRecorder) async throws {
+            try await capture(
+                Page(name, ownsNavigation: true,
+                     ConnectedToolsActionRowReviewCard(row: row, layoutReporter: { recorder.record($0) })),
+                scheme: scheme,
+                size: size,
+                scene: scene,
+                model: model,
+                viewportWidth: width,
+                layoutReporter: { recorder.record($0) }
+            )
+        }
+
+        for width in widths {
+            for state in states {
+                let recorder = ConnectedToolActionLayoutRecorder()
+                let row = ConnectedToolActionRow(
+                    connection: makeConnection(enabled: state.enabled),
+                    viewportWidth: width,
+                    usesAccessibilityLayout: false,
+                    working: state.working,
+                    disabled: state.disabled,
+                    onAction: { _ in XCTFail("The visual fixture must not run connected-tool actions.") },
+                    onRemove: { XCTFail("The visual fixture must not remove a connection.") },
+                    layoutReporter: { recorder.record($0) }
+                )
+                try await captureRow(row, name: "connected-tools-\(state.name)-\(Int(width))",
+                                     scheme: .light, size: .large, width: width, recorder: recorder)
+                try assertPaintedLayout(recorder.frames, width: width, isAccessibility: false)
+
+                let signature = "\(Int(width))-large"
+                let currentSizes = Dictionary(uniqueKeysWithValues: ["refresh", "toggle", "remove"].map { id in
+                    (id, recorder.frames["\(id).button"]!.size)
+                })
+                if state.name == "pause" {
+                    baselineSizes[signature] = currentSizes
+                } else if let baseline = baselineSizes[signature] {
+                    for id in ["refresh", "toggle", "remove"] {
+                        XCTAssertEqual(currentSizes[id]!.width, baseline[id]!.width, accuracy: 1,
+                                       "Label or working state changed the reserved width of \(id).")
+                        XCTAssertEqual(currentSizes[id]!.height, baseline[id]!.height, accuracy: 1,
+                                       "Label or working state changed the reserved height of \(id).")
+                    }
+                }
+            }
+        }
+
+        for width in [CGFloat(320), 393] {
+            for state in states {
+                let recorder = ConnectedToolActionLayoutRecorder()
+                let row = ConnectedToolActionRow(
+                    connection: makeConnection(enabled: state.enabled),
+                    viewportWidth: width,
+                    usesAccessibilityLayout: false,
+                    working: state.working,
+                    disabled: state.disabled,
+                    onAction: { _ in XCTFail("The dark visual fixture must not run connected-tool actions.") },
+                    onRemove: { XCTFail("The dark visual fixture must not remove a connection.") },
+                    layoutReporter: { recorder.record($0) }
+                )
+                try await captureRow(row, name: "connected-tools-\(state.name)-dark-\(Int(width))",
+                                     scheme: .dark, size: .large, width: width, recorder: recorder)
+                try assertPaintedLayout(recorder.frames, width: width, isAccessibility: false)
+            }
+        }
+
+        for width in [CGFloat(320), 360] {
+            for scheme in [ColorScheme.light, .dark] {
+                let recorder = ConnectedToolActionLayoutRecorder()
+                let row = ConnectedToolActionRow(
+                    connection: connection,
+                    viewportWidth: width,
+                    usesAccessibilityLayout: true,
+                    working: false,
+                    disabled: false,
+                    onAction: { _ in XCTFail("The accessibility visual fixture must not run actions.") },
+                    onRemove: { XCTFail("The accessibility visual fixture must not remove a connection.") },
+                    layoutReporter: { recorder.record($0) }
+                )
+                try await captureRow(row, name: "connected-tools-accessible-\(Int(width))",
+                                     scheme: scheme, size: .accessibility3, width: width, recorder: recorder)
+                try assertPaintedLayout(recorder.frames, width: width, isAccessibility: true)
+                if let regular = baselineSizes["\(Int(width))-large"] {
+                    for id in ["refresh", "toggle", "remove"] {
+                        XCTAssertGreaterThanOrEqual(recorder.frames["\(id).button"]!.height, regular[id]!.height)
+                    }
+                }
+            }
+        }
+
+        let armRecorder = ConnectedToolActionLayoutRecorder()
+        let callbacks = ConnectedToolReviewCallbacks()
+        let armedRow = ConnectedToolActionRow(
+            connection: connection,
+            viewportWidth: 393,
+            usesAccessibilityLayout: false,
+            working: false,
+            disabled: false,
+            onAction: { callbacks.actions.append($0) },
+            onRemove: { callbacks.removals += 1 },
+            layoutReporter: { armRecorder.record($0) }
+        )
+        try await capture(
+            Page("connected-tools-remove-armed", ownsNavigation: true,
+                 ConnectedToolsActionRowReviewCard(row: armedRow, layoutReporter: { armRecorder.record($0) })),
+            scheme: .light,
+            size: .large,
+            scene: scene,
+            model: model,
+            viewportWidth: 393,
+            layoutReporter: { armRecorder.record($0) },
+            beforeCapture: { window in
+                let control = try XCTUnwrap(accessibilityObject(identifier: "connected-tools.remove", in: window))
+                let activated: Bool
+                if let element = control as? UIAccessibilityElement {
+                    activated = element.accessibilityActivate()
+                } else if let view = control as? UIView {
+                    activated = view.accessibilityActivate()
+                } else {
+                    XCTFail("The actual Remove control was not represented by an accessibility-activatable element.")
+                    return
+                }
+                XCTAssertTrue(activated, "The actual Remove control should arm through accessibility activation.")
+                try await Task.sleep(for: .milliseconds(100))
+                window.layoutIfNeeded()
+                let armed = try XCTUnwrap(accessibilityObject(identifier: "connected-tools.remove", in: window))
+                let label = (armed as? UIAccessibilityElement)?.accessibilityLabel ?? (armed as? UIView)?.accessibilityLabel
+                XCTAssertEqual(label, "Confirm remove")
+            }
+        )
+        XCTAssertEqual(callbacks.actions, [])
+        XCTAssertEqual(callbacks.removals, 0, "The first activation may arm confirmation but must not execute removal.")
+        try assertPaintedLayout(armRecorder.frames, width: 393, isAccessibility: false)
+        let resting393 = try XCTUnwrap(baselineSizes["393-large"])
+        for id in ["refresh", "toggle", "remove"] {
+            let armedSurface = try XCTUnwrap(armRecorder.frames["\(id).button"])
+            XCTAssertEqual(armedSurface.width, resting393[id]!.width, accuracy: 1,
+                           "Arming Remove must not grow the \(id) surface width.")
+            XCTAssertEqual(armedSurface.height, resting393[id]!.height, accuracy: 1,
+                           "Arming Remove must not grow the \(id) surface height.")
+        }
+
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty, "No write request may be sent by a visual review fixture.")
+    }
+
+    @MainActor
     func testCostsCoverageNoticeAndSourceGapsInCompactAndAccessibleLayouts() async throws {
         let fixture = try NativeReviewFixture()
         var responses = fixture.responses
@@ -2098,7 +2399,9 @@ final class NativeVisualReviewTests: XCTestCase {
 
     @MainActor private func capture(_ page: Page, scheme: ColorScheme, size: DynamicTypeSize,
                                     scene: UIWindowScene, model: AppModel, requiresScrolling: Bool = false,
-                                    viewportWidth: CGFloat? = nil, increasedContrast: Bool = false) async throws {
+                                    viewportWidth: CGFloat? = nil, increasedContrast: Bool = false,
+                                    beforeCapture: (@MainActor (UIWindow) async throws -> Void)? = nil,
+                                    layoutReporter: (@MainActor ([String: CGRect]) -> Void)? = nil) async throws {
         UserDefaults.standard.set((scheme == .light ? AssistantAppearance.light : .dark).rawValue,
                                   forKey: AssistantAppearance.defaultsKey)
         let window = UIWindow(windowScene: scene)
@@ -2123,6 +2426,14 @@ final class NativeVisualReviewTests: XCTestCase {
         defer { window.isHidden = true; window.rootViewController = nil }
         try await Task.sleep(for: .milliseconds(500))
         window.layoutIfNeeded()
+        if let beforeCapture { try await beforeCapture(window) }
+        if let layoutReporter {
+            window.layoutIfNeeded()
+            layoutReporter([
+                "window.bounds": window.bounds,
+                "window.safe-area.available": window.safeAreaLayoutGuide.layoutFrame
+            ])
+        }
         func record(_ position: String) {
             var rendered = false
             let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
@@ -2180,6 +2491,27 @@ final class NativeVisualReviewTests: XCTestCase {
         if requiresScrolling {
             XCTAssertGreaterThan(capturedScrollPositions, 0, "Long message fixture was not captured below the fold: \(page.name)")
         }
+    }
+
+    @MainActor
+    private func accessibilityObject(identifier: String, in root: UIView) -> AnyObject? {
+        if root.isAccessibilityElement, root.accessibilityIdentifier == identifier { return root }
+        let elements = root.accessibilityElements as? [Any]
+            ?? (0..<max(0, root.accessibilityElementCount())).compactMap { root.accessibilityElement(at: $0) }
+        for element in elements {
+            if let accessible = element as? UIAccessibilityElement,
+               accessible.accessibilityIdentifier == identifier {
+                return accessible
+            }
+            if let view = element as? UIView,
+               let match = accessibilityObject(identifier: identifier, in: view) {
+                return match
+            }
+        }
+        for child in root.subviews {
+            if let match = accessibilityObject(identifier: identifier, in: child) { return match }
+        }
+        return nil
     }
 
     @MainActor private func pages(_ fixture: NativeReviewFixture, workspace: WorkspaceResponse,
@@ -2304,6 +2636,51 @@ private struct ActivitySearchRowReviewFixture: View {
         .background(AssistantTheme.canvas(for: colorScheme))
         .onAppear {
             if startsFocused { focused = true }
+        }
+    }
+}
+
+@MainActor
+private final class ConnectedToolReviewCallbacks {
+    var actions: [String] = []
+    var removals = 0
+}
+
+private struct ConnectedToolsActionCardFrameKey: PreferenceKey {
+    static var defaultValue = CGRect.zero
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if !next.isEmpty { value = next }
+    }
+}
+
+private struct ConnectedToolsActionRowReviewCard: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let row: ConnectedToolActionRow
+    let layoutReporter: (@MainActor ([String: CGRect]) -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Home Assistant")
+                .font(.headline)
+            row
+        }
+        .assistantCard(in: colorScheme)
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: ConnectedToolsActionCardFrameKey.self,
+                    value: proxy.frame(in: .global)
+                )
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AssistantTheme.canvas(for: colorScheme).ignoresSafeArea())
+        .onPreferenceChange(ConnectedToolsActionCardFrameKey.self) { frame in
+            guard !frame.isEmpty else { return }
+            layoutReporter?(["card.surface": frame])
         }
     }
 }

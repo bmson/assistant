@@ -917,6 +917,9 @@ struct AssistantConfirmationButton: View {
     var checksIntrinsicWidth = false
     var centersReservedGroup = false
     var prepare: (() async -> Bool)?
+#if DEBUG
+    var debugLayoutReporter: (@MainActor (String, CGRect) -> Void)? = nil
+#endif
     let action: () async -> Void
 
     @Environment(\.scenePhase) private var scenePhase
@@ -946,6 +949,14 @@ struct AssistantConfirmationButton: View {
         self.prepare = prepare
         self.action = action
     }
+
+#if DEBUG
+    func reportingLayout(_ report: (@MainActor (String, CGRect) -> Void)?) -> Self {
+        var copy = self
+        copy.debugLayoutReporter = report
+        return copy
+    }
+#endif
 
     static let defaultConfirmationTitle = "Confirm?"
 
@@ -992,34 +1003,62 @@ struct AssistantConfirmationButton: View {
                         }
                         .hidden()
                     }
-                    HStack(spacing: 8) {
-                        ZStack {
-                            Image(systemName: armed ? "checkmark" : systemImage)
-                                .opacity(working ? 0 : 1)
-                            if working { ProgressView().controlSize(.small) }
-                        }
-                        .frame(width: 16)
-                        Text(armed && !working ? confirmationTitle : title)
-                            .fixedSize(horizontal: checksIntrinsicWidth, vertical: true)
-                    }
-                }
-                .fixedSize(horizontal: checksIntrinsicWidth, vertical: true)
-            } else {
-                HStack(spacing: 8) {
-                    ZStack {
+                    let glyph = ZStack {
                         Image(systemName: armed ? "checkmark" : systemImage)
                             .opacity(working ? 0 : 1)
                         if working { ProgressView().controlSize(.small) }
                     }
                     .frame(width: 16)
-                    ZStack {
+                    let text = Text(armed && !working ? confirmationTitle : title)
+                        .fixedSize(horizontal: checksIntrinsicWidth, vertical: true)
+#if DEBUG
+                    let visibleGlyph = debugMeasured(glyph, component: "glyph")
+                    let visibleText = debugMeasured(text, component: "text")
+#else
+                    let visibleGlyph = glyph
+                    let visibleText = text
+#endif
+                    let visibleGroup = HStack(spacing: 8) {
+                        visibleGlyph
+                        visibleText
+                    }
+#if DEBUG
+                    debugMeasured(visibleGroup, component: "group")
+#else
+                    visibleGroup
+#endif
+                }
+                .fixedSize(horizontal: checksIntrinsicWidth, vertical: true)
+            } else {
+                let glyph = ZStack {
+                    Image(systemName: armed ? "checkmark" : systemImage)
+                        .opacity(working ? 0 : 1)
+                    if working { ProgressView().controlSize(.small) }
+                }
+                .frame(width: 16)
+                let text = ZStack {
                         Text(title).hidden()
                         Text(confirmationTitle).hidden()
                         // Default callers reserve only the resting and confirmation labels.
                         Text(armed && !working ? confirmationTitle : title)
-                    }
-                    .fixedSize(horizontal: false, vertical: true)
                 }
+                .fixedSize(horizontal: false, vertical: true)
+#if DEBUG
+                let visibleGlyph = debugMeasured(glyph, component: "glyph")
+                let visibleText = debugMeasured(text, component: "text")
+#else
+                let visibleGlyph = glyph
+                let visibleText = text
+#endif
+                let visibleGroup = HStack(spacing: 8) {
+                    visibleGlyph
+                    visibleText
+                }
+#if DEBUG
+                debugMeasured(visibleGroup, component: "group")
+#else
+                visibleGroup
+#endif
             }
         }
         .buttonStyle(AssistantActionButtonStyle(kind: kind, compact: compact, fillsWidth: fillsWidth,
@@ -1046,4 +1085,27 @@ struct AssistantConfirmationButton: View {
             confirmation.reset()
         }
     }
+
+#if DEBUG
+    @ViewBuilder
+    private func debugMeasured<Content: View>(_ content: Content, component: String) -> some View {
+        if debugLayoutReporter != nil {
+            content.background { debugFrame(component) }
+        } else {
+            content
+        }
+    }
+
+    private func debugFrame(_ component: String) -> some View {
+        GeometryReader { geometry in
+            Color.clear
+                .onAppear {
+                    debugLayoutReporter?(component, geometry.frame(in: .global))
+                }
+                .onChange(of: geometry.frame(in: .global)) { _, frame in
+                    debugLayoutReporter?(component, frame)
+                }
+        }
+    }
+#endif
 }

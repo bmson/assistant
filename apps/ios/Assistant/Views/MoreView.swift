@@ -978,108 +978,21 @@ private struct MCPConnectionsView: View {
     @ViewBuilder
     private func connectionActions(_ connection: McpConnection, viewportWidth: CGFloat) -> some View {
         let isWorking = workingConnectionID == connection.id
-        if usesAccessibilityLayout || viewportWidth <= 360 {
-            VStack(spacing: 8) {
-                actionButton("Refresh", icon: "arrow.clockwise", connection: connection, action: "refresh", prominent: true, working: isWorking, checksIntrinsicWidth: false)
-                actionButton(connection.enabled ? "Pause" : "Enable", icon: connection.enabled ? "pause.fill" : "play.fill", connection: connection, action: connection.enabled ? "disable" : "enable", prominent: false, working: isWorking, checksIntrinsicWidth: false)
-                deleteButton(connection, working: isWorking, checksIntrinsicWidth: false)
+        ConnectedToolActionRow(
+            connection: connection,
+            viewportWidth: viewportWidth,
+            usesAccessibilityLayout: usesAccessibilityLayout,
+            working: isWorking,
+            disabled: workingConnectionID != nil || isAdding || ((isLoading || loadFailed) && !hasLoaded),
+            onAction: { perform(connection, action: $0) },
+            onRemove: {
+                guard workingConnectionID == nil, !isAdding,
+                      !(isLoading && !hasLoaded), !(loadFailed && !hasLoaded) else { return }
+                workingConnectionID = connection.id
+                actionFailed = !(await model.deleteMcpConnection(id: connection.id))
+                workingConnectionID = nil
             }
-        } else {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) {
-                    actionButton("Refresh", icon: "arrow.clockwise", connection: connection, action: "refresh", prominent: true, working: isWorking, checksIntrinsicWidth: true)
-                        .frame(maxWidth: .infinity)
-                    actionButton(connection.enabled ? "Pause" : "Enable", icon: connection.enabled ? "pause.fill" : "play.fill", connection: connection, action: connection.enabled ? "disable" : "enable", prominent: false, working: isWorking, checksIntrinsicWidth: true)
-                        .frame(maxWidth: .infinity)
-                    deleteButton(connection, working: isWorking, checksIntrinsicWidth: true)
-                        .frame(maxWidth: .infinity)
-                }
-
-                VStack(spacing: 8) {
-                    actionButton("Refresh", icon: "arrow.clockwise", connection: connection, action: "refresh", prominent: true, working: isWorking, checksIntrinsicWidth: false)
-                    actionButton(connection.enabled ? "Pause" : "Enable", icon: connection.enabled ? "pause.fill" : "play.fill", connection: connection, action: connection.enabled ? "disable" : "enable", prominent: false, working: isWorking, checksIntrinsicWidth: false)
-                    deleteButton(connection, working: isWorking, checksIntrinsicWidth: false)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func actionButton(
-        _ title: String,
-        icon: String,
-        connection: McpConnection,
-        action: String,
-        prominent: Bool,
-        working: Bool,
-        checksIntrinsicWidth: Bool
-    ) -> some View {
-        if prominent {
-            Button { perform(connection, action: action) } label: {
-                actionButtonLabel(title, icon: icon, working: working, checksIntrinsicWidth: checksIntrinsicWidth)
-            }
-            .buttonStyle(AssistantActionButtonStyle(kind: .primary, fillsWidth: true, minimumHeight: 48))
-            .tint(AssistantTheme.accent(for: colorScheme))
-            .disabled(workingConnectionID != nil || isAdding || ((isLoading || loadFailed) && !hasLoaded))
-        } else {
-            Button { perform(connection, action: action) } label: {
-                actionButtonLabel(title, icon: icon, working: working, checksIntrinsicWidth: checksIntrinsicWidth)
-            }
-            .buttonStyle(AssistantActionButtonStyle(kind: .secondary, fillsWidth: true, minimumHeight: 48))
-            .tint(AssistantTheme.inkMuted(for: colorScheme))
-            .disabled(workingConnectionID != nil || isAdding || ((isLoading || loadFailed) && !hasLoaded))
-        }
-    }
-
-    private func actionButtonLabel(_ title: String, icon: String, working: Bool, checksIntrinsicWidth: Bool) -> some View {
-        ZStack {
-            ForEach(Array([
-                ("arrow.clockwise", "Refresh"),
-                ("pause.fill", "Pause"),
-                ("play.fill", "Enable"),
-                ("arrow.clockwise", "Working…"),
-                ("trash", "Remove"),
-                ("checkmark", "Confirm?")
-            ].enumerated()), id: \.offset) { reservation in
-                HStack(spacing: 8) {
-                    if reservation.element.1 == "Working…" {
-                        ProgressView().controlSize(.small).frame(width: 16)
-                    } else {
-                        Image(systemName: reservation.element.0).frame(width: 16)
-                    }
-                    Text(reservation.element.1)
-                }
-                .hidden()
-            }
-            HStack(spacing: 8) {
-                ZStack {
-                    Image(systemName: icon).opacity(working ? 0 : 1)
-                    if working { ProgressView().controlSize(.small) }
-                }
-                .frame(width: 16)
-                Text(working ? "Working…" : title)
-                    .fixedSize(horizontal: checksIntrinsicWidth, vertical: true)
-            }
-        }
-        .fixedSize(horizontal: checksIntrinsicWidth, vertical: false)
-    }
-
-    private func deleteButton(_ connection: McpConnection, working: Bool, checksIntrinsicWidth: Bool) -> some View {
-        AssistantConfirmationButton(
-            "Remove",
-            hint: "Deletes \(connection.name), its tools, and saved credential.",
-            fillsWidth: true,
-            minimumHeight: 48,
-            reservedWidthLabels: ["Refresh", "Pause", "Enable", "Working…"],
-            checksIntrinsicWidth: checksIntrinsicWidth,
-            centersReservedGroup: true
-        ) {
-            guard workingConnectionID == nil, !isAdding, !(isLoading && !hasLoaded), !(loadFailed && !hasLoaded) else { return }
-            workingConnectionID = connection.id
-            actionFailed = !(await model.deleteMcpConnection(id: connection.id))
-            workingConnectionID = nil
-        }
-        .disabled(workingConnectionID != nil || working || isAdding || ((isLoading || loadFailed) && !hasLoaded))
+        )
     }
 
     private func statusTag(_ connection: McpConnection) -> some View {
@@ -1146,6 +1059,234 @@ private struct MCPConnectionsView: View {
         }
     }
 }
+
+struct ConnectedToolActionRow: View {
+    let connection: McpConnection
+    let viewportWidth: CGFloat
+    let usesAccessibilityLayout: Bool
+    let working: Bool
+    let disabled: Bool
+    let onAction: (String) -> Void
+    let onRemove: () async -> Void
+#if DEBUG
+    let layoutReporter: (@MainActor ([String: CGRect]) -> Void)?
+
+    init(
+        connection: McpConnection,
+        viewportWidth: CGFloat,
+        usesAccessibilityLayout: Bool,
+        working: Bool,
+        disabled: Bool,
+        onAction: @escaping (String) -> Void,
+        onRemove: @escaping () async -> Void,
+        layoutReporter: (@MainActor ([String: CGRect]) -> Void)? = nil
+    ) {
+        self.connection = connection
+        self.viewportWidth = viewportWidth
+        self.usesAccessibilityLayout = usesAccessibilityLayout
+        self.working = working
+        self.disabled = disabled
+        self.onAction = onAction
+        self.onRemove = onRemove
+        self.layoutReporter = layoutReporter
+    }
+#else
+    init(
+        connection: McpConnection,
+        viewportWidth: CGFloat,
+        usesAccessibilityLayout: Bool,
+        working: Bool,
+        disabled: Bool,
+        onAction: @escaping (String) -> Void,
+        onRemove: @escaping () async -> Void
+    ) {
+        self.connection = connection
+        self.viewportWidth = viewportWidth
+        self.usesAccessibilityLayout = usesAccessibilityLayout
+        self.working = working
+        self.disabled = disabled
+        self.onAction = onAction
+        self.onRemove = onRemove
+    }
+#endif
+
+    var body: some View {
+        Group {
+            if usesAccessibilityLayout || viewportWidth <= 360 {
+                VStack(spacing: 8) {
+                    actionButton("Refresh", icon: "arrow.clockwise", action: "refresh", prominent: true, checksIntrinsicWidth: false)
+                    toggleButton(checksIntrinsicWidth: false)
+                    deleteButton(checksIntrinsicWidth: false)
+                }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        actionButton("Refresh", icon: "arrow.clockwise", action: "refresh", prominent: true, checksIntrinsicWidth: true)
+                            .frame(maxWidth: .infinity)
+                        toggleButton(checksIntrinsicWidth: true)
+                            .frame(maxWidth: .infinity)
+                        deleteButton(checksIntrinsicWidth: true)
+                            .frame(maxWidth: .infinity)
+                    }
+
+                    VStack(spacing: 8) {
+                        actionButton("Refresh", icon: "arrow.clockwise", action: "refresh", prominent: true, checksIntrinsicWidth: false)
+                        toggleButton(checksIntrinsicWidth: false)
+                        deleteButton(checksIntrinsicWidth: false)
+                    }
+                }
+            }
+        }
+#if DEBUG
+        .background {
+            if layoutReporter != nil { measureFrame("row.container") }
+        }
+        .onPreferenceChange(ConnectedToolActionLayoutPreferenceKey.self) { layoutReporter?($0) }
+#endif
+    }
+
+    @ViewBuilder
+    private func actionButton(
+        _ title: String,
+        icon: String,
+        action: String,
+        prominent: Bool,
+        checksIntrinsicWidth: Bool
+    ) -> some View {
+        let id = prominent ? "refresh" : "toggle"
+        let button = Button { onAction(action) } label: {
+            actionButtonLabel(title, icon: icon, id: id, checksIntrinsicWidth: checksIntrinsicWidth)
+        }
+        .buttonStyle(AssistantActionButtonStyle(kind: prominent ? .primary : .secondary, fillsWidth: true, minimumHeight: 48))
+        .tint(prominent ? AssistantTheme.accent(for: colorScheme) : AssistantTheme.inkMuted(for: colorScheme))
+        .disabled(working || disabled)
+        .accessibilityIdentifier("connected-tools.\(id)")
+#if DEBUG
+        measured(button, id: "\(id).button")
+#else
+        button
+#endif
+    }
+
+    @ViewBuilder
+    private func toggleButton(checksIntrinsicWidth: Bool) -> some View {
+        actionButton(
+            connection.enabled ? "Pause" : "Enable",
+            icon: connection.enabled ? "pause.fill" : "play.fill",
+            action: connection.enabled ? "disable" : "enable",
+            prominent: false,
+            checksIntrinsicWidth: checksIntrinsicWidth
+        )
+    }
+
+    private func actionButtonLabel(_ title: String, icon: String, id: String, checksIntrinsicWidth: Bool) -> some View {
+        ZStack {
+            ForEach(Array([
+                ("arrow.clockwise", "Refresh"),
+                ("pause.fill", "Pause"),
+                ("play.fill", "Enable"),
+                ("arrow.clockwise", "Working…"),
+                ("trash", "Remove"),
+                ("checkmark", "Confirm?")
+            ].enumerated()), id: \.offset) { reservation in
+                HStack(spacing: 8) {
+                    if reservation.element.1 == "Working…" {
+                        ProgressView().controlSize(.small).frame(width: 16)
+                    } else {
+                        Image(systemName: reservation.element.0).frame(width: 16)
+                    }
+                    Text(reservation.element.1)
+                }
+                .hidden()
+            }
+            let glyph = ZStack {
+                Image(systemName: icon).opacity(working ? 0 : 1)
+                if working { ProgressView().controlSize(.small) }
+            }
+            .frame(width: 16)
+            let text = Text(working ? "Working…" : title)
+                .fixedSize(horizontal: checksIntrinsicWidth, vertical: true)
+#if DEBUG
+            let measuredGlyph = measured(glyph, id: "\(id).glyph")
+            let measuredText = measured(text, id: "\(id).text")
+#else
+            let measuredGlyph = glyph
+            let measuredText = text
+#endif
+            let visibleGroup = HStack(spacing: 8) {
+                measuredGlyph
+                measuredText
+            }
+#if DEBUG
+            measured(visibleGroup, id: "\(id).group")
+#else
+            visibleGroup
+#endif
+        }
+        .fixedSize(horizontal: checksIntrinsicWidth, vertical: false)
+    }
+
+    private func deleteButton(checksIntrinsicWidth: Bool) -> some View {
+        let button = AssistantConfirmationButton(
+            "Remove",
+            hint: "Deletes \(connection.name), its tools, and saved credential.",
+            fillsWidth: true,
+            minimumHeight: 48,
+            reservedWidthLabels: ["Refresh", "Pause", "Enable", "Working…"],
+            checksIntrinsicWidth: checksIntrinsicWidth,
+            centersReservedGroup: true
+        ) {
+            await onRemove()
+        }
+#if DEBUG
+        let observedButton = button.reportingLayout(layoutReporter.map { report in
+            { component, frame in report(["remove.\(component)": frame]) }
+        })
+#else
+        let observedButton = button
+#endif
+        let control = observedButton
+            .disabled(working || disabled)
+            .accessibilityIdentifier("connected-tools.remove")
+#if DEBUG
+        return measured(control, id: "remove.button")
+#else
+        return control
+#endif
+    }
+
+    @Environment(\.colorScheme) private var colorScheme
+
+#if DEBUG
+    private func measureFrame(_ id: String) -> some View {
+        GeometryReader { proxy in
+            Color.clear.preference(
+                key: ConnectedToolActionLayoutPreferenceKey.self,
+                value: [id: proxy.frame(in: .global)]
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func measured<Content: View>(_ content: Content, id: String) -> some View {
+        if layoutReporter != nil {
+            content.background { measureFrame(id) }
+        } else {
+            content
+        }
+    }
+#endif
+}
+
+#if DEBUG
+private struct ConnectedToolActionLayoutPreferenceKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
+    }
+}
+#endif
 
 private enum MCPField: Hashable {
     case name
