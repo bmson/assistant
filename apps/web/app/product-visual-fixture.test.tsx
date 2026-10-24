@@ -1015,11 +1015,16 @@ it.each(fixtureStates)(
     // Chat uses its actual conversational header and accessible composer instead of an h1.
     if (page.productName !== 'chat') expect(html, page.name).toMatch(/<h1|aria-label="Message/);
     if (page.chatState) {
-      expect(html).toContain('Drawing on knowledge graph and earlier chats');
-      expect(html).toContain('2-hop connection');
-      expect(html).toContain('Earlier trip chat');
+      if (page.chatState === 'paper') {
+        expect(html).toContain('Drawing on knowledge graph and earlier chats');
+        expect(html).toContain('2-hop connection');
+        expect(html).toContain('Earlier trip chat');
+        expect(html).toContain('data-decision-card="true"');
+      } else {
+        expect(html).toContain('Context for this reply');
+        expect(html).not.toContain('Drawing on knowledge graph and earlier chats');
+      }
       expect(html).toContain('Stop this task');
-      if (page.chatState === 'paper') expect(html).toContain('data-decision-card="true"');
     }
     if (directory) {
       mkdirSync(directory, { recursive: true });

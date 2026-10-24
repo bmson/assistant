@@ -20,7 +20,7 @@ import {
   Sparkles,
   TriangleAlert,
 } from 'lucide-react';
-import { type ReactNode, useEffect, useState, useTransition } from 'react';
+import { type ReactNode, useCallback, useEffect, useLayoutEffect, useState } from 'react';
 import type { ChatCardPresentation, NoticeKind } from '@/lib/chat-notices';
 import { focusRing } from '@/lib/ui';
 import { DecisionCard, type DecisionTone } from './decision-card';
@@ -303,10 +303,12 @@ export function AssistantUpdate({
   sources,
   messageId,
   onFeedback,
+  sessionScope,
 }: {
   text: string;
   sources: RecallSource[];
   messageId: string;
+  sessionScope?: string;
   onFeedback?: (messageId: string, verdict: 'helpful' | 'not_helpful') => Promise<void>;
 }) {
   const attention = /(?:⚠️|anomaly|waiting for you|needs? (?:your )?attention)/i.test(text);
@@ -316,7 +318,12 @@ export function AssistantUpdate({
   const label = attention ? 'Needs attention' : reflection ? 'Quiet update' : 'Update';
   return (
     <DecisionCard tone={tone} icon={icon} label={label}>
-      <RecallNote sources={sources} messageId={messageId} onFeedback={onFeedback} />
+      <RecallNote
+        sources={sources}
+        messageId={messageId}
+        onFeedback={onFeedback}
+        sessionScope={sessionScope}
+      />
       <div className="break-words text-sm leading-6 text-strong [overflow-wrap:anywhere]">
         <MessageMarkdown text={text} />
       </div>
@@ -348,7 +355,7 @@ export function recallSourcesOf(message: UIMessage): RecallSource[] {
  * anyone west of UTC. The year appears once it differs from the current one —
  * without it a two-year-old memory was indistinguishable from last week's.
  */
-function friendlyRecallDate(isoDay: string, now: Date = new Date()): string {
+export function friendlyRecallDate(isoDay: string, now: Date = new Date()): string {
   const date = new Date(`${isoDay}T00:00:00Z`);
   if (Number.isNaN(date.getTime())) return isoDay;
   const sameYear = date.getUTCFullYear() === now.getUTCFullYear();
@@ -359,116 +366,291 @@ function friendlyRecallDate(isoDay: string, now: Date = new Date()): string {
   }).format(date);
 }
 
-function RecallFeedbackControl({
-  messageId,
-  onFeedback,
-}: {
+/** Async publication is scoped independently of cancellation, including unmount/replacement. */
+export function createRecallOperationFence(identity: string) {
+  let generation = 0;
+  let active = false;
+  return {
+    activate() {
+      active = true;
+    },
+    deactivate() {
+      active = false;
+      generation += 1;
+    },
+    begin() {
+      generation += 1;
+      return { identity, generation };
+    },
+    current(ticket: { identity: string; generation: number }) {
+      return active && identity === ticket.identity && generation === ticket.generation;
+    },
+  };
+}
+
+/** Each keyed mount owns its lease. Speculative renders never mutate a committed mount. */
+function useRecallOperationFence(identity: string) {
+  const [fence] = useState(() => createRecallOperationFence(identity));
+  useLayoutEffect(() => {
+    fence.activate();
+    return () => fence.deactivate();
+  }, [fence]);
+  return fence;
+}
+
+interface RecallFeedbackControlProps {
   messageId: string;
   onFeedback: (messageId: string, verdict: 'helpful' | 'not_helpful') => Promise<void>;
-}) {
-  const [pending, startTransition] = useTransition();
-  const [selection, setSelection] = useState<'helpful' | 'not_helpful' | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const save = (verdict: 'helpful' | 'not_helpful') => {
-    setError(null);
-    startTransition(async () => {
-      try {
-        await onFeedback(messageId, verdict);
-        setSelection(verdict);
-      } catch {
-        setError('Could not save feedback.');
-      }
-    });
+  identityScope?: string;
+  sessionScope?: string;
+}
+
+export function RecallFeedbackControl(props: RecallFeedbackControlProps) {
+  if (!props.sessionScope) return null;
+  const identity = JSON.stringify([props.sessionScope, props.identityScope ?? '', props.messageId]);
+  return <MountedRecallFeedbackControl key={identity} {...props} identity={identity} />;
+}
+
+function MountedRecallFeedbackControl({
+  messageId,
+  onFeedback,
+  identity,
+}: RecallFeedbackControlProps & { identity: string }) {
+  const fence = useRecallOperationFence(identity);
+  const [state, setState] = useState<{
+    identity: string;
+    pending: boolean;
+    selection: 'helpful' | 'not_helpful' | null;
+    error: boolean;
+    attempted: 'helpful' | 'not_helpful' | null;
+  }>({ identity, pending: false, selection: null, error: false, attempted: null });
+  const current =
+    state.identity === identity
+      ? state
+      : {
+          identity,
+          pending: false,
+          selection: null,
+          error: false,
+          attempted: null,
+        };
+  const save = async (verdict: 'helpful' | 'not_helpful') => {
+    if (current.pending) return;
+    const ticket = fence.begin();
+    setState({ ...current, pending: true, error: false, attempted: verdict });
+    try {
+      await onFeedback(messageId, verdict);
+      if (fence.current(ticket))
+        setState({
+          identity,
+          pending: false,
+          selection: verdict,
+          error: false,
+          attempted: verdict,
+        });
+    } catch {
+      if (fence.current(ticket))
+        setState({ ...current, pending: false, error: true, attempted: verdict });
+    }
   };
   return (
-    <span className="ml-1 inline-flex items-center gap-1 border-l border-current/15 pl-2">
+    <span className="recall-feedback-control inline-flex flex-wrap items-center gap-2">
       <span className="sr-only">Was this recalled context useful?</span>
       <button
         type="button"
-        disabled={pending}
-        onClick={() => save('helpful')}
-        aria-pressed={selection === 'helpful'}
+        disabled={current.pending}
+        onClick={() => void save('helpful')}
+        aria-pressed={current.selection === 'helpful'}
         title="This recalled context was useful"
-        className="rounded px-1 py-0.5 text-[11px] font-medium hover:bg-current/10 disabled:opacity-50"
+        className="rounded px-1 py-0.5 text-xs font-medium hover:bg-current/10 disabled:opacity-50"
       >
         Helpful
       </button>
       <button
         type="button"
-        disabled={pending}
-        onClick={() => save('not_helpful')}
-        aria-pressed={selection === 'not_helpful'}
+        disabled={current.pending}
+        onClick={() => void save('not_helpful')}
+        aria-pressed={current.selection === 'not_helpful'}
         title="This recalled context was not useful"
-        className="rounded px-1 py-0.5 text-[11px] font-medium hover:bg-current/10 disabled:opacity-50"
+        className="rounded px-1 py-0.5 text-xs font-medium hover:bg-current/10 disabled:opacity-50"
       >
         Not useful
       </button>
-      {error ? (
-        <span role="status" className="sr-only">
-          {error}
-        </span>
+      {current.error ? <span role="status">Could not save feedback.</span> : null}
+      {current.error && current.attempted ? (
+        <button
+          type="button"
+          disabled={current.pending}
+          onClick={() => {
+            if (current.attempted) void save(current.attempted);
+          }}
+          className="rounded underline underline-offset-2"
+        >
+          Retry feedback
+        </button>
       ) : null}
     </span>
   );
 }
 
-function RecallSourceControl({ source }: { source: RecallSource }) {
-  const [pending, startTransition] = useTransition();
-  const [suppressed, setSuppressed] = useState<boolean | null>(null);
-  const [error, setError] = useState(false);
-  useEffect(() => {
-    if (!source.surfaceKey) return;
-    let active = true;
-    const sourceRevision = source.sourceRevision;
-    void fetch(
-      `/api/recall/sources/${source.surfaceKey}?sourceRevision=${encodeURIComponent(sourceRevision ?? '')}`,
-      { cache: 'no-store' },
-    )
-      .then(async (response) =>
-        response.ok ? ((await response.json()) as { suppressed?: boolean }) : null,
-      )
-      .then((value) => {
-        if (active && typeof value?.suppressed === 'boolean') setSuppressed(value.suppressed);
-      })
-      .catch(() => {
-        if (active) setError(true);
-      });
-    return () => {
-      active = false;
-    };
-  }, [source.surfaceKey, source.sourceRevision]);
-  if (!source.surfaceKey || !source.sourceRevision) return null;
-  const save = () => {
-    if (suppressed === null) return;
-    const next = !suppressed;
-    setError(false);
-    startTransition(async () => {
+export function hasRecallLedgerReference(source: RecallSource): boolean {
+  return (
+    /^[a-f0-9]{64}$/.test(source.surfaceKey ?? '') &&
+    /^[a-f0-9]{64}$/.test(source.sourceRevision ?? '')
+  );
+}
+
+/** Existing authenticated source endpoint; non-OK and malformed reads are recoverable errors. */
+export async function readRecallSourceSetting(
+  source: Pick<RecallSource, 'surfaceKey' | 'sourceRevision'>,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const response = await fetch(
+    `/api/recall/sources/${source.surfaceKey}?sourceRevision=${encodeURIComponent(source.sourceRevision ?? '')}`,
+    { cache: 'no-store', signal },
+  );
+  if (!response.ok) throw new Error('Could not check setting.');
+  const value = (await response.json()) as { suppressed?: unknown };
+  if (typeof value?.suppressed !== 'boolean') throw new Error('Could not check setting.');
+  return value.suppressed;
+}
+
+export async function writeRecallSourceSetting(
+  source: Pick<RecallSource, 'surfaceKey' | 'sourceRevision'>,
+  suppressed: boolean,
+  signal?: AbortSignal,
+): Promise<'saved' | 'stale'> {
+  const response = await fetch(`/api/recall/sources/${source.surfaceKey}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ suppressed, expectedSourceRevision: source.sourceRevision }),
+    signal,
+  });
+  if (response.status === 409) return 'stale';
+  if (!response.ok) throw new Error('Could not save setting.');
+  const value = (await response.json()) as { ok?: unknown };
+  if (value?.ok !== true) throw new Error('Could not save setting.');
+  return 'saved';
+}
+
+interface RecallSourceControlProps {
+  source: RecallSource;
+  messageId?: string;
+  identityScope?: string;
+  sessionScope?: string;
+}
+
+export function RecallSourceControl(props: RecallSourceControlProps) {
+  if (!props.sessionScope) return <span>Privacy controls unavailable for this session.</span>;
+  const identity = JSON.stringify([
+    props.sessionScope,
+    props.identityScope ?? '',
+    props.messageId ?? '',
+    props.source.surfaceKey,
+    props.source.sourceRevision,
+  ]);
+  return <MountedRecallSourceControl key={identity} {...props} identity={identity} />;
+}
+
+function MountedRecallSourceControl({
+  source,
+  identity,
+}: RecallSourceControlProps & { identity: string }) {
+  const fence = useRecallOperationFence(identity);
+  const [state, setState] = useState<{
+    identity: string;
+    suppressed: boolean | null;
+    pending: boolean;
+    error: 'read' | 'write' | 'stale' | null;
+  }>({ identity, suppressed: null, pending: false, error: null });
+  const current =
+    state.identity === identity
+      ? state
+      : { identity, suppressed: null, pending: false, error: null };
+  const eligible = hasRecallLedgerReference(source);
+  const surfaceKey = source.surfaceKey;
+  const sourceRevision = source.sourceRevision;
+  const load = useCallback(
+    async (signal?: AbortSignal) => {
+      const ticket = fence.begin();
+      setState({ identity, suppressed: null, pending: true, error: null });
       try {
-        const response = await fetch(`/api/recall/sources/${source.surfaceKey}`, {
-          method: 'PATCH',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ suppressed: next, expectedSourceRevision: source.sourceRevision }),
-        });
-        if (!response.ok) throw new Error('Recall control rejected');
-        setSuppressed(next);
+        const suppressed = await readRecallSourceSetting({ surfaceKey, sourceRevision }, signal);
+        if (fence.current(ticket)) setState({ identity, suppressed, pending: false, error: null });
       } catch {
-        setError(true);
+        if (fence.current(ticket))
+          setState({ identity, suppressed: null, pending: false, error: 'read' });
       }
-    });
+    },
+    [fence, identity, surfaceKey, sourceRevision],
+  );
+  useEffect(() => {
+    const controller = new AbortController();
+    if (eligible) void load(controller.signal);
+    return () => {
+      controller.abort();
+    };
+  }, [eligible, load]);
+  if (!eligible) return null;
+  const save = async () => {
+    if (current.pending || current.suppressed === null || current.error === 'stale') return;
+    const next = !current.suppressed;
+    const ticket = fence.begin();
+    setState({ ...current, pending: true, error: null });
+    try {
+      const result = await writeRecallSourceSetting(source, next);
+      if (fence.current(ticket))
+        setState({
+          identity,
+          suppressed: result === 'saved' ? next : current.suppressed,
+          pending: false,
+          error: result === 'stale' ? 'stale' : null,
+        });
+    } catch {
+      if (fence.current(ticket))
+        setState({ identity, suppressed: null, pending: false, error: 'write' });
+    }
   };
   return (
-    <button
-      type="button"
-      className="ml-1 rounded underline decoration-current/40 underline-offset-2 hover:decoration-current disabled:opacity-50"
-      disabled={pending || suppressed === null}
-      onClick={save}
-      aria-label={
-        suppressed ? 'Allow this version in future recall' : 'Hide this version from future recall'
-      }
-      title={error ? 'Recall control could not be saved' : undefined}
-    >
-      {error ? 'Retry source control' : suppressed ? 'Allow this version' : 'Hide this version'}
-    </button>
+    <span className="recall-source-control inline-flex flex-wrap items-center gap-2">
+      {current.pending && current.suppressed === null ? (
+        <span role="status">Checking source setting…</span>
+      ) : null}
+      {current.error === 'read' ? <span role="status">Could not check setting.</span> : null}
+      {current.error === 'write' ? (
+        <span role="status">
+          Could not confirm result. Check the source setting before making another change.
+        </span>
+      ) : null}
+      {current.error === 'stale' ? (
+        <span role="status">Source changed. Refresh before changing this setting.</span>
+      ) : null}
+      {current.suppressed === null ? (
+        <button
+          type="button"
+          disabled={current.pending}
+          onClick={() => void load()}
+          className="rounded underline underline-offset-2 disabled:opacity-50"
+        >
+          {current.error === 'read'
+            ? 'Retry checking setting'
+            : current.error === 'write'
+              ? 'Recheck source setting'
+              : 'Check source setting'}
+        </button>
+      ) : current.error !== 'stale' ? (
+        <button
+          type="button"
+          disabled={current.pending}
+          onClick={() => void save()}
+          className="rounded underline underline-offset-2 disabled:opacity-50"
+        >
+          {current.suppressed
+            ? 'Allow this version in future recall'
+            : 'Hide this version from future recall'}
+        </button>
+      ) : null}
+    </span>
   );
 }
 
@@ -477,10 +659,12 @@ export function RecallNote({
   sources,
   messageId,
   onFeedback,
+  sessionScope,
 }: {
   sources: RecallSource[];
   /** Live streamed provenance has no durable message id, so it is view-only. */
   messageId?: string;
+  sessionScope?: string;
   /** Kept at the transport boundary so this shared view stays server-free. */
   onFeedback?: (messageId: string, verdict: 'helpful' | 'not_helpful') => Promise<void>;
 }) {
@@ -506,11 +690,21 @@ export function RecallNote({
         >
           {index > 0 ? '· ' : ''}
           {friendlyRecallDate(source.date)} — {source.label}
-          {messageId ? <RecallSourceControl source={source} /> : null}
+          {messageId ? (
+            <RecallSourceControl
+              source={source}
+              messageId={messageId}
+              sessionScope={sessionScope}
+            />
+          ) : null}
         </span>
       ))}
       {messageId && onFeedback ? (
-        <RecallFeedbackControl messageId={messageId} onFeedback={onFeedback} />
+        <RecallFeedbackControl
+          messageId={messageId}
+          onFeedback={onFeedback}
+          sessionScope={sessionScope}
+        />
       ) : null}
     </div>
   );
