@@ -1,6 +1,7 @@
 import type { PhoneCallPolicyPresentation } from '@assistant/application/approval-policy-presentation';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
+import { policyScope } from '@/app/settings/labels';
 import { projectStandingApprovalPolicy } from '@/lib/standing-approval-view';
 import { StandingApprovals } from './standing-approvals';
 
@@ -8,6 +9,7 @@ vi.mock('./actions', () => ({
   deletePolicy: async () => {},
   setPolicyEnabled: async () => {},
 }));
+
 import { PhoneCallPolicyDetails } from './phone-call-policy-details';
 
 describe('phone-call standing-rule settings details', () => {
@@ -158,10 +160,14 @@ describe('combined phone saved rows', () => {
   });
 
   it('keeps non-phone generic Enable behavior even with a phone-like template', () => {
-    const html = renderSaved({ ...savedOwnerPolicy, toolName: 'other.tool' });
+    const policy = { ...savedOwnerPolicy, toolName: 'other.tool' };
+    const view = projectStandingApprovalPolicy(policy);
+    expect(view.scope).toBe(policyScope(policy.templateKey, policy.match));
+    const html = renderToStaticMarkup(<StandingApprovals policies={[view]} />);
     expect(html).toContain('Enable rule');
     expect(html).not.toContain('Stored setting:');
-    expect(html).not.toContain('pending owner call');
+    expect(html).not.toContain('/approvals#waiting-for-you');
+    expect(html).not.toContain('This paused entry remains unchanged.');
   });
 
   it('keeps strict A renderer and generic enable controls', () => {
