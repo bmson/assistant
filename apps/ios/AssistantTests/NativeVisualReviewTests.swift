@@ -2115,7 +2115,7 @@ final class NativeVisualReviewTests: XCTestCase {
             model: model,
             viewportWidth: 393,
             beforeCapture: { window in
-                let control = try XCTUnwrap(accessibilityObject(identifier: "connected-tools.remove", in: window))
+                let control = try XCTUnwrap(self.accessibilityObject(identifier: "connected-tools.remove", in: window))
                 let activated: Bool
                 if let element = control as? UIAccessibilityElement {
                     activated = element.accessibilityActivate()
@@ -2128,7 +2128,7 @@ final class NativeVisualReviewTests: XCTestCase {
                 XCTAssertTrue(activated, "The actual Remove control should arm through accessibility activation.")
                 try await Task.sleep(for: .milliseconds(100))
                 window.layoutIfNeeded()
-                let armed = try XCTUnwrap(accessibilityObject(identifier: "connected-tools.remove", in: window))
+                let armed = try XCTUnwrap(self.accessibilityObject(identifier: "connected-tools.remove", in: window))
                 let label = (armed as? UIAccessibilityElement)?.accessibilityLabel ?? (armed as? UIView)?.accessibilityLabel
                 XCTAssertEqual(label, "Confirm remove")
             },
