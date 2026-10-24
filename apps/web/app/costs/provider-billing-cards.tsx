@@ -13,6 +13,20 @@ function money(value: number, currency: string) {
   }).format(value);
 }
 
+function billingTimestamp(label: string, value: string | null | undefined) {
+  if (!value) return `${label}: time not reported`;
+  const hasExplicitZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+  if (!hasExplicitZone) return `${label}: ${value} (timezone not provided)`;
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return `${label}: ${value} (timestamp unrecognized)`;
+  const formatted = new Intl.DateTimeFormat('en-US', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    timeZone: 'UTC',
+  }).format(parsed);
+  return `${label}: ${formatted} UTC`;
+}
+
 export function ProviderBillingCards({ reports }: { reports: ProviderBilling[] }) {
   return (
     <section className="mt-8 space-y-4" aria-label="Provider billing">
@@ -31,6 +45,8 @@ export function ProviderBillingCards({ reports }: { reports: ProviderBilling[] }
             service: string;
             detail: string;
             currency: string;
+            projectId?: string;
+            apiKeyId?: string;
             cost: number;
             net: number;
             credits: number;
@@ -38,11 +54,19 @@ export function ProviderBillingCards({ reports }: { reports: ProviderBilling[] }
         >();
         for (const line of report.lines) {
           totals.set(line.currency, (totals.get(line.currency) ?? 0) + line.net);
-          const key = `${line.service}:${line.detail}:${line.currency}`;
+          const key = JSON.stringify([
+            line.service,
+            line.detail,
+            line.currency,
+            line.projectId ?? null,
+            line.apiKeyId ?? null,
+          ]);
           const aggregate = services.get(key) ?? {
             service: line.service,
             detail: line.detail,
             currency: line.currency,
+            projectId: line.projectId,
+            apiKeyId: line.apiKeyId,
             cost: 0,
             net: 0,
             credits: 0,
@@ -81,19 +105,21 @@ export function ProviderBillingCards({ reports }: { reports: ProviderBilling[] }
               </span>
             </div>
             <p className="mt-1 text-xs text-muted">
-              {report.scope} · {report.period} · {report.source}
+              {report.scope} · {report.period}
+              {` · ${report.periodTimezone ? `${report.periodTimezone} period` : 'period timezone not reported'}`}{' '}
+              · {report.source}
             </p>
             <p className="mt-3 text-sm text-muted">{report.message}</p>
-            {report.fetchedAt ? (
-              <p className="mt-2 text-xs text-muted">
-                Fetched {report.fetchedAt.replace('T', ' ').replace('.000Z', ' UTC')}
-              </p>
-            ) : null}
-            {report.latestExportAt ? (
-              <p className="mt-1 text-xs text-muted">
-                Latest export {report.latestExportAt} · Latest usage {report.latestUsageAt}
-              </p>
-            ) : null}
+            <p className="mt-2 text-xs text-muted">
+              {billingTimestamp('Last checked', report.checkedAt)}
+            </p>
+            <p className="mt-1 text-xs text-muted">
+              {billingTimestamp('Fetched', report.fetchedAt)}
+            </p>
+            <p className="mt-1 text-xs text-muted">
+              {billingTimestamp('Latest export', report.latestExportAt)} ·{' '}
+              {billingTimestamp('Latest usage', report.latestUsageAt)}
+            </p>
             {services.size > 0 || report.forecast ? (
               <details className="mt-3 rounded-xl bg-sunken/45 p-3">
                 <summary className="cursor-pointer text-sm font-medium">
@@ -124,7 +150,9 @@ export function ProviderBillingCards({ reports }: { reports: ProviderBilling[] }
                   </div>
                 ) : report.status === 'reported' ? (
                   <p className="mt-3 text-xs text-muted">
-                    Month-end estimate needs at least three days of reported usage.
+                    {report.id === 'openai-billing'
+                      ? 'Month-end estimate unavailable: source usage freshness is not reported.'
+                      : 'Month-end estimate needs at least three days of reported usage.'}
                   </p>
                 ) : null}
                 {services.size > 0 ? (
@@ -134,7 +162,11 @@ export function ProviderBillingCards({ reports }: { reports: ProviderBilling[] }
                         <tr className="text-left text-xs text-muted">
                           <th className="py-2">Service and detail</th>
                           <th className="text-right">Currency</th>
-                          <th className="text-right">Cost</th>
+                          <th className="text-right">
+                            {report.amountBasis === 'provider_reported_cost'
+                              ? 'Reported cost'
+                              : 'Cost'}
+                          </th>
                           <th className="text-right">Credits</th>
                           <th className="text-right">Net spend</th>
                         </tr>
@@ -147,16 +179,30 @@ export function ProviderBillingCards({ reports }: { reports: ProviderBilling[] }
                               {service.detail ? (
                                 <span className="block text-xs text-muted">{service.detail}</span>
                               ) : null}
+                              {service.projectId ? (
+                                <span className="block text-xs text-muted">
+                                  Project: {service.projectId}
+                                </span>
+                              ) : null}
+                              {service.apiKeyId ? (
+                                <span className="block text-xs text-muted">
+                                  API key ID: {service.apiKeyId}
+                                </span>
+                              ) : null}
                             </td>
                             <td className="text-right tabular-nums">{service.currency}</td>
                             <td className="text-right tabular-nums">
                               {money(service.cost, service.currency)}
                             </td>
                             <td className="text-right tabular-nums">
-                              {money(service.credits, service.currency)}
+                              {report.amountBasis === 'provider_reported_cost'
+                                ? 'Not reported'
+                                : money(service.credits, service.currency)}
                             </td>
                             <td className="text-right tabular-nums">
-                              {money(service.net, service.currency)}
+                              {report.amountBasis === 'provider_reported_cost'
+                                ? 'Not reported'
+                                : money(service.net, service.currency)}
                             </td>
                           </tr>
                         ))}
@@ -180,15 +226,28 @@ export function ProviderBillingCards({ reports }: { reports: ProviderBilling[] }
                 >
                   Open Google Cloud Billing
                 </a>
-                <details className="mt-2">
-                  <summary className="cursor-pointer text-sm font-medium">
-                    Export setup steps and guide
-                  </summary>
+              </div>
+            ) : null}
+            {report.setup ||
+            (report.id === 'google-cloud' && report.status === 'not_configured') ? (
+              <details className="mt-2">
+                <summary className="cursor-pointer text-sm font-medium">
+                  {report.setup ? 'Review billing setup' : 'Export setup steps and guide'}
+                </summary>
+                {report.setup ? (
+                  <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs text-muted">
+                    {report.setup.steps.map((step) => (
+                      <li key={step}>{step}</li>
+                    ))}
+                  </ol>
+                ) : (
                   <p className="mt-2 text-xs text-muted">
                     Enable standard usage export in Google Cloud Billing, then connect its BigQuery
                     table and grant this installation read access. Initial data can take hours or
                     days.
                   </p>
+                )}
+                {report.id === 'google-cloud' ? (
                   <a
                     className="mt-2 inline-block underline"
                     href="https://docs.cloud.google.com/billing/docs/how-to/export-data-bigquery-setup"
@@ -197,8 +256,8 @@ export function ProviderBillingCards({ reports }: { reports: ProviderBilling[] }
                   >
                     Export setup guide
                   </a>
-                </details>
-              </div>
+                ) : null}
+              </details>
             ) : null}
           </article>
         );

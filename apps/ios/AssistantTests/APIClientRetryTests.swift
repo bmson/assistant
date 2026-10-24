@@ -1272,6 +1272,10 @@ final class APIClientRetryTests: XCTestCase {
             headers.first(where: { $0.key.caseInsensitiveCompare("x-assistant-workspace-sections") == .orderedSame })?.value,
             "1"
         )
+        XCTAssertEqual(
+            headers.first(where: { $0.key.caseInsensitiveCompare("x-assistant-billing-amounts") == .orderedSame })?.value,
+            "1"
+        )
     }
 
     @MainActor

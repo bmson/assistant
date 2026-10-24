@@ -2,7 +2,7 @@
   "format": 1,
   "purpose": "Source composition and route drift evidence only; not a deployment or configured-runtime receipt.",
   "runtimeSources": {
-    "packages/config/src/index.ts": "d65963a4a350f41242da86910f085d60909f13b584aa710e4a0423f60437fe9b",
+    "packages/config/src/index.ts": "492748104b6f0efc340dfd3153177b5889643d8aebe8b6909978da3d0ebdcae5",
     "apps/agent/src/deps.ts": "fb30df8600bbcf24da0d5cfa9ef1c92e28700b663429cdbbe37d65ecee0ea655",
     "apps/agent/src/index.ts": "6da57b60f853ca6622142a12b70bb31a73e8155eac30dd7d905218c19ca2fd56",
     "apps/web/lib/server.ts": "c7134fe07612b8653ef7ee73f92076bbdea5a27fb665c8efb3d843f960d49211",
@@ -399,7 +399,7 @@
     },
     "apps/web/app/api/mobile/v1/workspace/route.ts": {
       "methods": ["GET"],
-      "sha256": "222d52bd9fe7ec361124201080e2079b2c3080cba566f19767b85f9214573a7c"
+      "sha256": "56df8b9bb34e0b2f10b74a95fa8474c1baa8ab50f92c20d3b393eacd18f49891"
     },
     "apps/web/app/api/mobile/v1/workspace/sections/[section]/route.ts": {
       "methods": ["GET"],
