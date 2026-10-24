@@ -101,31 +101,46 @@ async function waitForOwnerFenceWaiter(
   database: Db,
   applicationName: string,
   blockerPid: number,
-  priorWaiterPid?: number,
+  priorWaiter?: { pid: number; applicationName: string },
 ): Promise<number> {
-  let observed: { pid: number; blockers: number[] }[] = [];
+  let observed: { pid: number; applicationName: string; blockers: number[] }[] = [];
   const diagnostic = (phase: string) => ({
     phase,
     applicationName,
     blockerPid,
-    priorWaiterPid,
+    priorWaiter,
     observed,
   });
   console.info('[policy-race-diagnostic]', JSON.stringify(diagnostic('observer.begin')));
   const deadline = performance.now() + 5_000;
   while (performance.now() < deadline) {
-    const rows = await database.$client<{ pid: number; blockers: number[] }[]>`
-      select pid, pg_blocking_pids(pid) as blockers from pg_stat_activity
+    const rows = await database.$client<
+      { pid: number; applicationName: string; blockers: number[] }[]
+    >`
+      select pid, application_name as "applicationName", pg_blocking_pids(pid) as blockers
+      from pg_stat_activity
       where datname = current_database() and pid <> pg_backend_pid()
-        and application_name = ${applicationName}
+        and (application_name = ${applicationName}
+          or (pid = ${priorWaiter?.pid ?? -1}
+            and application_name = ${priorWaiter?.applicationName ?? ''}))
         and state = 'active' and wait_event_type = 'Lock'
         and query ilike '%for no key update%'
     `;
     observed = rows;
+    const prior = priorWaiter
+      ? rows.find(
+          (row) =>
+            row.pid === priorWaiter.pid && row.applicationName === priorWaiter.applicationName,
+        )
+      : undefined;
     const waiter = rows.find(
       (row) =>
-        row.blockers.includes(blockerPid) &&
-        (priorWaiterPid === undefined || row.blockers.includes(priorWaiterPid)),
+        row.applicationName === applicationName &&
+        (priorWaiter === undefined
+          ? row.blockers.includes(blockerPid)
+          : row.pid !== priorWaiter.pid &&
+            row.blockers.includes(priorWaiter.pid) &&
+            prior?.blockers.includes(blockerPid)),
     );
     if (waiter) {
       console.info('[policy-race-diagnostic]', JSON.stringify(diagnostic('observer.matched')));
@@ -156,6 +171,11 @@ describe('PostgreSQL tool execution repository', () => {
       if (callIds.length) await db.delete(toolCalls).where(inArray(toolCalls.id, callIds));
       if (policyIds.length)
         await db.delete(approvalPolicies).where(inArray(approvalPolicies.id, policyIds));
+      // Resolution may commit before an observation assertion fails, before
+      // its generated policy ID can be added to policyIds. This owner is
+      // created uniquely by this test, so remove only its actual policy rows.
+      if (extraAgent)
+        await db.delete(approvalPolicies).where(eq(approvalPolicies.agentId, extraAgent));
       if (taskIds.length) await db.delete(tasks).where(inArray(tasks.id, taskIds));
       if (extraAgent) await db.delete(agents).where(eq(agents.id, extraAgent));
     } finally {
@@ -531,12 +551,10 @@ describe('PostgreSQL tool execution repository', () => {
         decision: { modelToolCallId: 'pg-policy-disable-first' },
         expectedPolicyFingerprint: enabledFingerprint,
       });
-      const startPid = await waitForOwnerFenceWaiter(
-        observer,
-        startName,
-        firstFence.blockerPid,
-        disablePid,
-      );
+      const startPid = await waitForOwnerFenceWaiter(observer, startName, firstFence.blockerPid, {
+        pid: disablePid,
+        applicationName: disableName,
+      });
       expect(startPid).not.toBe(disablePid);
       firstFence.release();
       await firstFence.blocker;
@@ -586,7 +604,7 @@ describe('PostgreSQL tool execution repository', () => {
           observer,
           disableSecondName,
           secondFence.blockerPid,
-          startPid,
+          { pid: startPid, applicationName: startFirstName },
         );
         expect(disablePid).not.toBe(startPid);
         secondFence.release();
@@ -683,12 +701,10 @@ describe('PostgreSQL tool execution repository', () => {
         decision: { modelToolCallId: 'pg-policy-delete-first' },
         expectedPolicyFingerprint: deleteFirstFingerprint,
       });
-      const startPid = await waitForOwnerFenceWaiter(
-        observer,
-        startName,
-        firstFence.blockerPid,
-        deletePid,
-      );
+      const startPid = await waitForOwnerFenceWaiter(observer, startName, firstFence.blockerPid, {
+        pid: deletePid,
+        applicationName: deleteName,
+      });
       expect(startPid).not.toBe(deletePid);
       firstFence.release();
       await firstFence.blocker;
@@ -744,7 +760,7 @@ describe('PostgreSQL tool execution repository', () => {
         observer,
         deleteAfterStartName,
         secondFence.blockerPid,
-        startPid,
+        { pid: startPid, applicationName: startAfterDeleteName },
       );
       expect(deletePid).not.toBe(startPid);
       secondFence.release();
@@ -833,12 +849,10 @@ describe('PostgreSQL tool execution repository', () => {
         decision: { modelToolCallId: 'pg-empty-policy-start' },
         expectedPolicyFingerprint: approvalPolicyFingerprint([]),
       });
-      const startPid = await waitForOwnerFenceWaiter(
-        observer,
-        startName,
-        holder.blockerPid,
-        resolverPid,
-      );
+      const startPid = await waitForOwnerFenceWaiter(observer, startName, holder.blockerPid, {
+        pid: resolverPid,
+        applicationName: resolverName,
+      });
       expect(startPid).not.toBe(resolverPid);
       holder.release();
       await holder.blocker;
