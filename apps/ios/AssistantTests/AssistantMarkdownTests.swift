@@ -1745,10 +1745,11 @@ extension AssistantMarkdownTests {
         }
         XCTAssertEqual(boundaryProbe.hostingControllerInitializationCount, 1,
             "The child UIHostingController is constructed once for this owned host.")
-        XCTAssertEqual(boundaryProbe.parentSnapshotGeneration, boundaryProbe.parentSnapshotCommitCount,
-            "Snapshot generation counts committed parent updates independently of root-value assignments.")
-        XCTAssertEqual(boundaryProbe.rootValueUpdateCount, boundaryProbe.parentSnapshotCommitCount,
-            "Each committed parent snapshot updates the root value once; initialization is counted separately.")
+        XCTAssertLessThanOrEqual(boundaryProbe.parentSnapshotGeneration, boundaryProbe.parentSnapshotRequestedGeneration,
+            "The committed generation cannot exceed the latest request; coalescing can skip requested generations.")
+        XCTAssertLessThanOrEqual(boundaryProbe.parentSnapshotCommitCount, boundaryProbe.parentSnapshotRequestCount)
+        XCTAssertEqual(boundaryProbe.rootValueUpdateCount, 0,
+            "Queued snapshot publication retains the original hosting root value.")
         let initialScroll = try XCTUnwrap(ownedTranscriptScrollView(in: window))
         let initialHierarchy = ownedTranscriptControllerIdentities(root: root, containing: initialScroll)
         XCTAssertGreaterThanOrEqual(initialHierarchy.count, 3,
@@ -1984,6 +1985,10 @@ extension AssistantMarkdownTests {
             stage: "row-sheet-presentation-settle-result", state: state, root: root,
             window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
         )
+        try await waitForTranscriptHostCondition("the parent snapshot handoff settles before child-only transactions") {
+            boundaryProbe.parentSnapshotGeneration == boundaryProbe.parentSnapshotRequestedGeneration
+        }
+        let requestsBeforeLocalUpdates = boundaryProbe.parentSnapshotRequestCount
         let generationBeforeLocalUpdates = boundaryProbe.parentSnapshotGeneration
         let commitsBeforeLocalUpdates = boundaryProbe.parentSnapshotCommitCount
         let rootUpdatesBeforeLocalUpdates = boundaryProbe.rootValueUpdateCount
@@ -2018,11 +2023,14 @@ extension AssistantMarkdownTests {
         XCTAssertEqual(boundaryProbe.parentSnapshotGeneration, generationBeforeLocalUpdates)
         XCTAssertEqual(boundaryProbe.parentSnapshotCommitCount, commitsBeforeLocalUpdates,
             "A child-local transaction must not commit a parent snapshot.")
+        XCTAssertEqual(boundaryProbe.parentSnapshotRequestCount, requestsBeforeLocalUpdates,
+            "A child-only transaction must not enqueue a parent snapshot.")
         XCTAssertEqual(boundaryProbe.rootValueUpdateCount, rootUpdatesBeforeLocalUpdates,
             "A child-local transaction must not assign a new root value.")
         XCTAssertEqual(boundaryProbe.hostingControllerInitializationCount, 1,
             "A child-local transaction must retain the single hosting controller.")
 
+        let requestsBeforeDefaultLocalUpdate = boundaryProbe.parentSnapshotRequestCount
         let generationBeforeDefaultLocalUpdate = boundaryProbe.parentSnapshotGeneration
         let commitsBeforeDefaultLocalUpdate = boundaryProbe.parentSnapshotCommitCount
         let rootUpdatesBeforeDefaultLocalUpdate = boundaryProbe.rootValueUpdateCount
@@ -2055,6 +2063,8 @@ extension AssistantMarkdownTests {
         XCTAssertEqual(boundaryProbe.parentSnapshotGeneration, generationBeforeDefaultLocalUpdate)
         XCTAssertEqual(boundaryProbe.parentSnapshotCommitCount, commitsBeforeDefaultLocalUpdate,
             "A second child-local transaction must not commit a parent snapshot.")
+        XCTAssertEqual(boundaryProbe.parentSnapshotRequestCount, requestsBeforeDefaultLocalUpdate,
+            "A second child-only transaction must not enqueue a parent snapshot.")
         XCTAssertEqual(boundaryProbe.rootValueUpdateCount, rootUpdatesBeforeDefaultLocalUpdate,
             "The default child-local transaction must not assign a new root value.")
         XCTAssertEqual(boundaryProbe.hostingControllerInitializationCount, 1,
@@ -2087,8 +2097,10 @@ extension AssistantMarkdownTests {
         XCTAssertEqual(observedDefaultParent.marker, 0)
         XCTAssertGreaterThan(boundaryProbe.parentSnapshotGeneration, generationBeforeDefaultParentUpdate)
         XCTAssertGreaterThan(boundaryProbe.parentSnapshotCommitCount, commitsBeforeDefaultParentUpdate)
-        XCTAssertGreaterThan(boundaryProbe.rootValueUpdateCount, rootUpdatesBeforeDefaultParentUpdate)
-        XCTAssertEqual(boundaryProbe.rootValueUpdateCount, boundaryProbe.parentSnapshotCommitCount)
+        XCTAssertEqual(boundaryProbe.rootValueUpdateCount, rootUpdatesBeforeDefaultParentUpdate)
+        XCTAssertEqual(boundaryProbe.rootValueUpdateCount, 0)
+        XCTAssertLessThanOrEqual(boundaryProbe.parentSnapshotGeneration, boundaryProbe.parentSnapshotRequestedGeneration)
+        XCTAssertLessThanOrEqual(boundaryProbe.parentSnapshotCommitCount, boundaryProbe.parentSnapshotRequestCount)
         XCTAssertEqual(observedDefaultParent.snapshotGeneration, boundaryProbe.parentSnapshotGeneration)
         XCTAssertEqual(observedDefaultParent.snapshotContentRevision, 3,
             "The leaf reports the content revision captured in its rendered parent snapshot.")
@@ -2521,6 +2533,74 @@ private func waitForTranscriptHostCondition(
 }
 
 @MainActor
+private func attachQueuedTranscriptReceipt(
+    _ stage: String,
+    root: UIViewController,
+    window: UIWindow,
+    scroll: UIScrollView,
+    input: UITextField,
+    probe: TranscriptHostBoundaryProbe,
+    state: QueuedTranscriptGeometryState
+) {
+    func rect(_ value: CGRect) -> [String: CGFloat] {
+        ["x": value.minX, "y": value.minY, "width": value.width, "height": value.height]
+    }
+    let row = state.rowSnapshots.last
+    let rowFrame = row?.measurement.frame(in: window)
+    let bottomError = scroll.contentOffset.y + scroll.bounds.height
+        - (scroll.contentSize.height + scroll.adjustedContentInset.bottom)
+    let payload: [String: Any] = [
+        "stage": stage,
+        "rootControllerIdentity": ObjectIdentifier(root).hashValue,
+        "windowIdentity": ObjectIdentifier(window).hashValue,
+        "scrollIdentity": ObjectIdentifier(scroll).hashValue,
+        "scrollControllerAncestry": ownedTranscriptControllerIdentities(root: root, containing: scroll).map(\.hashValue),
+        "scrollBounds": rect(scroll.bounds),
+        "scrollContentOffset": ["x": scroll.contentOffset.x, "y": scroll.contentOffset.y],
+        "scrollContentSize": ["width": scroll.contentSize.width, "height": scroll.contentSize.height],
+        "scrollContentInset": ["top": scroll.contentInset.top, "left": scroll.contentInset.left,
+                               "bottom": scroll.contentInset.bottom, "right": scroll.contentInset.right],
+        "scrollAdjustedContentInset": ["top": scroll.adjustedContentInset.top,
+                                       "left": scroll.adjustedContentInset.left,
+                                       "bottom": scroll.adjustedContentInset.bottom,
+                                       "right": scroll.adjustedContentInset.right],
+        "canonicalBottomError": bottomError,
+        "composerFrame": rect(state.composerFrame),
+        "viewportLocalFrame": state.viewportMeasurement.map { rect($0.localFrame) as Any } ?? NSNull(),
+        "viewportWindowFrame": state.viewportMeasurement?.frame(in: window).map { rect($0) as Any } ?? NSNull(),
+        "rowLocalFrame": row.map { rect($0.measurement.localFrame) as Any } ?? NSNull(),
+        "rowWindowFrame": row?.measurement.frame(in: window).map { rect($0) as Any } ?? NSNull(),
+        "rowToComposerClearance": rowFrame.map { state.composerFrame.minY - $0.maxY } ?? -1,
+        "renderedGeneration": row?.generation ?? -1,
+        "renderedContentRevision": row?.revision ?? -1,
+        "renderedTransactionMarker": row?.marker ?? -1,
+        "requestedGeneration": probe.parentSnapshotRequestedGeneration,
+        "committedGeneration": probe.parentSnapshotGeneration,
+        "requestCount": probe.parentSnapshotRequestCount,
+        "commitCount": probe.parentSnapshotCommitCount,
+        "coalescedCount": probe.coalescedSnapshotCount,
+        "rejectedDrainCount": probe.rejectedDrainCount,
+        "reveal": state.reveal,
+        "inputIdentity": ObjectIdentifier(input).hashValue,
+        "inputText": input.text ?? "",
+        "boundDraft": state.draft,
+        "inputIsFirstResponder": input.isFirstResponder,
+        "inputSelection": ownedTextSelectionOffsets(input) ?? [],
+        "inputWindowIdentity": input.window.map { ObjectIdentifier($0).hashValue } ?? -1,
+        "inputInExpectedWindow": input.window === window,
+    ]
+    do {
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "Queued transcript geometry — \(stage)"
+        attachment.lifetime = .keepAlways
+        XCTContext.runActivity(named: "Queued transcript geometry \(stage)") { $0.add(attachment) }
+    } catch {
+        XCTFail("Could not serialize queued transcript geometry receipt: \(error)")
+    }
+}
+
+@MainActor
 private func attachOwnedTranscriptBoundarySnapshot(
     stage: String,
     state: OwnedTranscriptHostRegressionState,
@@ -2543,6 +2623,11 @@ private func attachOwnedTranscriptBoundarySnapshot(
         "boundaryEvents": state.boundaryProbe?.events ?? [],
         "parentSnapshotGeneration": state.boundaryProbe?.parentSnapshotGeneration ?? -1,
         "parentSnapshotCommitCount": state.boundaryProbe?.parentSnapshotCommitCount ?? -1,
+        "parentSnapshotRequestedGeneration": state.boundaryProbe?.parentSnapshotRequestedGeneration ?? -1,
+        "parentSnapshotRequestCount": state.boundaryProbe?.parentSnapshotRequestCount ?? -1,
+        "coalescedSnapshotCount": state.boundaryProbe?.coalescedSnapshotCount ?? -1,
+        "scheduledDrainCount": state.boundaryProbe?.scheduledDrainCount ?? -1,
+        "rejectedDrainCount": state.boundaryProbe?.rejectedDrainCount ?? -1,
         "hostingControllerInitializationCount": state.boundaryProbe?.hostingControllerInitializationCount ?? -1,
         "rootValueUpdateCount": state.boundaryProbe?.rootValueUpdateCount ?? -1,
         "childTransactionObservations": state.childTransactionObservations.suffix(16).map {
@@ -2620,5 +2705,944 @@ private func attachOwnedTranscriptBoundarySnapshot(
         }
     } catch {
         XCTFail("Could not serialize owned transcript boundary receipt: \(error)")
+    }
+}
+
+private struct TranscriptHandoffTestPayload {
+    let contentRevision: Int
+    let body: String
+    let environment: EnvironmentValues
+    let transaction: Transaction
+    let environmentRevision: Int
+}
+
+@MainActor
+private func transcriptHandoffPayload(
+    revision: Int,
+    body: String,
+    localeIdentifier: String,
+    environmentRevision: Int,
+    marker: Int,
+    disablesAnimations: Bool = false,
+    animationDuration: Double? = nil
+) -> TranscriptHandoffTestPayload {
+    var environment = EnvironmentValues()
+    environment.locale = Locale(identifier: localeIdentifier)
+    environment.colorScheme = marker.isMultiple(of: 2) ? .light : .dark
+    var transaction = animationDuration.map { Transaction(animation: .easeInOut(duration: $0)) } ?? Transaction()
+    transaction.disablesAnimations = disablesAnimations
+    transaction[OwnedTranscriptHostMarkerKey.self] = marker
+    return TranscriptHandoffTestPayload(contentRevision: revision, body: body, environment: environment,
+                                        transaction: transaction, environmentRevision: environmentRevision)
+}
+
+private func assertTranscriptPayload(_ actual: TranscriptHandoffTestPayload?,
+                                    matches expected: TranscriptHandoffTestPayload,
+                                    message: String = "Captured snapshot fields must remain together.",
+                                    file: StaticString = #filePath, line: UInt = #line) {
+    guard let actual else { XCTFail(message, file: file, line: line); return }
+    XCTAssertEqual(actual.contentRevision, expected.contentRevision, message, file: file, line: line)
+    XCTAssertEqual(actual.body, expected.body, message, file: file, line: line)
+    XCTAssertEqual(actual.environment.locale.identifier, expected.environment.locale.identifier, message, file: file, line: line)
+    XCTAssertEqual(actual.environment.colorScheme, expected.environment.colorScheme, message, file: file, line: line)
+    XCTAssertEqual(actual.environmentRevision, expected.environmentRevision, message, file: file, line: line)
+    XCTAssertEqual(actual.transaction[OwnedTranscriptHostMarkerKey.self],
+                   expected.transaction[OwnedTranscriptHostMarkerKey.self], message, file: file, line: line)
+    XCTAssertEqual(actual.transaction.disablesAnimations, expected.transaction.disablesAnimations, message, file: file, line: line)
+    XCTAssertEqual(actual.transaction.animation == nil, expected.transaction.animation == nil, message, file: file, line: line)
+}
+
+@MainActor
+private final class HeldTranscriptSnapshotDrains {
+    private(set) var actions: [@MainActor () -> Void] = []
+
+    func enqueue(_ action: @escaping @MainActor () -> Void) {
+        actions.append(action)
+    }
+
+    @discardableResult
+    func removeNext() -> (@MainActor () -> Void)? {
+        guard !actions.isEmpty else { return nil }
+        return actions.removeFirst()
+    }
+}
+
+private struct QueuedTranscriptGeometryFixture: View {
+    @ObservedObject var state: QueuedTranscriptGeometryState
+
+    var body: some View {
+        GeometryReader { viewport in
+            ZStack(alignment: .bottom) {
+                ConversationColumn {
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            ForEach(0..<20) { index in
+                                Text("Queued handoff row \(index)")
+                                    .frame(maxWidth: .infinity, minHeight: 200, alignment: .leading)
+                            }
+                            OwnedTranscriptNativeInput(text: $state.draft)
+                                .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44, alignment: .leading)
+                            QueuedTranscriptGeometryRow(state: state)
+                        }
+                        .padding(.bottom, state.composerHeight + 30
+                            + (state.noticeHeight > 0 ? state.noticeHeight + 8 : 0))
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .onTranscriptGeometryChange { state.viewportMeasurement = $0 }
+                    .defaultScrollAnchor(.bottom)
+                } composer: {
+                    Color.blue.frame(height: state.composerHeight)
+                        .padding(.bottom, 12)
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) }
+                        action: { state.composerFrame = $0 }
+                }
+                .frame(width: viewport.size.width, height: viewport.size.height)
+                .offset(y: -state.reveal)
+            }
+        }
+        .frame(height: state.availableHeight, alignment: .top)
+        .ignoresSafeArea(.container)
+        .ignoresSafeArea(.keyboard)
+    }
+}
+
+@MainActor
+private final class QueuedTranscriptGeometryState: ObservableObject {
+    @Published var availableHeight: CGFloat = 852
+    @Published var reveal: CGFloat = 0
+    @Published var composerHeight: CGFloat = 84
+    @Published var noticeHeight: CGFloat = 0
+    @Published var draft = "draft-seed"
+    var composerFrame: CGRect = .zero
+    var viewportMeasurement: TranscriptGeometryMeasurement?
+    var rowSnapshots: [(generation: Int, revision: Int, marker: Int, measurement: TranscriptGeometryMeasurement)] = []
+    var transactionMarker = 0
+
+    func recordRow(_ measurement: TranscriptGeometryMeasurement, generation: Int?, revision: Int?) {
+        rowSnapshots.append((generation ?? -1, revision ?? -1, transactionMarker, measurement))
+    }
+}
+
+private struct QueuedTranscriptGeometryRow: View {
+    @ObservedObject var state: QueuedTranscriptGeometryState
+
+    var body: some View {
+        Text("Queued handoff latest row")
+            .frame(maxWidth: .infinity, minHeight: 100, alignment: .leading)
+            .onTranscriptSnapshotGeometryChange { measurement, generation, revision in
+                state.recordRow(measurement, generation: generation, revision: revision)
+            }
+            .transaction { state.transactionMarker = $0[OwnedTranscriptHostMarkerKey.self] }
+    }
+}
+
+@MainActor
+private final class QueuedTranscriptReplacementState: ObservableObject {
+    @Published var hostIdentity = 0
+    @Published var contentRevision = 72
+    var childSnapshots: [(contentRevision: Int, snapshotRevision: Int, generation: Int, marker: Int)] = []
+}
+
+private struct QueuedTranscriptReplacementFixture: View {
+    @ObservedObject var state: QueuedTranscriptReplacementState
+
+    var body: some View {
+        ConversationColumn {
+            ScrollView {
+                QueuedTranscriptReplacementLeaf(state: state, revision: state.contentRevision)
+            }
+        } composer: {
+            Color.blue.frame(height: 52)
+        }
+        .id(state.hostIdentity)
+    }
+}
+
+private struct QueuedTranscriptReplacementLeaf: View {
+    @ObservedObject var state: QueuedTranscriptReplacementState
+    let revision: Int
+    @Environment(\.transcriptHostSnapshotGeneration) private var generation
+    @Environment(\.transcriptHostSnapshotContentRevision) private var snapshotRevision
+
+    var body: some View {
+        Text("Replacement transcript content revision \(revision)")
+            .frame(maxWidth: .infinity, minHeight: 480, alignment: .topLeading)
+            .transaction { transaction in
+                state.childSnapshots.append((
+                    contentRevision: revision,
+                    snapshotRevision: snapshotRevision ?? -1,
+                    generation: generation ?? -1,
+                    marker: transaction[OwnedTranscriptHostMarkerKey.self]
+                ))
+            }
+    }
+}
+
+extension AssistantMarkdownTests {
+    @MainActor
+    func testTranscriptSnapshotHandoffCoalescesToOneWholeLatestPayload() throws {
+        let drains = HeldTranscriptSnapshotDrains()
+        let targetIsCurrent = true
+        var factoryMarkers: [Int] = []
+        var published: [TranscriptHandoffTestPayload] = []
+        var records: [(String, Int, TranscriptHandoffTestPayload?)] = []
+        let handoff = TranscriptSnapshotHandoff<TranscriptHandoffTestPayload>(
+            enqueue: { drains.enqueue($0) },
+            targetIsCurrent: { targetIsCurrent },
+            transaction: { payload in
+                factoryMarkers.append(payload.transaction[OwnedTranscriptHostMarkerKey.self])
+                return payload.transaction
+            },
+            publish: { published.append($0) },
+            didRecord: { stage, generation, payload in records.append((stage, generation, payload)) }
+        )
+        let payload73 = transcriptHandoffPayload(
+            revision: 73, body: "body-73", localeIdentifier: "fr_FR",
+            environmentRevision: 730, marker: 73, disablesAnimations: true, animationDuration: 0.25
+        )
+        let payload74 = transcriptHandoffPayload(
+            revision: 74, body: "body-74", localeIdentifier: "de_DE",
+            environmentRevision: 740, marker: 74, animationDuration: 0.5
+        )
+
+        XCTAssertEqual(handoff.request { _ in payload73 }, 1)
+        XCTAssertEqual(handoff.request { _ in payload74 }, 2)
+        XCTAssertEqual(handoff.latestRequestedGeneration, 2)
+        XCTAssertEqual(handoff.pendingGeneration, 2)
+        XCTAssertEqual(handoff.committedGeneration, 0)
+        XCTAssertEqual(handoff.requestCount, 2)
+        XCTAssertEqual(handoff.coalescedCount, 1)
+        XCTAssertEqual(handoff.scheduledDrainCount, 1)
+        XCTAssertTrue(handoff.hasScheduledDrain)
+        XCTAssertEqual(drains.actions.count, 1, "Requests are queued, never drained inline.")
+        XCTAssertTrue(published.isEmpty)
+        XCTAssertEqual(records.first?.0, "parent-snapshot-requested")
+        XCTAssertEqual(records.first?.1, 1)
+        let coalesced = try XCTUnwrap(records.first { $0.0 == "parent-snapshot-coalesced" })
+        XCTAssertEqual(coalesced.1, 1)
+        assertTranscriptPayload(coalesced.2, matches: payload73,
+                                message: "The displaced complete payload is observable for diagnostics.")
+
+        let declaredDefault = Transaction()
+        XCTAssertEqual(declaredDefault[OwnedTranscriptHostMarkerKey.self], 0)
+        let drain = try XCTUnwrap(drains.removeNext())
+        withTransaction(declaredDefault) { drain() }
+
+        XCTAssertEqual(published.count, 1, "The latest snapshot must publish as one indivisible value.")
+        assertTranscriptPayload(published.first, matches: payload74)
+        XCTAssertEqual(factoryMarkers, [74])
+        XCTAssertEqual(handoff.committedGeneration, 2)
+        XCTAssertEqual(handoff.commitCount, 1)
+        XCTAssertNil(handoff.pendingGeneration)
+        XCTAssertFalse(handoff.hasScheduledDrain)
+        XCTAssertTrue(drains.actions.isEmpty)
+        XCTAssertEqual(records.last?.0, "parent-snapshot-commit")
+        XCTAssertEqual(records.last?.1, 2)
+        assertTranscriptPayload(records.last?.2, matches: payload74)
+    }
+
+    @MainActor
+    func testTranscriptSnapshotHandoffLetsACompleteDefaultPayloadReplaceAQueuedUpdate() throws {
+        let drains = HeldTranscriptSnapshotDrains()
+        var published: [TranscriptHandoffTestPayload] = []
+        var transactionMarkers: [Int] = []
+        let handoff = TranscriptSnapshotHandoff<TranscriptHandoffTestPayload>(
+            enqueue: { drains.enqueue($0) },
+            targetIsCurrent: { true },
+            transaction: { payload in
+                transactionMarkers.append(payload.transaction[OwnedTranscriptHostMarkerKey.self])
+                return payload.transaction
+            },
+            publish: { published.append($0) }
+        )
+        let configured = transcriptHandoffPayload(
+            revision: 73, body: "configured-73", localeIdentifier: "fr_FR",
+            environmentRevision: 730, marker: 73, disablesAnimations: true, animationDuration: 0.25
+        )
+        let declaredDefault = transcriptHandoffPayload(
+            revision: 0, body: "default-content", localeIdentifier: "en_US",
+            environmentRevision: 0, marker: 0
+        )
+
+        XCTAssertEqual(handoff.request { _ in configured }, 1)
+        XCTAssertEqual(handoff.request { _ in declaredDefault }, 2)
+        XCTAssertEqual(handoff.coalescedCount, 1)
+        XCTAssertEqual(drains.actions.count, 1)
+        let callerDefaultTransaction = Transaction()
+        XCTAssertEqual(callerDefaultTransaction[OwnedTranscriptHostMarkerKey.self], 0)
+        withTransaction(callerDefaultTransaction) { drains.removeNext()?() }
+
+        XCTAssertEqual(published.count, 1, "No field may leak from the superseded snapshot.")
+        assertTranscriptPayload(published.first, matches: declaredDefault)
+        XCTAssertEqual(transactionMarkers, [0])
+        XCTAssertEqual(handoff.committedGeneration, 2)
+        XCTAssertEqual(handoff.commitCount, 1)
+        XCTAssertTrue(drains.actions.isEmpty)
+    }
+
+    @MainActor
+    func testTranscriptSnapshotHandoffDefersReentrantWorkAndRejectsInvalidatedOwner() throws {
+        let drains = HeldTranscriptSnapshotDrains()
+        var published: [TranscriptHandoffTestPayload] = []
+        var handoff: TranscriptSnapshotHandoff<TranscriptHandoffTestPayload>!
+        handoff = TranscriptSnapshotHandoff(
+            enqueue: { drains.enqueue($0) },
+            targetIsCurrent: { true },
+            transaction: { _ in Transaction() },
+            publish: { payload in
+                published.append(payload)
+                if payload.contentRevision == 73 {
+                    XCTAssertTrue(handoff.isDraining)
+                    XCTAssertEqual(handoff.request { _ in
+                        transcriptHandoffPayload(revision: 74, body: "reentrant-74", localeIdentifier: "de_DE",
+                                                 environmentRevision: 740, marker: 74)
+                    }, 2)
+                    XCTAssertEqual(handoff.pendingGeneration, 2)
+                    XCTAssertFalse(handoff.hasScheduledDrain, "Reentrant work waits until the current commit finishes.")
+                    XCTAssertTrue(drains.actions.isEmpty)
+                }
+            }
+        )
+        let first = transcriptHandoffPayload(revision: 73, body: "first-73", localeIdentifier: "fr_FR",
+                                             environmentRevision: 730, marker: 73)
+        XCTAssertEqual(handoff.request { _ in first }, 1)
+        let oldDrain = try XCTUnwrap(drains.removeNext())
+        withTransaction(Transaction()) { oldDrain() }
+        XCTAssertEqual(published.count, 1)
+        assertTranscriptPayload(published.first, matches: first)
+        XCTAssertEqual(handoff.committedGeneration, 1)
+        XCTAssertEqual(handoff.scheduledDrainCount, 2)
+        XCTAssertEqual(drains.actions.count, 1)
+
+        oldDrain()
+        XCTAssertEqual(published.count, 1, "A duplicate stale ticket cannot commit or consume the later ticket.")
+        assertTranscriptPayload(published.first, matches: first)
+        XCTAssertTrue(handoff.hasScheduledDrain)
+        let secondDrain = try XCTUnwrap(drains.removeNext())
+        withTransaction(Transaction()) { secondDrain() }
+        XCTAssertEqual(published.map(\.contentRevision), [73, 74])
+        XCTAssertEqual(handoff.committedGeneration, 2)
+
+        let replacementDrains = HeldTranscriptSnapshotDrains()
+        var currentOwner = "owner-A"
+        let oldOwnerInitial = transcriptHandoffPayload(revision: 72, body: "retained-owner",
+                                                       localeIdentifier: "en_US", environmentRevision: 720,
+                                                       marker: 72)
+        var retainedPublished: TranscriptHandoffTestPayload? = oldOwnerInitial
+        var replacementPublished: TranscriptHandoffTestPayload? = transcriptHandoffPayload(
+            revision: 0, body: "replacement-default", localeIdentifier: "en_US",
+            environmentRevision: 0, marker: 0
+        )
+        let abandoned = TranscriptSnapshotHandoff<TranscriptHandoffTestPayload>(
+            enqueue: { replacementDrains.enqueue($0) },
+            targetIsCurrent: { currentOwner == "owner-A" },
+            transaction: { _ in Transaction() },
+            publish: { payload in
+                if currentOwner == "owner-A" { retainedPublished = payload }
+                else { replacementPublished = payload }
+            }
+        )
+        XCTAssertEqual(abandoned.request { _ in first }, 1)
+        let initialOwnerDrain = try XCTUnwrap(replacementDrains.removeNext())
+        withTransaction(Transaction()) { initialOwnerDrain() }
+        assertTranscriptPayload(retainedPublished, matches: first)
+        let pendingNext = transcriptHandoffPayload(revision: 74, body: "pending-old-owner",
+                                                   localeIdentifier: "fr_FR", environmentRevision: 740,
+                                                   marker: 74)
+        XCTAssertEqual(abandoned.request { _ in pendingNext }, 2)
+        let obsoleteDrain = try XCTUnwrap(replacementDrains.removeNext())
+        currentOwner = "owner-B"
+        abandoned.invalidate()
+        XCTAssertNil(abandoned.request { _ in
+            transcriptHandoffPayload(revision: 99, body: "stale", localeIdentifier: "en_US",
+                                     environmentRevision: 990, marker: 99)
+        })
+        let stateBeforeStaleDrain = replacementPublished
+        withTransaction(Transaction()) { obsoleteDrain() }
+        assertTranscriptPayload(retainedPublished, matches: first,
+                                message: "Invalidation must preserve the old owner's last committed snapshot.")
+        assertTranscriptPayload(replacementPublished, matches: try XCTUnwrap(stateBeforeStaleDrain))
+        XCTAssertEqual(abandoned.committedGeneration, 1)
+        XCTAssertEqual(abandoned.commitCount, 1)
+        XCTAssertNil(abandoned.pendingGeneration)
+        XCTAssertFalse(abandoned.hasScheduledDrain)
+        XCTAssertTrue(replacementDrains.actions.isEmpty)
+    }
+
+    @MainActor
+    func testOwnedTranscriptHostAppliesCapturedTransactionsAfterTheCallerScopeEnds() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let previousKeyWindow = scene.keyWindow
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+        let state = OwnedTranscriptHostRegressionState()
+        let drains = HeldTranscriptSnapshotDrains()
+        let probe = TranscriptHostBoundaryProbe(
+            marker: { $0[OwnedTranscriptHostMarkerKey.self] },
+            contentRevision: { [weak state] in state?.contentRevision ?? -1 },
+            enqueueSnapshotDrain: { drains.enqueue($0) }
+        )
+        state.boundaryProbe = probe
+        let root = UIHostingController(
+            rootView: OwnedTranscriptHostRegressionFixture(state: state)
+                .environment(\.chatTranscriptRowGeometryProbe,
+                             ChatTranscriptRowGeometryProbe(messageID: "approved-receipts-receipt-one-receipt-two") {
+                    state.receiptMeasurement = $0
+                })
+                .environment(\.transcriptHostBoundaryProbe, probe)
+        )
+        window.rootViewController = root
+        window.makeKeyAndVisible()
+        defer {
+            window.endEditing(true)
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+
+        try await waitForTranscriptHostCondition("initial queued transcript snapshot") {
+            probe.parentSnapshotRequestCount > 0 && !drains.actions.isEmpty
+        }
+        for _ in 0..<12 {
+            if let initialDrain = drains.removeNext() {
+                let declaredDefault = Transaction()
+                XCTAssertEqual(declaredDefault[OwnedTranscriptHostMarkerKey.self], 0)
+                withTransaction(declaredDefault) { initialDrain() }
+            }
+            if probe.parentSnapshotGeneration == probe.parentSnapshotRequestedGeneration
+                && drains.actions.isEmpty && state.receiptMeasurement?.frame(in: window) != nil
+                && state.childTransactionObservations.last?.snapshotGeneration == probe.parentSnapshotGeneration
+                && state.updateChildLocalTransaction != nil {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        try await waitForTranscriptHostCondition("initial snapshot commit") {
+            probe.parentSnapshotGeneration == probe.parentSnapshotRequestedGeneration
+                && state.receiptMeasurement?.frame(in: window) != nil
+                && state.childTransactionObservations.last?.snapshotGeneration == probe.parentSnapshotGeneration
+                && state.updateChildLocalTransaction != nil
+        }
+        let baselineRequests = probe.parentSnapshotRequestCount
+        let baselineCommitted = probe.parentSnapshotGeneration
+        let baselineCommitCount = probe.parentSnapshotCommitCount
+        XCTAssertTrue(drains.actions.isEmpty)
+        let scroll = try XCTUnwrap(ownedTranscriptScrollView(in: window))
+        let nativeInput = try XCTUnwrap(ownedTextField(in: window))
+        attachOwnedTranscriptBoundarySnapshot(stage: "baseline-before-parent-updates", state: state, root: root,
+                                              window: window, scroll: scroll, input: nativeInput)
+
+        func transaction(marker: Int) -> Transaction {
+            var value = Transaction(animation: nil)
+            value[OwnedTranscriptHostMarkerKey.self] = marker
+            return value
+        }
+        func drainHeldSnapshot() throws {
+            let declaredDefault = Transaction()
+            XCTAssertEqual(declaredDefault[OwnedTranscriptHostMarkerKey.self], 0)
+            let drain = try XCTUnwrap(drains.removeNext())
+            // This executes after the caller's transaction scope has exited.
+            withTransaction(declaredDefault) { drain() }
+        }
+        func assertProvenance(revision: Int, marker: Int) async throws {
+            try await waitForTranscriptHostCondition("actual content and leaf transaction provenance \(revision)") {
+                state.childTransactionObservations.contains {
+                    $0.parentContentRevision == revision
+                        && $0.snapshotContentRevision == revision
+                        && $0.marker == marker
+                        && $0.snapshotGeneration == probe.parentSnapshotGeneration
+                }
+            }
+            let generation = probe.parentSnapshotGeneration
+            let commit = try XCTUnwrap(probe.events.last {
+                ($0["stage"] as? String) == "parent-snapshot-commit"
+                    && ($0["generation"] as? Int) == generation
+                    && ($0["contentRevision"] as? Int) == revision
+            })
+            XCTAssertEqual(commit["marker"] as? Int, marker,
+                           "The committed snapshot itself must carry the captured full transaction.")
+            let input = try XCTUnwrap(probe.events.last {
+                ($0["stage"] as? String) == "content-transform-input"
+                    && ($0["generation"] as? Int) == generation
+                    && ($0["contentRevision"] as? Int) == revision
+            }, "The hosted content input must carry the queued snapshot's captured diagnostics.")
+            XCTAssertEqual(input["marker"] as? Int, marker)
+            XCTAssertTrue(state.childTransactionObservations.contains {
+                $0.parentContentRevision == revision && $0.snapshotContentRevision == revision
+                    && $0.marker == marker && $0.snapshotGeneration == generation
+            }, "The actual hosted leaf must receive the same revision, marker and generation as content input.")
+        }
+
+        let marker73 = transaction(marker: 73)
+        withTransaction(marker73) { state.contentRevision = 73 }
+        try await waitForTranscriptHostCondition("generation 73 queued without inline drain") {
+            probe.parentSnapshotRequestCount > baselineRequests && !drains.actions.isEmpty
+        }
+        XCTAssertEqual(probe.parentSnapshotGeneration, baselineCommitted,
+                       "The current host remains at the prior commit while its transaction is held.")
+        XCTAssertEqual(drains.actions.count, 1)
+        attachOwnedTranscriptBoundarySnapshot(stage: "held-marker-73-before-drain", state: state, root: root,
+                                              window: window, scroll: scroll, input: nativeInput)
+        let requestsWhilePending = probe.parentSnapshotRequestCount
+        let localRevisionWhilePending = try XCTUnwrap(state.childTransactionObservations.last?.localRevision)
+        var pendingChildTransaction = Transaction(animation: nil)
+        pendingChildTransaction[OwnedTranscriptHostMarkerKey.self] = 99
+        try XCTUnwrap(state.updateChildLocalTransaction)(pendingChildTransaction)
+        try await waitForTranscriptHostCondition("child state can change while a genuine parent commit is pending") {
+            state.childTransactionObservations.contains {
+                $0.snapshotGeneration == baselineCommitted && $0.localRevision == localRevisionWhilePending + 1
+                    && $0.marker == 99
+            }
+        }
+        XCTAssertEqual(probe.parentSnapshotRequestCount, requestsWhilePending)
+        XCTAssertEqual(probe.parentSnapshotGeneration, baselineCommitted)
+        // This pending parent is real work: its later captured transaction may
+        // supersede the child's transaction while retaining the child's state.
+        try drainHeldSnapshot()
+        try await assertProvenance(revision: 73, marker: 73)
+        XCTAssertEqual(state.childTransactionObservations.last?.localRevision, localRevisionWhilePending + 1)
+        XCTAssertEqual(probe.parentSnapshotRequestCount, requestsWhilePending)
+        XCTAssertEqual(probe.parentSnapshotCommitCount, baselineCommitCount + 1)
+        XCTAssertTrue(drains.actions.isEmpty)
+        attachOwnedTranscriptBoundarySnapshot(stage: "after-marker-73-drain", state: state, root: root,
+                                              window: window, scroll: scroll, input: nativeInput)
+
+        let marker74 = transaction(marker: 74)
+        withTransaction(marker74) { state.contentRevision = 74 }
+        try await waitForTranscriptHostCondition("generation 74 queued without inline drain") {
+            probe.parentSnapshotRequestCount > baselineRequests + 1 && !drains.actions.isEmpty
+        }
+        XCTAssertEqual(drains.actions.count, 1)
+        attachOwnedTranscriptBoundarySnapshot(stage: "before-marker-74-drain", state: state, root: root,
+                                              window: window, scroll: scroll, input: nativeInput)
+        try drainHeldSnapshot()
+        try await assertProvenance(revision: 74, marker: 74)
+        XCTAssertEqual(probe.parentSnapshotCommitCount, baselineCommitCount + 2)
+        attachOwnedTranscriptBoundarySnapshot(stage: "after-marker-74-drain", state: state, root: root,
+                                              window: window, scroll: scroll, input: nativeInput)
+
+        let settledRequestCount = probe.parentSnapshotRequestCount
+        let settledGeneration = probe.parentSnapshotGeneration
+        let settledLocalRevision = try XCTUnwrap(state.childTransactionObservations.last?.localRevision)
+        var marker99 = Transaction(animation: nil)
+        marker99[OwnedTranscriptHostMarkerKey.self] = 99
+        state.updateChildLocalTransaction?(marker99)
+        try await waitForTranscriptHostCondition("marked local child transaction without parent snapshots") {
+            state.childTransactionObservations.contains {
+                $0.localRevision == settledLocalRevision + 1 && $0.marker == 99
+            }
+        }
+        state.updateChildLocalTransaction?(Transaction())
+        try await waitForTranscriptHostCondition("declared-default local child transaction without parent snapshots") {
+            state.childTransactionObservations.contains {
+                $0.localRevision == settledLocalRevision + 2 && $0.marker == 0
+            }
+        }
+        XCTAssertEqual(probe.parentSnapshotRequestCount, settledRequestCount,
+                       "Child-local updates do not create parent snapshot requests.")
+        XCTAssertEqual(probe.parentSnapshotGeneration, settledGeneration)
+        XCTAssertTrue(drains.actions.isEmpty, "The default-marker child updates leave no queued parent work.")
+    }
+
+    @MainActor
+    func testOwnedTranscriptHostLatestQueuedGeometryCannotRollBackToAnOlderViewport() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let previousKeyWindow = scene.keyWindow
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+        let state = QueuedTranscriptGeometryState()
+        let drains = HeldTranscriptSnapshotDrains()
+        let probe = TranscriptHostBoundaryProbe(
+            marker: { $0[OwnedTranscriptHostMarkerKey.self] },
+            contentRevision: { [weak state] in Int(state?.availableHeight ?? -1) },
+            enqueueSnapshotDrain: { drains.enqueue($0) }
+        )
+        let root = UIHostingController(
+            rootView: QueuedTranscriptGeometryFixture(state: state)
+                .environment(\.transcriptHostBoundaryProbe, probe)
+        )
+        window.rootViewController = root
+        window.makeKeyAndVisible()
+        defer {
+            window.endEditing(true)
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+
+        try await waitForTranscriptHostCondition("geometry host's initial snapshot") {
+            probe.parentSnapshotRequestCount > 0 && !drains.actions.isEmpty
+        }
+        for _ in 0..<12 {
+            if let initialDrain = drains.removeNext() {
+                withTransaction(Transaction()) { initialDrain() }
+            }
+            if probe.parentSnapshotGeneration == probe.parentSnapshotRequestedGeneration
+                && drains.actions.isEmpty
+                && state.rowSnapshots.last?.generation == probe.parentSnapshotGeneration {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let scroll = try XCTUnwrap(ownedTranscriptScrollView(in: window))
+        let input = try XCTUnwrap(ownedTextField(in: window))
+        XCTAssertTrue(input.becomeFirstResponder(), "The fixture's real UITextField must accept focus.")
+        input.text = "draft-edited"
+        input.sendActions(for: .editingChanged)
+        let selectionStart = try XCTUnwrap(input.position(from: input.beginningOfDocument, offset: 3))
+        let selectionEnd = try XCTUnwrap(input.position(from: input.beginningOfDocument, offset: 9))
+        input.selectedTextRange = input.textRange(from: selectionStart, to: selectionEnd)
+        try await waitForTranscriptHostCondition("the native input edit and selected range") {
+            input.text == "draft-edited" && state.draft == "draft-edited"
+                && input.isFirstResponder && input.window === window
+                && ownedTextSelectionOffsets(input) == [3, 9]
+                && scroll.contentSize.height > 0
+        }
+
+        func moveToCanonicalBottomOnce() {
+            let targetY = max(-scroll.adjustedContentInset.top,
+                              scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+            scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: targetY), animated: false)
+        }
+        func isCanonicalBottom(tolerance: CGFloat = 2) -> Bool {
+            abs(scroll.contentOffset.y + scroll.bounds.height
+                - (scroll.contentSize.height + scroll.adjustedContentInset.bottom)) <= tolerance
+        }
+        moveToCanonicalBottomOnce()
+        for _ in 0..<12 {
+            if let followup = drains.removeNext() {
+                withTransaction(Transaction()) { followup() }
+            }
+            if probe.parentSnapshotGeneration == probe.parentSnapshotRequestedGeneration
+                && drains.actions.isEmpty
+                && state.rowSnapshots.last?.generation == probe.parentSnapshotGeneration
+                && state.rowSnapshots.last?.revision == 852
+                && isCanonicalBottom()
+                && input.isFirstResponder
+                && state.draft == "draft-edited"
+                && ownedTextSelectionOffsets(input) == [3, 9] {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        try await waitForTranscriptHostCondition("focused native input and bottom-aligned rendered row") {
+            scroll.bounds.height == 852 && state.rowSnapshots.last?.measurement.frame(in: window) != nil
+                && state.rowSnapshots.last?.generation == probe.parentSnapshotGeneration
+                && state.viewportMeasurement?.frame(in: window) != nil
+                && state.draft == "draft-edited" && input.text == "draft-edited"
+                && input.isFirstResponder && input.window === window
+                && ownedTextSelectionOffsets(input) == [3, 9] && isCanonicalBottom()
+        }
+        let baselineGeneration = probe.parentSnapshotGeneration
+        let baselineCommitCount = probe.parentSnapshotCommitCount
+        let baselineRequests = probe.parentSnapshotRequestCount
+        let baselineComposer = state.composerFrame
+        let baselineViewport = try XCTUnwrap(state.viewportMeasurement?.frame(in: window))
+        let baselineRowReceipt = try XCTUnwrap(state.rowSnapshots.last)
+        let baselineRow = try XCTUnwrap(baselineRowReceipt.measurement.frame(in: window))
+        let initialScrollControllerAncestry = ownedTranscriptControllerIdentities(root: root, containing: scroll)
+        let initialInputIdentity = ObjectIdentifier(input)
+        XCTAssertEqual(baselineRowReceipt.generation, baselineGeneration)
+        XCTAssertEqual(baselineRowReceipt.revision, 852)
+        XCTAssertEqual(state.composerFrame.minY - baselineRow.maxY, 18, accuracy: 1)
+        XCTAssertEqual(scroll.bounds.height, 852, accuracy: 1)
+        XCTAssertEqual(state.reveal, 0)
+        XCTAssertTrue(drains.actions.isEmpty)
+        func assertNativeState(_ stage: String) throws {
+            XCTAssertTrue(ownedTranscriptScrollView(in: window) === scroll, "\(stage): the native UIScrollView identity is stable.")
+            XCTAssertEqual(ownedTranscriptControllerIdentities(root: root, containing: scroll), initialScrollControllerAncestry,
+                           "\(stage): the native hosting-controller ancestry is stable.")
+            XCTAssertTrue(ownedTextField(in: window) === input, "\(stage): the bound UITextField identity is stable.")
+            XCTAssertEqual(ObjectIdentifier(input), initialInputIdentity)
+            XCTAssertEqual(input.text, "draft-edited")
+            XCTAssertEqual(state.draft, "draft-edited")
+            XCTAssertTrue(input.isFirstResponder)
+            XCTAssertEqual(ownedTextSelectionOffsets(input), [3, 9])
+            XCTAssertTrue(input.window === window)
+            XCTAssertTrue(isCanonicalBottom(), "\(stage): the native scroll remains at the canonical bottom.")
+        }
+        try assertNativeState("baseline")
+        attachQueuedTranscriptReceipt("baseline-852", root: root, window: window, scroll: scroll,
+                                      input: input, probe: probe, state: state)
+
+        var transaction73 = Transaction(animation: nil)
+        transaction73[OwnedTranscriptHostMarkerKey.self] = 73
+        withTransaction(transaction73) {
+            state.availableHeight = 539
+            state.reveal = 18
+        }
+        try await waitForTranscriptHostCondition("the real 539/18 viewport layout while snapshot is held") {
+            abs(scroll.bounds.height - 539) < 1 && probe.parentSnapshotRequestCount > baselineRequests
+                && state.composerFrame.minY != baselineComposer.minY
+                && !drains.actions.isEmpty
+        }
+        let held539Generation = probe.parentSnapshotRequestedGeneration
+        let held539Composer = state.composerFrame
+        let held539RowReceipt = try XCTUnwrap(state.rowSnapshots.last)
+        let held539Row = try XCTUnwrap(held539RowReceipt.measurement.frame(in: window))
+        XCTAssertGreaterThan(held539Generation, baselineGeneration)
+        XCTAssertEqual(probe.parentSnapshotGeneration, baselineGeneration,
+                       "The rendered child remains on its previous snapshot before draining.")
+        XCTAssertGreaterThan(probe.parentSnapshotRequestCount, baselineRequests)
+        XCTAssertEqual(held539RowReceipt.generation, baselineGeneration)
+        XCTAssertEqual(held539RowReceipt.revision, 852,
+                       "The actual child environment remains at the prior content revision while its layout moves.")
+        let held539Request = try XCTUnwrap(probe.events.last { ($0["stage"] as? String) == "parent-snapshot-requested" })
+        XCTAssertEqual(held539Request["contentRevision"] as? Int, 539, "The held request records the 539-point content input.")
+        XCTAssertEqual(held539Request["marker"] as? Int, 73)
+        XCTAssertEqual(scroll.bounds.height, 539, accuracy: 1)
+        let held539Viewport = try XCTUnwrap(state.viewportMeasurement?.frame(in: window))
+        XCTAssertEqual(held539Viewport.height, 539, accuracy: 1)
+        XCTAssertEqual(held539Viewport.minY, baselineViewport.minY - 18, accuracy: 1)
+        XCTAssertEqual(state.reveal, 18)
+        XCTAssertNotEqual(held539Composer.minY, baselineComposer.minY)
+        XCTAssertGreaterThan(held539Row.width, 0)
+        XCTAssertNotEqual(held539Row, baselineRow, "The real row geometry follows the held parent layout.")
+        XCTAssertEqual(held539Composer.minY - held539Row.maxY, 18, accuracy: 1)
+        try assertNativeState("held-539-reveal-18")
+        XCTAssertGreaterThan(baselineRow.width, 0)
+        XCTAssertEqual(drains.actions.count, 1)
+        attachQueuedTranscriptReceipt("held-539-reveal-18", root: root, window: window, scroll: scroll,
+                                      input: input, probe: probe, state: state)
+
+        var transaction74 = Transaction(animation: nil)
+        transaction74[OwnedTranscriptHostMarkerKey.self] = 74
+        withTransaction(transaction74) {
+            state.availableHeight = 600
+            state.reveal = 450
+        }
+        try await waitForTranscriptHostCondition("the newer 600/450 viewport replaces the held snapshot") {
+            abs(scroll.bounds.height - 600) < 1
+                && state.composerFrame.minY != held539Composer.minY
+                && probe.parentSnapshotRequestedGeneration > held539Generation
+        }
+        let latestRequestedGeneration = probe.parentSnapshotRequestedGeneration
+        XCTAssertGreaterThan(latestRequestedGeneration, held539Generation)
+        XCTAssertGreaterThan(probe.parentSnapshotRequestCount, baselineRequests)
+        let held600Composer = state.composerFrame
+        let held600RowReceipt = try XCTUnwrap(state.rowSnapshots.last)
+        let held600Row = try XCTUnwrap(held600RowReceipt.measurement.frame(in: window))
+        XCTAssertGreaterThan(probe.coalescedSnapshotCount, 0)
+        XCTAssertEqual(probe.parentSnapshotGeneration, baselineGeneration,
+                       "Neither pending layout is rendered before the single latest drain.")
+        XCTAssertEqual(held600RowReceipt.generation, baselineGeneration)
+        XCTAssertEqual(held600RowReceipt.revision, 852)
+        let held600Request = try XCTUnwrap(probe.events.last { ($0["stage"] as? String) == "parent-snapshot-requested" })
+        XCTAssertEqual(held600Request["contentRevision"] as? Int, 600, "The latest held request carries the 600-point snapshot.")
+        XCTAssertEqual(held600Request["marker"] as? Int, 74)
+        XCTAssertEqual(scroll.bounds.height, 600, accuracy: 1)
+        let held600Viewport = try XCTUnwrap(state.viewportMeasurement?.frame(in: window))
+        XCTAssertEqual(held600Viewport.height, 600, accuracy: 1)
+        XCTAssertEqual(held600Viewport.minY, baselineViewport.minY - 450, accuracy: 1)
+        XCTAssertEqual(state.reveal, 450)
+        XCTAssertNotEqual(held600Composer.minY, held539Composer.minY)
+        XCTAssertGreaterThan(held600Row.width, 0)
+        XCTAssertEqual(held600Composer.minY - held600Row.maxY, 18, accuracy: 1)
+        try assertNativeState("held-600-reveal-450")
+        XCTAssertEqual(drains.actions.count, 1, "539 is coalesced; only the 600 snapshot has a queued drain.")
+        let held600Offset = scroll.contentOffset
+        let held600ContentSize = scroll.contentSize
+        let held600ContentInset = scroll.contentInset
+        let held600Insets = scroll.adjustedContentInset
+        attachQueuedTranscriptReceipt("held-600-reveal-450", root: root, window: window, scroll: scroll,
+                                      input: input, probe: probe, state: state)
+
+        let declaredDefault = Transaction()
+        XCTAssertEqual(declaredDefault[OwnedTranscriptHostMarkerKey.self], 0)
+        let drain = try XCTUnwrap(drains.removeNext())
+        withTransaction(declaredDefault) { drain() }
+        try await waitForTranscriptHostCondition("latest 600-point snapshot reaches the actual host and row") {
+            probe.parentSnapshotGeneration == latestRequestedGeneration
+                && probe.parentSnapshotCommitCount == baselineCommitCount + 1
+                && state.rowSnapshots.contains {
+                    $0.generation == latestRequestedGeneration && $0.revision == 600
+                        && $0.measurement.frame(in: window) != nil
+                }
+        }
+        let finalRowReceipt = try XCTUnwrap(state.rowSnapshots.last {
+            $0.generation == latestRequestedGeneration && $0.revision == 600
+        })
+        let finalRow = try XCTUnwrap(finalRowReceipt.measurement.frame(in: window))
+        let finalViewport = try XCTUnwrap(state.viewportMeasurement?.frame(in: window))
+        XCTAssertEqual(scroll.bounds.height, 600, accuracy: 1)
+        XCTAssertEqual(finalViewport.height, 600, accuracy: 1)
+        XCTAssertEqual(finalViewport.minY, held600Viewport.minY, accuracy: 1)
+        XCTAssertEqual(state.composerFrame, held600Composer,
+                       "Committing content cannot roll the current composer geometry back to the stale 539 request.")
+        XCTAssertEqual(state.composerFrame.minY - finalRow.maxY, 18, accuracy: 1)
+        try assertNativeState("after-latest-drain")
+        XCTAssertEqual(finalRow, held600Row,
+                       "The latest row remains at the geometry already owned by the 600-point parent layout.")
+        XCTAssertEqual(probe.parentSnapshotGeneration, latestRequestedGeneration)
+        XCTAssertEqual(probe.parentSnapshotCommitCount, baselineCommitCount + 1)
+        XCTAssertTrue(drains.actions.isEmpty)
+        XCTAssertEqual(scroll.contentOffset, held600Offset,
+                       "Committing the latest held snapshot must retain its already-visible native offset.")
+        XCTAssertEqual(scroll.contentSize, held600ContentSize)
+        XCTAssertEqual(scroll.contentInset.top, held600ContentInset.top, accuracy: 0.5)
+        XCTAssertEqual(scroll.contentInset.left, held600ContentInset.left, accuracy: 0.5)
+        XCTAssertEqual(scroll.contentInset.bottom, held600ContentInset.bottom, accuracy: 0.5)
+        XCTAssertEqual(scroll.contentInset.right, held600ContentInset.right, accuracy: 0.5)
+        XCTAssertEqual(scroll.adjustedContentInset.top, held600Insets.top, accuracy: 0.5)
+        XCTAssertEqual(scroll.adjustedContentInset.left, held600Insets.left, accuracy: 0.5)
+        XCTAssertEqual(scroll.adjustedContentInset.bottom, held600Insets.bottom, accuracy: 0.5)
+        XCTAssertEqual(scroll.adjustedContentInset.right, held600Insets.right, accuracy: 0.5)
+        attachQueuedTranscriptReceipt("after-latest-drain", root: root, window: window, scroll: scroll,
+                                      input: input, probe: probe, state: state)
+        let rejectedBeforeDuplicate = probe.rejectedDrainCount
+        withTransaction(declaredDefault) { drain() }
+        XCTAssertEqual(probe.parentSnapshotGeneration, latestRequestedGeneration,
+                       "A duplicate consumed ticket cannot roll back the latest rendered snapshot.")
+        XCTAssertEqual(probe.parentSnapshotCommitCount, baselineCommitCount + 1)
+        XCTAssertEqual(probe.rejectedDrainCount, rejectedBeforeDuplicate + 1)
+        XCTAssertEqual(state.rowSnapshots.last?.generation, latestRequestedGeneration)
+        XCTAssertEqual(state.rowSnapshots.last?.revision, 600)
+        XCTAssertEqual(state.composerFrame, held600Composer)
+        XCTAssertEqual(scroll.bounds.height, 600, accuracy: 1)
+        XCTAssertEqual(scroll.contentOffset, held600Offset,
+                       "A stale duplicate cannot restore the prior viewport's offset.")
+        XCTAssertEqual(scroll.contentSize, held600ContentSize)
+        XCTAssertEqual(scroll.contentInset.top, held600ContentInset.top, accuracy: 0.5)
+        XCTAssertEqual(scroll.contentInset.left, held600ContentInset.left, accuracy: 0.5)
+        XCTAssertEqual(scroll.contentInset.bottom, held600ContentInset.bottom, accuracy: 0.5)
+        XCTAssertEqual(scroll.contentInset.right, held600ContentInset.right, accuracy: 0.5)
+        XCTAssertEqual(scroll.adjustedContentInset.top, held600Insets.top, accuracy: 0.5)
+        XCTAssertEqual(scroll.adjustedContentInset.left, held600Insets.left, accuracy: 0.5)
+        XCTAssertEqual(scroll.adjustedContentInset.bottom, held600Insets.bottom, accuracy: 0.5)
+        XCTAssertEqual(scroll.adjustedContentInset.right, held600Insets.right, accuracy: 0.5)
+        XCTAssertEqual(state.composerFrame.minY - finalRow.maxY, 18, accuracy: 1)
+        try assertNativeState("after-stale-duplicate")
+        attachQueuedTranscriptReceipt("after-stale-duplicate", root: root, window: window, scroll: scroll,
+                                      input: input, probe: probe, state: state)
+        let commitEvent = try XCTUnwrap(probe.events.last { ($0["stage"] as? String) == "parent-snapshot-commit" })
+        XCTAssertEqual(commitEvent["generation"] as? Int, latestRequestedGeneration)
+        XCTAssertEqual(commitEvent["contentRevision"] as? Int, 600)
+        XCTAssertEqual(commitEvent["marker"] as? Int, 74)
+    }
+
+    @MainActor
+    func testDismantledTranscriptHostDrainCannotUpdateItsReplacement() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let previousKeyWindow = scene.keyWindow
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+        let state = QueuedTranscriptReplacementState()
+        let drains = HeldTranscriptSnapshotDrains()
+        let probe = TranscriptHostBoundaryProbe(
+            marker: { $0[OwnedTranscriptHostMarkerKey.self] },
+            contentRevision: { [weak state] in state?.contentRevision ?? -1 },
+            enqueueSnapshotDrain: { drains.enqueue($0) }
+        )
+        let root = UIHostingController(
+            rootView: QueuedTranscriptReplacementFixture(state: state)
+                .environment(\.transcriptHostBoundaryProbe, probe)
+        )
+        window.rootViewController = root
+        window.makeKeyAndVisible()
+        defer {
+            window.endEditing(true)
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+
+        try await waitForTranscriptHostCondition("the original host's first snapshot request") {
+            probe.hostingControllerInitializationCount == 1
+                && probe.parentSnapshotRequestCount > 0
+                && !drains.actions.isEmpty
+        }
+        for _ in 0..<12 {
+            if let firstDrain = drains.removeNext() {
+                withTransaction(Transaction()) { firstDrain() }
+            }
+            if probe.parentSnapshotGeneration == probe.parentSnapshotRequestedGeneration
+                && drains.actions.isEmpty
+                && state.childSnapshots.contains(where: { $0.contentRevision == 72 && $0.snapshotRevision == 72 }) {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        try await waitForTranscriptHostCondition("the original host renders revision 72") {
+            state.childSnapshots.contains { $0.contentRevision == 72 && $0.snapshotRevision == 72 }
+        }
+        let oldScroll = try XCTUnwrap(ownedTranscriptScrollView(in: window))
+        // Retain actual controller objects, including the child hosting root
+        // which owns its snapshot model, through the obsolete callback.
+        func controllerAncestry(containing scroll: UIScrollView) -> [UIViewController] {
+            var chain: [UIViewController] = [root]
+            var current: UIViewController = root
+            while let child = current.children.first(where: {
+                $0.isViewLoaded && ownedTranscriptScrollView(in: $0.view) === scroll
+            }) {
+                chain.append(child)
+                current = child
+            }
+            return chain
+        }
+        let retainedOldControllers = controllerAncestry(containing: oldScroll)
+        XCTAssertGreaterThanOrEqual(retainedOldControllers.count, 3)
+        let retainedOldHost = try XCTUnwrap(retainedOldControllers.last)
+        let oldHostIdentity = ObjectIdentifier(retainedOldHost)
+
+        var transaction73 = Transaction(animation: nil)
+        transaction73[OwnedTranscriptHostMarkerKey.self] = 73
+        withTransaction(transaction73) { state.contentRevision = 73 }
+        try await waitForTranscriptHostCondition("the original 73 snapshot remains pending") {
+            probe.parentSnapshotRequestedGeneration > probe.parentSnapshotGeneration
+                && !drains.actions.isEmpty
+        }
+        let obsoleteDrain = try XCTUnwrap(drains.removeNext())
+        XCTAssertFalse(state.childSnapshots.contains { $0.contentRevision == 73 && $0.snapshotRevision == 73 },
+                       "The held old snapshot has not reached its hosted leaf.")
+
+        var transaction74 = Transaction(animation: nil)
+        transaction74[OwnedTranscriptHostMarkerKey.self] = 74
+        withTransaction(transaction74) {
+            state.hostIdentity = 1
+            state.contentRevision = 74
+        }
+        try await waitForTranscriptHostCondition("old host dismantle and replacement host creation") {
+            probe.hostingControllerInitializationCount == 2
+                && probe.events.contains { ($0["stage"] as? String) == "handoff-invalidated" }
+                && !drains.actions.isEmpty
+        }
+        let replacementRequestedGeneration = probe.parentSnapshotRequestedGeneration
+        let replacementSnapshotCount = state.childSnapshots.count
+        let commitsBeforeObsoleteDrain = probe.parentSnapshotCommitCount
+        let declaredDefault = Transaction()
+        XCTAssertEqual(declaredDefault[OwnedTranscriptHostMarkerKey.self], 0)
+        withExtendedLifetime(retainedOldControllers) {
+            withTransaction(declaredDefault) { obsoleteDrain() }
+        }
+        XCTAssertEqual(ObjectIdentifier(retainedOldHost), oldHostIdentity)
+        XCTAssertTrue(retainedOldHost.isViewLoaded)
+        XCTAssertTrue(retainedOldControllers.contains { $0 === retainedOldHost },
+                      "The actual dismantled host and its retained root/model stay alive through the callback.")
+        XCTAssertEqual(state.childSnapshots.count, replacementSnapshotCount,
+                       "The retained old ticket cannot render any content into the replacement host.")
+        XCTAssertFalse(state.childSnapshots.contains { $0.contentRevision == 73 && $0.snapshotRevision == 73 })
+        XCTAssertEqual(probe.parentSnapshotRequestedGeneration, replacementRequestedGeneration)
+        XCTAssertEqual(probe.parentSnapshotCommitCount, commitsBeforeObsoleteDrain,
+                       "A retained dismantled host must not publish even if its old callback executes.")
+
+        let replacementDrain = try XCTUnwrap(drains.removeNext())
+        withTransaction(declaredDefault) { replacementDrain() }
+        try await waitForTranscriptHostCondition("the replacement host commits and renders revision 74") {
+            probe.parentSnapshotCommitCount >= 2
+                && state.childSnapshots.contains {
+                    $0.contentRevision == 74 && $0.snapshotRevision == 74 && $0.marker == 74
+                        && $0.generation == replacementRequestedGeneration
+                }
+        }
+        XCTAssertTrue(retainedOldControllers.contains { $0 === retainedOldHost })
+        XCTAssertEqual(ObjectIdentifier(retainedOldHost), oldHostIdentity)
+        XCTAssertFalse(controllerAncestry(containing: try XCTUnwrap(ownedTranscriptScrollView(in: window))).last === retainedOldHost)
+        XCTAssertFalse(ownedTranscriptScrollView(in: window) === oldScroll,
+                       "The replacement owns a newly hosted native scroll view.")
+        XCTAssertTrue(state.childSnapshots.contains {
+            $0.contentRevision == 74 && $0.snapshotRevision == 74 && $0.marker == 74
+        })
+        XCTAssertFalse(state.childSnapshots.contains { $0.contentRevision == 73 && $0.snapshotRevision == 73 })
+        XCTAssertTrue(drains.actions.isEmpty)
     }
 }

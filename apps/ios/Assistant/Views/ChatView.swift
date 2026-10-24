@@ -67,6 +67,10 @@ private struct ConversationTranscriptHost<Content: View>: UIViewControllerRepres
         }
     }
 
+    static func dismantleUIViewController(_ controller: ConversationTranscriptController<Content>, coordinator: ()) {
+        controller.invalidateSnapshotHandoff()
+    }
+
     func sizeThatFits(_ proposal: ProposedViewSize,
                      uiViewController: ConversationTranscriptController<Content>, context: Context) -> CGSize? {
         guard let width = proposal.width, let height = proposal.height,
@@ -79,7 +83,7 @@ private enum TranscriptCoordinateSpace: Hashable {
     case viewport
 }
 
-private struct ConversationTranscriptSnapshot<Content: View> {
+struct ConversationTranscriptSnapshot<Content: View> {
     let content: Content
     let environment: EnvironmentValues
     let transaction: Transaction
@@ -87,13 +91,142 @@ private struct ConversationTranscriptSnapshot<Content: View> {
     let diagnosticContentRevision: Int
 }
 
+/// Scheduling is injectable so tests can hold a real handoff without changing
+/// its coalescing, lifetime checks, transaction or publication path. Enqueue
+/// must retain the callback for a later turn, never execute it inline.
+typealias TranscriptSnapshotEnqueue = @MainActor (@escaping @MainActor () -> Void) -> Void
+
+@MainActor
+final class TranscriptSnapshotHandoff<Snapshot> {
+    private struct Pending {
+        let generation: Int
+        let snapshot: Snapshot
+    }
+
+    private let enqueue: TranscriptSnapshotEnqueue
+    private let targetIsCurrent: @MainActor () -> Bool
+    private let transaction: @MainActor (Snapshot) -> Transaction
+    private let publish: @MainActor (Snapshot) -> Void
+    private let didRecord: (@MainActor (String, Int, Snapshot?) -> Void)?
+    private var pending: Pending?
+    private var active = true
+    private var lifetimeEpoch = 0
+    private var ticketSequence = 0
+    private var scheduledTicket: Int?
+    private(set) var latestRequestedGeneration = 0
+    private(set) var committedGeneration = 0
+    private(set) var requestCount = 0
+    private(set) var commitCount = 0
+    private(set) var coalescedCount = 0
+    private(set) var scheduledDrainCount = 0
+    private(set) var isDraining = false
+    var pendingGeneration: Int? { pending?.generation }
+    var hasScheduledDrain: Bool { scheduledTicket != nil }
+
+    init(
+        enqueue: @escaping TranscriptSnapshotEnqueue = { action in
+            DispatchQueue.main.async { action() }
+        },
+        targetIsCurrent: @escaping @MainActor () -> Bool,
+        transaction: @escaping @MainActor (Snapshot) -> Transaction,
+        publish: @escaping @MainActor (Snapshot) -> Void,
+        didRecord: (@MainActor (String, Int, Snapshot?) -> Void)? = nil
+    ) {
+        self.enqueue = enqueue
+        self.targetIsCurrent = targetIsCurrent
+        self.transaction = transaction
+        self.publish = publish
+        self.didRecord = didRecord
+    }
+
+    @discardableResult
+    func request(makeSnapshot: (Int) -> Snapshot) -> Int? {
+        guard active, targetIsCurrent(), latestRequestedGeneration < Int.max else { return nil }
+        latestRequestedGeneration += 1
+        let next = Pending(generation: latestRequestedGeneration,
+                           snapshot: makeSnapshot(latestRequestedGeneration))
+        requestCount += 1
+        if let displaced = pending {
+            coalescedCount += 1
+            didRecord?("parent-snapshot-coalesced", displaced.generation, displaced.snapshot)
+        }
+        pending = next
+        didRecord?("parent-snapshot-requested", next.generation, next.snapshot)
+        scheduleIfNeeded()
+        return next.generation
+    }
+
+    func invalidate() {
+        guard active else { return }
+        active = false
+        lifetimeEpoch += 1
+        let discarded = pending
+        pending = nil
+        scheduledTicket = nil
+        didRecord?("handoff-invalidated", discarded?.generation ?? committedGeneration, discarded?.snapshot)
+    }
+
+    private func scheduleIfNeeded() {
+        guard active, !isDraining, pending != nil, scheduledTicket == nil,
+              ticketSequence < Int.max else { return }
+        ticketSequence += 1
+        let ticket = ticketSequence
+        let epoch = lifetimeEpoch
+        scheduledTicket = ticket
+        scheduledDrainCount += 1
+        didRecord?("handoff-drain-scheduled", pending?.generation ?? committedGeneration, pending?.snapshot)
+        enqueue { [weak self] in self?.drain(ticket: ticket, epoch: epoch) }
+    }
+
+    private func drain(ticket: Int, epoch: Int) {
+        guard active, epoch == lifetimeEpoch, scheduledTicket == ticket else {
+            didRecord?("handoff-stale-drain-rejected", committedGeneration, nil)
+            return
+        }
+        guard targetIsCurrent() else {
+            didRecord?("handoff-target-rejected", pending?.generation ?? committedGeneration, pending?.snapshot)
+            invalidate()
+            return
+        }
+        scheduledTicket = nil
+        guard let next = pending,
+              next.generation == latestRequestedGeneration,
+              next.generation > committedGeneration else { return }
+        // Consume before publication: a reentrant request is a new pending
+        // value and must never be cleared by this commit's acknowledgement.
+        pending = nil
+        isDraining = true
+        didRecord?("handoff-drain-begin", next.generation, next.snapshot)
+        withTransaction(transaction(next.snapshot)) {
+            publish(next.snapshot)
+        }
+        committedGeneration = next.generation
+        commitCount += 1
+        didRecord?("parent-snapshot-commit", next.generation, next.snapshot)
+        isDraining = false
+        // Only an actual newer request can schedule another turn. Publication
+        // itself is not a request, and there is no retry or polling loop.
+        scheduleIfNeeded()
+    }
+}
+
+@MainActor
+final class ConversationTranscriptSnapshotModel<Content: View>: ObservableObject {
+    @Published private(set) var snapshot: ConversationTranscriptSnapshot<Content>
+
+    init(snapshot: ConversationTranscriptSnapshot<Content>) { self.snapshot = snapshot }
+
+    func commit(snapshot: ConversationTranscriptSnapshot<Content>) { self.snapshot = snapshot }
+}
+
 private struct ConversationTranscriptRoot<Content: View>: View {
-    let snapshot: ConversationTranscriptSnapshot<Content>
+    @ObservedObject var snapshotModel: ConversationTranscriptSnapshotModel<Content>
 #if DEBUG
     let coordinates: TranscriptHostingCoordinates
 #endif
 
     var body: some View {
+        let snapshot = snapshotModel.snapshot
         snapshot.content
             .transaction(value: snapshot.generation) {
 #if DEBUG
@@ -125,17 +258,45 @@ private struct ConversationTranscriptRoot<Content: View>: View {
     }
 }
 
-/// The controller and generic root type stay stable across draft, streaming,
-/// environment and reveal updates. The root value carries an immutable snapshot.
+/// The controller and root stay stable across draft, streaming, environment
+/// and reveal updates. One queued handoff publishes a complete latest snapshot.
 /// SwiftUI owns the container frame; Auto Layout pins only the owned child to
 /// its bounds, never its safe area.
 private final class ConversationTranscriptController<Content: View>: UIViewController {
-    private var snapshot: ConversationTranscriptSnapshot<Content>
+    private let snapshotModel: ConversationTranscriptSnapshotModel<Content>
     private let host: UIHostingController<ConversationTranscriptRoot<Content>>
 #if DEBUG
     private let coordinates: TranscriptHostingCoordinates
 #endif
-    var parentSnapshotGeneration: Int { snapshot.generation }
+    var parentSnapshotGeneration: Int { snapshotModel.snapshot.generation }
+    private let enqueueSnapshotDrain: TranscriptSnapshotEnqueue
+    private lazy var handoff: TranscriptSnapshotHandoff<ConversationTranscriptSnapshot<Content>> = {
+        let model = snapshotModel
+#if DEBUG
+        let probe = model.snapshot.environment.transcriptHostBoundaryProbe
+#endif
+        return TranscriptSnapshotHandoff(
+            enqueue: enqueueSnapshotDrain,
+            targetIsCurrent: { [weak self, weak model] in
+                guard let self, let model else { return false }
+                return self.snapshotModel === model && self.host.rootView.snapshotModel === model
+            },
+            transaction: { $0.transaction },
+            publish: { [weak model] in model?.commit(snapshot: $0) },
+            didRecord: { stage, generation, snapshot in
+#if DEBUG
+                if let snapshot {
+                    (snapshot.environment.transcriptHostBoundaryProbe ?? probe)?.record(
+                        stage, transaction: snapshot.transaction, generation: generation,
+                        contentRevision: snapshot.diagnosticContentRevision
+                    )
+                } else {
+                    probe?.recordLifecycle(stage, generation: generation)
+                }
+#endif
+            }
+        )
+    }()
 
     init(content: Content, environment: EnvironmentValues, transaction: Transaction,
          diagnosticContentRevision: Int) {
@@ -143,14 +304,18 @@ private final class ConversationTranscriptController<Content: View>: UIViewContr
             content: content, environment: environment, transaction: transaction,
             generation: 0, diagnosticContentRevision: diagnosticContentRevision
         )
-        self.snapshot = snapshot
+        let model = ConversationTranscriptSnapshotModel(snapshot: snapshot)
+        snapshotModel = model
 #if DEBUG
+        enqueueSnapshotDrain = environment.transcriptHostBoundaryProbe?.enqueueSnapshotDrain
+            ?? { action in DispatchQueue.main.async { action() } }
         let coordinates = TranscriptHostingCoordinates()
         self.coordinates = coordinates
         host = UIHostingController(rootView: ConversationTranscriptRoot(
-            snapshot: snapshot, coordinates: coordinates))
+            snapshotModel: model, coordinates: coordinates))
 #else
-        host = UIHostingController(rootView: ConversationTranscriptRoot(snapshot: snapshot))
+        enqueueSnapshotDrain = { action in DispatchQueue.main.async { action() } }
+        host = UIHostingController(rootView: ConversationTranscriptRoot(snapshotModel: model))
 #endif
         super.init(nibName: nil, bundle: nil)
         host.safeAreaRegions = []
@@ -200,22 +365,15 @@ private final class ConversationTranscriptController<Content: View>: UIViewContr
 
     private func replaceSnapshot(content: Content, environment: EnvironmentValues,
                                  transaction: Transaction, diagnosticContentRevision: Int) {
-        let next = ConversationTranscriptSnapshot(
-            content: content, environment: environment, transaction: transaction,
-            generation: snapshot.generation &+ 1, diagnosticContentRevision: diagnosticContentRevision
-        )
-        snapshot = next
-#if DEBUG
-        let probe = environment.transcriptHostBoundaryProbe
-        probe?.record("parent-snapshot-commit", transaction: next.transaction,
-                      generation: next.generation, contentRevision: next.diagnosticContentRevision)
-        host.rootView = ConversationTranscriptRoot(snapshot: next, coordinates: coordinates)
-        probe?.record("root-value-updated", transaction: next.transaction,
-                      generation: next.generation, contentRevision: next.diagnosticContentRevision)
-#else
-        host.rootView = ConversationTranscriptRoot(snapshot: next)
-#endif
+        handoff.request { generation in
+            ConversationTranscriptSnapshot(
+                content: content, environment: environment, transaction: transaction,
+                generation: generation, diagnosticContentRevision: diagnosticContentRevision
+            )
+        }
     }
+
+    func invalidateSnapshotHandoff() { handoff.invalidate() }
 }
 
 #if DEBUG
@@ -228,19 +386,47 @@ final class TranscriptHostBoundaryProbe {
     private(set) var events: [[String: Any]] = []
     private(set) var parentSnapshotGeneration = 0
     private(set) var parentSnapshotCommitCount = 0
+    private(set) var parentSnapshotRequestedGeneration = 0
+    private(set) var parentSnapshotRequestCount = 0
+    private(set) var coalescedSnapshotCount = 0
+    private(set) var scheduledDrainCount = 0
+    private(set) var rejectedDrainCount = 0
+    let enqueueSnapshotDrain: TranscriptSnapshotEnqueue?
     private(set) var hostingControllerInitializationCount = 0
     private(set) var rootValueUpdateCount = 0
 
     var currentContentRevision: Int { contentRevision() }
 
     init(marker: @escaping @MainActor (Transaction) -> Int,
-         contentRevision: @escaping @MainActor () -> Int) {
+         contentRevision: @escaping @MainActor () -> Int,
+         enqueueSnapshotDrain: TranscriptSnapshotEnqueue? = nil) {
+        self.enqueueSnapshotDrain = enqueueSnapshotDrain
         self.marker = marker
         self.contentRevision = contentRevision
     }
 
+    /// Rejected/invalidated work can have no payload. Do not manufacture a
+    /// default transaction or a current content revision for those events.
+    func recordLifecycle(_ stage: String, generation: Int) {
+        if stage == "handoff-stale-drain-rejected" { rejectedDrainCount += 1 }
+        if events.count == 64 { events.removeFirst() }
+        events.append([
+            "time": CACurrentMediaTime(), "stage": stage,
+            "generation": generation, "hasSnapshot": false,
+        ])
+    }
+
     func record(_ stage: String, transaction: Transaction, generation: Int, contentRevision: Int? = nil) {
-        if stage == "parent-snapshot-commit" {
+        if stage == "parent-snapshot-requested" {
+            parentSnapshotRequestedGeneration = generation
+            parentSnapshotRequestCount += 1
+        } else if stage == "parent-snapshot-coalesced" {
+            coalescedSnapshotCount += 1
+        } else if stage == "handoff-drain-scheduled" {
+            scheduledDrainCount += 1
+        } else if stage == "handoff-stale-drain-rejected" || stage == "handoff-target-rejected" {
+            rejectedDrainCount += 1
+        } else if stage == "parent-snapshot-commit" {
             parentSnapshotGeneration = generation
             parentSnapshotCommitCount += 1
         } else if stage == "hosting-controller-initialized" {
@@ -517,7 +703,42 @@ private struct TranscriptGeometryObserver: ViewModifier {
     }
 }
 
+/// Snapshot provenance participates in the geometry value so a newly rendered
+/// generation measures the current proxy even when its rectangle is unchanged.
+private struct TranscriptSnapshotGeometryValue: Equatable {
+    let frame: CGRect
+    let generation: Int?
+    let revision: Int?
+}
+
+private struct TranscriptSnapshotGeometryObserver: ViewModifier {
+    @Environment(\.transcriptHostingCoordinates) private var coordinates
+    @Environment(\.transcriptHostSnapshotGeneration) private var generation
+    @Environment(\.transcriptHostSnapshotContentRevision) private var revision
+    let report: @MainActor (TranscriptGeometryMeasurement, Int?, Int?) -> Void
+
+    func body(content: Content) -> some View {
+        content.onGeometryChange(for: TranscriptSnapshotGeometryValue.self) {
+            TranscriptSnapshotGeometryValue(
+                frame: $0.frame(in: .named(TranscriptCoordinateSpace.viewport)),
+                generation: generation, revision: revision
+            )
+        } action: { observation in
+            if let coordinates {
+                report(TranscriptGeometryMeasurement(localFrame: observation.frame, coordinates: coordinates),
+                       observation.generation, observation.revision)
+            }
+        }
+    }
+}
+
 extension View {
+    func onTranscriptSnapshotGeometryChange(
+        _ report: @escaping @MainActor (TranscriptGeometryMeasurement, Int?, Int?) -> Void
+    ) -> some View {
+        modifier(TranscriptSnapshotGeometryObserver(report: report))
+    }
+
     func onTranscriptGeometryChange(
         _ report: @escaping @MainActor (TranscriptGeometryMeasurement) -> Void
     ) -> some View {
