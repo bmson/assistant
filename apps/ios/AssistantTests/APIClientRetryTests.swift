@@ -536,6 +536,42 @@ private final class LocalNotificationRecorder {
     }
 }
 
+/// Immediate, per-model surface recorder. These calls never reach ActivityKit
+/// or the system badge; their trace does not attribute an earlier OS stall.
+@MainActor
+private final class RecordingAppSystemSurfaces: AppSystemSurfaces {
+    private let id = UUID().uuidString
+    private(set) var operations: [String] = []
+
+    private func record(_ operation: String) {
+        operations.append(operation)
+        print("Notification fixture surfaces [\(id)]: \(operation); cancelled=\(Task.isCancelled)")
+    }
+
+    func ensure(agentName: String, thought: AssistantThought, detail: String, pendingCount: Int) async {
+        record("ensure(\(pendingCount))")
+    }
+
+    func start(agentName: String, thought: AssistantThought, detail: String, pendingCount: Int) async {
+        record("start(\(pendingCount))")
+    }
+
+    func update(thought: AssistantThought, detail: String, pendingCount: Int) async {
+        record("update(\(pendingCount))")
+    }
+
+    func needsAttention(agentName: String, detail: String, pendingCount: Int) async {
+        record("needsAttention(\(pendingCount))")
+    }
+
+    func finish(thought: AssistantThought, detail: String, succeeded: Bool) async {
+        record("finish(\(succeeded))")
+    }
+
+    func dismiss() async { record("dismiss") }
+    func updateBadge(_ count: Int) async { record("updateBadge(\(count))") }
+}
+
 final class APIClientRetryTests: XCTestCase {
     private let sessionLock = NSLock()
     private var testSessions: [URLSession] = []
@@ -4826,15 +4862,18 @@ extension APIClientRetryTests {
         enqueueAutomaticSpeech: ((ChatMessage) -> Void)? = nil,
         scheduleLocalNotification: LocalNotificationScheduler? = nil
     ) async throws -> AppModel {
+        let systemSurfaces = RecordingAppSystemSurfaces()
         let model: AppModel
         if let enqueueAutomaticSpeech {
             model = AppModel(
                 apiClient: makeClient(),
                 enqueueAutomaticSpeech: enqueueAutomaticSpeech,
-                scheduleLocalNotification: scheduleLocalNotification
+                scheduleLocalNotification: scheduleLocalNotification,
+                systemSurfaces: systemSurfaces
             )
         } else {
-            model = AppModel(apiClient: makeClient(), scheduleLocalNotification: scheduleLocalNotification)
+            model = AppModel(apiClient: makeClient(), scheduleLocalNotification: scheduleLocalNotification,
+                             systemSurfaces: systemSurfaces)
         }
         model.scenePhaseDidChange(.background)
         StubURLProtocol.primeBootstrap(try notificationBootstrap())
