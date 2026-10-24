@@ -520,11 +520,16 @@ struct MoreView: View {
                 Text(policy.displayName)
                     .font(.body.weight(.medium))
                     .fixedSize(horizontal: false, vertical: true)
-                policyScopeDetails(policy)
+                Text("Allow automatically")
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 HStack(spacing: 8) {
                     policyToggle(policy) { Text("Allow automatically") }
+                        .labelsHidden()
+                    Spacer(minLength: 0)
                     policyActions(policy)
                 }
+                policyScopeDetails(policy)
             }
         } else {
             VStack(alignment: .leading, spacing: 4) {
@@ -705,6 +710,8 @@ struct PhoneCallPolicyScopePresentation: View {
                     Text("Saved phone-call scope (not interpreted)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
                     DisclosureGroup("Show saved rule data") {
                         Text(presentation.details ?? "No saved rule data is available.")
                             .font(.caption.monospaced())
