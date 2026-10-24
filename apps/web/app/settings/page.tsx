@@ -5,8 +5,11 @@ import Link from 'next/link';
 import { SecurityClient } from '@/app/security/security-client';
 import { authMode, requireOwner } from '@/auth';
 import { getMobileAccessToken, hasMobileTokenRotationCapability } from '@/lib/mobile-access-token';
+import { getWorkspaceSettings } from '@/lib/server';
+import { projectStandingApprovalPolicy } from '@/lib/standing-approval-view';
 import { btn, Card, PageHeader, PageShell, SectionHeading } from '@/lib/ui';
 import { MobileTokenPanel } from './mobile-token';
+import { StandingApprovals } from './standing-approvals';
 
 export const metadata = { title: 'Settings' };
 export const dynamic = 'force-dynamic';
@@ -19,6 +22,8 @@ export default async function SettingsPage() {
   const proto = requestHeaders.get('x-forwarded-proto') ?? 'http';
   const serverUrl = host ? `${proto}://${host}` : config.AUTH_URL;
   const token = authMode === 'passkey' ? '' : await getMobileAccessToken();
+  const settings = await getWorkspaceSettings();
+  const standingPolicies = settings.policies.map(projectStandingApprovalPolicy);
   return (
     <PageShell size="reading" className="grid gap-8">
       <PageHeader title="Settings" intro="Connect your iPhone and manage your assistant account." />
@@ -51,6 +56,7 @@ export default async function SettingsPage() {
           </Card>
         </section>
       )}
+      <StandingApprovals policies={standingPolicies} />
     </PageShell>
   );
 }

@@ -15,8 +15,9 @@ import {
 } from '@assistant/firestore';
 import { assistantModuleMetas } from '@assistant/modules/meta';
 import type { AgentReadinessSource } from '@assistant/persistence';
-import { policyLabels, policyScope, scheduleLabels } from '@/app/settings/labels';
+import { scheduleLabels } from '@/app/settings/labels';
 import { getSelfRepairOverview } from '@/lib/self-repair-server';
+import { projectStandingApprovalPolicy } from '@/lib/standing-approval-view';
 import { readMobileWorkspaceSection } from './mobile-workspace-sections';
 import {
   getBillingOverview,
@@ -287,16 +288,7 @@ export async function getFirestoreMobileWorkspace(
               lastRunAt: schedule.lastRunAt,
             })),
           reminders: settings.reminders,
-          policies: settings.policies.map((policy) => ({
-            id: policy.id,
-            toolName: policy.toolName,
-            templateKey: policy.templateKey,
-            label: policyLabels[policy.templateKey] ?? null,
-            scope: policyScope(policy.templateKey, policy.match),
-            effect: policy.effect,
-            enabled: policy.enabled,
-            createdVia: policy.createdVia,
-          })),
+          policies: settings.policies.map(projectStandingApprovalPolicy),
           goalAutomationCount: settings.goalAutomationCount,
         }
       : {
