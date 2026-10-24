@@ -2536,8 +2536,24 @@ struct WorkspacePolicy: Codable, Identifiable, Sendable {
     let createdVia: String
 
     var scope: String? = nil
+    var phoneCallPresentation: WorkspacePhoneCallPolicyPresentation? = nil
 
     var displayName: String { label ?? templateKey.sentenceCaseIdentifier }
+}
+
+struct WorkspacePhoneCallPolicyPresentation: Codable, Sendable {
+    let kind: String
+    var recipient: String? = nil
+    var contactName: String? = nil
+    var maxMinutes: Int? = nil
+    var goal: String? = nil
+    var mayShare: String? = nil
+    var mayAgreeTo: String? = nil
+    var mustNot: String? = nil
+    var language: String? = nil
+    var voicemailMode: String? = nil
+    var voicemailMessage: String? = nil
+    var details: String? = nil
 }
 
 struct WorkspaceCosts: Codable, Sendable {

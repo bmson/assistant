@@ -26,7 +26,7 @@ export const policyLabels: Record<string, string> = {
   'calendar.respond_to_event.response': 'Respond to calendar invitations',
   'calendar.update_event.with_guests': 'Edit an event and invite approved guests',
   'docs.share.to_recipient': 'Share Google Docs with an approved recipient',
-  'phone.call.same_brief': 'Repeat an approved phone call',
+  'phone.call.same_brief': 'Repeat approved call',
   'sms.reply_to_owner': 'Reply to your text messages',
 };
 
