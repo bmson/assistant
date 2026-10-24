@@ -395,6 +395,9 @@ enum DocumentListPresentation: Equatable {
 
 struct WorkspaceView: View {
     let area: WorkspaceArea
+#if DEBUG
+    var documentLayoutObserver: (@MainActor (String, CGRect) -> Void)? = nil
+#endif
 
     @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
@@ -1879,22 +1882,31 @@ struct WorkspaceView: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
             if document.status == "ready" {
-                AssistantFlowLayout(spacing: 9) {
+                AssistantFlowLayout(spacing: 8) {
                     Button {
                         model.returnToChat()
                         model.send("From my documents, tell me about \"\(document.title)\".")
                     } label: {
-                        Label("Ask about this", systemImage: "bubble.left")
-                            .font(.subheadline.weight(.semibold))
+                        HStack(spacing: 8) {
+                            Image(systemName: "bubble.left")
+                            Text("Ask about this")
+                                .font(.subheadline.weight(.semibold))
+                        }
                     }
-                    .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
+                    .buttonStyle(AssistantActionButtonStyle(kind: .secondary, minimumHeight: 48))
                     .disabled(model.isSending)
-                    AssistantConfirmationButton("Delete", hint: "Removes the file and its searchable passages.") {
+#if DEBUG
+                    .overlay { documentLayoutProbe("action:document.ask:\(document.id)") }
+#endif
+                    AssistantConfirmationButton("Delete", hint: "Removes the file and its searchable passages.", minimumHeight: 48) {
                         workspaceActionInFlight = document.id
                         _ = await model.deleteDocument(document)
                         workspaceActionInFlight = nil
                     }
                     .disabled(actionsUnavailable)
+#if DEBUG
+                    .overlay { documentLayoutProbe("action:document.delete:\(document.id)") }
+#endif
                 }
                 .accessibilityHint(
                     model.isSending
@@ -1908,15 +1920,22 @@ struct WorkspaceView: View {
                     .foregroundStyle(AssistantTheme.errorInk(for: colorScheme))
             }
             if document.status != "ready" {
-                AssistantConfirmationButton("Delete", hint: "Removes the file and its searchable passages.") {
+                AssistantConfirmationButton("Delete", hint: "Removes the file and its searchable passages.", minimumHeight: 48) {
                     workspaceActionInFlight = document.id
                     _ = await model.deleteDocument(document)
                     workspaceActionInFlight = nil
                 }
                 .disabled(actionsUnavailable)
+#if DEBUG
+                .overlay { documentLayoutProbe("action:document.delete:\(document.id)") }
+#endif
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .assistantCard(in: colorScheme)
+#if DEBUG
+        .overlay { documentLayoutProbe("card:document:\(document.id)") }
+#endif
     }
 
     private func backstoryImports(_ imports: WorkspaceImports) -> some View {
@@ -1951,7 +1970,7 @@ struct WorkspaceView: View {
                 WorkspaceAvailabilityNotice(title: "Import history")
             }
             ForEach(imports.sources) { source in
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 8) {
                     importSourceHeader(source)
                     Text(importSourceProgressLabel(source))
                         .font(.caption)
@@ -1971,7 +1990,11 @@ struct WorkspaceView: View {
                     }
                     importActions(source)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .assistantCard(in: colorScheme)
+#if DEBUG
+                .overlay { documentLayoutProbe("card:import:\(source.workspacePath)") }
+#endif
             }
             if let pagination = model.workspace?.sectionPagination?.importSources {
                 loadMoreButton(section: .importSources, pagination: pagination)
@@ -2015,7 +2038,7 @@ struct WorkspaceView: View {
     private func importActions(_ source: WorkspaceImportSource) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if source.quarantinedNow > 0 {
-                AssistantFlowLayout(spacing: 9) {
+                AssistantFlowLayout(spacing: 8) {
                     importReviewButtons(source)
                 }
             }
@@ -2026,16 +2049,27 @@ struct WorkspaceView: View {
 
     @ViewBuilder
     private func importReviewButtons(_ source: WorkspaceImportSource) -> some View {
-        Button("Approve all") {
+        Button {
             updateImport(action: "review", source: source.source, verdict: "approve")
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark")
+                Text("Approve all")
+            }
         }
-        .buttonStyle(AssistantActionButtonStyle(kind: .primary))
+        .buttonStyle(AssistantActionButtonStyle(kind: .primary, minimumHeight: 48))
+#if DEBUG
+        .overlay { documentLayoutProbe("action:import.approve:\(source.workspacePath)") }
+#endif
         // Deletes and tombstones every held-back memory at once, so it asks
         // twice — as Reject does for a single memory.
         AssistantConfirmationButton("Reject all", confirmationTitle: "Reject all?", systemImage: "xmark",
-            hint: "Deletes every memory this import is holding for review.") {
+            hint: "Deletes every memory this import is holding for review.", minimumHeight: 48) {
             updateImport(action: "review", source: source.source, verdict: "reject")
         }
+#if DEBUG
+        .overlay { documentLayoutProbe("action:import.reject:\(source.workspacePath)") }
+#endif
     }
 
     private func importOverflowMenu(_ source: WorkspaceImportSource) -> some View {
@@ -2068,10 +2102,15 @@ struct WorkspaceView: View {
                 )
             }
         } label: {
-            Label("More", systemImage: "ellipsis.circle")
-                .frame(minWidth: 44, minHeight: 44)
+            HStack(spacing: 8) {
+                Image(systemName: "ellipsis.circle")
+                Text("More")
+            }
         }
-        .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
+        .buttonStyle(AssistantActionButtonStyle(kind: .secondary, minimumHeight: 48))
+#if DEBUG
+        .overlay { documentLayoutProbe("action:import.more:\(source.workspacePath)") }
+#endif
         .accessibilityLabel("More actions for \(source.source)")
         .accessibilityHint("Run this import again, purge its memories, or delete the source.")
     }
@@ -2087,6 +2126,7 @@ struct WorkspaceView: View {
                     title
                     StatusPill(status: source.status)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 ViewThatFits(in: .horizontal) {
                     HStack(alignment: .top, spacing: 8) {
@@ -2098,6 +2138,7 @@ struct WorkspaceView: View {
                         title
                         StatusPill(status: source.status)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
@@ -2134,11 +2175,19 @@ struct WorkspaceView: View {
     private func backstoryImportHeader(_ imports: WorkspaceImports) -> some View {
         let count = importSourceCountLabel(imports)
         let heading = countedSectionHeading("Backstory imports", count: count)
-        let upload = Button("Upload", systemImage: "tray.and.arrow.down") {
+        let upload = Button {
             showingBackstoryImporter = true
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "tray.and.arrow.down")
+                Text("Upload")
+            }
         }
-        .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
+        .buttonStyle(AssistantActionButtonStyle(kind: .secondary, minimumHeight: 48))
         .disabled(actionsUnavailable)
+#if DEBUG
+        .overlay { documentLayoutProbe("action:import.upload") }
+#endif
         .accessibilityHint("Choose a file to import as backstory.")
 
         return Group {
@@ -2211,9 +2260,11 @@ struct WorkspaceView: View {
                 workspacePath: "import/\(file.name)"
             )
         }
-        .frame(minWidth: 44, minHeight: 44)
-        .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
+        .buttonStyle(AssistantActionButtonStyle(kind: .secondary, minimumHeight: 48))
         .disabled(actionsUnavailable)
+#if DEBUG
+        .overlay { documentLayoutProbe("action:import.start:\(file.name)") }
+#endif
 
         return Group {
             if vertical {
@@ -2229,8 +2280,26 @@ struct WorkspaceView: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .assistantCard(in: colorScheme)
+#if DEBUG
+        .overlay { documentLayoutProbe("card:import-file:\(file.name)") }
+#endif
     }
+
+#if DEBUG
+    private func documentLayoutProbe(_ name: String) -> some View {
+        GeometryReader { geometry in
+            Color.clear
+                .onAppear { self.documentLayoutObserver?(name, geometry.frame(in: .global)) }
+                .onChange(of: geometry.frame(in: .global)) { _, frame in
+                    self.documentLayoutObserver?(name, frame)
+                }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+#endif
 
     private func documentCountSummary(_ documents: DocumentsOverview) -> [String]? {
         let stats = documents.stats
@@ -2260,11 +2329,19 @@ struct WorkspaceView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Button("Add document", systemImage: "plus") {
+            Button {
                 showingDocumentImporter = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "plus")
+                    Text("Add document")
+                }
             }
-            .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
+            .buttonStyle(AssistantActionButtonStyle(kind: .secondary, minimumHeight: 48))
             .disabled(actionsUnavailable)
+#if DEBUG
+            .overlay { documentLayoutProbe("action:document.add") }
+#endif
             .padding(.top, 2)
         }
 
@@ -2280,6 +2357,9 @@ struct WorkspaceView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .assistantCard(in: colorScheme)
+#if DEBUG
+        .overlay { documentLayoutProbe("card:document.empty") }
+#endif
     }
 
     @ViewBuilder
