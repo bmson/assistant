@@ -4,74 +4,66 @@ import UIKit
 import QuartzCore
 #endif
 
-/// Keep controls outside the scroll view’s gesture subtree while the transcript
-/// draws through the complete stage behind them. Both lift as one menu surface.
+func normalizedConversationViewportSize(_ size: CGSize) -> CGSize {
+    guard size.width.isFinite, size.height.isFinite, size.width >= 0, size.height >= 0 else {
+#if DEBUG
+        NSLog("ConversationColumn received an invalid explicit viewport size: %@", NSStringFromCGSize(size))
+#endif
+        return .zero
+    }
+    return size
+}
+
+/// Keep the transcript viewport and composer in one SwiftUI graph. The caller
+/// supplies the keyboard-aware viewport measured by ChatView's stationary root.
 struct ConversationColumn<Transcript: View, Composer: View>: View {
+    let viewportSize: CGSize
     @ViewBuilder var transcript: Transcript
     @ViewBuilder var composer: Composer
+#if DEBUG
+    @State private var windowCoordinates = TranscriptWindowCoordinates()
+#endif
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            ConversationTranscriptHost(content: transcript)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        let viewport = normalizedConversationViewportSize(viewportSize)
+        ConversationColumnLayout(viewportSize: viewport) {
+            transcript
+                .frame(width: viewport.width, height: viewport.height, alignment: .topLeading)
+                .ignoresSafeArea(.container)
+                .coordinateSpace(name: TranscriptCoordinateSpace.viewport)
+                .background {
+#if DEBUG
+                    TranscriptWindowAnchor(coordinates: windowCoordinates)
+#endif
+                }
+#if DEBUG
+                .environment(\.transcriptWindowCoordinates, windowCoordinates)
+#endif
             composer
         }
     }
 }
 
-/// Own only the transcript's hosting boundary. The parent supplies the complete
-/// keyboard-aware viewport and moves it together with the sibling composer.
-/// The child omits both safe-area regions so its SwiftUI layout does not add a
-/// second container or keyboard inset. Native scroll behavior is tested below.
-private struct ConversationTranscriptHost<Content: View>: UIViewControllerRepresentable {
-    let content: Content
+private struct ConversationColumnLayout: Layout {
+    let viewportSize: CGSize
 
-    func makeUIViewController(context: Context) -> ConversationTranscriptController<Content> {
-#if DEBUG
-        let controller = ConversationTranscriptController(
-            content: content,
-            environment: context.environment,
-            transaction: context.transaction,
-            diagnosticContentRevision: context.environment.transcriptHostBoundaryProbe?.currentContentRevision ?? -1
-        )
-        context.environment.transcriptHostBoundaryProbe?.record(
-            "hosting-controller-initialized", transaction: context.transaction, generation: 0,
-            contentRevision: context.environment.transcriptHostBoundaryProbe?.currentContentRevision
-        )
-#else
-        let controller = ConversationTranscriptController(
-            content: content, environment: context.environment, transaction: context.transaction,
-            diagnosticContentRevision: -1
-        )
-#endif
-        return controller
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        normalizedConversationViewportSize(viewportSize)
     }
 
-    func updateUIViewController(_ controller: ConversationTranscriptController<Content>, context: Context) {
-#if DEBUG
-        context.environment.transcriptHostBoundaryProbe?.record(
-            "representable-context", transaction: context.transaction, generation: controller.parentSnapshotGeneration
-        )
-#endif
-        withTransaction(context.transaction) {
-#if DEBUG
-            controller.update(
-                content: content,
-                environment: context.environment,
-                boundaryProbe: context.environment.transcriptHostBoundaryProbe,
-                transaction: context.transaction
-            )
-#else
-            controller.update(content: content, environment: context.environment, transaction: context.transaction)
-#endif
-        }
-    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard subviews.count >= 2 else { return }
+        let viewport = normalizedConversationViewportSize(viewportSize)
+        let transcriptProposal = ProposedViewSize(width: viewport.width, height: viewport.height)
+        subviews[0].place(at: bounds.origin, anchor: .topLeading, proposal: transcriptProposal)
 
-    func sizeThatFits(_ proposal: ProposedViewSize,
-                     uiViewController: ConversationTranscriptController<Content>, context: Context) -> CGSize? {
-        guard let width = proposal.width, let height = proposal.height,
-              width.isFinite, height.isFinite else { return nil }
-        return CGSize(width: max(width, 0), height: max(height, 0))
+        let composerProposal = ProposedViewSize(width: viewport.width, height: nil)
+        let composerSize = subviews[1].sizeThatFits(composerProposal)
+        subviews[1].place(
+            at: CGPoint(x: bounds.minX, y: bounds.maxY - composerSize.height),
+            anchor: .topLeading,
+            proposal: composerProposal
+        )
     }
 }
 
@@ -79,227 +71,19 @@ private enum TranscriptCoordinateSpace: Hashable {
     case viewport
 }
 
-private struct ConversationTranscriptSnapshot<Content: View> {
-    let content: Content
-    let environment: EnvironmentValues
-    let transaction: Transaction
-    let generation: Int
-    let diagnosticContentRevision: Int
-}
-
-private struct ConversationTranscriptRoot<Content: View>: View {
-    let snapshot: ConversationTranscriptSnapshot<Content>
 #if DEBUG
-    let coordinates: TranscriptHostingCoordinates
-#endif
-
-    var body: some View {
-        snapshot.content
-            .transaction(value: snapshot.generation) {
-#if DEBUG
-                snapshot.environment.transcriptHostBoundaryProbe?.record(
-                    "content-transform-input", transaction: $0, generation: snapshot.generation,
-                    contentRevision: snapshot.diagnosticContentRevision
-                )
-                snapshot.environment.transcriptHostBoundaryProbe?.record(
-                    "content-transform-captured", transaction: snapshot.transaction, generation: snapshot.generation,
-                    contentRevision: snapshot.diagnosticContentRevision
-                )
-#endif
-                $0 = snapshot.transaction
-#if DEBUG
-                snapshot.environment.transcriptHostBoundaryProbe?.record(
-                    "content-transform-output", transaction: $0, generation: snapshot.generation,
-                    contentRevision: snapshot.diagnosticContentRevision
-                )
-#endif
-            }
-#if DEBUG
-            .environment(\.transcriptHostingCoordinates, coordinates)
-            .environment(\.transcriptHostSnapshotGeneration, snapshot.generation)
-            .environment(\.transcriptHostSnapshotContentRevision, snapshot.diagnosticContentRevision)
-#endif
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .coordinateSpace(name: TranscriptCoordinateSpace.viewport)
-            .environment(\.self, snapshot.environment)
-    }
-}
-
-/// The controller and generic root type stay stable across draft, streaming,
-/// environment and reveal updates. The root value carries an immutable snapshot.
-/// SwiftUI owns the container frame; Auto Layout pins only the owned child to
-/// its bounds, never its safe area.
-private final class ConversationTranscriptController<Content: View>: UIViewController {
-    private var snapshot: ConversationTranscriptSnapshot<Content>
-    private let host: UIHostingController<ConversationTranscriptRoot<Content>>
-#if DEBUG
-    private let coordinates: TranscriptHostingCoordinates
-#endif
-    var parentSnapshotGeneration: Int { snapshot.generation }
-
-    init(content: Content, environment: EnvironmentValues, transaction: Transaction,
-         diagnosticContentRevision: Int) {
-        let snapshot = ConversationTranscriptSnapshot(
-            content: content, environment: environment, transaction: transaction,
-            generation: 0, diagnosticContentRevision: diagnosticContentRevision
-        )
-        self.snapshot = snapshot
-#if DEBUG
-        let coordinates = TranscriptHostingCoordinates()
-        self.coordinates = coordinates
-        host = UIHostingController(rootView: ConversationTranscriptRoot(
-            snapshot: snapshot, coordinates: coordinates))
-#else
-        host = UIHostingController(rootView: ConversationTranscriptRoot(snapshot: snapshot))
-#endif
-        super.init(nibName: nil, bundle: nil)
-        host.safeAreaRegions = []
-        host.sizingOptions = []
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
-
-    override func loadView() {
-        view = UIView()
-        view.backgroundColor = .clear
-        view.isOpaque = false
-    }
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        addChild(host)
-        host.view.backgroundColor = .clear
-        host.view.isOpaque = false
-        host.view.translatesAutoresizingMaskIntoConstraints = false
-#if DEBUG
-        coordinates.view = host.view
-#endif
-        view.addSubview(host.view)
-        NSLayoutConstraint.activate([
-            host.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            host.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            host.view.topAnchor.constraint(equalTo: view.topAnchor),
-            host.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-        ])
-        host.didMove(toParent: self)
-    }
-
-#if DEBUG
-    func update(content: Content, environment: EnvironmentValues,
-                boundaryProbe: TranscriptHostBoundaryProbe?, transaction: Transaction) {
-        replaceSnapshot(content: content, environment: environment, transaction: transaction,
-                        diagnosticContentRevision: boundaryProbe?.currentContentRevision ?? -1)
-    }
-#else
-    func update(content: Content, environment: EnvironmentValues, transaction: Transaction) {
-        replaceSnapshot(content: content, environment: environment, transaction: transaction,
-                        diagnosticContentRevision: -1)
-    }
-#endif
-
-    private func replaceSnapshot(content: Content, environment: EnvironmentValues,
-                                 transaction: Transaction, diagnosticContentRevision: Int) {
-        let next = ConversationTranscriptSnapshot(
-            content: content, environment: environment, transaction: transaction,
-            generation: snapshot.generation &+ 1, diagnosticContentRevision: diagnosticContentRevision
-        )
-        snapshot = next
-#if DEBUG
-        let probe = environment.transcriptHostBoundaryProbe
-        probe?.record("parent-snapshot-commit", transaction: next.transaction,
-                      generation: next.generation, contentRevision: next.diagnosticContentRevision)
-        host.rootView = ConversationTranscriptRoot(snapshot: next, coordinates: coordinates)
-        probe?.record("root-value-updated", transaction: next.transaction,
-                      generation: next.generation, contentRevision: next.diagnosticContentRevision)
-#else
-        host.rootView = ConversationTranscriptRoot(snapshot: next)
-#endif
-    }
-}
-
-#if DEBUG
-/// Opt-in diagnostic for tests that need to distinguish transaction loss at
-/// the representable boundary from state loss inside the hosted child.
+/// DEBUG geometry is converted through the actual viewport-sized anchor view.
+/// It measures its own bounds only; production layout has no measurement view.
 @MainActor
-final class TranscriptHostBoundaryProbe {
-    private let marker: @MainActor (Transaction) -> Int
-    private let contentRevision: @MainActor () -> Int
-    private(set) var events: [[String: Any]] = []
-    private(set) var parentSnapshotGeneration = 0
-    private(set) var parentSnapshotCommitCount = 0
-    private(set) var hostingControllerInitializationCount = 0
-    private(set) var rootValueUpdateCount = 0
-
-    var currentContentRevision: Int { contentRevision() }
-
-    init(marker: @escaping @MainActor (Transaction) -> Int,
-         contentRevision: @escaping @MainActor () -> Int) {
-        self.marker = marker
-        self.contentRevision = contentRevision
-    }
-
-    func record(_ stage: String, transaction: Transaction, generation: Int, contentRevision: Int? = nil) {
-        if stage == "parent-snapshot-commit" {
-            parentSnapshotGeneration = generation
-            parentSnapshotCommitCount += 1
-        } else if stage == "hosting-controller-initialized" {
-            hostingControllerInitializationCount += 1
-        } else if stage == "root-value-updated" {
-            rootValueUpdateCount += 1
-        }
-        if events.count == 64 { events.removeFirst() }
-        events.append([
-            "time": CACurrentMediaTime(),
-            "stage": stage,
-            "marker": marker(transaction),
-            "contentRevision": contentRevision ?? self.contentRevision(),
-            "generation": generation,
-        ])
-    }
-}
-
-private struct TranscriptHostBoundaryProbeKey: EnvironmentKey {
-    static let defaultValue: TranscriptHostBoundaryProbe? = nil
-}
-
-private struct TranscriptHostSnapshotGenerationKey: EnvironmentKey {
-    static let defaultValue: Int? = nil
-}
-
-private struct TranscriptHostSnapshotContentRevisionKey: EnvironmentKey {
-    static let defaultValue: Int? = nil
-}
-
-extension EnvironmentValues {
-    var transcriptHostBoundaryProbe: TranscriptHostBoundaryProbe? {
-        get { self[TranscriptHostBoundaryProbeKey.self] }
-        set { self[TranscriptHostBoundaryProbeKey.self] = newValue }
-    }
-
-    var transcriptHostSnapshotGeneration: Int? {
-        get { self[TranscriptHostSnapshotGenerationKey.self] }
-        set { self[TranscriptHostSnapshotGenerationKey.self] = newValue }
-    }
-
-    var transcriptHostSnapshotContentRevision: Int? {
-        get { self[TranscriptHostSnapshotContentRevisionKey.self] }
-        set { self[TranscriptHostSnapshotContentRevisionKey.self] = newValue }
-    }
-}
-
-/// A child-root measurement is converted through its owned native host at read
-/// time. A pure parent translation need not trigger a SwiftUI geometry callback.
-@MainActor
-fileprivate final class TranscriptHostingCoordinates {
+fileprivate final class TranscriptWindowCoordinates {
     weak var view: UIView?
 }
 
 struct TranscriptGeometryMeasurement {
     let localFrame: CGRect
-    private let coordinates: TranscriptHostingCoordinates
+    private let coordinates: TranscriptWindowCoordinates
 
-    fileprivate init(localFrame: CGRect, coordinates: TranscriptHostingCoordinates) {
+    fileprivate init(localFrame: CGRect, coordinates: TranscriptWindowCoordinates) {
         self.localFrame = localFrame
         self.coordinates = coordinates
     }
@@ -312,11 +96,65 @@ struct TranscriptGeometryMeasurement {
         return Self.isValid(frame) ? frame : nil
     }
 
+    @MainActor
+    func anchorFrame(in window: UIWindow) -> CGRect? {
+        guard let view = coordinates.view, view.window === window,
+              view.isDescendant(of: window), Self.isValid(view.bounds) else { return nil }
+        let frame = view.convert(view.bounds, to: window)
+        return Self.isValid(frame) ? frame : nil
+    }
+
     private static func isValid(_ frame: CGRect) -> Bool {
         !frame.isNull && !frame.isInfinite && !frame.isEmpty
             && frame.minX.isFinite && frame.minY.isFinite
             && frame.width.isFinite && frame.height.isFinite
             && frame.maxX.isFinite && frame.maxY.isFinite
+    }
+}
+
+@MainActor
+private struct TranscriptWindowAnchor: UIViewRepresentable {
+    let coordinates: TranscriptWindowCoordinates
+
+    func makeUIView(context: Context) -> UIView {
+        let view = makeAnchorView()
+        coordinates.view = view
+        return view
+    }
+
+    func updateUIView(_ view: UIView, context: Context) {
+        coordinates.view = view
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UIView, context: Context) -> CGSize? {
+        guard let width = proposal.width, let height = proposal.height,
+              width.isFinite, height.isFinite else { return nil }
+        return CGSize(width: max(width, 0), height: max(height, 0))
+    }
+
+    static func dismantleUIView(_ view: UIView, coordinator: ()) {
+        view.backgroundColor = .clear
+    }
+
+    private func makeAnchorView() -> UIView {
+        let view = UIView(frame: .zero)
+        view.backgroundColor = .clear
+        view.isOpaque = false
+        view.isUserInteractionEnabled = false
+        view.isAccessibilityElement = false
+        view.accessibilityElementsHidden = true
+        return view
+    }
+}
+
+private struct TranscriptWindowCoordinatesKey: EnvironmentKey {
+    static let defaultValue: TranscriptWindowCoordinates? = nil
+}
+
+private extension EnvironmentValues {
+    var transcriptWindowCoordinates: TranscriptWindowCoordinates? {
+        get { self[TranscriptWindowCoordinatesKey.self] }
+        set { self[TranscriptWindowCoordinatesKey.self] = newValue }
     }
 }
 
@@ -491,19 +329,8 @@ private struct ComposerPresentationMarker: UIViewRepresentable {
     }
 }
 
-private struct TranscriptHostingCoordinatesKey: EnvironmentKey {
-    static let defaultValue: TranscriptHostingCoordinates? = nil
-}
-
-private extension EnvironmentValues {
-    var transcriptHostingCoordinates: TranscriptHostingCoordinates? {
-        get { self[TranscriptHostingCoordinatesKey.self] }
-        set { self[TranscriptHostingCoordinatesKey.self] = newValue }
-    }
-}
-
 private struct TranscriptGeometryObserver: ViewModifier {
-    @Environment(\.transcriptHostingCoordinates) private var coordinates
+    @Environment(\.transcriptWindowCoordinates) private var coordinates
     let report: @MainActor (TranscriptGeometryMeasurement) -> Void
 
     func body(content: Content) -> some View {
@@ -1211,7 +1038,7 @@ struct ChatView: View {
             ZStack(alignment: .bottom) {
                 pullMenu
 
-                conversationSurface
+                conversationSurface(viewportSize: viewport.size)
                     // Resolve a stable viewport before the surface is
                     // transformed. A flexible max-height frame was recomputed
                     // as the lifted surface crossed the root safe area, shrinking
@@ -1424,9 +1251,9 @@ struct ChatView: View {
         }
     }
 
-    private var conversationSurface: some View {
+    private func conversationSurface(viewportSize: CGSize) -> some View {
         return Group {
-            ConversationColumn {
+            ConversationColumn(viewportSize: viewportSize) {
                 ScrollView {
                     // Keep rows mounted while the reader scrolls through the
                     // full viewport behind navigation and input.

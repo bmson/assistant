@@ -24,7 +24,7 @@ private struct LiftedTranscriptFixture: View {
         GeometryReader { viewport in
             ZStack(alignment: .bottom) {
                 Color.gray.frame(height: 450)
-                ConversationColumn {
+                ConversationColumn(viewportSize: viewport.size) {
                     Group {
                         ScrollView {
                             // Eager, as the transcript is: content can draw
@@ -567,6 +567,15 @@ final class AssistantMarkdownTests: XCTestCase {
             XCTAssertEqual(images[0].pngData(), images[1].pngData(),
                 "A hidden value must neither wrap nor disclose its character count")
         }
+    }
+
+    func testConversationViewportNormalizationUsesOnlyFiniteNonnegativeExplicitDimensions() {
+        XCTAssertEqual(normalizedConversationViewportSize(CGSize(width: 393, height: 852)),
+                       CGSize(width: 393, height: 852))
+        XCTAssertEqual(normalizedConversationViewportSize(.zero), .zero)
+        XCTAssertEqual(normalizedConversationViewportSize(CGSize(width: -1, height: 852)), .zero)
+        XCTAssertEqual(normalizedConversationViewportSize(CGSize(width: 393, height: .infinity)), .zero)
+        XCTAssertEqual(normalizedConversationViewportSize(CGSize(width: .nan, height: 852)), .zero)
     }
 
     @MainActor
@@ -1709,25 +1718,19 @@ final class AssistantMarkdownTests: XCTestCase {
 
 extension AssistantMarkdownTests {
     @MainActor
-    func testOwnedTranscriptHostPreservesIdentityStateAndInheritedUpdates() async throws {
+    func testParentTranscriptPreservesIdentityStateAndInheritedUpdates() async throws {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
         let previousKeyWindow = scene.keyWindow
         let window = UIWindow(windowScene: scene)
         window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
-        let state = OwnedTranscriptHostRegressionState()
-        let boundaryProbe = TranscriptHostBoundaryProbe(
-            marker: { $0[OwnedTranscriptHostMarkerKey.self] },
-            contentRevision: { [weak state] in state?.contentRevision ?? -1 }
-        )
-        state.boundaryProbe = boundaryProbe
+        let state = OwnedTranscriptParentRegressionState()
         let rowID = "approved-receipts-receipt-one-receipt-two"
         let probe = ChatTranscriptRowGeometryProbe(messageID: rowID) { measurement in
             state.receiptMeasurement = measurement
         }
         let root = UIHostingController(
-            rootView: OwnedTranscriptHostRegressionFixture(state: state)
+            rootView: OwnedTranscriptParentRegressionFixture(state: state)
                 .environment(\.chatTranscriptRowGeometryProbe, probe)
-                .environment(\.transcriptHostBoundaryProbe, boundaryProbe)
         )
         window.rootViewController = root
         window.makeKeyAndVisible()
@@ -1738,23 +1741,26 @@ extension AssistantMarkdownTests {
             previousKeyWindow?.makeKey()
         }
 
-        try await waitForTranscriptHostCondition("initial environment and actual receipt geometry") {
+        try await waitForParentTranscriptCondition("initial environment and actual receipt geometry") {
             state.environmentSnapshots.last?.localeIdentifier == "en_US"
                 && state.receiptMeasurement?.frame(in: window) != nil
+                && state.viewportMeasurement?.anchorFrame(in: window) != nil
                 && state.systemEnvironmentSnapshots[0] != nil
         }
-        XCTAssertEqual(boundaryProbe.hostingControllerInitializationCount, 1,
-            "The child UIHostingController is constructed once for this owned host.")
-        XCTAssertEqual(boundaryProbe.parentSnapshotGeneration, boundaryProbe.parentSnapshotCommitCount,
-            "Snapshot generation counts committed parent updates independently of root-value assignments.")
-        XCTAssertEqual(boundaryProbe.rootValueUpdateCount, boundaryProbe.parentSnapshotCommitCount,
-            "Each committed parent snapshot updates the root value once; initialization is counted separately.")
+        let initialViewportMeasurement = try XCTUnwrap(state.viewportMeasurement)
+        XCTAssertEqual(initialViewportMeasurement.localFrame.origin, .zero,
+            "The real ScrollView viewport begins at the explicit transcript origin.")
+        let initialAnchorFrame = try XCTUnwrap(initialViewportMeasurement.anchorFrame(in: window))
+        let initialViewportFrame = try XCTUnwrap(initialViewportMeasurement.frame(in: window))
+        XCTAssertEqual(initialAnchorFrame.minX, initialViewportFrame.minX, accuracy: 1)
+        XCTAssertEqual(initialAnchorFrame.minY, initialViewportFrame.minY, accuracy: 1)
+        XCTAssertEqual(initialAnchorFrame.width, initialViewportFrame.width, accuracy: 1)
+        XCTAssertEqual(initialAnchorFrame.height, initialViewportFrame.height, accuracy: 1)
         let initialScroll = try XCTUnwrap(ownedTranscriptScrollView(in: window))
-        let initialHierarchy = ownedTranscriptControllerIdentities(root: root, containing: initialScroll)
-        XCTAssertGreaterThanOrEqual(initialHierarchy.count, 3,
-            "The root, owned container and child transcript host must all be present.")
+        let initialMount = ownedTranscriptMountIdentities(scroll: initialScroll, rootView: root.view)
+        XCTAssertFalse(initialMount.isEmpty, "Record the real mounted ScrollView-to-root UIKit identity chain.")
         let input = try XCTUnwrap(ownedTextField(in: window), "The test-owned transcript input must expose its UITextField.")
-        XCTAssertTrue(input.isDescendant(of: initialScroll), "The test-owned input must be inside the transcript host.")
+        XCTAssertTrue(input.isDescendant(of: initialScroll), "The test-owned input must remain inside the transcript ScrollView.")
         XCTAssertTrue(input.window === window, "The test-owned input must belong to the measured window.")
         let inputFrameBeforeFocus = input.convert(input.bounds, to: window)
         XCTAssertTrue(inputFrameBeforeFocus.minX.isFinite && inputFrameBeforeFocus.minY.isFinite)
@@ -1764,7 +1770,7 @@ extension AssistantMarkdownTests {
         XCTAssertTrue(input.becomeFirstResponder(), "The native transcript field should focus before the parent update.")
         var previousFocusedGeometry: [CGFloat]?
         var stableFocusedGeometrySamples = 0
-        try await waitForTranscriptHostCondition("focused keyboard geometry to settle") {
+        try await waitForParentTranscriptCondition("focused keyboard geometry to settle") {
             let inputFrame = input.convert(input.bounds, to: window)
             let geometry: [CGFloat] = [
                 initialScroll.bounds.width, initialScroll.bounds.height,
@@ -1784,7 +1790,7 @@ extension AssistantMarkdownTests {
         let typedDraft = "Typed but unsent transcript draft"
         input.text = typedDraft
         input.sendActions(for: .editingChanged)
-        try await waitForTranscriptHostCondition("the native editing event updates the scoped draft") {
+        try await waitForParentTranscriptCondition("the native editing event updates the scoped draft") {
             state.draft == typedDraft
         }
         XCTAssertEqual(input.text, typedDraft)
@@ -1793,7 +1799,7 @@ extension AssistantMarkdownTests {
         input.selectedTextRange = input.textRange(from: selectionStart, to: selectionEnd)
         let expectedSelection = [3, 9]
         XCTAssertEqual(try XCTUnwrap(ownedTextSelectionOffsets(input)), expectedSelection)
-        let outerComposer = try XCTUnwrap(ownedView(in: window, accessibilityIdentifier: "transcript-host.outer-composer"))
+        let outerComposer = try XCTUnwrap(ownedView(in: window, accessibilityIdentifier: "transcript-parent.outer-composer"))
         XCTAssertFalse(outerComposer.isDescendant(of: initialScroll), "The sibling composer must remain outside the transcript scroll subtree.")
 
         XCTAssertEqual(state.environmentSnapshots.last?.colorScheme, .light)
@@ -1809,12 +1815,12 @@ extension AssistantMarkdownTests {
         let collapsedDisclosureHeight = try XCTUnwrap(state.disclosureHeight)
         XCTAssertGreaterThan(try XCTUnwrap(state.receiptMeasurement?.localFrame.height), 0)
         state.disclosureRequest += 1
-        try await waitForTranscriptHostCondition("the row-local disclosure expands") {
+        try await waitForParentTranscriptCondition("the row-local disclosure expands") {
             (state.disclosureHeight ?? 0) > collapsedDisclosureHeight + 24
         }
         state.openURLRequest += 1
-        try await waitForTranscriptHostCondition("the child receives the inherited OpenURL action") {
-            state.openedURLs.last == URL(string: "https://transcript-host.test/child")
+        try await waitForParentTranscriptCondition("the child receives the inherited OpenURL action") {
+            state.openedURLs.last == URL(string: "https://transcript-parent.test/child")
         }
 
         let viewportBeforeReveal = try XCTUnwrap(state.viewportMeasurement?.frame(in: window))
@@ -1823,15 +1829,15 @@ extension AssistantMarkdownTests {
         let offsetBeforeReveal = initialScroll.contentOffset
 
         var updateTransaction = Transaction(animation: nil)
-        updateTransaction[OwnedTranscriptHostMarkerKey.self] = 73
-        attachOwnedTranscriptBoundarySnapshot(
+        updateTransaction[OwnedTranscriptParentMarkerKey.self] = 73
+        attachParentTranscriptSnapshot(
             stage: "reveal-update-start", state: state, root: root,
             window: window, scroll: initialScroll, input: input
         )
         withTransaction(updateTransaction) {
             state.reveal = 18
         }
-        try await waitForTranscriptHostCondition("the owned viewport follows the parent reveal") {
+        try await waitForParentTranscriptCondition("the owned viewport follows the parent reveal") {
             guard let frame = state.viewportMeasurement?.frame(in: window) else { return false }
             return abs(frame.minY - (viewportBeforeReveal.minY - 18)) < 1
         }
@@ -1841,7 +1847,7 @@ extension AssistantMarkdownTests {
         XCTAssertEqual(initialScroll.adjustedContentInset, insetBeforeReveal)
         XCTAssertEqual(initialScroll.contentOffset, offsetBeforeReveal)
 
-        attachOwnedTranscriptBoundarySnapshot(
+        attachParentTranscriptSnapshot(
             stage: "updated-child-environment-start", state: state, root: root,
             window: window, scroll: initialScroll, input: input
         )
@@ -1856,12 +1862,12 @@ extension AssistantMarkdownTests {
             state.openURLGeneration = 1
         }
 
-        attachOwnedTranscriptBoundarySnapshot(
+        attachParentTranscriptSnapshot(
             stage: "updated-child-environment-requested", state: state, root: root,
             window: window, scroll: initialScroll, input: input
         )
-        try await waitForTranscriptHostCondition("updated child environment reaches the owned host", onTimeout: {
-            attachOwnedTranscriptBoundarySnapshot(
+        try await waitForParentTranscriptCondition("updated child environment reaches the parent SwiftUI graph", onTimeout: {
+            attachParentTranscriptSnapshot(
                 stage: "updated-child-environment", state: state, root: root,
                 window: window, scroll: initialScroll, input: input, includeScreenshot: true
             )
@@ -1870,7 +1876,9 @@ extension AssistantMarkdownTests {
             let checks: [String: Bool] = [
                 "locale": environment?.localeIdentifier == "fr_FR",
                 "modelRevision": environment?.modelRevision == 1,
-                "marker73": state.transactionMarkers.contains(73),
+                "marker73AtParentRevision1": state.childTransactionObservations.contains {
+                    $0.parentContentRevision == 1 && $0.marker == 73 && $0.localRevision == 0
+                },
                 "disclosure": state.disclosureStates[state.contentRevision] == true,
                 "systemEnvironment": state.systemEnvironmentSnapshots[state.contentRevision] != nil,
                 "measurement": state.receiptMeasurement?.frame(in: window) != nil,
@@ -1878,26 +1886,26 @@ extension AssistantMarkdownTests {
             state.recordPredicateSample(stage: "updated-child-environment", checks: checks)
             return checks.values.allSatisfy { $0 }
         }
-        attachOwnedTranscriptBoundarySnapshot(
+        attachParentTranscriptSnapshot(
             stage: "updated-child-environment-result", state: state, root: root,
             window: window, scroll: initialScroll, input: input
         )
         state.openURLRequest += 1
-        try await waitForTranscriptHostCondition("the replacement inherited OpenURL action is used") {
+        try await waitForParentTranscriptCondition("the replacement inherited OpenURL action is used") {
             state.openedURLGenerations.last == 1
         }
         let updatedScroll = try XCTUnwrap(ownedTranscriptScrollView(in: window))
         XCTAssertTrue(updatedScroll === initialScroll, "The production transcript UIScrollView must retain identity.")
-        XCTAssertEqual(ownedTranscriptControllerIdentities(root: root, containing: updatedScroll), initialHierarchy,
-            "The public controller ancestry hosting the scroll view must retain identity.")
+        XCTAssertEqual(ownedTranscriptMountIdentities(scroll: updatedScroll, rootView: root.view), initialMount,
+            "The real ScrollView-to-root UIKit mount chain must retain identity across parent updates.")
         XCTAssertTrue(ownedTextField(in: window) === input,
             "The focused native transcript input must retain its UIKit identity.")
         XCTAssertTrue(input.window === window)
         XCTAssertTrue(input.isFirstResponder, "Environment and content updates must not discard focused native input.")
         XCTAssertEqual(input.text, typedDraft, "The unsent draft must remain in the test-owned native input.")
-        XCTAssertEqual(state.draft, typedDraft, "The editingChanged draft binding must survive host updates.")
+        XCTAssertEqual(state.draft, typedDraft, "The editingChanged draft binding must survive parent updates.")
         XCTAssertEqual(try XCTUnwrap(ownedTextSelectionOffsets(input)), expectedSelection,
-            "An unrelated host/environment update must preserve the native text selection.")
+            "An unrelated parent/environment update must preserve the native text selection.")
         XCTAssertTrue(outerComposer.isDescendant(of: window))
         XCTAssertFalse(outerComposer.isDescendant(of: updatedScroll))
         let updatedEnvironment = try XCTUnwrap(state.environmentSnapshots.last)
@@ -1913,31 +1921,31 @@ extension AssistantMarkdownTests {
         XCTAssertEqual(updatedEnvironment.modelIdentity, ObjectIdentifier(state.model))
         XCTAssertEqual(updatedEnvironment.modelRevision, 1)
         XCTAssertTrue(state.receiptMeasurement?.frame(in: window) != nil,
-            "The DEBUG row-probe environment must continue converting the real grouped receipt through its current host.")
+            "The DEBUG row probe must convert the real grouped receipt through its viewport anchor.")
         XCTAssertGreaterThan(state.receiptMeasurement?.localFrame.height ?? 0, 0,
             "The actual receipt row must remain measurable through the same debug probe.")
         XCTAssertEqual(state.disclosureStates[state.contentRevision], true,
             "The child must report its expanded state for the updated parent content revision.")
 
         state.rowSheetRequest += 1
-        try await waitForTranscriptHostCondition("the row-local sheet presents") {
+        try await waitForParentTranscriptCondition("the row-local sheet presents") {
             ownedPresentedController(in: root) != nil
         }
         let presentedSheet = try XCTUnwrap(ownedPresentedController(in: root))
-        updateTransaction[OwnedTranscriptHostMarkerKey.self] = 74
-        attachOwnedTranscriptBoundarySnapshot(
+        updateTransaction[OwnedTranscriptParentMarkerKey.self] = 74
+        attachParentTranscriptSnapshot(
             stage: "row-sheet-update-start", state: state, root: root,
             window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
         )
         withTransaction(updateTransaction) {
             state.contentRevision += 1
         }
-        attachOwnedTranscriptBoundarySnapshot(
+        attachParentTranscriptSnapshot(
             stage: "row-sheet-update-requested", state: state, root: root,
             window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
         )
-        try await waitForTranscriptHostCondition("the row-local sheet survives a later content update", onTimeout: {
-            attachOwnedTranscriptBoundarySnapshot(
+        try await waitForParentTranscriptCondition("the row-local sheet survives a later content update", onTimeout: {
+            attachParentTranscriptSnapshot(
                 stage: "row-sheet-after-update", state: state, root: root,
                 window: window, scroll: initialScroll, input: input,
                 expectedSheet: presentedSheet, includeScreenshot: true
@@ -1954,19 +1962,19 @@ extension AssistantMarkdownTests {
             state.recordPredicateSample(stage: "row-sheet-after-update", checks: checks)
             return checks["sameController"]! && checks["marker74"]!
         }
-        attachOwnedTranscriptBoundarySnapshot(
+        attachParentTranscriptSnapshot(
             stage: "row-sheet-after-update-result", state: state, root: root,
             window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
         )
         XCTAssertTrue(ownedTranscriptScrollView(in: window) === initialScroll)
-        XCTAssertEqual(ownedTranscriptControllerIdentities(root: root, containing: initialScroll), initialHierarchy)
+        XCTAssertEqual(ownedTranscriptMountIdentities(scroll: initialScroll, rootView: root.view), initialMount)
 
-        try await waitForTranscriptHostCondition("the parent 74 transaction reaches the child-local leaf") {
+        try await waitForParentTranscriptCondition("the parent 74 transaction reaches the actual transcript leaf") {
             guard let observation = state.childTransactionObservations.last else { return false }
             return observation.parentContentRevision == 2 && observation.marker == 74
         }
-        try await waitForTranscriptHostCondition("the row-local sheet finishes presenting before child-local updates", onTimeout: {
-            attachOwnedTranscriptBoundarySnapshot(
+        try await waitForParentTranscriptCondition("the row-local sheet finishes presenting before child-local updates", onTimeout: {
+            attachParentTranscriptSnapshot(
                 stage: "row-sheet-presentation-settle-timeout", state: state, root: root,
                 window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
             )
@@ -1978,106 +1986,70 @@ extension AssistantMarkdownTests {
                 && !presentedSheet.isBeingPresented
                 && !presentedSheet.isBeingDismissed
                 && leaf?.parentContentRevision == 2
-                && leaf?.snapshotContentRevision == 2
         }
-        attachOwnedTranscriptBoundarySnapshot(
+        attachParentTranscriptSnapshot(
             stage: "row-sheet-presentation-settle-result", state: state, root: root,
             window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
         )
-        let generationBeforeLocalUpdates = boundaryProbe.parentSnapshotGeneration
-        let commitsBeforeLocalUpdates = boundaryProbe.parentSnapshotCommitCount
-        let rootUpdatesBeforeLocalUpdates = boundaryProbe.rootValueUpdateCount
         let startingLocalRevision = try XCTUnwrap(state.childTransactionObservations.last?.localRevision)
         var childTransaction99 = Transaction(animation: nil)
-        childTransaction99[OwnedTranscriptHostMarkerKey.self] = 99
+        childTransaction99[OwnedTranscriptParentMarkerKey.self] = 99
         let updateChildLocalState = try XCTUnwrap(state.updateChildLocalTransaction)
         updateChildLocalState(childTransaction99)
-        try await waitForTranscriptHostCondition("the child-local state observes transaction 99", onTimeout: {
-            attachOwnedTranscriptBoundarySnapshot(
+        try await waitForParentTranscriptCondition("the actual transcript leaf observes transaction 99", onTimeout: {
+            attachParentTranscriptSnapshot(
                 stage: "child-local-transaction-99-timeout", state: state, root: root,
                 window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
             )
         }) {
             guard let observation = state.childTransactionObservations.last else { return false }
             return observation.parentContentRevision == 2
-                && observation.snapshotContentRevision == 2
                 && observation.localRevision == startingLocalRevision + 1
                 && observation.marker == 99
-                && observation.snapshotGeneration == generationBeforeLocalUpdates
         }
-        attachOwnedTranscriptBoundarySnapshot(
+        attachParentTranscriptSnapshot(
             stage: "child-local-transaction-99-result", state: state, root: root,
             window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
         )
         let observed99 = try XCTUnwrap(state.childTransactionObservations.last)
         XCTAssertEqual(observed99.parentContentRevision, 2)
-        XCTAssertEqual(observed99.snapshotContentRevision, 2)
         XCTAssertEqual(observed99.localRevision, startingLocalRevision + 1)
         XCTAssertEqual(observed99.marker, 99)
-        XCTAssertEqual(observed99.snapshotGeneration, generationBeforeLocalUpdates)
-        XCTAssertEqual(boundaryProbe.parentSnapshotGeneration, generationBeforeLocalUpdates)
-        XCTAssertEqual(boundaryProbe.parentSnapshotCommitCount, commitsBeforeLocalUpdates,
-            "A child-local transaction must not commit a parent snapshot.")
-        XCTAssertEqual(boundaryProbe.rootValueUpdateCount, rootUpdatesBeforeLocalUpdates,
-            "A child-local transaction must not assign a new root value.")
-        XCTAssertEqual(boundaryProbe.hostingControllerInitializationCount, 1,
-            "A child-local transaction must retain the single hosting controller.")
-
-        let generationBeforeDefaultLocalUpdate = boundaryProbe.parentSnapshotGeneration
-        let commitsBeforeDefaultLocalUpdate = boundaryProbe.parentSnapshotCommitCount
-        let rootUpdatesBeforeDefaultLocalUpdate = boundaryProbe.rootValueUpdateCount
         var childDefaultTransaction = Transaction()
-        childDefaultTransaction[OwnedTranscriptHostMarkerKey.self] = 0
+        childDefaultTransaction[OwnedTranscriptParentMarkerKey.self] = 0
         updateChildLocalState(childDefaultTransaction)
-        try await waitForTranscriptHostCondition("the child-local state observes default transaction 0", onTimeout: {
-            attachOwnedTranscriptBoundarySnapshot(
+        try await waitForParentTranscriptCondition("the actual transcript leaf observes default transaction 0", onTimeout: {
+            attachParentTranscriptSnapshot(
                 stage: "child-local-default-transaction-timeout", state: state, root: root,
                 window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
             )
         }) {
             guard let observation = state.childTransactionObservations.last else { return false }
             return observation.parentContentRevision == 2
-                && observation.snapshotContentRevision == 2
                 && observation.localRevision == startingLocalRevision + 2
                 && observation.marker == 0
-                && observation.snapshotGeneration == generationBeforeDefaultLocalUpdate
         }
-        attachOwnedTranscriptBoundarySnapshot(
+        attachParentTranscriptSnapshot(
             stage: "child-local-default-transaction-result", state: state, root: root,
             window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
         )
         let observedDefaultLocal = try XCTUnwrap(state.childTransactionObservations.last)
         XCTAssertEqual(observedDefaultLocal.parentContentRevision, 2)
-        XCTAssertEqual(observedDefaultLocal.snapshotContentRevision, 2)
         XCTAssertEqual(observedDefaultLocal.localRevision, startingLocalRevision + 2)
         XCTAssertEqual(observedDefaultLocal.marker, 0)
-        XCTAssertEqual(observedDefaultLocal.snapshotGeneration, generationBeforeDefaultLocalUpdate)
-        XCTAssertEqual(boundaryProbe.parentSnapshotGeneration, generationBeforeDefaultLocalUpdate)
-        XCTAssertEqual(boundaryProbe.parentSnapshotCommitCount, commitsBeforeDefaultLocalUpdate,
-            "A second child-local transaction must not commit a parent snapshot.")
-        XCTAssertEqual(boundaryProbe.rootValueUpdateCount, rootUpdatesBeforeDefaultLocalUpdate,
-            "The default child-local transaction must not assign a new root value.")
-        XCTAssertEqual(boundaryProbe.hostingControllerInitializationCount, 1,
-            "Child-local transactions must retain the single hosting controller.")
-
-        let generationBeforeDefaultParentUpdate = boundaryProbe.parentSnapshotGeneration
-        let commitsBeforeDefaultParentUpdate = boundaryProbe.parentSnapshotCommitCount
-        let rootUpdatesBeforeDefaultParentUpdate = boundaryProbe.rootValueUpdateCount
         state.contentRevision += 1
-        try await waitForTranscriptHostCondition("a later default parent transaction reaches the child leaf", onTimeout: {
-            attachOwnedTranscriptBoundarySnapshot(
+        try await waitForParentTranscriptCondition("a later default parent transaction reaches the child leaf", onTimeout: {
+            attachParentTranscriptSnapshot(
                 stage: "default-parent-transaction-timeout", state: state, root: root,
                 window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
             )
         }) {
             guard let observation = state.childTransactionObservations.last else { return false }
             return observation.parentContentRevision == 3
-                && observation.snapshotContentRevision == 3
                 && observation.localRevision == startingLocalRevision + 2
                 && observation.marker == 0
-                && observation.snapshotGeneration > generationBeforeDefaultParentUpdate
         }
-        attachOwnedTranscriptBoundarySnapshot(
+        attachParentTranscriptSnapshot(
             stage: "default-parent-transaction-result", state: state, root: root,
             window: window, scroll: initialScroll, input: input, expectedSheet: presentedSheet
         )
@@ -2085,35 +2057,26 @@ extension AssistantMarkdownTests {
         XCTAssertEqual(observedDefaultParent.parentContentRevision, 3)
         XCTAssertEqual(observedDefaultParent.localRevision, startingLocalRevision + 2)
         XCTAssertEqual(observedDefaultParent.marker, 0)
-        XCTAssertGreaterThan(boundaryProbe.parentSnapshotGeneration, generationBeforeDefaultParentUpdate)
-        XCTAssertGreaterThan(boundaryProbe.parentSnapshotCommitCount, commitsBeforeDefaultParentUpdate)
-        XCTAssertGreaterThan(boundaryProbe.rootValueUpdateCount, rootUpdatesBeforeDefaultParentUpdate)
-        XCTAssertEqual(boundaryProbe.rootValueUpdateCount, boundaryProbe.parentSnapshotCommitCount)
-        XCTAssertEqual(observedDefaultParent.snapshotGeneration, boundaryProbe.parentSnapshotGeneration)
-        XCTAssertEqual(observedDefaultParent.snapshotContentRevision, 3,
-            "The leaf reports the content revision captured in its rendered parent snapshot.")
-        XCTAssertEqual(boundaryProbe.hostingControllerInitializationCount, 1,
-            "Parent updates must retain the single hosting controller.")
         XCTAssertTrue(ownedTranscriptScrollView(in: window) === initialScroll,
             "A default parent transaction must preserve the transcript scroll view identity")
-        XCTAssertEqual(ownedTranscriptControllerIdentities(root: root, containing: initialScroll), initialHierarchy)
+        XCTAssertEqual(ownedTranscriptMountIdentities(scroll: initialScroll, rootView: root.view), initialMount)
         XCTAssertTrue(ownedPresentedController(in: root) === presentedSheet,
             "Child-local and default parent transaction checks must preserve the row-local sheet")
 
         state.rowSheetRequest += 1
-        try await waitForTranscriptHostCondition("the row-local sheet dismisses") {
+        try await waitForParentTranscriptCondition("the row-local sheet dismisses") {
             ownedPresentedController(in: root) == nil
         }
     }
 }
 
 @Observable @MainActor
-private final class OwnedTranscriptHostRegressionModel {
+private final class OwnedTranscriptParentRegressionModel {
     var revision = 0
 }
 
 @MainActor
-private final class OwnedTranscriptHostRegressionState: ObservableObject {
+private final class OwnedTranscriptParentRegressionState: ObservableObject {
     @Published var reveal: CGFloat = 0
     @Published var contentRevision = 0
     @Published var colorScheme: ColorScheme = .light
@@ -2127,7 +2090,7 @@ private final class OwnedTranscriptHostRegressionState: ObservableObject {
     @Published var openURLGeneration = 0
     @Published var draft = "Unsent transcript draft"
 
-    let model = OwnedTranscriptHostRegressionModel()
+    let model = OwnedTranscriptParentRegressionModel()
     var environmentSnapshots: [OwnedTranscriptEnvironmentSnapshot] = []
     var systemEnvironmentSnapshots: [Int: OwnedTranscriptSystemEnvironmentSnapshot] = [:]
     var transactionMarkers: [Int] = []
@@ -2137,7 +2100,6 @@ private final class OwnedTranscriptHostRegressionState: ObservableObject {
     var disclosureStates: [Int: Bool] = [:]
     var openedURLs: [URL] = []
     var openedURLGenerations: [Int] = []
-    var boundaryProbe: TranscriptHostBoundaryProbe?
     var predicateSamples: [[String: Any]] = []
     var childTransactionObservations: [OwnedTranscriptChildTransactionObservation] = []
     var updateChildLocalTransaction: (@MainActor (Transaction) -> Void)?
@@ -2166,10 +2128,8 @@ private final class OwnedTranscriptHostRegressionState: ObservableObject {
 
 private struct OwnedTranscriptChildTransactionObservation: Equatable {
     let parentContentRevision: Int
-    let snapshotContentRevision: Int
     let localRevision: Int
     let marker: Int
-    let snapshotGeneration: Int
 }
 
 private struct OwnedTranscriptEnvironmentSnapshot: Equatable {
@@ -2210,12 +2170,12 @@ private struct OwnedTranscriptSystemEnvironmentReader: View {
     }
 }
 
-private struct OwnedTranscriptHostMarkerKey: TransactionKey {
+private struct OwnedTranscriptParentMarkerKey: TransactionKey {
     static var defaultValue: Int { 0 }
 }
 
 private struct OwnedTranscriptEnvironmentReader: View {
-    @ObservedObject var state: OwnedTranscriptHostRegressionState
+    @ObservedObject var state: OwnedTranscriptParentRegressionState
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.colorSchemeContrast) private var contrast
@@ -2225,7 +2185,7 @@ private struct OwnedTranscriptEnvironmentReader: View {
     @Environment(\.layoutDirection) private var layoutDirection
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openURL) private var openURL
-    @Environment(OwnedTranscriptHostRegressionModel.self) private var model
+    @Environment(OwnedTranscriptParentRegressionModel.self) private var model
 
     private var snapshot: OwnedTranscriptEnvironmentSnapshot {
         .init(colorScheme: colorScheme, dynamicTypeSize: dynamicTypeSize, contrast: contrast,
@@ -2239,71 +2199,73 @@ private struct OwnedTranscriptEnvironmentReader: View {
         .onAppear { state.environmentSnapshots.append(snapshot) }
         .onChange(of: snapshot) { _, value in state.environmentSnapshots.append(value) }
         .onChange(of: state.openURLRequest) { _, _ in
-            _ = openURL(URL(string: "https://transcript-host.test/child")!)
+            _ = openURL(URL(string: "https://transcript-parent.test/child")!)
         }
     }
 }
 
-private struct OwnedTranscriptHostRegressionFixture: View {
-    @ObservedObject var state: OwnedTranscriptHostRegressionState
+private struct OwnedTranscriptParentRegressionFixture: View {
+    @ObservedObject var state: OwnedTranscriptParentRegressionState
 
     private var receipts: [ChatMessage] {
         [
             ChatMessage(id: "receipt-one", role: .assistant, parts: [
                 .init(type: "approval", approvalId: "approval-one", shortCode: "A21",
-                      summary: "Confirm the first approved request", purpose: "Transcript host regression", status: "approved")
+                      summary: "Confirm the first approved request", purpose: "Parent graph regression", status: "approved")
             ]),
             ChatMessage(id: "receipt-two", role: .assistant, parts: [
                 .init(type: "approval", approvalId: "approval-two", shortCode: "A22",
-                      summary: "Confirm the second approved request", purpose: "Transcript host regression", status: "approved")
+                      summary: "Confirm the second approved request", purpose: "Parent graph regression", status: "approved")
             ]),
         ]
     }
 
     var body: some View {
         let openURLGeneration = state.openURLGeneration
-        ZStack(alignment: .bottom) {
-            ConversationColumn {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        OwnedTranscriptEnvironmentReader(state: state)
-                        OwnedTranscriptDisclosureRow(state: state)
-                        ChatTranscriptRows(
-                            messages: receipts,
-                            isSending: false,
-                            openApprovals: {},
-                            send: { _, _ in },
-                            decideApproval: { _, _ in true },
-                            rememberApproval: { _ in true },
-                            decideSuggestion: { _, _ in nil },
-                            openActivity: {},
-                            refreshCard: { _, _ in nil },
-                            hideMessage: { _ in },
-                            setRecallSourceSuppressed: { _, _, _ in .discarded },
-                            recallSourceSuppressed: { _, _ in nil },
-                            acknowledgeMessageDelivery: { _ in false },
-                            cardFormActions: nil,
-                            cardFormStateRevision: 0,
-                            cardFormTaskRevision: 0
-                        )
-                        .equatable()
-                        OwnedTranscriptNativeInput(text: $state.draft)
-                            .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44, alignment: .leading)
-                        OwnedTranscriptTransactionLeaf(
-                            state: state, parentContentRevision: state.contentRevision
-                        )
+        GeometryReader { viewport in
+            ZStack(alignment: .bottom) {
+                ConversationColumn(viewportSize: viewport.size) {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            OwnedTranscriptEnvironmentReader(state: state)
+                            OwnedTranscriptDisclosureRow(state: state)
+                            ChatTranscriptRows(
+                                messages: receipts,
+                                isSending: false,
+                                openApprovals: {},
+                                send: { _, _ in },
+                                decideApproval: { _, _ in true },
+                                rememberApproval: { _ in true },
+                                decideSuggestion: { _, _ in nil },
+                                openActivity: {},
+                                refreshCard: { _, _ in nil },
+                                hideMessage: { _ in },
+                                setRecallSourceSuppressed: { _, _, _ in .discarded },
+                                recallSourceSuppressed: { _, _ in nil },
+                                acknowledgeMessageDelivery: { _ in false },
+                                cardFormActions: nil,
+                                cardFormStateRevision: 0,
+                                cardFormTaskRevision: 0
+                            )
+                            .equatable()
+                            OwnedTranscriptNativeInput(text: $state.draft)
+                                .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44, alignment: .leading)
+                            OwnedTranscriptTransactionLeaf(
+                                state: state, parentContentRevision: state.contentRevision
+                            )
+                        }
+                        .padding(.bottom, 100)
                     }
-                    .padding(.bottom, 100)
+                    .scrollIndicators(.hidden)
+                    .onTranscriptGeometryChange { state.viewportMeasurement = $0 }
+                } composer: {
+                    OwnedTranscriptNativeComposer()
+                        .accessibilityIdentifier("transcript-parent.outer-composer")
+                        .frame(height: 52)
                 }
-                .scrollIndicators(.hidden)
-                .onTranscriptGeometryChange { state.viewportMeasurement = $0 }
-            } composer: {
-                OwnedTranscriptNativeComposer()
-                    .accessibilityIdentifier("transcript-host.outer-composer")
-                    .frame(height: 52)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .offset(y: -state.reveal)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .offset(y: -state.reveal)
         }
         .overlay(alignment: .topLeading) {
             // These SDK values are system-owned and read-only. Observe the
@@ -2328,7 +2290,7 @@ private struct OwnedTranscriptHostRegressionFixture: View {
 }
 
 private struct OwnedTranscriptDisclosureRow: View {
-    @ObservedObject var state: OwnedTranscriptHostRegressionState
+    @ObservedObject var state: OwnedTranscriptParentRegressionState
     @State private var isExpanded = false
     @State private var isSheetPresented = false
 
@@ -2354,30 +2316,21 @@ private struct OwnedTranscriptDisclosureRow: View {
 }
 
 private struct OwnedTranscriptTransactionLeaf: View {
-    let state: OwnedTranscriptHostRegressionState
+    let state: OwnedTranscriptParentRegressionState
     let parentContentRevision: Int
-    @Environment(\.transcriptHostSnapshotGeneration) private var snapshotGeneration
-    @Environment(\.transcriptHostSnapshotContentRevision) private var snapshotContentRevision
     @State private var localRevision = 0
 
     var body: some View {
         Text("Transcript content revision \(parentContentRevision), child revision \(localRevision)")
-            // This parent-owned leaf records the transaction actually reaching
-            // the hosted content. The registered update changes only this
-            // child's @State and does not publish a parent-state mutation.
+            // This actual transcript leaf records the native parent's
+            // transaction directly. The local state updates below prove the
+            // marker survives an ordinary nested SwiftUI update.
             .transaction { transaction in
-                let marker = transaction[OwnedTranscriptHostMarkerKey.self]
-                let generation = snapshotGeneration ?? -1
-                state.boundaryProbe?.record(
-                    "child-leaf", transaction: transaction, generation: generation,
-                    contentRevision: snapshotContentRevision ?? -1
-                )
+                let marker = transaction[OwnedTranscriptParentMarkerKey.self]
                 state.recordChildTransactionObservation(.init(
                     parentContentRevision: parentContentRevision,
-                    snapshotContentRevision: snapshotContentRevision ?? -1,
                     localRevision: localRevision,
-                    marker: marker,
-                    snapshotGeneration: generation
+                    marker: marker
                 ))
                 if state.transactionMarkers.last != marker {
                     state.transactionMarkers.append(marker)
@@ -2399,7 +2352,7 @@ private struct OwnedTranscriptNativeComposer: UIViewRepresentable {
     func makeUIView(context: Context) -> UIButton {
         let button = UIButton(type: .system)
         button.setTitle("Outer composer", for: .normal)
-        button.accessibilityIdentifier = "transcript-host.outer-composer"
+        button.accessibilityIdentifier = "transcript-parent.outer-composer"
         return button
     }
 
@@ -2416,7 +2369,7 @@ private struct OwnedTranscriptNativeInput: UIViewRepresentable {
     func makeUIView(context: Context) -> UITextField {
         let field = UITextField(frame: .zero)
         field.borderStyle = .roundedRect
-        field.accessibilityIdentifier = "transcript-host.native-input"
+        field.accessibilityIdentifier = "transcript-parent.native-input"
         field.text = text
         field.addTarget(context.coordinator, action: #selector(Coordinator.editingChanged(_:)), for: .editingChanged)
         return field
@@ -2455,7 +2408,7 @@ private func ownedTranscriptScrollView(in root: UIView) -> UIScrollView? {
 @MainActor
 private func ownedTextField(in root: UIView) -> UITextField? {
     if let field = root as? UITextField,
-       field.accessibilityIdentifier == "transcript-host.native-input" { return field }
+       field.accessibilityIdentifier == "transcript-parent.native-input" { return field }
     for child in root.subviews {
         if let found = ownedTextField(in: child) { return found }
     }
@@ -2481,18 +2434,16 @@ private func ownedView(in root: UIView, accessibilityIdentifier: String) -> UIVi
 }
 
 @MainActor
-private func ownedTranscriptControllerIdentities(root: UIViewController, containing scroll: UIScrollView) -> [ObjectIdentifier] {
-    func containsScroll(_ controller: UIViewController) -> Bool {
-        guard controller.isViewLoaded else { return false }
-        return ownedTranscriptScrollView(in: controller.view) === scroll
+private func ownedTranscriptMountIdentities(scroll: UIScrollView, rootView: UIView) -> [ObjectIdentifier] {
+    var result: [ObjectIdentifier] = []
+    var current: UIView? = scroll
+    while let view = current {
+        result.append(ObjectIdentifier(view))
+        if view === rootView { return result
+        }
+        current = view.superview
     }
-    var result = [ObjectIdentifier(root)]
-    var current = root
-    while let child = current.children.first(where: containsScroll) {
-        result.append(ObjectIdentifier(child))
-        current = child
-    }
-    return result
+    return []
 }
 
 @MainActor
@@ -2505,7 +2456,7 @@ private func ownedPresentedController(in root: UIViewController) -> UIViewContro
 }
 
 @MainActor
-private func waitForTranscriptHostCondition(
+private func waitForParentTranscriptCondition(
     _ label: String,
     timeout: Duration = .seconds(3),
     onTimeout: (() -> Void)? = nil,
@@ -2521,9 +2472,9 @@ private func waitForTranscriptHostCondition(
 }
 
 @MainActor
-private func attachOwnedTranscriptBoundarySnapshot(
+private func attachParentTranscriptSnapshot(
     stage: String,
-    state: OwnedTranscriptHostRegressionState,
+    state: OwnedTranscriptParentRegressionState,
     root: UIViewController,
     window: UIWindow,
     scroll: UIScrollView,
@@ -2540,17 +2491,10 @@ private func attachOwnedTranscriptBoundarySnapshot(
         "rootControllerIdentity": ObjectIdentifier(root).hashValue,
         "windowIdentity": ObjectIdentifier(window).hashValue,
         "transactionMarkers": state.transactionMarkers,
-        "boundaryEvents": state.boundaryProbe?.events ?? [],
-        "parentSnapshotGeneration": state.boundaryProbe?.parentSnapshotGeneration ?? -1,
-        "parentSnapshotCommitCount": state.boundaryProbe?.parentSnapshotCommitCount ?? -1,
-        "hostingControllerInitializationCount": state.boundaryProbe?.hostingControllerInitializationCount ?? -1,
-        "rootValueUpdateCount": state.boundaryProbe?.rootValueUpdateCount ?? -1,
         "childTransactionObservations": state.childTransactionObservations.suffix(16).map {
             ["parentContentRevision": $0.parentContentRevision,
-             "snapshotContentRevision": $0.snapshotContentRevision,
              "localRevision": $0.localRevision,
-             "marker": $0.marker,
-             "snapshotGeneration": $0.snapshotGeneration]
+             "marker": $0.marker]
         },
         "predicateSamples": state.predicateSamples,
         "environmentSnapshots": state.environmentSnapshots.suffix(8).map {
@@ -2574,7 +2518,8 @@ private func attachOwnedTranscriptBoundarySnapshot(
         "scrollWindow": scroll.window === window,
         "scrollBounds": String(describing: scroll.bounds),
         "scrollOffset": String(describing: scroll.contentOffset),
-        "controllerHierarchy": ownedTranscriptControllerIdentities(root: root, containing: scroll).map(\.hashValue),
+        "scrollToRootMount": ownedTranscriptMountIdentities(scroll: scroll, rootView: root.view).map(\.hashValue),
+        "scrollMountedInRoot": scroll.isDescendant(of: root.view),
         "inputIdentity": ObjectIdentifier(input).hashValue,
         "inputInWindow": input.window === window,
         "inputFocused": input.isFirstResponder,
@@ -2604,21 +2549,21 @@ private func attachOwnedTranscriptBoundarySnapshot(
     do {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
-        attachment.name = "Owned transcript host boundary snapshot — \(stage)"
+        attachment.name = "Parent transcript mount snapshot — \(stage)"
         attachment.lifetime = .keepAlways
-        XCTContext.runActivity(named: "Owned transcript host boundary snapshot") { activity in
+        XCTContext.runActivity(named: "Parent transcript mount snapshot") { activity in
             activity.add(attachment)
             if includeScreenshot {
                 let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
                     window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
                 }
                 let screenshot = XCTAttachment(image: image)
-                screenshot.name = "Owned transcript host failure — \(stage)"
+        screenshot.name = "Parent transcript failure — \(stage)"
                 screenshot.lifetime = .keepAlways
                 activity.add(screenshot)
             }
         }
     } catch {
-        XCTFail("Could not serialize owned transcript boundary receipt: \(error)")
+        XCTFail("Could not serialize parent transcript mount receipt: \(error)")
     }
 }
