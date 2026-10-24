@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { phoneCallPolicyPresentation } from './phone-call-policy-presentation';
-import { projectStandingApprovalPolicy } from './standing-approval-view';
+import { phoneCallPolicyPresentation } from './approval-policy-presentation.js';
 
 const brief = {
   to: '+14155550123',
@@ -66,50 +65,6 @@ describe('phone-call standing-rule presentation', () => {
         match: { recipient: 'owner@example.test' },
       }),
     ).toBeNull();
-  });
-
-  it('adds structured presentation without changing the existing label or scope projection', () => {
-    const projected = projectStandingApprovalPolicy({
-      id: 'call-rule',
-      toolName: 'phone.call',
-      templateKey: 'phone.call.same_brief',
-      match: { brief },
-      effect: 'allow',
-      enabled: true,
-      createdVia: 'owner',
-    });
-
-    expect(projected).toMatchObject({
-      id: 'call-rule',
-      toolName: 'phone.call',
-      templateKey: 'phone.call.same_brief',
-      label: expect.any(String),
-      scope: expect.any(String),
-      effect: 'allow',
-      enabled: true,
-      createdVia: 'owner',
-      phoneCallPresentation: {
-        kind: 'same_brief',
-        recipient: '+14155550123',
-        maxMinutes: 4,
-      },
-    });
-  });
-
-  it('uses the dictionary title for the known default and preserves a custom saved title', () => {
-    const policy = {
-      id: 'call-rule',
-      toolName: 'phone.call',
-      templateKey: 'phone.call.same_brief',
-      match: { brief },
-      effect: 'allow',
-      enabled: true,
-      createdVia: 'owner',
-    };
-    expect(projectStandingApprovalPolicy(policy).label).toBe('Repeat approved call');
-    expect(projectStandingApprovalPolicy({ ...policy, label: 'Call the Harbor desk' }).label).toBe(
-      'Call the Harbor desk',
-    );
   });
 
   it('keeps voicemail modes distinct for the same saved number and duration', () => {

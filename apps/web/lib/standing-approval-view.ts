@@ -1,5 +1,5 @@
+import { phoneCallPolicyPresentation } from '@assistant/application/approval-policy-presentation';
 import { policyLabels, policyScope } from '@/app/settings/labels';
-import { phoneCallPolicyPresentation } from './phone-call-policy-presentation';
 
 export interface StandingApprovalPolicyInput {
   id: string;

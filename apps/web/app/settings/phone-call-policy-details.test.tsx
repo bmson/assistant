@@ -1,6 +1,6 @@
+import type { PhoneCallPolicyPresentation } from '@assistant/application/approval-policy-presentation';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import type { PhoneCallPolicyPresentation } from '@/lib/phone-call-policy-presentation';
 import { PhoneCallPolicyDetails } from './phone-call-policy-details';
 
 describe('phone-call standing-rule settings details', () => {

@@ -1,4 +1,4 @@
-import type { PhoneCallPolicyPresentation } from '@/lib/phone-call-policy-presentation';
+import type { PhoneCallPolicyPresentation } from '@assistant/application/approval-policy-presentation';
 
 export function PhoneCallPolicyDetails({
   presentation,
