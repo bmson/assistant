@@ -4863,16 +4863,18 @@ extension APIClientRetryTests {
         scheduleLocalNotification: LocalNotificationScheduler? = nil
     ) async throws -> AppModel {
         let systemSurfaces = RecordingAppSystemSurfaces()
+        let notificationScheduler: LocalNotificationScheduler = scheduleLocalNotification
+            ?? { _, _, _, _, _, _ in false }
         let model: AppModel
         if let enqueueAutomaticSpeech {
             model = AppModel(
                 apiClient: makeClient(),
                 enqueueAutomaticSpeech: enqueueAutomaticSpeech,
-                scheduleLocalNotification: scheduleLocalNotification,
+                scheduleLocalNotification: notificationScheduler,
                 systemSurfaces: systemSurfaces
             )
         } else {
-            model = AppModel(apiClient: makeClient(), scheduleLocalNotification: scheduleLocalNotification,
+            model = AppModel(apiClient: makeClient(), scheduleLocalNotification: notificationScheduler,
                              systemSurfaces: systemSurfaces)
         }
         model.scenePhaseDidChange(.background)
