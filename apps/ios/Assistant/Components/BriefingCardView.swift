@@ -9,6 +9,23 @@ struct BriefingCardView: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.conversationViewportWidth) private var conversationViewportWidth
+
+    private var stacksEventRows: Bool {
+        guard let width = conversationViewportWidth, width.isFinite, width > 0 else { return true }
+        return dynamicTypeSize.isAccessibilitySize || width <= 360
+    }
+
+#if DEBUG
+    @Environment(\.eventRhythmReview) private var eventReview
+#endif
+    private var expandsEventOverflowForReview: Bool {
+#if DEBUG
+        eventReview?.expandsOverflow == true
+#else
+        false
+#endif
+    }
 
     private var stacksRows: Bool { dynamicTypeSize.isAccessibilitySize }
 
@@ -141,14 +158,15 @@ struct BriefingCardView: View {
         omittedCount: Int?,
         items: [MessageResponseCard.BriefingCard.AgendaItem]
     ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
             heading(title)
             let mixedCalendars = Set(items.flatMap(\.calendars)).count > 1
             let initial = Array(items.prefix(6))
             groupedCalendarRows(initial, showCalendarAttribution: mixedCalendars)
             if items.count > 6 {
-                CardDisclosure(collapsedLabel: "Showing 6 of \(items.count) · Show all", expandedLabel: "Show fewer", standalone: false) {
-                    VStack(alignment: .leading, spacing: 8) {
+                CardDisclosure(collapsedLabel: "Showing 6 of \(items.count) · Show all", expandedLabel: "Show fewer", standalone: false,
+                               initiallyExpanded: expandsEventOverflowForReview) {
+                    VStack(alignment: .leading, spacing: 16) {
                         ForEach(Array(items.dropFirst(6))) { item in
                             calendarAgendaRow(item, showCalendarAttribution: mixedCalendars)
                         }
@@ -176,14 +194,18 @@ struct BriefingCardView: View {
             .filter { group in
                 items.contains { $0.timeCategory == group }
         }
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: 20) {
             ForEach(groups, id: \.self) { group in
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 12) {
                     heading(group.title)
-                    ForEach(items.filter { $0.timeCategory == group }) { item in
-                        calendarAgendaRow(item, showCalendarAttribution: showCalendarAttribution)
+                        .eventRhythmFrame("new.heading:\(group.title)")
+                    VStack(alignment: .leading, spacing: 16) {
+                        ForEach(items.filter { $0.timeCategory == group }) { item in
+                            calendarAgendaRow(item, showCalendarAttribution: showCalendarAttribution)
+                        }
                     }
                 }
+                .eventRhythmFrame("new.group:\(group.title)")
             }
         }
     }
@@ -203,23 +225,25 @@ struct BriefingCardView: View {
         } else {
             timeLabel = item.time
         }
-        return VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(timeLabel)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-            }
+        let time = Text(timeLabel)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+        let details = VStack(alignment: .leading, spacing: 4) {
             Text(item.title)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(AssistantTheme.ink(for: colorScheme))
                 .fixedSize(horizontal: false, vertical: true)
+                .eventRhythmFrame("new.title:\(item.id)")
             if !item.location.isEmpty {
                 Text(item.location).font(.caption).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                     .fixedSize(horizontal: false, vertical: true)
+                    .eventRhythmFrame("new.location:\(item.id)")
             }
             if !item.note.isEmpty {
                 Text(item.note).font(.caption.weight(.medium)).foregroundStyle(AssistantTheme.accent(for: colorScheme))
                     .fixedSize(horizontal: false, vertical: true)
+                    .eventRhythmFrame("new.note:\(item.id)")
+                    .padding(.top, 4)
             }
             if showCalendarAttribution && !calendarNames.isEmpty {
                 Text(calendarNames.joined(separator: " · "))
@@ -228,7 +252,18 @@ struct BriefingCardView: View {
             }
             calendarActions(item)
         }
+        .eventRhythmFrame("new.details:\(item.id)")
+        let layout = stacksEventRows
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+            : AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: 12))
+        return layout {
+            time
+                .frame(width: stacksEventRows ? nil : 74, alignment: .leading)
+                .eventRhythmFrame("new.clock:\(item.id)")
+            details
+        }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .eventRhythmFrame("new.row:\(item.id)")
         .accessibilityElement(children: .contain)
     }
 
@@ -412,14 +447,18 @@ struct BriefingCardView: View {
     ) -> some View {
         var days: [String] = []
         for item in items where !days.contains(item.day) { days.append(item.day) }
-        return VStack(alignment: .leading, spacing: 14) {
+        return VStack(alignment: .leading, spacing: 20) {
             ForEach(days, id: \.self) { day in
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 12) {
                     heading(day)
-                    ForEach(Array(items.filter { $0.day == day }.enumerated()), id: \.offset) { _, item in
-                        agendaRow(item)
+                        .eventRhythmFrame("legacy.heading:\(day)")
+                    VStack(alignment: .leading, spacing: 16) {
+                        ForEach(Array(items.filter { $0.day == day }.enumerated()), id: \.offset) { _, item in
+                            agendaRow(item)
+                        }
                     }
                 }
+                .eventRhythmFrame("legacy.group:\(day)")
             }
             if let omittedCount {
                 Text("\(omittedCount) additional \(omittedCount == 1 ? "event is" : "events are") not shown.")
@@ -451,16 +490,19 @@ struct BriefingCardView: View {
             }
         }
         .monospacedDigit()
-        let details = VStack(alignment: .leading, spacing: 2) {
+        let details = VStack(alignment: .leading, spacing: 4) {
             Text(item.title)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(AssistantTheme.ink(for: colorScheme))
                 .fixedSize(horizontal: false, vertical: true)
+                .eventRhythmFrame("legacy.title:\(item.id)")
             if !item.location.isEmpty {
                 Text(item.location)
                     .font(.caption)
                     .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                    .lineLimit(2)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .eventRhythmFrame("legacy.location:\(item.id)")
             }
             if !item.note.isEmpty {
                 Label(item.note, systemImage: item.flag == "conflict" ? "exclamationmark.triangle.fill" : "sparkle")
@@ -469,13 +511,17 @@ struct BriefingCardView: View {
                                      ? AssistantTheme.warningInk(for: colorScheme)
                                      : AssistantTheme.accent(for: colorScheme))
                     .fixedSize(horizontal: false, vertical: true)
+                    .eventRhythmFrame("legacy.note:\(item.id)")
+                    .padding(.top, 4)
             }
         }
-        if stacksRows {
-            VStack(alignment: .leading, spacing: 2) {
-                time
+        .eventRhythmFrame("legacy.details:\(item.id)")
+        if stacksEventRows {
+            VStack(alignment: .leading, spacing: 8) {
+                time.eventRhythmFrame("legacy.clock:\(item.id)")
                 details
             }
+            .eventRhythmFrame("legacy.row:\(item.id)")
             .accessibilityElement(children: .combine)
         } else {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -484,8 +530,10 @@ struct BriefingCardView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
                     .frame(width: 74, alignment: .leading)
+                    .eventRhythmFrame("legacy.clock:\(item.id)")
                 details
             }
+            .eventRhythmFrame("legacy.row:\(item.id)")
             .accessibilityElement(children: .combine)
         }
     }

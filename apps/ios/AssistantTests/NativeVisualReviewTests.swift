@@ -1663,6 +1663,258 @@ final class NativeVisualReviewTests: XCTestCase {
         XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
     }
 
+#if DEBUG
+    private final class EventRhythmFrameRecorder {
+        var frames: [String: CGRect] = [:]
+    }
+
+    @MainActor
+    func testEventRhythmProductionRows() async throws {
+        NativeReviewProtocol.install([:])
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+                               session: URLSession(configuration: config))
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "assistant.event-rhythm-review"))
+        defaults.removePersistentDomain(forName: "assistant.event-rhythm-review")
+        let model = AppModel(apiClient: client, defaults: defaults)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let start = Date.now.addingTimeInterval(5 * 60)
+        var richCards: [MessageResponseCard] = (0..<6).map { index in
+            .event(id: "rhythm-rich-\(index)", start: start.addingTimeInterval(Double(index) * 86400).ISO8601Format(),
+                   time: "11:45 AM – 12:55 PM Pacific Time", title: "A deliberately long planning meeting title for the full family travel itinerary \(index)",
+                   location: "North waterfront conference room, beyond the old station and the harbor entrance",
+                   attendees: ["Robin — accepted"], calendars: ["Family planning calendar"],
+                   calendarLinkURL: "https://calendar.google.com/event/rhythm-\(index)",
+                   meetingLinkURL: "https://meet.google.com/rhythm-\(index)")
+        }
+        richCards.insert(.event(id: "rhythm-rich-same-day", start: start.ISO8601Format(), time: "All afternoon",
+                                title: "Second event on the first day", location: "", attendees: [], calendars: ["Work"],
+                                calendarLinkURL: nil, meetingLinkURL: nil), at: 1)
+        // Production composes all day groups before non-event cards. An input
+        // interleaving does not create a rendered day/non-day/day sequence.
+        richCards.insert(try XCTUnwrap(MessageResponseCard(part: .init(type: "data-card", data: RichMessageFixture.alert))), at: 2)
+        typealias Item = MessageResponseCard.BriefingCard.AgendaItem
+        func item(_ id: String, day: String, location: String, note: String) -> Item {
+            .init(id: id, day: day, time: day == "Unknown" ? "" : day == "All day" ? "All day" : "11:45 AM – 12:55 PM Pacific Time",
+                  title: "A long event title that must remain readable while the clock changes position",
+                  location: location, flag: "conflict", note: note, calendars: ["Work", "Personal"],
+                  calendarLinks: [.init(label: "Open event", url: "https://calendar.google.com/event/\(id)")],
+                  meetingLink: .init(label: "Join", url: "https://meet.google.com/\(id)"))
+        }
+        let longLocation = "North waterfront conference room beyond the old station, through the harbor entrance, upstairs past the library and the quiet garden"
+        let legacyItems = (0..<4).map { index in
+            item("rhythm-legacy-\(index)", day: index < 2 ? "Legacy day A" : "Legacy day B",
+                 location: index.isMultiple(of: 2) ? longLocation : "", note: "Keep this note even when no location was supplied.")
+        }
+        let newItems = (0..<8).map { index in
+            item("rhythm-new-\(index)", day: index == 0 ? "All day" : index == 1 ? "Unknown" : "Timed",
+                 location: index.isMultiple(of: 2) ? longLocation : "", note: "Needs a response before the travel plan is confirmed.")
+        }
+        func briefing(_ id: String, presentation: MessageResponseCard.BriefingCard.Presentation?,
+                      items: [Item]) throws -> MessageResponseCard.BriefingCard {
+            var data: [String: JSONValue] = [
+                "id": .string(id), "title": .string("Agenda"), "date": .string("Review day"),
+                "lead": .string("Incomplete calendar coverage remains visible."),
+                "sections": .array([
+                    .object(["type": .string("agenda"), "title": .string("Schedule"), "complete": .bool(false),
+                             "omittedCount": .number(2), "items": .array(items.map { item in .object([
+                                "id": .string(item.id), "day": .string(item.day), "time": .string(item.time),
+                                "title": .string(item.title), "location": .string(item.location), "flag": .string(item.flag),
+                                "note": .string(item.note), "calendars": .array(item.calendars.map { .string($0) }),
+                                "calendarLinks": .array(item.calendarLinks.map { .object(["label": .string($0.label), "url": .string($0.url)]) }),
+                                "meetingLink": .object(["label": .string("Join"), "url": .string("https://meet.google.com/\(item.id)")])
+                             ]) })]),
+                    .object(["type": .string("attention"), "title": .string("Possible overlaps"),
+                             "items": .array([.object(["title": .string("Schedules overlap"), "detail": .string("Overlap does not confirm attendance.")])]),
+                             "overlaps": .array([.object(["title": .string("Travel and review"), "detail": .string("The schedules overlap by twenty minutes.")])]),
+                             "overlapCount": .number(1), "itemCount": .number(1)])
+                ])
+            ]
+            if let presentation { data["presentation"] = .string(presentation.rawValue) }
+            return try XCTUnwrap(MessageResponseCard.BriefingCard(data: data))
+        }
+        let legacy = try briefing("rhythm-legacy", presentation: nil, items: legacyItems)
+        let agenda = try briefing("rhythm-new", presentation: .calendarAgenda, items: newItems)
+        let richIDs = (0..<6).map { "rhythm-rich-\($0)" } + ["rhythm-rich-same-day"]
+        func reviewPage(_ recorder: EventRhythmFrameRecorder, width: CGFloat?, expanded: Bool) -> Page {
+            Page("event-rhythm-\(width == nil ? "missing-width" : "viewport")-\(expanded ? "expanded" : "collapsed")", ownsNavigation: true,
+                 ScrollView {
+                     VStack(alignment: .leading, spacing: 24) {
+                         RichResponseCards(cards: richCards)
+                         BriefingCardView(card: legacy)
+                         BriefingCardView(card: agenda)
+                     }
+                     .padding(.horizontal, 16).padding(.vertical, 8)
+                     .coordinateSpace(name: "event-rhythm-review")
+                 }
+                 .environment(\.conversationViewportWidth, width)
+                 .environment(\.eventRhythmReview, .init(expandsOverflow: expanded, report: { recorder.frames[$0] = $1 }))
+                 .background(AssistantTheme.stage))
+        }
+        func verify(_ recorder: EventRhythmFrameRecorder, width: CGFloat, size: DynamicTypeSize,
+                    inheritedWidth: CGFloat?, expanded: Bool, scheme: ColorScheme = .light) throws {
+            let frames = recorder.frames
+            func frame(_ id: String) throws -> CGRect {
+                let value = try XCTUnwrap(frames[id], "Missing actual production geometry: \(id)")
+                XCTAssertTrue(value.minX.isFinite && value.minY.isFinite && value.width.isFinite && value.height.isFinite)
+                XCTAssertGreaterThan(value.width, 0); XCTAssertGreaterThan(value.height, 0)
+                return value
+            }
+            let stacked = size.isAccessibilitySize || inheritedWidth == nil || (inheritedWidth ?? 0) <= 360
+            let visibleRich = expanded ? richIDs : ["rhythm-rich-0", "rhythm-rich-1", "rhythm-rich-2", "rhythm-rich-same-day"]
+            let visibleNew = expanded ? newItems : Array(newItems.prefix(6))
+            let cases: [(String, [String])] = [("rich", visibleRich), ("legacy", legacyItems.map(\.id)), ("new", visibleNew.map(\.id))]
+            for (kind, ids) in cases {
+                for id in ids {
+                    let row = try frame("\(kind).row:\(id)")
+                    let clock = try frame("\(kind).clock:\(id)")
+                    let details = try frame("\(kind).details:\(id)")
+                    XCTAssertGreaterThanOrEqual(row.minX, 15); XCTAssertLessThanOrEqual(row.maxX, width - 15)
+                    if stacked {
+                        XCTAssertEqual(details.minY - clock.maxY, 8, accuracy: 1, "Time-above separation")
+                        XCTAssertEqual(clock.minX, details.minX, accuracy: 1)
+                    } else {
+                        XCTAssertEqual(clock.width, 74, accuracy: 1, "Actual fixed clock allocation")
+                        XCTAssertEqual(details.minX - clock.maxX, 12, accuracy: 1)
+                    }
+                    if kind == "rich", id != "rhythm-rich-same-day" {
+                        let join = try frame("rich.join:\(id)")
+                        XCTAssertGreaterThanOrEqual(join.width, 44); XCTAssertGreaterThanOrEqual(join.height, 44)
+                        let title = try frame("rich.title:\(id)")
+                        XCTAssertFalse(title.intersects(join), "Title and actual Join target must not collide")
+                    }
+                    if kind != "rich" {
+                        let title = try frame("\(kind).title:\(id)")
+                        let previous: CGRect
+                        if let location = frames["\(kind).location:\(id)"] {
+                            XCTAssertEqual(location.minY - title.maxY, 4, accuracy: 1)
+                            if kind == "legacy", size.isAccessibilitySize {
+                                XCTAssertGreaterThan(location.height, 44, "Long AX location must grow vertically")
+                            }
+                            previous = location
+                        } else { previous = title }
+                        let note = try frame("\(kind).note:\(id)")
+                        XCTAssertEqual(note.minY - previous.maxY, 8, accuracy: 1, "Notes keep 8pt even without location")
+                    }
+                }
+            }
+            // Actual first-day rows and headers, not duplicated test layouts.
+            let first = try frame("rich.row:rhythm-rich-0"), second = try frame("rich.row:rhythm-rich-same-day")
+            XCTAssertEqual(second.minY - first.maxY, 16, accuracy: 1)
+            let dayPapers = frames.filter { $0.key.hasPrefix("rich.item:day-") }.sorted { $0.value.minY < $1.value.minY }
+            XCTAssertEqual(dayPapers.count, expanded ? 6 : 3)
+            guard dayPapers.count == (expanded ? 6 : 3) else {
+                XCTFail("Missing actual visible day-paper geometry before spacing loops")
+                return
+            }
+            XCTAssertEqual(try XCTUnwrap(dayPapers.first).value.minY, 8, accuracy: 1, "No first-item extra day gap")
+            _ = try frame("rich.imminence:rhythm-rich-0")
+            if expanded {
+                let otherPapers = frames.filter { $0.key.hasPrefix("rich.item:card-") }.sorted { $0.value.minY < $1.value.minY }
+                XCTAssertEqual(otherPapers.count, 1, "Production puts the interleaved non-event input after day groups")
+                XCTAssertEqual(try XCTUnwrap(otherPapers.first).value.minY - (try XCTUnwrap(dayPapers.last).value.maxY), 8, accuracy: 1,
+                               "A non-event paper keeps the existing8 gap")
+            }
+            for index in 1..<dayPapers.count where index != 3 {
+                XCTAssertEqual(dayPapers[index].value.minY - dayPapers[index - 1].value.maxY, 20, accuracy: 1)
+            }
+            if expanded {
+                XCTAssertGreaterThan(dayPapers[3].value.minY - dayPapers[2].value.maxY, 20,
+                                     "The Show more control interrupts adjacency; do not bridge it")
+            }
+            let richHeadings = frames.filter { $0.key.hasPrefix("rich.heading:") }
+            XCTAssertEqual(richHeadings.count, expanded ? 6 : 3, "Every visible day paper must report its heading")
+            let requiredRichHeadings = Set(dayPapers.map { "rich.heading:" + String($0.key.dropFirst("rich.item:day-".count)) })
+            XCTAssertEqual(Set(richHeadings.keys), requiredRichHeadings)
+            // Require all IDs before iterating; missing probes cannot turn the
+            // spacing oracle into an empty loop that passes.
+            for id in requiredRichHeadings { _ = try frame(id) }
+            for paper in dayPapers {
+                let headingID = "rich.heading:" + String(paper.key.dropFirst("rich.item:day-".count))
+                let heading = try frame(headingID)
+                let rows = frames.filter {
+                    $0.key.hasPrefix("rich.row:") && $0.value.minY >= heading.maxY - 1 &&
+                    $0.value.minY >= paper.value.minY - 1 && $0.value.maxY <= paper.value.maxY + 1
+                }.sorted { $0.value.minY < $1.value.minY }
+                let firstRow = try XCTUnwrap(rows.first, "Missing first row INSIDE actual day paper: \(paper.key)").value
+                XCTAssertEqual(firstRow.minY - heading.maxY, 12, accuracy: 1)
+            }
+            let expectedGroups = ["legacy": ["Legacy day A", "Legacy day B"],
+                                  "new": ["All day", "Timed", "Time unavailable"]]
+            for kind in ["legacy", "new"] {
+                let names = try XCTUnwrap(expectedGroups[kind])
+                let requiredGroupIDs = Set(names.map { "\(kind).group:\($0)" })
+                let requiredHeadingIDs = Set(names.map { "\(kind).heading:\($0)" })
+                let actualGroupIDs = Set(frames.keys.filter { $0.hasPrefix("\(kind).group:") })
+                let actualHeadingIDs = Set(frames.keys.filter { $0.hasPrefix("\(kind).heading:") })
+                XCTAssertEqual(actualGroupIDs.count, kind == "legacy" ? 2 : 3)
+                XCTAssertEqual(actualHeadingIDs.count, kind == "legacy" ? 2 : 3)
+                XCTAssertEqual(actualGroupIDs, requiredGroupIDs)
+                XCTAssertEqual(actualHeadingIDs, requiredHeadingIDs)
+                for id in requiredGroupIDs.union(requiredHeadingIDs) { _ = try frame(id) }
+                let groups = try names.map { try frame("\(kind).group:\($0)") }.sorted { $0.minY < $1.minY }
+                for index in 1..<groups.count {
+                    XCTAssertEqual(groups[index].minY - groups[index - 1].maxY, 20, accuracy: 1)
+                }
+                for name in names {
+                    let group = try frame("\(kind).group:\(name)")
+                    let heading = try frame("\(kind).heading:\(name)")
+                    XCTAssertGreaterThanOrEqual(heading.minY, group.minY - 1)
+                    XCTAssertLessThanOrEqual(heading.maxY, group.maxY + 1)
+                    let rows = frames.filter {
+                        $0.key.hasPrefix("\(kind).row:") && $0.value.minY >= heading.maxY - 1 &&
+                        $0.value.minY >= group.minY - 1 && $0.value.maxY <= group.maxY + 1
+                    }.sorted { $0.value.minY < $1.value.minY }
+                    let firstRow = try XCTUnwrap(rows.first, "Missing first row INSIDE actual \(kind) group: \(name)").value
+                    XCTAssertEqual(firstRow.minY - heading.maxY, 12, accuracy: 1)
+                }
+            }
+            let legacyA = try frame("legacy.row:rhythm-legacy-0"), legacyB = try frame("legacy.row:rhythm-legacy-1")
+            XCTAssertEqual(legacyB.minY - legacyA.maxY, 16, accuracy: 1)
+            let newA = try frame("new.row:rhythm-new-2"), newB = try frame("new.row:rhythm-new-3")
+            XCTAssertEqual(newB.minY - newA.maxY, 16, accuracy: 1)
+            let receipt = frames.keys.sorted().map { id -> [String: Any] in
+                let rect = frames[id]!
+                return ["id": id, "x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height]
+            }
+            let data = try JSONSerialization.data(withJSONObject: ["scheme": scheme == .light ? "light" : "dark", "viewport": width, "inheritedViewport": inheritedWidth.map { $0 as Any } ?? NSNull(),
+                "accessibility": size.isAccessibilitySize, "expanded": expanded, "stacked": stacked, "paintedBounds": receipt,
+                "reviewLimits": "Frames verify allocation, spacing, collision and geometric order. Native text glyph clipping and VoiceOver reading/focus order still require capture/accessibility review."], options: [.prettyPrinted, .sortedKeys])
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "event-rhythm-\(scheme == .light ? "light" : "dark")-\(Int(width))-\(size.isAccessibilitySize ? "AX3" : "large")-\(inheritedWidth == nil ? "missing" : "known")-\(expanded ? "expanded" : "collapsed")-painted-bounds"
+            attachment.lifetime = .keepAlways; add(attachment)
+        }
+        for width in [CGFloat(320), 360, 390, 430] {
+            for size in [DynamicTypeSize.large, .accessibility3] {
+                let recorder = EventRhythmFrameRecorder()
+                try await capture(reviewPage(recorder, width: width, expanded: true), scheme: .light, size: size,
+                                  scene: scene, model: model, requiresScrolling: true, viewportWidth: width)
+                try verify(recorder, width: width, size: size, inheritedWidth: width, expanded: true)
+            }
+        }
+        for size in [DynamicTypeSize.large, .accessibility3] {
+            let recorder = EventRhythmFrameRecorder()
+            try await capture(reviewPage(recorder, width: nil, expanded: true), scheme: .light, size: size,
+                              scene: scene, model: model, requiresScrolling: true, viewportWidth: 390)
+            try verify(recorder, width: 390, size: size, inheritedWidth: nil, expanded: true)
+        }
+        let collapsed = EventRhythmFrameRecorder()
+        try await capture(reviewPage(collapsed, width: 390, expanded: false), scheme: .light, size: .large,
+                          scene: scene, model: model, requiresScrolling: true, viewportWidth: 390)
+        try verify(collapsed, width: 390, size: .large, inheritedWidth: 390, expanded: false)
+        for (width, size) in [(CGFloat(390), DynamicTypeSize.large), (CGFloat(320), .accessibility3)] {
+            let recorder = EventRhythmFrameRecorder()
+            try await capture(reviewPage(recorder, width: width, expanded: true), scheme: .dark, size: size,
+                              scene: scene, model: model, requiresScrolling: true, viewportWidth: width)
+            try verify(recorder, width: width, size: size, inheritedWidth: width, expanded: true, scheme: .dark)
+        }
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+    }
+
+#endif
+
     @MainActor
     func testGeneratedTableFormatting() async throws {
         let sessionConfig = URLSessionConfiguration.ephemeral
