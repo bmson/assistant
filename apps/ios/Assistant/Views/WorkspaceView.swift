@@ -593,6 +593,7 @@ struct WorkspaceView: View {
             .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, area == .skills ? 16 : 0)
     }
 
     private var isLandscape: Bool { verticalSizeClass == .compact }
@@ -900,7 +901,8 @@ struct WorkspaceView: View {
             } else {
                 skillLibrarySummary(skills, activeCount: active.count)
 
-                sectionHeading("Ready to use", count: active.count)
+                skillSectionHeading("Ready to use", count: active.count)
+                    .padding(.horizontal, 16)
                 if active.isEmpty {
                     compactSkillEmptyState
                 } else {
@@ -2573,6 +2575,22 @@ struct WorkspaceView: View {
             .padding(.top, 2)
         }
         .padding(.vertical, 8)
+        .padding(.horizontal, 16)
+    }
+
+    @ViewBuilder
+    private func skillSectionHeading(_ title: String, count: Int, font: Font = .headline) -> some View {
+        if usesAccessibilityLayout {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title).font(font)
+                countTag(count)
+            }
+        } else {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(title).font(font)
+                countTag(count)
+            }
+        }
     }
 
     private func summaryMetric(_ value: String, label: String, tint: Color) -> some View {
@@ -2743,15 +2761,9 @@ struct WorkspaceView: View {
             }
             .padding(.top, 6)
         } label: {
-            HStack(spacing: 9) {
-                Image(systemName: "archivebox")
-                    .foregroundStyle(.secondary)
-                Text("Retired procedures")
-                    .font(.subheadline.weight(.semibold))
-                Spacer(minLength: 0)
-                countTag(skills.count)
-            }
+            skillSectionHeading("Retired procedures", count: skills.count, font: .subheadline.weight(.semibold))
         }
+        .padding(.horizontal, 2)
         .assistantPanel(in: colorScheme)
     }
 
