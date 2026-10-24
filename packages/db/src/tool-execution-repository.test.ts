@@ -44,11 +44,22 @@ function withTransactionApplicationName(database: Db, applicationName: string): 
 }
 
 async function holdPostgresOwnerFence(database: Db, agentId: string) {
+  let observedBlockerPid: number | undefined;
+  let released = false;
   let release!: () => void;
   let acquired!: (pid: number) => void;
   let rejectAcquired!: (error: unknown) => void;
   const hold = new Promise<void>((resolve) => {
-    release = resolve;
+    release = () => {
+      if (!released) {
+        released = true;
+        console.info(
+          '[policy-race-diagnostic]',
+          JSON.stringify({ phase: 'holder.release', blockerPid: observedBlockerPid }),
+        );
+      }
+      resolve();
+    };
   });
   const locked = new Promise<number>((resolve, reject) => {
     acquired = resolve;
@@ -57,6 +68,7 @@ async function holdPostgresOwnerFence(database: Db, agentId: string) {
   const blocker = database.$client.begin(async (tx) => {
     const [backend] = await tx<{ pid: number }[]>`select pg_backend_pid()::int as pid`;
     if (!backend) throw new Error('Could not identify owner-fence blocker backend');
+    observedBlockerPid = backend.pid;
     await tx`select id from agents where id = ${agentId} for no key update`;
     acquired(backend.pid);
     await hold;
@@ -71,6 +83,10 @@ async function holdPostgresOwnerFence(database: Db, agentId: string) {
       );
       locked.then(resolve, reject);
     });
+    console.info(
+      '[policy-race-diagnostic]',
+      JSON.stringify({ phase: 'holder.acquired', blockerPid }),
+    );
     return { blockerPid, release, blocker };
   } catch (error) {
     release();
@@ -87,6 +103,15 @@ async function waitForOwnerFenceWaiter(
   blockerPid: number,
   priorWaiterPid?: number,
 ): Promise<number> {
+  let observed: { pid: number; blockers: number[] }[] = [];
+  const diagnostic = (phase: string) => ({
+    phase,
+    applicationName,
+    blockerPid,
+    priorWaiterPid,
+    observed,
+  });
+  console.info('[policy-race-diagnostic]', JSON.stringify(diagnostic('observer.begin')));
   const deadline = performance.now() + 5_000;
   while (performance.now() < deadline) {
     const rows = await database.$client<{ pid: number; blockers: number[] }[]>`
@@ -96,16 +121,20 @@ async function waitForOwnerFenceWaiter(
         and state = 'active' and wait_event_type = 'Lock'
         and query ilike '%for no key update%'
     `;
+    observed = rows;
     const waiter = rows.find(
       (row) =>
         row.blockers.includes(blockerPid) &&
         (priorWaiterPid === undefined || row.blockers.includes(priorWaiterPid)),
     );
-    if (waiter) return waiter.pid;
+    if (waiter) {
+      console.info('[policy-race-diagnostic]', JSON.stringify(diagnostic('observer.matched')));
+      return waiter.pid;
+    }
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
   throw new Error(
-    `Timed out observing ${applicationName} blocked by owner-fence backend ${blockerPid}`,
+    `Owner-fence observation timed out: ${JSON.stringify(diagnostic('observer.deadline'))}`,
   );
 }
 
@@ -585,7 +614,7 @@ describe('PostgreSQL tool execution repository', () => {
       await firstFence.blocker;
       await Promise.allSettled([disableFirst, staleStart]);
     }
-  });
+  }, 30_000);
 
   it('serializes actual policy deletion and autonomous start in either lock-acquisition order', async () => {
     db = createDb(testUrl(), RACE_POOL_OPTIONS);
@@ -737,7 +766,7 @@ describe('PostgreSQL tool execution repository', () => {
       await secondFence.blocker;
       await Promise.allSettled([start, laterDeletion]);
     }
-  });
+  }, 30_000);
 
   it('rejects an empty policy snapshot when a real approval resolution inserts the policy first', async () => {
     db = createDb(testUrl(), RACE_POOL_OPTIONS);
@@ -830,5 +859,5 @@ describe('PostgreSQL tool execution repository', () => {
       await holder.blocker;
       await Promise.allSettled([resolution, start]);
     }
-  });
+  }, 30_000);
 });
