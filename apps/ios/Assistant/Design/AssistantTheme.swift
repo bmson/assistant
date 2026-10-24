@@ -808,6 +808,7 @@ struct AssistantActionButtonStyle: ButtonStyle {
     var compact = true
     var fillsWidth = false
     var confirming = false
+    var minimumHeight: CGFloat = 44
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
@@ -821,7 +822,7 @@ struct AssistantActionButtonStyle: ButtonStyle {
             .font(.subheadline.weight(.semibold))
             .padding(.horizontal, compact ? 12 : 20)
             .padding(.vertical, 10)
-            .frame(minWidth: compact ? 44 : nil, maxWidth: fillsWidth ? .infinity : nil, minHeight: 44)
+            .frame(minWidth: compact ? 44 : nil, maxWidth: fillsWidth ? .infinity : nil, minHeight: minimumHeight)
             .foregroundStyle(confirming ? Color.white : foregroundColor)
             .background(confirming ? AssistantTheme.notificationBadge : backgroundColor, in: shape)
             .overlay {
@@ -911,6 +912,7 @@ struct AssistantConfirmationButton: View {
     var hint: String = ""
     var compact = true
     var fillsWidth = false
+    var minimumHeight: CGFloat = 44
     var prepare: (() async -> Bool)?
     let action: () async -> Void
 
@@ -922,7 +924,7 @@ struct AssistantConfirmationButton: View {
 
     init(_ title: String, confirmationTitle: String? = nil, systemImage: String = "trash",
          kind: AssistantActionButtonKind = .destructive, hint: String = "",
-         compact: Bool = true, fillsWidth: Bool = false,
+         compact: Bool = true, fillsWidth: Bool = false, minimumHeight: CGFloat = 44,
          prepare: (() async -> Bool)? = nil,
          action: @escaping () async -> Void) {
         self.title = title
@@ -932,6 +934,7 @@ struct AssistantConfirmationButton: View {
         self.hint = hint
         self.compact = compact
         self.fillsWidth = fillsWidth
+        self.minimumHeight = minimumHeight
         self.prepare = prepare
         self.action = action
     }
@@ -988,7 +991,7 @@ struct AssistantConfirmationButton: View {
             }
         }
         .buttonStyle(AssistantActionButtonStyle(kind: kind, compact: compact, fillsWidth: fillsWidth,
-            confirming: armed && kind == .destructive))
+            confirming: armed && kind == .destructive, minimumHeight: minimumHeight))
         .disabled(working)
         .accessibilityLabel(working ? "Working" : armed ? spokenConfirmation : title)
         .accessibilityHint(armed ? "Tap again to confirm. \(hint)" : "Requires two taps. \(hint)")

@@ -12,6 +12,19 @@ final class NativeVisualReviewTests: XCTestCase {
     }
 
     @MainActor
+    private final class DocumentLayoutFrameRecorder {
+        private(set) var frames: [String: CGRect] = [:]
+
+        func record(_ name: String, _ frame: CGRect) {
+            frames[name] = frame
+        }
+
+        func reset() {
+            frames.removeAll()
+        }
+    }
+
+    @MainActor
     private final class ComposerPresentationSampler: NSObject {
         struct Sample {
             let timestamp: CFTimeInterval
@@ -1995,7 +2008,7 @@ final class NativeVisualReviewTests: XCTestCase {
 
     @MainActor
     func testDocumentsAndImportCardsWrapAtCompactAndAccessibleWidths() async throws {
-        let fixture = try NativeReviewFixture()
+        let fixture = try NativeReviewFixture(longDocumentTitle: true)
         var responses = fixture.responses
         let workspacePath = "/api/mobile/v1/workspace"
         var workspace = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(responses[workspacePath])) as? [String: Any])
@@ -2046,11 +2059,35 @@ final class NativeVisualReviewTests: XCTestCase {
         let model = AppModel(apiClient: client, defaults: defaults)
         await model.refreshAll()
         _ = await model.refreshWorkspace()
+        XCTAssertEqual(
+            model.overview?.documents.documents.first?.title,
+            "Confirmed family travel arrangements and payment receipts for the autumn weekend (revised copy).pdf"
+        )
+        let renderedImports = try XCTUnwrap(model.workspace?.imports)
+        XCTAssertEqual(renderedImports.sources.first?.status, "importing")
+        XCTAssertEqual(renderedImports.sources.first?.quarantinedNow, 4)
+        XCTAssertNotNil(renderedImports.sources.first?.error)
+        XCTAssertEqual(renderedImports.sources.last?.status, "failed")
+        XCTAssertNotNil(renderedImports.sources.last?.error)
+        XCTAssertEqual(renderedImports.unstartedFiles.first?.name, "Trip planning notes — family weekend (final revised copy).md")
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
-        let page = Page("documents-and-imports", WorkspaceView(area: .documents))
-        try await capture(page, scheme: .light, size: .large, scene: scene, model: model, viewportWidth: 320)
-        try await capture(page, scheme: .dark, size: .large, scene: scene, model: model, viewportWidth: 320)
-        try await capture(page, scheme: .light, size: .accessibility3, scene: scene, model: model, viewportWidth: 320)
+        let frames = DocumentLayoutFrameRecorder()
+        let page = Page("documents-and-imports", WorkspaceView(
+            area: .documents,
+            documentLayoutObserver: { frames.record($0, $1) }
+        ))
+        try await captureDocumentReview(page, recorder: frames, width: 320, scheme: .light, size: .large,
+            scene: scene, model: model, includesEmptyCard: false, includesDocumentActions: true, includesAdd: false)
+        try await captureDocumentReview(page, recorder: frames, width: 320, scheme: .dark, size: .large,
+            scene: scene, model: model, includesEmptyCard: false, includesDocumentActions: true, includesAdd: false)
+        try await captureDocumentReview(page, recorder: frames, width: 320, scheme: .light, size: .accessibility3,
+            scene: scene, model: model, includesEmptyCard: false, includesDocumentActions: true, includesAdd: false)
+        try await captureDocumentReview(page, recorder: frames, width: 390, scheme: .light, size: .large,
+            scene: scene, model: model, includesEmptyCard: false, includesDocumentActions: true, includesAdd: false)
+        try await captureDocumentReview(page, recorder: frames, width: 390, scheme: .dark, size: .large,
+            scene: scene, model: model, includesEmptyCard: false, includesDocumentActions: true, includesAdd: false)
+        try await captureDocumentReview(page, recorder: frames, width: 390, scheme: .light, size: .accessibility3,
+            scene: scene, model: model, includesEmptyCard: false, includesDocumentActions: true, includesAdd: false)
 
         let emptyFixture = try NativeReviewFixture(emptyDocuments: true)
         var emptyResponses = emptyFixture.responses
@@ -2072,10 +2109,23 @@ final class NativeVisualReviewTests: XCTestCase {
         XCTAssertEqual(emptyDocuments.stats.total, 0)
         XCTAssertEqual(emptyModel.workspace?.imports?.sources.count, 2,
             "The true-empty documents fixture must retain the existing Backstory imports rows")
-        let emptyPage = Page("documents-empty-with-imports", WorkspaceView(area: .documents))
-        try await capture(emptyPage, scheme: .light, size: .large, scene: scene, model: emptyModel, viewportWidth: 320)
-        try await capture(emptyPage, scheme: .dark, size: .large, scene: scene, model: emptyModel, viewportWidth: 320)
-        try await capture(emptyPage, scheme: .light, size: .accessibility3, scene: scene, model: emptyModel, viewportWidth: 320)
+        let emptyFrames = DocumentLayoutFrameRecorder()
+        let emptyPage = Page("documents-empty-with-imports", WorkspaceView(
+            area: .documents,
+            documentLayoutObserver: { emptyFrames.record($0, $1) }
+        ))
+        try await captureDocumentReview(emptyPage, recorder: emptyFrames, width: 320, scheme: .light, size: .large,
+            scene: scene, model: emptyModel, includesEmptyCard: true, includesDocumentActions: false, includesAdd: true)
+        try await captureDocumentReview(emptyPage, recorder: emptyFrames, width: 320, scheme: .dark, size: .large,
+            scene: scene, model: emptyModel, includesEmptyCard: true, includesDocumentActions: false, includesAdd: true)
+        try await captureDocumentReview(emptyPage, recorder: emptyFrames, width: 320, scheme: .light, size: .accessibility3,
+            scene: scene, model: emptyModel, includesEmptyCard: true, includesDocumentActions: false, includesAdd: true)
+        try await captureDocumentReview(emptyPage, recorder: emptyFrames, width: 390, scheme: .light, size: .large,
+            scene: scene, model: emptyModel, includesEmptyCard: true, includesDocumentActions: false, includesAdd: true)
+        try await captureDocumentReview(emptyPage, recorder: emptyFrames, width: 390, scheme: .dark, size: .large,
+            scene: scene, model: emptyModel, includesEmptyCard: true, includesDocumentActions: false, includesAdd: true)
+        try await captureDocumentReview(emptyPage, recorder: emptyFrames, width: 390, scheme: .light, size: .accessibility3,
+            scene: scene, model: emptyModel, includesEmptyCard: true, includesDocumentActions: false, includesAdd: true)
         XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty, "Visual fixtures must not run import actions.")
         XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty, "Every visual read must stay in the fixture transport.")
     }
@@ -2116,6 +2166,86 @@ final class NativeVisualReviewTests: XCTestCase {
             XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty, "Fixture renders never activate a call or permission.")
             XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty, "Fixture transport rejects every external request.")
         }
+    }
+
+    @MainActor
+    private func assertDocumentCardFrames(
+        _ recorder: DocumentLayoutFrameRecorder,
+        width: CGFloat,
+        includesEmptyCard: Bool
+    ) {
+        var ids = [
+            "card:import:imports/family-archive.zip",
+            "card:import:imports/failed-backup.zip",
+            "card:import-file:Trip planning notes — family weekend (final revised copy).md",
+        ]
+        ids.append(includesEmptyCard ? "card:document.empty" : "card:document:document")
+        for id in ids {
+            guard let frame = recorder.frames[id] else {
+                XCTFail("Missing painted-card geometry for \(id)")
+                continue
+            }
+            XCTAssertEqual(frame.minX, 16, accuracy: 2, "Unexpected leading page gutter for \(id)")
+            XCTAssertEqual(frame.maxX, width - 16, accuracy: 2, "Card surface misses the trailing page gutter for \(id)")
+        }
+    }
+
+    @MainActor
+    private func assertDocumentActionFrames(
+        _ recorder: DocumentLayoutFrameRecorder,
+        width: CGFloat,
+        includesDocumentActions: Bool,
+        includesAdd: Bool,
+        accessibilitySize: Bool
+    ) {
+        var ids = [
+            "action:import.upload",
+            "action:import.more:imports/family-archive.zip",
+            "action:import.more:imports/failed-backup.zip",
+            "action:import.approve:imports/family-archive.zip",
+            "action:import.reject:imports/family-archive.zip",
+            "action:import.start:Trip planning notes — family weekend (final revised copy).md",
+        ]
+        if includesDocumentActions { ids += ["action:document.ask:document", "action:document.delete:document"] }
+        if includesAdd { ids.append("action:document.add") }
+        for id in ids {
+            guard let frame = recorder.frames[id] else {
+                XCTFail("Missing painted-action geometry for \(id)")
+                continue
+            }
+            if accessibilitySize {
+                XCTAssertGreaterThanOrEqual(frame.height, 48, "AX action target is shorter than 48pt: \(id)")
+            } else {
+                XCTAssertEqual(frame.height, 48, accuracy: 1, "Normal-size action target should paint at 48pt: \(id)")
+            }
+            XCTAssertGreaterThanOrEqual(frame.minX, 16, "Action target escapes the leading page gutter: \(id)")
+            XCTAssertLessThanOrEqual(frame.maxX, width - 16, "Action target escapes the trailing page gutter: \(id)")
+        }
+    }
+
+    @MainActor
+    private func captureDocumentReview(
+        _ page: Page,
+        recorder: DocumentLayoutFrameRecorder,
+        width: CGFloat,
+        scheme: ColorScheme,
+        size: DynamicTypeSize,
+        scene: UIWindowScene,
+        model: AppModel,
+        includesEmptyCard: Bool,
+        includesDocumentActions: Bool,
+        includesAdd: Bool
+    ) async throws {
+        recorder.reset()
+        try await capture(page, scheme: scheme, size: size, scene: scene, model: model, viewportWidth: width)
+        assertDocumentCardFrames(recorder, width: width, includesEmptyCard: includesEmptyCard)
+        assertDocumentActionFrames(
+            recorder,
+            width: width,
+            includesDocumentActions: includesDocumentActions,
+            includesAdd: includesAdd,
+            accessibilitySize: size.isAccessibilitySize
+        )
     }
 
     private struct Page {
@@ -2367,7 +2497,7 @@ private struct NativeReviewFixture {
         result[path] = try JSONSerialization.data(withJSONObject: workspace)
         return result
     }
-    init(transcriptMessageCount: Int? = nil, emptyDocuments: Bool = false) throws {
+    init(transcriptMessageCount: Int? = nil, emptyDocuments: Bool = false, longDocumentTitle: Bool = false) throws {
         let encoder = JSONEncoder()
         func json(_ value: Any) throws -> Data { try JSONSerialization.data(withJSONObject: value) }
         let stamp = "2026-10-03T09:00:00Z"
@@ -2391,7 +2521,9 @@ private struct NativeReviewFixture {
         let bootstrap = BootstrapResponse(generatedAt: stamp, identity: .init(id: "fixture-owner", name: "Assistant", avatarUrl: nil), shell: .init(dashboard: .init(pendingApprovals: 1, needsAttention: 1, presence: .idle), memoryHealth: health), conversation: conversation)
         let pending = PendingApproval(approval: .init(id: "approval", taskId: "task", shortCode: "A12", summary: "Send Robin the confirmed arrival time", payload: .object(["to": .string("robin@example.test"), "subject": .string("Weekend arrival"), "body": .string("I’ll arrive at 4:30 PM on Friday.")]), resolutionPayload: nil, status: "pending", requestedAt: stamp, resolvedAt: nil, resolvedVia: nil, expiresAt: "2026-10-04T09:00:00Z"), taskType: "chat_turn", taskTrust: "owner", toolName: "gmail.send", decision: .object([:]))
         let docs = DocumentsOverview(
-            documents: emptyDocuments ? [] : [.init(id: "document", title: "Weekend booking confirmation.pdf", mime: "application/pdf", source: "upload", trust: "owner", status: "ready", extractor: "pdf", chunkCount: 4, charCount: 2100, bytes: 31840, error: nil, createdAt: stamp)],
+            documents: emptyDocuments ? [] : [.init(id: "document", title: longDocumentTitle
+                ? "Confirmed family travel arrangements and payment receipts for the autumn weekend (revised copy).pdf"
+                : "Weekend booking confirmation.pdf", mime: "application/pdf", source: "upload", trust: "owner", status: "ready", extractor: "pdf", chunkCount: 4, charCount: 2100, bytes: 31840, error: nil, createdAt: stamp)],
             stats: emptyDocuments ? .init(total: 0, ready: 0, pending: 0, chunks: 0)
                 : .init(total: 1, ready: 1, pending: 0, chunks: 4),
             primaryConversationId: "main")

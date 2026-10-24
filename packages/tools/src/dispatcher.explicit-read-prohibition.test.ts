@@ -12,6 +12,7 @@ import type {
   ToolExecutionRepository,
 } from '@assistant/persistence';
 import {
+  approvalPolicyFingerprint,
   ownerPhoneRecipientRequest,
   phoneCallOwnerNumberReviewSourceFingerprint,
 } from '@assistant/persistence';
@@ -122,7 +123,7 @@ function makeRepositories() {
   };
   const policies: ApprovalPolicyRepository = {
     kind: 'approval-policy-repository',
-    list: async () => [],
+    list: vi.fn(async () => []),
     setEnabled: async () => false,
     delete: async () => false,
   };
@@ -346,6 +347,7 @@ function fixture(docsReplayKey = false, preparedDocumentId?: string) {
     docsRead,
     driveRead,
     sheetsRead,
+    task,
     repositories,
   };
 }
@@ -356,11 +358,31 @@ afterEach(() => {
 
 describe('P03 owner intent at ToolDispatcher boundary (synthetic repositories only)', () => {
   it('executes the direct authorized Gmail read positive control', async () => {
-    const { dispatch, read } = fixture();
+    const { dispatch, read, task, repositories } = fixture();
+    const disabledPolicy: Records['approvalPolicies'] = {
+      id: randomUUID(),
+      agentId: task.agentId,
+      toolName: 'gmail.search',
+      templateKey: 'gmail.send.to_recipient',
+      match: { recipient: 'owner@example.invalid' },
+      effect: 'deny',
+      enabled: false,
+      version: 1,
+      createdVia: 'settings',
+      createdAt: new Date('2026-10-08T12:00:00.000Z'),
+      updatedAt: new Date('2026-10-08T12:00:00.000Z'),
+    };
+    vi.mocked(repositories.policies.list).mockResolvedValue([disabledPolicy]);
     expect(await dispatch('Read my Gmail for the invoice.', 'gmail.search')).toMatchObject({
       kind: 'executed',
     });
     expect(read).toHaveBeenCalledOnce();
+    expect(repositories.policies.list).toHaveBeenCalledWith(task.agentId, {
+      toolName: 'gmail.search',
+    });
+    expect(repositories.started.mock.calls[0]?.[0].expectedPolicyFingerprint).toBe(
+      approvalPolicyFingerprint([disabledPolicy]),
+    );
   });
 
   it('blocks an explicit no-read request before gmail.search execute', async () => {

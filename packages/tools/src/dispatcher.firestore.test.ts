@@ -346,6 +346,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       try {
         const agentId = 'agent';
         const taskId = 'memory-task';
+        await store.doc('agents', agentId).set({ id: agentId, timezone: 'UTC' });
         await store.doc('tasks', taskId).set({
           id: taskId,
           agentId,
@@ -428,6 +429,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
     it('executes an idempotent autonomous call once under concurrent retries and reuses cache', async () => {
       const store = emulatorStore();
       try {
+        await store.doc('agents', 'agent').set({ id: 'agent', timezone: 'UTC' });
         const execution = new FirestoreToolExecutionRepository(store);
         const costs = new FirestoreCostRepository(store);
         const approvals = new FirestoreApprovalRepository(store);
@@ -669,6 +671,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
     it('suppresses retries when terminal persistence reports a conflict after paid execution', async () => {
       const store = emulatorStore();
       try {
+        await store.doc('agents', 'agent').set({ id: 'agent', timezone: 'UTC' });
         await seedBudget(store);
         await store.doc('rateTable', 'external_api').set({ unit: 'call', unitPriceUsd: 0.1 });
         await store.doc('tasks', 'paid-task').set({
