@@ -9,11 +9,22 @@ import QuartzCore
 struct ConversationColumn<Transcript: View, Composer: View>: View {
     @ViewBuilder var transcript: Transcript
     @ViewBuilder var composer: Composer
+#if DEBUG
+    var experimentUsesNativeContent = false
+    func experimentNativeContent(_ enabled: Bool) -> Self {
+        var copy = self
+        copy.experimentUsesNativeContent = enabled
+        return copy
+    }
+#endif
 
     var body: some View {
         ZStack(alignment: .bottom) {
             ConversationTranscriptHost(content: transcript)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+#if DEBUG
+                .modifier(NativeExperimentColumnSelection(enabled: experimentUsesNativeContent, transcript: transcript))
+#endif
             composer
         }
     }
@@ -1038,6 +1049,7 @@ struct ChatView: View {
     // chance to supersede an automatic scroll that may already be in flight.
     #if DEBUG
     private var visualReviewMenuIsOpen = false
+    private var nativeViewportExperiment: NativeTranscriptExperimentSession?
     #endif
     @State private var latestJumpRequest = 0
     // Unpositioned by default so normal finger scrolling remains authoritative.
@@ -1212,6 +1224,9 @@ struct ChatView: View {
                 pullMenu
 
                 conversationSurface
+#if DEBUG
+                    .environment(\.nativeExperimentViewportSize, viewport.size)
+#endif
                     // Resolve a stable viewport before the surface is
                     // transformed. A flexible max-height frame was recomputed
                     // as the lifted surface crossed the root safe area, shrinking
@@ -1249,6 +1264,25 @@ struct ChatView: View {
                     pullMenuOpenGestureTarget
                 }
             }
+#if DEBUG
+            .background {
+                if let session = nativeViewportExperiment {
+                    NativeTranscriptExperimentMarker(session: session, target: .stationary)
+                }
+            }
+            .onAppear {
+                nativeViewportExperiment?.setReveal = { distance in
+                    var transaction = Transaction(animation: nil)
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        menuPullDistance = distance
+                        menuCloseDragDistance = 0
+                        menuPullActive = distance > 0
+                    }
+                }
+            }
+            .onDisappear { nativeViewportExperiment?.setReveal = nil }
+#endif
             .background {
                 // The keyboard's rounded corners expose this backing below the
                 // chat viewport. Continue the stage gradient's bottom shade;
@@ -1625,6 +1659,9 @@ struct ChatView: View {
                         transcriptScrollPosition.scrollTo(edge: .bottom)
                     }
                 }
+#if DEBUG
+                .modifier(NativeExperimentTranscriptSelection(replacement: nativeExperimentTranscript))
+#endif
 
             } composer: {
                 // This is a sibling of ScrollView, so input/selection/menu
@@ -1643,6 +1680,13 @@ struct ChatView: View {
                     // moving its green background. The parent surface alone
                     // owns every point of reveal motion.
                     .padding(.bottom, PullMenuMotion.composerSurfaceBottomSpacing)
+#if DEBUG
+                    .background {
+                        if let session = nativeViewportExperiment {
+                            NativeTranscriptExperimentMarker(session: session, target: .composer)
+                        }
+                    }
+#endif
                     .onGeometryChange(for: CGFloat.self) { geometry in
                         geometry.size.height
                     } action: { height in
@@ -1650,6 +1694,9 @@ struct ChatView: View {
                     }
 
             }
+#if DEBUG
+            .experimentNativeContent(nativeViewportExperiment != nil)
+#endif
             .overlay(alignment: .bottom) {
                 VStack(spacing: 0) {
                     VStack(spacing: 10) {
@@ -1689,6 +1736,13 @@ struct ChatView: View {
                             .padding(.horizontal, 16)
                         }
                     }
+#if DEBUG
+                    .background {
+                        if let session = nativeViewportExperiment {
+                            NativeTranscriptExperimentMarker(session: session, target: .notice)
+                        }
+                    }
+#endif
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
                         floatingNoticeHeight = height
                     }
@@ -4120,6 +4174,31 @@ private struct ComposerWorkingIndicator: View {
 
 #if DEBUG
 extension ChatView {
+    /// Focused-test opt-in only. Composer, parent geometry and reveal stay here.
+    @MainActor static func nativeViewportExperiment(
+        _ session: NativeTranscriptExperimentSession,
+        safeAreaTopInset: CGFloat, safeAreaBottomInset: CGFloat,
+        safeAreaLeadingInset: CGFloat = 0, safeAreaTrailingInset: CGFloat = 0
+    ) -> ChatView {
+        var view = ChatView(safeAreaTopInset: safeAreaTopInset, safeAreaBottomInset: safeAreaBottomInset,
+                            safeAreaLeadingInset: safeAreaLeadingInset, safeAreaTrailingInset: safeAreaTrailingInset)
+        view.nativeViewportExperiment = session
+        return view
+    }
+
+    private var nativeExperimentTranscript: NativeTranscriptViewportExperiment? {
+        guard let session = nativeViewportExperiment else { return nil }
+        return NativeTranscriptViewportExperiment(
+            session: session, header: crownContentTopInset,
+            footer: composerHeight + PullMenuMotion.transcriptComposerSpacing
+                + (floatingNoticeHeight > 0 ? floatingNoticeHeight + 8 : 0),
+            leading: AssistantTheme.compactGutter + (crownOnLeadingEdge ? landscapeCrownClearance : 0),
+            trailing: AssistantTheme.compactGutter + (crownOnLeadingEdge ? 0 : landscapeCrownClearance),
+            reveal: conversationRevealDistance, revealInProgress: menuPullActive || menuOpen,
+            alignShortToBottom: pinsTranscriptToBottom
+        )
+    }
+
     @MainActor static func visualReviewMenu() -> AnyView {
         var view = ChatView(safeAreaTopInset: 62, safeAreaBottomInset: 34, safeAreaLeadingInset: 0, safeAreaTrailingInset: 0)
         view.visualReviewMenuIsOpen = true
