@@ -206,7 +206,7 @@ export async function getOwnerCallNumberGrantReview(
         status: tasks.status,
       },
       ownerTimeZone: agents.timezone,
-      repositoryNow: sql<Date>`clock_timestamp()`,
+      repositoryNow: sql<Date | string>`clock_timestamp()`,
     })
     .from(approvals)
     .innerJoin(tasks, eq(approvals.taskId, tasks.id))
@@ -227,6 +227,13 @@ export async function getOwnerCallNumberGrantReview(
     )
     .limit(1);
   if (!row) return null;
+  const repositoryNow =
+    row.repositoryNow instanceof Date
+      ? row.repositoryNow
+      : typeof row.repositoryNow === 'string'
+        ? new Date(row.repositoryNow)
+        : null;
+  if (!repositoryNow || !Number.isFinite(repositoryNow.getTime())) return null;
   const directOwnerRequest = await readPostgresOwnerCallRequest(
     db,
     agentId,
@@ -248,11 +255,11 @@ export async function getOwnerCallNumberGrantReview(
       policy.templateKey === 'phone.call.to_owner_number.v1' &&
       match &&
       match.recipientE164 === recipient &&
-      phoneCallToOwnerNumberGrantIsLive(match, row.repositoryNow)
+      phoneCallToOwnerNumberGrantIsLive(match, repositoryNow)
       ? [{ policyId: policy.id, match }]
       : [];
   });
-  return { ...row, existingActiveGrants, directOwnerRequest };
+  return { ...row, repositoryNow, existingActiveGrants, directOwnerRequest };
 }
 
 /** Atomically create the approval, its gated tool call, and their link. */

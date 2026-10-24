@@ -545,7 +545,7 @@ private struct OwnerCallNumberPermissionReview: View {
             } catch {
                 guard !Task.isCancelled else { return }
                 publish(operation) {
-                    error = "This review expired or changed. Review again."
+                    self.error = "This review expired or changed. Review again."
                     working = false
                 }
             }
