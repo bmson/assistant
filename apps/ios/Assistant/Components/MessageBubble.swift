@@ -73,8 +73,8 @@ struct MessageBubble: View {
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .body) private var messageFontSize = 14.0
-    @ScaledMetric(relativeTo: .body) private var bubbleHorizontalInset = AssistantTheme.ConversationSpacing.horizontalInset
-    @ScaledMetric(relativeTo: .body) private var bubbleVerticalInset = AssistantTheme.ConversationSpacing.verticalInset
+    @Environment(\.conversationViewportWidth) private var conversationViewportWidth
+    @ScaledMetric(relativeTo: .body) private var bubbleVerticalInset = AssistantTheme.ConversationSpacing.proseVerticalInset
     // Tool-result cards support the answer; they must not hide its caveats.
 
     @ViewBuilder
@@ -361,7 +361,8 @@ struct MessageBubble: View {
     }
 
     private var resolvedBubbleHorizontalInset: CGFloat {
-        min(bubbleHorizontalInset, AssistantTheme.ConversationSpacing.maximumHorizontalInset)
+        AssistantTheme.ConversationSpacing.horizontalInset(
+            viewportWidth: conversationViewportWidth, accessibility: dynamicTypeSize.isAccessibilitySize)
     }
 
     /// One assistant bubble's worth of paper. The whole reply remains the
@@ -554,7 +555,8 @@ struct MessageBubble: View {
     }
 
     private var resolvedBubbleVerticalInset: CGFloat {
-        min(bubbleVerticalInset, AssistantTheme.ConversationSpacing.maximumVerticalInset)
+        AssistantTheme.ConversationSpacing.verticalInset(
+            scaled: bubbleVerticalInset, accessibility: dynamicTypeSize.isAccessibilitySize)
     }
 
     private var decisionParts: [MessagePart] {
@@ -5327,16 +5329,19 @@ private struct ResponseCardSurface: ViewModifier {
     let colorSchemeContrast: ColorSchemeContrast
     let inset: CGFloat
     @Environment(\.responseCardIsEmbedded) private var embedded
-    @ScaledMetric(relativeTo: .body) private var horizontalInset = AssistantTheme.ConversationSpacing.horizontalInset
-    @ScaledMetric(relativeTo: .body) private var verticalInset = AssistantTheme.ConversationSpacing.verticalInset
+    @Environment(\.conversationViewportWidth) private var conversationViewportWidth
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .body) private var verticalInset = AssistantTheme.ConversationSpacing.proseVerticalInset
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: AssistantTheme.cardCornerRadius, style: .continuous)
         // Embedded source details retain their deliberate density. Standalone
         // cards share the prose bubble's outer content alignment.
         let padded = content
-            .padding(.horizontal, embedded ? inset : min(horizontalInset, AssistantTheme.ConversationSpacing.maximumHorizontalInset))
-            .padding(.vertical, embedded ? inset : min(verticalInset, AssistantTheme.ConversationSpacing.maximumVerticalInset))
+            .padding(.horizontal, embedded ? inset : AssistantTheme.ConversationSpacing.horizontalInset(
+                viewportWidth: conversationViewportWidth, accessibility: dynamicTypeSize.isAccessibilitySize))
+            .padding(.vertical, embedded ? inset : AssistantTheme.ConversationSpacing.verticalInset(
+                scaled: verticalInset, accessibility: dynamicTypeSize.isAccessibilitySize))
             .frame(maxWidth: .infinity, minHeight: AssistantTheme.responseCardMinHeight, alignment: .leading)
         if embedded {
             padded
@@ -6264,7 +6269,7 @@ private struct AssistantMarkdownView: View {
         // frame of a streaming turn.
         let blocks = AssistantMarkdown.blocks(in: source)
 
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
                 if case let .heading(level, _) = block, level <= 2, index > 0,
                    blocks[index - 1] != .divider {
@@ -6477,9 +6482,9 @@ private struct AssistantMarkdownView: View {
 
         var body: some View {
             let markerSample = numberMarkerSample
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: 12) {
                 ForEach(Array(nodes.enumerated()), id: \.offset) { _, node in
-                    VStack(alignment: .leading, spacing: 7) {
+                    VStack(alignment: .leading, spacing: 12) {
                         row(node, markerSample)
                         if !node.children.isEmpty {
                             let children = NestedList(nodes: node.children, numberMarkerFont: numberMarkerFont, row: row)

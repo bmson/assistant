@@ -121,6 +121,20 @@ private struct SourcesScrollFixture: View {
 /// regression in the chat bubble's markdown is caught by a test instead of a
 /// blank screenshot.
 final class AssistantMarkdownTests: XCTestCase {
+    func testConversationPaddingUsesViewportThresholdAndAccessibilityPrecedence() {
+        for width in [CGFloat?.none, .some(.nan), .some(.infinity), .some(0), .some(-1), .some(320), .some(360)] {
+            XCTAssertEqual(AssistantTheme.ConversationSpacing.horizontalInset(
+                viewportWidth: width, accessibility: false), 20)
+        }
+        XCTAssertEqual(AssistantTheme.ConversationSpacing.horizontalInset(
+            viewportWidth: 390, accessibility: false), 24)
+        XCTAssertEqual(AssistantTheme.ConversationSpacing.horizontalInset(
+            viewportWidth: 430, accessibility: true), 20)
+        XCTAssertEqual(AssistantTheme.ConversationSpacing.verticalInset(scaled: 20, accessibility: false), 20)
+        XCTAssertEqual(AssistantTheme.ConversationSpacing.verticalInset(scaled: 30, accessibility: false), 24)
+        XCTAssertEqual(AssistantTheme.ConversationSpacing.verticalInset(scaled: 20, accessibility: true), 24)
+    }
+
     @MainActor
     func testStyledDecisionReceiptSnapshots() throws {
         for (name, scheme, size, width) in [
