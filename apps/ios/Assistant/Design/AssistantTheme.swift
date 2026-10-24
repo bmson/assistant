@@ -808,6 +808,7 @@ struct AssistantActionButtonStyle: ButtonStyle {
     var compact = true
     var fillsWidth = false
     var confirming = false
+    var minimumHeight: CGFloat = 44
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
@@ -821,7 +822,7 @@ struct AssistantActionButtonStyle: ButtonStyle {
             .font(.subheadline.weight(.semibold))
             .padding(.horizontal, compact ? 12 : 20)
             .padding(.vertical, 10)
-            .frame(minWidth: compact ? 44 : nil, maxWidth: fillsWidth ? .infinity : nil, minHeight: 44)
+            .frame(minWidth: compact ? 44 : nil, maxWidth: fillsWidth ? .infinity : nil, minHeight: minimumHeight)
             .foregroundStyle(confirming ? Color.white : foregroundColor)
             .background(confirming ? AssistantTheme.notificationBadge : backgroundColor, in: shape)
             .overlay {
@@ -911,6 +912,10 @@ struct AssistantConfirmationButton: View {
     var hint: String = ""
     var compact = true
     var fillsWidth = false
+    var minimumHeight: CGFloat = 44
+    var reservedWidthLabels: [String] = []
+    var checksIntrinsicWidth = false
+    var centersReservedGroup = false
     var prepare: (() async -> Bool)?
     let action: () async -> Void
 
@@ -922,7 +927,9 @@ struct AssistantConfirmationButton: View {
 
     init(_ title: String, confirmationTitle: String? = nil, systemImage: String = "trash",
          kind: AssistantActionButtonKind = .destructive, hint: String = "",
-         compact: Bool = true, fillsWidth: Bool = false,
+         compact: Bool = true, fillsWidth: Bool = false, minimumHeight: CGFloat = 44,
+         reservedWidthLabels: [String] = [], checksIntrinsicWidth: Bool = false,
+         centersReservedGroup: Bool = false,
          prepare: (() async -> Bool)? = nil,
          action: @escaping () async -> Void) {
         self.title = title
@@ -932,6 +939,10 @@ struct AssistantConfirmationButton: View {
         self.hint = hint
         self.compact = compact
         self.fillsWidth = fillsWidth
+        self.minimumHeight = minimumHeight
+        self.reservedWidthLabels = reservedWidthLabels
+        self.checksIntrinsicWidth = checksIntrinsicWidth
+        self.centersReservedGroup = centersReservedGroup
         self.prepare = prepare
         self.action = action
     }
@@ -968,27 +979,51 @@ struct AssistantConfirmationButton: View {
                 }
             }
         } label: {
-            HStack(spacing: 8) {
+            if centersReservedGroup {
                 ZStack {
-                    Image(systemName: armed ? "checkmark" : systemImage)
-                        .opacity(working ? 0 : 1)
-                    if working { ProgressView().controlSize(.small) }
+                    ForEach(Array(([title, confirmationTitle] + reservedWidthLabels).enumerated()), id: \.offset) { reservation in
+                        HStack(spacing: 8) {
+                            if reservation.element == "Working…" {
+                                ProgressView().controlSize(.small).frame(width: 16)
+                            } else {
+                                Image(systemName: systemImage).frame(width: 16)
+                            }
+                            Text(reservation.element)
+                        }
+                        .hidden()
+                    }
+                    HStack(spacing: 8) {
+                        ZStack {
+                            Image(systemName: armed ? "checkmark" : systemImage)
+                                .opacity(working ? 0 : 1)
+                            if working { ProgressView().controlSize(.small) }
+                        }
+                        .frame(width: 16)
+                        Text(armed && !working ? confirmationTitle : title)
+                            .fixedSize(horizontal: checksIntrinsicWidth, vertical: true)
+                    }
                 }
-                .frame(width: 16)
-                ZStack {
-                    Text(title).hidden()
-                    Text(confirmationTitle).hidden()
-                    // The working state keeps the resting title and swaps only
-                    // the glyph for its spinner. A third word here would widen
-                    // every button in the app for a state that lasts one
-                    // round-trip, after the decision has already been made.
-                    Text(armed && !working ? confirmationTitle : title)
+                .fixedSize(horizontal: checksIntrinsicWidth, vertical: true)
+            } else {
+                HStack(spacing: 8) {
+                    ZStack {
+                        Image(systemName: armed ? "checkmark" : systemImage)
+                            .opacity(working ? 0 : 1)
+                        if working { ProgressView().controlSize(.small) }
+                    }
+                    .frame(width: 16)
+                    ZStack {
+                        Text(title).hidden()
+                        Text(confirmationTitle).hidden()
+                        // Default callers reserve only the resting and confirmation labels.
+                        Text(armed && !working ? confirmationTitle : title)
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
                 }
-                .fixedSize(horizontal: false, vertical: true)
             }
         }
         .buttonStyle(AssistantActionButtonStyle(kind: kind, compact: compact, fillsWidth: fillsWidth,
-            confirming: armed && kind == .destructive))
+            confirming: armed && kind == .destructive, minimumHeight: minimumHeight))
         .disabled(working)
         .accessibilityLabel(working ? "Working" : armed ? spokenConfirmation : title)
         .accessibilityHint(armed ? "Tap again to confirm. \(hint)" : "Requires two taps. \(hint)")

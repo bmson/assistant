@@ -777,44 +777,50 @@ private struct MCPConnectionsView: View {
     private var usesAccessibilityLayout: Bool { dynamicTypeSize.isAccessibilitySize }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                introduction
-                if loadFailed {
-                    AssistantLoadFailureState(
-                        title: "Couldn’t refresh connected tools",
-                        message: hasLoaded || !model.mcpConnections.isEmpty ? "Previous connections are shown. Refresh before changing them." : "Try again to check your connections.",
-                        retry: { Task { await load() } }
-                    )
-                }
-                if actionFailed {
-                    AssistantInlineFailure(message: "Couldn’t confirm that change. Your entries are kept. Try again or pull to refresh.")
-                        .assistantPanel(in: colorScheme)
-                }
-                if isLoading && !hasLoaded && model.mcpConnections.isEmpty {
-                    AssistantLoadingState(title: "Loading connected tools")
-                } else if model.mcpConnections.isEmpty && !loadFailed && hasLoaded {
-                    AssistantEmptyState(
-                        "No connected tools",
-                        systemImage: "point.3.connected.trianglepath.dotted",
-                        description: "Connect a tool service for your assistant to use."
-                    )
-                } else {
-                    ForEach(model.mcpConnections) { connection in
-                        connectionCard(connection)
+        GeometryReader { viewport in
+            let safeAreaViewportWidth = max(
+                0,
+                viewport.size.width - viewport.safeAreaInsets.leading - viewport.safeAreaInsets.trailing
+            )
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    introduction
+                    if loadFailed {
+                        AssistantLoadFailureState(
+                            title: "Couldn’t refresh connected tools",
+                            message: hasLoaded || !model.mcpConnections.isEmpty ? "Previous connections are shown. Refresh before changing them." : "Try again to check your connections.",
+                            retry: { Task { await load() } }
+                        )
                     }
+                    if actionFailed {
+                        AssistantInlineFailure(message: "Couldn’t confirm that change. Your entries are kept. Try again or pull to refresh.")
+                            .assistantPanel(in: colorScheme)
+                    }
+                    if isLoading && !hasLoaded && model.mcpConnections.isEmpty {
+                        AssistantLoadingState(title: "Loading connected tools")
+                    } else if model.mcpConnections.isEmpty && !loadFailed && hasLoaded {
+                        AssistantEmptyState(
+                            "No connected tools",
+                            systemImage: "point.3.connected.trianglepath.dotted",
+                            description: "Connect a tool service for your assistant to use."
+                        )
+                    } else {
+                        ForEach(model.mcpConnections) { connection in
+                            connectionCard(connection, viewportWidth: safeAreaViewportWidth)
+                        }
+                    }
+                    addConnection
                 }
-                addConnection
+                .padding(16)
+                .padding(.bottom, 28)
             }
-            .padding(16)
-            .padding(.bottom, 28)
+            .scrollBounceBehavior(.basedOnSize)
+            .scrollDismissesKeyboard(.interactively)
+            .background(AssistantTheme.canvas(for: colorScheme).ignoresSafeArea())
+            .refreshable { await load() }
         }
-        .scrollBounceBehavior(.basedOnSize)
-        .scrollDismissesKeyboard(.interactively)
-        .background(AssistantTheme.canvas(for: colorScheme).ignoresSafeArea())
         .navigationTitle("Connected tools")
         .assistantSubmenuChrome()
-        .refreshable { await load() }
         .task { await load() }
     }
 
@@ -904,7 +910,7 @@ private struct MCPConnectionsView: View {
         }
     }
 
-    private func connectionCard(_ connection: McpConnection) -> some View {
+    private func connectionCard(_ connection: McpConnection, viewportWidth: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 12) {
                 AssistantGlyph(systemName: connection.statusIcon, tint: statusColor(connection))
@@ -957,7 +963,7 @@ private struct MCPConnectionsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            connectionActions(connection)
+            connectionActions(connection, viewportWidth: viewportWidth)
         }
         .assistantCard(in: colorScheme)
     }
@@ -970,19 +976,30 @@ private struct MCPConnectionsView: View {
     }
 
     @ViewBuilder
-    private func connectionActions(_ connection: McpConnection) -> some View {
+    private func connectionActions(_ connection: McpConnection, viewportWidth: CGFloat) -> some View {
         let isWorking = workingConnectionID == connection.id
-        if usesAccessibilityLayout {
-            VStack(spacing: 9) {
-                actionButton("Refresh", icon: "arrow.clockwise", connection: connection, action: "refresh", prominent: true, working: isWorking)
-                actionButton(connection.enabled ? "Pause" : "Enable", icon: connection.enabled ? "pause.fill" : "play.fill", connection: connection, action: connection.enabled ? "disable" : "enable", prominent: false, working: isWorking)
-                deleteButton(connection, working: isWorking)
+        if usesAccessibilityLayout || viewportWidth <= 360 {
+            VStack(spacing: 8) {
+                actionButton("Refresh", icon: "arrow.clockwise", connection: connection, action: "refresh", prominent: true, working: isWorking, checksIntrinsicWidth: false)
+                actionButton(connection.enabled ? "Pause" : "Enable", icon: connection.enabled ? "pause.fill" : "play.fill", connection: connection, action: connection.enabled ? "disable" : "enable", prominent: false, working: isWorking, checksIntrinsicWidth: false)
+                deleteButton(connection, working: isWorking, checksIntrinsicWidth: false)
             }
         } else {
-            HStack(spacing: 9) {
-                actionButton("Refresh", icon: "arrow.clockwise", connection: connection, action: "refresh", prominent: true, working: isWorking)
-                actionButton(connection.enabled ? "Pause" : "Enable", icon: connection.enabled ? "pause.fill" : "play.fill", connection: connection, action: connection.enabled ? "disable" : "enable", prominent: false, working: isWorking)
-                deleteButton(connection, working: isWorking)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    actionButton("Refresh", icon: "arrow.clockwise", connection: connection, action: "refresh", prominent: true, working: isWorking, checksIntrinsicWidth: true)
+                        .frame(maxWidth: .infinity)
+                    actionButton(connection.enabled ? "Pause" : "Enable", icon: connection.enabled ? "pause.fill" : "play.fill", connection: connection, action: connection.enabled ? "disable" : "enable", prominent: false, working: isWorking, checksIntrinsicWidth: true)
+                        .frame(maxWidth: .infinity)
+                    deleteButton(connection, working: isWorking, checksIntrinsicWidth: true)
+                        .frame(maxWidth: .infinity)
+                }
+
+                VStack(spacing: 8) {
+                    actionButton("Refresh", icon: "arrow.clockwise", connection: connection, action: "refresh", prominent: true, working: isWorking, checksIntrinsicWidth: false)
+                    actionButton(connection.enabled ? "Pause" : "Enable", icon: connection.enabled ? "pause.fill" : "play.fill", connection: connection, action: connection.enabled ? "disable" : "enable", prominent: false, working: isWorking, checksIntrinsicWidth: false)
+                    deleteButton(connection, working: isWorking, checksIntrinsicWidth: false)
+                }
             }
         }
     }
@@ -994,36 +1011,69 @@ private struct MCPConnectionsView: View {
         connection: McpConnection,
         action: String,
         prominent: Bool,
-        working: Bool
+        working: Bool,
+        checksIntrinsicWidth: Bool
     ) -> some View {
         if prominent {
             Button { perform(connection, action: action) } label: {
-                actionButtonLabel(title, icon: icon, working: working)
+                actionButtonLabel(title, icon: icon, working: working, checksIntrinsicWidth: checksIntrinsicWidth)
             }
-            .buttonStyle(AssistantActionButtonStyle(kind: .primary))
+            .buttonStyle(AssistantActionButtonStyle(kind: .primary, fillsWidth: true, minimumHeight: 48))
             .tint(AssistantTheme.accent(for: colorScheme))
             .disabled(workingConnectionID != nil || isAdding || ((isLoading || loadFailed) && !hasLoaded))
         } else {
             Button { perform(connection, action: action) } label: {
-                actionButtonLabel(title, icon: icon, working: working)
+                actionButtonLabel(title, icon: icon, working: working, checksIntrinsicWidth: checksIntrinsicWidth)
             }
-            .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
+            .buttonStyle(AssistantActionButtonStyle(kind: .secondary, fillsWidth: true, minimumHeight: 48))
             .tint(AssistantTheme.inkMuted(for: colorScheme))
             .disabled(workingConnectionID != nil || isAdding || ((isLoading || loadFailed) && !hasLoaded))
         }
     }
 
-    private func actionButtonLabel(_ title: String, icon: String, working: Bool) -> some View {
-        HStack(spacing: 6) {
-            if working { ProgressView().controlSize(.small) }
-            else { Image(systemName: icon) }
-            Text(working ? "Working…" : title)
+    private func actionButtonLabel(_ title: String, icon: String, working: Bool, checksIntrinsicWidth: Bool) -> some View {
+        ZStack {
+            ForEach(Array([
+                ("arrow.clockwise", "Refresh"),
+                ("pause.fill", "Pause"),
+                ("play.fill", "Enable"),
+                ("arrow.clockwise", "Working…"),
+                ("trash", "Remove"),
+                ("checkmark", "Confirm?")
+            ].enumerated()), id: \.offset) { reservation in
+                HStack(spacing: 8) {
+                    if reservation.element.1 == "Working…" {
+                        ProgressView().controlSize(.small).frame(width: 16)
+                    } else {
+                        Image(systemName: reservation.element.0).frame(width: 16)
+                    }
+                    Text(reservation.element.1)
+                }
+                .hidden()
+            }
+            HStack(spacing: 8) {
+                ZStack {
+                    Image(systemName: icon).opacity(working ? 0 : 1)
+                    if working { ProgressView().controlSize(.small) }
+                }
+                .frame(width: 16)
+                Text(working ? "Working…" : title)
+                    .fixedSize(horizontal: checksIntrinsicWidth, vertical: true)
+            }
         }
-        .frame(maxWidth: .infinity, minHeight: 36)
+        .fixedSize(horizontal: checksIntrinsicWidth, vertical: false)
     }
 
-    private func deleteButton(_ connection: McpConnection, working: Bool) -> some View {
-        AssistantConfirmationButton("Remove", hint: "Deletes \(connection.name), its tools, and saved credential.") {
+    private func deleteButton(_ connection: McpConnection, working: Bool, checksIntrinsicWidth: Bool) -> some View {
+        AssistantConfirmationButton(
+            "Remove",
+            hint: "Deletes \(connection.name), its tools, and saved credential.",
+            fillsWidth: true,
+            minimumHeight: 48,
+            reservedWidthLabels: ["Refresh", "Pause", "Enable", "Working…"],
+            checksIntrinsicWidth: checksIntrinsicWidth,
+            centersReservedGroup: true
+        ) {
             guard workingConnectionID == nil, !isAdding, !(isLoading && !hasLoaded), !(loadFailed && !hasLoaded) else { return }
             workingConnectionID = connection.id
             actionFailed = !(await model.deleteMcpConnection(id: connection.id))
