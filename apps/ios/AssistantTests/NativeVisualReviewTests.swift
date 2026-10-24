@@ -17,6 +17,7 @@ final class NativeVisualReviewTests: XCTestCase {
     private final class ConversationViewportRecorder {
         struct Measurement: Equatable {
             let rawRootWidth: CGFloat
+            let outerAvailableWidth: CGFloat
             let leadingSafeArea: CGFloat
             let trailingSafeArea: CGFloat
             let inheritedWidth: CGFloat?
@@ -40,11 +41,13 @@ final class NativeVisualReviewTests: XCTestCase {
         let recorder: ConversationViewportRecorder
         let messageID: String
         let rawRootWidth: CGFloat
+        let outerAvailableWidth: CGFloat
         let leadingSafeArea: CGFloat
         let trailingSafeArea: CGFloat
 
         private var measurement: ConversationViewportRecorder.Measurement {
-            .init(rawRootWidth: rawRootWidth, leadingSafeArea: leadingSafeArea,
+            .init(rawRootWidth: rawRootWidth, outerAvailableWidth: outerAvailableWidth,
+                  leadingSafeArea: leadingSafeArea,
                   trailingSafeArea: trailingSafeArea, inheritedWidth: inheritedWidth,
                   accessibility: dynamicTypeSize.isAccessibilitySize)
         }
@@ -1592,7 +1595,54 @@ final class NativeVisualReviewTests: XCTestCase {
         let surfaceMessages: [ChatMessage] = [
             messages[0],
             .optimistic(role: .assistant,
-                text: "First paragraph with room to read.\n\nSecond paragraph stays distinct.\n\n- First item\n- Second item\n  - Nested detail\n\n```swift\nlet title = \"Weekend plan\"\n```\n\n| Item | Status |\n| --- | --- |\n| Train | Confirmed |",
+                text: """
+                **Weekend travel plan**
+
+                Keep the morning flexible until the train and hotel arrangements are confirmed. The station is close enough to reach on foot, but leave time for the crossing near the waterfront and for finding the correct platform. If the weather turns, use the covered entrance rather than rushing with luggage through the garden path.
+
+                The train booking is the first decision to settle. Check the departure station, the arrival station, the passenger names, and the luggage allowance together before paying. A slightly later departure may leave more time for breakfast, but it should still arrive early enough for a relaxed walk to the hotel. Save the confirmation where it can be found without searching through unrelated mail.
+
+                - Confirm the outbound date and the station printed on the ticket.
+                - Keep the return journey separate until the final afternoon plan is clear.
+                - Put the booking reference beside the departure time in the shared note.
+                  - Include the platform only after the operator confirms it.
+                  - Keep the original confirmation available if the platform changes.
+                - Check whether the fare can be changed and when that option expires.
+
+                **Arrival and check-in**
+
+                Ask the hotel whether luggage can be left before the room is ready. That answer determines whether the first stop should be the hotel or the cafe by the station. Keep the arrival message short: give the expected time, ask about the bag drop, and leave the final dinner decision for later. Do not describe an unconfirmed early check-in as a promise.
+
+                There are two sensible afternoon routes. The waterfront walk is easier to shorten if someone is tired, while the old-town route offers more indoor stops if it rains. Both routes should keep a comfortable gap before dinner. A quiet hour at the hotel is part of the plan, rather than a delay to make up by hurrying through the last stop.
+
+                1. Check the bags or leave them with the hotel if that has been confirmed.
+                2. Choose lunch near the first stop so nobody has to cross town twice.
+                3. Agree on a meeting point before splitting up for the afternoon.
+                4. Recheck the weather and energy level before adding another activity.
+                5. Keep the dinner reservation time visible in the shared plan.
+
+                **Information to keep handy**
+
+                The shared note should contain the train reference, hotel address, arrival window, and one contact number for each booking. Keep private confirmation details in the original booking record. The note only needs enough context to answer practical questions during the trip, including which entrance to use and where to wait if the group arrives at different times.
+
+                ```swift
+                let title = "Weekend plan"
+                ```
+
+                | Item | Status |
+                | --- | --- |
+                | Train | Confirm the fare conditions before booking |
+                | Hotel | Ask about luggage storage and the arrival window |
+                | Dinner | Keep the final time separate from the afternoon walk |
+
+                **Before returning home**
+
+                Leave enough time after breakfast to collect bags and check the room. Review the return service before leaving the hotel, especially if the route includes a transfer. If a service changes, update the shared note with the revised departure and meeting point instead of leaving two conflicting times in circulation. A calm fallback is to meet at the station cafe and make the next decision together.
+
+                The final check is simple: everyone has their ticket, the bags are accounted for, the route to the station is clear, and the next departure time has been verified. Keep this closing note at the end of the answer so the native screenshot review can confirm the real Markdown content was reached below the fold.
+
+                SURFACE-PADDING-END-OF-TRAVEL-PLAN-2026-10-23
+                """,
                 id: "surface-padding-markdown"),
             ChatMessage(id: "surface-padding-card", role: .assistant, parts: [event]),
             ChatMessage(id: "surface-padding-contract", role: .assistant, parts: [
@@ -1606,25 +1656,28 @@ final class NativeVisualReviewTests: XCTestCase {
         ]
         let viewportRecorder = ConversationViewportRecorder(messageIDs: Set(surfaceMessages.map(\.id)))
         let paddingPage = Page("conversation-surface-padding", ownsNavigation: true,
-            GeometryReader { viewport in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: AssistantTheme.ConversationSpacing.surfaceGap) {
-                        ForEach(surfaceMessages) { message in
-                            MessageBubble(message: message, userPrompt: nil, isStreaming: false,
-                                openApprovals: {}, runForReal: nil, retry: nil, decideApproval: nil)
-                                .background(ConversationViewportReader(
-                                    recorder: viewportRecorder, messageID: message.id,
-                                    rawRootWidth: viewport.size.width,
-                                    leadingSafeArea: viewport.safeAreaInsets.leading,
-                                    trailingSafeArea: viewport.safeAreaInsets.trailing))
+            GeometryReader { available in
+                GeometryReader { viewport in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: AssistantTheme.ConversationSpacing.surfaceGap) {
+                            ForEach(surfaceMessages) { message in
+                                MessageBubble(message: message, userPrompt: nil, isStreaming: false,
+                                    openApprovals: {}, runForReal: nil, retry: nil, decideApproval: nil)
+                                    .background(ConversationViewportReader(
+                                        recorder: viewportRecorder, messageID: message.id,
+                                        rawRootWidth: viewport.size.width,
+                                        outerAvailableWidth: available.size.width,
+                                        leadingSafeArea: available.safeAreaInsets.leading,
+                                        trailingSafeArea: available.safeAreaInsets.trailing))
+                            }
                         }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
                 }
-                .environment(\.conversationViewportWidth, max(0, viewport.size.width
-                    - viewport.safeAreaInsets.leading - viewport.safeAreaInsets.trailing))
-            }.ignoresSafeArea(.container).background(AssistantTheme.stage))
+                .ignoresSafeArea(.container)
+                .environment(\.conversationViewportWidth, available.size.width)
+            }.background(AssistantTheme.stage))
         for width in [CGFloat(320), 360, 390, 430] {
             for scheme in [ColorScheme.light, .dark] {
                 for size in [DynamicTypeSize.large, .accessibility3] {
@@ -1634,15 +1687,20 @@ final class NativeVisualReviewTests: XCTestCase {
                 }
             }
         }
-        // The root stays 390pt wide while its 40pt horizontal safe area makes
-        // the inherited viewport 350pt. This crosses the 360pt policy boundary
-        // and catches either skipping the safe area or subtracting it twice.
+        // The outer geometry is already a 350pt safe viewport. The ignored
+        // inner stage stays 390pt wide, and both inherit the outer width without
+        // subtracting its 20pt + 20pt safe-area metadata again.
         let safeAreaPage = Page("conversation-surface-padding-horizontal-safe-area", ownsNavigation: true,
                                 paddingPage.content)
         try await capture(safeAreaPage, scheme: .light, size: .large, scene: scene, model: model,
                           requiresScrolling: true, viewportWidth: 390,
                           additionalSafeAreaInsets: UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20),
                           viewportRecorder: viewportRecorder)
+        for message in surfaceMessages {
+            let measured = try XCTUnwrap(viewportRecorder.measurements[message.id])
+            XCTAssertEqual(measured.outerAvailableWidth, 350, accuracy: 0.5,
+                           "The 390pt host with 20pt safe areas on both sides supplies a 350pt outer viewport")
+        }
         // Exercise the same standalone overflow composition in its expanded
         // state; the first three results remain outside this disclosure.
         let cards = try [alert, event, briefing, RichMessageFixture.generated()].map {
@@ -1780,7 +1838,7 @@ final class NativeVisualReviewTests: XCTestCase {
                     }
                     if kind == "rich", id != "rhythm-rich-same-day" {
                         let join = try frame("rich.join:\(id)")
-                        XCTAssertGreaterThanOrEqual(join.width, 44); XCTAssertGreaterThanOrEqual(join.height, 44)
+                        XCTAssertGreaterThanOrEqual(join.width + 1e-6, 44); XCTAssertGreaterThanOrEqual(join.height + 1e-6, 44)
                         let title = try frame("rich.title:\(id)")
                         XCTAssertFalse(title.intersects(join), "Title and actual Join target must not collide")
                     }
@@ -2502,14 +2560,45 @@ final class NativeVisualReviewTests: XCTestCase {
             ((view as? UIScrollView).map { [$0] } ?? []) + view.subviews.flatMap { scrollViews(in: $0) }
         }
         // Presented native sheets live outside the original hosting subtree.
-        if let scroll = scrollViews(in: window).filter({ scroll in
+        let nativeScrollCandidates = scrollViews(in: window)
+        let selectedScroll = nativeScrollCandidates.filter({ scroll in
             // Safe-area/navigation insets reduce the usable viewport even
             // when the content is shorter than the scroll view's bounds.
             let viewportHeight = max(0, scroll.bounds.height
                                      - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom)
             return scroll.bounds.width >= window.bounds.width * 0.7 && scroll.bounds.height >= window.bounds.height * 0.35 &&
                 scroll.contentSize.height > viewportHeight + 2
-        }).max(by: { $0.bounds.height < $1.bounds.height }) {
+        }).max(by: { $0.bounds.height < $1.bounds.height })
+        func scrollDiagnostic(_ scroll: UIScrollView, index: Int) -> [String: Any] {
+            let visibleFrame = scroll.convert(scroll.bounds, to: window)
+            let viewportHeight = max(0, scroll.bounds.height
+                                     - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom)
+            let bottom = max(-scroll.adjustedContentInset.top,
+                             scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+            func rect(_ value: CGRect) -> [String: CGFloat] {
+                ["x": value.minX, "y": value.minY, "width": value.width, "height": value.height]
+            }
+            func insets(_ value: UIEdgeInsets) -> [String: CGFloat] {
+                ["top": value.top, "left": value.left, "bottom": value.bottom, "right": value.right]
+            }
+            return ["candidateIndex": index, "nativeIdentity": String(describing: ObjectIdentifier(scroll)),
+                    "class": String(describing: type(of: scroll)), "accessibilityIdentifier": scroll.accessibilityIdentifier ?? "",
+                    "bounds": rect(scroll.bounds), "frameInWindow": rect(visibleFrame),
+                    "contentSize": ["width": scroll.contentSize.width, "height": scroll.contentSize.height],
+                    "contentInset": insets(scroll.contentInset), "adjustedContentInset": insets(scroll.adjustedContentInset),
+                    "contentOffset": ["x": scroll.contentOffset.x, "y": scroll.contentOffset.y],
+                    "effectiveViewportHeight": viewportHeight, "computedBottom": bottom,
+                    "meetsWidthPredicate": scroll.bounds.width >= window.bounds.width * 0.7,
+                    "meetsHeightPredicate": scroll.bounds.height >= window.bounds.height * 0.35,
+                    "meetsOverflowPredicate": scroll.contentSize.height > viewportHeight + 2,
+                    "selected": selectedScroll === scroll]
+        }
+        let initialScrollDiagnostics = viewportRecorder == nil ? [] : nativeScrollCandidates.enumerated().map {
+            scrollDiagnostic($0.element, index: $0.offset)
+        }
+        var scrollStepDiagnostics: [[String: Any]] = []
+        var selectedFinalDiagnostic: [String: Any]?
+        if let scroll = selectedScroll {
             let initial = scroll.contentOffset
             var offset = max(initial.y, -scroll.adjustedContentInset.top)
             var index = 0
@@ -2523,18 +2612,52 @@ final class NativeVisualReviewTests: XCTestCase {
                 let viewportHeight = max(1, scroll.bounds.height
                                          - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom)
                 offset = min(bottom, offset + viewportHeight * 0.72)
+                let requestedOffsetY = offset
                 scroll.setContentOffset(CGPoint(x: initial.x, y: offset), animated: false)
                 try await Task.sleep(for: .milliseconds(130))
                 window.layoutIfNeeded()
                 offset = scroll.contentOffset.y
                 index += 1
                 capturedScrollPositions += 1
+                if viewportRecorder != nil {
+                    scrollStepDiagnostics.append(["index": index, "requestedOffsetY": requestedOffsetY,
+                                                  "actualOffsetY": offset, "computedBottom": bottom,
+                                                  "effectiveViewportHeight": viewportHeight])
+                }
                 record("scroll-\(String(format: "%02d", index))")
             }
             let finalBottom = max(-scroll.adjustedContentInset.top,
                                   scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
             XCTAssertLessThanOrEqual(finalBottom - offset, 2, "Incomplete below-fold capture: \(page.name)")
+            if viewportRecorder != nil, let selectedIndex = nativeScrollCandidates.firstIndex(where: { $0 === scroll }) {
+                selectedFinalDiagnostic = scrollDiagnostic(scroll, index: selectedIndex)
+            }
             scroll.setContentOffset(initial, animated: false)
+        }
+        if viewportRecorder != nil {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "page": page.name, "scheme": scheme == .light ? "light" : "dark",
+                "dynamicType": size.isAccessibilitySize ? "accessibility3" : "large",
+                "windowFrame": ["x": window.frame.minX, "y": window.frame.minY,
+                                "width": window.frame.width, "height": window.frame.height],
+                "windowBounds": ["x": window.bounds.minX, "y": window.bounds.minY,
+                                 "width": window.bounds.width, "height": window.bounds.height],
+                "hostSafeAreaInsets": ["top": host.view.safeAreaInsets.top, "left": host.view.safeAreaInsets.left,
+                                       "bottom": host.view.safeAreaInsets.bottom, "right": host.view.safeAreaInsets.right],
+                "requiresScrolling": requiresScrolling, "capturedScrollPositions": capturedScrollPositions,
+                "selectionRule": "Existing70percentwidth/35percentheight/overflow>effectiveviewport+2; greatest bounds.height. No fallback or selection-policy change.",
+                "selectedCandidateIndex": nativeScrollCandidates.firstIndex(where: { $0 === selectedScroll }).map { $0 as Any } ?? NSNull(),
+                "allInitialNativeScrollCandidates": initialScrollDiagnostics,
+                "selectedFinalBeforeRestore": selectedFinalDiagnostic.map { $0 as Any } ?? NSNull(),
+                "scrollSteps": scrollStepDiagnostics,
+                "allNativeScrollCandidatesAfterRestore": nativeScrollCandidates.enumerated().map { scrollDiagnostic($0.element, index: $0.offset) },
+                "fixtureEndMarker": "SURFACE-PADDING-END-OF-TRAVEL-PLAN-2026-10-23",
+                "reviewLimit": "The semantic long-content precondition was corrected; this does not prove the original fixture fit or identify the original zero-scroll cause. Inspect actual geometry and PNG marker in an authorized native run."
+            ], options: [.prettyPrinted, .sortedKeys])
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "\(page.name)-\(scheme == .light ? "light" : "dark")-\(Int(window.bounds.width))-\(size.isAccessibilitySize ? "AX3" : "large")-native-scroll-diagnostics"
+            attachment.lifetime = .keepAlways
+            add(attachment)
         }
         if requiresScrolling {
             XCTAssertGreaterThan(capturedScrollPositions, 0, "Long message fixture was not captured below the fold: \(page.name)")
@@ -2546,6 +2669,7 @@ final class NativeVisualReviewTests: XCTestCase {
                 guard let measured = viewportRecorder.measurements[id] else { return nil }
                 return [
                     "messageID": id, "rawRootWidth": measured.rawRootWidth,
+                    "outerAvailableWidth": measured.outerAvailableWidth,
                     "leadingSafeArea": measured.leadingSafeArea, "trailingSafeArea": measured.trailingSafeArea,
                     "effectiveInheritedWidth": measured.inheritedWidth.map { $0 as Any } ?? NSNull(),
                     "accessibility": measured.accessibility,
@@ -2575,11 +2699,13 @@ final class NativeVisualReviewTests: XCTestCase {
                 let measured = try XCTUnwrap(viewportRecorder.measurements[id], "Missing viewport receipt: \(id)")
                 let inheritedWidth = try XCTUnwrap(measured.inheritedWidth, "Bubble did not inherit its viewport: \(id)")
                 XCTAssertEqual(measured.rawRootWidth, window.bounds.width, accuracy: 0.5,
-                               "The producer measures the full root before safe-area subtraction and transcript gutters")
+                               "The ignored inner stage measures the full window before transcript gutters")
+                XCTAssertEqual(measured.outerAvailableWidth, expectedWidth, accuracy: 0.5,
+                               "The outer pre-ignore producer already measures the available horizontal safe viewport")
                 XCTAssertEqual(measured.leadingSafeArea, safeArea.left, accuracy: 0.5)
                 XCTAssertEqual(measured.trailingSafeArea, safeArea.right, accuracy: 0.5)
                 XCTAssertEqual(inheritedWidth, expectedWidth, accuracy: 0.5,
-                               "The bubble inherits the root width minus horizontal safe area exactly once")
+                               "The bubble inherits the outer available width directly without a second safe-area subtraction")
                 XCTAssertEqual(measured.accessibility, size.isAccessibilitySize)
                 let inset = AssistantTheme.ConversationSpacing.horizontalInset(
                     viewportWidth: inheritedWidth, accessibility: measured.accessibility)
