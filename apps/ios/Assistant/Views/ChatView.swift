@@ -1690,7 +1690,18 @@ struct ChatView: View {
                     .onGeometryChange(for: CGFloat.self) { geometry in
                         geometry.size.height
                     } action: { height in
+#if DEBUG
+                        let diagnosticPriorHeight = nativeViewportExperiment == nil ? nil : composerHeight
+#endif
                         composerHeight = height
+#if DEBUG
+                        if let session = nativeViewportExperiment {
+                            session.observe(.composerGeometryAction, values: ["sampleKind": "geometry-action-assigned-rhs",
+                                "sessionID": NativeExperimentDiagnostic.identity(session),
+                                "prior": diagnosticPriorHeight.map { NativeExperimentDiagnostic.number($0) as Any } ?? NSNull(),
+                                "incoming": NativeExperimentDiagnostic.number(height), "assignedValue": NativeExperimentDiagnostic.number(height)])
+                        }
+#endif
                     }
 
             }
@@ -4188,10 +4199,17 @@ extension ChatView {
 
     private var nativeExperimentTranscript: NativeTranscriptViewportExperiment? {
         guard let session = nativeViewportExperiment else { return nil }
+        let existingHeader = crownContentTopInset
+        let existingComposerHeight = composerHeight
+        let existingNoticeHeight = floatingNoticeHeight
+        let existingFooter = existingComposerHeight + PullMenuMotion.transcriptComposerSpacing
+            + (existingNoticeHeight > 0 ? existingNoticeHeight + 8 : 0)
+        session.observe(.nativeReplacementConstruction, values: ["sampleKind": "replacement-construction",
+            "sessionID": NativeExperimentDiagnostic.identity(session),
+            "composerState": NativeExperimentDiagnostic.number(existingComposerHeight),
+            "noticeState": NativeExperimentDiagnostic.number(existingNoticeHeight), "footer": NativeExperimentDiagnostic.number(existingFooter)])
         return NativeTranscriptViewportExperiment(
-            session: session, header: crownContentTopInset,
-            footer: composerHeight + PullMenuMotion.transcriptComposerSpacing
-                + (floatingNoticeHeight > 0 ? floatingNoticeHeight + 8 : 0),
+            session: session, header: existingHeader, footer: existingFooter,
             leading: AssistantTheme.compactGutter + (crownOnLeadingEdge ? landscapeCrownClearance : 0),
             trailing: AssistantTheme.compactGutter + (crownOnLeadingEdge ? 0 : landscapeCrownClearance),
             reveal: conversationRevealDistance, revealInProgress: menuPullActive || menuOpen,

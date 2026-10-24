@@ -123,6 +123,8 @@ final class NativeTranscriptExperimentSession {
     private var captureDiagnosticCount = 0
     private var configureDiagnostics: [[String: Any]] = []
     private var captureDiagnostics: [[String: Any]] = []
+    private var parentBoundaryCounts: [DiagnosticCall: Int] = [:]
+    private var parentBoundaryDiagnostics: [DiagnosticCall: [[String: Any]]] = [:]
     var acknowledge: ((String) async -> Bool)?
     weak var controller: NativeTranscriptExperimentController?
     var setReveal: ((CGFloat) -> Void)?
@@ -131,7 +133,13 @@ final class NativeTranscriptExperimentSession {
     var noticeView: UIView?
     init(snapshot: Snapshot) { self.snapshot = snapshot }
     func event(_ value: String) { events.append(value) }
-    enum DiagnosticCall { case configure, capture }
+    enum DiagnosticCall: String, Hashable {
+        case configure, capture
+        case composerGeometryAction = "composer-geometry-action"
+        case nativeReplacementConstruction = "native-replacement-construction"
+        case nativeTranscriptSelectorEvaluation = "native-transcript-selector-evaluation"
+        case representableUpdateEntry = "representable-update-entry"
+    }
     func observe(_ call: DiagnosticCall, values: [String: Any]) {
         diagnosticSequence += 1
         var sample = values
@@ -145,11 +153,23 @@ final class NativeTranscriptExperimentSession {
             captureDiagnosticCount += 1
             captureDiagnostics.append(sample)
             captureDiagnostics = Array(captureDiagnostics.suffix(8))
+        case .composerGeometryAction, .nativeReplacementConstruction, .nativeTranscriptSelectorEvaluation, .representableUpdateEntry:
+            parentBoundaryCounts[call, default: 0] += 1
+            var history = parentBoundaryDiagnostics[call] ?? []
+            history.append(sample)
+            parentBoundaryDiagnostics[call] = Array(history.suffix(8))
         }
     }
     /// Passive observation only: never asks UIKit to lay out or capture again.
     func readinessDiagnosticSnapshot() -> [String: Any] {
-        ["schema": "native-experiment-readiness-diagnostics/v1", "sampleKind": "final-passive",
+        let parentCalls: [DiagnosticCall] = [.composerGeometryAction, .nativeReplacementConstruction,
+                                             .nativeTranscriptSelectorEvaluation, .representableUpdateEntry]
+        let boundaries = Dictionary(uniqueKeysWithValues: parentCalls.map { call in
+            let count = parentBoundaryCounts[call] ?? 0
+            return (call.rawValue, ["presence": count > 0 ? "observed" : "not-observed", "total": count,
+                                   "last8": parentBoundaryDiagnostics[call] ?? []] as [String: Any])
+        })
+        return ["schema": "native-experiment-readiness-diagnostics/v1", "sampleKind": "final-passive",
          "session": ["scope": NativeExperimentDiagnostic.scope(snapshot.scope), "revision": snapshot.revision,
                      "actionRevision": snapshot.actionRevision, "expectedRowIDs": snapshot.rows.map(\.id),
                      "controllerID": NativeExperimentDiagnostic.identity(controller),
@@ -157,7 +177,10 @@ final class NativeTranscriptExperimentSession {
          "controller": controller?.passiveDiagnosticSnapshot() as Any? ?? NSNull(),
          "readiness": NativeExperimentDiagnostic.readiness(geometry),
          "configure": ["total": configureDiagnosticCount, "last8": configureDiagnostics],
-         "capture": ["total": captureDiagnosticCount, "last8": captureDiagnostics]]
+         "capture": ["total": captureDiagnosticCount, "last8": captureDiagnostics],
+         "parentPropagation": ["schema": "native-experiment-parent-propagation/v1", "boundaries": boundaries,
+                               "assignmentMeaning": "assignedValue is the write RHS, not a committed state read",
+                               "selectorAbsenceMeaning": "No native-branch observation does not prove fallback selection"]]
     }
     func apply(_ value: Snapshot) {
         guard value.scope != snapshot.scope || value.revision > snapshot.revision else {
@@ -319,7 +342,13 @@ struct NativeExperimentColumnSelection<Transcript: View>: ViewModifier {
 struct NativeExperimentTranscriptSelection: ViewModifier {
     let replacement: NativeTranscriptViewportExperiment?
     @ViewBuilder func body(content: Content) -> some View {
-        if let replacement { replacement }
+        if let replacement {
+            let _ = replacement.session.observe(.nativeTranscriptSelectorEvaluation, values: [
+                "sampleKind": "selector-evaluation", "branch": "native-replacement",
+                "sessionID": NativeExperimentDiagnostic.identity(replacement.session),
+                "footer": NativeExperimentDiagnostic.number(replacement.footer)])
+            replacement
+        }
         else { content }
     }
 }
@@ -392,7 +421,11 @@ struct NativeTranscriptViewportExperiment: UIViewControllerRepresentable {
         NativeTranscriptExperimentController(session: session)
     }
     func updateUIViewController(_ controller: NativeTranscriptExperimentController, context: Context) {
-        controller.configure(size: viewportSize, header: header, footer: footer, leading: leading, trailing: trailing,
+        let suppliedViewportSize = viewportSize
+        session.observe(.representableUpdateEntry, values: ["sampleKind": "representable-update-entry",
+            "sessionID": NativeExperimentDiagnostic.identity(session), "controllerID": NativeExperimentDiagnostic.identity(controller),
+            "footer": NativeExperimentDiagnostic.number(footer), "viewport": NativeExperimentDiagnostic.size(suppliedViewportSize)])
+        controller.configure(size: suppliedViewportSize, header: header, footer: footer, leading: leading, trailing: trailing,
                              reveal: reveal, inProgress: revealInProgress, alignShort: alignShortToBottom,
                              presentation: presentation)
     }
