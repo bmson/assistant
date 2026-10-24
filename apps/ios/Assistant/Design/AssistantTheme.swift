@@ -1,5 +1,17 @@
 import SwiftUI
 
+private struct ConversationViewportWidthKey: EnvironmentKey {
+    static let defaultValue: CGFloat? = nil
+}
+
+extension EnvironmentValues {
+    /// Stationary safe-area viewport width, before transcript gutters.
+    var conversationViewportWidth: CGFloat? {
+        get { self[ConversationViewportWidthKey.self] }
+        set { self[ConversationViewportWidthKey.self] = newValue }
+    }
+}
+
 /// The app's appearance override. The app used to follow the iPhone's
 /// appearance silently, so a scheduled system change flipped the
 /// conversation between light and dark with no visible cause.
@@ -38,6 +50,16 @@ enum AssistantTheme {
         static let verticalInset: CGFloat = 16
         static let maximumHorizontalInset: CGFloat = 28
         static let maximumVerticalInset: CGFloat = 22
+        static let proseVerticalInset: CGFloat = 20
+        static func horizontalInset(viewportWidth: CGFloat?, accessibility: Bool) -> CGFloat {
+            guard !accessibility, let viewportWidth, viewportWidth.isFinite, viewportWidth > 360 else {
+                return 20
+            }
+            return 24
+        }
+        static func verticalInset(scaled: CGFloat, accessibility: Bool) -> CGFloat {
+            accessibility ? 24 : min(scaled, 24)
+        }
         static let contextHorizontalInset: CGFloat = 12
         static let contextVerticalInset: CGFloat = 8
         static let contextCornerRadius: CGFloat = 16

@@ -11,6 +11,53 @@ final class NativeVisualReviewTests: XCTestCase {
         var activity = 0
     }
 
+    // Test-only, external storage: observing the bubble environment must not
+    // publish SwiftUI state or change the production view's layout.
+    @MainActor
+    private final class ConversationViewportRecorder {
+        struct Measurement: Equatable {
+            let rawRootWidth: CGFloat
+            let leadingSafeArea: CGFloat
+            let trailingSafeArea: CGFloat
+            let inheritedWidth: CGFloat?
+            let accessibility: Bool
+        }
+
+        let expectedMessageIDs: Set<String>
+        private(set) var measurements: [String: Measurement] = [:]
+
+        init(messageIDs: Set<String>) { expectedMessageIDs = messageIDs }
+        func reset() { measurements.removeAll() }
+        func record(_ measurement: Measurement, messageID: String) {
+            measurements[messageID] = measurement
+        }
+    }
+
+    @MainActor
+    private struct ConversationViewportReader: View {
+        @Environment(\.conversationViewportWidth) private var inheritedWidth
+        @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+        let recorder: ConversationViewportRecorder
+        let messageID: String
+        let rawRootWidth: CGFloat
+        let leadingSafeArea: CGFloat
+        let trailingSafeArea: CGFloat
+
+        private var measurement: ConversationViewportRecorder.Measurement {
+            .init(rawRootWidth: rawRootWidth, leadingSafeArea: leadingSafeArea,
+                  trailingSafeArea: trailingSafeArea, inheritedWidth: inheritedWidth,
+                  accessibility: dynamicTypeSize.isAccessibilitySize)
+        }
+
+        var body: some View {
+            Color.clear
+                .onAppear { recorder.record(measurement, messageID: messageID) }
+                .onChange(of: measurement) { _, value in recorder.record(value, messageID: messageID) }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+    }
+
     @MainActor
     private final class ComposerPresentationSampler: NSObject {
         struct Sample {
@@ -1540,6 +1587,62 @@ final class NativeVisualReviewTests: XCTestCase {
             transcript(sending: false).padding(.horizontal, 16).padding(.vertical, 8)
         }.background(AssistantTheme.stage))
         try await capture(settledPage, scheme: .light, size: .large, scene: scene, model: model, requiresScrolling: true)
+        // Exercise production prose and standalone cards with the viewport
+        // environment measured before the fixture's transcript gutters.
+        let surfaceMessages: [ChatMessage] = [
+            messages[0],
+            .optimistic(role: .assistant,
+                text: "First paragraph with room to read.\n\nSecond paragraph stays distinct.\n\n- First item\n- Second item\n  - Nested detail\n\n```swift\nlet title = \"Weekend plan\"\n```\n\n| Item | Status |\n| --- | --- |\n| Train | Confirmed |",
+                id: "surface-padding-markdown"),
+            ChatMessage(id: "surface-padding-card", role: .assistant, parts: [event]),
+            ChatMessage(id: "surface-padding-contract", role: .assistant, parts: [
+                .init(type: "text", text: "The requested result could not be verified."),
+                .init(type: "notice", notice: ChatNoticeKind.responseContract.rawValue),
+            ]),
+            ChatMessage(id: "surface-padding-retracted", role: .assistant, parts: [
+                .init(type: "text", text: "This earlier answer was withdrawn."),
+                .init(type: "notice", notice: ChatNoticeKind.retracted.rawValue),
+            ]),
+        ]
+        let viewportRecorder = ConversationViewportRecorder(messageIDs: Set(surfaceMessages.map(\.id)))
+        let paddingPage = Page("conversation-surface-padding", ownsNavigation: true,
+            GeometryReader { viewport in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: AssistantTheme.ConversationSpacing.surfaceGap) {
+                        ForEach(surfaceMessages) { message in
+                            MessageBubble(message: message, userPrompt: nil, isStreaming: false,
+                                openApprovals: {}, runForReal: nil, retry: nil, decideApproval: nil)
+                                .background(ConversationViewportReader(
+                                    recorder: viewportRecorder, messageID: message.id,
+                                    rawRootWidth: viewport.size.width,
+                                    leadingSafeArea: viewport.safeAreaInsets.leading,
+                                    trailingSafeArea: viewport.safeAreaInsets.trailing))
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                }
+                .environment(\.conversationViewportWidth, max(0, viewport.size.width
+                    - viewport.safeAreaInsets.leading - viewport.safeAreaInsets.trailing))
+            }.ignoresSafeArea(.container).background(AssistantTheme.stage))
+        for width in [CGFloat(320), 360, 390, 430] {
+            for scheme in [ColorScheme.light, .dark] {
+                for size in [DynamicTypeSize.large, .accessibility3] {
+                    try await capture(paddingPage, scheme: scheme, size: size, scene: scene, model: model,
+                                      requiresScrolling: true, viewportWidth: width,
+                                      viewportRecorder: viewportRecorder)
+                }
+            }
+        }
+        // The root stays 390pt wide while its 40pt horizontal safe area makes
+        // the inherited viewport 350pt. This crosses the 360pt policy boundary
+        // and catches either skipping the safe area or subtracting it twice.
+        let safeAreaPage = Page("conversation-surface-padding-horizontal-safe-area", ownsNavigation: true,
+                                paddingPage.content)
+        try await capture(safeAreaPage, scheme: .light, size: .large, scene: scene, model: model,
+                          requiresScrolling: true, viewportWidth: 390,
+                          additionalSafeAreaInsets: UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20),
+                          viewportRecorder: viewportRecorder)
         // Exercise the same standalone overflow composition in its expanded
         // state; the first three results remain outside this disclosure.
         let cards = try [alert, event, briefing, RichMessageFixture.generated()].map {
@@ -2098,7 +2201,10 @@ final class NativeVisualReviewTests: XCTestCase {
 
     @MainActor private func capture(_ page: Page, scheme: ColorScheme, size: DynamicTypeSize,
                                     scene: UIWindowScene, model: AppModel, requiresScrolling: Bool = false,
-                                    viewportWidth: CGFloat? = nil, increasedContrast: Bool = false) async throws {
+                                    viewportWidth: CGFloat? = nil, increasedContrast: Bool = false,
+                                    additionalSafeAreaInsets: UIEdgeInsets? = nil,
+                                    viewportRecorder: ConversationViewportRecorder? = nil) async throws {
+        viewportRecorder?.reset()
         UserDefaults.standard.set((scheme == .light ? AssistantAppearance.light : .dark).rawValue,
                                   forKey: AssistantAppearance.defaultsKey)
         let window = UIWindow(windowScene: scene)
@@ -2118,6 +2224,7 @@ final class NativeVisualReviewTests: XCTestCase {
             .environment(\.dynamicTypeSize, size).transaction { $0.animation = nil; $0.disablesAnimations = true }
             .environment(\.scenePhase, .active))
         window.rootViewController = host
+        if let additionalSafeAreaInsets { host.additionalSafeAreaInsets = additionalSafeAreaInsets }
         if increasedContrast { host.traitOverrides.accessibilityContrast = .high }
         window.makeKeyAndVisible()
         defer { window.isHidden = true; window.rootViewController = nil }
@@ -2179,6 +2286,53 @@ final class NativeVisualReviewTests: XCTestCase {
         }
         if requiresScrolling {
             XCTAssertGreaterThan(capturedScrollPositions, 0, "Long message fixture was not captured below the fold: \(page.name)")
+        }
+        if let viewportRecorder {
+            let safeArea = host.view.safeAreaInsets
+            let expectedWidth = max(0, window.bounds.width - safeArea.left - safeArea.right)
+            let rows: [[String: Any]] = viewportRecorder.measurements.keys.sorted().compactMap { id in
+                guard let measured = viewportRecorder.measurements[id] else { return nil }
+                return [
+                    "messageID": id, "rawRootWidth": measured.rawRootWidth,
+                    "leadingSafeArea": measured.leadingSafeArea, "trailingSafeArea": measured.trailingSafeArea,
+                    "effectiveInheritedWidth": measured.inheritedWidth.map { $0 as Any } ?? NSNull(),
+                    "accessibility": measured.accessibility,
+                ]
+            }
+            let data = try JSONSerialization.data(withJSONObject: [
+                "page": page.name, "scheme": scheme == .light ? "light" : "dark",
+                "dynamicType": size.isAccessibilitySize ? "accessibility3" : "large",
+                "windowWidth": window.bounds.width, "hostSafeAreaLeft": safeArea.left,
+                "hostSafeAreaRight": safeArea.right, "expectedEffectiveWidth": expectedWidth,
+                "expectedMessageIDs": viewportRecorder.expectedMessageIDs.sorted(),
+                "missingMessageIDs": viewportRecorder.expectedMessageIDs.subtracting(viewportRecorder.measurements.keys).sorted(),
+                "bubbles": rows,
+            ], options: [.prettyPrinted, .sortedKeys])
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "\(page.name)-\(scheme == .light ? "light" : "dark")-\(Int(window.bounds.width))-\(size.isAccessibilitySize ? "AX3" : "large")-viewport-receipt"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            XCTAssertEqual(Set(viewportRecorder.measurements.keys), viewportRecorder.expectedMessageIDs,
+                           "Every production MessageBubble root must report in this capture; stale or missing receipts fail")
+            if let additionalSafeAreaInsets {
+                XCTAssertGreaterThan(safeArea.left + safeArea.right, 0, "The nonzero safe-area fixture must actually take effect")
+                XCTAssertEqual(safeArea.left, additionalSafeAreaInsets.left, accuracy: 0.5)
+                XCTAssertEqual(safeArea.right, additionalSafeAreaInsets.right, accuracy: 0.5)
+            }
+            for id in viewportRecorder.expectedMessageIDs.sorted() {
+                let measured = try XCTUnwrap(viewportRecorder.measurements[id], "Missing viewport receipt: \(id)")
+                let inheritedWidth = try XCTUnwrap(measured.inheritedWidth, "Bubble did not inherit its viewport: \(id)")
+                XCTAssertEqual(measured.rawRootWidth, window.bounds.width, accuracy: 0.5,
+                               "The producer measures the full root before safe-area subtraction and transcript gutters")
+                XCTAssertEqual(measured.leadingSafeArea, safeArea.left, accuracy: 0.5)
+                XCTAssertEqual(measured.trailingSafeArea, safeArea.right, accuracy: 0.5)
+                XCTAssertEqual(inheritedWidth, expectedWidth, accuracy: 0.5,
+                               "The bubble inherits the root width minus horizontal safe area exactly once")
+                XCTAssertEqual(measured.accessibility, size.isAccessibilitySize)
+                let inset = AssistantTheme.ConversationSpacing.horizontalInset(
+                    viewportWidth: inheritedWidth, accessibility: measured.accessibility)
+                XCTAssertEqual(inset, size.isAccessibilitySize || expectedWidth <= 360 ? 20 : 24)
+            }
         }
     }
 
