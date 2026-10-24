@@ -1,6 +1,52 @@
 import SwiftUI
 import UIKit
 
+#if DEBUG
+/// Raw native TextRenderer observations, not source-character or pixel-ink coverage.
+struct EventRhythmTextSample: Sendable {
+    let sourceText: String
+    let isTruncated: Bool
+    let lineBounds: [CGRect]
+    let runBounds: [CGRect]
+}
+struct EventRhythmReview {
+    var expandsOverflow = false
+    var report: (String, CGRect) -> Void = { _, _ in }
+    var reportText: @Sendable (String, EventRhythmTextSample) -> Void = { _, _ in }
+}
+private struct EventRhythmReviewKey: EnvironmentKey {
+    static let defaultValue: EventRhythmReview? = nil
+}
+extension EnvironmentValues {
+    var eventRhythmReview: EventRhythmReview? {
+        get { self[EventRhythmReviewKey.self] }
+        set { self[EventRhythmReviewKey.self] = newValue }
+    }
+}
+private struct EventRhythmFrame: ViewModifier {
+    let id: String
+    @Environment(\.eventRhythmReview) private var review
+    func body(content: Content) -> some View {
+        content.background {
+            if let review {
+                Color.clear.onGeometryChange(for: CGRect.self) { proxy in
+                    proxy.frame(in: .named("event-rhythm-review"))
+                } action: { review.report(id, $0) }
+            }
+        }
+    }
+}
+#endif
+extension View {
+    @ViewBuilder func eventRhythmFrame(_ id: String) -> some View {
+#if DEBUG
+        modifier(EventRhythmFrame(id: id))
+#else
+        self
+#endif
+    }
+}
+
 /// The recovery renderer's data-only decisions. Callback availability carries
 /// the existing in-flight gate; this value never infers whether tools ran.
 struct RecoveryNoticePresentation {
@@ -2660,6 +2706,23 @@ struct RichResponseCards: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.conversationViewportWidth) private var conversationViewportWidth
+
+    private var stacksEventRows: Bool {
+        guard let width = conversationViewportWidth, width.isFinite, width > 0 else { return true }
+        return dynamicTypeSize.isAccessibilitySize || width <= 360
+    }
+
+#if DEBUG
+    @Environment(\.eventRhythmReview) private var eventReview
+#endif
+    private var expandsEventOverflowForReview: Bool {
+#if DEBUG
+        eventReview?.expandsOverflow == true
+#else
+        false
+#endif
+    }
 
     private var usesAccessibilityLayout: Bool { dynamicTypeSize.isAccessibilitySize }
 
@@ -2702,13 +2765,18 @@ struct RichResponseCards: View {
         VStack(alignment: .leading, spacing: AssistantTheme.ConversationSpacing.surfaceGap) {
             ForEach(preview) { item in
                 displayItem(item)
+                    .eventRhythmFrame("rich.item:\(item.id)")
+                    .padding(.top, adjacentEventDayGap(before: item, in: preview))
             }
             if !overflow.isEmpty {
                 CardDisclosure(collapsedLabel: "Show \(overflow.count) more \(overflow.count == 1 ? "result" : "results")",
-                    expandedLabel: "Showing all \(displayItems.count) results", standalone: true, showsBottomCollapse: true) {
+                    expandedLabel: "Showing all \(displayItems.count) results", standalone: true, showsBottomCollapse: true,
+                    initiallyExpanded: expandsEventOverflowForReview) {
                     VStack(alignment: .leading, spacing: AssistantTheme.ConversationSpacing.surfaceGap) {
                         ForEach(overflow) { item in
                             displayItem(item)
+                                .eventRhythmFrame("rich.item:\(item.id)")
+                                .padding(.top, adjacentEventDayGap(before: item, in: overflow))
                         }
                     }
                 }
@@ -2716,6 +2784,13 @@ struct RichResponseCards: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
+    }
+
+    private func adjacentEventDayGap(before item: DisplayItem, in items: [DisplayItem]) -> CGFloat {
+        guard case .day = item,
+              let index = items.firstIndex(where: { $0.id == item.id }), index > 0,
+              case .day = items[index - 1] else { return 0 }
+        return 12
     }
 
     @ViewBuilder
@@ -2804,7 +2879,7 @@ struct RichResponseCards: View {
     }
 
     private func eventDayCard(_ group: EventDayGroup) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             if !group.date.isEmpty {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(group.date)
@@ -2817,43 +2892,57 @@ struct RichResponseCards: View {
                             .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                     }
                 }
+                .eventRhythmFrame("rich.heading:\(group.id)")
             }
-            ForEach(group.events) { event in
-                eventRow(event)
+            VStack(alignment: .leading, spacing: 16) {
+                ForEach(group.events) { event in
+                    eventRow(event)
+                        .eventRhythmFrame("rich.row:\(event.id)")
+                }
             }
         }
         .responseCardSurface(colorScheme: colorScheme, colorSchemeContrast: colorSchemeContrast, inset: 16)
     }
 
     private func eventRow(_ event: EventRow) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(event.time)
-                    .font(.caption.monospacedDigit().weight(.medium))
+        let clock = VStack(alignment: .leading, spacing: 8) {
+            Text(event.time)
+                .font(.caption.monospacedDigit().weight(.medium))
+                .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+            if let imminence = eventImminence(event) {
+                Text(imminence)
+                    .font(.caption2.weight(.bold))
                     .foregroundStyle(AssistantTheme.accent(for: colorScheme))
-                if let imminence = eventImminence(event) {
-                    Text(imminence)
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(AssistantTheme.accent(for: colorScheme))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 5)
-                        .background(AssistantTheme.accent(for: colorScheme).opacity(0.12), in: Capsule())
-                        .accessibilityLabel(imminence == "Now" ? "Happening now" : "Starts \(imminence.lowercased())")
-                }
-                Spacer(minLength: 4)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 5)
+                    .background(AssistantTheme.accent(for: colorScheme).opacity(0.12), in: Capsule())
+                    .accessibilityLabel(imminence == "Now" ? "Happening now" : "Starts \(imminence.lowercased())")
+                    .eventRhythmFrame("rich.imminence:\(event.id)")
+            }
+        }
+        let details = VStack(alignment: .leading, spacing: 4) {
+            let titleLayout = stacksEventRows
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                : AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: 8))
+            titleLayout {
+                Text(AssistantMarkdown.inlineAttributed(event.title))
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .eventRhythmFrame("rich.title:\(event.id)")
+                if !stacksEventRows { Spacer(minLength: 4) }
                 if let meetingLinkURL = event.meetingLinkURL, let url = URL(string: meetingLinkURL) {
                     Link(destination: url) {
                         Label("Join", systemImage: "video.fill")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+                            .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .eventRhythmFrame("rich.join:\(event.id)")
                     }
                     .accessibilityLabel("Join video meeting for \(event.title)")
                 }
             }
-            Text(AssistantMarkdown.inlineAttributed(event.title))
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(AssistantTheme.ink(for: colorScheme))
-                .fixedSize(horizontal: false, vertical: true)
 
             calendarEventLabel(event)
 
@@ -2884,7 +2973,18 @@ struct RichResponseCards: View {
                         }
                     }
                 }
+                .padding(.top, event.location.isEmpty ? 0 : 4)
             }
+        }
+        .eventRhythmFrame("rich.details:\(event.id)")
+        let layout = stacksEventRows
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+            : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
+        return layout {
+            clock
+                .frame(width: stacksEventRows ? nil : 74, alignment: .leading)
+                .eventRhythmFrame("rich.clock:\(event.id)")
+            details
         }
     }
 
