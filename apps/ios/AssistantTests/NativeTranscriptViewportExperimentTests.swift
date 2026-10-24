@@ -113,7 +113,7 @@ final class NativeTranscriptViewportExperimentTests: XCTestCase {
             .environment(\.colorScheme, .light).environment(\.dynamicTypeSize, typeSize)
             .environment(\.locale, Locale(identifier: "en_US_POSIX"))
             .environment(\.calendar, Calendar(identifier: .gregorian)).environment(\.timeZone, TimeZone(secondsFromGMT: 0)!)
-            .environment(\.layoutDirection, direction).environment(\.conversationViewportWidth, effectiveWidth)))
+            .environment(\.layoutDirection, direction).environment(\.nativeExperimentFixtureViewportWidth, effectiveWidth)))
         host.additionalSafeAreaInsets = additionalInsets
         window.rootViewController = host; window.layoutIfNeeded()
         try await wait("real collection, all three laid-out row attributes and actual composer") {

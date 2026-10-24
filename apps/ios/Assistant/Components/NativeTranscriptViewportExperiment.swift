@@ -86,7 +86,7 @@ final class NativeTranscriptExperimentSession {
         let enabled: Bool
         let reduceMotion: Bool
         let reduceTransparency: Bool
-        let conversationViewportWidth: CGFloat?
+        let fixtureViewportWidth: CGFloat?
     }
     struct Geometry {
         let scope: Scope
@@ -198,7 +198,14 @@ final class NativeTranscriptExperimentSession {
 }
 
 private struct NativeExperimentViewportSizeKey: EnvironmentKey { static let defaultValue = CGSize.zero }
+private struct NativeExperimentFixtureViewportWidthKey: EnvironmentKey { static let defaultValue: CGFloat? = nil }
 extension EnvironmentValues {
+    /// Fixture context only. Actual f97 MessageBubble does not consume this key
+    /// or PR680 adaptive width; its production scaled insets remain unchanged.
+    var nativeExperimentFixtureViewportWidth: CGFloat? {
+        get { self[NativeExperimentFixtureViewportWidthKey.self] }
+        set { self[NativeExperimentFixtureViewportWidthKey.self] = newValue }
+    }
     var nativeExperimentViewportSize: CGSize {
         get { self[NativeExperimentViewportSizeKey.self] }
         set { self[NativeExperimentViewportSizeKey.self] = newValue }
@@ -254,7 +261,7 @@ fileprivate struct NativeExperimentPresentation {
     let enabled: Bool
     let scene: ScenePhase
     let openURL: OpenURLAction
-    let conversationViewportWidth: CGFloat?
+    let fixtureViewportWidth: CGFloat?
 }
 
 struct NativeTranscriptViewportExperiment: UIViewControllerRepresentable {
@@ -280,12 +287,12 @@ struct NativeTranscriptViewportExperiment: UIViewControllerRepresentable {
     @Environment(\.isEnabled) private var enabled
     @Environment(\.scenePhase) private var scene
     @Environment(\.openURL) private var openURL
-    @Environment(\.conversationViewportWidth) private var conversationViewportWidth
+    @Environment(\.nativeExperimentFixtureViewportWidth) private var fixtureViewportWidth
     private var presentation: NativeExperimentPresentation {
         .init(model: model, colorScheme: colorScheme, contrast: contrast, typeSize: typeSize,
               locale: locale, calendar: calendar, timeZone: timeZone, direction: direction,
               reduceMotion: reduceMotion, reduceTransparency: reduceTransparency,
-              enabled: enabled, scene: scene, openURL: openURL, conversationViewportWidth: conversationViewportWidth)
+              enabled: enabled, scene: scene, openURL: openURL, fixtureViewportWidth: fixtureViewportWidth)
     }
     func makeUIViewController(context: Context) -> NativeTranscriptExperimentController {
         NativeTranscriptExperimentController(session: session)
@@ -330,7 +337,7 @@ private struct NativeExperimentRowRoot: View {
         .environment(\.isEnabled, presentation.enabled)
         .environment(\.scenePhase, presentation.scene)
         .environment(\.openURL, presentation.openURL)
-        .environment(\.conversationViewportWidth, presentation.conversationViewportWidth)
+        .environment(\.nativeExperimentFixtureViewportWidth, presentation.fixtureViewportWidth)
         .onAppear { session.event("appear:\(key.itemID)"); session.mounted(key, token: mount, revision: revision) }
         .onDisappear { session.event("disappear:\(key.itemID)") }
         .onChange(of: revision) { _, value in session.mounted(key, token: mount, revision: value) }
@@ -358,12 +365,12 @@ private struct NativeExperimentContextReader: View {
     @Environment(\.isEnabled) private var enabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    @Environment(\.conversationViewportWidth) private var viewportWidth
+    @Environment(\.nativeExperimentFixtureViewportWidth) private var viewportWidth
     private var receipt: NativeTranscriptExperimentSession.ContextReceipt {
         .init(revision: revision, modelIdentity: ObjectIdentifier(model), colorScheme: colorScheme,
               contrast: contrast, typeSize: typeSize, locale: locale.identifier, calendar: calendar.identifier,
               timeZone: timeZone.identifier, direction: direction, scene: scene, enabled: enabled,
-              reduceMotion: reduceMotion, reduceTransparency: reduceTransparency, conversationViewportWidth: viewportWidth)
+              reduceMotion: reduceMotion, reduceTransparency: reduceTransparency, fixtureViewportWidth: viewportWidth)
     }
     var body: some View {
         Color.clear
