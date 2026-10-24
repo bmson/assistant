@@ -616,7 +616,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
       await expect(start).resolves.toBeNull();
       const calls = await store.collection('toolCalls').where('taskId', '==', taskId).get();
       expect(calls.docs.filter((row) => row.get('toolName') === toolName)).toHaveLength(1);
-      expect(calls.docs.find((row) => row.id === toolId)?.get('status')).toBe('approved');
+      expect(calls.docs.find((row) => row.get('id') === toolId)?.get('status')).toBe('approved');
     } finally {
       releaseInsert.resolve();
       await Promise.allSettled([resolution, start]);
