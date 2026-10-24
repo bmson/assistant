@@ -574,8 +574,8 @@ final class AssistantMarkdownTests: XCTestCase {
                        CGSize(width: 393, height: 852))
         XCTAssertEqual(normalizedConversationViewportSize(.zero), .zero)
         XCTAssertEqual(normalizedConversationViewportSize(CGSize(width: -1, height: 852)), .zero)
-        XCTAssertEqual(normalizedConversationViewportSize(CGSize(width: 393, height: .infinity)), .zero)
-        XCTAssertEqual(normalizedConversationViewportSize(CGSize(width: .nan, height: 852)), .zero)
+        XCTAssertEqual(normalizedConversationViewportSize(CGSize(width: 393, height: CGFloat.infinity)), .zero)
+        XCTAssertEqual(normalizedConversationViewportSize(CGSize(width: CGFloat.nan, height: 852)), .zero)
     }
 
     @MainActor
