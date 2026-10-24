@@ -324,16 +324,16 @@ private struct NativeExperimentRowRoot: View {
             }
         }
         .background(NativeExperimentContextReader(session: session, key: key, revision: revision))
+        // Contrast, Reduce Motion and Reduce Transparency are read-only system
+        // values observed independently in each host. They are not forwarded;
+        // these receipts do not prove controlled propagation or equivalence.
         .environment(presentation.model)
         .environment(\.colorScheme, presentation.colorScheme)
-        .environment(\.colorSchemeContrast, presentation.contrast)
         .environment(\.dynamicTypeSize, presentation.typeSize)
         .environment(\.locale, presentation.locale)
         .environment(\.calendar, presentation.calendar)
         .environment(\.timeZone, presentation.timeZone)
         .environment(\.layoutDirection, presentation.direction)
-        .environment(\.accessibilityReduceMotion, presentation.reduceMotion)
-        .environment(\.accessibilityReduceTransparency, presentation.reduceTransparency)
         .environment(\.isEnabled, presentation.enabled)
         .environment(\.scenePhase, presentation.scene)
         .environment(\.openURL, presentation.openURL)

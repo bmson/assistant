@@ -422,7 +422,7 @@ final class NativeTranscriptViewportExperimentTests: XCTestCase {
             if element.accessibilityLabel == label { return element }
             if let view = element as? UIView, let found = accessible(label: label, in: view) { return found }
         }
-        return root.subviews.lazy.compactMap { accessible(label: label, in: $0) }.first
+        return root.subviews.lazy.compactMap { self.accessible(label: label, in: $0) }.first
     }
     @MainActor private func activate(_ element: NSObject) throws {
         try require(element.accessibilityActivate(), "Actual control did not support native accessibility activation; STOP")
