@@ -26,6 +26,20 @@ describe('phone.call tool', () => {
     expect(registered.tool.acceptsUntrustedInput).toBe(false);
   });
 
+  it('adds the owner-number grant template only behind the explicit feature flag', () => {
+    const registry = new ToolRegistry();
+    registerCallTools(registry, {
+      allowedCountryCodes: '1',
+      maxMinutes: 5,
+      ownerNumberGrantEnabled: true,
+      startCall: async () => ({ callSid: `CA${'b'.repeat(32)}` }),
+    });
+    expect(registry.get('phone.call')?.flags.scopedAllowTemplates).toEqual([
+      'phone.call.same_brief',
+      'phone.call.to_owner_number.v1',
+    ]);
+  });
+
   it('refuses an undialable number before any approval card exists, and caps the length', async () => {
     const { registered } = setup();
     const prepare = registered.tool.prepare as NonNullable<typeof registered.tool.prepare>;

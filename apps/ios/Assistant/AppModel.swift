@@ -4463,6 +4463,55 @@ final class AppModel {
         }
     }
 
+    /// Read the current owner inbox, not properties captured by an older View.
+    /// A removed row retires local review publication; an accepted durable receipt
+    /// remains authoritative and continues through ordinary reconciliation.
+    func ownerCallReviewSourceIsCurrent(_ origin: OwnerCallReviewSourceIdentity) -> Bool {
+        guard activityConnectionRevision == origin.connectionRevision, client != nil,
+              let pending = overview?.approvals.pending.first(where: { $0.id == origin.approvalID }) else { return false }
+        return pending.taskTrust == "owner" && pending.toolName == "phone.call"
+            && pending.approval.status == "pending" && pending.ownerNumberGrantAvailable == true
+            && pending.ownerCallSourceFingerprint == origin.sourceFingerprint
+            && pending.approval.payload == origin.source
+    }
+
+#if DEBUG
+    /// Pure native fixture projection: no notifications, badges, Live Activities or reads.
+    func installOwnerCallReviewProjectionForTesting(_ projection: OverviewResponse, connectionRevision: Int) {
+        overview = projection
+        activityConnectionRevision = connectionRevision
+    }
+#endif
+
+    func previewOwnerCallNumberGrant(id: String, validityChoice: String) async throws -> OwnerCallNumberGrantPreview {
+        guard let client else { throw APIError.invalidServerURL }
+        let version = connectionVersion
+        let review = try await client.previewOwnerCallNumberGrant(id: id, validityChoice: validityChoice)
+        guard connectionIsCurrent(client, version: version) else { throw APIError.invalidResponse }
+        return review
+    }
+
+    /// Keep permission off locally until the atomic approval-and-grant response arrives.
+    func approveOwnerCallNumberGrant(id: String, reviewToken: String) async -> String? {
+        guard let client else { return "Connect to your assistant to review again." }
+        let version = connectionVersion
+        guard approvalsBeingDecided.insert(id).inserted else { return "This decision is still being saved." }
+        defer { if connectionVersion == version { approvalsBeingDecided.remove(id) } }
+        do {
+            let receipt = try await client.approveOwnerCallNumberGrant(id: id, reviewToken: reviewToken)
+            guard connectionIsCurrent(client, version: version), receipt.ok, receipt.ownerCallNumberGrant != nil else { throw APIError.invalidResponse }
+            setDecisionStatus(id: id, status: "approved")
+            scheduleApprovalReconciliation(refreshingWorkspace: true)
+            return nil
+        } catch {
+            if case APIError.server(status: 409, message: "This review expired or changed. Review again.") = error {
+                return "This review expired or changed. Review again."
+            }
+            if connectionIsCurrent(client, version: version) { _ = await refreshOverview(reportFailure: false) }
+            return "Could not confirm result. Refresh to check this call and saved permission before trying again."
+        }
+    }
+
     func approveAndRemember(_ item: PendingApproval) async -> Bool {
         await approveAndRemember(id: item.id)
     }

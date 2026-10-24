@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { configuredOwnerPhoneRecipientFingerprint } from '@assistant/config';
 import type {
   ApprovedToolCall,
   CachedToolCallInput,
@@ -13,14 +14,19 @@ import type {
 import {
   advanceExternalEffect,
   approvalPolicyFingerprint,
+  directOwnerCallRequestBinding,
   type ExternalEffectProgress,
   idempotencyIdentityDigest,
   MAX_APPROVAL_POLICY_SNAPSHOT_ROWS,
   mcpApprovalBindingFingerprint,
   modelToolCallIdentityDigest,
+  ownerAutonomyGrantBindingMatches,
+  phoneCallOwnerNumberGrantBindingMatches,
+  sameDirectOwnerCallRequestBinding,
   toolCallReceiptKeyId,
   toolCallReplayKeysForStart,
 } from '@assistant/persistence';
+import { readFirestoreOwnerCallRequest as ownerCallRequest } from './owner-call-request.js';
 import { createFirestorePhoneCalendarCompatibilityRepository } from './phone-calendar-compatibility.js';
 import { createFirestorePhoneCalendarSharingRepository } from './phone-calendar-sharing.js';
 import { assertPrivacyErasureInactiveInTransaction } from './privacy-erasure.js';
@@ -151,6 +157,10 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
   ): Promise<Records['toolCallReceipts'] | null> {
     const digest = idempotencyIdentityDigest(idempotencyKey);
     return digest ? this.receiptForKey({ agentId, taskId, kind: 'idempotency', digest }) : null;
+  }
+
+  async ownerCallRequest(agentId: string, taskId: string) {
+    return ownerCallRequest(this.store, agentId, taskId, 'running');
   }
 
   async load(
@@ -323,6 +333,8 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
       } catch {
         return markStaleAuthorization();
       }
+      if (input.expectedPhoneCallOwnerNumberGrant && current.task.trust !== 'owner')
+        return markStaleAuthorization();
 
       if (toolCall.toolName === 'mcp.call') {
         const binding = input.expectedMcpBinding;
@@ -358,6 +370,38 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
       }
 
       await assertPrivacyErasureInactiveInTransaction(tx, this.store, input.agentId);
+      const directOwnerRequest = input.expectedPhoneCallOwnerNumberGrant
+        ? await ownerCallRequest(this.store, input.agentId, input.taskId, 'running', tx)
+        : null;
+      const repositoryNow = this.store.now();
+      if (
+        !(repositoryNow instanceof Date) ||
+        !Number.isFinite(repositoryNow.getTime()) ||
+        (input.expectedPhoneCallOwnerNumberGrant &&
+          (process.env.PHONE_CALL_TO_OWNER_GRANT_ENABLED !== 'true' ||
+            !sameDirectOwnerCallRequestBinding(
+              input.expectedPhoneCallOwnerNumberGrant.directOwnerRequest,
+              directOwnerRequest,
+            ) ||
+            !phoneCallOwnerNumberGrantBindingMatches(
+              input.expectedPhoneCallOwnerNumberGrant,
+              policyRows.find(
+                (row) => row.id === input.expectedPhoneCallOwnerNumberGrant?.policyId,
+              ) ?? null,
+              input.agentId,
+              (input.args as { brief?: { to?: unknown; maxMinutes?: unknown } }).brief ?? {},
+              repositoryNow,
+              input.expectedPhoneCallOwnerNumberGrant.recipientAuthority.kind ===
+                'configured_owner_phone'
+                ? configuredOwnerPhoneRecipientFingerprint(
+                    input.expectedPhoneCallOwnerNumberGrant.match.recipientE164,
+                  )
+                : null,
+            ))) ||
+        (input.expectedOwnerAutonomyGrant &&
+          !ownerAutonomyGrantBindingMatches(input.expectedOwnerAutonomyGrant, task, repositoryNow))
+      )
+        return markStaleAuthorization();
       const startedAt = input.startedAt ?? this.store.now();
       // A write to the stable owner document serializes this claim with every
       // approval-policy writer. Firestore retries if either side raced.
@@ -546,6 +590,7 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
       } catch {
         return null;
       }
+      if (input.expectedPhoneCallOwnerNumberGrant && task.trust !== 'owner') return null;
       const keyRefs = placeholderKeys.map((key) => this.store.doc('toolCallReceiptKeys', key.id));
       const existingKeys = keyRefs.length ? await tx.getAll(...keyRefs) : [];
       if (existingKeys.some((snapshot) => snapshot.exists)) return null;
@@ -568,7 +613,38 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
         const existing = await tx.get(mapping);
         if (existing.exists) return null;
       }
+      const directOwnerRequest = input.expectedPhoneCallOwnerNumberGrant
+        ? await ownerCallRequest(this.store, input.agentId, input.taskId, 'running', tx)
+        : null;
       const now = this.store.now();
+      if (
+        !(now instanceof Date) ||
+        !Number.isFinite(now.getTime()) ||
+        (input.expectedPhoneCallOwnerNumberGrant &&
+          (process.env.PHONE_CALL_TO_OWNER_GRANT_ENABLED !== 'true' ||
+            !sameDirectOwnerCallRequestBinding(
+              input.expectedPhoneCallOwnerNumberGrant.directOwnerRequest,
+              directOwnerRequest,
+            ) ||
+            !phoneCallOwnerNumberGrantBindingMatches(
+              input.expectedPhoneCallOwnerNumberGrant,
+              policyRows.find(
+                (row) => row.id === input.expectedPhoneCallOwnerNumberGrant?.policyId,
+              ) ?? null,
+              input.agentId,
+              (input.args as { brief?: { to?: unknown; maxMinutes?: unknown } }).brief ?? {},
+              now,
+              input.expectedPhoneCallOwnerNumberGrant.recipientAuthority.kind ===
+                'configured_owner_phone'
+                ? configuredOwnerPhoneRecipientFingerprint(
+                    input.expectedPhoneCallOwnerNumberGrant.match.recipientE164,
+                  )
+                : null,
+            ))) ||
+        (input.expectedOwnerAutonomyGrant &&
+          !ownerAutonomyGrantBindingMatches(input.expectedOwnerAutonomyGrant, task, now))
+      )
+        return null;
       tx.update(ownerRef, { updatedAt: now });
       const call = {
         id,

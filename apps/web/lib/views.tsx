@@ -41,6 +41,8 @@ export interface PendingApprovalView {
   voiceFlag: string | null;
   actionKind: 'email' | 'calendar' | 'message' | 'document' | 'browser' | 'action';
   expired: boolean;
+  ownerNumberGrantAvailable: boolean;
+  ownerNumberGrantSourceFingerprint: string | null;
 }
 
 const asText = (value: unknown): string =>
@@ -78,6 +80,33 @@ function approvalFields(toolName: string, payload: unknown): ApprovalField[] {
     case 'sms.send':
       fields = [field('To', p.to), field('Message', p.body, true)];
       break;
+    case 'phone.call': {
+      const brief =
+        p.brief && typeof p.brief === 'object' && !Array.isArray(p.brief)
+          ? (p.brief as Record<string, unknown>)
+          : {};
+      fields = [
+        field('Number to call', brief.to),
+        field('Contact', brief.contactName),
+        field('Goal', brief.goal, true),
+        field('May share', brief.context, true),
+        field('May agree to', brief.mayAgreeTo, true),
+        field('Must not', brief.mustNot, true),
+        field('Call duration requested', brief.maxMinutes ? `${brief.maxMinutes} minutes` : null),
+        field(
+          'Voicemail behavior',
+          brief.onVoicemail === 'leave_message' ? 'Leave a message' : 'Hang up',
+        ),
+        field(
+          brief.onVoicemail === 'hang_up'
+            ? 'Saved voicemail message (not used when hanging up)'
+            : 'Voicemail message',
+          brief.voicemailMessage,
+          true,
+        ),
+      ];
+      break;
+    }
     case 'docs.share':
       fields = [
         field('Document', p.documentId),
@@ -249,6 +278,9 @@ export function toPendingApprovalView(
   toolCall: { toolName: string; decision: unknown },
   now: Date = new Date(),
   timeZone?: string,
+  ownerNumberGrantEnabled = false,
+  ownerCallSourceFingerprint: string | null = null,
+  ownerCallAdmissionAvailable = false,
 ): PendingApprovalView {
   return {
     id: approval.id,
@@ -267,6 +299,13 @@ export function toPendingApprovalView(
     voiceFlag: extractVoiceFlag(approval.payload),
     actionKind: approvalActionKind(toolCall.toolName),
     expired: approval.expiresAt <= now,
+    ownerNumberGrantSourceFingerprint: ownerCallSourceFingerprint,
+    ownerNumberGrantAvailable:
+      ownerNumberGrantEnabled &&
+      ownerCallAdmissionAvailable &&
+      task.trust === 'owner' &&
+      toolCall.toolName === 'phone.call' &&
+      approval.expiresAt > now,
   };
 }
 

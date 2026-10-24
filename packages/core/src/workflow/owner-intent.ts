@@ -1,3 +1,4 @@
+import { ownerPhoneRecipientRequest, ownerRequestedPhoneCall } from '@assistant/persistence';
 import { emailProvenanceText, isForwardedIngest } from '../email-provenance.js';
 import type { ClarificationContinuation, Trust } from '../events.js';
 import { explicitlyDisallowsTools } from './conversation-local-context.js';
@@ -16,6 +17,7 @@ export type OwnerIntentScope =
   | 'external_read'
   | 'private_read'
   | 'external_send'
+  | 'phone_call'
   | 'workspace_write'
   | 'personal_write'
   | 'watch_create'
@@ -259,6 +261,15 @@ function orderedReadThenSend(text: string, sendVerbs: string): boolean {
   return !/\b(?:do not|don't|never|should not|shouldn't|would not|wouldn't|not to)\b/i.test(prefix);
 }
 
+/** Reuse and repository proofs share the same deterministic recipient parser. */
+export function explicitOwnerCallRecipient(text: string): string | null {
+  const request = ownerPhoneRecipientRequest(text);
+  return request?.kind === 'explicit_number' ? request.recipientE164 : null;
+}
+export function explicitOwnerSelfCall(text: string): boolean {
+  return ownerPhoneRecipientRequest(text)?.kind === 'owner_self';
+}
+
 function scopesFor(text: string): OwnerIntentScope[] {
   if (explicitlyDisallowsTools(text)) return [];
   const scopes = new Set<OwnerIntentScope>();
@@ -268,6 +279,7 @@ function scopesFor(text: string): OwnerIntentScope[] {
   // this scope.
   if (detectFutureWatchIntent(text)) scopes.add('watch_create');
   const sendVerbs = '(?:send|email|reply|text|message|invite|respond|rsvp|forward|contact)';
+  if (ownerRequestedPhoneCall(text)) scopes.add('phone_call');
   if (affirmativeAction(text, sendVerbs) || orderedReadThenSend(text, sendVerbs))
     scopes.add('external_send');
   if (affirmativeAction(text, '(?:apply\\s+(?:to|for)|submit\\b.{0,80}\\b(?:application|form))')) {

@@ -25,6 +25,8 @@ export interface StartCallInput {
 export interface CallToolDeps {
   allowedCountryCodes: string;
   maxMinutes: number;
+  /** Enables only the separate, versioned owner-number standing grant. */
+  ownerNumberGrantEnabled?: boolean;
   /** Refuses (throws) when a cap, the budget, or configuration stops the call; otherwise dials. */
   startCall(input: StartCallInput): Promise<{ callSid: string }>;
 }
@@ -38,7 +40,7 @@ export function registerCallTools(registry: ToolRegistry, deps: CallToolDeps): T
   const tool: AssistantTool<typeof InputSchema, CallPendingResult> = {
     name: 'phone.call',
     description:
-      "Place a phone call from the assistant's own number and hold the conversation live, on the owner's behalf, to achieve one goal (book a table, ask opening hours, chase an order). Every call needs the owner's approval of the brief unless a saved rule permits the same brief within its time limit. The other party always hears that you are an AI assistant. Put in `context` only the facts you may share, in `mayAgreeTo` exactly what you may accept, and in `mustNot` the hard limits. During the call you can check with the owner. The result (outcome, summary, facts noted, transcript) arrives in the next turn — call ONCE and wait.",
+      "Place a phone call from the assistant's own number and hold the conversation live, on the owner's behalf, to achieve one goal (book a table, ask opening hours, chase an order). Every call needs the owner's approval of the brief unless a saved rule permits it. Exact-brief rules cover only that brief. A separate enabled owner-number permission may cover any direct-owner topic to its exact number within its duration ceiling and expiry, only for an authenticated current owner chat request. The other party always hears that you are an AI assistant. Put in `context` only the facts you may share, in `mayAgreeTo` exactly what you may accept, and in `mustNot` the hard limits. During the call you can check with the owner. The result (outcome, summary, facts noted, transcript) arrives in the next turn — call ONCE and wait.",
     inputSchema: InputSchema,
     risk: 'approval',
     acceptsUntrustedInput: false,
@@ -120,7 +122,10 @@ export function registerCallTools(registry: ToolRegistry, deps: CallToolDeps): T
   registry.register(tool as unknown as AssistantTool, {
     outwardFacing: true,
     blanketAllowIneligible: true,
-    scopedAllowTemplates: ['phone.call.same_brief'],
+    scopedAllowTemplates: [
+      'phone.call.same_brief',
+      ...(deps.ownerNumberGrantEnabled ? ['phone.call.to_owner_number.v1'] : []),
+    ],
     autonomyFloor: true,
     // The other party's words come back in the transcript.
     returnsUntrustedContent: true,

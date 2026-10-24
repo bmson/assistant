@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -200,6 +201,8 @@ const ConfigSchema = z.object({
   CALL_DAILY_LIMIT: z.coerce.number().int().min(0).max(100).default(10),
   /** Hard ceiling on one call's length; a brief may ask for less. */
   CALL_MAX_MINUTES: z.coerce.number().int().min(1).max(60).default(15),
+  /** Allows explicit, expiring grants for calls to the number in an owner-approved brief. */
+  PHONE_CALL_TO_OWNER_GRANT_ENABLED: booleanString,
   PROFILE_ENC_KEY: z.string().default(''),
   /** Encryption key for owner-managed MCP bearer credentials. */
   MCP_ENC_KEY: z.string().default(''),
@@ -659,4 +662,17 @@ export function reloadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 /** Test seam — clears the process-level config cache. */
 export function resetConfigForTest(): void {
   cached = undefined;
+}
+
+/**
+ * Authority from this process's normally loaded configuration snapshot. Changes
+ * take effect through normal reloadConfig/restart, not an unobserved env edit.
+ * The configured number never leaves this helper; callers receive a binding only.
+ */
+export function configuredOwnerPhoneRecipientFingerprint(recipientE164: string): string | null {
+  const configured = loadConfig().OWNER_PHONE;
+  if (!/^\+[1-9]\d{6,14}$/.test(configured) || configured !== recipientE164) return null;
+  return createHash('sha256')
+    .update(JSON.stringify(['configured-owner-phone-v1', configured]))
+    .digest('hex');
 }

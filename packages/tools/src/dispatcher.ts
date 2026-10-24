@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
-import { outboundEmailAllowed } from '@assistant/config';
+import { configuredOwnerPhoneRecipientFingerprint, outboundEmailAllowed } from '@assistant/config';
 import {
   activeAutonomyGrant,
   autonomyFloorBlocks,
   BrowserPlanSchema,
+  extractOwnerIntent,
   isGoalWorkEvidence,
   isJobPending,
   isReadOnlyPlan,
@@ -27,10 +28,17 @@ import type {
   ApprovalRepository,
   CostRepository,
   ExpectedMcpApprovalBinding,
+  ExpectedOwnerAutonomyGrantBinding,
+  ExpectedPhoneCallOwnerNumberGrantBinding,
   Records,
   ToolExecutionRepository,
 } from '@assistant/persistence';
-import { approvalPolicyFingerprint } from '@assistant/persistence';
+import {
+  approvalPolicyFingerprint,
+  ownerPhoneProposalNeedsApproval,
+  parsePhoneCallToOwnerNumberGrantMatch,
+  phoneCallOwnerNumberReviewSourceFingerprint,
+} from '@assistant/persistence';
 import { approvalFallbackSummary } from './approval-summaries.js';
 import { isAmbiguousGoogleMutationError } from './google/client.js';
 import { PartialGoogleArtifactError } from './google/effect-progress.js';
@@ -266,8 +274,9 @@ function requiredOwnerIntentScopes(
     return ['external_read'];
   }
   const required = new Set<OwnerIntentScope>();
-  if (flags.outwardFacing === true) required.add('external_send');
-  if (flags.networkEgress === true) {
+  if (toolName === 'phone.call') required.add('phone_call');
+  else if (flags.outwardFacing === true) required.add('external_send');
+  if (toolName !== 'phone.call' && flags.networkEgress === true) {
     required.add(flags.outwardFacing === true ? 'external_send' : 'external_read');
   }
   if (flags.confidentialRead === true) required.add('private_read');
@@ -858,6 +867,7 @@ export class ToolDispatcher {
       return failApproved('task was cancelled or is no longer running');
     }
     let expectedPolicyFingerprint: string;
+    let expectedPhoneCallOwnerNumberGrant: ExpectedPhoneCallOwnerNumberGrantBinding | undefined;
     let expectedMcpBinding: ExpectedMcpApprovalBinding | undefined;
     try {
       const policyRows = await this.policyRepository.list(ctx.agentId, {
@@ -867,7 +877,7 @@ export class ToolDispatcher {
         agentId: ctx.agentId,
         toolName: call.toolName,
         args: approvedArgs,
-        ctx,
+        ctx: { ...ctx, ownerCallRequest: undefined },
       });
       expectedPolicyFingerprint = approvalPolicyFingerprint(
         policyRows as ApprovalPolicyAuthority[],
@@ -935,6 +945,7 @@ export class ToolDispatcher {
         expectedApprovalId: call.approvalId,
         expectedResolutionPayload: loaded.approval?.resolutionPayload ?? null,
         expectedPolicyFingerprint,
+        ...(expectedPhoneCallOwnerNumberGrant ? { expectedPhoneCallOwnerNumberGrant } : {}),
         expectedTaskTrust: taskTrust,
         ...(expectedMcpBinding ? { expectedMcpBinding } : {}),
         expectedTaskStatus: 'running',
@@ -1376,6 +1387,35 @@ export class ToolDispatcher {
       };
     }
 
+    // C is available only to an authenticated current owner-chat admission.
+    let ownerCallRequest: Awaited<
+      ReturnType<NonNullable<ToolExecutionRepository['ownerCallRequest']>>
+    > = null;
+    if (
+      input.toolName === 'phone.call' &&
+      input.task.type === 'chat_turn' &&
+      input.task.trust === 'owner'
+    ) {
+      try {
+        ownerCallRequest =
+          (await this.executionRepository.ownerCallRequest?.(input.task.agentId, input.task.id)) ??
+          null;
+      } catch {
+        /* C fails closed; exact approval remains available. */
+      }
+    }
+    // A named/ambiguous proposal can only create a review for this exact action.
+    // Classification is bound to the current persisted admitted message, not model args.
+    const phoneTrigger = input.task.trigger as { payload?: { text?: unknown } } | null;
+    const reviewOnlyPhoneProposal =
+      input.toolName === 'phone.call' &&
+      input.ctx.trust === 'owner' &&
+      ownerCallRequest !== null &&
+      phoneCallOwnerNumberReviewSourceFingerprint(input.task.trigger) ===
+        ownerCallRequest.taskTriggerFingerprint &&
+      typeof phoneTrigger?.payload?.text === 'string' &&
+      ownerPhoneProposalNeedsApproval(phoneTrigger.payload.text);
+
     // A source can be present in an authenticated owner message without being
     // an owner request. Every direct owner chat turn must therefore carry the
     // parsed scope for a sensitive action, even when its context is otherwise
@@ -1402,7 +1442,10 @@ export class ToolDispatcher {
           : requiredScopes;
       const authorizedScopes = new Set(input.ctx.ownerIntent?.authorizedScopes ?? []);
       const missing = guardedScopes.filter((scope) => !authorizedScopes.has(scope));
-      if (missing.length > 0) {
+      if (
+        missing.length > 0 &&
+        !(reviewOnlyPhoneProposal && missing.length === 1 && missing[0] === 'phone_call')
+      ) {
         return {
           kind: 'rejected',
           reason: `no positively authored owner request authorized this action (${missing.join(', ')}); ask the owner to state the intended action directly`,
@@ -1466,6 +1509,59 @@ export class ToolDispatcher {
       };
     }
 
+    let ownerCallRecipient: string | null = null;
+    let ownerCallRecipientAuthority:
+      | ExpectedPhoneCallOwnerNumberGrantBinding['recipientAuthority']
+      | undefined;
+    if (ownerCallRequest) {
+      const trigger = input.task.trigger as { payload?: { text?: unknown } } | null;
+      const sourceIntent =
+        typeof trigger?.payload?.text === 'string'
+          ? extractOwnerIntent({
+              text: trigger.payload.text,
+              trust: 'owner',
+              trigger: input.task.trigger,
+            })
+          : null;
+      ownerCallRecipient =
+        ownerCallRequest.recipientRequest?.kind === 'explicit_number'
+          ? ownerCallRequest.recipientRequest.recipientE164
+          : null;
+      if (ownerCallRecipient)
+        ownerCallRecipientAuthority = {
+          kind: 'explicit_number',
+          recipientE164: ownerCallRecipient,
+        };
+      else if (ownerCallRequest.recipientRequest?.kind === 'owner_self') {
+        const recipient = (args as { brief?: { to?: unknown } }).brief?.to;
+        const fingerprint =
+          typeof recipient === 'string'
+            ? configuredOwnerPhoneRecipientFingerprint(recipient)
+            : null;
+        if (typeof recipient === 'string' && fingerprint) {
+          ownerCallRecipient = recipient;
+          ownerCallRecipientAuthority = {
+            kind: 'configured_owner_phone',
+            recipientE164: recipient,
+            fingerprint,
+          };
+        }
+      }
+      if (
+        !ownerCallRecipient ||
+        phoneCallOwnerNumberReviewSourceFingerprint(input.task.trigger) !==
+          ownerCallRequest.taskTriggerFingerprint ||
+        sourceIntent?.sourceActor !== 'owner' ||
+        !sourceIntent.authorizedScopes.includes('phone_call')
+      )
+        ownerCallRequest = null;
+    }
+    const policyContext = {
+      ...input.ctx,
+      ownerCallRequest: ownerCallRequest ?? undefined,
+      ownerCallRecipient: ownerCallRecipient ?? undefined,
+    };
+
     // Policy match (templates only; unknown templates fail closed)
     let policyRows: Awaited<ReturnType<ApprovalPolicyRepository['list']>>;
     let expectedPolicyFingerprint: string;
@@ -1477,12 +1573,15 @@ export class ToolDispatcher {
       expectedPolicyFingerprint = approvalPolicyFingerprint(
         policyRows as ApprovalPolicyAuthority[],
       );
-      policyMatch = matchPolicyRows(policyRows, {
-        agentId: input.task.agentId,
-        toolName: input.toolName,
-        args,
-        ctx: input.ctx,
-      });
+      policyMatch = matchPolicyRows(
+        reviewOnlyPhoneProposal ? policyRows.filter((row) => row.effect === 'deny') : policyRows,
+        {
+          agentId: input.task.agentId,
+          toolName: input.toolName,
+          args,
+          ctx: policyContext,
+        },
+      );
     } catch {
       return { kind: 'rejected', reason: 'approval policy could not be verified' };
     }
@@ -1490,6 +1589,24 @@ export class ToolDispatcher {
       return {
         kind: 'rejected',
         reason: `denied by policy ${policyMatch.policy.templateKey}`,
+      };
+    }
+    let expectedPhoneCallOwnerNumberGrant: ExpectedPhoneCallOwnerNumberGrantBinding | undefined;
+    if (policyMatch?.policy.templateKey === 'phone.call.to_owner_number.v1') {
+      const match = parsePhoneCallToOwnerNumberGrantMatch(policyMatch.policy.match);
+      if (
+        input.ctx.trust !== 'owner' ||
+        policyMatch.policy.effect !== 'allow' ||
+        !match ||
+        !ownerCallRequest
+      ) {
+        return { kind: 'rejected', reason: 'owner-call grant could not be verified' };
+      }
+      expectedPhoneCallOwnerNumberGrant = {
+        policyId: policyMatch.policy.id,
+        match,
+        directOwnerRequest: ownerCallRequest,
+        recipientAuthority: ownerCallRecipientAuthority!,
       };
     }
 
@@ -1566,13 +1683,14 @@ export class ToolDispatcher {
         ? await this.unverifiedRecipients(input.toolName, args, input.ctx)
         : [];
     const recipientUnverified = unverifiedRecipients.length > 0;
-    const computedTier: RiskTier = taintNeedsApproval
-      ? 'approval'
-      : policyAllows
-        ? 'autonomous'
-        : recipientUnverified
-          ? 'approval'
-          : baseTier;
+    const computedTier: RiskTier =
+      reviewOnlyPhoneProposal || taintNeedsApproval
+        ? 'approval'
+        : policyAllows
+          ? 'autonomous'
+          : recipientUnverified
+            ? 'approval'
+            : baseTier;
 
     // Free-range grant: an owner-armed grant downgrades an otherwise
     // approval-gated call to autonomous, unless the call is on the hard floor
@@ -1581,6 +1699,7 @@ export class ToolDispatcher {
     // is still reserved on the autonomous path — both stay enforced.
     const grant = computedTier === 'approval' ? activeAutonomyGrant(input.task, Date.now()) : null;
     const grantApplied =
+      !reviewOnlyPhoneProposal &&
       grant !== null &&
       !autonomyFloorBlocks({
         flags: registered.flags,
@@ -1588,6 +1707,10 @@ export class ToolDispatcher {
         recipientUnverified,
       });
     const tier: RiskTier = grantApplied ? 'autonomous' : computedTier;
+    const expectedOwnerAutonomyGrant: ExpectedOwnerAutonomyGrantBinding | undefined =
+      grantApplied && grant && input.task.trust === 'owner'
+        ? { trust: 'owner', grant: structuredClone(grant) }
+        : undefined;
 
     const decision = {
       riskTier: tier,
@@ -1651,7 +1774,15 @@ export class ToolDispatcher {
       }
     }
 
-    return this.execute({ input, args, decision, registered, expectedPolicyFingerprint });
+    return this.execute({
+      input,
+      args,
+      decision,
+      registered,
+      expectedPolicyFingerprint,
+      ...(expectedPhoneCallOwnerNumberGrant ? { expectedPhoneCallOwnerNumberGrant } : {}),
+      ...(expectedOwnerAutonomyGrant ? { expectedOwnerAutonomyGrant } : {}),
+    });
   }
 
   /** Reserve a tool's declared cost estimate. null = tool has no estimate (nothing to reserve). */
@@ -1712,8 +1843,18 @@ export class ToolDispatcher {
     decision: Record<string, unknown>;
     registered: RegisteredTool;
     expectedPolicyFingerprint: string;
+    expectedPhoneCallOwnerNumberGrant?: ExpectedPhoneCallOwnerNumberGrantBinding;
+    expectedOwnerAutonomyGrant?: ExpectedOwnerAutonomyGrantBinding;
   }): Promise<DispatchOutcome> {
-    const { input, args, decision, registered, expectedPolicyFingerprint } = opts;
+    const {
+      input,
+      args,
+      decision,
+      registered,
+      expectedPolicyFingerprint,
+      expectedPhoneCallOwnerNumberGrant,
+      expectedOwnerAutonomyGrant,
+    } = opts;
     const idempotencyKey = registered.tool.idempotencyKey?.(args, {
       ...input.ctx,
       operationId: input.modelToolCallId,
@@ -1810,6 +1951,8 @@ export class ToolDispatcher {
       idempotencyKey: idempotencyKey ?? null,
       decision,
       expectedPolicyFingerprint,
+      ...(expectedPhoneCallOwnerNumberGrant ? { expectedPhoneCallOwnerNumberGrant } : {}),
+      ...(expectedOwnerAutonomyGrant ? { expectedOwnerAutonomyGrant } : {}),
     });
     if (!row) {
       // lost an idempotency race to a concurrent executor

@@ -2,7 +2,7 @@
   "format": 1,
   "purpose": "Source composition and route drift evidence only; not a deployment or configured-runtime receipt.",
   "runtimeSources": {
-    "packages/config/src/index.ts": "d65963a4a350f41242da86910f085d60909f13b584aa710e4a0423f60437fe9b",
+    "packages/config/src/index.ts": "45869584713afe656a96b387d5dc9f70cd2352f4661095325e421577b1369a22",
     "apps/agent/src/deps.ts": "fb30df8600bbcf24da0d5cfa9ef1c92e28700b663429cdbbe37d65ecee0ea655",
     "apps/agent/src/index.ts": "6da57b60f853ca6622142a12b70bb31a73e8155eac30dd7d905218c19ca2fd56",
     "apps/web/lib/server.ts": "c7134fe07612b8653ef7ee73f92076bbdea5a27fb665c8efb3d843f960d49211",
@@ -147,7 +147,7 @@
     },
     "apps/web/app/api/mobile/v1/approvals/[id]/route.ts": {
       "methods": ["POST"],
-      "sha256": "180da7b2659787731ffd158076f111cd342e75732a73d2d04c3b766ae7e13ece"
+      "sha256": "167a707fd09ebaf23f73d81b7037859744c4bd5b7673619fb52e9c2d74c2fff9"
     },
     "apps/web/app/api/mobile/v1/bootstrap/route.ts": {
       "methods": ["GET"],
@@ -399,7 +399,7 @@
     },
     "apps/web/app/api/mobile/v1/workspace/route.ts": {
       "methods": ["GET"],
-      "sha256": "222d52bd9fe7ec361124201080e2079b2c3080cba566f19767b85f9214573a7c"
+      "sha256": "e14739ef7dbc4a22e095a290d93886cc189ed7a2a9fcf4bedb98947087e932fe"
     },
     "apps/web/app/api/mobile/v1/workspace/sections/[section]/route.ts": {
       "methods": ["GET"],

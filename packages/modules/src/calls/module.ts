@@ -51,6 +51,7 @@ export const callsModule = defineModule<CallBridge>({
       registerCallTools(registry, {
         allowedCountryCodes: config.CALL_ALLOWED_COUNTRY_CODES,
         maxMinutes: config.CALL_MAX_MINUTES,
+        ownerNumberGrantEnabled: config.PHONE_CALL_TO_OWNER_GRANT_ENABLED,
         startCall: (input) =>
           startCall(
             {

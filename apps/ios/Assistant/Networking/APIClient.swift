@@ -1588,6 +1588,23 @@ struct APIClient: Sendable {
         return try await perform(request, as: SuggestionResult.self)
     }
 
+    func previewOwnerCallNumberGrant(id: String, validityChoice: String) async throws -> OwnerCallNumberGrantPreview {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/approvals/\(id)"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(OwnerCallGrantActionBody(action: "preview_reusable_call_v1", validityChoice: validityChoice))
+        return try await perform(request, as: OwnerCallNumberGrantPreview.self)
+    }
+
+    /// A final submission is never retried automatically after an uncertain response.
+    func approveOwnerCallNumberGrant(id: String, reviewToken: String) async throws -> ApprovalResult {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/approvals/\(id)"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(OwnerCallGrantActionBody(action: "approve_reusable_call_v1", reviewToken: reviewToken, acknowledgement: "any_direct_owner_topic_any_answerer_v1"))
+        return try await perform(request, as: ApprovalResult.self)
+    }
+
     func approveAndRemember(id: String) async throws -> ApprovalResult {
         try await approvalAction(id: id, body: ApprovalActionBody(action: "remember", payload: nil))
     }

@@ -51,6 +51,58 @@ describe('toPendingApprovalView', () => {
     expect(view.expired).toBe(false);
     expect(view.actionKind).toBe('calendar');
   });
+
+  it('shows the exact phone-call brief and only offers separate future permission when enabled', () => {
+    const call = approval(new Date('2026-07-22T18:00:01.000Z'));
+    call.payload = {
+      brief: {
+        to: '+14155550123',
+        contactName: 'Nopa',
+        goal: 'Ask about a table tonight.',
+        context: 'The owner prefers a quiet table.',
+        mayAgreeTo: 'Any table between 7 and 8pm.',
+        mustNot: 'Do not leave a deposit.',
+        maxMinutes: 12,
+        onVoicemail: 'hang_up',
+        voicemailMessage: 'Please call back.',
+      },
+    };
+    const view = toPendingApprovalView(
+      call,
+      { type: 'chat_turn', trust: 'owner' },
+      { toolName: 'phone.call', decision: null },
+      now,
+      'UTC',
+      true,
+      null,
+      true,
+    );
+    expect(view.ownerNumberGrantAvailable).toBe(true);
+    expect(view.fields).toEqual(
+      expect.arrayContaining([
+        { label: 'Number to call', value: '+14155550123', block: false },
+        { label: 'Goal', value: 'Ask about a table tonight.', block: true },
+        { label: 'May share', value: 'The owner prefers a quiet table.', block: true },
+        { label: 'May agree to', value: 'Any table between 7 and 8pm.', block: true },
+        { label: 'Must not', value: 'Do not leave a deposit.', block: true },
+        {
+          label: 'Saved voicemail message (not used when hanging up)',
+          value: 'Please call back.',
+          block: true,
+        },
+      ]),
+    );
+    expect(
+      toPendingApprovalView(
+        call,
+        { type: 'chat_turn', trust: 'owner' },
+        { toolName: 'phone.call', decision: null },
+        now,
+        'UTC',
+        false,
+      ).ownerNumberGrantAvailable,
+    ).toBe(false);
+  });
 });
 
 describe('displayTaskStatus', () => {

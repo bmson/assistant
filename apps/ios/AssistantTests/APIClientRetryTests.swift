@@ -35,6 +35,7 @@ final class StubURLProtocol: URLProtocol {
     private static var recordedHeaders: [[String: String]] = []
     private static var recordedTimeouts: [TimeInterval] = []
     private static var heldResponses: [String: StubURLProtocol] = [:]
+    private static var retiredHeldResponses: Set<String> = []
     private static var stoppedPaths: Set<String> = []
     private static var stoppedRequests: Set<String> = []
     private static var stopLoadingObservers: [String: [() -> Void]] = [:]
@@ -48,6 +49,7 @@ final class StubURLProtocol: URLProtocol {
     static func beginTestCase(_ id: String) {
         lock.withLock {
             activeTestCaseID = id
+            retiredHeldResponses = []
             outcomes = []
             pathOutcomes = [:]
             tokenOutcomes = [:]
@@ -145,6 +147,20 @@ final class StubURLProtocol: URLProtocol {
 
     static func hasStoppedRequest(method: String, url: URL, testCaseID: String) -> Bool {
         lock.withLock { stoppedRequests.contains("\(testCaseID)\u{0}\(method)\u{0}\(url.absoluteString)") }
+    }
+
+    /// Retires this owned case/path even if cancellation precedes registration.
+    static func retireHeldResponse(path: String, testCaseID: String) {
+        let instance = lock.withLock { () -> StubURLProtocol? in
+            retiredHeldResponses.insert(stopLoadingKey(path: path, testCaseID: testCaseID))
+            guard let held = heldResponses[path],
+                  Self.testCaseID(in: held.request.allHTTPHeaderFields ?? [:]) == testCaseID else { return nil }
+            return heldResponses.removeValue(forKey: path)
+        }
+        if let instance {
+            instance.heldResponse = nil
+            instance.client?.urlProtocol(instance, didFailWithError: URLError(.cancelled))
+        }
     }
 
     static func releaseHeldResponse(path: String) {
@@ -328,9 +344,15 @@ final class StubURLProtocol: URLProtocol {
             heldResponse = (status, body)
             heldResponseCorrelatesMutation = false
             let key = Self.stopLoadingKey(path: path, testCaseID: requestTestCaseID)
-            Self.lock.withLock {
+            let canHold = Self.lock.withLock {
+                guard Self.activeTestCaseID == requestTestCaseID, !Self.retiredHeldResponses.contains(key) else { return false }
                 Self.stoppedPaths.remove(key)
                 Self.heldResponses[path] = self
+                return true
+            }
+            if !canHold {
+                heldResponse = nil
+                client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
             }
         case let .heldCalendarConfigureAcknowledgement(status, body):
             guard let requestTestCaseID = Self.testCaseID(in: request.allHTTPHeaderFields ?? [:]),
@@ -8609,5 +8631,103 @@ extension APIClientRetryTests {
         try await exercise("ready-binding-lost", outcome: .bindingLost, edit: .none)
         try await exercise("binding-lost-pending-unsaved-follow-up", outcome: .bindingLost, edit: .pendingFollowUp)
         try await exercise("binding-lost-pending-unsaved-whitespace", outcome: .bindingLost, edit: .pendingWhitespace)
+    }
+}
+
+extension APIClientRetryTests {
+    func testOwnerCallGrantFinalUsesExactlyThreeFieldsAndNoAutomaticTransportRetry() async throws {
+        StubURLProtocol.prime([.failure(URLError(.timedOut))])
+        do {
+            _ = try await makeClient().approveOwnerCallNumberGrant(id: "approval", reviewToken: "sealed-review")
+            XCTFail("A lost final response must remain ambiguous.")
+        } catch {}
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(StubURLProtocol.bodies.first)) as? [String: String])
+        XCTAssertEqual(payload, ["action": "approve_reusable_call_v1", "reviewToken": "sealed-review", "acknowledgement": "any_direct_owner_topic_any_answerer_v1"])
+    }
+
+    @MainActor
+    func testOwnerCallGrantStale409IsDistinctFromDisabled409AndUnknownTransportResult() async throws {
+        let stale = "This review expired or changed. Review again."
+        let ambiguous = "Could not confirm result. Refresh to check this call and saved permission before trying again."
+        for message in [stale, "Reusable owner-number calls are disabled."] {
+            StubURLProtocol.prime([.success(status: 409, body: try JSONSerialization.data(withJSONObject: ["error": message]))])
+            let model = AppModel(apiClient: makeClient())
+            let result = await model.approveOwnerCallNumberGrant(id: "approval", reviewToken: "sealed-review")
+            XCTAssertEqual(result, message == stale ? stale : ambiguous)
+            XCTAssertEqual(StubURLProtocol.attempts.filter { $0 == "POST" }.count, 1)
+        }
+    }
+}
+
+
+extension APIClientRetryTests {
+    @MainActor
+    func testHeldOwnerCallResponsesUseTheProductionPublicationBoundary() async throws {
+        func item(id: String = "owner-call-review", source: JSONValue = .object(["brief": .string("original")]), fingerprint: String = "source-v1") -> PendingApproval {
+            PendingApproval(approval: ApprovalRecord(id: id, taskId: "task", shortCode: "A1", summary: "Synthetic call", payload: source, resolutionPayload: nil, status: "pending", requestedAt: "2026-10-23T12:00:00Z", resolvedAt: nil, resolvedVia: nil, expiresAt: "2099-10-23T12:00:00Z"), taskType: "chat_turn", taskTrust: "owner", toolName: "phone.call", decision: .null, ownerNumberGrantAvailable: true, ownerCallSourceFingerprint: fingerprint)
+        }
+        func projection(_ pending: [PendingApproval]) throws -> OverviewResponse {
+            try JSONDecoder().decode(OverviewResponse.self, from: overviewBody(pending: pending))
+        }
+        let receiptBody = Data(#"{"ok":true,"taskId":"task","toolCallId":"tool","approvalId":"owner-call-review","ownerCallNumberGrant":{"policyId":"policy","grantId":"grant","expiresAt":"2099-10-30T12:00:00Z"}}"#.utf8)
+        for phase in ["preview-error", "final-success", "final-error"] {
+            for change in ["live", "source", "approval", "connection", "validity", "disappear", "new-review", "post-write-removal"] {
+                let label = "\(phase)/\(change)"
+                let approvalID = "owner-call-review-\(phase)-\(change)"
+                let path = "/api/mobile/v1/approvals/\(approvalID)"
+                let client = makeClient()
+                let model = AppModel(apiClient: client)
+                let original = item(id: approvalID)
+                model.installOwnerCallReviewProjectionForTesting(try projection([original]), connectionRevision: 0)
+                let origin = OwnerCallReviewSourceIdentity(approvalID: original.id, source: original.approval.payload, sourceFingerprint: original.ownerCallSourceFingerprint, connectionRevision: 0)
+                let lease = OwnerCallReviewPublicationLease()
+                let operation = lease.begin(source: origin, validityChoice: "7d")
+                var publications: [String] = []
+                var successfulReceipt: ApprovalResult?
+                let status = phase == "final-success" ? 200 : 409
+                let successfulBody = Data(String(decoding: receiptBody, as: UTF8.self).replacingOccurrences(of: "owner-call-review", with: approvalID).utf8)
+                let body = phase == "final-success" ? successfulBody : Data(#"{"error":"This review expired or changed. Review again."}"#.utf8)
+                StubURLProtocol.prime([], paths: [path: [.held(status: status, body: body)]])
+                let completion = Task {
+                    do {
+                        if phase == "preview-error" { _ = try await client.previewOwnerCallNumberGrant(id: original.id, validityChoice: "7d") }
+                        else { successfulReceipt = try await client.approveOwnerCallNumberGrant(id: original.id, reviewToken: "sealed-review") }
+                        lease.publish(operation, currentSource: { model.ownerCallReviewSourceIsCurrent(origin) }) { publications.append("saved/working=false") }
+                    } catch {
+                        lease.publish(operation, currentSource: { model.ownerCallReviewSourceIsCurrent(origin) }) { publications.append("error/working=false") }
+                    }
+                }
+                defer {
+                    lease.invalidate()
+                    StubURLProtocol.retireHeldResponse(path: path, testCaseID: testCaseID)
+                    completion.cancel()
+                }
+                let clock = ContinuousClock()
+                let deadline = clock.now.advanced(by: .seconds(2))
+                while !StubURLProtocol.isHoldingResponse(path: path), clock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(1))
+                }
+                guard StubURLProtocol.isHoldingResponse(path: path) else {
+                    XCTFail("Owned held response did not become ready before its monotonic deadline: " + label)
+                    throw URLError(.timedOut)
+                }
+                switch change {
+                case "source": model.installOwnerCallReviewProjectionForTesting(try projection([item(id: approvalID, source: .object(["brief": .string("changed")]), fingerprint: "source-v2")]), connectionRevision: 0)
+                case "approval": model.installOwnerCallReviewProjectionForTesting(try projection([item(id: "replacement")]), connectionRevision: 0)
+                case "connection": model.installOwnerCallReviewProjectionForTesting(try projection([original]), connectionRevision: 1)
+                case "validity": _ = lease.begin(source: origin, validityChoice: "30d")
+                case "disappear": lease.invalidate()
+                case "new-review": _ = lease.begin(source: origin, validityChoice: "7d")
+                case "post-write-removal": model.installOwnerCallReviewProjectionForTesting(try projection([]), connectionRevision: 0)
+                default: break
+                }
+                StubURLProtocol.releaseHeldResponse(path: path)
+                await completion.value
+                XCTAssertEqual(publications.count, change == "live" ? 1 : 0, label)
+                if phase == "final-success" { XCTAssertEqual(successfulReceipt?.approvalId, original.id, "A retired view must not undo or misclassify the durable response: " + label) }
+                XCTAssertEqual(StubURLProtocol.attempts, ["POST"], label)
+            }
+        }
     }
 }

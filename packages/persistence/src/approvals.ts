@@ -1,3 +1,4 @@
+import type { PhoneCallOwnerNumberGrantFinalizationBinding } from './phone-call-owner-number-grant.js';
 import type { Records } from './records.js';
 
 export interface ResolveApprovalInput {
@@ -21,12 +22,20 @@ export interface ResolveApprovalInput {
     match: Record<string, unknown>;
     effect: 'allow' | 'deny';
   };
+  /** Dedicated, token-bound path for granting future calls to an approved number. */
+  ownerCallNumberGrant?: PhoneCallOwnerNumberGrantFinalizationBinding;
   /** Caller will resume the task itself (used by bounded internal canaries/tests). */
   deferNotification?: boolean;
 }
 
 export type ResolveApprovalResult =
-  | { ok: true; taskId: string; toolCallId: string; approvalId: string }
+  | {
+      ok: true;
+      taskId: string;
+      toolCallId: string;
+      approvalId: string;
+      ownerCallNumberGrant?: { policyId: string; grantId: string; expiresAt: string };
+    }
   | { ok: false; reason: string };
 
 export type ApprovalResolution = ResolveApprovalResult & {
@@ -41,6 +50,9 @@ export interface ApprovalInboxQuery {
 
 export interface PendingApprovalItem {
   rememberLabel?: string | null;
+  ownerNumberGrantAvailable?: boolean;
+  ownerCallSourceFingerprint?: string | null;
+  ownerCallAdmissionAvailable?: boolean;
   approval: Records['approvals'];
   taskType: string;
   taskTrust: string;
@@ -76,6 +88,11 @@ export interface ApprovalRepository {
   create(input: CreateApprovalInput): Promise<CreatedApproval>;
   /** Read the current owner-scoped approval payload needed to derive a standing policy. */
   getRememberable(agentId: string, approvalId: string): Promise<RememberableApproval | null>;
+  /** Current pending owner-call approval and its directly linked owner task/tool call. */
+  getOwnerCallNumberGrantReview?(
+    agentId: string,
+    approvalId: string,
+  ): Promise<OwnerCallNumberGrantReview | null>;
   /** Owner-scoped bounded approval screen projection; resolved history excludes payloads. */
   listInbox(agentId: string, options?: ApprovalInboxQuery): Promise<ApprovalInbox>;
   /** A bounded scan may return no eligible notices while its durable cursor still has more pages. */
@@ -92,6 +109,19 @@ export interface ApprovalRepository {
 export interface RememberableApproval {
   approval: Records['approvals'];
   toolName: string;
+}
+
+export interface OwnerCallNumberGrantReview {
+  approval: Records['approvals'];
+  toolCall: Pick<Records['toolCalls'], 'id' | 'taskId' | 'toolName' | 'args' | 'status'>;
+  task: Pick<Records['tasks'], 'id' | 'agentId' | 'trust' | 'status'>;
+  ownerTimeZone: string;
+  repositoryNow: Date;
+  directOwnerRequest: import('./phone-call-owner-number-grant.js').DirectOwnerCallRequestBinding;
+  existingActiveGrants: Array<{
+    policyId: string;
+    match: import('./phone-call-owner-number-grant.js').PhoneCallToOwnerNumberGrantMatch;
+  }>;
 }
 
 export interface ApprovalWake {

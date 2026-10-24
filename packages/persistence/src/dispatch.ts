@@ -1,6 +1,8 @@
+import type { ExpectedOwnerAutonomyGrantBinding } from './autonomy-grant.js';
 import type { ExternalEffectProgress } from './external-effect.js';
 import type { PhoneCalendarCompatibilityRepository } from './phone-calendar-compatibility.js';
 import type { PhoneCalendarSharingRepository } from './phone-calendar-sharing.js';
+import type { ExpectedPhoneCallOwnerNumberGrantBinding } from './phone-call-owner-number-grant.js';
 import type { Records } from './records.js';
 
 export interface WakeIntent {
@@ -50,6 +52,10 @@ export interface ClaimApprovedToolCallInput {
   expectedPolicyFingerprint: string;
   /** MCP's prepared connection/tool/credential binding; required for mcp.call. */
   expectedMcpBinding?: import('./approval-authority.js').ExpectedMcpApprovalBinding;
+  /** Exact selected C policy row and scope, rechecked at the atomic claim. */
+  expectedPhoneCallOwnerNumberGrant?: ExpectedPhoneCallOwnerNumberGrantBinding;
+  /** Present only when this owner task grant changed the original risk decision. */
+  expectedOwnerAutonomyGrant?: ExpectedOwnerAutonomyGrantBinding;
   /** Trust/capability tier read from the task before claiming. */
   expectedTaskTrust: string;
   /** Task state that must still hold at the atomic side-effect claim. */
@@ -77,6 +83,10 @@ export interface StartAutonomousToolCallInput {
   decision: Record<string, unknown>;
   /** Bounded snapshot of every owner/tool policy row used for this risk decision. */
   expectedPolicyFingerprint: string;
+  /** Exact selected C policy row and scope, rechecked at the atomic start. */
+  expectedPhoneCallOwnerNumberGrant?: ExpectedPhoneCallOwnerNumberGrantBinding;
+  /** Present only when this owner task grant changed the original risk decision. */
+  expectedOwnerAutonomyGrant?: ExpectedOwnerAutonomyGrantBinding;
   startedAt?: Date;
 }
 export interface CachedToolCallInput
@@ -87,6 +97,11 @@ export interface CachedToolCallInput
 /** Owner- and task-scoped persistence for the already-approved execution path. */
 export interface ToolExecutionRepository {
   readonly kind: 'tool-execution-repository';
+  /** Authenticated current owner-chat admission and its latest linked owner message. */
+  ownerCallRequest?(
+    agentId: string,
+    taskId: string,
+  ): Promise<import('./phone-call-owner-number-grant.js').DirectOwnerCallRequestBinding | null>;
   /** Load a call and its links without returning another owner's records. */
   load(agentId: string, taskId: string, toolCallId: string): Promise<ApprovedToolCall | null>;
   /** Find the unique call emitted by a model inside this task, for crash recovery. */
