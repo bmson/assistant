@@ -275,7 +275,8 @@ export class FirestoreApprovalRepository implements ApprovalRepository {
           const policy = decodeRecord<Records['approvalPolicies']>(snapshot.data());
           const match = parsePhoneCallToOwnerNumberGrantMatch(policy.match);
           const recipient = (tool.args as { brief?: { to?: unknown } })?.brief?.to;
-          return policy.id === snapshot.id &&
+          return validDocumentIdentifier(policy.id) &&
+            documentKey(policy.id) === snapshot.id &&
             policy.enabled &&
             policy.effect === 'allow' &&
             policy.templateKey === 'phone.call.to_owner_number.v1' &&
