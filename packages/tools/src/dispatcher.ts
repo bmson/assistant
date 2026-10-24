@@ -35,7 +35,7 @@ import { approvalFallbackSummary } from './approval-summaries.js';
 import { isAmbiguousGoogleMutationError } from './google/client.js';
 import { PartialGoogleArtifactError } from './google/effect-progress.js';
 import { isAmbiguousMcpMutationError } from './mcp-transport.js';
-import { matchPolicies, matchPolicyRows } from './policies.js';
+import { matchPolicyRows } from './policies.js';
 import type { ToolRegistry } from './registry.js';
 import { isAmbiguousTwilioDeliveryError } from './twilio/client.js';
 import {
@@ -1467,12 +1467,25 @@ export class ToolDispatcher {
     }
 
     // Policy match (templates only; unknown templates fail closed)
-    const policyMatch = await matchPolicies(this.policyRepository, {
-      agentId: input.task.agentId,
-      toolName: input.toolName,
-      args,
-      ctx: input.ctx,
-    });
+    let policyRows: Awaited<ReturnType<ApprovalPolicyRepository['list']>>;
+    let expectedPolicyFingerprint: string;
+    let policyMatch: ReturnType<typeof matchPolicyRows>;
+    try {
+      policyRows = await this.policyRepository.list(input.task.agentId, {
+        toolName: input.toolName,
+      });
+      expectedPolicyFingerprint = approvalPolicyFingerprint(
+        policyRows as ApprovalPolicyAuthority[],
+      );
+      policyMatch = matchPolicyRows(policyRows, {
+        agentId: input.task.agentId,
+        toolName: input.toolName,
+        args,
+        ctx: input.ctx,
+      });
+    } catch {
+      return { kind: 'rejected', reason: 'approval policy could not be verified' };
+    }
     if (policyMatch?.effect === 'deny') {
       return {
         kind: 'rejected',
@@ -1521,12 +1534,14 @@ export class ToolDispatcher {
     const policyAllows =
       policyMatch?.effect === 'allow' &&
       (registered.flags.blanketAllowIneligible !== true ||
-        registered.flags.scopedAllowTemplates?.includes(policyMatch.policy.templateKey) === true);
+        registered.flags.scopedAllowTemplates?.includes(policyMatch?.policy.templateKey ?? '') ===
+          true);
     const explicitlyAllowedUnderTaint =
       policyAllows &&
       input.ctx.trust === 'owner' &&
-      registered.flags.scopedAllowUnderTaintTemplates?.includes(policyMatch.policy.templateKey) ===
-        true;
+      registered.flags.scopedAllowUnderTaintTemplates?.includes(
+        policyMatch?.policy.templateKey ?? '',
+      ) === true;
     const taintNeedsApproval =
       privilegedTaint &&
       !explicitlyAllowedUnderTaint &&
@@ -1636,7 +1651,7 @@ export class ToolDispatcher {
       }
     }
 
-    return this.execute({ input, args, decision, registered });
+    return this.execute({ input, args, decision, registered, expectedPolicyFingerprint });
   }
 
   /** Reserve a tool's declared cost estimate. null = tool has no estimate (nothing to reserve). */
@@ -1696,8 +1711,9 @@ export class ToolDispatcher {
     args: Record<string, unknown>;
     decision: Record<string, unknown>;
     registered: RegisteredTool;
+    expectedPolicyFingerprint: string;
   }): Promise<DispatchOutcome> {
-    const { input, args, decision, registered } = opts;
+    const { input, args, decision, registered, expectedPolicyFingerprint } = opts;
     const idempotencyKey = registered.tool.idempotencyKey?.(args, {
       ...input.ctx,
       operationId: input.modelToolCallId,
@@ -1793,11 +1809,15 @@ export class ToolDispatcher {
       args,
       idempotencyKey: idempotencyKey ?? null,
       decision,
+      expectedPolicyFingerprint,
     });
     if (!row) {
       // lost an idempotency race to a concurrent executor
       if (reserved?.ok) await this.costRepository.release(reserved.reservationId).catch(() => {});
-      return { kind: 'rejected', reason: 'identical call already in flight' };
+      return {
+        kind: 'rejected',
+        reason: 'autonomous authorization changed or identical call is already in flight',
+      };
     }
 
     // Cancellation or lease replacement can commit after the durable call

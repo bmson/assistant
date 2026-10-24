@@ -501,6 +501,10 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
     });
     if (!placeholderKeys) throw new Error('Tool replay identity is invalid');
     return this.store.db.runTransaction(async (tx) => {
+      if (!/^[a-f0-9]{64}$/.test(input.expectedPolicyFingerprint)) return null;
+      const ownerRef = this.store.doc('agents', input.agentId);
+      const owner = await tx.get(ownerRef);
+      if (!owner.exists || owner.get('id') !== input.agentId) return null;
       await assertPrivacyErasureInactiveInTransaction(tx, this.store, input.agentId);
       const task = read<Records['tasks']>(
         await tx.get(this.store.doc('tasks', input.taskId)),
@@ -512,6 +516,36 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
         ['done', 'failed', 'cancelled'].includes(task.status)
       )
         return null;
+      const policySnapshots = await tx.get(
+        this.store
+          .collection('approvalPolicies')
+          .where('agentId', '==', input.agentId)
+          .where('toolName', '==', input.toolName)
+          .orderBy('id', 'asc')
+          .limit(MAX_APPROVAL_POLICY_SNAPSHOT_ROWS + 1),
+      );
+      if (policySnapshots.size > MAX_APPROVAL_POLICY_SNAPSHOT_ROWS) return null;
+      let malformedPolicy = false;
+      const policyRows = policySnapshots.docs.map((snapshot) => {
+        const row = decodeRecord<Records['approvalPolicies']>(snapshot.data());
+        if (
+          !row ||
+          typeof row !== 'object' ||
+          Array.isArray(row) ||
+          row.id !== snapshot.get('id') ||
+          documentKey(row.id) !== snapshot.id ||
+          row.agentId !== input.agentId ||
+          row.toolName !== input.toolName
+        )
+          malformedPolicy = true;
+        return row;
+      });
+      if (malformedPolicy) return null;
+      try {
+        if (approvalPolicyFingerprint(policyRows) !== input.expectedPolicyFingerprint) return null;
+      } catch {
+        return null;
+      }
       const keyRefs = placeholderKeys.map((key) => this.store.doc('toolCallReceiptKeys', key.id));
       const existingKeys = keyRefs.length ? await tx.getAll(...keyRefs) : [];
       if (existingKeys.some((snapshot) => snapshot.exists)) return null;
@@ -534,12 +568,14 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
         const existing = await tx.get(mapping);
         if (existing.exists) return null;
       }
+      const now = this.store.now();
+      tx.update(ownerRef, { updatedAt: now });
       const call = {
         id,
-        createdAt: this.store.now(),
+        createdAt: now,
         status: 'executing',
         taskId: input.taskId,
-        startedAt: input.startedAt ?? this.store.now(),
+        startedAt: input.startedAt ?? now,
         step: input.step,
         toolName: input.toolName,
         args: input.args,
