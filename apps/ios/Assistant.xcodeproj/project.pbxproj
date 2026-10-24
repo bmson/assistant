@@ -17,6 +17,7 @@
 		B00000000000000000000006 /* Networking/APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000006 /* Networking/APIClient.swift */; };
 		B00000000000000000000008 /* Components/StatusPill.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000008 /* Components/StatusPill.swift */; };
 		B00000000000000000000009 /* Components/MessageBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000009 /* Components/MessageBubble.swift */; };
+		B20000000000000000000001 /* Components/NativeTranscriptViewportExperiment.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000001 /* Components/NativeTranscriptViewportExperiment.swift */; };
 		B0000000000000000000000A /* Views/RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000A /* Views/RootView.swift */; };
 		B0000000000000000000000B /* Views/ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000B /* Views/ChatView.swift */; };
 		B0000000000000000000000C /* Views/ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000C /* Views/ActivityView.swift */; };
@@ -41,6 +42,7 @@
 		B00000000000000000000078 /* Views/CommitmentsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000078 /* Views/CommitmentsView.swift */; };
 		B00000000000000000000077 /* Views/MemoryLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000077 /* Views/MemoryLibraryView.swift */; };
 		B00000000000000000000050 /* AssistantMarkdownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000050 /* AssistantMarkdownTests.swift */; };
+		B20000000000000000000002 /* NativeTranscriptViewportExperimentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000002 /* NativeTranscriptViewportExperimentTests.swift */; };
 		B00000000000000000000051 /* System/LocationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000051 /* System/LocationManager.swift */; };
 		B00000000000000000000054 /* Views/KnowledgeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000054 /* Views/KnowledgeView.swift */; };
 		B00000000000000000000055 /* Models/PollingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000055 /* Models/PollingPolicy.swift */; };
@@ -133,6 +135,7 @@
 		C00000000000000000000006 /* Networking/APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Networking/APIClient.swift; sourceTree = "<group>"; };
 		C00000000000000000000008 /* Components/StatusPill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components/StatusPill.swift; sourceTree = "<group>"; };
 		C00000000000000000000009 /* Components/MessageBubble.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components/MessageBubble.swift; sourceTree = "<group>"; };
+		C20000000000000000000001 /* Components/NativeTranscriptViewportExperiment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components/NativeTranscriptViewportExperiment.swift; sourceTree = "<group>"; };
 		C0000000000000000000000A /* Views/RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/RootView.swift; sourceTree = "<group>"; };
 		C0000000000000000000000B /* Views/ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/ChatView.swift; sourceTree = "<group>"; };
 		C0000000000000000000000C /* Views/ActivityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/ActivityView.swift; sourceTree = "<group>"; };
@@ -160,6 +163,7 @@
 		C00000000000000000000078 /* Views/CommitmentsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CommitmentsView.swift; sourceTree = "<group>"; };
 		C00000000000000000000077 /* Views/MemoryLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/MemoryLibraryView.swift; sourceTree = "<group>"; };
 		C00000000000000000000050 /* AssistantMarkdownTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantMarkdownTests.swift; sourceTree = "<group>"; };
+		C20000000000000000000002 /* NativeTranscriptViewportExperimentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTranscriptViewportExperimentTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000051 /* System/LocationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = System/LocationManager.swift; sourceTree = "<group>"; };
 		C00000000000000000000052 /* Assistant.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Assistant.entitlements; sourceTree = "<group>"; };
 		C00000000000000000000054 /* Views/KnowledgeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/KnowledgeView.swift; sourceTree = "<group>"; };
@@ -288,6 +292,7 @@
 				C00000000000000000000024 /* Components/ChatDashboard.swift */,
 				C00000000000000000000008 /* Components/StatusPill.swift */,
 				C00000000000000000000009 /* Components/MessageBubble.swift */,
+				C20000000000000000000001 /* Components/NativeTranscriptViewportExperiment.swift */,
 				C00000000000000000000056 /* Components/MermaidDiagramView.swift */,
 				C0000000000000000000000A /* Views/RootView.swift */,
 				C00000000000000000000070 /* Views/SituationPacksView.swift */,
@@ -343,6 +348,7 @@
 				C000000000000000000000A6 /* EncryptedCardFormDraftStorageTests.swift */,
 				C000000000000000000000B0 /* NativeCardFormParserTests.swift */,
 				C00000000000000000000050 /* AssistantMarkdownTests.swift */,
+				C20000000000000000000002 /* NativeTranscriptViewportExperimentTests.swift */,
 				C00000000000000000000082 /* SpeakableTextTests.swift */,
 				C00000000000000000000085 /* SpeechVoiceTests.swift */,
 				C00000000000000000000060 /* APIClientRetryTests.swift */,
@@ -521,6 +527,7 @@
 				B0000000000000000000001B /* Components/ChatDashboard.swift in Sources */,
 				B00000000000000000000008 /* Components/StatusPill.swift in Sources */,
 				B00000000000000000000009 /* Components/MessageBubble.swift in Sources */,
+				B20000000000000000000001 /* Components/NativeTranscriptViewportExperiment.swift in Sources */,
 				B0000000000000000000000A /* Views/RootView.swift in Sources */,
 				B00000000000000000000070 /* Views/SituationPacksView.swift in Sources */,
 				B0000000000000000000000B /* Views/ChatView.swift in Sources */,
@@ -570,6 +577,7 @@
 				B000000000000000000000A6 /* EncryptedCardFormDraftStorageTests.swift in Sources */,
 				B000000000000000000000B0 /* NativeCardFormParserTests.swift in Sources */,
 				B00000000000000000000050 /* AssistantMarkdownTests.swift in Sources */,
+				B20000000000000000000002 /* NativeTranscriptViewportExperimentTests.swift in Sources */,
 				B00000000000000000000060 /* APIClientRetryTests.swift in Sources */,
 				B00000000000000000000082 /* SpeakableTextTests.swift in Sources */,
 				B00000000000000000000085 /* SpeechVoiceTests.swift in Sources */,
