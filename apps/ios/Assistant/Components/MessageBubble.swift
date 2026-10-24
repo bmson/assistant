@@ -2,9 +2,17 @@ import SwiftUI
 import UIKit
 
 #if DEBUG
+/// Raw native TextRenderer observations, not source-character or pixel-ink coverage.
+struct EventRhythmTextSample: Sendable {
+    let sourceText: String
+    let isTruncated: Bool
+    let lineBounds: [CGRect]
+    let runBounds: [CGRect]
+}
 struct EventRhythmReview {
     var expandsOverflow = false
     var report: (String, CGRect) -> Void = { _, _ in }
+    var reportText: @Sendable (String, EventRhythmTextSample) -> Void = { _, _ in }
 }
 private struct EventRhythmReviewKey: EnvironmentKey {
     static let defaultValue: EventRhythmReview? = nil

@@ -1722,8 +1722,19 @@ final class NativeVisualReviewTests: XCTestCase {
     }
 
 #if DEBUG
-    private final class EventRhythmFrameRecorder {
+    private final class EventRhythmFrameRecorder: @unchecked Sendable {
+        // Geometry is observed on the main actor; render callbacks may run elsewhere.
         var frames: [String: CGRect] = [:]
+        private let textLock = NSLock()
+        private var renderedText: [String: EventRhythmTextSample] = [:]
+        func recordText(_ id: String, _ sample: EventRhythmTextSample) {
+            textLock.lock(); defer { textLock.unlock() }
+            renderedText[id] = sample
+        }
+        var textSamples: [String: EventRhythmTextSample] {
+            textLock.lock(); defer { textLock.unlock() }
+            return renderedText
+        }
     }
 
     @MainActor
@@ -1800,14 +1811,15 @@ final class NativeVisualReviewTests: XCTestCase {
                  ScrollView {
                      VStack(alignment: .leading, spacing: 24) {
                          RichResponseCards(cards: richCards)
-                         BriefingCardView(card: legacy)
-                         BriefingCardView(card: agenda)
+                         RichResponseCards(cards: [.briefing(legacy)])
+                         RichResponseCards(cards: [.briefing(agenda)])
                      }
                      .padding(.horizontal, 16).padding(.vertical, 8)
                      .coordinateSpace(name: "event-rhythm-review")
                  }
                  .environment(\.conversationViewportWidth, width)
-                 .environment(\.eventRhythmReview, .init(expandsOverflow: expanded, report: { recorder.frames[$0] = $1 }))
+                 .environment(\.eventRhythmReview, .init(expandsOverflow: expanded,
+                     report: { recorder.frames[$0] = $1 }, reportText: { recorder.recordText($0, $1) }))
                  .background(AssistantTheme.stage))
         }
         func verify(_ recorder: EventRhythmFrameRecorder, width: CGFloat, size: DynamicTypeSize,
@@ -1820,6 +1832,18 @@ final class NativeVisualReviewTests: XCTestCase {
                 return value
             }
             let stacked = size.isAccessibilitySize || inheritedWidth == nil || (inheritedWidth ?? 0) <= 360
+            // These are independent expectations for the unchanged standalone paper policy.
+            // The renderer's inset22 argument is for embedded cards, not this owning paper.
+            let expectedPaperInset: CGFloat = !size.isAccessibilitySize && (inheritedWidth ?? 0) > 360 ? 24 : 20
+            let expectedPaperInnerWidth = width - 32 - expectedPaperInset * 2
+            let briefingPaperIDs = ["legacy": "rich.item:card-\(legacy.id)", "new": "rich.item:card-\(agenda.id)"]
+            let requiredBriefingPaperIDs = Set(briefingPaperIDs.values)
+            // Require BOTH actual owning papers before the rich-card filter excludes them.
+            for id in requiredBriefingPaperIDs {
+                let paper = try frame(id)
+                XCTAssertEqual(paper.minX, 16, accuracy: 1)
+                XCTAssertEqual(paper.width, width - 32, accuracy: 1)
+            }
             let visibleRich = expanded ? richIDs : ["rhythm-rich-0", "rhythm-rich-1", "rhythm-rich-2", "rhythm-rich-same-day"]
             let visibleNew = expanded ? newItems : Array(newItems.prefix(6))
             let cases: [(String, [String])] = [("rich", visibleRich), ("legacy", legacyItems.map(\.id)), ("new", visibleNew.map(\.id))]
@@ -1843,7 +1867,14 @@ final class NativeVisualReviewTests: XCTestCase {
                         XCTAssertFalse(title.intersects(join), "Title and actual Join target must not collide")
                     }
                     if kind != "rich" {
+                        let paper = try frame(try XCTUnwrap(briefingPaperIDs[kind]))
+                        let expectedLeading = paper.minX + expectedPaperInset
+                        XCTAssertEqual(row.minX, expectedLeading, accuracy: 1, "Actual owning-paper content rail")
+                        XCTAssertLessThanOrEqual(row.width, expectedPaperInnerWidth + 1)
+                        XCTAssertLessThanOrEqual(row.maxX, paper.maxX - expectedPaperInset + 1)
                         let title = try frame("\(kind).title:\(id)")
+                        XCTAssertEqual(title.minX, expectedLeading + (stacked ? 0 : 74 + 12), accuracy: 1,
+                                       "Title retains the owning paper's time/details rail")
                         let previous: CGRect
                         if let location = frames["\(kind).location:\(id)"] {
                             XCTAssertEqual(location.minY - title.maxY, 4, accuracy: 1)
@@ -1869,7 +1900,9 @@ final class NativeVisualReviewTests: XCTestCase {
             XCTAssertEqual(try XCTUnwrap(dayPapers.first).value.minY, 8, accuracy: 1, "No first-item extra day gap")
             _ = try frame("rich.imminence:rhythm-rich-0")
             if expanded {
-                let otherPapers = frames.filter { $0.key.hasPrefix("rich.item:card-") }.sorted { $0.value.minY < $1.value.minY }
+                let otherPapers = frames.filter {
+                    $0.key.hasPrefix("rich.item:card-") && !requiredBriefingPaperIDs.contains($0.key)
+                }.sorted { $0.value.minY < $1.value.minY }
                 XCTAssertEqual(otherPapers.count, 1, "Production puts the interleaved non-event input after day groups")
                 XCTAssertEqual(try XCTUnwrap(otherPapers.first).value.minY - (try XCTUnwrap(dayPapers.last).value.maxY), 8, accuracy: 1,
                                "A non-event paper keeps the existing8 gap")
@@ -1932,13 +1965,53 @@ final class NativeVisualReviewTests: XCTestCase {
             XCTAssertEqual(legacyB.minY - legacyA.maxY, 16, accuracy: 1)
             let newA = try frame("new.row:rhythm-new-2"), newB = try frame("new.row:rhythm-new-3")
             XCTAssertEqual(newB.minY - newA.maxY, 16, accuracy: 1)
+            let textSamples = recorder.textSamples
+            let expectedClockIDs = Set(legacyItems.flatMap { ["legacy.clock.start:\($0.id)", "legacy.clock.end:\($0.id)"] })
+            XCTAssertEqual(Set(textSamples.keys), expectedClockIDs, "Both source identities must draw; missing samples cannot pass")
+            for item in legacyItems {
+                let timeParts = item.time.components(separatedBy: " – ")
+                let expectedLabels = [("start", timeParts.first ?? item.time),
+                                      ("end", timeParts.dropFirst().joined(separator: " – "))]
+                for (part, expectedText) in expectedLabels {
+                    let id = "legacy.clock.\(part):\(item.id)"
+                    let sample = try XCTUnwrap(textSamples[id], "Missing actual native TextRenderer receipt: \(id)")
+                    let allocated = try frame(id)
+                    XCTAssertEqual(sample.sourceText, expectedText, "Receipt must belong to the exact fixture clock source")
+                    XCTAssertFalse(sample.isTruncated, "Native clock Text layout truncated: \(id)")
+                    XCTAssertFalse(sample.lineBounds.isEmpty); XCTAssertFalse(sample.runBounds.isEmpty)
+                    if !stacked && part == "end" {
+                        XCTAssertGreaterThan(sample.lineBounds.count, 1, "Wide74 clock must wrap the full end time/timezone")
+                    }
+                    for nativeBounds in sample.lineBounds + sample.runBounds {
+                        XCTAssertTrue(nativeBounds.minX.isFinite && nativeBounds.minY.isFinite &&
+                                      nativeBounds.width.isFinite && nativeBounds.height.isFinite)
+                        XCTAssertGreaterThan(nativeBounds.width, 0); XCTAssertGreaterThan(nativeBounds.height, 0)
+                        // Preserve raw native local coordinates; no min/span normalization or clamping.
+                        XCTAssertGreaterThanOrEqual(nativeBounds.minX, -1)
+                        XCTAssertGreaterThanOrEqual(nativeBounds.minY, -1)
+                        XCTAssertLessThanOrEqual(nativeBounds.maxX, allocated.width + 1)
+                        XCTAssertLessThanOrEqual(nativeBounds.maxY, allocated.height + 1)
+                    }
+                }
+            }
+            func rawBounds(_ rect: CGRect) -> [String: CGFloat] {
+                ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height]
+            }
+            let nativeTextReceipt = textSamples.keys.sorted().map { id -> [String: Any] in
+                let sample = textSamples[id]!
+                return ["id": id, "sourceText": sample.sourceText, "isTruncated": sample.isTruncated,
+                        "lineCount": sample.lineBounds.count, "lineBounds": sample.lineBounds.map(rawBounds),
+                        "runBounds": sample.runBounds.map(rawBounds)]
+            }
             let receipt = frames.keys.sorted().map { id -> [String: Any] in
                 let rect = frames[id]!
                 return ["id": id, "x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height]
             }
             let data = try JSONSerialization.data(withJSONObject: ["scheme": scheme == .light ? "light" : "dark", "viewport": width, "inheritedViewport": inheritedWidth.map { $0 as Any } ?? NSNull(),
                 "accessibility": size.isAccessibilitySize, "expanded": expanded, "stacked": stacked, "paintedBounds": receipt,
-                "reviewLimits": "Frames verify allocation, spacing, collision and geometric order. Native text glyph clipping and VoiceOver reading/focus order still require capture/accessibility review."], options: [.prettyPrinted, .sortedKeys])
+                "briefingPaperHorizontalInset": expectedPaperInset, "briefingPaperInnerWidth": expectedPaperInnerWidth,
+                "nativeClockText": nativeTextReceipt,
+                "reviewLimits": "Native TextRenderer reports truncation and raw line/run typographic bounds, not terminal Unicode/source-character or pixel-ink coverage. Public CharacterIndex has no validated terminal String mapping. Original PNG review MUST confirm the full time and Pacific Time suffix; VoiceOver reading/focus order also remains unproved."], options: [.prettyPrinted, .sortedKeys])
             let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
             attachment.name = "event-rhythm-\(scheme == .light ? "light" : "dark")-\(Int(width))-\(size.isAccessibilitySize ? "AX3" : "large")-\(inheritedWidth == nil ? "missing" : "known")-\(expanded ? "expanded" : "collapsed")-painted-bounds"
             attachment.lifetime = .keepAlways; add(attachment)

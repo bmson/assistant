@@ -483,10 +483,16 @@ struct BriefingCardView: View {
             Text(bounds.first ?? item.time)
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+                .fixedSize(horizontal: false, vertical: true)
+                .eventRhythmClockText("legacy.clock.start:\(item.id)", sourceText: bounds.first ?? item.time)
+                .eventRhythmFrame("legacy.clock.start:\(item.id)")
             if bounds.count > 1 {
                 Text(bounds.dropFirst().joined(separator: " – "))
                     .font(.caption)
                     .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .eventRhythmClockText("legacy.clock.end:\(item.id)", sourceText: bounds.dropFirst().joined(separator: " – "))
+                    .eventRhythmFrame("legacy.clock.end:\(item.id)")
             }
         }
         .monospacedDigit()
@@ -527,8 +533,6 @@ struct BriefingCardView: View {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 // The clock column keeps its own width so titles line up.
                 time
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
                     .frame(width: 74, alignment: .leading)
                     .eventRhythmFrame("legacy.clock:\(item.id)")
                 details
@@ -578,5 +582,46 @@ struct BriefingCardView: View {
         case "cloudy": "cloud.fill"
         default: "sun.max.fill"
         }
+    }
+}
+
+#if DEBUG
+/// Observe the original native layout only during the opt-in event review.
+/// Public CharacterIndex values do not provide a String/Unicode terminal map.
+private struct EventRhythmClockTextRenderer: TextRenderer {
+    let id: String
+    let sourceText: String
+    let report: @Sendable (String, EventRhythmTextSample) -> Void
+
+    func draw(layout: Text.Layout, in context: inout GraphicsContext) {
+        // The public SDK draws Line/Run/RunSlice, not a complete Text.Layout.
+        // Forward every original line without changing its layout or graphics state.
+        for line in layout { context.draw(line) }
+        report(id, .init(sourceText: sourceText, isTruncated: layout.isTruncated,
+                         lineBounds: layout.map { $0.typographicBounds.rect },
+                         runBounds: layout.flatMap { line in line.map { $0.typographicBounds.rect } }))
+    }
+}
+private struct EventRhythmClockTextReview: ViewModifier {
+    let id: String
+    let sourceText: String
+    @Environment(\.eventRhythmReview) private var review
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if let review {
+            content.textRenderer(EventRhythmClockTextRenderer(id: id, sourceText: sourceText, report: review.reportText))
+        } else {
+            content
+        }
+    }
+}
+#endif
+private extension View {
+    @ViewBuilder func eventRhythmClockText(_ id: String, sourceText: String) -> some View {
+#if DEBUG
+        modifier(EventRhythmClockTextReview(id: id, sourceText: sourceText))
+#else
+        self
+#endif
     }
 }
