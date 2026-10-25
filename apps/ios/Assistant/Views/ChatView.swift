@@ -97,20 +97,25 @@ private struct ConversationTranscriptRoot<Content: View>: View {
         snapshot.content
             .transaction(value: snapshot.generation) {
 #if DEBUG
+                let invocationOrdinal = snapshot.environment.transcriptHostBoundaryProbe?
+                    .beginTransformInvocation(generation: snapshot.generation)
                 snapshot.environment.transcriptHostBoundaryProbe?.record(
                     "content-transform-input", transaction: $0, generation: snapshot.generation,
-                    contentRevision: snapshot.diagnosticContentRevision
+                    contentRevision: snapshot.diagnosticContentRevision,
+                    transformInvocationOrdinal: invocationOrdinal
                 )
                 snapshot.environment.transcriptHostBoundaryProbe?.record(
                     "content-transform-captured", transaction: snapshot.transaction, generation: snapshot.generation,
-                    contentRevision: snapshot.diagnosticContentRevision
+                    contentRevision: snapshot.diagnosticContentRevision,
+                    transformInvocationOrdinal: invocationOrdinal
                 )
 #endif
                 $0 = snapshot.transaction
 #if DEBUG
                 snapshot.environment.transcriptHostBoundaryProbe?.record(
                     "content-transform-output", transaction: $0, generation: snapshot.generation,
-                    contentRevision: snapshot.diagnosticContentRevision
+                    contentRevision: snapshot.diagnosticContentRevision,
+                    transformInvocationOrdinal: invocationOrdinal
                 )
 #endif
             }
@@ -225,6 +230,7 @@ private final class ConversationTranscriptController<Content: View>: UIViewContr
 final class TranscriptHostBoundaryProbe {
     private let marker: @MainActor (Transaction) -> Int
     private let contentRevision: @MainActor () -> Int
+    private var transformInvocationCounts: [Int: Int] = [:]
     private(set) var events: [[String: Any]] = []
     private(set) var parentSnapshotGeneration = 0
     private(set) var parentSnapshotCommitCount = 0
@@ -233,13 +239,30 @@ final class TranscriptHostBoundaryProbe {
 
     var currentContentRevision: Int { contentRevision() }
 
+    /// Diagnostic correlation only; the most recent transform is not proof of
+    /// causality for a later leaf observation or of transaction equivalence.
+    func latestTransformInvocationOrdinal(generation: Int) -> Int? {
+        transformInvocationCounts[generation]
+    }
+
+    func beginTransformInvocation(generation: Int) -> Int {
+        let ordinal = (transformInvocationCounts[generation] ?? 0) + 1
+        transformInvocationCounts[generation] = ordinal
+        if transformInvocationCounts.count > 64,
+           let oldest = transformInvocationCounts.keys.min() {
+            transformInvocationCounts.removeValue(forKey: oldest)
+        }
+        return ordinal
+    }
+
     init(marker: @escaping @MainActor (Transaction) -> Int,
          contentRevision: @escaping @MainActor () -> Int) {
         self.marker = marker
         self.contentRevision = contentRevision
     }
 
-    func record(_ stage: String, transaction: Transaction, generation: Int, contentRevision: Int? = nil) {
+    func record(_ stage: String, transaction: Transaction, generation: Int, contentRevision: Int? = nil,
+                transformInvocationOrdinal: Int? = nil) {
         if stage == "parent-snapshot-commit" {
             parentSnapshotGeneration = generation
             parentSnapshotCommitCount += 1
@@ -253,6 +276,11 @@ final class TranscriptHostBoundaryProbe {
             "time": CACurrentMediaTime(),
             "stage": stage,
             "marker": marker(transaction),
+            "isContinuous": transaction.isContinuous,
+            "disablesAnimations": transaction.disablesAnimations,
+            "animationPresent": transaction.animation != nil,
+            "transformInvocationOrdinal": transformInvocationOrdinal.map { $0 as Any } ?? NSNull(),
+            "latestObservedTransformInvocationOrdinal": latestTransformInvocationOrdinal(generation: generation).map { $0 as Any } ?? NSNull(),
             "contentRevision": contentRevision ?? self.contentRevision(),
             "generation": generation,
         ])

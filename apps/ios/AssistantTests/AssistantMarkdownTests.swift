@@ -2170,6 +2170,10 @@ private struct OwnedTranscriptChildTransactionObservation: Equatable {
     let localRevision: Int
     let marker: Int
     let snapshotGeneration: Int
+    let isContinuous: Bool
+    let disablesAnimations: Bool
+    let animationPresent: Bool
+    let latestObservedTransformInvocationOrdinal: Int?
 }
 
 private struct OwnedTranscriptEnvironmentSnapshot: Equatable {
@@ -2377,7 +2381,12 @@ private struct OwnedTranscriptTransactionLeaf: View {
                     snapshotContentRevision: snapshotContentRevision ?? -1,
                     localRevision: localRevision,
                     marker: marker,
-                    snapshotGeneration: generation
+                    snapshotGeneration: generation,
+                    isContinuous: transaction.isContinuous,
+                    disablesAnimations: transaction.disablesAnimations,
+                    animationPresent: transaction.animation != nil,
+                    latestObservedTransformInvocationOrdinal: state.boundaryProbe?
+                        .latestTransformInvocationOrdinal(generation: generation)
                 ))
                 if state.transactionMarkers.last != marker {
                     state.transactionMarkers.append(marker)
@@ -2550,8 +2559,13 @@ private func attachOwnedTranscriptBoundarySnapshot(
              "snapshotContentRevision": $0.snapshotContentRevision,
              "localRevision": $0.localRevision,
              "marker": $0.marker,
-             "snapshotGeneration": $0.snapshotGeneration]
+             "snapshotGeneration": $0.snapshotGeneration,
+             "isContinuous": $0.isContinuous,
+             "disablesAnimations": $0.disablesAnimations,
+             "animationPresent": $0.animationPresent,
+             "latestObservedTransformInvocationOrdinal": $0.latestObservedTransformInvocationOrdinal.map { $0 as Any } ?? NSNull()] as [String: Any]
         },
+        "transactionObservationMeaning": "Public fields are observations, not Transaction equality. Input/captured/output share a per-generation transformInvocationOrdinal. A leaf's latestObservedTransformInvocationOrdinal only correlates the most recently observed transform, not a causal delivery token. Missing values are null. Existing tests set only the custom marker; default public fields may not distinguish competing hypotheses.",
         "predicateSamples": state.predicateSamples,
         "environmentSnapshots": state.environmentSnapshots.suffix(8).map {
             ["locale": $0.localeIdentifier, "scheme": String(describing: $0.colorScheme),
