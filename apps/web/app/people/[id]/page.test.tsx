@@ -1,17 +1,28 @@
 import { randomUUID } from 'node:crypto';
 import { GRAPH_EXTRACTION_VERSION } from '@assistant/application/knowledge-graph';
 import { resetConfigForTest } from '@assistant/config';
-import { createInstallationStore, embeddingSpaceKey } from '@assistant/firestore';
+import {
+  createInstallationStore,
+  embeddingSpaceKey,
+  getFirestorePersonDetail,
+} from '@assistant/firestore';
 import { FieldValue } from '@google-cloud/firestore';
 import { NextRequest } from 'next/server';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ owner: vi.fn(), db: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  owner: vi.fn(),
+  db: vi.fn(),
+  pgBrowse: vi.fn(() => {
+    throw new Error('Unexpected PostgreSQL browse fallback');
+  }),
+}));
 vi.mock('@/auth', () => ({ requireOwner: mocks.owner }));
 vi.mock('@/lib/server', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/server')>()),
   getDb: mocks.db,
+  withPostgresMemoryBrowseRead: mocks.pgBrowse,
 }));
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn(), unstable_cache: (run: unknown) => run }));
 // The client controls call useRouter, which needs a mounted App Router.
@@ -225,6 +236,7 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
     const html = renderToStaticMarkup(await page.default(params(contactId)));
     expect(mocks.owner).toHaveBeenCalled();
     expect(mocks.db).not.toHaveBeenCalled();
+    expect(mocks.pgBrowse).not.toHaveBeenCalled();
     expect(html).toContain('Anna Example');
     expect(html).toContain('daughter');
     // Saved facts, the timeline, occasions, and graph relations.
@@ -276,6 +288,7 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
     expect(html).toContain('Anna Renamed');
     expect(html).toContain('Wedding day');
     expect(mocks.db).not.toHaveBeenCalled();
+    expect(mocks.pgBrowse).not.toHaveBeenCalled();
   });
 
   it('deletes a person through the shared Server Action', async () => {
@@ -297,18 +310,56 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
     }
   });
 
-  it('rejects a configured agent mismatch and ambiguous installation', async () => {
+  async function expectUnavailable(
+    configuredAgentId = agentId,
+    reason = 'exactly one configured agent',
+  ) {
+    await expect(getFirestorePersonDetail(store, configuredAgentId, contactId)).rejects.toThrow(
+      reason,
+    );
+    const ownerChecks = mocks.owner.mock.calls.length;
+    const html = renderToStaticMarkup(
+      await page.default({
+        ...params(contactId),
+        searchParams: Promise.resolve({ q: 'Anna & Bob' }),
+      }),
+    );
+    expect(mocks.owner).toHaveBeenCalledTimes(ownerChecks + 1);
+    expect(mocks.db).not.toHaveBeenCalled();
+    expect(mocks.pgBrowse).not.toHaveBeenCalled();
+    expect(html).toContain('Person unavailable');
+    expect(html).toContain('role="alert"');
+    expect(html).toContain('Could not load this view. Your search is preserved.');
+    expect(html).toContain(`href="/people/${contactId}?q=Anna%20%26%20Bob"`);
+    expect(html).toContain('href="/people?q=Anna%20%26%20Bob"');
+    expect(html).toContain('Try again');
+    expect(html).not.toContain('<form');
+    for (const canary of [
+      'Anna Example',
+      'Anna Renamed',
+      'Bob Example',
+      'Owner private contact',
+      'Foreign private person',
+      'Anna is close friends with Bob',
+      'Went hiking with Anna',
+      'Wedding day',
+    ]) {
+      expect(html).not.toContain(canary);
+    }
+  }
+
+  it('shows unavailable without private data for configured owner mismatch or ambiguity', async () => {
     vi.stubEnv('FIRESTORE_AGENT_ID', otherAgentId);
     resetConfigForTest();
     try {
-      await expect(page.default(params(contactId))).rejects.toThrow('exactly one configured agent');
+      await expectUnavailable(otherAgentId);
     } finally {
       vi.stubEnv('FIRESTORE_AGENT_ID', agentId);
       resetConfigForTest();
     }
     await store.doc('agents', otherAgentId).set({ id: otherAgentId });
     try {
-      await expect(page.default(params(contactId))).rejects.toThrow('exactly one configured agent');
+      await expectUnavailable();
     } finally {
       await store.doc('agents', otherAgentId).delete();
     }
@@ -317,9 +368,7 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
   it('fails closed while privacy erasure is active', async () => {
     await store.doc('privacyErasureJobs', agentId).set({ agentId, status: 'active' });
     try {
-      await expect(page.default(params(contactId))).rejects.toThrow(
-        'Privacy erasure is in progress',
-      );
+      await expectUnavailable(agentId, 'Privacy erasure is in progress');
     } finally {
       await store.doc('privacyErasureJobs', agentId).delete();
     }

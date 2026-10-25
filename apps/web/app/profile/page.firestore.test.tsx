@@ -1,12 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import { resetConfigForTest } from '@assistant/config';
-import { createInstallationStore } from '@assistant/firestore';
+import * as firestore from '@assistant/firestore';
+import { createInstallationStore, FirestoreProfileMemoryHubRepository } from '@assistant/firestore';
 import { NextRequest } from 'next/server';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-const auth = vi.hoisted(() => ({ owner: vi.fn() }));
+const auth = vi.hoisted(() => ({
+  owner: vi.fn(),
+  pgBrowse: vi.fn(() => {
+    throw new Error('Unexpected PostgreSQL browse fallback');
+  }),
+}));
 vi.mock('@/auth', () => ({ requireOwner: auth.owner }));
+vi.mock('@/lib/server', async (original) => ({
+  ...(await original<typeof import('@/lib/server')>()),
+  withPostgresMemoryBrowseRead: auth.pgBrowse,
+}));
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn(), unstable_cache: (run: unknown) => run }));
 
 const emulatorHost = process.env.FIRESTORE_EMULATOR_HOST ?? '';
@@ -93,18 +103,40 @@ describe.skipIf(!localEmulator)('Firestore memory hub page with PostgreSQL offli
     resetConfigForTest();
   });
 
-  it('renders review items and open loops from Firestore', async () => {
+  it('admits only browse reads and renders two static destinations without private panel reads', async () => {
     const { proxy } = await import('@/proxy');
-    for (const method of ['GET', 'POST'])
-      expect(proxy(new NextRequest('http://localhost/profile', { method })).status).toBe(
-        method === 'GET' ? 307 : 410,
-      );
-    const { getDb } = await import('@/lib/server');
-    expect(() => getDb()).toThrow('PostgreSQL-backed web surface is unavailable');
-
-    const html = renderToStaticMarkup(await page.default());
-    expect(html).toContain('Quarantined claim awaiting review');
-    expect(html).toContain('Send Grace the slides');
+    for (const path of ['/profile', '/profile/knowledge']) {
+      for (const method of ['GET', 'HEAD'])
+        expect(proxy(new NextRequest(`http://localhost${path}`, { method })).status).toBe(200);
+      for (const method of ['POST', 'DELETE'])
+        expect(proxy(new NextRequest(`http://localhost${path}`, { method })).status).toBe(405);
+    }
+    const server = await import('@/lib/server');
+    expect(() => server.getDb()).toThrow('PostgreSQL-backed web surface is unavailable');
+    const sqlRead = vi.spyOn(server, 'getDb');
+    const storeRead = vi.spyOn(firestore, 'createInstallationStore');
+    const hubRead = vi.spyOn(FirestoreProfileMemoryHubRepository.prototype, 'load');
+    try {
+      const html = renderToStaticMarkup(await page.default());
+      expect(auth.owner).toHaveBeenCalled();
+      expect(sqlRead).not.toHaveBeenCalled();
+      expect(auth.pgBrowse).not.toHaveBeenCalled();
+      expect(hubRead).not.toHaveBeenCalled();
+      expect(storeRead).not.toHaveBeenCalled();
+      expect(html).toContain('What I remember');
+      expect(html).toContain('Browse only. Editing and cleanup are unavailable here.');
+      expect(html.match(/<h2\b/g)).toHaveLength(2);
+      expect(html).toContain('href="/people"');
+      expect(html).toContain('href="/profile/knowledge?view=library"');
+      expect(html).not.toContain('Quarantined claim awaiting review');
+      expect(html).not.toContain('Send Grace the slides');
+      expect(html).not.toContain('Ada Owner');
+      expect(html).not.toContain('<form');
+    } finally {
+      hubRead.mockRestore();
+      storeRead.mockRestore();
+      sqlRead.mockRestore();
+    }
   });
 
   it('requires the owner before reading', async () => {
