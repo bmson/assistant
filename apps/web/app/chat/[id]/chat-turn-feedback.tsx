@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { focusRing } from '@/lib/ui';
+import { requestRecoveryHref } from './chat-request-recovery';
 import type { AsyncNote, PollTrouble } from './use-chat-polling';
 
 interface ChatTurnFeedbackProps {
@@ -9,6 +10,7 @@ interface ChatTurnFeedbackProps {
   pollTrouble: PollTrouble;
   canRetry: boolean;
   onRetry: () => void;
+  conversationId?: string;
 }
 
 /** Durable turn feedback belongs after the empty/populated transcript choice. */
@@ -19,7 +21,10 @@ export function ChatTurnFeedback({
   pollTrouble,
   canRetry,
   onRetry,
+  conversationId,
 }: ChatTurnFeedbackProps) {
+  const recoveryHref =
+    conversationId && note?.taskId ? requestRecoveryHref(conversationId, note.taskId) : null;
   return (
     <>
       {showError ? (
@@ -32,11 +37,31 @@ export function ChatTurnFeedback({
         </p>
       ) : null}
       {note ? (
-        <p data-chat-reading-block="true" role="status" className="mt-3 text-xs text-stage-muted">
+        <p
+          tabIndex={-1}
+          id="request-status"
+          data-chat-reading-block="true"
+          role="status"
+          className="mt-3 text-xs text-stage-muted"
+        >
           {note.text}{' '}
-          <Link href="/tasks" className="font-medium underline underline-offset-2">
-            Open Activity
-          </Link>
+          {recoveryHref ? (
+            <>
+              <Link
+                href={recoveryHref}
+                className={`mobile-touch-target inline-flex items-center rounded-md font-medium underline underline-offset-2 ${focusRing}`}
+              >
+                Open request activity
+              </Link>
+              {' · '}
+              <Link
+                href={`/chat/${conversationId}`}
+                className={`mobile-touch-target inline-flex items-center rounded-md font-medium underline underline-offset-2 ${focusRing}`}
+              >
+                Back to chat
+              </Link>
+            </>
+          ) : null}
           {note.retryable && canRetry ? (
             <>
               {' · '}
