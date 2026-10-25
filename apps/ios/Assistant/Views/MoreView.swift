@@ -1061,6 +1061,7 @@ private struct MCPConnectionsView: View {
 }
 
 struct ConnectedToolActionRow: View {
+    @ScaledMetric(relativeTo: .subheadline) private var iconTextSpacing: CGFloat = 8
     let connection: McpConnection
     let viewportWidth: CGFloat
     let usesAccessibilityLayout: Bool
@@ -1195,21 +1196,18 @@ struct ConnectedToolActionRow: View {
                 ("trash", "Remove"),
                 ("checkmark", "Confirm?")
             ].enumerated()), id: \.offset) { reservation in
-                HStack(spacing: 8) {
-                    if reservation.element.1 == "Working…" {
-                        ProgressView().controlSize(.small).frame(width: 16)
-                    } else {
-                        Image(systemName: reservation.element.0).frame(width: 16)
-                    }
+                HStack(spacing: iconTextSpacing) {
+                    AssistantIntrinsicActionGlyph(systemImage: reservation.element.0, working: reservation.element.1 == "Working…")
                     Text(reservation.element.1)
                 }
                 .hidden()
             }
-            let glyph = ZStack {
-                Image(systemName: icon).opacity(working ? 0 : 1)
-                if working { ProgressView().controlSize(.small) }
-            }
-            .frame(width: 16)
+            let glyph = AssistantIntrinsicActionGlyph(systemImage: icon, working: working)
+#if DEBUG
+                .reportingIntrinsicLayout(layoutReporter.map { report in
+                    { symbol, frame in report(["\(id).intrinsic.\(symbol)": frame]) }
+                })
+#endif
             let text = Text(working ? "Working…" : title)
                 .fixedSize(horizontal: checksIntrinsicWidth, vertical: true)
 #if DEBUG
@@ -1219,7 +1217,7 @@ struct ConnectedToolActionRow: View {
             let measuredGlyph = glyph
             let measuredText = text
 #endif
-            let visibleGroup = HStack(spacing: 8) {
+            let visibleGroup = HStack(spacing: iconTextSpacing) {
                 measuredGlyph
                 measuredText
             }

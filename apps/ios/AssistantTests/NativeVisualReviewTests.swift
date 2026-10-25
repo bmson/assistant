@@ -2712,7 +2712,13 @@ final class NativeVisualReviewTests: XCTestCase {
                 XCTAssertTrue(contains(safeArea, surface), "The \(id) painted target overflowed the available safe area.")
                 XCTAssertTrue(contains(window, surface), "The \(id) painted target overflowed the actual window.")
                 XCTAssertEqual(group.midX, surface.midX, accuracy: 1, "The complete visible label group must be centered.")
-                XCTAssertEqual(text.minX - glyph.maxX, 8, accuracy: 1, "The visible glyph and text must keep an 8pt gap.")
+                XCTAssertGreaterThanOrEqual(text.minX - glyph.maxX, 8 - 1, "The scaled gap must stay outside the intrinsic glyph slot.")
+                for symbol in AssistantIntrinsicActionGlyph.reservedSymbols + ["spinner"] {
+                    let intrinsic = try XCTUnwrap(frames["\(id).intrinsic.\(symbol)"], "Missing uncompressed intrinsic extent for \(id)/\(symbol)")
+                    XCTAssertGreaterThan(intrinsic.width, 0)
+                    XCTAssertTrue(contains(glyph, intrinsic), "The symbol slot must contain every uncompressed state at the inherited Dynamic Type size.")
+                    XCTAssertGreaterThanOrEqual(text.minX - intrinsic.maxX, 8 - 1, "No intrinsic symbol state may enter the label gap.")
+                }
                 XCTAssertEqual(text.midY, glyph.midY, accuracy: 1)
             }
 

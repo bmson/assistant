@@ -916,6 +916,50 @@ struct AssistantConfirmationState {
     mutating func reset() { expiresAt = nil }
 }
 
+/// Reserve the actual uncompressed symbol extents at the inherited font size.
+/// Every state shares this slot; a scaled symbol cannot paint into its label gap.
+struct AssistantIntrinsicActionGlyph: View {
+    let systemImage: String
+    var working = false
+    static let reservedSymbols = ["arrow.clockwise", "pause.fill", "play.fill", "trash", "checkmark"]
+#if DEBUG
+    var intrinsicLayoutReporter: (@MainActor (String, CGRect) -> Void)? = nil
+
+    func reportingIntrinsicLayout(_ report: (@MainActor (String, CGRect) -> Void)?) -> Self {
+        var copy = self
+        copy.intrinsicLayoutReporter = report
+        return copy
+    }
+#endif
+
+    var body: some View {
+        ZStack {
+            ForEach(Array((Self.reservedSymbols + [systemImage]).enumerated()), id: \.offset) { symbol in
+                intrinsic(Image(systemName: symbol.element), id: symbol.element).hidden()
+            }
+            intrinsic(ProgressView().controlSize(.small), id: "spinner").hidden()
+            Image(systemName: systemImage).fixedSize().opacity(working ? 0 : 1)
+            if working { ProgressView().controlSize(.small).fixedSize() }
+        }
+        .fixedSize()
+    }
+
+    private func intrinsic<Content: View>(_ content: Content, id: String) -> some View {
+        content.fixedSize()
+#if DEBUG
+            .background {
+                if intrinsicLayoutReporter != nil {
+                    GeometryReader { geometry in
+                        Color.clear
+                            .onAppear { intrinsicLayoutReporter?(id, geometry.frame(in: .global)) }
+                            .onChange(of: geometry.frame(in: .global)) { _, frame in intrinsicLayoutReporter?(id, frame) }
+                    }
+                }
+            }
+#endif
+    }
+}
+
 /// Keep confirmation at the original touch target. Every label the button can
 /// show reserves the same space, so arming never moves this button or its
 /// neighbours under the finger.
@@ -945,6 +989,7 @@ struct AssistantConfirmationButton: View {
 #endif
     let action: () async -> Void
 
+    @ScaledMetric(relativeTo: .subheadline) private var reservedIconTextSpacing: CGFloat = 8
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.isEnabled) private var isEnabled
     @State private var confirmation = AssistantConfirmationState()
@@ -1033,22 +1078,18 @@ struct AssistantConfirmationButton: View {
             if centersReservedGroup {
                 ZStack {
                     ForEach(Array(([title, confirmationTitle] + reservedWidthLabels).enumerated()), id: \.offset) { reservation in
-                        HStack(spacing: 8) {
-                            if reservation.element == "Working…" {
-                                ProgressView().controlSize(.small).frame(width: 16)
-                            } else {
-                                Image(systemName: systemImage).frame(width: 16)
-                            }
+                        HStack(spacing: reservedIconTextSpacing) {
+                            AssistantIntrinsicActionGlyph(systemImage: systemImage, working: reservation.element == "Working…")
                             Text(reservation.element)
                         }
                         .hidden()
                     }
-                    let glyph = ZStack {
-                        Image(systemName: armed ? "checkmark" : systemImage)
-                            .opacity(working ? 0 : 1)
-                        if working { ProgressView().controlSize(.small) }
-                    }
-                    .frame(width: 16)
+                    let glyph = AssistantIntrinsicActionGlyph(systemImage: armed ? "checkmark" : systemImage, working: working)
+#if DEBUG
+                        .reportingIntrinsicLayout(debugLayoutReporter.map { report in
+                            { symbol, frame in report("intrinsic.\(symbol)", frame) }
+                        })
+#endif
                     let text = Text(armed && !working ? confirmationTitle : title)
                         .fixedSize(horizontal: checksIntrinsicWidth, vertical: true)
 #if DEBUG
@@ -1058,7 +1099,7 @@ struct AssistantConfirmationButton: View {
                     let visibleGlyph = glyph
                     let visibleText = text
 #endif
-                    let visibleGroup = HStack(spacing: 8) {
+                    let visibleGroup = HStack(spacing: reservedIconTextSpacing) {
                         visibleGlyph
                         visibleText
                     }
