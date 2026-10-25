@@ -276,7 +276,7 @@ describe.skipIf(!localEmulator)('Firestore knowledge workspace with PostgreSQL o
     ];
     for (const [path, method] of allowed)
       expect(proxy(new NextRequest(`http://localhost${path}`, { method })).status).toBe(
-        path.startsWith('/api/') ? 200 : method === 'GET' ? 307 : 410,
+        path.startsWith('/api/') ? 200 : method === 'GET' ? 200 : 405,
       );
     for (const [path, method] of [
       ['/api/mobile/v1/knowledge/workspace', 'POST'],
@@ -359,21 +359,22 @@ describe.skipIf(!localEmulator)('Firestore knowledge workspace with PostgreSQL o
     expect((await graph(new Request('http://localhost/x?entity=bad'))).status).toBe(400);
   });
 
-  it('renders the library, map, and cleanup views of the page from Firestore', async () => {
+  it('renders browse library/map and safely falls back from cleanup in Firestore', async () => {
     const seeded = await seedGraph();
     const render = async (params: Record<string, string>) =>
       renderToStaticMarkup(await KnowledgePage({ searchParams: Promise.resolve(params) }));
     const library = await render({});
     expect(auth.owner).toHaveBeenCalled();
-    expect(library).toContain('Memory library');
+    expect(library).toContain('Library');
     expect(library).toContain('Grace lives in Oslo');
-    expect(library).toContain('3 to review');
+    expect(library).toContain('Browse only');
     const map = await render({ view: 'map', entity: seeded.grace });
-    expect(map).toContain('Connections around Grace');
+    expect(map).toContain('Grace');
     expect(map).toContain('Grace works at Acme');
     const cleanup = await render({ view: 'cleanup' });
-    expect(cleanup).toContain('Remove disconnected graph items');
-    expect(cleanup).toContain('Grace might move to Bergen');
+    expect(cleanup).not.toContain('Remove disconnected graph items');
+    expect(cleanup).toContain('Editing and cleanup are unavailable');
+    expect(cleanup).not.toContain('Retry processing');
   });
 
   it('renames, retypes, and merges entities over the mobile route', async () => {

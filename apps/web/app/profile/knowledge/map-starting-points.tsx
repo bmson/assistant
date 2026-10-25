@@ -90,7 +90,7 @@ export function MapStartingPoints({
       </div>
 
       <label className="mt-5 block">
-        <span className="sr-only">Search connected items</span>
+        <span className="sr-only">Search items in this view</span>
         <span className="relative block">
           <Search
             aria-hidden="true"
@@ -99,7 +99,7 @@ export function MapStartingPoints({
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search people, places, projects…"
+            placeholder="Search items in this view…"
             className={`${inputClass} w-full pl-9`}
           />
         </span>

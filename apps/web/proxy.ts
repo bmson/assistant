@@ -77,6 +77,16 @@ export function proxy(request: NextRequest) {
   // Browser chat and administration pages are owner surfaces. Native APIs
   // retain their existing persistence and authentication boundaries below.
   const adminPage = ['/settings', '/security', '/signin', '/setup'].includes(path);
+  const memoryBrowsePage =
+    ['/profile', '/people', '/profile/knowledge'].includes(path) ||
+    /^\/people\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      path,
+    );
+  const memoryBrowseRead = memoryBrowsePage && ['GET', 'HEAD'].includes(request.method);
+  // Page reachability grants no Server Action authority. The page still
+  // authenticates its owner before any configured-owner read.
+  if (memoryBrowsePage && !memoryBrowseRead)
+    return Response.json({ error: 'Memory browsing is read-only.' }, { status: 405 });
   const auditApi = /^\/api\/audit\/[0-9a-f-]{36}$/i.test(path);
   if (auditApi)
     return ['GET', 'HEAD'].includes(request.method)
@@ -97,7 +107,10 @@ export function proxy(request: NextRequest) {
   // persistence mode, including the isolated shipping-image smoke check.
   if (asset && ['GET', 'HEAD'].includes(request.method)) return NextResponse.next();
   if (!path.startsWith('/api/') && !path.startsWith('/_next/') && !asset) {
-    if (path === '/' || (!adminPage && !auditPage && !localChatPage && !ownerChatPage)) {
+    if (
+      path === '/' ||
+      (!adminPage && !auditPage && !localChatPage && !ownerChatPage && !memoryBrowseRead)
+    ) {
       if (request.method === 'GET' || request.method === 'HEAD') {
         return NextResponse.redirect(new URL('/settings', request.url));
       }
@@ -166,13 +179,7 @@ export function proxy(request: NextRequest) {
       request.method === 'GET') ||
     (path === '/' && request.method === 'GET') ||
     (path === '/profile/memories' && request.method === 'GET') ||
-    // The memory hub and its owner-authenticated Server Actions.
-    (path === '/profile' && ['GET', 'POST'].includes(request.method)) ||
-    // The People directory, one person's page, and their owner-authenticated
-    // Server Actions (add, edit, occasions, facts, relations, merge, delete).
-    (path === '/people' && ['GET', 'POST'].includes(request.method)) ||
-    (/^\/people\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(path) &&
-      ['GET', 'POST'].includes(request.method)) ||
+    memoryBrowseRead ||
     (path === '/profile/data' && ['GET', 'POST'].includes(request.method)) ||
     (path === '/api/profile-export' && request.method === 'GET') ||
     (path === '/api/mobile/v1/memory/export' && request.method === 'GET') ||
@@ -188,8 +195,6 @@ export function proxy(request: NextRequest) {
     (path === '/api/documents/upload' && request.method === 'POST') ||
     (path === '/profile/voice' && ['GET', 'POST'].includes(request.method)) ||
     (path === '/profile/about' && ['GET', 'POST'].includes(request.method)) ||
-    // Knowledge workspace: bounded Firestore reads and owner graph curation actions.
-    (path === '/profile/knowledge' && ['GET', 'POST'].includes(request.method)) ||
     (path === '/cards' && ['GET', 'POST'].includes(request.method)) ||
     (path === '/packs' && ['GET', 'POST'].includes(request.method)) ||
     // Settings Server Actions recheck owner auth; Firestore supports the

@@ -103,15 +103,19 @@ describe.skipIf(!localEmulator)('Firestore owner Memory hub page with PostgreSQL
 
   const params = { searchParams: Promise.resolve({}) };
 
-  it('only admits the GET page through the Firestore proxy', async () => {
+  it('admits only the new browse GETs and keeps retired page routes blocked', async () => {
     const { proxy } = await import('../../../proxy.js');
     const request = (path: string, method = 'GET') =>
       new NextRequest(`http://localhost${path}`, { method });
-    expect(proxy(request('/profile/memories')).status).toBe(307);
-    expect(proxy(request('/profile/memories', 'POST')).status).toBe(410);
-    expect(proxy(request('/profile/knowledge')).status).toBe(307);
-    expect(proxy(request('/profile')).status).toBe(307);
-    expect(proxy(request('/profile/about')).status).toBe(307);
+    for (const path of ['/profile', '/profile/knowledge']) {
+      for (const method of ['GET', 'HEAD']) expect(proxy(request(path, method)).status).toBe(200);
+      for (const method of ['POST', 'DELETE'])
+        expect(proxy(request(path, method)).status).toBe(405);
+    }
+    for (const path of ['/profile/memories', '/profile/about']) {
+      for (const method of ['GET', 'HEAD']) expect(proxy(request(path, method)).status).toBe(307);
+      expect(proxy(request(path, 'POST')).status).toBe(410);
+    }
   });
 
   it('renders only configured-owner memory and feedback through the page', async () => {
