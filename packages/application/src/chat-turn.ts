@@ -1387,7 +1387,7 @@ export async function handleChatTurn(
     if (recallMode !== 'automatic' && recallMode !== 'continuation') return { sources: [] };
     try {
       const layered = await retrieveOwnerContext({
-        db: dependencies.db ?? requireDb(),
+        db: dependencies.db,
         persistence: dependencies.persistence,
         router,
         mode: recallMode,

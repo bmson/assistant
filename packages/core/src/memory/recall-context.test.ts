@@ -43,7 +43,6 @@ describe('shared owner recall entrypoint', () => {
       embed: vi.fn(async () => [[1, 0]]),
     } as never;
     const common = {
-      db: {} as never,
       persistence,
       router,
       agentId: 'agent-1',
@@ -73,5 +72,33 @@ describe('shared owner recall entrypoint', () => {
     expect(direct.sources).toHaveLength(1);
     expect(direct.block).toContain('wheelchair-accessible entrances');
     expect(history.segments).toHaveBeenCalledTimes(3);
+  });
+
+  it('fails closed when a required recall persistence port and database are both missing', async () => {
+    const router = {
+      embeddingSpace: vi.fn(async () => ({
+        provider: 'synthetic',
+        model: 'eligibility-missing-port',
+        dimensions: 2,
+        revision: '1',
+      })),
+      embed: vi.fn(async () => [[1, 0]]),
+    } as never;
+
+    await expect(
+      retrieveOwnerContext({
+        router,
+        persistence: {
+          ownerContext: { listOpenCommitments: vi.fn(async () => []) },
+        } as never,
+        taskId: 'missing-history-task',
+        agentId: 'agent-1',
+        conversationId: 'current-conversation',
+        queryText: 'Find clinics with wheelchair-accessible entrances.',
+        eligibilityText: 'Find clinics with wheelchair-accessible entrances.',
+        mode: 'automatic',
+        graphEnabled: false,
+      }),
+    ).rejects.toThrow('History recall storage is not configured');
   });
 });

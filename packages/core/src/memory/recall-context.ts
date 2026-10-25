@@ -15,7 +15,7 @@ import { readSituationDecisionContext } from './situation-context.js';
 
 /** Shared bounded recall used before planning and, for legacy paths, before a model step. */
 export async function retrieveOwnerContext(input: {
-  db: Db;
+  db?: Db;
   persistence?: ExecutionPersistence;
   router: ModelRouter;
   taskId: string;
@@ -28,7 +28,7 @@ export async function retrieveOwnerContext(input: {
   graphEnabled: boolean;
   discussionTurns?: ReadonlyArray<DiscussionTurn>;
 }) {
-  const { db, persistence, router, taskId, agentId, conversationId, graphEnabled } = input;
+  const { persistence, router, taskId, agentId, conversationId, graphEnabled } = input;
   const frame = assembleDiscussionFrame({
     currentText: input.queryText,
     turns: input.discussionTurns ?? [],
@@ -45,7 +45,16 @@ export async function retrieveOwnerContext(input: {
         return suppressed?.has(sourceKey) ?? true;
       }
     : undefined;
-  const historyRepository = persistence?.history ?? db;
+  // Resolve each legacy PostgreSQL fallback only when that port is absent. A
+  // complete portable persistence adapter must not need a SQL connection.
+  const historyRepository = persistence?.history ?? input.db;
+  if (!historyRepository) {
+    throw new Error('History recall storage is not configured');
+  }
+  const ownerContextRepository = persistence?.ownerContext ?? input.db;
+  if (!ownerContextRepository) {
+    throw new Error('Owner context storage is not configured');
+  }
   const since =
     input.sinceCreatedAt ??
     (await recentWindowStart(historyRepository, conversationId, 20, agentId)) ??
@@ -57,9 +66,13 @@ export async function retrieveOwnerContext(input: {
             taskId,
             expectedSpace: embeddingSpace,
           });
+          const graphRepository = persistence?.graph ?? input.db;
+          if (!graphRepository) {
+            throw new Error('Knowledge graph recall storage is not configured');
+          }
           return {
             graph: await recallKnowledgeGraph(
-              persistence?.graph ?? db,
+              graphRepository,
               {
                 agentId,
                 queryText,
@@ -103,13 +116,13 @@ export async function retrieveOwnerContext(input: {
   });
   const [situations, commitments] = await Promise.all([
     readSituationDecisionContext({
-      db,
+      db: input.db,
       persistence,
       agentId,
       discussionFrame: queryText,
       limit: 16,
     }),
-    listOpenCommitments(persistence?.ownerContext ?? db, {
+    listOpenCommitments(ownerContextRepository, {
       agentId,
       query: queryText,
       limit: 40,
