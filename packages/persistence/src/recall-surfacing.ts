@@ -23,8 +23,60 @@ export interface RecallSurfaceRecord {
   version: number;
 }
 
+/** Successful owner/privacy-fenced read of one saved revision's control state. */
+export type RecallSourceSettingStatus =
+  | { status: 'allowed' }
+  | { status: 'suppressed' }
+  | { status: 'stale' }
+  | { status: 'unavailable'; reason: 'missing_record' | 'unversioned_legacy' };
+
+/** Validate the complete ledger row before interpreting its saved revision. */
+export function recallSourceSettingStatusFromRecord(
+  value: unknown,
+  expected: { agentId: string; sourceKey: string; expectedSourceRevision: string },
+): RecallSourceSettingStatus {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Recall source setting record is invalid');
+  const row = value as Record<string, unknown>;
+  const validDate = (date: unknown): date is Date =>
+    date instanceof Date && Number.isFinite(date.getTime());
+  if (
+    typeof row.id !== 'string' ||
+    row.id.length === 0 ||
+    row.agentId !== expected.agentId ||
+    row.sourceKey !== expected.sourceKey ||
+    typeof row.sourceKey !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(row.sourceKey) ||
+    typeof row.kind !== 'string' ||
+    row.kind.length === 0 ||
+    !validDate(row.firstSurfacedAt) ||
+    !validDate(row.lastSurfacedAt) ||
+    !(row.lastMessageId === null || typeof row.lastMessageId === 'string') ||
+    !Number.isSafeInteger(row.surfaceCount) ||
+    (row.surfaceCount as number) < 1 ||
+    !Number.isSafeInteger(row.version) ||
+    (row.version as number) < 1 ||
+    !(
+      row.sourceRevision === null ||
+      (typeof row.sourceRevision === 'string' && /^[a-f0-9]{64}$/.test(row.sourceRevision))
+    ) ||
+    !(row.suppressedAt === null || validDate(row.suppressedAt)) ||
+    (row.sourceRevision === null && row.suppressedAt !== null)
+  )
+    throw new Error('Recall source setting record is invalid');
+  if (row.sourceRevision === null) return { status: 'unavailable', reason: 'unversioned_legacy' };
+  if (row.sourceRevision !== expected.expectedSourceRevision) return { status: 'stale' };
+  return row.suppressedAt === null ? { status: 'allowed' } : { status: 'suppressed' };
+}
+
 export interface RecallSurfacingRepository {
   readonly kind: 'recall-surfacing-repository';
+  /** Exact saved-reference status. Missing storage/owner/privacy or malformed data throws. */
+  readSourceSetting(input: {
+    agentId: string;
+    sourceKey: string;
+    expectedSourceRevision: string;
+  }): Promise<RecallSourceSettingStatus>;
   /** Returns the subset currently hidden by this owner. Missing storage must fail closed. */
   suppressed(
     agentId: string,
