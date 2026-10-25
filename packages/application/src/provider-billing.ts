@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Config } from '@assistant/config';
-import type { ToolExecutionRepository } from '@assistant/persistence';
+import type { CostBasis, CostEvidenceTotal, ToolExecutionRepository } from '@assistant/persistence';
 import { GoogleAuth } from 'google-auth-library';
 import { z } from 'zod';
 import type { ModelProviderPorts } from './model-providers.js';
@@ -43,6 +43,84 @@ export type BillingCoverageState =
   | 'overlapping'
   | 'unknown';
 
+export interface LedgerEvidenceGroup {
+  basis: CostBasis;
+  label: string;
+  rows: Array<{ id: string; usd: string | null; count: number | null }>;
+}
+
+/** Existing USD event groups, not account coverage, invoices or held liability. */
+export interface LedgerEvidenceCoverage {
+  currency: 'USD';
+  metadata: string;
+  emptyMessage: string;
+  groups: LedgerEvidenceGroup[];
+}
+
+const LEDGER_EVIDENCE_LABELS: Record<CostBasis, string> = {
+  provider_reported: 'Provider-reported operation receipts',
+  token_rate: 'Token-rate estimates',
+  preflight_estimate: 'Preflight estimates',
+  component_ledger: 'Mixed reported and estimated components',
+  unknown: 'Unverified ledger records',
+};
+
+function ledgerEvidenceCoverage(
+  rows?: readonly CostEvidenceTotal[] | null,
+): LedgerEvidenceCoverage {
+  const groups = new Map<CostBasis, Array<{ usd: string | null; count: number | null }>>();
+  for (const value of Array.isArray(rows) ? rows : []) {
+    const row = value as Partial<CostEvidenceTotal> | null;
+    const basisValue = row?.basis;
+    const validBasis =
+      typeof basisValue === 'string' && Object.hasOwn(LEDGER_EVIDENCE_LABELS, basisValue);
+    const basis: CostBasis = validBasis ? (basisValue as CostBasis) : 'unknown';
+    const usd =
+      typeof row?.usd === 'string' &&
+      /^-?\d+(?:\.\d+)?$/.test(row.usd) &&
+      Number.isFinite(Number(row.usd))
+        ? row.usd
+        : null;
+    const count =
+      typeof row?.count === 'number' && Number.isSafeInteger(row.count) && row.count >= 0
+        ? row.count
+        : null;
+    const existing = groups.get(basis) ?? [];
+    existing.push({ usd, count });
+    groups.set(basis, existing);
+  }
+  return {
+    currency: 'USD',
+    metadata: [
+      'Ledger aggregation in USD. Exact period boundaries, source/account scope and freshness are not supplied; coverage remains unverified.',
+      'Recorded amounts do not verify a provider bill.',
+      'Held reservations and unknown liability are separate from these recorded-event groups.',
+    ].join(' '),
+    emptyMessage:
+      'Ledger evidence is unavailable or not supplied. Empty evidence does not establish zero spending or no activity.',
+    groups: (Object.keys(LEDGER_EVIDENCE_LABELS) as CostBasis[]).flatMap((basis) => {
+      const values = groups.get(basis);
+      if (!values) return [];
+      const ordered = values
+        .slice()
+        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+      const occurrences = new Map<string, number>();
+      return [
+        {
+          basis,
+          label: LEDGER_EVIDENCE_LABELS[basis],
+          rows: ordered.map((row) => {
+            const digest = createHash('sha256').update(JSON.stringify(row)).digest('hex');
+            const occurrence = occurrences.get(digest) ?? 0;
+            occurrences.set(digest, occurrence + 1);
+            return { id: `${basis}:${digest}:${occurrence}`, ...row };
+          }),
+        },
+      ];
+    }),
+  };
+}
+
 export interface BillingCoverageEntry {
   id: string;
   label: string;
@@ -51,6 +129,7 @@ export interface BillingCoverageEntry {
   detail: string;
   period?: string;
   source?: string;
+  ledgerEvidence?: LedgerEvidenceCoverage;
 }
 
 /** A source inventory, never a combined spend total. */
@@ -63,7 +142,10 @@ export interface BillingCoverageProjection {
   entries: BillingCoverageEntry[];
 }
 
-export function billingCoverageProjection(reports: ProviderBilling[]): BillingCoverageProjection {
+export function billingCoverageProjection(
+  reports: ProviderBilling[],
+  evidence?: readonly CostEvidenceTotal[] | null,
+): BillingCoverageProjection {
   const attentionStatuses = reports
     .filter((report) => report.status !== 'reported' && report.status !== 'included')
     .map((report) => {
@@ -118,9 +200,10 @@ export function billingCoverageProjection(reports: ProviderBilling[]): BillingCo
       id: 'assistant-ledger',
       label: 'Assistant usage ledger',
       state: 'overlapping',
-      scope: 'Assistant operations',
+      scope: 'Assistant operation ledger; account attribution unverified',
+      ledgerEvidence: ledgerEvidenceCoverage(evidence),
       detail: [
-        'Includes provider-reported items and configured-rate estimates.',
+        'Includes provider-reported operation receipts and configured-rate estimates used for assistant caps, not account invoices.',
         'It can overlap provider charges and must stay separate; assistant limits do not cap cloud or provider bills.',
       ].join(' '),
     },

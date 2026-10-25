@@ -476,3 +476,207 @@ it('summarizes current missing and stale providers without using hypothetical ga
   );
   expect(coverage.statusSummary).not.toContain('Phone calls');
 });
+
+function ledgerEntry(
+  rows?: Parameters<typeof billingCoverageProjection>[1],
+  reports: ProviderBilling[] = [],
+) {
+  const projection = billingCoverageProjection(reports, rows);
+  expect(projection.totalState).toBe('unavailable');
+  expect(projection.title).toBe('Whole-app total unavailable');
+  const entry = projection.entries.find((value) => value.id === 'assistant-ledger');
+  if (!entry?.ledgerEvidence) throw new Error('Missing ledger evidence projection');
+  return entry;
+}
+
+it.each([{ rows: undefined }, { rows: null }, { rows: [] }])(
+  'keeps absent or empty evidence unknown without inferring zero or no activity ($rows)',
+  ({ rows }) => {
+    const entry = ledgerEntry(rows);
+    expect(entry.ledgerEvidence?.groups).toEqual([]);
+    expect(entry.ledgerEvidence?.emptyMessage).toContain(
+      'does not establish zero spending or no activity',
+    );
+    expect(entry.ledgerEvidence?.metadata).toContain('freshness are not supplied');
+    expect(entry.ledgerEvidence?.metadata).toMatch(/^Ledger aggregation in USD\./);
+    expect(entry.ledgerEvidence?.metadata).not.toContain('Monthly');
+    expect(entry.period).toBeUndefined();
+    expect(entry.source).toBeUndefined();
+  },
+);
+
+it('preserves each mixed evidence basis, exact USD representation and event count without an aggregate', () => {
+  const rows = [
+    { basis: 'provider_reported' as const, usd: '1.250000', count: 2 },
+    { basis: 'token_rate' as const, usd: '0.000003', count: 3 },
+    { basis: 'preflight_estimate' as const, usd: '2.5000', count: 4 },
+    { basis: 'component_ledger' as const, usd: '3.125', count: 5 },
+    { basis: 'unknown' as const, usd: '4.000000', count: 6 },
+  ];
+  const entry = ledgerEntry(rows);
+  expect(entry.ledgerEvidence?.currency).toBe('USD');
+  expect(
+    entry.ledgerEvidence?.groups.map((group) => ({ basis: group.basis, ...group.rows[0] })),
+  ).toEqual(rows.map((row) => ({ ...row, id: expect.any(String) })));
+  expect(entry.ledgerEvidence?.groups.map((group) => group.label)).toEqual([
+    'Provider-reported operation receipts',
+    'Token-rate estimates',
+    'Preflight estimates',
+    'Mixed reported and estimated components',
+    'Unverified ledger records',
+  ]);
+  expect(Object.keys(entry.ledgerEvidence ?? {})).not.toContain('total');
+  expect(entry.detail).toContain('not account invoices');
+});
+
+it('keeps duplicate basis groups separate with stable unique keys and no subtotal', () => {
+  const rows = [
+    { basis: 'unknown' as const, usd: '1.00', count: 2 },
+    { basis: 'unknown' as const, usd: '3.00', count: 4 },
+    { basis: 'unknown' as const, usd: '1.00', count: 2 },
+  ];
+  const first = ledgerEntry(rows).ledgerEvidence?.groups[0]?.rows ?? [];
+  const reordered = ledgerEntry([...rows].reverse()).ledgerEvidence?.groups[0]?.rows;
+  expect(first).toEqual(reordered);
+  expect(first).toHaveLength(3);
+  expect(new Set(first.map((row) => row.id)).size).toBe(3);
+  expect(first.map(({ usd, count }) => ({ usd, count }))).toEqual([
+    { usd: '1.00', count: 2 },
+    { usd: '1.00', count: 2 },
+    { usd: '3.00', count: 4 },
+  ]);
+});
+
+it('preserves explicit zero and safe amount/count under unrecognized basis while malformed fields remain unknown', () => {
+  const rows = [
+    { basis: 'provider_reported', usd: '0.000000', count: 1 },
+    { basis: 'unexpected_basis', usd: '9.125000', count: 7 },
+    { basis: 'token_rate', usd: 'NaN', count: 2 },
+    { basis: 'preflight_estimate', usd: 'Infinity', count: Number.POSITIVE_INFINITY },
+    { basis: 'component_ledger', usd: null, count: undefined },
+  ] as unknown as NonNullable<Parameters<typeof billingCoverageProjection>[1]>;
+  const groups = ledgerEntry(rows).ledgerEvidence?.groups ?? [];
+  expect(groups.find((group) => group.basis === 'provider_reported')?.rows[0]).toMatchObject({
+    usd: '0.000000',
+    count: 1,
+  });
+  expect(groups.find((group) => group.basis === 'unknown')).toMatchObject({
+    label: 'Unverified ledger records',
+    rows: [expect.objectContaining({ usd: '9.125000', count: 7 })],
+  });
+  expect(groups.find((group) => group.basis === 'token_rate')?.rows[0]).toMatchObject({
+    usd: null,
+    count: 2,
+  });
+  expect(groups.find((group) => group.basis === 'preflight_estimate')?.rows[0]).toMatchObject({
+    usd: null,
+    count: null,
+  });
+  expect(groups.find((group) => group.basis === 'component_ledger')?.rows[0]).toMatchObject({
+    usd: null,
+    count: null,
+  });
+});
+
+it('retains provider period/scope and stale or missing Vertex state without inventing metadata for ledger groups', () => {
+  const reports: ProviderBilling[] = [
+    {
+      ...base,
+      id: 'openrouter',
+      label: 'OpenRouter',
+      status: 'stale',
+      period: '2026-10',
+      scope: 'Shared saved key',
+      message: 'Includes unrelated usage; not assistant-only.',
+      lines: [],
+    },
+    {
+      ...base,
+      id: 'vertex',
+      label: 'Google Vertex AI',
+      status: 'unavailable',
+      message: 'No matching project row.',
+      lines: [],
+    },
+  ];
+  const projection = billingCoverageProjection(reports, [
+    { basis: 'provider_reported', usd: '2.00', count: 1 },
+  ]);
+  expect(projection.entries.find((entry) => entry.id === 'openrouter')).toMatchObject({
+    state: 'stale',
+    period: '2026-10',
+    scope: 'Shared saved key',
+    detail: 'Includes unrelated usage; not assistant-only.',
+  });
+  expect(projection.entries.find((entry) => entry.id === 'vertex')?.state).toBe('unknown');
+  const ledger = ledgerEntry([{ basis: 'provider_reported', usd: '2.00', count: 1 }], reports);
+  expect(ledger.period).toBeUndefined();
+  expect(ledger.scope).toContain('attribution unverified');
+  expect(ledger.ledgerEvidence?.metadata).toContain(
+    'Exact period boundaries, source/account scope and freshness are not supplied',
+  );
+});
+
+it('projects equivalent PostgreSQL and Firestore DTO shapes without reading or combining held liability', () => {
+  // Both existing readers expose basis/usd/count. No adapter/database execution is implied.
+  const postgres = {
+    byEvidence: [{ basis: 'provider_reported' as const, usd: '0.000000', count: 1 }],
+    held: [
+      {
+        id: 'held',
+        estimatedUsd: '987.654321',
+        source: 'unknown',
+        description: 'Unverified liability',
+      },
+    ],
+  };
+  const firestore = {
+    byEvidence: [{ basis: 'provider_reported' as const, usd: '0.000000', count: 1 }],
+    held: [...postgres.held],
+  };
+  expect(billingCoverageProjection([], postgres.byEvidence)).toEqual(
+    billingCoverageProjection([], firestore.byEvidence),
+  );
+  const projected = JSON.stringify(billingCoverageProjection([], postgres.byEvidence));
+  expect(projected).not.toContain('987.654321');
+  expect(postgres.held).toEqual(firestore.held);
+  expect(ledgerEntry(undefined).ledgerEvidence?.groups).toEqual([]); // unavailable upstream shape
+  expect(ledgerEntry([]).ledgerEvidence?.groups).toEqual([]);
+});
+
+it('keeps a paired same-provider report and operation receipt overlapping rather than summing the two views', () => {
+  // The synthetic fixture establishes this overlap; byEvidence itself supplies no provider attribution.
+  const report: ProviderBilling = {
+    ...base,
+    id: 'openrouter',
+    label: 'OpenRouter',
+    status: 'reported',
+    period: '2026-10',
+    scope: 'Shared saved key',
+    message: 'Key usage includes unrelated use.',
+    lines: [
+      {
+        service: 'OpenRouter',
+        detail: 'Saved-key usage',
+        currency: 'USD',
+        cost: 2.5,
+        credits: 0,
+        net: 2.5,
+      },
+    ],
+  };
+  const projection = billingCoverageProjection(
+    [report],
+    [{ basis: 'provider_reported', usd: '2.500000', count: 1 }],
+  );
+  expect(projection.overlapWarning).toContain('overlap provider bills');
+  expect(projection.totalState).toBe('unavailable');
+  expect(projection.entries.find((entry) => entry.id === 'openrouter')?.scope).toBe(
+    'Shared saved key',
+  );
+  expect(
+    ledgerEntry([{ basis: 'provider_reported', usd: '2.500000', count: 1 }]).ledgerEvidence
+      ?.groups[0]?.rows[0]?.usd,
+  ).toBe('2.500000');
+  expect(Object.hasOwn(projection, 'totalUsd')).toBe(false);
+});

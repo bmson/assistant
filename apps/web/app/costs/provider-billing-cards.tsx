@@ -3,6 +3,7 @@ import type {
   BillingCoverageState,
   ProviderBilling,
 } from '@assistant/application/provider-billing';
+import { ChevronRight } from 'lucide-react';
 import { cardShellClass } from '@/lib/ui';
 
 function money(value: number, currency: string) {
@@ -242,9 +243,13 @@ export function BillingCoverageSummary({ coverage }: { coverage: BillingCoverage
         <p className="mt-2 text-sm font-medium text-muted">{coverage.statusSummary}</p>
       ) : null}
       <p className="mt-2 text-xs text-muted">{coverage.overlapWarning}</p>
-      <details className="mt-3">
-        <summary className="cursor-pointer text-sm font-medium">
-          Coverage sources and gaps ({coverage.entries.length})
+      <details className="group/coverage mt-3">
+        <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium">
+          <ChevronRight
+            aria-hidden="true"
+            className="size-4 shrink-0 transition-transform group-open/coverage:rotate-90"
+          />
+          <span>Cost sources and usage breakdown ({coverage.entries.length})</span>
         </summary>
         <ul className="mt-3 space-y-3 border-t border-edge/60 pt-3">
           {coverage.entries.map((entry) => (
@@ -259,6 +264,36 @@ export function BillingCoverageSummary({ coverage }: { coverage: BillingCoverage
                 {entry.source ? ` · ${entry.source}` : ''}
               </p>
               <p className="mt-1 text-xs text-muted">{entry.detail}</p>
+              {entry.ledgerEvidence ? (
+                <section aria-label="Assistant ledger evidence" className="mt-2 space-y-2">
+                  <p className="text-xs text-muted">{entry.ledgerEvidence.metadata}</p>
+                  {entry.ledgerEvidence.groups.length === 0 ? (
+                    <p className="text-xs text-muted">{entry.ledgerEvidence.emptyMessage}</p>
+                  ) : (
+                    <ul className="space-y-2">
+                      {entry.ledgerEvidence.groups.map((group) => (
+                        <li key={group.basis} data-cost-basis={group.basis}>
+                          <p className="text-xs font-medium">{group.label}</p>
+                          {group.rows.length > 1 ? (
+                            <p className="text-xs text-muted">Separate rows; no subtotal.</p>
+                          ) : null}
+                          <ul>
+                            {group.rows.map((row) => (
+                              <li key={row.id} className="text-xs tabular-nums text-muted">
+                                {row.usd === null ? 'Amount unknown' : `Ledger USD ${row.usd}`}
+                                {' · '}
+                                {row.count === null
+                                  ? 'Event count unknown'
+                                  : `${row.count} recorded ${row.count === 1 ? 'event' : 'events'}`}
+                              </li>
+                            ))}
+                          </ul>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              ) : null}
             </li>
           ))}
         </ul>
