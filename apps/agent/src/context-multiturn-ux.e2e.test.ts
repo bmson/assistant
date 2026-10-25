@@ -270,11 +270,9 @@ function syntheticRouter(
   captured: Captured[],
   embeddingFor: (text: string) => number[],
   requestedReadTool: string,
-  requestText: string,
+  expectedQuery: string,
+  readState: { success: boolean },
 ) {
-  let stepCount = 0;
-  const read = detectPersonalReadRequest([{ role: 'user', content: requestText }]);
-  const explicitHistoryRead = Boolean(read?.conversationQuery);
   const router = {
     route: async () => syntheticPreflightRoute('synthetic/context-ux'),
     async object(role: string) {
@@ -315,10 +313,9 @@ function syntheticRouter(
       };
     },
     async step(role: string, options: { system?: string; messages?: unknown[] }) {
-      // The executor performs mandatory historical reads through its
-      // runtime-owned private-read router before asking for the answer.
-      const hasReadResult = explicitHistoryRead || stepCount > 0;
-      stepCount += 1;
+      // Explicit intent authorizes the tool call, but only a preceding
+      // successful dispatch can satisfy the historical-read requirement.
+      const hasReadResult = readState.success;
       captured.push({
         role,
         system: options.system ?? '',
@@ -335,7 +332,7 @@ function syntheticRouter(
               {
                 toolCallId: `context-read-${randomUUID()}`,
                 toolName: requestedReadTool,
-                input: { query: requestText },
+                input: { query: expectedQuery },
               },
             ],
       };
@@ -348,6 +345,9 @@ function syntheticReadDispatcher(
   runtime: TestRuntime,
   conversationId: string,
   embeddingFor: (text: string) => number[],
+  receipts: Array<{ query: string; matches: unknown[] }>,
+  expectedQuery: string | undefined,
+  readState: { success: boolean },
 ): DispatcherPort {
   const repository = runtime.persistence.history;
   return {
@@ -406,6 +406,8 @@ function syntheticReadDispatcher(
         })),
         mode: input.args.mode === 'text' ? 'text' : 'semantic',
       };
+      receipts.push({ query, matches: result.matches });
+      if (query === expectedQuery && result.matches.length > 0) readState.success = true;
       return { kind: 'executed', toolCallId: randomUUID(), result, cached: false };
     },
     async executeApproved() {
@@ -704,8 +706,17 @@ describe.each(['postgres', 'firestore'] as const)(
 
     async function runTurn(runtime: TestRuntime, conversationId: string, text: string) {
       const captured: Captured[] = [];
+      const readReceipts: Array<{ query: string; matches: unknown[] }> = [];
+      const readIntent = detectPersonalReadRequest([{ role: 'user', content: text }]);
+      const readState = { success: false };
       const requestedReadTool = 'conversations.search';
-      const router = syntheticRouter(captured, runtime.embeddingFor, requestedReadTool, text);
+      const router = syntheticRouter(
+        captured,
+        runtime.embeddingFor,
+        requestedReadTool,
+        readIntent?.conversationQuery ?? text,
+        readState,
+      );
       const response = await handleChatTurn(request(conversationId, text), {
         config: runtime.config,
         router,
@@ -722,15 +733,49 @@ describe.each(['postgres', 'firestore'] as const)(
             db: runtime.db ?? unavailableDb,
             persistence: runtime.persistence,
             router,
-            dispatcher: syntheticReadDispatcher(runtime, conversationId, runtime.embeddingFor),
+            dispatcher: syntheticReadDispatcher(
+              runtime,
+              conversationId,
+              runtime.embeddingFor,
+              readReceipts,
+              readIntent?.conversationQuery,
+              readState,
+            ),
           } satisfies ExecutorDeps,
           taskId,
         );
         expect(result.outcome, JSON.stringify(result)).toBe('done');
+        if (readIntent?.conversationQuery) {
+          expect(readReceipts).toContainEqual({
+            query: readIntent.conversationQuery,
+            matches: expect.arrayContaining([expect.anything()]),
+          });
+          if (runtime.db) {
+            const persistedCalls = await runtime.db
+              .select({
+                toolName: toolCalls.toolName,
+                status: toolCalls.status,
+                args: toolCalls.args,
+                result: toolCalls.result,
+              })
+              .from(toolCalls)
+              .where(eq(toolCalls.taskId, taskId));
+            expect(persistedCalls).toContainEqual(
+              expect.objectContaining({
+                toolName: 'conversations.search',
+                status: 'succeeded',
+                args: expect.objectContaining({ query: readIntent.conversationQuery }),
+                result: expect.objectContaining({
+                  matches: expect.arrayContaining([expect.anything()]),
+                }),
+              }),
+            );
+          }
+        }
       } else {
         expect(stream).toContain(OWNER_REPLY);
       }
-      return { response, captured: captured.at(-1), stream };
+      return { response, captured: captured.at(-1), stream, readReceipts };
     }
 
     it(

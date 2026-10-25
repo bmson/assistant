@@ -237,7 +237,7 @@ export async function firestoreChatSmoke(
     recall?: boolean;
     request?: string;
     expectRecall?: boolean;
-    expectRecallMode?: 'automatic' | 'explicit';
+    expectRecallMode?: 'automatic' | 'explicit' | 'disabled';
     expectOpenCommitment?: boolean;
   } = {},
 ) {
@@ -510,6 +510,12 @@ export async function firestoreChatSmoke(
     },
   );
   const roles: string[] = [];
+  let modelSteps = 0;
+  const dispatchReceipts: Array<{
+    toolName: string;
+    args: Record<string, unknown>;
+    result: unknown;
+  }> = [];
   let systemPrompt = '';
   let modelMessages = '';
   let delivered = 0;
@@ -540,6 +546,7 @@ export async function firestoreChatSmoke(
       return [embedding];
     },
     async step(_role: string, input: { system: string; messages: unknown[] }) {
+      modelSteps += 1;
       systemPrompt = input.system;
       modelMessages = JSON.stringify(input.messages);
       return {
@@ -565,23 +572,37 @@ export async function firestoreChatSmoke(
         })),
       resultIsUntrusted: (toolName) => toolName === 'conversations.search',
       dispatch: async (input) => {
-        if (input.toolName === 'calendar.list_events')
-          return {
-            kind: 'executed',
+        if (input.toolName === 'calendar.list_events') {
+          const result = {
+            kind: 'executed' as const,
             toolCallId: randomUUID(),
             result: { events: [], complete: true },
             cached: false,
           };
-        if (input.toolName === 'gmail.search')
-          return {
-            kind: 'executed',
+          dispatchReceipts.push({
+            toolName: input.toolName,
+            args: input.args,
+            result: result.result,
+          });
+          return result;
+        }
+        if (input.toolName === 'gmail.search') {
+          const result = {
+            kind: 'executed' as const,
             toolCallId: randomUUID(),
             result: { results: [], complete: true, hasMore: false },
             cached: false,
           };
-        if (input.toolName === 'conversations.search')
-          return {
-            kind: 'executed',
+          dispatchReceipts.push({
+            toolName: input.toolName,
+            args: input.args,
+            result: result.result,
+          });
+          return result;
+        }
+        if (input.toolName === 'conversations.search') {
+          const result = {
+            kind: 'executed' as const,
             toolCallId: randomUUID(),
             result: {
               matches: [
@@ -598,6 +619,13 @@ export async function firestoreChatSmoke(
             },
             cached: false,
           };
+          dispatchReceipts.push({
+            toolName: input.toolName,
+            args: input.args,
+            result: result.result,
+          });
+          return result;
+        }
         throw new Error(`Unexpected tool dispatch: ${input.toolName}`);
       },
       executeApproved: async () => {
@@ -614,35 +642,45 @@ export async function firestoreChatSmoke(
   assert.deepEqual(sqlAccesses, [], 'Even best-effort context must avoid SQL');
   assert.equal(outcome.outcome, 'done', JSON.stringify(outcome));
   assert.equal(delivered, 1);
-  assert.deepEqual(roles.slice(0, 2), ['classify', 'plan']);
-  assert.match(systemPrompt, /Synthetic owner prefers clear explanations/);
-  assert.match(systemPrompt, /Synthetic Observatory/);
+  const explicitRead = detectPersonalReadRequest([{ role: 'user', content: request }]);
+  const deterministicPrivateRead = Boolean(explicitRead);
+  if (!deterministicPrivateRead) {
+    assert.deepEqual(roles.slice(0, 2), ['classify', 'plan']);
+  }
+  const modelExecuted = roles.length > 0 || modelSteps > 0;
+  if (modelExecuted) {
+    assert.match(systemPrompt, /Synthetic owner prefers clear explanations/);
+    assert.match(systemPrompt, /Synthetic Observatory/);
+  }
   const privateRecallCanaries = [
     /Rainbow observation notes/,
     /Earlier coastal rainbows by the sea/,
     /The owner observes rainbows by the sea\./,
   ];
-  if (options.expectOpenCommitment) {
+  if (modelExecuted && options.expectOpenCommitment) {
     assert.match(systemPrompt, /Rainbow observation notes/);
     assert.doesNotMatch(systemPrompt, /Earlier coastal rainbows by the sea/);
     assert.doesNotMatch(systemPrompt, /The owner observes rainbows by the sea\./);
   } else if (
-    !options.recall ||
-    expectedRecallMode === 'explicit' ||
-    options.expectRecall === false
+    modelExecuted &&
+    (!options.recall || expectedRecallMode === 'explicit' || options.expectRecall === false)
   ) {
-    for (const canary of privateRecallCanaries) {
+    const canaries =
+      expectedRecallMode === 'explicit'
+        ? [privateRecallCanaries[0] as RegExp]
+        : privateRecallCanaries;
+    for (const canary of canaries) {
       assert.doesNotMatch(systemPrompt, canary);
       assert.doesNotMatch(modelMessages, canary);
     }
-  } else {
+  } else if (modelExecuted) {
     // Relevant history and graph are selected through the shared two-source
     // fuser; the commitment is not independently injected through openLoops.
     const commitmentCanary = /Rainbow observation notes/;
     assert.doesNotMatch(systemPrompt, commitmentCanary);
     assert.doesNotMatch(modelMessages, commitmentCanary);
   }
-  assert.match(systemPrompt, /Explain science clearly/);
+  if (modelExecuted) assert.match(systemPrompt, /Explain science clearly/);
   if (options.recall && expectedRecallMode === 'automatic') {
     // Pre-planning retrieval is carried into the model's message window as
     // reference evidence; it is not duplicated in the static system prompt.
@@ -659,7 +697,31 @@ export async function firestoreChatSmoke(
     assert.equal(metrics.docs[0]?.get('historyUsed'), 2);
   }
   const persistedTask = await store.doc('tasks', task.id).get();
-  assert.equal(persistedTask.get('plan.action'), 'reply');
+  assert.equal(persistedTask.get('plan.action'), deterministicPrivateRead ? 'workflow' : 'reply');
+  if (deterministicPrivateRead) {
+    const expectedTool = explicitRead?.firstToolName;
+    assert.ok(expectedTool, `Expected a supported deterministic read for: ${request}`);
+    const receipt = dispatchReceipts.find((entry) => entry.toolName === expectedTool);
+    assert.ok(receipt, `Expected successful ${expectedTool} dispatcher receipt`);
+    const persistedCalls = await store.collection('toolCalls').where('taskId', '==', task.id).get();
+    const persistedReceipt = persistedCalls.docs
+      .map((doc) => doc.data())
+      .find((call) => call.toolName === expectedTool && call.status === 'succeeded');
+    assert.ok(persistedReceipt, `Expected persisted successful ${expectedTool} receipt`);
+    assert.deepEqual(persistedReceipt.args, receipt.args);
+    if (expectedTool === 'conversations.search') {
+      assert.equal(typeof receipt.args.query, 'string');
+      assert.ok((receipt.args.query as string).length >= 2);
+      const result = receipt.result as { matches?: unknown[] };
+      assert.ok(Array.isArray(result.matches) && result.matches.length > 0);
+      assert.equal(
+        (persistedReceipt.args as { query?: unknown } | undefined)?.query,
+        explicitRead?.conversationQuery,
+      );
+      const persistedResult = persistedReceipt.result as { matches?: unknown[] } | undefined;
+      assert.ok(Array.isArray(persistedResult?.matches) && persistedResult.matches.length > 0);
+    }
+  }
   const taskState = persistedTask.get('state') as
     | {
         plannerState?: { planningRecall?: { status?: string; sourceCount?: number } };
@@ -711,7 +773,9 @@ export async function firestoreChatSmoke(
           planningRecallSourceCount: planningRecall?.sourceCount ?? 0,
           preflightRecallMode: recallPreflight?.mode,
           preflightSourceKeys: recallPreflight?.sources.map((source) => source.surfaceKey).sort(),
+          expectedPreflightSourceKeys: recallPreflight?.expectedSourceKeys,
           runtimeSourceKeys,
+          dispatchReceipts,
         }
       : {}),
   };
