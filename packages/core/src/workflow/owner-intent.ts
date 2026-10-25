@@ -58,15 +58,15 @@ export function isExplicitCommitmentReadRequest(intent: OwnerIntent): boolean {
   const topicFilter = String.raw`(?:\s+(?:about|for)\s+[\p{L}\p{M}\p{N}\s,'’-]{1,80})?`;
   const suffix = String.raw`${topicFilter}\s*[.!?]*\s*$`;
   const directQuestion = new RegExp(
-    String.raw`^\s*(?:what|which)\s+are\s+(?:my|our|the)\s+${qualifier}${commitmentNoun}${suffix}`,
+    String.raw`^\s*(?:what|which)\s+are\s+(?:my|our)\s+${qualifier}${commitmentNoun}${suffix}`,
     'iu',
   );
   const directStatusQuestion = new RegExp(
-    String.raw`^\s*(?:what|which)\s+${qualifier}${commitmentNoun}\s+(?:do\s+i\s+owe|am\s+i\s+waiting\s+on|are\s+(?:still\s+)?(?:open|outstanding)|remain\s+open)\s*[.!?]*\s*$`,
+    String.raw`^\s*(?:what|which)\s+${qualifier}${commitmentNoun}\s+(?:do\s+i\s+(?:still\s+)?owe|am\s+i\s+(?:still\s+)?waiting\s+on)\s*[.!?]*\s*$`,
     'iu',
   );
   const directListCommand = new RegExp(
-    String.raw`^\s*(?:list|show|review|check)\s+(?:(?:my|our|the)\s+)?${qualifier}${commitmentNoun}${suffix}`,
+    String.raw`^\s*(?:list|show|review|check)\s+(?:my|our)\s+${qualifier}${commitmentNoun}${suffix}`,
     'iu',
   );
   const explicitListPurpose =
