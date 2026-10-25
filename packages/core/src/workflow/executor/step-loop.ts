@@ -134,6 +134,7 @@ import {
 } from '../memory-read-answer.js';
 import {
   isConversationLocalContext,
+  isExplicitCommitmentReadRequest,
   isSelfContainedTextTransformation,
   latestOwnerIntent,
   type OwnerIntent,
@@ -1051,6 +1052,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // can still use contacts.lookup / memory.recall there.
   let recallBlock: string | undefined;
   let openLoops: string | undefined;
+  const commitmentPurposeRequested = isExplicitCommitmentReadRequest(ownerIntent);
   const recallMode = resolveRecallMode({
     resolvedReadIntent: rc.resolvedReadIntent ?? { kind: 'none' },
     ownerIntent,
@@ -1061,7 +1063,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     taskType: task.type,
     conversationId: task.conversationId ?? undefined,
     localOnly: localTransformation || restrictedChecklistResume,
-    explicitReadRequested: Boolean(readRequest),
+    explicitReadRequested: Boolean(readRequest) || commitmentPurposeRequested,
   });
   const fallbackRecallMode =
     recallMode === 'automatic' || recallMode === 'continuation' ? recallMode : undefined;
@@ -1146,7 +1148,13 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     !isConversationLocalContext(ownerText) &&
     privilegedTask &&
     !state.untrustedContext &&
-    task.conversationId
+    task.conversationId &&
+    // Automatic and continuation recall already pass through the shared
+    // eligibility and two-source fuser above. Explicit reads of another
+    // private source do not authorize this separate commitment lookup; only
+    // an admitted owner request to review open commitments/follow-ups does.
+    commitmentPurposeRequested &&
+    recallMode === 'explicit'
   ) {
     try {
       const lastUser = [...rc.window].reverse().find((m) => m.role === 'user');

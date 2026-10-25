@@ -1,4 +1,4 @@
-import type { OwnerCommitment, SituationDecisionContext } from '@assistant/persistence';
+import type { SituationDecisionContext } from '@assistant/persistence';
 import type { RecallMode } from '../workflow/owner-intent.js';
 import {
   type ContextCandidate,
@@ -8,7 +8,6 @@ import {
 import type { RecallSource } from './recall.js';
 import {
   eligibleAutomaticRecallCandidates,
-  ownerCommitmentRecallMeaning,
   situationDecisionRecallMeaning,
 } from './recall-eligibility.js';
 import { recallSourceRevision, recallSurfaceKey } from './recall-surfacing.js';
@@ -19,7 +18,6 @@ export async function fuseOwnerContext(input: {
   mode: RecallMode;
   rankedContext: ReadonlyArray<ContextCandidate>;
   decisions?: ReadonlyArray<SituationDecisionContext>;
-  commitments?: ReadonlyArray<OwnerCommitment>;
   isSuppressed?: (sourceKey: string, sourceRevision: string) => Promise<boolean>;
   limit?: number;
   maxBytes?: number;
@@ -55,49 +53,21 @@ export async function fuseOwnerContext(input: {
       meaning: situationDecisionRecallMeaning(decision),
     };
   });
-  const commitments = (input.commitments ?? []).map((commitment) => {
-    const source: RecallSource = {
-      date: commitment.updatedAt.toISOString().slice(0, 10),
-      label: `${commitment.kind}: ${commitment.title}`.slice(0, 80),
-      kind: 'commitment',
-      surfaceKey: recallSurfaceKey('commitment', [commitment.id]),
-      sourceRevision: recallSourceRevision({
-        id: commitment.id,
-        updatedAt: commitment.updatedAt.toISOString(),
-        status: commitment.status,
-        contentHash: commitment.contentHash,
-        title: commitment.title,
-        nextAction: commitment.nextAction,
-        dueAt: commitment.dueAt?.toISOString() ?? null,
-      }),
-    };
-    const description = [
-      `[${commitment.kind}; ${commitment.status}] ${commitment.title}`,
-      commitment.dueAt ? `due ${commitment.dueAt.toISOString().slice(0, 10)}` : '',
-      commitment.nextAction ? `next: ${commitment.nextAction}` : '',
-    ]
-      .filter(Boolean)
-      .join('; ');
-    const lexical = lexicalContextScore(input.queryText, `${description} ${commitment.details}`);
-    source.relevance = lexical;
-    return {
-      source,
-      score: lexical,
-      text: description,
-      meaning: ownerCommitmentRecallMeaning(commitment),
-    };
-  });
+  // Automatic and continuation recall intentionally omit open commitments
+  // until a trusted structured work-purpose signal exists. Explicit owner-list
+  // requests are handled separately by the executor's purpose-gated openLoops.
   const mapped = [
-    ...input.rankedContext.map((entry) => {
-      const lexical = lexicalContextScore(input.queryText, entry.text);
-      return {
-        ...entry,
-        score: entry.score * 0.8 + lexical * 0.2,
-        meaning: entry.meaning ?? '',
-      };
-    }),
+    ...input.rankedContext
+      .filter((entry) => entry.source.kind !== 'commitment')
+      .map((entry) => {
+        const lexical = lexicalContextScore(input.queryText, entry.text);
+        return {
+          ...entry,
+          score: entry.score * 0.8 + lexical * 0.2,
+          meaning: entry.meaning ?? '',
+        };
+      }),
     ...decisions,
-    ...commitments,
   ];
   for (const candidate of mapped) {
     const key = candidate.source.surfaceKey;

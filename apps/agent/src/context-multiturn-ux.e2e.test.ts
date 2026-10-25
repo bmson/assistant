@@ -273,6 +273,8 @@ function syntheticRouter(
   requestText: string,
 ) {
   let stepCount = 0;
+  const read = detectPersonalReadRequest([{ role: 'user', content: requestText }]);
+  const explicitHistoryRead = Boolean(read?.conversationQuery);
   const router = {
     route: async () => syntheticPreflightRoute('synthetic/context-ux'),
     async object(role: string) {
@@ -313,7 +315,9 @@ function syntheticRouter(
       };
     },
     async step(role: string, options: { system?: string; messages?: unknown[] }) {
-      const hasReadResult = stepCount > 0;
+      // The executor performs mandatory historical reads through its
+      // runtime-owned private-read router before asking for the answer.
+      const hasReadResult = explicitHistoryRead || stepCount > 0;
       stepCount += 1;
       captured.push({
         role,
@@ -376,7 +380,7 @@ function syntheticReadDispatcher(
             return suppressed?.has(sourceKey) ?? true;
           }
         : undefined;
-      const result = await recallRelevantContext(
+      const recalled = await recallRelevantContext(
         repository,
         {
           agentId: runtime.ownerId,
@@ -391,6 +395,17 @@ function syntheticReadDispatcher(
           isSuppressed,
         },
       );
+      // Mirror the real conversations.search result shape. A RecallResult
+      // contains useful text, but it is not a durable search receipt because
+      // it has no `matches` array for the personal-read contract to validate.
+      const result = {
+        matches: (recalled.rankedContext ?? []).map((entry) => ({
+          text: entry.text,
+          sourceMessageIds: entry.source.evidence?.sourceMessageIds ?? [],
+          sourceRevision: entry.source.sourceRevision,
+        })),
+        mode: input.args.mode === 'text' ? 'text' : 'semantic',
+      };
       return { kind: 'executed', toolCallId: randomUUID(), result, cached: false };
     },
     async executeApproved() {
@@ -558,7 +573,18 @@ describe.each(['postgres', 'firestore'] as const)(
       scenario?.sourceTurns.forEach((text, index) => {
         embeddingGroups.set(text, matching.has(index) ? 'query' : `source-${index}`);
       });
-      if (scenario) embeddingGroups.set(scenario.question, 'query');
+      if (scenario) {
+        embeddingGroups.set(scenario.question, 'query');
+        const read = detectPersonalReadRequest([{ role: 'user', content: scenario.question }]);
+        for (const query of [
+          read?.conversationAnchorQuery,
+          read?.conversationQuery,
+          read?.conversationFollowupQuery,
+          read?.conversationCorrectionQuery,
+        ]) {
+          if (query) embeddingGroups.set(query, 'query');
+        }
+      }
       for (const alias of scenario?.questionAliases ?? []) embeddingGroups.set(alias, 'query');
       for (const text of scenario?.matchingSourceTexts ?? []) embeddingGroups.set(text, 'query');
       const vectors = new Map<string, number[]>();

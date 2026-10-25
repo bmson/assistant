@@ -1,7 +1,17 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { loadConfig } from '@assistant/config';
 import { type ExecutorDeps, executeTask, type ModelRouter } from '@assistant/core';
+import { fuseOwnerContext } from '@assistant/core/memory/fused-owner-context';
 import { GRAPH_EXTRACTION_VERSION } from '@assistant/core/memory/knowledge-graph';
+import {
+  isExplicitCommitmentReadRequest,
+  isSelfContainedTextTransformation,
+  latestOwnerIntent,
+  resolveActiveReadIntent,
+  resolveRecallMode,
+} from '@assistant/core/workflow/owner-intent';
+import { detectPersonalReadRequest } from '@assistant/core/workflow/read-intent';
 import type { Db } from '@assistant/db';
 import {
   createFirestoreExecutionPersistence,
@@ -16,6 +26,10 @@ import {
   finalChannelDeliveryReport,
 } from '@assistant/persistence';
 import { FieldValue } from '@google-cloud/firestore';
+import {
+  recallSourceRevision,
+  recallSurfaceKey,
+} from '../packages/core/src/memory/recall-surfacing.js';
 
 export const CHAT_SMOKE_SPACE: EmbeddingSpace = {
   provider: 'synthetic',
@@ -24,20 +38,245 @@ export const CHAT_SMOKE_SPACE: EmbeddingSpace = {
   revision: '1',
 };
 
+const SMOKE_HISTORY_TEXT = 'The owner observed coastal rainbows by the sea.';
+const SMOKE_HISTORY_SUMMARY = 'Earlier coastal rainbows by the sea';
+const SMOKE_GRAPH_EVIDENCE = 'The owner observes rainbows by the sea.';
+const SMOKE_COMMITMENT_TITLE = 'Rainbow observation notes';
+const SMOKE_COMMITMENT_NEXT_ACTION = 'Compare the rainbow notes';
+const SMOKE_RAW_HISTORY_SIMILARITY = 0.85;
+const SMOKE_POSITIVE_REQUEST =
+  'Please help me prepare my observation notes about coastal rainbows by the sea.';
+
+function preflightRecallCandidates(
+  messageId: string,
+  graphRelationId: string,
+  graphMemoryId: string,
+) {
+  const graphMeaning = `Owner observes Coastal rainbows ${SMOKE_GRAPH_EVIDENCE}`;
+  return [
+    {
+      text: `[2026-10-24] Summary excerpt: ${SMOKE_HISTORY_SUMMARY}\n  User: ${SMOKE_HISTORY_TEXT}`,
+      meaning: `${SMOKE_HISTORY_SUMMARY} ${SMOKE_HISTORY_TEXT}`,
+      score: 1,
+      source: {
+        date: '2026-10-24',
+        label: SMOKE_HISTORY_SUMMARY,
+        surfaceKey: recallSurfaceKey('chat:summary_with_excerpt', [messageId]),
+        sourceRevision: recallSourceRevision({
+          summary: SMOKE_HISTORY_SUMMARY,
+          keyMessage: { id: messageId, text: SMOKE_HISTORY_TEXT },
+        }),
+        relevance: 1,
+        evidence: {
+          representation: 'summary_with_excerpt' as const,
+          sourceMessageIds: [messageId],
+          renderedUtf8Bytes: 120,
+        },
+      },
+    },
+    {
+      text: `[2026-10-24]\n  User: ${SMOKE_HISTORY_TEXT}`,
+      meaning: SMOKE_HISTORY_TEXT,
+      score: SMOKE_RAW_HISTORY_SIMILARITY,
+      source: {
+        date: '2026-10-24',
+        label: SMOKE_HISTORY_TEXT,
+        surfaceKey: recallSurfaceKey('chat:message_excerpts', [messageId]),
+        sourceRevision: recallSourceRevision([[messageId, SMOKE_HISTORY_TEXT]]),
+        relevance: SMOKE_RAW_HISTORY_SIMILARITY,
+        evidence: {
+          representation: 'message_excerpts' as const,
+          sourceMessageIds: [messageId],
+          renderedUtf8Bytes: 70,
+        },
+      },
+    },
+    {
+      text: `[1 hop] ${graphMeaning}\n  Evidence: ${SMOKE_GRAPH_EVIDENCE}.`,
+      meaning: graphMeaning,
+      score: 1,
+      source: {
+        date: '2026-10-24',
+        label: graphMeaning.slice(0, 80),
+        kind: 'knowledge_graph' as const,
+        hops: 1 as const,
+        surfaceKey: recallSurfaceKey('knowledge_graph', [graphRelationId]),
+        sourceRevision: recallSourceRevision([
+          {
+            relationId: graphRelationId,
+            sourceMemoryId: graphMemoryId,
+            assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
+            validFrom: null,
+            validUntil: null,
+            content: null,
+            evidenceQuote: SMOKE_GRAPH_EVIDENCE,
+          },
+        ]),
+        relevance: 1,
+      },
+    },
+  ];
+}
+
+export async function preflightPlanningRecall(request: string, now: Date) {
+  const resolveMode = (text: string) => {
+    const trigger = { source: 'chat', payload: { text } };
+    const ownerIntent = latestOwnerIntent([{ role: 'user', content: text }], {
+      trust: 'owner',
+      trigger,
+    });
+    const ownerText = ownerIntent.ownerAuthoredText;
+    const readIntent = resolveActiveReadIntent({ text: ownerText, now, timeZone: 'UTC' });
+    const privateRead = detectPersonalReadRequest([{ role: 'user', content: ownerText }]) !== null;
+    const localTransformation =
+      ownerIntent.authorizedScopes.length === 0 &&
+      isSelfContainedTextTransformation(ownerText, ownerIntent.externalText);
+    return resolveRecallMode({
+      resolvedReadIntent: readIntent,
+      ownerIntent,
+      enabled: loadConfig().CHAT_RECALL_ENABLED,
+      untrustedContext: false,
+      trustedTask: true,
+      taskType: 'chat_turn',
+      conversationId: 'firestore-chat-smoke-preflight',
+      localOnly: localTransformation,
+      explicitReadRequested: privateRead || isExplicitCommitmentReadRequest(ownerIntent),
+      requireNewRequest: true,
+    });
+  };
+  const mode = resolveMode(request);
+  const messageId = 'firestore-smoke-history-message-a';
+  const graphRelationId = 'firestore-smoke-graph-relation-a';
+  const fuse = (
+    queryText: string,
+    recallMode: 'automatic' | 'disabled',
+    rankedContext: ReturnType<typeof preflightRecallCandidates>,
+  ) =>
+    fuseOwnerContext({
+      queryText,
+      eligibilityText: queryText,
+      mode: recallMode,
+      rankedContext,
+      limit: 8,
+    });
+  const permutations = [
+    {
+      messageId: randomUUID(),
+      relationId: randomUUID(),
+      memoryId: randomUUID(),
+      order: [0, 1, 2],
+    },
+    {
+      messageId: randomUUID(),
+      relationId: randomUUID(),
+      memoryId: randomUUID(),
+      order: [2, 0, 1],
+    },
+    {
+      messageId: randomUUID(),
+      relationId: randomUUID(),
+      memoryId: randomUUID(),
+      order: [1, 2, 0],
+    },
+  ];
+  const positiveMode = resolveMode(SMOKE_POSITIVE_REQUEST);
+  const permutedFusions = await Promise.all(
+    permutations.map(async ({ messageId, relationId, memoryId, order }) => {
+      const candidates = preflightRecallCandidates(messageId, relationId, memoryId);
+      const result = await fuse(
+        SMOKE_POSITIVE_REQUEST,
+        positiveMode === 'automatic' ? 'automatic' : 'disabled',
+        order.flatMap((index) => (candidates[index] ? [candidates[index]] : [])),
+      );
+      return {
+        result,
+        sourceKinds: result.sources
+          .map((source) => source.kind ?? source.evidence?.representation ?? 'unknown')
+          .sort(),
+      };
+    }),
+  );
+  const firstFusion = permutedFusions.at(0);
+  if (!firstFusion) throw new Error('Missing deterministic recall preflight permutation');
+  const fused = await fuse(
+    request,
+    mode === 'automatic' ? 'automatic' : 'disabled',
+    preflightRecallCandidates(messageId, graphRelationId, 'firestore-smoke-graph-memory-a'),
+  );
+  assert.deepEqual(
+    permutedFusions.map((entry) => entry.sourceKinds),
+    permutedFusions.map(() => ['knowledge_graph', 'summary_with_excerpt']),
+    'Fuser selection must preserve history and graph identities across ID and ordering permutations',
+  );
+  const genericCandidates = preflightRecallCandidates(
+    'firestore-smoke-generic-history',
+    'firestore-smoke-generic-relation',
+    'firestore-smoke-generic-memory',
+  );
+  const generic = await fuse(
+    'Explain how a rainbow forms.',
+    resolveMode('Explain how a rainbow forms.') === 'automatic' ? 'automatic' : 'disabled',
+    genericCandidates,
+  );
+  return {
+    mode,
+    sources: fused.sources,
+    genericMode: resolveMode('Explain how a rainbow forms.'),
+    genericSources: generic.sources,
+    expectedSourceKeys: [
+      recallSurfaceKey('chat:summary_with_excerpt', [messageId]),
+      recallSurfaceKey('knowledge_graph', [graphRelationId]),
+    ].sort(),
+  };
+}
+
 /** Full queued chat -> planner -> model -> durable final, with synthetic provider output. */
 export async function firestoreChatSmoke(
   store: InstallationStore,
-  options: { recall?: boolean; request?: string; expectRecall?: boolean } = {},
+  options: {
+    recall?: boolean;
+    request?: string;
+    expectRecall?: boolean;
+    expectRecallMode?: 'automatic' | 'explicit';
+    expectOpenCommitment?: boolean;
+  } = {},
 ) {
   const agentId = randomUUID();
   const conversationId = randomUUID();
   const skillId = randomUUID();
   const persistence = createFirestoreExecutionPersistence(store, agentId, CHAT_SMOKE_SPACE);
   const now = new Date();
+  let expectedRuntimeSourceKeys: string[] = [];
+  let syntheticHistoryMessageId: string | undefined;
   const request = options.request ?? 'Explain how a rainbow forms.';
+  const expectedRecallMode = options.expectRecallMode ?? 'automatic';
+  const recallPreflight = options.recall ? await preflightPlanningRecall(request, now) : undefined;
+  if (options.recall) {
+    assert.equal(
+      recallPreflight?.mode,
+      expectedRecallMode,
+      'The recall fixture request must resolve through its expected read path',
+    );
+    assert.equal(recallPreflight?.genericMode, 'automatic');
+    assert.deepEqual(recallPreflight?.genericSources, []);
+    assert.deepEqual(
+      recallPreflight?.sources.map((source) => source.surfaceKey).sort(),
+      expectedRecallMode === 'automatic' && options.expectRecall === true
+        ? recallPreflight?.expectedSourceKeys
+        : [],
+      'The same synthetic source universe must fuse only subject-eligible source identities',
+    );
+  }
   const answer =
     'A rainbow appears when sunlight is refracted and reflected inside water droplets.';
   const embedding = Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0));
+  const historyMessageEmbedding = Array.from({ length: 1536 }, (_, index) =>
+    index === 0
+      ? SMOKE_RAW_HISTORY_SIMILARITY
+      : index === 1
+        ? Math.sqrt(1 - SMOKE_RAW_HISTORY_SIMILARITY ** 2)
+        : 0,
+  );
   await store.doc('agents', agentId).set({
     id: agentId,
     name: 'Synthetic assistant',
@@ -96,9 +335,9 @@ export async function firestoreChatSmoke(
     reopenedFromId: null,
     reopenOperationId: null,
     kind: 'follow_up',
-    title: 'Rainbow observation notes',
+    title: SMOKE_COMMITMENT_TITLE,
     details: '',
-    nextAction: 'Compare the rainbow notes',
+    nextAction: SMOKE_COMMITMENT_NEXT_ACTION,
     status: 'open',
     dueAt: null,
     snoozedUntil: null,
@@ -132,6 +371,7 @@ export async function firestoreChatSmoke(
   if (options.recall) {
     const historyConversationId = randomUUID();
     const historyMessageId = randomUUID();
+    syntheticHistoryMessageId = historyMessageId;
     const historyAt = new Date(now.getTime() - 86_400_000);
     await store.doc('conversations', historyConversationId).set({
       id: historyConversationId,
@@ -145,9 +385,12 @@ export async function firestoreChatSmoke(
       id: historyMessageId,
       conversationId: historyConversationId,
       role: 'user',
-      text: 'The owner observed coastal rainbows by the sea.',
+      text: SMOKE_HISTORY_TEXT,
       createdAt: historyAt,
-      embedding: FieldValue.vector(embedding),
+      // Keep the raw-message candidate above the history recall threshold but
+      // below the exact summary/graph matches so the two-source fuser cap is
+      // stable regardless of randomized source IDs.
+      embedding: FieldValue.vector(historyMessageEmbedding),
       embeddingSpace: embeddingSpaceKey(CHAT_SMOKE_SPACE),
     });
     const segmentId = randomUUID();
@@ -157,7 +400,7 @@ export async function firestoreChatSmoke(
       conversationId: historyConversationId,
       startMessageId: historyMessageId,
       endMessageId: historyMessageId,
-      summary: 'Earlier coastal rainbows by the sea',
+      summary: SMOKE_HISTORY_SUMMARY,
       startedAt: historyAt,
       endedAt: historyAt,
       createdAt: historyAt,
@@ -169,10 +412,14 @@ export async function firestoreChatSmoke(
       subjectId = randomUUID(),
       objectId = randomUUID(),
       relationId = randomUUID();
+    expectedRuntimeSourceKeys = [
+      recallSurfaceKey('chat:summary_with_excerpt', [historyMessageId]),
+      recallSurfaceKey('knowledge_graph', [relationId]),
+    ].sort();
     await new FirestoreMemoryRepository(store, CHAT_SMOKE_SPACE).save({
       id: memoryId,
       agentId,
-      content: 'The owner observes rainbows by the sea.',
+      content: SMOKE_GRAPH_EVIDENCE,
       contentHash: `synthetic-${memoryId}`,
       createdAt: historyAt,
       expiresAt: null,
@@ -216,7 +463,7 @@ export async function firestoreChatSmoke(
       objectEntityId: objectId,
       sourceMemoryId: memoryId,
       predicate: 'observes',
-      evidenceQuote: 'The owner observes rainbows by the sea.',
+      evidenceQuote: SMOKE_GRAPH_EVIDENCE,
       confidence: '1',
       reviewStatus: 'pending',
       assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
@@ -266,6 +513,7 @@ export async function firestoreChatSmoke(
   let systemPrompt = '';
   let modelMessages = '';
   let delivered = 0;
+  let deliveredText = '';
   const router = {
     async embeddingSpace() {
       return CHAT_SMOKE_SPACE;
@@ -309,17 +557,56 @@ export async function firestoreChatSmoke(
     router,
     persistence,
     dispatcher: {
-      toolDefs: () => [],
-      resultIsUntrusted: () => false,
-      dispatch: async () => {
-        throw new Error('Unexpected tool dispatch');
+      toolDefs: () =>
+        ['calendar.list_events', 'gmail.search', 'conversations.search'].map((name) => ({
+          name,
+          description: 'Synthetic private-read fixture tool.',
+          inputSchema: {} as never,
+        })),
+      resultIsUntrusted: (toolName) => toolName === 'conversations.search',
+      dispatch: async (input) => {
+        if (input.toolName === 'calendar.list_events')
+          return {
+            kind: 'executed',
+            toolCallId: randomUUID(),
+            result: { events: [], complete: true },
+            cached: false,
+          };
+        if (input.toolName === 'gmail.search')
+          return {
+            kind: 'executed',
+            toolCallId: randomUUID(),
+            result: { results: [], complete: true, hasMore: false },
+            cached: false,
+          };
+        if (input.toolName === 'conversations.search')
+          return {
+            kind: 'executed',
+            toolCallId: randomUUID(),
+            result: {
+              matches: [
+                {
+                  messageId: syntheticHistoryMessageId ?? 'synthetic-history-message',
+                  conversationId: 'synthetic-history-conversation',
+                  text: SMOKE_HISTORY_TEXT,
+                  role: 'user',
+                  origin: 'owner',
+                  sourceRevision: 'synthetic-history-revision',
+                },
+              ],
+              mode: 'semantic',
+            },
+            cached: false,
+          };
+        throw new Error(`Unexpected tool dispatch: ${input.toolName}`);
       },
       executeApproved: async () => {
         throw new Error('Unexpected approval');
       },
     },
-    deliverFinal: async (_task, _text, attemptId) => {
+    deliverFinal: async (_task, text, attemptId) => {
       delivered++;
+      deliveredText = text;
       return finalChannelDeliveryReport([finalChannelDelivery('dashboard', 'accepted', attemptId)]);
     },
   };
@@ -330,9 +617,33 @@ export async function firestoreChatSmoke(
   assert.deepEqual(roles.slice(0, 2), ['classify', 'plan']);
   assert.match(systemPrompt, /Synthetic owner prefers clear explanations/);
   assert.match(systemPrompt, /Synthetic Observatory/);
-  assert.match(systemPrompt, /Rainbow observation notes/);
+  const privateRecallCanaries = [
+    /Rainbow observation notes/,
+    /Earlier coastal rainbows by the sea/,
+    /The owner observes rainbows by the sea\./,
+  ];
+  if (options.expectOpenCommitment) {
+    assert.match(systemPrompt, /Rainbow observation notes/);
+    assert.doesNotMatch(systemPrompt, /Earlier coastal rainbows by the sea/);
+    assert.doesNotMatch(systemPrompt, /The owner observes rainbows by the sea\./);
+  } else if (
+    !options.recall ||
+    expectedRecallMode === 'explicit' ||
+    options.expectRecall === false
+  ) {
+    for (const canary of privateRecallCanaries) {
+      assert.doesNotMatch(systemPrompt, canary);
+      assert.doesNotMatch(modelMessages, canary);
+    }
+  } else {
+    // Relevant history and graph are selected through the shared two-source
+    // fuser; the commitment is not independently injected through openLoops.
+    const commitmentCanary = /Rainbow observation notes/;
+    assert.doesNotMatch(systemPrompt, commitmentCanary);
+    assert.doesNotMatch(modelMessages, commitmentCanary);
+  }
   assert.match(systemPrompt, /Explain science clearly/);
-  if (options.recall) {
+  if (options.recall && expectedRecallMode === 'automatic') {
     // Pre-planning retrieval is carried into the model's message window as
     // reference evidence; it is not duplicated in the static system prompt.
     assert.equal(
@@ -347,7 +658,32 @@ export async function firestoreChatSmoke(
     // whether those candidates enter the model window.
     assert.equal(metrics.docs[0]?.get('historyUsed'), 2);
   }
-  assert.equal((await store.doc('tasks', task.id).get()).get('plan.action'), 'reply');
+  const persistedTask = await store.doc('tasks', task.id).get();
+  assert.equal(persistedTask.get('plan.action'), 'reply');
+  const taskState = persistedTask.get('state') as
+    | {
+        plannerState?: { planningRecall?: { status?: string; sourceCount?: number } };
+        recall?: Array<{ surfaceKey?: string }>;
+      }
+    | undefined;
+  const planningRecall = taskState?.plannerState?.planningRecall;
+  const runtimeSourceKeys = (taskState?.recall ?? [])
+    .map((source) => source.surfaceKey)
+    .filter((key): key is string => Boolean(key))
+    .sort();
+  if (options.recall && expectedRecallMode === 'automatic') {
+    // Only the automatic/continuation planning-recall path writes `complete`;
+    // a generic request must complete the gate while surfacing no sources.
+    assert.equal(planningRecall?.status, 'complete');
+    if (options.expectRecall === true) {
+      assert.ok((planningRecall?.sourceCount ?? 0) > 0);
+      assert.deepEqual(runtimeSourceKeys, expectedRuntimeSourceKeys);
+    } else {
+      assert.equal(planningRecall?.sourceCount ?? 0, 0);
+      assert.deepEqual(runtimeSourceKeys, []);
+      for (const canary of privateRecallCanaries) assert.doesNotMatch(modelMessages, canary);
+    }
+  }
   assert.equal((await store.doc('skills', skillId).get()).get('useCount'), 1);
   assert.equal((await store.doc('skills', skillId).get()).get('successCount'), 1);
   assert.equal(
@@ -355,7 +691,7 @@ export async function firestoreChatSmoke(
       agentId,
       conversationId,
       taskId: task.id,
-      text: answer,
+      text: deliveredText,
     }),
     true,
   );
@@ -371,6 +707,11 @@ export async function firestoreChatSmoke(
       ? {
           historySurfaced: options.expectRecall === true,
           graphSurfaced: options.expectRecall === true,
+          planningRecallStatus: planningRecall?.status,
+          planningRecallSourceCount: planningRecall?.sourceCount ?? 0,
+          preflightRecallMode: recallPreflight?.mode,
+          preflightSourceKeys: recallPreflight?.sources.map((source) => source.surfaceKey).sort(),
+          runtimeSourceKeys,
         }
       : {}),
   };

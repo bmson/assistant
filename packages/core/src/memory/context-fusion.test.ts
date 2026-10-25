@@ -301,6 +301,30 @@ describe('bounded fused owner context selection', () => {
     ]);
   });
 
+  it('never fuses automatic commitments, even on matching owner-work topics', async () => {
+    const commitment = candidate(45, 'Rainbow observation notes', 1, 'commitment');
+    const requests = [
+      'What does open commitments mean for rainbow observation notes?',
+      'Find an article about open commitments for rainbow observation notes.',
+      'Find an article explaining how authors write rainbow observation notes for my class.',
+      'Prepare a list of articles about open commitments for rainbow notes for my class.',
+      'Can you help me prepare my list of articles about rainbow observation notes?',
+      'Can you help me understand what open commitments mean for rainbow observation notes?',
+      'Please help me prepare my observation notes and research articles about coastal rainbows.',
+      'Help me prepare my observation notes about coastal rainbows by the sea.',
+    ];
+
+    for (const request of requests) {
+      const fused = await fuseOwnerContext({
+        queryText: request,
+        eligibilityText: request,
+        mode: 'automatic',
+        rankedContext: [commitment],
+      });
+      expect(fused.sources).toEqual([]);
+    }
+  });
+
   it.each(['explicit', 'disabled'] as const)(
     'does not surface automatic candidates in %s mode',
     async (mode) => {

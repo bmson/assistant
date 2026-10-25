@@ -50,6 +50,38 @@ export interface OwnerIntent {
 
 export type RecallMode = 'automatic' | 'explicit' | 'continuation' | 'disabled';
 
+/** An explicit private read of the owner's open commitment list, by purpose. */
+export function isExplicitCommitmentReadRequest(intent: OwnerIntent): boolean {
+  const text = intent.ownerAuthoredText;
+  const commitmentNoun = `(?:commitments?|follow[- ]?ups?|promises?|to-?dos?)`;
+  const qualifier = String.raw`(?:(?:open|outstanding|unresolved|pending)\s+)?`;
+  const topicFilter = String.raw`(?:\s+(?:about|for)\s+[\p{L}\p{M}\p{N}\s,'’-]{1,80})?`;
+  const suffix = String.raw`${topicFilter}\s*[.!?]*\s*$`;
+  const directQuestion = new RegExp(
+    String.raw`^\s*(?:what|which)\s+are\s+(?:my|our|the)\s+${qualifier}${commitmentNoun}${suffix}`,
+    'iu',
+  );
+  const directStatusQuestion = new RegExp(
+    String.raw`^\s*(?:what|which)\s+${qualifier}${commitmentNoun}\s+(?:do\s+i\s+owe|am\s+i\s+waiting\s+on|are\s+(?:still\s+)?(?:open|outstanding)|remain\s+open)\s*[.!?]*\s*$`,
+    'iu',
+  );
+  const directListCommand = new RegExp(
+    String.raw`^\s*(?:list|show|review|check)\s+(?:(?:my|our|the)\s+)?${qualifier}${commitmentNoun}${suffix}`,
+    'iu',
+  );
+  const explicitListPurpose =
+    directQuestion.test(text) || directStatusQuestion.test(text) || directListCommand.test(text);
+  const directImperative = directListCommand.test(text);
+  return (
+    (intent.sourceActor === 'owner' || intent.sourceActor === 'mixed') &&
+    (intent.requestKind === 'new_request' || directImperative) &&
+    intent.separation !== 'unknown' &&
+    !isConversationLocalContext(text) &&
+    explicitListPurpose &&
+    (intent.authorizedScopes.includes('external_read') || directImperative)
+  );
+}
+
 /** Final fallback-callsite gate, shared with tests so the caller cannot drift. */
 export function shouldRunFallbackRecall(input: {
   mode: RecallMode;

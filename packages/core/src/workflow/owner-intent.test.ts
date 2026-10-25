@@ -7,6 +7,7 @@ import {
   explicitlyOptsOutOfRecall,
   extractOwnerIntent,
   isConversationLocalContext,
+  isExplicitCommitmentReadRequest,
   isSelfContainedCalculationRequest,
   isSelfContainedTextTransformation,
   latestOwnerIntent,
@@ -102,6 +103,41 @@ describe('shared recall mode', () => {
         clarificationContinuation: { ...continuation, ...override },
       }),
     ).toBe('disabled');
+  });
+});
+
+describe('explicit commitment read purpose', () => {
+  it('admits direct owner-list questions and imperatives, not phrase-matched research requests', () => {
+    const intent = (text: string) => extractOwnerIntent({ trust: 'owner', text });
+    for (const text of [
+      'What are my open commitments?',
+      'What are my open commitments about rainbow observation notes?',
+      'Which follow-ups am I waiting on?',
+      'List my open commitments.',
+      'Show open follow-ups.',
+      'Review our outstanding commitments.',
+    ]) {
+      expect(isExplicitCommitmentReadRequest(intent(text))).toBe(true);
+    }
+    for (const text of [
+      'What does open commitments mean?',
+      'What does open commitments mean for rainbow observation notes?',
+      'Find an article about open commitments.',
+      'Find an email about open commitments.',
+      'Search my inbox for open commitments.',
+      'Show me an article about open commitments.',
+      'What is on my calendar tomorrow?',
+      'Search my inbox for newsletter messages.',
+      'What did I tell you about a rainbow?',
+      'Do not use tools. List my open commitments.',
+    ]) {
+      expect(isExplicitCommitmentReadRequest(intent(text))).toBe(false);
+    }
+    expect(
+      isExplicitCommitmentReadRequest(
+        extractOwnerIntent({ trust: 'unknown', text: 'What are my open commitments?' }),
+      ),
+    ).toBe(false);
   });
 });
 

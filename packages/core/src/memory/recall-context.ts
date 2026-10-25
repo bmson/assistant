@@ -6,7 +6,6 @@ import type { ExecutionPersistence } from '@assistant/persistence';
 import { embeddingSpaceIdentityKey } from '@assistant/persistence';
 import type { ModelRouter } from '../model-router/router.js';
 import type { RecallMode } from '../workflow/owner-intent.js';
-import { listOpenCommitments } from './commitments.js';
 import { assembleDiscussionFrame, type DiscussionTurn } from './discussion-frame.js';
 import { fuseOwnerContext } from './fused-owner-context.js';
 import { recallKnowledgeGraph, recallWithGraphFallback } from './graph-recall.js';
@@ -50,10 +49,6 @@ export async function retrieveOwnerContext(input: {
   const historyRepository = persistence?.history ?? input.db;
   if (!historyRepository) {
     throw new Error('History recall storage is not configured');
-  }
-  const ownerContextRepository = persistence?.ownerContext ?? input.db;
-  if (!ownerContextRepository) {
-    throw new Error('Owner context storage is not configured');
   }
   const since =
     input.sinceCreatedAt ??
@@ -114,33 +109,19 @@ export async function retrieveOwnerContext(input: {
       console.error('executor history recall failed — continuing without it', err);
     },
   });
-  const [situations, commitments] = await Promise.all([
-    readSituationDecisionContext({
-      db: input.db,
-      persistence,
-      agentId,
-      discussionFrame: queryText,
-      limit: 16,
-    }),
-    listOpenCommitments(ownerContextRepository, {
-      agentId,
-      query: queryText,
-      limit: 40,
-    }).catch((error) => {
-      console.error(
-        'executor open commitment recall failed — continuing with other context',
-        error,
-      );
-      return [];
-    }),
-  ]);
+  const situations = await readSituationDecisionContext({
+    db: input.db,
+    persistence,
+    agentId,
+    discussionFrame: queryText,
+    limit: 16,
+  });
   const fused = await fuseOwnerContext({
     queryText,
     eligibilityText: input.eligibilityText,
     mode: input.mode,
     rankedContext: layered.rankedContext,
     decisions: situations.decisions,
-    commitments,
     isSuppressed,
     limit: 8,
     maxBytes: 2600,
