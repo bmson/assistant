@@ -2,7 +2,8 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
-vi.mock('next/navigation', () => ({ usePathname: () => '/chat' }));
+const path = vi.hoisted(() => ({ value: '/chat' }));
+vi.mock('next/navigation', () => ({ usePathname: () => path.value }));
 vi.mock('next/link', async () => {
   const React = await import('react');
   return {
@@ -28,5 +29,17 @@ describe('owner browser navigation', () => {
     const html = renderToStaticMarkup(createElement(AdminNavigation, { passkey: true }));
     expect(html).toContain('href="/chat"');
     expect(html).toContain('href="/security"');
+  });
+  it.each([
+    '/profile',
+    '/profile/knowledge',
+    '/people',
+    '/people/00000000-0000-4000-8000-000000000001',
+  ])('marks only Memory active for %s', (pathname) => {
+    path.value = pathname;
+    const html = renderToStaticMarkup(createElement(AdminNavigation, { passkey: false }));
+    expect(html).toMatch(/href="\/profile" aria-current="page"/);
+    expect(html).not.toMatch(/href="\/chat" aria-current/);
+    path.value = '/chat';
   });
 });

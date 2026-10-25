@@ -10,11 +10,10 @@ import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import { createInstallationStore } from '@assistant/firestore';
 import { CalendarDays, MapPin, Search } from 'lucide-react';
 import Link from 'next/link';
-import { AddPerson } from '@/app/people/add-person';
 import { PersonAvatar } from '@/app/people/person-avatar';
 import { requireOwner } from '@/auth';
 import { listFirestorePeopleDirectory } from '@/lib/firestore-people';
-import { getDb } from '@/lib/server';
+import { withPostgresMemoryBrowseRead } from '@/lib/server';
 import {
   Badge,
   btn,
@@ -44,7 +43,8 @@ function matches(person: PersonSummary, query: string): boolean {
 
 async function loadPeopleDirectory(now: Date): Promise<PersonSummary[]> {
   const config = loadConfig();
-  if (config.PERSISTENCE_DRIVER !== 'firestore') return listPeopleDirectory(getDb(), { now });
+  if (config.PERSISTENCE_DRIVER !== 'firestore')
+    return withPostgresMemoryBrowseRead((db) => listPeopleDirectory(db, { now, browseOnly: true }));
   const problems = validateAgentPersistenceConfig(config);
   if (problems.length) throw new Error(problems.join('; '));
   const store = createInstallationStore({
@@ -66,10 +66,30 @@ export default async function PeoplePage({
 }) {
   await requireOwner();
   const { q } = await searchParams;
-  const query = (q ?? '').trim();
+  const query = (typeof q === 'string' ? q : '').trim().slice(0, 120);
+  const personHref = (id: string) =>
+    `/people/${id}${query ? `?q=${encodeURIComponent(query)}` : ''}`;
 
   const now = new Date();
-  const everyone = await loadPeopleDirectory(now);
+  let everyone: PersonSummary[];
+  try {
+    everyone = await loadPeopleDirectory(now);
+  } catch {
+    return (
+      <PageShell size="reading">
+        <PageHeader back={{ href: '/profile', label: 'Memory' }} title="People" />
+        <p role="alert" className="mt-4 text-muted">
+          Could not load this view. Your search is preserved.
+        </p>
+        <Link
+          href={`/people${query ? `?q=${encodeURIComponent(query)}` : ''}`}
+          className={btn.outline}
+        >
+          Try again
+        </Link>
+      </PageShell>
+    );
+  }
   const people = everyone.filter((person) => matches(person, query));
 
   const byGroup = PERSON_GROUPS.map((group) => ({
@@ -84,20 +104,20 @@ export default async function PeoplePage({
   return (
     <PageShell size="reading">
       <PageHeader
-        back={{ href: '/chat', label: 'Chat' }}
+        back={{ href: '/profile', label: 'Memory' }}
         title="People"
-        intro="Everyone the assistant knows about, and how you are connected. Open someone to see their birthday, their connections, and what you have done together."
+        intro="Browse people and their recorded connections. Search the people loaded in this view."
       />
 
       {/* Birthdays first — the one thing on this page that is time-sensitive. */}
       {upcoming.length > 0 && !query ? (
         <section className="mt-6">
-          <SectionHeading title="Coming up" count={upcoming.length} />
+          <SectionHeading title="Coming up in this view" count={upcoming.length} />
           <ul className="mt-3 flex flex-col gap-2">
             {upcoming.map((person) => (
               <li key={person.id}>
                 <Link
-                  href={`/people/${person.id}`}
+                  href={personHref(person.id)}
                   className="mobile-touch-target flex min-w-0 items-center gap-3 rounded-xl border border-accent/25 bg-accent/[0.06] p-3.5 motion-safe:transition-colors hover:bg-accent/10"
                 >
                   <CalendarDays className="size-4 shrink-0 text-accent" aria-hidden="true" />
@@ -115,11 +135,10 @@ export default async function PeoplePage({
       <section className="mt-8">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <SectionHeading
-            title={query ? `Matching “${query}”` : 'Everyone'}
-            count={everyone.length}
-            hint={query ? `${people.length} shown` : undefined}
+            title={query ? `Matching “${query}”` : 'People in this view'}
+            count={people.length}
+            hint={`${people.length} shown in this view`}
           />
-          <AddPerson />
         </div>
 
         {/* A GET form, so a search is a URL the owner can bookmark or share
@@ -136,6 +155,7 @@ export default async function PeoplePage({
             <input
               id="people-search"
               name="q"
+              maxLength={120}
               defaultValue={query}
               placeholder="Name, relationship, or place"
               className={`${inputClass} w-full pl-9`}
@@ -152,12 +172,9 @@ export default async function PeoplePage({
         </form>
 
         {everyone.length === 0 ? (
-          <EmptyState>
-            No people yet — names mentioned in conversations become contacts automatically, or add
-            someone above.
-          </EmptyState>
+          <EmptyState>No people are available in this view yet.</EmptyState>
         ) : people.length === 0 ? (
-          <EmptyState>Nobody matches “{query}”.</EmptyState>
+          <EmptyState>No people match “{query}” in this view.</EmptyState>
         ) : (
           <div className="mt-6 flex flex-col gap-8">
             {byGroup.map((section) => (
@@ -170,7 +187,7 @@ export default async function PeoplePage({
                   {section.people.map((person) => (
                     <li key={person.id}>
                       <Link
-                        href={`/people/${person.id}`}
+                        href={personHref(person.id)}
                         className="mobile-touch-target flex min-w-0 items-center gap-3 rounded-xl bg-raised p-3.5 ring-1 ring-edge/60 motion-safe:transition-colors hover:bg-sunken/50"
                       >
                         <PersonAvatar name={person.name} />

@@ -210,13 +210,13 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
     resetConfigForTest();
   });
 
-  it('admits UUID detail GET and Server Action POST through the Firestore proxy', async () => {
+  it('admits UUID detail reads and blocks Server Actions through the Firestore proxy', async () => {
     const { proxy } = await import('../../../proxy.js');
     const request = (path: string, method = 'GET') =>
       new NextRequest(`http://localhost${path}`, { method });
-    expect(proxy(request(`/people/${contactId}`)).status).toBe(307);
-    expect(proxy(request(`/people/${contactId}`, 'POST')).status).toBe(410);
-    expect(proxy(request(`/people/${contactId}`, 'DELETE')).status).toBe(410);
+    expect(proxy(request(`/people/${contactId}`)).status).toBe(200);
+    expect(proxy(request(`/people/${contactId}`, 'POST')).status).toBe(405);
+    expect(proxy(request(`/people/${contactId}`, 'DELETE')).status).toBe(405);
     expect(proxy(request('/people/not-a-uuid')).status).toBe(307);
     expect(proxy(request('/people/not-a-uuid', 'POST')).status).toBe(410);
   });
@@ -231,16 +231,16 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
     expect(html).toContain('Anna is close friends with Bob');
     expect(html).toContain('Went hiking with Anna');
     expect(html).toContain('id="important-dates"');
-    expect(html).toContain('Explore connections');
+    expect(html).toContain('Browse this person');
     expect(html).toContain('Bobby');
     expect(html).toContain(`href="/people/${friendId}"`);
     // Every control the PostgreSQL page offers.
-    expect(html).toContain('Add a fact about Anna Example');
-    expect(html).toContain('Add connection');
-    expect(html).toContain('Save changes');
-    expect(html).toContain('merge into…');
-    expect(html).toContain('Bob Example (friend)');
-    expect(html).toContain('Delete person');
+    expect(html).not.toContain('Add a fact about Anna Example');
+    expect(html).not.toContain('Add connection');
+    expect(html).not.toContain('Save changes');
+    expect(html).not.toContain('merge into…');
+    expect(html).not.toContain('merge into…');
+    expect(html).not.toContain('Delete person');
   });
 
   it('edits the person and adds an occasion through the shared Server Actions', async () => {
