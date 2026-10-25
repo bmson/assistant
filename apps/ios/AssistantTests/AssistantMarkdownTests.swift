@@ -1757,7 +1757,7 @@ extension AssistantMarkdownTests {
                 }.joined(separator: "\n"))
                 readinessAttachment.name = "Diagnostic-only initial readiness components — \(label)"
                 readinessAttachment.lifetime = .keepAlways
-                add(readinessAttachment)
+                self.add(readinessAttachment)
                 if let scroll = ownedTranscriptScrollView(in: window),
                    let input = ownedTextField(in: window) {
                     attachOwnedTranscriptBoundarySnapshot(
