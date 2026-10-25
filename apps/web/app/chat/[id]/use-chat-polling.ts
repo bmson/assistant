@@ -299,6 +299,8 @@ export function useChatPolling({
   conversationId,
   observationScope,
   recoveryTaskId,
+  recoveryObservationRevision,
+  recoverySelectionRef,
   publicationEpochRef,
   setMessages,
   statusRef,
@@ -319,6 +321,8 @@ export function useChatPolling({
   conversationId: string;
   observationScope?: string;
   recoveryTaskId?: string | null;
+  recoveryObservationRevision?: number;
+  recoverySelectionRef?: RefObject<{ observationRevision: number }>;
   publicationEpochRef?: RefObject<number>;
   setMessages: Dispatch<SetStateAction<UIMessage[]>>;
   statusRef: RefObject<string>;
@@ -388,6 +392,42 @@ export function useChatPolling({
       );
     };
 
+    // A retired same-thread read can reveal a newly committed reply, but it
+    // cannot edit known rows, cards, task state, observation health or cursors.
+    const appendUnseenDurableMessages = (incoming: UIMessage[], stillCurrent: () => boolean) => {
+      const identities = (message: UIMessage) => {
+        const metadata = message.metadata as
+          | { durableMessageId?: unknown; channelMessageId?: unknown }
+          | undefined;
+        return [message.id, metadata?.durableMessageId, metadata?.channelMessageId].filter(
+          (id): id is string => typeof id === 'string' && id.length > 0,
+        );
+      };
+      const known = new Set([
+        ...logRef.current.flatMap(identities),
+        ...(serverIdsRef.current ?? EMPTY_SERVER_IDS),
+      ]);
+      const fresh = incoming.filter((message) => {
+        const ids = identities(message);
+        if (typeof message.id !== 'string' || !message.id || ids.some((id) => known.has(id)))
+          return false;
+        for (const id of ids) known.add(id);
+        return true;
+      });
+      if (!fresh.length || !stillCurrent()) return;
+      setMessages((current) => {
+        // React may defer this updater beyond an explicit navigation or session
+        // replacement. Such a read must not publish rows or mark their IDs seen.
+        if (!stillCurrent()) return current;
+        const present = new Set(current.flatMap(identities));
+        const additions = fresh.filter(
+          (message) => !identities(message).some((id) => present.has(id)),
+        );
+        for (const message of additions) serverIdsRef.current?.add(message.id);
+        return additions.length ? [...current, ...additions] : current;
+      });
+    };
+
     const settle = (
       expectedTaskId: string,
       note: string | null,
@@ -406,6 +446,7 @@ export function useChatPolling({
       if (cancelled) return;
       const turn = asyncTurnRef.current;
       const publicationEpoch = publicationEpochRef?.current;
+      const navigationRevision = recoverySelectionRef?.current.observationRevision;
       // Nothing to catch up on while the tab is hidden, and a background tab
       // polling forever is the kind of thing that shows up on a phone battery.
       if (document.visibilityState !== 'visible') return schedule(turn);
@@ -421,6 +462,12 @@ export function useChatPolling({
         };
       }
       const turnState = turn ? turnRef.current : null;
+      const hardObservationIsCurrent = () =>
+        !cancelled && navigationRevision === recoverySelectionRef?.current.observationRevision;
+      const ownsPublication = () =>
+        publicationEpoch === publicationEpochRef?.current &&
+        (turn?.taskId ?? null) === (asyncTurnRef.current?.taskId ?? null) &&
+        (!turn || turnRef.current === turnState);
       // What this poll did, read by schedule() at the bottom to decide whether
       // the server held (ask again now) or answered at once (back off).
       let elapsedMs = 0;
@@ -458,12 +505,9 @@ export function useChatPolling({
         const res = await fetch(`/api/chat/status?${query.toString()}`, {
           signal: AbortSignal.any([observation.signal, AbortSignal.timeout(POLL_TIMEOUT_MS)]),
         });
-        if (
-          cancelled ||
-          publicationEpoch !== publicationEpochRef?.current ||
-          (turn?.taskId ?? null) !== (asyncTurnRef.current?.taskId ?? null)
-        )
-          return;
+        if (!hardObservationIsCurrent()) return;
+        // An old failed request cannot expire or degrade the current turn.
+        if (!res.ok && !ownsPublication()) return;
         elapsedMs = Date.now() - startedAt;
         // A dead session never recovers by polling — say so and stop asking.
         if (res.status === 401 || res.status === 403) {
@@ -472,8 +516,6 @@ export function useChatPolling({
           return;
         }
         if (res.ok) {
-          pollFailures = 0;
-          setTrouble(null);
           const data = (await res.json()) as {
             taskStatus: string | null;
             messages: UIMessage[];
@@ -483,14 +525,18 @@ export function useChatPolling({
             hasMore: boolean;
             activity?: ChatActivityItem[];
           };
-          if (
-            cancelled ||
-            publicationEpoch !== publicationEpochRef?.current ||
-            (turn?.taskId ?? null) !== (asyncTurnRef.current?.taskId ?? null)
-          )
+          if (!hardObservationIsCurrent()) return;
+          if (!ownsPublication()) {
+            appendUnseenDurableMessages(data.messages, hardObservationIsCurrent);
             return;
+          }
+          pollFailures = 0;
+          setTrouble(null);
           const sameTurn =
-            !!turn && asyncTurnRef.current?.taskId === turn.taskId && turnRef.current === turnState;
+            !!turn &&
+            publicationEpoch === publicationEpochRef?.current &&
+            asyncTurnRef.current?.taskId === turn.taskId &&
+            turnRef.current === turnState;
           if (sameTurn && turnState) {
             setActivity(data.activity ?? []);
             turnState.lastTaskStatus = data.taskStatus;
@@ -515,8 +561,10 @@ export function useChatPolling({
           // tick can legitimately end where it began. Only chase the next page
           // when the cursor actually moved — otherwise this loop would re-ask
           // for the same page with no delay between tries.
-          const advanced = Boolean(data.nextCursor) && data.nextCursor !== cursorRef.current;
-          if (data.nextCursor) cursorRef.current = data.nextCursor;
+          const ownsCursor = sameTurn || (!turn && !asyncTurnRef.current);
+          const advanced =
+            ownsCursor && Boolean(data.nextCursor) && data.nextCursor !== cursorRef.current;
+          if (ownsCursor && data.nextCursor) cursorRef.current = data.nextCursor;
           if (data.hasMore && advanced) {
             nextDelayMs = 0;
             return;
@@ -568,7 +616,7 @@ export function useChatPolling({
           if (pollFailures >= 3) setTrouble('stale');
         }
       } catch {
-        if (cancelled) return;
+        if (!hardObservationIsCurrent() || !ownsPublication()) return;
         // Transient poll failures retry on the next tick — but a thread that
         // has silently gone stale is indistinguishable from a quiet one, so a
         // streak of failures says so in the log.
@@ -663,5 +711,5 @@ export function useChatPolling({
       window.removeEventListener(CARD_REFRESH_EVENT, onCardRefresh);
       pokePollRef.current = null;
     };
-  }, [conversationId, observationScope, recoveryTaskId, setMessages]);
+  }, [conversationId, observationScope, recoveryObservationRevision, setMessages]);
 }

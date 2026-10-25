@@ -255,12 +255,21 @@ export function ChatClient({
   const searchParams = useSearchParams();
   const requestedRecoveryTask = searchParams.get('task');
   const selectedRecoveryTask = validRecoveryTask(requestedRecoveryTask);
+  const [recoveryObservationRevision, setRecoveryObservationRevision] = useState(0);
   const recoverySelectionRef = useRef({
     conversationId,
     session: formSessionScope,
     task: requestedRecoveryTask,
     revision: 0,
+    observationRevision: 0,
   });
+  const acceptedRecoveryCleanupRef = useRef<{
+    selectionRevision: number;
+    oldTask: string;
+    acceptedTask: string;
+    operation: ChatOperationTurnFence;
+    session: string | undefined;
+  } | null>(null);
   const currentConversationIdRef = useRef(conversationId);
   currentConversationIdRef.current = conversationId;
   const { destinations, signedIn } = useNavCommands();
@@ -475,6 +484,7 @@ export function ChatClient({
           // an unrelated later send.
           forceRef.current = false;
           const generation = mountedGenerationRef.current;
+          const admissionSelection = { ...recoverySelectionRef.current };
           const formGeneration = cardFormCallbackGeneration();
           const operationId = pendingOperationIdRef.current?.id;
           const activeOrdinary = activeOrdinaryOperationRef.current;
@@ -492,7 +502,10 @@ export function ChatClient({
             generation !== mountedGenerationRef.current ||
             currentConversationIdRef.current !== conversationId ||
             formGeneration !== cardFormCallbackGeneration() ||
-            operationId !== pendingOperationIdRef.current?.id
+            operationId !== pendingOperationIdRef.current?.id ||
+            admissionSelection.revision !== recoverySelectionRef.current.revision ||
+            (capturedOrdinaryTurn &&
+              !isCurrentChatOperation(activeOrdinaryOperationRef.current, capturedOrdinaryTurn))
           )
             return response;
           if (capturedOrdinaryTurn && response.status === 409) {
@@ -504,6 +517,7 @@ export function ChatClient({
               generation !== mountedGenerationRef.current ||
               currentConversationIdRef.current !== conversationId ||
               operationId !== pendingOperationIdRef.current?.id ||
+              admissionSelection.revision !== recoverySelectionRef.current.revision ||
               !isCurrentChatOperation(activeOrdinaryOperationRef.current, capturedOrdinaryTurn)
             )
               return response;
@@ -539,7 +553,8 @@ export function ChatClient({
               .catch(() => null)) as unknown;
             if (
               generation !== mountedGenerationRef.current ||
-              formGeneration !== cardFormCallbackGeneration()
+              formGeneration !== cardFormCallbackGeneration() ||
+              admissionSelection.revision !== recoverySelectionRef.current.revision
             )
               return response;
             const conflict = parseActiveCardFormConflict(body);
@@ -590,7 +605,8 @@ export function ChatClient({
               .catch(() => null)) as unknown;
             if (
               generation !== mountedGenerationRef.current ||
-              formGeneration !== cardFormCallbackGeneration()
+              formGeneration !== cardFormCallbackGeneration() ||
+              admissionSelection.revision !== recoverySelectionRef.current.revision
             )
               return response;
             const stale = parseStaleCardFormConflict(body);
@@ -648,7 +664,28 @@ export function ChatClient({
             isCurrentChatOperation(activeOrdinaryOperationRef.current, capturedOrdinaryTurn)
           )
             activeOrdinaryOperationRef.current = { ...capturedOrdinaryTurn, taskId };
-          setAsyncTurn(taskId && cursor ? { taskId, cursor } : null);
+          const acceptedTurn = taskId && cursor ? { taskId, cursor } : null;
+          // A query change restarts task observation. Publish the accepted turn
+          // before retiring its predecessor's recovery selection, so there is
+          // no identity-free poll between this response and the next render.
+          asyncTurnRef.current = acceptedTurn;
+          setAsyncTurn(acceptedTurn);
+          if (response.ok) {
+            acceptedRecoveryCleanupRef.current =
+              capturedOrdinaryTurn && acceptedTurn && validRecoveryTask(admissionSelection.task)
+                ? {
+                    selectionRevision: admissionSelection.revision,
+                    oldTask: admissionSelection.task as string,
+                    acceptedTask: acceptedTurn.taskId,
+                    operation: capturedOrdinaryTurn,
+                    session: admissionSelection.session,
+                  }
+                : null;
+            const recoveryUrl = new URL(window.location.href);
+            recoveryUrl.searchParams.delete('task');
+            recoveryUrl.hash = '';
+            window.history.replaceState(null, '', recoveryUrl.pathname + recoveryUrl.search);
+          }
           if (isCardFormOperation && cardFormOperation && operationId) {
             if (taskId && cursor) {
               try {
@@ -919,6 +956,8 @@ export function ChatClient({
     conversationId,
     observationScope: formSessionScope,
     recoveryTaskId: selectedRecoveryTask,
+    recoveryObservationRevision,
+    recoverySelectionRef,
     publicationEpochRef,
     setMessages,
     statusRef,
@@ -944,12 +983,35 @@ export function ChatClient({
       selection.session !== formSessionScope ||
       selection.task !== requestedRecoveryTask
     ) {
+      const cleanup = acceptedRecoveryCleanupRef.current;
+      // A token is single-use and can authorize only the exact internal
+      // old-selection → no-selection transition of this accepted operation.
+      acceptedRecoveryCleanupRef.current = null;
+      const retiringAcceptedSelection =
+        cleanup !== null &&
+        cleanup.selectionRevision === selection.revision &&
+        cleanup.oldTask === selection.task &&
+        cleanup.session === formSessionScope &&
+        selection.conversationId === conversationId &&
+        selection.session === formSessionScope &&
+        requestedRecoveryTask === null &&
+        cleanup.acceptedTask !== cleanup.oldTask &&
+        cleanup.operation.conversationId === conversationId &&
+        cleanup.operation.scopeGeneration === mountedGenerationRef.current &&
+        pendingOperationIdRef.current?.id === cleanup.operation.clientOperationId &&
+        isCurrentChatOperation(activeOrdinaryOperationRef.current, cleanup.operation) &&
+        asyncTurnRef.current?.taskId === cleanup.acceptedTask;
       recoverySelectionRef.current = {
         conversationId,
         session: formSessionScope,
         task: requestedRecoveryTask,
         revision: selection.revision + 1,
+        observationRevision: selection.observationRevision + (retiringAcceptedSelection ? 0 : 1),
       };
+      // Ordinary admission retires its predecessor's URL but keeps the durable
+      // thread observation alive. Explicit request navigation starts a new one.
+      if (!retiringAcceptedSelection)
+        setRecoveryObservationRevision(recoverySelectionRef.current.observationRevision);
     }
     const previousTask = previousRecoveryTaskRef.current;
     previousRecoveryTaskRef.current = selectedRecoveryTask;
@@ -1465,10 +1527,6 @@ export function ChatClient({
     stickToBottomRef.current = true;
     setAtBottom(true);
     setUnseenCount(0);
-    const recoveryUrl = new URL(window.location.href);
-    recoveryUrl.searchParams.delete('task');
-    recoveryUrl.hash = '';
-    window.history.replaceState(null, '', recoveryUrl.pathname + recoveryUrl.search);
     setLastSubmittedText(text);
     pendingOperationIdRef.current = retryOperation ?? {
       id: crypto.randomUUID(),

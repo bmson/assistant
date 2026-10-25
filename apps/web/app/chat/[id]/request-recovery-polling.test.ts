@@ -1,3 +1,4 @@
+import type { UIMessage } from 'ai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AsyncNote, AsyncTurn, TurnState } from './use-chat-polling';
 
@@ -26,39 +27,70 @@ function usePollingHost(
   task = taskId,
   recoveryTaskId?: string | null,
   publicationEpochRef = { current: 0 },
+  recoverySelectionRef = { current: { observationRevision: 0 } },
+  deferMessages = false,
 ) {
   const asyncTurnRef = { current: { taskId: task, cursor: '' } as AsyncTurn | null };
   const notes: AsyncNote[] = [];
   const messages: unknown[] = [];
+  const logRef = { current: [] as UIMessage[] };
+  const cursorRef = { current: null as string | null };
+  const serverIdsRef = { current: new Set<string>() };
+  const setActivity = vi.fn(),
+    setPollTrouble = vi.fn(),
+    onTaskTerminal = vi.fn();
   const setAsyncTurn = vi.fn((value) => {
     asyncTurnRef.current = value;
   });
   const setAsyncNote = vi.fn((value) => {
     if (value) notes.push(value);
   });
+  const pendingUpdates: Array<(current: UIMessage[]) => UIMessage[]> = [];
   const setMessages = vi.fn((update) => {
-    messages.push(update([]));
+    if (deferMessages) {
+      pendingUpdates.push(update);
+      return;
+    }
+    logRef.current = update(logRef.current);
+    messages.push(logRef.current);
   });
   useChatPolling({
     conversationId,
     recoveryTaskId,
     publicationEpochRef,
+    recoverySelectionRef,
     asyncTurnRef,
     setAsyncTurn,
     setAsyncNote,
     setMessages,
     statusRef: { current: 'ready' },
-    cursorRef: { current: null },
-    logRef: { current: [] },
-    serverIdsRef: { current: new Set<string>() },
+    cursorRef,
+    logRef,
+    serverIdsRef,
     turnRef: { current: null as TurnState | null },
     pokePollRef: { current: null },
-    setActivity: vi.fn(),
+    setActivity,
     setLiveRecall: vi.fn(),
-    setPollTrouble: vi.fn(),
+    setPollTrouble,
+    onTaskTerminal,
   });
   const cleanup = effects.mount?.();
-  return { notes, messages, asyncTurnRef, setAsyncTurn, cleanup: cleanup as () => void };
+  return {
+    notes,
+    messages,
+    asyncTurnRef,
+    setAsyncTurn,
+    setMessages,
+    pendingUpdates,
+    cursorRef,
+    logRef,
+    serverIdsRef,
+    recoverySelectionRef,
+    setActivity,
+    setPollTrouble,
+    onTaskTerminal,
+    cleanup: cleanup as () => void,
+  };
 }
 function response(status: string, messages: unknown[] = []) {
   return Response.json({ taskStatus: status, messages, nextCursor: null, hasMore: false });
@@ -156,8 +188,8 @@ describe('actual polling effect recovery lifecycle (controlled hook host)', () =
       .mockImplementation(async () => response('cancelled'));
     vi.stubGlobal('fetch', fetcher);
     const a = usePollingHost(taskId, taskId);
-    // Same-conversation observable task change updates the live identity before
-    // the old effect is cleaned up. A's deferred payload must never publish as B.
+    // Explicit navigation invalidates all publication before effect cleanup.
+    a.recoverySelectionRef.current.observationRevision += 1;
     a.asyncTurnRef.current = { taskId: otherTask, cursor: '' };
     answerA(
       response('done', [
@@ -244,8 +276,9 @@ describe('actual polling effect recovery lifecycle (controlled hook host)', () =
     );
     await flush();
     expect(selected.notes).toEqual([]);
-    expect(selected.messages).toEqual([]);
-    // The next legitimate observation may read saved late answers; no dispatch.
+    expect(selected.logRef.current.map((message) => message.id)).toEqual(['saved-late-answer']);
+    expect(selected.cursorRef.current).toBeNull();
+    // The old read appends new durable content, never its running task state.
     await vi.advanceTimersByTimeAsync(2501);
     expect(selected.notes.at(-1)?.text).toBe(CANCELLED_REQUEST_NOTE);
     expect(selected.notes.at(-1)?.retryable).toBe(false);
@@ -279,7 +312,152 @@ describe('actual polling effect recovery lifecycle (controlled hook host)', () =
     });
     await flush();
     expect(mounted.notes).toEqual([]);
-    expect(mounted.messages).toEqual([]);
+    expect(mounted.logRef.current.map((message) => message.id)).toEqual(['old']);
+    expect(mounted.cursorRef.current).toBeNull();
+    mounted.cleanup();
+  });
+  it.each(['done', 'cancelled', 'failed'])(
+    'retired same-thread %s read appends only new IDs without taking B state, cards, cursor or health',
+    async (terminal) => {
+      let resolve!: (value: Response) => void;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          () =>
+            new Promise<Response>((done) => {
+              resolve = done;
+            }),
+        ),
+      );
+      const mounted = usePollingHost();
+      const known: UIMessage = {
+        id: 'known',
+        role: 'assistant',
+        parts: [{ type: 'text', text: 'Current content' }],
+      };
+      const owner: UIMessage = {
+        id: 'owner-operation',
+        role: 'user',
+        metadata: { durableMessageId: 'owner-durable', channelMessageId: 'owner-channel' },
+        parts: [{ type: 'text', text: 'Already visible owner turn' }],
+      };
+      mounted.setMessages(() => [known, owner]);
+      mounted.serverIdsRef.current.add('server-known');
+      mounted.asyncTurnRef.current = {
+        taskId: '44444444-4444-4444-8444-444444444444',
+        cursor: 'new-cursor',
+      };
+      mounted.cursorRef.current = 'new-cursor';
+      resolve(
+        Response.json({
+          taskStatus: terminal,
+          messages: [
+            { ...known, parts: [{ type: 'text', text: 'Old overwrite' }] },
+            {
+              id: 'owner-durable',
+              role: 'user',
+              parts: [{ type: 'text', text: 'Duplicate durable owner row' }],
+            },
+            {
+              id: 'owner-channel',
+              role: 'user',
+              parts: [{ type: 'text', text: 'Duplicate channel owner row' }],
+            },
+            {
+              id: 'server-known',
+              role: 'assistant',
+              parts: [{ type: 'text', text: 'Already known elsewhere' }],
+            },
+            {
+              id: 'new-durable-a',
+              role: 'assistant',
+              parts: [{ type: 'text', text: 'Saved late A answer' }],
+            },
+            {
+              id: 'new-durable-a',
+              role: 'assistant',
+              parts: [{ type: 'text', text: 'Duplicate ID' }],
+            },
+          ],
+          refreshed: [{ ...known, parts: [{ type: 'text', text: 'Old card refresh' }] }],
+          superseded: ['known'],
+          activity: [{ toolName: 'old-task', status: 'failed', step: 1 }],
+          nextCursor: 'old-cursor',
+          hasMore: true,
+        }),
+      );
+      await flush();
+      expect(mounted.logRef.current).toEqual([
+        known,
+        owner,
+        {
+          id: 'new-durable-a',
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'Saved late A answer' }],
+        },
+      ]);
+      expect(mounted.notes).toEqual([]);
+      expect(mounted.setAsyncTurn).not.toHaveBeenCalled();
+      expect(mounted.setActivity).not.toHaveBeenCalled();
+      expect(mounted.setPollTrouble).not.toHaveBeenCalled();
+      expect(mounted.onTaskTerminal).not.toHaveBeenCalled();
+      expect(mounted.cursorRef.current).toBe('new-cursor');
+      mounted.cleanup();
+    },
+  );
+  it.each([401, 403, 404, 500])(
+    'retired HTTP %s cannot change B auth/trouble or task state',
+    async (status) => {
+      let resolve!: (value: Response) => void;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          () =>
+            new Promise<Response>((done) => {
+              resolve = done;
+            }),
+        ),
+      );
+      const mounted = usePollingHost();
+      mounted.asyncTurnRef.current = { taskId: '44444444-4444-4444-8444-444444444444', cursor: '' };
+      resolve(new Response('{}', { status }));
+      await flush();
+      expect(mounted.setPollTrouble).not.toHaveBeenCalled();
+      expect(mounted.setAsyncTurn).not.toHaveBeenCalled();
+      expect(mounted.notes).toEqual([]);
+      expect(mounted.messages).toEqual([]);
+      mounted.cleanup();
+    },
+  );
+  it('a deferred retired-row updater rechecks the hard navigation/session fence before rows or seen IDs publish', async () => {
+    let resolve!: (value: Response) => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise<Response>((done) => {
+            resolve = done;
+          }),
+      ),
+    );
+    const hard = { current: { observationRevision: 0 } };
+    const mounted = usePollingHost(taskId, taskId, { current: 0 }, hard, true);
+    mounted.asyncTurnRef.current = { taskId: '44444444-4444-4444-8444-444444444444', cursor: '' };
+    resolve(
+      response('done', [
+        {
+          id: 'queued-old',
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'Queued old answer' }],
+        },
+      ]),
+    );
+    await flush();
+    expect(mounted.pendingUpdates).toHaveLength(1);
+    hard.current.observationRevision += 1;
+    const current: UIMessage[] = [];
+    expect(mounted.pendingUpdates[0]?.(current)).toBe(current);
+    expect(mounted.serverIdsRef.current.has('queued-old')).toBe(false);
     mounted.cleanup();
   });
 });
