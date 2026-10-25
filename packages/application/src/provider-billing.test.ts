@@ -7,7 +7,9 @@ import {
   getProviderBilling,
   googleBillingQuery,
   type ProviderBilling,
+  projectBillingForMobile,
   readGoogleBilling,
+  readOpenAIBilling,
   readOpenRouterBilling,
 } from './provider-billing.js';
 
@@ -335,6 +337,186 @@ describe('month-end run rate', () => {
     });
     expect(forecast?.daysInMonth).toBe(29);
     expect(forecast?.totals[0]?.projected).toBe(58);
+  });
+});
+
+describe('OpenAI organization Costs adapter', () => {
+  it('opens only the dedicated sealed admin credential and will not query without explicit filters', async () => {
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    p.config.OPENAI_BILLING_ADMIN_KEY_ENCRYPTED = 'sealed-admin-fixture';
+    p.models.open = vi.fn((sealed) =>
+      sealed === 'sealed-admin-fixture' ? 'sk-admin-fixturevalue' : 'sk-project-modelvalue',
+    );
+    p.fetch = vi.fn(async () => response({ data: [], has_more: false, next_page: null }));
+    const missing = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(missing).toMatchObject({
+      status: 'not_configured',
+      setup: { code: 'openai_scope_missing' },
+    });
+    expect(p.fetch).not.toHaveBeenCalled();
+    p.config.OPENAI_BILLING_PROJECT_IDS = 'proj_fixture';
+    const start = Math.floor(Date.parse('2026-09-01T00:00:00Z') / 1_000);
+    const end = Math.floor(Date.parse('2026-09-02T00:00:00Z') / 1_000);
+    vi.mocked(p.fetch).mockResolvedValue(
+      response({
+        data: [
+          {
+            start_time: start,
+            end_time: end,
+            results: [
+              {
+                object: 'organization.costs.result',
+                amount: { value: 0, currency: 'USD' },
+                project_id: 'proj_fixture',
+                api_key_id: null,
+                line_item: 'Input',
+              },
+            ],
+          },
+        ],
+        has_more: false,
+        next_page: null,
+      }),
+    );
+    const report = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(report).toMatchObject({
+      status: 'reported',
+      amountBasis: 'provider_reported_cost',
+      lines: [{ cost: 0 }],
+    });
+    expect(p.models.open).toHaveBeenCalledExactlyOnceWith('sealed-admin-fixture');
+    expect(JSON.stringify(report)).not.toContain('sk-admin-fixturevalue');
+    expect(JSON.stringify(report)).not.toContain('sk-project-modelvalue');
+  });
+
+  it('uses explicit filters and complete cursor pages, preserving amount-only scope', async () => {
+    const bucket = (day: number, value: number) => ({
+      object: 'bucket',
+      start_time: Math.floor(
+        Date.parse(`2026-09-${String(day).padStart(2, '0')}T00:00:00Z`) / 1000,
+      ),
+      end_time: Math.floor(
+        Date.parse(`2026-09-${String(day + 1).padStart(2, '0')}T00:00:00Z`) / 1000,
+      ),
+      results: [
+        {
+          object: 'organization.costs.result',
+          amount: { value, currency: 'usd' },
+          line_item: 'Input tokens',
+          project_id: 'proj_a',
+          api_key_id: 'key_a',
+        },
+      ],
+    });
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response({ data: [bucket(1, 0.125)], has_more: true, next_page: 'next' }),
+      )
+      .mockResolvedValueOnce(
+        response({ data: [bucket(2, 0.375)], has_more: false, next_page: null }),
+      );
+    const result = await readOpenAIBilling(
+      request,
+      'sk-admin-testsecret',
+      base,
+      now,
+      ['proj_a'],
+      ['key_a'],
+    );
+    expect(result).toMatchObject({
+      status: 'reported',
+      amountBasis: 'provider_reported_cost',
+      latestUsageAt: null,
+      lines: [
+        {
+          cost: 0.5,
+          credits: 0,
+          net: 0.5,
+          currency: 'USD',
+          projectId: 'proj_a',
+          apiKeyId: 'key_a',
+        },
+      ],
+    });
+    const [firstUrl, firstInit] = request.mock.calls[0] as [string, RequestInit];
+    const params = new URL(firstUrl).searchParams;
+    expect(new URL(firstUrl).origin + new URL(firstUrl).pathname).toBe(
+      'https://api.openai.com/v1/organization/costs',
+    );
+    expect(params.getAll('project_ids')).toEqual(['proj_a']);
+    expect(params.getAll('api_key_ids')).toEqual(['key_a']);
+    expect(params.getAll('group_by')).toEqual(['project_id', 'api_key_id', 'line_item']);
+    expect(params.get('bucket_width')).toBe('1d');
+    expect(params.get('page')).toBeNull();
+    expect(firstInit.headers).toEqual({ Authorization: 'Bearer sk-admin-testsecret' });
+    expect(new URL(request.mock.calls[1]?.[0] as string).searchParams.get('page')).toBe('next');
+    expect(result.message).toContain('credits and net-after-credits amounts are not reported');
+    expect(billingForecast(result)).toBeUndefined();
+  });
+
+  it('rejects missing scope, invalid identity rows, repeated cursors, and empty results as unknown', async () => {
+    await expect(
+      readOpenAIBilling(vi.fn(), 'sk-admin-testsecret', base, now, [], []),
+    ).rejects.toThrow();
+    const wrongScope = vi.fn(async () =>
+      response({
+        data: [
+          {
+            start_time: 1798761600,
+            end_time: 1798848000,
+            results: [
+              {
+                object: 'organization.costs.result',
+                amount: { value: 1, currency: 'USD' },
+                project_id: 'proj_other',
+                api_key_id: null,
+              },
+            ],
+          },
+        ],
+        has_more: false,
+        next_page: null,
+      }),
+    );
+    await expect(
+      readOpenAIBilling(wrongScope, 'sk-admin-testsecret', base, now, ['proj_a'], []),
+    ).rejects.toThrow();
+    const repeated = vi
+      .fn()
+      .mockResolvedValueOnce(response({ data: [], has_more: true, next_page: 'same' }))
+      .mockResolvedValueOnce(response({ data: [], has_more: true, next_page: 'same' }));
+    await expect(
+      readOpenAIBilling(repeated, 'sk-admin-testsecret', base, now, ['proj_a'], []),
+    ).rejects.toThrow();
+    const empty = await readOpenAIBilling(
+      vi.fn(async () => response({ data: [], has_more: false, next_page: null })),
+      'sk-admin-testsecret',
+      base,
+      now,
+      ['proj_a'],
+      [],
+    );
+    expect(empty.status).toBe('unavailable');
+    expect(empty.lines).toEqual([]);
+  });
+
+  it('hides amount-only lines from old mobile clients and keeps supported reports intact', () => {
+    const amountOnly = {
+      ...base,
+      id: 'openai-billing',
+      amountBasis: 'provider_reported_cost' as const,
+      status: 'reported' as const,
+      lines: [
+        { service: 'OpenAI', detail: 'proj_a', currency: 'USD', cost: 1, credits: 0, net: 1 },
+      ],
+    };
+    expect(projectBillingForMobile([amountOnly], false)[0]).toMatchObject({
+      status: 'unavailable',
+      lines: [],
+    });
+    expect(projectBillingForMobile([amountOnly], true)[0]).toBe(amountOnly);
   });
 });
 

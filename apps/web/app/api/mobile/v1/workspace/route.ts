@@ -1,5 +1,9 @@
 import { visibleWorkspaceCapabilityModules } from '@assistant/application';
-import { billingCoverageProjection } from '@assistant/application/provider-billing';
+import {
+  billingCoverageProjection,
+  type ProviderBilling,
+  projectBillingForMobile,
+} from '@assistant/application/provider-billing';
 import { loadConfig } from '@assistant/config';
 import { assistantModuleMetas } from '@assistant/modules/meta';
 import { policyLabels, policyScope, scheduleLabels } from '@/app/settings/labels';
@@ -24,6 +28,7 @@ function workspaceResponse(
   },
 ): Response {
   const supportsSections = request.headers.get('x-assistant-workspace-sections') === '1';
+  const supportsAmountOnlyBilling = request.headers.get('x-assistant-billing-amounts') === '1';
   const unavailable = Object.values(payload.sectionAvailability).some(
     (section) => section.status !== 'available' || section.version !== 1,
   );
@@ -37,7 +42,15 @@ function workspaceResponse(
       },
       { status: 503 },
     );
-  return mobileJson(payload);
+  const costs = (
+    payload as typeof payload & { costs?: { billing?: ProviderBilling[]; [key: string]: unknown } }
+  ).costs;
+  if (!costs) return mobileJson(payload);
+  const billing = projectBillingForMobile(costs.billing ?? [], supportsAmountOnlyBilling);
+  return mobileJson({
+    ...payload,
+    costs: { ...costs, billing, billingCoverage: billingCoverageProjection(billing) },
+  });
 }
 
 /**

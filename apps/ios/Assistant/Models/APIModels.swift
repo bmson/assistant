@@ -2602,11 +2602,20 @@ struct WorkspaceProviderBilling: Codable, Identifiable, Sendable {
     let source: String
     let message: String
     let fetchedAt: String?
+    var checkedAt: String? = nil
+    var periodTimezone: String? = nil
+    var amountBasis: String? = nil
+    var setup: WorkspaceBillingSetup? = nil
     let latestExportAt: String?
     let latestUsageAt: String?
     let lines: [WorkspaceBillingLine]
     var includedIn: String? = nil
     var forecast: WorkspaceBillingForecast? = nil
+}
+
+struct WorkspaceBillingSetup: Codable, Sendable {
+    let code: String
+    let steps: [String]
 }
 
 struct WorkspaceBillingForecast: Codable, Sendable {
@@ -2631,6 +2640,8 @@ struct WorkspaceBillingLine: Codable, Sendable {
     let cost: Double
     let credits: Double
     let net: Double
+    var projectId: String? = nil
+    var apiKeyId: String? = nil
 }
 
 struct WorkspaceCostBreakdown: Codable, Identifiable, Sendable {
