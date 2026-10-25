@@ -1707,6 +1707,104 @@ final class AssistantMarkdownTests: XCTestCase {
     }
 }
 
+#if DEBUG
+extension AssistantMarkdownTests {
+    @MainActor
+    func testOwnedTranscriptHostDiagnosticDefaultPublicFieldsAndDisabledAnimations() async throws {
+        // Diagnostic only: fresh fixtures omit the original focused-input/sheet sequence.
+        // Changing a public flag changes SwiftUI semantics; neither outcome explains
+        // the original failure or establishes transaction delivery as a product PASS.
+        for disablesAnimations in [false, true] {
+            let label = disablesAnimations ? "disables-animations-true-marker-73" : "default-public-fields-marker-73"
+            let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+            let previousKeyWindow = scene.keyWindow
+            let window = UIWindow(windowScene: scene)
+            window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+            let state = OwnedTranscriptHostRegressionState()
+            let boundaryProbe = TranscriptHostBoundaryProbe(
+                marker: { $0[OwnedTranscriptHostMarkerKey.self] },
+                contentRevision: { [weak state] in state?.contentRevision ?? -1 }
+            )
+            state.boundaryProbe = boundaryProbe
+            let geometryProbe = ChatTranscriptRowGeometryProbe(
+                messageID: "approved-receipts-receipt-one-receipt-two"
+            ) { state.receiptMeasurement = $0 }
+            let root = UIHostingController(
+                rootView: OwnedTranscriptHostRegressionFixture(state: state)
+                    .environment(\.chatTranscriptRowGeometryProbe, geometryProbe)
+                    .environment(\.transcriptHostBoundaryProbe, boundaryProbe)
+            )
+            window.rootViewController = root
+            window.makeKeyAndVisible()
+            defer {
+                window.endEditing(true)
+                window.isHidden = true
+                window.rootViewController = nil
+                previousKeyWindow?.makeKey()
+            }
+            try await waitForTranscriptHostCondition("diagnostic baseline leaf and receipt geometry") {
+                state.childTransactionObservations.last?.parentContentRevision == 0
+                    && state.receiptMeasurement?.frame(in: window) != nil
+            }
+            let scroll = try XCTUnwrap(ownedTranscriptScrollView(in: window))
+            let input = try XCTUnwrap(ownedTextField(in: window))
+            let initialHierarchy = ownedTranscriptControllerIdentities(root: root, containing: scroll)
+            let initialGeneration = boundaryProbe.parentSnapshotGeneration
+            attachOwnedTranscriptBoundarySnapshot(
+                stage: "diagnostic-\(label)-fully-default-baseline", state: state, root: root,
+                window: window, scroll: scroll, input: input
+            )
+
+            var transaction = Transaction(animation: nil)
+            transaction[OwnedTranscriptHostMarkerKey.self] = 73
+            transaction.disablesAnimations = disablesAnimations
+            withTransaction(transaction) { state.contentRevision += 1 }
+            attachOwnedTranscriptBoundarySnapshot(
+                stage: "diagnostic-\(label)-requested", state: state, root: root,
+                window: window, scroll: scroll, input: input
+            )
+            // Wait for current content/generation only, never the requested marker or flag.
+            try await waitForTranscriptHostCondition("diagnostic current leaf for \(label)", onTimeout: {
+                attachOwnedTranscriptBoundarySnapshot(
+                    stage: "diagnostic-\(label)-inconclusive-current-leaf-timeout", state: state, root: root,
+                    window: window, scroll: scroll, input: input
+                )
+            }) {
+                guard let leaf = state.childTransactionObservations.last else { return false }
+                return boundaryProbe.parentSnapshotGeneration > initialGeneration
+                    && leaf.parentContentRevision == state.contentRevision
+                    && leaf.snapshotContentRevision == state.contentRevision
+                    && leaf.snapshotGeneration == boundaryProbe.parentSnapshotGeneration
+            }
+            attachOwnedTranscriptBoundarySnapshot(
+                stage: "diagnostic-\(label)-observed-not-product-verdict", state: state, root: root,
+                window: window, scroll: scroll, input: input
+            )
+            let leaf = state.childTransactionObservations.last
+            let payload: [String: Any] = [
+                "diagnosticOnly": true,
+                "control": label,
+                "requestedMarker": 73,
+                "requestedDisablesAnimations": disablesAnimations,
+                "currentParentGeneration": boundaryProbe.parentSnapshotGeneration,
+                "latestLeafGeneration": leaf.map { $0.snapshotGeneration as Any } ?? NSNull(),
+                "latestLeafContentRevision": leaf.map { $0.snapshotContentRevision as Any } ?? NSNull(),
+                "latestLeafMarker": leaf.map { $0.marker as Any } ?? NSNull(),
+                "latestLeafDisablesAnimations": leaf.map { $0.disablesAnimations as Any } ?? NSNull(),
+                "scrollIdentityRetained": ownedTranscriptScrollView(in: window) === scroll,
+                "controllerHierarchyRetained": ownedTranscriptControllerIdentities(root: root, containing: scroll) == initialHierarchy,
+                "interpretation": "Descriptive companion observations only; inconclusive about the original default-public-field failure and causal delivery. Public flags are not Transaction equality; transform ordinals are correlation only. Fresh fixtures are not the original focused-input/sheet reproduction.",
+            ]
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "Diagnostic-only owned host public-field comparison — \(label)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+    }
+}
+#endif
+
 extension AssistantMarkdownTests {
     @MainActor
     func testOwnedTranscriptHostPreservesIdentityStateAndInheritedUpdates() async throws {
