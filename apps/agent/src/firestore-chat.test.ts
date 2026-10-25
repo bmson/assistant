@@ -27,14 +27,42 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore ordinary chat c
       await disposeStore(store);
     }
   });
-  it('runs historical and graph recall without SQL', async () => {
+  it('excludes generic world-question recall without SQL', async () => {
     vi.stubEnv('CHAT_RECALL_ENABLED', 'true');
     vi.stubEnv('GRAPH_RAG_ENABLED', 'true');
     const store = emulatorStore();
     try {
-      expect(await firestoreChatSmoke(store, { recall: true })).toMatchObject({
-        history: true,
-        graph: true,
+      expect(
+        await firestoreChatSmoke(store, {
+          recall: true,
+          request: 'How do coastal rainbows form?',
+          expectRecall: false,
+        }),
+      ).toMatchObject({
+        historySurfaced: false,
+        graphSurfaced: false,
+        sqlAccesses: 0,
+        finalized: true,
+      });
+    } finally {
+      await disposeStore(store);
+    }
+  });
+
+  it('recalls relevant owner history and graph context without SQL', async () => {
+    vi.stubEnv('CHAT_RECALL_ENABLED', 'true');
+    vi.stubEnv('GRAPH_RAG_ENABLED', 'true');
+    const store = emulatorStore();
+    try {
+      expect(
+        await firestoreChatSmoke(store, {
+          recall: true,
+          request: 'What did I tell you about coastal rainbows by the sea?',
+          expectRecall: true,
+        }),
+      ).toMatchObject({
+        historySurfaced: true,
+        graphSurfaced: true,
         sqlAccesses: 0,
         finalized: true,
       });

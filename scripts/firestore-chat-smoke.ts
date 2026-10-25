@@ -27,14 +27,14 @@ export const CHAT_SMOKE_SPACE: EmbeddingSpace = {
 /** Full queued chat -> planner -> model -> durable final, with synthetic provider output. */
 export async function firestoreChatSmoke(
   store: InstallationStore,
-  options: { recall?: boolean } = {},
+  options: { recall?: boolean; request?: string; expectRecall?: boolean } = {},
 ) {
   const agentId = randomUUID();
   const conversationId = randomUUID();
   const skillId = randomUUID();
   const persistence = createFirestoreExecutionPersistence(store, agentId, CHAT_SMOKE_SPACE);
   const now = new Date();
-  const request = 'Explain how a rainbow forms.';
+  const request = options.request ?? 'Explain how a rainbow forms.';
   const answer =
     'A rainbow appears when sunlight is refracted and reflected inside water droplets.';
   const embedding = Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0));
@@ -145,7 +145,7 @@ export async function firestoreChatSmoke(
       id: historyMessageId,
       conversationId: historyConversationId,
       role: 'user',
-      text: 'Historical rainbow observation at the coast',
+      text: 'The owner observed coastal rainbows by the sea.',
       createdAt: historyAt,
       embedding: FieldValue.vector(embedding),
       embeddingSpace: embeddingSpaceKey(CHAT_SMOKE_SPACE),
@@ -157,7 +157,7 @@ export async function firestoreChatSmoke(
       conversationId: historyConversationId,
       startMessageId: historyMessageId,
       endMessageId: historyMessageId,
-      summary: 'Earlier rainbow discussion by the sea',
+      summary: 'Earlier coastal rainbows by the sea',
       startedAt: historyAt,
       endedAt: historyAt,
       createdAt: historyAt,
@@ -335,12 +335,16 @@ export async function firestoreChatSmoke(
   if (options.recall) {
     // Pre-planning retrieval is carried into the model's message window as
     // reference evidence; it is not duplicated in the static system prompt.
-    assert.match(modelMessages, /Earlier rainbow discussion by the sea/);
-    assert.match(modelMessages, /Coastal rainbows/);
+    assert.equal(
+      modelMessages.includes('Earlier coastal rainbows by the sea'),
+      options.expectRecall === true,
+    );
+    assert.equal(modelMessages.includes('Coastal rainbows'), options.expectRecall === true);
     const metrics = await store.collection('recallMetrics').where('taskId', '==', task.id).get();
     assert.equal(metrics.size, 1);
     assert.equal(metrics.docs[0]?.get('graphUsed'), 1);
-    // Segment and raw-message tiers both contributed one complete source.
+    // Segment and raw-message tiers both produced candidates; eligibility decides
+    // whether those candidates enter the model window.
     assert.equal(metrics.docs[0]?.get('historyUsed'), 2);
   }
   assert.equal((await store.doc('tasks', task.id).get()).get('plan.action'), 'reply');
@@ -363,6 +367,11 @@ export async function firestoreChatSmoke(
     skills: true,
     finalized: true,
     sqlAccesses: sqlAccesses.length,
-    ...(options.recall ? { history: true, graph: true } : {}),
+    ...(options.recall
+      ? {
+          historySurfaced: options.expectRecall === true,
+          graphSurfaced: options.expectRecall === true,
+        }
+      : {}),
   };
 }

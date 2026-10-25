@@ -171,6 +171,12 @@ const REQUEST_NEED_CUE = new RegExp(
   `\\b(?:${[...GENERIC_TASK_TERMS, 'think', 'recommend', 'suggest', 'opinion'].join('|')})\\b`,
   'iu',
 );
+// Recognize bounded questions that explicitly ask about the owner's state or
+// an owner-authored action. A generic world question alone is not an owner ask.
+const EXPLICIT_OWNER_ACTION_QUESTION =
+  /^\s*(?:what|which|where|when|who|whose|how)\b[^.!?]{0,64}\b(?:did|do|does|was|were|is|are|have|has|will|would|can|could|should)\s+(?:I|we|my|our)\b|^\s*what\s+(?:happened|occurred)\s+(?:with|to)\s+(?:my|our)\b/iu;
+const COPULAR_OWNER_STATE_QUESTION =
+  /^\s*what\s+(?:is|was)\s+(?:the\s+)?(?:current\s+)?(?:name|preference|choice)\b[^.!?]{0,64}\b(?:of|for)\b[^.!?]{0,48}\b(?:in|for)\s+(?:my|our)\b/iu;
 const DIRECT_RECALL_OPT_OUT =
   /\b(?:don't|do not|never)\s+(?:use|apply|include|consider)\b[^.!?]{0,100}\b(?:earlier|previous|saved|past)\b/i;
 const PERSONAL_RECALL_OPT_OUT =
@@ -220,7 +226,11 @@ function hasDirectOptOut(requestText: string): boolean {
 }
 
 function querySubjectPhrases(requestText: string): string[] {
-  if (!REQUEST_NEED_CUE.test(requestText)) return [];
+  const ownerInformationQuestion =
+    /^\s*(?:what|which|where|when|who|whose|how)\b/iu.test(requestText) &&
+    (EXPLICIT_OWNER_ACTION_QUESTION.test(requestText) ||
+      COPULAR_OWNER_STATE_QUESTION.test(requestText));
+  if (!REQUEST_NEED_CUE.test(requestText) && !ownerInformationQuestion) return [];
   const raw = requestText.normalize('NFC').toLowerCase().replace(/[’‘]/gu, "'");
   const rawTokens = [...raw.matchAll(/[\p{L}\p{M}\p{N}]+/gu)];
   const hyphenatedComponents = new Set<number>();

@@ -164,6 +164,48 @@ describe('automatic recall eligibility', () => {
     expect(result.candidates).toEqual([]);
   });
 
+  it.each([
+    'What is my current preference for wheelchair-accessible entrances?',
+    'Which wheelchair-accessible entrances did I choose for the appointment?',
+    'What did I choose for wheelchair-accessible entrances?',
+    'What did I tell you about coastal rainbows by the sea?',
+    'What is the current name of the morning block in my studio workflow?',
+  ])('admits a concrete owner-information question: %s', (request) => {
+    const meaning = request.includes('coastal rainbows')
+      ? 'Earlier coastal rainbows observed by the sea'
+      : request.includes('studio workflow')
+        ? 'For my studio workflow, I named the morning block Quiet Start at Eight'
+        : 'wheelchair-accessible entrances';
+    const preference = candidate('owner-history', meaning);
+    const result = eligibleAutomaticRecallCandidates(request, [preference]);
+    expect(result.reason).toBe('eligible');
+    expect(result.candidates).toEqual([preference]);
+  });
+
+  it('excludes a generic world question despite exact shared subject wording', () => {
+    const history = candidate('owner-history', 'Earlier coastal rainbows observed by the sea');
+    const result = eligibleAutomaticRecallCandidates('How do coastal rainbows form?', [history]);
+    expect(result.reason).toBe('no_request_subject');
+    expect(result.candidates).toEqual([]);
+  });
+
+  it('does not treat an unrelated personal setting as an owner-history question', () => {
+    const history = candidate('owner-history', 'Earlier coastal rainbows observed by the sea');
+    const result = eligibleAutomaticRecallCandidates(
+      'How do coastal rainbows form for my current science class?',
+      [history],
+    );
+    expect(result.reason).toBe('no_request_subject');
+    expect(result.candidates).toEqual([]);
+
+    const statusReport = eligibleAutomaticRecallCandidates(
+      'How do coastal rainbows form for my class status report?',
+      [history],
+    );
+    expect(statusReport.reason).toBe('no_request_subject');
+    expect(statusReport.candidates).toEqual([]);
+  });
+
   it('honors a direct owner opt-out without treating a negative-history question as an opt-out', () => {
     const memory = [candidate('cedar', 'Cedar East rejected because clearance')];
     const optOut = eligibleAutomaticRecallCandidates(

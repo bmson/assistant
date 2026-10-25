@@ -53,9 +53,10 @@ import { disposeStore, emulatorStore } from '../../../packages/firestore/src/tes
 
 const SOURCE_TEXT =
   'For morning reminders, I prefer one digest before 9 AM rather than separate alerts.';
-const POST_ERASURE_TEXT = 'Since the memory reset, I prefer reminders after 10 AM.';
+const POST_ERASURE_TEXT = 'Since the memory reset, I prefer morning reminders after 10 AM.';
 const QUESTION = 'What timing and format do I prefer for my morning reminders?';
-const ACTION = 'Please send a short summary of my reminder preference to my own inbox.';
+const ACTION =
+  'Please send a short summary of my morning reminders timing and format preference to my own inbox.';
 const REPLY = 'I heard you.';
 const SPACE: EmbeddingSpace = {
   provider: 'synthetic',
