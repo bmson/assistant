@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { retrieveOwnerContext } from './recall-context.js';
 
 describe('shared owner recall entrypoint', () => {
-  it('keeps direct, planning, and fallback outputs identical for the same bounded source set', async () => {
+  it('keeps repeated shared-pipeline results stable for the same bounded source set', async () => {
     const since = new Date('2026-10-01T00:00:00.000Z');
     const history = {
       kind: 'history-recall-repository' as const,
@@ -54,23 +54,23 @@ describe('shared owner recall entrypoint', () => {
       graphEnabled: false,
     } as const;
 
-    const [direct, planning, fallback] = await Promise.all([
-      retrieveOwnerContext({ ...common, taskId: 'direct-task', mode: 'automatic' }),
-      retrieveOwnerContext({ ...common, taskId: 'planning-task', mode: 'automatic' }),
-      retrieveOwnerContext({ ...common, taskId: 'fallback-task', mode: 'continuation' }),
+    const [first, repeated, continuationMode] = await Promise.all([
+      retrieveOwnerContext({ ...common, taskId: 'pipeline-a', mode: 'automatic' }),
+      retrieveOwnerContext({ ...common, taskId: 'pipeline-b', mode: 'automatic' }),
+      retrieveOwnerContext({ ...common, taskId: 'pipeline-continuation', mode: 'continuation' }),
     ]);
 
-    const selected = (result: typeof direct) => ({
+    const selected = (result: typeof first) => ({
       block: result.block,
       sources: result.sources.map(({ surfaceKey, sourceRevision }) => ({
         surfaceKey,
         sourceRevision,
       })),
     });
-    expect(selected(direct)).toEqual(selected(planning));
-    expect(selected(direct)).toEqual(selected(fallback));
-    expect(direct.sources).toHaveLength(1);
-    expect(direct.block).toContain('wheelchair-accessible entrances');
+    expect(selected(first)).toEqual(selected(repeated));
+    expect(selected(first)).toEqual(selected(continuationMode));
+    expect(first.sources).toHaveLength(1);
+    expect(first.block).toContain('wheelchair-accessible entrances');
     expect(history.segments).toHaveBeenCalledTimes(3);
   });
 
