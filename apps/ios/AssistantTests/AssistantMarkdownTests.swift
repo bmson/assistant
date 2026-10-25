@@ -1742,10 +1742,40 @@ extension AssistantMarkdownTests {
                 window.rootViewController = nil
                 previousKeyWindow?.makeKey()
             }
-            try await waitForTranscriptHostCondition("diagnostic baseline leaf and receipt geometry") {
-                state.childTransactionObservations.last?.parentContentRevision == 0
+            // Initial UI readiness matches the original acceptance fixture. An initial
+            // transaction callback is an observation, not a readiness requirement.
+            try await waitForTranscriptHostCondition("diagnostic initial environment and actual receipt geometry", onTimeout: {
+                let checks: [String: Bool] = [
+                    "locale": state.environmentSnapshots.last?.localeIdentifier == "en_US",
+                    "receiptFrame": state.receiptMeasurement?.frame(in: window) != nil,
+                    "systemEnvironment": state.systemEnvironmentSnapshots[0] != nil,
+                    "initialRevisionZeroLeafAvailable": state.childTransactionObservations.last?.parentContentRevision == 0,
+                ]
+                state.recordPredicateSample(stage: "diagnostic-\(label)-initial-readiness-timeout", checks: checks)
+                let readinessAttachment = XCTAttachment(string: checks.keys.sorted().map {
+                    "\($0)=\(checks[$0] == true)"
+                }.joined(separator: "\n"))
+                readinessAttachment.name = "Diagnostic-only initial readiness components — \(label)"
+                readinessAttachment.lifetime = .keepAlways
+                add(readinessAttachment)
+                if let scroll = ownedTranscriptScrollView(in: window),
+                   let input = ownedTextField(in: window) {
+                    attachOwnedTranscriptBoundarySnapshot(
+                        stage: "diagnostic-\(label)-initial-readiness-timeout", state: state, root: root,
+                        window: window, scroll: scroll, input: input
+                    )
+                }
+            }) {
+                state.environmentSnapshots.last?.localeIdentifier == "en_US"
                     && state.receiptMeasurement?.frame(in: window) != nil
+                    && state.systemEnvironmentSnapshots[0] != nil
             }
+            state.recordPredicateSample(stage: "diagnostic-\(label)-initial-readiness-result", checks: [
+                "locale": state.environmentSnapshots.last?.localeIdentifier == "en_US",
+                "receiptFrame": state.receiptMeasurement?.frame(in: window) != nil,
+                "systemEnvironment": state.systemEnvironmentSnapshots[0] != nil,
+                "initialRevisionZeroLeafAvailable": state.childTransactionObservations.last?.parentContentRevision == 0,
+            ])
             let scroll = try XCTUnwrap(ownedTranscriptScrollView(in: window))
             let input = try XCTUnwrap(ownedTextField(in: window))
             let initialHierarchy = ownedTranscriptControllerIdentities(root: root, containing: scroll)
