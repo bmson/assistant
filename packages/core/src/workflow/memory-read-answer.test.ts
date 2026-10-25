@@ -746,6 +746,35 @@ describe('exact historical source projection', () => {
       requestProfile: { tools: 'none' },
     });
   });
+  it.each([
+    {
+      label: 'an unknown source key',
+      sourceKey: 'memory:not-in-the-receipt',
+      quote: 'Owner prefers minimal UI with careful typography.',
+    },
+    {
+      label: 'a quote that is not a contiguous source substring',
+      sourceKey: 'memory:ui',
+      quote: 'Owner prefers minimal UI with careful typography. Also likes charts.',
+    },
+  ])('rejects $label from a selector response', async ({ sourceKey, quote }) => {
+    const result = await selectMemoryReadAnswer({
+      router: {
+        object: vi.fn(async () => ({
+          ok: true,
+          object: { selections: [{ sourceKey, quote }] },
+        })),
+      } as never,
+      taskId: 'qa',
+      request: 'What are my UI preferences?',
+      evidence,
+    });
+    expect(result).toMatchObject({
+      status: 'unavailable',
+      failureReason: 'invalid_quote',
+      selections: [],
+    });
+  });
   it('rejects a valid quote from a source omitted by the selector prompt budget', async () => {
     const matches = Array.from({ length: 8 }, (_, index) =>
       message(

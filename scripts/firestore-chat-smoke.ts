@@ -48,6 +48,106 @@ const SMOKE_RAW_HISTORY_SIMILARITY = 0.85;
 const SMOKE_POSITIVE_REQUEST =
   'Please help me prepare my observation notes about coastal rainbows by the sea.';
 
+type SmokeExtractSource = { key: string; body: string; speaker: string };
+
+const smokeExtractStopWords = new Set([
+  'a',
+  'about',
+  'an',
+  'and',
+  'by',
+  'can',
+  'could',
+  'did',
+  'do',
+  'for',
+  'help',
+  'i',
+  'me',
+  'my',
+  'of',
+  'please',
+  'prepare',
+  'the',
+  'tell',
+  'to',
+  'what',
+  'you',
+]);
+
+function smokeExtractTerm(value: string): string {
+  return value
+    .toLocaleLowerCase('en-US')
+    .replace(/ies$/u, 'y')
+    .replace(/(?:ed|ing)$/u, '')
+    .replace(/s$/u, '');
+}
+
+/** Deterministic smoke selector: choose only relevant exact sentences supplied by the caller. */
+export function selectSmokeExtractQuotes(prompt: unknown): {
+  selections: Array<{ sourceKey: string; quote: string }>;
+} | null {
+  if (typeof prompt !== 'string') return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(prompt);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const request = (parsed as { request?: unknown }).request;
+  const sources = (parsed as { sources?: unknown }).sources;
+  if (typeof request !== 'string' || !Array.isArray(sources)) return null;
+
+  const requestTerms = new Set(
+    (request.match(/[\p{L}\p{N}]+/gu) ?? [])
+      .map(smokeExtractTerm)
+      .filter((term) => term.length > 1 && !smokeExtractStopWords.has(term)),
+  );
+  const ownerHistoryRequest = /\bwhat\s+did\s+i\s+(?:tell|say)\s+you\b/iu.test(request);
+  const commitmentRequest =
+    /\b(?:open\s+)?commitments?\b|\bfollow[- ]?ups?\b|\baction items?\b/iu.test(request);
+  const minimumMatches = Math.min(2, requestTerms.size);
+  if (minimumMatches === 0) return { selections: [] };
+
+  const selections: Array<{ sourceKey: string; quote: string }> = [];
+  for (const raw of sources) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const source = raw as SmokeExtractSource;
+    if (
+      typeof source.key !== 'string' ||
+      typeof source.body !== 'string' ||
+      typeof source.speaker !== 'string' ||
+      !['Recorded owner message', 'Saved fact marked owner-confirmed'].includes(source.speaker)
+    )
+      continue;
+    if (ownerHistoryRequest && source.speaker !== 'Recorded owner message') continue;
+
+    const sentences = source.body
+      .split(/(?<=[.!?])\s+|\n+/u)
+      .map((sentence) => sentence.trim())
+      .filter((sentence) => sentence.length > 0 && sentence.length <= 800);
+    const candidates = sentences
+      .map((quote) => {
+        const bodyTerms = new Set((quote.match(/[\p{L}\p{N}]+/gu) ?? []).map(smokeExtractTerm));
+        const matchingTerms = [...requestTerms].filter((term) => bodyTerms.has(term));
+        const hasCommitmentEvidence =
+          /\bcommitments?\b|\bfollow[- ]?ups?\b|\baction items?\b/iu.test(quote);
+        return { quote, matchingTerms, hasCommitmentEvidence };
+      })
+      .filter(
+        (candidate) =>
+          candidate.matchingTerms.length >= minimumMatches &&
+          (!commitmentRequest || candidate.hasCommitmentEvidence),
+      )
+      .sort((left, right) => right.matchingTerms.length - left.matchingTerms.length);
+    const best = candidates[0];
+    if (best && source.body.includes(best.quote))
+      selections.push({ sourceKey: source.key, quote: best.quote });
+  }
+  return { selections: selections.slice(0, 8) };
+}
+
 function preflightRecallCandidates(
   messageId: string,
   graphRelationId: string,
@@ -532,7 +632,7 @@ export async function firestoreChatSmoke(
     async embeddingSpaceKey() {
       return embeddingSpaceIdentityKey(CHAT_SMOKE_SPACE);
     },
-    async object(role: string) {
+    async object(role: string, options: { prompt?: unknown }) {
       roles.push(role);
       const object =
         role === 'classify'
@@ -544,7 +644,9 @@ export async function firestoreChatSmoke(
                 steps: [],
                 missingInfo: [],
               }
-            : { decision: 'publish', reasons: [] };
+            : role === 'extract'
+              ? selectSmokeExtractQuotes(options.prompt)
+              : { decision: 'publish', reasons: [] };
       return { ok: true, object, modelId: 'synthetic/model', degraded: false };
     },
     async embed() {
@@ -587,8 +689,7 @@ export async function firestoreChatSmoke(
       fromStatus: 'executing',
       result,
     });
-    if (!persisted)
-      return { kind: 'rejected' as const, reason: 'tool success was not persisted' };
+    if (!persisted) return { kind: 'rejected' as const, reason: 'tool success was not persisted' };
     dispatchReceipts.push({
       toolCallId: toolCall.id,
       taskId: input.task.id,
@@ -655,8 +756,8 @@ export async function firestoreChatSmoke(
   if (!deterministicPrivateRead) {
     assert.deepEqual(roles.slice(0, 2), ['classify', 'plan']);
   }
-  const modelExecuted = roles.length > 0 || modelSteps > 0;
-  if (modelExecuted) {
+  const responseModelExecuted = modelSteps > 0;
+  if (responseModelExecuted) {
     assert.match(systemPrompt, /Synthetic owner prefers clear explanations/);
     assert.match(systemPrompt, /Synthetic Observatory/);
   }
@@ -665,12 +766,12 @@ export async function firestoreChatSmoke(
     /Earlier coastal rainbows by the sea/,
     /The owner observes rainbows by the sea\./,
   ];
-  if (modelExecuted && options.expectOpenCommitment) {
+  if (responseModelExecuted && options.expectOpenCommitment) {
     assert.match(systemPrompt, /Rainbow observation notes/);
     assert.doesNotMatch(systemPrompt, /Earlier coastal rainbows by the sea/);
     assert.doesNotMatch(systemPrompt, /The owner observes rainbows by the sea\./);
   } else if (
-    modelExecuted &&
+    responseModelExecuted &&
     (!options.recall || expectedRecallMode === 'explicit' || options.expectRecall === false)
   ) {
     const canaries =
@@ -681,14 +782,14 @@ export async function firestoreChatSmoke(
       assert.doesNotMatch(systemPrompt, canary);
       assert.doesNotMatch(modelMessages, canary);
     }
-  } else if (modelExecuted) {
+  } else if (responseModelExecuted) {
     // Relevant history and graph are selected through the shared two-source
     // fuser; the commitment is not independently injected through openLoops.
     const commitmentCanary = /Rainbow observation notes/;
     assert.doesNotMatch(systemPrompt, commitmentCanary);
     assert.doesNotMatch(modelMessages, commitmentCanary);
   }
-  if (modelExecuted) assert.match(systemPrompt, /Explain science clearly/);
+  if (responseModelExecuted) assert.match(systemPrompt, /Explain science clearly/);
   if (options.recall && expectedRecallMode === 'automatic') {
     // Pre-planning retrieval is carried into the model's message window as
     // reference evidence; it is not duplicated in the static system prompt.
@@ -764,8 +865,12 @@ export async function firestoreChatSmoke(
       for (const canary of privateRecallCanaries) assert.doesNotMatch(modelMessages, canary);
     }
   }
-  assert.equal((await store.doc('skills', skillId).get()).get('useCount'), 1);
-  assert.equal((await store.doc('skills', skillId).get()).get('successCount'), 1);
+  const skillApplied = responseModelExecuted && systemPrompt.includes('Explain science clearly');
+  assert.equal((await store.doc('skills', skillId).get()).get('useCount'), skillApplied ? 1 : 0);
+  assert.equal(
+    (await store.doc('skills', skillId).get()).get('successCount'),
+    skillApplied ? 1 : 0,
+  );
   assert.equal(
     await persistence.executionEvidence.finalMessageExists({
       agentId,
@@ -780,7 +885,7 @@ export async function firestoreChatSmoke(
   return {
     planned: true,
     ownerContext: true,
-    skills: true,
+    skills: skillApplied,
     finalized: true,
     sqlAccesses: sqlAccesses.length,
     ...(options.recall
