@@ -1,6 +1,7 @@
 import type { AgentRow, Db } from '@assistant/db';
 import {
   createPostgresExecutionContextRepository,
+  createPostgresExecutionEvidenceRepository,
   createPostgresExecutionJobRepository,
 } from '@assistant/db';
 import type { CostRepository, ToolCallEffectOutcome } from '@assistant/persistence';
@@ -20,6 +21,7 @@ import {
 } from '../../memory/situation-context.js';
 import type { ModelRouter } from '../../model-router/router.js';
 import { approvalHeadline, approvalPrompt, clarifyingQuestion } from '../../owner-text.js';
+import { buildPublicActivityQuery } from '../active-read-intent.js';
 import { deliveredChannels, markApprovalsNotified } from '../approvals.js';
 import {
   type ArtifactIntent,
@@ -126,6 +128,8 @@ export interface RunContext {
   window: ModelMessage[];
   artifactIntent?: ArtifactIntent;
   documentReadIntent?: DocumentReadIntent;
+  resolvedReadIntent?: import('../active-read-intent.js').ResolvedReadIntent;
+  publicApprovalCurrent?: () => Promise<boolean>;
   /** Validated, exact-owner correction mode. Never populated from chat recency. */
   checklistCorrection?: ChecklistCorrectionResumeProjection;
   /** Exact Activity-selected cancellation; permits only remaining private reads. */
@@ -163,6 +167,15 @@ function removePriorPlanningRecall(window: ModelMessage[]): void {
  * phases do not silently claim those sources were checked.
  */
 export async function preparePlanningRecall(rc: RunContext): Promise<boolean> {
+  if (
+    rc.resolvedReadIntent?.kind === 'public_activity' ||
+    rc.resolvedReadIntent?.kind === 'combined' ||
+    rc.resolvedReadIntent?.kind === 'clarify_public'
+  ) {
+    removePriorPlanningRecall(rc.window);
+    rc.state.recall = undefined;
+    return true;
+  }
   const { deps, db, router, task, agent, state, window } = rc;
   state.plannerState ??= {};
   removePriorPlanningRecall(window);
@@ -570,6 +583,83 @@ export async function resumePendingApprovals(rc: RunContext): Promise<ExecuteRes
         if (state.pendingJob) {
           stillPending.push(pending);
           continue;
+        }
+        const read = rc.resolvedReadIntent;
+        if (read?.kind === 'public_activity' || read?.kind === 'combined') {
+          const scopeQuery = buildPublicActivityQuery(read.public);
+          const call = state.pendingToolBatch?.calls.find(
+            (candidate) =>
+              candidate.toolCallId === pending.toolCallId &&
+              candidate.dbToolCallId === pending.dbToolCallId &&
+              candidate.toolName === pending.toolName,
+          );
+          // Do not rewrite approved args. A mismatch stops the old task and
+          // requires the corrected request's own ordinary proposal/journal.
+          const publicSearch = pending.toolName === 'web.search';
+          const durable = await (
+            deps.persistence?.executionJobs ?? createPostgresExecutionJobRepository(db)
+          ).loadToolCall(task.agentId, task.id, pending.dbToolCallId);
+          const publicInputs = [
+            call?.input,
+            durable?.args,
+            approval.resolutionPayload ?? durable?.args,
+          ];
+          const inputRecords = publicInputs.filter(
+            (value): value is Record<string, unknown> =>
+              value !== null && typeof value === 'object' && !Array.isArray(value),
+          );
+          let matches =
+            Boolean(call) &&
+            durable?.toolName === pending.toolName &&
+            durable.approvalId === approval.id &&
+            inputRecords.length === 3 &&
+            scopeQuery.kind === 'query' &&
+            (await rc.publicApprovalCurrent?.()) === true;
+          if (matches && call && publicSearch && scopeQuery.kind === 'query')
+            matches = inputRecords.every(
+              (input) =>
+                Object.keys(input).length === 2 &&
+                input.query === scopeQuery.query &&
+                input.count === 5,
+            );
+          else if (matches && call && pending.toolName === 'web.fetch') {
+            const rows = await (
+              deps.persistence?.executionEvidence ?? createPostgresExecutionEvidenceRepository(db)
+            ).taskEvidence({ agentId: task.agentId, taskId: task.id });
+            const urls = rows
+              .filter(
+                (row) =>
+                  row.toolName === 'web.search' &&
+                  row.status === 'succeeded' &&
+                  (row.args as { query?: unknown })?.query ===
+                    (scopeQuery.kind === 'query' ? scopeQuery.query : undefined),
+              )
+              .flatMap((row) => {
+                const results = (row.result as { results?: Array<{ url?: unknown }> } | null)
+                  ?.results;
+                return Array.isArray(results)
+                  ? results.flatMap((result) =>
+                      typeof result.url === 'string' ? [result.url] : [],
+                    )
+                  : [];
+              });
+            matches = inputRecords.every(
+              (input) =>
+                Object.keys(input).length === 1 &&
+                typeof input.url === 'string' &&
+                urls.includes(input.url),
+            );
+          } else if (read.kind === 'public_activity') matches = false;
+          if (!matches) {
+            const marked = await markTaskNeedsAttention(
+              deps.persistence?.tasks ?? db,
+              lease,
+              'Pending search arguments no longer match the verified owner request; no approved call was executed.',
+            );
+            return marked
+              ? { outcome: 'needs_attention', detail: 'public search journal mismatch' }
+              : LOST_LEASE;
+          }
         }
         if (!(await renewTaskLease(deps.persistence?.tasks ?? db, lease))) return LOST_LEASE;
         const outcome = await dispatcher.executeApproved(

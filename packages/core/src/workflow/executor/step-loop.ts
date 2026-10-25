@@ -36,6 +36,7 @@ import { withSpan } from '../../otel.js';
 import { approvalHeadline, approvalPrompt } from '../../owner-text.js';
 import { isSituationRequest } from '../../situations-schema.js';
 import { acceptedKnownSenderReplyIntent } from '../accepted-suggestion-intent.js';
+import { buildPublicActivityQuery } from '../active-read-intent.js';
 import { deliveredChannels, markApprovalsNotified } from '../approvals.js';
 import {
   artifactRoutingFailure,
@@ -527,6 +528,30 @@ export function latestCurrentTaskAssistantText(window: ModelMessage[]): string {
 export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<ExecuteResult> {
   const { deps, db, router, dispatcher, task, agent, state, ctx, artifactIntent } = rc;
   const restrictedChecklistResume = Boolean(rc.checklistCorrection || rc.checklistCancellation);
+  const publicScope =
+    rc.resolvedReadIntent?.kind === 'public_activity' || rc.resolvedReadIntent?.kind === 'combined'
+      ? rc.resolvedReadIntent.public
+      : undefined;
+  const publicOnly = rc.resolvedReadIntent?.kind === 'public_activity';
+  const publicQuery = publicScope ? buildPublicActivityQuery(publicScope) : undefined;
+  const publicModelWindow = (): ModelMessage[] =>
+    !publicScope
+      ? rc.window
+      : rc.window.flatMap((message): ModelMessage[] => {
+          if (message.role === 'user') return [message];
+          if (
+            (message.role !== 'assistant' && message.role !== 'tool') ||
+            !Array.isArray(message.content)
+          )
+            return [];
+          const content = message.content.filter(
+            (part) =>
+              (part.type === 'tool-call' || part.type === 'tool-result') &&
+              /^web\.(?:search|fetch)$/.test(part.toolName),
+          );
+          return content.length ? [{ ...message, content } as ModelMessage] : [];
+        });
+
   const evidence =
     deps.persistence?.executionEvidence ?? createPostgresExecutionEvidenceRepository(db);
   const executionContext =
@@ -601,7 +626,11 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     directOwner && !restrictedChecklistResume ? detectFutureWatchIntent(ownerText) : null;
   const memoryWrite = directOwner && !restrictedChecklistResume && isMemoryWriteRequest(ownerText);
   const detectedLookups =
-    directOwner && !restrictedChecklistResume ? detectLiveLookups(ownerWindow) : [];
+    directOwner && !restrictedChecklistResume
+      ? publicQuery?.kind === 'query'
+        ? [{ kind: 'web' as const, request: publicQuery.query, publicActivityScope: publicScope }]
+        : detectLiveLookups(ownerWindow)
+      : [];
   // A registry without the scores tool (a trimmed install or trust tier) takes
   // a sports question down the general search-then-fetch path instead of
   // failing on a tool that is not there.
@@ -633,7 +662,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   const birthdaySaves =
     directOwner && !restrictedChecklistResume ? requestedBirthdaySaves(ownerWindow) : [];
   const situationRequest =
-    directOwner && !restrictedChecklistResume && isSituationRequest(ownerText);
+    !publicScope && directOwner && !restrictedChecklistResume && isSituationRequest(ownerText);
   const skillInventoryRequest =
     directOwner && !restrictedChecklistResume ? savedSkillInventoryIntent(ownerText) : null;
   if (skillInventoryRequest) {
@@ -674,18 +703,22 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // so it is exactly the "third-party text" this rule excludes: without the
   // guard, a crafted message reading like "what's on my calendar tomorrow?"
   // would force a search of the owner's own accounts and override the plan.
-  let readRequest: PersonalReadRequest | null = restrictedChecklistResume
-    ? null
-    : task.trust === 'owner' &&
-        !isForwardedIngest(task) &&
-        ownerIntent.authorizedScopes.includes('private_read') &&
-        !situationRequest &&
-        !tripOwnsCalendar
-      ? detectPersonalReadRequest(ownerWindow, {
-          now: readReferenceAt,
-          timeZone: requestTimeZone,
-        })
-      : null;
+  const eligiblePrivateRead =
+    !restrictedChecklistResume &&
+    task.trust === 'owner' &&
+    !isForwardedIngest(task) &&
+    ownerIntent.authorizedScopes.includes('private_read') &&
+    !situationRequest &&
+    !tripOwnsCalendar;
+  let readRequest: PersonalReadRequest | null =
+    !eligiblePrivateRead || publicOnly
+      ? null
+      : rc.resolvedReadIntent?.kind === 'personal' || rc.resolvedReadIntent?.kind === 'combined'
+        ? rc.resolvedReadIntent.personal
+        : detectPersonalReadRequest(ownerWindow, {
+            now: readReferenceAt,
+            timeZone: requestTimeZone,
+          });
   let assessmentStepReserve: 1 | 2 = EMAIL_REVIEW_DEFAULT_ASSESSMENT_RESERVE;
   if (readRequest?.emailReview) {
     const originalMaxSteps = task.maxSteps;
@@ -914,6 +947,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       }
     }
     const readContext = {
+      resolvedReadIntent: rc.resolvedReadIntent,
       readRequest,
       lookupContext,
       verifiedCompoundTripChecklist,
@@ -921,7 +955,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     };
     // Empty model output and exhausted read budgets still use the same
     // deterministic primary agenda as the normal final-response path.
-    if (!restrictedChecklistResume && !requestedCardIntent(ownerText)) {
+    if (!publicOnly && !restrictedChecklistResume && !requestedCardIntent(ownerText)) {
       const current = await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id });
       const cards = responseCardsForFinal({
         evidence: current.map((row) => ({ ...row, fromCurrentTask: true })),
@@ -937,7 +971,8 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     }
     return !restrictedChecklistResume &&
       directOwner &&
-      (requestedCardIntent(ownerText) ||
+      (publicOnly ||
+        requestedCardIntent(ownerText) ||
         readRequest?.kind === 'memory' ||
         requestedSavedSkillName(ownerText, latestUserText(rc.window)))
       ? stageModelFinalResponse(deps, lease, state, rc.window, pending, artifactIntent, readContext)
@@ -974,6 +1009,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   const triggerPayload = (task.trigger as { payload?: Record<string, unknown> } | null)?.payload;
   const arrivalTask = triggerPayload?.kind === 'arrival';
   const ownerCard =
+    !publicScope &&
     !isConversationLocalContext(ownerText) &&
     !restrictedChecklistResume &&
     privilegedTask &&
@@ -988,6 +1024,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // transient, so it mirrors the owner-card gate.
   let ambientBlock: string | undefined;
   if (
+    !publicScope &&
     !isConversationLocalContext(ownerText) &&
     !restrictedChecklistResume &&
     privilegedTask &&
@@ -1013,6 +1050,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   let recallBlock: string | undefined;
   let openLoops: string | undefined;
   if (
+    !publicScope &&
     loadConfig().CHAT_RECALL_ENABLED &&
     state.plannerState.planningRecall === undefined &&
     !localTransformation &&
@@ -1087,6 +1125,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   }
 
   if (
+    !publicScope &&
     !restrictedChecklistResume &&
     !localTransformation &&
     !isConversationLocalContext(ownerText) &&
@@ -1123,9 +1162,10 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // simulations still exclude stored procedures along with other account context.
   let skillsBlock: string | undefined;
   let explicitlyRequestedSkillRetrieved = false;
-  const explicitlyRequestedSkillName = readRequest
-    ? requestedSavedSkillName(ownerText, latestUserText(rc.window))
-    : null;
+  const explicitlyRequestedSkillName =
+    !publicScope && readRequest
+      ? requestedSavedSkillName(ownerText, latestUserText(rc.window))
+      : null;
   if (!restrictedChecklistResume && explicitlyRequestedSkillName) {
     try {
       const skillStorage = deps.persistence?.skills ?? db;
@@ -1152,6 +1192,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     }
   }
   if (
+    !publicScope &&
     !restrictedChecklistResume &&
     !isConversationLocalContext(ownerText) &&
     privilegedTask &&
@@ -2106,6 +2147,24 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     // reading it. Otherwise the model writes the answer and the response
     // contract checks it against this same ledger before it goes out.
     let readAnswerTurn = false;
+    if (publicScope && !boundedForcedReadTool && !forcedLiveLookup) {
+      // Unstructured public pages can support source leads, not a fabricated
+      // event tuple. Render those receipts without another paid draft call.
+      return stageModelFinalResponse(
+        deps,
+        lease,
+        state,
+        rc.window,
+        {
+          text: '',
+          progress: 'Read public listings; occurrence details remain unverified.',
+          terminalStatus: 'needs_attention',
+          outcome: 'needs_attention',
+        },
+        artifactIntent,
+        { resolvedReadIntent: rc.resolvedReadIntent, readRequest, lookupContext },
+      );
+    }
     if (readRequest && !mustRecordGoalProgress && !boundedForcedReadTool && !forcedLiveLookup) {
       if (readRequest.emailReview) {
         const review = readRequest.emailReview;
@@ -2992,6 +3051,9 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         : rc.checklistCancellation
           ? `\nThis is a task-bound owner cancellation. Use only the runtime-selected private read for a remaining pending checklist lookup. Do not use the original plan, add targets, or perform writes. Preserve completed items and do not repeat any cancelled item.`
           : '',
+      publicScope
+        ? `Public discovery scope: ${JSON.stringify({ topic: publicScope.topic, location: publicScope.location.label, civilWindow: publicScope.civilWindow, timeZone: publicScope.clock.timeZone, filters: publicScope.filters.map(({ kind, value }) => ({ kind, value })) })}. The runtime renders public source leads and any separately authorized personal answer from their own receipts. Unstructured page text does not establish a matching event occurrence; names, timing, venue, price and availability must not be presented as verified. do not infer booking, outreach or calendar changes. Never substitute private mail/calendar, recalled context or old assistant answers. If public coverage fails, say which part could not be verified.`
+        : '',
       readAnswerTurn && readRequest ? readAnswerDirective(readRequest) : '',
       liveLookupDirective(liveLookups, {
         next: forcedLiveLookup?.lookup,
@@ -3023,9 +3085,12 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     // Automatic goal checkpoints are runtime capabilities, not model
     // capabilities. Hiding the tool prevents an eager model from persisting
     // unverified prose before the ledger-backed checkpoint runs.
-    const goalFilteredTools = isUnattendedGoalSession(task)
-      ? availableToolDefs.filter((tool) => tool.name !== 'goals.update_progress')
+    const sourceFilteredTools = publicOnly
+      ? availableToolDefs.filter((tool) => /^web\.(?:search|fetch)$/.test(tool.name))
       : availableToolDefs;
+    const goalFilteredTools = isUnattendedGoalSession(task)
+      ? sourceFilteredTools.filter((tool) => tool.name !== 'goals.update_progress')
+      : sourceFilteredTools;
     const watchRecoveryHasPriorAttempt =
       state.futureWatchRecoveryAttempts > 0 &&
       readToolEvidence.some(
@@ -3402,7 +3467,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       stepResult = await router.step(role, {
         taskId: task.id,
         system,
-        messages: rc.window,
+        messages: publicModelWindow(),
         tools: toolSet as never,
         toolChoice:
           readAnswerTurn || airportClarificationTurn
@@ -3496,7 +3561,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         stepResult = await router.step(role, {
           taskId: task.id,
           system: `${system}\n\nAnswer this conceptual question directly. The previous tool call was not executed. Return only the answer; no tools or action promises.`,
-          messages: rc.window,
+          messages: publicModelWindow(),
           tools: {},
           toolChoice: 'none',
           critical,
@@ -3536,7 +3601,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       stepResult = await router.step(role, {
         taskId: task.id,
         system: `${system}\n\nThis is an explicit artifact request. Call ${forcedArtifact.toolName} now. Do not answer with prose until that tool call has been emitted.`,
-        messages: rc.window,
+        messages: publicModelWindow(),
         tools: toolSet as never,
         toolChoice: { type: 'tool', toolName: forcedArtifact.toolName },
         forceFallback: useForcedToolFallback,
@@ -3579,7 +3644,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       stepResult = await router.step(role, {
         taskId: task.id,
         system: `${system}\n\nYou claimed an approval exists, but no tool call created it. Emit the actual gated tool call now. Never write an approval code or approval-page notice yourself; the runtime creates those after the tool call.`,
-        messages: rc.window,
+        messages: publicModelWindow(),
         tools: toolSet as never,
         toolChoice: 'required',
         forceFallback: useForcedToolFallback,
@@ -3611,7 +3676,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       stepResult = await router.step(role, {
         taskId: task.id,
         system: `${system}\n\nThis request needs an action, not a summary. Emit the appropriate tool call now; do not answer in prose until you have.`,
-        messages: rc.window,
+        messages: publicModelWindow(),
         tools: toolSet as never,
         toolChoice: 'required',
         forceFallback: useForcedToolFallback,
@@ -3833,6 +3898,26 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     // that left tool calls in an unknown (truncated) state is a hard failure.
     const completedTextAnswer =
       stepResult.toolCalls.length === 0 && stepResult.text.trim().length > 0;
+    if (
+      publicScope &&
+      !resumingBatch &&
+      stepResult.toolCalls.some(
+        (call) =>
+          (publicOnly || /^web\.(?:search|fetch)$/.test(call.toolName)) &&
+          (!forcedLiveLookup?.input ||
+            call.toolName !== forcedLiveLookup.toolName ||
+            stableJson(call.input) !== stableJson(forcedLiveLookup.input)),
+      )
+    ) {
+      const text =
+        'I could not keep the public lookup within the requested search, so I stopped without substituting private sources.';
+      return stageFinalResponse(deps, lease, state, rc.window, {
+        text,
+        progress: text,
+        terminalStatus: 'needs_attention',
+        outcome: 'needs_attention',
+      });
+    }
     // Calls discarded by the no-tool boundary must reach the checked read
     // fallback. Throwing here retries the paid model call with the same source
     // evidence and can leave an otherwise completed lookup sleeping forever.
@@ -3911,6 +3996,50 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           toolName: journalCall.toolName,
           input: journalCall.input,
         };
+        if (publicScope && (publicOnly || /^web\.(?:search|fetch)$/.test(tc.toolName))) {
+          let scoped = (await rc.publicApprovalCurrent?.()) === true;
+          if (publicQuery?.kind === 'query' && tc.toolName === 'web.search')
+            scoped =
+              scoped &&
+              Object.keys(tc.input).length === 2 &&
+              tc.input.query === publicQuery.query &&
+              tc.input.count === 5;
+          if (publicQuery?.kind === 'query' && tc.toolName === 'web.fetch') {
+            const urls = readToolEvidence
+              .filter(
+                (row) =>
+                  row.fromCurrentTask !== false &&
+                  row.toolName === 'web.search' &&
+                  row.status === 'succeeded' &&
+                  (row.args as { query?: unknown })?.query === publicQuery.query,
+              )
+              .flatMap((row) => {
+                const results = (row.result as { results?: Array<{ url?: unknown }> } | null)
+                  ?.results;
+                return Array.isArray(results)
+                  ? results.flatMap((result) =>
+                      typeof result.url === 'string' ? [result.url] : [],
+                    )
+                  : [];
+              });
+            scoped =
+              scoped &&
+              Object.keys(tc.input).length === 1 &&
+              typeof tc.input.url === 'string' &&
+              urls.includes(tc.input.url);
+          }
+          if (!/^web\.(?:search|fetch)$/.test(tc.toolName)) scoped = false;
+          if (!scoped) {
+            const text =
+              'The saved public lookup no longer matches the verified search. I stopped before executing it.';
+            return stageFinalResponse(deps, lease, state, rc.window, {
+              text,
+              progress: text,
+              terminalStatus: 'needs_attention',
+              outcome: 'needs_attention',
+            });
+          }
+        }
         const updateCall = async (patch: Partial<PendingToolBatchCall>) => {
           Object.assign(journalCall, patch);
           state.contextWindow = compact(rc.window) as unknown as TaskState['contextWindow'];
@@ -4700,6 +4829,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       // grounding check would read a true local aside — the weather, where the
       // owner is — as something the model made up.
       {
+        resolvedReadIntent: rc.resolvedReadIntent,
         readRequest,
         groundingCorpus: state.untrustedContext ? undefined : ambientBlock,
         lookupContext,

@@ -1,5 +1,6 @@
 import { emailProvenanceText, isForwardedIngest } from '../email-provenance.js';
 import type { ClarificationContinuation, Trust } from '../events.js';
+import type { ResolvedReadIntent } from './active-read-intent.js';
 import { explicitlyDisallowsTools } from './conversation-local-context.js';
 import { detectFutureWatchIntent } from './future-watch-intent.js';
 import { detectLiveLookup } from './live-lookup.js';
@@ -42,6 +43,23 @@ export interface OwnerIntent {
   externalText: string;
   authorizedScopes: OwnerIntentScope[];
   separation: 'clear' | 'none' | 'unknown';
+}
+
+/** Source resolution may narrow mistaken private reads, never bypass dispatcher policy. */
+export function ownerIntentForResolvedRead(
+  intent: OwnerIntent,
+  read: ResolvedReadIntent,
+): OwnerIntent {
+  if (read.kind === 'none' || read.kind === 'personal') return intent;
+  const scopes: OwnerIntentScope[] = intent.authorizedScopes.filter(
+    (scope) => scope !== 'private_read',
+  );
+  if (read.kind !== 'clarify_public') {
+    if (!scopes.includes('external_read')) scopes.push('external_read');
+    if (read.kind === 'combined' && intent.authorizedScopes.includes('private_read'))
+      scopes.push('private_read');
+  }
+  return { ...intent, authorizedScopes: scopes };
 }
 
 /** Explicit opt-outs override ambient retrieval from older chats and memory. */
@@ -574,16 +592,7 @@ export function latestOwnerIntent(
     (current.sourceActor === 'owner' || current.sourceActor === 'mixed') &&
     current.separation !== 'unknown' &&
     !explicitlyOptsOutOfRecall(current.ownerAuthoredText) &&
-    detectPersonalReadRequest(
-      ownerAuthoredWindow(window, current).map((message) => {
-        if (message.role !== 'user') return message;
-        const text = messageText(message.content);
-        return {
-          ...message,
-          content: hasUnmatchedQuote(text) ? '' : splitQuoted(text).authored,
-        };
-      }),
-    ) &&
+    detectPersonalReadRequest(ownerAuthoredReadWindow(window, current)) &&
     !current.authorizedScopes.includes('private_read')
   )
     current.authorizedScopes.push('private_read');
@@ -614,3 +623,17 @@ export function ownerAuthoredWindow<T extends { role: string; content: unknown }
     index === latestIndex ? { ...message, content: intent.ownerAuthoredText } : message,
   );
 }
+
+/** Private-read topic resolution consumes authored prose, never quoted instructions. */
+export function ownerAuthoredReadWindow<T extends { role: string; content: unknown }>(
+  window: T[],
+  intent: OwnerIntent,
+): T[] {
+  return ownerAuthoredWindow(window, intent).map((message) => {
+    if (message.role !== 'user') return message;
+    const text = messageText(message.content);
+    return { ...message, content: hasUnmatchedQuote(text) ? '' : splitQuoted(text).authored };
+  });
+}
+
+export { resolveActiveReadIntent } from './active-read-intent.js';

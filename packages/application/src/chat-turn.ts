@@ -40,6 +40,8 @@ import {
   isSelfContainedCalculationRequest,
   isSelfContainedTextTransformation,
   needsConversationReasoning,
+  ownerAuthoredReadWindow,
+  resolveActiveReadIntent,
 } from '@assistant/core/workflow/owner-intent';
 import { detectPersonalReadRequest } from '@assistant/core/workflow/read-intent';
 import { RequestChecklistSchema } from '@assistant/core/workflow/request-checklist-schema';
@@ -1033,6 +1035,42 @@ export async function handleChatTurn(
   const historyRows = triggerIndex >= 0 ? pageRows.slice(0, triggerIndex + 1) : [persistedUser];
   const noticeRows = await applicationBackgroundNoticeIds(chat, agent.id, historyRows);
   const modelHistory = boundedModelHistory(historyRows, noticeRows);
+  // These are persisted, owner-scoped rows anchored at this admission, not
+  // model history labels or recalled private content.
+  const activeReadIntent = resolveActiveReadIntent({
+    text: extractOwnerIntent({ text: persistedUser.text, trust: 'owner' }).ownerAuthoredText,
+    now: admittedTask.createdAt,
+    timeZone: agent.timezone,
+    provenance: {
+      agentId: agent.id,
+      conversationId: conversation.id,
+      taskId: admittedTask.id,
+      triggerMessageId: persistedUser.id,
+      requestHash: createHash('sha256').update(persistedUser.text).digest('hex'),
+    },
+    ownerTurns: historyRows.flatMap((row) =>
+      row.role === 'user' && row.origin === 'owner'
+        ? [
+            {
+              id: row.id,
+              agentId: agent.id,
+              conversationId: conversation.id,
+              ...(row.taskId ? { taskId: row.taskId } : {}),
+              role: 'user' as const,
+              origin: 'owner' as const,
+              ...(row.id === persistedUser.id ? { requestAt: admittedTask.createdAt } : {}),
+              text: row.text,
+              ownerAuthoredText: extractOwnerIntent({ text: row.text, trust: 'owner' })
+                .ownerAuthoredText,
+            },
+          ]
+        : [],
+    ),
+    personalHistory: ownerAuthoredReadWindow(
+      modelHistory.map((message) => ({ role: message.role, content: textOf(message) })),
+      extractOwnerIntent({ text: persistedUser.text, trust: 'owner' }),
+    ),
+  });
   // Only actually rendered messages are covered by the prompt. Earlier rows
   // omitted by its byte cap remain eligible for historical retrieval.
   const firstRenderedAt =
@@ -1210,6 +1248,15 @@ export async function handleChatTurn(
     );
   if (resumedConversationalReply) {
     needsAction = false;
+  } else if (
+    activeReadIntent.kind === 'public_activity' ||
+    activeReadIntent.kind === 'combined' ||
+    activeReadIntent.kind === 'clarify_public'
+  ) {
+    // Public discovery and public clarification need the same executor path;
+    // the private-read detector must not overrule an explicit source correction.
+    needsAction = true;
+    ruledOnAction = true;
   } else if (localTransformation && !autonomousRequested && !forceRequested) {
     // Quoted source instructions do not authorize tools or change a local rewrite's scope.
     needsAction = false;

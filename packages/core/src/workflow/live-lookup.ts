@@ -1,4 +1,5 @@
 import { leagueNamedIn } from '../sports/leagues.js';
+import type { PublicActivityScopeData } from './active-read-intent.js';
 import { requestedArtifactIntent, requestedDocumentReadIntent } from './artifact-intent.js';
 import {
   detectPersonalReadRequest,
@@ -13,6 +14,8 @@ import type { ActionEvidence } from './response-contract.js';
 export type LiveLookup = {
   kind: 'weather' | 'web' | 'sports' | 'directions';
   request: string;
+  /** Runtime-admitted scope; permits only a bounded walk of this search's public URLs. */
+  publicActivityScope?: PublicActivityScopeData;
   /** Team/league names extracted from a completion-dependent sports reminder. */
   reminderTeam?: string;
   reminderLeague?: string;
@@ -964,6 +967,19 @@ export function nextLiveLookup(
       toolName: 'web.search',
       ...(lookup.request.length <= 256 ? { input: { query: lookup.request, count: 5 } } : {}),
     };
+  if (lookup.publicActivityScope) {
+    const fetched = rows.filter((row) => row.toolName === 'web.fetch');
+    if (fetched.length >= 3) return undefined;
+    const attempted = new Set(fetched.map((row) => (row.args as { url?: unknown } | null)?.url));
+    for (const row of searches.filter(successfulLookup)) {
+      const results = (row.result as { results?: Array<{ url?: string }> }).results;
+      const url = results?.find(
+        (item) => /^https?:\/\//i.test(item.url ?? '') && !attempted.has(item.url),
+      )?.url;
+      if (url) return { toolName: 'web.fetch', input: { url } };
+    }
+    return undefined;
+  }
   if (rows.some((row) => row.toolName === 'web.fetch')) return undefined;
   for (const row of searches.filter(successfulLookup)) {
     const results = (row.result as { results?: Array<{ url?: string }> }).results;

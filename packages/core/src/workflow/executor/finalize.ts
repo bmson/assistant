@@ -38,6 +38,7 @@ import {
   requestedSavedSkillName,
 } from '../../memory/skills.js';
 import { truncateAtBoundary } from '../../owner-text.js';
+import { buildPublicActivityQuery, type ResolvedReadIntent } from '../active-read-intent.js';
 import {
   type ArtifactIntent,
   artifactExecutionFailure,
@@ -783,6 +784,7 @@ export async function stageModelFinalResponse(
    * measure a stated time against.
    */
   readContext?: {
+    resolvedReadIntent?: ResolvedReadIntent;
     readRequest?: PersonalReadRequest | null;
     compoundTripExtraction?: CompoundTripExtraction;
     verifiedCompoundTripChecklist?: boolean;
@@ -798,15 +800,26 @@ export async function stageModelFinalResponse(
   // survive only into a dashboard chat_turn's persisted parts, below.
   const strippedFinal = stripCueTags(pending.text);
   pending.text = strippedFinal.text;
+  const publicScope =
+    readContext?.resolvedReadIntent?.kind === 'public_activity' ||
+    readContext?.resolvedReadIntent?.kind === 'combined'
+      ? readContext.resolvedReadIntent.public
+      : undefined;
+  const publicOnly = readContext?.resolvedReadIntent?.kind === 'public_activity';
+  const publicQuery = publicScope ? buildPublicActivityQuery(publicScope) : undefined;
   const evidenceRepository = executionEvidence(deps);
-  const rawRows = await evidenceRepository.taskEvidence({ agentId: task.agentId, taskId: task.id });
-  const rawPriorRows = task.conversationId
-    ? await evidenceRepository.conversationEvidence({
-        agentId: task.agentId,
-        conversationId: task.conversationId,
-        excludeTaskId: task.id,
-      })
-    : [];
+  const allRows = await evidenceRepository.taskEvidence({ agentId: task.agentId, taskId: task.id });
+  const rawRows = publicOnly
+    ? allRows.filter((row) => /^web\.(?:search|fetch)$/.test(row.toolName))
+    : allRows;
+  const rawPriorRows =
+    !publicScope && task.conversationId
+      ? await evidenceRepository.conversationEvidence({
+          agentId: task.agentId,
+          conversationId: task.conversationId,
+          excludeTaskId: task.id,
+        })
+      : [];
   // The deterministic contract and optional verifier also consume durable
   // evidence, so refresh conversation-search payloads there without changing
   // the immutable tool/effect ledger. A stale read_result chunk linked to an
@@ -844,7 +857,11 @@ export async function stageModelFinalResponse(
     window.findLastIndex((message) => message.role === 'user') + 1,
   );
   const liveLookups =
-    task.trust === 'owner' && !isForwardedIngest(task) ? detectLiveLookups(currentRequest) : [];
+    publicQuery?.kind === 'query'
+      ? [{ kind: 'web' as const, request: publicQuery.query, publicActivityScope: publicScope }]
+      : task.trust === 'owner' && !isForwardedIngest(task)
+        ? detectLiveLookups(currentRequest)
+        : [];
   // A lookup that succeeded is not the same as an answer that matches it. The
   // failure check proves retrieval happened; the figure check proves the draft
   // reported what was retrieved, which is the half that let a stale score
@@ -970,8 +987,9 @@ export async function stageModelFinalResponse(
       now: task.createdAt,
       ...(state.requestTimeZone ? { timeZone: state.requestTimeZone } : {}),
     });
-  let classifiedRead = readContext ? readContext.readRequest : detectedRead();
+  let classifiedRead = publicOnly ? null : readContext ? readContext.readRequest : detectedRead();
   if (
+    !publicOnly &&
     readContext &&
     !readContext.readRequest &&
     task.trust === 'owner' &&
@@ -1022,12 +1040,13 @@ export async function stageModelFinalResponse(
         })
       : undefined;
   const contractOptions = {
+    ...(publicScope ? { publicActivity: publicScope } : {}),
     ...(explicitSourceSelection ? { explicitSourceSelection } : {}),
     ...(memoryReadSelection ? { memoryReadSelection } : {}),
     requestText:
       task.trust === 'owner' && !isForwardedIngest(task) ? latestUserText(window) : undefined,
     urlCorpus: sourceCorpus,
-    readRequest: classifiedRead,
+    readRequest: publicScope ? null : classifiedRead,
     companionWeather: liveLookups.some((lookup) => lookup.kind === 'weather'),
     ...(readContext?.compoundTripExtraction
       ? { compoundTripExtraction: readContext.compoundTripExtraction }
@@ -1217,7 +1236,9 @@ export async function stageModelFinalResponse(
         taskId: task.id,
         request: latestUserText(window) ?? task.title ?? 'Answer the current request.',
         draft: initialCheck.text,
-        evidence,
+        evidence: publicScope
+          ? evidence.filter((row) => /^web\.(?:search|fetch)$/.test(row.toolName))
+          : evidence,
         critical: task.trust === 'owner',
         reasoningReview:
           task.trust === 'owner' &&
@@ -1277,11 +1298,27 @@ export async function stageModelFinalResponse(
   const tripOwnsCalendar = liveLookups.some(
     (lookup) => lookup.destination === 'calendar' || lookup.airportIntent,
   );
+  const cardEvidence = publicOnly
+    ? evidence.flatMap((row): ActionEvidence[] => {
+        if (row.toolName !== 'web.search') return [];
+        const result = row.result as { results?: Array<{ url?: unknown }> } | null;
+        const results = Array.isArray(result?.results)
+          ? result.results.filter(
+              (item) => typeof item.url === 'string' && checked.text.includes(item.url),
+            )
+          : [];
+        return results.length ? [{ ...row, result: { ...result, results } }] : [];
+      })
+    : evidence;
   const specializedCards = responseCardsForFinal({
+    resolvedReadIntent: readContext?.resolvedReadIntent,
     evidence: tripOwnsCalendar
-      ? evidence.filter((row) => row.toolName !== 'calendar.list_events')
-      : evidence,
-    readRequest: contractOptions.readRequest,
+      ? cardEvidence.filter((row) => row.toolName !== 'calendar.list_events')
+      : cardEvidence,
+    readRequest:
+      readContext?.resolvedReadIntent?.kind === 'combined'
+        ? readContext.readRequest
+        : contractOptions.readRequest,
     ambient: readContext?.groundingCorpus,
     requestText: latestUserText(window),
     lookupOrder: liveLookups.map((lookup) => lookup.kind),
@@ -1470,23 +1507,32 @@ export async function stageModelFinalResponse(
   if (cards.length > 0) pending.responseCards = cards;
   // A requested card that could not be grounded must say so. Staying quiet let
   // the prose claim a card the Cards page never received.
-  const text = refreshCardId
-    ? generatedCard
-      ? `Refreshed “${generatedCard.spec.title}” from its sources.\n\n${truncateAtBoundary(checked.text.trim(), 500)}`
-      : 'I could not verify the latest source data, so I left your saved card unchanged. Please try again.'
-    : scoreboard && cardRequested && !checked.blocked
-      ? savedScoreCard
-        ? `${checked.text.trim()}\n\nSaved “${savedScoreCard.spec.title}” to your Cards page; the scoreboard here stays live while the game is on.`
-        : CARD_NOT_BUILT
-      : cardRequested && !checked.blocked
-        ? generatedCard
-          ? `Saved “${generatedCard.spec.title}” to your Cards page.`
+  const personalAnswer =
+    readContext?.resolvedReadIntent?.kind === 'combined' && readContext.readRequest
+      ? verifiedReadResponse(
+          readContext.readRequest,
+          evidence.filter((row) => !/^web\./.test(row.toolName)),
+        )
+      : undefined;
+  const text = personalAnswer
+    ? `${checked.text}\n\n${readContext?.readRequest?.kind === 'email' ? 'Email' : 'Calendar availability'}\n${personalAnswer}`
+    : refreshCardId
+      ? generatedCard
+        ? `Refreshed “${generatedCard.spec.title}” from its sources.\n\n${truncateAtBoundary(checked.text.trim(), 500)}`
+        : 'I could not verify the latest source data, so I left your saved card unchanged. Please try again.'
+      : scoreboard && cardRequested && !checked.blocked
+        ? savedScoreCard
+          ? `${checked.text.trim()}\n\nSaved “${savedScoreCard.spec.title}” to your Cards page; the scoreboard here stays live while the game is on.`
           : CARD_NOT_BUILT
-        : agendaSummary
-          ? [agendaSummary, /^Next step: [^\r\n]+$/m.exec(checked.text)?.[0]]
-              .filter(Boolean)
-              .join('\n\n')
-          : checked.text;
+        : cardRequested && !checked.blocked
+          ? generatedCard
+            ? `Saved “${generatedCard.spec.title}” to your Cards page.`
+            : CARD_NOT_BUILT
+          : agendaSummary
+            ? [agendaSummary, /^Next step: [^\r\n]+$/m.exec(checked.text)?.[0]]
+                .filter(Boolean)
+                .join('\n\n')
+            : checked.text;
   if ((cardRequested || refreshCardId) && !generatedCard && !savedScoreCard) {
     pending.terminalStatus = 'needs_attention';
     pending.outcome = 'needs_attention';
@@ -1494,6 +1540,13 @@ export async function stageModelFinalResponse(
   // Stamp the contract verdict on pending; recordQualitySignals reads it from
   // the single funnel in finalizePendingResponse, so every terminal path — not
   // just this prose-model one — persists its verdict and loop-health counters.
+  if (
+    publicScope &&
+    checked.groundingFallback?.some((reason) => reason.startsWith('public_event_'))
+  ) {
+    pending.terminalStatus = 'needs_attention';
+    pending.outcome = 'needs_attention';
+  }
   pending.contractBlocked =
     checked.blocked ||
     (rejectedRevision && reflectedCheck.blocked) ||

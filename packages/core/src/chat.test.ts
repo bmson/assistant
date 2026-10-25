@@ -131,15 +131,20 @@ describe('buildSystemPrompt forwarding rule (D3)', () => {
     expect(PROMPT_VERSION).toBeGreaterThanOrEqual(24);
   });
 
-  it('shows an agenda shape and reads open day questions as schedule lookups (v25)', () => {
+  it('keeps personal agenda, public discovery and originating-clock rules distinct (v25)', () => {
     const prompt = buildSystemPrompt(agent, {});
     expect(prompt).toContain('Shape a schedule or agenda answer exactly like this');
     expect(prompt).toMatch(/\*\*09:30–10:15\*\* — Linear interview prep/);
     expect(prompt).toMatch(/Never recite the raw event record/i);
-    expect(prompt).toMatch(/what is happening today/i);
-    expect(prompt).toMatch(/educated guess/i);
     expect(prompt).toMatch(
-      /resolve 'today', 'tonight', and 'this weekend' against the owner's clock/i,
+      /day questions about the owner's own agenda are private schedule lookups/i,
+    );
+    expect(prompt).toMatch(/public\/city events[^\n]+public discovery[^\n]+public web sources/i);
+    expect(prompt).toMatch(
+      /never substitute private account results or recalled context for failed public discovery/i,
+    );
+    expect(prompt).toMatch(
+      /resolve relative dates against the originating request clock, never an invented year/i,
     );
     expect(PROMPT_VERSION).toBeGreaterThanOrEqual(25);
   });

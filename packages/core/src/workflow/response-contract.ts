@@ -6,6 +6,7 @@ import {
   gradeAuditedOutput,
   repairPresentationDefects,
 } from '../model-router/audit-graders.js';
+import type { PublicActivityScopeData } from './active-read-intent.js';
 import { billingAuditProjection, renderBillingAudit } from './billing-audit.js';
 import type { BriefingCalendarEvent } from './briefing.js';
 import { calendarEventAnalysisResponse } from './calendar-event-analysis.js';
@@ -118,6 +119,8 @@ export interface ResponseContractResult {
 }
 
 interface ResponseContractOptions {
+  /** The same admitted public scope used for query construction. */
+  publicActivity?: PublicActivityScopeData;
   /** Runtime-selected exact historical quotes; revalidated against the current ledger. */
   memoryReadSelection?: MemoryReadSelection;
   explicitSourceSelection?: ExplicitSourceSelection;
@@ -4715,13 +4718,101 @@ function enforcePersonalReadGrounding(
   return undefined;
 }
 
-/** Replace unsupported action claims with a deterministic, evidence-based reply. */
+/** Public page text is a source lead, not a typed event occurrence.
+ * Do not promote model-written names, venues, prices or timing to verified facts. */
+export function publicActivitySourceLeads(
+  evidence: ActionEvidence[],
+  scope: PublicActivityScopeData,
+): string | undefined {
+  const normalize = (value: string) =>
+    value
+      .toLocaleLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim();
+  const city = normalize(scope.location.label);
+  const days: Date[] = [];
+  for (
+    let at = Date.parse(scope.civilWindow.startDate);
+    at < Date.parse(scope.civilWindow.endDateExclusive) && days.length < 31;
+    at += 86400000
+  )
+    days.push(new Date(at));
+  const links: Array<{ title: string; url: string }> = [];
+  for (const row of evidence) {
+    if (row.fromCurrentTask === false || row.status !== 'succeeded' || row.toolName !== 'web.fetch')
+      continue;
+    const result = record(row.result);
+    if (typeof result?.url !== 'string') continue;
+    const source = [result.title, result.text, result.content]
+      .filter((value) => typeof value === 'string')
+      .join(' ')
+      // URL slugs and query strings locate pages; their dates/places do not
+      // establish visible relevance of the source content itself.
+      .replace(/https?:\/\/[^\s<>"'`]+/gi, ' ');
+    const normalized = normalize(source);
+    // These checks exclude plainly irrelevant pages. They do NOT establish
+    // which occurrence on a mixed listing page the details describe.
+    const placeMentioned =
+      normalized.includes(city) || (city === 'san francisco' && /\bsf\b/.test(normalized));
+    const dateMentioned = days.some((date) => {
+      const month = date.toLocaleString('en-US', { month: 'long', timeZone: 'UTC' });
+      const day = date.getUTCDate();
+      const year = date.getUTCFullYear();
+      return (
+        source.includes(date.toISOString().slice(0, 10)) ||
+        [month, month.slice(0, 3)].some((label) =>
+          new RegExp(`\\b${label}\\.?\\s+${day}(?:st|nd|rd|th)?(?:,|\\s)+${year}\\b`, 'i').test(
+            source,
+          ),
+        )
+      );
+    });
+    if (!placeMentioned || !dateMentioned) continue;
+    if (
+      scope.filters.some((filter) => filter.kind === 'free') &&
+      /\bnot\s+free\b|\b(?:tickets?|admission|entry)\b[^.!?\n]{0,24}[$€£]\s*[1-9]/i.test(source)
+    )
+      continue;
+    const url = normalizeUrl(result.url);
+    if (!url || !/^https?:$/.test(url.protocol) || url.username || url.password) continue;
+    const title = (typeof result.title === 'string' ? result.title : url.hostname)
+      .replace(/[\r\n\t]+/g, ' ')
+      .trim()
+      .slice(0, 120)
+      .replace(/[\\[\]<>*_`]/g, '\\$&');
+    const href = url.href.replace(/\(/g, '%28').replace(/\)/g, '%29');
+    if (!title || links.some((item) => item.url === href)) continue;
+    links.push({ title, url: href });
+    if (links.length === 3) break;
+  }
+  if (!links.length) return undefined;
+  return [
+    `Public event leads for ${scope.location.label}, ${scope.civilWindow.startDate} to before ${scope.civilWindow.endDateExclusive}:`,
+    links.map((item) => `- [${item.title}](${item.url})`).join('\n'),
+    `These public source pages may help you continue the search. Matching event occurrences, times, venues, admission prices${scope.filters.some((filter) => filter.kind === 'free') ? ' (including free admission)' : ''} and availability remain unverified. Check the linked listings before making plans.`,
+  ].join('\n\n');
+}
+
 export function enforceResponseContract(
   text: string,
   evidence: ActionEvidence[],
   opts?: ResponseContractOptions,
 ): ResponseContractResult {
   text = stripBackgroundNoticeEcho(text);
+  if (opts?.publicActivity) {
+    // A generic fetched page has no occurrence-level evidence contract. Keep
+    // the routing repair useful without calling page-wide substring matches a
+    // verified shortlist or publishing unsupported model-written details.
+    const leads = publicActivitySourceLeads(evidence, opts.publicActivity);
+    return {
+      text:
+        leads ??
+        `I could not verify matching public events for ${opts.publicActivity.location.label}, from ${opts.publicActivity.civilWindow.startDate} to before ${opts.publicActivity.civilWindow.endDateExclusive}. I cannot recommend a matching event from these results yet.`,
+      blocked: false,
+      unsupported: [],
+      groundingFallback: ['public_event_occurrence_unverified'],
+    };
+  }
   if (
     gradeAuditedOutput(text, {
       repetitionRequested: explicitlyRequestsRepetition(opts?.requestText),
