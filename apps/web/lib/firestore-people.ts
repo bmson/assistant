@@ -42,7 +42,7 @@ export async function getFirestorePersonDossier(
   store: InstallationStore,
   agentId: string,
   contactId: string,
-  opts: { factLimit: number; now: Date },
+  opts: { factLimit: number; now: Date; includeEditingSuggestions?: boolean },
 ): Promise<PersonDossier | null> {
   const fence = await readPrivacyErasureFence(store, agentId);
   if (!(await getFirestorePersonDetail(store, agentId, contactId))) return null;
@@ -51,6 +51,7 @@ export async function getFirestorePersonDossier(
       new FirestoreProfilePeopleReadRepository(store, agentId),
       contactId,
       opts.factLimit,
+      opts,
     ),
     getFirestorePersonTemporalDetails(store, agentId, contactId, opts.now),
     getFirestorePersonGraph(
