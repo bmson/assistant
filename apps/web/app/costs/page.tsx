@@ -62,7 +62,7 @@ export default async function CostsPage() {
     taskDefaultLimit,
   } = dashboard;
   const billing = await getBillingOverview();
-  const billingCoverage = billingCoverageProjection(billing);
+  const billingCoverage = billingCoverageProjection(billing, dashboard.byEvidence);
 
   return (
     <PageShell size="reading">
@@ -92,21 +92,6 @@ export default async function CostsPage() {
 
       <BillingCoverageSummary coverage={billingCoverage} />
       <ProviderBillingCards reports={billing} />
-      <h2 className="mt-8 text-lg font-semibold">Assistant usage ledger</h2>
-      <p className="mt-1 text-sm text-muted">
-        Includes estimates used to enforce task, daily and monthly caps. These caps do not limit
-        your cloud bill. Ledger costs overlap provider billing above and are not added to it.
-      </p>
-      <div className="mt-4 grid gap-3 sm:grid-cols-2">
-        {dashboard.byEvidence.map((row) => (
-          <div key={row.basis} className={`${cardShellClass} p-3 text-sm`}>
-            <p className="text-muted">{COST_BASIS_LABELS[row.basis]}</p>
-            <p className="mt-1 font-medium tabular-nums">
-              {formatUsd(row.usd)} · {row.count} events this month
-            </p>
-          </div>
-        ))}
-      </div>
 
       {/* Burn vs caps */}
       <section className="mt-8 grid gap-4 sm:grid-cols-2">
