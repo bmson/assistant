@@ -16,7 +16,7 @@ import {
   Square,
   Zap,
 } from 'lucide-react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   useCallback,
   useEffect,
@@ -69,6 +69,15 @@ import {
 } from './card-form-operations';
 import { ChatErrorBanner } from './chat-error-banner';
 import { ChatLog } from './chat-log';
+import {
+  cancelledRequestNote,
+  readUnconfirmedStop,
+  requestRecoveryHref,
+  requestStatusNote,
+  saveUnconfirmedStop,
+  selectedRequestNote,
+  validRecoveryTask,
+} from './chat-request-recovery';
 import { ChatTurnFeedback } from './chat-turn-feedback';
 import {
   type ChatErrorInfo,
@@ -243,6 +252,15 @@ export function ChatClient({
   initialInput,
 }: ChatClientProps) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const requestedRecoveryTask = searchParams.get('task');
+  const selectedRecoveryTask = validRecoveryTask(requestedRecoveryTask);
+  const recoverySelectionRef = useRef({
+    conversationId,
+    session: formSessionScope,
+    task: requestedRecoveryTask,
+    revision: 0,
+  });
   const currentConversationIdRef = useRef(conversationId);
   currentConversationIdRef.current = conversationId;
   const { destinations, signedIn } = useNavCommands();
@@ -283,6 +301,7 @@ export function ChatClient({
   const [asyncTurn, setAsyncTurn] = useState<AsyncTurn | null>(initialAsyncTurn ?? null);
   /** How an open turn ended. `retryable` offers to resend the opening message. */
   const [asyncNote, setAsyncNote] = useState<AsyncNote | null>(null);
+  const publicationEpochRef = useRef(0);
   /** The silent poll loop's only surfaces: repeated failure, or a dead session. */
   const [pollTrouble, setPollTrouble] = useState<PollTrouble>(null);
   const [asyncActionError, setAsyncActionError] = useState<string | null>(null);
@@ -295,10 +314,24 @@ export function ChatClient({
     null,
   );
   const ordinaryTurnTokenRef = useRef(0);
-  const setOperationCancellationState = (state: typeof operationCancellation) => {
-    operationCancellationRef.current = state;
-    setOperationCancellation(state);
-  };
+  const setOperationCancellationState = useCallback(
+    (state: typeof operationCancellation) => {
+      operationCancellationRef.current = state;
+      setOperationCancellation(state);
+      try {
+        if (formSessionScope)
+          saveUnconfirmedStop(
+            window.sessionStorage,
+            formSessionScope,
+            conversationId,
+            state?.turn.clientOperationId ?? null,
+          );
+      } catch {
+        // Keep the in-memory uncertainty and exact retry identity if storage is unavailable.
+      }
+    },
+    [conversationId, formSessionScope],
+  );
   const [isCancellingAsync, startCancelTransition] = useTransition();
   const [activity, setActivity] = useState<ChatActivityItem[]>([]);
   /** Live provenance for the current streaming turn (the persisted part covers reloads). */
@@ -335,6 +368,8 @@ export function ChatClient({
     setOperationCancellation(null);
     volatileFormConflictRef.current = null;
     setAsyncTurn(null);
+    setAsyncNote(null);
+    setAsyncActionError(null);
     setInput('');
     saveFormDraft(null);
     try {
@@ -477,8 +512,7 @@ export function ChatClient({
               // accepted stream or a reason to mint a replacement operation.
               activeOrdinaryOperationRef.current = null;
               pendingOperationIdRef.current = null;
-              operationCancellationRef.current = null;
-              setOperationCancellation(null);
+              setOperationCancellationState(null);
               setAsyncTurn(null);
               setActivity([]);
               setAsyncNote({
@@ -662,7 +696,7 @@ export function ChatClient({
           return response;
         }) as typeof fetch,
       }),
-    [conversationId, getFormStorage, saveFormDraft],
+    [conversationId, getFormStorage, saveFormDraft, setOperationCancellationState],
   );
 
   const { messages, sendMessage, setMessages, status, error, clearError, stop } = useChat({
@@ -729,6 +763,31 @@ export function ChatClient({
       );
     }
   }, [conversationId, formSessionScope, getFormStorage, saveFormDraft]);
+
+  useEffect(() => {
+    if (!formSessionScope) return;
+    let operationId: string | null = null;
+    try {
+      operationId = readUnconfirmedStop(window.sessionStorage, formSessionScope, conversationId);
+    } catch {
+      return;
+    }
+    if (!operationId) return;
+    ordinaryTurnTokenRef.current += 1;
+    const turn = {
+      conversationId,
+      clientOperationId: operationId,
+      turnToken: ordinaryTurnTokenRef.current,
+      scopeGeneration: mountedGenerationRef.current,
+    };
+    activeOrdinaryOperationRef.current = turn;
+    pendingOperationIdRef.current = { id: operationId, autonomous: false, force: false };
+    operationCancellationRef.current = { turn, phase: 'unknown' };
+    setOperationCancellation({ turn, phase: 'unknown' });
+    setAsyncActionError(
+      'Stop is unconfirmed. Retry Stop for this same request; do not send it again yet.',
+    );
+  }, [conversationId, formSessionScope]);
 
   // The elevated mode belongs to exactly one turn. Wait until useChat has
   // accepted the request so the memoized transport can read the submitted
@@ -858,6 +917,9 @@ export function ChatClient({
   // have their own exact observer so a parked task cannot lock the composer.
   useChatPolling({
     conversationId,
+    observationScope: formSessionScope,
+    recoveryTaskId: selectedRecoveryTask,
+    publicationEpochRef,
     setMessages,
     statusRef,
     asyncTurnRef,
@@ -873,6 +935,63 @@ export function ChatClient({
     setPollTrouble,
     onTaskTerminal: handleFormTaskTerminal,
   });
+
+  const previousRecoveryTaskRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    const selection = recoverySelectionRef.current;
+    if (
+      selection.conversationId !== conversationId ||
+      selection.session !== formSessionScope ||
+      selection.task !== requestedRecoveryTask
+    ) {
+      recoverySelectionRef.current = {
+        conversationId,
+        session: formSessionScope,
+        task: requestedRecoveryTask,
+        revision: selection.revision + 1,
+      };
+    }
+    const previousTask = previousRecoveryTaskRef.current;
+    previousRecoveryTaskRef.current = selectedRecoveryTask;
+    if (!selectedRecoveryTask) {
+      if (previousTask && asyncTurnRef.current?.taskId === previousTask) {
+        asyncTurnRef.current = null;
+        setAsyncTurn(null);
+        setActivity([]);
+        turnRef.current = null;
+      }
+      if (previousTask) setAsyncNote((note) => (note?.taskId === previousTask ? null : note));
+      if (requestedRecoveryTask !== null)
+        setAsyncNote({ text: requestStatusNote(null), retryable: false });
+      return;
+    }
+    const turn = { taskId: selectedRecoveryTask, cursor: cursorRef.current ?? '' };
+    asyncTurnRef.current = turn;
+    turnRef.current = null;
+    setAsyncNote((previous) => selectedRequestNote(previous, selectedRecoveryTask));
+    setActivity([]);
+    setAsyncTurn(turn);
+  }, [conversationId, formSessionScope, requestedRecoveryTask, selectedRecoveryTask]);
+
+  const focusedRecoveryRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!selectedRecoveryTask) {
+      focusedRecoveryRef.current = null;
+      return;
+    }
+    if (
+      asyncNote?.taskId !== selectedRecoveryTask ||
+      focusedRecoveryRef.current === selectedRecoveryTask
+    )
+      return;
+    document.getElementById('request-status')?.focus({ preventScroll: true });
+    focusedRecoveryRef.current = selectedRecoveryTask;
+  }, [selectedRecoveryTask, asyncNote?.taskId]);
+
+  const retainRequestRecovery = (taskId: string) => {
+    const href = requestRecoveryHref(conversationId, taskId);
+    if (href) window.history.replaceState(null, '', href);
+  };
 
   // Sending a turn must not wait out an idle interval before the poll notices
   // the new task — re-tick as soon as one is handed over.
@@ -1346,6 +1465,10 @@ export function ChatClient({
     stickToBottomRef.current = true;
     setAtBottom(true);
     setUnseenCount(0);
+    const recoveryUrl = new URL(window.location.href);
+    recoveryUrl.searchParams.delete('task');
+    recoveryUrl.hash = '';
+    window.history.replaceState(null, '', recoveryUrl.pathname + recoveryUrl.search);
     setLastSubmittedText(text);
     pendingOperationIdRef.current = retryOperation ?? {
       id: crypto.randomUUID(),
@@ -1635,6 +1758,8 @@ export function ChatClient({
       pendingOperationIdRef.current?.id !== captured.clientOperationId
     )
       return;
+    const capturedSelectionRevision = recoverySelectionRef.current.revision;
+    publicationEpochRef.current += 1;
     setAsyncActionError(null);
     setOperationCancellationState({ turn: captured, phase: 'checking' });
     startCancelTransition(async () => {
@@ -1649,16 +1774,24 @@ export function ChatClient({
         !isCurrentChatOperation(activeOrdinaryOperationRef.current, captured)
       )
         return;
+      if (capturedSelectionRevision === recoverySelectionRef.current.revision)
+        publicationEpochRef.current += 1;
       if (outcome.kind === 'unknown') {
         setOperationCancellationState({ turn: captured, phase: 'unknown' });
         setAsyncActionError(
-          'Stop is unconfirmed. Retry Stop to check the same message; do not send it again yet.',
+          'Stop is unconfirmed. Retry Stop for this same request; do not send it again yet.',
         );
         return;
       }
       setOperationCancellationState(null);
       setAsyncActionError(null);
       pendingOperationIdRef.current = null;
+      if (capturedSelectionRevision !== recoverySelectionRef.current.revision) {
+        // The receipt resolves this exact Stop, but cannot select its old task
+        // over a request the owner has since opened. That selection keeps polling.
+        activeOrdinaryOperationRef.current = null;
+        return;
+      }
       if (outcome.outcome === 'cancelled_before_admission') {
         activeOrdinaryOperationRef.current = null;
         setAsyncTurn(null);
@@ -1675,18 +1808,21 @@ export function ChatClient({
         return;
       }
       if (outcome.outcome === 'cancelled' || outcome.outcome === 'already_cancelled') {
+        retainRequestRecovery(outcome.taskId);
         activeOrdinaryOperationRef.current = { ...captured, taskId: outcome.taskId };
         setAsyncTurn({ taskId: outcome.taskId, cursor: cursorRef.current ?? '' });
-        setAsyncNote({
-          text: 'Cancellation was recorded. A dispatched effect may still be in progress.',
-          retryable: false,
-        });
+        setAsyncNote(cancelledRequestNote(outcome.taskId));
         return;
       }
       activeOrdinaryOperationRef.current = null;
       setAsyncTurn(null);
       setActivity([]);
-      setAsyncNote({ text: 'This message had already finished.', retryable: false });
+      retainRequestRecovery(outcome.taskId);
+      setAsyncNote({
+        text: requestStatusNote(outcome.taskStatus),
+        retryable: false,
+        taskId: outcome.taskId,
+      });
     });
   };
 
@@ -1739,26 +1875,27 @@ export function ChatClient({
       (!capturedOrdinary ||
         (isCurrentChatOperation(activeOrdinaryOperationRef.current, capturedOrdinary) &&
           activeOrdinaryOperationRef.current?.taskId === taskId));
+    const capturedSelectionRevision = recoverySelectionRef.current.revision;
+    publicationEpochRef.current += 1;
     setAsyncActionError(null);
     startCancelTransition(async () => {
       try {
         const result = await cancelChatTask(taskId);
         if (!isCurrentCancellation()) return;
+        if (capturedSelectionRevision !== recoverySelectionRef.current.revision) return;
+        publicationEpochRef.current += 1;
         if (result.outcome === 'not_found' || result.outcome === 'no_longer_retriable') {
           setAsyncActionError(
             'This task is no longer available. Refresh Activity to see its current state.',
           );
           return;
         }
-        setAsyncNote({
-          text:
-            result.outcome === 'cancelled'
-              ? 'Stop requested. The task will stop at its next checkpoint.'
-              : result.outcome === 'already_cancelled'
-                ? 'This task was already stopped.'
-                : 'This task had already finished.',
-          retryable: result.outcome === 'cancelled' || result.outcome === 'already_cancelled',
-        });
+        retainRequestRecovery(taskId);
+        setAsyncNote(
+          result.outcome === 'cancelled' || result.outcome === 'already_cancelled'
+            ? cancelledRequestNote(taskId)
+            : { taskId, text: 'This task had already finished.', retryable: false },
+        );
         if (
           formDraftRef.current?.operation?.taskId === taskId ||
           formDraftRef.current?.blockedByTask?.taskId === taskId
@@ -1969,6 +2106,7 @@ export function ChatClient({
             </div>
           )}
           <ChatTurnFeedback
+            conversationId={conversationId}
             showError={
               (!!asyncTurn && !!asyncActionError) ||
               (operationCancellation?.turn.conversationId === conversationId &&
