@@ -1,4 +1,5 @@
 import type { CalendarOccurrenceSource, CalendarOwnerParticipation } from '@assistant/persistence';
+import type { ResolvedReadIntent } from './active-read-intent.js';
 import { calendarAgendaCards, calendarAgendaScopedEvidence } from './calendar-agenda.js';
 import { calendarSourceDateLabel, calendarWindowMembership } from './calendar-read-window.js';
 import { canonicalOccurrenceGroups } from './calendar-relationship.js';
@@ -1569,6 +1570,7 @@ function orderForLookups(
 }
 
 export function responseCardsForFinal(input: {
+  resolvedReadIntent?: ResolvedReadIntent;
   evidence: ActionEvidence[];
   readRequest?: PersonalReadRequest | null;
   ambient?: string;
@@ -1576,6 +1578,15 @@ export function responseCardsForFinal(input: {
   /** The live lookups the request asked for, in the order it asked them. */
   lookupOrder?: ReadonlyArray<LiveLookup['kind']>;
 }): ResponseCard[] {
+  if (input.resolvedReadIntent?.kind === 'public_activity')
+    input = {
+      ...input,
+      evidence: input.evidence.filter(
+        (row) => row.fromCurrentTask !== false && /^web\.(?:search|fetch)$/.test(row.toolName),
+      ),
+      readRequest: null,
+      ambient: undefined,
+    };
   const agendaEvidence = calendarAgendaScopedEvidence(input.evidence, input.readRequest);
   const agenda = calendarAgendaCards({
     evidence: agendaEvidence,

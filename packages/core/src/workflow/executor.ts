@@ -8,6 +8,13 @@ import { isForwardedIngest } from '../email-provenance.js';
 import type { TaskState, Trust } from '../events.js';
 import { withSpan } from '../otel.js';
 import { classifyFailure, failureNotice, ownerTaskLabel } from '../owner-text.js';
+import {
+  publicActivityFollowupDisposition,
+  publicActivityScopeHash,
+  type ResolvedReadIntent,
+  resolveActiveReadIntent,
+  type VerifiedOwnerReadTurn,
+} from './active-read-intent.js';
 import { requestedArtifactIntent } from './artifact-intent.js';
 import {
   projectChecklistCancellationResume,
@@ -43,7 +50,7 @@ import {
   LOST_LEASE,
   type ToolContextLike,
 } from './executor/types.js';
-import { compact, latestUserText } from './executor/util.js';
+import { compact, latestUserText, toolResultMessage } from './executor/util.js';
 import {
   checkpointTask,
   claimTask,
@@ -55,7 +62,12 @@ import {
   type TaskLease,
   taskState,
 } from './machine.js';
-import { latestOwnerIntent, ownerAuthoredWindow } from './owner-intent.js';
+import {
+  extractOwnerIntent,
+  latestOwnerIntent,
+  ownerAuthoredWindow,
+  ownerIntentForResolvedRead,
+} from './owner-intent.js';
 import {
   buildRequestChecklist,
   hasOwnerChecklistCancellationMarker,
@@ -63,6 +75,122 @@ import {
 } from './request-checklist.js';
 import { RequestChecklistSchema } from './request-checklist-schema.js';
 import { isSaveStatusQuestion, previousSaveStatus } from './saved-work.js';
+
+/** Resolve only actual owner rows from this admitted chat; prompt history is not provenance. */
+async function admittedReadIntent(
+  repository: ExecutionContextRepository,
+  task: TaskRow,
+  window: ModelMessage[],
+  timeZone: string,
+): Promise<ResolvedReadIntent> {
+  if (
+    task.type !== 'chat_turn' ||
+    task.trust !== 'owner' ||
+    !task.conversationId ||
+    isForwardedIngest(task)
+  )
+    return { kind: 'none' };
+  const trigger = task.trigger as {
+    source?: unknown;
+    agentId?: unknown;
+    conversationId?: unknown;
+    trust?: unknown;
+    payload?: { text?: unknown; triggerMessageId?: unknown };
+  } | null;
+  const text = typeof trigger?.payload?.text === 'string' ? trigger.payload.text : '';
+  const ownerText = extractOwnerIntent({ text, trust: 'owner' }).ownerAuthoredText;
+  const unavailable = () =>
+    resolveActiveReadIntent({ text: ownerText, now: task.createdAt, timeZone });
+  if (
+    trigger?.source !== 'chat' ||
+    trigger.agentId !== task.agentId ||
+    trigger.conversationId !== task.conversationId ||
+    trigger.trust !== 'owner' ||
+    typeof trigger.payload?.triggerMessageId !== 'string'
+  )
+    return unavailable();
+  try {
+    const current = await repository.getOwnerMessage({
+      agentId: task.agentId,
+      conversationId: task.conversationId,
+      messageId: trigger.payload.triggerMessageId,
+    });
+    if (
+      current?.role !== 'user' ||
+      current.origin !== 'owner' ||
+      current.conversationId !== task.conversationId ||
+      current.taskId !== task.id ||
+      current.text !== text
+    )
+      return unavailable();
+    const rows = await repository.seedHistory({
+      agentId: task.agentId,
+      conversationId: task.conversationId,
+      before: task.createdAt,
+      throughMessageId: current.id,
+      limit: 40,
+    });
+    const ownerRows = rows
+      .filter(
+        (row) =>
+          row.role === 'user' &&
+          row.origin === 'owner' &&
+          row.conversationId === task.conversationId &&
+          row.hiddenAt === null,
+      )
+      .slice(-8);
+    const turns: VerifiedOwnerReadTurn[] = await Promise.all(
+      ownerRows.map(async (row) => {
+        const parent =
+          row.taskId === task.id
+            ? task
+            : row.taskId
+              ? await repository.getTask(task.agentId, row.taskId)
+              : null;
+        const parentTrigger = parent?.trigger as typeof trigger;
+        const requestAt =
+          parent?.agentId === task.agentId &&
+          parent.conversationId === task.conversationId &&
+          parent.type === 'chat_turn' &&
+          parent.trust === 'owner' &&
+          parentTrigger?.source === 'chat' &&
+          parentTrigger.payload?.triggerMessageId === row.id &&
+          parentTrigger.payload.text === row.text
+            ? parent.createdAt
+            : undefined;
+        return {
+          id: row.id,
+          agentId: task.agentId,
+          conversationId: task.conversationId as string,
+          ...(row.taskId ? { taskId: row.taskId } : {}),
+          role: 'user',
+          origin: 'owner',
+          text: row.text,
+          ownerAuthoredText: extractOwnerIntent({ text: row.text, trust: 'owner' })
+            .ownerAuthoredText,
+          ...(requestAt ? { requestAt } : {}),
+        };
+      }),
+    );
+    return resolveActiveReadIntent({
+      text: ownerText,
+      now: task.createdAt,
+      timeZone,
+      provenance: {
+        agentId: task.agentId,
+        conversationId: task.conversationId,
+        taskId: task.id,
+        triggerMessageId: current.id,
+        requestHash: createHash('sha256').update(text).digest('hex'),
+      },
+      ownerTurns: turns,
+      personalHistory: window,
+    });
+  } catch {
+    // Missing provenance must not turn an explicit public correction into a private lookup.
+    return unavailable();
+  }
+}
 
 /**
  * Why a goal says its queued work should no longer run: the owner stopped it, or
@@ -807,14 +935,72 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
   // instruction embeds the sender's own draft, whose free text could otherwise
   // trip the artifact/doc-URL heuristics and force docs.create over gmail.send.
   const isKnownReply = isKnownSenderReplyTask(task);
-  const ownerIntent =
+  const resolvedReadIntent = await admittedReadIntent(
+    persistence.executionContext,
+    task,
+    window,
+    state.requestTimeZone ?? agent.timezone,
+  );
+  const publicOnly = resolvedReadIntent.kind === 'public_activity';
+  if (resolvedReadIntent.kind === 'public_activity' || resolvedReadIntent.kind === 'combined') {
+    // A validated, bounded data checkpoint only. The approval journal remains
+    // the sole record of proposed arguments and permission to execute them.
+    state.plannerState.publicActivityScope = resolvedReadIntent.public;
+    state.plannerState.publicActivityScopeHash = publicActivityScopeHash(resolvedReadIntent.public);
+  }
+  if (resolvedReadIntent.kind === 'public_activity' || resolvedReadIntent.kind === 'combined') {
+    // Rebuild public context from this task's admitted scope and current web
+    // receipts. Earlier assistant prose, private tool results and recall are
+    // never a source for a public discovery answer, including after a retry.
+    const publicRows = await persistence.executionEvidence.taskEvidence({
+      agentId: task.agentId,
+      taskId: task.id,
+    });
+    const webMessages = publicRows
+      .filter(
+        (row) =>
+          /^web\.(?:search|fetch)$/.test(row.toolName) ||
+          (!publicOnly &&
+            /^(?:calendar\.(?:list_events|search_events)|gmail\.(?:search|read_thread))$/.test(
+              row.toolName,
+            )),
+      )
+      .flatMap((row): ModelMessage[] => {
+        const journal = state.pendingToolBatch?.calls.find((call) => call.dbToolCallId === row.id);
+        const toolCallId = journal?.toolCallId ?? row.id;
+        return [
+          {
+            role: 'assistant',
+            content: [{ type: 'tool-call', toolCallId, toolName: row.toolName, input: row.args }],
+          } as ModelMessage,
+          toolResultMessage(
+            toolCallId,
+            row.toolName,
+            row.status === 'succeeded' ? row.result : { status: row.status, error: row.error },
+          ),
+        ];
+      });
+    const scope = resolvedReadIntent.public;
+    window = [
+      {
+        role: 'user',
+        content: `Find ${scope.topic} in ${scope.location.label}, from ${scope.civilWindow.startDate} to before ${scope.civilWindow.endDateExclusive} (${scope.clock.timeZone}). ${scope.filters.map((filter) => filter.value).join('; ')}. Use public web sources only. Calendar, mail, recalled context and previous assistant answers are excluded. Return a compact shortlist with verified dates, place and source links; name any unverified coverage.`,
+      },
+      ...webMessages,
+    ];
+    state.contextWindow = window as unknown as TaskState['contextWindow'];
+    state.recall = undefined;
+  }
+  const ownerIntent = ownerIntentForResolvedRead(
     correction && originalCorrectionIntent
       ? originalCorrectionIntent
       : latestOwnerIntent(window, {
           trust: task.trust as Trust,
           trigger: task.trigger,
           clarificationContinuation: state.clarificationContinuation,
-        });
+        }),
+    resolvedReadIntent,
+  );
   const ownerWindow = ownerAuthoredWindow(window, ownerIntent);
   const artifactIntent =
     !correction && state.step === 0 && !isKnownReply
@@ -846,6 +1032,7 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
     state,
     ctx: undefined as unknown as ToolContextLike,
     window,
+    resolvedReadIntent,
     artifactIntent,
     documentReadIntent,
     ...(correction ? { checklistCorrection: correction } : {}),
@@ -861,7 +1048,102 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
     getWindow: () => rc.window,
     browserStageSnapshots,
   });
-  if (correction) rc.ctx.ownerIntent = ownerIntent;
+  rc.ctx.ownerIntent = ownerIntent;
+
+  if (resolvedReadIntent.kind === 'clarify_public') {
+    const text =
+      resolvedReadIntent.reason === 'missing_location'
+        ? 'Which city should I search for public events in?'
+        : resolvedReadIntent.reason === 'missing_time'
+          ? 'What date or date range should I search for public events?'
+          : 'Please restate the city, dates and any requirements for the public events search so I can keep the search within your request.';
+    return stageFinalResponse(deps, lease, state, rc.window, {
+      text,
+      progress: 'Public search needs clarification; no private lookup was substituted.',
+      terminalStatus: 'done',
+      outcome: 'done',
+    });
+  }
+
+  rc.publicApprovalCurrent = async () => {
+    if (resolvedReadIntent.kind !== 'public_activity' && resolvedReadIntent.kind !== 'combined')
+      return true;
+    try {
+      const current = await persistence.executionContext.getOwnerMessage({
+        agentId: task.agentId,
+        conversationId: resolvedReadIntent.public.conversationId,
+        messageId: resolvedReadIntent.public.requestMessageId,
+      });
+      if (
+        !current ||
+        current.taskId !== task.id ||
+        current.origin !== 'owner' ||
+        current.role !== 'user'
+      )
+        return false;
+      // Anchor at the actual admitted message identity, including sub-ms DB
+      // timestamps: read from one millisecond before, then locate the exact ID.
+      // The parked latest-message watermark could already include a correction.
+      const ordered = await persistence.executionContext.getOwnerRepliesAfter({
+        agentId: task.agentId,
+        conversationId: resolvedReadIntent.public.conversationId,
+        after: { createdAt: new Date(current.createdAt.getTime() - 1) },
+        limit: 10,
+      });
+      const index = ordered.findIndex((row) => row.id === current.id);
+      if (index < 0 || ordered.length >= 10) return false;
+      const newer = ordered.slice(index + 1);
+      for (const reply of newer) {
+        if (
+          reply.role !== 'user' ||
+          reply.origin !== 'owner' ||
+          reply.hiddenAt != null ||
+          reply.conversationId !== task.conversationId
+        )
+          return false;
+        const parent = reply.taskId
+          ? await persistence.executionContext.getTask(task.agentId, reply.taskId)
+          : null;
+        const next =
+          parent && parent.agentId === task.agentId && parent.conversationId === task.conversationId
+            ? await admittedReadIntent(
+                persistence.executionContext,
+                parent,
+                [],
+                state.requestTimeZone ?? agent.timezone,
+              )
+            : resolveActiveReadIntent({
+                text: reply.text,
+                now: reply.createdAt,
+                timeZone: state.requestTimeZone ?? agent.timezone,
+              });
+        const disposition = publicActivityFollowupDisposition(
+          resolvedReadIntent.public,
+          next,
+          reply.text,
+          resolvedReadIntent,
+        );
+        if (disposition === 'superseded') return false;
+        // A new substantive topic ends this search's conversational linkage.
+        // A later unqualified Stop must not revoke every earlier task.
+        if (disposition === 'unrelated') break;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  if (!(await rc.publicApprovalCurrent())) {
+    const marked = await markTaskNeedsAttention(
+      persistence.tasks,
+      lease,
+      'The public search changed or could not be verified; no further lookup was dispatched.',
+    );
+    return marked
+      ? { outcome: 'needs_attention', detail: 'public search superseded or unverifiable' }
+      : LOST_LEASE;
+  }
 
   // ── Resume: settle a finished (or timed-out) browser job, then approvals ───
   if (!correction) await resumePendingJob(rc);
@@ -886,6 +1168,8 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
   // (First run just baselines the watermark; chat channel only.)
   if (
     !correction &&
+    resolvedReadIntent.kind !== 'public_activity' &&
+    resolvedReadIntent.kind !== 'combined' &&
     !(await foldOwnerRepliesSincePark(persistence.executionContext, task, state, rc.window))
   ) {
     const marked = await markTaskNeedsAttention(
@@ -1101,7 +1385,7 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
         trigger: task.trigger,
         clarificationContinuation: state.clarificationContinuation,
       }));
-  rc.ctx.ownerIntent = resumedOwnerIntent;
+  rc.ctx.ownerIntent = ownerIntentForResolvedRead(resumedOwnerIntent, resolvedReadIntent);
   const resumedOwnerWindow = ownerAuthoredWindow(rc.window, resumedOwnerIntent);
   rc.artifactIntent =
     !correction && !cancellation && state.step === 0 && !isKnownReply
