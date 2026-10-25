@@ -500,19 +500,45 @@ export function hasRecallLedgerReference(source: RecallSource): boolean {
   );
 }
 
-/** Existing authenticated source endpoint; non-OK and malformed reads are recoverable errors. */
+export type WebRecallSourceSetting =
+  | { version: 1; status: 'allowed'; suppressed: false }
+  | { version: 1; status: 'suppressed'; suppressed: true }
+  | { version: 1; status: 'stale'; suppressed: null }
+  | { version: 1; status: 'unavailable'; suppressed: null };
+
+/** Reject rollout mismatches rather than interpreting an unverified setting as allowed. */
+export function decodeRecallSourceSetting(value: unknown): WebRecallSourceSetting {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Could not check setting.');
+  const record = value as Record<string, unknown>;
+  if (
+    Object.keys(record).length !== 3 ||
+    !Object.keys(record).every((key) => ['version', 'status', 'suppressed'].includes(key)) ||
+    record.version !== 1
+  )
+    throw new Error('Could not check setting.');
+  if (record.status === 'allowed' && record.suppressed === false)
+    return { version: 1, status: 'allowed', suppressed: false };
+  if (record.status === 'suppressed' && record.suppressed === true)
+    return { version: 1, status: 'suppressed', suppressed: true };
+  if (record.status === 'stale' && record.suppressed === null)
+    return { version: 1, status: 'stale', suppressed: null };
+  if (record.status === 'unavailable' && record.suppressed === null)
+    return { version: 1, status: 'unavailable', suppressed: null };
+  throw new Error('Could not check setting.');
+}
+
+/** Existing authenticated source endpoint; failed or unversioned reads stay unverified. */
 export async function readRecallSourceSetting(
   source: Pick<RecallSource, 'surfaceKey' | 'sourceRevision'>,
   signal?: AbortSignal,
-): Promise<boolean> {
+): Promise<WebRecallSourceSetting> {
   const response = await fetch(
     `/api/recall/sources/${source.surfaceKey}?sourceRevision=${encodeURIComponent(source.sourceRevision ?? '')}`,
     { cache: 'no-store', signal },
   );
   if (!response.ok) throw new Error('Could not check setting.');
-  const value = (await response.json()) as { suppressed?: unknown };
-  if (typeof value?.suppressed !== 'boolean') throw new Error('Could not check setting.');
-  return value.suppressed;
+  return decodeRecallSourceSetting(await response.json());
 }
 
 export async function writeRecallSourceSetting(
@@ -552,6 +578,84 @@ export function RecallSourceControl(props: RecallSourceControlProps) {
   return <MountedRecallSourceControl key={identity} {...props} identity={identity} />;
 }
 
+export type RecallSourceSettingPhase = 'unknown' | 'checking' | WebRecallSourceSetting['status'];
+
+type RecallSourceSettingError = 'read' | 'write' | null;
+
+/** Shared presentation keeps an unreadable historical setting distinct from a verified choice. */
+export function RecallSourceSettingView({
+  status,
+  pending,
+  error,
+  onRead,
+  onSave,
+}: {
+  status: RecallSourceSettingPhase;
+  pending: boolean;
+  error: RecallSourceSettingError;
+  onRead: () => void;
+  onSave: () => void;
+}) {
+  const verified = status === 'allowed' || status === 'suppressed';
+  return (
+    <span className="recall-source-control inline-flex flex-wrap items-center gap-2">
+      {status === 'checking' ? <span role="status">Checking future recall setting…</span> : null}
+      {status === 'unknown' && error === 'read' ? (
+        <span role="status">
+          Future recall setting unavailable. Its hidden or allowed state could not be checked.
+        </span>
+      ) : null}
+      {status === 'unknown' && error === 'write' ? (
+        <span role="status">
+          Could not confirm result. Check the source setting before making another change.
+        </span>
+      ) : null}
+      {status === 'stale' ? (
+        <span role="status">
+          Refresh the chat before changing this saved version’s future recall setting.
+        </span>
+      ) : null}
+      {status === 'unavailable' ? (
+        <span role="status">Future recall setting unavailable for this saved reference.</span>
+      ) : null}
+      {status === 'allowed' ? (
+        <span>Future recall: not hidden by this control for this saved version.</span>
+      ) : null}
+      {status === 'suppressed' ? (
+        <span>
+          Future recall: hidden by this control for this saved version. The saved source is not
+          deleted.
+        </span>
+      ) : null}
+      {status === 'unknown' || status === 'checking' ? (
+        <button
+          type="button"
+          disabled={pending}
+          onClick={onRead}
+          className="rounded underline underline-offset-2 disabled:opacity-50"
+        >
+          {error === 'read'
+            ? 'Retry checking setting'
+            : error === 'write'
+              ? 'Recheck source setting'
+              : 'Check source setting'}
+        </button>
+      ) : verified ? (
+        <button
+          type="button"
+          disabled={pending}
+          onClick={onSave}
+          className="rounded underline underline-offset-2 disabled:opacity-50"
+        >
+          {status === 'suppressed'
+            ? 'Allow this version in future recall'
+            : 'Hide this version from future recall'}
+        </button>
+      ) : null}
+    </span>
+  );
+}
+
 function MountedRecallSourceControl({
   source,
   identity,
@@ -559,27 +663,28 @@ function MountedRecallSourceControl({
   const fence = useRecallOperationFence(identity);
   const [state, setState] = useState<{
     identity: string;
-    suppressed: boolean | null;
+    status: RecallSourceSettingPhase;
     pending: boolean;
-    error: 'read' | 'write' | 'stale' | null;
-  }>({ identity, suppressed: null, pending: false, error: null });
+    error: RecallSourceSettingError;
+  }>({ identity, status: 'unknown', pending: false, error: null });
   const current =
     state.identity === identity
       ? state
-      : { identity, suppressed: null, pending: false, error: null };
+      : { identity, status: 'unknown' as const, pending: false, error: null };
   const eligible = hasRecallLedgerReference(source);
   const surfaceKey = source.surfaceKey;
   const sourceRevision = source.sourceRevision;
   const load = useCallback(
     async (signal?: AbortSignal) => {
       const ticket = fence.begin();
-      setState({ identity, suppressed: null, pending: true, error: null });
+      setState({ identity, status: 'checking', pending: true, error: null });
       try {
-        const suppressed = await readRecallSourceSetting({ surfaceKey, sourceRevision }, signal);
-        if (fence.current(ticket)) setState({ identity, suppressed, pending: false, error: null });
+        const setting = await readRecallSourceSetting({ surfaceKey, sourceRevision }, signal);
+        if (fence.current(ticket))
+          setState({ identity, status: setting.status, pending: false, error: null });
       } catch {
         if (fence.current(ticket))
-          setState({ identity, suppressed: null, pending: false, error: 'read' });
+          setState({ identity, status: 'unknown', pending: false, error: 'read' });
       }
     },
     [fence, identity, surfaceKey, sourceRevision],
@@ -593,8 +698,9 @@ function MountedRecallSourceControl({
   }, [eligible, load]);
   if (!eligible) return null;
   const save = async () => {
-    if (current.pending || current.suppressed === null || current.error === 'stale') return;
-    const next = !current.suppressed;
+    if (current.pending || (current.status !== 'allowed' && current.status !== 'suppressed'))
+      return;
+    const next = current.status === 'allowed';
     const ticket = fence.begin();
     setState({ ...current, pending: true, error: null });
     try {
@@ -602,55 +708,23 @@ function MountedRecallSourceControl({
       if (fence.current(ticket))
         setState({
           identity,
-          suppressed: result === 'saved' ? next : current.suppressed,
+          status: result === 'stale' ? 'stale' : next ? 'suppressed' : 'allowed',
           pending: false,
-          error: result === 'stale' ? 'stale' : null,
+          error: null,
         });
     } catch {
       if (fence.current(ticket))
-        setState({ identity, suppressed: null, pending: false, error: 'write' });
+        setState({ identity, status: 'unknown', pending: false, error: 'write' });
     }
   };
   return (
-    <span className="recall-source-control inline-flex flex-wrap items-center gap-2">
-      {current.pending && current.suppressed === null ? (
-        <span role="status">Checking source setting…</span>
-      ) : null}
-      {current.error === 'read' ? <span role="status">Could not check setting.</span> : null}
-      {current.error === 'write' ? (
-        <span role="status">
-          Could not confirm result. Check the source setting before making another change.
-        </span>
-      ) : null}
-      {current.error === 'stale' ? (
-        <span role="status">Source changed. Refresh before changing this setting.</span>
-      ) : null}
-      {current.suppressed === null ? (
-        <button
-          type="button"
-          disabled={current.pending}
-          onClick={() => void load()}
-          className="rounded underline underline-offset-2 disabled:opacity-50"
-        >
-          {current.error === 'read'
-            ? 'Retry checking setting'
-            : current.error === 'write'
-              ? 'Recheck source setting'
-              : 'Check source setting'}
-        </button>
-      ) : current.error !== 'stale' ? (
-        <button
-          type="button"
-          disabled={current.pending}
-          onClick={() => void save()}
-          className="rounded underline underline-offset-2 disabled:opacity-50"
-        >
-          {current.suppressed
-            ? 'Allow this version in future recall'
-            : 'Hide this version from future recall'}
-        </button>
-      ) : null}
-    </span>
+    <RecallSourceSettingView
+      status={current.status}
+      pending={current.pending}
+      error={current.error}
+      onRead={() => void load()}
+      onSave={() => void save()}
+    />
   );
 }
 

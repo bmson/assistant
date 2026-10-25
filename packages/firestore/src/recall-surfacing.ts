@@ -1,8 +1,10 @@
-import type {
-  RecallSurfaceRecord,
-  RecallSurfaceRef,
-  RecallSurfacingRepository,
-  Records,
+import {
+  type RecallSourceSettingStatus,
+  type RecallSurfaceRecord,
+  type RecallSurfaceRef,
+  type RecallSurfacingRepository,
+  type Records,
+  recallSourceSettingStatusFromRecord,
 } from '@assistant/persistence';
 import {
   assertPrivacyErasureFenceUnchanged,
@@ -44,6 +46,36 @@ function validStoredSurface(row: Records['recallSurfaces']): boolean {
 export class FirestoreRecallSurfacingRepository implements RecallSurfacingRepository {
   readonly kind = 'recall-surfacing-repository' as const;
   constructor(readonly store: InstallationStore) {}
+
+  async readSourceSetting(input: {
+    agentId: string;
+    sourceKey: string;
+    expectedSourceRevision: string;
+  }): Promise<RecallSourceSettingStatus> {
+    const { agentId, sourceKey, expectedSourceRevision } = input;
+    if (
+      typeof agentId !== 'string' ||
+      agentId.length === 0 ||
+      typeof sourceKey !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(sourceKey) ||
+      typeof expectedSourceRevision !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(expectedSourceRevision)
+    )
+      throw new Error('Invalid recall source setting identity');
+    const fence = await readPrivacyErasureFence(this.store, agentId);
+    const owner = await this.store.doc('agents', agentId).get();
+    if (!owner.exists || owner.id !== documentKey(agentId) || owner.get('id') !== agentId)
+      throw new Error('Recall source setting owner is unavailable');
+    const expectedId = surfaceId(agentId, sourceKey);
+    const snapshot = await this.store.doc('recallSurfaces', expectedId).get();
+    await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
+    if (!snapshot.exists) return { status: 'unavailable', reason: 'missing_record' };
+    const row = decodeRecord<RecallSurfaceRecord>(snapshot.data());
+    const status = recallSourceSettingStatusFromRecord(row, input);
+    if (row.id !== expectedId || documentKey(row.id) !== snapshot.id)
+      throw new Error('Recall source setting identity is invalid');
+    return status;
+  }
 
   async suppressed(
     agentId: string,

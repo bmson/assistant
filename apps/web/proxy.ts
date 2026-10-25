@@ -147,6 +147,10 @@ export function proxy(request: NextRequest) {
     (path === '/api/health' && request.method === 'GET') ||
     // Owner artifact download, gated on the owner's files record.
     (path === '/api/files' && request.method === 'GET') ||
+    // Versioned recall controls retain owner authentication and privacy fences
+    // in the handler. Admit only its existing read and explicit write methods.
+    (/^\/api\/recall\/sources\/[a-f0-9]{64}$/.test(path) &&
+      ['GET', 'PATCH'].includes(request.method)) ||
     (path === '/api/ready' && request.method === 'GET') ||
     (path === '/api/release-probe' && request.method === 'GET') ||
     // Persistence-free owner reads: live scores (agent timezone only) and route maps.
