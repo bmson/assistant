@@ -572,6 +572,13 @@ private final class RecordingAppSystemSurfaces: AppSystemSurfaces {
     func updateBadge(_ count: Int) async { record("updateBadge(\(count))") }
 }
 
+private actor StreamTextDeltaRecorder {
+    private var values: [String] = []
+
+    func append(_ value: String) { values.append(value) }
+    func snapshot() -> [String] { values }
+}
+
 final class APIClientRetryTests: XCTestCase {
     private let sessionLock = NSLock()
     private var testSessions: [URLSession] = []
@@ -3096,7 +3103,10 @@ final class APIClientRetryTests: XCTestCase {
 
     @MainActor
     func testChatFollowsNewMessagesAndGrowingStreamWhileAtBottom() async throws {
-        let model = AppModel(apiClient: makeClient())
+        let model = AppModel(
+            apiClient: makeClient(),
+            systemSurfaces: RecordingAppSystemSurfaces()
+        )
         // A chat read alone is not an authenticated composer session.
         StubURLProtocol.primeBootstrap(try notificationBootstrap())
         await model.refreshAll()
@@ -3169,17 +3179,57 @@ final class APIClientRetryTests: XCTestCase {
         }
         StubURLProtocol.prime([.stream(body: try chunk("First words.\n"))])
         model.send("Continue with a detailed response.")
-        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
-        while model.messages.last?.text != "First words.\n", ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(50))
+
+        // Keep request dispatch, stream readiness, and consumed text inside
+        // the original three-second first-delta budget. The stub sends the
+        // initial body synchronously before marking this stream ready.
+        let firstDeltaDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        var readyStream: (operationID: String, authorization: String)?
+        while (readyStream == nil || model.messages.last?.text != "First words.\n"),
+              ContinuousClock.now < firstDeltaDeadline {
+            for (method, url, headers, body) in StubURLProtocol.requests
+            where method == "POST" && url.path == "/api/mobile/v1/chat" {
+                let payload = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+                let operationID = payload?["clientOperationId"] as? String
+                let authorization = headers.first {
+                    $0.key.caseInsensitiveCompare("authorization") == .orderedSame
+                }?.value
+                if let operationID, let authorization,
+                   StubURLProtocol.isStreamReady(operationId: operationID, authorization: authorization) {
+                    readyStream = (operationID, authorization)
+                    break
+                }
+            }
+            if readyStream == nil || model.messages.last?.text != "First words.\n" {
+                try await Task.sleep(for: .milliseconds(50))
+            }
         }
+        XCTAssertNotNil(readyStream, "The chat POST and initial stream delivery must become ready within the first-delta budget")
+        let stream = try XCTUnwrap(readyStream)
+        let chatRequests = StubURLProtocol.requests.filter {
+            $0.0 == "POST" && $0.1.path == "/api/mobile/v1/chat"
+        }
+        XCTAssertEqual(chatRequests.count, 1, "The initial text delta belongs to one chat POST")
+        let chatBody = try XCTUnwrap(chatRequests.first?.3)
+        let chatPayload = try XCTUnwrap(JSONSerialization.jsonObject(with: chatBody) as? [String: Any])
+        XCTAssertEqual(chatPayload["conversationId"] as? String, "follow-chat")
+        XCTAssertEqual(chatPayload["clientOperationId"] as? String, stream.operationID)
+        let sentMessages = try XCTUnwrap(chatPayload["messages"] as? [[String: Any]])
+        let sentParts = try XCTUnwrap(sentMessages.first?["parts"] as? [[String: Any]])
+        XCTAssertEqual(sentParts.first?["text"] as? String, "Continue with a detailed response.")
+        XCTAssertEqual(
+            chatRequests.first?.2.first { $0.key.caseInsensitiveCompare("authorization") == .orderedSame }?.value,
+            stream.authorization
+        )
         XCTAssertEqual(model.messages.last?.text, "First words.\n")
         let streamID = model.messages.last?.id
         try await assertAtBottom()
         for index in 1...3 {
             let delta = String(repeating: "Streaming section \(index).\n", count: 35)
             let previousText = model.messages.last?.text ?? ""
-            StubURLProtocol.appendStream(try chunk(delta))
+            StubURLProtocol.appendStream(
+                try chunk(delta), operationId: stream.operationID, authorization: stream.authorization
+            )
             // Use the same bounded state wait as the first streamed chunk above.
             let deltaDeadline = ContinuousClock.now.advanced(by: .seconds(3))
             while model.messages.last?.text != previousText + delta, ContinuousClock.now < deltaDeadline {
@@ -5999,6 +6049,161 @@ extension APIClientRetryTests {
         )
         let receipt = try await send.value
         XCTAssertNil(receipt.taskId)
+    }
+
+    func testAPIClientConsumesWholeInitialTextDeltaDeliveredInline() async throws {
+        let token = "initial-inline-delta-test"
+        let clientID = "33333333-3333-4333-8333-333333333333"
+        let conversationID = "11111111-1111-4111-8111-111111111111"
+        let operationID = "22222222-2222-4222-8222-222222222222"
+        let expectedDelta = "First words.\n"
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "type": "text-delta", "delta": expectedDelta,
+        ])
+        let initialFrame = Data("data: \(String(decoding: payload, as: UTF8.self))\n\n".utf8)
+        StubURLProtocol.prime([], tokens: ["Bearer \(token)": [.stream(body: initialFrame)]])
+
+        let client = makeClient(clientID: clientID, token: token)
+        let recorder = StreamTextDeltaRecorder()
+        let send = Task {
+            try await client.sendMessage(
+                conversationId: conversationID,
+                text: "Read the initial streamed words",
+                clientOperationId: operationID,
+                autonomous: false,
+                onDelta: { await recorder.append($0) },
+                onCue: { _ in }
+            )
+        }
+
+        let authorization = "Bearer \(token)"
+        defer {
+            send.cancel()
+            StubURLProtocol.cancelStream(operationId: operationID, authorization: authorization)
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        var ready = false
+        var received = await recorder.snapshot()
+        while (!ready || received != [expectedDelta]), ContinuousClock.now < deadline {
+            ready = StubURLProtocol.isStreamReady(operationId: operationID, authorization: authorization)
+            received = await recorder.snapshot()
+            if !ready || received != [expectedDelta] {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+
+        XCTAssertTrue(ready, "The POST's initial inline body must reach the ready stream")
+        guard ready else {
+            send.cancel()
+            StubURLProtocol.cancelStream(operationId: operationID, authorization: authorization)
+            _ = try? await send.value
+            XCTFail("The initial inline stream did not become ready")
+            return
+        }
+        XCTAssertEqual(received, [expectedDelta], "APIClient must parse and consume the initial text event before stream completion")
+        let request = try XCTUnwrap(StubURLProtocol.requests.first { $0.1.path == "/api/mobile/v1/chat" })
+        XCTAssertEqual(request.0, "POST")
+        XCTAssertEqual(
+            request.2.first { $0.key.caseInsensitiveCompare("authorization") == .orderedSame }?.value,
+            authorization
+        )
+        let requestBody = try XCTUnwrap(JSONSerialization.jsonObject(with: request.3) as? [String: Any])
+        XCTAssertEqual(requestBody["clientId"] as? String, clientID)
+        XCTAssertEqual(requestBody["conversationId"] as? String, conversationID)
+        XCTAssertEqual(requestBody["clientOperationId"] as? String, operationID)
+        let sentMessages = try XCTUnwrap(requestBody["messages"] as? [[String: Any]])
+        let sentParts = try XCTUnwrap(sentMessages.first?["parts"] as? [[String: Any]])
+        XCTAssertEqual(sentParts.first?["text"] as? String, "Read the initial streamed words")
+
+        StubURLProtocol.appendStream(
+            Data("data: [DONE]\n\n".utf8), operationId: operationID, authorization: authorization
+        )
+        let receipt = try await send.value
+        XCTAssertNil(receipt.taskId)
+        XCTAssertEqual(receipt.conversationId, conversationID)
+    }
+
+    func testAPIClientReassemblesInitialTextDeltaAcrossUtf8ByteBoundary() async throws {
+        let token = "initial-fragmented-delta-test"
+        let conversationID = "11111111-1111-4111-8111-111111111111"
+        let operationID = "22222222-2222-4222-8222-222222222222"
+        let expectedDelta = "café"
+        let frame = Data("data: {\"type\":\"text-delta\",\"delta\":\"café\"}\n\n".utf8)
+        let accentBytes = Data([0xc3, 0xa9])
+        guard let accentRange = frame.range(of: accentBytes) else {
+            XCTFail("The initial SSE frame must include the raw UTF-8 bytes for é")
+            return
+        }
+        let splitIndex = frame.distance(from: frame.startIndex, to: accentRange.lowerBound) + 1
+        let initialFragment = Data(frame.prefix(splitIndex))
+        let remainingFragment = Data(frame.suffix(frame.count - splitIndex))
+        XCTAssertEqual(Array(initialFragment.suffix(1)), [UInt8(0xc3)])
+        XCTAssertEqual(Array(remainingFragment.prefix(1)), [UInt8(0xa9)])
+        StubURLProtocol.prime([], tokens: ["Bearer \(token)": [.stream(body: initialFragment)]])
+
+        let client = makeClient(token: token)
+        let recorder = StreamTextDeltaRecorder()
+        let send = Task {
+            try await client.sendMessage(
+                conversationId: conversationID,
+                text: "Read a fragmented initial event",
+                clientOperationId: operationID,
+                autonomous: false,
+                onDelta: { await recorder.append($0) },
+                onCue: { _ in }
+            )
+        }
+
+        let authorization = "Bearer \(token)"
+        defer {
+            send.cancel()
+            StubURLProtocol.cancelStream(operationId: operationID, authorization: authorization)
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        var ready = false
+        while !ready, ContinuousClock.now < deadline {
+            ready = StubURLProtocol.isStreamReady(operationId: operationID, authorization: authorization)
+            if !ready { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        XCTAssertTrue(ready, "The initial fragment must be delivered before the remainder is appended")
+        guard ready else {
+            send.cancel()
+            StubURLProtocol.cancelStream(operationId: operationID, authorization: authorization)
+            _ = try? await send.value
+            XCTFail("The fragmented initial stream did not become ready")
+            return
+        }
+        let beforeRemainder = await recorder.snapshot()
+        XCTAssertTrue(beforeRemainder.isEmpty, "An incomplete UTF-8 SSE event must not emit partial text")
+
+        StubURLProtocol.appendStream(
+            remainingFragment, operationId: operationID, authorization: authorization
+        )
+        let request = try XCTUnwrap(StubURLProtocol.requests.first { $0.1.path == "/api/mobile/v1/chat" })
+        XCTAssertEqual(request.0, "POST")
+        XCTAssertEqual(
+            request.2.first { $0.key.caseInsensitiveCompare("authorization") == .orderedSame }?.value,
+            authorization
+        )
+        let requestBody = try XCTUnwrap(JSONSerialization.jsonObject(with: request.3) as? [String: Any])
+        XCTAssertEqual(requestBody["conversationId"] as? String, conversationID)
+        XCTAssertEqual(requestBody["clientOperationId"] as? String, operationID)
+        let sentMessages = try XCTUnwrap(requestBody["messages"] as? [[String: Any]])
+        let sentParts = try XCTUnwrap(sentMessages.first?["parts"] as? [[String: Any]])
+        XCTAssertEqual(sentParts.first?["text"] as? String, "Read a fragmented initial event")
+        var received = await recorder.snapshot()
+        while received != [expectedDelta], ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+            received = await recorder.snapshot()
+        }
+        XCTAssertEqual(received, [expectedDelta], "The actual APIClient parser must reassemble a split UTF-8 text delta")
+
+        StubURLProtocol.appendStream(
+            Data("data: [DONE]\n\n".utf8), operationId: operationID, authorization: authorization
+        )
+        let receipt = try await send.value
+        XCTAssertNil(receipt.taskId)
+        XCTAssertEqual(receipt.conversationId, conversationID)
     }
 
     func testOperationCancellationValidatesIdentityAndTreatsUnknownAsUnknown() async throws {
