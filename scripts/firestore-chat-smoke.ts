@@ -20,6 +20,7 @@ import {
   type InstallationStore,
 } from '@assistant/firestore';
 import {
+  approvalPolicyFingerprint,
   type EmbeddingSpace,
   embeddingSpaceIdentityKey,
   finalChannelDelivery,
@@ -512,7 +513,11 @@ export async function firestoreChatSmoke(
   const roles: string[] = [];
   let modelSteps = 0;
   const dispatchReceipts: Array<{
+    toolCallId: string;
+    taskId: string;
+    step: number;
     toolName: string;
+    modelToolCallId: string;
     args: Record<string, unknown>;
     result: unknown;
   }> = [];
@@ -559,6 +564,42 @@ export async function firestoreChatSmoke(
       };
     },
   } as unknown as ModelRouter;
+  const persistSyntheticRead = async (
+    input: Parameters<ExecutorDeps['dispatcher']['dispatch']>[0],
+    result: unknown,
+  ) => {
+    const toolCall = await persistence.toolExecution.start({
+      agentId: input.task.agentId,
+      taskId: input.task.id,
+      step: input.step,
+      toolName: input.toolName,
+      args: input.args,
+      idempotencyKey: null,
+      decision: { modelToolCallId: input.modelToolCallId },
+      expectedPolicyFingerprint: approvalPolicyFingerprint([]),
+    });
+    if (!toolCall) return { kind: 'rejected' as const, reason: 'tool call was not persisted' };
+    const persisted = await persistence.toolExecution.outcome({
+      agentId: input.task.agentId,
+      taskId: input.task.id,
+      toolCallId: toolCall.id,
+      status: 'succeeded',
+      fromStatus: 'executing',
+      result,
+    });
+    if (!persisted)
+      return { kind: 'rejected' as const, reason: 'tool success was not persisted' };
+    dispatchReceipts.push({
+      toolCallId: toolCall.id,
+      taskId: input.task.id,
+      step: input.step,
+      toolName: input.toolName,
+      modelToolCallId: input.modelToolCallId,
+      args: input.args,
+      result,
+    });
+    return { kind: 'executed' as const, toolCallId: toolCall.id, result, cached: false };
+  };
   const deps: ExecutorDeps = {
     db: unavailableDb as Db,
     router,
@@ -573,58 +614,25 @@ export async function firestoreChatSmoke(
       resultIsUntrusted: (toolName) => toolName === 'conversations.search',
       dispatch: async (input) => {
         if (input.toolName === 'calendar.list_events') {
-          const result = {
-            kind: 'executed' as const,
-            toolCallId: randomUUID(),
-            result: { events: [], complete: true },
-            cached: false,
-          };
-          dispatchReceipts.push({
-            toolName: input.toolName,
-            args: input.args,
-            result: result.result,
-          });
-          return result;
+          return persistSyntheticRead(input, { events: [], complete: true });
         }
         if (input.toolName === 'gmail.search') {
-          const result = {
-            kind: 'executed' as const,
-            toolCallId: randomUUID(),
-            result: { results: [], complete: true, hasMore: false },
-            cached: false,
-          };
-          dispatchReceipts.push({
-            toolName: input.toolName,
-            args: input.args,
-            result: result.result,
-          });
-          return result;
+          return persistSyntheticRead(input, { results: [], complete: true, hasMore: false });
         }
         if (input.toolName === 'conversations.search') {
-          const result = {
-            kind: 'executed' as const,
-            toolCallId: randomUUID(),
-            result: {
-              matches: [
-                {
-                  messageId: syntheticHistoryMessageId ?? 'synthetic-history-message',
-                  conversationId: 'synthetic-history-conversation',
-                  text: SMOKE_HISTORY_TEXT,
-                  role: 'user',
-                  origin: 'owner',
-                  sourceRevision: 'synthetic-history-revision',
-                },
-              ],
-              mode: 'semantic',
-            },
-            cached: false,
-          };
-          dispatchReceipts.push({
-            toolName: input.toolName,
-            args: input.args,
-            result: result.result,
+          return persistSyntheticRead(input, {
+            matches: [
+              {
+                messageId: syntheticHistoryMessageId ?? 'synthetic-history-message',
+                conversationId: 'synthetic-history-conversation',
+                text: SMOKE_HISTORY_TEXT,
+                role: 'user',
+                origin: 'owner',
+                sourceRevision: 'synthetic-history-revision',
+              },
+            ],
+            mode: 'semantic',
           });
-          return result;
         }
         throw new Error(`Unexpected tool dispatch: ${input.toolName}`);
       },
@@ -703,12 +711,22 @@ export async function firestoreChatSmoke(
     assert.ok(expectedTool, `Expected a supported deterministic read for: ${request}`);
     const receipt = dispatchReceipts.find((entry) => entry.toolName === expectedTool);
     assert.ok(receipt, `Expected successful ${expectedTool} dispatcher receipt`);
-    const persistedCalls = await store.collection('toolCalls').where('taskId', '==', task.id).get();
-    const persistedReceipt = persistedCalls.docs
-      .map((doc) => doc.data())
-      .find((call) => call.toolName === expectedTool && call.status === 'succeeded');
+    const persistedCalls = await persistence.executionEvidence.taskEvidence({
+      agentId,
+      taskId: task.id,
+    });
+    const persistedReceipt = persistedCalls.find((call) => call.id === receipt.toolCallId);
     assert.ok(persistedReceipt, `Expected persisted successful ${expectedTool} receipt`);
+    assert.equal(receipt.taskId, task.id);
+    assert.equal(persistedReceipt.toolName, receipt.toolName);
+    assert.equal(persistedReceipt.step, receipt.step);
+    assert.equal(persistedReceipt.status, 'succeeded');
+    assert.equal(
+      (persistedReceipt.decision as { modelToolCallId?: unknown } | null)?.modelToolCallId,
+      receipt.modelToolCallId,
+    );
     assert.deepEqual(persistedReceipt.args, receipt.args);
+    assert.deepEqual(persistedReceipt.result, receipt.result);
     if (expectedTool === 'conversations.search') {
       assert.equal(typeof receipt.args.query, 'string');
       assert.ok((receipt.args.query as string).length >= 2);

@@ -32,6 +32,7 @@ import type {
   RecallSurfaceRecord,
 } from '@assistant/persistence';
 import {
+  approvalPolicyFingerprint,
   conversationMessageSourceRevision,
   embeddingSpaceIdentityKey,
 } from '@assistant/persistence';
@@ -211,6 +212,53 @@ const scenarios: Scenario[] = [
   },
 ];
 
+function recordSyntheticReadCompletion(
+  expectedQuery: string | undefined,
+  query: string,
+  matches: unknown[],
+  state: { success: boolean },
+) {
+  if (expectedQuery === undefined || (query === expectedQuery && matches.length > 0))
+    state.success = true;
+  return state.success;
+}
+
+describe('synthetic historical-read completion gate', () => {
+  const routerFor = (state: { success: boolean }, requestQuery: string) =>
+    syntheticRouter([], () => [], 'conversations.search', requestQuery, state) as unknown as {
+      step(
+        role: string,
+        options: { system?: string; messages?: unknown[] },
+      ): Promise<{ toolCalls: unknown[]; text: string }>;
+    };
+
+  it('finishes an explicit historical read only for the exact query with matches', async () => {
+    const state = { success: false };
+    const router = routerFor(state, 'earlier preference');
+    expect((await router.step('draft', {})).toolCalls).toHaveLength(1);
+    expect(
+      recordSyntheticReadCompletion('earlier preference', 'similar but different', [{}], state),
+    ).toBe(false);
+    expect((await router.step('draft', {})).toolCalls).toHaveLength(1);
+    expect(recordSyntheticReadCompletion('earlier preference', 'earlier preference', [], state)).toBe(
+      false,
+    );
+    expect((await router.step('draft', {})).toolCalls).toHaveLength(1);
+    expect(
+      recordSyntheticReadCompletion('earlier preference', 'earlier preference', [{}], state),
+    ).toBe(true);
+    expect((await router.step('draft', {})).toolCalls).toHaveLength(0);
+  });
+
+  it('finishes a nonhistorical route after an actual successful search, including no matches', async () => {
+    const state = { success: false };
+    const router = routerFor(state, 'current user request');
+    expect((await router.step('draft', {})).toolCalls).toHaveLength(1);
+    expect(recordSyntheticReadCompletion(undefined, 'current user request', [], state)).toBe(true);
+    expect((await router.step('draft', {})).toolCalls).toHaveLength(0);
+  });
+});
+
 describe('cross-turn recall scenario source expectations', () => {
   it('keeps every positive context assertion present in a seeded source turn', () => {
     for (const scenario of scenarios) {
@@ -251,6 +299,16 @@ function syntheticPreflightRoute(modelId: string) {
 }
 
 type Captured = { role: string; system: string; messages: unknown[] };
+type SyntheticReadReceipt = {
+  toolCallId: string;
+  taskId: string;
+  step: number;
+  toolName: string;
+  modelToolCallId: string;
+  query: string;
+  args: Record<string, unknown>;
+  result: { matches: unknown[]; mode: string };
+};
 
 type TestRuntime = {
   ownerId: string;
@@ -270,7 +328,7 @@ function syntheticRouter(
   captured: Captured[],
   embeddingFor: (text: string) => number[],
   requestedReadTool: string,
-  expectedQuery: string,
+  requestQuery: string,
   readState: { success: boolean },
 ) {
   const router = {
@@ -313,8 +371,9 @@ function syntheticRouter(
       };
     },
     async step(role: string, options: { system?: string; messages?: unknown[] }) {
-      // Explicit intent authorizes the tool call, but only a preceding
-      // successful dispatch can satisfy the historical-read requirement.
+      // Completion follows a dispatch outcome recorded by the paired fixture
+      // dispatcher. Explicit historical reads set that state only for their
+      // exact query with matches; other routes complete after an actual search.
       const hasReadResult = readState.success;
       captured.push({
         role,
@@ -332,7 +391,7 @@ function syntheticRouter(
               {
                 toolCallId: `context-read-${randomUUID()}`,
                 toolName: requestedReadTool,
-                input: { query: expectedQuery },
+                input: { query: requestQuery },
               },
             ],
       };
@@ -345,7 +404,7 @@ function syntheticReadDispatcher(
   runtime: TestRuntime,
   conversationId: string,
   embeddingFor: (text: string) => number[],
-  receipts: Array<{ query: string; matches: unknown[] }>,
+  receipts: SyntheticReadReceipt[],
   expectedQuery: string | undefined,
   readState: { success: boolean },
 ): DispatcherPort {
@@ -361,9 +420,13 @@ function syntheticReadDispatcher(
     async dispatch(input) {
       if (input.toolName !== 'conversations.search')
         return { kind: 'rejected', reason: 'Only persisted conversation search is available' };
-      const query = input.args.query;
-      if (typeof query !== 'string')
+      let args: { query: string };
+      try {
+        args = z.object({ query: z.string().min(2).max(500) }).parse(input.args);
+      } catch {
         return { kind: 'rejected', reason: 'Conversation search query is missing' };
+      }
+      const query = args.query;
       const since =
         (await repository.recentWindowStart({
           agentId: runtime.ownerId,
@@ -404,11 +467,42 @@ function syntheticReadDispatcher(
           sourceMessageIds: entry.source.evidence?.sourceMessageIds ?? [],
           sourceRevision: entry.source.sourceRevision,
         })),
-        mode: input.args.mode === 'text' ? 'text' : 'semantic',
+        mode: 'semantic',
       };
-      receipts.push({ query, matches: result.matches });
-      if (query === expectedQuery && result.matches.length > 0) readState.success = true;
-      return { kind: 'executed', toolCallId: randomUUID(), result, cached: false };
+      const toolCall = await runtime.persistence.toolExecution.start({
+        agentId: runtime.ownerId,
+        taskId: input.task.id,
+        step: input.step,
+        toolName: input.toolName,
+        args,
+        idempotencyKey: null,
+        decision: { modelToolCallId: input.modelToolCallId },
+        expectedPolicyFingerprint: approvalPolicyFingerprint([]),
+      });
+      if (!toolCall)
+        return { kind: 'rejected', reason: 'Conversation search receipt could not be started' };
+      const persisted = await runtime.persistence.toolExecution.outcome({
+        agentId: runtime.ownerId,
+        taskId: input.task.id,
+        toolCallId: toolCall.id,
+        status: 'succeeded',
+        fromStatus: 'executing',
+        result,
+      });
+      if (!persisted)
+        return { kind: 'rejected', reason: 'Conversation search success could not be persisted' };
+      receipts.push({
+        toolCallId: toolCall.id,
+        taskId: input.task.id,
+        step: input.step,
+        toolName: input.toolName,
+        modelToolCallId: input.modelToolCallId,
+        query,
+        args,
+        result,
+      });
+      recordSyntheticReadCompletion(expectedQuery, query, result.matches, readState);
+      return { kind: 'executed', toolCallId: toolCall.id, result, cached: false };
     },
     async executeApproved() {
       return { kind: 'failed', error: 'No synthetic approved effect exists' };
@@ -706,7 +800,7 @@ describe.each(['postgres', 'firestore'] as const)(
 
     async function runTurn(runtime: TestRuntime, conversationId: string, text: string) {
       const captured: Captured[] = [];
-      const readReceipts: Array<{ query: string; matches: unknown[] }> = [];
+      const readReceipts: SyntheticReadReceipt[] = [];
       const readIntent = detectPersonalReadRequest([{ role: 'user', content: text }]);
       const readState = { success: false };
       const requestedReadTool = 'conversations.search';
@@ -745,14 +839,43 @@ describe.each(['postgres', 'firestore'] as const)(
           taskId,
         );
         expect(result.outcome, JSON.stringify(result)).toBe('done');
+        const persistedEvidence = await runtime.persistence.executionEvidence.taskEvidence({
+          agentId: runtime.ownerId,
+          taskId,
+        });
+        for (const receipt of readReceipts) {
+          const persistedReceipt = persistedEvidence.find((row) => row.id === receipt.toolCallId);
+          expect(persistedReceipt).toMatchObject({
+            id: receipt.toolCallId,
+            toolName: receipt.toolName,
+            status: 'succeeded',
+            step: receipt.step,
+            args: receipt.args,
+            result: receipt.result,
+            decision: { modelToolCallId: receipt.modelToolCallId },
+          });
+          expect(receipt.taskId).toBe(taskId);
+        }
         if (readIntent?.conversationQuery) {
-          expect(readReceipts).toContainEqual({
-            query: readIntent.conversationQuery,
-            matches: expect.arrayContaining([expect.anything()]),
+          const historicalReceipt = readReceipts.find(
+            (receipt) => receipt.query === readIntent.conversationQuery,
+          );
+          expect(historicalReceipt).toMatchObject({
+            taskId,
+            toolName: 'conversations.search',
+            args: { query: readIntent.conversationQuery },
+            result: {
+              matches: expect.arrayContaining([expect.anything()]),
+              mode: 'semantic',
+            },
           });
           if (runtime.db) {
             const persistedCalls = await runtime.db
               .select({
+                id: toolCalls.id,
+                taskId: toolCalls.taskId,
+                step: toolCalls.step,
+                decision: toolCalls.decision,
                 toolName: toolCalls.toolName,
                 status: toolCalls.status,
                 args: toolCalls.args,
@@ -760,8 +883,15 @@ describe.each(['postgres', 'firestore'] as const)(
               })
               .from(toolCalls)
               .where(eq(toolCalls.taskId, taskId));
+            expect(historicalReceipt).toBeDefined();
             expect(persistedCalls).toContainEqual(
               expect.objectContaining({
+                id: historicalReceipt?.toolCallId,
+                taskId,
+                step: historicalReceipt?.step,
+                decision: expect.objectContaining({
+                  modelToolCallId: historicalReceipt?.modelToolCallId,
+                }),
                 toolName: 'conversations.search',
                 status: 'succeeded',
                 args: expect.objectContaining({ query: readIntent.conversationQuery }),
