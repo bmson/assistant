@@ -176,6 +176,12 @@ const ConfigSchema = z.object({
   GCP_BILLING_QUERY_PROJECT: z.string().default(''),
   GCP_BILLING_LOCATION: z.string().default('US'),
   GCP_BILLING_SCOPE: z.enum(['project', 'billing_account']).default('project'),
+  /** Optional web-only billing credential, sealed with MCP_ENC_KEY; never a model API key. */
+  OPENAI_BILLING_ADMIN_KEY_ENCRYPTED: z.string().default(''),
+  /** Explicit comma-separated Costs API filters. At least one is required before querying. */
+  OPENAI_BILLING_PROJECT_IDS: z.string().default(''),
+  OPENAI_BILLING_API_KEY_IDS: z.string().default(''),
+  OPENAI_BILLING_ACCOUNT_LABEL: z.string().default(''),
   /** Reject a billing query before it exceeds this scan allowance. */
   GCP_BILLING_MAX_BYTES: z.coerce
     .number()

@@ -21,6 +21,48 @@ const report: ProviderBilling = {
 };
 
 describe('provider billing presentation', () => {
+  it('labels selected OpenAI amount as reported cost without inventing credits, net or freshness', () => {
+    const html = renderToStaticMarkup(
+      <ProviderBillingCards
+        reports={[
+          {
+            ...report,
+            id: 'openai-billing',
+            label: 'OpenAI organization',
+            status: 'reported',
+            periodTimezone: 'UTC',
+            checkedAt: '2026-09-27T12:00:00Z',
+            fetchedAt: '2026-09-27T12:00:00Z',
+            amountBasis: 'provider_reported_cost',
+            scope: 'Projects: proj_a; API keys: key_a',
+            message: 'Selected source scope.',
+            lines: [
+              {
+                service: 'OpenAI',
+                detail: 'proj_a · key_a · Input tokens',
+                currency: 'USD',
+                cost: 0.00000012,
+                credits: 0,
+                net: 0.00000012,
+                projectId: 'proj_a',
+                apiKeyId: 'key_a',
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+    expect(html).toContain('Reported cost');
+    expect(html).toContain('Project: proj_a');
+    expect(html).toContain('API key ID: key_a');
+    expect(html).toContain('Credits</th>');
+    expect(html).toContain('Net spend</th>');
+    expect(html).toContain('Not reported');
+    expect(html).toContain('Latest export: time not reported');
+    expect(html).toContain('Latest usage: time not reported');
+    expect(html).not.toContain('Credits: $0.00');
+  });
+
   it('shows whole-app incompleteness and source-scoped gaps without inventing an aggregate', () => {
     const coverage = billingCoverageProjection([
       {
@@ -114,7 +156,7 @@ describe('provider billing presentation', () => {
     expect(html).toContain('€3.00');
     expect(html).toContain('-$2.00');
     expect(html).toContain('Stale');
-    expect(html).toContain('Fetched 2026-09-26');
+    expect(html).toContain('Fetched: Sep 26, 2026');
     expect(html).not.toContain('$11.00');
   });
 
