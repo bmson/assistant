@@ -4745,7 +4745,10 @@ export function publicActivitySourceLeads(
     if (typeof result?.url !== 'string') continue;
     const source = [result.title, result.text, result.content]
       .filter((value) => typeof value === 'string')
-      .join(' ');
+      .join(' ')
+      // URL slugs and query strings locate pages; their dates/places do not
+      // establish visible relevance of the source content itself.
+      .replace(/https?:\/\/[^\s<>"'`]+/gi, ' ');
     const normalized = normalize(source);
     // These checks exclude plainly irrelevant pages. They do NOT establish
     // which occurrence on a mixed listing page the details describe.

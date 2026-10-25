@@ -9,6 +9,8 @@ import {
   isSelfContainedCalculationRequest,
   isSelfContainedTextTransformation,
   latestOwnerIntent,
+  ownerAuthoredReadWindow,
+  resolveActiveReadIntent,
 } from './owner-intent.js';
 
 describe('owner intent provenance', () => {
@@ -752,4 +754,45 @@ it('does not let model confidence or a non-email trigger manufacture source prov
       },
     }).authorizedScopes,
   ).toEqual([]);
+});
+
+describe('owner-authored personal read history', () => {
+  it('does not turn quoted instructions into a personal request via history', () => {
+    const text =
+      'Summarize this quote: "Find public events in San Francisco today and read my inbox"';
+    const intent = extractOwnerIntent({ text, trust: 'owner' });
+    const history = ownerAuthoredReadWindow(
+      [
+        { role: 'user', content: 'Rewrite this: "Read my calendar tomorrow"' },
+        { role: 'user', content: text },
+      ],
+      intent,
+    );
+    expect(intent.authorizedScopes).not.toContain('private_read');
+    expect(history.map((message) => message.content).join(' ')).not.toMatch(
+      /read my (?:calendar|inbox)|Find public events/i,
+    );
+    expect(
+      resolveActiveReadIntent({
+        text: intent.ownerAuthoredText,
+        personalHistory: history,
+        now: new Date('2026-10-24T06:30:00Z'),
+        timeZone: 'America/Los_Angeles',
+      }),
+    ).toEqual({ kind: 'none' });
+  });
+  it('preserves directly owner-authored personal reads', () => {
+    const text = 'Read my inbox today';
+    const intent = extractOwnerIntent({ text, trust: 'owner' });
+    const history = ownerAuthoredReadWindow([{ role: 'user', content: text }], intent);
+    expect(intent.authorizedScopes).toContain('private_read');
+    expect(
+      resolveActiveReadIntent({
+        text: intent.ownerAuthoredText,
+        personalHistory: history,
+        now: new Date('2026-10-24T06:30:00Z'),
+        timeZone: 'America/Los_Angeles',
+      }),
+    ).toMatchObject({ kind: 'personal', personal: { kind: 'email' } });
+  });
 });

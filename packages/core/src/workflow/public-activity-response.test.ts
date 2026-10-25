@@ -74,6 +74,17 @@ describe('public activity response source contract', () => {
   ])('does not surface plainly irrelevant %s page', (_name, content) => {
     expect(publicActivitySourceLeads([fetchEvidence(content)], scope())).toBeUndefined();
   });
+  it('does not use requested-date or city tokens inside a URL as source relevance', () => {
+    const wrongYear = `${listing.replace('2026', '2025')} https://example.test/art-2026-10-24`;
+    expect(publicActivitySourceLeads([fetchEvidence(wrongYear)], scope())).toBeUndefined();
+    const result = enforceResponseContract(reply, [fetchEvidence(wrongYear)], {
+      publicActivity: scope(),
+    });
+    expect(result.text).toContain('could not verify');
+    expect(result.text).not.toContain('Art Walk');
+    const wrongCity = `${listing.replace('San Francisco', 'Seattle')} https://example.test/San-Francisco`;
+    expect(publicActivitySourceLeads([fetchEvidence(wrongCity)], scope())).toBeUndefined();
+  });
   it('excludes stale, private-only, failed fetch and search-snippet-only evidence', () => {
     const search: ActionEvidence = {
       toolName: 'web.search',

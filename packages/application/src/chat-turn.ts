@@ -40,6 +40,7 @@ import {
   isSelfContainedCalculationRequest,
   isSelfContainedTextTransformation,
   needsConversationReasoning,
+  ownerAuthoredReadWindow,
   resolveActiveReadIntent,
 } from '@assistant/core/workflow/owner-intent';
 import { detectPersonalReadRequest } from '@assistant/core/workflow/read-intent';
@@ -1065,7 +1066,10 @@ export async function handleChatTurn(
           ]
         : [],
     ),
-    personalHistory: modelHistory,
+    personalHistory: ownerAuthoredReadWindow(
+      modelHistory.map((message) => ({ role: message.role, content: textOf(message) })),
+      extractOwnerIntent({ text: persistedUser.text, trust: 'owner' }),
+    ),
   });
   // Only actually rendered messages are covered by the prompt. Earlier rows
   // omitted by its byte cap remain eligible for historical retrieval.

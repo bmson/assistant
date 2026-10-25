@@ -65,6 +65,7 @@ import {
 import {
   extractOwnerIntent,
   latestOwnerIntent,
+  ownerAuthoredReadWindow,
   ownerAuthoredWindow,
   ownerIntentForResolvedRead,
 } from './owner-intent.js';
@@ -98,7 +99,8 @@ async function admittedReadIntent(
     payload?: { text?: unknown; triggerMessageId?: unknown };
   } | null;
   const text = typeof trigger?.payload?.text === 'string' ? trigger.payload.text : '';
-  const ownerText = extractOwnerIntent({ text, trust: 'owner' }).ownerAuthoredText;
+  const admittedOwnerIntent = extractOwnerIntent({ text, trust: 'owner' });
+  const ownerText = admittedOwnerIntent.ownerAuthoredText;
   const unavailable = () =>
     resolveActiveReadIntent({ text: ownerText, now: task.createdAt, timeZone });
   if (
@@ -184,7 +186,7 @@ async function admittedReadIntent(
         requestHash: createHash('sha256').update(text).digest('hex'),
       },
       ownerTurns: turns,
-      personalHistory: window,
+      personalHistory: ownerAuthoredReadWindow(window, admittedOwnerIntent),
     });
   } catch {
     // Missing provenance must not turn an explicit public correction into a private lookup.

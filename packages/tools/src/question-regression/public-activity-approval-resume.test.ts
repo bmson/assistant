@@ -144,6 +144,8 @@ class OfflineRouter {
 interface Execution {
   name: string;
   args: Record<string, unknown>;
+  dbToolCallId?: string;
+  taskId?: string;
 }
 function fixtureDispatcher(
   db: Db,
@@ -164,8 +166,15 @@ function fixtureDispatcher(
         risk: 'approval',
         acceptsUntrustedInput: true,
         approvalSummary: (args) => `${name}: ${JSON.stringify(args)}`,
-        execute: async (args) => {
-          executions.push({ name, args: args as Record<string, unknown> });
+        execute: async (args, ctx) => {
+          if (!ctx.execution?.dbToolCallId)
+            throw new Error('Synthetic adapter requires durable execution identity');
+          executions.push({
+            name,
+            args: args as Record<string, unknown>,
+            dbToolCallId: ctx.execution.dbToolCallId,
+            taskId: ctx.taskId,
+          });
           if (failure === true || (failure === 'fetch_failure' && name === 'web.fetch'))
             throw new Error('Synthetic public source unavailable');
           const values = args as Record<string, unknown>;
@@ -207,8 +216,15 @@ function fixtureDispatcher(
         inputSchema: z.object({}).passthrough(),
         risk: 'autonomous',
         acceptsUntrustedInput: true,
-        execute: async (args) => {
-          executions.push({ name, args: args as Record<string, unknown> });
+        execute: async (args, ctx) => {
+          if (!ctx.execution?.dbToolCallId)
+            throw new Error('Synthetic adapter requires durable execution identity');
+          executions.push({
+            name,
+            args: args as Record<string, unknown>,
+            dbToolCallId: ctx.execution.dbToolCallId,
+            taskId: ctx.taskId,
+          });
           return { events: [], messages: [], text: canaries[index % canaries.length] };
         },
       },
@@ -410,15 +426,16 @@ describe('public activity actual approval lifecycle (isolated PostgreSQL)', () =
         expect(partial?.status).toBe('needs_attention');
         for (const call of calls.filter(
           (c) => c.toolName === 'web.search' && c.status === 'succeeded',
-        ))
-          expect(
-            executions
-              .slice(executionOffset)
-              .filter(
-                (e) =>
-                  e.name === call.toolName && JSON.stringify(e.args) === JSON.stringify(call.args),
-              ),
-          ).toHaveLength(1);
+        )) {
+          // PostgreSQL JSONB may reorder object keys. Bind by the dispatcher's
+          // actual durable identity, then compare values rather than serialization.
+          const actual = executions
+            .slice(executionOffset)
+            .filter((entry) => entry.dbToolCallId === call.id);
+          expect(actual).toHaveLength(1);
+          expect(actual[0]).toMatchObject({ name: call.toolName, taskId: admitted.taskId });
+          expect(actual[0]?.args).toEqual(call.args);
+        }
       }
     }));
   it.each(['denied', 'expired', 'failed'] as const)(
@@ -670,9 +687,14 @@ describe('public activity actual approval lifecycle (isolated PostgreSQL)', () =
       expect(resolved?.resolutionPayload).toEqual(editedPayload);
       await run(tx, admitted.taskId, dispatcher, router);
       if (mode === 'identical') {
-        expect(executions.filter((e) => e.name === 'web.search')).toEqual([
-          { name: 'web.search', args: originalArgs },
-        ]);
+        const actualSearches = executions.filter((e) => e.name === 'web.search');
+        expect(actualSearches).toHaveLength(1);
+        expect(actualSearches[0]).toMatchObject({
+          name: 'web.search',
+          dbToolCallId: search.id,
+          taskId: admitted.taskId,
+        });
+        expect(actualSearches[0]?.args).toEqual(originalArgs);
         await settle(tx, admitted.taskId, dispatcher, router);
       } else {
         expect(executions).toEqual([]);

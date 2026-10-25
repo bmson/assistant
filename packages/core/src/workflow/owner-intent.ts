@@ -592,16 +592,7 @@ export function latestOwnerIntent(
     (current.sourceActor === 'owner' || current.sourceActor === 'mixed') &&
     current.separation !== 'unknown' &&
     !explicitlyOptsOutOfRecall(current.ownerAuthoredText) &&
-    detectPersonalReadRequest(
-      ownerAuthoredWindow(window, current).map((message) => {
-        if (message.role !== 'user') return message;
-        const text = messageText(message.content);
-        return {
-          ...message,
-          content: hasUnmatchedQuote(text) ? '' : splitQuoted(text).authored,
-        };
-      }),
-    ) &&
+    detectPersonalReadRequest(ownerAuthoredReadWindow(window, current)) &&
     !current.authorizedScopes.includes('private_read')
   )
     current.authorizedScopes.push('private_read');
@@ -631,6 +622,18 @@ export function ownerAuthoredWindow<T extends { role: string; content: unknown }
   return window.map((message, index) =>
     index === latestIndex ? { ...message, content: intent.ownerAuthoredText } : message,
   );
+}
+
+/** Private-read topic resolution consumes authored prose, never quoted instructions. */
+export function ownerAuthoredReadWindow<T extends { role: string; content: unknown }>(
+  window: T[],
+  intent: OwnerIntent,
+): T[] {
+  return ownerAuthoredWindow(window, intent).map((message) => {
+    if (message.role !== 'user') return message;
+    const text = messageText(message.content);
+    return { ...message, content: hasUnmatchedQuote(text) ? '' : splitQuoted(text).authored };
+  });
 }
 
 export { resolveActiveReadIntent } from './active-read-intent.js';

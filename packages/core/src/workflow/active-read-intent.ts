@@ -135,6 +135,8 @@ function validZone(zone: string): boolean {
 const PUBLIC =
   /\b(?:public\s+(?:events?|activities)|city\s+events?|things?\s+to\s+do|(?:events?|activities)\b[^.!?]{0,60}\b(?:attend|in\s+San\s+Francisco)|anything\s+(?:happening|going\s+on)\s+in\b)/i;
 const PERSONAL_QUALIFICATION = /\b(?:my|our)\s+(?:calendar|agenda|schedule|inbox|email)\b/i;
+const OWNED_PRIVATE_RECORD =
+  /\b(?:my|our)\s+(?:[\p{L}'’-]+\s+){0,4}(?:reservations?|bookings?|confirmations?|itinerar(?:y|ies)|tickets?|appointments?)\b/iu;
 const EXPLICIT_PUBLIC =
   /\b(?:public\s+(?:events?|activities)|city\s+events?|things?\s+to\s+do|(?:events?|activities)\b[^.!?]{0,40}\battend)\b/i;
 const CONTINUATION =
@@ -164,7 +166,8 @@ function isPublicRequest(text: string): boolean {
     (PUBLIC.test(text) ||
       (Boolean(place(text)) &&
         (/\b(?:events?|activities|happening)\b/i.test(text) || Boolean(activityTopic(text))))) &&
-    (!PERSONAL_QUALIFICATION.test(text) || EXPLICIT_PUBLIC.test(text))
+    (!(PERSONAL_QUALIFICATION.test(text) || OWNED_PRIVATE_RECORD.test(text)) ||
+      EXPLICIT_PUBLIC.test(text))
   );
 }
 function activityTopic(text: string): string | undefined {

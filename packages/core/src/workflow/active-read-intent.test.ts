@@ -466,4 +466,17 @@ describe('pending public search follow-up disposition', () => {
       /but look|calendar|inbox|newer_than/i,
     );
   });
+  it.each([
+    'Find my hotel confirmation email in Berlin and find my flight confirmation email to Paris on 2026-12-21 and find my museum reservation in Rome',
+    'Find my museum reservation in Rome',
+    'Find my hotel confirmation email in Berlin',
+    'Find my museum booking in Rome',
+  ])('preserves owner-private reservation or confirmation lookup: %s', (text) => {
+    expect(resolve(text).kind).toBe('personal');
+  });
+  it('retains genuine public museum discovery and explicit public-not-private scope', () => {
+    expect(resolve('Find museums in Rome today').kind).toBe('public_activity');
+    const corrected = resolve('Find public events in Rome today, not my museum reservation');
+    expect(corrected.kind).toBe('public_activity');
+  });
 });

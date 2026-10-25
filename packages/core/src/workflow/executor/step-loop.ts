@@ -703,21 +703,22 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // so it is exactly the "third-party text" this rule excludes: without the
   // guard, a crafted message reading like "what's on my calendar tomorrow?"
   // would force a search of the owner's own accounts and override the plan.
-  let readRequest: PersonalReadRequest | null = restrictedChecklistResume
-    ? null
-    : task.trust === 'owner' &&
-        !isForwardedIngest(task) &&
-        ownerIntent.authorizedScopes.includes('private_read') &&
-        !situationRequest &&
-        !tripOwnsCalendar
-      ? detectPersonalReadRequest(ownerWindow, {
-          now: readReferenceAt,
-          timeZone: requestTimeZone,
-        })
-      : null;
-  if (publicOnly) readRequest = null;
-  else if (rc.resolvedReadIntent?.kind === 'personal' || rc.resolvedReadIntent?.kind === 'combined')
-    readRequest = rc.resolvedReadIntent.personal;
+  const eligiblePrivateRead =
+    !restrictedChecklistResume &&
+    task.trust === 'owner' &&
+    !isForwardedIngest(task) &&
+    ownerIntent.authorizedScopes.includes('private_read') &&
+    !situationRequest &&
+    !tripOwnsCalendar;
+  let readRequest: PersonalReadRequest | null =
+    !eligiblePrivateRead || publicOnly
+      ? null
+      : rc.resolvedReadIntent?.kind === 'personal' || rc.resolvedReadIntent?.kind === 'combined'
+        ? rc.resolvedReadIntent.personal
+        : detectPersonalReadRequest(ownerWindow, {
+            now: readReferenceAt,
+            timeZone: requestTimeZone,
+          });
   let assessmentStepReserve: 1 | 2 = EMAIL_REVIEW_DEFAULT_ASSESSMENT_RESERVE;
   if (readRequest?.emailReview) {
     const originalMaxSteps = task.maxSteps;
