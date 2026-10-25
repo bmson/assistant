@@ -171,10 +171,13 @@ const REQUEST_NEED_CUE = new RegExp(
   `\\b(?:${[...GENERIC_TASK_TERMS, 'think', 'recommend', 'suggest', 'opinion'].join('|')})\\b`,
   'iu',
 );
-// Recognize bounded questions that explicitly ask about the owner's state or
-// an owner-authored action. A generic world question alone is not an owner ask.
+// Only admit owner-information actions, not any first-person how-to question
+// such as "How can I explain coastal rainbows?" Shared topic words alone do
+// not make a world-help request an owner-history request.
 const EXPLICIT_OWNER_ACTION_QUESTION =
-  /^\s*(?:what|which|where|when|who|whose|how)\b[^.!?]{0,64}\b(?:did|do|does|was|were|is|are|have|has|will|would|can|could|should)\s+(?:I|we|my|our)\b|^\s*what\s+(?:happened|occurred)\s+(?:with|to)\s+(?:my|our)\b/iu;
+  /^\s*(?:(?:what|which|where|when|who|whose|how)\b[^.!?]{0,64}\b(?:did|have|has)\s+(?:I|we)\s+(?:first\s+)?(?:choose|chose|select|selected|pick|picked|name|named|call|called|save|saved|prefer|preferred|decide|decided|tell|told|say|said|mention|mentioned|write|wrote|record|recorded|set|make|made|marked|mark)\b|(?:what|which)\b[^.!?]{0,64}\bdo\s+(?:I|we)\s+prefer\b)|^\s*what\s+(?:happened|occurred)\s+(?:with|to)\s+(?:my|our)\b/iu;
+const DIRECT_OWNER_STATE_QUESTION =
+  /^\s*what\s+(?:is|was)\s+(?:my|our)\s+(?:current\s+)?(?:(?:[\p{L}\p{M}]+)\s+){0,2}(?:name|preference|choice|region|setting|status)\b/iu;
 const COPULAR_OWNER_STATE_QUESTION =
   /^\s*what\s+(?:is|was)\s+(?:the\s+)?(?:current\s+)?(?:name|preference|choice)\b[^.!?]{0,64}\b(?:of|for)\b[^.!?]{0,48}\b(?:in|for)\s+(?:my|our)\b/iu;
 const DIRECT_RECALL_OPT_OUT =
@@ -229,6 +232,7 @@ function querySubjectPhrases(requestText: string): string[] {
   const ownerInformationQuestion =
     /^\s*(?:what|which|where|when|who|whose|how)\b/iu.test(requestText) &&
     (EXPLICIT_OWNER_ACTION_QUESTION.test(requestText) ||
+      DIRECT_OWNER_STATE_QUESTION.test(requestText) ||
       COPULAR_OWNER_STATE_QUESTION.test(requestText));
   if (!REQUEST_NEED_CUE.test(requestText) && !ownerInformationQuestion) return [];
   const raw = requestText.normalize('NFC').toLowerCase().replace(/[’‘]/gu, "'");

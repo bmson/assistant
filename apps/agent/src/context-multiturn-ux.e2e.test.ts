@@ -132,16 +132,16 @@ const scenarios: Scenario[] = [
   {
     name: 'preserves two conflicting choices with their situation labels',
     sourceTurns: [
-      'For the Launch plan, I chose daily status emails.',
-      'For the Quiet Writing plan, I chose weekly status summaries.',
+      'For the Launch plan, I chose daily status updates by email.',
+      'For the Quiet Writing plan, I chose weekly status updates by summary.',
     ],
-    question: 'Which different status update choices did I make for my two plans?',
+    question: 'Which status updates did I choose for the Launch plan and Quiet Writing plan?',
     matchingSourceIndexes: [0, 1],
     expectInContext: [
       'Launch plan',
-      'daily status emails',
+      'daily status updates by email',
       'Quiet Writing plan',
-      'weekly status summaries',
+      'weekly status updates by summary',
     ],
   },
   {
@@ -185,11 +185,13 @@ const scenarios: Scenario[] = [
   },
   {
     name: 'does not retrieve an explicitly hidden version after a positive recall',
-    sourceTurns: ['Synthetic forget marker: the owner prefers the cobalt folder for invoices.'],
+    sourceTurns: [
+      'Synthetic forget marker: the owner prefers cobalt as the folder color for invoices.',
+    ],
     question: 'Which folder color did I choose for invoices?',
     matchingSourceIndexes: [0],
     hideSourceIndexBeforeQuestion: 0,
-    expectOutOfContext: ['cobalt folder'],
+    expectOutOfContext: ['cobalt as the folder color'],
   },
   {
     name: 'honors hide, allow, and exact source revision changes',
@@ -208,6 +210,19 @@ const scenarios: Scenario[] = [
     expectInContext: ['forwarded vendor note', 'email us the export'],
   },
 ];
+
+describe('cross-turn recall scenario source expectations', () => {
+  it('keeps every positive context assertion present in a seeded source turn', () => {
+    for (const scenario of scenarios) {
+      const sourceText = [...scenario.sourceTurns, ...(scenario.matchingSourceTexts ?? [])]
+        .join('\n')
+        .toLocaleLowerCase();
+      for (const expected of scenario.expectInContext ?? []) {
+        expect(sourceText, `${scenario.name}: ${expected}`).toContain(expected.toLocaleLowerCase());
+      }
+    }
+  });
+});
 
 function localEmbedding(text: string): number[] {
   const vector = new Array<number>(1536).fill(0);
@@ -1866,7 +1881,9 @@ describe.each(['postgres', 'firestore'] as const)(
             : await runtime.createConversation();
           if (scenario.hideSourceIndexBeforeQuestion !== undefined) {
             const beforeHide = await runTurn(runtime, targetConversationId, scenario.question);
-            expect(capturedRequestText(beforeHide.captured)).toContain('cobalt folder');
+            expect(capturedRequestText(beforeHide.captured)).toContain(
+              'cobalt as the folder color',
+            );
             const hideSourceId = sourceMessageIds[scenario.hideSourceIndexBeforeQuestion];
             await runtime.setHidden(required(hideSourceId, 'Source to hide'), true);
           }
@@ -2080,7 +2097,7 @@ describe.each(['postgres', 'firestore'] as const)(
       'does not retrieve a hidden owner source into a later model request',
       async (ctx) => {
         const sourceText =
-          'Synthetic forget marker: the owner prefers the cobalt folder for invoices.';
+          'Synthetic forget marker: the owner prefers cobalt as the folder color for invoices.';
         const query = 'Which folder color did I choose for invoices?';
         const runtime = await setupCase(ctx, {
           name: 'hidden source fixture',
@@ -2098,10 +2115,10 @@ describe.each(['postgres', 'firestore'] as const)(
 
         const targetConversationId = await runtime.createConversation();
         const first = await runTurn(runtime, targetConversationId, query);
-        expect(capturedRequestText(first.captured)).toContain('cobalt folder');
+        expect(capturedRequestText(first.captured)).toContain('cobalt as the folder color');
         await runtime.setHidden(sourceId, true);
         const afterHide = await runTurn(runtime, targetConversationId, query);
-        expect(capturedRequestText(afterHide.captured)).not.toContain('cobalt folder');
+        expect(capturedRequestText(afterHide.captured)).not.toContain('cobalt as the folder color');
       },
       driver === 'firestore' ? 30_000 : undefined,
     );

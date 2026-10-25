@@ -206,6 +206,70 @@ describe('automatic recall eligibility', () => {
     expect(statusReport.candidates).toEqual([]);
   });
 
+  it('does not treat a first-person world how-to as owner history when the subject matches', () => {
+    const history = candidate('owner-history', 'Earlier coastal rainbows observed by the sea');
+    for (const request of [
+      'How do I explain coastal rainbows to a child?',
+      'How can I explain coastal rainbows to a child?',
+    ]) {
+      const result = eligibleAutomaticRecallCandidates(request, [history]);
+      expect(result.reason).toBe('no_request_subject');
+      expect(result.candidates).toEqual([]);
+    }
+
+    const ownerQuestion = eligibleAutomaticRecallCandidates(
+      'What did I tell you about coastal rainbows by the sea?',
+      [history],
+    );
+    expect(ownerQuestion.reason).toBe('eligible');
+    expect(ownerQuestion.candidates).toEqual([history]);
+  });
+
+  it('admits the retained first-action and current-chair preference questions', () => {
+    const earlier = candidate('chair-earlier', 'For my desk chair, I used to prefer a firm seat.');
+    const current = candidate(
+      'chair-current',
+      'Correction: my current chair preference is a soft seat.',
+    );
+    const exactRetainedQuestion =
+      'What did I first prefer for my desk chair, and what is my current chair preference?';
+    const result = eligibleAutomaticRecallCandidates(exactRetainedQuestion, [earlier, current]);
+    expect(result.reason).toBe('eligible');
+    expect(result.candidates).toEqual([earlier, current]);
+
+    const directState = eligibleAutomaticRecallCandidates('What is my current chair preference?', [
+      current,
+    ]);
+    expect(directState.reason).toBe('eligible');
+    expect(directState.candidates).toEqual([current]);
+  });
+
+  it('admits actual multi-source plan and folder recall fixtures by shared meaning phrases', () => {
+    const plans = [
+      candidate('launch-plan', 'For the Launch plan, I chose daily status updates by email.'),
+      candidate(
+        'writing-plan',
+        'For the Quiet Writing plan, I chose weekly status updates by summary.',
+      ),
+    ];
+    const planQuestion =
+      'Which status updates did I choose for the Launch plan and Quiet Writing plan?';
+    const planResult = eligibleAutomaticRecallCandidates(planQuestion, plans);
+    expect(planResult.reason).toBe('eligible');
+    expect(planResult.candidates).toEqual(plans);
+
+    const folder = candidate(
+      'invoice-folder',
+      'Synthetic forget marker: the owner prefers cobalt as the folder color for invoices.',
+    );
+    const folderResult = eligibleAutomaticRecallCandidates(
+      'Which folder color did I choose for invoices?',
+      [folder],
+    );
+    expect(folderResult.reason).toBe('eligible');
+    expect(folderResult.candidates).toEqual([folder]);
+  });
+
   it('honors a direct owner opt-out without treating a negative-history question as an opt-out', () => {
     const memory = [candidate('cedar', 'Cedar East rejected because clearance')];
     const optOut = eligibleAutomaticRecallCandidates(
