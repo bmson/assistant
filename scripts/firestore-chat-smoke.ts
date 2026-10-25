@@ -21,6 +21,8 @@ import {
 } from '@assistant/firestore';
 import {
   approvalPolicyFingerprint,
+  conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
   type EmbeddingSpace,
   embeddingSpaceIdentityKey,
   finalChannelDelivery,
@@ -340,6 +342,10 @@ export async function firestoreChatSmoke(
     expectRecall?: boolean;
     expectRecallMode?: 'automatic' | 'explicit' | 'disabled';
     expectOpenCommitment?: boolean;
+    expectedOutcome?: 'done' | 'needs_attention';
+    expectedMemoryReadFailure?: 'incomplete_selection';
+    expectedDeliveredTextIncludes?: string[];
+    expectedDeliveredTextExcludes?: string[];
   } = {},
 ) {
   const agentId = randomUUID();
@@ -349,6 +355,7 @@ export async function firestoreChatSmoke(
   const now = new Date();
   let expectedRuntimeSourceKeys: string[] = [];
   let syntheticHistoryMessageId: string | undefined;
+  let syntheticHistoryConversationId: string | undefined;
   const request = options.request ?? 'Explain how a rainbow forms.';
   const expectedRecallMode = options.expectRecallMode ?? 'automatic';
   const recallPreflight = options.recall ? await preflightPlanningRecall(request, now) : undefined;
@@ -473,6 +480,7 @@ export async function firestoreChatSmoke(
     const historyConversationId = randomUUID();
     const historyMessageId = randomUUID();
     syntheticHistoryMessageId = historyMessageId;
+    syntheticHistoryConversationId = historyConversationId;
     const historyAt = new Date(now.getTime() - 86_400_000);
     await store.doc('conversations', historyConversationId).set({
       id: historyConversationId,
@@ -486,6 +494,7 @@ export async function firestoreChatSmoke(
       id: historyMessageId,
       conversationId: historyConversationId,
       role: 'user',
+      origin: 'owner',
       text: SMOKE_HISTORY_TEXT,
       createdAt: historyAt,
       // Keep the raw-message candidate above the history recall threshold but
@@ -623,6 +632,8 @@ export async function firestoreChatSmoke(
   }> = [];
   let systemPrompt = '';
   let modelMessages = '';
+  const extractPrompts: unknown[] = [];
+  const extractSelections: unknown[] = [];
   let delivered = 0;
   let deliveredText = '';
   const router = {
@@ -634,6 +645,11 @@ export async function firestoreChatSmoke(
     },
     async object(role: string, options: { prompt?: unknown }) {
       roles.push(role);
+      const extractSelection = role === 'extract' ? selectSmokeExtractQuotes(options.prompt) : null;
+      if (role === 'extract') {
+        extractPrompts.push(options.prompt);
+        extractSelections.push(extractSelection);
+      }
       const object =
         role === 'classify'
           ? { trivial: false }
@@ -645,7 +661,7 @@ export async function firestoreChatSmoke(
                 missingInfo: [],
               }
             : role === 'extract'
-              ? selectSmokeExtractQuotes(options.prompt)
+              ? extractSelection
               : { decision: 'publish', reasons: [] };
       return { ok: true, object, modelId: 'synthetic/model', degraded: false };
     },
@@ -721,15 +737,24 @@ export async function firestoreChatSmoke(
           return persistSyntheticRead(input, { results: [], complete: true, hasMore: false });
         }
         if (input.toolName === 'conversations.search') {
+          const messageId = syntheticHistoryMessageId ?? 'synthetic-history-message';
+          const historyConversationId =
+            syntheticHistoryConversationId ?? 'synthetic-history-conversation';
           return persistSyntheticRead(input, {
             matches: [
               {
-                messageId: syntheticHistoryMessageId ?? 'synthetic-history-message',
-                conversationId: 'synthetic-history-conversation',
+                messageId,
+                conversationId: historyConversationId,
                 text: SMOKE_HISTORY_TEXT,
                 role: 'user',
                 origin: 'owner',
-                sourceRevision: 'synthetic-history-revision',
+                sourceRevision: conversationMessageSourceRevision(messageId, SMOKE_HISTORY_TEXT),
+                speakerRevision: conversationMessageSpeakerRevision(
+                  messageId,
+                  SMOKE_HISTORY_TEXT,
+                  'user',
+                  'owner',
+                ),
               },
             ],
             mode: 'semantic',
@@ -749,10 +774,70 @@ export async function firestoreChatSmoke(
   };
   const outcome = await executeTask(deps, task.id);
   assert.deepEqual(sqlAccesses, [], 'Even best-effort context must avoid SQL');
-  assert.equal(outcome.outcome, 'done', JSON.stringify(outcome));
+  if (options.expectedOutcome === 'needs_attention')
+    assert.equal(options.expectedMemoryReadFailure, 'incomplete_selection');
+  assert.equal(outcome.outcome, options.expectedOutcome ?? 'done', JSON.stringify(outcome));
   assert.equal(delivered, 1);
+  if (options.expectedDeliveredTextIncludes) {
+    for (const expected of options.expectedDeliveredTextIncludes)
+      assert.ok(
+        deliveredText.includes(expected),
+        `Expected final delivery to include: ${expected}`,
+      );
+  }
+  if (options.expectedDeliveredTextExcludes) {
+    for (const forbidden of options.expectedDeliveredTextExcludes)
+      assert.ok(
+        !deliveredText.includes(forbidden),
+        `Final delivery must not include: ${forbidden}`,
+      );
+  }
+  if (options.expectedMemoryReadFailure) {
+    assert.equal(options.expectedOutcome, 'needs_attention');
+    assert.equal(outcome.outcome, 'needs_attention');
+    assert.ok(
+      outcome.detail?.includes(
+        'I found candidate owner-authored records, but could not reliably select a directly relevant passage.',
+      ),
+      'Expected the exact incomplete-selection outcome diagnostic',
+    );
+    for (const extractPrompt of extractPrompts) {
+      assert.equal(typeof extractPrompt, 'string');
+      const parsedExtractPrompt = JSON.parse(extractPrompt as string) as {
+        sources?: Array<{ body?: unknown; speaker?: unknown }>;
+      };
+      assert.ok(Array.isArray(parsedExtractPrompt.sources));
+      assert.ok(
+        parsedExtractPrompt.sources.some(
+          (source) =>
+            source.body === SMOKE_HISTORY_TEXT && source.speaker === 'Recorded owner message',
+        ),
+        'Expected the retrieved owner history source to reach exact passage selection',
+      );
+      for (const source of parsedExtractPrompt.sources) {
+        if (typeof source.body !== 'string') continue;
+        assert.ok(!source.body.includes(SMOKE_COMMITMENT_TITLE));
+        assert.ok(!source.body.includes(SMOKE_COMMITMENT_NEXT_ACTION));
+      }
+    }
+    assert.doesNotMatch(systemPrompt, /Rainbow observation notes/u);
+    assert.doesNotMatch(systemPrompt, /Compare the rainbow notes/u);
+    assert.doesNotMatch(modelMessages, /Rainbow observation notes/u);
+    assert.doesNotMatch(modelMessages, /Compare the rainbow notes/u);
+    assert.doesNotMatch(deliveredText, /Rainbow observation notes/u);
+    assert.doesNotMatch(deliveredText, /Compare the rainbow notes/u);
+  }
   const explicitRead = detectPersonalReadRequest([{ role: 'user', content: request }]);
   const deterministicPrivateRead = Boolean(explicitRead);
+  if (options.expectedMemoryReadFailure) {
+    assert.equal(explicitRead?.firstToolName, 'conversations.search');
+    assert.ok(extractSelections.length > 0);
+    assert.deepEqual(
+      extractSelections,
+      extractSelections.map(() => ({ selections: [] })),
+      'Expected each exact source-selection pass to return no unsupported commitment passage',
+    );
+  }
   if (!deterministicPrivateRead) {
     assert.deepEqual(roles.slice(0, 2), ['classify', 'plan']);
   }
@@ -810,7 +895,9 @@ export async function firestoreChatSmoke(
   if (deterministicPrivateRead) {
     const expectedTool = explicitRead?.firstToolName;
     assert.ok(expectedTool, `Expected a supported deterministic read for: ${request}`);
-    const receipt = dispatchReceipts.find((entry) => entry.toolName === expectedTool);
+    const matchingReceipts = dispatchReceipts.filter((entry) => entry.toolName === expectedTool);
+    if (options.expectedMemoryReadFailure) assert.equal(matchingReceipts.length, 1);
+    const receipt = matchingReceipts[0];
     assert.ok(receipt, `Expected successful ${expectedTool} dispatcher receipt`);
     const persistedCalls = await persistence.executionEvidence.taskEvidence({
       agentId,
@@ -838,7 +925,17 @@ export async function firestoreChatSmoke(
         explicitRead?.conversationQuery,
       );
       const persistedResult = persistedReceipt.result as { matches?: unknown[] } | undefined;
-      assert.ok(Array.isArray(persistedResult?.matches) && persistedResult.matches.length > 0);
+      const persistedMatches = persistedResult?.matches;
+      assert.ok(Array.isArray(persistedMatches) && persistedMatches.length > 0);
+      assert.ok(
+        (persistedMatches as Array<Record<string, unknown>>).some(
+          (match) =>
+            match.messageId === syntheticHistoryMessageId &&
+            match.conversationId === syntheticHistoryConversationId &&
+            match.text === SMOKE_HISTORY_TEXT,
+        ),
+        'Expected the successful source-read receipt to contain the exact seeded owner message',
+      );
     }
   }
   const taskState = persistedTask.get('state') as
@@ -888,6 +985,7 @@ export async function firestoreChatSmoke(
     skills: skillApplied,
     finalized: true,
     sqlAccesses: sqlAccesses.length,
+    ...(options.expectedOutcome ? { outcome: outcome.outcome } : {}),
     ...(options.recall
       ? {
           historySurfaced: options.expectRecall === true,

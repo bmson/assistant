@@ -5,7 +5,6 @@ import type { Config } from '@assistant/config';
 import { loadConfig } from '@assistant/config';
 import type { ModelRouter } from '@assistant/core';
 import { type DispatcherPort, type ExecutorDeps, executeTask } from '@assistant/core';
-import { recallRelevantContext } from '@assistant/core/memory/recall';
 import { extractOwnerIntent } from '@assistant/core/workflow/owner-intent';
 import { detectPersonalReadRequest } from '@assistant/core/workflow/read-intent';
 import {
@@ -50,6 +49,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { z } from 'zod';
 import type { InstallationStore } from '../../../packages/firestore/src/store.js';
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
+import { selectSyntheticExtractQuotes } from './context-multiturn-ux-synthetic-selector.js';
 
 const DATABASE_URL =
   process.env.DATABASE_URL ?? 'postgres://assistant:assistant@localhost:55432/assistant_test';
@@ -221,69 +221,6 @@ function recordSyntheticReadCompletion(
   if (expectedQuery === undefined || (query === expectedQuery && matches.length > 0))
     state.success = true;
   return state.success;
-}
-
-function selectSyntheticExtractQuotes(prompt: unknown): {
-  selections: Array<{ sourceKey: string; quote: string }>;
-} | null {
-  if (typeof prompt !== 'string') return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(prompt);
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-  const request = (parsed as { request?: unknown }).request;
-  const sources = (parsed as { sources?: unknown }).sources;
-  if (typeof request !== 'string' || !Array.isArray(sources)) return null;
-
-  const stopWords = new Set([
-    'about',
-    'did',
-    'for',
-    'from',
-    'i',
-    'its',
-    'said',
-    'tell',
-    'the',
-    'what',
-    'you',
-  ]);
-  const terms = new Set(
-    (request.toLocaleLowerCase('en-US').match(/[\p{L}\p{N}]+/gu) ?? []).filter(
-      (term) => term.length > 1 && !stopWords.has(term),
-    ),
-  );
-  if (terms.size === 0) return { selections: [] };
-  const ownerHistoryRequest = /\bwhat\s+did\s+i\s+(?:tell|say)\s+you\b/iu.test(request);
-  const minimumMatches = Math.min(2, terms.size);
-  const selections: Array<{ sourceKey: string; quote: string }> = [];
-  for (const raw of sources) {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
-    const source = raw as { key?: unknown; body?: unknown; speaker?: unknown };
-    if (
-      typeof source.key !== 'string' ||
-      typeof source.body !== 'string' ||
-      typeof source.speaker !== 'string' ||
-      !['Recorded owner message', 'Saved fact marked owner-confirmed'].includes(source.speaker) ||
-      (ownerHistoryRequest && source.speaker !== 'Recorded owner message')
-    )
-      continue;
-    const quote = source.body
-      .split(/(?<=[.!?])\s+|\n+/u)
-      .map((sentence) => sentence.trim())
-      .find((sentence) => {
-        if (sentence.length === 0 || sentence.length > 800) return false;
-        const bodyTerms = new Set(
-          sentence.toLocaleLowerCase('en-US').match(/[\p{L}\p{N}]+/gu) ?? [],
-        );
-        return [...terms].filter((term) => bodyTerms.has(term)).length >= minimumMatches;
-      });
-    if (quote) selections.push({ sourceKey: source.key, quote });
-  }
-  return { selections: selections.slice(0, 8) };
 }
 
 describe('synthetic historical-read completion gate', () => {
@@ -478,7 +415,6 @@ function syntheticReadDispatcher(
   expectedQuery: string | undefined,
   readState: { success: boolean },
 ): DispatcherPort {
-  const repository = runtime.persistence.history;
   return {
     toolDefs: () =>
       ['conversations.search'].map((name) => ({
@@ -497,48 +433,28 @@ function syntheticReadDispatcher(
         return { kind: 'rejected', reason: 'Conversation search query is missing' };
       }
       const query = args.query;
-      const since =
-        (await repository.recentWindowStart({
-          agentId: runtime.ownerId,
-          conversationId,
-          size: 20,
-        })) ?? new Date();
-      const isSuppressed = runtime.persistence.recallSurfacing
-        ? async (sourceKey: string, sourceRevision: string) => {
-            const suppressed = await runtime.persistence.recallSurfacing?.suppressed(
-              runtime.ownerId,
-              [sourceKey],
-              { [sourceKey]: sourceRevision },
-            );
-            return suppressed?.has(sourceKey) ?? true;
-          }
-        : undefined;
-      const recalled = await recallRelevantContext(
-        repository,
-        {
-          agentId: runtime.ownerId,
-          queryText: query,
-          embed: async (values) => values.map(embeddingFor),
-          exclude: { conversationId, sinceCreatedAt: since },
-        },
-        {
-          taskId: input.task.id,
-          limit: 12,
-          embeddingSpaceKey: embeddingSpaceIdentityKey(SPACE),
-          isSuppressed,
-        },
-      );
-      // Mirror the real conversations.search result shape. A RecallResult
-      // contains useful text, but it is not a durable search receipt because
-      // it has no `matches` array for the personal-read contract to validate.
-      const result = {
-        matches: (recalled.rankedContext ?? []).map((entry) => ({
-          text: entry.text,
-          sourceMessageIds: entry.source.evidence?.sourceMessageIds ?? [],
-          sourceRevision: entry.source.sourceRevision,
-        })),
-        mode: 'semantic',
-      };
+      const search = runtime.persistence.conversationSearch;
+      if (!search)
+        return { kind: 'rejected', reason: 'Conversation search repository is unavailable' };
+      const semantic = await search.semantic({
+        agentId: runtime.ownerId,
+        embedding: embeddingFor(query),
+        embeddingSpaceKey: embeddingSpaceIdentityKey(SPACE),
+        currentConversationId: conversationId,
+        limit: 5,
+      });
+      const matches = semantic.length
+        ? semantic
+        : await search.text({
+            agentId: runtime.ownerId,
+            query,
+            currentConversationId: conversationId,
+            limit: 5,
+          });
+      // Preserve the same revision-bound match envelope returned by the real
+      // conversations.search tool so the personal-read contract can validate
+      // identity and speaker provenance.
+      const result = { matches, mode: semantic.length ? 'semantic' : 'text' };
       const toolCall = await runtime.persistence.toolExecution.start({
         agentId: runtime.ownerId,
         taskId: input.task.id,

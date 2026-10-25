@@ -125,10 +125,6 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore ordinary chat c
       request: 'Search my inbox for an email about open commitments for rainbow observation notes.',
       mode: 'explicit' as const,
     },
-    {
-      request: 'What did I tell you about open commitments for rainbow observation notes?',
-      mode: 'explicit' as const,
-    },
   ])(
     'keeps the commitment canary out of subject-matched recall: $request',
     async ({ request, mode, expectRecall = false }) => {
@@ -157,11 +153,36 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore ordinary chat c
     },
   );
 
-  it.each([
-    'What is on my calendar tomorrow?',
-    'Search my inbox for newsletter messages.',
-    'What did I tell you about a rainbow?',
-  ])('keeps unrelated commitments out of an explicit private read: %s', async (request) => {
+  it.each(['What is on my calendar tomorrow?', 'Search my inbox for newsletter messages.'])(
+    'keeps unrelated commitments out of an explicit private read: %s',
+    async (request) => {
+      vi.stubEnv('CHAT_RECALL_ENABLED', 'true');
+      vi.stubEnv('GRAPH_RAG_ENABLED', 'true');
+      const store = emulatorStore();
+      try {
+        expect(
+          await firestoreChatSmoke(store, {
+            recall: true,
+            request,
+            expectRecall: false,
+            expectRecallMode: 'explicit',
+          }),
+        ).toMatchObject({
+          historySurfaced: false,
+          graphSurfaced: false,
+          preflightRecallMode: 'explicit',
+          preflightSourceKeys: [],
+          runtimeSourceKeys: [],
+          sqlAccesses: 0,
+          finalized: true,
+        });
+      } finally {
+        await disposeStore(store);
+      }
+    },
+  );
+
+  it('answers an explicit owner-history question with the exact matching message', async () => {
     vi.stubEnv('CHAT_RECALL_ENABLED', 'true');
     vi.stubEnv('GRAPH_RAG_ENABLED', 'true');
     const store = emulatorStore();
@@ -169,17 +190,51 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore ordinary chat c
       expect(
         await firestoreChatSmoke(store, {
           recall: true,
-          request,
+          request: 'What did I tell you about a rainbow?',
           expectRecall: false,
           expectRecallMode: 'explicit',
+          expectedOutcome: 'done',
+          expectedDeliveredTextIncludes: ['The owner observed coastal rainbows by the sea.'],
         }),
       ).toMatchObject({
+        outcome: 'done',
         historySurfaced: false,
         graphSurfaced: false,
         preflightRecallMode: 'explicit',
-        preflightSourceKeys: [],
-        runtimeSourceKeys: [],
         sqlAccesses: 0,
+        skills: false,
+        finalized: true,
+      });
+    } finally {
+      await disposeStore(store);
+    }
+  });
+
+  it('needs attention when a related owner note cannot answer an open-commitment history question', async () => {
+    vi.stubEnv('CHAT_RECALL_ENABLED', 'true');
+    vi.stubEnv('GRAPH_RAG_ENABLED', 'true');
+    const store = emulatorStore();
+    try {
+      expect(
+        await firestoreChatSmoke(store, {
+          recall: true,
+          request: 'What did I tell you about open commitments for rainbow observation notes?',
+          expectRecall: false,
+          expectRecallMode: 'explicit',
+          expectedOutcome: 'needs_attention',
+          expectedMemoryReadFailure: 'incomplete_selection',
+          expectedDeliveredTextIncludes: [
+            'I found candidate owner-authored records, but could not reliably select a directly relevant passage.',
+          ],
+          expectedDeliveredTextExcludes: ['Rainbow observation notes', 'Compare the rainbow notes'],
+        }),
+      ).toMatchObject({
+        outcome: 'needs_attention',
+        historySurfaced: false,
+        graphSurfaced: false,
+        preflightRecallMode: 'explicit',
+        sqlAccesses: 0,
+        skills: false,
         finalized: true,
       });
     } finally {

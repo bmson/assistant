@@ -1014,6 +1014,45 @@ describe('exact historical source projection', () => {
       'candidate owner-authored records',
     );
   });
+  it('marks a same-topic open-commitment question incomplete when history has no commitment evidence', async () => {
+    const request = 'What did I tell you about open commitments for rainbow observation notes?';
+    const historyEvidence: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        result: {
+          matches: [
+            message(
+              'rainbow-history',
+              'The owner observed coastal rainbows by the sea.',
+              'user',
+              'owner',
+            ),
+          ],
+        },
+      },
+    ];
+    const object = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, object: { selections: [] } })
+      .mockResolvedValueOnce({ ok: true, object: { selections: [] } });
+    const result = await selectMemoryReadAnswer({
+      router: { object } as never,
+      taskId: 'rainbow-commitment-history',
+      request,
+      evidence: historyEvidence,
+    });
+
+    expect(object).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      status: 'unavailable',
+      failureReason: 'incomplete_selection',
+      selections: [],
+    });
+    expect(renderMemoryReadAnswer(result, historyEvidence, request)).toContain(
+      'I found candidate owner-authored records, but could not reliably select a directly relevant passage.',
+    );
+  });
   it('requires both speaker sides for an explicit owner-versus-assistant history comparison', async () => {
     const request = 'Separate my correction from your earlier claim about the flight time.';
     let recoveryPrompt = '';
