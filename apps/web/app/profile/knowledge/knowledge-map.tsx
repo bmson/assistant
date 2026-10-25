@@ -3,7 +3,6 @@
 import type { KnowledgeMapSnapshot } from '@assistant/application';
 import { ChevronLeft } from 'lucide-react';
 import { useCallback, useMemo, useState } from 'react';
-import { SourceImpactForget } from '@/app/profile/knowledge/source-impact-forget';
 import {
   clipNodeLabel,
   entityKindLabel,
@@ -11,12 +10,10 @@ import {
   humanizeEntityLabel,
 } from '@/lib/knowledge';
 import { btnSm, focusRing } from '@/lib/ui';
-import { ConnectionTree } from './connection-tree';
 import { knowledgeConnections, layoutFocusRing, layoutKnowledgeMap } from './knowledge-map-model';
 import { MapFocusCanvas } from './map-focus-canvas';
 import { MapOverviewCanvas } from './map-overview-canvas';
 import { MapStartingPoints } from './map-starting-points';
-import { RemoveConnection } from './remove-connection';
 
 /**
  * How the map is being read right now.
@@ -32,9 +29,11 @@ const KIND_LEGEND = ['person', 'organization', 'project', 'place', 'event', 'dat
 export function KnowledgeMap({
   snapshot,
   initialSelectedId,
+  contextHref = '/profile/knowledge?view=map',
 }: {
   snapshot: KnowledgeMapSnapshot;
   initialSelectedId?: string;
+  contextHref?: string;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId ?? null);
   const [mode, setMode] = useState<MapMode>(initialSelectedId ? 'focus' : 'start');
@@ -100,13 +99,25 @@ export function KnowledgeMap({
   if (snapshot.nodes.length === 0) {
     return (
       <div className="rounded-2xl border border-edge bg-sunken/30 px-6 py-16 text-center">
-        <p className="font-medium text-strong">No connected knowledge to map</p>
-        <p className="mt-1 text-sm text-muted">
-          Add or organize source memories to build the first connection.
-        </p>
+        <p className="font-medium text-strong">No connected items in this loaded view</p>
+        <p className="mt-1 text-sm text-muted">Try clearing map filters or opening the Library.</p>
+        <div className="mt-4 flex flex-wrap justify-center gap-2">
+          <a className={btnSm.outline} href="/profile/knowledge?view=map">
+            Clear map filters
+          </a>
+          <a className={btnSm.outline} href="/profile/knowledge?view=library">
+            Open Library
+          </a>
+        </div>
       </div>
     );
   }
+
+  const focusedHref = (entityId: string) => {
+    const url = new URL(contextHref, 'https://assistant.invalid');
+    url.searchParams.set('entity', entityId);
+    return `${url.pathname}${url.search}#knowledge-item`;
+  };
 
   const inspector = selected ? (
     <aside
@@ -126,17 +137,22 @@ export function KnowledgeMap({
       </h2>
       <p className="mt-1 text-sm text-muted">
         {connections.length} {connections.length === 1 ? 'connection' : 'connections'} in this view
-        · {new Set(selectedEdges.map((edge) => edge.sourceMemoryId)).size} sources
+        · {new Set(selectedEdges.map((edge) => edge.sourceMemoryId)).size} saved source notes
       </p>
       <a
         className={`${btnSm.outline} mt-3 min-h-11 max-w-full whitespace-normal text-left`}
-        href={`/profile/knowledge?view=map&entity=${encodeURIComponent(selected.id)}#knowledge-item`}
+        href={focusedHref(selected.id)}
       >
-        Review or edit {humanizeEntityLabel(selected.label)}
+        Open saved item {humanizeEntityLabel(selected.label)}
       </a>
       <div className="mt-5">
         <h3 className="text-sm font-semibold text-strong">Connections and evidence</h3>
-        <div className="mt-2 max-h-[34rem] divide-y divide-edge overflow-y-auto">
+        {connections.length === 0 ? (
+          <p className="mt-2 text-sm text-muted">
+            No connections are loaded for this item in this view.
+          </p>
+        ) : null}
+        <div className="mt-2 divide-y divide-edge">
           {connections.map(({ id, edge, sources, confirmed }) => {
             const otherId = edge.subjectId === selected.id ? edge.objectId : edge.subjectId;
             const other = nodeById.get(otherId);
@@ -145,7 +161,7 @@ export function KnowledgeMap({
                 <p
                   className={`mb-2 text-xs font-medium ${confirmed ? 'text-accent' : 'text-amber-700 dark:text-amber-300'}`}
                 >
-                  {confirmed ? 'Confirmed connection' : 'Needs your review'}
+                  {confirmed ? 'Confirmed connection' : 'Unreviewed connection'}
                 </p>
                 <p className="text-sm font-semibold text-strong">{edge.presentation.sentence}</p>
                 {edge.validFrom || edge.validUntil ? (
@@ -161,12 +177,19 @@ export function KnowledgeMap({
                   >
                     Explore {humanizeEntityLabel(other.label)}
                   </button>
+                ) : !other ? (
+                  <a
+                    href={focusedHref(otherId)}
+                    className="mt-1 inline-block text-sm text-accent underline"
+                  >
+                    Open item outside this loaded view
+                  </a>
                 ) : null}
                 <details className="mt-1 text-sm">
                   <summary
                     className={`disclosure flex cursor-pointer items-center gap-2 rounded py-3 text-muted ${focusRing}`}
                   >
-                    Supporting evidence ({sources.length})
+                    Saved source notes ({sources.length})
                   </summary>
                   {sources.map((source) => (
                     <div key={source.sourceMemoryId} className="mb-3 border-l-2 border-edge pl-3">
@@ -176,9 +199,13 @@ export function KnowledgeMap({
                           : 'Source connection not yet reviewed'}
                       </p>
                       <blockquote className="whitespace-pre-wrap break-words text-xs leading-5 text-muted">
-                        {source.evidenceQuote ?? source.sourceContent}
+                        {source.evidenceQuote ||
+                          source.sourceContent ||
+                          'Source preview unavailable in this view.'}
                       </blockquote>
-                      {source.evidenceQuote && source.evidenceQuote !== source.sourceContent ? (
+                      {source.evidenceQuote &&
+                      source.sourceContent &&
+                      source.evidenceQuote !== source.sourceContent ? (
                         <details className="mt-2 text-xs text-muted">
                           <summary
                             className={`disclosure flex cursor-pointer items-center gap-2 rounded py-2 ${focusRing}`}
@@ -190,13 +217,6 @@ export function KnowledgeMap({
                           </p>
                         </details>
                       ) : null}
-                      <div className="mt-2">
-                        <RemoveConnection
-                          relationId={source.id}
-                          sentence={edge.presentation.sentence}
-                        />
-                        <SourceImpactForget memoryId={source.sourceMemoryId} />
-                      </div>
                     </div>
                   ))}
                 </details>
@@ -214,7 +234,10 @@ export function KnowledgeMap({
           starting points, the item in hand, and the switch between the two
           drawings. Without it the canvas changes under the owner with nothing
           naming what changed. */}
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+      <nav
+        aria-label="Knowledge map navigation"
+        className="mb-3 flex flex-wrap items-center justify-between gap-2"
+      >
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           {mode === 'start' ? (
             <p className="text-sm font-medium text-strong">Knowledge map</p>
@@ -226,6 +249,8 @@ export function KnowledgeMap({
                 onClick={() => {
                   setMode('start');
                   setSelectedId(null);
+                  setRingPage(0);
+                  setView('map');
                 }}
               >
                 <ChevronLeft className="size-4" />
@@ -242,7 +267,7 @@ export function KnowledgeMap({
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {mode !== 'start' ? (
+          {
             <fieldset className="flex flex-wrap items-center gap-2" aria-label="Connection view">
               <button
                 type="button"
@@ -261,7 +286,7 @@ export function KnowledgeMap({
                 List
               </button>
             </fieldset>
-          ) : null}
+          }
           {mode === 'focus' ? (
             <button type="button" className={btnSm.outline} onClick={() => setMode('overview')}>
               Whole map
@@ -273,9 +298,33 @@ export function KnowledgeMap({
             </button>
           ) : null}
         </div>
-      </div>
+      </nav>
 
-      {mode === 'start' ? (
+      {view === 'list' ? (
+        selected ? (
+          <div className="mt-4">{inspector}</div>
+        ) : (
+          <section aria-label="Items in this loaded view">
+            <p className="mb-3 text-sm text-muted">
+              {snapshot.nodes.length} items in this view
+              {snapshot.truncated ? ' · connections are a bounded subset' : ''}
+            </p>
+            <ul className="grid gap-2 sm:grid-cols-2">
+              {snapshot.nodes.map((node) => (
+                <li key={node.id}>
+                  <button
+                    type="button"
+                    onClick={() => open(node.id)}
+                    className={`${btnSm.outline} min-h-11 w-full whitespace-normal break-words text-left`}
+                  >
+                    {humanizeEntityLabel(node.label)} · {entityKindLabel(node.kind)}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )
+      ) : mode === 'start' ? (
         <MapStartingPoints
           snapshot={snapshot}
           onOpen={(id) => {
@@ -285,10 +334,13 @@ export function KnowledgeMap({
           }}
           onShowEverything={() => setMode('overview')}
         />
-      ) : view === 'list' && selected ? (
-        <ConnectionTree key={selected.id} root={selected} />
       ) : (
         <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
+          {selected ? (
+            <h2 className="break-words text-lg font-semibold xl:hidden">
+              {humanizeEntityLabel(selected.label)}
+            </h2>
+          ) : null}
           <div className="min-w-0">
             {mode === 'overview' ? (
               <MapOverviewCanvas

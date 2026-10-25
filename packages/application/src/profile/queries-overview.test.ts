@@ -1,6 +1,10 @@
-import type { ProfileOverviewRepository } from '@assistant/persistence';
-import { describe, expect, it } from 'vitest';
-import { getProfileOverview } from './queries.js';
+import type {
+  ProfileContact,
+  ProfileOverviewRepository,
+  ProfilePeopleReadRepository,
+} from '@assistant/persistence';
+import { describe, expect, it, vi } from 'vitest';
+import { getPersonProfile, getProfileOverview } from './queries.js';
 
 describe('getProfileOverview', () => {
   it('uses a portable read and selects compiled-card fact IDs', async () => {
@@ -47,4 +51,61 @@ describe('getProfileOverview', () => {
     expect(result.cardFactIds).toEqual(['pinned', 'important']);
     expect(result.ownerFacts).toHaveLength(2);
   });
+});
+
+describe('getPersonProfile browse-only composition', () => {
+  function fixture() {
+    const target = {
+      id: 'target',
+      name: 'Annie',
+      aliases: [],
+      emails: [],
+      phones: [],
+      trust: 'known',
+      relationship: 'friend',
+    } as unknown as ProfileContact;
+    const first = { ...target, id: 'first', name: 'Anna', aliases: ['Annie'] };
+    const listContacts = vi.fn(async () => [first, target]);
+    const getFacts = vi.fn(async () => ({ rows: [], total: 17 }));
+    const listOccasions = vi.fn(async () => []);
+    const repository: ProfilePeopleReadRepository = {
+      kind: 'profile-people-read-repository',
+      getContact: async () => target,
+      getOwnerContact: async () => null,
+      getOwnerCard: async () => null,
+      listContacts,
+      getFacts,
+      listOccasions,
+    };
+    return { repository, listContacts, getFacts, listOccasions };
+  }
+
+  it('does not read the full contact directory when editing suggestions are disabled', async () => {
+    const f = fixture();
+    f.listContacts.mockRejectedValue(new Error('editor-only directory must not be read'));
+    const result = await getPersonProfile(f.repository, 'target', 250, {
+      includeEditingSuggestions: false,
+    });
+    expect(f.listContacts).not.toHaveBeenCalled();
+    expect(f.getFacts).toHaveBeenCalledExactlyOnceWith('target', 250);
+    expect(f.listOccasions).toHaveBeenCalledExactlyOnceWith('target');
+    expect(result).toMatchObject({ contact: { id: 'target' }, totalFacts: 17, mergeOptions: [] });
+    expect(result?.duplicate).toBeUndefined();
+  });
+
+  it.each([undefined, true])(
+    'retains default/editor directory, merge and duplicate behavior (%s)',
+    async (includeEditingSuggestions) => {
+      const f = fixture();
+      const result =
+        includeEditingSuggestions === undefined
+          ? await getPersonProfile(f.repository, 'target')
+          : await getPersonProfile(f.repository, 'target', 250, { includeEditingSuggestions });
+      expect(f.listContacts).toHaveBeenCalledTimes(1);
+      expect(f.getFacts).toHaveBeenCalledExactlyOnceWith('target', 250);
+      expect(f.listOccasions).toHaveBeenCalledExactlyOnceWith('target');
+      expect(result?.mergeOptions).toEqual([{ id: 'first', label: 'Anna (friend)' }]);
+      expect(result?.duplicate).toEqual({ targetId: 'first', reason: 'matching name or alias' });
+    },
+  );
 });

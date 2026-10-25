@@ -16,6 +16,7 @@ import { getAgent } from '@assistant/core/chat';
 import { daysUntilOccurrence, listOccasionsForContact } from '@assistant/core/memory/occasions';
 import {
   contacts,
+  createPostgresProfilePeopleReadRepository,
   type Db,
   knowledgeGraphEntities,
   knowledgeGraphRelations,
@@ -264,10 +265,10 @@ function presentEdge(edge: KnowledgeGraphNeighborEdge, selfLabel: string) {
 export async function getPersonDossier(
   db: Db,
   contactId: string,
-  opts: { factLimit?: number; now?: Date } = {},
+  opts: { factLimit?: number; now?: Date; includeEditingSuggestions?: boolean } = {},
 ): Promise<PersonDossier | null> {
   const now = opts.now ?? new Date();
-  const profile = await getPersonProfile(db, contactId, opts.factLimit);
+  const profile = await getPersonProfile(db, contactId, opts.factLimit, opts);
   if (!profile) return null;
 
   const agent = await getAgent(db);
@@ -363,7 +364,12 @@ export async function getPersonDossier(
     else connections.push(connection);
   }
 
-  const occasionRows = await listOccasionsForContact(db, contactId);
+  const occasionRows =
+    opts.includeEditingSuggestions === false
+      ? await createPostgresProfilePeopleReadRepository(db, agent.id, undefined, {
+          browseOnly: true,
+        }).listOccasions(contactId)
+      : await listOccasionsForContact(db, contactId);
   const birthday = toBirthday(occasionRows, now);
   const upcomingOccasion = nextOccasionWithinLead(occasionRows, now);
 
@@ -466,9 +472,20 @@ export function nextOccasionWithinLead(
  * contacts that is 2000 round trips for one page, so every read below is
  * grouped and stitched in memory instead.
  */
+// These bound returned rows, not the database work needed to compute them.
+export const PEOPLE_BROWSE_OCCASION_MAX_ROWS = 1_000;
+export const PEOPLE_BROWSE_EDGE_MAX_ROWS = 10_000;
+export class PeopleBrowseReadLimitError extends Error {
+  readonly code = 'PEOPLE_BROWSE_READ_LIMIT';
+  constructor() {
+    super('People data is unavailable because the bounded output limit was reached');
+    this.name = 'PeopleBrowseReadLimitError';
+  }
+}
+
 export async function listPeopleDirectory(
   db: Db,
-  opts: { now?: Date } = {},
+  opts: { now?: Date; browseOnly?: boolean } = {},
 ): Promise<PersonSummary[]> {
   const now = opts.now ?? new Date();
   const agent = await getAgent(db);
@@ -478,7 +495,7 @@ export async function listPeopleDirectory(
     .where(ne(contacts.trust, 'owner'))
     .orderBy(contacts.name, contacts.id)
     .limit(DIRECTORY_LIMIT);
-  return summarizePeopleDirectory(db, agent.id, people, now);
+  return summarizePeopleDirectory(db, agent.id, people, now, opts.browseOnly);
 }
 
 /** One bounded, resumable directory page for the configured owner. */
@@ -527,10 +544,21 @@ async function summarizePeopleDirectory(
   agentId: string,
   people: Array<typeof contacts.$inferSelect>,
   now: Date,
+  browseOnly = false,
 ): Promise<PersonSummary[]> {
   if (people.length === 0) return [];
   const ids = people.map((person) => person.id);
 
+  const directoryOccasions = db
+    .select()
+    .from(occasionsTable)
+    .where(
+      and(
+        eq(occasionsTable.agentId, agentId),
+        inArray(occasionsTable.contactId, ids),
+        eq(occasionsTable.quarantined, false),
+      ),
+    );
   const [factRows, contactRows, occasionRows, edgeRows] = await Promise.all([
     db
       .select({ contactId: memories.subjectContactId, value: count() })
@@ -551,18 +579,13 @@ async function summarizePeopleDirectory(
       .from(memories)
       .where(and(experienceMemory(), inArray(memories.subjectContactId, ids)))
       .groupBy(memories.subjectContactId),
-    db
-      .select()
-      .from(occasionsTable)
-      .where(
-        and(
-          eq(occasionsTable.agentId, agentId),
-          inArray(occasionsTable.contactId, ids),
-          eq(occasionsTable.quarantined, false),
-        ),
-      ),
-    listDirectoryEdges(db, agentId, ids),
+    browseOnly ? directoryOccasions.limit(PEOPLE_BROWSE_OCCASION_MAX_ROWS + 1) : directoryOccasions,
+    listDirectoryEdges(db, agentId, ids, browseOnly),
   ]);
+
+  if (browseOnly && occasionRows.length > PEOPLE_BROWSE_OCCASION_MAX_ROWS) {
+    throw new PeopleBrowseReadLimitError();
+  }
 
   const factCounts = new Map(factRows.map((row) => [row.contactId, Number(row.value)]));
   const lastContact = new Map(
@@ -611,10 +634,11 @@ async function listDirectoryEdges(
   db: Db,
   agentId: string,
   contactIds: string[],
+  browseOnly = false,
 ): Promise<Map<string, DirectoryEdges>> {
   const self = alias(knowledgeGraphEntities, 'directory_self');
   const other = alias(knowledgeGraphEntities, 'directory_other');
-  const rows = await db
+  const query = db
     .select({
       contactId: self.contactId,
       predicate: knowledgeGraphRelations.predicate,
@@ -644,6 +668,10 @@ async function listDirectoryEdges(
     .innerJoin(knowledgeGraphSources, eq(knowledgeGraphSources.memoryId, memories.id))
     .where(and(activeKnowledgeGraphWhere(agentId), inArray(self.contactId, contactIds)));
 
+  const rows = await (browseOnly ? query.limit(PEOPLE_BROWSE_EDGE_MAX_ROWS + 1) : query);
+  if (browseOnly && rows.length > PEOPLE_BROWSE_EDGE_MAX_ROWS) {
+    throw new PeopleBrowseReadLimitError();
+  }
   const byContact = new Map<string, DirectoryEdges>();
   for (const row of rows) {
     if (!row.contactId) continue;

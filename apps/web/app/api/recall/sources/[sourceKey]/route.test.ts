@@ -293,15 +293,53 @@ describe('production proxy and authenticated recall source route', () => {
     expect(response.status).toBe(503);
     expect(response.headers.get('x-middleware-next')).toBeNull();
   });
-  it.each(['/profile', '/people', '/profile/knowledge', '/profile/about'])(
-    'keeps unrelated browser exposure closed: %s',
-    (path) => {
-      expect(proxy(new NextRequest(`https://example.com${path}`)).status).toBe(307);
-      expect(proxy(new NextRequest(`https://example.com${path}`, { method: 'POST' })).status).toBe(
-        410,
+  it.each([
+    '/profile',
+    '/people',
+    '/profile/knowledge',
+    '/people/123e4567-e89b-42d3-a456-426614174000',
+  ])('admits exact owner-authenticated browse pages without write authority: %s', (path) => {
+    for (const method of ['GET', 'HEAD']) {
+      const response = proxy(new NextRequest(`https://example.com${path}?q=Ada`, { method }));
+      expect(response.status).toBe(200);
+      expect(response.headers.get('x-middleware-next')).toBe('1');
+      expect(response.headers.get('location')).toBeNull();
+    }
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
+      const response = proxy(
+        new NextRequest(`https://example.com${path}`, {
+          method,
+          headers: { 'next-action': 'synthetic-known-write-action' },
+        }),
       );
-    },
-  );
+      expect(response.status).toBe(405);
+      expect(response.headers.get('x-middleware-next')).toBeNull();
+    }
+    // Proxy admission does not invoke recall ports or replace page-owner auth.
+    expect(mocks.auth).not.toHaveBeenCalled();
+    expect(mocks.getRecallSurfacingPorts).not.toHaveBeenCalled();
+  });
+  it.each([
+    '/profile/about',
+    '/profile/memories',
+    '/profile/voice',
+    '/profile/data',
+    '/profile/knowledge/extra',
+    '/people/not-a-uuid',
+    '/people/123e4567-e89b-42d3-a456-426614174000/extra',
+  ])('keeps retired pages and unapproved browse descendants closed: %s', (path) => {
+    for (const method of ['GET', 'HEAD']) {
+      const response = proxy(new NextRequest(`https://example.com${path}`, { method }));
+      expect(response.status).toBe(307);
+      expect(response.headers.get('x-middleware-next')).toBeNull();
+      expect(response.headers.get('location')).toBe('https://example.com/settings');
+    }
+    expect(proxy(new NextRequest(`https://example.com${path}`, { method: 'POST' })).status).toBe(
+      410,
+    );
+    expect(mocks.auth).not.toHaveBeenCalled();
+    expect(mocks.getRecallSurfacingPorts).not.toHaveBeenCalled();
+  });
   it('preserves existing health, audit and mobile read admission', () => {
     for (const path of ['/api/health', '/audit', '/api/mobile/v1/people']) {
       expect(

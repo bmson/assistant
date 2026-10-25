@@ -1,4 +1,3 @@
-import { PREDICATE_VOCABULARY } from '@assistant/application';
 import { getPersonDossier, type PersonDossier } from '@assistant/application/people';
 import {
   eventDateLabel,
@@ -9,20 +8,16 @@ import type { MemorySnapshot } from '@assistant/application/profile';
 import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import { createInstallationStore } from '@assistant/firestore';
 import { Handshake, MapPin, Sparkles } from 'lucide-react';
+import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { MergeControl } from '@/app/people/merge-control';
-import { OccasionsPanel } from '@/app/people/occasions-panel';
 import { PersonAvatar } from '@/app/people/person-avatar';
-import { DeletePerson, PersonControls } from '@/app/people/person-controls';
 import { ConnectionList, RelationshipList } from '@/app/people/relationship-list';
-import { AddFact } from '@/app/profile/add-fact';
-import { FactRow, type FactView } from '@/app/profile/fact-row';
-import { AddKnowledgeRelation } from '@/app/profile/knowledge/add-relation';
-import { ConnectionTree } from '@/app/profile/knowledge/connection-tree';
+import { BrowseFact } from '@/app/profile/browse-fact';
+import type { FactView } from '@/app/profile/fact-row';
 import { requireOwner } from '@/auth';
 import { getFirestorePersonDossier } from '@/lib/firestore-people';
 import { relativeTime } from '@/lib/format';
-import { getDb } from '@/lib/server';
+import { withPostgresMemoryBrowseRead } from '@/lib/server';
 import {
   Badge,
   EmptyState,
@@ -33,7 +28,6 @@ import {
   PageShell,
   Panel,
   SectionHeading,
-  summaryClass,
 } from '@/lib/ui';
 
 export const dynamic = 'force-dynamic';
@@ -74,7 +68,13 @@ function occasionNoun(kind: string, label: string): string {
 async function loadPersonDossier(id: string, now: Date): Promise<PersonDossier | null> {
   const config = loadConfig();
   if (config.PERSISTENCE_DRIVER !== 'firestore')
-    return getPersonDossier(getDb(), id, { factLimit: FACT_LIMIT, now });
+    return withPostgresMemoryBrowseRead((db) =>
+      getPersonDossier(db, id, {
+        factLimit: FACT_LIMIT,
+        now,
+        includeEditingSuggestions: false,
+      }),
+    );
   const problems = validateAgentPersistenceConfig(config);
   if (problems.length) throw new Error(problems.join('; '));
   const store = createInstallationStore({
@@ -86,37 +86,60 @@ async function loadPersonDossier(id: string, now: Date): Promise<PersonDossier |
     return await getFirestorePersonDossier(store, config.FIRESTORE_AGENT_ID, id, {
       factLimit: FACT_LIMIT,
       now,
+      includeEditingSuggestions: false,
     });
   } finally {
     await store.db.terminate();
   }
 }
 
-export default async function PersonPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function PersonPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams?: Promise<{ q?: string }>;
+}) {
   await requireOwner();
   const { id } = await params;
   if (!UUID_RE.test(id)) notFound();
 
+  const rawQuery = (await searchParams)?.q;
+  const query = (typeof rawQuery === 'string' ? rawQuery : '').trim().slice(0, 120);
+  const backHref = `/people${query ? `?q=${encodeURIComponent(query)}` : ''}`;
   const now = new Date();
-  const dossier = await loadPersonDossier(id, now);
+  let dossier: PersonDossier | null;
+  try {
+    dossier = await loadPersonDossier(id, now);
+  } catch {
+    return (
+      <PageShell size="reading">
+        <PageHeader back={{ href: backHref, label: 'People' }} title="Person unavailable" />
+        <p role="alert" className="mt-4 text-muted">
+          Could not load this view. Your search is preserved.
+        </p>
+        <Link
+          href={`/people/${id}${query ? `?q=${encodeURIComponent(query)}` : ''}`}
+          className="mt-4 inline-block underline"
+        >
+          Try again
+        </Link>
+      </PageShell>
+    );
+  }
   if (!dossier) notFound();
 
   const { profile, location, origins, relations, connections, events } = dossier;
-  const { contact, facts, totalFacts, occasions, occasionSuggestions, mergeOptions, duplicate } =
-    profile;
+  const { contact, facts, totalFacts, occasions } = profile;
   const lastContact = lastContactLabel(dossier.lastContactAt, now);
   const groupLabel = dossier.group === 'other' ? null : PERSON_GROUP_LABELS[dossier.group];
 
   return (
     <PageShell size="reading">
       <PageHeader
-        back={{ href: '/people', label: 'People' }}
+        back={{ href: backHref, label: 'People' }}
         title={contact.name}
-        intro={
-          contact.relationship
-            ? undefined
-            : 'No relationship recorded yet. Add one below and the assistant will treat them as a known contact.'
-        }
+        intro={contact.relationship ? undefined : 'No relationship recorded yet.'}
       />
 
       {/* The identity line: who they are to you, where they are, when you last
@@ -144,7 +167,7 @@ export default async function PersonPage({ params }: { params: Promise<{ id: str
               <Badge
                 tone="amber"
                 size="xs"
-                title="The assistant doesn't know who this is yet, so content from them is treated as untrusted. Saving a relationship marks them as known."
+                title="Content from this person is treated as untrusted."
               >
                 Unverified
               </Badge>
@@ -153,6 +176,11 @@ export default async function PersonPage({ params }: { params: Promise<{ id: str
         </div>
       </div>
 
+      {contact.aliases.length ? (
+        <p className="mt-3 break-words text-sm text-muted">
+          Also known as {contact.aliases.join(', ')}
+        </p>
+      ) : null}
       {origins.length > 0 ? (
         <Panel className="mt-6">
           <InfoGrid columns={1}>
@@ -172,23 +200,31 @@ export default async function PersonPage({ params }: { params: Promise<{ id: str
         </Panel>
       ) : null}
 
-      <OccasionsPanel
-        contactId={contact.id}
-        personName={contact.name}
-        occasions={occasions}
-        suggestions={occasionSuggestions}
-      />
-
-      {dossier.entityId ? (
-        <section className="mt-8">
-          <SectionHeading title="Explore connections" />
-          <div className="mt-3">
-            <ConnectionTree
-              key={`${dossier.entityId}:${relations.map((row) => row.id).join(',')}:${connections.map((row) => row.id).join(',')}`}
-              root={{ id: dossier.entityId, label: contact.name, kind: 'person' }}
-            />
-          </div>
+      {occasions.length ? (
+        <section id="important-dates" className="mt-6">
+          <SectionHeading title="Saved dates" />
+          <ul className="mt-3 space-y-2">
+            {occasions.map((occasion) => (
+              <li key={occasion.id} className="rounded-xl bg-raised p-3 text-sm">
+                <span className="font-medium">{occasion.label || occasion.kind}</span> ·{' '}
+                {occasion.month}/{occasion.day}
+                {occasion.year ? `/${occasion.year}` : ''}
+                {occasion.quarantined ? ' · Unreviewed' : ''}
+                {occasion.notes ? <p className="mt-1 text-muted">{occasion.notes}</p> : null}
+              </li>
+            ))}
+          </ul>
         </section>
+      ) : null}
+      {dossier.entityId ? (
+        <p className="mt-6">
+          <Link
+            className="text-sm text-accent underline"
+            href={`/profile/knowledge?view=map&entity=${encodeURIComponent(dossier.entityId)}`}
+          >
+            Browse this person’s connections
+          </Link>
+        </p>
       ) : null}
 
       {/* Relationships to other people — the section this page exists for, so
@@ -198,26 +234,14 @@ export default async function PersonPage({ params }: { params: Promise<{ id: str
       <section className="mt-8">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <SectionHeading title="Relationships" count={relations.length} />
-          {/* Always offered, including for a contact the graph has never heard
-              of: `dossier.entity` is null until a fact about them has been
-              extracted, so gating on it hid this button on exactly the page a
-              just-added person lands on — while the empty state below told them
-              to use it. With no entity yet the name is pre-typed instead of
-              prefilled, and saving creates the entity against this contact. */}
-          <AddKnowledgeRelation
-            selected={dossier.entity}
-            subjectLabel={contact.name}
-            subjectContactId={contact.id}
-            vocabulary={PREDICATE_VOCABULARY}
-          />
         </div>
         {relations.length === 0 ? (
           <EmptyState>
             No connections to other people are recorded yet. They are picked up from what you tell
-            the assistant, or you can add one above.
+            the assistant.
           </EmptyState>
         ) : (
-          <RelationshipList relations={relations} now={now} />
+          <RelationshipList relations={relations} now={now} peopleQuery={query} />
         )}
       </section>
 
@@ -286,9 +310,7 @@ export default async function PersonPage({ params }: { params: Promise<{ id: str
                 ? 'is tomorrow'
                 : `is in ${dossier.upcomingOccasion.daysUntil} days`}
           </p>
-          <p className="mt-0.5 text-xs text-muted">
-            Reminder · the assistant will raise it in your morning brief.
-          </p>
+          <p className="mt-0.5 text-xs text-muted">Saved upcoming occasion.</p>
         </section>
       ) : null}
 
@@ -296,7 +318,6 @@ export default async function PersonPage({ params }: { params: Promise<{ id: str
       <section className="mt-8">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <SectionHeading title="Saved facts" count={totalFacts} />
-          <AddFact subjectContactId={contact.id} subjectLabel={contact.name} />
         </div>
         {totalFacts > FACT_LIMIT ? (
           <p className="mt-1 text-xs text-muted">
@@ -308,44 +329,11 @@ export default async function PersonPage({ params }: { params: Promise<{ id: str
         ) : (
           <div className="mt-3 flex flex-col gap-2">
             {facts.map((fact) => (
-              <FactRow key={fact.id} fact={toFactView(fact, now, contact.name)} />
+              <BrowseFact key={fact.id} fact={toFactView(fact, now, contact.name)} />
             ))}
           </div>
         )}
       </section>
-
-      {/* Editing lives below the reading material, not above it: this page is
-          about the person first and a record to maintain second. */}
-      <Panel className="mt-8">
-        <SectionHeading title={`Manage ${contact.name}`} />
-        <p className="mt-2 max-w-[62ch] text-sm leading-5 text-muted">
-          How the assistant recognises {contact.name}. Adding a relationship marks them as known, so
-          their content is no longer treated as unverified.
-        </p>
-        <PersonControls
-          contactId={contact.id}
-          initialName={contact.name}
-          initialAliases={contact.aliases}
-          initialRelationship={contact.relationship}
-        />
-        {/* Merge and delete stay behind a disclosure — not to tidy them away,
-            but because they are the two controls on this page you cannot undo,
-            and they should not sit one mis-click from the name field. */}
-        <details className="mt-6 border-t border-edge pt-4">
-          <summary className={summaryClass}>
-            Merge or remove
-            <span className="text-xs font-normal text-muted">Irreversible</span>
-          </summary>
-          <p className="mt-2 max-w-[62ch] text-xs text-muted">
-            Merging moves every fact onto the person you pick and retires this entry. Deleting
-            removes {contact.name} and their facts for good.
-          </p>
-          <div className="mt-3 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
-            <MergeControl contactId={contact.id} options={mergeOptions} suggested={duplicate} />
-            <DeletePerson contactId={contact.id} name={contact.name} returnTo="/people" />
-          </div>
-        </details>
-      </Panel>
     </PageShell>
   );
 }

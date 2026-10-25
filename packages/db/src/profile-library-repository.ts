@@ -16,6 +16,16 @@ import {
 import type { Db } from './client.js';
 import { contacts, knowledgeGraphSources, memories } from './schema.js';
 
+// Output/transport bound only: PostgreSQL still performs the grouped query.
+export const PROFILE_LIBRARY_FILTER_MAX_ROWS = 1_000;
+export class PostgresProfileLibraryFilterLimitError extends Error {
+  readonly code = 'POSTGRES_PROFILE_LIBRARY_FILTER_LIMIT';
+  constructor() {
+    super('Library filters are unavailable because the bounded output limit was reached');
+    this.name = 'PostgresProfileLibraryFilterLimitError';
+  }
+}
+
 function activeConnections(agentId: string, extractionVersion: number): SQL<number> {
   return sql<number>`(
     SELECT count(*)::int
@@ -47,7 +57,8 @@ export function createPostgresProfileLibraryRepository(db: Db): ProfileLibraryRe
           .innerJoin(contacts, eq(memories.subjectContactId, contacts.id))
           .where(and(eq(memories.agentId, agentId), eq(memories.category, 'knowledge')))
           .groupBy(contacts.id, contacts.name, contacts.trust)
-          .orderBy(asc(contacts.name), asc(contacts.id)),
+          .orderBy(asc(contacts.name), asc(contacts.id))
+          .limit(PROFILE_LIBRARY_FILTER_MAX_ROWS + 1),
         db
           .select({ source: memories.source })
           .from(memories)
@@ -59,8 +70,15 @@ export function createPostgresProfileLibraryRepository(db: Db): ProfileLibraryRe
             ),
           )
           .groupBy(memories.source)
-          .orderBy(asc(memories.source)),
+          .orderBy(asc(memories.source))
+          .limit(PROFILE_LIBRARY_FILTER_MAX_ROWS + 1),
       ]);
+      if (
+        subjectRows.length > PROFILE_LIBRARY_FILTER_MAX_ROWS ||
+        sourceRows.length > PROFILE_LIBRARY_FILTER_MAX_ROWS
+      ) {
+        throw new PostgresProfileLibraryFilterLimitError();
+      }
       return {
         subjects: subjectRows,
         sources: sourceRows.flatMap((row) => (row.source ? [row.source] : [])),
