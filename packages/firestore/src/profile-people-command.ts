@@ -1,6 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import type { ProfilePeopleCommandRepository, Records } from '@assistant/persistence';
+import {
+  normalizeContactAliases,
+  normalizeContactName,
+  type OwnerEditorApply,
+  type OwnerEditorClaim,
+  type OwnerEditorReply,
+  ownerEditorCommitRevision,
+  ownerEditorSnapshotRevision,
+} from '@assistant/persistence';
 import type { DocumentSnapshot, Transaction } from '@google-cloud/firestore';
+import { assertConfiguredOwner } from './knowledge-graph-read.js';
+import {
+  beginFirestoreOwnerEditorWrite,
+  completeFirestoreOwnerEditorWrite,
+} from './owner-editor-repository.js';
 import { privacyErasureIsActive } from './privacy-erasure.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
@@ -145,6 +159,156 @@ export class FirestoreProfilePeopleCommandRepository implements ProfilePeopleCom
         aliases: [...normalizedAliases.values()],
         updatedAt: this.store.now(),
       });
+    });
+  }
+
+  async editorContact(contactId: string) {
+    await assertConfiguredOwner(this.store, this.configuredAgentId);
+    const snapshot = await this.store.doc('contacts', contactId).get();
+    if (!snapshot.exists) return null;
+    const contact = readContact(snapshot);
+    const ownerId = snapshot.get('agentId');
+    if ((ownerId !== undefined && ownerId !== this.configuredAgentId) || !snapshot.updateTime)
+      return null;
+    return { ...contact, revision: this.editorContactRevision(snapshot) };
+  }
+
+  private editorContactRevision(snapshot: DocumentSnapshot) {
+    if (!snapshot.updateTime) throw new Error('Person update time is unavailable');
+    return ownerEditorSnapshotRevision({
+      driver: 'firestore',
+      ownerId: this.configuredAgentId,
+      id: snapshot.id,
+      updateTime: {
+        seconds: snapshot.updateTime.seconds,
+        nanoseconds: snapshot.updateTime.nanoseconds,
+      },
+    });
+  }
+
+  async commitEditor(
+    claim: OwnerEditorClaim,
+    prepared: {
+      request: Extract<OwnerEditorApply, { command: 'create_person' | 'update_person_identity' }>;
+      name: string;
+      aliases: string[];
+    },
+    now: Date,
+  ): Promise<OwnerEditorReply> {
+    return this.store.db.runTransaction(async (tx) => {
+      const admitted = await beginFirestoreOwnerEditorWrite(this.store, tx, claim, now);
+      if (admitted.kind === 'reply') return admitted.reply;
+      if (claim.scope.ownerId !== this.configuredAgentId) throw new Error('Owner changed');
+      const request = prepared.request;
+      if (
+        claim.scope.command !== request.command ||
+        claim.scope.operationId !== request.operationId ||
+        (request.command === 'update_person_identity'
+          ? claim.scope.targetId !== request.contactId
+          : claim.scope.targetId !== null)
+      )
+        throw new Error('Prepared person operation does not match its claim');
+      const name = normalizeContactName(prepared.name);
+      const logicalId =
+        request.command === 'update_person_identity' ? request.contactId : randomUUID();
+      const ref = this.store.doc('contacts', logicalId);
+      const currentSnapshot =
+        request.command === 'update_person_identity' ? await tx.get(ref) : null;
+      const current = currentSnapshot?.exists ? readContact(currentSnapshot) : null;
+      if (
+        request.command === 'update_person_identity' &&
+        (!currentSnapshot ||
+          !current ||
+          current.trust === 'owner' ||
+          (currentSnapshot?.get('agentId') !== undefined &&
+            currentSnapshot.get('agentId') !== this.configuredAgentId) ||
+          this.editorContactRevision(currentSnapshot) !== request.expectedContactRevision)
+      )
+        return completeFirestoreOwnerEditorWrite(
+          this.store,
+          tx,
+          admitted,
+          { outcome: 'conflict', reason: 'contact_changed' },
+          now,
+        );
+      const existing = await tx.get(
+        this.store.collection('contacts').limit(CONTACT_SCAN_LIMIT + 1),
+      );
+      if (existing.size > CONTACT_SCAN_LIMIT)
+        return completeFirestoreOwnerEditorWrite(
+          this.store,
+          tx,
+          admitted,
+          { outcome: 'unavailable', reason: 'contact_read_limit' },
+          now,
+        );
+      for (const snapshot of existing.docs) {
+        const ownerId = snapshot.get('agentId');
+        if (ownerId !== undefined && ownerId !== this.configuredAgentId) continue;
+        const row = readContact(snapshot);
+        if (row.id !== current?.id && row.name.toLocaleLowerCase() === name.toLocaleLowerCase())
+          return completeFirestoreOwnerEditorWrite(
+            this.store,
+            tx,
+            admitted,
+            { outcome: 'conflict', reason: 'duplicate_contact' },
+            now,
+          );
+      }
+      const aliases = normalizeContactAliases(
+        [
+          ...prepared.aliases,
+          ...(current && current.name.toLocaleLowerCase() !== name.toLocaleLowerCase()
+            ? [current.name]
+            : []),
+        ],
+        name,
+      );
+      if (
+        current &&
+        current.name === name &&
+        JSON.stringify(current.aliases) === JSON.stringify(aliases)
+      ) {
+        const ids = { contactId: current.id };
+        return completeFirestoreOwnerEditorWrite(
+          this.store,
+          tx,
+          admitted,
+          { outcome: 'unchanged', ids, revision: ownerEditorCommitRevision(claim, ids) },
+          now,
+        );
+      }
+      if (current) tx.update(ref, { name, aliases, updatedAt: now });
+      else
+        tx.create(
+          ref,
+          encodeRecord({
+            id: logicalId,
+            agentId: this.configuredAgentId,
+            name,
+            aliases,
+            relationship: '',
+            trust: 'known',
+            emails: [],
+            phones: [],
+            notes: '',
+            createdAt: now,
+            updatedAt: now,
+          }),
+        );
+      const ids = { contactId: logicalId };
+      return completeFirestoreOwnerEditorWrite(
+        this.store,
+        tx,
+        admitted,
+        {
+          outcome: 'saved',
+          ids,
+          revision: ownerEditorCommitRevision(claim, ids),
+          refreshPending: true,
+        },
+        now,
+      );
     });
   }
 }

@@ -1,4 +1,10 @@
-import { type EmbeddingSpace, type Records, snapshotEmbeddingSpace } from '@assistant/persistence';
+import {
+  type EmbeddingSpace,
+  type OwnerEditorTiming,
+  type Records,
+  snapshotEmbeddingSpace,
+} from '@assistant/persistence';
+import { predicateSpec } from '@assistant/persistence/predicate-vocabulary';
 import type { DocumentSnapshot, QueryDocumentSnapshot } from '@google-cloud/firestore';
 import { graphSourceEligible } from './graph-source-eligibility.js';
 import { decodeMemoryRecord } from './memory-record.js';
@@ -19,6 +25,7 @@ export interface FirestorePersonGraphEdge {
   reviewStatus: 'confirmed' | 'unreviewed';
   validFrom: string | null;
   validUntil: string | null;
+  assertionTiming?: OwnerEditorTiming | null;
   other: {
     id: string;
     label: string;
@@ -138,6 +145,18 @@ function activeEdge(
     reviewStatus: row.reviewStatus === 'confirmed' ? 'confirmed' : 'unreviewed',
     validFrom: row.validFrom,
     validUntil: row.validUntil,
+    assertionTiming:
+      predicateSpec(row.predicate)?.group === 'family' &&
+      subject.kind === 'person' &&
+      object.kind === 'person' &&
+      row.assertion != null &&
+      row.assertion.polarity === 'positive' &&
+      row.assertion.modality === 'asserted' &&
+      (row.assertion.tense === 'unspecified' ||
+        row.assertion.tense === 'present' ||
+        row.assertion.tense === 'past')
+        ? row.assertion.tense
+        : null,
     other: {
       id: other.id,
       label: other.preferredLabel ?? other.label,

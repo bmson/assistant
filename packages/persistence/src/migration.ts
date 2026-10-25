@@ -281,6 +281,18 @@ export type MigrationRecord = {
   checksum: string;
 };
 
+export type MigrationRuntimeExclusionsV1 = {
+  version: 1;
+  tables: ['owner_editor_operations'];
+  maintenanceCursorPrefixes: ['owner-editor-epoch:'];
+};
+
+export const OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1: MigrationRuntimeExclusionsV1 = {
+  version: 1,
+  tables: ['owner_editor_operations'],
+  maintenanceCursorPrefixes: ['owner-editor-epoch:'],
+};
+
 export type MigrationManifest = {
   format: 'assistant-workspace-migration';
   /**
@@ -303,7 +315,12 @@ export type MigrationManifest = {
     MigrationTable,
     { collection: MigrationCollection; count: number; checksum: string }
   >;
-  coverage: { complete: boolean; supportedTables: MigrationTable[]; omittedTables: string[] };
+  coverage: {
+    complete: boolean;
+    supportedTables: MigrationTable[];
+    omittedTables: string[];
+    runtimeExclusions?: MigrationRuntimeExclusionsV1;
+  };
   recordCount: number;
   bundleChecksum: string;
   unsupportedTables: string[];
@@ -316,6 +333,65 @@ export type MigrationBundle = {
 
 export function tableDefinition(table: string) {
   return MIGRATION_TABLES.find((definition) => definition.table === table);
+}
+
+export function isOwnerEditorRuntimeCursorName(name: unknown): name is string {
+  return typeof name === 'string' && name.startsWith('owner-editor-epoch:');
+}
+
+export function migrationCoverageOmittedTables(
+  sourceTables: readonly string[],
+  selectedTables: readonly string[],
+  runtimeExclusions?: MigrationRuntimeExclusionsV1,
+): string[] {
+  const selected = new Set(selectedTables);
+  const excluded = new Set<string>(runtimeExclusions?.tables ?? []);
+  return sourceTables.filter((table) => !selected.has(table) && !excluded.has(table));
+}
+
+export function migrationCoverageIsComplete(
+  sourceTables: readonly string[],
+  selectedTables: readonly string[],
+  runtimeExclusions?: MigrationRuntimeExclusionsV1,
+): boolean {
+  const selected = new Set(selectedTables);
+  const source = new Set(sourceTables);
+  return (
+    selected.size === MIGRATION_TABLES.length &&
+    MIGRATION_TABLES.every(({ table }) => selected.has(table)) &&
+    MIGRATION_TABLES.every(({ table }) => source.has(table)) &&
+    migrationCoverageOmittedTables(sourceTables, selectedTables, runtimeExclusions).length === 0
+  );
+}
+
+/** New v3 bundles bind the explicit exclusion declaration; older bundles retain their checksum. */
+export function migrationBundleChecksum(
+  records: readonly MigrationRecord[],
+  version: MigrationManifest['formatVersion'],
+  runtimeExclusions?: MigrationRuntimeExclusionsV1,
+): string {
+  return runtimeExclusions
+    ? checksumForMigrationVersion({ records, runtimeExclusions }, version)
+    : checksumForMigrationVersion(records, version);
+}
+
+function validateRuntimeExclusions(value: unknown): value is MigrationRuntimeExclusionsV1 {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const exclusion = value as Record<string, unknown>;
+  const keys = Object.keys(exclusion).sort();
+  return (
+    keys.length === 3 &&
+    keys[0] === 'maintenanceCursorPrefixes' &&
+    keys[1] === 'tables' &&
+    keys[2] === 'version' &&
+    exclusion.version === 1 &&
+    Array.isArray(exclusion.tables) &&
+    exclusion.tables.length === 1 &&
+    exclusion.tables[0] === 'owner_editor_operations' &&
+    Array.isArray(exclusion.maintenanceCursorPrefixes) &&
+    exclusion.maintenanceCursorPrefixes.length === 1 &&
+    exclusion.maintenanceCursorPrefixes[0] === 'owner-editor-epoch:'
+  );
 }
 
 /** Stable Firestore document IDs for provenance junctions with composite keys. */
@@ -558,6 +634,17 @@ export function validateMigrationBundle(
     manifest.unsupportedTables.length !== 0
   )
     throw new Error('Invalid migration coverage metadata');
+  if (
+    manifest.coverage.runtimeExclusions !== undefined &&
+    !validateRuntimeExclusions(manifest.coverage.runtimeExclusions)
+  )
+    throw new Error('Invalid migration runtime exclusions');
+  const excludedRuntimeTables = new Set<string>(manifest.coverage.runtimeExclusions?.tables ?? []);
+  if (
+    manifest.coverage.runtimeExclusions &&
+    manifest.coverage.omittedTables.some((table) => excludedRuntimeTables.has(table))
+  )
+    throw new Error('Runtime-excluded tables cannot also be omitted');
   if (manifest.coverage.complete && manifest.coverage.omittedTables.length)
     throw new Error('Complete migration coverage cannot omit tables');
   if (
@@ -600,9 +687,17 @@ export function validateMigrationBundle(
   if (bundle.manifest.recordCount !== sorted.length)
     throw new Error('Migration record count mismatch');
   const seen = new Set<string>();
-  if (versionChecksum(sorted) !== bundle.manifest.bundleChecksum)
+  if (
+    migrationBundleChecksum(sorted, manifest.formatVersion, manifest.coverage.runtimeExclusions) !==
+    bundle.manifest.bundleChecksum
+  )
     throw new Error('Migration bundle checksum mismatch');
   for (const record of sorted) {
+    if (
+      (record.table as string) === 'owner_editor_operations' ||
+      (record.table === 'maintenance_cursors' && isOwnerEditorRuntimeCursorName(record.data.name))
+    )
+      throw new Error('Owner editor runtime metadata cannot be imported');
     const key = `${record.table}:${record.id}`;
     if (seen.has(key)) throw new Error(`Duplicate migration record: ${key}`);
     seen.add(key);

@@ -35,3 +35,17 @@ export interface ProfilePeopleRemovalRepository {
   /** Move occasions, union identity fields into the target, then remove the source. */
   finishMerge(sourceId: string, targetId: string): Promise<{ movedOccasions: number }>;
 }
+
+/** Complete bounded editor read projection; issuance stays in the authenticated composition. */
+export interface OwnerEditorPeopleReadSnapshot {
+  ownerId: string;
+  people: import('./owner-editor.js').OwnerEditorPersonOption[];
+  identity: {
+    contactId: string;
+    name: string;
+    aliases: string[];
+    trust: string;
+    revision: string;
+  } | null;
+  corrections: import('./owner-editor.js').OwnerEditorCorrectionEligibility[];
+}

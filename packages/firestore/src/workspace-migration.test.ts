@@ -23,7 +23,7 @@ import { FirestoreCardFormAdmissionRepository } from './card-form-admission.js';
 import { FirestoreMemoryEmbeddingRefreshRepository } from './memory-embedding-refresh.js';
 import { FirestoreProfileMemoryMaintenance } from './profile-memory-maintenance.js';
 import { FirestoreScheduleRepository } from './schedules.js';
-import { decodeRecord } from './store.js';
+import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 import { FirestoreTaskLeaseRepository } from './tasks.js';
 import { disposeStore, emulatorStore } from './test-store.js';
 import { activateWorkspaceBundle, importWorkspaceBundle } from './workspace-migration.js';
@@ -389,6 +389,66 @@ describe('Firestore migration preview', () => {
     installationId: 'preview',
   };
   const previewStore = {} as Parameters<typeof importWorkspaceBundle>[0];
+
+  it('fails closed before writes when the import target editor epoch is ready', async () => {
+    const source = bundle(target);
+    const agentId = source.manifest.source.agentId;
+    const reads: string[] = [];
+    const epoch = {
+      ownerId: agentId,
+      epoch: randomUUID(),
+      ready: true,
+      privacyGenerationDigest: 'a'.repeat(64),
+    };
+    const store = {
+      installationId: target.installationId,
+      projectId: target.projectId,
+      databaseId: target.databaseId,
+      collection(name: string) {
+        reads.push(`collection:${name}`);
+        return {
+          limit: () => ({
+            get: async () => ({
+              size: 1,
+              empty: false,
+              docs: [
+                {
+                  id: documentKey(agentId),
+                  get: (field: string) => (field === 'id' ? agentId : undefined),
+                },
+              ],
+            }),
+          }),
+        };
+      },
+      doc(collection: string, id: string) {
+        reads.push(`doc:${collection}/${id}`);
+        return {
+          get: async () => ({
+            exists: true,
+            get: (field: string) =>
+              field === 'name'
+                ? `owner-editor-epoch:${agentId}`
+                : field === 'cursor'
+                  ? JSON.stringify(epoch)
+                  : undefined,
+          }),
+        };
+      },
+    } as unknown as InstallationStore;
+
+    await expect(
+      importWorkspaceBundle(store, source, {
+        sourceAgentId: agentId,
+        target,
+        mode: 'write',
+      }),
+    ).rejects.toThrow('Owner editor is active; disable it before importing this workspace.');
+    expect(reads).toEqual([
+      'collection:agents',
+      `doc:maintenanceCursors/owner-editor-epoch:${agentId}`,
+    ]);
+  });
 
   it.skipIf(!enabled)(
     'round-trips active call identity and private-data-free compact receipts',
@@ -1135,10 +1195,17 @@ describe.skipIf(!enabled)('Firestore workspace migration import', () => {
         bundleChecksum: source.manifest.bundleChecksum,
       });
       expect((await store.doc('coordination', 'migration').get()).get('status')).toBe('active');
+      const epochName = `owner-editor-epoch:${sourceAgentId}`;
+      const epochDocument = await store.doc('maintenanceCursors', epochName).get();
+      const activatedEpoch = JSON.parse(epochDocument.get('cursor')) as Record<string, unknown>;
+      expect(activatedEpoch).toMatchObject({ ownerId: sourceAgentId, ready: true });
       await expect(activation()).resolves.toMatchObject({
         activated: true,
         alreadyActivated: true,
       });
+      expect(
+        JSON.parse((await store.doc('maintenanceCursors', epochName).get()).get('cursor')),
+      ).toEqual(activatedEpoch);
       await expect(
         activateWorkspaceBundle(store, source, {
           sourceAgentId,

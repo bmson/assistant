@@ -19,6 +19,7 @@ import {
   updateContactIdentity,
   voiceProfile,
 } from '@assistant/db';
+import type { OwnerKnowledgeGraphFactRepository } from '@assistant/persistence';
 import {
   type ActiveJobLookup,
   isOwnerCardCompilationRepository,
@@ -34,6 +35,12 @@ import {
   type VoiceSamplePurgeRepository,
 } from '@assistant/persistence';
 import { and, eq, sql } from 'drizzle-orm';
+import type { OwnerEditorDomainPort } from '../owner-editor.js';
+import {
+  createOwnerEditorDomain,
+  type OwnerEditorDomainStorage,
+  type PreparedOwnerEditor,
+} from '../owner-editor-domain.js';
 import {
   type CreateProfileMemoryInput,
   createProfileMemoryCommands,
@@ -681,4 +688,146 @@ export async function reviewPersonOccasion(
       .delete(occasions)
       .where(and(eq(occasions.id, occasionId), eq(occasions.agentId, agent.id)));
   }
+}
+
+/** PostgreSQL adapter keeps existing canonical writer and actual leased receipt hooks. */
+export async function createPostgresOwnerEditorDomain(input: {
+  db: import('@assistant/db').Db;
+  router: EmbeddingPort;
+}): Promise<OwnerEditorDomainPort<PreparedOwnerEditor>> {
+  const {
+    postgresOwnerEditorContact,
+    commitPostgresOwnerEditorPerson,
+    readPostgresOwnerEditorFamily,
+    readPostgresOwnerEditorGraphScope,
+    beginPostgresOwnerEditorWrite,
+    completePostgresOwnerEditorWrite,
+    postgresOwnerEditorContext,
+    postgresOwnerEditorEntity,
+  } = await import('@assistant/db');
+  const { commitPreparedOwnerKnowledgeGraphFactPostgres } = await import(
+    '@assistant/core/memory/knowledge-graph'
+  );
+  const { ownerFamilyCorrectionTarget, eligibleOwnerFamilyCorrection } = await import(
+    '@assistant/core/memory/owner-family-fact'
+  );
+  const context = (ownerId: string) => postgresOwnerEditorContext(input.db, ownerId);
+  const graph: OwnerKnowledgeGraphFactRepository = {
+    kind: 'owner-knowledge-graph-fact-repository',
+    async context(ownerId) {
+      if (!ownerId) throw new Error('Editor owner required');
+      return { ...(await context(ownerId)), contacts: [] };
+    },
+    entity: (ownerId, id) => postgresOwnerEditorEntity(input.db, ownerId, id),
+    async correctionTarget(ownerId, id) {
+      const state = await readPostgresOwnerEditorGraphScope(input.db, ownerId, id);
+      return state
+        ? ownerFamilyCorrectionTarget(
+            state as import('@assistant/core/memory/owner-family-fact').OwnerFamilyScopeRows,
+          )
+        : null;
+    },
+    createAtomic(prepared) {
+      if (!prepared.editor) throw new Error('Editor claim required for editor writer');
+      return commitPreparedOwnerKnowledgeGraphFactPostgres(input.db, prepared);
+    },
+  };
+  const storage: OwnerEditorDomainStorage = {
+    graph,
+    context,
+    contact: (ownerId, id) => postgresOwnerEditorContact(input.db, ownerId, id),
+    async family(ownerId, fields, targetId) {
+      const state = await readPostgresOwnerEditorFamily(input.db, ownerId, fields, targetId);
+      if (
+        !state ||
+        state.canonicalConflict ||
+        (state.canonicalIds &&
+          (!state.canonicalScope ||
+            !eligibleOwnerFamilyCorrection(
+              state.canonicalScope as import('@assistant/core/memory/owner-family-fact').OwnerFamilyScopeRows,
+            )))
+      )
+        return null;
+      const correction = state.target
+        ? ownerFamilyCorrectionTarget(
+            state.target as import('@assistant/core/memory/owner-family-fact').OwnerFamilyScopeRows,
+          )
+        : null;
+      if (targetId && !correction) return null;
+      return {
+        subject: state.subject,
+        object: state.object,
+        canonicalRevision: state.canonicalRevision,
+        ...(state.canonicalIds ? { canonicalIds: state.canonicalIds } : {}),
+        ...(state.target && correction
+          ? {
+              target: {
+                revision: state.target.revision,
+                assertionId: state.target.assertion.id,
+                correction,
+              },
+            }
+          : {}),
+      };
+    },
+    async commitUnchangedFamily(claim, fields, now) {
+      const { ownerEditorCommitRevision } = await import('@assistant/persistence');
+      if (
+        claim.scope.command !== 'add_family_relationship' ||
+        ![fields.subjectContactId, fields.objectContactId].includes(claim.scope.targetId ?? '')
+      )
+        throw new Error('Unchanged family operation does not match its claim');
+      return input.db.transaction(
+        async (tx) => {
+          const admitted = await beginPostgresOwnerEditorWrite(tx, claim, now);
+          if (admitted.kind === 'reply') return admitted.reply;
+          const state = await readPostgresOwnerEditorFamily(
+            tx as unknown as import('@assistant/db').Db,
+            claim.scope.ownerId,
+            fields,
+            undefined,
+            true,
+          );
+          if (
+            !state ||
+            !state.canonicalIds ||
+            state.canonicalConflict ||
+            !state.canonicalScope ||
+            !eligibleOwnerFamilyCorrection(
+              state.canonicalScope as import('@assistant/core/memory/owner-family-fact').OwnerFamilyScopeRows,
+            ) ||
+            state.subject.revision !== fields.expectedSubjectRevision ||
+            state.object.revision !== fields.expectedObjectRevision ||
+            (fields.expectedCanonicalState.kind === 'revision' &&
+              state.canonicalRevision !== fields.expectedCanonicalState.revision)
+          )
+            return completePostgresOwnerEditorWrite(
+              tx,
+              admitted,
+              { outcome: 'conflict', reason: 'family_snapshot_changed' },
+              now,
+            );
+          return completePostgresOwnerEditorWrite(
+            tx,
+            admitted,
+            {
+              outcome: 'unchanged',
+              ids: state.canonicalIds,
+              revision: ownerEditorCommitRevision(claim, state.canonicalIds),
+            },
+            now,
+          );
+        },
+        { isolationLevel: 'serializable' },
+      );
+    },
+    commitPerson: (claim, prepared, now) =>
+      commitPostgresOwnerEditorPerson(input.db, claim, prepared, now),
+    async commitFamily(_claim, prepared) {
+      const saved = await graph.createAtomic(prepared);
+      if (!saved.editorReply) throw new Error('Atomic writer returned no operation receipt');
+      return saved.editorReply;
+    },
+  };
+  return createOwnerEditorDomain({ storage, router: input.router });
 }

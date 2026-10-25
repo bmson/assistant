@@ -13,12 +13,14 @@ import {
   type MigrationRecord,
   type MigrationTarget,
   PreciseMigrationTimestamp,
+  parseOwnerEditorEpochCursor,
   snapshotEmbeddingSpace,
   tableDefinition,
   validateMigrationBundle,
 } from '@assistant/persistence';
 import { FieldValue, Timestamp } from '@google-cloud/firestore';
 import { assertFirestoreInstallationOwner } from './installation-owner.js';
+import { rotateFirestoreOwnerEditorEpochInTransaction } from './owner-editor-repository.js';
 import { decodeRecord, encodeRecord, type InstallationStore } from './store.js';
 
 export type WorkspaceImportMode = 'preview' | 'write' | 'verify';
@@ -61,6 +63,31 @@ export type WorkspaceActivationResult = {
   alreadyActivated: boolean;
   bundleChecksum: string;
 };
+
+async function assertEditorEpochDisabledBeforeImport(
+  store: InstallationStore,
+  ownerId: string,
+): Promise<void> {
+  const name = `owner-editor-epoch:${ownerId}`;
+  const snapshot = await store.doc('maintenanceCursors', name).get();
+  if (!snapshot.exists) return;
+  if (snapshot.get('name') !== name || typeof snapshot.get('cursor') !== 'string')
+    throw new Error('Owner editor metadata is malformed; disable the editor before importing.');
+  let cursor: unknown;
+  try {
+    cursor = JSON.parse(snapshot.get('cursor'));
+  } catch {
+    throw new Error('Owner editor metadata is malformed; disable the editor before importing.');
+  }
+  let epoch: ReturnType<typeof parseOwnerEditorEpochCursor>;
+  try {
+    epoch = parseOwnerEditorEpochCursor(cursor);
+  } catch {
+    throw new Error('Owner editor metadata is malformed; disable the editor before importing.');
+  }
+  if (epoch.ownerId !== ownerId || epoch.ready)
+    throw new Error('Owner editor is active; disable it before importing this workspace.');
+}
 
 function preciseTimestamp(timestamp: Timestamp): PreciseMigrationTimestamp {
   if (timestamp.nanoseconds % 1_000 !== 0)
@@ -900,6 +927,7 @@ export async function importWorkspaceBundle(
   if (store.databaseId !== options.target.databaseId)
     throw new Error('Firestore database identity does not match migration target');
   await assertFirestoreInstallationOwner(store, options.sourceAgentId, true);
+  if (mode === 'write') await assertEditorEpochDisabledBeforeImport(store, options.sourceAgentId);
   const marker = store.doc('coordination', 'migration');
   const markerSnapshot = await marker.get();
   const markerData = markerSnapshot.exists ? markerSnapshot.data() : undefined;
@@ -1158,6 +1186,7 @@ export async function activateWorkspaceBundle(
       !Number.isSafeInteger(current.get('totalWrites'))
     )
       throw new Error('Migration marker does not prove a complete pending import');
+    await rotateFirestoreOwnerEditorEpochInTransaction(store, tx, input.sourceAgentId, true);
     tx.update(marker, {
       status: 'active',
       activation: encodeRecord(activation),

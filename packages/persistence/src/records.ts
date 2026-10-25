@@ -3,8 +3,10 @@ import type { DocumentExtractionMetadata } from './document-extraction-metadata.
 /** Portable record shapes. PostgreSQL compatibility is checked by records.test.ts.
  * These types are owned by persistence: change them intentionally, not on every SQL migration. */
 import type { KnowledgeGraphAssertion } from './knowledge-graph-sync.js';
+import type { OwnerEditorOperationRecord } from './owner-editor.js';
 
 export interface Records {
+  ownerEditorOperations: OwnerEditorOperationRecord;
   phoneCalendarSharing: {
     id: string;
     agentId: string;

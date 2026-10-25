@@ -6,10 +6,21 @@ import {
 } from '@assistant/application/people-presentation';
 import type { MemorySnapshot } from '@assistant/application/profile';
 import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
-import { createInstallationStore } from '@assistant/firestore';
+import {
+  assertFirestoreInstallationOwner,
+  assertPrivacyErasureFenceUnchanged,
+  createInstallationStore,
+  firestoreOwnerEditorViewSnapshot,
+  readFirestoreOwnerEditorIssuanceContext,
+  readPrivacyErasureFence,
+} from '@assistant/firestore';
 import { Handshake, MapPin, Sparkles } from 'lucide-react';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import {
+  OwnerEditorControls,
+  type OwnerEditorControlsProps,
+} from '@/app/people/owner-editor-controls';
 import { PersonAvatar } from '@/app/people/person-avatar';
 import { ConnectionList, RelationshipList } from '@/app/people/relationship-list';
 import { BrowseFact } from '@/app/profile/browse-fact';
@@ -17,7 +28,8 @@ import type { FactView } from '@/app/profile/fact-row';
 import { requireOwner } from '@/auth';
 import { getFirestorePersonDossier } from '@/lib/firestore-people';
 import { relativeTime } from '@/lib/format';
-import { withPostgresMemoryBrowseRead } from '@/lib/server';
+import { buildOwnerEditorView } from '@/lib/owner-editor-view';
+import { readPostgresOwnerEditorViewInputs, withPostgresMemoryBrowseRead } from '@/lib/server';
 import {
   Badge,
   EmptyState,
@@ -65,16 +77,59 @@ function occasionNoun(kind: string, label: string): string {
   return kind;
 }
 
-async function loadPersonDossier(id: string, now: Date): Promise<PersonDossier | null> {
+async function loadPersonDossier(
+  id: string,
+  now: Date,
+  formSessionScope: string | undefined,
+): Promise<{
+  data: PersonDossier | null;
+  editor: OwnerEditorControlsProps | null;
+}> {
   const config = loadConfig();
+  const enabled =
+    !config.ASSISTANT_RELEASE_WRITES_PAUSED &&
+    !config.RESTORE_REHEARSAL &&
+    !(config.PERSISTENCE_DRIVER !== 'firestore' && config.POSTGRES_SOURCE_WRITES_FENCED);
+  const editorInput = (data: PersonDossier) => ({
+    contactId: id,
+    relationIds: [
+      ...new Set(
+        data.relations
+          .map((relation) => relation.id)
+          .filter((relationId) =>
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+              relationId,
+            ),
+          ),
+      ),
+    ],
+  });
   if (config.PERSISTENCE_DRIVER !== 'firestore')
-    return withPostgresMemoryBrowseRead((db) =>
-      getPersonDossier(db, id, {
+    return withPostgresMemoryBrowseRead(async (db) => {
+      const data = await getPersonDossier(db, id, {
         factLimit: FACT_LIMIT,
         now,
         includeEditingSuggestions: false,
-      }),
-    );
+      });
+      let editor: OwnerEditorControlsProps | null = null;
+      if (data && enabled && formSessionScope && config.AUTH_SECRET) {
+        try {
+          const inputs = await readPostgresOwnerEditorViewInputs(db, editorInput(data));
+          if (inputs)
+            editor = buildOwnerEditorView({
+              ...inputs,
+              enabled,
+              formSessionScope,
+              secret: config.AUTH_SECRET,
+              displayedContact: data.profile.contact,
+              displayedRelationships: data.relations,
+            });
+        } catch {
+          /* Bounded editor read failure does not erase a valid dossier. */
+        }
+      }
+      return { data, editor };
+    });
   const problems = validateAgentPersistenceConfig(config);
   if (problems.length) throw new Error(problems.join('; '));
   const store = createInstallationStore({
@@ -83,11 +138,43 @@ async function loadPersonDossier(id: string, now: Date): Promise<PersonDossier |
     databaseId: config.FIRESTORE_DATABASE_ID,
   });
   try {
-    return await getFirestorePersonDossier(store, config.FIRESTORE_AGENT_ID, id, {
+    await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
+    const fence = await readPrivacyErasureFence(store, config.FIRESTORE_AGENT_ID);
+    const data = await getFirestorePersonDossier(store, config.FIRESTORE_AGENT_ID, id, {
       factLimit: FACT_LIMIT,
       now,
       includeEditingSuggestions: false,
     });
+    let editor: OwnerEditorControlsProps | null = null;
+    if (data && enabled && formSessionScope && config.AUTH_SECRET) {
+      try {
+        const context = await readFirestoreOwnerEditorIssuanceContext(
+          store,
+          config.FIRESTORE_AGENT_ID,
+        );
+        if (context) {
+          const snapshot = await firestoreOwnerEditorViewSnapshot(
+            store,
+            config.FIRESTORE_AGENT_ID,
+            editorInput(data),
+          );
+          editor = buildOwnerEditorView({
+            enabled,
+            context,
+            snapshot,
+            formSessionScope,
+            secret: config.AUTH_SECRET,
+            displayedContact: data.profile.contact,
+            displayedRelationships: data.relations,
+          });
+        }
+      } catch {
+        /* Unsupported/malformed/capped editor snapshot stays read-only. */
+      }
+    }
+    await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
+    await assertPrivacyErasureFenceUnchanged(store, config.FIRESTORE_AGENT_ID, fence);
+    return { data, editor };
   } finally {
     await store.db.terminate();
   }
@@ -100,7 +187,7 @@ export default async function PersonPage({
   params: Promise<{ id: string }>;
   searchParams?: Promise<{ q?: string }>;
 }) {
-  await requireOwner();
+  const session = await requireOwner();
   const { id } = await params;
   if (!UUID_RE.test(id)) notFound();
 
@@ -109,8 +196,11 @@ export default async function PersonPage({
   const backHref = `/people${query ? `?q=${encodeURIComponent(query)}` : ''}`;
   const now = new Date();
   let dossier: PersonDossier | null;
+  let editor: OwnerEditorControlsProps | null = null;
   try {
-    dossier = await loadPersonDossier(id, now);
+    const loaded = await loadPersonDossier(id, now, session.formSessionScope);
+    dossier = loaded.data;
+    editor = loaded.editor;
   } catch {
     return (
       <PageShell size="reading">
@@ -176,6 +266,11 @@ export default async function PersonPage({
         </div>
       </div>
 
+      {editor ? (
+        <section className="mt-4" aria-label="Edit people and family">
+          <OwnerEditorControls {...editor} />
+        </section>
+      ) : null}
       {contact.aliases.length ? (
         <p className="mt-3 break-words text-sm text-muted">
           Also known as {contact.aliases.join(', ')}
