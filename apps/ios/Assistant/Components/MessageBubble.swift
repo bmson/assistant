@@ -323,13 +323,15 @@ struct MessageBubble: View {
     @ViewBuilder
     private func messageText(responseCards: [MessageResponseCard]) -> some View {
         if message.role == .assistant {
+            let bubbles = message.visibleTextBubbles
+            let hasSupporting = !bubbles.isEmpty && message.hasSupportingResultCards
             // A reply split by [break] cues stacks as separate sheets, the way
             // separate texts from a person stack — one paper bubble per text
             // part, copy still takes the whole reply.
-            ForEach(Array(message.visibleTextBubbles.enumerated()), id: \.offset) { index, bubble in
+            ForEach(Array(bubbles.enumerated()), id: \.offset) { index, bubble in
                 assistantBubble(
                     bubble,
-                    showsSources: message.hasSupportingResultCards && index == message.visibleTextBubbles.count - 1,
+                    showsSources: hasSupporting && index == bubbles.count - 1,
                     responseCards: responseCards
                 )
             }
