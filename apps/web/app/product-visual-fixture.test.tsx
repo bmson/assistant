@@ -17,6 +17,7 @@ type RepairVisualState =
 const state = vi.hoisted(() => ({
   empty: false,
   path: '/goals',
+  search: '',
   firestore: false,
   chatState: null as 'stage' | 'paper' | null,
   costScenario: null as 'mixed' | 'gcp-unconfigured' | null,
@@ -291,16 +292,21 @@ vi.mock('@/auth', () => ({
   isAuthed: async () => ({ user: { name: 'Synthetic owner', email: 'owner@example.test' } }),
   authMode: 'passkey',
 }));
-vi.mock('next/navigation', () => ({
-  usePathname: () => state.path,
-  useRouter: () => ({ refresh() {}, push() {}, replace() {} }),
-  notFound: () => {
-    throw new Error('QA_NOT_FOUND');
-  },
-  redirect: (href: string) => {
-    throw new Error(`QA_REDIRECT:${href}`);
-  },
-}));
+vi.mock('next/navigation', async () => {
+  const { ReadonlyURLSearchParams } =
+    await vi.importActual<typeof import('next/navigation')>('next/navigation');
+  return {
+    usePathname: () => state.path,
+    useSearchParams: () => new ReadonlyURLSearchParams(state.search),
+    useRouter: () => ({ refresh() {}, push() {}, replace() {} }),
+    notFound: () => {
+      throw new Error('QA_NOT_FOUND');
+    },
+    redirect: (href: string) => {
+      throw new Error(`QA_REDIRECT:${href}`);
+    },
+  };
+});
 vi.mock('@assistant/config', async () => ({
   ...(await vi.importActual('@assistant/config')),
   loadConfig: () => ({
@@ -961,6 +967,7 @@ it.each(fixtureStates)(
     const directory = process.env.PRODUCT_VISUAL_QA_DIR;
     state.empty = page.empty;
     state.path = page.route.split('?')[0];
+    state.search = new URLSearchParams(page.query ?? {}).toString();
     state.firestore = page.productName === 'memory-read-only';
     state.chatState = page.chatState ?? null;
     state.costScenario = page.costMode ?? null;
