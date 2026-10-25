@@ -173,12 +173,14 @@ describe('bounded fused owner context selection', () => {
 
   it('fuses active decisions with their pack revision and skips an owner-muted revision', async () => {
     const fused = await fuseOwnerContext({
-      queryText: 'why did we reject the Cedar plan',
-      rankedContext: [candidate(26, 'Earlier message about Cedar', 0.82)],
+      queryText: 'Find the Cedar rail option we rejected',
+      eligibilityText: 'Find the Cedar rail option we rejected',
+      mode: 'automatic',
+      rankedContext: [candidate(26, 'Earlier message about Cedar rail', 0.82)],
       decisions: [
         {
           decisionId: 'cedar',
-          option: 'Cedar plan',
+          option: 'Cedar rail option',
           outcome: 'rejected',
           reason: 'The launch window conflicts with support coverage.',
           scope: 'situation',
@@ -191,7 +193,7 @@ describe('bounded fused owner context selection', () => {
       ],
       isSuppressed: async (_key, revision) =>
         revision === (26 + 100).toString(16).padStart(64, '0'),
-      limit: 3,
+      limit: 8,
     });
     expect(fused.selected).toHaveLength(1);
     expect(fused.sources[0]?.kind).toBe('decision');
@@ -199,4 +201,60 @@ describe('bounded fused owner context selection', () => {
     expect(fused.block).toContain('version 4');
     expect(fused.block).toContain('rejected');
   });
+
+  it('applies eligibility before the fixed two-source cap and ignores decision metadata', async () => {
+    const fused = await fuseOwnerContext({
+      queryText: 'Find clinics with wheelchair-accessible entrances',
+      eligibilityText: 'Find clinics with wheelchair-accessible entrances',
+      mode: 'automatic',
+      rankedContext: [
+        candidate(31, 'An unrelated source with a misleading display label', 0.99),
+        candidate(32, 'Earlier confirmation of wheelchair-accessible entrances', 0.92),
+        candidate(33, 'Wheelchair-accessible entrances are required', 0.88),
+      ].map((entry, index) =>
+        index === 0
+          ? { ...entry, source: { ...entry.source, label: 'wheelchair-accessible entrances' } }
+          : entry,
+      ),
+      decisions: [
+        {
+          decisionId: 'metadata-only',
+          option: 'Keep the current layout',
+          outcome: 'chosen',
+          reason: 'Preserve the lobby flow.',
+          scope: 'situation',
+          packId: 'wheelchair-accessible-entrances',
+          packTitle: 'Wheelchair-accessible entrances',
+          packVersion: 4,
+          packUpdatedAt: '2026-10-01T12:00:00.000Z',
+          relevance: 100,
+        },
+      ],
+      limit: 8,
+    });
+
+    expect(fused.selected).toHaveLength(2);
+    expect(fused.selected.map((entry) => entry.text)).toEqual([
+      'Earlier confirmation of wheelchair-accessible entrances',
+      'Wheelchair-accessible entrances are required',
+    ]);
+    expect(fused.block).not.toContain('misleading display label');
+    expect(fused.sources.map((source) => source.label)).not.toContain(
+      'wheelchair-accessible-entrances',
+    );
+  });
+
+  it.each(['explicit', 'disabled'] as const)(
+    'does not surface automatic candidates in %s mode',
+    async (mode) => {
+      const fused = await fuseOwnerContext({
+        queryText: 'Find wheelchair-accessible entrances',
+        eligibilityText: 'Find wheelchair-accessible entrances',
+        mode,
+        rankedContext: [candidate(34, 'Wheelchair-accessible entrances', 1)],
+      });
+      expect(fused.selected).toEqual([]);
+      expect(fused.block).toBe('');
+    },
+  );
 });

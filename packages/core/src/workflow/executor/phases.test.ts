@@ -205,7 +205,7 @@ describe('pre-planning context retrieval', () => {
       decisionId: 'async-updates',
       option: 'Daily meetings',
       outcome: 'rejected' as const,
-      reason: 'They break focus time during the launch.',
+      reason: 'The daily meeting cadence interrupts focus during the launch.',
       scope: 'situation' as const,
       packId: 'pack-launch',
       packTitle: 'Launch plan',
@@ -214,13 +214,17 @@ describe('pre-planning context retrieval', () => {
       relevance: 7,
     };
     let currentDecision: Omit<typeof situationDecision, 'outcome'> & {
-      outcome: 'accepted' | 'rejected';
+      outcome: 'chosen' | 'rejected';
     } = situationDecision;
     const retrieveSituationDecisions = vi.fn(async () => [currentDecision]);
     const window: ModelMessage[] = [
       { role: 'user', content: 'We are preparing the Paris rail itinerary.' },
       { role: 'assistant', content: 'The planning group can review those train options.' },
-      { role: 'user', content: 'Please email the agenda to the planning group.' },
+      {
+        role: 'user',
+        content:
+          'Find the meeting cadence for the launch agenda for the planning group and email it.',
+      },
     ];
     const context = {
       deps: {
@@ -268,7 +272,9 @@ describe('pre-planning context retrieval', () => {
         type: 'chat_turn',
         trigger: {
           source: 'chat',
-          payload: { text: 'Please email the agenda to the planning group.' },
+          payload: {
+            text: 'Find the meeting cadence for the launch agenda for the planning group and email it.',
+          },
         },
       },
       agent: { id: 'agent-1' },
@@ -289,7 +295,7 @@ describe('pre-planning context retrieval', () => {
     expect(window.at(-1)?.content).toContain('planning@example.com');
     expect(window.at(-1)?.content).toContain('pack-launch');
     expect(window.at(-1)?.content).toContain('version 5');
-    expect(window.at(-1)?.content).toContain('break focus time');
+    expect(window.at(-1)?.content).toContain('interrupts focus');
     expect(retrieveSituationDecisions).toHaveBeenCalledWith(
       expect.objectContaining({
         agentId: 'agent-1',
@@ -338,8 +344,8 @@ describe('pre-planning context retrieval', () => {
     currentDecision = {
       ...situationDecision,
       option: 'Weekly notes',
-      outcome: 'accepted',
-      reason: 'The owner changed the cadence after the launch.',
+      outcome: 'chosen',
+      reason: 'The owner changed the meeting cadence after the launch.',
       packVersion: 6,
     };
     await expect(preparePlanningRecall(context)).resolves.toBe(true);

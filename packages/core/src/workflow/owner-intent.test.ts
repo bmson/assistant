@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildEmailContentProvenance } from '../email-provenance.js';
 import type { ClarificationContinuation } from '../events.js';
+import type { ResolvedReadIntent } from './active-read-intent.js';
 import {
   clarificationAnswerStatus,
   explicitlyOptsOutOfRecall,
@@ -11,7 +12,81 @@ import {
   latestOwnerIntent,
   ownerAuthoredReadWindow,
   resolveActiveReadIntent,
+  resolveRecallMode,
 } from './owner-intent.js';
+
+describe('shared recall mode', () => {
+  const ownerIntent = extractOwnerIntent({
+    trust: 'owner',
+    text: 'Find clinics with wheelchair-accessible entrances.',
+  });
+  const continuation: ClarificationContinuation = {
+    sourceTaskId: 'source-task',
+    ownerAuthoredText: 'Find clinics with wheelchair-accessible entrances.',
+    question: 'Which city?',
+    authorizedScopes: [],
+    tainted: false,
+    answerStatus: 'answer',
+  };
+  const base = {
+    resolvedReadIntent: { kind: 'none' } as ResolvedReadIntent,
+    ownerIntent,
+    enabled: true,
+    untrustedContext: false,
+    trustedTask: true,
+    taskType: 'chat_turn',
+    conversationId: 'conversation-1',
+  };
+
+  it('admits a normal owner request and a verified continuation to the shared eligibility gate', () => {
+    expect(resolveRecallMode(base)).toBe('automatic');
+    expect(resolveRecallMode({ ...base, clarificationContinuation: continuation })).toBe(
+      'continuation',
+    );
+    const opinion = extractOwnerIntent({
+      trust: 'owner',
+      text: 'Do you think a daily check-in makes sense for launch?',
+    });
+    expect(resolveRecallMode({ ...base, ownerIntent: opinion })).toBe('automatic');
+  });
+
+  it('keeps explicit personal reads separate and disables public and combined projections', () => {
+    const personal = { kind: 'personal', personal: {} } as unknown as ResolvedReadIntent;
+    const publicActivity = { kind: 'public_activity', public: {} } as unknown as ResolvedReadIntent;
+    const combined = {
+      kind: 'combined',
+      public: {},
+      personal: {},
+      combinationPurpose: {},
+    } as unknown as ResolvedReadIntent;
+    expect(resolveRecallMode({ ...base, resolvedReadIntent: personal })).toBe('explicit');
+    expect(resolveRecallMode({ ...base, resolvedReadIntent: publicActivity })).toBe('disabled');
+    expect(resolveRecallMode({ ...base, resolvedReadIntent: combined })).toBe('disabled');
+  });
+
+  it.each([
+    { enabled: false },
+    { untrustedContext: true },
+    { trustedTask: false },
+    { conversationId: undefined },
+    { localOnly: true },
+    { taskType: 'adhoc' },
+  ])('disables automatic recall under a hard gate: %o', (override) => {
+    expect(resolveRecallMode({ ...base, ...override })).toBe('disabled');
+  });
+
+  it.each([
+    { answerStatus: 'uncertain' as const, tainted: false },
+    { answerStatus: 'answer' as const, tainted: true },
+  ])('does not admit an unverified or tainted continuation: %o', (override) => {
+    expect(
+      resolveRecallMode({
+        ...base,
+        clarificationContinuation: { ...continuation, ...override },
+      }),
+    ).toBe('disabled');
+  });
+});
 
 describe('owner intent provenance', () => {
   it.each([

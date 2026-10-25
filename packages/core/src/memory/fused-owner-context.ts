@@ -1,14 +1,22 @@
 import type { OwnerCommitment, SituationDecisionContext } from '@assistant/persistence';
+import type { RecallMode } from '../workflow/owner-intent.js';
 import {
   type ContextCandidate,
   fuseContextCandidates,
   lexicalContextScore,
 } from './context-fusion.js';
 import type { RecallSource } from './recall.js';
+import {
+  eligibleAutomaticRecallCandidates,
+  ownerCommitmentRecallMeaning,
+  situationDecisionRecallMeaning,
+} from './recall-eligibility.js';
 import { recallSourceRevision, recallSurfaceKey } from './recall-surfacing.js';
 
 export async function fuseOwnerContext(input: {
   queryText: string;
+  eligibilityText: string;
+  mode: RecallMode;
   rankedContext: ReadonlyArray<ContextCandidate>;
   decisions?: ReadonlyArray<SituationDecisionContext>;
   commitments?: ReadonlyArray<OwnerCommitment>;
@@ -16,7 +24,10 @@ export async function fuseOwnerContext(input: {
   limit?: number;
   maxBytes?: number;
 }) {
-  const candidates: ContextCandidate[] = [];
+  if (input.mode !== 'automatic' && input.mode !== 'continuation') {
+    return fuseContextCandidates([], { limit: 2, maxBytes: input.maxBytes });
+  }
+  const candidates: Array<ContextCandidate & { meaning: string }> = [];
   const decisions = (input.decisions ?? []).map((decision) => {
     const text = `${decision.scope} choice in “${decision.packTitle}” [pack ${decision.packId}, version ${decision.packVersion}]: ${decision.outcome} “${decision.option}” because ${decision.reason}`;
     const lexical = lexicalContextScore(input.queryText, text);
@@ -41,6 +52,7 @@ export async function fuseOwnerContext(input: {
       source,
       score: relevance * 0.7 + lexical * 0.3,
       text,
+      meaning: situationDecisionRecallMeaning(decision),
     };
   });
   const commitments = (input.commitments ?? []).map((commitment) => {
@@ -68,21 +80,46 @@ export async function fuseOwnerContext(input: {
       .join('; ');
     const lexical = lexicalContextScore(input.queryText, `${description} ${commitment.details}`);
     source.relevance = lexical;
-    return { source, score: lexical, text: description };
+    return {
+      source,
+      score: lexical,
+      text: description,
+      meaning: ownerCommitmentRecallMeaning(commitment),
+    };
   });
-  for (const candidate of [
+  const mapped = [
     ...input.rankedContext.map((entry) => {
       const lexical = lexicalContextScore(input.queryText, entry.text);
-      return { ...entry, score: entry.score * 0.8 + lexical * 0.2 };
+      return { ...entry, score: entry.score * 0.8 + lexical * 0.2, meaning: entry.text };
     }),
     ...decisions,
     ...commitments,
-  ]) {
+  ];
+  for (const candidate of mapped) {
     const key = candidate.source.surfaceKey;
     const revision = candidate.source.sourceRevision;
     if (!key || !revision || (input.isSuppressed && (await input.isSuppressed(key, revision))))
       continue;
     candidates.push(candidate);
   }
-  return fuseContextCandidates(candidates, { limit: input.limit, maxBytes: input.maxBytes });
+  const eligible = eligibleAutomaticRecallCandidates(
+    input.eligibilityText,
+    candidates.map((candidate) => ({
+      id: candidate.source.surfaceKey as string,
+      sourceRevision: candidate.source.sourceRevision as string,
+      meaning: candidate.meaning,
+    })),
+  );
+  const eligibleIdentity = new Set(
+    eligible.candidates.map((candidate) => `${candidate.id}\u0000${candidate.sourceRevision}`),
+  );
+  const selectedPool = candidates.filter((candidate) =>
+    eligibleIdentity.has(`${candidate.source.surfaceKey}\u0000${candidate.source.sourceRevision}`),
+  );
+  // Keep automatic surfaced context at two sources; caller-provided values can
+  // lower the cap for tests or specialized callers, never raise it.
+  return fuseContextCandidates(selectedPool, {
+    limit: Math.min(2, input.limit ?? 2),
+    maxBytes: input.maxBytes,
+  });
 }

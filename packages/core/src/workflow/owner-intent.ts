@@ -1,7 +1,10 @@
 import { emailProvenanceText, isForwardedIngest } from '../email-provenance.js';
 import type { ClarificationContinuation, Trust } from '../events.js';
 import type { ResolvedReadIntent } from './active-read-intent.js';
-import { explicitlyDisallowsTools } from './conversation-local-context.js';
+import {
+  explicitlyDisallowsTools,
+  isConversationLocalContext,
+} from './conversation-local-context.js';
 import { detectFutureWatchIntent } from './future-watch-intent.js';
 import { detectLiveLookup } from './live-lookup.js';
 import { detectPersonalReadRequest } from './read-intent.js';
@@ -43,6 +46,68 @@ export interface OwnerIntent {
   externalText: string;
   authorizedScopes: OwnerIntentScope[];
   separation: 'clear' | 'none' | 'unknown';
+}
+
+export type RecallMode = 'automatic' | 'explicit' | 'continuation' | 'disabled';
+
+/**
+ * Classifies private recall use from already trusted request state. This is a
+ * routing decision only: it neither creates read scopes nor selects sources.
+ */
+export function resolveRecallMode(input: {
+  resolvedReadIntent: ResolvedReadIntent;
+  ownerIntent: OwnerIntent;
+  clarificationContinuation?: ClarificationContinuation;
+  enabled: boolean;
+  untrustedContext: boolean;
+  trustedTask: boolean;
+  taskType: string;
+  conversationId?: string;
+  localOnly?: boolean;
+  explicitReadRequested?: boolean;
+  requireNewRequest?: boolean;
+}): RecallMode {
+  const { resolvedReadIntent, ownerIntent, clarificationContinuation } = input;
+  // Public and mixed public projections never receive ambient private context.
+  if (
+    resolvedReadIntent.kind === 'public_activity' ||
+    resolvedReadIntent.kind === 'combined' ||
+    resolvedReadIntent.kind === 'clarify_public'
+  )
+    return 'disabled';
+  // Keep explicit reads on their existing tool and dispatcher path. The
+  // automatic fuser must not widen their selected source or purpose.
+  if (resolvedReadIntent.kind === 'personal' || input.explicitReadRequested) return 'explicit';
+  const text = ownerIntent.ownerAuthoredText;
+  if (
+    !input.enabled ||
+    input.untrustedContext ||
+    !input.trustedTask ||
+    !input.conversationId ||
+    input.localOnly ||
+    explicitlyOptsOutOfRecall(text) ||
+    isConversationLocalContext(text) ||
+    (ownerIntent.authorizedScopes.length === 0 &&
+      isSelfContainedTextTransformation(text, ownerIntent.externalText)) ||
+    !['chat_turn', 'email_triage', 'sms_turn'].includes(input.taskType) ||
+    (input.requireNewRequest && ownerIntent.requestKind !== 'new_request') ||
+    !['owner', 'mixed', 'assistant'].includes(ownerIntent.sourceActor) ||
+    ownerIntent.separation === 'unknown' ||
+    !text.trim()
+  )
+    return 'disabled';
+  const continuation = clarificationContinuation;
+  if (continuation) {
+    if (
+      continuation.answerStatus !== 'answer' ||
+      continuation.tainted ||
+      !continuation.sourceTaskId.trim() ||
+      !continuation.ownerAuthoredText.trim()
+    )
+      return 'disabled';
+    return 'continuation';
+  }
+  return 'automatic';
 }
 
 /** Source resolution may narrow mistaken private reads, never bypass dispatcher policy. */

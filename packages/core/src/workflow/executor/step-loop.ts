@@ -138,6 +138,7 @@ import {
   latestOwnerIntent,
   type OwnerIntent,
   ownerAuthoredWindow,
+  resolveRecallMode,
 } from '../owner-intent.js';
 import { isConceptualNoToolRequest, PLANNER_VERSION } from '../planner.js';
 import {
@@ -1049,17 +1050,23 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // can still use contacts.lookup / memory.recall there.
   let recallBlock: string | undefined;
   let openLoops: string | undefined;
+  const recallMode = resolveRecallMode({
+    resolvedReadIntent: rc.resolvedReadIntent ?? { kind: 'none' },
+    ownerIntent,
+    clarificationContinuation: state.clarificationContinuation,
+    enabled: loadConfig().CHAT_RECALL_ENABLED,
+    untrustedContext: state.untrustedContext,
+    trustedTask: privilegedTask,
+    taskType: task.type,
+    conversationId: task.conversationId ?? undefined,
+    localOnly: localTransformation || restrictedChecklistResume,
+    explicitReadRequested: Boolean(readRequest),
+  });
   if (
     !publicScope &&
-    loadConfig().CHAT_RECALL_ENABLED &&
+    (recallMode === 'automatic' || recallMode === 'continuation') &&
     state.plannerState.planningRecall === undefined &&
-    !localTransformation &&
-    !isConversationLocalContext(ownerText) &&
     !restrictedChecklistResume &&
-    !readRequest &&
-    privilegedTask &&
-    !state.untrustedContext &&
-    (task.type === 'chat_turn' || task.type === 'email_triage' || task.type === 'sms_turn') &&
     task.conversationId
   ) {
     const conversationId = task.conversationId;
@@ -1079,10 +1086,12 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           db,
           persistence: deps.persistence,
           router,
+          mode: recallMode,
           taskId: task.id,
           agentId: agent.id,
           conversationId,
           queryText,
+          eligibilityText: ownerText,
           discussionTurns: rc.window
             .filter(
               (_, index) => index !== rc.window.findLastIndex((message) => message.role === 'user'),

@@ -18,14 +18,11 @@ import { conversationMessageTexts } from '@assistant/core/conversation-context';
 import { getAmbientBlock } from '@assistant/core/memory/ambient';
 import { listOpenCommitments, renderOpenCommitments } from '@assistant/core/memory/commitments';
 import { getOwnerCard } from '@assistant/core/memory/consolidation';
-import { assembleDiscussionFrame } from '@assistant/core/memory/discussion-frame';
-import { fuseOwnerContext } from '@assistant/core/memory/fused-owner-context';
-import { recallKnowledgeGraph, recallWithGraphFallback } from '@assistant/core/memory/graph-recall';
-import { type RecallSource, recallRelevantContext } from '@assistant/core/memory/recall';
+import type { RecallSource } from '@assistant/core/memory/recall';
+import { retrieveOwnerContext } from '@assistant/core/memory/recall-context';
 import { recordRecallMetric } from '@assistant/core/memory/recall-metrics';
 import {
   explicitlyAsksAboutPriorSituationDecision,
-  readSituationDecisionContext,
   renderSituationDecisionContext,
 } from '@assistant/core/memory/situation-context';
 import type { ModelRouter, StreamOutcome } from '@assistant/core/model-router';
@@ -42,6 +39,7 @@ import {
   needsConversationReasoning,
   ownerAuthoredReadWindow,
   resolveActiveReadIntent,
+  resolveRecallMode,
 } from '@assistant/core/workflow/owner-intent';
 import { detectPersonalReadRequest } from '@assistant/core/workflow/read-intent';
 import { RequestChecklistSchema } from '@assistant/core/workflow/request-checklist-schema';
@@ -67,7 +65,6 @@ import {
   chatAdmissionPayload,
   composerChecklistCancellationRequestHash,
   EMAIL_REVIEW_CHAT_BUDGET_PROFILE,
-  embeddingSpaceIdentityKey,
 } from '@assistant/persistence';
 import {
   convertToModelMessages,
@@ -1367,6 +1364,16 @@ export async function handleChatTurn(
     throw new Error('Chat admission lease was lost before streaming');
   }
 
+  const recallMode = resolveRecallMode({
+    resolvedReadIntent: activeReadIntent,
+    ownerIntent: conversationalIntent,
+    enabled: config.CHAT_RECALL_ENABLED,
+    untrustedContext: false,
+    trustedTask: true,
+    taskType: 'chat_turn',
+    conversationId: conversation.id,
+    localOnly: isSelfContainedCalculationRequest(userText) || localTransformation,
+  });
   const noHistoricalContext =
     explicitlyOptsOutOfRecall(userText) ||
     isConversationLocalContext(userText) ||
@@ -1377,123 +1384,39 @@ export async function handleChatTurn(
     sources: RecallSource[];
     situationDecisions?: string;
   }> => {
-    if (!config.CHAT_RECALL_ENABLED || noHistoricalContext) return { sources: [] };
-    const frame = assembleDiscussionFrame({
-      currentText: userText,
-      turns: modelHistory
-        .filter((message) => !noticeRows.has(message.id))
-        .map((message) => ({
-          id: message.id,
-          role: message.role,
-          text: message.parts
-            .filter((part) => part.type === 'text')
-            .map((part) => part.text)
-            .join('\n'),
-          representation: 'rendered' as const,
-        })),
-    });
-    if (!frame.available) return { sources: [] };
-    const queryText = frame.queryText;
-    const embeddingSpace = await router.embeddingSpace();
-    const embeddingSpaceKey = embeddingSpaceIdentityKey(embeddingSpace);
-    const isSuppressed = dependencies.persistence?.recallSurfacing
-      ? async (sourceKey: string, sourceRevision: string) => {
-          const suppressed = await dependencies.persistence?.recallSurfacing?.suppressed(
-            agent.id,
-            [sourceKey],
-            { [sourceKey]: sourceRevision },
-          );
-          return suppressed?.has(sourceKey) ?? true;
-        }
-      : undefined;
+    if (recallMode !== 'automatic' && recallMode !== 'continuation') return { sources: [] };
     try {
-      const [layered, situationRead] = await Promise.all([
-        recallWithGraphFallback({
-          graph: config.GRAPH_RAG_ENABLED
-            ? async () => {
-                const [queryEmbedding] = await router.embed([queryText], {
-                  expectedSpace: embeddingSpace,
-                });
-                return {
-                  graph: await recallKnowledgeGraph(
-                    dependencies.persistence?.graph ?? requireDb(),
-                    {
-                      agentId: agent.id,
-                      queryText,
-                      queryEmbedding,
-                    },
-                    { isSuppressed, limit: 8 },
-                  ),
-                  queryEmbedding,
-                };
-              }
-            : undefined,
-          history: (queryEmbedding, graph) =>
-            recallRelevantContext(
-              dependencies.persistence?.history ?? requireDb(),
-              {
-                agentId: agent.id,
-                queryText,
-                embed: (values, embedOpts) =>
-                  router.embed(values, {
-                    ...(embedOpts ?? {}),
-                    expectedSpace: embeddingSpace,
-                  }),
-                exclude: {
-                  conversationId: conversation.id,
-                  sinceCreatedAt: firstRenderedAt,
-                },
-              },
-              {
-                limit: 12,
-                ...(graph.used > 0 ? { maxChars: 1200 } : {}),
-                queryEmbedding,
-                embeddingSpaceKey,
-                isSuppressed,
-              },
-            ),
-          onGraphError: (err) => {
-            // GraphRAG is additive. Existing vector recall must still answer when
-            // graph storage, extraction, or its query embedding is unavailable.
-            console.error('knowledge graph recall failed — falling back to chat recall', err);
-          },
-          onHistoryError: (err) => {
-            console.error(
-              'chat history recall failed — continuing with graph evidence if available',
-              err,
-            );
-          },
-        }),
-        readSituationDecisionContext({
-          db: dependencies.db,
-          persistence: dependencies.persistence,
-          agentId: agent.id,
-          discussionFrame: queryText,
-        }),
-      ]);
-      const situationDecisions = renderSituationDecisionContext(situationRead.decisions);
+      const layered = await retrieveOwnerContext({
+        db: dependencies.db ?? requireDb(),
+        persistence: dependencies.persistence,
+        router,
+        mode: recallMode,
+        taskId: admittedTask.id,
+        agentId: agent.id,
+        conversationId: conversation.id,
+        queryText: userText,
+        eligibilityText: conversationalIntent.ownerAuthoredText,
+        sinceCreatedAt: firstRenderedAt,
+        discussionTurns: modelHistory
+          .filter((message) => !noticeRows.has(message.id))
+          .map((message) => ({
+            id: message.id,
+            role: message.role,
+            text: message.parts
+              .filter((part) => part.type === 'text')
+              .map((part) => part.text)
+              .join('\n'),
+            representation: 'rendered' as const,
+          })),
+        graphEnabled: config.GRAPH_RAG_ENABLED,
+      });
+      const situationDecisions = renderSituationDecisionContext(layered.situationDecisions);
       const explicitLookupNotice =
         explicitlyAsksAboutPriorSituationDecision(userText) && !situationDecisions
-          ? situationRead.status === 'unavailable'
+          ? layered.situationDecisionStatus === 'unavailable'
             ? 'The owner explicitly asked about an earlier situation-pack decision, but that private decision lookup was unavailable. Do not invent or guess the remembered choice; state the lookup limitation briefly.'
             : 'The owner explicitly asked about an earlier situation-pack decision, and no matching confirmed choice was found in the active packs. This does not prove the owner never stated it; answer from the current conversation or ask one focused question.'
           : undefined;
-      const openCommitments = await listOpenCommitments(
-        dependencies.persistence?.ownerContext ?? requireDb(),
-        { agentId: agent.id, query: queryText, limit: 40 },
-      ).catch((err) => {
-        console.error('open commitment context failed — continuing with other evidence', err);
-        return [];
-      });
-      const fused = await fuseOwnerContext({
-        queryText,
-        rankedContext: layered.rankedContext,
-        decisions: situationRead.decisions,
-        commitments: openCommitments,
-        isSuppressed,
-        limit: 8,
-        maxBytes: 2600,
-      });
       void recordRecallMetric(dependencies.persistence?.recallMetrics ?? requireDb(), {
         agentId: agent.id,
         conversationId: conversation.id,
@@ -1505,11 +1428,11 @@ export async function handleChatTurn(
         historyFailed: layered.historyFailed,
         historyTier: layered.history.tier ?? 'none',
         historyUsed: layered.history.used ?? layered.history.sources.length,
-        sourceCount: fused.sources.length,
+        sourceCount: layered.sources.length,
       }).catch((err) => console.error('chat recall metric failed', err));
       return {
-        block: fused.block || undefined,
-        sources: fused.sources,
+        block: layered.block || undefined,
+        sources: layered.sources,
         situationDecisions: explicitLookupNotice,
       };
     } catch (err) {

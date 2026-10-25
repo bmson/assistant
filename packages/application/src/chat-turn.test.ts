@@ -19,6 +19,7 @@ const stubs = vi.hoisted(() => ({
   composerCancellation: vi.fn(),
   getAmbientBlock: vi.fn(async () => undefined),
   getOwnerCard: vi.fn(async () => undefined),
+  retrieveOwnerContext: vi.fn(),
   createPostgresTaskRepository: vi.fn(),
   notifyTask: vi.fn(),
 }));
@@ -32,6 +33,9 @@ vi.mock('@assistant/core/memory/commitments', () => ({
   renderOpenCommitments: () => '',
 }));
 vi.mock('@assistant/core/memory/ambient', () => ({ getAmbientBlock: stubs.getAmbientBlock }));
+vi.mock('@assistant/core/memory/recall-context', () => ({
+  retrieveOwnerContext: stubs.retrieveOwnerContext,
+}));
 vi.mock('@assistant/core/memory/consolidation', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@assistant/core/memory/consolidation')>()),
   getOwnerCard: stubs.getOwnerCard,
@@ -334,6 +338,25 @@ beforeEach(() => {
   stubs.queueAdmission.mockReset();
   stubs.getAmbientBlock.mockReset().mockResolvedValue(undefined);
   stubs.getOwnerCard.mockReset().mockResolvedValue(undefined);
+  stubs.retrieveOwnerContext.mockReset().mockResolvedValue({
+    block: '',
+    sources: [],
+    graph: { block: '', used: 0, candidates: 0, sources: [] },
+    graphFailed: false,
+    historyFailed: false,
+    history: { block: '', sources: [], tier: 'none', used: 0 },
+    rankedContext: [],
+    situationDecisionStatus: 'complete',
+    situationDecisions: [],
+    discussionFrame: {
+      queryText: '',
+      bytes: 0,
+      available: true,
+      currentTurnComplete: true,
+      coverage: [],
+      omittedTurns: 0,
+    },
+  });
   stubs.createPostgresTaskRepository.mockReset();
   stubs.notifyTask.mockReset();
   stubs.enqueueTask.mockResolvedValue({ task: { id: 'queued-task' } });
@@ -561,6 +584,7 @@ describe('chat needs-action triage', () => {
       config: config(),
       router: scripted.router,
       chat: store.chat,
+      db: {} as never,
       persistence: { tasks: {}, ownerContext: {} } as never,
     });
 
@@ -1899,6 +1923,40 @@ describe('chat needs-action triage', () => {
 });
 
 describe('tool-less conversational reply', () => {
+  it('routes direct chat recall through the shared gated owner-context path', async () => {
+    const store = chatStore();
+    const scripted = scriptedRouter({
+      triage: { needsAction: false },
+      draft: 'Here is the result.',
+    });
+    const prompt = 'Find clinics with wheelchair-accessible entrances.';
+    const response = await handleChatTurn(send(prompt), {
+      config: loadConfig({
+        OPENROUTER_API_KEY: 'test-key',
+        QUEUE_DRIVER: 'local',
+        CHAT_RECALL_ENABLED: 'true',
+        GRAPH_RAG_ENABLED: 'false',
+      }),
+      router: scripted.router,
+      chat: store.chat,
+      db: {} as never,
+      persistence: { tasks: {}, ownerContext: {} } as never,
+    });
+
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(stubs.retrieveOwnerContext).toHaveBeenCalledOnce();
+    expect(stubs.retrieveOwnerContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: 'automatic',
+        queryText: prompt,
+        eligibilityText: prompt,
+        conversationId: CONVERSATION,
+        graphEnabled: false,
+      }),
+    );
+  });
+
   it.each([
     'Rewrite this note as a clear, polite message under 45 words: "hey team the demo got moved to friday cause design isnt ready can everyone send me blockers by tomorrow lunch and dont wait till the meeting". Keep the timing exactly as written. Give only the rewritten message.',
     'Polish this paragraph: the draft is not ready. Give only the paragraph.',
@@ -2035,20 +2093,38 @@ describe('tool-less conversational reply', () => {
       }),
       embed: vi.fn(async () => [[1, 0]]),
     });
-    const retrieve = vi.fn(async () => [
-      {
-        decisionId: 'daily-check-in',
-        option: 'Daily check-in',
-        outcome: 'rejected' as const,
-        reason: 'It interrupted focus during launch.',
-        scope: 'situation' as const,
-        packId: '00000000-0000-4000-8000-0000000000a1',
-        packTitle: 'Launch plan',
-        packVersion: 3,
-        packUpdatedAt: '2026-10-01T00:00:00.000Z',
-        relevance: 5,
+    const decision = {
+      decisionId: 'daily-check-in',
+      option: 'Daily check-in',
+      outcome: 'rejected' as const,
+      reason: 'It interrupted focus during launch.',
+      scope: 'situation' as const,
+      packId: '00000000-0000-4000-8000-0000000000a1',
+      packTitle: 'Launch plan',
+      packVersion: 3,
+      packUpdatedAt: '2026-10-01T00:00:00.000Z',
+      relevance: 5,
+    };
+    stubs.retrieveOwnerContext.mockResolvedValueOnce({
+      block:
+        'Relevant owner context: Launch plan, version 3, rejected the daily check-in because it interrupted focus. Never action permission.',
+      sources: [],
+      graph: { block: '', used: 0, candidates: 0, sources: [] },
+      graphFailed: false,
+      historyFailed: false,
+      history: { block: '', sources: [], tier: 'none', used: 0 },
+      rankedContext: [],
+      situationDecisionStatus: 'complete',
+      situationDecisions: [decision],
+      discussionFrame: {
+        queryText: '',
+        bytes: 0,
+        available: true,
+        currentTurnComplete: true,
+        coverage: [],
+        omittedTurns: 0,
       },
-    ]);
+    });
     const response = await handleChatTurn(
       send('Do you think a daily check-in makes sense for launch?'),
       {
@@ -2060,6 +2136,7 @@ describe('tool-less conversational reply', () => {
         }),
         router: scripted.router,
         chat: store.chat,
+        db: {} as never,
         persistence: {
           tasks: {},
           ownerContext: {},
@@ -2070,28 +2147,21 @@ describe('tool-less conversational reply', () => {
             neighborhood: async () => [],
           },
           recallMetrics: { kind: 'recall-metrics-repository', record: vi.fn(async () => {}) },
-          situationDecisionContext: {
-            kind: 'situation-decision-context-repository',
-            retrieve,
-          },
         } as never,
       },
     );
 
     expect(response.status).toBe(200);
     await response.text();
-    expect(retrieve).toHaveBeenCalledWith(
+    expect(stubs.retrieveOwnerContext).toHaveBeenCalledWith(
       expect.objectContaining({
-        agentId: AGENT,
-        discussionFrame: expect.stringContaining(
-          'Do you think a daily check-in makes sense for launch?',
-        ),
+        mode: 'automatic',
+        eligibilityText: 'Do you think a daily check-in makes sense for launch?',
       }),
     );
     const request = scripted.stream.mock.calls[0]?.[1] as unknown as { system: string };
     expect(request?.system).toContain('Launch plan');
     expect(request?.system).toContain('version 3');
-    expect(request?.system).toContain('never action permission');
   });
 
   it('honors a current no-history instruction before memory and ambient reads', async () => {
