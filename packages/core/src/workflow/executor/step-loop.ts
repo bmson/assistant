@@ -139,6 +139,7 @@ import {
   type OwnerIntent,
   ownerAuthoredWindow,
   resolveRecallMode,
+  shouldRunFallbackRecall,
 } from '../owner-intent.js';
 import { isConceptualNoToolRequest, PLANNER_VERSION } from '../planner.js';
 import {
@@ -1062,14 +1063,19 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     localOnly: localTransformation || restrictedChecklistResume,
     explicitReadRequested: Boolean(readRequest),
   });
+  const fallbackRecallMode =
+    recallMode === 'automatic' || recallMode === 'continuation' ? recallMode : undefined;
   if (
-    !publicScope &&
-    (recallMode === 'automatic' || recallMode === 'continuation') &&
-    state.plannerState.planningRecall === undefined &&
-    !restrictedChecklistResume &&
-    task.conversationId
+    fallbackRecallMode &&
+    shouldRunFallbackRecall({
+      mode: fallbackRecallMode,
+      publicScope: Boolean(publicScope),
+      planningRecallPrepared: state.plannerState.planningRecall !== undefined,
+      restrictedChecklistResume,
+      conversationId: task.conversationId ?? undefined,
+    })
   ) {
-    const conversationId = task.conversationId;
+    const conversationId = task.conversationId ?? '';
     const lastUser = [...rc.window].reverse().find((m) => m.role === 'user');
     const payload = (task.trigger as { payload?: Record<string, unknown> } | null)?.payload ?? {};
     const emailMeta =
@@ -1086,7 +1092,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           db,
           persistence: deps.persistence,
           router,
-          mode: recallMode,
+          mode: fallbackRecallMode,
           taskId: task.id,
           agentId: agent.id,
           conversationId,

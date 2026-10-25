@@ -12,6 +12,7 @@ function candidate(
 ): ContextCandidate {
   return {
     text: label,
+    meaning: label,
     score,
     source: {
       date,
@@ -242,6 +243,62 @@ describe('bounded fused owner context selection', () => {
     expect(fused.sources.map((source) => source.label)).not.toContain(
       'wheelchair-accessible-entrances',
     );
+  });
+
+  it('eligibility sees raw source meaning instead of history or graph display metadata', async () => {
+    const datedHistory = candidate(
+      41,
+      '[2026-10-01] Summary excerpt: Launch group meets weekly.',
+      1,
+    );
+    datedHistory.meaning = 'Launch group meets weekly.';
+    const hopGraph = candidate(
+      42,
+      '[1 hop] Owner —works_at→ Northwind [unverified]\n  Evidence: Owner works at Northwind.',
+      1,
+      'knowledge_graph',
+    );
+    hopGraph.meaning = 'Owner works at Northwind.';
+    const statusCommitment = candidate(43, '[question; open] Launch checklist', 1, 'commitment');
+    statusCommitment.meaning = 'question Launch checklist confirm dates';
+    const genuine = candidate(
+      44,
+      '[2026-10-01] Summary excerpt: Cedar rail is wheelchair accessible.',
+      1,
+    );
+    genuine.meaning = 'Cedar rail is wheelchair accessible.';
+
+    const results = await Promise.all([
+      fuseOwnerContext({
+        queryText: 'Find 2026-10',
+        eligibilityText: 'Find 2026-10',
+        mode: 'automatic',
+        rankedContext: [datedHistory],
+      }),
+      fuseOwnerContext({
+        queryText: 'Find 1 hop',
+        eligibilityText: 'Find 1 hop',
+        mode: 'automatic',
+        rankedContext: [hopGraph],
+      }),
+      fuseOwnerContext({
+        queryText: 'Find open launch',
+        eligibilityText: 'Find open launch',
+        mode: 'automatic',
+        rankedContext: [statusCommitment],
+      }),
+      fuseOwnerContext({
+        queryText: 'Find Cedar rail accessibility',
+        eligibilityText: 'Find Cedar rail accessibility',
+        mode: 'automatic',
+        rankedContext: [genuine],
+      }),
+    ]);
+
+    expect(results.slice(0, 3).every((result) => result.selected.length === 0)).toBe(true);
+    expect(results[3]?.selected.map((entry) => entry.source.surfaceKey)).toEqual([
+      genuine.source.surfaceKey,
+    ]);
   });
 
   it.each(['explicit', 'disabled'] as const)(

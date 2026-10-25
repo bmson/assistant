@@ -1,6 +1,19 @@
 import type { TaskLease } from '@assistant/persistence';
 import type { ModelMessage } from 'ai';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const recallEntrySpy = vi.hoisted(() => ({ calls: [] as Array<Record<string, unknown>> }));
+vi.mock('../../memory/recall-context.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../memory/recall-context.js')>();
+  return {
+    ...actual,
+    retrieveOwnerContext: async (input: Record<string, unknown>) => {
+      recallEntrySpy.calls.push(input);
+      return actual.retrieveOwnerContext(input as never);
+    },
+  };
+});
+
 import { assistantMessageParts } from '../../chat.js';
 import { loadConfig, resetConfigForTest } from '../../config.js';
 import { TaskStateSchema } from '../../events.js';
@@ -183,6 +196,7 @@ describe('pre-planning context retrieval', () => {
   );
 
   it('injects relevant history before planning and records the retrieved source', async () => {
+    recallEntrySpy.calls.length = 0;
     loadConfig({ CHAT_RECALL_ENABLED: 'true', GRAPH_RAG_ENABLED: 'false' });
     const recentWindowStart = vi.fn(async () => new Date('2026-10-01T00:00:00Z'));
     let segmentRows = [
@@ -254,7 +268,7 @@ describe('pre-planning context retrieval', () => {
           tasks: { kind: 'task-lease-repository', checkpoint },
         },
       },
-      db: {},
+      db: undefined,
       router: {
         embeddingSpace: async () => ({
           provider: 'synthetic',
@@ -285,6 +299,16 @@ describe('pre-planning context retrieval', () => {
 
     await expect(preparePlanningRecall(context)).resolves.toBe(true);
 
+    expect(recallEntrySpy.calls[0]).toMatchObject({
+      mode: 'automatic',
+      eligibilityText:
+        'Find the meeting cadence for the launch agenda for the planning group and email it.',
+      queryText:
+        'Find the meeting cadence for the launch agenda for the planning group and email it.',
+      discussionTurns: expect.arrayContaining([
+        expect.objectContaining({ text: 'We are preparing the Paris rail itinerary.' }),
+      ]),
+    });
     expect(recentWindowStart).toHaveBeenCalled();
     expect(segments).toHaveBeenCalled();
     expect(context.router.embed).toHaveBeenCalledWith(

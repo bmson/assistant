@@ -49,6 +49,9 @@ vi.mock('@assistant/core/queue', () => ({
 }));
 
 const { handleChatTurn, resumeAdmittedChatTask } = await import('./chat-turn.js');
+const actualRecallContext = await vi.importActual<
+  typeof import('@assistant/core/memory/recall-context')
+>('@assistant/core/memory/recall-context');
 
 const AGENT = '00000000-0000-4000-8000-00000000000a';
 const CONVERSATION = '00000000-0000-4000-8000-00000000000c';
@@ -297,7 +300,23 @@ function scriptedRouter(script: RouterScript) {
       };
     },
   );
-  return { router: { route, object, stream } as unknown as ModelRouter, route, object, stream };
+  return {
+    router: {
+      route,
+      object,
+      stream,
+      embeddingSpace: vi.fn(async () => ({
+        provider: 'synthetic',
+        model: 'chat-turn-recall-test',
+        dimensions: 2,
+        revision: '1',
+      })),
+      embed: vi.fn(async (values: string[]) => values.map(() => [1, 0])),
+    } as unknown as ModelRouter,
+    route,
+    object,
+    stream,
+  };
 }
 
 function send(text: string, extra: Record<string, unknown> = {}) {
@@ -1930,6 +1949,39 @@ describe('tool-less conversational reply', () => {
       draft: 'Here is the result.',
     });
     const prompt = 'Find clinics with wheelchair-accessible entrances.';
+    const segments = vi.fn(async () => [
+      {
+        conversationId: 'prior-conversation',
+        summary: 'The owner prefers wheelchair-accessible entrances at clinics.',
+        startMessageId: 'prior-message',
+        startedAt: new Date('2026-09-01T00:00:00.000Z'),
+        endedAt: new Date('2026-09-01T00:00:00.000Z'),
+        similarity: 0.98,
+        keyMessage: {
+          id: 'prior-message',
+          role: 'user' as const,
+          text: 'Use wheelchair-accessible entrances for clinics.',
+        },
+      },
+    ]);
+    const persistence = {
+      tasks: {},
+      history: {
+        kind: 'history-recall-repository',
+        recentWindowStart: vi.fn(async () => new Date('2026-10-01T00:00:00.000Z')),
+        segments,
+        messages: vi.fn(async () => []),
+        neighborhood: vi.fn(async () => []),
+      },
+      ownerContext: {
+        kind: 'owner-context-repository',
+        listOpenCommitments: vi.fn(async () => []),
+      },
+      situationDecisionContext: { retrieve: vi.fn(async () => []) },
+      recallSurfacing: { suppressed: vi.fn(async () => new Set<string>()) },
+      recallMetrics: { kind: 'recall-metrics-repository', record: vi.fn(async () => undefined) },
+    };
+    stubs.retrieveOwnerContext.mockImplementation(actualRecallContext.retrieveOwnerContext);
     const response = await handleChatTurn(send(prompt), {
       config: loadConfig({
         OPENROUTER_API_KEY: 'test-key',
@@ -1939,8 +1991,7 @@ describe('tool-less conversational reply', () => {
       }),
       router: scripted.router,
       chat: store.chat,
-      db: {} as never,
-      persistence: { tasks: {}, ownerContext: {} } as never,
+      persistence: persistence as never,
     });
 
     expect(response.status).toBe(200);
@@ -1955,6 +2006,8 @@ describe('tool-less conversational reply', () => {
         graphEnabled: false,
       }),
     );
+    expect(segments).toHaveBeenCalledOnce();
+    expect(persistence.recallMetrics.record).toHaveBeenCalledOnce();
   });
 
   it.each([

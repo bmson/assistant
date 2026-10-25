@@ -90,7 +90,11 @@ export async function fuseOwnerContext(input: {
   const mapped = [
     ...input.rankedContext.map((entry) => {
       const lexical = lexicalContextScore(input.queryText, entry.text);
-      return { ...entry, score: entry.score * 0.8 + lexical * 0.2, meaning: entry.text };
+      return {
+        ...entry,
+        score: entry.score * 0.8 + lexical * 0.2,
+        meaning: entry.meaning ?? '',
+      };
     }),
     ...decisions,
     ...commitments,

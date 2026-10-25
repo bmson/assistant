@@ -101,4 +101,115 @@ describe('shared owner recall entrypoint', () => {
       }),
     ).rejects.toThrow('History recall storage is not configured');
   });
+
+  it('does not match a history date wrapper as source meaning', async () => {
+    const history = {
+      kind: 'history-recall-repository' as const,
+      recentWindowStart: vi.fn(async () => null),
+      segments: vi.fn(async () => [
+        {
+          conversationId: 'prior-conversation',
+          summary: 'The planning group uses a weekly meeting cadence.',
+          startMessageId: 'prior-message',
+          startedAt: new Date('2026-10-01T00:00:00.000Z'),
+          endedAt: new Date('2026-10-01T00:00:00.000Z'),
+          similarity: 0.99,
+          keyMessage: {
+            id: 'prior-message',
+            role: 'user' as const,
+            text: 'The meeting cadence is weekly.',
+          },
+        },
+      ]),
+      messages: vi.fn(async () => []),
+      neighborhood: vi.fn(async () => []),
+    };
+    const result = await retrieveOwnerContext({
+      persistence: {
+        history,
+        ownerContext: { listOpenCommitments: vi.fn(async () => []) },
+        situationDecisionContext: { retrieve: vi.fn(async () => []) },
+      } as never,
+      router: {
+        embeddingSpace: vi.fn(async () => ({
+          provider: 'synthetic',
+          model: 'history-meaning-projection',
+          dimensions: 2,
+          revision: '1',
+        })),
+        embed: vi.fn(async () => [[1, 0]]),
+      } as never,
+      taskId: 'date-wrapper-task',
+      agentId: 'agent-1',
+      conversationId: 'current-conversation',
+      queryText: 'Find 2026-10',
+      eligibilityText: 'Find 2026-10',
+      mode: 'automatic',
+      graphEnabled: false,
+    });
+
+    expect(result.sources).toEqual([]);
+    expect(history.segments).toHaveBeenCalledOnce();
+  });
+
+  it.each(['Find 1 hop', 'Find unverified Owner'])(
+    'does not match graph presentation metadata as meaning for %s',
+    async (queryText) => {
+      const now = new Date();
+      const relation = {
+        relationId: 'relation-1',
+        subjectEntityId: 'owner-entity',
+        subjectLabel: 'Owner',
+        predicate: 'works_at',
+        assertion: { tense: 'present', polarity: 'positive', modality: 'unverified' },
+        objectEntityId: 'company-entity',
+        objectLabel: 'Contoso',
+        sourceMemoryId: 'memory-1',
+        content: 'Owner works at Contoso.',
+        evidenceQuote: 'I work at Contoso.',
+        createdAt: now,
+        confidence: '0.99',
+        validFrom: null,
+        validUntil: null,
+        similarity: 0.99,
+      };
+      const history = {
+        kind: 'history-recall-repository' as const,
+        recentWindowStart: vi.fn(async () => null),
+        segments: vi.fn(async () => []),
+        messages: vi.fn(async () => []),
+        neighborhood: vi.fn(async () => []),
+      };
+      const result = await retrieveOwnerContext({
+        persistence: {
+          history,
+          graph: {
+            kind: 'graph-recall-repository',
+            seeds: vi.fn(async () => [relation]),
+            connected: vi.fn(async () => []),
+          },
+          ownerContext: { listOpenCommitments: vi.fn(async () => []) },
+          situationDecisionContext: { retrieve: vi.fn(async () => []) },
+        } as never,
+        router: {
+          embeddingSpace: vi.fn(async () => ({
+            provider: 'synthetic',
+            model: 'graph-meaning-projection',
+            dimensions: 2,
+            revision: '1',
+          })),
+          embed: vi.fn(async () => [[1, 0]]),
+        } as never,
+        taskId: 'graph-metadata-task',
+        agentId: 'agent-1',
+        conversationId: 'current-conversation',
+        queryText,
+        eligibilityText: queryText,
+        mode: 'automatic',
+        graphEnabled: true,
+      });
+
+      expect(result.sources).toEqual([]);
+    },
+  );
 });

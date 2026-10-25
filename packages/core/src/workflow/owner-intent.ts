@@ -50,6 +50,23 @@ export interface OwnerIntent {
 
 export type RecallMode = 'automatic' | 'explicit' | 'continuation' | 'disabled';
 
+/** Final fallback-callsite gate, shared with tests so the caller cannot drift. */
+export function shouldRunFallbackRecall(input: {
+  mode: RecallMode;
+  publicScope: boolean;
+  planningRecallPrepared: boolean;
+  restrictedChecklistResume: boolean;
+  conversationId?: string;
+}): boolean {
+  return (
+    !input.publicScope &&
+    (input.mode === 'automatic' || input.mode === 'continuation') &&
+    !input.planningRecallPrepared &&
+    !input.restrictedChecklistResume &&
+    Boolean(input.conversationId)
+  );
+}
+
 /**
  * Classifies private recall use from already trusted request state. This is a
  * routing decision only: it neither creates read scopes nor selects sources.

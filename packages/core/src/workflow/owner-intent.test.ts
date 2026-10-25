@@ -13,6 +13,7 @@ import {
   ownerAuthoredReadWindow,
   resolveActiveReadIntent,
   resolveRecallMode,
+  shouldRunFallbackRecall,
 } from './owner-intent.js';
 
 describe('shared recall mode', () => {
@@ -48,6 +49,22 @@ describe('shared recall mode', () => {
       text: 'Do you think a daily check-in makes sense for launch?',
     });
     expect(resolveRecallMode({ ...base, ownerIntent: opinion })).toBe('automatic');
+  });
+
+  it('admits verified continuation at the actual fallback-callsite gate and preserves its bypasses', () => {
+    const base = {
+      mode: 'continuation' as const,
+      publicScope: false,
+      planningRecallPrepared: false,
+      restrictedChecklistResume: false,
+      conversationId: 'conversation-1',
+    };
+    expect(shouldRunFallbackRecall(base)).toBe(true);
+    expect(shouldRunFallbackRecall({ ...base, publicScope: true })).toBe(false);
+    expect(shouldRunFallbackRecall({ ...base, planningRecallPrepared: true })).toBe(false);
+    expect(shouldRunFallbackRecall({ ...base, restrictedChecklistResume: true })).toBe(false);
+    expect(shouldRunFallbackRecall({ ...base, conversationId: undefined })).toBe(false);
+    expect(shouldRunFallbackRecall({ ...base, mode: 'disabled' })).toBe(false);
   });
 
   it('keeps explicit personal reads separate and disables public and combined projections', () => {
