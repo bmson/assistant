@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { type OwnerEditorScope, ownerEditorPrivacyDigest } from '@assistant/persistence';
+import {
+  type OwnerEditorScope,
+  ownerEditorMaintenanceTargetEpochDigest,
+  ownerEditorPrivacyDigest,
+} from '@assistant/persistence';
 import { describe, expect, it } from 'vitest';
 import {
   beginFirestoreOwnerEditorWrite,
@@ -54,6 +58,30 @@ function fixture(ready: boolean | null = true) {
 }
 
 describe('editor actual Firestore erasure lifecycle with offline transactional storage', () => {
+  it('clears the original maintenance binder when erasure rotates a disabled epoch', async () => {
+    const f = fixture(false);
+    f.seed('maintenanceCursors', f.name, {
+      name: f.name,
+      cursor: JSON.stringify({
+        ownerId: f.ownerId,
+        epoch: f.epoch,
+        ready: false,
+        privacyGenerationDigest: ownerEditorPrivacyDigest(null),
+        maintenanceBinder: {
+          version: 1,
+          operationId: randomUUID(),
+          requestDigest: 'd'.repeat(64),
+          action: 'provision-disabled',
+          targetEpochDigest: ownerEditorMaintenanceTargetEpochDigest(f.epoch),
+        },
+      }),
+    });
+    await f.begin();
+    const rotated = JSON.parse(String(f.rows('maintenanceCursors')[0]?.cursor));
+    expect(rotated.epoch).not.toBe(f.epoch);
+    expect(rotated.ready).toBe(false);
+    expect(rotated).not.toHaveProperty('maintenanceBinder');
+  });
   it('retires issued handles at erasure entry and fences an already-held claim', async () => {
     const f = fixture();
     const reserved = await f.operations.reserve(f.scope, 'b'.repeat(64), new Date());

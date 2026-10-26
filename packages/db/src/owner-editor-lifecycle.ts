@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { ownerEditorPrivacyDigest, parseOwnerEditorEpochCursor } from '@assistant/persistence';
+import {
+  ownerEditorEpochCursorWithoutMaintenanceBinder,
+  ownerEditorPrivacyDigest,
+  parseOwnerEditorEpochCursor,
+} from '@assistant/persistence';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { maintenanceCursors, ownerEditorOperations } from './schema.js';
@@ -25,7 +29,7 @@ export async function rotateExistingPostgresEditorForErasure(
     .update(maintenanceCursors)
     .set({
       cursor: JSON.stringify({
-        ...current,
+        ...ownerEditorEpochCursorWithoutMaintenanceBinder(current),
         epoch: randomUUID(),
         ...(privacyGeneration !== undefined
           ? { privacyGenerationDigest: ownerEditorPrivacyDigest(privacyGeneration) }
