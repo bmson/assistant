@@ -34,6 +34,7 @@ final class StubURLProtocol: URLProtocol {
     private static var recordedBodies: [Data] = []
     private static var recordedHeaders: [[String: String]] = []
     private static var recordedTimeouts: [TimeInterval] = []
+    private static var recordedRequestTimeline: [(method: String, path: String, uptime: TimeInterval)] = []
     private static var heldResponses: [String: StubURLProtocol] = [:]
     private static var stoppedPaths: Set<String> = []
     private static var stoppedRequests: Set<String> = []
@@ -56,6 +57,7 @@ final class StubURLProtocol: URLProtocol {
             recordedBodies = []
             recordedHeaders = []
             recordedTimeouts = []
+            recordedRequestTimeline = []
             heldResponses = [:]
             stoppedPaths = []
             stoppedRequests = []
@@ -93,6 +95,7 @@ final class StubURLProtocol: URLProtocol {
             recordedBodies = []
             recordedHeaders = []
             recordedTimeouts = []
+            recordedRequestTimeline = []
             heldResponses = [:]
             stoppedPaths = []
             stoppedRequests = []
@@ -127,6 +130,10 @@ final class StubURLProtocol: URLProtocol {
     static var bodies: [Data] { lock.withLock { recordedBodies } }
     static var headers: [[String: String]] { lock.withLock { recordedHeaders } }
     static var timeouts: [TimeInterval] { lock.withLock { recordedTimeouts } }
+    /// Metadata only, captured when the stub accepts each request, before its response delay.
+    static var requestTimeline: [(method: String, path: String, uptime: TimeInterval)] {
+        lock.withLock { recordedRequestTimeline }
+    }
     static var completedResponsePaths: Set<String> { lock.withLock { completedPaths } }
     static func isHoldingResponse(path: String) -> Bool { lock.withLock { heldResponses[path] != nil } }
     static func observeStopLoading(path: String, testCaseID: String, onStop: @escaping () -> Void) {
@@ -224,6 +231,9 @@ final class StubURLProtocol: URLProtocol {
             recordedBodies.append(body)
             recordedHeaders.append(headers)
             recordedTimeouts.append(timeout)
+            if let url {
+                recordedRequestTimeline.append((method, url.path, ProcessInfo.processInfo.systemUptime))
+            }
             if let authorization = headers.first(where: { $0.key.caseInsensitiveCompare("authorization") == .orderedSame })?.value,
                var queued = tokenOutcomes[authorization], !queued.isEmpty {
                 let result = queued.removeFirst()
@@ -542,14 +552,16 @@ private final class LocalNotificationRecorder {
 private final class RecordingAppSystemSurfaces: AppSystemSurfaces {
     private let id = UUID().uuidString
     private(set) var operations: [String] = []
+    var diagnosticObserver: (@MainActor (String, AssistantThought?) -> Void)?
 
-    private func record(_ operation: String) {
+    private func record(_ operation: String, thought: AssistantThought? = nil) {
         operations.append(operation)
         print("Notification fixture surfaces [\(id)]: \(operation); cancelled=\(Task.isCancelled)")
+        diagnosticObserver?(operation, thought)
     }
 
     func ensure(agentName: String, thought: AssistantThought, detail: String, pendingCount: Int) async {
-        record("ensure(\(pendingCount))")
+        record("ensure(\(pendingCount))", thought: thought)
     }
 
     func start(agentName: String, thought: AssistantThought, detail: String, pendingCount: Int) async {
@@ -557,7 +569,7 @@ private final class RecordingAppSystemSurfaces: AppSystemSurfaces {
     }
 
     func update(thought: AssistantThought, detail: String, pendingCount: Int) async {
-        record("update(\(pendingCount))")
+        record("update(\(pendingCount))", thought: thought)
     }
 
     func needsAttention(agentName: String, detail: String, pendingCount: Int) async {
@@ -4914,9 +4926,10 @@ extension APIClientRetryTests {
     @MainActor
     private func notificationModel(
         enqueueAutomaticSpeech: ((ChatMessage) -> Void)? = nil,
-        scheduleLocalNotification: LocalNotificationScheduler? = nil
+        scheduleLocalNotification: LocalNotificationScheduler? = nil,
+        systemSurfaces suppliedSystemSurfaces: RecordingAppSystemSurfaces? = nil
     ) async throws -> AppModel {
-        let systemSurfaces = RecordingAppSystemSurfaces()
+        let systemSurfaces = suppliedSystemSurfaces ?? RecordingAppSystemSurfaces()
         let notificationScheduler: LocalNotificationScheduler = scheduleLocalNotification
             ?? { _, _, _, _, _, _ in false }
         let model: AppModel
@@ -5603,7 +5616,14 @@ extension APIClientRetryTests {
 
     @MainActor
     private func assertLateTaskCancellationDoesNotAffectNewerTurn(responseStatus: Int) async throws {
-        let model = try await notificationModel()
+        let surfaces = RecordingAppSystemSurfaces()
+        let model = try await notificationModel(systemSurfaces: surfaces)
+        var surfaceTimeline: [(uptime: TimeInterval, operation: String)] = []
+        surfaces.diagnosticObserver = { operation, thought in
+            surfaceTimeline.append((ProcessInfo.processInfo.systemUptime,
+                "\(operation); thought=\(String(describing: thought))"))
+        }
+        defer { surfaces.diagnosticObserver = nil }
         let workingMessage = ChatMessage(id: "old-task-status-message", role: .assistant,
             parts: [.init(type: "text", text: "The earlier task is still working.")])
         let working = ChatUpdates(
@@ -5635,6 +5655,22 @@ extension APIClientRetryTests {
         ])
         defer { StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/activity/task-old-stop") }
 
+        let sendStartedAt = ProcessInfo.processInfo.systemUptime
+        func receiptStageDiagnostics() -> String {
+            // A startingWork recorder update proves sendMessage returned its parsed receipt.
+            // This is a downstream milestone, not a direct timestamp inside the parser.
+            let requests = StubURLProtocol.requestTimeline.map {
+                "\($0.uptime - sendStartedAt)s: \($0.method) \($0.path)"
+            }
+            let surfaceEvents = surfaceTimeline.map {
+                "\($0.uptime - sendStartedAt)s: \($0.operation)"
+            }
+            return "elapsed=\(ProcessInfo.processInfo.systemUptime - sendStartedAt)s; "
+                + "cancelResponseStatus=\(responseStatus); isSending=\(model.isSending); "
+                + "isCancelling=\(model.isCancellingSend); hasError=\(model.errorMessage != nil); "
+                + "thought=\(String(describing: model.activityThought)); "
+                + "requests=\(requests); surfaces=\(surfaceEvents)"
+        }
         model.send("Earlier task")
         let receiptPollDeadline = ContinuousClock.now.advanced(by: .seconds(3))
         while !StubURLProtocol.urls.contains(where: { url in
@@ -5648,7 +5684,7 @@ extension APIClientRetryTests {
             guard url.path == "/api/mobile/v1/chat/status",
                   let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return false }
             return queryItems.contains { $0.name == "taskId" && $0.value == "task-old-stop" }
-        }), "The durable task receipt is parsed before issuing Stop")
+        }), "The durable task receipt is parsed before issuing Stop. \(receiptStageDiagnostics())")
         let workingStatusDeadline = ContinuousClock.now.advanced(by: .seconds(3))
         while !model.messages.contains(where: { $0.id == "old-task-status-message" }),
               ContinuousClock.now < workingStatusDeadline { try await Task.sleep(for: .milliseconds(10)) }
