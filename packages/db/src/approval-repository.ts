@@ -206,7 +206,6 @@ export async function getOwnerCallNumberGrantReview(
         status: tasks.status,
       },
       ownerTimeZone: agents.timezone,
-      repositoryNow: sql<Date | string>`clock_timestamp()`,
     })
     .from(approvals)
     .innerJoin(tasks, eq(approvals.taskId, tasks.id))
@@ -227,13 +226,6 @@ export async function getOwnerCallNumberGrantReview(
     )
     .limit(1);
   if (!row) return null;
-  const repositoryNow =
-    row.repositoryNow instanceof Date
-      ? row.repositoryNow
-      : typeof row.repositoryNow === 'string'
-        ? new Date(row.repositoryNow)
-        : null;
-  if (!repositoryNow || !Number.isFinite(repositoryNow.getTime())) return null;
   const directOwnerRequest = await readPostgresOwnerCallRequest(
     db,
     agentId,
@@ -247,6 +239,21 @@ export async function getOwnerCallNumberGrantReview(
     .where(and(eq(approvalPolicies.agentId, agentId), eq(approvalPolicies.toolName, 'phone.call')))
     .limit(MAX_APPROVAL_POLICY_SNAPSHOT_ROWS + 1);
   if (policies.length > MAX_APPROVAL_POLICY_SNAPSHOT_ROWS) return null;
+  const [clock] = await db.execute<{ now: Date | string }>(sql`select clock_timestamp() as now`);
+  const repositoryNow =
+    clock?.now instanceof Date
+      ? clock.now
+      : typeof clock?.now === 'string'
+        ? new Date(clock.now)
+        : null;
+  if (
+    !repositoryNow ||
+    !Number.isFinite(repositoryNow.getTime()) ||
+    !(row.approval.expiresAt instanceof Date) ||
+    !Number.isFinite(row.approval.expiresAt.getTime()) ||
+    row.approval.expiresAt <= repositoryNow
+  )
+    return null;
   const recipient = (row.toolCall.args as { brief?: { to?: unknown } })?.brief?.to;
   const existingActiveGrants = policies.flatMap((policy) => {
     const match = parsePhoneCallToOwnerNumberGrantMatch(policy.match);
