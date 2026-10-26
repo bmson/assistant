@@ -6,15 +6,27 @@ import {
   type OwnerEditorMaintenanceRequest,
   rotateFirestoreOwnerEditorEpochForMaintenance,
 } from './owner-editor-maintenance.js';
-import { encodeRecord, type InstallationStore } from './store.js';
-import { disposeStore, emulatorStore } from './test-store.js';
+import { createInstallationStore, encodeRecord, type InstallationStore } from './store.js';
+import { disposeStore } from './test-store.js';
+
+function isolatedMaintenanceEmulatorStore(): InstallationStore {
+  const host = process.env.FIRESTORE_EMULATOR_HOST;
+  if (!host || !/^(127\.0\.0\.1|localhost):\d+$/.test(host)) {
+    throw new Error('Maintenance Firestore tests require a loopback emulator');
+  }
+  return createInstallationStore({
+    projectId: 'demo-assistant-test',
+    installationId: `owner-editor-maintenance-test-${randomUUID()}`,
+    databaseId: '(default)',
+  });
+}
 
 // Authored for ordinary isolated Firestore CI. Never a live-service target.
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('maintenance native Firestore CAS', () => {
   let store: InstallationStore;
   let ownerId: string;
   beforeEach(async () => {
-    store = emulatorStore();
+    store = isolatedMaintenanceEmulatorStore();
     ownerId = randomUUID();
     if (!store.projectId) throw new Error('Missing isolated fixture project');
     await store.doc('agents', ownerId).create({ id: ownerId });

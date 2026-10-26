@@ -77,7 +77,18 @@ const context = {
 };
 const leased = Object.freeze({ fixture: 'same-leased-db' });
 const fence = Object.freeze({ fixture: 'same-fence-token' });
-const data = createProductVisualData(false);
+const visualData = createProductVisualData(false);
+const displayedRevision = 'a'.repeat(64);
+const data = {
+  ...visualData,
+  dossier: {
+    ...visualData.dossier,
+    profile: {
+      ...visualData.dossier.profile,
+      contact: { ...visualData.dossier.profile.contact, identityRevision: displayedRevision },
+    },
+  },
+};
 const contact = data.dossier.profile.contact;
 const snapshot = {
   ownerId,
@@ -86,9 +97,9 @@ const snapshot = {
     name: contact.name,
     aliases: contact.aliases,
     trust: contact.trust,
-    revision: 'a'.repeat(64),
+    revision: displayedRevision,
   },
-  people: [{ contactId: contact.id, name: contact.name, revision: 'a'.repeat(64) }],
+  people: [{ contactId: contact.id, name: contact.name, revision: displayedRevision }],
   corrections: [],
 };
 const directory = () => People({ searchParams: Promise.resolve({ q: contact.name }) });
@@ -218,6 +229,24 @@ describe('actual page + real issuance builder composition, named reader/fence po
     expect(html).toContain(contact.name);
     expect(html).not.toContain('Edit name and aliases');
   });
+  it.each(['postgres', 'firestore'] as const)(
+    '%s does not adopt a newer native revision when the displayed values are identical',
+    async (driver) => {
+      ports.driver = driver;
+      const newerSnapshot = {
+        ...snapshot,
+        identity: { ...snapshot.identity, revision: 'b'.repeat(64) },
+        people: snapshot.people.map((person) => ({ ...person, revision: 'b'.repeat(64) })),
+      };
+      ports.pgEditor.mockResolvedValue({ context, snapshot: newerSnapshot });
+      ports.fsSnapshot.mockResolvedValue(newerSnapshot);
+      const html = renderToStaticMarkup(await dossier());
+      expect(html).toContain(contact.name);
+      expect(html).not.toContain('Edit name and aliases');
+      expect(contact.identityRevision).toBe(displayedRevision);
+      if (driver === 'firestore') expect(ports.pgRead).not.toHaveBeenCalled();
+    },
+  );
   it.each(['disabled', 'legacy'] as const)(
     '%s skips optional PG editor reads and keeps browse',
     async (mode) => {

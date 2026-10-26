@@ -206,11 +206,15 @@ describe('contact names', () => {
         relationship: 'combined relationship',
         expectedContactRevision: oldRevision,
       }),
-    ).resolves.toMatchObject({ status: 'updated', name: 'Xtest-Combined Name' });
+    ).resolves.toMatchObject({
+      status: 'updated',
+      name: 'Xtest-Combined Name',
+      aliases: ['Xtest-Combined Alias', 'Xtest-Revision Before'],
+    });
     const [afterCombined] = await db.select().from(contacts).where(eq(contacts.id, person.id));
     expect(afterCombined).toMatchObject({
       name: 'Xtest-Combined Name',
-      aliases: ['Xtest-Combined Alias'],
+      aliases: ['Xtest-Combined Alias', 'Xtest-Revision Before'],
       relationship: 'combined relationship',
       identityAuthority: 'owner',
       trust: 'known',
