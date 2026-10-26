@@ -282,9 +282,10 @@ async function verifyDestination(
     runtimeExclusions?.tables.includes('owner_editor_operations') &&
       runtimeExclusions.maintenanceCursorPrefixes.includes('owner-editor-epoch:'),
   );
-  // Legacy v3 bundles lack the declaration but activation itself has always
-  // created this owner-bound runtime state. Permit it only after activation;
-  // pending legacy imports still require an empty runtime surface.
+  // An old v3 bundle can be activated by editor-aware code without this
+  // declaration. Active markers may therefore carry validated runtime state.
+  // Pre-editor active installations with no epoch require explicit maintenance;
+  // verification must never provision authority. Pending legacy stays empty.
   const runtimeEditorEpochAllowed = runtimeEditorStateDeclared || marker.get('status') === 'active';
   let runtimeEpochCount = 0;
   let runtimeReceiptCount = 0;
@@ -323,7 +324,9 @@ async function verifyDestination(
         throw new Error('Editor epoch privacy generation is stale');
       runtimeEpochCount = 1;
     } else if (markerStatus === 'active') {
-      throw new Error('Active migration owner editor epoch is missing');
+      throw new Error(
+        'Active migration owner editor epoch is missing; controlled maintenance must provision a disabled epoch before retrying verification',
+      );
     }
     runtimeReceiptCount = await verifyRuntimeEditorReceipts(
       store,

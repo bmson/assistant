@@ -3,6 +3,7 @@ import {
   cardFormAdmissionActiveEventId,
   cardFormAdmissionExternalEventId,
   checksum,
+  checksumForMigrationVersion,
   checksumV3,
   compositeMigrationId,
   deterministicMigrationCompare,
@@ -26,6 +27,7 @@ import { FirestoreCardFormAdmissionRepository } from './card-form-admission.js';
 import { FirestoreMemoryEmbeddingRefreshRepository } from './memory-embedding-refresh.js';
 import {
   createFirestoreOwnerEditorOperationRepository,
+  readFirestoreOwnerEditorIssuanceContext,
   rotateFirestoreOwnerEditorEpoch,
 } from './owner-editor-repository.js';
 import { FirestoreProfileMemoryMaintenance } from './profile-memory-maintenance.js';
@@ -103,30 +105,50 @@ function bundle(target: MigrationBundle['manifest']['target'], taskCount = 1): M
 }
 
 function addRecord(source: MigrationBundle, record: MigrationRecord): void {
-  record.checksum = checksum(record.data);
+  const version = source.manifest.formatVersion;
+  const versionChecksum = (value: unknown) => checksumForMigrationVersion(value, version);
+  const compare =
+    version >= 3
+      ? deterministicMigrationCompare
+      : (left: string, right: string) => left.localeCompare(right);
+  record.checksum = versionChecksum(record.data);
   source.records.push(record);
-  source.records.sort((a, b) => `${a.table}:${a.id}`.localeCompare(`${b.table}:${b.id}`));
+  source.records.sort((a, b) => compare(`${a.table}:${a.id}`, `${b.table}:${b.id}`));
   const records = source.records.filter((candidate) => candidate.table === record.table);
   source.manifest.tables[record.table] = {
     collection: record.collection,
     count: records.length,
-    checksum: checksum(records),
+    checksum: versionChecksum(records),
   };
   source.manifest.coverage.supportedTables = Object.keys(
     source.manifest.tables,
   ) as MigrationBundle['manifest']['coverage']['supportedTables'];
   source.manifest.recordCount = source.records.length;
-  source.manifest.bundleChecksum = checksum(source.records);
+  source.manifest.bundleChecksum = migrationBundleChecksum(
+    source.records,
+    version,
+    source.manifest.coverage.runtimeExclusions,
+  );
 }
 
 function refreshRecord(source: MigrationBundle, record: MigrationRecord): void {
-  record.checksum = checksum(record.data);
-  source.records.sort((a, b) => `${a.table}:${a.id}`.localeCompare(`${b.table}:${b.id}`));
+  const version = source.manifest.formatVersion;
+  const versionChecksum = (value: unknown) => checksumForMigrationVersion(value, version);
+  const compare =
+    version >= 3
+      ? deterministicMigrationCompare
+      : (left: string, right: string) => left.localeCompare(right);
+  record.checksum = versionChecksum(record.data);
+  source.records.sort((a, b) => compare(`${a.table}:${a.id}`, `${b.table}:${b.id}`));
   const records = source.records.filter((candidate) => candidate.table === record.table);
   const summary = source.manifest.tables[record.table];
   if (!summary) throw new Error('fixture summary missing');
-  summary.checksum = checksum(records);
-  source.manifest.bundleChecksum = checksum(source.records);
+  summary.checksum = versionChecksum(records);
+  source.manifest.bundleChecksum = migrationBundleChecksum(
+    source.records,
+    version,
+    source.manifest.coverage.runtimeExclusions,
+  );
 }
 
 function addApproval(source: MigrationBundle, shortCode: string): void {
@@ -187,6 +209,7 @@ function addGraphSource(source: MigrationBundle): string {
 
 function upgradeFixtureToV3(source: MigrationBundle): void {
   source.manifest.formatVersion = 3;
+  source.manifest.coverage.runtimeExclusions = OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1;
   for (const record of source.records) record.checksum = checksumV3(record.data);
   source.records.sort((left, right) =>
     deterministicMigrationCompare(`${left.table}:${left.id}`, `${right.table}:${right.id}`),
@@ -195,7 +218,11 @@ function upgradeFixtureToV3(source: MigrationBundle): void {
     const records = source.records.filter((record) => record.table === table);
     summary.checksum = checksumV3(records);
   }
-  source.manifest.bundleChecksum = checksumV3(source.records);
+  source.manifest.bundleChecksum = migrationBundleChecksum(
+    source.records,
+    3,
+    source.manifest.coverage.runtimeExclusions,
+  );
 }
 
 function completeV3Bundle(target: MigrationBundle['manifest']['target']): MigrationBundle {
@@ -1187,7 +1214,7 @@ describe.skipIf(!enabled)('Firestore workspace migration import', () => {
         data: {
           name: 'approval-recovery',
           cursor: 'approval-task-1',
-          updatedAt: serializeMigrationTimestamp('2026-09-23T06:29:00.000000Z'),
+          updatedAt: serializeMigrationTimestamp('2026-09-23 06:29:00.000000+00'),
         },
         checksum: '',
       };
@@ -1436,6 +1463,175 @@ describe.skipIf(!enabled)('Firestore workspace migration import', () => {
       await expect(store.doc('maintenanceCursors', epochName).get()).resolves.toMatchObject({
         exists: true,
       });
+    } finally {
+      await disposeStore(store);
+    }
+  });
+
+  it('requires trusted epoch provisioning to recover a historical active migration without an epoch', async () => {
+    const store = emulatorStore();
+    const target = {
+      projectId: 'demo-assistant-test',
+      databaseId: '(default)',
+      installationId: store.installationId,
+    };
+    try {
+      const source = completeV3Bundle(target);
+      delete source.manifest.coverage.runtimeExclusions;
+      source.manifest.bundleChecksum = migrationBundleChecksum(source.records, 3);
+      const sourceAgentId = source.manifest.source.agentId;
+      const bytes = Buffer.from(JSON.stringify(source));
+      const evidence = {
+        sourceWriteFenceId: 'historical-fence-2026-09-23-003',
+        sourceWritesDrainedAt: '2026-09-23T06:30:00.000Z',
+        snapshotUri: `gs://${target.projectId}-workspace/workspace/${target.installationId}/migration/snapshots/historical.json`,
+        snapshotGeneration: '1790144100630775',
+        snapshotSha256: createHash('sha256').update(bytes).digest('hex'),
+      };
+      await importWorkspaceBundle(store, source, { sourceAgentId, target, mode: 'write' });
+      const portableBefore = await Promise.all(
+        source.records.map((record) => store.doc(record.collection, record.id).get()),
+      );
+      const privacyJob = {
+        agentId: sourceAgentId,
+        generation: randomUUID(),
+        status: 'complete',
+        counts: {},
+      };
+      const privacyJobRef = store.doc('privacyErasureJobs', sourceAgentId);
+      await privacyJobRef.set(privacyJob);
+      await store.doc('coordination', 'migration').update({
+        status: 'active',
+        activation: {
+          sourceWriteFenceId: evidence.sourceWriteFenceId,
+          sourceWritesDrainedAt: new Date(evidence.sourceWritesDrainedAt),
+          snapshotUri: evidence.snapshotUri,
+          snapshotGeneration: evidence.snapshotGeneration,
+          snapshotSha256: evidence.snapshotSha256,
+        },
+      });
+      const markerRef = store.doc('coordination', 'migration');
+      const historicalMarkerSnapshot = await markerRef.get();
+      const historicalMarker = historicalMarkerSnapshot.data();
+      expect(
+        await store.doc('maintenanceCursors', `owner-editor-epoch:${sourceAgentId}`).get(),
+      ).toMatchObject({ exists: false });
+      expect(await store.collection('ownerEditorOperations').get()).toMatchObject({ size: 0 });
+      await expect(
+        readFirestoreOwnerEditorIssuanceContext(store, sourceAgentId),
+      ).resolves.toBeNull();
+
+      await expect(
+        importWorkspaceBundle(store, source, { sourceAgentId, target, mode: 'verify' }),
+      ).rejects.toThrow('Active migration owner editor epoch is missing');
+      await expect(
+        activateWorkspaceBundle(store, source, {
+          sourceAgentId,
+          target,
+          evidence,
+          snapshotBytes: bytes,
+        }),
+      ).rejects.toThrow('Active migration owner editor epoch is missing');
+      const markerAfterRejection = await markerRef.get();
+      expect(markerAfterRejection.data()).toEqual(historicalMarker);
+      expect(markerAfterRejection.updateTime).toEqual(historicalMarkerSnapshot.updateTime);
+      expect(await store.collection('ownerEditorOperations').get()).toMatchObject({ size: 0 });
+      expect(
+        await store.doc('maintenanceCursors', `owner-editor-epoch:${sourceAgentId}`).get(),
+      ).toMatchObject({ exists: false });
+      const portableAfterRejection = await Promise.all(
+        source.records.map((record) => store.doc(record.collection, record.id).get()),
+      );
+      expect(portableAfterRejection.map((snapshot) => snapshot.data())).toEqual(
+        portableBefore.map((snapshot) => snapshot.data()),
+      );
+      expect(portableAfterRejection.map((snapshot) => snapshot.updateTime)).toEqual(
+        portableBefore.map((snapshot) => snapshot.updateTime),
+      );
+
+      await expect(rotateFirestoreOwnerEditorEpoch(store, randomUUID(), false)).rejects.toThrow(
+        'Editor owner is unavailable',
+      );
+      await privacyJobRef.set({ ...privacyJob, status: 'pending' });
+      await expect(rotateFirestoreOwnerEditorEpoch(store, sourceAgentId, false)).rejects.toThrow(
+        'Editor privacy state is unavailable',
+      );
+      expect(
+        await store.doc('maintenanceCursors', `owner-editor-epoch:${sourceAgentId}`).get(),
+      ).toMatchObject({ exists: false });
+
+      const portableAfterMaintenanceFailures = await Promise.all(
+        source.records.map((record) => store.doc(record.collection, record.id).get()),
+      );
+      expect(portableAfterMaintenanceFailures.map((snapshot) => snapshot.data())).toEqual(
+        portableBefore.map((snapshot) => snapshot.data()),
+      );
+      expect(portableAfterMaintenanceFailures.map((snapshot) => snapshot.updateTime)).toEqual(
+        portableBefore.map((snapshot) => snapshot.updateTime),
+      );
+      const markerAfterMaintenanceFailures = await markerRef.get();
+      expect(markerAfterMaintenanceFailures.data()).toEqual(historicalMarker);
+      expect(markerAfterMaintenanceFailures.updateTime).toEqual(
+        historicalMarkerSnapshot.updateTime,
+      );
+      expect(await store.collection('ownerEditorOperations').get()).toMatchObject({ size: 0 });
+
+      await privacyJobRef.set(privacyJob);
+      const repairedEpoch = await rotateFirestoreOwnerEditorEpoch(store, sourceAgentId, false);
+      await expect(
+        store.doc('maintenanceCursors', `owner-editor-epoch:${sourceAgentId}`).get(),
+      ).resolves.toMatchObject({ exists: true });
+      const repairedCursor = JSON.parse(
+        String(
+          (await store.doc('maintenanceCursors', `owner-editor-epoch:${sourceAgentId}`).get()).get(
+            'cursor',
+          ),
+        ),
+      ) as Record<string, unknown>;
+      expect(repairedCursor).toMatchObject({
+        ownerId: sourceAgentId,
+        epoch: repairedEpoch,
+        ready: false,
+      });
+      await expect(
+        readFirestoreOwnerEditorIssuanceContext(store, sourceAgentId),
+      ).resolves.toBeNull();
+      await expect(
+        importWorkspaceBundle(store, source, { sourceAgentId, target, mode: 'verify' }),
+      ).resolves.toMatchObject({ verified: true });
+      await expect(
+        activateWorkspaceBundle(store, source, {
+          sourceAgentId,
+          target,
+          evidence,
+          snapshotBytes: bytes,
+        }),
+      ).resolves.toMatchObject({ activated: true, alreadyActivated: true });
+      await expect(
+        readFirestoreOwnerEditorIssuanceContext(store, sourceAgentId),
+      ).resolves.toBeNull();
+      expect(
+        JSON.parse(
+          String(
+            (
+              await store.doc('maintenanceCursors', `owner-editor-epoch:${sourceAgentId}`).get()
+            ).get('cursor'),
+          ),
+        ),
+      ).toEqual(repairedCursor);
+      const markerAfterRepair = await markerRef.get();
+      expect(markerAfterRepair.data()).toEqual(historicalMarker);
+      expect(markerAfterRepair.updateTime).toEqual(historicalMarkerSnapshot.updateTime);
+      const portableAfterRepair = await Promise.all(
+        source.records.map((record) => store.doc(record.collection, record.id).get()),
+      );
+      expect(portableAfterRepair.map((snapshot) => snapshot.data())).toEqual(
+        portableBefore.map((snapshot) => snapshot.data()),
+      );
+      expect(portableAfterRepair.map((snapshot) => snapshot.updateTime)).toEqual(
+        portableBefore.map((snapshot) => snapshot.updateTime),
+      );
+      expect(await store.collection('ownerEditorOperations').get()).toMatchObject({ size: 0 });
     } finally {
       await disposeStore(store);
     }
