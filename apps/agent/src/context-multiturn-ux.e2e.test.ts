@@ -4,7 +4,13 @@ import { handleChatTurn } from '@assistant/application';
 import type { Config } from '@assistant/config';
 import { loadConfig } from '@assistant/config';
 import type { ModelRouter } from '@assistant/core';
-import { type DispatcherPort, type ExecutorDeps, executeTask } from '@assistant/core';
+import {
+  type DispatcherPort,
+  type ExecutorDeps,
+  executeTask,
+  type TaskState,
+  TaskStateSchema,
+} from '@assistant/core';
 import { extractOwnerIntent } from '@assistant/core/workflow/owner-intent';
 import { detectPersonalReadRequest } from '@assistant/core/workflow/read-intent';
 import {
@@ -27,12 +33,14 @@ import {
 import type {
   ApplicationChatPersistence,
   EmbeddingSpace,
+  ExecutionEvidenceRecord,
   ExecutionPersistence,
   RecallSurfaceRecord,
 } from '@assistant/persistence';
 import {
   approvalPolicyFingerprint,
   conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
   embeddingSpaceIdentityKey,
 } from '@assistant/persistence';
 import {
@@ -223,6 +231,55 @@ function recordSyntheticReadCompletion(
   return state.success;
 }
 
+function exactPersistedReadMatch(input: {
+  taskId: string;
+  query: string;
+  sourceId: string;
+  body: string;
+  receipts: SyntheticReadReceipt[];
+  evidence: ExecutionEvidenceRecord[];
+}) {
+  for (const receipt of input.receipts) {
+    if (receipt.taskId !== input.taskId || receipt.query !== input.query) continue;
+    const row = input.evidence.find((value) => value.id === receipt.toolCallId);
+    if (
+      !row ||
+      row.status !== 'succeeded' ||
+      row.toolName !== 'conversations.search' ||
+      (row.args as { query?: unknown } | null)?.query !== input.query
+    )
+      continue;
+    const result = row.result as { matches?: unknown[] } | null;
+    if (!Array.isArray(result?.matches)) continue;
+    const match = result.matches.find((value) => {
+      if (!value || typeof value !== 'object') return false;
+      const source = value as Record<string, unknown>;
+      return (
+        source.messageId === input.sourceId &&
+        source.text === input.body &&
+        source.role === 'user' &&
+        source.origin === 'owner' &&
+        source.sourceRevision === conversationMessageSourceRevision(input.sourceId, input.body) &&
+        source.speakerRevision ===
+          conversationMessageSpeakerRevision(input.sourceId, input.body, 'user', 'owner')
+      );
+    });
+    if (match) return match;
+  }
+  return undefined;
+}
+
+function capturedRecallSource(
+  captured: Captured | undefined,
+  taskId: string | null,
+  sourceId: string,
+) {
+  if (!taskId || captured?.phase !== 'step' || captured.taskId !== taskId) return undefined;
+  return captured.persistedRecall?.find((source) =>
+    source.evidence?.sourceMessageIds.includes(sourceId),
+  );
+}
+
 describe('synthetic historical-read completion gate', () => {
   const routerFor = (state: { success: boolean }, requestQuery: string | undefined) =>
     syntheticRouter([], () => [], 'conversations.search', requestQuery, state) as unknown as {
@@ -260,6 +317,135 @@ describe('synthetic historical-read completion gate', () => {
     expect(result.toolCalls).toHaveLength(0);
     expect(result.text).toBe(OWNER_REPLY);
     expect(state.success).toBe(false);
+  });
+});
+
+describe('phase-aware contextual source identity capture', () => {
+  it('keeps model inputs immutable and selector frames separate', async () => {
+    const captured: Captured[] = [];
+    const selectors: SelectorCaptured[] = [];
+    const router = syntheticRouter(
+      captured,
+      () => [],
+      'conversations.search',
+      undefined,
+      { success: false },
+      { selectors },
+    ) as unknown as {
+      step(role: string, options: { taskId: string; messages: unknown[] }): Promise<unknown>;
+      object(role: string, options: { taskId: string; prompt: string }): Promise<unknown>;
+      stream(
+        role: string,
+        options: {
+          system: string;
+          messages: unknown[];
+          onComplete: (text: string) => Promise<void>;
+        },
+      ): Promise<unknown>;
+    };
+    const messages = [{ role: 'user', content: 'Actual request' }];
+    await router.step('draft', { taskId: 'actual-task', messages });
+    messages.push({ role: 'assistant', content: 'Later executor append' });
+    expect(captured[0]?.messages).toEqual([{ role: 'user', content: 'Actual request' }]);
+    const prompt = JSON.stringify({ request: 'Earlier preference?', sources: [] });
+    await router.object('extract', { taskId: 'actual-task', prompt });
+    expect(selectors).toEqual([{ taskId: 'actual-task', prompt }]);
+    expect(captured).toHaveLength(1);
+    const streamMessages = [{ role: 'user', content: 'Actual streaming request' }];
+    await router.stream('reply', {
+      system: 'Actual streaming system',
+      messages: streamMessages,
+      onComplete: async () => {
+        streamMessages.push({ role: 'assistant', content: 'Later stream append' });
+      },
+    });
+    expect(captured[1]).toMatchObject({
+      phase: 'stream',
+      messages: [{ role: 'user', content: 'Actual streaming request' }],
+    });
+    expect(selectors).toHaveLength(1);
+  });
+
+  it('requires actual task-bound provenance rather than a UUID in rendered text', () => {
+    const source = {
+      date: '2026-10-26',
+      label: 'Owner source',
+      surfaceKey: 'a'.repeat(64),
+      sourceRevision: 'b'.repeat(64),
+      evidence: {
+        representation: 'message_excerpts' as const,
+        sourceMessageIds: ['actual-source'],
+        renderedUtf8Bytes: 30,
+      },
+    };
+    const captured: Captured = {
+      phase: 'step',
+      taskId: 'actual-task',
+      role: 'draft',
+      system: 'actual-source appears in unrelated rendered prose',
+      messages: [],
+      persistedRecall: [source],
+    };
+    expect(capturedRecallSource(captured, 'actual-task', 'actual-source')).toEqual(source);
+    expect(
+      capturedRecallSource({ ...captured, persistedRecall: [] }, 'actual-task', 'actual-source'),
+    ).toBeUndefined();
+    expect(capturedRecallSource(captured, 'another-task', 'actual-source')).toBeUndefined();
+    expect(capturedRecallSource(captured, 'actual-task', 'another-source')).toBeUndefined();
+  });
+
+  it('rejects wrong-query, wrong-task, stale, failed and wrong-speaker durable search evidence', () => {
+    const sourceId = '11111111-1111-4111-8111-111111111111';
+    const body = 'The owner chose the exact earlier preference.';
+    const match = {
+      messageId: sourceId,
+      text: body,
+      role: 'user',
+      origin: 'owner',
+      sourceRevision: conversationMessageSourceRevision(sourceId, body),
+      speakerRevision: conversationMessageSpeakerRevision(sourceId, body, 'user', 'owner'),
+    };
+    const receipt: SyntheticReadReceipt = {
+      toolCallId: 'receipt',
+      taskId: 'actual-task',
+      step: 1,
+      toolName: 'conversations.search',
+      modelToolCallId: 'actual-call',
+      query: 'earlier preference',
+      args: { query: 'earlier preference' },
+      result: { matches: [match], mode: 'semantic' },
+    };
+    const evidence: ExecutionEvidenceRecord = {
+      id: 'receipt',
+      toolName: 'conversations.search',
+      status: 'succeeded',
+      args: receipt.args,
+      result: receipt.result,
+      error: null,
+      step: 1,
+      decision: null,
+    };
+    const input = {
+      taskId: 'actual-task',
+      query: 'earlier preference',
+      sourceId,
+      body,
+      receipts: [receipt],
+      evidence: [evidence],
+    };
+    expect(exactPersistedReadMatch(input)).toEqual(match);
+    expect(exactPersistedReadMatch({ ...input, taskId: 'another-task' })).toBeUndefined();
+    expect(exactPersistedReadMatch({ ...input, query: 'another query' })).toBeUndefined();
+    for (const row of [
+      { ...evidence, status: 'failed' as const },
+      { ...evidence, args: { query: 'another query' } },
+      { ...evidence, result: { matches: [{ ...match, sourceRevision: 'b'.repeat(64) }] } },
+      { ...evidence, result: { matches: [{ ...match, speakerRevision: 'b'.repeat(64) }] } },
+      { ...evidence, result: { matches: [{ ...match, text: 'Stale body' }] } },
+      { ...evidence, result: { matches: [{ ...match, role: 'assistant' }] } },
+      { ...evidence, result: { matches: [{ ...match, origin: 'unknown' }] } },
+    ])
+      expect(exactPersistedReadMatch({ ...input, evidence: [row] })).toBeUndefined();
   });
 });
 
@@ -302,7 +488,15 @@ function syntheticPreflightRoute(modelId: string) {
   };
 }
 
-type Captured = { role: string; system: string; messages: unknown[] };
+type Captured = {
+  role: string;
+  system: string;
+  messages: unknown[];
+  phase?: 'step' | 'stream';
+  taskId?: string;
+  persistedRecall?: TaskState['recall'];
+};
+type SelectorCaptured = { taskId?: string; prompt: unknown };
 type SyntheticReadReceipt = {
   toolCallId: string;
   taskId: string;
@@ -334,10 +528,20 @@ function syntheticRouter(
   requestedReadTool: string,
   requestQuery: string | undefined,
   readState: { success: boolean },
+  capture: {
+    runtime?: Pick<TestRuntime, 'ownerId' | 'persistence'>;
+    conversationId?: string;
+    selectors?: SelectorCaptured[];
+  } = {},
 ) {
   const router = {
     route: async () => syntheticPreflightRoute('synthetic/context-ux'),
-    async object(role: string, options: { prompt?: unknown } = {}) {
+    async object(role: string, options: { taskId?: string; prompt?: unknown } = {}) {
+      if (role === 'extract')
+        capture.selectors?.push({
+          taskId: options.taskId,
+          prompt: structuredClone(options.prompt),
+        });
       return {
         ok: true,
         modelId: 'synthetic/offline',
@@ -367,7 +571,12 @@ function syntheticRouter(
       role: string,
       options: { system: string; messages: unknown[]; onComplete: (text: string) => Promise<void> },
     ) {
-      captured.push({ role, system: options.system, messages: options.messages });
+      captured.push({
+        role,
+        phase: 'stream',
+        system: options.system,
+        messages: structuredClone(options.messages),
+      });
       await options.onComplete(OWNER_REPLY);
       return {
         ok: true,
@@ -383,17 +592,37 @@ function syntheticRouter(
           })(),
       };
     },
-    async step(role: string, options: { system?: string; messages?: unknown[] }) {
+    async step(role: string, options: { taskId?: string; system?: string; messages?: unknown[] }) {
       // Completion follows a dispatch outcome recorded by the paired fixture
       // dispatcher. Explicit historical reads set that state only for their
       // exact query with matches. Ordinary turns finish without manufacturing a
       // historical search, leaving ambient-recall eligibility to the product path.
       const hasReadResult = readState.success;
-      captured.push({
+      // Snapshot the actual invocation before awaiting a source-state read; later
+      // executor appends must not become retroactive model input.
+      const invocation: Captured = {
         role,
+        phase: 'step',
+        taskId: options.taskId,
         system: options.system ?? '',
-        messages: options.messages ?? [],
-      });
+        messages: structuredClone(options.messages ?? []),
+      };
+      if (capture.runtime) {
+        if (!options.taskId) throw new Error('Executor capture requires its actual task ID');
+        const task = await capture.runtime.persistence.executionContext.getTask(
+          capture.runtime.ownerId,
+          options.taskId,
+        );
+        if (
+          !task ||
+          task.id !== options.taskId ||
+          task.agentId !== capture.runtime.ownerId ||
+          task.conversationId !== capture.conversationId
+        )
+          throw new Error('Executor capture task ownership changed');
+        invocation.persistedRecall = structuredClone(TaskStateSchema.parse(task.state).recall);
+      }
+      captured.push(invocation);
       return {
         ok: true,
         modelId: 'synthetic/offline',
@@ -849,7 +1078,9 @@ describe.each(['postgres', 'firestore'] as const)(
 
     async function runTurn(runtime: TestRuntime, conversationId: string, text: string) {
       const captured: Captured[] = [];
+      const selectors: SelectorCaptured[] = [];
       const readReceipts: SyntheticReadReceipt[] = [];
+      let persistedEvidence: ExecutionEvidenceRecord[] = [];
       const readIntent = detectPersonalReadRequest([{ role: 'user', content: text }]);
       const readState = { success: false };
       const requestedReadTool = 'conversations.search';
@@ -859,6 +1090,7 @@ describe.each(['postgres', 'firestore'] as const)(
         requestedReadTool,
         readIntent?.conversationQuery,
         readState,
+        { runtime, conversationId, selectors },
       );
       const response = await handleChatTurn(request(conversationId, text), {
         config: runtime.config,
@@ -888,7 +1120,7 @@ describe.each(['postgres', 'firestore'] as const)(
           taskId,
         );
         expect(result.outcome, JSON.stringify(result)).toBe('done');
-        const persistedEvidence = await runtime.persistence.executionEvidence.taskEvidence({
+        persistedEvidence = await runtime.persistence.executionEvidence.taskEvidence({
           agentId: runtime.ownerId,
           taskId,
         });
@@ -954,7 +1186,77 @@ describe.each(['postgres', 'firestore'] as const)(
       } else {
         expect(stream).toContain(OWNER_REPLY);
       }
-      return { response, captured: captured.at(-1), stream, readReceipts };
+      return {
+        response,
+        taskId,
+        captured: captured.at(-1),
+        selectors,
+        stream,
+        readReceipts,
+        persistedEvidence,
+        requestQuery: readIntent?.conversationQuery,
+      };
+    }
+
+    async function expectTurnSourceIdentity(
+      runtime: TestRuntime,
+      turn: Awaited<ReturnType<typeof runTurn>>,
+      sourceConversationId: string,
+      sourceId: string,
+      surfaced: Array<Record<string, unknown>>,
+    ) {
+      const ownerSource = await runtime.persistence.executionContext.getOwnerMessage({
+        agentId: runtime.ownerId,
+        conversationId: sourceConversationId,
+        messageId: sourceId,
+      });
+      expect(ownerSource).toMatchObject({ id: sourceId, role: 'user', origin: 'owner' });
+      if (!ownerSource) throw new Error('Expected source is not an actual visible owner row');
+      if (turn.requestQuery) {
+        const matched = exactPersistedReadMatch({
+          taskId: required(turn.taskId, 'Explicit read task ID'),
+          query: turn.requestQuery,
+          sourceId,
+          body: ownerSource.text,
+          receipts: turn.readReceipts,
+          evidence: turn.persistedEvidence,
+        });
+        expect(
+          matched,
+          'Exact successful query receipt must contain this actual owner message',
+        ).toBeDefined();
+        const selectorSources = turn.selectors
+          .filter((selector) => selector.taskId === turn.taskId)
+          .flatMap((selector) => {
+            if (typeof selector.prompt !== 'string') return [];
+            const value = JSON.parse(selector.prompt) as { sources?: unknown[] };
+            return Array.isArray(value.sources) ? value.sources : [];
+          });
+        expect(selectorSources).toContainEqual(
+          expect.objectContaining({
+            key: `message:${sourceId}`,
+            body: ownerSource.text,
+            speaker: 'Recorded owner message',
+          }),
+        );
+      } else {
+        expect(turn.captured).toMatchObject({ phase: 'step', taskId: turn.taskId });
+        expectCurrentPlanningRecallToContain(turn.captured, `owner: ${ownerSource.text}`);
+        const source = capturedRecallSource(turn.captured, turn.taskId, sourceId);
+        expect(source, 'Model-step task checkpoint must name the exact source UUID').toBeDefined();
+        expect(source?.evidence?.sourceMessageIds).toContain(sourceId);
+        expect(source?.surfaceKey).toMatch(/^[a-f0-9]{64}$/);
+        expect(source?.sourceRevision).toMatch(/^[a-f0-9]{64}$/);
+        expect(surfaced).toContainEqual(
+          expect.objectContaining({
+            surfaceKey: source?.surfaceKey,
+            sourceRevision: source?.sourceRevision,
+            evidence: expect.objectContaining({
+              sourceMessageIds: expect.arrayContaining([sourceId]),
+            }),
+          }),
+        );
+      }
     }
 
     it(
@@ -2195,7 +2497,13 @@ describe.each(['postgres', 'firestore'] as const)(
             });
             for (const sourceId of expectedSourceIds) {
               expect(surfacedSourceIds).toContain(sourceId);
-              expect(prompt).toContain(sourceId);
+              await expectTurnSourceIdentity(
+                runtime,
+                target,
+                sourceConversationId,
+                sourceId,
+                surfaced,
+              );
             }
 
             for (const source of surfaced) {
@@ -2227,7 +2535,14 @@ describe.each(['postgres', 'firestore'] as const)(
               .map((index) => sourceMessageIds[index])
               .filter((id): id is string => Boolean(id));
             if (!scenario.sameConversation && expectedSourceIds.length > 0) {
-              for (const sourceId of expectedSourceIds) expect(prompt).toContain(sourceId);
+              for (const sourceId of expectedSourceIds)
+                await expectTurnSourceIdentity(
+                  runtime,
+                  target,
+                  sourceConversationId,
+                  sourceId,
+                  surfaced,
+                );
             } else {
               expect(surfaced.length).toBeGreaterThan(0);
             }
