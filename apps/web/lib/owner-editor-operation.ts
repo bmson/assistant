@@ -55,7 +55,7 @@ export class OwnerEditorOperation {
   constructor(
     private readonly session: OwnerEditorSessionView,
     private readonly storage: () => OwnerEditorStorage,
-    private readonly request: typeof fetch = fetch,
+    private readonly request: typeof fetch = (input, init) => globalThis.fetch(input, init),
   ) {}
   getSnapshot = () => this.state;
   getServerSnapshot = () => INITIAL;
