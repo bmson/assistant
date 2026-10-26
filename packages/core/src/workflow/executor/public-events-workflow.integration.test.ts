@@ -266,13 +266,14 @@ function fixture(mode: Mode = 'matching') {
     },
   };
   const deps = { db, persistence, router, dispatcher } as unknown as ExecutorDeps;
-  async function turn(text: string) {
+  async function turn(text: string, createdAt: Date = requestAt) {
     const id = randomUUID();
     const ownerMessage = await append({
       conversationId,
       taskId: id,
       role: 'user',
       origin: 'owner',
+      createdAt,
       text,
       parts: [{ type: 'text', text }],
     });
@@ -283,7 +284,7 @@ function fixture(mode: Mode = 'matching') {
       type: 'chat_turn',
       trust: 'owner',
       status: 'pending',
-      createdAt: requestAt,
+      createdAt,
       trigger: {
         source: 'chat',
         agentId,
@@ -398,6 +399,73 @@ describe('admitted public city events through the complete offline executor', ()
       expect(f.router.step).not.toHaveBeenCalled();
     },
   );
+
+  it('re-anchors DST date correction to each persisted task and excludes stale/private history', async () => {
+    const f = fixture();
+    const oldTaskId = randomUUID();
+    f.ledger.push({
+      id: randomUUID(),
+      taskId: oldTaskId,
+      toolName: 'web.fetch',
+      args: { url },
+      status: 'succeeded',
+      step: 1,
+      result: { title: 'STALE_CANARY', url, text: listing },
+    });
+    f.messages.push({
+      id: randomUUID(),
+      conversationId: f.conversationId,
+      taskId: oldTaskId,
+      role: 'assistant',
+      origin: 'assistant',
+      text: 'PRIVATE_PRIOR_ASSISTANT_CANARY',
+      hiddenAt: null,
+      parts: [],
+      createdAt: new Date('2026-10-31T05:00:00.000Z'),
+    } as Records['messages']);
+
+    const beforeFallback = new Date('2026-11-01T06:30:00.000Z');
+    const first = await f.turn('Find public events in San Francisco this weekend.', beforeFallback);
+    const firstScope = PublicActivityScopeDataSchema.parse(
+      TaskStateSchema.parse(first.task.state).plannerState.publicActivityScope,
+    );
+    expect(first.task.createdAt.toISOString()).toBe(beforeFallback.toISOString());
+    expect(firstScope).toMatchObject({
+      civilWindow: { startDate: '2026-10-31', endDateExclusive: '2026-11-02' },
+      clock: {
+        referenceAt: beforeFallback.toISOString(),
+        timeZone: zone,
+        source: 'task_created_at',
+      },
+    });
+    expect(first.calls.map((call) => call.toolName)).toEqual(['web.search', 'web.fetch']);
+    expect(first.calls.every((call) => call.scopes.join(',') === 'external_read')).toBe(true);
+    expect(first.calls[0]?.args.query).toContain('2026-10-31 to before 2026-11-02');
+    expect(first.reply?.text).not.toMatch(/STALE_CANARY|PRIVATE_/);
+
+    const afterFallback = new Date('2026-11-01T09:30:00.000Z');
+    const corrected = await f.turn('2026-11-07 instead', afterFallback);
+    const correctedScope = PublicActivityScopeDataSchema.parse(
+      TaskStateSchema.parse(corrected.task.state).plannerState.publicActivityScope,
+    );
+    expect(corrected.task.createdAt.toISOString()).toBe(afterFallback.toISOString());
+    expect(correctedScope).toMatchObject({
+      civilWindow: { startDate: '2026-11-07', endDateExclusive: '2026-11-08' },
+      clock: {
+        referenceAt: afterFallback.toISOString(),
+        timeZone: zone,
+        source: 'task_created_at',
+      },
+    });
+    expect(corrected.calls.map((call) => call.toolName)).toEqual(['web.search', 'web.fetch']);
+    expect(corrected.calls.every((call) => call.scopes.join(',') === 'external_read')).toBe(true);
+    expect(corrected.calls[0]?.args.query).toContain('2026-11-07 to before 2026-11-08');
+    expect(corrected.reply?.text).not.toMatch(/STALE_CANARY|PRIVATE_/);
+    expect(f.dispatched.every((call) => /^web\.(search|fetch)$/.test(call.toolName))).toBe(true);
+    expect(f.router.step).not.toHaveBeenCalled();
+    expect(f.forbidden).not.toHaveBeenCalled();
+    expect(f.commitmentReads).not.toHaveBeenCalled();
+  });
 
   it('excludes prior-task successful pages and private history, and performs a fresh current-task search', async () => {
     const f = fixture('snippet');
