@@ -4,7 +4,11 @@ import type { Db } from './client.js';
 import { approvalPolicies, approvals, conversations, messages, tasks } from './schema.js';
 
 // Raw SQL results mimic postgres-js's transparent timestamptz parser. No DB client/query is created.
-function fixture(rawClock: unknown, expiresAt = '2026-10-23T12:01:00.123Z') {
+function fixture(
+  rawClock: unknown,
+  expiresAt = '2026-10-23T12:01:00.123Z',
+  approvalExpiresAt = '2026-10-24T12:00:00.000Z',
+) {
   const agentId = 'owner';
   const taskId = '11111111-1111-4111-8111-111111111111';
   const conversationId = '22222222-2222-4222-8222-222222222222';
@@ -53,7 +57,7 @@ function fixture(rawClock: unknown, expiresAt = '2026-10-23T12:01:00.123Z') {
       taskId,
       toolCallId,
       status: 'pending',
-      expiresAt: new Date('2026-10-24T12:00:00.000Z'),
+      expiresAt: new Date(approvalExpiresAt),
     },
     toolCall: {
       id: toolCallId,
@@ -64,10 +68,13 @@ function fixture(rawClock: unknown, expiresAt = '2026-10-23T12:01:00.123Z') {
     },
     task: { id: taskId, agentId, trust: 'owner', status: 'waiting_approval' },
     ownerTimeZone: 'UTC',
-    repositoryNow: rawClock,
   };
   const readTables: unknown[] = [];
   const db = {
+    execute: async () => {
+      readTables.push('clock_timestamp');
+      return rawClock === undefined ? [] : [{ now: rawClock }];
+    },
     select: () => {
       let table: unknown;
       const query = {
@@ -151,6 +158,24 @@ describe('PostgreSQL owner-call preview database-clock boundary', () => {
     expect(review?.existingActiveGrants).toEqual([]);
   });
 
+  it('samples the database clock after follow-up reads and uses it for active-grant expiry', async () => {
+    const f = fixture('2026-10-23 12:00:01.000000+00', '2026-10-23T12:00:00.500Z');
+    const review = await f.review();
+    expect(review?.repositoryNow.toISOString()).toBe('2026-10-23T12:00:01.000Z');
+    expect(review?.existingActiveGrants).toEqual([]);
+    expect(f.readTables.at(-1)).toBe('clock_timestamp');
+  });
+
+  it('rejects a preview when the approval expires before the final database clock sample', async () => {
+    const f = fixture(
+      '2026-10-23 12:00:01.000000+00',
+      '2026-10-23T12:01:00.000Z',
+      '2026-10-23T12:00:00.500Z',
+    );
+    expect(await f.review()).toBeNull();
+    expect(f.readTables.at(-1)).toBe('clock_timestamp');
+  });
+
   it.each([
     ['missing', undefined],
     ['null', null],
@@ -164,6 +189,13 @@ describe('PostgreSQL owner-call preview database-clock boundary', () => {
   ])('fails closed without a process-clock fallback for %s', async (_label, rawClock) => {
     const f = fixture(rawClock);
     expect(await f.review()).toBeNull();
-    expect(f.readTables).toEqual([approvals]);
+    expect(f.readTables).toEqual([
+      approvals,
+      tasks,
+      conversations,
+      messages,
+      approvalPolicies,
+      'clock_timestamp',
+    ]);
   });
 });
