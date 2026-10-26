@@ -151,6 +151,7 @@ describe('provider billing without guessed totals', () => {
       base,
       now,
     );
+    expect(report.amountBasis).toBe('provider_reported_cost');
     expect(report.lines[0]?.net).toBe(12);
     expect(report.message).toContain('not added here');
     const zero = await readOpenRouterBilling(
@@ -338,6 +339,25 @@ describe('month-end run rate', () => {
     expect(forecast?.daysInMonth).toBe(29);
     expect(forecast?.totals[0]?.projected).toBe(58);
   });
+
+  it('projects amount-only reported cost without claiming an after-credits amount', () => {
+    const forecast = billingForecast({
+      ...report,
+      id: 'openrouter',
+      amountBasis: 'provider_reported_cost',
+      period: '2026-09',
+      fetchedAt: '2026-09-16T00:00:00Z',
+      lines: [
+        { service: 'OpenRouter', detail: '', currency: 'USD', cost: 30, credits: 0, net: 99 },
+      ],
+    });
+    expect(forecast?.totals).toEqual([
+      { currency: 'USD', spent: 30, dailyAverage: 2, projected: 60 },
+    ]);
+    expect(forecast?.message).toContain('reported cost');
+    expect(forecast?.message).toContain('does not report credits');
+    expect(forecast?.message).not.toContain('after credits');
+  });
 });
 
 describe('OpenAI organization Costs adapter', () => {
@@ -516,7 +536,34 @@ describe('OpenAI organization Costs adapter', () => {
       status: 'unavailable',
       lines: [],
     });
+    expect(projectBillingForMobile([amountOnly], false)[0]?.message).toContain(
+      'Update the app to view the reported-cost breakdown.',
+    );
     expect(projectBillingForMobile([amountOnly], true)[0]).toBe(amountOnly);
+  });
+
+  it('keeps the actual OpenRouter amount-only report unavailable to older mobile clients', async () => {
+    const request = vi.fn(async () => response({ data: { usage_monthly: 12 } }));
+    const report = await readOpenRouterBilling(
+      request,
+      'fixture-key',
+      { ...base, id: 'openrouter' },
+      now,
+    );
+    expect(request).toHaveBeenCalledOnce();
+    expect(report).toMatchObject({
+      id: 'openrouter',
+      status: 'reported',
+      amountBasis: 'provider_reported_cost',
+      lines: [{ service: 'OpenRouter', cost: 12, credits: 0, net: 12 }],
+    });
+    const newerClient = projectBillingForMobile([report], true)[0];
+    expect(newerClient).toBe(report);
+    expect(newerClient?.amountBasis).toBe('provider_reported_cost');
+    const olderClient = projectBillingForMobile([report], false)[0];
+    expect(olderClient).toMatchObject({ status: 'unavailable', lines: [], forecast: undefined });
+    expect(olderClient?.amountBasis).toBe('provider_reported_cost');
+    expect(olderClient?.message).toContain('Update the app to view the reported-cost breakdown.');
   });
 });
 
