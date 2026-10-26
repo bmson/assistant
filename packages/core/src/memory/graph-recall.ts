@@ -27,7 +27,7 @@ export interface GraphRecallResult {
   used: number;
   candidates: number;
   sources: RecallSource[];
-  rankedContext?: Array<{ text: string; score: number; source: RecallSource }>;
+  rankedContext?: Array<{ text: string; meaning?: string; score: number; source: RecallSource }>;
 }
 
 /**
@@ -56,7 +56,7 @@ export interface LayeredRecallResult {
   graphFailed: boolean;
   historyFailed: boolean;
   history: HistoryRecallResult;
-  rankedContext: Array<{ text: string; score: number; source: RecallSource }>;
+  rankedContext: Array<{ text: string; meaning?: string; score: number; source: RecallSource }>;
 }
 
 const DEFAULTS = {
@@ -203,6 +203,19 @@ function graphPathSource(evidence: Array<{ row: RelationRow; hops: 1 | 2 }>): Re
   };
 }
 
+/** Semantic relation/evidence fields only; excludes hop/date/status presentation wrappers. */
+function graphPathMeaning(evidence: Array<{ row: RelationRow; hops: 1 | 2 }>): string {
+  return evidence
+    .flatMap(({ row }) => [
+      row.subjectLabel,
+      readablePredicate(row.predicate),
+      row.objectLabel,
+      row.evidenceQuote ?? row.content,
+    ])
+    .filter(Boolean)
+    .join(' ');
+}
+
 /**
  * Retrieve a compact, evidence-labelled graph context. The caller owns query
  * embedding and trust gating; this function never embeds and never throws for
@@ -287,6 +300,7 @@ export async function recallKnowledgeGraph(
     sources.push(source);
     rankedContext.push({
       text: entry,
+      meaning: graphPathMeaning(evidence),
       score: source.relevance ?? 0,
       source,
     });

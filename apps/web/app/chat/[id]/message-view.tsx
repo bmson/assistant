@@ -618,13 +618,12 @@ export function RecallSourceSettingView({
       {status === 'unavailable' ? (
         <span role="status">Future recall setting unavailable for this saved reference.</span>
       ) : null}
-      {status === 'allowed' ? (
-        <span>Future recall: not hidden by this control for this saved version.</span>
+      {status === 'allowed' && !pending ? (
+        <span>Future recall: This version is not hidden by this control.</span>
       ) : null}
-      {status === 'suppressed' ? (
+      {status === 'suppressed' && !pending ? (
         <span>
-          Future recall: hidden by this control for this saved version. The saved source is not
-          deleted.
+          Future recall: This version is hidden by this control. The saved source is not deleted.
         </span>
       ) : null}
       {status === 'unknown' || status === 'checking' ? (

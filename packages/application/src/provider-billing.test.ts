@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import type { ModelProviderPorts } from './model-providers.js';
 import {
@@ -7,7 +8,9 @@ import {
   getProviderBilling,
   googleBillingQuery,
   type ProviderBilling,
+  projectBillingForMobile,
   readGoogleBilling,
+  readOpenAIBilling,
   readOpenRouterBilling,
 } from './provider-billing.js';
 
@@ -149,6 +152,7 @@ describe('provider billing without guessed totals', () => {
       base,
       now,
     );
+    expect(report.amountBasis).toBe('provider_reported_cost');
     expect(report.lines[0]?.net).toBe(12);
     expect(report.message).toContain('not added here');
     const zero = await readOpenRouterBilling(
@@ -188,6 +192,276 @@ describe('provider billing without guessed totals', () => {
     const nextMonth = await getProviderBilling(p);
     expect(nextMonth[0]?.status).toBe('unavailable');
     expect(nextMonth[0]?.lines).toEqual([]);
+  });
+
+  it('normalizes a legacy OpenRouter cache row without querying the provider', async () => {
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    const connection = {
+      id: '9f6d4e68-8d88-46d8-8ea8-5243396b3ef7',
+      kind: 'openrouter',
+      label: 'OpenRouter',
+      apiKeyEncrypted: 'encrypted-openrouter-key',
+      baseUrl: null,
+      vertexProject: null,
+      vertexLocation: null,
+      enabled: true,
+      lastTestedAt: null,
+      lastError: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    vi.mocked(p.models.connections.list).mockResolvedValue([connection]);
+    const key = `provider-billing:v1:${createHash('sha256')
+      .update(
+        JSON.stringify([
+          '2026-09',
+          [
+            'openrouter',
+            '9f6d4e68-8d88-46d8-8ea8-5243396b3ef7',
+            'OpenRouter',
+            'test-openrouter-key',
+          ],
+        ]),
+      )
+      .digest('hex')}`;
+    const legacyReport: ProviderBilling = {
+      id: '9f6d4e68-8d88-46d8-8ea8-5243396b3ef7',
+      label: 'OpenRouter',
+      status: 'reported',
+      period: '2026-09',
+      scope: 'Connection: OpenRouter',
+      source: 'openrouter',
+      message: 'Legacy cached OpenRouter amount.',
+      fetchedAt: '2026-09-16T12:00:00.000Z',
+      latestExportAt: null,
+      latestUsageAt: null,
+      lines: [
+        {
+          service: 'OpenRouter',
+          detail: 'Current API key · month to date',
+          currency: 'USD',
+          cost: 12,
+          credits: 0,
+          net: 12,
+        },
+      ],
+    };
+    p.models.open = vi.fn(() => 'test-openrouter-key');
+    p.cache.cacheGet = vi.fn(async (cacheKey) =>
+      cacheKey === key ? { result: { checkedAt: now.toISOString(), report: legacyReport } } : null,
+    );
+    p.cache.cachePut = vi.fn(async () => {});
+    p.fetch = vi.fn();
+
+    const report = (await getProviderBilling(p)).find(
+      (item) => item.id === '9f6d4e68-8d88-46d8-8ea8-5243396b3ef7',
+    );
+    expect(p.fetch).not.toHaveBeenCalled();
+    expect(p.cache.cachePut).not.toHaveBeenCalled();
+    expect(report?.amountBasis).toBe('provider_reported_cost');
+    expect(report?.lines[0]).toMatchObject({ cost: 12, credits: 0, net: 12 });
+    expect(report?.forecast?.totals[0]).toMatchObject({ currency: 'USD', spent: 12 });
+    expect(report?.forecast?.message).toContain('reported cost');
+    if (!report) throw new Error('The pre-upgrade OpenRouter cache row was not returned.');
+    expect(projectBillingForMobile([report], true)[0]?.amountBasis).toBe('provider_reported_cost');
+    expect(projectBillingForMobile([report], false)[0]).toMatchObject({
+      status: 'unavailable',
+      amountBasis: 'provider_reported_cost',
+      lines: [],
+      forecast: undefined,
+    });
+  });
+
+  it('preserves OpenRouter setup guidance for current and older mobile clients when no key exists', async () => {
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    const connection = {
+      id: 'f2a932d4-adee-4a48-8e12-2ab73b1e1fc6',
+      kind: 'openrouter',
+      label: 'OpenRouter',
+      apiKeyEncrypted: null,
+      baseUrl: null,
+      vertexProject: null,
+      vertexLocation: null,
+      enabled: true,
+      lastTestedAt: null,
+      lastError: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    vi.mocked(p.models.connections.list).mockResolvedValue([connection]);
+    p.models.config.LLM_PROVIDER = 'openrouter';
+    p.models.config.OPENROUTER_API_KEY = '';
+    p.fetch = vi.fn();
+
+    const report = (await getProviderBilling(p)).find((item) => item.id === connection.id);
+
+    if (!report) throw new Error('OpenRouter setup report is missing.');
+    expect(report).toMatchObject({
+      status: 'not_configured',
+      message: 'Connect an OpenRouter API key in AI providers to read its reported spend.',
+      lines: [],
+    });
+    expect(report).not.toHaveProperty('amountBasis');
+    expect(p.fetch).not.toHaveBeenCalled();
+    expect(projectBillingForMobile([report], true)[0]).toBe(report);
+    expect(projectBillingForMobile([report], false)[0]).toMatchObject({
+      status: 'not_configured',
+      message: report.message,
+      lines: [],
+      forecast: undefined,
+    });
+    expect(projectBillingForMobile([report], false)[0]).not.toHaveProperty('amountBasis');
+    expect(projectBillingForMobile([report], false)[0]?.message).not.toContain(
+      'Update the app to view the reported-cost breakdown.',
+    );
+  });
+
+  it('does not label cached OpenRouter unavailable rows as amount-only reports', async () => {
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    const connectionId = 'f2a932d4-adee-4a48-8e12-2ab73b1e1fc6';
+    const connection = {
+      id: connectionId,
+      kind: 'openrouter',
+      label: 'OpenRouter',
+      apiKeyEncrypted: 'encrypted-openrouter-key',
+      baseUrl: null,
+      vertexProject: null,
+      vertexLocation: null,
+      enabled: true,
+      lastTestedAt: null,
+      lastError: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    vi.mocked(p.models.connections.list).mockResolvedValue([connection]);
+    p.models.open = vi.fn(() => 'test-openrouter-key');
+    const key = `provider-billing:v1:${createHash('sha256')
+      .update(
+        JSON.stringify([
+          '2026-09',
+          ['openrouter', connectionId, 'OpenRouter', 'test-openrouter-key'],
+        ]),
+      )
+      .digest('hex')}`;
+    const unavailable: ProviderBilling = {
+      id: connectionId,
+      label: 'OpenRouter',
+      status: 'unavailable',
+      period: '2026-09',
+      scope: 'Connection: OpenRouter',
+      source: 'openrouter',
+      message: 'Provider data is unavailable. Missing spend is not zero.',
+      fetchedAt: null,
+      latestExportAt: null,
+      latestUsageAt: null,
+      lines: [],
+    };
+    p.cache.cacheGet = vi.fn(async (cacheKey) =>
+      cacheKey === key ? { result: { checkedAt: now.toISOString(), report: unavailable } } : null,
+    );
+    p.cache.cachePut = vi.fn(async () => {});
+    p.fetch = vi.fn();
+
+    const report = (await getProviderBilling(p)).find((item) => item.id === connectionId);
+
+    if (!report) throw new Error('Cached unavailable OpenRouter report is missing.');
+    expect(p.fetch).not.toHaveBeenCalled();
+    expect(p.cache.cachePut).not.toHaveBeenCalled();
+    expect(report).toMatchObject({ status: 'unavailable', lines: [] });
+    expect(report).not.toHaveProperty('amountBasis');
+    expect(projectBillingForMobile([report], false)[0]).toMatchObject({
+      status: 'unavailable',
+      lines: [],
+      forecast: undefined,
+    });
+    expect(projectBillingForMobile([report], false)[0]).not.toHaveProperty('amountBasis');
+    expect(projectBillingForMobile([report], false)[0]?.message).not.toContain(
+      'Update the app to view the reported-cost breakdown.',
+    );
+  });
+
+  it('normalizes OpenRouter cache reads on stale-error and refresh-in-progress returns', async () => {
+    const connectionId = '9f6d4e68-8d88-46d8-8ea8-5243396b3ef7';
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    const connection = {
+      id: connectionId,
+      kind: 'openrouter',
+      label: 'OpenRouter',
+      apiKeyEncrypted: 'encrypted-openrouter-key',
+      baseUrl: null,
+      vertexProject: null,
+      vertexLocation: null,
+      enabled: true,
+      lastTestedAt: null,
+      lastError: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    vi.mocked(p.models.connections.list).mockResolvedValue([connection]);
+    p.models.open = vi.fn(() => 'test-openrouter-key');
+    const key = `provider-billing:v1:${createHash('sha256')
+      .update(
+        JSON.stringify([
+          '2026-09',
+          ['openrouter', connectionId, 'OpenRouter', 'test-openrouter-key'],
+        ]),
+      )
+      .digest('hex')}`;
+    const legacyReport: ProviderBilling = {
+      id: connectionId,
+      label: 'OpenRouter',
+      status: 'reported',
+      period: '2026-09',
+      scope: 'Connection: OpenRouter',
+      source: 'openrouter',
+      message: 'Legacy cached OpenRouter amount.',
+      fetchedAt: '2026-09-16T12:00:00.000Z',
+      latestExportAt: null,
+      latestUsageAt: null,
+      lines: [
+        {
+          service: 'OpenRouter',
+          detail: 'Current API key · month to date',
+          currency: 'USD',
+          cost: 12,
+          credits: 0,
+          net: 12,
+        },
+      ],
+    };
+    const seedCache = (target: BillingPorts) => {
+      target.cache.cacheGet = vi.fn(async (cacheKey) =>
+        cacheKey === key
+          ? { result: { checkedAt: now.toISOString(), report: legacyReport } }
+          : null,
+      );
+    };
+    seedCache(p);
+    p.now = () => new Date(now.getTime() + 2 * 3_600_000);
+    p.fetch = vi.fn(async () => {
+      throw new Error('synthetic refresh failure');
+    });
+    const stale = (await getProviderBilling(p)).find((item) => item.id === connectionId);
+    expect(stale).toMatchObject({ status: 'stale', amountBasis: 'provider_reported_cost' });
+    expect(stale?.lines[0]).toMatchObject({ cost: 12, credits: 0, net: 12 });
+
+    const pendingPorts = ports();
+    pendingPorts.config.GCP_BILLING_EXPORT_TABLE = '';
+    vi.mocked(pendingPorts.models.connections.list).mockResolvedValue([connection]);
+    pendingPorts.models.open = vi.fn(() => 'test-openrouter-key');
+    seedCache(pendingPorts);
+    pendingPorts.now = () => new Date(now.getTime() + 2 * 3_600_000);
+    pendingPorts.refreshBudgetMs = 0;
+    pendingPorts.fetch = vi.fn(() => new Promise<Response>(() => {}));
+    const pending = (await getProviderBilling(pendingPorts)).find(
+      (item) => item.id === connectionId,
+    );
+    expect(pending).toMatchObject({ status: 'stale', amountBasis: 'provider_reported_cost' });
+    expect(pending?.lines[0]).toMatchObject({ cost: 12, credits: 0, net: 12 });
   });
 
   it('serves the last snapshot instead of waiting out a slow provider refresh', async () => {
@@ -335,6 +609,232 @@ describe('month-end run rate', () => {
     });
     expect(forecast?.daysInMonth).toBe(29);
     expect(forecast?.totals[0]?.projected).toBe(58);
+  });
+
+  it('projects amount-only reported cost without claiming an after-credits amount', () => {
+    const forecast = billingForecast({
+      ...report,
+      id: 'openrouter',
+      amountBasis: 'provider_reported_cost',
+      period: '2026-09',
+      fetchedAt: '2026-09-16T00:00:00Z',
+      lines: [
+        { service: 'OpenRouter', detail: '', currency: 'USD', cost: 30, credits: 0, net: 99 },
+      ],
+    });
+    expect(forecast?.totals).toEqual([
+      { currency: 'USD', spent: 30, dailyAverage: 2, projected: 60 },
+    ]);
+    expect(forecast?.message).toContain('reported cost');
+    expect(forecast?.message).toContain('does not report credits');
+    expect(forecast?.message).not.toContain('after credits');
+  });
+});
+
+describe('OpenAI organization Costs adapter', () => {
+  it('opens only the dedicated sealed admin credential and will not query without explicit filters', async () => {
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    p.config.OPENAI_BILLING_ADMIN_KEY_ENCRYPTED = 'sealed-admin-fixture';
+    p.models.open = vi.fn((sealed) =>
+      sealed === 'sealed-admin-fixture' ? 'sk-admin-fixturevalue' : 'sk-project-modelvalue',
+    );
+    p.fetch = vi.fn(async () => response({ data: [], has_more: false, next_page: null }));
+    const missing = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(missing).toMatchObject({
+      status: 'not_configured',
+      setup: { code: 'openai_scope_missing' },
+    });
+    expect(p.fetch).not.toHaveBeenCalled();
+    p.config.OPENAI_BILLING_PROJECT_IDS = 'proj_fixture';
+    const start = Math.floor(Date.parse('2026-09-01T00:00:00Z') / 1_000);
+    const end = Math.floor(Date.parse('2026-09-02T00:00:00Z') / 1_000);
+    vi.mocked(p.fetch).mockResolvedValue(
+      response({
+        data: [
+          {
+            start_time: start,
+            end_time: end,
+            results: [
+              {
+                object: 'organization.costs.result',
+                amount: { value: 0, currency: 'USD' },
+                project_id: 'proj_fixture',
+                api_key_id: null,
+                line_item: 'Input',
+              },
+            ],
+          },
+        ],
+        has_more: false,
+        next_page: null,
+      }),
+    );
+    const report = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(report).toMatchObject({
+      status: 'reported',
+      amountBasis: 'provider_reported_cost',
+      lines: [{ cost: 0 }],
+    });
+    expect(p.models.open).toHaveBeenCalledExactlyOnceWith('sealed-admin-fixture');
+    expect(JSON.stringify(report)).not.toContain('sk-admin-fixturevalue');
+    expect(JSON.stringify(report)).not.toContain('sk-project-modelvalue');
+  });
+
+  it('uses explicit filters and complete cursor pages, preserving amount-only scope', async () => {
+    const bucket = (day: number, value: number) => ({
+      object: 'bucket',
+      start_time: Math.floor(
+        Date.parse(`2026-09-${String(day).padStart(2, '0')}T00:00:00Z`) / 1000,
+      ),
+      end_time: Math.floor(
+        Date.parse(`2026-09-${String(day + 1).padStart(2, '0')}T00:00:00Z`) / 1000,
+      ),
+      results: [
+        {
+          object: 'organization.costs.result',
+          amount: { value, currency: 'usd' },
+          line_item: 'Input tokens',
+          project_id: 'proj_a',
+          api_key_id: 'key_a',
+        },
+      ],
+    });
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response({ data: [bucket(1, 0.125)], has_more: true, next_page: 'next' }),
+      )
+      .mockResolvedValueOnce(
+        response({ data: [bucket(2, 0.375)], has_more: false, next_page: null }),
+      );
+    const result = await readOpenAIBilling(
+      request,
+      'sk-admin-testsecret',
+      base,
+      now,
+      ['proj_a'],
+      ['key_a'],
+    );
+    expect(result).toMatchObject({
+      status: 'reported',
+      amountBasis: 'provider_reported_cost',
+      latestUsageAt: null,
+      lines: [
+        {
+          cost: 0.5,
+          credits: 0,
+          net: 0.5,
+          currency: 'USD',
+          projectId: 'proj_a',
+          apiKeyId: 'key_a',
+        },
+      ],
+    });
+    const [firstUrl, firstInit] = request.mock.calls[0] as [string, RequestInit];
+    const params = new URL(firstUrl).searchParams;
+    expect(new URL(firstUrl).origin + new URL(firstUrl).pathname).toBe(
+      'https://api.openai.com/v1/organization/costs',
+    );
+    expect(params.getAll('project_ids')).toEqual(['proj_a']);
+    expect(params.getAll('api_key_ids')).toEqual(['key_a']);
+    expect(params.getAll('group_by')).toEqual(['project_id', 'api_key_id', 'line_item']);
+    expect(params.get('bucket_width')).toBe('1d');
+    expect(params.get('page')).toBeNull();
+    expect(firstInit.headers).toEqual({ Authorization: 'Bearer sk-admin-testsecret' });
+    expect(new URL(request.mock.calls[1]?.[0] as string).searchParams.get('page')).toBe('next');
+    expect(result.message).toContain('credits and net-after-credits amounts are not reported');
+    expect(billingForecast(result)).toBeUndefined();
+  });
+
+  it('rejects missing scope, invalid identity rows, repeated cursors, and empty results as unknown', async () => {
+    await expect(
+      readOpenAIBilling(vi.fn(), 'sk-admin-testsecret', base, now, [], []),
+    ).rejects.toThrow();
+    const wrongScope = vi.fn(async () =>
+      response({
+        data: [
+          {
+            start_time: 1798761600,
+            end_time: 1798848000,
+            results: [
+              {
+                object: 'organization.costs.result',
+                amount: { value: 1, currency: 'USD' },
+                project_id: 'proj_other',
+                api_key_id: null,
+              },
+            ],
+          },
+        ],
+        has_more: false,
+        next_page: null,
+      }),
+    );
+    await expect(
+      readOpenAIBilling(wrongScope, 'sk-admin-testsecret', base, now, ['proj_a'], []),
+    ).rejects.toThrow();
+    const repeated = vi
+      .fn()
+      .mockResolvedValueOnce(response({ data: [], has_more: true, next_page: 'same' }))
+      .mockResolvedValueOnce(response({ data: [], has_more: true, next_page: 'same' }));
+    await expect(
+      readOpenAIBilling(repeated, 'sk-admin-testsecret', base, now, ['proj_a'], []),
+    ).rejects.toThrow();
+    const empty = await readOpenAIBilling(
+      vi.fn(async () => response({ data: [], has_more: false, next_page: null })),
+      'sk-admin-testsecret',
+      base,
+      now,
+      ['proj_a'],
+      [],
+    );
+    expect(empty.status).toBe('unavailable');
+    expect(empty.lines).toEqual([]);
+  });
+
+  it('hides amount-only lines from old mobile clients and keeps supported reports intact', () => {
+    const amountOnly = {
+      ...base,
+      id: 'openai-billing',
+      amountBasis: 'provider_reported_cost' as const,
+      status: 'reported' as const,
+      lines: [
+        { service: 'OpenAI', detail: 'proj_a', currency: 'USD', cost: 1, credits: 0, net: 1 },
+      ],
+    };
+    expect(projectBillingForMobile([amountOnly], false)[0]).toMatchObject({
+      status: 'unavailable',
+      lines: [],
+    });
+    expect(projectBillingForMobile([amountOnly], false)[0]?.message).toContain(
+      'Update the app to view the reported-cost breakdown.',
+    );
+    expect(projectBillingForMobile([amountOnly], true)[0]).toBe(amountOnly);
+  });
+
+  it('keeps the actual OpenRouter amount-only report unavailable to older mobile clients', async () => {
+    const request = vi.fn(async () => response({ data: { usage_monthly: 12 } }));
+    const report = await readOpenRouterBilling(
+      request,
+      'fixture-key',
+      { ...base, id: 'openrouter' },
+      now,
+    );
+    expect(request).toHaveBeenCalledOnce();
+    expect(report).toMatchObject({
+      id: 'openrouter',
+      status: 'reported',
+      amountBasis: 'provider_reported_cost',
+      lines: [{ service: 'OpenRouter', cost: 12, credits: 0, net: 12 }],
+    });
+    const newerClient = projectBillingForMobile([report], true)[0];
+    expect(newerClient).toBe(report);
+    expect(newerClient?.amountBasis).toBe('provider_reported_cost');
+    const olderClient = projectBillingForMobile([report], false)[0];
+    expect(olderClient).toMatchObject({ status: 'unavailable', lines: [], forecast: undefined });
+    expect(olderClient?.amountBasis).toBe('provider_reported_cost');
+    expect(olderClient?.message).toContain('Update the app to view the reported-cost breakdown.');
   });
 });
 

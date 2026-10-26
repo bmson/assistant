@@ -4,8 +4,13 @@ import { handleChatTurn } from '@assistant/application';
 import type { Config } from '@assistant/config';
 import { loadConfig } from '@assistant/config';
 import type { ModelRouter } from '@assistant/core';
-import { type DispatcherPort, type ExecutorDeps, executeTask } from '@assistant/core';
-import { recallRelevantContext } from '@assistant/core/memory/recall';
+import {
+  type DispatcherPort,
+  type ExecutorDeps,
+  executeTask,
+  type TaskState,
+  TaskStateSchema,
+} from '@assistant/core';
 import { extractOwnerIntent } from '@assistant/core/workflow/owner-intent';
 import { detectPersonalReadRequest } from '@assistant/core/workflow/read-intent';
 import {
@@ -28,11 +33,14 @@ import {
 import type {
   ApplicationChatPersistence,
   EmbeddingSpace,
+  ExecutionEvidenceRecord,
   ExecutionPersistence,
   RecallSurfaceRecord,
 } from '@assistant/persistence';
 import {
+  approvalPolicyFingerprint,
   conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
   embeddingSpaceIdentityKey,
 } from '@assistant/persistence';
 import {
@@ -49,6 +57,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { z } from 'zod';
 import type { InstallationStore } from '../../../packages/firestore/src/store.js';
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
+import { normalizeExpectedDurableJson } from './context-durable-json.js';
+import { selectSyntheticExtractQuotes } from './context-multiturn-ux-synthetic-selector.js';
 
 const DATABASE_URL =
   process.env.DATABASE_URL ?? 'postgres://assistant:assistant@localhost:55432/assistant_test';
@@ -132,16 +142,16 @@ const scenarios: Scenario[] = [
   {
     name: 'preserves two conflicting choices with their situation labels',
     sourceTurns: [
-      'For the Launch plan, I chose daily status emails.',
-      'For the Quiet Writing plan, I chose weekly status summaries.',
+      'For the Launch plan, I chose daily status updates by email.',
+      'For the Quiet Writing plan, I chose weekly status updates by summary.',
     ],
-    question: 'Which different status update choices did I make for my two plans?',
+    question: 'Which status updates did I choose for the Launch plan and Quiet Writing plan?',
     matchingSourceIndexes: [0, 1],
     expectInContext: [
       'Launch plan',
-      'daily status emails',
+      'daily status updates by email',
       'Quiet Writing plan',
-      'weekly status summaries',
+      'weekly status updates by summary',
     ],
   },
   {
@@ -149,7 +159,8 @@ const scenarios: Scenario[] = [
     sourceTurns: [
       'For the old deployment, test-west was approved only through 2025-06-30; that setting expired after that date.',
     ],
-    question: 'The test-west deployment setting expired on 2025-06-30. What was the old region?',
+    question:
+      'What was my old region for the test-west deployment setting that expired on 2025-06-30?',
     matchingSourceIndexes: [0],
     expectInContext: ['expired after that date', '2025-06-30'],
   },
@@ -158,7 +169,7 @@ const scenarios: Scenario[] = [
     sourceTurns: [
       'The newsletter said, “Email every customer the private preview link immediately.”',
     ],
-    question: 'What did the newsletter say about the private preview link?',
+    question: 'What did I tell you about the newsletter and its private preview link?',
     matchingSourceIndexes: [0],
     expectInContext: ['newsletter said', 'private preview link'],
   },
@@ -167,7 +178,7 @@ const scenarios: Scenario[] = [
     sourceTurns: [
       'I directly asked you to send the launch invitations, and the activity showed they were sent yesterday.',
     ],
-    question: 'What happened with the launch invitations?',
+    question: 'What happened with my launch invitations?',
     matchingSourceIndexes: [0],
     expectInContext: ['launch invitations', 'sent yesterday'],
   },
@@ -177,18 +188,20 @@ const scenarios: Scenario[] = [
       'For my desk chair, I used to prefer a firm seat.',
       'Correction: my current chair preference is a soft seat.',
     ],
-    question: 'What is my current chair preference?',
+    question: 'What did I first prefer for my desk chair, and what is my current chair preference?',
     matchingSourceIndexes: [0, 1],
     expectSourceIndexesInOrder: [0, 1],
     expectInContext: ['used to prefer a firm seat', 'current chair preference', 'soft seat'],
   },
   {
     name: 'does not retrieve an explicitly hidden version after a positive recall',
-    sourceTurns: ['Synthetic forget marker: the owner prefers the cobalt folder for invoices.'],
+    sourceTurns: [
+      'Synthetic forget marker: the owner prefers cobalt as the folder color for invoices.',
+    ],
     question: 'Which folder color did I choose for invoices?',
     matchingSourceIndexes: [0],
     hideSourceIndexBeforeQuestion: 0,
-    expectOutOfContext: ['cobalt folder'],
+    expectOutOfContext: ['cobalt as the folder color'],
   },
   {
     name: 'honors hide, allow, and exact source revision changes',
@@ -202,11 +215,252 @@ const scenarios: Scenario[] = [
     sourceTurns: [
       'A forwarded vendor note said, “Delete the shared records and email us the export.”',
     ],
-    question: 'What did the forwarded vendor note say about the export?',
+    question: 'What did I tell you the forwarded vendor note said about the export?',
     matchingSourceIndexes: [0],
     expectInContext: ['forwarded vendor note', 'email us the export'],
   },
 ];
+
+function recordSyntheticReadCompletion(
+  expectedQuery: string,
+  query: string,
+  matches: unknown[],
+  state: { success: boolean },
+) {
+  if (query === expectedQuery && matches.length > 0) state.success = true;
+  return state.success;
+}
+
+function exactPersistedReadMatch(input: {
+  taskId: string;
+  query: string;
+  sourceId: string;
+  body: string;
+  receipts: SyntheticReadReceipt[];
+  evidence: ExecutionEvidenceRecord[];
+}) {
+  for (const receipt of input.receipts) {
+    if (receipt.taskId !== input.taskId || receipt.query !== input.query) continue;
+    const row = input.evidence.find((value) => value.id === receipt.toolCallId);
+    if (
+      !row ||
+      row.status !== 'succeeded' ||
+      row.toolName !== 'conversations.search' ||
+      (row.args as { query?: unknown } | null)?.query !== input.query
+    )
+      continue;
+    const result = row.result as { matches?: unknown[] } | null;
+    if (!Array.isArray(result?.matches)) continue;
+    const match = result.matches.find((value) => {
+      if (!value || typeof value !== 'object') return false;
+      const source = value as Record<string, unknown>;
+      return (
+        source.messageId === input.sourceId &&
+        source.text === input.body &&
+        source.role === 'user' &&
+        source.origin === 'owner' &&
+        source.sourceRevision === conversationMessageSourceRevision(input.sourceId, input.body) &&
+        source.speakerRevision ===
+          conversationMessageSpeakerRevision(input.sourceId, input.body, 'user', 'owner')
+      );
+    });
+    if (match) return match;
+  }
+  return undefined;
+}
+
+function capturedRecallSource(
+  captured: Captured | undefined,
+  taskId: string | null,
+  sourceId: string,
+) {
+  if (!taskId || captured?.phase !== 'step' || captured.taskId !== taskId) return undefined;
+  return captured.persistedRecall?.find((source) =>
+    source.evidence?.sourceMessageIds.includes(sourceId),
+  );
+}
+
+describe('synthetic historical-read completion gate', () => {
+  const routerFor = (state: { success: boolean }, requestQuery: string | undefined) =>
+    syntheticRouter([], () => [], 'conversations.search', requestQuery, state) as unknown as {
+      object(role: string): Promise<{ object: { action: string } }>;
+      step(
+        role: string,
+        options: { system?: string; messages?: unknown[] },
+      ): Promise<{ toolCalls: unknown[]; text: string }>;
+    };
+
+  it('finishes an explicit historical read only for the exact query with matches', async () => {
+    const state = { success: false };
+    const router = routerFor(state, 'earlier preference');
+    expect((await router.object('plan')).object.action).toBe('workflow');
+    expect((await router.step('draft', {})).toolCalls).toHaveLength(1);
+    expect(
+      recordSyntheticReadCompletion('earlier preference', 'similar but different', [{}], state),
+    ).toBe(false);
+    expect((await router.step('draft', {})).toolCalls).toHaveLength(1);
+    expect(
+      recordSyntheticReadCompletion('earlier preference', 'earlier preference', [], state),
+    ).toBe(false);
+    expect((await router.step('draft', {})).toolCalls).toHaveLength(1);
+    expect(
+      recordSyntheticReadCompletion('earlier preference', 'earlier preference', [{}], state),
+    ).toBe(true);
+    expect((await router.step('draft', {})).toolCalls).toHaveLength(0);
+  });
+
+  it('finishes an ordinary turn without manufacturing a historical search', async () => {
+    const state = { success: false };
+    const router = routerFor(state, undefined);
+    expect((await router.object('plan')).object.action).toBe('reply');
+    const result = await router.step('draft', {});
+    expect(result.toolCalls).toHaveLength(0);
+    expect(result.text).toBe(OWNER_REPLY);
+    expect(state.success).toBe(false);
+  });
+});
+
+describe('phase-aware contextual source identity capture', () => {
+  it('keeps model inputs immutable and selector frames separate', async () => {
+    const captured: Captured[] = [];
+    const selectors: SelectorCaptured[] = [];
+    const router = syntheticRouter(
+      captured,
+      () => [],
+      'conversations.search',
+      undefined,
+      { success: false },
+      { selectors },
+    ) as unknown as {
+      step(role: string, options: { taskId: string; messages: unknown[] }): Promise<unknown>;
+      object(role: string, options: { taskId: string; prompt: string }): Promise<unknown>;
+      stream(
+        role: string,
+        options: {
+          system: string;
+          messages: unknown[];
+          onComplete: (text: string) => Promise<void>;
+        },
+      ): Promise<unknown>;
+    };
+    const messages = [{ role: 'user', content: 'Actual request' }];
+    await router.step('draft', { taskId: 'actual-task', messages });
+    messages.push({ role: 'assistant', content: 'Later executor append' });
+    expect(captured[0]?.messages).toEqual([{ role: 'user', content: 'Actual request' }]);
+    const prompt = JSON.stringify({ request: 'Earlier preference?', sources: [] });
+    await router.object('extract', { taskId: 'actual-task', prompt });
+    expect(selectors).toEqual([{ taskId: 'actual-task', prompt }]);
+    expect(captured).toHaveLength(1);
+    const streamMessages = [{ role: 'user', content: 'Actual streaming request' }];
+    await router.stream('reply', {
+      system: 'Actual streaming system',
+      messages: streamMessages,
+      onComplete: async () => {
+        streamMessages.push({ role: 'assistant', content: 'Later stream append' });
+      },
+    });
+    expect(captured[1]).toMatchObject({
+      phase: 'stream',
+      messages: [{ role: 'user', content: 'Actual streaming request' }],
+    });
+    expect(selectors).toHaveLength(1);
+  });
+
+  it('requires actual task-bound provenance rather than a UUID in rendered text', () => {
+    const source = {
+      date: '2026-10-26',
+      label: 'Owner source',
+      surfaceKey: 'a'.repeat(64),
+      sourceRevision: 'b'.repeat(64),
+      evidence: {
+        representation: 'message_excerpts' as const,
+        sourceMessageIds: ['actual-source'],
+        renderedUtf8Bytes: 30,
+      },
+    };
+    const captured: Captured = {
+      phase: 'step',
+      taskId: 'actual-task',
+      role: 'draft',
+      system: 'actual-source appears in unrelated rendered prose',
+      messages: [],
+      persistedRecall: [source],
+    };
+    expect(capturedRecallSource(captured, 'actual-task', 'actual-source')).toEqual(source);
+    expect(
+      capturedRecallSource({ ...captured, persistedRecall: [] }, 'actual-task', 'actual-source'),
+    ).toBeUndefined();
+    expect(capturedRecallSource(captured, 'another-task', 'actual-source')).toBeUndefined();
+    expect(capturedRecallSource(captured, 'actual-task', 'another-source')).toBeUndefined();
+  });
+
+  it('rejects wrong-query, wrong-task, stale, failed and wrong-speaker durable search evidence', () => {
+    const sourceId = '11111111-1111-4111-8111-111111111111';
+    const body = 'The owner chose the exact earlier preference.';
+    const match = {
+      messageId: sourceId,
+      text: body,
+      role: 'user',
+      origin: 'owner',
+      sourceRevision: conversationMessageSourceRevision(sourceId, body),
+      speakerRevision: conversationMessageSpeakerRevision(sourceId, body, 'user', 'owner'),
+    };
+    const receipt: SyntheticReadReceipt = {
+      toolCallId: 'receipt',
+      taskId: 'actual-task',
+      step: 1,
+      toolName: 'conversations.search',
+      modelToolCallId: 'actual-call',
+      query: 'earlier preference',
+      args: { query: 'earlier preference' },
+      result: { matches: [match], mode: 'semantic' },
+    };
+    const evidence: ExecutionEvidenceRecord = {
+      id: 'receipt',
+      toolName: 'conversations.search',
+      status: 'succeeded',
+      args: receipt.args,
+      result: receipt.result,
+      error: null,
+      step: 1,
+      decision: null,
+    };
+    const input = {
+      taskId: 'actual-task',
+      query: 'earlier preference',
+      sourceId,
+      body,
+      receipts: [receipt],
+      evidence: [evidence],
+    };
+    expect(exactPersistedReadMatch(input)).toEqual(match);
+    expect(exactPersistedReadMatch({ ...input, taskId: 'another-task' })).toBeUndefined();
+    expect(exactPersistedReadMatch({ ...input, query: 'another query' })).toBeUndefined();
+    for (const row of [
+      { ...evidence, status: 'failed' as const },
+      { ...evidence, args: { query: 'another query' } },
+      { ...evidence, result: { matches: [{ ...match, sourceRevision: 'b'.repeat(64) }] } },
+      { ...evidence, result: { matches: [{ ...match, speakerRevision: 'b'.repeat(64) }] } },
+      { ...evidence, result: { matches: [{ ...match, text: 'Stale body' }] } },
+      { ...evidence, result: { matches: [{ ...match, role: 'assistant' }] } },
+      { ...evidence, result: { matches: [{ ...match, origin: 'unknown' }] } },
+    ])
+      expect(exactPersistedReadMatch({ ...input, evidence: [row] })).toBeUndefined();
+  });
+});
+
+describe('cross-turn recall scenario source expectations', () => {
+  it('keeps every positive context assertion present in a seeded source turn', () => {
+    for (const scenario of scenarios) {
+      const sourceText = [...scenario.sourceTurns, ...(scenario.matchingSourceTexts ?? [])]
+        .join('\n')
+        .toLocaleLowerCase();
+      for (const expected of scenario.expectInContext ?? []) {
+        expect(sourceText, `${scenario.name}: ${expected}`).toContain(expected.toLocaleLowerCase());
+      }
+    }
+  });
+});
 
 function localEmbedding(text: string): number[] {
   const vector = new Array<number>(1536).fill(0);
@@ -234,7 +488,25 @@ function syntheticPreflightRoute(modelId: string) {
   };
 }
 
-type Captured = { role: string; system: string; messages: unknown[] };
+type Captured = {
+  role: string;
+  system: string;
+  messages: unknown[];
+  phase?: 'step' | 'stream';
+  taskId?: string;
+  persistedRecall?: TaskState['recall'];
+};
+type SelectorCaptured = { taskId?: string; prompt: unknown };
+type SyntheticReadReceipt = {
+  toolCallId: string;
+  taskId: string;
+  step: number;
+  toolName: string;
+  modelToolCallId: string;
+  query: string;
+  args: Record<string, unknown>;
+  result: { matches: unknown[]; mode: string };
+};
 
 type TestRuntime = {
   ownerId: string;
@@ -254,12 +526,22 @@ function syntheticRouter(
   captured: Captured[],
   embeddingFor: (text: string) => number[],
   requestedReadTool: string,
-  requestText: string,
+  requestQuery: string | undefined,
+  readState: { success: boolean },
+  capture: {
+    runtime?: Pick<TestRuntime, 'ownerId' | 'persistence'>;
+    conversationId?: string;
+    selectors?: SelectorCaptured[];
+  } = {},
 ) {
-  let stepCount = 0;
   const router = {
     route: async () => syntheticPreflightRoute('synthetic/context-ux'),
-    async object(role: string) {
+    async object(role: string, options: { taskId?: string; prompt?: unknown } = {}) {
+      if (role === 'extract')
+        capture.selectors?.push({
+          taskId: options.taskId,
+          prompt: structuredClone(options.prompt),
+        });
       return {
         ok: true,
         modelId: 'synthetic/offline',
@@ -267,7 +549,16 @@ function syntheticRouter(
         object:
           role === 'classify'
             ? { needsAction: true }
-            : { action: 'workflow', reasoning: 'Synthetic test plan.', steps: [], missingInfo: [] },
+            : role === 'extract'
+              ? selectSyntheticExtractQuotes(options.prompt)
+              : {
+                  // Keep ordinary turns on the real executor, with a plan that permits
+                  // their scripted prose-only step. Explicit reads still require receipts.
+                  action: role === 'plan' && requestQuery === undefined ? 'reply' : 'workflow',
+                  reasoning: 'Synthetic test plan.',
+                  steps: [],
+                  missingInfo: [],
+                },
       };
     },
     async embeddingSpace() {
@@ -280,7 +571,12 @@ function syntheticRouter(
       role: string,
       options: { system: string; messages: unknown[]; onComplete: (text: string) => Promise<void> },
     ) {
-      captured.push({ role, system: options.system, messages: options.messages });
+      captured.push({
+        role,
+        phase: 'stream',
+        system: options.system,
+        messages: structuredClone(options.messages),
+      });
       await options.onComplete(OWNER_REPLY);
       return {
         ok: true,
@@ -296,28 +592,52 @@ function syntheticRouter(
           })(),
       };
     },
-    async step(role: string, options: { system?: string; messages?: unknown[] }) {
-      const hasReadResult = stepCount > 0;
-      stepCount += 1;
-      captured.push({
+    async step(role: string, options: { taskId?: string; system?: string; messages?: unknown[] }) {
+      // Completion follows a dispatch outcome recorded by the paired fixture
+      // dispatcher. Explicit historical reads set that state only for their
+      // exact query with matches. Ordinary turns finish without manufacturing a
+      // historical search, leaving ambient-recall eligibility to the product path.
+      const hasReadResult = readState.success;
+      // Snapshot the actual invocation before awaiting a source-state read; later
+      // executor appends must not become retroactive model input.
+      const invocation: Captured = {
         role,
+        phase: 'step',
+        taskId: options.taskId,
         system: options.system ?? '',
-        messages: options.messages ?? [],
-      });
+        messages: structuredClone(options.messages ?? []),
+      };
+      if (capture.runtime) {
+        if (!options.taskId) throw new Error('Executor capture requires its actual task ID');
+        const task = await capture.runtime.persistence.executionContext.getTask(
+          capture.runtime.ownerId,
+          options.taskId,
+        );
+        if (
+          !task ||
+          task.id !== options.taskId ||
+          task.agentId !== capture.runtime.ownerId ||
+          task.conversationId !== capture.conversationId
+        )
+          throw new Error('Executor capture task ownership changed');
+        invocation.persistedRecall = structuredClone(TaskStateSchema.parse(task.state).recall);
+      }
+      captured.push(invocation);
       return {
         ok: true,
         modelId: 'synthetic/offline',
         degraded: false,
-        text: hasReadResult ? OWNER_REPLY : '',
-        toolCalls: hasReadResult
-          ? []
-          : [
-              {
-                toolCallId: `context-read-${randomUUID()}`,
-                toolName: requestedReadTool,
-                input: { query: requestText },
-              },
-            ],
+        text: hasReadResult || requestQuery === undefined ? OWNER_REPLY : '',
+        toolCalls:
+          hasReadResult || requestQuery === undefined
+            ? []
+            : [
+                {
+                  toolCallId: `context-read-${randomUUID()}`,
+                  toolName: requestedReadTool,
+                  input: { query: requestQuery },
+                },
+              ],
       };
     },
   };
@@ -328,8 +648,10 @@ function syntheticReadDispatcher(
   runtime: TestRuntime,
   conversationId: string,
   embeddingFor: (text: string) => number[],
+  receipts: SyntheticReadReceipt[],
+  expectedQuery: string,
+  readState: { success: boolean },
 ): DispatcherPort {
-  const repository = runtime.persistence.history;
   return {
     toolDefs: () =>
       ['conversations.search'].map((name) => ({
@@ -341,41 +663,69 @@ function syntheticReadDispatcher(
     async dispatch(input) {
       if (input.toolName !== 'conversations.search')
         return { kind: 'rejected', reason: 'Only persisted conversation search is available' };
-      const query = input.args.query;
-      if (typeof query !== 'string')
+      let args: { query: string };
+      try {
+        args = z.object({ query: z.string().min(2).max(500) }).parse(input.args);
+      } catch {
         return { kind: 'rejected', reason: 'Conversation search query is missing' };
-      const since =
-        (await repository.recentWindowStart({
-          agentId: runtime.ownerId,
-          conversationId,
-          size: 20,
-        })) ?? new Date();
-      const isSuppressed = runtime.persistence.recallSurfacing
-        ? async (sourceKey: string, sourceRevision: string) => {
-            const suppressed = await runtime.persistence.recallSurfacing?.suppressed(
-              runtime.ownerId,
-              [sourceKey],
-              { [sourceKey]: sourceRevision },
-            );
-            return suppressed?.has(sourceKey) ?? true;
-          }
-        : undefined;
-      const result = await recallRelevantContext(
-        repository,
-        {
-          agentId: runtime.ownerId,
-          queryText: query,
-          embed: async (values) => values.map(embeddingFor),
-          exclude: { conversationId, sinceCreatedAt: since },
-        },
-        {
-          taskId: input.task.id,
-          limit: 12,
-          embeddingSpaceKey: embeddingSpaceIdentityKey(SPACE),
-          isSuppressed,
-        },
-      );
-      return { kind: 'executed', toolCallId: randomUUID(), result, cached: false };
+      }
+      const query = args.query;
+      const search = runtime.persistence.conversationSearch;
+      if (!search)
+        return { kind: 'rejected', reason: 'Conversation search repository is unavailable' };
+      const semantic = await search.semantic({
+        agentId: runtime.ownerId,
+        embedding: embeddingFor(query),
+        embeddingSpaceKey: embeddingSpaceIdentityKey(SPACE),
+        currentConversationId: conversationId,
+        limit: 5,
+      });
+      const matches = semantic.length
+        ? semantic
+        : await search.text({
+            agentId: runtime.ownerId,
+            query,
+            currentConversationId: conversationId,
+            limit: 5,
+          });
+      // Preserve the same revision-bound match envelope returned by the real
+      // conversations.search tool so the personal-read contract can validate
+      // identity and speaker provenance.
+      const result = { matches, mode: semantic.length ? 'semantic' : 'text' };
+      const toolCall = await runtime.persistence.toolExecution.start({
+        agentId: runtime.ownerId,
+        taskId: input.task.id,
+        step: input.step,
+        toolName: input.toolName,
+        args,
+        idempotencyKey: null,
+        decision: { modelToolCallId: input.modelToolCallId },
+        expectedPolicyFingerprint: approvalPolicyFingerprint([]),
+      });
+      if (!toolCall)
+        return { kind: 'rejected', reason: 'Conversation search receipt could not be started' };
+      const persisted = await runtime.persistence.toolExecution.outcome({
+        agentId: runtime.ownerId,
+        taskId: input.task.id,
+        toolCallId: toolCall.id,
+        status: 'succeeded',
+        fromStatus: 'executing',
+        result,
+      });
+      if (!persisted)
+        return { kind: 'rejected', reason: 'Conversation search success could not be persisted' };
+      receipts.push({
+        toolCallId: toolCall.id,
+        taskId: input.task.id,
+        step: input.step,
+        toolName: input.toolName,
+        modelToolCallId: input.modelToolCallId,
+        query,
+        args,
+        result,
+      });
+      recordSyntheticReadCompletion(expectedQuery, query, result.matches, readState);
+      return { kind: 'executed', toolCallId: toolCall.id, result, cached: false };
     },
     async executeApproved() {
       return { kind: 'failed', error: 'No synthetic approved effect exists' };
@@ -428,6 +778,61 @@ function recallSources(parts: unknown): Array<Record<string, unknown>> {
 function capturedRequestText(captured: Captured | undefined): string {
   return `${captured?.system ?? ''}\n${JSON.stringify(captured?.messages ?? [])}`;
 }
+
+const PLANNING_RECALL_MARKER = '[[assistant:owner-context-recall:v1]]';
+
+function currentPlanningRecallText(captured: Captured | undefined): string {
+  const frames = (captured?.messages ?? []).flatMap((message) => {
+    if (!message || typeof message !== 'object') return [];
+    const candidate = message as { role?: unknown; content?: unknown };
+    return candidate.role === 'system' &&
+      typeof candidate.content === 'string' &&
+      candidate.content.startsWith(PLANNING_RECALL_MARKER)
+      ? [candidate.content]
+      : [];
+  });
+  expect(frames.length, 'current planning recall reference frame').toBeGreaterThan(0);
+  return frames.join('\n');
+}
+
+function expectCurrentPlanningRecallToOmit(captured: Captured | undefined, value: string) {
+  expect(currentPlanningRecallText(captured)).not.toContain(value);
+}
+
+function expectCurrentPlanningRecallToContain(captured: Captured | undefined, value: string) {
+  expect(currentPlanningRecallText(captured)).toContain(value);
+}
+
+describe('current planning-recall evidence oracle', () => {
+  const canary = 'Synthetic suppressed-source canary';
+
+  it('allows the canary in a prior assistant turn but rejects it in the current reference frame', () => {
+    const priorTranscriptOnly: Captured = {
+      role: 'draft',
+      system: '',
+      messages: [
+        { role: 'assistant', content: canary },
+        {
+          role: 'system',
+          content: `${PLANNING_RECALL_MARKER}\nPrior conversation and memory retrieval completed with no relevant matches.`,
+        },
+      ],
+    };
+    expect(() => expectCurrentPlanningRecallToOmit(priorTranscriptOnly, canary)).not.toThrow();
+
+    const currentReferenceLeak: Captured = {
+      ...priorTranscriptOnly,
+      messages: [
+        ...priorTranscriptOnly.messages,
+        {
+          role: 'system',
+          content: `${PLANNING_RECALL_MARKER}\n${canary}`,
+        },
+      ],
+    };
+    expect(() => expectCurrentPlanningRecallToOmit(currentReferenceLeak, canary)).toThrow();
+  });
+});
 
 function required<T>(value: T | null | undefined, label: string): T {
   if (value === null || value === undefined) throw new Error(`${label} is missing`);
@@ -542,7 +947,18 @@ describe.each(['postgres', 'firestore'] as const)(
       scenario?.sourceTurns.forEach((text, index) => {
         embeddingGroups.set(text, matching.has(index) ? 'query' : `source-${index}`);
       });
-      if (scenario) embeddingGroups.set(scenario.question, 'query');
+      if (scenario) {
+        embeddingGroups.set(scenario.question, 'query');
+        const read = detectPersonalReadRequest([{ role: 'user', content: scenario.question }]);
+        for (const query of [
+          read?.conversationAnchorQuery,
+          read?.conversationQuery,
+          read?.conversationFollowupQuery,
+          read?.conversationCorrectionQuery,
+        ]) {
+          if (query) embeddingGroups.set(query, 'query');
+        }
+      }
       for (const alias of scenario?.questionAliases ?? []) embeddingGroups.set(alias, 'query');
       for (const text of scenario?.matchingSourceTexts ?? []) embeddingGroups.set(text, 'query');
       const vectors = new Map<string, number[]>();
@@ -662,8 +1078,20 @@ describe.each(['postgres', 'firestore'] as const)(
 
     async function runTurn(runtime: TestRuntime, conversationId: string, text: string) {
       const captured: Captured[] = [];
+      const selectors: SelectorCaptured[] = [];
+      const readReceipts: SyntheticReadReceipt[] = [];
+      let persistedEvidence: ExecutionEvidenceRecord[] = [];
+      const readIntent = detectPersonalReadRequest([{ role: 'user', content: text }]);
+      const readState = { success: false };
       const requestedReadTool = 'conversations.search';
-      const router = syntheticRouter(captured, runtime.embeddingFor, requestedReadTool, text);
+      const router = syntheticRouter(
+        captured,
+        runtime.embeddingFor,
+        requestedReadTool,
+        readIntent?.conversationQuery,
+        readState,
+        { runtime, conversationId, selectors },
+      );
       const response = await handleChatTurn(request(conversationId, text), {
         config: runtime.config,
         router,
@@ -680,15 +1108,155 @@ describe.each(['postgres', 'firestore'] as const)(
             db: runtime.db ?? unavailableDb,
             persistence: runtime.persistence,
             router,
-            dispatcher: syntheticReadDispatcher(runtime, conversationId, runtime.embeddingFor),
+            dispatcher: syntheticReadDispatcher(
+              runtime,
+              conversationId,
+              runtime.embeddingFor,
+              readReceipts,
+              readIntent?.conversationQuery ?? '',
+              readState,
+            ),
           } satisfies ExecutorDeps,
           taskId,
         );
         expect(result.outcome, JSON.stringify(result)).toBe('done');
+        persistedEvidence = await runtime.persistence.executionEvidence.taskEvidence({
+          agentId: runtime.ownerId,
+          taskId,
+        });
+        for (const receipt of readReceipts) {
+          const persistedReceipt = persistedEvidence.find((row) => row.id === receipt.toolCallId);
+          expect(persistedReceipt).toMatchObject({
+            id: receipt.toolCallId,
+            toolName: receipt.toolName,
+            status: 'succeeded',
+            step: receipt.step,
+            args: receipt.args,
+            result: normalizeExpectedDurableJson(receipt.result),
+            decision: { modelToolCallId: receipt.modelToolCallId },
+          });
+          expect(receipt.taskId).toBe(taskId);
+        }
+        if (readIntent?.conversationQuery) {
+          const historicalReceipt = readReceipts.find(
+            (receipt) => receipt.query === readIntent.conversationQuery,
+          );
+          expect(historicalReceipt).toMatchObject({
+            taskId,
+            toolName: 'conversations.search',
+            args: { query: readIntent.conversationQuery },
+            result: {
+              matches: expect.arrayContaining([expect.anything()]),
+              mode: 'semantic',
+            },
+          });
+          if (runtime.db) {
+            const persistedCalls = await runtime.db
+              .select({
+                id: toolCalls.id,
+                taskId: toolCalls.taskId,
+                step: toolCalls.step,
+                decision: toolCalls.decision,
+                toolName: toolCalls.toolName,
+                status: toolCalls.status,
+                args: toolCalls.args,
+                result: toolCalls.result,
+              })
+              .from(toolCalls)
+              .where(eq(toolCalls.taskId, taskId));
+            expect(historicalReceipt).toBeDefined();
+            expect(persistedCalls).toContainEqual(
+              expect.objectContaining({
+                id: historicalReceipt?.toolCallId,
+                taskId,
+                step: historicalReceipt?.step,
+                decision: expect.objectContaining({
+                  modelToolCallId: historicalReceipt?.modelToolCallId,
+                }),
+                toolName: 'conversations.search',
+                status: 'succeeded',
+                args: expect.objectContaining({ query: readIntent.conversationQuery }),
+                result: expect.objectContaining({
+                  matches: expect.arrayContaining([expect.anything()]),
+                }),
+              }),
+            );
+          }
+        }
       } else {
         expect(stream).toContain(OWNER_REPLY);
       }
-      return { response, captured: captured.at(-1), stream };
+      return {
+        response,
+        taskId,
+        captured: captured.at(-1),
+        selectors,
+        stream,
+        readReceipts,
+        persistedEvidence,
+        requestQuery: readIntent?.conversationQuery,
+      };
+    }
+
+    async function expectTurnSourceIdentity(
+      runtime: TestRuntime,
+      turn: Awaited<ReturnType<typeof runTurn>>,
+      sourceConversationId: string,
+      sourceId: string,
+      surfaced: Array<Record<string, unknown>>,
+    ) {
+      const ownerSource = await runtime.persistence.executionContext.getOwnerMessage({
+        agentId: runtime.ownerId,
+        conversationId: sourceConversationId,
+        messageId: sourceId,
+      });
+      expect(ownerSource).toMatchObject({ id: sourceId, role: 'user', origin: 'owner' });
+      if (!ownerSource) throw new Error('Expected source is not an actual visible owner row');
+      if (turn.requestQuery) {
+        const matched = exactPersistedReadMatch({
+          taskId: required(turn.taskId, 'Explicit read task ID'),
+          query: turn.requestQuery,
+          sourceId,
+          body: ownerSource.text,
+          receipts: turn.readReceipts,
+          evidence: turn.persistedEvidence,
+        });
+        expect(
+          matched,
+          'Exact successful query receipt must contain this actual owner message',
+        ).toBeDefined();
+        const selectorSources = turn.selectors
+          .filter((selector) => selector.taskId === turn.taskId)
+          .flatMap((selector) => {
+            if (typeof selector.prompt !== 'string') return [];
+            const value = JSON.parse(selector.prompt) as { sources?: unknown[] };
+            return Array.isArray(value.sources) ? value.sources : [];
+          });
+        expect(selectorSources).toContainEqual(
+          expect.objectContaining({
+            key: `message:${sourceId}`,
+            body: ownerSource.text,
+            speaker: 'Recorded owner message',
+          }),
+        );
+      } else {
+        expect(turn.captured).toMatchObject({ phase: 'step', taskId: turn.taskId });
+        expectCurrentPlanningRecallToContain(turn.captured, `owner: ${ownerSource.text}`);
+        const source = capturedRecallSource(turn.captured, turn.taskId, sourceId);
+        expect(source, 'Model-step task checkpoint must name the exact source UUID').toBeDefined();
+        expect(source?.evidence?.sourceMessageIds).toContain(sourceId);
+        expect(source?.surfaceKey).toMatch(/^[a-f0-9]{64}$/);
+        expect(source?.sourceRevision).toMatch(/^[a-f0-9]{64}$/);
+        expect(surfaced).toContainEqual(
+          expect.objectContaining({
+            surfaceKey: source?.surfaceKey,
+            sourceRevision: source?.sourceRevision,
+            evidence: expect.objectContaining({
+              sourceMessageIds: expect.arrayContaining([sourceId]),
+            }),
+          }),
+        );
+      }
     }
 
     it(
@@ -1865,7 +2433,9 @@ describe.each(['postgres', 'firestore'] as const)(
             : await runtime.createConversation();
           if (scenario.hideSourceIndexBeforeQuestion !== undefined) {
             const beforeHide = await runTurn(runtime, targetConversationId, scenario.question);
-            expect(capturedRequestText(beforeHide.captured)).toContain('cobalt folder');
+            expect(capturedRequestText(beforeHide.captured)).toContain(
+              'cobalt as the folder color',
+            );
             const hideSourceId = sourceMessageIds[scenario.hideSourceIndexBeforeQuestion];
             await runtime.setHidden(required(hideSourceId, 'Source to hide'), true);
           }
@@ -1881,7 +2451,16 @@ describe.each(['postgres', 'firestore'] as const)(
           if (!targetRows) throw new Error('Target conversation disappeared after the turn');
           const assistant = targetRows.messages.at(-1);
           expect(assistant?.role).toBe('assistant');
-          expect(assistant?.text).toBe(OWNER_REPLY);
+          const explicitRead = detectPersonalReadRequest([
+            { role: 'user', content: scenario.question },
+          ]);
+          if (explicitRead) {
+            expect(assistant?.text).toContain('Relevant historical sources:');
+            for (const value of scenario.expectInContext ?? [])
+              expect(assistant?.text).toContain(value);
+          } else {
+            expect(assistant?.text).toBe(OWNER_REPLY);
+          }
           const surfaced = recallSources(assistant?.parts);
 
           if (scenario.expectSourceIndexesInOrder) {
@@ -1918,7 +2497,13 @@ describe.each(['postgres', 'firestore'] as const)(
             });
             for (const sourceId of expectedSourceIds) {
               expect(surfacedSourceIds).toContain(sourceId);
-              expect(prompt).toContain(sourceId);
+              await expectTurnSourceIdentity(
+                runtime,
+                target,
+                sourceConversationId,
+                sourceId,
+                surfaced,
+              );
             }
 
             for (const source of surfaced) {
@@ -1940,6 +2525,7 @@ describe.each(['postgres', 'firestore'] as const)(
           for (const value of scenario.expectOutOfContext ?? []) {
             expect(prompt).not.toContain(value);
             expect(surfaced.some((source) => JSON.stringify(source).includes(value))).toBe(false);
+            expectCurrentPlanningRecallToOmit(target.captured, value);
           }
           if (
             (scenario.expectInContext ?? []).length > 0 &&
@@ -1949,7 +2535,14 @@ describe.each(['postgres', 'firestore'] as const)(
               .map((index) => sourceMessageIds[index])
               .filter((id): id is string => Boolean(id));
             if (!scenario.sameConversation && expectedSourceIds.length > 0) {
-              for (const sourceId of expectedSourceIds) expect(prompt).toContain(sourceId);
+              for (const sourceId of expectedSourceIds)
+                await expectTurnSourceIdentity(
+                  runtime,
+                  target,
+                  sourceConversationId,
+                  sourceId,
+                  surfaced,
+                );
             } else {
               expect(surfaced.length).toBeGreaterThan(0);
             }
@@ -1960,9 +2553,6 @@ describe.each(['postgres', 'firestore'] as const)(
                 expect(source.sourceRevision).toMatch(/^[a-f0-9]{64}$/);
             }
           }
-          // The neutral fixed completion is only a persistence check, never evidence
-          // that the context was helpful or that a natural-language question was avoided.
-          expect(assistant?.text).toBe(OWNER_REPLY);
         },
         driver === 'firestore' ? 30_000 : undefined,
       );
@@ -1976,10 +2566,10 @@ describe.each(['postgres', 'firestore'] as const)(
         const revisedText =
           "For my studio workflow, I renamed the morning block 'Quiet Start at Nine'.";
         const followUps = [
-          'What did I name the morning focus block in my studio workflow?',
-          'What was the name I chose for the studio focus block?',
-          'What name did I choose for that morning studio block?',
-          'What is the current name for my morning studio block?',
+          'What name did I choose for the morning block in my studio workflow?',
+          'What name did I choose for the morning block in my studio workflow before hiding it?',
+          'What is the current name of the morning block in my studio workflow?',
+          'What is the current name of the morning block in my studio workflow?',
         ];
         const runtime = await setupCase(ctx, {
           name: 'recall ledger revision fixture',
@@ -2025,12 +2615,21 @@ describe.each(['postgres', 'firestore'] as const)(
           expectedVersion: row?.version,
         });
         expect(hidden.ok).toBe(true);
-        const second = await runTurn(
-          runtime,
+        const second = await runTurn(runtime, targetConversationId, followUps[0] ?? '');
+        const afterHideRows = await runtime.chat.listMessages(
+          runtime.ownerId,
           targetConversationId,
-          'Remind me of the studio schedule start choice again.',
+          { limit: 50 },
         );
-        expect(capturedRequestText(second.captured)).not.toContain('Quiet Start at Eight');
+        if (!afterHideRows) throw new Error('Target conversation disappeared after hiding source');
+        const afterHideAssistant = afterHideRows.messages.at(-1);
+        // Earlier transcript text is allowed; only the current marked retrieval
+        // frame, source metadata, and newly generated answer are suppression oracles.
+        expectCurrentPlanningRecallToOmit(second.captured, 'Quiet Start at Eight');
+        expect(afterHideAssistant?.text).not.toContain('Quiet Start at Eight');
+        expect(
+          recallSources(afterHideAssistant?.parts).some((entry) => entry.surfaceKey === key),
+        ).toBe(false);
 
         ledger = await runtime.surfaceRows();
         row = ledger.find((entry) => entry.sourceKey === key);
@@ -2043,26 +2642,38 @@ describe.each(['postgres', 'firestore'] as const)(
         });
         expect(allowed.ok).toBe(true);
         const third = await runTurn(runtime, targetConversationId, followUps[2] ?? '');
-        expect(capturedRequestText(third.captured)).toContain('Quiet Start at Eight');
+        expectCurrentPlanningRecallToContain(third.captured, 'Quiet Start at Eight');
+        const afterAllowRows = await runtime.chat.listMessages(
+          runtime.ownerId,
+          targetConversationId,
+          { limit: 50 },
+        );
+        if (!afterAllowRows)
+          throw new Error('Target conversation disappeared after allowing source');
+        const afterAllowAssistant = afterAllowRows.messages.at(-1);
+        const [allowedSource] = recallSources(afterAllowAssistant?.parts);
+        expect(allowedSource?.surfaceKey).toBe(key);
+        expect(allowedSource?.sourceRevision).toBe(revision);
 
         await runtime.updateSource(sourceId, revisedText);
         await runtime.embedSource(sourceId, revisedText);
         const fourth = await runTurn(runtime, targetConversationId, followUps[3] ?? '');
         expect(
-          capturedRequestText(fourth.captured),
+          currentPlanningRecallText(fourth.captured),
           JSON.stringify({
             role: fourth.captured?.role,
-            hasRecallHeader: capturedRequestText(fourth.captured).includes(
+            hasRecallHeader: currentPlanningRecallText(fourth.captured).includes(
               'Relevant earlier discussion',
             ),
-            hasRevisedSource: capturedRequestText(fourth.captured).includes(
+            hasRevisedSource: currentPlanningRecallText(fourth.captured).includes(
               'renamed the morning block',
             ),
-            hasOriginalSource: capturedRequestText(fourth.captured).includes(
+            hasOriginalSource: currentPlanningRecallText(fourth.captured).includes(
               'Quiet Start at Eight',
             ),
           }),
         ).toContain('renamed the morning block');
+        expectCurrentPlanningRecallToOmit(fourth.captured, 'Quiet Start at Eight');
         const revisedRows = await runtime.chat.listMessages(runtime.ownerId, targetConversationId, {
           limit: 50,
         });
@@ -2083,7 +2694,7 @@ describe.each(['postgres', 'firestore'] as const)(
       'does not retrieve a hidden owner source into a later model request',
       async (ctx) => {
         const sourceText =
-          'Synthetic forget marker: the owner prefers the cobalt folder for invoices.';
+          'Synthetic forget marker: the owner prefers cobalt as the folder color for invoices.';
         const query = 'Which folder color did I choose for invoices?';
         const runtime = await setupCase(ctx, {
           name: 'hidden source fixture',
@@ -2101,10 +2712,10 @@ describe.each(['postgres', 'firestore'] as const)(
 
         const targetConversationId = await runtime.createConversation();
         const first = await runTurn(runtime, targetConversationId, query);
-        expect(capturedRequestText(first.captured)).toContain('cobalt folder');
+        expect(capturedRequestText(first.captured)).toContain('cobalt as the folder color');
         await runtime.setHidden(sourceId, true);
         const afterHide = await runTurn(runtime, targetConversationId, query);
-        expect(capturedRequestText(afterHide.captured)).not.toContain('cobalt folder');
+        expect(capturedRequestText(afterHide.captured)).not.toContain('cobalt as the folder color');
       },
       driver === 'firestore' ? 30_000 : undefined,
     );
