@@ -45,6 +45,10 @@ const SMOKE_HISTORY_TEXT = 'The owner observed coastal rainbows by the sea.';
 const SMOKE_HISTORY_SUMMARY = 'Earlier coastal rainbows by the sea';
 const SMOKE_GRAPH_EVIDENCE = 'The owner observes rainbows by the sea.';
 const SMOKE_COMMITMENT_TITLE = 'Rainbow observation notes';
+const EXPECTED_NEGATIVE_READ_QUERIES = [
+  'open commitments for rainbow observation notes',
+  'Owner-authored statements and corrections about open commitments for rainbow observation notes',
+] as const;
 const SMOKE_COMMITMENT_NEXT_ACTION = 'Compare the rainbow notes';
 const SMOKE_RAW_HISTORY_SIMILARITY = 0.85;
 const SMOKE_POSITIVE_REQUEST =
@@ -356,6 +360,7 @@ export async function firestoreChatSmoke(
   let expectedRuntimeSourceKeys: string[] = [];
   let syntheticHistoryMessageId: string | undefined;
   let syntheticHistoryConversationId: string | undefined;
+  let syntheticHistoryCreatedAt: Date | undefined;
   const request = options.request ?? 'Explain how a rainbow forms.';
   const expectedRecallMode = options.expectRecallMode ?? 'automatic';
   const recallPreflight = options.recall ? await preflightPlanningRecall(request, now) : undefined;
@@ -482,6 +487,7 @@ export async function firestoreChatSmoke(
     syntheticHistoryMessageId = historyMessageId;
     syntheticHistoryConversationId = historyConversationId;
     const historyAt = new Date(now.getTime() - 86_400_000);
+    syntheticHistoryCreatedAt = historyAt;
     await store.doc('conversations', historyConversationId).set({
       id: historyConversationId,
       agentId,
@@ -749,6 +755,7 @@ export async function firestoreChatSmoke(
                 role: 'user',
                 origin: 'owner',
                 sourceRevision: conversationMessageSourceRevision(messageId, SMOKE_HISTORY_TEXT),
+                createdAt: syntheticHistoryCreatedAt ?? now,
                 speakerRevision: conversationMessageSpeakerRevision(
                   messageId,
                   SMOKE_HISTORY_TEXT,
@@ -942,7 +949,8 @@ export async function firestoreChatSmoke(
     assert.doesNotMatch(systemPrompt, commitmentCanary);
     assert.doesNotMatch(modelMessages, commitmentCanary);
   }
-  if (responseModelExecuted) assert.match(systemPrompt, /Explain science clearly/);
+  if (responseModelExecuted && !deterministicPrivateRead)
+    assert.match(systemPrompt, /Explain science clearly/);
   if (options.recall && expectedRecallMode === 'automatic') {
     // Pre-planning retrieval is carried into the model's message window as
     // reference evidence; it is not duplicated in the static system prompt.
@@ -964,46 +972,72 @@ export async function firestoreChatSmoke(
     const expectedTool = explicitRead?.firstToolName;
     assert.ok(expectedTool, `Expected a supported deterministic read for: ${request}`);
     const matchingReceipts = dispatchReceipts.filter((entry) => entry.toolName === expectedTool);
-    if (options.expectedMemoryReadFailure) assert.equal(matchingReceipts.length, 1);
-    const receipt = matchingReceipts[0];
-    assert.ok(receipt, `Expected successful ${expectedTool} dispatcher receipt`);
     const persistedCalls = await persistence.executionEvidence.taskEvidence({
       agentId,
       taskId: task.id,
     });
-    const persistedReceipt = persistedCalls.find((call) => call.id === receipt.toolCallId);
-    assert.ok(persistedReceipt, `Expected persisted successful ${expectedTool} receipt`);
-    assert.equal(receipt.taskId, task.id);
-    assert.equal(persistedReceipt.toolName, receipt.toolName);
-    assert.equal(persistedReceipt.step, receipt.step);
-    assert.equal(persistedReceipt.status, 'succeeded');
-    assert.equal(
-      (persistedReceipt.decision as { modelToolCallId?: unknown } | null)?.modelToolCallId,
-      receipt.modelToolCallId,
+    const receiptsToVerify = options.expectedMemoryReadFailure
+      ? (() => {
+          assert.equal(expectedTool, 'conversations.search');
+          assert.equal(matchingReceipts.length, EXPECTED_NEGATIVE_READ_QUERIES.length);
+          assert.deepEqual(
+            matchingReceipts.map((receipt) => receipt.args.query),
+            EXPECTED_NEGATIVE_READ_QUERIES,
+          );
+          return matchingReceipts;
+        })()
+      : [matchingReceipts[0]].filter((receipt) => receipt !== undefined);
+    assert.ok(
+      receiptsToVerify.length > 0,
+      `Expected successful ${expectedTool} dispatcher receipt`,
     );
-    assert.deepEqual(persistedReceipt.args, receipt.args);
-    assert.deepEqual(persistedReceipt.result, receipt.result);
-    if (expectedTool === 'conversations.search') {
-      assert.equal(typeof receipt.args.query, 'string');
-      assert.ok((receipt.args.query as string).length >= 2);
-      const result = receipt.result as { matches?: unknown[] };
-      assert.ok(Array.isArray(result.matches) && result.matches.length > 0);
+    if (options.expectedMemoryReadFailure) {
       assert.equal(
-        (persistedReceipt.args as { query?: unknown } | undefined)?.query,
-        explicitRead?.conversationQuery,
+        persistedCalls.filter((call) => call.toolName === 'conversations.search').length,
+        EXPECTED_NEGATIVE_READ_QUERIES.length,
       );
-      const persistedResult = persistedReceipt.result as { matches?: unknown[] } | undefined;
-      const persistedMatches = persistedResult?.matches;
-      assert.ok(Array.isArray(persistedMatches) && persistedMatches.length > 0);
-      assert.ok(
-        (persistedMatches as Array<Record<string, unknown>>).some(
-          (match) =>
-            match.messageId === syntheticHistoryMessageId &&
-            match.conversationId === syntheticHistoryConversationId &&
-            match.text === SMOKE_HISTORY_TEXT,
-        ),
-        'Expected the successful source-read receipt to contain the exact seeded owner message',
+      assert.equal(new Set(receiptsToVerify.map((receipt) => receipt.toolCallId)).size, 2);
+      assert.equal(new Set(receiptsToVerify.map((receipt) => receipt.modelToolCallId)).size, 2);
+      assert.equal(new Set(receiptsToVerify.map((receipt) => receipt.step)).size, 2);
+    }
+    for (const [index, receipt] of receiptsToVerify.entries()) {
+      const persistedReceipt = persistedCalls.find((call) => call.id === receipt.toolCallId);
+      assert.ok(persistedReceipt, `Expected persisted successful ${expectedTool} receipt`);
+      assert.equal(receipt.taskId, task.id);
+      assert.equal(persistedReceipt.toolName, receipt.toolName);
+      assert.equal(persistedReceipt.step, receipt.step);
+      assert.equal(persistedReceipt.status, 'succeeded');
+      assert.equal(
+        (persistedReceipt.decision as { modelToolCallId?: unknown } | null)?.modelToolCallId,
+        receipt.modelToolCallId,
       );
+      assert.deepEqual(persistedReceipt.args, receipt.args);
+      assert.deepEqual(persistedReceipt.result, receipt.result);
+      if (expectedTool === 'conversations.search') {
+        assert.equal(typeof receipt.args.query, 'string');
+        assert.ok((receipt.args.query as string).length >= 2);
+        const result = receipt.result as { matches?: unknown[] };
+        assert.ok(Array.isArray(result.matches) && result.matches.length > 0);
+        const expectedQuery: string = options.expectedMemoryReadFailure
+          ? (EXPECTED_NEGATIVE_READ_QUERIES[index] ?? '')
+          : (explicitRead?.conversationQuery ?? '');
+        assert.equal(
+          (persistedReceipt.args as { query?: unknown } | undefined)?.query,
+          expectedQuery,
+        );
+        const persistedResult = persistedReceipt.result as { matches?: unknown[] } | undefined;
+        const persistedMatches = persistedResult?.matches;
+        assert.ok(Array.isArray(persistedMatches) && persistedMatches.length > 0);
+        assert.ok(
+          (persistedMatches as Array<Record<string, unknown>>).some(
+            (match) =>
+              match.messageId === syntheticHistoryMessageId &&
+              match.conversationId === syntheticHistoryConversationId &&
+              match.text === SMOKE_HISTORY_TEXT,
+          ),
+          'Expected the successful source-read receipt to contain the exact seeded owner message',
+        );
+      }
     }
   }
   const taskState = persistedTask.get('state') as

@@ -214,18 +214,17 @@ const scenarios: Scenario[] = [
 ];
 
 function recordSyntheticReadCompletion(
-  expectedQuery: string | undefined,
+  expectedQuery: string,
   query: string,
   matches: unknown[],
   state: { success: boolean },
 ) {
-  if (expectedQuery === undefined || (query === expectedQuery && matches.length > 0))
-    state.success = true;
+  if (query === expectedQuery && matches.length > 0) state.success = true;
   return state.success;
 }
 
 describe('synthetic historical-read completion gate', () => {
-  const routerFor = (state: { success: boolean }, requestQuery: string) =>
+  const routerFor = (state: { success: boolean }, requestQuery: string | undefined) =>
     syntheticRouter([], () => [], 'conversations.search', requestQuery, state) as unknown as {
       step(
         role: string,
@@ -251,12 +250,12 @@ describe('synthetic historical-read completion gate', () => {
     expect((await router.step('draft', {})).toolCalls).toHaveLength(0);
   });
 
-  it('finishes a nonhistorical route after an actual successful search, including no matches', async () => {
+  it('finishes an ordinary turn without manufacturing a historical search', async () => {
     const state = { success: false };
-    const router = routerFor(state, 'current user request');
-    expect((await router.step('draft', {})).toolCalls).toHaveLength(1);
-    expect(recordSyntheticReadCompletion(undefined, 'current user request', [], state)).toBe(true);
-    expect((await router.step('draft', {})).toolCalls).toHaveLength(0);
+    const router = routerFor(state, undefined);
+    const result = await router.step('draft', {});
+    expect(result.toolCalls).toHaveLength(0);
+    expect(result.text).toBe(OWNER_REPLY);
   });
 });
 
@@ -329,7 +328,7 @@ function syntheticRouter(
   captured: Captured[],
   embeddingFor: (text: string) => number[],
   requestedReadTool: string,
-  requestQuery: string,
+  requestQuery: string | undefined,
   readState: { success: boolean },
 ) {
   const router = {
@@ -381,7 +380,8 @@ function syntheticRouter(
     async step(role: string, options: { system?: string; messages?: unknown[] }) {
       // Completion follows a dispatch outcome recorded by the paired fixture
       // dispatcher. Explicit historical reads set that state only for their
-      // exact query with matches; other routes complete after an actual search.
+      // exact query with matches. Ordinary turns finish without manufacturing a
+      // historical search, leaving ambient-recall eligibility to the product path.
       const hasReadResult = readState.success;
       captured.push({
         role,
@@ -392,16 +392,17 @@ function syntheticRouter(
         ok: true,
         modelId: 'synthetic/offline',
         degraded: false,
-        text: hasReadResult ? OWNER_REPLY : '',
-        toolCalls: hasReadResult
-          ? []
-          : [
-              {
-                toolCallId: `context-read-${randomUUID()}`,
-                toolName: requestedReadTool,
-                input: { query: requestQuery },
-              },
-            ],
+        text: hasReadResult || requestQuery === undefined ? OWNER_REPLY : '',
+        toolCalls:
+          hasReadResult || requestQuery === undefined
+            ? []
+            : [
+                {
+                  toolCallId: `context-read-${randomUUID()}`,
+                  toolName: requestedReadTool,
+                  input: { query: requestQuery },
+                },
+              ],
       };
     },
   };
@@ -413,7 +414,7 @@ function syntheticReadDispatcher(
   conversationId: string,
   embeddingFor: (text: string) => number[],
   receipts: SyntheticReadReceipt[],
-  expectedQuery: string | undefined,
+  expectedQuery: string,
   readState: { success: boolean },
 ): DispatcherPort {
   return {
@@ -542,6 +543,61 @@ function recallSources(parts: unknown): Array<Record<string, unknown>> {
 function capturedRequestText(captured: Captured | undefined): string {
   return `${captured?.system ?? ''}\n${JSON.stringify(captured?.messages ?? [])}`;
 }
+
+const PLANNING_RECALL_MARKER = '[[assistant:owner-context-recall:v1]]';
+
+function currentPlanningRecallText(captured: Captured | undefined): string {
+  const frames = (captured?.messages ?? []).flatMap((message) => {
+    if (!message || typeof message !== 'object') return [];
+    const candidate = message as { role?: unknown; content?: unknown };
+    return candidate.role === 'system' &&
+      typeof candidate.content === 'string' &&
+      candidate.content.startsWith(PLANNING_RECALL_MARKER)
+      ? [candidate.content]
+      : [];
+  });
+  expect(frames.length, 'current planning recall reference frame').toBeGreaterThan(0);
+  return frames.join('\n');
+}
+
+function expectCurrentPlanningRecallToOmit(captured: Captured | undefined, value: string) {
+  expect(currentPlanningRecallText(captured)).not.toContain(value);
+}
+
+function expectCurrentPlanningRecallToContain(captured: Captured | undefined, value: string) {
+  expect(currentPlanningRecallText(captured)).toContain(value);
+}
+
+describe('current planning-recall evidence oracle', () => {
+  const canary = 'Synthetic suppressed-source canary';
+
+  it('allows the canary in a prior assistant turn but rejects it in the current reference frame', () => {
+    const priorTranscriptOnly: Captured = {
+      role: 'draft',
+      system: '',
+      messages: [
+        { role: 'assistant', content: canary },
+        {
+          role: 'system',
+          content: `${PLANNING_RECALL_MARKER}\nPrior conversation and memory retrieval completed with no relevant matches.`,
+        },
+      ],
+    };
+    expect(() => expectCurrentPlanningRecallToOmit(priorTranscriptOnly, canary)).not.toThrow();
+
+    const currentReferenceLeak: Captured = {
+      ...priorTranscriptOnly,
+      messages: [
+        ...priorTranscriptOnly.messages,
+        {
+          role: 'system',
+          content: `${PLANNING_RECALL_MARKER}\n${canary}`,
+        },
+      ],
+    };
+    expect(() => expectCurrentPlanningRecallToOmit(currentReferenceLeak, canary)).toThrow();
+  });
+});
 
 function required<T>(value: T | null | undefined, label: string): T {
   if (value === null || value === undefined) throw new Error(`${label} is missing`);
@@ -795,7 +851,7 @@ describe.each(['postgres', 'firestore'] as const)(
         captured,
         runtime.embeddingFor,
         requestedReadTool,
-        readIntent?.conversationQuery ?? text,
+        readIntent?.conversationQuery,
         readState,
       );
       const response = await handleChatTurn(request(conversationId, text), {
@@ -819,7 +875,7 @@ describe.each(['postgres', 'firestore'] as const)(
               conversationId,
               runtime.embeddingFor,
               readReceipts,
-              readIntent?.conversationQuery,
+              readIntent?.conversationQuery ?? '',
               readState,
             ),
           } satisfies ExecutorDeps,
@@ -2087,7 +2143,16 @@ describe.each(['postgres', 'firestore'] as const)(
           if (!targetRows) throw new Error('Target conversation disappeared after the turn');
           const assistant = targetRows.messages.at(-1);
           expect(assistant?.role).toBe('assistant');
-          expect(assistant?.text).toBe(OWNER_REPLY);
+          const explicitRead = detectPersonalReadRequest([
+            { role: 'user', content: scenario.question },
+          ]);
+          if (explicitRead) {
+            expect(assistant?.text).toContain('Relevant historical sources:');
+            for (const value of scenario.expectInContext ?? [])
+              expect(assistant?.text).toContain(value);
+          } else {
+            expect(assistant?.text).toBe(OWNER_REPLY);
+          }
           const surfaced = recallSources(assistant?.parts);
 
           if (scenario.expectSourceIndexesInOrder) {
@@ -2146,6 +2211,7 @@ describe.each(['postgres', 'firestore'] as const)(
           for (const value of scenario.expectOutOfContext ?? []) {
             expect(prompt).not.toContain(value);
             expect(surfaced.some((source) => JSON.stringify(source).includes(value))).toBe(false);
+            expectCurrentPlanningRecallToOmit(target.captured, value);
           }
           if (
             (scenario.expectInContext ?? []).length > 0 &&
@@ -2166,9 +2232,6 @@ describe.each(['postgres', 'firestore'] as const)(
                 expect(source.sourceRevision).toMatch(/^[a-f0-9]{64}$/);
             }
           }
-          // The neutral fixed completion is only a persistence check, never evidence
-          // that the context was helpful or that a natural-language question was avoided.
-          expect(assistant?.text).toBe(OWNER_REPLY);
         },
         driver === 'firestore' ? 30_000 : undefined,
       );
@@ -2232,7 +2295,20 @@ describe.each(['postgres', 'firestore'] as const)(
         });
         expect(hidden.ok).toBe(true);
         const second = await runTurn(runtime, targetConversationId, followUps[0] ?? '');
-        expect(capturedRequestText(second.captured)).not.toContain('Quiet Start at Eight');
+        const afterHideRows = await runtime.chat.listMessages(
+          runtime.ownerId,
+          targetConversationId,
+          { limit: 50 },
+        );
+        if (!afterHideRows) throw new Error('Target conversation disappeared after hiding source');
+        const afterHideAssistant = afterHideRows.messages.at(-1);
+        // Earlier transcript text is allowed; only the current marked retrieval
+        // frame, source metadata, and newly generated answer are suppression oracles.
+        expectCurrentPlanningRecallToOmit(second.captured, 'Quiet Start at Eight');
+        expect(afterHideAssistant?.text).not.toContain('Quiet Start at Eight');
+        expect(
+          recallSources(afterHideAssistant?.parts).some((entry) => entry.surfaceKey === key),
+        ).toBe(false);
 
         ledger = await runtime.surfaceRows();
         row = ledger.find((entry) => entry.sourceKey === key);
@@ -2245,26 +2321,38 @@ describe.each(['postgres', 'firestore'] as const)(
         });
         expect(allowed.ok).toBe(true);
         const third = await runTurn(runtime, targetConversationId, followUps[2] ?? '');
-        expect(capturedRequestText(third.captured)).toContain('Quiet Start at Eight');
+        expectCurrentPlanningRecallToContain(third.captured, 'Quiet Start at Eight');
+        const afterAllowRows = await runtime.chat.listMessages(
+          runtime.ownerId,
+          targetConversationId,
+          { limit: 50 },
+        );
+        if (!afterAllowRows)
+          throw new Error('Target conversation disappeared after allowing source');
+        const afterAllowAssistant = afterAllowRows.messages.at(-1);
+        const [allowedSource] = recallSources(afterAllowAssistant?.parts);
+        expect(allowedSource?.surfaceKey).toBe(key);
+        expect(allowedSource?.sourceRevision).toBe(revision);
 
         await runtime.updateSource(sourceId, revisedText);
         await runtime.embedSource(sourceId, revisedText);
         const fourth = await runTurn(runtime, targetConversationId, followUps[3] ?? '');
         expect(
-          capturedRequestText(fourth.captured),
+          currentPlanningRecallText(fourth.captured),
           JSON.stringify({
             role: fourth.captured?.role,
-            hasRecallHeader: capturedRequestText(fourth.captured).includes(
+            hasRecallHeader: currentPlanningRecallText(fourth.captured).includes(
               'Relevant earlier discussion',
             ),
-            hasRevisedSource: capturedRequestText(fourth.captured).includes(
+            hasRevisedSource: currentPlanningRecallText(fourth.captured).includes(
               'renamed the morning block',
             ),
-            hasOriginalSource: capturedRequestText(fourth.captured).includes(
+            hasOriginalSource: currentPlanningRecallText(fourth.captured).includes(
               'Quiet Start at Eight',
             ),
           }),
         ).toContain('renamed the morning block');
+        expectCurrentPlanningRecallToOmit(fourth.captured, 'Quiet Start at Eight');
         const revisedRows = await runtime.chat.listMessages(runtime.ownerId, targetConversationId, {
           limit: 50,
         });
