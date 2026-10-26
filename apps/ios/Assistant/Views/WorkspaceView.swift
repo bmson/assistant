@@ -1613,20 +1613,20 @@ struct WorkspaceView: View {
     private func repairSummary(_ issue: WorkspaceRepairIssue, fallback: String) -> (message: String, nextStep: String) {
         if issue.status == "pr_open" {
             if let review = issue.codeReview {
-                let result = review.approved ? "approved" : "flagged"
+                let result = review.approved ? "approved" : "needs changes"
                 return (
-                    "A saved independent review \(result) commit \(String(review.commitSha.prefix(12))). The pull request may have changed since that review.",
-                    "Open the pull request and verify its current revision and checks before merging."
+                    "Saved independent review: \(result).",
+                    "Current pull request state is unverified. Check its revision and checks before merging."
                 )
             }
             return (
-                "A pull request is recorded. Its current revision and checks are not verified here.",
-                "Open the pull request and inspect its current state before merging."
+                "A pull request is recorded.",
+                "Current pull request state is unverified. Check its revision and checks before merging."
             )
         }
         if issue.status == "monitoring", issue.deploymentConfirmed == true {
             return (
-                "A deployment was observed for the merged revision. The original behavior still needs verification.",
+                "A deployment was observed for the merged revision.",
                 "Check the original problem before confirming it is fixed."
             )
         }
