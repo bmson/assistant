@@ -239,7 +239,7 @@ function boundedResult(result: OwnerEditorMaintenanceResult): OwnerEditorMainten
   return result;
 }
 
-function withRpcDeadline<T>(
+export function withRpcDeadline<T>(
   operation: () => Promise<T>,
   deadline: number,
   label: string,
