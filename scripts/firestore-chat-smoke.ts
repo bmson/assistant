@@ -773,16 +773,78 @@ export async function firestoreChatSmoke(
     },
   };
   const outcome = await executeTask(deps, task.id);
+  const negativeReadDiagnostics = options.expectedMemoryReadFailure
+    ? (() => {
+        const extractPasses = extractPrompts.map((prompt, index) => {
+          let sources: Array<{ key?: unknown; speaker?: unknown }> = [];
+          if (typeof prompt === 'string') {
+            try {
+              const parsed = JSON.parse(prompt) as { sources?: unknown };
+              if (Array.isArray(parsed.sources))
+                sources = parsed.sources.filter(
+                  (source): source is { key?: unknown; speaker?: unknown } =>
+                    Boolean(source) && typeof source === 'object' && !Array.isArray(source),
+                );
+            } catch {
+              // The failure context should remain printable even for a malformed prompt.
+            }
+          }
+          const selection = extractSelections[index] as
+            | { selections?: Array<{ sourceKey?: unknown }> }
+            | null
+            | undefined;
+          const selectedKeys = Array.isArray(selection?.selections)
+            ? selection.selections
+                .map((entry) => entry.sourceKey)
+                .filter((key): key is string => typeof key === 'string')
+            : [];
+          return {
+            sourceKeys: sources
+              .map((source) => source.key)
+              .filter((key): key is string => typeof key === 'string'),
+            speakers: sources
+              .map((source) => source.speaker)
+              .filter((speaker): speaker is string => typeof speaker === 'string'),
+            selectedKeys,
+            selectorReason:
+              selection === null || selection === undefined
+                ? 'selector returned no usable selection object'
+                : selectedKeys.length === 0
+                  ? 'selector returned no exact passage; expected server failureReason incomplete_selection'
+                  : 'selector returned one or more exact passage keys',
+          };
+        });
+        return `Synthetic private-read failure diagnostics: ${JSON.stringify({
+          taskId: task.id,
+          roles,
+          readReceipts: dispatchReceipts.map((receipt) => ({
+            toolCallId: receipt.toolCallId,
+            step: receipt.step,
+            toolName: receipt.toolName,
+            query: receipt.args.query,
+          })),
+          deliveredText,
+          outcomeDetail: outcome.detail,
+          extractPasses,
+          expectedFailureReason: options.expectedMemoryReadFailure,
+        })}`;
+      })()
+    : '';
+  const failureContext = negativeReadDiagnostics ? `\n${negativeReadDiagnostics}` : '';
   assert.deepEqual(sqlAccesses, [], 'Even best-effort context must avoid SQL');
   if (options.expectedOutcome === 'needs_attention')
     assert.equal(options.expectedMemoryReadFailure, 'incomplete_selection');
-  assert.equal(outcome.outcome, options.expectedOutcome ?? 'done', JSON.stringify(outcome));
-  assert.equal(delivered, 1);
+  assert.equal(
+    outcome.outcome,
+    options.expectedOutcome ?? 'done',
+    `${JSON.stringify(outcome)}${failureContext}`,
+  );
+  assert.equal(delivered, 1, failureContext);
   if (options.expectedDeliveredTextIncludes) {
     for (const expected of options.expectedDeliveredTextIncludes)
       assert.ok(
         deliveredText.includes(expected),
-        `Expected final delivery to include: ${expected}`,
+        `Expected final delivery to include: ${expected}${failureContext}`,
       );
   }
   if (options.expectedDeliveredTextExcludes) {
@@ -799,7 +861,7 @@ export async function firestoreChatSmoke(
       outcome.detail?.includes(
         'I found candidate owner-authored records, but could not reliably select a directly relevant passage.',
       ),
-      'Expected the exact incomplete-selection outcome diagnostic',
+      `Expected the exact incomplete-selection outcome diagnostic${failureContext}`,
     );
     for (const extractPrompt of extractPrompts) {
       assert.equal(typeof extractPrompt, 'string');
@@ -842,9 +904,15 @@ export async function firestoreChatSmoke(
     assert.deepEqual(roles.slice(0, 2), ['classify', 'plan']);
   }
   const responseModelExecuted = modelSteps > 0;
-  if (responseModelExecuted) {
+  // Explicit private reads intentionally skip owner-card and ambient context.
+  // The model may still run for bounded read orchestration, but that does not
+  // make it a general response turn that should receive these context blocks.
+  if (responseModelExecuted && !deterministicPrivateRead) {
     assert.match(systemPrompt, /Synthetic owner prefers clear explanations/);
     assert.match(systemPrompt, /Synthetic Observatory/);
+  } else if (responseModelExecuted) {
+    assert.doesNotMatch(systemPrompt, /Synthetic owner prefers clear explanations/);
+    assert.doesNotMatch(systemPrompt, /Synthetic Observatory/);
   }
   const privateRecallCanaries = [
     /Rainbow observation notes/,

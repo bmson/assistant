@@ -49,6 +49,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { z } from 'zod';
 import type { InstallationStore } from '../../../packages/firestore/src/store.js';
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
+import { normalizeExpectedDurableJson } from './context-durable-json.js';
 import { selectSyntheticExtractQuotes } from './context-multiturn-ux-synthetic-selector.js';
 
 const DATABASE_URL =
@@ -837,7 +838,7 @@ describe.each(['postgres', 'firestore'] as const)(
             status: 'succeeded',
             step: receipt.step,
             args: receipt.args,
-            result: receipt.result,
+            result: normalizeExpectedDurableJson(receipt.result),
             decision: { modelToolCallId: receipt.modelToolCallId },
           });
           expect(receipt.taskId).toBe(taskId);
