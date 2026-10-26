@@ -413,12 +413,19 @@ interface CachedBilling {
   report: ProviderBilling;
 }
 
+function normalizeCachedOpenRouterReport(report: ProviderBilling): ProviderBilling {
+  return (report.status === 'reported' || report.status === 'stale') && report.lines.length > 0
+    ? { ...report, amountBasis: 'provider_reported_cost' }
+    : report;
+}
+
 /** Durable, scope/credential/version-keyed snapshots prevent a query on every mobile refresh. */
 async function cached(
   ports: BillingPorts,
   base: ProviderBilling,
   identity: unknown,
   load: () => Promise<ProviderBilling>,
+  normalizeCachedReport: (report: ProviderBilling) => ProviderBilling = (report) => report,
 ): Promise<ProviderBilling> {
   const now = (ports.now ?? (() => new Date()))();
   const key = `provider-billing:v1:${createHash('sha256')
@@ -427,6 +434,11 @@ async function cached(
   let saved: CachedBilling | undefined;
   try {
     saved = (await ports.cache.cacheGet(key, now))?.result as CachedBilling | undefined;
+    if (saved?.report) {
+      // Normalize old snapshots when they cross the read boundary so fresh,
+      // stale-fallback and refresh-in-progress responses share the same shape.
+      saved = { ...saved, report: normalizeCachedReport(saved.report) };
+    }
   } catch {
     // Do not start potentially billable queries when their cache is unavailable.
     return {
@@ -1222,8 +1234,12 @@ export async function getProviderBilling(ports: BillingPorts): Promise<ProviderB
         status: 'not_configured' as const,
         message: 'Connect an OpenRouter API key in AI providers to read its reported spend.',
       };
-    return cached(ports, report, ['openrouter', connection.id, connection.label, key], () =>
-      readOpenRouterBilling(ports.fetch ?? fetch, key, report, now),
+    return cached(
+      ports,
+      report,
+      ['openrouter', connection.id, connection.label, key],
+      () => readOpenRouterBilling(ports.fetch ?? fetch, key, report, now),
+      normalizeCachedOpenRouterReport,
     );
   });
   const result = await Promise.all([
