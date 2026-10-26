@@ -323,7 +323,11 @@ export function billingForecast(report: ProviderBilling): BillingForecast | unde
   if (!Number.isFinite(observedDays) || observedDays < 3 || observedDays > daysInMonth) return;
   const amounts = new Map<string, number>();
   for (const line of report.lines)
-    amounts.set(line.currency, (amounts.get(line.currency) ?? 0) + line.net);
+    amounts.set(
+      line.currency,
+      (amounts.get(line.currency) ?? 0) +
+        (report.amountBasis === 'provider_reported_cost' ? line.cost : line.net),
+    );
   return {
     through,
     observedDays,
@@ -335,7 +339,9 @@ export function billingForecast(report: ProviderBilling): BillingForecast | unde
       projected: (spent / observedDays) * daysInMonth,
     })),
     message:
-      'Month-end estimate at the observed average daily spend, after credits. Assumes this export covers the month from day one and usage stays similar. Delayed charges, changing usage and one-off credits can change the result.',
+      report.amountBasis === 'provider_reported_cost'
+        ? 'Month-end run-rate estimate at the observed average daily reported cost. This source does not report credits or net-after-credits amounts. Assumes this feed covers the month from day one and usage stays similar. Delayed charges and changing usage can change the result.'
+        : 'Month-end estimate at the observed average daily spend, after credits. Assumes this export covers the month from day one and usage stays similar. Delayed charges, changing usage and one-off credits can change the result.',
   };
 }
 
@@ -752,6 +758,7 @@ export async function readOpenRouterBilling(
     status: 'reported',
     fetchedAt: now.toISOString(),
     message: `Spend reported for the connected API key, including use outside this assistant. Credit purchases and other keys are excluded.${data.byok_usage_monthly ? ' BYOK upstream usage is billed separately by that provider and is not added here.' : ''}`,
+    amountBasis: 'provider_reported_cost',
     lines: [
       {
         service: 'OpenRouter',

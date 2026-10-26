@@ -21,6 +21,38 @@ const report: ProviderBilling = {
 };
 
 describe('provider billing presentation', () => {
+  it('renders OpenRouter amount-only values as reported cost without invented credits or net', () => {
+    const html = renderToStaticMarkup(
+      <ProviderBillingCards
+        reports={[
+          {
+            ...report,
+            id: 'openrouter',
+            label: 'OpenRouter',
+            status: 'reported',
+            amountBasis: 'provider_reported_cost',
+            fetchedAt: '2026-09-27T12:00:00Z',
+            message: 'Spend reported for the connected API key.',
+            lines: [
+              {
+                service: 'OpenRouter',
+                detail: 'Current API key · month to date',
+                currency: 'USD',
+                cost: 12,
+                credits: 0,
+                net: 12,
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+    expect(html).toContain('Reported cost');
+    expect(html).toContain('$12.00');
+    expect(html).toContain('Not reported');
+    expect(html).not.toContain('Credits: $0.00');
+  });
+
   it('labels selected OpenAI amount as reported cost without inventing credits, net or freshness', () => {
     const html = renderToStaticMarkup(
       <ProviderBillingCards
