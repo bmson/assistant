@@ -6,8 +6,14 @@ import {
   checksumV3,
   compositeMigrationId,
   deserializeMigrationValue,
+  isOwnerEditorRuntimeCursorName,
+  MIGRATION_TABLES,
   type MigrationBundle,
   type MigrationRecord,
+  migrationBundleChecksum,
+  migrationCoverageIsComplete,
+  migrationCoverageOmittedTables,
+  OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
   type SerializedValue,
   serializeMigrationTimestamp,
   serializeMigrationValue,
@@ -128,6 +134,46 @@ describe('workspace migration format', () => {
   it('rejects unsupported tables before any database work', () => {
     expect(() => assertSupportedMigrationTables(['agents', 'not_a_real_table'])).toThrow(
       'Unsupported migration tables: not_a_real_table',
+    );
+  });
+
+  it('accounts for only the recognized runtime table and cursor prefix in portable coverage', () => {
+    const allPortable = MIGRATION_TABLES.map(({ table }) => table);
+    const sourceTables = [...allPortable, 'owner_editor_operations', 'future_runtime_table'];
+    expect(migrationCoverageOmittedTables(sourceTables, allPortable)).toEqual([
+      'owner_editor_operations',
+      'future_runtime_table',
+    ]);
+    expect(
+      migrationCoverageOmittedTables(sourceTables, allPortable, OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1),
+    ).toEqual(['future_runtime_table']);
+    expect(
+      migrationCoverageIsComplete(sourceTables, allPortable, OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1),
+    ).toBe(false);
+    expect(
+      migrationCoverageIsComplete(
+        [...allPortable, 'owner_editor_operations'],
+        allPortable,
+        OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
+      ),
+    ).toBe(true);
+    expect(
+      migrationCoverageIsComplete(
+        allPortable.slice(1),
+        allPortable,
+        OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
+      ),
+    ).toBe(false);
+    expect(isOwnerEditorRuntimeCursorName('owner-editor-epoch:owner')).toBe(true);
+    expect(isOwnerEditorRuntimeCursorName('privacy-erasure-generation:owner')).toBe(false);
+  });
+
+  it('binds explicit runtime exclusions into new bundle checksums but preserves legacy checksums', () => {
+    const records = [agent('owner')];
+    expect(migrationBundleChecksum(records, 3)).toBe(checksumV3(records));
+    expect(migrationBundleChecksum(records, 2)).toBe(checksum(records));
+    expect(migrationBundleChecksum(records, 3, OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1)).not.toBe(
+      checksumV3(records),
     );
   });
 
@@ -318,6 +364,78 @@ describe('migration format integrity', () => {
     input.manifest.bundleChecksum = checksumV3([record]);
     expect(() => validate(input)).not.toThrow();
   });
+
+  it('accepts an exact versioned runtime exclusion and rejects altered declarations', () => {
+    const input = bundle();
+    input.manifest.coverage.runtimeExclusions = OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1;
+    input.manifest.bundleChecksum = migrationBundleChecksum(
+      input.records,
+      input.manifest.formatVersion,
+      OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
+    );
+    expect(() => validate(input)).not.toThrow();
+    input.manifest.coverage.runtimeExclusions = {
+      ...OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
+      version: 2,
+    } as unknown as typeof OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1;
+    expect(() => validate(input)).toThrow('runtime exclusions');
+
+    const wrongTable = bundle();
+    wrongTable.manifest.coverage.runtimeExclusions = {
+      ...OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
+      tables: ['some_other_table'],
+    } as unknown as typeof OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1;
+    expect(() => validate(wrongTable)).toThrow('runtime exclusions');
+
+    const wrongPrefix = bundle();
+    wrongPrefix.manifest.coverage.runtimeExclusions = {
+      ...OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
+      maintenanceCursorPrefixes: ['all-maintenance-cursors:'],
+    } as unknown as typeof OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1;
+    expect(() => validate(wrongPrefix)).toThrow('runtime exclusions');
+  });
+
+  it('rejects legacy maintenance cursor records containing an owner editor epoch', () => {
+    const input = bundle();
+    const data: MigrationRecord['data'] = {
+      name: 'owner-editor-epoch:owner',
+      cursor: '{"ownerId":"owner","epoch":"old"}',
+      updatedAt: '2026-10-25T00:00:00.000Z',
+    };
+    const epochRecord: MigrationRecord = {
+      table: 'maintenance_cursors',
+      collection: 'maintenanceCursors',
+      id: 'owner-editor-epoch:owner',
+      data,
+      checksum: checksum(data),
+    };
+    input.records.push(epochRecord);
+    input.manifest.tables.maintenance_cursors = {
+      collection: 'maintenanceCursors',
+      count: 1,
+      checksum: checksum([epochRecord]),
+    };
+    input.manifest.coverage.supportedTables = ['agents', 'maintenance_cursors'];
+    input.manifest.recordCount = input.records.length;
+    input.manifest.bundleChecksum = checksum(input.records);
+    expect(() => validate(input)).toThrow('Owner editor runtime metadata cannot be imported');
+  });
+
+  it('rejects owner editor receipt rows even if supplied as an unknown migration table', () => {
+    const input = bundle();
+    const receipt = {
+      table: 'owner_editor_operations',
+      collection: 'ownerEditorOperations',
+      id: 'receipt-id',
+      data: { id: 'receipt-id' },
+      checksum: '',
+    } as unknown as MigrationRecord;
+    receipt.checksum = checksum(receipt.data);
+    input.records.push(receipt);
+    input.manifest.recordCount = input.records.length;
+    input.manifest.bundleChecksum = checksum(input.records);
+    expect(() => validate(input)).toThrow('Owner editor runtime metadata cannot be imported');
+  });
   it('rejects duplicate records even with newly recomputed bundle and table checksums', () => {
     const input = bundle();
     const first = input.records[0];
@@ -488,6 +606,31 @@ describe('migration required ownership', () => {
     expect(() =>
       validateMigrationReferences([agent('owner'), source, occasionLineage], 'owner'),
     ).toThrow('reference occasionId');
+  });
+  it('preserves recognized contact identity authority and rejects malformed metadata', () => {
+    const contact = (identityAuthority?: string | null): MigrationRecord => ({
+      table: 'contacts',
+      collection: 'contacts',
+      id: 'contact-row',
+      data: {
+        id: 'contact-row',
+        ...(identityAuthority !== undefined ? { identityAuthority } : {}),
+      },
+      checksum: '',
+    });
+    expect(() => validateMigrationReferences([agent('owner'), contact()], 'owner')).not.toThrow();
+    expect(() =>
+      validateMigrationReferences([agent('owner'), contact(null)], 'owner'),
+    ).not.toThrow();
+    expect(() =>
+      validateMigrationReferences([agent('owner'), contact('owner')], 'owner'),
+    ).not.toThrow();
+    expect(() =>
+      validateMigrationReferences([agent('owner'), contact('inferred')], 'owner'),
+    ).not.toThrow();
+    expect(() =>
+      validateMigrationReferences([agent('owner'), contact('trusted')], 'owner'),
+    ).toThrow('Invalid contact identity authority');
   });
   it('rejects approval links to another task even when both IDs exist', () => {
     const row = (

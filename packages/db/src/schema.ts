@@ -5,6 +5,8 @@ import type {
   EmailContentProvenanceSnapshot,
   ImportArchiveDiagnostics,
   ImportUnitProvenance,
+  OwnerEditorCommand,
+  OwnerEditorTerminalResult,
 } from '@assistant/persistence';
 import { sql } from 'drizzle-orm';
 import {
@@ -31,6 +33,55 @@ const timestamps = {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 };
+
+/** Short-lived editor receipts, intentionally excluded from portable replay. */
+export const ownerEditorOperations = pgTable(
+  'owner_editor_operations',
+  {
+    id: text('id').primaryKey(),
+    ownerId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    epoch: uuid('epoch').notNull(),
+    privacyGenerationDigest: text('privacy_generation_digest').notNull(),
+    operationId: uuid('operation_id').notNull(),
+    requestHash: text('request_hash').notNull(),
+    scopeDigest: text('scope_digest').notNull(),
+    command: text('command').$type<OwnerEditorCommand>().notNull(),
+    protocolVersion: integer('protocol_version').$type<1>().notNull(),
+    formIssuedAt: timestamp('form_issued_at', { withTimezone: true }).notNull(),
+    formExpiresAt: timestamp('form_expires_at', { withTimezone: true }).notNull(),
+    claimToken: uuid('claim_token'),
+    claimExpiresAt: timestamp('claim_expires_at', { withTimezone: true }),
+    status: text('status')
+      .$type<'preparing' | 'committed' | 'terminal_rejected' | 'abandoned'>()
+      .notNull(),
+    statusVersion: integer('status_version').notNull(),
+    result: jsonb('result').$type<OwnerEditorTerminalResult>(),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('owner_editor_operation_identity').on(t.ownerId, t.epoch, t.operationId),
+    index('owner_editor_operation_owner').on(t.ownerId, t.createdAt),
+    index('owner_editor_operation_retention').on(t.ownerId, t.formIssuedAt, t.id),
+    check(
+      'owner_editor_operation_hashes',
+      sql`${t.id} ~ '^[a-f0-9]{64}$' AND ${t.requestHash} ~ '^[a-f0-9]{64}$' AND ${t.scopeDigest} ~ '^[a-f0-9]{64}$' AND ${t.privacyGenerationDigest} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      'owner_editor_operation_version',
+      sql`${t.protocolVersion} = 1 AND ${t.statusVersion} >= 1 AND ${t.formExpiresAt} > ${t.formIssuedAt}`,
+    ),
+    check(
+      'owner_editor_operation_command',
+      sql`${t.command} IN ('create_person','update_person_identity','add_family_relationship','correct_owner_family_relationship')`,
+    ),
+    check(
+      'owner_editor_operation_state',
+      sql`(${t.status} = 'preparing' AND ${t.claimToken} IS NOT NULL AND ${t.claimExpiresAt} IS NOT NULL AND ${t.result} IS NULL) OR (${t.status} IN ('committed','terminal_rejected','abandoned') AND ${t.claimToken} IS NULL AND ${t.claimExpiresAt} IS NULL AND ${t.result} IS NOT NULL)`,
+    ),
+  ],
+);
 
 // Situation packs keep bounded planning state, not a second scheduler. Source
 // snapshots and dependencies are reviewed explicitly before a correction lands.
@@ -1248,10 +1299,17 @@ export const contacts = pgTable(
     phones: text('phones').array().notNull().default([]),
     relationship: text('relationship').notNull().default(''),
     trust: text('trust').notNull().default('unknown'),
+    identityAuthority: text('identity_authority', { enum: ['owner', 'inferred'] }),
     notes: text('notes').notNull().default(''),
     ...timestamps,
   },
-  (t) => [check('contacts_trust_check', sql`${t.trust} IN ('owner','known','unknown')`)],
+  (t) => [
+    check('contacts_trust_check', sql`${t.trust} IN ('owner','known','unknown')`),
+    check(
+      'contacts_identity_authority_check',
+      sql`${t.identityAuthority} IS NULL OR ${t.identityAuthority} IN ('owner','inferred')`,
+    ),
+  ],
 );
 
 // ── Knowledge graph ────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ import {
   idempotencyIdentityDigest,
   MIGRATION_TABLES,
   modelToolCallIdentityDigest,
+  OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
   toolCallReceiptKeyId,
 } from '@assistant/persistence';
 import { drizzle } from 'drizzle-orm/postgres-js';
@@ -11,7 +12,21 @@ import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
 import { afterEach, describe, expect, it } from 'vitest';
 import { allocateTestTarget, assertAllocatedTestTarget } from './test-target.js';
-import { exportWorkspaceSnapshot } from './workspace-migration.js';
+import {
+  exportWorkspaceSnapshot,
+  filterPortableMaintenanceCursorRows,
+} from './workspace-migration.js';
+
+describe('portable owner editor cursor filtering', () => {
+  it('filters only the reserved editor epoch cursor before portable record checksums', () => {
+    const rows = [
+      { name: 'owner-editor-epoch:owner', cursor: '{"epoch":"private"}' },
+      { name: 'privacy-erasure-generation:owner', cursor: 'generation-1' },
+      { name: 'approval-recovery', cursor: 'task-1' },
+    ];
+    expect(filterPortableMaintenanceCursorRows(rows)).toEqual(rows.slice(1));
+  });
+});
 
 const databaseUrl = process.env.DATABASE_URL;
 const enabled = Boolean(databaseUrl && new URL(databaseUrl).pathname.endsWith('_test'));
@@ -253,6 +268,7 @@ describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
           'email_observer_work',
         ]),
         omittedTables: [],
+        runtimeExclusions: OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
       });
       expect(
         complete.records.find(

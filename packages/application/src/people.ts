@@ -34,7 +34,11 @@ import {
   type KnowledgeGraphEntityView,
   type KnowledgeGraphNeighborEdge,
 } from './knowledge-graph.js';
-import { type PersonGraphEdgeInput, projectPersonGraph } from './people-graph-projection.js';
+import {
+  type PersonGraphEdgeInput,
+  presentPersonGraphRelation,
+  projectPersonGraph,
+} from './people-graph-projection.js';
 import {
   type BirthdayView,
   derivePersonGroup,
@@ -42,7 +46,6 @@ import {
   turningAge,
 } from './people-presentation.js';
 import { getPersonProfile, type MemorySnapshot, type PersonProfile } from './profile/queries.js';
-import { presentKnowledgeGraphRelation } from './relationship-presentation.js';
 
 export type {
   BirthdayView,
@@ -243,17 +246,15 @@ function presentEdge(edge: KnowledgeGraphNeighborEdge, selfLabel: string) {
   // `label` already carries the owner's preferred spelling — the neighbourhood
   // query coalesces it in SQL.
   const otherLabel = edge.other.label;
-  return edge.outbound
-    ? presentKnowledgeGraphRelation({
-        subjectLabel: selfLabel,
-        predicate: edge.predicate,
-        objectLabel: otherLabel,
-      })
-    : presentKnowledgeGraphRelation({
-        subjectLabel: otherLabel,
-        predicate: edge.predicate,
-        objectLabel: selfLabel,
-      });
+  return presentPersonGraphRelation({
+    subjectLabel: edge.outbound ? selfLabel : otherLabel,
+    predicate: edge.predicate,
+    objectLabel: edge.outbound ? otherLabel : selfLabel,
+    otherIsPerson: edge.other.kind === 'person',
+    validFrom: edge.validFrom,
+    validUntil: edge.validUntil,
+    assertionTiming: edge.assertionTiming,
+  });
 }
 
 /**

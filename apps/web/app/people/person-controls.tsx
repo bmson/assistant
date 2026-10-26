@@ -2,11 +2,7 @@
 
 import { unstable_rethrow, useRouter } from 'next/navigation';
 import { useId, useRef, useState, useTransition } from 'react';
-import {
-  deleteContactAction,
-  updateContactIdentityAction,
-  updateContactRelationship,
-} from '@/app/profile/actions';
+import { deleteContactAction, updateContactIdentityAction } from '@/app/profile/actions';
 import { btn, btnSm, inputClass, labelClass } from '@/lib/ui';
 
 /**
@@ -20,64 +16,82 @@ export function PersonControls({
   initialName,
   initialAliases,
   initialRelationship,
+  identityRevision,
 }: {
   contactId: string;
   initialName: string;
   initialAliases: string[];
   initialRelationship: string;
+  identityRevision?: string;
 }) {
   const initialAliasText = initialAliases.join(', ');
+  // Values and precondition belong to the same mounted edit session. A
+  // refreshed server prop must never authorize the owner's older draft.
+  const [editSession] = useState(() => ({
+    contactId,
+    name: initialName,
+    aliases: initialAliasText,
+    relationship: initialRelationship,
+    identityRevision,
+  }));
   const [name, setName] = useState(initialName);
   const [aliases, setAliases] = useState(initialAliasText);
   const [relationship, setRelationship] = useState(initialRelationship);
   const [saved, setSaved] = useState(false);
+  const [refreshPending, setRefreshPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reviewRequired, setReviewRequired] = useState(false);
+  const displayedSnapshotChanged =
+    contactId !== editSession.contactId || identityRevision !== editSession.identityRevision;
+  const hasDisplayedRevision =
+    !displayedSnapshotChanged && /^[0-9a-f]{64}$/.test(editSession.identityRevision ?? '');
   const [pending, startTransition] = useTransition();
   const fieldId = useId();
   const saving = useRef(false);
 
-  // The server action revalidates this page, so the initial* props catch up
-  // after a save and the button settles back to disabled on its own.
   const dirty =
-    name !== initialName || aliases !== initialAliasText || relationship !== initialRelationship;
+    name !== editSession.name ||
+    aliases !== editSession.aliases ||
+    relationship !== editSession.relationship;
 
   /** Any edit clears the last save's feedback, so it never labels new text. */
   const touched = () => {
     setSaved(false);
+    setRefreshPending(false);
     setError(null);
   };
 
   const save = () => {
     // Block a second activation before React renders the pending state.
-    if (saving.current || pending || !dirty) return;
+    if (saving.current || pending || !dirty || !hasDisplayedRevision || reviewRequired) return;
     saving.current = true;
     setError(null);
     setSaved(false);
+    setRefreshPending(false);
     startTransition(async () => {
       try {
         let result: Awaited<ReturnType<typeof updateContactIdentityAction>>;
         try {
-          result = await updateContactIdentityAction(contactId, name, aliases);
+          result = await updateContactIdentityAction(
+            editSession.contactId,
+            name,
+            aliases,
+            editSession.identityRevision,
+            relationship,
+          );
         } catch (cause) {
           unstable_rethrow(cause);
-          setError('Couldn’t confirm the save. Your edits are still here. Try again.');
+          setReviewRequired(true);
+          setError('Couldn’t confirm the save. Reopen this person to review saved details.');
           return;
         }
         if (result.error) {
           setError(result.error);
+          if (result.code === 'review_required' || result.code === 'conflict')
+            setReviewRequired(true);
           return;
         }
-        if (relationship !== initialRelationship) {
-          // This one reports failure by throwing rather than returning an error,
-          // so an unguarded await escaped the transition: the owner saw neither a
-          // confirmation nor a message, even though the name had already saved.
-          try {
-            await updateContactRelationship(contactId, relationship);
-          } catch {
-            setError('The name was saved, but the relationship could not be. Try again.');
-            return;
-          }
-        }
+        setRefreshPending(result.refreshPending === true);
         setSaved(true);
       } finally {
         saving.current = false;
@@ -156,11 +170,23 @@ export function PersonControls({
         </div>
       </div>
       <div className="mt-4 flex min-w-0 flex-wrap items-center gap-3">
-        <button type="button" disabled={pending || !dirty} onClick={save} className={btn.primary}>
+        <button
+          type="button"
+          disabled={pending || !dirty || !hasDisplayedRevision || reviewRequired}
+          onClick={save}
+          className={btn.primary}
+        >
           {pending ? 'Saving…' : 'Save changes'}
         </button>
+        {!hasDisplayedRevision ? (
+          <span role="status" className="text-xs text-muted">
+            Reopen this person to review current details before editing.
+          </span>
+        ) : null}
         {saved && !pending ? (
-          <span className="text-xs font-medium text-emerald-600 dark:text-emerald-400">Saved</span>
+          <span className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
+            {refreshPending ? 'Saved. Some derived details still need to refresh.' : 'Saved'}
+          </span>
         ) : null}
         {error ? (
           <span role="alert" className="text-xs text-red-600 dark:text-red-400">

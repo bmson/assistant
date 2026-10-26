@@ -218,6 +218,13 @@ export async function getKnowledgeMapSnapshot(
         evidenceQuote: knowledgeGraphRelations.evidenceQuote,
         validFrom: knowledgeGraphRelations.validFrom,
         validUntil: knowledgeGraphRelations.validUntil,
+        assertionTiming: sql<'unspecified' | 'present' | 'past' | null>`case
+          when ${knowledgeGraphRelations.assertion}->>'polarity' = 'positive'
+            and ${knowledgeGraphRelations.assertion}->>'modality' = 'asserted'
+            and ${knowledgeGraphRelations.assertion}->>'tense' in ('unspecified', 'present', 'past')
+          then ${knowledgeGraphRelations.assertion}->>'tense'
+          else null
+        end`,
         assertionContext: {
           id: knowledgeGraphAssertions.id,
           semanticRevision: knowledgeGraphAssertions.semanticRevision,

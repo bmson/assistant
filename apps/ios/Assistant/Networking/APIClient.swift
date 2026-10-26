@@ -72,6 +72,10 @@ enum APIError: LocalizedError {
         case .invalidResponse: "The server returned an unreadable response."
         case .chatTurnCancelledBeforeAdmission: "This turn was cancelled before it was admitted."
         case .unauthorized: "The access key was not accepted by this Assistant server."
+        case let .server(status, message) where status == 428 && message == "review_required":
+            "Open this person again to review their current details before saving."
+        case let .server(status, message) where status == 409 && message == "conflict":
+            "This person changed. Review the current details before applying your edit."
         case let .server(_, message): message
         case let .decoding(model, detail): "Could not read the \(model) response: \(detail)."
         case let .transport(error): Self.transportDescription(error)
@@ -1433,6 +1437,10 @@ struct APIClient: Sendable {
     }
 
     func updatePerson(id: String, person: PersonMutation) async throws {
+        guard let expectedContactRevision = person.expectedContactRevision,
+              Self.isDigest(expectedContactRevision) else {
+            throw APIError.invalidResponse
+        }
         var request = makeRequest(
             url: configuration.baseURL.appending(path: "api/mobile/v1/memory/people/\(id)")
         )
@@ -2152,6 +2160,7 @@ struct PersonMutation: Encodable, Sendable {
     let name: String
     let relationship: String
     let aliases: String
+    var expectedContactRevision: String? = nil
 }
 
 struct OccasionMutation: Encodable, Sendable {

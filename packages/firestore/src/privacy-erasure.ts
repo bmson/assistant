@@ -8,6 +8,8 @@ import type {
 import {
   emailAttachmentCustodyCleanupIntentId,
   notificationDashboardMessageId,
+  ownerEditorPrivacyDigest,
+  parseOwnerEditorEpochCursor,
 } from '@assistant/persistence';
 import {
   type DocumentSnapshot,
@@ -17,6 +19,10 @@ import {
   type Timestamp,
   type Transaction,
 } from '@google-cloud/firestore';
+import {
+  ownerEditorFirestorePrivacyToken,
+  rotateFirestoreOwnerEditorEpochInTransaction,
+} from './owner-editor-repository.js';
 import { eraseFirestorePhoneCalendarSharing } from './phone-calendar-compatibility.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
@@ -192,6 +198,8 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
       )
         throw new Error('Privacy erasure owner changed');
       const [jobSnapshot, card] = await tx.getAll(jobRef, cardRef);
+      const epochRef = this.store.doc('maintenanceCursors', `owner-editor-epoch:${agentId}`);
+      const epochSnapshot = await tx.get(epochRef);
       if (card?.exists && card.get('agentId') !== agentId)
         throw new Error('Owner card belongs to another agent');
       const current = jobSnapshot?.exists ? decodeRecord<Job>(jobSnapshot.data()) : null;
@@ -208,6 +216,20 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
               counts: { memories: 0, graphRelations: 0, writingSamples: 0, securityIncidents: 0 },
             };
       const now = this.store.now();
+      if (epochSnapshot.exists && (!current || !privacyErasureIsActive(current.status))) {
+        const epoch = parseOwnerEditorEpochCursor(
+          JSON.parse(epochSnapshot.get('cursor') ?? 'null'),
+        );
+        if (
+          epoch.ownerId !== agentId ||
+          epochSnapshot.get('name') !== `owner-editor-epoch:${agentId}`
+        )
+          throw new Error('Editor epoch owner mismatch');
+        tx.update(epochRef, {
+          cursor: JSON.stringify({ ...epoch, epoch: randomUUID() }),
+          updatedAt: now,
+        });
+      }
       tx.set(jobRef, encodeRecord({ ...job, updatedAt: now }));
       tx.set(cardRef, encodeRecord({ agentId, content: '', compiledAt: now, invalidatedAt: now }));
       return job;
@@ -1396,6 +1418,28 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
     // owner backfill before any owner-scoped destructive operation can run.
     await this.assertWritingSamplesOwned(agentId);
     const job = await this.begin(agentId);
+    for (;;) {
+      const removed = await this.store.db.runTransaction(async (tx) => {
+        await this.activeJob(tx, agentId, job.generation);
+        const page = await tx.get(
+          this.store
+            .collection('ownerEditorOperations')
+            .where('ownerId', '==', agentId)
+            .limit(PAGE_SIZE),
+        );
+        for (const doc of page.docs) {
+          if (
+            doc.get('ownerId') !== agentId ||
+            typeof doc.get('id') !== 'string' ||
+            documentKey(doc.get('id')) !== doc.id
+          )
+            throw new Error('Editor receipt owner or identity mismatch');
+          tx.delete(doc.ref);
+        }
+        return page.size;
+      });
+      if (!removed) break;
+    }
     await this.deleteOwned(agentId, job.generation, 'watchFireEffects');
     await this.deleteOwned(agentId, job.generation, 'watchFires');
     await this.eraseSecurityEvidence(agentId, job.generation);
@@ -1751,13 +1795,33 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
     await this.store.db.runTransaction(async (tx) => {
       const jobRef = this.store.doc('privacyErasureJobs', agentId);
       const job = await tx.get(jobRef);
-      if (!job.exists || job.get('agentId') !== agentId || job.get('status') !== 'content-erased')
+      if (
+        !job.exists ||
+        job.get('agentId') !== agentId ||
+        !['content-erased', 'complete'].includes(job.get('status'))
+      )
         throw new Error('Privacy erasure data phase is incomplete');
       const pending = await tx.get(
         this.store.collection('privacyErasureAssets').where('agentId', '==', agentId).limit(1),
       );
       if (!pending.empty) throw new Error('Privacy erasure assets remain');
-      tx.update(jobRef, { status: 'complete', updatedAt: this.store.now() });
+      if (job.get('status') !== 'complete')
+        tx.update(jobRef, { status: 'complete', updatedAt: this.store.now() });
+    });
+    // Native job updateTime is part of the privacy token, so observe the committed
+    // completion in a new transaction. A crash in this gap fails closed; complete()
+    // may be retried without enabling a missing or disabled editor.
+    await this.store.db.runTransaction(async (tx) => {
+      const ref = this.store.doc('maintenanceCursors', `owner-editor-epoch:${agentId}`);
+      const snapshot = await tx.get(ref);
+      if (!snapshot.exists) return;
+      const epoch = parseOwnerEditorEpochCursor(JSON.parse(snapshot.get('cursor') ?? 'null'));
+      if (epoch.ownerId !== agentId || snapshot.get('name') !== `owner-editor-epoch:${agentId}`)
+        throw new Error('Editor epoch owner mismatch');
+      const job = await tx.get(this.store.doc('privacyErasureJobs', agentId));
+      const generation = ownerEditorFirestorePrivacyToken(job, agentId);
+      if (epoch.privacyGenerationDigest === ownerEditorPrivacyDigest(generation)) return;
+      await rotateFirestoreOwnerEditorEpochInTransaction(this.store, tx, agentId, epoch.ready);
     });
   }
 }

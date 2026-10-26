@@ -1,5 +1,11 @@
+import type { OwnerEditorTiming } from '@assistant/persistence/owner-editor';
+import { predicateSpec } from '@assistant/persistence/predicate-vocabulary';
 import type { PersonConnection, PersonRelation } from './people.js';
-import { presentKnowledgeGraphRelation } from './relationship-presentation.js';
+import {
+  presentKnowledgeGraphRelation,
+  presentOwnerFamilyFact,
+  validOwnerFamilyMeaning,
+} from './relationship-presentation.js';
 
 export interface PersonGraphEdgeInput {
   id: string;
@@ -8,6 +14,8 @@ export interface PersonGraphEdgeInput {
   reviewStatus: 'confirmed' | 'unreviewed';
   validFrom: string | null;
   validUntil: string | null;
+  /** Present only when the stored edge is an explicit positive, asserted family claim. */
+  assertionTiming?: OwnerEditorTiming | null;
   other: {
     id: string;
     label: string;
@@ -25,6 +33,35 @@ export interface PersonGraphProjection {
 
 const ORIGIN_PREDICATES = new Set(['met', 'met_at', 'met_during']);
 
+export function presentPersonGraphRelation(input: {
+  subjectLabel: string;
+  predicate: string;
+  objectLabel: string;
+  otherIsPerson: boolean;
+  validFrom: string | null;
+  validUntil: string | null;
+  assertionTiming?: OwnerEditorTiming | null;
+}) {
+  const fallback = presentKnowledgeGraphRelation(input);
+  const validity = { validFrom: input.validFrom, validUntil: input.validUntil };
+  if (
+    !input.otherIsPerson ||
+    predicateSpec(input.predicate)?.group !== 'family' ||
+    input.assertionTiming == null ||
+    (input.predicate.startsWith('former_') && input.assertionTiming !== 'past') ||
+    !validOwnerFamilyMeaning({ timing: input.assertionTiming, validity })
+  )
+    return fallback;
+  const sentence = presentOwnerFamilyFact({
+    subjectLabel: input.subjectLabel,
+    predicate: input.predicate,
+    objectLabel: input.objectLabel,
+    timing: input.assertionTiming,
+    validity,
+  });
+  return { ...fallback, sentence, accessibleLabel: sentence };
+}
+
 /** Use the SQL dossier's stored edge direction and person/connection buckets. */
 export function projectPersonGraph(
   personName: string,
@@ -38,17 +75,15 @@ export function projectPersonGraph(
   };
   for (const edge of edges) {
     const otherLabel = edge.other.label;
-    const presentation = edge.outbound
-      ? presentKnowledgeGraphRelation({
-          subjectLabel: personName,
-          predicate: edge.predicate,
-          objectLabel: otherLabel,
-        })
-      : presentKnowledgeGraphRelation({
-          subjectLabel: otherLabel,
-          predicate: edge.predicate,
-          objectLabel: personName,
-        });
+    const presentation = presentPersonGraphRelation({
+      subjectLabel: edge.outbound ? personName : otherLabel,
+      predicate: edge.predicate,
+      objectLabel: edge.outbound ? otherLabel : personName,
+      otherIsPerson: edge.other.kind === 'person',
+      validFrom: edge.validFrom,
+      validUntil: edge.validUntil,
+      assertionTiming: edge.assertionTiming,
+    });
     const shared = {
       id: edge.id,
       sentence: presentation.sentence,

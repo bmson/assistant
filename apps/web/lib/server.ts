@@ -431,6 +431,30 @@ export async function startFirestoreGoalWork(id: string) {
   return goalWorkResult(await repository.startWork(id, goalWorkAutomation));
 }
 
+// Driver plumbing stays at the web composition root; editor adapters consume
+// these ports without introducing a second persistence composition boundary.
+export {
+  assertPostgresInstallationOwner,
+  createPostgresOwnerEditorOperationRepository,
+} from '@assistant/db';
+
+/** Use only the caller's already fenced leased read handle, including pool-max-one installations. */
+export async function readPostgresOwnerEditorViewInputs(
+  db: Db,
+  input: { contactId?: string; relationIds?: readonly string[] },
+) {
+  const { readPostgresOwnerEditorIssuanceContext, postgresOwnerEditorViewSnapshot } = await import(
+    '@assistant/db'
+  );
+  const ownerId = await assertPostgresInstallationOwner(db);
+  const context = await readPostgresOwnerEditorIssuanceContext(db, ownerId);
+  if (!context) return null;
+  if (!input.contactId)
+    return { context, snapshot: { ownerId, identity: null, people: [], corrections: [] } };
+  const snapshot = await postgresOwnerEditorViewSnapshot(db, ownerId, input);
+  return { context, snapshot: { ...snapshot, ownerId } };
+}
+
 export function getDb(): Db {
   const config = loadConfig();
   if (config.PERSISTENCE_DRIVER === 'firestore') {

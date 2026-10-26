@@ -20,6 +20,9 @@ const mocks = vi.hoisted(() => ({
   fsFocus: vi.fn(),
   fsMap: vi.fn(),
   terminate: vi.fn(),
+  fsOwnerFence: vi.fn(),
+  fsPrivacyRead: vi.fn(),
+  fsPrivacyAssert: vi.fn(),
 }));
 vi.mock('@/auth', () => ({ requireOwner: mocks.owner }));
 vi.mock('@assistant/config', async (original) => ({
@@ -55,6 +58,9 @@ vi.mock('@/lib/server', () => ({ withPostgresMemoryBrowseRead: mocks.pgRead }));
 vi.mock('@assistant/firestore', async (original) => ({
   ...(await original<Record<string, unknown>>()),
   createInstallationStore: () => ({ db: { terminate: mocks.terminate } }),
+  assertFirestoreInstallationOwner: mocks.fsOwnerFence,
+  readPrivacyErasureFence: mocks.fsPrivacyRead,
+  assertPrivacyErasureFenceUnchanged: mocks.fsPrivacyAssert,
 }));
 vi.mock('@/lib/firestore-people', () => ({
   listFirestorePeopleDirectory: mocks.fsPeople,
@@ -90,6 +96,9 @@ const emptyLibrary = { rows: [], total: 0, page: 1, totalPages: 0 };
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.driver = 'postgres';
+  mocks.fsOwnerFence.mockResolvedValue('owner');
+  mocks.fsPrivacyRead.mockResolvedValue(null);
+  mocks.fsPrivacyAssert.mockResolvedValue(undefined);
   mocks.owner.mockResolvedValue({ user: { email: 'owner@example.test' } });
   mocks.pgRead.mockImplementation(async (read) => read({}));
   mocks.people.mockResolvedValue([]);

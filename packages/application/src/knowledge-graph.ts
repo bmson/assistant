@@ -23,6 +23,8 @@ import type {
   OwnerKnowledgeGraphFactRepository,
 } from '@assistant/persistence';
 import { deriveSharedParentViews, knowledgeAssertionEndpointView } from '@assistant/persistence';
+import type { OwnerEditorTiming } from '@assistant/persistence/owner-editor';
+import { predicateSpec } from '@assistant/persistence/predicate-vocabulary';
 
 export { GRAPH_EXTRACTION_VERSION } from '@assistant/core/memory/knowledge-graph';
 
@@ -865,6 +867,8 @@ export interface KnowledgeGraphNeighborEdge {
   /** Temporal qualifiers as canonical date keys, when the source states a span. */
   validFrom: string | null;
   validUntil: string | null;
+  /** Explicit positive/asserted family timing; absent for unsupported or legacy claims. */
+  assertionTiming?: OwnerEditorTiming | null;
   other: KnowledgeGraphEntityView;
 }
 
@@ -925,6 +929,7 @@ export async function getKnowledgeGraphNeighborhood(
         reviewStatus: knowledgeGraphRelations.reviewStatus,
         validFrom: knowledgeGraphRelations.validFrom,
         validUntil: knowledgeGraphRelations.validUntil,
+        assertion: knowledgeGraphRelations.assertion,
         subjectId: knowledgeGraphRelations.subjectEntityId,
         objectId: knowledgeGraphRelations.objectEntityId,
         subjectLabel: displayLabel(subject),
@@ -961,6 +966,18 @@ export async function getKnowledgeGraphNeighborhood(
       reviewStatus: asReviewStatus(row.reviewStatus),
       validFrom: row.validFrom,
       validUntil: row.validUntil,
+      assertionTiming:
+        predicateSpec(row.predicate)?.group === 'family' &&
+        row.subjectKind === 'person' &&
+        row.objectKind === 'person' &&
+        row.assertion != null &&
+        row.assertion.polarity === 'positive' &&
+        row.assertion.modality === 'asserted' &&
+        (row.assertion.tense === 'unspecified' ||
+          row.assertion.tense === 'present' ||
+          row.assertion.tense === 'past')
+          ? row.assertion.tense
+          : null,
       other: outbound
         ? {
             id: row.objectId,
