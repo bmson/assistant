@@ -1,5 +1,5 @@
 import type {
-  ProfileContact,
+  ProfileContactSnapshot,
   ProfileOverviewRepository,
   ProfilePeopleReadRepository,
 } from '@assistant/persistence';
@@ -63,7 +63,12 @@ describe('getPersonProfile browse-only composition', () => {
       phones: [],
       trust: 'known',
       relationship: 'friend',
-    } as unknown as ProfileContact;
+      identityRevision: 'a'.repeat(64),
+      identityAuthority: null,
+      notes: '',
+      createdAt: new Date('2026-10-26T12:00:00Z'),
+      updatedAt: new Date('2026-10-26T12:00:00Z'),
+    } satisfies ProfileContactSnapshot;
     const first = { ...target, id: 'first', name: 'Anna', aliases: ['Annie'] };
     const listContacts = vi.fn(async () => [first, target]);
     const getFacts = vi.fn(async () => ({ rows: [], total: 17 }));
@@ -90,6 +95,7 @@ describe('getPersonProfile browse-only composition', () => {
     expect(f.getFacts).toHaveBeenCalledExactlyOnceWith('target', 250);
     expect(f.listOccasions).toHaveBeenCalledExactlyOnceWith('target');
     expect(result).toMatchObject({ contact: { id: 'target' }, totalFacts: 17, mergeOptions: [] });
+    expect(result?.contact.identityRevision).toBe('a'.repeat(64));
     expect(result?.duplicate).toBeUndefined();
   });
 

@@ -2,7 +2,7 @@ import {
   ownerEditorCanonicalApply,
   parseOwnerEditorRequest,
 } from '@assistant/application/owner-editor-wire';
-import type { OwnerEditorFormGrant } from '@assistant/persistence/owner-editor';
+import type { OwnerEditorFormGrant, OwnerEditorReply } from '@assistant/persistence/owner-editor';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ownerEditorRequestHash } from '../../../packages/application/src/owner-editor-hash';
 import {
@@ -12,7 +12,7 @@ import {
   readOwnerEditorPendingMarker,
   writeOwnerEditorPendingMarker,
 } from './owner-editor-client';
-import { OwnerEditorOperation } from './owner-editor-operation';
+import { OwnerEditorOperation, ownerEditorOutcomeMessage } from './owner-editor-operation';
 
 const op = '11111111-1111-4111-8111-111111111111';
 const nextOp = '44444444-4444-4444-8444-444444444444';
@@ -392,6 +392,31 @@ describe('actual owner editor operation controller with offline named transport'
   );
 });
 
+describe('owner editor outcome copy preserves authority distinctions', () => {
+  it('does not claim a failed save for unresolved or retired-scope outcomes', () => {
+    const unresolved = ownerEditorOutcomeMessage(unknown() as OwnerEditorReply);
+    const retired = ownerEditorOutcomeMessage({
+      version: 1,
+      authority: 'scope_retirement',
+      command: grant.command,
+      operationId: op,
+      outcome: 'voided',
+      reason: 'scope_retired',
+    });
+    expect(unresolved).toContain('could not be confirmed');
+    expect(unresolved).not.toContain('not applied');
+    expect(retired).toContain('does not confirm whether its save happened');
+    expect(retired).not.toContain('not applied');
+  });
+  it('uses terminal unavailable receipt wording without repeated draft-retention claims', () => {
+    const message = ownerEditorOutcomeMessage(
+      saved({ outcome: 'unavailable', reason: 'owner_editor_unavailable' }) as OwnerEditorReply,
+    );
+    expect(message).toBe('This save was not applied. Editing is unavailable.');
+    expect(message).not.toContain('draft');
+  });
+});
+
 describe('independent live request identity and explicit conflict review', () => {
   it('same UUID/command terminal receipt with wrong hash cannot clear or be learned from later GET', async () => {
     const { controller, storage, fetcher } = fixture();
@@ -447,7 +472,7 @@ describe('independent live request identity and explicit conflict review', () =>
     expect(storage.values.size).toBe(0);
     expect(fetcher).not.toHaveBeenCalled();
   });
-  it('reload proof reconciliation cannot teach a hash from POST; terminal old-handle GET is required', async () => {
+  it('recovers an expired preparing claim through GET proof and same-operation reconciliation', async () => {
     const storage = new Storage();
     writeOwnerEditorPendingMarker(storage, session.ownerId, session.formSessionScope, {
       id: grant.issuedOperationHandle,
@@ -456,20 +481,55 @@ describe('independent live request identity and explicit conflict review', () =>
     });
     const fetcher = vi
       .fn<typeof fetch>()
-      .mockResolvedValueOnce(response(unknown({ receiptBindingToken: 'original-proof' })))
-      .mockResolvedValueOnce(response(saved()))
-      .mockResolvedValueOnce(response(saved()));
+      .mockResolvedValueOnce(
+        response(
+          unknown({
+            reason: 'preparing',
+            receiptBindingToken: 'original-proof',
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        response({
+          version: 1,
+          authority: 'operation_receipt',
+          command: grant.command,
+          operationId: op,
+          requestHash: hash,
+          statusVersion: 2,
+          outcome: 'not_applied',
+          reason: 'preparation_failed',
+        }),
+      );
     const controller = new OwnerEditorOperation(session, () => storage, fetcher);
     controller.initialize();
-    await controller.check();
+    await controller.checkPendingResult();
     expect(controller.getSnapshot().message).not.toContain('Your draft is kept');
-    await controller.reconcile();
-    expect(controller.getSnapshot().phase).toBe('pending');
-    expect(pending(storage)).not.toBeNull();
-    await controller.check();
-    expect(controller.getSnapshot().phase).toBe('resolved');
+    expect(controller.canReconcile()).toBe(true);
+    await controller.checkPendingResult();
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'resolved',
+      reviewRequired: false,
+      reply: { authority: 'operation_receipt', outcome: 'not_applied' },
+    });
     expect(pending(storage)).toBeNull();
-    expect(fetcher.mock.calls.map((call) => call[1]?.method)).toEqual(['GET', 'POST', 'GET']);
+    expect(fetcher.mock.calls.map((call) => call[1]?.method)).toEqual(['GET', 'POST']);
+    const reconciliation = JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body));
+    expect(reconciliation).toEqual({
+      version: 1,
+      intent: 'reconcile',
+      command: grant.command,
+      operationId: op,
+      receiptBindingToken: 'original-proof',
+    });
+    expect(JSON.stringify(reconciliation)).not.toContain('Sam');
+    const fresh = {
+      ...grant,
+      operationId: nextOp,
+      issuedOperationHandle: 'fresh-after-retirement',
+    };
+    expect(controller.acceptFreshSnapshot([fresh])).toBe(true);
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'ready', reviewRequired: false });
   });
   it('conflict remains locked across fresh props until explicit same-command review, then uses reviewed CAS', async () => {
     const { controller, fetcher } = fixture();

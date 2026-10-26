@@ -77,6 +77,12 @@ export const ownerEditorAliasesFromText = (value: string) =>
     .filter(Boolean);
 export const ownerEditorAliasesToText = (values: readonly string[]) => values.join('\n');
 const emptyPerson = { name: '', aliases: '' };
+export const ownerEditorTimingHelpText =
+  'Choose how this relationship is recorded. Dates are separate and do not change this choice.';
+
+export function OwnerEditorTimingHelp() {
+  return <p className="text-sm text-muted">{ownerEditorTimingHelpText}</p>;
+}
 
 /** Serializable owner-bound snapshot only. No grant/record authority is minted here. */
 export function OwnerEditorControls(props: OwnerEditorControlsProps) {
@@ -438,7 +444,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
           </button>
         </div>
       ))}
-      {state.message ? (
+      {state.message && !active ? (
         <p role="status" className="text-sm text-muted">
           {state.message}
         </p>
@@ -458,26 +464,16 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
           )}
         </div>
       ) : null}
-      {state.phase === 'pending' ? (
+      {state.phase === 'pending' && !active ? (
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
-            className={btn.outline}
+            className={btn.primary}
             disabled={state.busy}
-            onClick={() => void controller.check()}
+            onClick={() => void controller.checkPendingResult()}
           >
-            Check save result
+            Check result
           </button>
-          {controller.canReconcile() ? (
-            <button
-              type="button"
-              className={btn.outline}
-              disabled={state.busy}
-              onClick={() => void controller.reconcile()}
-            >
-              Resolve this earlier save
-            </button>
-          ) : null}
         </div>
       ) : null}
       {state.phase === 'resolved' ? (
@@ -487,11 +483,11 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
       ) : null}
       {active ? (
         <Modal label={title} onClose={close} dismissible={!state.busy}>
-          <p className="text-sm text-muted">
-            Drafts stay only on this page while it is open. Reloading the page does not retain your
-            private draft.
-          </p>
           <h2 className="text-lg font-semibold text-strong">{title}</h2>
+          <p className="text-sm text-muted">
+            Closing does not cancel a save. Reloading may lose this draft; if the result is unknown,
+            reopen this page to check that same save.
+          </p>
           {conflictReview}
           <form
             ref={form}
@@ -511,17 +507,11 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                     </p>
                   ) : (
                     <p className="text-sm text-muted">
-                      Displayed saved name: {displayedIdentity?.name}. Saved aliases:{' '}
+                      When editing began: {displayedIdentity?.name}. Aliases:{' '}
                       {displayedIdentity?.aliases.join(', ') || 'None'}. Editing name and aliases
                       does not change trust.
                     </p>
                   )}
-                  {active === 'identity' ? (
-                    <p className="text-sm text-muted">
-                      Saved name: {displayedIdentity?.name}. Saved aliases:{' '}
-                      {displayedIdentity?.aliases.join(', ') || 'None'}.
-                    </p>
-                  ) : null}
                   <label className={labelClass} htmlFor={id('name')}>
                     Name
                   </label>
@@ -624,13 +614,8 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                     <option value="present">Recorded as present</option>
                     <option value="past">Recorded as past</option>
                   </select>
+                  <OwnerEditorTimingHelp />
                   {fieldError('timing')}
-                  {familyDraft.timing === 'present' && familyDraft.until ? (
-                    <p className="text-sm text-muted">
-                      Timing and dates are recorded separately. An end date does not change the
-                      recorded timing.
-                    </p>
-                  ) : null}
                   {(['from', 'until'] as const).map((part) => (
                     <div key={part} className="flex flex-col gap-1">
                       <label className={labelClass} htmlFor={id(part)}>
@@ -696,26 +681,16 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
               <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
-                  className={btn.outline}
+                  className={btn.primary}
                   disabled={state.busy}
-                  onClick={() => void controller.check()}
+                  onClick={() => void controller.checkPendingResult()}
                 >
-                  Check save result
+                  Check result
                 </button>
-                {controller.canReconcile() ? (
-                  <button
-                    type="button"
-                    className={btn.outline}
-                    disabled={state.busy}
-                    onClick={() => void controller.reconcile()}
-                  >
-                    Resolve this earlier save
-                  </button>
-                ) : null}
               </div>
             ) : null}
             <div className="flex flex-wrap gap-2">
-              {!finished ? (
+              {!finished && state.phase !== 'pending' ? (
                 <button type="submit" className={btn.primary} disabled={locked || !grant}>
                   {state.busy
                     ? 'Saving…'
@@ -744,7 +719,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                 </button>
               ) : null}
               <button type="button" className={btn.outline} disabled={state.busy} onClick={close}>
-                {state.phase === 'pending' ? 'Close and check later' : 'Close'}
+                Close
               </button>
             </div>
           </form>
@@ -762,6 +737,10 @@ export function OwnerEditorPeopleSelectors(props: {
   errors?: { subject?: string; object?: string };
   onChange(endpoint: 'subject' | 'object', contactId: string): void;
 }) {
+  const nameCounts = new Map<string, number>();
+  for (const person of props.people) {
+    nameCounts.set(person.name, (nameCounts.get(person.name) ?? 0) + 1);
+  }
   return (
     <>
       {(['subject', 'object'] as const).map((endpoint, index) => {
@@ -787,7 +766,9 @@ export function OwnerEditorPeopleSelectors(props: {
                 .filter((person) => person.contactId !== opposite)
                 .map((person) => (
                   <option key={person.contactId} value={person.contactId}>
-                    {person.name} · {person.contactId.slice(0, 8)}
+                    {nameCounts.get(person.name) === 1
+                      ? person.name
+                      : `${person.name} · ${person.contactId.slice(0, 8)}`}
                   </option>
                 ))}
             </select>
@@ -823,7 +804,7 @@ export function OwnerEditorConflictReview(props: {
       aria-label="Review changed saved details"
       className="flex flex-col gap-2 rounded-xl bg-sunken p-3 text-sm"
     >
-      <h3 className="font-semibold">Latest saved values</h3>
+      <h3 className="font-semibold">Latest</h3>
       {props.latestIdentity ? (
         <p>
           Saved name: {props.latestIdentity.name}. All saved aliases:{' '}
@@ -844,7 +825,7 @@ export function OwnerEditorConflictReview(props: {
           when recorded).
         </p>
       ) : null}
-      <h3 className="font-semibold">Your intended edit</h3>
+      <h3 className="font-semibold">Your draft</h3>
       {props.intendedIdentity ? (
         <p>
           Name: {props.intendedIdentity.name}. Aliases: {props.intendedIdentity.aliases || 'None'}.
@@ -852,7 +833,7 @@ export function OwnerEditorConflictReview(props: {
       ) : null}
       {props.intendedFamily ? <p>{props.intendedFamily}</p> : null}
       {!props.intendedIdentity && !props.intendedFamily ? (
-        <p>No private draft is retained after a page reload.</p>
+        <p>No draft is available to compare.</p>
       ) : null}
       {props.missing ? (
         <p role="alert">
@@ -869,7 +850,7 @@ export function OwnerEditorConflictReview(props: {
           disabled={!props.canReview}
           onClick={props.onReview}
         >
-          I reviewed the latest saved values —{' '}
+          I reviewed the latest values —{' '}
           {props.intendedIdentity || props.intendedFamily
             ? 'keep my draft for editing'
             : 'start a new edit'}

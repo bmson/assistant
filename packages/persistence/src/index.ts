@@ -116,6 +116,7 @@ export * from './phone-calendars.js';
 export * from './privacy-erasure.js';
 export * from './privacy-export.js';
 export * from './proactive-health.js';
+export * from './profile-contact-identity.js';
 export * from './profile-library.js';
 export * from './profile-memory-maintenance.js';
 export * from './profile-memory-management.js';

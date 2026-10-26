@@ -1299,10 +1299,17 @@ export const contacts = pgTable(
     phones: text('phones').array().notNull().default([]),
     relationship: text('relationship').notNull().default(''),
     trust: text('trust').notNull().default('unknown'),
+    identityAuthority: text('identity_authority', { enum: ['owner', 'inferred'] }),
     notes: text('notes').notNull().default(''),
     ...timestamps,
   },
-  (t) => [check('contacts_trust_check', sql`${t.trust} IN ('owner','known','unknown')`)],
+  (t) => [
+    check('contacts_trust_check', sql`${t.trust} IN ('owner','known','unknown')`),
+    check(
+      'contacts_identity_authority_check',
+      sql`${t.identityAuthority} IS NULL OR ${t.identityAuthority} IN ('owner','inferred')`,
+    ),
+  ],
 );
 
 // ── Knowledge graph ────────────────────────────────────────────────────────

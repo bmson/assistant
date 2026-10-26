@@ -607,6 +607,31 @@ describe('migration required ownership', () => {
       validateMigrationReferences([agent('owner'), source, occasionLineage], 'owner'),
     ).toThrow('reference occasionId');
   });
+  it('preserves recognized contact identity authority and rejects malformed metadata', () => {
+    const contact = (identityAuthority?: string | null): MigrationRecord => ({
+      table: 'contacts',
+      collection: 'contacts',
+      id: 'contact-row',
+      data: {
+        id: 'contact-row',
+        ...(identityAuthority !== undefined ? { identityAuthority } : {}),
+      },
+      checksum: '',
+    });
+    expect(() => validateMigrationReferences([agent('owner'), contact()], 'owner')).not.toThrow();
+    expect(() =>
+      validateMigrationReferences([agent('owner'), contact(null)], 'owner'),
+    ).not.toThrow();
+    expect(() =>
+      validateMigrationReferences([agent('owner'), contact('owner')], 'owner'),
+    ).not.toThrow();
+    expect(() =>
+      validateMigrationReferences([agent('owner'), contact('inferred')], 'owner'),
+    ).not.toThrow();
+    expect(() =>
+      validateMigrationReferences([agent('owner'), contact('trusted')], 'owner'),
+    ).toThrow('Invalid contact identity authority');
+  });
   it('rejects approval links to another task even when both IDs exist', () => {
     const row = (
       table: MigrationRecord['table'],

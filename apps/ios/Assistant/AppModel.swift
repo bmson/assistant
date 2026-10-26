@@ -350,6 +350,7 @@ final class AppModel {
             errorNotice = errorMessage.map { AssistantErrorNotice(message: $0) }
         }
     }
+    private(set) var personIdentityReviewRequired = false
     @ObservationIgnored private var missingTaskReplyNotice: MissingTaskReplyNotice?
     private(set) var errorNotice: AssistantErrorNotice?
     @ObservationIgnored private var errorSource: AssistantErrorSource?
@@ -3852,6 +3853,47 @@ final class AppModel {
 
     func savePerson(id: String? = nil, mutation: PersonMutation) async -> Bool {
         guard id?.hasPrefix("local:") != true else { return false }
+        if let id {
+            personIdentityReviewRequired = false
+            guard let expectedContactRevision = mutation.expectedContactRevision,
+                  expectedContactRevision.range(
+                    of: "^[a-f0-9]{64}$",
+                    options: .regularExpression
+                  ) != nil else {
+                personIdentityReviewRequired = true
+                errorMessage = "Open this person again to review their current details before saving."
+                return false
+            }
+            guard let client else {
+                errorMessage = "Connect to your assistant before saving."
+                return false
+            }
+            let version = connectionVersion
+            errorMessage = nil
+            do {
+                try await client.updatePerson(id: id, person: mutation)
+                guard connectionIsCurrent(client, version: version) else {
+                    personIdentityReviewRequired = true
+                    errorMessage = "Your assistant connection changed before this save could be confirmed. " +
+                        "Reload the person before trying again."
+                    return false
+                }
+                // The write is acknowledged before local views are refreshed.
+                // A failed follow-up read must not turn the save into a retry.
+                _ = await reconcileEdits([.people, .personCaches, .workspace, .person(id)])
+                return true
+            } catch {
+                guard connectionIsCurrent(client, version: version) else { return false }
+                personIdentityReviewRequired = Self.personIdentityFailureRequiresReview(error)
+                if let apiError = error as? APIError, case .transport = apiError {
+                    errorMessage = "Couldn’t confirm whether this person saved. " +
+                        "Reopen the person and review it before trying again."
+                } else {
+                    reportError(error)
+                }
+                return false
+            }
+        }
         let localID = id ?? "local:" + UUID().uuidString
         let aliases = mutation.aliases.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let initials = mutation.name.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined()
@@ -3885,6 +3927,12 @@ final class AppModel {
             if let id { try await client.updatePerson(id: id, person: mutation) }
             else { try await client.createPerson(mutation) }
         }
+    }
+
+    private static func personIdentityFailureRequiresReview(_ error: Error) -> Bool {
+        guard let apiError = error as? APIError else { return true }
+        if case let .server(status, _) = apiError { return status != 400 }
+        return true
     }
 
     func deletePerson(id: String) async -> Bool {

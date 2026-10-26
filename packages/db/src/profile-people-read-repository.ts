@@ -1,5 +1,10 @@
-import type { ProfilePeopleReadRepository } from '@assistant/persistence';
-import { and, asc, count, desc, eq, gt, isNull, or } from 'drizzle-orm';
+import {
+  type ProfileContact,
+  type ProfileContactSnapshot,
+  type ProfilePeopleReadRepository,
+  profileContactIdentityRevision,
+} from '@assistant/persistence';
+import { and, asc, count, desc, eq, gt, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { agents, contacts, memories, occasions, ownerCard } from './schema.js';
 
@@ -18,21 +23,44 @@ export function createPostgresProfilePeopleReadRepository(
   now: () => Date = () => new Date(),
   opts: { browseOnly?: boolean } = {},
 ): ProfilePeopleReadRepository {
+  const snapshot = (
+    contact: ProfileContact,
+    native: Record<string, unknown>,
+  ): ProfileContactSnapshot => ({
+    ...contact,
+    identityRevision: profileContactIdentityRevision({
+      driver: 'postgres',
+      ownerId: agentId,
+      native,
+    }),
+  });
   return {
     kind: 'profile-people-read-repository',
 
-    async getOwnerContact() {
-      const [row] = await db.select().from(contacts).where(eq(contacts.trust, 'owner')).limit(1);
-      return row ?? null;
+    async getOwnerContact(): Promise<ProfileContactSnapshot | null> {
+      const [selected] = await db
+        .select({ contact: contacts, native: sql<Record<string, unknown>>`to_jsonb(${contacts})` })
+        .from(contacts)
+        .where(eq(contacts.trust, 'owner'))
+        .limit(1);
+      return selected ? snapshot(selected.contact, selected.native) : null;
     },
 
     async getContact(id) {
-      const [row] = await db.select().from(contacts).where(eq(contacts.id, id)).limit(1);
-      return row ?? null;
+      const [selected] = await db
+        .select({ contact: contacts, native: sql<Record<string, unknown>>`to_jsonb(${contacts})` })
+        .from(contacts)
+        .where(eq(contacts.id, id))
+        .limit(1);
+      return selected ? snapshot(selected.contact, selected.native) : null;
     },
 
-    listContacts() {
-      return db.select().from(contacts).orderBy(asc(contacts.name), asc(contacts.id));
+    async listContacts() {
+      const selected = await db
+        .select({ contact: contacts, native: sql<Record<string, unknown>>`to_jsonb(${contacts})` })
+        .from(contacts)
+        .orderBy(asc(contacts.name), asc(contacts.id));
+      return selected.map(({ contact, native }) => snapshot(contact, native));
     },
 
     async getFacts(contactId, limit) {

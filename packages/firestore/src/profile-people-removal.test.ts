@@ -63,6 +63,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
           targetId,
         );
         expect(moved.movedOccasions).toBe(1);
+        expect((await store.doc('contacts', targetId).get()).get('identityAuthority')).toBe(
+          'owner',
+        );
         const existing = await store.doc('occasions', sourceOccasionId).get();
         expect(existing.data()).toMatchObject({
           id: sourceOccasionId,

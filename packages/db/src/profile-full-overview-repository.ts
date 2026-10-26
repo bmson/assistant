@@ -1,4 +1,7 @@
-import type { ProfileOverviewRepository } from '@assistant/persistence';
+import {
+  type ProfileOverviewRepository,
+  profileContactIdentityRevision,
+} from '@assistant/persistence';
 import { and, asc, count, desc, eq, gt, inArray, isNull, ne, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { createPostgresProfileMemoryHubRepository } from './profile-memory-hub-repository.js';
@@ -19,29 +22,68 @@ export function createPostgresProfileOverviewRepository(db: Db): ProfileOverview
   return {
     kind: 'profile-overview-repository',
     async load() {
-      const [hub, voice, configured, people, [card]] = await Promise.all([
+      const [hub, voice, configured, peopleRows, ownerRows, [card]] = await Promise.all([
         createPostgresProfileMemoryHubRepository(db).load(),
         createPostgresProfileVoiceOverviewRepository(db).load(),
         db.select({ id: agents.id }).from(agents).limit(2),
         db
-          .select()
+          .select({
+            contact: contacts,
+            native: sql<Record<string, unknown>>`to_jsonb(${contacts})`,
+          })
           .from(contacts)
           .where(ne(contacts.trust, 'owner'))
           .orderBy(asc(contacts.name), asc(contacts.id))
           .limit(PROFILE_CONTACT_LIMIT),
+        db
+          .select({
+            contact: contacts,
+            native: sql<Record<string, unknown>>`to_jsonb(${contacts})`,
+          })
+          .from(contacts)
+          .where(eq(contacts.trust, 'owner'))
+          .limit(1),
         db.select().from(ownerCard).where(eq(ownerCard.id, 1)).limit(1),
       ]);
       if (configured.length !== 1 || !configured[0])
         throw new Error('Profile overview requires exactly one configured agent');
       const agentId = configured[0].id;
+      if (hub.owner && !ownerRows[0])
+        throw new Error('Profile owner identity revision is unavailable');
       // The hub reads the owner directly, so a long people list cannot push it off the page.
-      const owner = hub.owner;
+      const ownerRow = ownerRows[0];
+      const owner = ownerRow
+        ? {
+            id: ownerRow.contact.id,
+            name: ownerRow.contact.name,
+            aliases: ownerRow.contact.aliases,
+            relationship: ownerRow.contact.relationship,
+            trust: ownerRow.contact.trust,
+            identityRevision: profileContactIdentityRevision({
+              driver: 'postgres',
+              ownerId: agentId,
+              native: ownerRow.native,
+            }),
+          }
+        : undefined;
       const active = and(
         eq(memories.agentId, agentId),
         eq(memories.category, 'knowledge'),
         eq(memories.quarantined, false),
         or(isNull(memories.expiresAt), gt(memories.expiresAt, sql`now()`)),
       );
+      const people = peopleRows.map(({ contact, native }) => ({
+        id: contact.id,
+        name: contact.name,
+        aliases: contact.aliases,
+        relationship: contact.relationship,
+        trust: contact.trust,
+        identityRevision: profileContactIdentityRevision({
+          driver: 'postgres',
+          ownerId: agentId,
+          native,
+        }),
+      }));
       const contactIds = people.map((contact) => contact.id);
       const [ownerFacts, factCountRows] = await Promise.all([
         owner

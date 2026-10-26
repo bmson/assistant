@@ -22,6 +22,7 @@ import {
 import type { OwnerKnowledgeGraphFactRepository } from '@assistant/persistence';
 import {
   type ActiveJobLookup,
+  isContactIdentityRevision,
   isOwnerCardCompilationRepository,
   isProfileOccasionCommandRepository,
   isProfilePeopleCommandRepository,
@@ -223,8 +224,23 @@ export async function updatePersonIdentity(
   contactId: string,
   name: string,
   aliasesText: string,
-): Promise<{ error?: string }> {
+  expectedContactRevision?: string,
+  relationship?: string,
+): Promise<{
+  error?: string;
+  code?: 'review_required' | 'conflict' | 'not_found';
+  refreshPending?: boolean;
+}> {
   if (!UUID_RE.test(contactId)) return { error: 'Invalid person identifier.' };
+  // This is the revision of the values originally displayed to the owner.
+  // Reading the latest row here would authorize an old form against new data.
+  if (!isContactIdentityRevision(expectedContactRevision))
+    return {
+      error: 'Open this person again to review their current details before saving.',
+      code: 'review_required',
+    };
+  if (relationship !== undefined && typeof relationship !== 'string')
+    return { error: 'Person relationship must be text.' };
   try {
     const normalizedName = normalizeContactName(name);
     const aliases = aliasesText
@@ -233,19 +249,46 @@ export async function updatePersonIdentity(
       .map((alias) => alias.trim())
       .filter(Boolean);
     const normalizedAliases = normalizeContactAliases(aliases, normalizedName);
-    if (isProfilePeopleCommandRepository(store)) {
-      await store.updateIdentity(contactId, normalizedName, normalizedAliases);
-    } else {
-      await updateContactIdentity(store, {
-        contactId,
-        name: normalizedName,
-        aliases: normalizedAliases,
-      });
-    }
+    const normalizedRelationship = relationship?.trim().slice(0, 80);
+    const result = isProfilePeopleCommandRepository(store)
+      ? await store.updateIdentity(
+          contactId,
+          normalizedName,
+          normalizedAliases,
+          expectedContactRevision,
+          normalizedRelationship,
+        )
+      : await updateContactIdentity(store, {
+          contactId,
+          name: normalizedName,
+          aliases: normalizedAliases,
+          expectedContactRevision,
+          relationship: normalizedRelationship,
+        });
+    if (result.status === 'review_required')
+      return {
+        error: 'Open this person again to review their current details before saving.',
+        code: 'review_required',
+      };
+    if (result.status === 'conflict')
+      return {
+        error: 'These details changed. Review the saved person before applying your edit.',
+        code: 'conflict',
+      };
+    if (result.status === 'not_found') return { error: 'Person not found.', code: 'not_found' };
   } catch (error) {
     return { error: ownerFacingError(error, 'Person could not be renamed. Please try again.') };
   }
-  if (!isProfilePeopleCommandRepository(store)) await compileOwnerCard(store);
+  if (!isProfilePeopleCommandRepository(store)) {
+    try {
+      await compileOwnerCard(store);
+    } catch {
+      // Primary identity/relationship CAS has already committed. A derived
+      // card failure cannot truthfully turn that save into "not applied".
+      console.error('[profile] Person saved; owner card refresh is pending.');
+      return { refreshPending: true };
+    }
+  }
   return {};
 }
 

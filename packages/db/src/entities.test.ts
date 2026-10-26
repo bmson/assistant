@@ -1,3 +1,4 @@
+import { profileContactIdentityRevision } from '@assistant/persistence';
 import { eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDb, type Db } from './client.js';
@@ -10,6 +11,7 @@ import {
   normalizeContactName,
   renameContact,
   resolveSubjectContact,
+  updateContactIdentity,
 } from './entities.js';
 import { contacts, memories, memoryTombstones, occasions } from './schema.js';
 
@@ -116,9 +118,24 @@ describe('contact names', () => {
     if (!person) throw new Error('failed to create test person');
     createdContactIds.push(person.id);
 
+    const [before] = await db
+      .select({ native: sql<Record<string, unknown>>`to_jsonb(${contacts})` })
+      .from(contacts)
+      .where(eq(contacts.id, person.id));
+    if (!before) throw new Error('missing test contact snapshot');
+    const revision = profileContactIdentityRevision({
+      driver: 'postgres',
+      ownerId: agentId,
+      native: before.native,
+    });
+
     await expect(
-      renameContact(db, { contactId: person.id, name: '  Xtest-New   Name ' }),
-    ).resolves.toEqual({ name: 'Xtest-New Name' });
+      renameContact(db, {
+        contactId: person.id,
+        name: '  Xtest-New   Name ',
+        expectedContactRevision: revision,
+      }),
+    ).resolves.toEqual({ status: 'updated', name: 'Xtest-New Name', aliases: ['Xtest-Old Name'] });
     const [renamed] = await db.select().from(contacts).where(eq(contacts.id, person.id));
     expect(renamed?.name).toBe('Xtest-New Name');
     expect(renamed?.aliases).toContain('Xtest-Old Name');
@@ -127,9 +144,132 @@ describe('contact names', () => {
     const [stillCanonical] = await db.select().from(contacts).where(eq(contacts.id, person.id));
     expect(stillCanonical?.name).toBe('Xtest-New Name');
 
-    await expect(renameContact(db, { contactId: ownerId, name: 'Not the owner' })).rejects.toThrow(
-      'cannot be renamed',
-    );
+    const [ownerBefore] = await db
+      .select({ native: sql<Record<string, unknown>>`to_jsonb(${contacts})` })
+      .from(contacts)
+      .where(eq(contacts.id, ownerId));
+    if (!ownerBefore) throw new Error('missing owner test snapshot');
+    await expect(
+      renameContact(db, {
+        contactId: ownerId,
+        name: 'Not the owner',
+        expectedContactRevision: profileContactIdentityRevision({
+          driver: 'postgres',
+          ownerId: agentId,
+          native: ownerBefore.native,
+        }),
+      }),
+    ).resolves.toEqual({ status: 'not_found' });
+  });
+
+  it('rejects missing and stale contact revisions before replacing an owner edit', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const [person] = await db
+      .insert(contacts)
+      .values({ name: 'Xtest-Revision Before', trust: 'known', identityAuthority: 'inferred' })
+      .returning();
+    if (!person) throw new Error('failed to create revision test person');
+    createdContactIds.push(person.id);
+    const [before] = await db
+      .select({ native: sql<Record<string, unknown>>`to_jsonb(${contacts})` })
+      .from(contacts)
+      .where(eq(contacts.id, person.id));
+    if (!before) throw new Error('missing revision test snapshot');
+    const oldRevision = profileContactIdentityRevision({
+      driver: 'postgres',
+      ownerId: agentId,
+      native: before.native,
+    });
+
+    await expect(
+      updateContactIdentity(db, {
+        contactId: person.id,
+        name: 'Xtest-Missing Revision',
+        aliases: ['Xtest-Missing Alias'],
+        relationship: 'missing-revision-relationship',
+      }),
+    ).resolves.toEqual({ status: 'review_required' });
+    const [afterMissing] = await db.select().from(contacts).where(eq(contacts.id, person.id));
+    expect(afterMissing).toMatchObject({
+      name: 'Xtest-Revision Before',
+      aliases: [],
+      relationship: '',
+      identityAuthority: 'inferred',
+      trust: 'known',
+    });
+
+    await expect(
+      updateContactIdentity(db, {
+        contactId: person.id,
+        name: 'Xtest-Combined Name',
+        aliases: ['Xtest-Combined Alias'],
+        relationship: 'combined relationship',
+        expectedContactRevision: oldRevision,
+      }),
+    ).resolves.toMatchObject({ status: 'updated', name: 'Xtest-Combined Name' });
+    const [afterCombined] = await db.select().from(contacts).where(eq(contacts.id, person.id));
+    expect(afterCombined).toMatchObject({
+      name: 'Xtest-Combined Name',
+      aliases: ['Xtest-Combined Alias'],
+      relationship: 'combined relationship',
+      identityAuthority: 'owner',
+      trust: 'known',
+    });
+
+    await db
+      .update(contacts)
+      .set({
+        name: 'Xtest-Owner Chosen',
+        aliases: ['Xtest-Owner Alias'],
+        relationship: 'intervening relationship',
+        identityAuthority: 'owner',
+        updatedAt: sql`now()`,
+      })
+      .where(eq(contacts.id, person.id));
+    await expect(
+      updateContactIdentity(db, {
+        contactId: person.id,
+        name: 'Xtest-Stale Inference',
+        aliases: ['Xtest-Stale Alias'],
+        relationship: 'stale relationship',
+        expectedContactRevision: oldRevision,
+      }),
+    ).resolves.toEqual({ status: 'conflict' });
+    const [after] = await db.select().from(contacts).where(eq(contacts.id, person.id));
+    expect(after).toMatchObject({
+      name: 'Xtest-Owner Chosen',
+      aliases: ['Xtest-Owner Alias'],
+      relationship: 'intervening relationship',
+      identityAuthority: 'owner',
+    });
+
+    const [failureBefore] = await db
+      .select({ native: sql<Record<string, unknown>>`to_jsonb(${contacts})` })
+      .from(contacts)
+      .where(eq(contacts.id, person.id));
+    if (!failureBefore) throw new Error('missing pre-failure contact');
+    const failureRevision = profileContactIdentityRevision({
+      driver: 'postgres',
+      ownerId: agentId,
+      native: failureBefore.native,
+    });
+    await expect(
+      updateContactIdentity(db, {
+        contactId: person.id,
+        name: 'Xtest-Failure Name',
+        aliases: ['Xtest-Failure Alias'],
+        // PostgreSQL text rejects NUL; the native UPDATE must fail and roll back.
+        relationship: 'invalid\u0000relationship',
+        expectedContactRevision: failureRevision,
+      }),
+    ).rejects.toThrow();
+    const [afterFailure] = await db.select().from(contacts).where(eq(contacts.id, person.id));
+    expect(afterFailure).toMatchObject({
+      name: 'Xtest-Owner Chosen',
+      aliases: ['Xtest-Owner Alias'],
+      relationship: 'intervening relationship',
+      identityAuthority: 'owner',
+    });
   });
 
   it('deletes a person, tombstones their facts, and never deletes the owner', async (ctx) => {
@@ -258,7 +398,21 @@ describe('resolveSubjectContact', () => {
     expect(await resolveSubjectContact(db, { subject: 'AI Bot' })).toBeNull();
   });
 
-  it("matches the owner's fuller name to the owner contact and adopts it", async (ctx) => {
+  it('resolves an exact candidate by its nested native row identity', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const [person] = await db
+      .insert(contacts)
+      .values({ name: 'Xtest-Exact Candidate', trust: 'unknown' })
+      .returning();
+    if (!person) throw new Error('failed to create exact candidate');
+    createdContactIds.push(person.id);
+    await expect(resolveSubjectContact(db, { subject: 'Xtest-Exact Candidate' })).resolves.toEqual({
+      contactId: person.id,
+      created: false,
+    });
+  });
+
+  it("matches the owner's fuller name but never changes the owner's identity", async (ctx) => {
     if (!dbUp) return ctx.skip();
     const [owner] = await db.select().from(contacts).where(eq(contacts.id, ownerId));
     const fullName = `${owner?.name} Xtestson`;
@@ -268,8 +422,8 @@ describe('resolveSubjectContact', () => {
     expect(resolved?.created).toBe(false);
 
     const [after] = await db.select().from(contacts).where(eq(contacts.id, ownerId));
-    expect(after?.name).toBe(fullName); // fuller name adopted
-    // and the fuller name keeps resolving to the owner
+    expect(after?.name).toBe(owner?.name);
+    // The fuller name resolves without granting an inferred owner identity write.
     const again = await resolveSubjectContact(db, { subject: fullName });
     expect(again?.contactId).toBe(ownerId);
   });
@@ -293,10 +447,25 @@ describe('resolveSubjectContact', () => {
       .where(eq(contacts.id, first?.contactId ?? ''));
     expect(row?.name).toBe('Xtest-Anna Jónsdóttir');
     expect(row?.relationship).toBe('friend');
+    expect(row?.identityAuthority).toBe('inferred');
 
     // the short form still resolves to the same (now fuller-named) contact
     const short = await resolveSubjectContact(db, { subject: 'xtest-anna' });
     expect(short?.contactId).toBe(first?.contactId);
+  });
+
+  it('does not infer a replacement identity for legacy contacts with unknown authority', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const [legacy] = await db
+      .insert(contacts)
+      .values({ name: 'Xtest-Legacy Name', relationship: 'friend', trust: 'unknown' })
+      .returning();
+    if (!legacy) throw new Error('failed to create legacy contact');
+    createdContactIds.push(legacy.id);
+    const resolved = await resolveSubjectContact(db, { subject: 'Xtest-Legacy Name Extended' });
+    expect(resolved).toEqual({ contactId: legacy.id, created: false });
+    const [after] = await db.select().from(contacts).where(eq(contacts.id, legacy.id));
+    expect(after).toMatchObject({ name: 'Xtest-Legacy Name', identityAuthority: null });
   });
 });
 
@@ -340,6 +509,7 @@ describe('mergeContacts', () => {
       .where(eq(contacts.id, (target as NonNullable<typeof target>).id));
     expect(merged?.relationship).toBe('cousin');
     expect(merged?.aliases).toContain('Xtest-Dup');
+    expect(merged?.identityAuthority).toBe('owner');
     expect(merged?.emails.sort()).toEqual(['dup@x.is', 'full@x.is']);
     const [fact] = await db
       .select()

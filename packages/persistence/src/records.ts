@@ -519,6 +519,8 @@ export interface Records {
     createdAt: Date;
     updatedAt: Date;
     trust: string;
+    /** Null/absent legacy metadata is unknown and cannot authorize inferred renames. */
+    identityAuthority?: 'owner' | 'inferred' | null;
     aliases: string[];
     emails: string[];
     phones: string[];

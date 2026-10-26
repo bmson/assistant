@@ -213,6 +213,11 @@ export class OwnerEditorOperation {
     if (this.state.phase !== 'pending' || !marker || this.state.busy) return;
     await this.send(marker, null);
   }
+  /** Continue the original operation only when its authenticated proof is available. */
+  async checkPendingResult() {
+    if (this.canReconcile()) await this.reconcile();
+    else await this.check();
+  }
   async reconcile() {
     const marker = this.state.marker;
     if (
@@ -232,13 +237,18 @@ export class OwnerEditorOperation {
     };
     const parsed = parseOwnerEditorRequest(request, ownerEditorRoute(marker.command));
     if (!parsed.ok) return;
+    const reconciliationProof = this.receiptBindingToken;
     this.receiptBindingToken = null;
-    await this.send(marker, parsed.request);
+    await this.send(marker, parsed.request, reconciliationProof);
   }
   canReconcile() {
     return !!this.receiptBindingToken && !!this.originalOperationId;
   }
-  private async send(marker: OwnerEditorPendingMarker, body: OwnerEditorRequest | null) {
+  private async send(
+    marker: OwnerEditorPendingMarker,
+    body: OwnerEditorRequest | null,
+    reconciliationProof: string | null = null,
+  ) {
     const generation = ++this.generation;
     try {
       if (!sameMarker(this.currentMarker(), marker)) {
@@ -286,8 +296,10 @@ export class OwnerEditorOperation {
         this.unknown();
         return;
       }
-      // On reload only this authenticated response to the exact captured OLD
-      // issued handle may establish original UUID/hash; a new grant never does.
+      // On reload only the exact captured OLD issued handle establishes the
+      // operation UUID. A terminal receipt may establish its hash only after
+      // the exact operation's GET-issued reconciliation proof; an unproved
+      // POST or a new grant never supplies either binding.
       if (!body && reply.authority !== 'request_rejection') {
         this.originalOperationId = reply.operationId;
         if (this.originalRequestHash === null && reply.authority === 'operation_receipt')
@@ -308,17 +320,21 @@ export class OwnerEditorOperation {
         this.publish({
           reply,
           busy: false,
-          message:
-            'Save could not be confirmed. Check its result before saving again. Drafts are not stored across page reloads.',
+          message: 'Save could not be confirmed. Check its result before saving again.',
         });
         return;
       }
-      if (
-        reply.authority === 'operation_receipt' &&
-        (this.originalRequestHash === null || reply.requestHash !== this.originalRequestHash)
-      ) {
-        this.unknown();
-        return;
+      if (reply.authority === 'operation_receipt') {
+        if (
+          this.originalRequestHash === null &&
+          body?.intent === 'reconcile' &&
+          reconciliationProof
+        )
+          this.originalRequestHash = reply.requestHash;
+        if (this.originalRequestHash === null || reply.requestHash !== this.originalRequestHash) {
+          this.unknown();
+          return;
+        }
       }
       const originalId = this.originalOperationId;
       if (
@@ -391,10 +407,10 @@ export function ownerEditorOutcomeMessage(reply: OwnerEditorReply): string {
     case 'not_applied':
       return 'This save was not applied. Refresh the saved details before trying a new edit.';
     case 'conflict':
-      return 'Saved details changed. Review the latest saved values before editing again. Private drafts are not retained after a reload.';
+      return 'Saved details changed. Review the latest saved values before editing again.';
     case 'invalid':
       return 'The save was not applied. Check the fields and refresh the form.';
     case 'unavailable':
-      return 'This save was not applied. Editing is unavailable. Private drafts are not retained after a reload.';
+      return 'This save was not applied. Editing is unavailable.';
   }
 }

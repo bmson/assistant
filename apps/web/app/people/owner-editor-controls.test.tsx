@@ -6,6 +6,7 @@ import {
   type OwnerEditorControlsProps,
   OwnerEditorDraftCache,
   OwnerEditorPeopleSelectors,
+  OwnerEditorTimingHelp,
   ownerEditorAliasesFromText,
   ownerEditorAliasesToText,
   ownerEditorConflictIntent,
@@ -84,7 +85,30 @@ describe('actual selector and memory-only draft lifecycle regressions', () => {
       expect(selects.filter((s) => s.includes('disabled=""'))).toHaveLength(1);
       expect(selects[swapped ? 0 : 1]).not.toContain(`value="${contact}"`);
       expect(selects[swapped ? 0 : 1]).toContain('Choose an existing named person');
+      expect(selects[swapped ? 0 : 1]).not.toContain('Sam · 22222222');
     }
+  });
+  it('uses names by default and only adds an ID prefix to disambiguate duplicate names', () => {
+    const html = renderToStaticMarkup(
+      <OwnerEditorPeopleSelectors
+        idPrefix="pair"
+        draft={{ subject: '', object: '' }}
+        people={[
+          { contactId: contact, name: 'Sam', revision: 'a'.repeat(64) },
+          { contactId: other, name: 'Sam', revision: 'b'.repeat(64) },
+          {
+            contactId: '55555555-5555-4555-8555-555555555555',
+            name: 'Alex',
+            revision: 'c'.repeat(64),
+          },
+        ]}
+        onChange={() => {}}
+      />,
+    );
+    expect(html).toContain('Sam · 22222222');
+    expect(html).toContain('Sam · 44444444');
+    expect(html).toContain('>Alex</option>');
+    expect(html).not.toContain('Alex · 55555555');
   });
   it('shows latest ALL aliases separately from intended aliases before explicit review', () => {
     const html = renderToStaticMarkup(
@@ -98,13 +122,16 @@ describe('actual selector and memory-only draft lifecycle regressions', () => {
       />,
     );
     for (const text of [
+      'Latest',
+      'Your draft',
       'New saved name',
       'Old name, Another alias',
       'My intended name',
       'My alias',
-      'I reviewed the latest saved values',
+      'I reviewed the latest values — keep my draft for editing',
     ])
       expect(html).toContain(text);
+    expect(html).toContain('aria-label="Review changed saved details"');
   });
   it('successful identity clears only completed draft; next open includes backend retained old-name alias', () => {
     const cache = new OwnerEditorDraftCache();
@@ -147,7 +174,7 @@ describe('actual selector and memory-only draft lifecycle regressions', () => {
   });
 });
 
-it('missing correction after reload promises no retained draft and offers no review adoption', () => {
+it('missing correction has no draft comparison and offers no review adoption', () => {
   const html = renderToStaticMarkup(
     <OwnerEditorConflictReview
       relationships={[]}
@@ -158,7 +185,7 @@ it('missing correction after reload promises no retained draft and offers no rev
       }}
     />,
   );
-  expect(html).toContain('No private draft is retained after a page reload.');
+  expect(html).toContain('No draft is available to compare.');
   expect(html).toContain('This relationship is no longer editable here.');
   expect(html).toContain('No different relationship will be substituted.');
   expect(html).not.toContain('Your intended edit stays');
@@ -185,7 +212,7 @@ it('actual caller intent helper distinguishes missing family draft from placehol
       onReview={() => {}}
     />,
   );
-  expect(html).toContain('No private draft is retained after a page reload.');
+  expect(html).toContain('No draft is available to compare.');
   expect(html).toContain('start a new edit');
   expect(html).not.toContain('keep my draft');
   expect(html).not.toContain(input.familyPreview);
@@ -206,7 +233,14 @@ it('actual caller intent helper distinguishes missing family draft from placehol
   expect(liveHTML).toContain('Private intended name');
   expect(liveHTML).toContain('Sam, Jr.');
   expect(liveHTML).toContain('keep my draft');
-  expect(liveHTML).not.toContain('No private draft');
+  expect(liveHTML).not.toContain('No draft is available');
+});
+
+it('renders timing help that matches the stored timing and separate date contract', () => {
+  const html = renderToStaticMarkup(<OwnerEditorTimingHelp />);
+  expect(html).toContain(
+    'Choose how this relationship is recorded. Dates are separate and do not change this choice.',
+  );
 });
 it('actual alias codec preserves commas on name-only edit and freshly reopened backend aliases', () => {
   const saved = ['Sam, Jr.', 'Another alias'];

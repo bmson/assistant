@@ -1,8 +1,10 @@
-import type {
-  ProfileContact,
-  ProfileFact,
-  ProfileOccasion,
-  ProfilePeopleReadRepository,
+import {
+  type ProfileContact,
+  type ProfileContactSnapshot,
+  type ProfileFact,
+  type ProfileOccasion,
+  type ProfilePeopleReadRepository,
+  profileContactIdentityRevision,
 } from '@assistant/persistence';
 import { type Query, Timestamp } from '@google-cloud/firestore';
 import { decodeMemoryRecord } from './memory-record.js';
@@ -23,6 +25,29 @@ async function collect<T extends { id: string }>(
   for (const doc of await collectProfileDocuments(query, PAGE_SIZE, budget)) {
     const row = decodeRecord<Partial<T>>(doc.data());
     if (typeof row.id === 'string' && documentKey(row.id) === doc.id) rows.push(row as T);
+  }
+  return rows;
+}
+
+async function collectContactSnapshots(
+  query: Query,
+  ownerId: string,
+  budget: ProfileReadBudget,
+): Promise<ProfileContactSnapshot[]> {
+  const rows: ProfileContactSnapshot[] = [];
+  for (const doc of await collectProfileDocuments(query, PAGE_SIZE, budget)) {
+    const row = decodeRecord<Partial<ProfileContact>>(doc.data());
+    if (typeof row.id !== 'string' || documentKey(row.id) !== doc.id) continue;
+    if (!doc.updateTime) throw new Error('Contact identity revision is unavailable');
+    rows.push({
+      ...(row as ProfileContact),
+      identityRevision: profileContactIdentityRevision({
+        driver: 'firestore',
+        ownerId,
+        id: doc.id,
+        updateTime: { seconds: doc.updateTime.seconds, nanoseconds: doc.updateTime.nanoseconds },
+      }),
+    });
   }
   return rows;
 }
@@ -71,17 +96,38 @@ export class FirestoreProfilePeopleReadRepository implements ProfilePeopleReadRe
     readonly agentId: string,
   ) {}
 
-  async getOwnerContact(): Promise<ProfileContact | null> {
+  async getOwnerContact(): Promise<ProfileContactSnapshot | null> {
     return this.reads.run(async (budget) => {
-      const rows = await collect<ProfileContact>(
-        this.store.collection('contacts').where('trust', '==', 'owner'),
-        budget,
+      const docs = await budget.page(
+        2,
+        async (limit) =>
+          (
+            await this.store
+              .collection('contacts')
+              .where('trust', '==', 'owner')
+              .limit(Math.min(2, limit))
+              .get()
+          ).docs,
       );
-      return rows.find((row) => row.trust === 'owner') ?? null;
+      const doc = docs.find((candidate) => candidate.get('trust') === 'owner');
+      if (!doc) return null;
+      const row = decodeRecord<ProfileContact>(doc.data());
+      if (typeof row.id !== 'string' || documentKey(row.id) !== doc.id)
+        throw new Error('Malformed owner contact');
+      if (!doc.updateTime) throw new Error('Contact identity revision is unavailable');
+      return {
+        ...row,
+        identityRevision: profileContactIdentityRevision({
+          driver: 'firestore',
+          ownerId: this.agentId,
+          id: doc.id,
+          updateTime: { seconds: doc.updateTime.seconds, nanoseconds: doc.updateTime.nanoseconds },
+        }),
+      };
     });
   }
 
-  async getContact(id: string): Promise<ProfileContact | null> {
+  async getContact(id: string): Promise<ProfileContactSnapshot | null> {
     return this.reads.run(async (budget) => {
       const [doc] = await budget.records(1, async () => [
         await this.store.doc('contacts', id).get(),
@@ -89,13 +135,27 @@ export class FirestoreProfilePeopleReadRepository implements ProfilePeopleReadRe
       if (!doc) throw new Error('Missing profile point-read snapshot');
       if (!doc.exists) return null;
       const row = decodeRecord<ProfileContact>(doc.data());
-      return row.id === id ? row : null;
+      if (row.id !== id) return null;
+      if (!doc.updateTime) throw new Error('Contact identity revision is unavailable');
+      return {
+        ...row,
+        identityRevision: profileContactIdentityRevision({
+          driver: 'firestore',
+          ownerId: this.agentId,
+          id: doc.id,
+          updateTime: { seconds: doc.updateTime.seconds, nanoseconds: doc.updateTime.nanoseconds },
+        }),
+      };
     });
   }
 
-  async listContacts(): Promise<ProfileContact[]> {
+  async listContacts(): Promise<ProfileContactSnapshot[]> {
     return this.reads.run(async (budget) => {
-      const rows = await collect<ProfileContact>(this.store.collection('contacts'), budget);
+      const rows = await collectContactSnapshots(
+        this.store.collection('contacts'),
+        this.agentId,
+        budget,
+      );
       return rows.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
     });
   }

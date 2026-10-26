@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { createDb, type Db } from './client.js';
 import { createPostgresProfileOverviewRepository } from './profile-full-overview-repository.js';
+import { createPostgresProfilePeopleReadRepository } from './profile-people-read-repository.js';
 import { agents, contacts, memories, ownerCard } from './schema.js';
 
 const DATABASE_URL =
@@ -68,9 +69,16 @@ describe('PostgreSQL full Profile overview', () => {
               set: { content: 'Compiled owner card', compiledAt },
             });
           const after = await repository.load();
-          expect(after.people.find((row) => row.contact.id === personId)).toMatchObject({
+          const projectedPerson = after.people.find((row) => row.contact.id === personId);
+          expect(projectedPerson).toMatchObject({
             factCount: 1,
           });
+          expect(projectedPerson?.contact.identityRevision).toMatch(/^[0-9a-f]{64}$/);
+          const dossier = await createPostgresProfilePeopleReadRepository(
+            tx as unknown as Db,
+            agentId,
+          ).getContact(personId);
+          expect(dossier?.identityRevision).toBe(projectedPerson?.contact.identityRevision);
           expect(after.ownerFacts.some((fact) => fact.id === ownerFactId)).toBe(true);
           expect(after.memoryHealth.totalUsable).toBe(before.memoryHealth.totalUsable + 2);
           expect(after.card).toEqual({ content: 'Compiled owner card', compiledAt });
@@ -128,6 +136,7 @@ describe('PostgreSQL full Profile overview', () => {
 
           const after = await repository.load();
           expect(after.owner?.id).toBe(ownerId);
+          expect(after.owner?.identityRevision).toMatch(/^[0-9a-f]{64}$/);
           expect(after.ownerFacts).toHaveLength(250);
           expect(after.ownerFacts[0]?.id).toBe(pinnedId);
           expect(after.ownerFacts.map((fact) => fact.id)).not.toContain(lowestId);

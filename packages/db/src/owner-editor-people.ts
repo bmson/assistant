@@ -108,6 +108,11 @@ export function commitPostgresOwnerEditorPerson(
       current.name === name &&
       JSON.stringify(current.aliases) === JSON.stringify(aliases)
     ) {
+      if (current.identityAuthority !== 'owner')
+        await tx
+          .update(contacts)
+          .set({ identityAuthority: 'owner', updatedAt: sql`now()` })
+          .where(eq(contacts.id, current.id));
       const ids = { contactId: current.id };
       return completePostgresOwnerEditorWrite(
         tx,
@@ -119,12 +124,18 @@ export function commitPostgresOwnerEditorPerson(
     const [saved] = current
       ? await tx
           .update(contacts)
-          .set({ name, aliases, updatedAt: sql`now()` })
+          .set({ name, aliases, identityAuthority: 'owner', updatedAt: sql`now()` })
           .where(eq(contacts.id, current.id))
           .returning({ id: contacts.id })
       : await tx
           .insert(contacts)
-          .values({ name, aliases, relationship: '', trust: 'known' })
+          .values({
+            name,
+            aliases,
+            relationship: '',
+            trust: 'known',
+            identityAuthority: 'owner',
+          })
           .returning({ id: contacts.id });
     if (!saved) throw new Error('Person write did not return its durable identity');
     const ids = { contactId: saved.id };

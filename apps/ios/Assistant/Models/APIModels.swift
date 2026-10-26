@@ -1986,6 +1986,41 @@ struct PersonProfileContact: Codable, Sendable, Identifiable {
     var aliases: [String]
     var relationship: String
     let trust: String
+    /// Opaque revision for the exact identity snapshot shown by the detail read.
+    /// Missing on older servers; clients must not invent or refetch it before save.
+    var identityRevision: String? = nil
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, aliases, relationship, trust, identityRevision
+    }
+
+    init(
+        id: String,
+        name: String,
+        aliases: [String],
+        relationship: String,
+        trust: String,
+        identityRevision: String? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.aliases = aliases
+        self.relationship = relationship
+        self.trust = trust
+        self.identityRevision = identityRevision
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        aliases = try container.decode([String].self, forKey: .aliases)
+        relationship = try container.decode(String.self, forKey: .relationship)
+        trust = try container.decode(String.self, forKey: .trust)
+        // A malformed additive revision disables updates without making the
+        // otherwise readable detail unavailable to an older/newer client.
+        identityRevision = try? container.decode(String.self, forKey: .identityRevision)
+    }
 }
 
 struct PersonOccasion: Codable, Identifiable, Sendable {

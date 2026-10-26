@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { parseExactTimestamp } from './exact-timestamp.js';
+import { parseContactIdentityAuthority } from './profile-contact-identity.js';
 import { toolCallReceiptKeyId } from './tool-call-receipts.js';
 
 /**
@@ -871,6 +872,7 @@ export function validateMigrationReferences(
     'writing_samples',
   ]);
   for (const record of records) {
+    if (record.table === 'contacts') parseContactIdentityAuthority(record.data.identityAuthority);
     if (
       record.table !== 'agents' &&
       'agentId' in record.data &&

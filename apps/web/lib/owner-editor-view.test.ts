@@ -14,7 +14,13 @@ const context = {
   epoch: '44444444-4444-4444-8444-444444444444',
   privacyGeneration: 'fixture-generation',
 };
-const displayedContact = { id: contactId, name: 'Sam', aliases: ['Samuel'], trust: 'unknown' };
+const displayedContact = {
+  id: contactId,
+  name: 'Sam',
+  aliases: ['Samuel'],
+  trust: 'unknown',
+  identityRevision: revision,
+};
 const identitySnapshot = {
   contactId,
   name: 'Sam',
@@ -95,6 +101,9 @@ describe('server editor view builds real grants only for the same displayed nati
     { ...displayedContact, aliases: [] },
     { ...displayedContact, trust: 'known' },
     { ...displayedContact, id: otherId },
+    { ...displayedContact, identityRevision: 'b'.repeat(64) },
+    { ...displayedContact, identityRevision: undefined },
+    { ...displayedContact, identityRevision: 'not-a-native-revision' },
   ])(
     'a displayed/native read mismatch disables editor without manufacturing matching CAS (%j)',
     (displayed) => {

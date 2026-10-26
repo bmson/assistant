@@ -259,7 +259,21 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
     const { addOccasionAction, updateContactIdentityAction } = await import(
       '@/app/profile/actions'
     );
-    expect(await updateContactIdentityAction(contactId, 'Anna Renamed', 'Annie, Nan')).toEqual({});
+    const displayedContact = await getFirestorePersonDetail(store, agentId, contactId);
+    expect(displayedContact?.identityRevision).toMatch(/^[a-f0-9]{64}$/);
+    expect(
+      await updateContactIdentityAction(contactId, 'Unreviewed rename', '', undefined, 'son'),
+    ).toMatchObject({ code: 'review_required' });
+    expect((await store.doc('contacts', contactId).get()).get('name')).toBe('Anna Example');
+    expect(
+      await updateContactIdentityAction(
+        contactId,
+        'Anna Renamed',
+        'Annie, Nan',
+        displayedContact?.identityRevision,
+        'daughter',
+      ),
+    ).toEqual({});
     expect(
       await addOccasionAction(contactId, {
         kind: 'anniversary',
@@ -274,6 +288,7 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
 
     const saved = await store.doc('contacts', contactId).get();
     expect(saved.get('name')).toBe('Anna Renamed');
+    expect(saved.get('relationship')).toBe('daughter');
     // The previous name is kept as an alias, as in PostgreSQL.
     expect(saved.get('aliases')).toEqual(['Annie', 'Nan', 'Anna Example']);
     const occasions = await store

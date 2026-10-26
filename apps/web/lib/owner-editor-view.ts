@@ -25,6 +25,7 @@ export interface OwnerEditorDisplayedContact {
   name: string;
   aliases: string[];
   trust: string;
+  identityRevision?: string | null;
 }
 
 /** No storage/activation/provider access. Null issuance keeps B1 browsing usable. */
@@ -54,11 +55,15 @@ export function buildOwnerEditorView(input: {
     return null;
   const identity = snapshot.identity;
   if (
-    displayedContact &&
-    (!identity ||
+    identity &&
+    (!displayedContact ||
+      !displayedContact.identityRevision ||
+      !/^[a-f0-9]{64}$/.test(displayedContact.identityRevision) ||
+      !identity ||
       identity.contactId !== displayedContact.id ||
       identity.name !== displayedContact.name ||
       identity.trust !== displayedContact.trust ||
+      identity.revision !== displayedContact.identityRevision ||
       JSON.stringify(identity.aliases) !== JSON.stringify(displayedContact.aliases))
   )
     return null;
@@ -91,7 +96,7 @@ export function buildOwnerEditorView(input: {
               contactId: identity.contactId,
               name: identity.name,
               aliases: identity.aliases,
-              revision: identity.revision,
+              revision: displayedContact?.identityRevision ?? '',
             },
             family: {
               grant: grant('add_family_relationship', identity.contactId),

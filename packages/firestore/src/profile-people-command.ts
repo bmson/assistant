@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import type { ProfilePeopleCommandRepository, Records } from '@assistant/persistence';
+import type {
+  ProfileContactIdentityMutation,
+  ProfilePeopleCommandRepository,
+  Records,
+} from '@assistant/persistence';
 import {
+  isContactIdentityRevision,
   normalizeContactAliases,
   normalizeContactName,
   type OwnerEditorApply,
@@ -8,6 +13,7 @@ import {
   type OwnerEditorReply,
   ownerEditorCommitRevision,
   ownerEditorSnapshotRevision,
+  parseContactIdentityAuthority,
 } from '@assistant/persistence';
 import type { DocumentSnapshot, Transaction } from '@google-cloud/firestore';
 import { assertConfiguredOwner } from './knowledge-graph-read.js';
@@ -45,6 +51,7 @@ async function assertWritableOwner(
 
 function readContact(snapshot: DocumentSnapshot): Contact {
   const row = decodeRecord<Contact>(snapshot.data());
+  parseContactIdentityAuthority(row.identityAuthority);
   if (
     typeof row.id !== 'string' ||
     documentKey(row.id) !== snapshot.id ||
@@ -96,6 +103,7 @@ export class FirestoreProfilePeopleCommandRepository implements ProfilePeopleCom
         phones: [],
         notes: '',
         trust: 'known',
+        identityAuthority: 'owner',
         createdAt: now,
         updatedAt: now,
       };
@@ -122,22 +130,30 @@ export class FirestoreProfilePeopleCommandRepository implements ProfilePeopleCom
     });
   }
 
-  async updateIdentity(contactId: string, name: string, aliases: string[]): Promise<void> {
+  async updateIdentity(
+    contactId: string,
+    name: string,
+    aliases: string[],
+    expectedContactRevision?: string,
+    relationship?: string,
+  ): Promise<ProfileContactIdentityMutation> {
+    if (!isContactIdentityRevision(expectedContactRevision)) return { status: 'review_required' };
     const ref = this.store.doc('contacts', contactId);
     const contactsQuery = this.store.collection('contacts').limit(CONTACT_SCAN_LIMIT + 1);
-    await this.store.db.runTransaction(async (tx) => {
+    return this.store.db.runTransaction(async (tx) => {
       await assertWritableOwner(tx, this.store, this.configuredAgentId);
       const [snapshot, existing] = await Promise.all([tx.get(ref), tx.get(contactsQuery)]);
-      if (!snapshot.exists) throw new Error('Person not found or cannot be renamed.');
+      if (!snapshot.exists) return { status: 'not_found' };
       const contact = readContact(snapshot);
       const ownerId = snapshot.get('agentId');
       if (
         (ownerId !== undefined && ownerId !== this.configuredAgentId) ||
         contact.trust === 'owner'
       )
-        throw new Error('Person not found or cannot be renamed.');
-      if (existing.size > CONTACT_SCAN_LIMIT)
-        throw new Error('Contact directory is too large to update safely');
+        return { status: 'not_found' };
+      if (this.editorContactRevision(snapshot) !== expectedContactRevision)
+        return { status: 'conflict' };
+      if (existing.size > CONTACT_SCAN_LIMIT) return { status: 'review_required' };
       const duplicate = existing.docs.some((candidate) => {
         if (candidate.id === snapshot.id) return false;
         const ownerId = candidate.get('agentId');
@@ -145,7 +161,7 @@ export class FirestoreProfilePeopleCommandRepository implements ProfilePeopleCom
         const row = readContact(candidate);
         return row.name.toLocaleLowerCase() === name.toLocaleLowerCase();
       });
-      if (duplicate) throw new Error('A person with that name already exists.');
+      if (duplicate) return { status: 'conflict' };
       const renamed = contact.name.toLocaleLowerCase() !== name.toLocaleLowerCase();
       const normalizedAliases = new Map<string, string>();
       for (const alias of [...aliases, ...(renamed ? [contact.name] : [])]) {
@@ -157,8 +173,11 @@ export class FirestoreProfilePeopleCommandRepository implements ProfilePeopleCom
       tx.update(ref, {
         name,
         aliases: [...normalizedAliases.values()],
+        identityAuthority: 'owner',
+        ...(relationship !== undefined ? { relationship } : {}),
         updatedAt: this.store.now(),
       });
+      return { status: 'updated', name, aliases: [...normalizedAliases.values()] };
     });
   }
 
@@ -269,6 +288,8 @@ export class FirestoreProfilePeopleCommandRepository implements ProfilePeopleCom
         current.name === name &&
         JSON.stringify(current.aliases) === JSON.stringify(aliases)
       ) {
+        if (current.identityAuthority !== 'owner')
+          tx.update(ref, { identityAuthority: 'owner', updatedAt: now });
         const ids = { contactId: current.id };
         return completeFirestoreOwnerEditorWrite(
           this.store,
@@ -278,7 +299,7 @@ export class FirestoreProfilePeopleCommandRepository implements ProfilePeopleCom
           now,
         );
       }
-      if (current) tx.update(ref, { name, aliases, updatedAt: now });
+      if (current) tx.update(ref, { name, aliases, identityAuthority: 'owner', updatedAt: now });
       else
         tx.create(
           ref,
@@ -289,6 +310,7 @@ export class FirestoreProfilePeopleCommandRepository implements ProfilePeopleCom
             aliases,
             relationship: '',
             trust: 'known',
+            identityAuthority: 'owner',
             emails: [],
             phones: [],
             notes: '',

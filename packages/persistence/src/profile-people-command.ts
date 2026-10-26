@@ -1,9 +1,17 @@
+import type { ProfileContactIdentityMutation } from './profile-contact-identity.js';
+
 /** Owner-scoped person mutations that are safe to implement per persistence provider. */
 export interface ProfilePeopleCommandRepository {
   readonly kind: 'profile-people-command-repository';
   create(input: { name: string; relationship: string; aliases: string[] }): Promise<string>;
   updateRelationship(contactId: string, relationship: string): Promise<void>;
-  updateIdentity(contactId: string, name: string, aliases: string[]): Promise<void>;
+  updateIdentity(
+    contactId: string,
+    name: string,
+    aliases: string[],
+    expectedContactRevision?: string,
+    relationship?: string,
+  ): Promise<ProfileContactIdentityMutation>;
 }
 
 export function isProfilePeopleCommandRepository(
