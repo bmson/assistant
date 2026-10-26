@@ -3392,7 +3392,7 @@ final class NativeVisualReviewTests: XCTestCase {
             apiClient: client, defaults: defaults,
             storeConnectionToken: { _ in tokenWrites += 1; XCTFail("Layout must never save a connection key") },
             enqueueAutomaticSpeech: { _ in XCTFail("No speech in connection layout fixture") },
-            scheduleLocalNotification: { _, _, _, _, _, _ in XCTFail("No notification in connection layout fixture") },
+            scheduleLocalNotification: { _, _, _, _, _, _ in XCTFail("No notification in connection layout fixture"); return false },
             systemSurfaces: surfaces,
             captureCurrentPlace: { nil }
         )
@@ -3411,7 +3411,6 @@ final class NativeVisualReviewTests: XCTestCase {
             .environment(\.connectionGeometryReporter, ConnectionGeometryReporter(report: { recorder.record($0) }))
             .environment(\.dynamicTypeSize, size)
             .environment(\.scenePhase, .inactive)
-            .environment(\.accessibilityReduceMotion, true)
             .transaction { $0.animation = nil; $0.disablesAnimations = true }))
         let previousWindow = scene.keyWindow
         let window = UIWindow(windowScene: scene)
@@ -3422,7 +3421,7 @@ final class NativeVisualReviewTests: XCTestCase {
         defer {
             window.endEditing(true)
             if let selectedScroll, let originalOffset { selectedScroll.setContentOffset(originalOffset, animated: false) }
-            model.scenePhaseDidChange(.background)
+            model.scenePhaseDidChange(SwiftUI.ScenePhase.background)
             window.isHidden = true
             window.rootViewController = nil
             previousWindow?.makeKey()
@@ -3526,7 +3525,7 @@ final class NativeVisualReviewTests: XCTestCase {
             XCTAssertEqual(delta, 19, accuracy: 1)
             XCTAssertEqual(try XCTUnwrap(recorder.frames[.rootAvailable]).minY - windowSafe.minY, delta, accuracy: 1)
             XCTAssertEqual(try XCTUnwrap(recorder.frames[.heading]).minY - headingBefore.minY, delta, accuracy: 1, "Safe-area delta must be applied once")
-            host.additionalSafeAreaInsets = .zero
+            host.additionalSafeAreaInsets = UIEdgeInsets.zero
             try await settleConnection(window: window, host: host, recorder: recorder, required: required)
             try await assertConnectionNativeInputBehavior(window: window, host: host, recorder: recorder, required: required)
         }
