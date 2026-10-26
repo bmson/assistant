@@ -78,7 +78,7 @@ export const ownerEditorAliasesFromText = (value: string) =>
 export const ownerEditorAliasesToText = (values: readonly string[]) => values.join('\n');
 const emptyPerson = { name: '', aliases: '' };
 export const ownerEditorTimingHelpText =
-  'Choose how this relationship is recorded. Dates are separate and do not change this choice.';
+  'Choose how this relationship is described. This choice is separate from the dates below.';
 
 export function OwnerEditorTimingHelp() {
   return <p className="text-sm text-muted">{ownerEditorTimingHelpText}</p>;
@@ -539,7 +539,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                     <div className="rounded-xl bg-sunken p-3 text-sm">
                       <p>Original owner-authored statement: {correctionSnapshot.sourceText}</p>
                       <p>
-                        Recorded span:{' '}
+                        Relationship dates:{' '}
                         {correctionSnapshot.original.validity.validFrom ?? 'Start not recorded'} —{' '}
                         {correctionSnapshot.original.validity.validUntil ?? 'End not recorded'} (end
                         inclusive when recorded).
@@ -597,7 +597,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                   </select>
                   {fieldError('predicate')}
                   <label className={labelClass} htmlFor={id('timing')}>
-                    Recorded timing
+                    How this relationship is described
                   </label>
                   <select
                     {...fieldProps('timing')}
@@ -610,18 +610,21 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                       })
                     }
                   >
-                    <option value="unspecified">Timing not recorded</option>
-                    <option value="present">Recorded as present</option>
-                    <option value="past">Recorded as past</option>
+                    <option value="unspecified">Not specified</option>
+                    <option value="present">Present</option>
+                    <option value="past">Past</option>
                   </select>
                   <OwnerEditorTimingHelp />
                   {fieldError('timing')}
+                  <p className="text-sm font-medium">Relationship dates (optional)</p>
+                  <p className="text-sm text-muted">
+                    Dates when this relationship applies, as you know them—not when you saved it.
+                    Leave unknown dates blank.
+                  </p>
                   {(['from', 'until'] as const).map((part) => (
                     <div key={part} className="flex flex-col gap-1">
                       <label className={labelClass} htmlFor={id(part)}>
-                        {part === 'from'
-                          ? 'Recorded from (optional)'
-                          : 'Recorded through (optional, inclusive)'}
+                        {part === 'from' ? 'From' : 'Through (inclusive)'}
                       </label>
                       <input
                         {...fieldProps(`validity.${part === 'from' ? 'validFrom' : 'validUntil'}`)}
@@ -813,13 +816,14 @@ export function OwnerEditorConflictReview(props: {
       ) : null}
       {props.relationships.map((relationship) => (
         <p key={relationship.relationId}>
-          {relationship.sentence} Recorded span: {relationship.validFrom ?? 'Start not recorded'} —{' '}
+          {relationship.sentence} Relationship dates:{' '}
+          {relationship.validFrom ?? 'Start not recorded'} —{' '}
           {relationship.validUntil ?? 'End not recorded'} (inclusive when recorded).
         </p>
       ))}
       {props.latestCorrection ? (
         <p>
-          Latest owner-authored statement: {props.latestCorrection.sourceText}. Recorded span:{' '}
+          Latest owner-authored statement: {props.latestCorrection.sourceText}. Relationship dates:{' '}
           {props.latestCorrection.original.validity.validFrom ?? 'Start not recorded'} —{' '}
           {props.latestCorrection.original.validity.validUntil ?? 'End not recorded'} (inclusive
           when recorded).

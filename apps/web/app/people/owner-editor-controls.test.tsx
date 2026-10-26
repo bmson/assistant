@@ -239,7 +239,7 @@ it('actual caller intent helper distinguishes missing family draft from placehol
 it('renders timing help that matches the stored timing and separate date contract', () => {
   const html = renderToStaticMarkup(<OwnerEditorTimingHelp />);
   expect(html).toContain(
-    'Choose how this relationship is recorded. Dates are separate and do not change this choice.',
+    'Choose how this relationship is described. This choice is separate from the dates below.',
   );
 });
 it('actual alias codec preserves commas on name-only edit and freshly reopened backend aliases', () => {
