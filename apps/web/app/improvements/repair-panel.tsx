@@ -92,22 +92,22 @@ export function isRepairConfirmationCurrent(
 function recordedSummary(issue: RepairView) {
   if (issue.status === 'pr_open') {
     if (issue.codeReview) {
-      const decision = issue.codeReview.approved ? 'approved' : 'flagged';
+      const decision = issue.codeReview.approved ? 'approved' : 'needs changes';
       return {
-        message: `A saved independent review ${decision} commit ${issue.codeReview.commitSha.slice(0, 12)}. The pull request may have changed since that review.`,
+        message: `Saved independent review: ${decision}.`,
         nextStep:
-          'Open the pull request and verify its current revision and checks before merging.',
+          'Current pull request state is unverified. Check its revision and checks before merging.',
       };
     }
     return {
-      message: 'A pull request is recorded. Its current revision and checks are not verified here.',
-      nextStep: 'Open the pull request and inspect its current state before merging.',
+      message: 'A pull request is recorded.',
+      nextStep:
+        'Current pull request state is unverified. Check its revision and checks before merging.',
     };
   }
   if (issue.status === 'monitoring' && issue.deploymentConfirmed === true) {
     return {
-      message:
-        'A deployment was observed for the merged revision. The original behavior still needs verification.',
+      message: 'A deployment was observed for the merged revision.',
       nextStep: 'Check the original problem before confirming it is fixed.',
     };
   }
