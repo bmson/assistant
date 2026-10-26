@@ -607,11 +607,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
       release: releaseInsert.promise,
     });
     const ownerRead = deferred();
+    const releaseOwnerRead = deferred();
     const startStore = transactionBarrier(store, 'owner', {
       holdAfter: 'tool-call-create',
       reached: () => {},
       release: Promise.resolve(),
       ownerRead: ownerRead.resolve,
+      releaseOwnerRead: releaseOwnerRead.promise,
     });
     const policy = {
       agentId: 'owner',
@@ -642,12 +644,19 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
       await waitBounded(ownerRead.promise, 'empty-snapshot start owner-fence transaction read');
       releaseInsert.resolve();
       await expect(resolution).resolves.toMatchObject({ ok: true });
+      expect(
+        await new FirestoreApprovalPolicyRepository(store).list('owner', { toolName }),
+      ).toMatchObject([{ agentId: 'owner', toolName, enabled: true }]);
+      // Resolve-before-read: this releases the actual native owner read, not
+      // merely a callback that already acquired the competing owner lock.
+      releaseOwnerRead.resolve();
       await expect(start).resolves.toBeNull();
       const calls = await store.collection('toolCalls').where('taskId', '==', taskId).get();
       expect(calls.docs.filter((row) => row.get('toolName') === toolName)).toHaveLength(1);
       expect(calls.docs.find((row) => row.get('id') === toolId)?.get('status')).toBe('approved');
     } finally {
       releaseInsert.resolve();
+      releaseOwnerRead.resolve();
       await Promise.allSettled([resolution, start]);
     }
   });
