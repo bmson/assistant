@@ -211,6 +211,7 @@ export function createPostgresMemoryToolRepository(
             agentId: memories.agentId,
             sourceTaskId: memories.sourceTaskId,
             contentHash: memories.contentHash,
+            ownerCorrection: memories.ownerCorrection,
             goalId: memories.goalId,
             originTrust: memories.originTrust,
             quarantined: memories.quarantined,

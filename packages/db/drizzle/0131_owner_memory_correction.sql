@@ -1,0 +1,1 @@
+ALTER TABLE "memories" ADD COLUMN "owner_correction" jsonb;

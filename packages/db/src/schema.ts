@@ -5,6 +5,7 @@ import type {
   EmailContentProvenanceSnapshot,
   ImportArchiveDiagnostics,
   ImportUnitProvenance,
+  OwnerCorrection,
   OwnerEditorCommand,
   OwnerEditorTerminalResult,
 } from '@assistant/persistence';
@@ -1158,6 +1159,7 @@ export const memories = pgTable(
     kind: text('kind').notNull(),
     content: text('content').notNull(),
     contentHash: text('content_hash').notNull().unique(),
+    ownerCorrection: jsonb('owner_correction').$type<OwnerCorrection>(),
     embedding: vector('embedding', { dimensions: 1536 }),
     /** Provider/model/width revision for the stored vector; null means legacy/unknown. */
     embeddingSpaceKey: text('embedding_space_key'),

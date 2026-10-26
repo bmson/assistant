@@ -75,6 +75,13 @@ const operation = z
         (v.status === 'abandoned') !== (v.result.outcome === 'not_applied'))
     )
       ctx.addIssue({ code: 'custom', message: 'Editor terminal outcome does not match state' });
+    if (
+      v.result &&
+      (v.result.outcome === 'saved' || v.result.outcome === 'unchanged') &&
+      v.command === 'correct_owner_memory' &&
+      (Object.keys(v.result.ids).length !== 1 || !v.result.ids.memoryId)
+    )
+      ctx.addIssue({ code: 'custom', message: 'Memory correction receipt identity is invalid' });
   });
 
 export function parseOwnerEditorTerminalResult(value: unknown): OwnerEditorTerminalResult {

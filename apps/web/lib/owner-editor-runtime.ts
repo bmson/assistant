@@ -26,7 +26,10 @@ import {
   getRouter,
 } from './server';
 
-export type OwnerEditorApiPath = '/api/people/editor' | '/api/profile/knowledge/family';
+export type OwnerEditorApiPath =
+  | '/api/people/editor'
+  | '/api/profile/knowledge/family'
+  | '/api/profile/knowledge/memory';
 
 /** Domain construction is deferred until AFTER durable reservation, including router access. */
 function lazyDomain(

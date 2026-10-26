@@ -48,6 +48,8 @@ export interface FactView {
   connectionCount?: number;
   projectionStatus?: 'connected' | 'mapping' | 'needs_attention' | 'no_connections';
   mapHref?: string;
+  /** Exact saved-note destination; edit authority is checked with its displayed snapshot. */
+  noteHref?: string;
 }
 
 const PROMINENCE_OPTIONS: Array<{ level: ProminenceLevel; label: string; hint: string }> = [

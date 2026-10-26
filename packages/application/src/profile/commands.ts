@@ -99,7 +99,10 @@ export function profileMemoryCommands(
 }
 
 export interface EmbeddingPort {
-  embed(texts: string[]): Promise<number[][]>;
+  embed(
+    texts: string[],
+    options?: { expectedSpace?: import('@assistant/persistence').EmbeddingSpace },
+  ): Promise<number[][]>;
   embeddingSpace(): Promise<import('@assistant/persistence').EmbeddingSpace>;
 }
 
@@ -704,6 +707,9 @@ export async function createPostgresOwnerEditorDomain(input: {
     completePostgresOwnerEditorWrite,
     postgresOwnerEditorContext,
     postgresOwnerEditorEntity,
+    readPostgresOwnerMemoryEditorSnapshot,
+    commitPostgresOwnerMemoryCorrection,
+    readPostgresOwnerEditorIssuanceContext,
   } = await import('@assistant/db');
   const { commitPreparedOwnerKnowledgeGraphFactPostgres } = await import(
     '@assistant/core/memory/knowledge-graph'
@@ -735,6 +741,20 @@ export async function createPostgresOwnerEditorDomain(input: {
   const storage: OwnerEditorDomainStorage = {
     graph,
     context,
+    memory: (ownerId, id, scope) =>
+      input.db.transaction(async (tx) => {
+        const current = await readPostgresOwnerEditorIssuanceContext(tx, ownerId);
+        if (
+          !current ||
+          current.epoch !== scope.epoch ||
+          current.privacyGeneration !== scope.privacyGeneration
+        )
+          return null;
+        return readPostgresOwnerMemoryEditorSnapshot(tx, ownerId, id);
+      }),
+    commitMemory: (claim, prepared, now) =>
+      commitPostgresOwnerMemoryCorrection(input.db, claim, prepared, now),
+    memoryFollowup: createPostgresProfileMemoryCommandPersistence(input.db),
     contact: (ownerId, id) => postgresOwnerEditorContact(input.db, ownerId, id),
     async family(ownerId, fields, targetId) {
       const state = await readPostgresOwnerEditorFamily(input.db, ownerId, fields, targetId);

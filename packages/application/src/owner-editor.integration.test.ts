@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   agents,
@@ -10,10 +10,13 @@ import {
   knowledgeGraphRelations,
   maintenanceCursors,
   memories,
+  memoryTombstones,
+  ownerCard,
   ownerEditorOperations,
   postgresOwnerEditorContact,
   readPostgresOwnerEditorGraphScope,
   readPostgresOwnerEditorIssuanceContext,
+  readPostgresOwnerMemoryEditorSnapshot,
   rotatePostgresOwnerEditorEpoch,
 } from '@assistant/db';
 import {
@@ -22,8 +25,10 @@ import {
   type OwnerEditorOperationRepository,
   type OwnerEditorReply,
   type OwnerEditorScope,
+  type OwnerMemoryEditorSnapshot,
   ownerEditorOperationId,
   ownerEditorPrivacyDigest,
+  type Records,
 } from '@assistant/persistence';
 import type { Transaction } from '@google-cloud/firestore';
 import { eq, sql } from 'drizzle-orm';
@@ -35,13 +40,14 @@ import {
   readFirestoreOwnerEditorContact,
   readFirestoreOwnerEditorGraphScope,
 } from '../../firestore/src/owner-editor-graph.js';
+import { readFirestoreOwnerMemoryEditorSnapshot } from '../../firestore/src/owner-editor-memory.js';
 import {
   createFirestoreOwnerEditorOperationRepository,
   readFirestoreOwnerEditorIssuanceContext,
   rotateFirestoreOwnerEditorEpoch,
 } from '../../firestore/src/owner-editor-repository.js';
 import { FirestorePrivacyErasureRepository } from '../../firestore/src/privacy-erasure.js';
-import type { InstallationStore } from '../../firestore/src/store.js';
+import { decodeRecord, type InstallationStore } from '../../firestore/src/store.js';
 import { disposeStore, emulatorStore } from '../../firestore/src/test-store.js';
 import type { OwnerEditorDomainPort } from './owner-editor.js';
 import { applyOwnerEditorCommand } from './owner-editor.js';
@@ -88,11 +94,13 @@ function issued(ownerId: string, epoch: string, request: OwnerEditorApply): Owne
     targetId:
       request.command === 'create_person'
         ? null
-        : request.command === 'update_person_identity'
-          ? request.contactId
-          : request.command === 'correct_owner_family_relationship'
-            ? request.targetRelationId
-            : request.subjectContactId,
+        : request.command === 'correct_owner_memory'
+          ? request.memoryId
+          : request.command === 'update_person_identity'
+            ? request.contactId
+            : request.command === 'correct_owner_family_relationship'
+              ? request.targetRelationId
+              : request.subjectContactId,
     sessionDigest: 'a'.repeat(64),
     nonce: randomUUID(),
     issuedAt: now,
@@ -381,6 +389,160 @@ function failFirestoreTerminalReceipt(store: InstallationStore): InstallationSto
     },
   });
 }
+/** Shared actual-driver acceptance; no fake storage or successful-response assumption. */
+async function verifySavedNotePipeline<Prepared>(input: {
+  ownerId: string;
+  epoch: string;
+  memoryId: string;
+  domain: OwnerEditorDomainPort<Prepared>;
+  operations: OwnerEditorOperationRepository;
+  snapshot(): Promise<OwnerMemoryEditorSnapshot | null>;
+  memory(): Promise<Records['memories']>;
+  primaryState(): Promise<unknown>;
+  provenanceState(): Promise<unknown>;
+  embeddingCalls(): number;
+  withReceiptFault(run: (domain: OwnerEditorDomainPort<Prepared>) => Promise<void>): Promise<void>;
+  rotate(): Promise<unknown>;
+  context(): Promise<OwnerEditorIssuanceContext | null>;
+  erase(): Promise<void>;
+  hasMemory(): Promise<boolean>;
+}) {
+  const request = async (
+    content: string,
+  ): Promise<Extract<OwnerEditorApply, { command: 'correct_owner_memory' }>> => {
+    const snapshot = await input.snapshot();
+    if (!snapshot?.eligible)
+      throw new Error(`Ineligible actual SDK fixture: ${JSON.stringify(snapshot)}`);
+    return {
+      version: 1,
+      intent: 'apply',
+      command: 'correct_owner_memory',
+      operationId: randomUUID(),
+      memoryId: input.memoryId,
+      expectedContentHash: snapshot.contentHash,
+      expectedMemoryRevision: snapshot.revision,
+      content,
+    };
+  };
+  const run = (
+    value: OwnerEditorApply,
+    scope = issued(input.ownerId, input.epoch, value),
+    domain = input.domain,
+  ) =>
+    applyOwnerEditorCommand({
+      request: checked(value),
+      scope,
+      domain,
+      operations: input.operations,
+    });
+  const original = await input.memory(),
+    provenanceBefore = await input.provenanceState();
+  const first = await request('Synthetic owner correction from the actual driver');
+  const firstScope = issued(input.ownerId, input.epoch, first);
+  const saved = await run(first, firstScope);
+  expect(saved).toMatchObject({
+    authority: 'operation_receipt',
+    outcome: 'saved',
+    ids: { memoryId: input.memoryId },
+    refreshPending: true,
+  });
+  const current = await input.memory();
+  expect(current).toMatchObject({
+    id: input.memoryId,
+    content: first.content,
+    contentHash: createHash('sha256').update(first.content).digest('hex'),
+    ownerConfirmed: true,
+    originTrust: 'owner',
+    ownerCorrection: {
+      version: 1,
+      correctedByOwner: true,
+      priorContentHash: original.contentHash,
+      currentContentHash: createHash('sha256').update(first.content).digest('hex'),
+    },
+  });
+  for (const key of [
+    'source',
+    'sourceTaskId',
+    'subjectContactId',
+    'kind',
+    'domain',
+    'createdAt',
+  ] as const)
+    expect(current[key]).toEqual(original[key]);
+  expect(await input.provenanceState()).toEqual(provenanceBefore);
+  expect((await input.operations.lookup(firstScope, new Date())).reply).toEqual(saved);
+  expect(await run(first, firstScope)).toEqual(saved);
+  expect(input.embeddingCalls()).toBe(1);
+  const stale = {
+    ...first,
+    operationId: randomUUID(),
+    content: 'A stale displayed edit must not overwrite',
+  };
+  expect(await run(stale)).toMatchObject({ outcome: 'conflict' });
+  expect(input.embeddingCalls()).toBe(1);
+  expect((await input.memory()).content).toBe(first.content);
+
+  const failed = await request('Synthetic correction whose receipt must roll back');
+  const failedScope = issued(input.ownerId, input.epoch, failed),
+    primaryBeforeFault = await input.primaryState();
+  await input.withReceiptFault(async (domain) => {
+    expect(await run(failed, failedScope, domain)).toMatchObject({
+      authority: 'unresolved',
+      outcome: 'outcome_unknown',
+    });
+  });
+  expect(await input.primaryState()).toEqual(primaryBeforeFault);
+  expect((await input.operations.lookup(failedScope, new Date())).operation?.status).toBe(
+    'preparing',
+  );
+  expect(await input.provenanceState()).toEqual(provenanceBefore);
+
+  const held = await request('Synthetic held correction after epoch retirement');
+  const heldScope = issued(input.ownerId, input.epoch, held);
+  const reserved = await input.operations.reserve(
+    heldScope,
+    ownerEditorRequestHash(held),
+    new Date(),
+  );
+  if (reserved.kind !== 'claimed') throw new Error(JSON.stringify(reserved));
+  const prepared = await input.domain.prepare(checked(held), heldScope);
+  if (!prepared.ok) throw new Error(JSON.stringify(prepared));
+  await input.rotate();
+  const primaryAfterRetirement = await input.primaryState();
+  expect(await input.domain.commit(reserved.claim, prepared.prepared, new Date())).toMatchObject({
+    authority: 'scope_retirement',
+    outcome: 'voided',
+  });
+  expect(await input.primaryState()).toEqual(primaryAfterRetirement);
+  expect((await input.memory()).content).toBe(first.content);
+
+  const privacyRequest = await request(
+    'Synthetic prepared correction held across actual privacy erasure',
+  );
+  const context = await input.context();
+  if (!context) throw new Error('Missing fresh privacy test scope');
+  const privacyScope = {
+    ...issued(input.ownerId, context.epoch, privacyRequest),
+    privacyGeneration: context.privacyGeneration,
+  };
+  const privacyClaim = await input.operations.reserve(
+    privacyScope,
+    ownerEditorRequestHash(privacyRequest),
+    new Date(),
+  );
+  if (privacyClaim.kind !== 'claimed') throw new Error(JSON.stringify(privacyClaim));
+  const privacyPrepared = await input.domain.prepare(checked(privacyRequest), privacyScope);
+  if (!privacyPrepared.ok) throw new Error(JSON.stringify(privacyPrepared));
+  await input.erase();
+  expect(await input.hasMemory()).toBe(false);
+  expect((await input.operations.lookup(privacyScope, new Date())).operation).toBeNull();
+  expect(
+    await input.domain.commit(privacyClaim.claim, privacyPrepared.prepared, new Date()),
+  ).toMatchObject({ authority: 'scope_retirement', outcome: 'voided' });
+  expect(await input.hasMemory()).toBe(false);
+  expect((await input.operations.lookup(privacyScope, new Date())).operation).toBeNull();
+}
+
 async function dropOwnedEditorFixture(
   admin: ReturnType<typeof createDb>,
   target: ReturnType<typeof allocateTestTarget>,
@@ -635,6 +797,83 @@ describe.skipIf(!process.env.ASSISTANT_TEST_TARGET_TOKEN)(
         });
       });
     }, 60000);
+    it('durably corrects an exact saved note with displayed CAS, replay, receipt rollback and held-epoch retirement', async () => {
+      await withIsolatedPostgres(async (db, ownerId) => {
+        const epoch = await rotatePostgresOwnerEditorEpoch(db, ownerId, true),
+          memoryId = randomUUID(),
+          content = 'Synthetic manual saved note';
+        await db.insert(memories).values({
+          id: memoryId,
+          agentId: ownerId,
+          category: 'knowledge',
+          kind: 'fact',
+          content,
+          contentHash: createHash('sha256').update(content).digest('hex'),
+          source: 'manual',
+          domain: 'home',
+        });
+        const embedding = router(),
+          domain = await createPostgresOwnerEditorDomain({ db, router: embedding }),
+          operations = createPostgresOwnerEditorOperationRepository(db);
+        const memory = async () => {
+          const [row] = await db.select().from(memories).where(eq(memories.id, memoryId));
+          if (!row) throw new Error('Missing actual PG note');
+          return row;
+        };
+        await verifySavedNotePipeline({
+          ownerId,
+          epoch,
+          memoryId,
+          domain,
+          operations,
+          snapshot: () =>
+            db.transaction((tx) => readPostgresOwnerMemoryEditorSnapshot(tx, ownerId, memoryId)),
+          memory,
+          primaryState: async () => ({
+            memory: await memory(),
+            tombstones: await db.select().from(memoryTombstones),
+            card: await db.select().from(ownerCard),
+            epoch: await db.select().from(maintenanceCursors),
+          }),
+          provenanceState: async () => {
+            const row = await memory();
+            return { source: row.source, sourceTaskId: row.sourceTaskId };
+          },
+          embeddingCalls: () => embedding.embed.mock.calls.length,
+          rotate: () => rotatePostgresOwnerEditorEpoch(db, ownerId, true),
+          context: () =>
+            db.transaction((tx) => readPostgresOwnerEditorIssuanceContext(tx, ownerId)),
+          erase: async () => {
+            const erasure = createPostgresPrivacyErasureRepository(db);
+            await erasure.erase();
+            await erasure.complete();
+          },
+          hasMemory: async () =>
+            (await db.select({ id: memories.id }).from(memories).where(eq(memories.id, memoryId)))
+              .length === 1,
+          withReceiptFault: async (run) => {
+            const faultName = `memory_receipt_fault_${randomUUID().replaceAll('-', '')}`;
+            await db.$client.unsafe(
+              `CREATE FUNCTION ${faultName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.status = 'committed' THEN RAISE EXCEPTION 'Injected terminal receipt failure'; END IF; RETURN NEW; END; $$`,
+            );
+            try {
+              await db.$client.unsafe(
+                `CREATE TRIGGER ${faultName} BEFORE UPDATE ON owner_editor_operations FOR EACH ROW EXECUTE FUNCTION ${faultName}()`,
+              );
+              try {
+                await run(domain);
+              } finally {
+                await db.$client.unsafe(
+                  `DROP TRIGGER IF EXISTS ${faultName} ON owner_editor_operations`,
+                );
+              }
+            } finally {
+              await db.$client.unsafe(`DROP FUNCTION IF EXISTS ${faultName}()`);
+            }
+          },
+        });
+      });
+    }, 60000);
     it('proves overlapping distinct PostgreSQL writer connections contend on owner serialization for normalized-name races', async () => {
       await withIsolatedPostgres(async (db, ownerId, control) => {
         const epoch = randomUUID();
@@ -754,6 +993,130 @@ const loopbackEmulator = /^(127\.0\.0\.1|localhost):\d+$/.test(
 describe.skipIf(!loopbackEmulator)(
   'owner editor real isolated Firestore writer (CI emulator only)',
   () => {
+    it('durably corrects exact imported evidence without changing its source and preserves actual SDK atomicity', async () => {
+      const store = emulatorStore(),
+        ownerId = randomUUID(),
+        memoryId = randomUUID(),
+        sourceId = randomUUID(),
+        source = 'synthetic-single-source',
+        now = new Date(),
+        content = 'Synthetic imported saved note';
+      const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+      try {
+        await store.doc('agents', ownerId).set({ id: ownerId, timezone: 'UTC', locale: 'en' });
+        const epoch = await rotateFirestoreOwnerEditorEpoch(store, ownerId, true);
+        await store.doc('memories', memoryId).set({
+          id: memoryId,
+          agentId: ownerId,
+          category: 'knowledge',
+          kind: 'fact',
+          content,
+          contentHash: hash(content),
+          source,
+          sourceTaskId: null,
+          subjectContactId: null,
+          domain: 'home',
+          ownerConfirmed: false,
+          originTrust: 'known',
+          quarantined: false,
+          expiresAt: null,
+          supersededById: null,
+          validFrom: null,
+          validUntil: null,
+          createdAt: now,
+          importance: 3,
+          pinned: false,
+          confidence: '0.70',
+          lastAccessedAt: null,
+          lastConsolidatedAt: null,
+        });
+        await store.doc('importSources', sourceId).set({
+          id: sourceId,
+          agentId: ownerId,
+          source,
+          status: 'done',
+          kind: 'text',
+          workspacePath: 'import/synthetic.txt',
+          createdAt: now,
+          updatedAt: now,
+        });
+        const lineageId = hash(JSON.stringify([source, memoryId]));
+        // Match the actual importer: no synthetic id property on this junction.
+        await store.doc('memoryImportLineage', lineageId).set({
+          agentId: ownerId,
+          source,
+          memoryId,
+          sourceUnitProvenance: [
+            {
+              sourceOffset: 0,
+              unitOffset: 0,
+              observedAt: null,
+              authorEmail: null,
+              header: 'Synthetic source',
+              hasQuotedContent: false,
+              unitTextHash: hash('Synthetic original source'),
+            },
+          ],
+          createdAt: now,
+        });
+        const embedding = router(),
+          domain = createOwnerEditorDomain({
+            storage: createFirestoreOwnerEditorDomainStorage(store, ownerId, space),
+            router: embedding,
+          }),
+          operations = createFirestoreOwnerEditorOperationRepository(store, ownerId);
+        const memory = async () =>
+          decodeRecord<Records['memories']>((await store.doc('memories', memoryId).get()).data());
+        await verifySavedNotePipeline({
+          ownerId,
+          epoch,
+          memoryId,
+          domain,
+          operations,
+          memory,
+          snapshot: () => readFirestoreOwnerMemoryEditorSnapshot(store, ownerId, memoryId),
+          primaryState: async () => ({
+            memory: await memory(),
+            tombstones: (await store.collection('memoryTombstones').get()).docs.map((doc) =>
+              doc.data(),
+            ),
+            hashes: (await store.collection('memoryContentHashes').get()).docs.map((doc) =>
+              doc.data(),
+            ),
+            card: (await store.collection('ownerCards').get()).docs.map((doc) => doc.data()),
+            epoch: (
+              await store.doc('maintenanceCursors', `owner-editor-epoch:${ownerId}`).get()
+            ).data(),
+          }),
+          provenanceState: async () => ({
+            source: (await store.doc('importSources', sourceId).get()).data(),
+            lineage: (await store.doc('memoryImportLineage', lineageId).get()).data(),
+          }),
+          embeddingCalls: () => embedding.embed.mock.calls.length,
+          rotate: () => rotateFirestoreOwnerEditorEpoch(store, ownerId, true),
+          context: () => readFirestoreOwnerEditorIssuanceContext(store, ownerId),
+          erase: async () => {
+            const erasure = new FirestorePrivacyErasureRepository(store, ownerId);
+            await erasure.erase();
+            await erasure.complete();
+          },
+          hasMemory: async () => (await store.doc('memories', memoryId).get()).exists,
+          withReceiptFault: (run) =>
+            run(
+              createOwnerEditorDomain({
+                storage: createFirestoreOwnerEditorDomainStorage(
+                  failFirestoreTerminalReceipt(store),
+                  ownerId,
+                  space,
+                ),
+                router: embedding,
+              }),
+            ),
+        });
+      } finally {
+        await disposeStore(store);
+      }
+    }, 60000);
     it('roundtrips inclusive days and source-backed correction through actual Firestore transactions', async () => {
       const store = emulatorStore(),
         ownerId = randomUUID(),

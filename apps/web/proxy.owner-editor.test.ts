@@ -18,7 +18,11 @@ describe.each(['postgres', 'firestore'])('exact owner editor ingress in %s', (dr
     config.RESTORE_REHEARSAL = false;
     config.ASSISTANT_RELEASE_WRITES_PAUSED = false;
   });
-  const paths = ['/api/people/editor', '/api/profile/knowledge/family'];
+  const paths = [
+    '/api/people/editor',
+    '/api/profile/knowledge/family',
+    '/api/profile/knowledge/memory',
+  ];
   it('forwards only GET receipt lookups and POST commands to the guarded adapters', () => {
     for (const path of paths)
       for (const method of ['GET', 'POST']) {
@@ -72,6 +76,8 @@ it('does not turn the Firestore exact exception into a prefix allowlist', () => 
     '/api/people/editor/',
     '/api/profile/knowledge/family/extra',
     '/api/profile/knowledge/family/',
+    '/api/profile/knowledge/memory/extra',
+    '/api/profile/knowledge/memory/',
     '/api/profile/knowledge/correct',
   ]) {
     const response = proxy(new NextRequest(`https://assistant.test${path}`, { method: 'POST' }));

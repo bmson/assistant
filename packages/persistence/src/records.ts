@@ -4,6 +4,7 @@ import type { DocumentExtractionMetadata } from './document-extraction-metadata.
  * These types are owned by persistence: change them intentionally, not on every SQL migration. */
 import type { KnowledgeGraphAssertion } from './knowledge-graph-sync.js';
 import type { OwnerEditorOperationRecord } from './owner-editor.js';
+import type { OwnerCorrection } from './owner-memory-correction.js';
 
 export interface Records {
   ownerEditorOperations: OwnerEditorOperationRecord;
@@ -475,6 +476,7 @@ export interface Records {
     kind: string;
     confidence: string;
     contentHash: string;
+    ownerCorrection?: OwnerCorrection | null;
     goalId: string | null;
     originTrust: string;
     category: string;

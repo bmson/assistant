@@ -83,11 +83,13 @@ function fixture() {
     targetId:
       request.command === 'create_person'
         ? null
-        : request.command === 'update_person_identity'
-          ? request.contactId
-          : request.command === 'correct_owner_family_relationship'
-            ? request.targetRelationId
-            : request.subjectContactId,
+        : request.command === 'correct_owner_memory'
+          ? request.memoryId
+          : request.command === 'update_person_identity'
+            ? request.contactId
+            : request.command === 'correct_owner_family_relationship'
+              ? request.targetRelationId
+              : request.subjectContactId,
     sessionDigest: 'a'.repeat(64),
     nonce: randomUUID(),
     issuedAt: now.getTime(),

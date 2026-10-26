@@ -1,12 +1,16 @@
 import type { OwnerEditorCommand, OwnerEditorReply } from '@assistant/persistence/owner-editor';
 
-export type OwnerEditorRoute = '/api/people/editor' | '/api/profile/knowledge/family';
+export type OwnerEditorRoute =
+  | '/api/people/editor'
+  | '/api/profile/knowledge/family'
+  | '/api/profile/knowledge/memory';
 
 const COMMAND_ROUTE: Record<OwnerEditorCommand, OwnerEditorRoute> = {
   create_person: '/api/people/editor',
   update_person_identity: '/api/people/editor',
   add_family_relationship: '/api/profile/knowledge/family',
   correct_owner_family_relationship: '/api/profile/knowledge/family',
+  correct_owner_memory: '/api/profile/knowledge/memory',
 };
 
 export function ownerEditorRoute(command: OwnerEditorCommand): OwnerEditorRoute {
@@ -18,6 +22,7 @@ const COMMANDS = new Set<string>([
   'update_person_identity',
   'add_family_relationship',
   'correct_owner_family_relationship',
+  'correct_owner_memory',
 ]);
 const TERMINAL_OUTCOMES = new Set([
   'saved',
@@ -105,9 +110,12 @@ export function decodeOwnerEditorReply(value: unknown): OwnerEditorReply | null 
       const requiredIds =
         value.command === 'create_person' || value.command === 'update_person_identity'
           ? ['contactId']
-          : ['relationId', 'memoryId', 'assertionId'];
+          : value.command === 'correct_owner_memory'
+            ? ['memoryId']
+            : ['relationId', 'memoryId', 'assertionId'];
       const ids = value.ids;
       if (requiredIds.some((key) => !uuid(ids[key]))) return null;
+      if (value.command === 'correct_owner_memory' && Object.keys(ids).length !== 1) return null;
     } else if (value.outcome === 'conflict' || value.outcome === 'unavailable') {
       if (typeof value.reason !== 'string' || !value.reason) return null;
     } else if (value.outcome === 'invalid') {

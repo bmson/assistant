@@ -52,6 +52,7 @@ export {
   listEligibleOwnerCommitments,
 } from './owner-context-repository.js';
 export * from './owner-editor-graph.js';
+export * from './owner-editor-memory.js';
 export * from './owner-editor-people.js';
 export * from './owner-editor-repository.js';
 export * from './owner-editor-retention.js';

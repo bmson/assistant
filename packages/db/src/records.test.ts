@@ -64,7 +64,14 @@ it('keeps portable record types compatible with all PostgreSQL tables', () => {
   expectTypeOf<Records['improvementProposals']>().toEqualTypeOf<
     typeof schema.improvementProposals.$inferSelect
   >();
-  expectTypeOf<Records['memories']>().toEqualTypeOf<typeof schema.memories.$inferSelect>();
+  // Historical portable rows may omit the additive marker; native SQL rows
+  // always expose its nullable column after schema 131.
+  expectTypeOf<Omit<Records['memories'], 'ownerCorrection'>>().toEqualTypeOf<
+    Omit<typeof schema.memories.$inferSelect, 'ownerCorrection'>
+  >();
+  expectTypeOf<NonNullable<Records['memories']['ownerCorrection']> | null>().toEqualTypeOf<
+    typeof schema.memories.$inferSelect.ownerCorrection
+  >();
   expectTypeOf<Records['memoryEmbeddingRefreshes']>().toEqualTypeOf<
     typeof schema.memoryEmbeddingRefreshes.$inferSelect
   >();

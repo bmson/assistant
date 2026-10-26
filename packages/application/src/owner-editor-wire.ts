@@ -96,6 +96,17 @@ const applySchema = z.discriminatedUnion('command', [
     expectedTargetRevision: revision,
     replacement: family,
   }),
+  z.strictObject({
+    ...envelope,
+    command: z.literal('correct_owner_memory'),
+    memoryId: uuid,
+    expectedContentHash: revision,
+    expectedMemoryRevision: revision,
+    content: z
+      .string()
+      .transform((content) => content.trim())
+      .pipe(z.string().min(3).max(4_000)),
+  }),
 ]);
 const reconcileSchema = z.strictObject({
   version: z.literal(1),
@@ -106,24 +117,38 @@ const reconcileSchema = z.strictObject({
 });
 
 export function ownerEditorPath(command: OwnerEditorCommand): string {
-  return command === 'create_person' || command === 'update_person_identity'
-    ? '/api/people/editor'
-    : '/api/profile/knowledge/family';
+  switch (command) {
+    case 'create_person':
+    case 'update_person_identity':
+      return '/api/people/editor';
+    case 'add_family_relationship':
+    case 'correct_owner_family_relationship':
+      return '/api/profile/knowledge/family';
+    case 'correct_owner_memory':
+      return '/api/profile/knowledge/memory';
+  }
 }
 
 export function ownerEditorApplyMatchesScope(
   request: OwnerEditorApply,
   scope: OwnerEditorScope,
 ): boolean {
-  const target =
-    request.command === 'create_person'
-      ? scope.targetId === null
-      : request.command === 'update_person_identity'
-        ? scope.targetId === request.contactId
-        : request.command === 'correct_owner_family_relationship'
-          ? scope.targetId === request.targetRelationId
-          : scope.targetId === request.subjectContactId ||
-            scope.targetId === request.objectContactId;
+  const target = (() => {
+    switch (request.command) {
+      case 'create_person':
+        return scope.targetId === null;
+      case 'update_person_identity':
+        return scope.targetId === request.contactId;
+      case 'add_family_relationship':
+        return (
+          scope.targetId === request.subjectContactId || scope.targetId === request.objectContactId
+        );
+      case 'correct_owner_family_relationship':
+        return scope.targetId === request.targetRelationId;
+      case 'correct_owner_memory':
+        return scope.targetId === request.memoryId;
+    }
+  })();
   return target && scope.operationId === request.operationId && scope.command === request.command;
 }
 
@@ -165,6 +190,13 @@ export function parseOwnerEditorRequest(value: unknown, path: string): OwnerEdit
         fieldErrors: { aliases: error instanceof Error ? error.message : 'Check the aliases.' },
       };
     }
+  } else if (request.command === 'correct_owner_memory') {
+    request.content = request.content.trim();
+    if (request.content.length < 3 || request.content.length > 4_000)
+      return {
+        ok: false,
+        fieldErrors: { content: 'Enter a saved note between 3 and 4,000 characters.' },
+      };
   } else {
     const fields = request.command === 'add_family_relationship' ? request : request.replacement;
     const checked = family.safeParse({

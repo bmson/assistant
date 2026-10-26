@@ -6,7 +6,10 @@ import {
   type OwnerEditorFamilyFields,
   ownerEditorSnapshotRevision,
 } from '@assistant/persistence';
-import { ownerFamilyEditorProjection } from '@assistant/persistence/owner-family-scope';
+import {
+  ownerFamilyCorrectionReadOnlyReason,
+  ownerFamilyEditorProjection,
+} from '@assistant/persistence/owner-family-scope';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { assertPostgresInstallationOwner } from './installation-owner.js';
@@ -370,6 +373,14 @@ export async function postgresOwnerEditorViewSnapshot(
     );
     const correction = ownerFamilyEditorProjection(scope, entities, people);
     if (correction) result.corrections.push(correction);
+    else {
+      result.readOnlyCorrections ??= [];
+      result.readOnlyCorrections.push({
+        relationId: scope.relation.id,
+        sourceMemoryId: scope.source.id,
+        reason: ownerFamilyCorrectionReadOnlyReason(scope) ?? 'source_unverified',
+      });
+    }
   }
   return result;
 }

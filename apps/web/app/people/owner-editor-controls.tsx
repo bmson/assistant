@@ -15,8 +15,11 @@ import type {
 } from '@assistant/persistence/owner-editor';
 import { useRouter } from 'next/navigation';
 import {
+  createContext,
+  type ReactNode,
   type SetStateAction,
   useCallback,
+  useContext,
   useEffect,
   useId,
   useMemo,
@@ -29,6 +32,8 @@ import { btn, btnSm, inputClass, labelClass, selectClass, textareaClass } from '
 import { Modal } from '@/lib/ui-client';
 
 export interface OwnerEditorControlsProps {
+  contextual?: boolean;
+  children?: ReactNode;
   session: OwnerEditorSessionView;
   createGrant: OwnerEditorFormGrant | null;
   identity?: {
@@ -51,6 +56,7 @@ export interface OwnerEditorControlsProps {
     }[];
   };
   corrections?: { grant: OwnerEditorFormGrant; eligibility: OwnerEditorCorrectionEligibility }[];
+  readOnlyCorrections?: { relationId: string; sourceMemoryId: string; reason: string }[];
 }
 type Active = 'create' | 'identity' | 'family' | { correction: string } | null;
 interface IdentityDraft {
@@ -362,395 +368,439 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
         : active === 'family'
           ? 'Add family relationship'
           : 'Correct family relationship';
+  const openContextual = (entry: OwnerEditorEntryPoint, element: HTMLElement) => {
+    if (locked || state.busy) return;
+    if (entry === 'identity') {
+      if (!identity) return;
+      setIdentityDraft(
+        (d) =>
+          d ??
+          familyDrafts.current.identity({
+            name: identity.name,
+            aliases: ownerEditorAliasesToText(identity.aliases),
+          }),
+      );
+      open('identity', element);
+    } else if (entry === 'family') {
+      if (family) beginFamily(element);
+    } else {
+      const c = corrections.find(
+        (candidate) => candidate.eligibility.relationId === entry.correction,
+      );
+      if (!c || !family) return;
+      const original = c.eligibility.original;
+      setCorrectionSnapshot(c.eligibility);
+      activeDraftKey.current = `correction:${c.eligibility.relationId}`;
+      setFamilyDraft(
+        familyDrafts.current.family(activeDraftKey.current) ?? {
+          subject: original.subjectContactId,
+          object: original.objectContactId,
+          predicate: original.predicate,
+          timing: original.timing,
+          from: original.validity.validFrom ?? '',
+          until: original.validity.validUntil ?? '',
+          note: original.note,
+        },
+      );
+      open({ correction: c.eligibility.relationId }, element);
+    }
+  };
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap gap-2">
-        {createGrant ? (
-          <button
-            type="button"
-            className={btnSm.outline}
-            disabled={locked}
-            onClick={(e) => {
-              setReturnToFamily(false);
-              open('create', e.currentTarget);
-            }}
-          >
-            Add person
-          </button>
+    <OwnerEditorEntryContext.Provider
+      value={{
+        locked: locked || state.busy,
+        identity: !!identity,
+        family: !!family,
+        correctionIds: corrections.map((c) => c.eligibility.relationId),
+        open: openContextual,
+      }}
+    >
+      <div className="flex flex-col gap-3">
+        {props.children}
+        {!props.contextual ? (
+          <>
+            <div className="flex flex-wrap gap-2">
+              {createGrant ? (
+                <button
+                  type="button"
+                  className={btnSm.outline}
+                  disabled={locked}
+                  onClick={(e) => {
+                    setReturnToFamily(false);
+                    open('create', e.currentTarget);
+                  }}
+                >
+                  Add person
+                </button>
+              ) : null}
+              {identity ? (
+                <button
+                  type="button"
+                  className={btnSm.outline}
+                  disabled={locked}
+                  onClick={(e) => {
+                    setIdentityDraft(
+                      (d) =>
+                        d ??
+                        familyDrafts.current.identity({
+                          name: identity.name,
+                          aliases: ownerEditorAliasesToText(identity.aliases),
+                        }),
+                    );
+                    open('identity', e.currentTarget);
+                  }}
+                >
+                  Edit name and aliases
+                </button>
+              ) : null}
+              {family ? (
+                <button
+                  type="button"
+                  className={btnSm.outline}
+                  disabled={locked}
+                  onClick={(e) => beginFamily(e.currentTarget)}
+                >
+                  Add family relationship
+                </button>
+              ) : null}
+            </div>
+            {corrections.map((c) => (
+              <div key={c.eligibility.relationId} className="rounded-xl bg-raised p-3">
+                <p className="text-sm">{c.eligibility.sourceText}</p>
+                <button
+                  type="button"
+                  className={btnSm.outline}
+                  disabled={locked || !family}
+                  onClick={(e) => {
+                    openContextual({ correction: c.eligibility.relationId }, e.currentTarget);
+                  }}
+                >
+                  Correct this owner-authored relationship
+                </button>
+              </div>
+            ))}
+          </>
         ) : null}
-        {identity ? (
-          <button
-            type="button"
-            className={btnSm.outline}
-            disabled={locked}
-            onClick={(e) => {
-              setIdentityDraft(
-                (d) =>
-                  d ??
-                  familyDrafts.current.identity({
-                    name: identity.name,
-                    aliases: ownerEditorAliasesToText(identity.aliases),
-                  }),
-              );
-              open('identity', e.currentTarget);
-            }}
-          >
-            Edit name and aliases
-          </button>
+        {state.message ? (
+          <p role="status" className="text-sm text-muted">
+            {state.message}
+          </p>
         ) : null}
-        {family ? (
-          <button
-            type="button"
-            className={btnSm.outline}
-            disabled={locked}
-            onClick={(e) => beginFamily(e.currentTarget)}
-          >
-            Add family relationship
-          </button>
+        {state.reviewRequired && !active ? (
+          <div className="flex flex-col gap-2">
+            {lastActive.current ? (
+              <button
+                type="button"
+                className={btn.outline}
+                onClick={(event) => open(lastActive.current, event.currentTarget)}
+              >
+                Review latest saved values and my draft
+              </button>
+            ) : (
+              conflictReview
+            )}
+          </div>
         ) : null}
-      </div>
-      {corrections.map((c) => (
-        <div key={c.eligibility.relationId} className="rounded-xl bg-raised p-3">
-          <p className="text-sm">{c.eligibility.sourceText}</p>
-          <button
-            type="button"
-            className={btnSm.outline}
-            disabled={locked || !family}
-            onClick={(e) => {
-              const original = c.eligibility.original;
-              setCorrectionSnapshot(c.eligibility);
-              activeDraftKey.current = `correction:${c.eligibility.relationId}`;
-              setFamilyDraft(
-                familyDrafts.current.family(activeDraftKey.current) ?? {
-                  subject: original.subjectContactId,
-                  object: original.objectContactId,
-                  predicate: original.predicate,
-                  timing: original.timing,
-                  from: original.validity.validFrom ?? '',
-                  until: original.validity.validUntil ?? '',
-                  note: original.note,
-                },
-              );
-              open({ correction: c.eligibility.relationId }, e.currentTarget);
-            }}
-          >
-            Correct this owner-authored relationship
-          </button>
-        </div>
-      ))}
-      {state.message ? (
-        <p role="status" className="text-sm text-muted">
-          {state.message}
-        </p>
-      ) : null}
-      {state.reviewRequired && !active ? (
-        <div className="flex flex-col gap-2">
-          {lastActive.current ? (
-            <button
-              type="button"
-              className={btn.outline}
-              onClick={(event) => open(lastActive.current, event.currentTarget)}
-            >
-              Review latest saved values and my draft
-            </button>
-          ) : (
-            conflictReview
-          )}
-        </div>
-      ) : null}
-      {state.phase === 'pending' ? (
-        <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            className={btn.outline}
-            disabled={state.busy}
-            onClick={() => void controller.check()}
-          >
-            Check save result
-          </button>
-          {controller.canReconcile() ? (
+        {state.phase === 'pending' ? (
+          <div className="flex flex-wrap gap-2">
             <button
               type="button"
               className={btn.outline}
               disabled={state.busy}
-              onClick={() => void controller.reconcile()}
+              onClick={() => void controller.check()}
             >
-              Resolve this earlier save
+              Check save result
             </button>
-          ) : null}
-        </div>
-      ) : null}
-      {state.phase === 'resolved' ? (
-        <button type="button" className={btnSm.outline} onClick={() => router.refresh()}>
-          Refresh saved details
-        </button>
-      ) : null}
-      {active ? (
-        <Modal label={title} onClose={close} dismissible={!state.busy}>
-          <p className="text-sm text-muted">
-            Drafts stay only on this page while it is open. Reloading the page does not retain your
-            private draft.
-          </p>
-          <h2 className="text-lg font-semibold text-strong">{title}</h2>
-          {conflictReview}
-          <form
-            ref={form}
-            className="flex flex-col gap-3"
-            aria-busy={state.busy}
-            onSubmit={(e) => {
-              e.preventDefault();
-              void submit();
-            }}
-          >
-            <fieldset disabled={locked || finished} className="flex min-w-0 flex-col gap-3">
-              {!familyMode ? (
-                <>
-                  {active === 'create' ? (
-                    <p className="text-sm text-muted">
-                      Adding a person marks them as a known contact.
-                    </p>
-                  ) : (
-                    <p className="text-sm text-muted">
-                      Displayed saved name: {displayedIdentity?.name}. Saved aliases:{' '}
-                      {displayedIdentity?.aliases.join(', ') || 'None'}. Editing name and aliases
-                      does not change trust.
-                    </p>
-                  )}
-                  {active === 'identity' ? (
-                    <p className="text-sm text-muted">
-                      Saved name: {displayedIdentity?.name}. Saved aliases:{' '}
-                      {displayedIdentity?.aliases.join(', ') || 'None'}.
-                    </p>
-                  ) : null}
-                  <label className={labelClass} htmlFor={id('name')}>
-                    Name
-                  </label>
-                  <input
-                    {...fieldProps('name')}
-                    className={inputClass}
-                    value={draft.name}
-                    onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-                  />
-                  {fieldError('name')}
-                  <label className={labelClass} htmlFor={id('aliases')}>
-                    Also known as (one alias per line, optional)
-                  </label>
-                  <textarea
-                    {...fieldProps('aliases')}
-                    className={textareaClass}
-                    value={draft.aliases}
-                    onChange={(e) => setDraft({ ...draft, aliases: e.target.value })}
-                  />
-                  {fieldError('aliases')}
-                </>
-              ) : familyDraft && displayedFamily ? (
-                <>
-                  {correctionSnapshot ? (
-                    <div className="rounded-xl bg-sunken p-3 text-sm">
-                      <p>Original owner-authored statement: {correctionSnapshot.sourceText}</p>
-                      <p>
-                        Recorded span:{' '}
-                        {correctionSnapshot.original.validity.validFrom ?? 'Start not recorded'} —{' '}
-                        {correctionSnapshot.original.validity.validUntil ?? 'End not recorded'} (end
-                        inclusive when recorded).
-                      </p>
-                      <p>
-                        Saving replaces this statement in saved memory and records its correction
-                        history.
-                      </p>
-                    </div>
-                  ) : null}
-                  <OwnerEditorPeopleSelectors
-                    idPrefix={uid}
-                    draft={familyDraft}
-                    people={displayedFamily.people}
-                    anchorPosition={active === 'family' ? anchorPosition : undefined}
-                    errors={{
-                      subject: error('subjectContactId'),
-                      object: error('objectContactId'),
-                    }}
-                    onChange={(endpoint, contactId) =>
-                      setFamilyDraft({ ...familyDraft, [endpoint]: contactId })
-                    }
-                  />
-                  <button
-                    type="button"
-                    className={btn.outline}
-                    onClick={() => {
-                      setFamilyDraft({
-                        ...familyDraft,
-                        subject: familyDraft.object,
-                        object: familyDraft.subject,
-                      });
-                      setAnchorPosition((position) =>
-                        position === 'subject' ? 'object' : 'subject',
-                      );
-                    }}
-                  >
-                    Swap people
-                  </button>
-                  <label className={labelClass} htmlFor={id('predicate')}>
-                    Relationship of the first person to the second
-                  </label>
-                  <select
-                    {...fieldProps('predicate')}
-                    className={selectClass}
-                    value={familyDraft.predicate}
-                    onChange={(e) => setFamilyDraft({ ...familyDraft, predicate: e.target.value })}
-                  >
-                    <option value="">Choose a family relationship</option>
-                    {familyPredicates.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.id.replaceAll('_', ' ')}
-                      </option>
-                    ))}
-                  </select>
-                  {fieldError('predicate')}
-                  <label className={labelClass} htmlFor={id('timing')}>
-                    Recorded timing
-                  </label>
-                  <select
-                    {...fieldProps('timing')}
-                    className={selectClass}
-                    value={familyDraft.timing}
-                    onChange={(e) =>
-                      setFamilyDraft({
-                        ...familyDraft,
-                        timing: e.target.value as FamilyDraft['timing'],
-                      })
-                    }
-                  >
-                    <option value="unspecified">Timing not recorded</option>
-                    <option value="present">Recorded as present</option>
-                    <option value="past">Recorded as past</option>
-                  </select>
-                  {fieldError('timing')}
-                  {familyDraft.timing === 'present' && familyDraft.until ? (
-                    <p className="text-sm text-muted">
-                      Timing and dates are recorded separately. An end date does not change the
-                      recorded timing.
-                    </p>
-                  ) : null}
-                  {(['from', 'until'] as const).map((part) => (
-                    <div key={part} className="flex flex-col gap-1">
-                      <label className={labelClass} htmlFor={id(part)}>
-                        {part === 'from'
-                          ? 'Recorded from (optional)'
-                          : 'Recorded through (optional, inclusive)'}
-                      </label>
-                      <input
-                        {...fieldProps(`validity.${part === 'from' ? 'validFrom' : 'validUntil'}`)}
-                        id={id(part)}
-                        type="date"
-                        className={inputClass}
-                        value={familyDraft[part]}
-                        onChange={(e) => setFamilyDraft({ ...familyDraft, [part]: e.target.value })}
-                      />
-                      {fieldError(`validity.${part === 'from' ? 'validFrom' : 'validUntil'}`)}
-                    </div>
-                  ))}
-                  <label className={labelClass} htmlFor={id('note')}>
-                    Owner note (optional)
-                  </label>
-                  <textarea
-                    {...fieldProps('note')}
-                    className={textareaClass}
-                    value={familyDraft.note}
-                    onChange={(e) => setFamilyDraft({ ...familyDraft, note: e.target.value })}
-                  />
-                  {fieldError('note')}
-                  <p className="rounded-xl bg-sunken p-3 text-sm" aria-live="polite">
-                    {preview}
-                  </p>
-                </>
-              ) : null}
-            </fieldset>
-            {active === 'family' && createGrant ? (
+            {controller.canReconcile() ? (
               <button
                 type="button"
                 className={btn.outline}
-                disabled={locked}
-                onClick={() => {
-                  setReturnToFamily(true);
-                  setDisplayedGrant(createGrant);
-                  setActive('create');
-                  setFinished(false);
-                }}
+                disabled={state.busy}
+                onClick={() => void controller.reconcile()}
               >
-                Create a person separately
+                Resolve this earlier save
               </button>
             ) : null}
-            {Object.entries(state.fieldErrors)
-              .filter(([key]) => key === 'request' || key.startsWith('expected'))
-              .map(([key, value]) => (
-                <p key={key} role="alert" className="text-sm text-red-600">
-                  {value}
-                </p>
-              ))}
-            {state.message ? (
-              <p role="status" className="text-sm">
-                {state.message}
-              </p>
-            ) : null}
-            {state.phase === 'pending' ? (
-              <div className="flex flex-wrap gap-2">
+          </div>
+        ) : null}
+        {state.phase === 'resolved' ? (
+          <button type="button" className={btnSm.outline} onClick={() => router.refresh()}>
+            Refresh saved details
+          </button>
+        ) : null}
+        {active ? (
+          <Modal label={title} onClose={close} dismissible={!state.busy}>
+            <p className="text-sm text-muted">
+              Drafts stay only on this page while it is open. Reloading the page does not retain
+              your private draft.
+            </p>
+            <h2 className="text-lg font-semibold text-strong">{title}</h2>
+            {conflictReview}
+            <form
+              ref={form}
+              className="flex flex-col gap-3"
+              aria-busy={state.busy}
+              onSubmit={(e) => {
+                e.preventDefault();
+                void submit();
+              }}
+            >
+              <fieldset disabled={locked || finished} className="flex min-w-0 flex-col gap-3">
+                {!familyMode ? (
+                  <>
+                    {active === 'create' ? (
+                      <p className="text-sm text-muted">
+                        Adding a person marks them as a known contact.
+                      </p>
+                    ) : (
+                      <p className="text-sm text-muted">
+                        Displayed saved name: {displayedIdentity?.name}. Saved aliases:{' '}
+                        {displayedIdentity?.aliases.join(', ') || 'None'}. Editing name and aliases
+                        does not change trust.
+                      </p>
+                    )}
+                    {active === 'identity' ? (
+                      <p className="text-sm text-muted">
+                        Saved name: {displayedIdentity?.name}. Saved aliases:{' '}
+                        {displayedIdentity?.aliases.join(', ') || 'None'}.
+                      </p>
+                    ) : null}
+                    <label className={labelClass} htmlFor={id('name')}>
+                      Name
+                    </label>
+                    <input
+                      {...fieldProps('name')}
+                      className={inputClass}
+                      value={draft.name}
+                      onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                    />
+                    {fieldError('name')}
+                    <label className={labelClass} htmlFor={id('aliases')}>
+                      Also known as (one alias per line, optional)
+                    </label>
+                    <textarea
+                      {...fieldProps('aliases')}
+                      className={textareaClass}
+                      value={draft.aliases}
+                      onChange={(e) => setDraft({ ...draft, aliases: e.target.value })}
+                    />
+                    {fieldError('aliases')}
+                  </>
+                ) : familyDraft && displayedFamily ? (
+                  <>
+                    {correctionSnapshot ? (
+                      <div className="rounded-xl bg-sunken p-3 text-sm">
+                        <p>Original owner-authored statement: {correctionSnapshot.sourceText}</p>
+                        <p>
+                          Recorded span:{' '}
+                          {correctionSnapshot.original.validity.validFrom ?? 'Start not recorded'} —{' '}
+                          {correctionSnapshot.original.validity.validUntil ?? 'End not recorded'}{' '}
+                          (end inclusive when recorded).
+                        </p>
+                        <p>
+                          Saving replaces this statement in saved memory and records its correction
+                          history.
+                        </p>
+                      </div>
+                    ) : null}
+                    <OwnerEditorPeopleSelectors
+                      idPrefix={uid}
+                      draft={familyDraft}
+                      people={displayedFamily.people}
+                      anchorPosition={active === 'family' ? anchorPosition : undefined}
+                      errors={{
+                        subject: error('subjectContactId'),
+                        object: error('objectContactId'),
+                      }}
+                      onChange={(endpoint, contactId) =>
+                        setFamilyDraft({ ...familyDraft, [endpoint]: contactId })
+                      }
+                    />
+                    <button
+                      type="button"
+                      className={btn.outline}
+                      onClick={() => {
+                        setFamilyDraft({
+                          ...familyDraft,
+                          subject: familyDraft.object,
+                          object: familyDraft.subject,
+                        });
+                        setAnchorPosition((position) =>
+                          position === 'subject' ? 'object' : 'subject',
+                        );
+                      }}
+                    >
+                      Swap people
+                    </button>
+                    <label className={labelClass} htmlFor={id('predicate')}>
+                      Relationship of the first person to the second
+                    </label>
+                    <select
+                      {...fieldProps('predicate')}
+                      className={selectClass}
+                      value={familyDraft.predicate}
+                      onChange={(e) =>
+                        setFamilyDraft({ ...familyDraft, predicate: e.target.value })
+                      }
+                    >
+                      <option value="">Choose a family relationship</option>
+                      {familyPredicates.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.id.replaceAll('_', ' ')}
+                        </option>
+                      ))}
+                    </select>
+                    {fieldError('predicate')}
+                    <label className={labelClass} htmlFor={id('timing')}>
+                      Recorded timing
+                    </label>
+                    <select
+                      {...fieldProps('timing')}
+                      className={selectClass}
+                      value={familyDraft.timing}
+                      onChange={(e) =>
+                        setFamilyDraft({
+                          ...familyDraft,
+                          timing: e.target.value as FamilyDraft['timing'],
+                        })
+                      }
+                    >
+                      <option value="unspecified">Timing not recorded</option>
+                      <option value="present">Recorded as present</option>
+                      <option value="past">Recorded as past</option>
+                    </select>
+                    {fieldError('timing')}
+                    {familyDraft.timing === 'present' && familyDraft.until ? (
+                      <p className="text-sm text-muted">
+                        Timing and dates are recorded separately. An end date does not change the
+                        recorded timing.
+                      </p>
+                    ) : null}
+                    {(['from', 'until'] as const).map((part) => (
+                      <div key={part} className="flex flex-col gap-1">
+                        <label className={labelClass} htmlFor={id(part)}>
+                          {part === 'from'
+                            ? 'Recorded from (optional)'
+                            : 'Recorded through (optional, inclusive)'}
+                        </label>
+                        <input
+                          {...fieldProps(
+                            `validity.${part === 'from' ? 'validFrom' : 'validUntil'}`,
+                          )}
+                          id={id(part)}
+                          type="date"
+                          className={inputClass}
+                          value={familyDraft[part]}
+                          onChange={(e) =>
+                            setFamilyDraft({ ...familyDraft, [part]: e.target.value })
+                          }
+                        />
+                        {fieldError(`validity.${part === 'from' ? 'validFrom' : 'validUntil'}`)}
+                      </div>
+                    ))}
+                    <label className={labelClass} htmlFor={id('note')}>
+                      Owner note (optional)
+                    </label>
+                    <textarea
+                      {...fieldProps('note')}
+                      className={textareaClass}
+                      value={familyDraft.note}
+                      onChange={(e) => setFamilyDraft({ ...familyDraft, note: e.target.value })}
+                    />
+                    {fieldError('note')}
+                    <p className="rounded-xl bg-sunken p-3 text-sm" aria-live="polite">
+                      {preview}
+                    </p>
+                  </>
+                ) : null}
+              </fieldset>
+              {active === 'family' && createGrant ? (
                 <button
                   type="button"
                   className={btn.outline}
-                  disabled={state.busy}
-                  onClick={() => void controller.check()}
+                  disabled={locked}
+                  onClick={() => {
+                    setReturnToFamily(true);
+                    setDisplayedGrant(createGrant);
+                    setActive('create');
+                    setFinished(false);
+                  }}
                 >
-                  Check save result
+                  Create a person separately
                 </button>
-                {controller.canReconcile() ? (
+              ) : null}
+              {Object.entries(state.fieldErrors)
+                .filter(([key]) => key === 'request' || key.startsWith('expected'))
+                .map(([key, value]) => (
+                  <p key={key} role="alert" className="text-sm text-red-600">
+                    {value}
+                  </p>
+                ))}
+              {state.message ? (
+                <p role="status" className="text-sm">
+                  {state.message}
+                </p>
+              ) : null}
+              {state.phase === 'pending' ? (
+                <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
                     className={btn.outline}
                     disabled={state.busy}
-                    onClick={() => void controller.reconcile()}
+                    onClick={() => void controller.check()}
                   >
-                    Resolve this earlier save
+                    Check save result
+                  </button>
+                  {controller.canReconcile() ? (
+                    <button
+                      type="button"
+                      className={btn.outline}
+                      disabled={state.busy}
+                      onClick={() => void controller.reconcile()}
+                    >
+                      Resolve this earlier save
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+              <div className="flex flex-wrap gap-2">
+                {!finished ? (
+                  <button type="submit" className={btn.primary} disabled={locked || !grant}>
+                    {state.busy
+                      ? 'Saving…'
+                      : active === 'create'
+                        ? 'Add person'
+                        : correctionSnapshot && familyMode
+                          ? 'Save correction'
+                          : 'Save'}
                   </button>
                 ) : null}
+                {returnToFamily &&
+                selectCreatedId &&
+                family?.people.some((p) => p.contactId === selectCreatedId) ? (
+                  <button
+                    type="button"
+                    className={btn.outline}
+                    onClick={() => {
+                      setDisplayedFamily(family);
+                      setDisplayedGrant(family.grant);
+                      setActive('family');
+                      setFinished(false);
+                      setReturnToFamily(false);
+                    }}
+                  >
+                    Return to family relationship
+                  </button>
+                ) : null}
+                <button type="button" className={btn.outline} disabled={state.busy} onClick={close}>
+                  {state.phase === 'pending' ? 'Close and check later' : 'Close'}
+                </button>
               </div>
-            ) : null}
-            <div className="flex flex-wrap gap-2">
-              {!finished ? (
-                <button type="submit" className={btn.primary} disabled={locked || !grant}>
-                  {state.busy
-                    ? 'Saving…'
-                    : active === 'create'
-                      ? 'Add person'
-                      : correctionSnapshot && familyMode
-                        ? 'Save correction'
-                        : 'Save'}
-                </button>
-              ) : null}
-              {returnToFamily &&
-              selectCreatedId &&
-              family?.people.some((p) => p.contactId === selectCreatedId) ? (
-                <button
-                  type="button"
-                  className={btn.outline}
-                  onClick={() => {
-                    setDisplayedFamily(family);
-                    setDisplayedGrant(family.grant);
-                    setActive('family');
-                    setFinished(false);
-                    setReturnToFamily(false);
-                  }}
-                >
-                  Return to family relationship
-                </button>
-              ) : null}
-              <button type="button" className={btn.outline} disabled={state.busy} onClick={close}>
-                {state.phase === 'pending' ? 'Close and check later' : 'Close'}
-              </button>
-            </div>
-          </form>
-        </Modal>
-      ) : null}
-    </div>
+            </form>
+          </Modal>
+        ) : null}
+      </div>
+    </OwnerEditorEntryContext.Provider>
   );
 }
 
@@ -923,4 +973,55 @@ export function ownerEditorConflictIntent(input: {
   if (input.command === 'update_person_identity')
     return { intendedIdentity: input.identityDraft ?? undefined };
   return { intendedFamily: input.familyDraft ? input.familyPreview : undefined };
+}
+
+type OwnerEditorEntryPoint = 'identity' | 'family' | { correction: string };
+const OwnerEditorEntryContext = createContext<{
+  locked: boolean;
+  identity: boolean;
+  family: boolean;
+  correctionIds: string[];
+  open(entry: OwnerEditorEntryPoint, element: HTMLElement): void;
+} | null>(null);
+
+/** Contextual triggers reuse ONE surrounding controller and exact server capabilities. */
+export function OwnerEditorContextTrigger({ entry }: { entry: OwnerEditorEntryPoint }) {
+  const context = useContext(OwnerEditorEntryContext);
+  const eligible =
+    !!context &&
+    (entry === 'identity'
+      ? context.identity
+      : entry === 'family'
+        ? context.family
+        : context.family && context.correctionIds.includes(entry.correction));
+  if (!eligible || !context) return null;
+  return (
+    <button
+      type="button"
+      className={btnSm.outline}
+      disabled={context.locked}
+      onClick={(event) => context.open(entry, event.currentTarget)}
+    >
+      {entry === 'identity'
+        ? 'Edit details'
+        : entry === 'family'
+          ? 'Add family relationship'
+          : 'Edit relationship'}
+    </button>
+  );
+}
+export function OwnerEditorContextualHost({
+  editor,
+  children,
+}: {
+  editor: OwnerEditorControlsProps | null;
+  children: ReactNode;
+}) {
+  return editor ? (
+    <OwnerEditorControls {...editor} contextual>
+      {children}
+    </OwnerEditorControls>
+  ) : (
+    children
+  );
 }

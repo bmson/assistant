@@ -218,6 +218,7 @@ function encodeRecallHeader(sources: RecallSource[]): string {
     label: s.label.slice(0, 60),
     ...(s.kind ? { kind: s.kind } : {}),
     ...(s.hops ? { hops: s.hops } : {}),
+    ...(s.ownerCorrected === true ? { ownerCorrected: true } : {}),
   }));
   return encodeURIComponent(JSON.stringify(trimmed));
 }

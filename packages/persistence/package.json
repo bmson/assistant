@@ -19,7 +19,8 @@
     "./predicate-vocabulary": "./src/predicate-vocabulary.ts",
     "./knowledge-validity": "./src/knowledge-validity.ts",
     "./owner-family-presentation": "./src/owner-family-presentation.ts",
-    "./owner-family-scope": "./src/owner-family-scope.ts"
+    "./owner-family-scope": "./src/owner-family-scope.ts",
+    "./owner-memory-correction": "./src/owner-memory-correction.ts"
   },
   "dependencies": {
     "zod": "^4.6.7"

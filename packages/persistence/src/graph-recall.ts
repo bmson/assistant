@@ -9,6 +9,8 @@ export interface GraphRelation {
   objectEntityId: string;
   objectLabel: string;
   sourceMemoryId: string;
+  sourceContentHash?: string;
+  sourceOwnerCorrection?: unknown;
   content: string;
   evidenceQuote: string | null;
   createdAt: Date;

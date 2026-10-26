@@ -169,7 +169,7 @@ describe('actual page + real issuance builder composition, named reader/fence po
     expect(html).toContain('Add person');
     expect(html).toContain('method="get"');
     expect(html).toContain(`?q=${encodeURIComponent(contact.name)}`);
-    expect(html).not.toContain('Edit name and aliases');
+    expect(html).not.toContain('Edit details');
     expect(html).not.toContain('method="post"');
   });
   it('PG dossier binds same displayed/native identity/options and preserves q back/map context', async () => {
@@ -192,7 +192,7 @@ describe('actual page + real issuance builder composition, named reader/fence po
     const html = renderToStaticMarkup(await dossier());
     expect(ports.trace).toEqual(['pg-before', 'browse', 'editor', 'pg-after']);
     expect(ports.pgEditor.mock.calls[0]?.[1]).toMatchObject({ contactId: contact.id });
-    expect(html).toContain('Edit name and aliases');
+    expect(html).toContain('Edit details');
     expect(html).toContain('Add family relationship');
     expect(html).toContain('/people?q=retained%20search');
     expect(html).toContain(contact.name);
@@ -202,7 +202,7 @@ describe('actual page + real issuance builder composition, named reader/fence po
     ports.pgEditor.mockResolvedValue(null);
     let html = renderToStaticMarkup(await dossier());
     expect(html).toContain(contact.name);
-    expect(html).not.toContain('Edit name and aliases');
+    expect(html).not.toContain('Edit details');
     ports.pgEditor.mockRejectedValue(Error('bounded editor contact cap'));
     html = renderToStaticMarkup(await dossier());
     expect(html).toContain(contact.name);
@@ -216,7 +216,7 @@ describe('actual page + real issuance builder composition, named reader/fence po
     });
     const html = renderToStaticMarkup(await dossier());
     expect(html).toContain(contact.name);
-    expect(html).not.toContain('Edit name and aliases');
+    expect(html).not.toContain('Edit details');
   });
   it.each(['disabled', 'legacy'] as const)(
     '%s skips optional PG editor reads and keeps browse',
@@ -236,7 +236,7 @@ describe('actual page + real issuance builder composition, named reader/fence po
     });
     const html = renderToStaticMarkup(await dossier());
     expect(html).toContain('Could not load this view');
-    expect(html).not.toContain('Edit name and aliases');
+    expect(html).not.toContain('Edit details');
     expect(html).toContain('q=retained%20search');
   });
   it('FS directory uses same outer owner/fence/store and context only, zero option scan/PG fallback', async () => {
@@ -270,7 +270,7 @@ describe('actual page + real issuance builder composition, named reader/fence po
     ]);
     expect(ports.fsSnapshot).toHaveBeenCalledTimes(1);
     expect(ports.fsSnapshot.mock.calls[0]?.[0]).toBe(ports.fsPerson.mock.calls[0]?.[0]);
-    expect(html).toContain('Edit name and aliases');
+    expect(html).toContain('Edit details');
     expect(ports.pgRead).not.toHaveBeenCalled();
   });
   it('FS missing epoch skips optional native options and retains browse', async () => {
@@ -279,7 +279,7 @@ describe('actual page + real issuance builder composition, named reader/fence po
     const html = renderToStaticMarkup(await dossier());
     expect(ports.fsSnapshot).not.toHaveBeenCalled();
     expect(html).toContain(contact.name);
-    expect(html).not.toContain('Edit name and aliases');
+    expect(html).not.toContain('Edit details');
     expect(ports.fsAfter).toHaveBeenCalledOnce();
   });
   it('FS bounded editor snapshot failure leaves the fenced dossier readable with no PG fallback', async () => {
@@ -288,7 +288,7 @@ describe('actual page + real issuance builder composition, named reader/fence po
     const html = renderToStaticMarkup(await dossier());
     expect(html).toContain(contact.name);
     expect(html).not.toContain('Could not load this view');
-    expect(html).not.toContain('Edit name and aliases');
+    expect(html).not.toContain('Edit details');
     expect(ports.fsOwner).toHaveBeenCalledTimes(2);
     expect(ports.fsAfter).toHaveBeenCalledOnce();
     expect(ports.pgRead).not.toHaveBeenCalled();
@@ -299,8 +299,24 @@ describe('actual page + real issuance builder composition, named reader/fence po
     ports.fsAfter.mockRejectedValue(Error('erasure generation changed'));
     const html = renderToStaticMarkup(await dossier());
     expect(html).toContain('Could not load this view');
-    expect(html).not.toContain('Edit name and aliases');
+    expect(html).not.toContain('Edit details');
     expect(ports.pgRead).not.toHaveBeenCalled();
     expect(ports.terminate).toHaveBeenCalledOnce();
   });
+});
+
+it('actual dossier returns to the selected Memory map with filters and anchor retained', async () => {
+  const returnTo =
+    '/profile/knowledge?view=map&entity=selected&memory=source&q=retained#knowledge-item';
+  const html = renderToStaticMarkup(
+    await Person({
+      params: Promise.resolve({ id: contact.id }),
+      searchParams: Promise.resolve({ returnTo }),
+    }),
+  );
+  expect(html).toContain('Memory map');
+  expect(html).toContain(
+    'view=map&amp;entity=selected&amp;memory=source&amp;q=retained#knowledge-item',
+  );
+  expect(html).toContain('Edit details');
 });

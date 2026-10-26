@@ -860,6 +860,7 @@ export async function getKnowledgeGraphOverview(
 /** One edge as the local map draws it: the neighbour plus direction relative to the queried entity. */
 export interface KnowledgeGraphNeighborEdge {
   id: string;
+  sourceMemoryId?: string;
   predicate: string;
   /** True when the queried entity is the subject of the relation. */
   outbound: boolean;
@@ -925,6 +926,7 @@ export async function getKnowledgeGraphNeighborhood(
     db
       .select({
         id: knowledgeGraphRelations.id,
+        sourceMemoryId: memories.id,
         predicate: knowledgeGraphRelations.predicate,
         reviewStatus: knowledgeGraphRelations.reviewStatus,
         validFrom: knowledgeGraphRelations.validFrom,
@@ -961,6 +963,7 @@ export async function getKnowledgeGraphNeighborhood(
     const outbound = row.subjectId === entity.id;
     return {
       id: row.id,
+      sourceMemoryId: row.sourceMemoryId,
       predicate: row.predicate,
       outbound,
       reviewStatus: asReviewStatus(row.reviewStatus),

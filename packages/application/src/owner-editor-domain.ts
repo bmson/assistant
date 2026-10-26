@@ -1,4 +1,5 @@
 import { prepareOwnerKnowledgeGraphFactWithRepository } from '@assistant/core/memory/knowledge-graph';
+import type { OwnerMemoryEditorSnapshot } from '@assistant/persistence';
 import {
   normalizeContactAliases,
   normalizeContactName,
@@ -13,6 +14,11 @@ import {
   type OwnerKnowledgeGraphFactRepository,
 } from '@assistant/persistence';
 import type { OwnerEditorDomainPort } from './owner-editor.js';
+import {
+  type PreparedOwnerMemoryCorrection,
+  prepareOwnerMemoryCorrection,
+  refreshOwnerMemoryCorrection,
+} from './owner-memory-editor.js';
 import type { EmbeddingPort } from './profile/commands.js';
 
 export interface OwnerEditorContactSnapshot {
@@ -32,6 +38,20 @@ export interface OwnerEditorFamilySnapshot {
 /** Bounded snapshot adapters on the existing driver; commit rechecks these under its claim lock. */
 export interface OwnerEditorDomainStorage {
   contact(ownerId: string, contactId: string): Promise<OwnerEditorContactSnapshot | null>;
+  memory?(
+    ownerId: string,
+    memoryId: string,
+    scope: OwnerEditorScope,
+  ): Promise<OwnerMemoryEditorSnapshot | null>;
+  commitMemory?(
+    claim: OwnerEditorClaim,
+    prepared: PreparedOwnerMemoryCorrection,
+    now: Date,
+  ): Promise<OwnerEditorReply>;
+  memoryFollowup?: {
+    maintenance: import('@assistant/persistence').ProfileMemoryMaintenance;
+    ownerCards: import('@assistant/persistence').OwnerCardCompilationRepository;
+  };
   /** Must reject incomplete/raw-limit snapshots and canonical/shared/derived edit scope. */
   family(
     ownerId: string,
@@ -57,6 +77,7 @@ export interface OwnerEditorDomainStorage {
   ): Promise<OwnerEditorReply>;
 }
 export type PreparedOwnerEditor =
+  | { kind: 'memory'; memory: PreparedOwnerMemoryCorrection }
   | {
       kind: 'person';
       request: Extract<OwnerEditorApply, { command: 'create_person' | 'update_person_identity' }>;
@@ -84,18 +105,36 @@ export function createOwnerEditorDomain(input: {
       const targetMatches =
         request.command === 'create_person'
           ? scope.targetId === null
-          : request.command === 'update_person_identity'
-            ? scope.targetId === request.contactId
-            : request.command === 'correct_owner_family_relationship'
-              ? scope.targetId === request.targetRelationId
-              : scope.targetId === request.subjectContactId ||
-                scope.targetId === request.objectContactId;
+          : request.command === 'correct_owner_memory'
+            ? scope.targetId === request.memoryId
+            : request.command === 'update_person_identity'
+              ? scope.targetId === request.contactId
+              : request.command === 'correct_owner_family_relationship'
+                ? scope.targetId === request.targetRelationId
+                : scope.targetId === request.subjectContactId ||
+                  scope.targetId === request.objectContactId;
       if (
         !targetMatches ||
         scope.operationId !== request.operationId ||
         scope.command !== request.command
       )
         return { ok: false, result: { outcome: 'conflict', reason: 'issuance_target_changed' } };
+      if (request.command === 'correct_owner_memory') {
+        if (!storage.memory || !storage.commitMemory)
+          return {
+            ok: false,
+            result: { outcome: 'unavailable', reason: 'memory_editor_unavailable' },
+          };
+        const result = await prepareOwnerMemoryCorrection(
+          request,
+          scope,
+          storage.memory.bind(storage),
+          router,
+        );
+        return result.ok
+          ? { ok: true, prepared: { kind: 'memory', memory: result.prepared } }
+          : result;
+      }
       if (request.command === 'create_person' || request.command === 'update_person_identity') {
         let name: string, aliases: string[];
         try {
@@ -224,7 +263,22 @@ export function createOwnerEditorDomain(input: {
         },
       };
     },
-    commit(claim, prepared, now) {
+    async commit(claim, prepared, now) {
+      if (prepared.kind === 'memory') {
+        if (!storage.commitMemory) throw new Error('Memory writer unavailable');
+        const reply = await storage.commitMemory(claim, prepared.memory, now);
+        if (
+          reply.authority === 'operation_receipt' &&
+          reply.outcome === 'saved' &&
+          storage.memoryFollowup
+        )
+          await refreshOwnerMemoryCorrection(
+            storage.memoryFollowup,
+            claim.scope.ownerId,
+            prepared.memory.memoryId,
+          );
+        return reply;
+      }
       return prepared.kind === 'family-unchanged'
         ? storage.commitUnchangedFamily(claim, prepared.fields, now)
         : prepared.kind === 'person'

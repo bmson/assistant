@@ -20,6 +20,7 @@ type Source = Records['knowledgeGraphSources'];
 
 export interface FirestorePersonGraphEdge {
   id: string;
+  sourceMemoryId?: string;
   predicate: string;
   outbound: boolean;
   reviewStatus: 'confirmed' | 'unreviewed';
@@ -152,6 +153,7 @@ function activeEdge(
       : null;
   return {
     id: row.id,
+    sourceMemoryId: memory.id,
     predicate: row.predicate,
     outbound,
     reviewStatus: row.reviewStatus === 'confirmed' ? 'confirmed' : 'unreviewed',
