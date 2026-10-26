@@ -5,7 +5,7 @@ type Db = Parameters<typeof getAgent>[0];
 import type { ExecutionPersistence } from '@assistant/persistence';
 import { embeddingSpaceIdentityKey } from '@assistant/persistence';
 import type { ModelRouter } from '../model-router/router.js';
-import { listOpenCommitments } from './commitments.js';
+import type { RecallMode } from '../workflow/owner-intent.js';
 import { assembleDiscussionFrame, type DiscussionTurn } from './discussion-frame.js';
 import { fuseOwnerContext } from './fused-owner-context.js';
 import { recallKnowledgeGraph, recallWithGraphFallback } from './graph-recall.js';
@@ -14,17 +14,20 @@ import { readSituationDecisionContext } from './situation-context.js';
 
 /** Shared bounded recall used before planning and, for legacy paths, before a model step. */
 export async function retrieveOwnerContext(input: {
-  db: Db;
+  db?: Db;
   persistence?: ExecutionPersistence;
   router: ModelRouter;
   taskId: string;
   agentId: string;
   conversationId: string;
   queryText: string;
+  eligibilityText: string;
+  mode: Extract<RecallMode, 'automatic' | 'continuation'>;
+  sinceCreatedAt?: Date;
   graphEnabled: boolean;
   discussionTurns?: ReadonlyArray<DiscussionTurn>;
 }) {
-  const { db, persistence, router, taskId, agentId, conversationId, graphEnabled } = input;
+  const { persistence, router, taskId, agentId, conversationId, graphEnabled } = input;
   const frame = assembleDiscussionFrame({
     currentText: input.queryText,
     turns: input.discussionTurns ?? [],
@@ -41,9 +44,16 @@ export async function retrieveOwnerContext(input: {
         return suppressed?.has(sourceKey) ?? true;
       }
     : undefined;
-  const historyRepository = persistence?.history ?? db;
+  // Resolve each legacy PostgreSQL fallback only when that port is absent. A
+  // complete portable persistence adapter must not need a SQL connection.
+  const historyRepository = persistence?.history ?? input.db;
+  if (!historyRepository) {
+    throw new Error('History recall storage is not configured');
+  }
   const since =
-    (await recentWindowStart(historyRepository, conversationId, 20, agentId)) ?? new Date();
+    input.sinceCreatedAt ??
+    (await recentWindowStart(historyRepository, conversationId, 20, agentId)) ??
+    new Date();
   const layered = await recallWithGraphFallback({
     graph: graphEnabled
       ? async () => {
@@ -51,9 +61,13 @@ export async function retrieveOwnerContext(input: {
             taskId,
             expectedSpace: embeddingSpace,
           });
+          const graphRepository = persistence?.graph ?? input.db;
+          if (!graphRepository) {
+            throw new Error('Knowledge graph recall storage is not configured');
+          }
           return {
             graph: await recallKnowledgeGraph(
-              persistence?.graph ?? db,
+              graphRepository,
               {
                 agentId,
                 queryText,
@@ -95,31 +109,19 @@ export async function retrieveOwnerContext(input: {
       console.error('executor history recall failed — continuing without it', err);
     },
   });
-  const [situations, commitments] = await Promise.all([
-    readSituationDecisionContext({
-      db,
-      persistence,
-      agentId,
-      discussionFrame: queryText,
-      limit: 16,
-    }),
-    listOpenCommitments(persistence?.ownerContext ?? db, {
-      agentId,
-      query: queryText,
-      limit: 40,
-    }).catch((error) => {
-      console.error(
-        'executor open commitment recall failed — continuing with other context',
-        error,
-      );
-      return [];
-    }),
-  ]);
+  const situations = await readSituationDecisionContext({
+    db: input.db,
+    persistence,
+    agentId,
+    discussionFrame: queryText,
+    limit: 16,
+  });
   const fused = await fuseOwnerContext({
     queryText,
+    eligibilityText: input.eligibilityText,
+    mode: input.mode,
     rankedContext: layered.rankedContext,
     decisions: situations.decisions,
-    commitments,
     isSuppressed,
     limit: 8,
     maxBytes: 2600,

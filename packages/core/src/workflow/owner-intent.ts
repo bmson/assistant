@@ -1,7 +1,10 @@
 import { emailProvenanceText, isForwardedIngest } from '../email-provenance.js';
 import type { ClarificationContinuation, Trust } from '../events.js';
 import type { ResolvedReadIntent } from './active-read-intent.js';
-import { explicitlyDisallowsTools } from './conversation-local-context.js';
+import {
+  explicitlyDisallowsTools,
+  isConversationLocalContext,
+} from './conversation-local-context.js';
 import { detectFutureWatchIntent } from './future-watch-intent.js';
 import { detectLiveLookup } from './live-lookup.js';
 import { detectPersonalReadRequest } from './read-intent.js';
@@ -43,6 +46,117 @@ export interface OwnerIntent {
   externalText: string;
   authorizedScopes: OwnerIntentScope[];
   separation: 'clear' | 'none' | 'unknown';
+}
+
+export type RecallMode = 'automatic' | 'explicit' | 'continuation' | 'disabled';
+
+/** An explicit private read of the owner's open commitment list, by purpose. */
+export function isExplicitCommitmentReadRequest(intent: OwnerIntent): boolean {
+  const text = intent.ownerAuthoredText;
+  const commitmentNoun = `(?:commitments?|follow[- ]?ups?|promises?|to-?dos?)`;
+  const qualifier = String.raw`(?:(?:open|outstanding|unresolved|pending)\s+)?`;
+  const topicFilter = String.raw`(?:\s+(?:about|for)\s+[\p{L}\p{M}\p{N}\s,'’-]{1,80})?`;
+  const suffix = String.raw`${topicFilter}\s*[.!?]*\s*$`;
+  const directQuestion = new RegExp(
+    String.raw`^\s*(?:what|which)\s+are\s+(?:my|our)\s+${qualifier}${commitmentNoun}${suffix}`,
+    'iu',
+  );
+  const directStatusQuestion = new RegExp(
+    String.raw`^\s*(?:what|which)\s+${qualifier}${commitmentNoun}\s+(?:do\s+i\s+(?:still\s+)?owe|am\s+i\s+(?:still\s+)?waiting\s+on)\s*[.!?]*\s*$`,
+    'iu',
+  );
+  const directListCommand = new RegExp(
+    String.raw`^\s*(?:list|show|review|check)\s+(?:my|our)\s+${qualifier}${commitmentNoun}${suffix}`,
+    'iu',
+  );
+  const explicitListPurpose =
+    directQuestion.test(text) || directStatusQuestion.test(text) || directListCommand.test(text);
+  const directImperative = directListCommand.test(text);
+  return (
+    (intent.sourceActor === 'owner' || intent.sourceActor === 'mixed') &&
+    (intent.requestKind === 'new_request' || directImperative) &&
+    intent.separation !== 'unknown' &&
+    !isConversationLocalContext(text) &&
+    explicitListPurpose &&
+    (intent.authorizedScopes.includes('external_read') || directImperative)
+  );
+}
+
+/** Final fallback-callsite gate, shared with tests so the caller cannot drift. */
+export function shouldRunFallbackRecall(input: {
+  mode: RecallMode;
+  publicScope: boolean;
+  planningRecallPrepared: boolean;
+  restrictedChecklistResume: boolean;
+  conversationId?: string;
+}): boolean {
+  return (
+    !input.publicScope &&
+    (input.mode === 'automatic' || input.mode === 'continuation') &&
+    !input.planningRecallPrepared &&
+    !input.restrictedChecklistResume &&
+    Boolean(input.conversationId)
+  );
+}
+
+/**
+ * Classifies private recall use from already trusted request state. This is a
+ * routing decision only: it neither creates read scopes nor selects sources.
+ */
+export function resolveRecallMode(input: {
+  resolvedReadIntent: ResolvedReadIntent;
+  ownerIntent: OwnerIntent;
+  clarificationContinuation?: ClarificationContinuation;
+  enabled: boolean;
+  untrustedContext: boolean;
+  trustedTask: boolean;
+  taskType: string;
+  conversationId?: string;
+  localOnly?: boolean;
+  explicitReadRequested?: boolean;
+  requireNewRequest?: boolean;
+}): RecallMode {
+  const { resolvedReadIntent, ownerIntent, clarificationContinuation } = input;
+  // Public and mixed public projections never receive ambient private context.
+  if (
+    resolvedReadIntent.kind === 'public_activity' ||
+    resolvedReadIntent.kind === 'combined' ||
+    resolvedReadIntent.kind === 'clarify_public'
+  )
+    return 'disabled';
+  // Keep explicit reads on their existing tool and dispatcher path. The
+  // automatic fuser must not widen their selected source or purpose.
+  if (resolvedReadIntent.kind === 'personal' || input.explicitReadRequested) return 'explicit';
+  const text = ownerIntent.ownerAuthoredText;
+  if (
+    !input.enabled ||
+    input.untrustedContext ||
+    !input.trustedTask ||
+    !input.conversationId ||
+    input.localOnly ||
+    explicitlyOptsOutOfRecall(text) ||
+    isConversationLocalContext(text) ||
+    (ownerIntent.authorizedScopes.length === 0 &&
+      isSelfContainedTextTransformation(text, ownerIntent.externalText)) ||
+    !['chat_turn', 'email_triage', 'sms_turn'].includes(input.taskType) ||
+    (input.requireNewRequest && ownerIntent.requestKind !== 'new_request') ||
+    !['owner', 'mixed', 'assistant'].includes(ownerIntent.sourceActor) ||
+    ownerIntent.separation === 'unknown' ||
+    !text.trim()
+  )
+    return 'disabled';
+  const continuation = clarificationContinuation;
+  if (continuation) {
+    if (
+      continuation.answerStatus !== 'answer' ||
+      continuation.tainted ||
+      !continuation.sourceTaskId.trim() ||
+      !continuation.ownerAuthoredText.trim()
+    )
+      return 'disabled';
+    return 'continuation';
+  }
+  return 'automatic';
 }
 
 /** Source resolution may narrow mistaken private reads, never bypass dispatcher policy. */

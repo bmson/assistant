@@ -3,6 +3,8 @@ import { createRecallBlock } from './recall-budget.js';
 
 export interface ContextCandidate {
   text: string;
+  /** Source meaning used for eligibility; excludes rendered provenance wrappers. */
+  meaning?: string;
   score: number;
   source: RecallSource;
 }

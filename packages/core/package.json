@@ -36,6 +36,7 @@
     "./memory/occasions": "./src/memory/occasions.ts",
     "./memory/predicate-vocabulary": "./src/memory/predicate-vocabulary.ts",
     "./memory/recall": "./src/memory/recall.ts",
+    "./memory/recall-context": "./src/memory/recall-context.ts",
     "./memory/recall-metrics": "./src/memory/recall-metrics.ts",
     "./memory/skills": "./src/memory/skills.ts",
     "./memory/situation-context": "./src/memory/situation-context.ts",
