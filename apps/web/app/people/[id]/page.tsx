@@ -226,11 +226,7 @@ export default async function PersonPage({
 
   return (
     <PageShell size="reading">
-      <PageHeader
-        back={{ href: backHref, label: 'People' }}
-        title={contact.name}
-        intro={contact.relationship ? undefined : 'No relationship recorded yet.'}
-      />
+      <PageHeader back={{ href: backHref, label: 'People' }} title={contact.name} />
 
       {/* The identity line: who they are to you, where they are, when you last
           spoke. Every segment is dropped when its source is empty, so this
@@ -240,7 +236,9 @@ export default async function PersonPage({
         <div className="min-w-0 flex-1">
           <MetaLine
             segments={[
-              contact.relationship || 'Relationship not set',
+              contact.relationship
+                ? `Relationship to you: ${contact.relationship}`
+                : 'Relationship to you: not recorded',
               location ? (
                 <>
                   <MapPin className="size-3.5" aria-hidden="true" />
@@ -328,7 +326,7 @@ export default async function PersonPage({
           look this person up again. */}
       <section className="mt-8">
         <div className="flex flex-wrap items-end justify-between gap-3">
-          <SectionHeading title="Relationships" count={relations.length} />
+          <SectionHeading title="Connections between people" count={relations.length} />
         </div>
         {relations.length === 0 ? (
           <EmptyState>

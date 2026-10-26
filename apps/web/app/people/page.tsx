@@ -274,7 +274,9 @@ export default async function PeoplePage({
                           </span>
                           <MetaLine
                             segments={[
-                              person.relationship || 'Relationship not set',
+                              person.relationship
+                                ? `Relationship to you: ${person.relationship}`
+                                : 'Relationship to you: not recorded',
                               person.location ? (
                                 <>
                                   <MapPin className="size-3" aria-hidden="true" />
