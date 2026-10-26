@@ -127,6 +127,8 @@ export interface PersonRelation {
   validFrom: string | null;
   validUntil: string | null;
   reviewStatus: 'unreviewed' | 'confirmed' | 'rejected';
+  assertionTiming?: 'unspecified' | 'present' | 'past';
+  sourceMemoryId?: string;
 }
 
 /** A connection to something that is not a person — a place, employer, event. */
@@ -327,6 +329,8 @@ export async function getPersonDossier(
         validFrom: edge.validFrom,
         validUntil: edge.validUntil,
         reviewStatus: edge.reviewStatus,
+        ...(edge.assertionTiming ? { assertionTiming: edge.assertionTiming } : {}),
+        sourceMemoryId: edge.sourceMemoryId,
       });
       if (ORIGIN_PREDICATES.has(edge.predicate)) {
         origins.push({

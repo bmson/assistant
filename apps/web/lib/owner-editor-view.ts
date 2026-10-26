@@ -19,6 +19,7 @@ export interface OwnerEditorViewSnapshot {
   } | null;
   people?: OwnerEditorPersonOption[];
   corrections?: OwnerEditorCorrectionEligibility[];
+  readOnlyCorrections?: { relationId: string; sourceMemoryId: string; reason: string }[];
 }
 export interface OwnerEditorDisplayedContact {
   id: string;
@@ -84,6 +85,7 @@ export function buildOwnerEditorView(input: {
     return {
       session,
       createGrant: grant('create_person', null),
+      readOnlyCorrections: snapshot.readOnlyCorrections,
       ...(identity
         ? {
             identity: {

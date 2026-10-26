@@ -27,6 +27,7 @@ import { DecisionCard, type DecisionTone } from './decision-card';
 import { MessageMarkdown } from './markdown';
 
 export interface RecallSource {
+  ownerCorrected?: true;
   date: string;
   label: string;
   kind?: 'chat' | 'knowledge_graph' | 'decision' | 'commitment';
@@ -763,6 +764,7 @@ export function RecallNote({
           title={`From ${source.date}${source.hops ? ` · ${source.hops}-hop connection` : ''} — ${source.label}`}
         >
           {index > 0 ? '· ' : ''}
+          {source.ownerCorrected === true ? 'Owner-corrected saved note · ' : ''}
           {friendlyRecallDate(source.date)} — {source.label}
           {messageId ? (
             <RecallSourceControl
@@ -799,6 +801,8 @@ export function decodeRecallHeader(value: string | null): RecallSource[] | null 
           (s as RecallSource).kind === 'knowledge_graph' ||
           (s as RecallSource).kind === 'decision' ||
           (s as RecallSource).kind === 'commitment') &&
+        ((s as RecallSource).ownerCorrected === undefined ||
+          (s as RecallSource).ownerCorrected === true) &&
         ((s as RecallSource).hops === undefined ||
           (s as RecallSource).hops === 1 ||
           (s as RecallSource).hops === 2),

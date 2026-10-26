@@ -1,8 +1,28 @@
-# People and family editor lifecycle
+# Owner editor lifecycle
 
-The editor supports four commands through two exact HTTP adapters. Its signed form handles do not create write authority: each driver must verify the current installation owner, complete privacy generation, editor epoch, original operation hash, live claim, and native source revisions in the same transaction as the primary write and terminal receipt. Receipt revisions identify committed operations; subsequent edits require freshly read native entity revisions.
+The editor supports five commands through three exact HTTP adapters. Its signed form handles do not create write authority: each driver must verify the current installation owner, complete privacy generation, editor epoch, original operation hash, live claim, and native source revisions in the same transaction as the primary write and terminal receipt. Receipt revisions identify committed operations; subsequent edits require freshly read native entity revisions.
 
-Ordinary editor commands, receipt lookups and read-only migration verification never create an editor epoch. Missing, malformed or disabled epoch metadata leaves browsing available without an editing grant. Enabling an installation is a maintenance operation, separate from shipping this source. PostgreSQL schema migration 0130 and required Firestore indexes must be installed and verified before enabling editing.
+Ordinary editor commands, receipt lookups and read-only migration verification never create an editor epoch. Missing, malformed or disabled epoch metadata leaves browsing available without an editing grant. Enabling an installation is a maintenance operation, separate from shipping this source. PostgreSQL schema migration 0131 and required Firestore indexes must be installed and verified before enabling editing.
+
+## Saved note corrections
+
+`correct_owner_memory` uses `/api/profile/knowledge/memory`: GET only reconciles an existing operation receipt; POST applies or reconciles the command. The saved-note detail page at `/profile/knowledge/notes/[id]` reads one exact note and its current eligibility before offering an edit. Memory library and map links preserve their browsing context. Relationship corrections use the exact source note when it is verified; unavailable editing has an explicit reason rather than a graph rename fallback.
+
+The command binds the displayed content hash and canonical native/provenance revision. Both are checked before embedding preparation and again inside the atomic commit. Preparation releases its short snapshot lease before embedding. A stale page never silently substitutes a newly loaded revision for the user's reviewed snapshot. The owner fence, privacy generation, epoch, live claim, eligible note update, card invalidation and terminal receipt are checked or written in one driver transaction.
+
+Only an owned, live knowledge note with complete, verified provenance is eligible. A single verified imported or extracted note can be corrected explicitly; shared, combined, historical, superseded, expired, quarantined, unknown-source or incompletely proven notes remain read-only. Correction preserves the note identifier, source, source task, subject, kind, domain, creation time and original import/document lineage.
+
+Schema 0131 adds nullable `ownerCorrection` metadata. A changed saved note records version 1, `correctedByOwner: true`, the preceding saved-note content hash, the new content hash and correction time. The preceding hash describes the saved note, not the original external document. The shared correction primitive also serves existing correction callers. Same-text updates preserve a valid existing marker without inventing one; create and confirm operations do not mark notes as corrected. Missing or null markers on old records remain compatible. Invalid markers or a current-content hash mismatch fail closed.
+
+Portable export/import validates a present marker without normalizing the bytes of older bundles or changing their checksums. Explicit privacy export includes the marker, and deleting the note deletes its inline marker. Recall and the saved-note page attribute changed text as an “Owner-corrected saved note”; retained external provenance does not claim the original email or document contained the correction.
+
+The browser retains one operation until its outcome is resolved. Closing an editor does not cancel a pending write. A changed current note requires explicit review against the draft before a new operation. Post-commit graph or card refresh failure reports a saved note with refresh pending; it must not report a rejected save. Fresh editing authority comes from a new read after resolution. Source tests and authored SDK cases do not prove browser interaction, real-driver execution or deployed readiness; those remain separate acceptance gates.
+
+## Recovery image bounds
+
+An image predating correction attribution is only a fallback before any marker-capable correction can commit. After a correction, recovery must retain its marker and source attribution: pin an independently reviewed correction-aware and maintenance-binder-compatible image, rather than stripping markers, restoring older data or inferring attribution.
+
+Disabled editor grants do not fence every correction writer. Legacy server actions and native/mobile corrections use the shared correction primitive and can write an owner-correction marker while those grants remain disabled. A proposed rollout must hold all marker-capable correction entrypoints until the actual retirement boundary and a verified correction-aware, binder-compatible recovery image are established, or prove an equivalent earlier boundary. A general write pause covers this only when its exact entrypoint coverage has been verified. The post-marker rollback restriction starts when any such writer can commit, rather than when browser editing is enabled. Image existence, schema compatibility, entrypoint coverage and these source capabilities are separate checks; this document does not establish a live recovery baseline or relax the maintenance gates.
 
 ## Erasure and retention
 

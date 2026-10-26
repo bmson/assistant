@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { FieldValue } from '@google-cloud/firestore';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { embeddingSpaceKey } from './memory.js';
@@ -95,18 +95,19 @@ describe.skipIf(!localEmulator)('Firestore source-backed person graph', () => {
       store.doc('memories', id).set({
         id,
         agentId,
+        content: `lives in Reykjavík ${id}`,
         category: 'knowledge',
         quarantined: false,
         expiresAt: null,
         embedding: FieldValue.vector([1, 0]),
         embeddingSpace: embeddingSpaceKey(space),
-        contentHash: `hash-${id}`,
+        contentHash: createHash('sha256').update(`lives in Reykjavík ${id}`).digest('hex'),
         ...memoryPatch,
       }),
       store.doc('knowledgeGraphSources', id).set({
         memoryId: id,
         status: 'ready',
-        contentHash: `hash-${id}`,
+        contentHash: createHash('sha256').update(`lives in Reykjavík ${id}`).digest('hex'),
         extractionVersion: 2,
         ...sourcePatch,
       }),
@@ -126,7 +127,14 @@ describe.skipIf(!localEmulator)('Firestore source-backed person graph', () => {
     await edge('malformed', {}, { embedding: FieldValue.vector([1]) });
     await edge('retired', {}, { supersededById: 'replacement' });
     await edge('forgotten');
-    await store.doc('memoryTombstones', 'hash-forgotten').set({ contentHash: 'hash-forgotten' });
+    await store
+      .doc(
+        'memoryTombstones',
+        createHash('sha256').update('lives in Reykjavík forgotten').digest('hex'),
+      )
+      .set({
+        contentHash: createHash('sha256').update('lives in Reykjavík forgotten').digest('hex'),
+      });
     expect(
       (await getFirestorePersonGraph(store, agentId, contactId, 2, undefined, space))?.edges.map(
         (row) => row.id,
@@ -149,6 +157,7 @@ describe.skipIf(!localEmulator)('Firestore source-backed person graph', () => {
       edges: [
         {
           id: 'location',
+          sourceMemoryId: 'location',
           predicate: 'lives_in',
           outbound: true,
           reviewStatus: 'confirmed',
@@ -163,6 +172,7 @@ describe.skipIf(!localEmulator)('Firestore source-backed person graph', () => {
         },
         {
           id: 'incoming',
+          sourceMemoryId: 'incoming',
           predicate: 'parent_of',
           outbound: false,
           reviewStatus: 'unreviewed',

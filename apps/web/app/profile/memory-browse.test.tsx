@@ -209,7 +209,9 @@ describe('Memory browse server composition', () => {
         }),
       );
       noWrites(html);
-      expect(html).toContain('Editing and cleanup are unavailable');
+      expect(html).toContain('Cleanup is unavailable here');
+      expect(html).toContain('Open a saved note or person to review available edits');
+      expect(html).not.toContain('Browse only. Editing and cleanup are unavailable');
       expect(html).toContain('method="get"');
       expect(mocks.graph).not.toHaveBeenCalled();
       expect(mocks.map).not.toHaveBeenCalled();

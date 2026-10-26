@@ -262,3 +262,27 @@ it('keeps a named-only item free of inferred family relationships or invented so
   expect(panel).not.toContain('parent');
   expect(panel).not.toContain('partners');
 });
+
+it('offers a clearly labelled contact-bound People editor destination while retaining selected map context', () => {
+  const contactId = '22222222-2222-4222-8222-222222222222';
+  const linked = {
+    ...snapshot,
+    nodes: snapshot.nodes.map((node, index) => (index === 0 ? { ...node, contactId } : node)),
+  };
+  const context = '/profile/knowledge?view=map&memory=source&q=retained&kind=person';
+  const html = renderToStaticMarkup(
+    <KnowledgeMap snapshot={linked} initialSelectedId="a" contextHref={context} />,
+  );
+  expect(html).toContain('Open Alex Full Name in People to edit details and relationships');
+  expect(html).toContain(`/people/${contactId}?returnTo=`);
+  const encoded = new URLSearchParams({
+    returnTo: `${context}&entity=a#knowledge-item`,
+  }).toString();
+  // URLSearchParams and encodeURIComponent differ only in space encoding here;
+  // this synthetic context has no spaces, and preserves every filter plus selection.
+  expect(html).toContain(encoded.replace(/'/g, '%27'));
+  const unlinked = renderToStaticMarkup(
+    <KnowledgeMap snapshot={snapshot} initialSelectedId="a" contextHref={context} />,
+  );
+  expect(unlinked).not.toContain('in People to edit details and relationships');
+});

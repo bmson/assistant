@@ -113,7 +113,9 @@ function fixture() {
     router: { embeddingSpace: async () => space, embed },
   });
   const operations = createFirestoreOwnerEditorOperationRepository(f.store, ownerId);
-  const handlers = (path: '/api/people/editor' | '/api/profile/knowledge/family') =>
+  const handlers = (
+    path: '/api/people/editor' | '/api/profile/knowledge/family' | '/api/profile/knowledge/memory',
+  ) =>
     createOwnerEditorHttpHandlers(path, {
       authenticate: async () => ({ formSessionScope: session.formSessionScope }),
       resolveOwnerId: async () => ownerId,
@@ -140,7 +142,11 @@ function fixture() {
     const url = new URL(String(input), origin);
     if (
       url.origin !== origin ||
-      !['/api/people/editor', '/api/profile/knowledge/family'].includes(url.pathname)
+      ![
+        '/api/people/editor',
+        '/api/profile/knowledge/family',
+        '/api/profile/knowledge/memory',
+      ].includes(url.pathname)
     )
       throw Error('Unexpected offline pipeline route');
     const request = new Request(url, {
@@ -149,7 +155,10 @@ function fixture() {
     });
     trace.push({ method: request.method, path: url.pathname });
     const factory = handlers(
-      url.pathname as '/api/people/editor' | '/api/profile/knowledge/family',
+      url.pathname as
+        | '/api/people/editor'
+        | '/api/profile/knowledge/family'
+        | '/api/profile/knowledge/memory',
     );
     const response =
       request.method === 'GET'

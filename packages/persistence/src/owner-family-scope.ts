@@ -25,6 +25,31 @@ export interface OwnerFamilyScopeRows {
   native: unknown;
 }
 
+/** Explains a failed direct-replacement capability without granting one. */
+export function ownerFamilyCorrectionReadOnlyReason(rows: OwnerFamilyScopeRows): string | null {
+  if (eligibleOwnerFamilyCorrection(rows)) return null;
+  if (
+    rows.source.expiresAt !== null ||
+    rows.source.supersededById !== null ||
+    rows.relation.correctedByRelationId
+  )
+    return 'historical_source';
+  if (
+    rows.source.source !== 'knowledge-graph-owner' ||
+    rows.source.originTrust !== 'owner' ||
+    !rows.source.ownerConfirmed
+  )
+    return 'source_note';
+  if (
+    rows.sourceRelations.length !== 1 ||
+    rows.canonicalRelations.length !== 1 ||
+    rows.evidence.length !== 1
+  )
+    return 'shared_evidence';
+  if (!rows.sourcePrecisionLossless) return 'source_dates_unverified';
+  return 'source_unverified';
+}
+
 /** A selected row cannot hide canonical siblings or retire another source's evidence. */
 export function eligibleOwnerFamilyCorrection(rows: OwnerFamilyScopeRows): boolean {
   const { ownerId, relation, source, assertion, evidence, sourceRelations, canonicalRelations } =

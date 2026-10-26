@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { parseExactTimestamp } from './exact-timestamp.js';
+import { parseOwnerCorrection } from './owner-memory-correction.js';
 import { toolCallReceiptKeyId } from './tool-call-receipts.js';
 
 /**
@@ -1028,6 +1029,7 @@ export function validateMigrationReferences(
     if (record.table === 'skill_library_revisions')
       requireReference(record, 'agentId', 'agents', true);
     if (record.table === 'memories') {
+      parseOwnerCorrection(record.data.ownerCorrection, String(record.data.contentHash));
       requireReference(record, 'subjectContactId', 'contacts');
       requireReference(record, 'sourceTaskId', 'tasks');
       requireReference(record, 'goalId', 'goals');

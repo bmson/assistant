@@ -1868,3 +1868,61 @@ export async function getTaskDiscoveryPorts() {
     agentId: (await getAgent(getDb())).id,
   };
 }
+
+/** One exact note read, never a per-card provenance scan or an authoring call. */
+export async function loadOwnerMemoryEditorView(
+  memoryId: string,
+  formSessionScope: string | undefined,
+) {
+  const [
+    { readPostgresOwnerEditorIssuanceContext, readPostgresOwnerMemoryEditorSnapshot },
+    { readFirestoreOwnerEditorIssuanceContext, readFirestoreOwnerMemoryEditorSnapshot },
+    { buildOwnerMemoryEditorView },
+  ] = await Promise.all([
+    import('@assistant/db'),
+    import('@assistant/firestore'),
+    import('./owner-memory-editor-view'),
+  ]);
+  const config = loadConfig();
+  const enabled =
+    !config.ASSISTANT_RELEASE_WRITES_PAUSED &&
+    !config.RESTORE_REHEARSAL &&
+    !(config.PERSISTENCE_DRIVER !== 'firestore' && config.POSTGRES_SOURCE_WRITES_FENCED);
+  const finish = (
+    snapshot: NonNullable<Awaited<ReturnType<typeof readPostgresOwnerMemoryEditorSnapshot>>>,
+    context: Awaited<ReturnType<typeof readPostgresOwnerEditorIssuanceContext>>,
+  ) =>
+    buildOwnerMemoryEditorView({
+      snapshot,
+      context,
+      formSessionScope,
+      secret: config.AUTH_SECRET,
+      enabled,
+    });
+  if (config.PERSISTENCE_DRIVER !== 'firestore')
+    return withPostgresMemoryBrowseRead(async (tx) => {
+      const ownerId = await assertPostgresInstallationOwner(tx);
+      const snapshot = await readPostgresOwnerMemoryEditorSnapshot(tx, ownerId, memoryId);
+      if (!snapshot) return null;
+      const context = await readPostgresOwnerEditorIssuanceContext(tx, ownerId);
+      return finish(snapshot, context);
+    });
+  if (validateAgentPersistenceConfig(config).length)
+    throw new Error('Memory persistence is unavailable');
+  const store = getFirestoreInstallationStore();
+  return store.db.runTransaction(async (tx) => {
+    const snapshot = await readFirestoreOwnerMemoryEditorSnapshot(
+      store,
+      config.FIRESTORE_AGENT_ID,
+      memoryId,
+      tx,
+    );
+    if (!snapshot) return null;
+    const context = await readFirestoreOwnerEditorIssuanceContext(
+      store,
+      config.FIRESTORE_AGENT_ID,
+      tx,
+    );
+    return finish(snapshot, context);
+  });
+}

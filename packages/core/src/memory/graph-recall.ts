@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto';
 import {
   createPostgresGraphRecallRepository,
   type Db,
   postgresActiveGraphWhere,
 } from '@assistant/db';
 import type { GraphRecallRepository, GraphRelation as RelationRow } from '@assistant/persistence';
+import { validOwnerCorrection } from '@assistant/persistence';
 import { GRAPH_EXTRACTION_VERSION } from './knowledge-graph.js';
 import type { RecallSource } from './recall.js';
 import { createRecallBlock } from './recall-budget.js';
@@ -181,6 +183,11 @@ function graphPathSource(evidence: Array<{ row: RelationRow; hops: 1 | 2 }>): Re
       80,
     ),
     kind: 'knowledge_graph',
+    ...(rows.every((row) =>
+      validOwnerCorrection(row.sourceOwnerCorrection, row.sourceContentHash ?? ''),
+    )
+      ? { ownerCorrected: true as const }
+      : {}),
     hops: evidence.some((item) => item.hops === 2) ? 2 : 1,
     // A single assertion keeps its established identity. Multi-assertion paths
     // use every relation ID so hiding one neighbor path cannot hide another.
@@ -197,6 +204,12 @@ function graphPathSource(evidence: Array<{ row: RelationRow; hops: 1 | 2 }>): Re
         validUntil: row.validUntil,
         content: row.content,
         evidenceQuote: row.evidenceQuote,
+        ...(row.sourceOwnerCorrection != null
+          ? {
+              sourceOwnerCorrection: row.sourceOwnerCorrection,
+              sourceContentHash: row.sourceContentHash,
+            }
+          : {}),
       })),
     ),
     relevance: Math.max(...rows.map((row) => validSimilarity(row.similarity)), 0),
@@ -233,8 +246,8 @@ export async function recallKnowledgeGraph(
   });
   const now = new Date();
   const allowHistorical = asksForHistoricalGraphState(args.queryText);
-  const currentCandidates = candidates.filter((row) =>
-    graphIntervalEligible(row, now, allowHistorical),
+  const currentCandidates = candidates.filter(
+    (row) => graphIntervalEligible(row, now, allowHistorical) && graphBodyMatches(row),
   );
   const seeds = currentCandidates
     .filter((row) => validSimilarity(row.similarity) >= opts.minSimilarity)
@@ -267,8 +280,8 @@ export async function recallKnowledgeGraph(
     limit: opts.limit * 2,
     extractionVersion: GRAPH_EXTRACTION_VERSION,
   });
-  const intervalEligibleNeighbors = connectedRows.filter((row) =>
-    graphIntervalEligible(row, now, allowHistorical),
+  const intervalEligibleNeighbors = connectedRows.filter(
+    (row) => graphIntervalEligible(row, now, allowHistorical) && graphBodyMatches(row),
   );
   const neighborRows = intervalEligibleNeighbors;
 
@@ -295,7 +308,7 @@ export async function recallKnowledgeGraph(
 
   for (const seed of eligibleSeeds) {
     if (entries.length >= opts.limit) break;
-    const evidence = `Evidence: ${clip(seed.evidenceQuote ?? seed.content, opts.maxEvidenceChars)}.`;
+    const evidence = `${correctedEvidenceLabel(seed)}: ${clip(seed.evidenceQuote ?? seed.content, opts.maxEvidenceChars)}.`;
     await add(`[1 hop] ${relationPath(seed)}\n  ${evidence}`, [{ row: seed, hops: 1 }]);
   }
   for (const neighbor of neighborRows) {
@@ -309,8 +322,8 @@ export async function recallKnowledgeGraph(
     );
     if (!seed) continue;
     const evidence = [
-      `Evidence: ${clip(seed.evidenceQuote ?? seed.content, opts.maxEvidenceChars)}.`,
-      `Connected evidence: ${clip(neighbor.evidenceQuote ?? neighbor.content, opts.maxEvidenceChars)}.`,
+      `${correctedEvidenceLabel(seed)}: ${clip(seed.evidenceQuote ?? seed.content, opts.maxEvidenceChars)}.`,
+      `Connected ${correctedEvidenceLabel(neighbor).toLowerCase()}: ${clip(neighbor.evidenceQuote ?? neighbor.content, opts.maxEvidenceChars)}.`,
     ].join(' ');
     await add(`[2 hops] ${relationPath(seed)}; ${relationPath(neighbor)}\n  ${evidence}`, [
       { row: seed, hops: 1 },
@@ -385,4 +398,17 @@ export async function recallWithGraphFallback(options: {
     options.onHistoryError?.(error);
   }
   return { ...combineRecallBlocks(graph, history), graph, graphFailed, historyFailed, history };
+}
+
+function graphBodyMatches(row: RelationRow): boolean {
+  return (
+    row.sourceContentHash === undefined ||
+    createHash('sha256').update(row.content).digest('hex') === row.sourceContentHash
+  );
+}
+
+function correctedEvidenceLabel(row: RelationRow): string {
+  return validOwnerCorrection(row.sourceOwnerCorrection, row.sourceContentHash ?? '')
+    ? 'Owner-corrected saved note (linked source is provenance, not original document wording)'
+    : 'Evidence';
 }

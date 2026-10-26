@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { legacyKnowledgeMapDisplayPolicy } from '@assistant/application';
 import { afterEach, describe, expect, it } from 'vitest';
 import { FirestoreGraphRecallRepository } from './graph-recall.js';
@@ -10,6 +10,7 @@ const emulator = /^(?:127\.0\.0\.1|localhost):\d+$/.test(process.env.FIRESTORE_E
 const space = { provider: 'test', model: 'fixture', dimensions: 1536, revision: '1' };
 const now = new Date('2026-10-18T12:00:00Z');
 const filters = { query: '', kind: '', predicates: [], review: 'all' as const, sourceMemoryId: '' };
+const sourceContentHash = createHash('sha256').update('Anna lives in Oslo.').digest('hex');
 
 describe.skipIf(!emulator)('legacy map display compatibility', () => {
   const stores: ReturnType<typeof emulatorStore>[] = [];
@@ -50,7 +51,7 @@ describe.skipIf(!emulator)('legacy map display compatibility', () => {
         expiresAt: null,
         supersededById: null,
         subjectContactId: null,
-        contentHash: 'source-hash',
+        contentHash: sourceContentHash,
         embeddingSpace: embeddingSpaceKey(space),
         embedding: Array.from({ length: 1536 }, (_, index) => (index === 0 ? 0.1 : 0)),
         ownerConfirmed: false,
@@ -60,7 +61,7 @@ describe.skipIf(!emulator)('legacy map display compatibility', () => {
       store.doc('knowledgeGraphSources', memoryId).set({
         memoryId,
         status: 'ready',
-        contentHash: 'source-hash',
+        contentHash: sourceContentHash,
         subjectContactId: null,
         extractionVersion: version,
       }),
@@ -244,7 +245,7 @@ describe.skipIf(!emulator)('legacy map display compatibility', () => {
     expect((await f.map()).total).toBe(0);
     expect((await f.neighborhood()).total).toBe(0);
     await f.store.doc('knowledgeGraphEntities', f.anna).update({ label: 'Anna' });
-    await f.store.doc('memoryTombstones', 'source-hash').set({ erasedAt: now });
+    await f.store.doc('memoryTombstones', sourceContentHash).set({ erasedAt: now });
     expect((await f.map()).total).toBe(0);
     expect((await f.neighborhood()).total).toBe(0);
   });

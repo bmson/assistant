@@ -7,7 +7,10 @@ import {
   ownerEditorSnapshotRevision,
   type Records,
 } from '@assistant/persistence';
-import { ownerFamilyEditorProjection } from '@assistant/persistence/owner-family-scope';
+import {
+  ownerFamilyCorrectionReadOnlyReason,
+  ownerFamilyEditorProjection,
+} from '@assistant/persistence/owner-family-scope';
 import { type DocumentSnapshot, Timestamp, type Transaction } from '@google-cloud/firestore';
 import { assertConfiguredOwner } from './knowledge-graph-read.js';
 import { decodeMemoryRecord } from './memory-record.js';
@@ -414,6 +417,14 @@ export async function firestoreOwnerEditorViewSnapshot(
     ]);
     const correction = ownerFamilyEditorProjection(scope, entities, people);
     if (correction) result.corrections.push(correction);
+    else {
+      result.readOnlyCorrections ??= [];
+      result.readOnlyCorrections.push({
+        relationId: scope.relation.id,
+        sourceMemoryId: scope.source.id,
+        reason: ownerFamilyCorrectionReadOnlyReason(scope) ?? 'source_unverified',
+      });
+    }
   }
   return result;
 }

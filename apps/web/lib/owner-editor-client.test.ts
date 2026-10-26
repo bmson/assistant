@@ -56,13 +56,14 @@ function seededStorage() {
 }
 
 describe('owner editor client helpers', () => {
-  it('maps only the four commands to the two declared endpoints', () => {
+  it('maps only declared commands to their exact endpoints', () => {
     expect(ownerEditorRoute('create_person')).toBe('/api/people/editor');
     expect(ownerEditorRoute('update_person_identity')).toBe('/api/people/editor');
     expect(ownerEditorRoute('add_family_relationship')).toBe('/api/profile/knowledge/family');
     expect(ownerEditorRoute('correct_owner_family_relationship')).toBe(
       '/api/profile/knowledge/family',
     );
+    expect(ownerEditorRoute('correct_owner_memory')).toBe('/api/profile/knowledge/memory');
   });
 
   it('decodes complete authoritative replies and rejects empty or malformed fulfilled JSON', () => {
@@ -71,6 +72,34 @@ describe('owner editor client helpers', () => {
     expect(decodeOwnerEditorReply({ ...receipt(), requestHash: 'short' })).toBeNull();
     expect(
       decodeOwnerEditorReply({ ...receipt(), authority: 'unresolved', outcome: 'saved' }),
+    ).toBeNull();
+  });
+
+  it('accepts a memory correction receipt with only memoryId and rejects extra saved identities', () => {
+    const memoryReceipt = {
+      version: 1,
+      authority: 'operation_receipt',
+      command: 'correct_owner_memory',
+      operationId,
+      requestHash,
+      statusVersion: 3,
+      outcome: 'saved',
+      ids: { memoryId: '22222222-2222-4222-8222-222222222222' },
+      revision: 'c'.repeat(64),
+    };
+    expect(decodeOwnerEditorReply(memoryReceipt)).toMatchObject({
+      command: 'correct_owner_memory',
+      authority: 'operation_receipt',
+      ids: { memoryId: '22222222-2222-4222-8222-222222222222' },
+    });
+    expect(
+      decodeOwnerEditorReply({
+        ...memoryReceipt,
+        ids: {
+          memoryId: '22222222-2222-4222-8222-222222222222',
+          relationId: '33333333-3333-4333-8333-333333333333',
+        },
+      }),
     ).toBeNull();
   });
 

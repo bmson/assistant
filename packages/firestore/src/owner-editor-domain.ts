@@ -14,10 +14,16 @@ import {
   readFirestoreOwnerEditorFamily,
 } from './owner-editor-graph.js';
 import {
+  commitFirestoreOwnerMemoryCorrection,
+  readFirestoreOwnerMemoryEditorSnapshot,
+} from './owner-editor-memory.js';
+import {
   beginFirestoreOwnerEditorWrite,
   completeFirestoreOwnerEditorWrite,
+  readFirestoreOwnerEditorIssuanceContext,
 } from './owner-editor-repository.js';
 import { FirestoreOwnerKnowledgeGraphFactRepository } from './owner-knowledge-graph-fact.js';
+import { createFirestoreProfileMemoryCommandPersistence } from './profile-memory-commands.js';
 import { FirestoreProfilePeopleCommandRepository } from './profile-people-command.js';
 import type { InstallationStore } from './store.js';
 
@@ -31,6 +37,29 @@ export function createFirestoreOwnerEditorDomainStorage(
   const people = new FirestoreProfilePeopleCommandRepository(store, ownerId);
   return {
     graph,
+    memory: async (
+      expected: string,
+      id: string,
+      scope: import('@assistant/persistence').OwnerEditorScope,
+    ) => {
+      if (expected !== ownerId) throw new Error('Owner changed');
+      return store.db.runTransaction(async (tx) => {
+        const current = await readFirestoreOwnerEditorIssuanceContext(store, ownerId, tx);
+        if (
+          !current ||
+          current.epoch !== scope.epoch ||
+          current.privacyGeneration !== scope.privacyGeneration
+        )
+          return null;
+        return readFirestoreOwnerMemoryEditorSnapshot(store, ownerId, id, tx);
+      });
+    },
+    commitMemory: (
+      claim: OwnerEditorClaim,
+      prepared: import('./owner-editor-memory.js').PreparedFirestoreOwnerMemoryCorrection,
+      now: Date,
+    ) => commitFirestoreOwnerMemoryCorrection(store, embeddingSpace, claim, prepared, now),
+    memoryFollowup: createFirestoreProfileMemoryCommandPersistence(store, embeddingSpace),
     context: (expected: string) => {
       if (expected !== ownerId) throw new Error('Owner changed');
       return firestoreOwnerEditorContext(store, ownerId);

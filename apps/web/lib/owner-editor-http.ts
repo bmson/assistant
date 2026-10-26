@@ -2,6 +2,7 @@ import {
   OWNER_EDITOR_BODY_TIMEOUT_MS,
   OWNER_EDITOR_MAX_BODY_BYTES,
   ownerEditorApplyMatchesScope,
+  ownerEditorPath,
   parseOwnerEditorRequest,
 } from '@assistant/application/owner-editor-wire';
 import { ownerEditorRetired, ownerEditorUnknown } from '@assistant/persistence';
@@ -73,9 +74,9 @@ function rejection(
   );
 }
 
-/** Two exact adapters share guards, but there is no arbitrary action dispatch. */
+/** Exact adapters share guards, but there is no arbitrary action dispatch. */
 export function createOwnerEditorHttpHandlers(
-  path: '/api/people/editor' | '/api/profile/knowledge/family',
+  path: '/api/people/editor' | '/api/profile/knowledge/family' | '/api/profile/knowledge/memory',
   ports: OwnerEditorHttpPorts,
 ) {
   const now = ports.now ?? Date.now;
@@ -125,6 +126,8 @@ export function createOwnerEditorHttpHandlers(
     });
     if (checked.kind === 'invalid') return rejection('invalid_form_scope', 403);
     if (checked.kind === 'retired') return json(ownerEditorRetired(checked.scope));
+    if (ownerEditorPath(checked.scope.command) !== path)
+      return rejection('issuance_mismatch', 409, checked.scope);
     if (
       !write &&
       (url.searchParams.getAll('operation').length !== 1 ||

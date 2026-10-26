@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FirestoreGraphRecallRepository } from './graph-recall.js';
 import { FirestoreKnowledgeWorkspaceReadRepository } from './knowledge-workspace-read.js';
@@ -62,7 +62,10 @@ describe.skipIf(!emulator)('Firestore knowledge workspace reads', () => {
     });
   }
 
+  const bodyHashes = new Map<string, string>();
   function memory(id: string, content: string, patch: Record<string, unknown> = {}) {
+    const contentHash = createHash('sha256').update(content).digest('hex');
+    bodyHashes.set(id, contentHash);
     return store.doc('memories', id).set({
       id,
       agentId,
@@ -72,7 +75,7 @@ describe.skipIf(!emulator)('Firestore knowledge workspace reads', () => {
       expiresAt: null,
       embedding: Array.from({ length: 1536 }, (_, i) => (i === 0 ? 0.1 : 0)),
       embeddingSpace: embeddingSpaceKey(space),
-      contentHash: `hash-${id}`,
+      contentHash,
       subjectContactId: null,
       ownerConfirmed: false,
       lastConsolidatedAt: null,
@@ -86,7 +89,7 @@ describe.skipIf(!emulator)('Firestore knowledge workspace reads', () => {
     return store.doc('knowledgeGraphSources', memoryId).set({
       memoryId,
       status: 'ready',
-      contentHash: `hash-${memoryId}`,
+      contentHash: bodyHashes.get(memoryId),
       subjectContactId: null,
       extractionVersion: VERSION,
       ...patch,
@@ -468,6 +471,7 @@ describe.skipIf(!emulator)('Firestore knowledge workspace reads', () => {
     ['missing vector', { embedding: null }],
     ['wrong dimensions', { embedding: [0.1, 0.2] }],
     ['zero vector', { embedding: Array(1536).fill(0) }],
+    ['body/hash mismatch', { content: 'Altered body with stale graph extraction' }],
     ['superseded source', { supersededById: 'replacement' }],
     ['expired source', { expiresAt: new Date('2020-01-01T00:00:00Z') }],
     ['tombstoned source', {}],
@@ -475,11 +479,11 @@ describe.skipIf(!emulator)('Firestore knowledge workspace reads', () => {
     const ref = store.doc('memories', ids.memoryActive);
     const saved = (await ref.get()).data();
     if (!saved) throw new Error('Missing active fixture');
-    const tombstone = store.doc('memoryTombstones', `hash-${ids.memoryActive}`);
+    const tombstone = store.doc('memoryTombstones', String(saved.contentHash));
     try {
       if (Object.keys(patch).length) await ref.update(patch);
       if (label === 'tombstoned source')
-        await tombstone.set({ contentHash: `hash-${ids.memoryActive}` });
+        await tombstone.set({ contentHash: String(saved.contentHash) });
       const snapshot = await repository.snapshot({ extractionVersion: VERSION, now });
       const focus = await snapshot.focus(ids.anna);
       expect(focus?.relations.find((row) => row.id === ids.active)?.inRecall).toBe(false);

@@ -87,9 +87,13 @@ export function proxy(request: NextRequest) {
   // authenticates its owner before any configured-owner read.
   if (memoryBrowsePage && !memoryBrowseRead)
     return Response.json({ error: 'Memory browsing is read-only.' }, { status: 405 });
-  // These two adapters enforce owner, origin, session, signed issuance and
+  // These exact adapters enforce owner, origin, session, signed issuance and
   // transactional receipt authority themselves. No prefix/action dispatch.
-  if (path === '/api/people/editor' || path === '/api/profile/knowledge/family')
+  if (
+    path === '/api/people/editor' ||
+    path === '/api/profile/knowledge/family' ||
+    path === '/api/profile/knowledge/memory'
+  )
     return ['GET', 'POST'].includes(request.method)
       ? NextResponse.next()
       : Response.json(

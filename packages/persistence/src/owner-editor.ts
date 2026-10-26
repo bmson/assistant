@@ -1,9 +1,10 @@
-/** Portable contracts for the four owner-authored People/Family commands. */
+/** Portable contracts for owner-authored People, Family, and Memory commands. */
 export const OWNER_EDITOR_COMMANDS = [
   'create_person',
   'update_person_identity',
   'add_family_relationship',
   'correct_owner_family_relationship',
+  'correct_owner_memory',
 ] as const;
 export type OwnerEditorCommand = (typeof OWNER_EDITOR_COMMANDS)[number];
 export type OwnerEditorTiming = 'unspecified' | 'present' | 'past';
@@ -48,6 +49,13 @@ export type OwnerEditorApply = ApplyEnvelope &
         targetRelationId: string;
         expectedTargetRevision: string;
         replacement: OwnerEditorFamilyFields;
+      }
+    | {
+        command: 'correct_owner_memory';
+        memoryId: string;
+        expectedContentHash: string;
+        expectedMemoryRevision: string;
+        content: string;
       }
   );
 /** Resolves a stored request; this body cannot prepare or change a draft. */

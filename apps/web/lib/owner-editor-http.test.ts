@@ -36,13 +36,19 @@ const third = '55555555-5555-4555-8555-555555555555';
 const epoch = '44444444-4444-4444-8444-444444444444';
 const hash = 'a'.repeat(64);
 const session = { ownerId: owner, formSessionScope: 'offline_http_form_session' };
-const paths = { people: '/api/people/editor', family: '/api/profile/knowledge/family' } as const;
+const paths = {
+  people: '/api/people/editor',
+  family: '/api/profile/knowledge/family',
+  memory: '/api/profile/knowledge/memory',
+} as const;
 function fixture(command: OwnerEditorCommand = 'create_person') {
   let clock = NOW;
   const path =
     command === 'create_person' || command === 'update_person_identity'
       ? paths.people
-      : paths.family;
+      : command === 'correct_owner_memory'
+        ? paths.memory
+        : paths.family;
   const grant = issueOwnerEditorFormGrant({
     context: { ownerId: owner, epoch, privacyGeneration: 'fixture-generation' },
     session,
@@ -70,7 +76,9 @@ function fixture(command: OwnerEditorCommand = 'create_person') {
     ids:
       command === 'create_person' || command === 'update_person_identity'
         ? { contactId: target }
-        : { relationId: target, memoryId: other, assertionId: third },
+        : command === 'correct_owner_memory'
+          ? { memoryId: target }
+          : { relationId: target, memoryId: other, assertionId: third },
     revision: 'b'.repeat(64),
   };
   const lookup = vi
@@ -130,15 +138,24 @@ function fixture(command: OwnerEditorCommand = 'create_person') {
             contactId: target,
             expectedContactRevision: hash,
           }
-        : command === 'add_family_relationship'
-          ? { ...envelope, command, ...fields }
-          : {
+        : command === 'correct_owner_memory'
+          ? {
               ...envelope,
               command,
-              targetRelationId: target,
-              expectedTargetRevision: hash,
-              replacement: fields,
-            };
+              memoryId: target,
+              expectedContentHash: hash,
+              expectedMemoryRevision: 'd'.repeat(64),
+              content: 'A corrected saved note',
+            }
+          : command === 'add_family_relationship'
+            ? { ...envelope, command, ...fields }
+            : {
+                ...envelope,
+                command,
+                targetRelationId: target,
+                expectedTargetRevision: hash,
+                replacement: fields,
+              };
   function request(
     method: string,
     options: {
@@ -237,6 +254,7 @@ describe('actual two HTTP factories, actual crypto/parser/body guards, offline b
     'update_person_identity',
     'add_family_relationship',
     'correct_owner_family_relationship',
+    'correct_owner_memory',
   ] as const)(
     'dispatches exactly %s with verified owner scope on its declared route',
     async (command) => {
@@ -473,8 +491,15 @@ describe('actual two HTTP factories, actual crypto/parser/body guards, offline b
   it('valid but wrong command route is rejected by actual wire mapping', async () => {
     const f = fixture();
     const handlers = createOwnerEditorHttpHandlers(paths.family, f.ports);
-    await rejection(await handlers.POST(f.request('POST', { pathname: paths.family })), 422);
+    await rejection(await handlers.POST(f.request('POST', { pathname: paths.family })), 409);
     assertNoDomain(f);
+    const memory = fixture('correct_owner_memory');
+    const memoryOnFamily = createOwnerEditorHttpHandlers(paths.family, memory.ports);
+    await rejection(
+      await memoryOnFamily.POST(memory.request('POST', { pathname: paths.family })),
+      409,
+    );
+    assertNoDomain(memory);
   });
   it.each(['HEAD', 'PUT', 'DELETE'])(
     'unsupported %s method rejects before auth/resolution',
@@ -503,6 +528,25 @@ describe('actual two HTTP factories, actual crypto/parser/body guards, offline b
       assertNoDomain(f);
     },
   );
+  it.each([
+    ['add_family_relationship', paths.memory],
+    ['correct_owner_memory', paths.family],
+  ] as const)(
+    'GET rejects a valid signed handle on the wrong command route: %s',
+    async (command, wrongPath) => {
+      const f = fixture(command);
+      const handlers = createOwnerEditorHttpHandlers(wrongPath, f.ports);
+      await rejection(await handlers.GET(f.request('GET', { pathname: wrongPath })), 409);
+      expect(f.ports.withBackend).not.toHaveBeenCalled();
+      expect(f.lookup).not.toHaveBeenCalled();
+    },
+  );
+  it('GET permits a valid memory correction handle on its originally issued route', async () => {
+    const f = fixture('correct_owner_memory');
+    const response = await f.handlers().GET(f.request('GET'));
+    expect(response.status).toBe(202);
+    expect(f.lookup).toHaveBeenCalledExactlyOnceWith(f.scope, new Date(NOW));
+  });
   it('POST query parameters are rejected rather than selecting another operation', async () => {
     const f = fixture();
     await rejection(await f.handlers().POST(f.request('POST', { query: '?operation=other' })), 400);

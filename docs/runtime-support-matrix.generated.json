@@ -5,13 +5,13 @@
     "packages/config/src/index.ts": "d65963a4a350f41242da86910f085d60909f13b584aa710e4a0423f60437fe9b",
     "apps/agent/src/deps.ts": "fb30df8600bbcf24da0d5cfa9ef1c92e28700b663429cdbbe37d65ecee0ea655",
     "apps/agent/src/index.ts": "6da57b60f853ca6622142a12b70bb31a73e8155eac30dd7d905218c19ca2fd56",
-    "apps/web/lib/server.ts": "6cfaec6552ebcf2e1740bc1330032a06c79d35dd7f2b60e26c74685eb68925cf",
-    "apps/web/proxy.ts": "bddeea767999c8d0ffb150c17ef5bc8aa218ec3a512aa5cb576d35b049d5262e",
-    "packages/db/drizzle/meta/_journal.json": "7123c28799651bb2cc37bf6a0dfe052f73cab74edf975a944170df22f14d5bbd",
-    "infra/gcp/release-contracts.json": "7d1af80d6e9b4b7493e08b1a4cb19b078c883aede25382a9121ca68c609f7aa6"
+    "apps/web/lib/server.ts": "47c3906445e13f73f70ee9c341aef7d3279b8a50fd8e120a088f4528fdd57c61",
+    "apps/web/proxy.ts": "d6fd945d3b9d6c7e258787bf474bfc677f27066525b021310ebab69cb7063a1a",
+    "packages/db/drizzle/meta/_journal.json": "8e23e078a6747ca45e1312e5bb7053ded78d9668a964646598b108f57ba05e42",
+    "infra/gcp/release-contracts.json": "b773e0e1f157bcca050474307bde62ee5c97a892de4495026a8f38a76da97ffa"
   },
-  "latestPostgresMigration": "0130_strange_aqueduct",
-  "postgresSchemaVersion": 130,
+  "latestPostgresMigration": "0131_owner_memory_correction",
+  "postgresSchemaVersion": 131,
   "releaseContracts": {
     "agent": {
       "apiContract": 1,
@@ -20,8 +20,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 130,
-        "max": 130
+        "min": 131,
+        "max": 131
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -32,8 +32,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 130,
-        "max": 130
+        "min": 131,
+        "max": 131
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -45,7 +45,7 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 130
+        "max": 131
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -57,7 +57,7 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 130
+        "max": 131
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -69,13 +69,13 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 130
+        "max": 131
       },
       "currentPostgresSchemaCompatible": true
     }
   },
   "agentWebSchemaCompatible": true,
-  "webApiRouteCount": 98,
+  "webApiRouteCount": 99,
   "routes": {
     "apps/web/app/api/audit/[id]/route.ts": {
       "methods": ["GET"],
@@ -448,6 +448,10 @@
     "apps/web/app/api/profile/knowledge/family/route.ts": {
       "methods": ["GET", "POST"],
       "sha256": "dfafb26dd6a0fc306da9acf4fc03cdc1589c0325c0dcafa7135216b77533eeb6"
+    },
+    "apps/web/app/api/profile/knowledge/memory/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "39b84bbfcf8a754910e592646c602e1c22679548548fabbaabbf9fbbbc7ba231"
     },
     "apps/web/app/api/profile-export/route.ts": {
       "methods": ["GET"],

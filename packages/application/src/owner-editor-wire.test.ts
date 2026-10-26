@@ -1,14 +1,21 @@
 import type { OwnerEditorApply } from '@assistant/persistence';
 import { describe, expect, it } from 'vitest';
 import { ownerEditorRequestHash } from './owner-editor-hash.js';
-import { isOwnerEditorCivilDay, parseOwnerEditorRequest } from './owner-editor-wire.js';
+import {
+  isOwnerEditorCivilDay,
+  ownerEditorApplyMatchesScope,
+  ownerEditorPath,
+  parseOwnerEditorRequest,
+} from './owner-editor-wire.js';
 
 const people = '/api/people/editor';
 const family = '/api/profile/knowledge/family';
+const memoryPath = '/api/profile/knowledge/memory';
 const operationId = '00000000-0000-4000-8000-000000000001';
 const subject = '00000000-0000-4000-8000-000000000002';
 const object = '00000000-0000-4000-8000-000000000003';
 const revision = 'a'.repeat(64);
+const memoryId = '00000000-0000-4000-8000-000000000004';
 const add = {
   version: 1,
   intent: 'apply',
@@ -26,6 +33,72 @@ const add = {
 };
 
 describe('owner editor civil meaning and strict wire boundary', () => {
+  const memoryApply = {
+    version: 1,
+    intent: 'apply',
+    command: 'correct_owner_memory',
+    operationId,
+    memoryId,
+    expectedContentHash: revision,
+    expectedMemoryRevision: 'b'.repeat(64),
+    content: '  Updated saved note  ',
+  };
+
+  it('strictly binds a trimmed saved-note correction and both displayed revisions', () => {
+    const parsed = parseOwnerEditorRequest(memoryApply, memoryPath);
+    expect(parsed.ok).toBe(true);
+    if (
+      parsed.ok &&
+      parsed.request.intent === 'apply' &&
+      parsed.request.command === 'correct_owner_memory'
+    ) {
+      expect(parsed.request).toMatchObject({
+        command: 'correct_owner_memory',
+        memoryId,
+        expectedContentHash: revision,
+        expectedMemoryRevision: 'b'.repeat(64),
+        content: 'Updated saved note',
+      });
+      expect(ownerEditorRequestHash(parsed.request)).not.toBe(
+        ownerEditorRequestHash({ ...parsed.request, content: 'Different note' }),
+      );
+      const scope = {
+        ownerId: subject,
+        sessionDigest: revision,
+        epoch: object,
+        privacyGeneration: null,
+        command: 'correct_owner_memory' as const,
+        operationId,
+        targetId: memoryId,
+        nonce: object,
+        issuedAt: 1,
+        expiresAt: 2,
+      };
+      expect(ownerEditorPath(parsed.request.command)).toBe(memoryPath);
+      expect(ownerEditorApplyMatchesScope(parsed.request, scope)).toBe(true);
+      expect(ownerEditorApplyMatchesScope(parsed.request, { ...scope, targetId: object })).toBe(
+        false,
+      );
+    }
+    expect(parseOwnerEditorRequest(memoryApply, family).ok).toBe(false);
+    expect(parseOwnerEditorRequest({ ...memoryApply, unexpected: true }, memoryPath).ok).toBe(
+      false,
+    );
+    expect(parseOwnerEditorRequest({ ...memoryApply, memoryId: object }, memoryPath).ok).toBe(true);
+    expect(
+      parseOwnerEditorRequest({ ...memoryApply, expectedContentHash: 'short' }, memoryPath).ok,
+    ).toBe(false);
+    expect(
+      parseOwnerEditorRequest({ ...memoryApply, expectedMemoryRevision: 'short' }, memoryPath).ok,
+    ).toBe(false);
+    expect(parseOwnerEditorRequest({ ...memoryApply, content: '  x  ' }, memoryPath).ok).toBe(
+      false,
+    );
+    expect(
+      parseOwnerEditorRequest({ ...memoryApply, content: ` ${'x'.repeat(4_001)} ` }, memoryPath).ok,
+    ).toBe(false);
+  });
+
   it.each([
     ['2000-02-29', true],
     ['1900-02-29', false],

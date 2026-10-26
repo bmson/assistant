@@ -5,6 +5,7 @@ import type {
   EmailContentProvenanceSnapshot,
   ImportArchiveDiagnostics,
   ImportUnitProvenance,
+  OwnerCorrection,
   OwnerEditorCommand,
   OwnerEditorTerminalResult,
 } from '@assistant/persistence';
@@ -74,7 +75,7 @@ export const ownerEditorOperations = pgTable(
     ),
     check(
       'owner_editor_operation_command',
-      sql`${t.command} IN ('create_person','update_person_identity','add_family_relationship','correct_owner_family_relationship')`,
+      sql`${t.command} IN ('create_person','update_person_identity','add_family_relationship','correct_owner_family_relationship','correct_owner_memory')`,
     ),
     check(
       'owner_editor_operation_state',
@@ -1158,6 +1159,7 @@ export const memories = pgTable(
     kind: text('kind').notNull(),
     content: text('content').notNull(),
     contentHash: text('content_hash').notNull().unique(),
+    ownerCorrection: jsonb('owner_correction').$type<OwnerCorrection>(),
     embedding: vector('embedding', { dimensions: 1536 }),
     /** Provider/model/width revision for the stored vector; null means legacy/unknown. */
     embeddingSpaceKey: text('embedding_space_key'),

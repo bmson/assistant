@@ -48,4 +48,5 @@ export interface OwnerEditorPeopleReadSnapshot {
     revision: string;
   } | null;
   corrections: import('./owner-editor.js').OwnerEditorCorrectionEligibility[];
+  readOnlyCorrections?: { relationId: string; sourceMemoryId: string; reason: string }[];
 }
