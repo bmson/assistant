@@ -3239,6 +3239,340 @@ final class NativeVisualReviewTests: XCTestCase {
         )
     }
 
+    // MARK: Connection safe-area source fixtures (two selected originals; no matrix entries)
+#if DEBUG
+    @MainActor
+    private final class ConnectionLayoutRecorder {
+        var frames: [ConnectionGeometryElement: CGRect] = [:]
+        func record(_ sample: ConnectionGeometrySample) { frames[sample.element] = sample.frame }
+    }
+
+    @MainActor
+    private final class ConnectionEvidenceLedger {
+        private(set) var keys: Set<String> = []
+        private(set) var bytes = 0
+        private let allowed: Set<String> = ["connection-root-normal-initial", "connection-root-AX3-long-error"]
+
+        func capture(_ window: UIWindow, key: String, test: NativeVisualReviewTests) throws {
+            guard allowed.contains(key), !keys.contains(key), keys.count < 2 else {
+                throw NSError(domain: "ConnectionEvidenceCap", code: 1)
+            }
+            var rendered = false
+            let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                rendered = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            }
+            guard rendered, let png = image.pngData(), !png.isEmpty,
+                  png.count <= 8 * 1024 * 1024, bytes + png.count <= 16 * 1024 * 1024 else {
+                throw NSError(domain: "ConnectionEvidenceCap", code: 2)
+            }
+            keys.insert(key)
+            bytes += png.count
+            let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+            attachment.name = key
+            attachment.lifetime = .keepAlways
+            test.add(attachment)
+        }
+
+        func finish() {
+            XCTAssertEqual(keys, allowed, "Only the two selected existing mounts produce original images")
+            print("Connection selected originals: count=\(keys.count), encodedBytes=\(bytes); xcresult overhead not included")
+        }
+    }
+
+    @MainActor
+    private final class ConnectionRecordingSurfaces: AppSystemSurfaces {
+        var operations: [String] = []
+        func ensure(agentName: String, thought: AssistantThought, detail: String, pendingCount: Int) async { operations.append("ensure") }
+        func start(agentName: String, thought: AssistantThought, detail: String, pendingCount: Int) async { operations.append("start") }
+        func update(thought: AssistantThought, detail: String, pendingCount: Int) async { operations.append("update") }
+        func needsAttention(agentName: String, detail: String, pendingCount: Int) async { operations.append("needsAttention") }
+        func finish(thought: AssistantThought, detail: String, succeeded: Bool) async { operations.append("finish") }
+        func dismiss() async { operations.append("dismiss") }
+        func updateBadge(_ count: Int) async { operations.append("badge") }
+    }
+
+    @MainActor
+    private func connectionDescendants<T: UIView>(_ view: UIView, as type: T.Type) -> [T] {
+        ((view as? T).map { [$0] } ?? []) + view.subviews.flatMap { connectionDescendants($0, as: type) }
+    }
+
+    @MainActor
+    private func settleConnection(
+        window: UIWindow,
+        host: UIViewController,
+        recorder: ConnectionLayoutRecorder,
+        required: Set<ConnectionGeometryElement>
+    ) async throws {
+        var previous: [ConnectionGeometryElement: CGRect] = [:]
+        var stable = 0
+        for _ in 0..<40 {
+            try Task.checkCancellation()
+            host.view.setNeedsLayout()
+            window.layoutIfNeeded()
+            host.view.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(16))
+            let current = recorder.frames.filter { required.contains($0.key) }
+            if current.count == required.count && current == previous { stable += 1 }
+            else { stable = 0 }
+            if stable >= 3 { return }
+            previous = current
+        }
+        XCTFail("Connection geometry did not settle within 40 display opportunities; missing \(required.subtracting(recorder.frames.keys))")
+        throw NSError(domain: "ConnectionLayoutFixture", code: 1)
+    }
+
+    @MainActor
+    private func assertConnectionRect(_ frame: CGRect, inside safe: CGRect, name: String) {
+        XCTAssertTrue([frame.minX, frame.minY, frame.maxX, frame.maxY].allSatisfy { $0.isFinite }, name)
+        XCTAssertGreaterThan(frame.width, 0, name)
+        XCTAssertGreaterThan(frame.height, 0, name)
+        XCTAssertGreaterThanOrEqual(frame.minX, safe.minX - 1, "\(name) leading edge")
+        XCTAssertGreaterThanOrEqual(frame.minY, safe.minY - 1, "\(name) top edge")
+        XCTAssertLessThanOrEqual(frame.maxX, safe.maxX + 1, "\(name) trailing edge")
+        XCTAssertLessThanOrEqual(frame.maxY, safe.maxY + 1, "\(name) bottom edge")
+    }
+
+    @MainActor
+    private func revealConnectionElement(
+        _ element: ConnectionGeometryElement,
+        window: UIWindow,
+        host: UIViewController,
+        scroll: UIScrollView,
+        recorder: ConnectionLayoutRecorder,
+        required: Set<ConnectionGeometryElement>
+    ) async throws {
+        let frame = try XCTUnwrap(recorder.frames[element], "Missing production geometry: \(element)")
+        let viewport = window.safeAreaLayoutGuide.layoutFrame.intersection(scroll.convert(scroll.bounds, to: window))
+        XCTAssertGreaterThan(viewport.height, 0)
+        let minimum = -scroll.adjustedContentInset.top
+        let maximum = max(minimum, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+        let desired = scroll.contentOffset.y + frame.midY - viewport.midY
+        scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: min(maximum, max(minimum, desired))), animated: false)
+        try await settleConnection(window: window, host: host, recorder: recorder, required: required)
+        let visible = try XCTUnwrap(recorder.frames[element])
+        assertConnectionRect(visible, inside: window.safeAreaLayoutGuide.layoutFrame, name: element.rawValue)
+        assertConnectionRect(visible, inside: viewport, name: "\(element.rawValue) scroll viewport")
+    }
+
+    @MainActor
+    func testConnectionRootAndSettingsRespectActualWindowSafeAreaAtNormalAndAX3() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        // The fixture uses the allocated simulator's actual portrait window. It
+        // does not manufacture a notch inset or infer a hardware model from width.
+        XCTAssertGreaterThan(scene.coordinateSpace.bounds.height, scene.coordinateSpace.bounds.width)
+        let evidence = ConnectionEvidenceLedger()
+        defer { evidence.finish() }
+        for onboarding in [true, false] {
+            for size in [DynamicTypeSize.large, .accessibility3] {
+                try await withConnectionLayoutMount(scene: scene, onboarding: onboarding, size: size, evidence: evidence)
+            }
+        }
+    }
+
+    @MainActor
+    private func withConnectionLayoutMount(scene: UIWindowScene, onboarding: Bool, size: DynamicTypeSize, evidence: ConnectionEvidenceLedger) async throws {
+        NativeReviewProtocol.install([:])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeReviewProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        guard NotificationManager.shared.pendingDestination == nil else {
+            XCTFail("Connection fixture requires an empty notification destination; it must not consume another test's work")
+            throw NSError(domain: "ConnectionLayoutFixture", code: 2)
+        }
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"), session: session)
+        let suite = "assistant.connection-safe-area.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        let previousApprovalHandler = NotificationManager.shared.approvalDecisionHandler
+        let previousDeviceTokenHandler = NotificationManager.shared.deviceTokenHandler
+        let surfaces = ConnectionRecordingSurfaces()
+        var tokenWrites = 0
+        let model = AppModel(
+            apiClient: client, defaults: defaults,
+            storeConnectionToken: { _ in tokenWrites += 1; XCTFail("Layout must never save a connection key") },
+            enqueueAutomaticSpeech: { _ in XCTFail("No speech in connection layout fixture") },
+            scheduleLocalNotification: { _, _, _, _, _, _ in XCTFail("No notification in connection layout fixture"); return false },
+            systemSurfaces: surfaces,
+            captureCurrentPlace: { nil }
+        )
+        XCTAssertNil(model.bootstrap)
+        XCTAssertFalse(model.hasSavedConnection)
+        XCTAssertFalse(model.isLoading)
+        let hasLongError = onboarding && size == .accessibility3
+        let syntheticError = "Offline layout fixture: the assistant server could not be reached. Check the server address and this device’s connection, then review the access key before trying again. Nothing was submitted by this test. This deliberately long explanation must remain readable as the text size grows."
+        if hasLongError { model.errorMessage = syntheticError }
+        let recorder = ConnectionLayoutRecorder()
+        let content: AnyView = onboarding
+            ? AnyView(RootView())
+            : AnyView(NavigationStack { ConnectionView(isOnboarding: false, showsDoneButton: true) })
+        let host = UIHostingController(rootView: AnyView(content
+            .environment(model)
+            .environment(\.connectionGeometryReporter, ConnectionGeometryReporter(report: { recorder.record($0) }))
+            .environment(\.dynamicTypeSize, size)
+            .environment(\.scenePhase, .inactive)
+            .transaction { $0.animation = nil; $0.disablesAnimations = true }))
+        let previousWindow = scene.keyWindow
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.overrideUserInterfaceStyle = .light
+        var selectedScroll: UIScrollView?
+        var originalOffset: CGPoint?
+        defer {
+            window.endEditing(true)
+            if let selectedScroll, let originalOffset { selectedScroll.setContentOffset(originalOffset, animated: false) }
+            model.scenePhaseDidChange(SwiftUI.ScenePhase.background)
+            window.isHidden = true
+            window.rootViewController = nil
+            previousWindow?.makeKey()
+            NotificationManager.shared.approvalDecisionHandler = previousApprovalHandler
+            NotificationManager.shared.deviceTokenHandler = previousDeviceTokenHandler
+            session.invalidateAndCancel()
+            defaults.removePersistentDomain(forName: suite)
+            XCTAssertEqual(tokenWrites, 0)
+            XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+            XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+        }
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        var required: Set<ConnectionGeometryElement> = onboarding
+            ? [.rootAvailable, .scrollViewport, .scrollBody, .heading, .form, .serverField, .keyField, .primary]
+            : [.scrollViewport, .scrollBody, .form, .serverField, .keyField, .primary]
+        if hasLongError { required.insert(.error) }
+        try await settleConnection(window: window, host: host, recorder: recorder, required: required)
+        let viewport = try XCTUnwrap(recorder.frames[.scrollViewport])
+        let scroll = try XCTUnwrap(connectionDescendants(window, as: UIScrollView.self)
+            .filter { !$0.isHidden && $0.bounds.height > 0 }
+            .max { left, right in
+                left.convert(left.bounds, to: window).intersection(viewport).height < right.convert(right.bounds, to: window).intersection(viewport).height
+            })
+        selectedScroll = scroll
+        originalOffset = scroll.contentOffset
+        let windowSafe = window.safeAreaLayoutGuide.layoutFrame
+        XCTAssertGreaterThan(windowSafe.height, 0)
+        XCTAssertEqual(windowSafe.minY, window.bounds.minY + window.safeAreaInsets.top, accuracy: 1)
+        if onboarding {
+            let root = try XCTUnwrap(recorder.frames[.rootAvailable])
+            XCTAssertEqual(root.minY, windowSafe.minY, accuracy: 1, "Root must start at actual window safe-area top")
+            // Assert the initial unscrolled production layout before any test
+            // reveal can repair a heading that began under the status area.
+            XCTAssertEqual(viewport.minY, root.minY, accuracy: 1, "Initial viewport inherits the actual root safe-area top")
+            let initialHeading = try XCTUnwrap(recorder.frames[.heading])
+            XCTAssertEqual(initialHeading.minY, root.minY + 24, accuracy: 1, "Initial heading uses the designed 24pt content gap once")
+            assertConnectionRect(initialHeading, inside: windowSafe, name: "Initial unscrolled heading")
+            if size == .large { try evidence.capture(window, key: "connection-root-normal-initial", test: self) }
+            try await revealConnectionElement(.heading, window: window, host: host, scroll: scroll, recorder: recorder, required: required)
+        } else {
+            let navigation = try XCTUnwrap(connectionDescendants(window, as: UINavigationBar.self).first { !$0.isHidden })
+            XCTAssertEqual(navigation.topItem?.title, "Connection")
+            assertConnectionRect(navigation.convert(navigation.bounds, to: window), inside: windowSafe, name: "Actual settings navigation heading")
+        }
+        let form = try XCTUnwrap(recorder.frames[.form])
+        let actualViewport = windowSafe.intersection(scroll.convert(scroll.bounds, to: window))
+        XCTAssertTrue([form.minX, form.minY, form.maxX, form.maxY].allSatisfy { $0.isFinite })
+        XCTAssertGreaterThan(form.width, 0)
+        XCTAssertGreaterThan(form.height, 0)
+        XCTAssertGreaterThanOrEqual(form.minX, actualViewport.minX - 1)
+        XCTAssertLessThanOrEqual(form.maxX, actualViewport.maxX + 1)
+        if form.height <= actualViewport.height {
+            try await revealConnectionElement(.form, window: window, host: host, scroll: scroll, recorder: recorder, required: required)
+        } else {
+            // An AX card may legitimately wrap beyond one viewport. Preserve
+            // all text and prove each real field remains wholly reachable.
+            print("Connection card legitimately exceeds viewport: cardHeight=\(form.height), viewportHeight=\(actualViewport.height), AX=\(size.isAccessibilitySize)")
+        }
+        for element in [ConnectionGeometryElement.serverField, .keyField, .primary] {
+            try await revealConnectionElement(element, window: window, host: host, scroll: scroll, recorder: recorder, required: required)
+        }
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(recorder.frames[.primary]).height, 48)
+        if hasLongError {
+            XCTAssertEqual(model.errorMessage, syntheticError)
+            let error = try XCTUnwrap(recorder.frames[.error])
+            XCTAssertTrue([error.minX, error.minY, error.maxX, error.maxY].allSatisfy { $0.isFinite })
+            XCTAssertGreaterThan(error.width, 0)
+            XCTAssertGreaterThanOrEqual(error.minX, actualViewport.minX - 1)
+            XCTAssertLessThanOrEqual(error.maxX, actualViewport.maxX + 1)
+            // Match the production subheadline style at SwiftUI AX3's UIKit
+            // category. Subtract its actual 14pt-per-edge error padding before
+            // comparing with a single font line; this is allocation evidence,
+            // not terminal-glyph or complete-text rendering proof.
+            let font = UIFont.preferredFont(forTextStyle: .subheadline,
+                compatibleWith: UITraitCollection(preferredContentSizeCategory: .accessibilityExtraLarge))
+            XCTAssertGreaterThan(error.height - 28, font.lineHeight)
+            if error.height <= actualViewport.height {
+                try await revealConnectionElement(.error, window: window, host: host, scroll: scroll, recorder: recorder, required: required)
+            } else {
+                print("Connection AX3 error exceeds viewport: original shows only current scroll position; full explanation requires scrolling")
+            }
+            // A single original cannot promise the entire oversized card,
+            // error and button simultaneously. Individual control reachability
+            // was asserted above; report the actual visible context explicitly.
+            let visible = windowSafe.intersection(scroll.convert(scroll.bounds, to: window))
+            let names: [ConnectionGeometryElement] = [.form, .serverField, .keyField, .error, .primary]
+            print("Connection AX3 original visible element intersections=\(names.filter { recorder.frames[$0]?.intersects(visible) == true }.map(\.rawValue)); whole-source glyph coverage not inferred")
+            try evidence.capture(window, key: "connection-root-AX3-long-error", test: self)
+        }
+        // One explicit safe-area perturbation, only on the actual RootView normal
+        // mount. The expected shift comes from UIKit's measured hosting guide.
+        if onboarding && size == .large {
+            scroll.setContentOffset(CGPoint(x: 0, y: -scroll.adjustedContentInset.top), animated: false)
+            try await settleConnection(window: window, host: host, recorder: recorder, required: required)
+            let headingBefore = try XCTUnwrap(recorder.frames[.heading])
+            let hostTopBefore = host.view.safeAreaLayoutGuide.layoutFrame.minY
+            host.additionalSafeAreaInsets.top = 19
+            try await settleConnection(window: window, host: host, recorder: recorder, required: required)
+            let delta = host.view.safeAreaLayoutGuide.layoutFrame.minY - hostTopBefore
+            XCTAssertEqual(delta, 19, accuracy: 1)
+            XCTAssertEqual(try XCTUnwrap(recorder.frames[.rootAvailable]).minY - windowSafe.minY, delta, accuracy: 1)
+            XCTAssertEqual(try XCTUnwrap(recorder.frames[.heading]).minY - headingBefore.minY, delta, accuracy: 1, "Safe-area delta must be applied once")
+            host.additionalSafeAreaInsets = UIEdgeInsets.zero
+            try await settleConnection(window: window, host: host, recorder: recorder, required: required)
+            try await assertConnectionNativeInputBehavior(window: window, host: host, recorder: recorder, required: required)
+        }
+        XCTAssertNil(model.bootstrap, "Layout never authenticates or submits the form")
+        XCTAssertFalse(model.isLoading)
+        print("Connection safe-area source fixture: onboarding=\(onboarding), AX=\(size.isAccessibilitySize), windowInsets=\(window.safeAreaInsets), safeFrame=\(windowSafe); selectedOriginalsRetained=\(evidence.keys.count)")
+    }
+
+    @MainActor
+    private func assertConnectionNativeInputBehavior(window: UIWindow, host: UIViewController, recorder: ConnectionLayoutRecorder, required: Set<ConnectionGeometryElement>) async throws {
+        let fields = connectionDescendants(window, as: UITextField.self)
+        let server = try XCTUnwrap(fields.first { !$0.isSecureTextEntry && $0.keyboardType == .URL })
+        let key = try XCTUnwrap(fields.first { $0.isSecureTextEntry })
+        XCTAssertEqual(server.textContentType, .URL)
+        XCTAssertEqual(server.returnKeyType, .next)
+        XCTAssertEqual(server.autocapitalizationType, .none)
+        XCTAssertEqual(server.autocorrectionType, .no)
+        XCTAssertEqual(key.textContentType, .password)
+        XCTAssertEqual(key.returnKeyType, .go)
+        XCTAssertEqual(key.autocapitalizationType, .none)
+        XCTAssertEqual(key.autocorrectionType, .no)
+        XCTAssertTrue(server.becomeFirstResponder())
+        XCTAssertTrue(server.isFirstResponder)
+        XCTAssertTrue(key.becomeFirstResponder())
+        XCTAssertTrue(key.isFirstResponder)
+        XCTAssertFalse(server.isFirstResponder)
+        // Give a real software keyboard up to 24 display opportunities. No
+        // fabricated frame and no programmatic scroll repairs the focused field.
+        for _ in 0..<24 {
+            try await Task.sleep(for: .milliseconds(16))
+            window.layoutIfNeeded()
+            if window.keyboardLayoutGuide.layoutFrame.height > window.safeAreaInsets.bottom + 1 { break }
+        }
+        try await settleConnection(window: window, host: host, recorder: recorder, required: required)
+        let keyboard = window.keyboardLayoutGuide.layoutFrame
+        let observed = keyboard.height > window.safeAreaInsets.bottom + 1 && keyboard.minY < window.safeAreaLayoutGuide.layoutFrame.maxY - 1
+        print("Connection native keyboard observed=\(observed), guide=\(keyboard); absence is NOT viewport-avoidance proof")
+        if observed {
+            XCTAssertTrue(key.isFirstResponder)
+            XCTAssertLessThanOrEqual(key.convert(key.bounds, to: window).maxY, keyboard.minY + 1, "Native keyboard avoidance must reveal the focused key field without a test scroll")
+            XCTAssertGreaterThanOrEqual(key.convert(key.bounds, to: window).minY, window.safeAreaLayoutGuide.layoutFrame.minY - 1)
+        }
+        // Never sends .editingDidEndOnExit / .go: no connection or keychain write.
+        window.endEditing(true)
+    }
+#endif
+
     private struct Page {
         let name: String
         var ownsNavigation = false
