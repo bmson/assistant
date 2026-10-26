@@ -47,7 +47,6 @@ describe.each(['firestore', 'postgres'])('mobile administration in %s mode', (dr
       '/',
       '/chat/not-a-conversation-id',
       '/chat/123e4567-e89b-12d3-a456-426614174000/extra',
-      '/profile',
       '/tasks',
       '/documents',
     ]) {

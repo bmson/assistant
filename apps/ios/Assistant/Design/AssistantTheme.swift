@@ -1,5 +1,17 @@
 import SwiftUI
 
+private struct ConversationViewportWidthKey: EnvironmentKey {
+    static let defaultValue: CGFloat? = nil
+}
+
+extension EnvironmentValues {
+    /// Stationary safe-area viewport width, before transcript gutters.
+    var conversationViewportWidth: CGFloat? {
+        get { self[ConversationViewportWidthKey.self] }
+        set { self[ConversationViewportWidthKey.self] = newValue }
+    }
+}
+
 /// The app's appearance override. The app used to follow the iPhone's
 /// appearance silently, so a scheduled system change flipped the
 /// conversation between light and dark with no visible cause.
@@ -38,6 +50,16 @@ enum AssistantTheme {
         static let verticalInset: CGFloat = 16
         static let maximumHorizontalInset: CGFloat = 28
         static let maximumVerticalInset: CGFloat = 22
+        static let proseVerticalInset: CGFloat = 20
+        static func horizontalInset(viewportWidth: CGFloat?, accessibility: Bool) -> CGFloat {
+            guard !accessibility, let viewportWidth, viewportWidth.isFinite, viewportWidth > 360 else {
+                return 20
+            }
+            return 24
+        }
+        static func verticalInset(scaled: CGFloat, accessibility: Bool) -> CGFloat {
+            accessibility ? 24 : min(scaled, 24)
+        }
         static let contextHorizontalInset: CGFloat = 12
         static let contextVerticalInset: CGFloat = 8
         static let contextCornerRadius: CGFloat = 16
@@ -894,6 +916,50 @@ struct AssistantConfirmationState {
     mutating func reset() { expiresAt = nil }
 }
 
+/// Reserve the actual uncompressed symbol extents at the inherited font size.
+/// Every state shares this slot; a scaled symbol cannot paint into its label gap.
+struct AssistantIntrinsicActionGlyph: View {
+    let systemImage: String
+    var working = false
+    static let reservedSymbols = ["arrow.clockwise", "pause.fill", "play.fill", "trash", "checkmark"]
+#if DEBUG
+    var intrinsicLayoutReporter: (@MainActor (String, CGRect) -> Void)? = nil
+
+    func reportingIntrinsicLayout(_ report: (@MainActor (String, CGRect) -> Void)?) -> Self {
+        var copy = self
+        copy.intrinsicLayoutReporter = report
+        return copy
+    }
+#endif
+
+    var body: some View {
+        ZStack {
+            ForEach(Array((Self.reservedSymbols + [systemImage]).enumerated()), id: \.offset) { symbol in
+                intrinsic(Image(systemName: symbol.element), id: symbol.element).hidden()
+            }
+            intrinsic(ProgressView().controlSize(.small), id: "spinner").hidden()
+            Image(systemName: systemImage).fixedSize().opacity(working ? 0 : 1)
+            if working { ProgressView().controlSize(.small).fixedSize() }
+        }
+        .fixedSize()
+    }
+
+    private func intrinsic<Content: View>(_ content: Content, id: String) -> some View {
+        content.fixedSize()
+#if DEBUG
+            .background {
+                if intrinsicLayoutReporter != nil {
+                    GeometryReader { geometry in
+                        Color.clear
+                            .onAppear { intrinsicLayoutReporter?(id, geometry.frame(in: .global)) }
+                            .onChange(of: geometry.frame(in: .global)) { _, frame in intrinsicLayoutReporter?(id, frame) }
+                    }
+                }
+            }
+#endif
+    }
+}
+
 /// Keep confirmation at the original touch target. Every label the button can
 /// show reserves the same space, so arming never moves this button or its
 /// neighbours under the finger.
@@ -913,9 +979,17 @@ struct AssistantConfirmationButton: View {
     var compact = true
     var fillsWidth = false
     var minimumHeight: CGFloat = 44
+    var reservedWidthLabels: [String] = []
+    var checksIntrinsicWidth = false
+    var centersReservedGroup = false
     var prepare: (() async -> Bool)?
+#if DEBUG
+    var debugLayoutReporter: (@MainActor (String, CGRect) -> Void)? = nil
+    var debugConfirmationLabelReporter: (@MainActor (String) -> Void)? = nil
+#endif
     let action: () async -> Void
 
+    @ScaledMetric(relativeTo: .subheadline) private var reservedIconTextSpacing: CGFloat = 8
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.isEnabled) private var isEnabled
     @State private var confirmation = AssistantConfirmationState()
@@ -925,6 +999,8 @@ struct AssistantConfirmationButton: View {
     init(_ title: String, confirmationTitle: String? = nil, systemImage: String = "trash",
          kind: AssistantActionButtonKind = .destructive, hint: String = "",
          compact: Bool = true, fillsWidth: Bool = false, minimumHeight: CGFloat = 44,
+         reservedWidthLabels: [String] = [], checksIntrinsicWidth: Bool = false,
+         centersReservedGroup: Bool = false,
          prepare: (() async -> Bool)? = nil,
          action: @escaping () async -> Void) {
         self.title = title
@@ -935,9 +1011,34 @@ struct AssistantConfirmationButton: View {
         self.compact = compact
         self.fillsWidth = fillsWidth
         self.minimumHeight = minimumHeight
+        self.reservedWidthLabels = reservedWidthLabels
+        self.checksIntrinsicWidth = checksIntrinsicWidth
+        self.centersReservedGroup = centersReservedGroup
         self.prepare = prepare
         self.action = action
     }
+
+#if DEBUG
+    func reportingLayout(_ report: (@MainActor (String, CGRect) -> Void)?) -> Self {
+        var copy = self
+        copy.debugLayoutReporter = report
+        return copy
+    }
+
+    /// Layout fixture only: mount the real armed branch without a gesture or
+    /// action. This does not establish tap or accessibility activation behavior.
+    func initiallyArmedForLayoutReview() -> Self {
+        var copy = self
+        copy._confirmation = State(initialValue: AssistantConfirmationState(expiresAt: .distantFuture))
+        return copy
+    }
+
+    func reportingConfirmationLabel(_ report: (@MainActor (String) -> Void)?) -> Self {
+        var copy = self
+        copy.debugConfirmationLabelReporter = report
+        return copy
+    }
+#endif
 
     static let defaultConfirmationTitle = "Confirm?"
 
@@ -952,6 +1053,9 @@ struct AssistantConfirmationButton: View {
     }
 
     var body: some View {
+#if DEBUG
+        let debugAccessibilityLabel = working ? "Working" : armed ? spokenConfirmation : title
+#endif
         Button {
             guard !working, isEnabled else { return }
             if !armed, let prepare {
@@ -971,29 +1075,83 @@ struct AssistantConfirmationButton: View {
                 }
             }
         } label: {
-            HStack(spacing: 8) {
+            if centersReservedGroup {
                 ZStack {
+                    ForEach(Array(([title, confirmationTitle] + reservedWidthLabels).enumerated()), id: \.offset) { reservation in
+                        HStack(spacing: reservedIconTextSpacing) {
+                            AssistantIntrinsicActionGlyph(systemImage: systemImage, working: reservation.element == "Working…")
+                            Text(reservation.element)
+                        }
+                        .hidden()
+                    }
+                    let glyph = AssistantIntrinsicActionGlyph(systemImage: armed ? "checkmark" : systemImage, working: working)
+#if DEBUG
+                        .reportingIntrinsicLayout(debugLayoutReporter.map { report in
+                            { symbol, frame in report("intrinsic.\(symbol)", frame) }
+                        })
+#endif
+                    let text = Text(armed && !working ? confirmationTitle : title)
+                        .fixedSize(horizontal: checksIntrinsicWidth, vertical: true)
+#if DEBUG
+                    let visibleGlyph = debugMeasured(glyph, component: "glyph")
+                    let visibleText = debugMeasured(text, component: "text")
+#else
+                    let visibleGlyph = glyph
+                    let visibleText = text
+#endif
+                    let visibleGroup = HStack(spacing: reservedIconTextSpacing) {
+                        visibleGlyph
+                        visibleText
+                    }
+#if DEBUG
+                    debugMeasured(visibleGroup, component: "group")
+#else
+                    visibleGroup
+#endif
+                }
+                .fixedSize(horizontal: checksIntrinsicWidth, vertical: true)
+            } else {
+                let glyph = ZStack {
                     Image(systemName: armed ? "checkmark" : systemImage)
                         .opacity(working ? 0 : 1)
                     if working { ProgressView().controlSize(.small) }
                 }
                 .frame(width: 16)
-                ZStack {
-                    Text(title).hidden()
-                    Text(confirmationTitle).hidden()
-                    // The working state keeps the resting title and swaps only
-                    // the glyph for its spinner. A third word here would widen
-                    // every button in the app for a state that lasts one
-                    // round-trip, after the decision has already been made.
-                    Text(armed && !working ? confirmationTitle : title)
+                let text = ZStack {
+                        Text(title).hidden()
+                        Text(confirmationTitle).hidden()
+                        // Default callers reserve only the resting and confirmation labels.
+                        Text(armed && !working ? confirmationTitle : title)
                 }
                 .fixedSize(horizontal: false, vertical: true)
+#if DEBUG
+                let visibleGlyph = debugMeasured(glyph, component: "glyph")
+                let visibleText = debugMeasured(text, component: "text")
+#else
+                let visibleGlyph = glyph
+                let visibleText = text
+#endif
+                let visibleGroup = HStack(spacing: 8) {
+                    visibleGlyph
+                    visibleText
+                }
+#if DEBUG
+                debugMeasured(visibleGroup, component: "group")
+#else
+                visibleGroup
+#endif
             }
         }
         .buttonStyle(AssistantActionButtonStyle(kind: kind, compact: compact, fillsWidth: fillsWidth,
             confirming: armed && kind == .destructive, minimumHeight: minimumHeight))
         .disabled(working)
+#if DEBUG
+        .accessibilityLabel(debugAccessibilityLabel)
+        .onAppear { debugConfirmationLabelReporter?(debugAccessibilityLabel) }
+        .onChange(of: debugAccessibilityLabel) { _, label in debugConfirmationLabelReporter?(label) }
+#else
         .accessibilityLabel(working ? "Working" : armed ? spokenConfirmation : title)
+#endif
         .accessibilityHint(armed ? "Tap again to confirm. \(hint)" : "Requires two taps. \(hint)")
         .accessibilityAction(.escape) { confirmation.reset() }
         .task(id: confirmation.expiresAt) {
@@ -1014,4 +1172,27 @@ struct AssistantConfirmationButton: View {
             confirmation.reset()
         }
     }
+
+#if DEBUG
+    @ViewBuilder
+    private func debugMeasured<Content: View>(_ content: Content, component: String) -> some View {
+        if debugLayoutReporter != nil {
+            content.background { debugFrame(component) }
+        } else {
+            content
+        }
+    }
+
+    private func debugFrame(_ component: String) -> some View {
+        GeometryReader { geometry in
+            Color.clear
+                .onAppear {
+                    debugLayoutReporter?(component, geometry.frame(in: .global))
+                }
+                .onChange(of: geometry.frame(in: .global)) { _, frame in
+                    debugLayoutReporter?(component, frame)
+                }
+        }
+    }
+#endif
 }

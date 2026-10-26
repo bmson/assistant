@@ -46,7 +46,8 @@ describe('chat turn feedback', () => {
 
     expect(html.match(/role="status"/g)).toHaveLength(1);
     expect(html.match(/This message was stopped before it was admitted/g)).toHaveLength(1);
-    expect(html).toContain('href="/tasks"');
+    expect(html).not.toContain('href="/tasks"');
+    expect(html).not.toContain('Open request activity');
     expect(html).not.toContain('Try again');
   });
 
@@ -62,5 +63,29 @@ describe('chat turn feedback', () => {
 
     expect(blocked).not.toContain('Try again');
     expect(allowed.match(/Try again/g)).toHaveLength(1);
+  });
+  it('gives both request recovery links the existing mobile target and keyboard focus treatments', () => {
+    const html = renderToStaticMarkup(
+      <ChatTurnFeedback
+        conversationId="11111111-1111-4111-8111-111111111111"
+        showError={false}
+        error={null}
+        note={{
+          text: 'Request status',
+          retryable: false,
+          taskId: '22222222-2222-4222-8222-222222222222',
+        }}
+        pollTrouble={null}
+        canRetry={false}
+        onRetry={vi.fn()}
+      />,
+    );
+    const links = html.match(/<a[^>]*>/g) ?? [];
+    expect(links).toHaveLength(2);
+    for (const link of links) {
+      expect(link).toContain('mobile-touch-target inline-flex items-center');
+      expect(link).toContain('focus-visible:outline-2');
+      expect(link).toContain('focus-visible:outline-offset-2');
+    }
   });
 });

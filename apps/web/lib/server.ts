@@ -128,6 +128,7 @@ import {
 } from '@assistant/core/workflow/schedules';
 import {
   anomalies,
+  assertPostgresInstallationOwner,
   assertPostgresRestoreRehearsalReadOnly,
   createDb,
   createPostgresApplicationChatPersistence,
@@ -448,6 +449,21 @@ export function getDb(): Db {
     });
   }
   return globalCache.__assistantDb;
+}
+
+/** Bounded browse reads share the installation identity and erasure fence. */
+export async function withPostgresMemoryBrowseRead<T>(read: (db: Db) => Promise<T>): Promise<T> {
+  const db = getDb();
+  const ownerId = await assertPostgresInstallationOwner(db);
+  return withPostgresPrivacyObservationFence(db, ownerId, async (tx) => {
+    // Retained read APIs accept Db; Drizzle's transaction has the same query
+    // surface but omits the pool's $client. Preserve the actual leased handle.
+    const leasedDb = tx as unknown as Db;
+    await assertPostgresInstallationOwner(leasedDb, ownerId);
+    const result = await read(leasedDb);
+    await assertPostgresInstallationOwner(leasedDb, ownerId);
+    return result;
+  });
 }
 
 export function getEmailObligationRepository() {

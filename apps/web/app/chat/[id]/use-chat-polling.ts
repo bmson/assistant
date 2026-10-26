@@ -15,6 +15,11 @@
 import type { UIMessage } from 'ai';
 import { type Dispatch, type RefObject, type SetStateAction, useEffect, useRef } from 'react';
 import { CARD_REFRESH_EVENT } from './card-refresh-events';
+import {
+  CANCELLED_REQUEST_NOTE,
+  type RequestRecoveryNote,
+  requestStatusNote,
+} from './chat-request-recovery';
 import { uniqueMessageIds } from './message-reconciliation';
 import {
   type RecallSource,
@@ -31,10 +36,7 @@ export interface AsyncTurn {
 }
 
 /** How an open turn ended. `retryable` offers to resend the opening message. */
-export interface AsyncNote {
-  text: string;
-  retryable: boolean;
-}
+export type AsyncNote = RequestRecoveryNote;
 
 /** One live tool step reported for a running task. */
 export interface ChatActivityItem {
@@ -283,7 +285,7 @@ export function taskTimeoutNote(status: string | null): string {
     case 'failed':
       return 'This task failed. Check Activity for details.';
     case 'cancelled':
-      return 'This task was cancelled.';
+      return CANCELLED_REQUEST_NOTE;
     default:
       return 'I could not verify this task’s current status. Check Activity for the latest update.';
   }
@@ -295,6 +297,11 @@ export function taskTimeoutNote(status: string | null): string {
  */
 export function useChatPolling({
   conversationId,
+  observationScope,
+  recoveryTaskId,
+  recoveryObservationRevision,
+  recoverySelectionRef,
+  publicationEpochRef,
   setMessages,
   statusRef,
   asyncTurnRef,
@@ -312,6 +319,11 @@ export function useChatPolling({
   keepPollingTask,
 }: {
   conversationId: string;
+  observationScope?: string;
+  recoveryTaskId?: string | null;
+  recoveryObservationRevision?: number;
+  recoverySelectionRef?: RefObject<{ observationRevision: number }>;
+  publicationEpochRef?: RefObject<number>;
   setMessages: Dispatch<SetStateAction<UIMessage[]>>;
   statusRef: RefObject<string>;
   asyncTurnRef: RefObject<AsyncTurn | null>;
@@ -334,7 +346,7 @@ export function useChatPolling({
   onTaskTerminalRef.current = onTaskTerminal;
   const keepPollingTaskRef = useRef(keepPollingTask);
   keepPollingTaskRef.current = keepPollingTask;
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the loop reads component-owned refs and stable setters by design — re-subscribing on every cursor move would restart the poll mid-conversation, so only a new conversation id does.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the loop reads component-owned refs and stable setters by design — re-subscribing on every cursor move would restart the poll mid-conversation, so a new conversation or authenticated session invalidates the observation.
   useEffect(() => {
     let cancelled = false;
     let timer = 0;
@@ -380,13 +392,51 @@ export function useChatPolling({
       );
     };
 
+    // A retired same-thread read can reveal a newly committed reply, but it
+    // cannot edit known rows, cards, task state, observation health or cursors.
+    const appendUnseenDurableMessages = (incoming: UIMessage[], stillCurrent: () => boolean) => {
+      const identities = (message: UIMessage) => {
+        const metadata = message.metadata as
+          | { durableMessageId?: unknown; channelMessageId?: unknown }
+          | undefined;
+        return [message.id, metadata?.durableMessageId, metadata?.channelMessageId].filter(
+          (id): id is string => typeof id === 'string' && id.length > 0,
+        );
+      };
+      const known = new Set([
+        ...logRef.current.flatMap(identities),
+        ...(serverIdsRef.current ?? EMPTY_SERVER_IDS),
+      ]);
+      const fresh = incoming.filter((message) => {
+        const ids = identities(message);
+        if (typeof message.id !== 'string' || !message.id || ids.some((id) => known.has(id)))
+          return false;
+        for (const id of ids) known.add(id);
+        return true;
+      });
+      if (!fresh.length || !stillCurrent()) return;
+      setMessages((current) => {
+        // React may defer this updater beyond an explicit navigation or session
+        // replacement. Such a read must not publish rows or mark their IDs seen.
+        if (!stillCurrent()) return current;
+        const present = new Set(current.flatMap(identities));
+        const additions = fresh.filter(
+          (message) => !identities(message).some((id) => present.has(id)),
+        );
+        for (const message of additions) serverIdsRef.current?.add(message.id);
+        return additions.length ? [...current, ...additions] : current;
+      });
+    };
+
     const settle = (
       expectedTaskId: string,
       note: string | null,
       opts?: { retryable?: boolean },
     ) => {
       if (cancelled || asyncTurnRef.current?.taskId !== expectedTaskId) return;
-      setAsyncNote(note ? { text: note, retryable: opts?.retryable ?? false } : null);
+      setAsyncNote(
+        note ? { text: note, retryable: opts?.retryable ?? false, taskId: expectedTaskId } : null,
+      );
       setAsyncTurn(null);
       setActivity([]);
       turnRef.current = null;
@@ -395,6 +445,8 @@ export function useChatPolling({
     const poll = async () => {
       if (cancelled) return;
       const turn = asyncTurnRef.current;
+      const publicationEpoch = publicationEpochRef?.current;
+      const navigationRevision = recoverySelectionRef?.current.observationRevision;
       // Nothing to catch up on while the tab is hidden, and a background tab
       // polling forever is the kind of thing that shows up on a phone battery.
       if (document.visibilityState !== 'visible') return schedule(turn);
@@ -410,6 +462,12 @@ export function useChatPolling({
         };
       }
       const turnState = turn ? turnRef.current : null;
+      const hardObservationIsCurrent = () =>
+        !cancelled && navigationRevision === recoverySelectionRef?.current.observationRevision;
+      const ownsPublication = () =>
+        publicationEpoch === publicationEpochRef?.current &&
+        (turn?.taskId ?? null) === (asyncTurnRef.current?.taskId ?? null) &&
+        (!turn || turnRef.current === turnState);
       // What this poll did, read by schedule() at the bottom to decide whether
       // the server held (ask again now) or answered at once (back off).
       let elapsedMs = 0;
@@ -447,7 +505,9 @@ export function useChatPolling({
         const res = await fetch(`/api/chat/status?${query.toString()}`, {
           signal: AbortSignal.any([observation.signal, AbortSignal.timeout(POLL_TIMEOUT_MS)]),
         });
-        if (cancelled) return;
+        if (!hardObservationIsCurrent()) return;
+        // An old failed request cannot expire or degrade the current turn.
+        if (!res.ok && !ownsPublication()) return;
         elapsedMs = Date.now() - startedAt;
         // A dead session never recovers by polling — say so and stop asking.
         if (res.status === 401 || res.status === 403) {
@@ -456,8 +516,6 @@ export function useChatPolling({
           return;
         }
         if (res.ok) {
-          pollFailures = 0;
-          setTrouble(null);
           const data = (await res.json()) as {
             taskStatus: string | null;
             messages: UIMessage[];
@@ -467,12 +525,31 @@ export function useChatPolling({
             hasMore: boolean;
             activity?: ChatActivityItem[];
           };
-          if (cancelled) return;
+          if (!hardObservationIsCurrent()) return;
+          if (!ownsPublication()) {
+            appendUnseenDurableMessages(data.messages, hardObservationIsCurrent);
+            return;
+          }
+          pollFailures = 0;
+          setTrouble(null);
           const sameTurn =
-            !!turn && asyncTurnRef.current?.taskId === turn.taskId && turnRef.current === turnState;
+            !!turn &&
+            publicationEpoch === publicationEpochRef?.current &&
+            asyncTurnRef.current?.taskId === turn.taskId &&
+            turnRef.current === turnState;
           if (sameTurn && turnState) {
             setActivity(data.activity ?? []);
             turnState.lastTaskStatus = data.taskStatus;
+            if (
+              Date.now() - turnState.startedAt >= 30_000 ||
+              PARKED_TASK_STATUSES.has(data.taskStatus ?? '')
+            ) {
+              setAsyncNote({
+                text: requestStatusNote(data.taskStatus),
+                retryable: false,
+                taskId: turnState.taskId,
+              });
+            }
           }
           // `refreshed` is deliberately kept out of the settle checks below: a
           // re-read of a card already on screen is not this turn producing an
@@ -484,13 +561,20 @@ export function useChatPolling({
           // tick can legitimately end where it began. Only chase the next page
           // when the cursor actually moved — otherwise this loop would re-ask
           // for the same page with no delay between tries.
-          const advanced = Boolean(data.nextCursor) && data.nextCursor !== cursorRef.current;
-          if (data.nextCursor) cursorRef.current = data.nextCursor;
+          const ownsCursor = sameTurn || (!turn && !asyncTurnRef.current);
+          const advanced =
+            ownsCursor && Boolean(data.nextCursor) && data.nextCursor !== cursorRef.current;
+          if (ownsCursor && data.nextCursor) cursorRef.current = data.nextCursor;
           if (data.hasMore && advanced) {
             nextDelayMs = 0;
             return;
           }
           if (sameTurn && turnState && data.taskStatus) {
+            if (data.taskStatus === 'done' && recoveryTaskId === turnState.taskId) {
+              // The thread cursor may be newer than this task. Status is authoritative;
+              // another assistant row never proves this request's old reply was read.
+              return settle(turnState.taskId, requestStatusNote('done'));
+            }
             turnState.sawAssistant ||= data.messages.some(
               (message) => message.role === 'assistant',
             );
@@ -518,17 +602,21 @@ export function useChatPolling({
               onTaskTerminalRef.current?.(turnState.taskId, data.taskStatus);
               return settle(
                 turnState.taskId,
-                `The task ${data.taskStatus === 'cancelled' ? 'was cancelled' : 'ended unsuccessfully'}.`,
-                { retryable: true },
+                data.taskStatus === 'cancelled'
+                  ? CANCELLED_REQUEST_NOTE
+                  : requestStatusNote('failed'),
+                { retryable: data.taskStatus !== 'cancelled' },
               );
             }
           }
+        } else if (res.status === 404 && turn && asyncTurnRef.current?.taskId === turn.taskId) {
+          return settle(turn.taskId, requestStatusNote(null));
         } else {
           pollFailures += 1;
           if (pollFailures >= 3) setTrouble('stale');
         }
       } catch {
-        if (cancelled) return;
+        if (!hardObservationIsCurrent() || !ownsPublication()) return;
         // Transient poll failures retry on the next tick — but a thread that
         // has silently gone stale is indistinguishable from a quiet one, so a
         // streak of failures says so in the log.
@@ -623,5 +711,5 @@ export function useChatPolling({
       window.removeEventListener(CARD_REFRESH_EVENT, onCardRefresh);
       pokePollRef.current = null;
     };
-  }, [conversationId, setMessages]);
+  }, [conversationId, observationScope, recoveryObservationRevision, setMessages]);
 }

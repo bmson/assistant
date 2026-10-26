@@ -1,4 +1,9 @@
-import type { RecallSurfacingRepository, Records } from '@assistant/persistence';
+import {
+  type RecallSourceSettingStatus,
+  type RecallSurfacingRepository,
+  type Records,
+  recallSourceSettingStatusFromRecord,
+} from '@assistant/persistence';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import {
@@ -10,6 +15,33 @@ import { recallSurfaces } from './schema.js';
 export function createPostgresRecallSurfacingRepository(db: Db): RecallSurfacingRepository {
   return {
     kind: 'recall-surfacing-repository',
+    async readSourceSetting(input) {
+      const { agentId, sourceKey, expectedSourceRevision } = input;
+      if (
+        typeof agentId !== 'string' ||
+        agentId.length === 0 ||
+        typeof sourceKey !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(sourceKey) ||
+        typeof expectedSourceRevision !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(expectedSourceRevision)
+      )
+        throw new Error('Invalid recall source setting identity');
+      return withPostgresPrivacyObservationFence(
+        db,
+        agentId,
+        async (): Promise<RecallSourceSettingStatus> => {
+          const [row] = await db
+            .select()
+            .from(recallSurfaces)
+            .where(
+              and(eq(recallSurfaces.agentId, agentId), eq(recallSurfaces.sourceKey, sourceKey)),
+            )
+            .limit(1);
+          if (!row) return { status: 'unavailable', reason: 'missing_record' };
+          return recallSourceSettingStatusFromRecord(row, input);
+        },
+      );
+    },
     async suppressed(agentId, sourceKeys, currentRevisions) {
       if (!sourceKeys.length) return new Set();
       return withPostgresPrivacyObservationFence(db, agentId, async () => {

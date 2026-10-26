@@ -43,7 +43,6 @@ import {
   situationPacks,
   situationPreviews,
   tasks,
-  toolCache,
   toolCallReceiptKeys,
   toolCallReceipts,
   voiceProfile,
@@ -549,21 +548,24 @@ export async function assertPostgresPrivacyObservationFence(
   if (current !== observed) throw new Error('Privacy erasure changed during observation');
 }
 
+export type PostgresPrivacyObservationTransaction = Parameters<Parameters<Db['transaction']>[0]>[0];
+
 /**
  * Keep an owner-scoped read composition ordered against privacy erasure. The
  * owner row lock serializes this read with the erasure transaction, and the
  * generation check catches a completed erase between an earlier discovery
- * step and acquiring the lock. The callback may use the same pool for its
- * ordinary reads; it must remain bounded so the lock is short lived.
+ * step and acquiring the lock. The callback receives the leased transaction
+ * for its ordinary reads, including on single-connection pools. Reads must
+ * remain bounded so the lock is short lived.
  */
 export async function withPostgresPrivacyObservationFence<T>(
   db: Db,
   agentId: string,
-  read: () => Promise<T>,
+  read: (tx: PostgresPrivacyObservationTransaction) => Promise<T>,
 ): Promise<T> {
   return db.transaction(async (tx) => {
     const observed = await lockPostgresPrivacyObservationFence(tx, agentId);
-    const value = await read();
+    const value = await read(tx);
     await assertPostgresPrivacyObservationFence(tx, agentId, observed);
     return value;
   });

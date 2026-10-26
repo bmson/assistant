@@ -2,7 +2,10 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createRecallOperationFence,
+  decodeRecallSourceSetting,
   type RecallSource,
+  type RecallSourceSettingPhase,
+  RecallSourceSettingView,
   readRecallSourceSetting,
   writeRecallSourceSetting,
 } from './message-view';
@@ -89,6 +92,9 @@ describe('reply context presentation', () => {
     expect(html).toContain('Earlier chats');
     expect(html).toContain('Saved context');
     expect(html).toContain('Date unavailable');
+    expect(html).toContain('Saved context:');
+    expect(html).toContain('whitespace-pre-wrap break-words');
+    expect(html).toContain('rewrite this reply or delete the saved source');
     expect(html.match(/Privacy controls unavailable/g)).toHaveLength(2);
     expect(html).not.toContain('Helpful');
   });
@@ -101,14 +107,139 @@ describe('reply context presentation', () => {
   });
 });
 
+describe('versioned future recall setting contract', () => {
+  const valid = [
+    { version: 1, status: 'allowed', suppressed: false },
+    { version: 1, status: 'suppressed', suppressed: true },
+    { version: 1, status: 'stale', suppressed: null },
+    { version: 1, status: 'unavailable', suppressed: null },
+  ];
+
+  it.each(valid)('accepts only the exact verified wire pair $status', (value) => {
+    expect(decodeRecallSourceSetting(value)).toEqual(value);
+    // The previous client accepts boolean states only; unknown historical states fail read-only.
+    expect(typeof value.suppressed === 'boolean').toBe(
+      value.status === 'allowed' || value.status === 'suppressed',
+    );
+  });
+
+  it('rejects legacy, rollout, contradictory and extended success bodies', () => {
+    const malformed: unknown[] = [
+      null,
+      [],
+      true,
+      'allowed',
+      { suppressed: false },
+      { suppressed: true },
+      { version: 1, status: 'allowed' },
+      { version: 1, suppressed: false },
+      { status: 'allowed', suppressed: false },
+      { version: 2, status: 'allowed', suppressed: false },
+      { version: '1', status: 'allowed', suppressed: false },
+      { version: 1, status: 'unknown', suppressed: null },
+      { version: 1, status: 'allowed', suppressed: 'false' },
+      { version: 1, status: 'unavailable', suppressed: 'null' },
+      { version: 1, status: 'allowed', suppressed: undefined },
+      { version: 1, status: 'unavailable', suppressed: null, reason: 'missing_record' },
+      { version: 1, status: 'allowed', suppressed: false, sourceRevision: 'c'.repeat(64) },
+    ];
+    for (const status of ['allowed', 'suppressed', 'stale', 'unavailable']) {
+      for (const suppressed of [true, false, null]) {
+        if (!valid.some((value) => value.status === status && value.suppressed === suppressed))
+          malformed.push({ version: 1, status, suppressed });
+      }
+    }
+    for (const value of malformed) expect(() => decodeRecallSourceSetting(value)).toThrow();
+  });
+
+  it('keeps domain stale/unavailable distinct from failed transport, without issuing PATCH', async () => {
+    const signal = new AbortController().signal;
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    for (const value of valid) {
+      fetch.mockResolvedValueOnce(Response.json(value));
+      expect(await readRecallSourceSetting(source, signal)).toEqual(value);
+    }
+    fetch.mockResolvedValueOnce(Response.json({ suppressed: false }));
+    await expect(readRecallSourceSetting(source, signal)).rejects.toThrow();
+    fetch.mockResolvedValueOnce(new Response('<html>unreadable</html>', { status: 200 }));
+    await expect(readRecallSourceSetting(source, signal)).rejects.toThrow();
+    for (const [, options] of fetch.mock.calls) {
+      expect(options).toEqual({ cache: 'no-store', signal });
+      expect(options).not.toHaveProperty('method');
+    }
+    expect(fetch).toHaveBeenCalledTimes(6);
+  });
+});
+
+/** These render the production view; SSR does not execute mounted effects or click handlers. */
+describe('future recall setting presentation', () => {
+  function markup(
+    status: RecallSourceSettingPhase,
+    error: 'read' | 'write' | null = null,
+    pending = false,
+  ) {
+    return renderToStaticMarkup(
+      <RecallSourceSettingView
+        status={status}
+        pending={pending}
+        error={error}
+        onRead={vi.fn()}
+        onSave={vi.fn()}
+      />,
+    );
+  }
+
+  it.each(['stale', 'unavailable'] as const)(
+    'renders %s read-only, never as allowed/off',
+    (status) => {
+      const html = markup(status);
+      expect(html).toContain('role="status"');
+      expect(html).not.toContain('<button');
+      expect(html).not.toContain('not hidden');
+      expect(html).not.toContain('Allow this version');
+      expect(html).not.toContain('Hide this version');
+    },
+  );
+
+  it('offers explicit read retry or uncertain-write recheck while the setting remains unknown', () => {
+    const failed = markup('unknown', 'read');
+    expect(failed).toContain('Future recall setting unavailable');
+    expect(failed).toContain('Retry checking setting');
+    const uncertain = markup('unknown', 'write');
+    expect(uncertain).toContain('Could not confirm result');
+    expect(uncertain).toContain('Recheck source setting');
+    for (const html of [failed, uncertain, markup('checking', null, true)]) {
+      expect(html).not.toContain('Allow this version');
+      expect(html).not.toContain('Hide this version');
+    }
+    expect(markup('checking', null, true)).toContain('disabled=""');
+  });
+
+  it('describes verified states only for this control and saved version', () => {
+    const allowed = markup('allowed');
+    expect(allowed).toContain('not hidden by this control for this saved version');
+    expect(allowed).toContain('Hide this version from future recall');
+    const suppressed = markup('suppressed');
+    expect(suppressed).toContain('hidden by this control for this saved version');
+    expect(suppressed).toContain('The saved source is not deleted');
+    expect(suppressed).toContain('Allow this version in future recall');
+    expect(markup('allowed', null, true)).toContain('disabled=""');
+  });
+});
+
 describe('existing recall transport and publication fencing', () => {
   it('keeps the authenticated source/revision GET and exact PATCH body', async () => {
     const fetch = vi
       .fn()
-      .mockResolvedValueOnce(Response.json({ suppressed: true }))
+      .mockResolvedValueOnce(Response.json({ version: 1, status: 'suppressed', suppressed: true }))
       .mockResolvedValueOnce(Response.json({ ok: true, version: 1 }));
     vi.stubGlobal('fetch', fetch);
-    expect(await readRecallSourceSetting(source)).toBe(true);
+    expect(await readRecallSourceSetting(source)).toEqual({
+      version: 1,
+      status: 'suppressed',
+      suppressed: true,
+    });
     expect(fetch.mock.calls[0][0]).toBe(
       `/api/recall/sources/${source.surfaceKey}?sourceRevision=${source.sourceRevision}`,
     );

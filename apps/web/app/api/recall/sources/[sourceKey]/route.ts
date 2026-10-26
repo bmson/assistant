@@ -16,16 +16,27 @@ export async function GET(
   const { sourceKey } = await context.params;
   if (!/^[a-f0-9]{64}$/.test(sourceKey)) return json({ error: 'invalid source key' }, 400);
   const sourceRevision = new URL(request.url).searchParams.get('sourceRevision');
-  if (sourceRevision !== null && !/^[a-f0-9]{64}$/.test(sourceRevision))
+  if (sourceRevision === null || !/^[a-f0-9]{64}$/.test(sourceRevision))
     return json({ error: 'invalid source revision' }, 400);
   try {
     const { agentId, repository } = await getRecallSurfacingPorts();
-    const suppressed = await repository.suppressed(
+    const setting = await repository.readSourceSetting({
       agentId,
-      [sourceKey],
-      sourceRevision ? { [sourceKey]: sourceRevision } : undefined,
-    );
-    return json({ suppressed: suppressed.has(sourceKey) });
+      sourceKey,
+      expectedSourceRevision: sourceRevision,
+    });
+    switch (setting.status) {
+      case 'allowed':
+        return json({ version: 1, status: 'allowed', suppressed: false });
+      case 'suppressed':
+        return json({ version: 1, status: 'suppressed', suppressed: true });
+      case 'stale':
+        return json({ version: 1, status: 'stale', suppressed: null });
+      case 'unavailable':
+        return json({ version: 1, status: 'unavailable', suppressed: null });
+      default:
+        throw new Error('Invalid recall source setting');
+    }
   } catch {
     return json({ error: 'recall controls are unavailable' }, 503);
   }

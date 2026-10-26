@@ -134,7 +134,10 @@ export function ReplyContextDetails({
   );
   return (
     <div id={id} className="reply-context-details">
-      <p>These entries were retrieved when this reply was prepared.</p>
+      <p>
+        These entries were retrieved when this reply was prepared. Changing future recall does not
+        rewrite this reply or delete the saved source.
+      </p>
       <ul className="reply-context-records">
         {records.map((source, index) => {
           const key =
@@ -148,7 +151,10 @@ export function ReplyContextDetails({
             source.kind === 'commitment';
           return (
             <li key={key} className="reply-context-record">
-              <p className="reply-context-label">{source.label}</p>
+              <p className="reply-context-label whitespace-pre-wrap break-words">
+                <span>Saved context: </span>
+                {source.label}
+              </p>
               <p className="reply-context-metadata">
                 {replyContextDate(source.date, now)} · {replyContextKind(source.kind)}
                 {source.hops === 1 || source.hops === 2 ? ` · ${source.hops}-hop connection` : ''}

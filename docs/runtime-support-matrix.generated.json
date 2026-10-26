@@ -2,11 +2,11 @@
   "format": 1,
   "purpose": "Source composition and route drift evidence only; not a deployment or configured-runtime receipt.",
   "runtimeSources": {
-    "packages/config/src/index.ts": "d65963a4a350f41242da86910f085d60909f13b584aa710e4a0423f60437fe9b",
+    "packages/config/src/index.ts": "492748104b6f0efc340dfd3153177b5889643d8aebe8b6909978da3d0ebdcae5",
     "apps/agent/src/deps.ts": "fb30df8600bbcf24da0d5cfa9ef1c92e28700b663429cdbbe37d65ecee0ea655",
     "apps/agent/src/index.ts": "6da57b60f853ca6622142a12b70bb31a73e8155eac30dd7d905218c19ca2fd56",
-    "apps/web/lib/server.ts": "c7134fe07612b8653ef7ee73f92076bbdea5a27fb665c8efb3d843f960d49211",
-    "apps/web/proxy.ts": "93a75f2e8459877898c920d5a9560255f90771b98d6ff584aed16a2898b5485a",
+    "apps/web/lib/server.ts": "8844de2eb075b33237a183144d9b3d604748f6ffd25e34e699f541374b8c6412",
+    "apps/web/proxy.ts": "f3d8f51017b5ed799da0647286badd7cfc7cf5ec2ee9ba2bfbcc667774af0c4f",
     "packages/db/drizzle/meta/_journal.json": "6aaf30195d32ffcffca7dd36fa138c7d82a37d7249fa59ced46a1d2975ca42d6",
     "infra/gcp/release-contracts.json": "bf1237ceb69f5656c0529bee0c652d9a69957a5a2f18f7baa27144e72e9c7c2a"
   },
@@ -399,7 +399,7 @@
     },
     "apps/web/app/api/mobile/v1/workspace/route.ts": {
       "methods": ["GET"],
-      "sha256": "222d52bd9fe7ec361124201080e2079b2c3080cba566f19767b85f9214573a7c"
+      "sha256": "cda4cd2db53e8db6f6135c457f4d0ef09b88f11a0c1a6e1459b5c7cac6bd4257"
     },
     "apps/web/app/api/mobile/v1/workspace/sections/[section]/route.ts": {
       "methods": ["GET"],
@@ -451,7 +451,7 @@
     },
     "apps/web/app/api/recall/sources/[sourceKey]/route.ts": {
       "methods": ["GET", "PATCH"],
-      "sha256": "7f05e2a1675d3b50e73d993d4f1b57bdecd42bc1fc5fd11851ed89cc8e2cd14c"
+      "sha256": "53144872293e9786abb202f3352d664e281410e7c97d510292affb910a2b7e14"
     },
     "apps/web/app/api/release-probe/route.ts": {
       "methods": ["GET"],

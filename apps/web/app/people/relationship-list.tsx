@@ -2,7 +2,6 @@ import type { PersonConnection, PersonRelation } from '@assistant/application/pe
 import { relationSpanLabel } from '@assistant/application/people-presentation';
 import Link from 'next/link';
 import { PersonAvatar } from '@/app/people/person-avatar';
-import { RemoveConnection } from '@/app/profile/knowledge/remove-connection';
 import { Badge } from '@/lib/ui';
 
 const rowClass = 'flex min-w-0 items-center gap-3 rounded-xl bg-raised p-3.5 ring-1 ring-edge/60';
@@ -16,7 +15,15 @@ const rowClass = 'flex min-w-0 items-center gap-3 rounded-xl bg-raised p-3.5 rin
  * subject of a stored edge is not always the person whose page this is. This
  * component only decides how to frame it.
  */
-export function RelationshipList({ relations, now }: { relations: PersonRelation[]; now: Date }) {
+export function RelationshipList({
+  relations,
+  now,
+  peopleQuery = '',
+}: {
+  relations: PersonRelation[];
+  now: Date;
+  peopleQuery?: string;
+}) {
   return (
     <ul className="mt-3 flex flex-col gap-2">
       {relations.map((relation) => {
@@ -27,7 +34,7 @@ export function RelationshipList({ relations, now }: { relations: PersonRelation
             <span className="min-w-0 flex-1 text-sm leading-6 text-pretty break-words text-strong">
               {relation.sentence}
             </span>
-            {span ? <span className="shrink-0 text-xs text-muted">{span}</span> : null}
+            {span ? <span className="text-xs text-muted">{span}</span> : null}
             {relation.reviewStatus === 'unreviewed' ? (
               <Badge
                 tone="muted"
@@ -43,7 +50,7 @@ export function RelationshipList({ relations, now }: { relations: PersonRelation
           <li key={relation.id}>
             {relation.otherContactId ? (
               <Link
-                href={`/people/${relation.otherContactId}`}
+                href={`/people/${relation.otherContactId}${peopleQuery ? `?q=${encodeURIComponent(peopleQuery.slice(0, 120))}` : ''}`}
                 className={`mobile-touch-target ${rowClass} motion-safe:transition-colors hover:bg-sunken/50`}
               >
                 {body}
@@ -52,9 +59,6 @@ export function RelationshipList({ relations, now }: { relations: PersonRelation
               // A person named only inside a fact has no page to open.
               <div className={rowClass}>{body}</div>
             )}
-            <div className="flex justify-end pt-1">
-              <RemoveConnection relationId={relation.id} sentence={relation.sentence} />
-            </div>
           </li>
         );
       })}
@@ -79,8 +83,7 @@ export function ConnectionList({
             <span className="min-w-0 flex-1 text-sm leading-6 text-pretty break-words text-strong">
               {connection.sentence}
             </span>
-            {span ? <span className="shrink-0 text-xs text-muted">{span}</span> : null}
-            <RemoveConnection relationId={connection.id} sentence={connection.sentence} />
+            {span ? <span className="text-xs text-muted">{span}</span> : null}
           </li>
         );
       })}

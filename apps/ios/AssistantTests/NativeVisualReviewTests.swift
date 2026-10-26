@@ -11,6 +11,56 @@ final class NativeVisualReviewTests: XCTestCase {
         var activity = 0
     }
 
+    // Test-only, external storage: observing the bubble environment must not
+    // publish SwiftUI state or change the production view's layout.
+    @MainActor
+    private final class ConversationViewportRecorder {
+        struct Measurement: Equatable {
+            let rawRootWidth: CGFloat
+            let outerAvailableWidth: CGFloat
+            let leadingSafeArea: CGFloat
+            let trailingSafeArea: CGFloat
+            let inheritedWidth: CGFloat?
+            let accessibility: Bool
+        }
+
+        let expectedMessageIDs: Set<String>
+        private(set) var measurements: [String: Measurement] = [:]
+
+        init(messageIDs: Set<String>) { expectedMessageIDs = messageIDs }
+        func reset() { measurements.removeAll() }
+        func record(_ measurement: Measurement, messageID: String) {
+            measurements[messageID] = measurement
+        }
+    }
+
+    @MainActor
+    private struct ConversationViewportReader: View {
+        @Environment(\.conversationViewportWidth) private var inheritedWidth
+        @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+        let recorder: ConversationViewportRecorder
+        let messageID: String
+        let rawRootWidth: CGFloat
+        let outerAvailableWidth: CGFloat
+        let leadingSafeArea: CGFloat
+        let trailingSafeArea: CGFloat
+
+        private var measurement: ConversationViewportRecorder.Measurement {
+            .init(rawRootWidth: rawRootWidth, outerAvailableWidth: outerAvailableWidth,
+                  leadingSafeArea: leadingSafeArea,
+                  trailingSafeArea: trailingSafeArea, inheritedWidth: inheritedWidth,
+                  accessibility: dynamicTypeSize.isAccessibilitySize)
+        }
+
+        var body: some View {
+            Color.clear
+                .onAppear { recorder.record(measurement, messageID: messageID) }
+                .onChange(of: measurement) { _, value in recorder.record(value, messageID: messageID) }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+    }
+
     @MainActor
     private final class DocumentLayoutFrameRecorder {
         private(set) var frames: [String: CGRect] = [:]
@@ -21,6 +71,16 @@ final class NativeVisualReviewTests: XCTestCase {
 
         func reset() {
             frames.removeAll()
+        }
+    }
+
+    @MainActor
+    private final class ConnectedToolActionLayoutRecorder {
+        var frames: [String: CGRect] = [:]
+        var confirmationLabels: [String] = []
+
+        func record(_ values: [String: CGRect]) {
+            frames.merge(values, uniquingKeysWith: { _, latest in latest })
         }
     }
 
@@ -1553,6 +1613,117 @@ final class NativeVisualReviewTests: XCTestCase {
             transcript(sending: false).padding(.horizontal, 16).padding(.vertical, 8)
         }.background(AssistantTheme.stage))
         try await capture(settledPage, scheme: .light, size: .large, scene: scene, model: model, requiresScrolling: true)
+        // Exercise production prose and standalone cards with the viewport
+        // environment measured before the fixture's transcript gutters.
+        let surfaceMessages: [ChatMessage] = [
+            messages[0],
+            .optimistic(role: .assistant,
+                text: """
+                **Weekend travel plan**
+
+                Keep the morning flexible until the train and hotel arrangements are confirmed. The station is close enough to reach on foot, but leave time for the crossing near the waterfront and for finding the correct platform. If the weather turns, use the covered entrance rather than rushing with luggage through the garden path.
+
+                The train booking is the first decision to settle. Check the departure station, the arrival station, the passenger names, and the luggage allowance together before paying. A slightly later departure may leave more time for breakfast, but it should still arrive early enough for a relaxed walk to the hotel. Save the confirmation where it can be found without searching through unrelated mail.
+
+                - Confirm the outbound date and the station printed on the ticket.
+                - Keep the return journey separate until the final afternoon plan is clear.
+                - Put the booking reference beside the departure time in the shared note.
+                  - Include the platform only after the operator confirms it.
+                  - Keep the original confirmation available if the platform changes.
+                - Check whether the fare can be changed and when that option expires.
+
+                **Arrival and check-in**
+
+                Ask the hotel whether luggage can be left before the room is ready. That answer determines whether the first stop should be the hotel or the cafe by the station. Keep the arrival message short: give the expected time, ask about the bag drop, and leave the final dinner decision for later. Do not describe an unconfirmed early check-in as a promise.
+
+                There are two sensible afternoon routes. The waterfront walk is easier to shorten if someone is tired, while the old-town route offers more indoor stops if it rains. Both routes should keep a comfortable gap before dinner. A quiet hour at the hotel is part of the plan, rather than a delay to make up by hurrying through the last stop.
+
+                1. Check the bags or leave them with the hotel if that has been confirmed.
+                2. Choose lunch near the first stop so nobody has to cross town twice.
+                3. Agree on a meeting point before splitting up for the afternoon.
+                4. Recheck the weather and energy level before adding another activity.
+                5. Keep the dinner reservation time visible in the shared plan.
+
+                **Information to keep handy**
+
+                The shared note should contain the train reference, hotel address, arrival window, and one contact number for each booking. Keep private confirmation details in the original booking record. The note only needs enough context to answer practical questions during the trip, including which entrance to use and where to wait if the group arrives at different times.
+
+                ```swift
+                let title = "Weekend plan"
+                ```
+
+                | Item | Status |
+                | --- | --- |
+                | Train | Confirm the fare conditions before booking |
+                | Hotel | Ask about luggage storage and the arrival window |
+                | Dinner | Keep the final time separate from the afternoon walk |
+
+                **Before returning home**
+
+                Leave enough time after breakfast to collect bags and check the room. Review the return service before leaving the hotel, especially if the route includes a transfer. If a service changes, update the shared note with the revised departure and meeting point instead of leaving two conflicting times in circulation. A calm fallback is to meet at the station cafe and make the next decision together.
+
+                The final check is simple: everyone has their ticket, the bags are accounted for, the route to the station is clear, and the next departure time has been verified. Keep this closing note at the end of the answer so the native screenshot review can confirm the real Markdown content was reached below the fold.
+
+                SURFACE-PADDING-END-OF-TRAVEL-PLAN-2026-10-23
+                """,
+                id: "surface-padding-markdown"),
+            ChatMessage(id: "surface-padding-card", role: .assistant, parts: [event]),
+            ChatMessage(id: "surface-padding-contract", role: .assistant, parts: [
+                .init(type: "text", text: "The requested result could not be verified."),
+                .init(type: "notice", notice: ChatNoticeKind.responseContract.rawValue),
+            ]),
+            ChatMessage(id: "surface-padding-retracted", role: .assistant, parts: [
+                .init(type: "text", text: "This earlier answer was withdrawn."),
+                .init(type: "notice", notice: ChatNoticeKind.retracted.rawValue),
+            ]),
+        ]
+        let viewportRecorder = ConversationViewportRecorder(messageIDs: Set(surfaceMessages.map(\.id)))
+        let paddingPage = Page("conversation-surface-padding", ownsNavigation: true,
+            GeometryReader { available in
+                GeometryReader { viewport in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: AssistantTheme.ConversationSpacing.surfaceGap) {
+                            ForEach(surfaceMessages) { message in
+                                MessageBubble(message: message, userPrompt: nil, isStreaming: false,
+                                    openApprovals: {}, runForReal: nil, retry: nil, decideApproval: nil)
+                                    .background(ConversationViewportReader(
+                                        recorder: viewportRecorder, messageID: message.id,
+                                        rawRootWidth: viewport.size.width,
+                                        outerAvailableWidth: available.size.width,
+                                        leadingSafeArea: available.safeAreaInsets.leading,
+                                        trailingSafeArea: available.safeAreaInsets.trailing))
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                    }
+                }
+                .ignoresSafeArea(.container)
+                .environment(\.conversationViewportWidth, available.size.width)
+            }.background(AssistantTheme.stage))
+        for width in [CGFloat(320), 360, 390, 430] {
+            for scheme in [ColorScheme.light, .dark] {
+                for size in [DynamicTypeSize.large, .accessibility3] {
+                    try await capture(paddingPage, scheme: scheme, size: size, scene: scene, model: model,
+                                      requiresScrolling: true, viewportWidth: width,
+                                      viewportRecorder: viewportRecorder)
+                }
+            }
+        }
+        // The outer geometry is already a 350pt safe viewport. The ignored
+        // inner stage stays 390pt wide, and both inherit the outer width without
+        // subtracting its 20pt + 20pt safe-area metadata again.
+        let safeAreaPage = Page("conversation-surface-padding-horizontal-safe-area", ownsNavigation: true,
+                                paddingPage.content)
+        try await capture(safeAreaPage, scheme: .light, size: .large, scene: scene, model: model,
+                          requiresScrolling: true, viewportWidth: 390,
+                          additionalSafeAreaInsets: UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20),
+                          viewportRecorder: viewportRecorder)
+        for message in surfaceMessages {
+            let measured = try XCTUnwrap(viewportRecorder.measurements[message.id])
+            XCTAssertEqual(measured.outerAvailableWidth, 350, accuracy: 0.5,
+                           "The 390pt host with 20pt safe areas on both sides supplies a 350pt outer viewport")
+        }
         // Exercise the same standalone overflow composition in its expanded
         // state; the first three results remain outside this disclosure.
         let cards = try [alert, event, briefing, RichMessageFixture.generated()].map {
@@ -1572,6 +1743,349 @@ final class NativeVisualReviewTests: XCTestCase {
         XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
         XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
     }
+
+#if DEBUG
+    private final class EventRhythmFrameRecorder: @unchecked Sendable {
+        // Geometry is observed on the main actor; render callbacks may run elsewhere.
+        var frames: [String: CGRect] = [:]
+        private let textLock = NSLock()
+        private var renderedText: [String: EventRhythmTextSample] = [:]
+        func recordText(_ id: String, _ sample: EventRhythmTextSample) {
+            textLock.lock(); defer { textLock.unlock() }
+            renderedText[id] = sample
+        }
+        var textSamples: [String: EventRhythmTextSample] {
+            textLock.lock(); defer { textLock.unlock() }
+            return renderedText
+        }
+    }
+
+    @MainActor
+    func testEventRhythmProductionRows() async throws {
+        let eventLedger = EventCaptureLedger()
+        defer { eventLedger.finishMethod(self) }
+        do {
+        try eventLedger.check("method setup")
+        NativeReviewProtocol.install([:])
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+                               session: URLSession(configuration: config))
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "assistant.event-rhythm-review"))
+        defaults.removePersistentDomain(forName: "assistant.event-rhythm-review")
+        let model = AppModel(apiClient: client, defaults: defaults)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let start = Date.now.addingTimeInterval(5 * 60)
+        var richCards: [MessageResponseCard] = (0..<6).map { index in
+            .event(id: "rhythm-rich-\(index)", start: start.addingTimeInterval(Double(index) * 86400).ISO8601Format(),
+                   time: "11:45 AM – 12:55 PM Pacific Time", title: "A deliberately long planning meeting title for the full family travel itinerary \(index)",
+                   location: "North waterfront conference room, beyond the old station and the harbor entrance",
+                   attendees: ["Robin — accepted"], calendars: ["Family planning calendar"],
+                   calendarLinkURL: "https://calendar.google.com/event/rhythm-\(index)",
+                   meetingLinkURL: "https://meet.google.com/rhythm-\(index)")
+        }
+        richCards.insert(.event(id: "rhythm-rich-same-day", start: start.ISO8601Format(), time: "All afternoon",
+                                title: "Second event on the first day", location: "", attendees: [], calendars: ["Work"],
+                                calendarLinkURL: nil, meetingLinkURL: nil), at: 1)
+        // Production composes all day groups before non-event cards. An input
+        // interleaving does not create a rendered day/non-day/day sequence.
+        richCards.insert(try XCTUnwrap(MessageResponseCard(part: .init(type: "data-card", data: RichMessageFixture.alert))), at: 2)
+        typealias Item = MessageResponseCard.BriefingCard.AgendaItem
+        func item(_ id: String, day: String, location: String, note: String) -> Item {
+            .init(id: id, day: day, time: day == "Unknown" ? "" : day == "All day" ? "All day" : "11:45 AM – 12:55 PM Pacific Time",
+                  title: "A long event title that must remain readable while the clock changes position",
+                  location: location, flag: "conflict", note: note, calendars: ["Work", "Personal"],
+                  calendarLinks: [.init(label: "Open event", url: "https://calendar.google.com/event/\(id)")],
+                  meetingLink: .init(label: "Join", url: "https://meet.google.com/\(id)"))
+        }
+        let longLocation = "North waterfront conference room beyond the old station, through the harbor entrance, upstairs past the library and the quiet garden"
+        let legacyItems = (0..<4).map { index in
+            item("rhythm-legacy-\(index)", day: index < 2 ? "Legacy day A" : "Legacy day B",
+                 location: index.isMultiple(of: 2) ? longLocation : "", note: "Keep this note even when no location was supplied.")
+        }
+        let newItems = (0..<8).map { index in
+            item("rhythm-new-\(index)", day: index == 0 ? "All day" : index == 1 ? "Unknown" : "Timed",
+                 location: index.isMultiple(of: 2) ? longLocation : "", note: "Needs a response before the travel plan is confirmed.")
+        }
+        func briefing(_ id: String, presentation: MessageResponseCard.BriefingCard.Presentation?,
+                      items: [Item]) throws -> MessageResponseCard.BriefingCard {
+            var data: [String: JSONValue] = [
+                "id": .string(id), "title": .string("Agenda"), "date": .string("Review day"),
+                "lead": .string("Incomplete calendar coverage remains visible."),
+                "sections": .array([
+                    .object(["type": .string("agenda"), "title": .string("Schedule"), "complete": .bool(false),
+                             "omittedCount": .number(2), "items": .array(items.map { item in .object([
+                                "id": .string(item.id), "day": .string(item.day), "time": .string(item.time),
+                                "title": .string(item.title), "location": .string(item.location), "flag": .string(item.flag),
+                                "note": .string(item.note), "calendars": .array(item.calendars.map { .string($0) }),
+                                "calendarLinks": .array(item.calendarLinks.map { .object(["label": .string($0.label), "url": .string($0.url)]) }),
+                                "meetingLink": .object(["label": .string("Join"), "url": .string("https://meet.google.com/\(item.id)")])
+                             ]) })]),
+                    .object(["type": .string("attention"), "title": .string("Possible overlaps"),
+                             "items": .array([.object(["title": .string("Schedules overlap"), "detail": .string("Overlap does not confirm attendance.")])]),
+                             "overlaps": .array([.object(["title": .string("Travel and review"), "detail": .string("The schedules overlap by twenty minutes.")])]),
+                             "overlapCount": .number(1), "itemCount": .number(1)])
+                ])
+            ]
+            if let presentation { data["presentation"] = .string(presentation.rawValue) }
+            return try XCTUnwrap(MessageResponseCard.BriefingCard(data: data))
+        }
+        let legacy = try briefing("rhythm-legacy", presentation: nil, items: legacyItems)
+        let agenda = try briefing("rhythm-new", presentation: .calendarAgenda, items: newItems)
+        let richIDs = (0..<6).map { "rhythm-rich-\($0)" } + ["rhythm-rich-same-day"]
+        func reviewPage(_ recorder: EventRhythmFrameRecorder, width: CGFloat?, expanded: Bool) -> Page {
+            Page("event-rhythm-\(width == nil ? "missing-width" : "viewport")-\(expanded ? "expanded" : "collapsed")", ownsNavigation: true,
+                 ScrollView {
+                     VStack(alignment: .leading, spacing: 24) {
+                         RichResponseCards(cards: richCards)
+                         RichResponseCards(cards: [.briefing(legacy)])
+                         RichResponseCards(cards: [.briefing(agenda)])
+                     }
+                     .padding(.horizontal, 16).padding(.vertical, 8)
+                     .coordinateSpace(name: "event-rhythm-review")
+                 }
+                 .environment(\.conversationViewportWidth, width)
+                 .environment(\.eventRhythmReview, .init(expandsOverflow: expanded,
+                     report: { recorder.frames[$0] = $1 }, reportText: { recorder.recordText($0, $1) }))
+                 .background(AssistantTheme.stage))
+        }
+        func verify(_ recorder: EventRhythmFrameRecorder, width: CGFloat, size: DynamicTypeSize,
+                    inheritedWidth: CGFloat?, expanded: Bool, scheme: ColorScheme = .light) throws {
+            try eventLedger.check("before painted verification")
+            let frames = recorder.frames
+            func frame(_ id: String) throws -> CGRect {
+                let value = try XCTUnwrap(frames[id], "Missing actual production geometry: \(id)")
+                XCTAssertTrue(value.minX.isFinite && value.minY.isFinite && value.width.isFinite && value.height.isFinite)
+                XCTAssertGreaterThan(value.width, 0); XCTAssertGreaterThan(value.height, 0)
+                return value
+            }
+            let stacked = size.isAccessibilitySize || inheritedWidth == nil || (inheritedWidth ?? 0) <= 360
+            // These are independent expectations for the unchanged standalone paper policy.
+            // The renderer's inset22 argument is for embedded cards, not this owning paper.
+            let expectedPaperInset: CGFloat = !size.isAccessibilitySize && (inheritedWidth ?? 0) > 360 ? 24 : 20
+            let expectedPaperInnerWidth = width - 32 - expectedPaperInset * 2
+            let briefingPaperIDs = ["legacy": "rich.item:card-\(legacy.id)", "new": "rich.item:card-\(agenda.id)"]
+            let requiredBriefingPaperIDs = Set(briefingPaperIDs.values)
+            // Require BOTH actual owning papers before the rich-card filter excludes them.
+            for id in requiredBriefingPaperIDs {
+                let paper = try frame(id)
+                XCTAssertEqual(paper.minX, 16, accuracy: 1)
+                XCTAssertEqual(paper.width, width - 32, accuracy: 1)
+            }
+            let visibleRich = expanded ? richIDs : ["rhythm-rich-0", "rhythm-rich-1", "rhythm-rich-2", "rhythm-rich-same-day"]
+            let visibleNew = expanded ? newItems : Array(newItems.prefix(6))
+            let cases: [(String, [String])] = [("rich", visibleRich), ("legacy", legacyItems.map(\.id)), ("new", visibleNew.map(\.id))]
+            for (kind, ids) in cases {
+                for id in ids {
+                    let row = try frame("\(kind).row:\(id)")
+                    let clock = try frame("\(kind).clock:\(id)")
+                    let details = try frame("\(kind).details:\(id)")
+                    XCTAssertGreaterThanOrEqual(row.minX, 15); XCTAssertLessThanOrEqual(row.maxX, width - 15)
+                    if stacked {
+                        XCTAssertEqual(details.minY - clock.maxY, 8, accuracy: 1, "Time-above separation")
+                        XCTAssertEqual(clock.minX, details.minX, accuracy: 1)
+                    } else {
+                        XCTAssertEqual(clock.width, 74, accuracy: 1, "Actual fixed clock allocation")
+                        XCTAssertEqual(details.minX - clock.maxX, 12, accuracy: 1)
+                    }
+                    if kind == "rich", id != "rhythm-rich-same-day" {
+                        let join = try frame("rich.join:\(id)")
+                        XCTAssertGreaterThanOrEqual(join.width + 1e-6, 44); XCTAssertGreaterThanOrEqual(join.height + 1e-6, 44)
+                        let title = try frame("rich.title:\(id)")
+                        XCTAssertFalse(title.intersects(join), "Title and actual Join target must not collide")
+                    }
+                    if kind != "rich" {
+                        let paper = try frame(try XCTUnwrap(briefingPaperIDs[kind]))
+                        let expectedLeading = paper.minX + expectedPaperInset
+                        XCTAssertEqual(row.minX, expectedLeading, accuracy: 1, "Actual owning-paper content rail")
+                        XCTAssertLessThanOrEqual(row.width, expectedPaperInnerWidth + 1)
+                        XCTAssertLessThanOrEqual(row.maxX, paper.maxX - expectedPaperInset + 1)
+                        let title = try frame("\(kind).title:\(id)")
+                        XCTAssertEqual(title.minX, expectedLeading + (stacked ? 0 : 74 + 12), accuracy: 1,
+                                       "Title retains the owning paper's time/details rail")
+                        let previous: CGRect
+                        if let location = frames["\(kind).location:\(id)"] {
+                            XCTAssertEqual(location.minY - title.maxY, 4, accuracy: 1)
+                            if kind == "legacy", size.isAccessibilitySize {
+                                XCTAssertGreaterThan(location.height, 44, "Long AX location must grow vertically")
+                            }
+                            previous = location
+                        } else { previous = title }
+                        let note = try frame("\(kind).note:\(id)")
+                        XCTAssertEqual(note.minY - previous.maxY, 8, accuracy: 1, "Notes keep 8pt even without location")
+                    }
+                }
+            }
+            // Actual first-day rows and headers, not duplicated test layouts.
+            let first = try frame("rich.row:rhythm-rich-0"), second = try frame("rich.row:rhythm-rich-same-day")
+            XCTAssertEqual(second.minY - first.maxY, 16, accuracy: 1)
+            let dayPapers = frames.filter { $0.key.hasPrefix("rich.item:day-") }.sorted { $0.value.minY < $1.value.minY }
+            XCTAssertEqual(dayPapers.count, expanded ? 6 : 3)
+            guard dayPapers.count == (expanded ? 6 : 3) else {
+                XCTFail("Missing actual visible day-paper geometry before spacing loops")
+                return
+            }
+            XCTAssertEqual(try XCTUnwrap(dayPapers.first).value.minY, 8, accuracy: 1, "No first-item extra day gap")
+            _ = try frame("rich.imminence:rhythm-rich-0")
+            if expanded {
+                let otherPapers = frames.filter {
+                    $0.key.hasPrefix("rich.item:card-") && !requiredBriefingPaperIDs.contains($0.key)
+                }.sorted { $0.value.minY < $1.value.minY }
+                XCTAssertEqual(otherPapers.count, 1, "Production puts the interleaved non-event input after day groups")
+                XCTAssertEqual(try XCTUnwrap(otherPapers.first).value.minY - (try XCTUnwrap(dayPapers.last).value.maxY), 8, accuracy: 1,
+                               "A non-event paper keeps the existing8 gap")
+            }
+            for index in 1..<dayPapers.count where index != 3 {
+                XCTAssertEqual(dayPapers[index].value.minY - dayPapers[index - 1].value.maxY, 20, accuracy: 1)
+            }
+            if expanded {
+                XCTAssertGreaterThan(dayPapers[3].value.minY - dayPapers[2].value.maxY, 20,
+                                     "The Show more control interrupts adjacency; do not bridge it")
+            }
+            let richHeadings = frames.filter { $0.key.hasPrefix("rich.heading:") }
+            XCTAssertEqual(richHeadings.count, expanded ? 6 : 3, "Every visible day paper must report its heading")
+            let requiredRichHeadings = Set(dayPapers.map { "rich.heading:" + String($0.key.dropFirst("rich.item:day-".count)) })
+            XCTAssertEqual(Set(richHeadings.keys), requiredRichHeadings)
+            // Require all IDs before iterating; missing probes cannot turn the
+            // spacing oracle into an empty loop that passes.
+            for id in requiredRichHeadings { _ = try frame(id) }
+            for paper in dayPapers {
+                let headingID = "rich.heading:" + String(paper.key.dropFirst("rich.item:day-".count))
+                let heading = try frame(headingID)
+                let rows = frames.filter {
+                    $0.key.hasPrefix("rich.row:") && $0.value.minY >= heading.maxY - 1 &&
+                    $0.value.minY >= paper.value.minY - 1 && $0.value.maxY <= paper.value.maxY + 1
+                }.sorted { $0.value.minY < $1.value.minY }
+                let firstRow = try XCTUnwrap(rows.first, "Missing first row INSIDE actual day paper: \(paper.key)").value
+                XCTAssertEqual(firstRow.minY - heading.maxY, 12, accuracy: 1)
+            }
+            let expectedGroups = ["legacy": ["Legacy day A", "Legacy day B"],
+                                  "new": ["All day", "Timed", "Time unavailable"]]
+            for kind in ["legacy", "new"] {
+                let names = try XCTUnwrap(expectedGroups[kind])
+                let requiredGroupIDs = Set(names.map { "\(kind).group:\($0)" })
+                let requiredHeadingIDs = Set(names.map { "\(kind).heading:\($0)" })
+                let actualGroupIDs = Set(frames.keys.filter { $0.hasPrefix("\(kind).group:") })
+                let actualHeadingIDs = Set(frames.keys.filter { $0.hasPrefix("\(kind).heading:") })
+                XCTAssertEqual(actualGroupIDs.count, kind == "legacy" ? 2 : 3)
+                XCTAssertEqual(actualHeadingIDs.count, kind == "legacy" ? 2 : 3)
+                XCTAssertEqual(actualGroupIDs, requiredGroupIDs)
+                XCTAssertEqual(actualHeadingIDs, requiredHeadingIDs)
+                for id in requiredGroupIDs.union(requiredHeadingIDs) { _ = try frame(id) }
+                let groups = try names.map { try frame("\(kind).group:\($0)") }.sorted { $0.minY < $1.minY }
+                for index in 1..<groups.count {
+                    XCTAssertEqual(groups[index].minY - groups[index - 1].maxY, 20, accuracy: 1)
+                }
+                for name in names {
+                    let group = try frame("\(kind).group:\(name)")
+                    let heading = try frame("\(kind).heading:\(name)")
+                    XCTAssertGreaterThanOrEqual(heading.minY, group.minY - 1)
+                    XCTAssertLessThanOrEqual(heading.maxY, group.maxY + 1)
+                    let rows = frames.filter {
+                        $0.key.hasPrefix("\(kind).row:") && $0.value.minY >= heading.maxY - 1 &&
+                        $0.value.minY >= group.minY - 1 && $0.value.maxY <= group.maxY + 1
+                    }.sorted { $0.value.minY < $1.value.minY }
+                    let firstRow = try XCTUnwrap(rows.first, "Missing first row INSIDE actual \(kind) group: \(name)").value
+                    XCTAssertEqual(firstRow.minY - heading.maxY, 12, accuracy: 1)
+                }
+            }
+            let legacyA = try frame("legacy.row:rhythm-legacy-0"), legacyB = try frame("legacy.row:rhythm-legacy-1")
+            XCTAssertEqual(legacyB.minY - legacyA.maxY, 16, accuracy: 1)
+            let newA = try frame("new.row:rhythm-new-2"), newB = try frame("new.row:rhythm-new-3")
+            XCTAssertEqual(newB.minY - newA.maxY, 16, accuracy: 1)
+            let textSamples = recorder.textSamples
+            let expectedClockIDs = Set(legacyItems.flatMap { ["legacy.clock.start:\($0.id)", "legacy.clock.end:\($0.id)"] })
+            XCTAssertEqual(Set(textSamples.keys), expectedClockIDs, "Both source identities must draw; missing samples cannot pass")
+            for item in legacyItems {
+                let timeParts = item.time.components(separatedBy: " – ")
+                let expectedLabels = [("start", timeParts.first ?? item.time),
+                                      ("end", timeParts.dropFirst().joined(separator: " – "))]
+                for (part, expectedText) in expectedLabels {
+                    let id = "legacy.clock.\(part):\(item.id)"
+                    let sample = try XCTUnwrap(textSamples[id], "Missing actual native TextRenderer receipt: \(id)")
+                    let allocated = try frame(id)
+                    XCTAssertEqual(sample.sourceText, expectedText, "Receipt must belong to the exact fixture clock source")
+                    XCTAssertFalse(sample.isTruncated, "Native clock Text layout truncated: \(id)")
+                    XCTAssertFalse(sample.lineBounds.isEmpty); XCTAssertFalse(sample.runBounds.isEmpty)
+                    if !stacked && part == "end" {
+                        XCTAssertGreaterThan(sample.lineBounds.count, 1, "Wide74 clock must wrap the full end time/timezone")
+                    }
+                    for nativeBounds in sample.lineBounds + sample.runBounds {
+                        XCTAssertTrue(nativeBounds.minX.isFinite && nativeBounds.minY.isFinite &&
+                                      nativeBounds.width.isFinite && nativeBounds.height.isFinite)
+                        XCTAssertGreaterThan(nativeBounds.width, 0); XCTAssertGreaterThan(nativeBounds.height, 0)
+                        // Preserve raw native local coordinates; no min/span normalization or clamping.
+                        XCTAssertGreaterThanOrEqual(nativeBounds.minX, -1)
+                        XCTAssertGreaterThanOrEqual(nativeBounds.minY, -1)
+                        XCTAssertLessThanOrEqual(nativeBounds.maxX, allocated.width + 1)
+                        XCTAssertLessThanOrEqual(nativeBounds.maxY, allocated.height + 1)
+                    }
+                }
+            }
+            func rawBounds(_ rect: CGRect) -> [String: CGFloat] {
+                ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height]
+            }
+            let nativeTextReceipt = textSamples.keys.sorted().map { id -> [String: Any] in
+                let sample = textSamples[id]!
+                return ["id": id, "sourceText": sample.sourceText, "isTruncated": sample.isTruncated,
+                        "lineCount": sample.lineBounds.count, "lineBounds": sample.lineBounds.map(rawBounds),
+                        "runBounds": sample.runBounds.map(rawBounds)]
+            }
+            let receipt = frames.keys.sorted().map { id -> [String: Any] in
+                let rect = frames[id]!
+                return ["id": id, "x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height]
+            }
+            try eventLedger.check("painted receipt serialization")
+            let data = try JSONSerialization.data(withJSONObject: ["scheme": scheme == .light ? "light" : "dark", "viewport": width, "inheritedViewport": inheritedWidth.map { $0 as Any } ?? NSNull(),
+                "accessibility": size.isAccessibilitySize, "expanded": expanded, "stacked": stacked, "paintedBounds": receipt,
+                "briefingPaperHorizontalInset": expectedPaperInset, "briefingPaperInnerWidth": expectedPaperInnerWidth,
+                "nativeClockText": nativeTextReceipt,
+                "reviewLimits": "Native TextRenderer reports truncation and raw line/run typographic bounds, not terminal Unicode/source-character or pixel-ink coverage. Public CharacterIndex has no validated terminal String mapping. Original PNG review MUST confirm the full time and Pacific Time suffix; VoiceOver reading/focus order also remains unproved."], options: [.prettyPrinted, .sortedKeys])
+            try eventLedger.check("painted receipt serialization completed")
+            try eventLedger.allowJSON(data.count)
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "event-rhythm-\(scheme == .light ? "light" : "dark")-\(Int(width))-\(size.isAccessibilitySize ? "AX3" : "large")-\(inheritedWidth == nil ? "missing" : "known")-\(expanded ? "expanded" : "collapsed")-painted-bounds"
+            attachment.lifetime = .keepAlways; add(attachment)
+            try eventLedger.check("painted receipt attachment completed")
+        }
+        for width in [CGFloat(320), 360, 390, 430] {
+            for size in [DynamicTypeSize.large, .accessibility3] {
+                try eventLedger.beginCase(self)
+                let recorder = EventRhythmFrameRecorder()
+                try await capture(reviewPage(recorder, width: width, expanded: true), scheme: .light, size: size,
+                                  scene: scene, model: model, requiresScrolling: true, viewportWidth: width, eventCapturePolicy: eventLedger)
+                try verify(recorder, width: width, size: size, inheritedWidth: width, expanded: true)
+            }
+        }
+        for size in [DynamicTypeSize.large, .accessibility3] {
+            try eventLedger.beginCase(self)
+            let recorder = EventRhythmFrameRecorder()
+            try await capture(reviewPage(recorder, width: nil, expanded: true), scheme: .light, size: size,
+                              scene: scene, model: model, requiresScrolling: true, viewportWidth: 390, eventCapturePolicy: eventLedger)
+            try verify(recorder, width: 390, size: size, inheritedWidth: nil, expanded: true)
+        }
+        try eventLedger.beginCase(self)
+        let collapsed = EventRhythmFrameRecorder()
+        try await capture(reviewPage(collapsed, width: 390, expanded: false), scheme: .light, size: .large,
+                          scene: scene, model: model, requiresScrolling: true, viewportWidth: 390, eventCapturePolicy: eventLedger)
+        try verify(collapsed, width: 390, size: .large, inheritedWidth: 390, expanded: false)
+        for (width, size) in [(CGFloat(390), DynamicTypeSize.large), (CGFloat(320), .accessibility3)] {
+            try eventLedger.beginCase(self)
+            let recorder = EventRhythmFrameRecorder()
+            try await capture(reviewPage(recorder, width: width, expanded: true), scheme: .dark, size: size,
+                              scene: scene, model: model, requiresScrolling: true, viewportWidth: width, eventCapturePolicy: eventLedger)
+            try verify(recorder, width: width, size: size, inheritedWidth: width, expanded: true, scheme: .dark)
+        }
+        XCTAssertEqual(eventLedger.ordinal, 13, "All thirteen existing event cases share one ledger")
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+        } catch {
+            if !eventLedger.minimalEmitted { eventLedger.emitMinimal(self, reason: String(describing: error)) }
+            throw error
+        }
+    }
+
+#endif
 
     @MainActor
     func testGeneratedTableFormatting() async throws {
@@ -1860,6 +2374,521 @@ final class NativeVisualReviewTests: XCTestCase {
         }
         XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
         XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+    }
+
+    @MainActor private final class ConnectedToolCaptureLedger {
+        struct Stop: Error { let reason: String }
+        let started = ContinuousClock.now
+        let test: NativeVisualReviewTests
+        let initialFailures: Int
+        var caseStart = ContinuousClock.now
+        var seen: Set<String> = []
+        var completed: Set<String> = []
+        var photographed: Set<String> = []
+        var perCasePNG: [String: Int] = [:]
+        var pngCount = 0
+        var retainedBytes = 0
+        var attemptedPNGBytes = 0
+        static let byteLimit = 80 * 1024 * 1024
+        static let reserve = 4096
+        static func key(_ name: String, scheme: ColorScheme, size: DynamicTypeSize, width: CGFloat) -> String {
+            "\(name)|\(scheme == .light ? "light" : "dark")|\(size.isAccessibilitySize ? "accessibility3" : "large")|\(Int(width))"
+        }
+        static var expected: Set<String> {
+            var result: Set<String> = [
+                "connected-tools-production-get-fixture|light|large|393",
+                "connected-tools-production-get-fixture-dark|dark|large|393",
+                "connected-tools-remove-initially-armed-layout-only|light|large|393",
+                "skills-compact-accessibility|light|accessibility3|320"
+            ]
+            for width in [320, 360, 390, 393, 430] {
+                for state in ["pause", "enable", "working", "disabled"] {
+                    result.insert("connected-tools-\(state)-\(width)|light|large|\(width)")
+                }
+            }
+            for width in [320, 393] {
+                for state in ["pause", "enable", "working", "disabled"] {
+                    result.insert("connected-tools-\(state)-dark-\(width)|dark|large|\(width)")
+                }
+            }
+            for width in [320, 360] {
+                for scheme in ["light", "dark"] {
+                    result.insert("connected-tools-accessible-\(width)|\(scheme)|accessibility3|\(width)")
+                }
+            }
+            return result
+        }
+        // Four exact Design-selected tuples share one screenshot/byte budget.
+        static let selected: Set<String> = [
+            "connected-tools-production-get-fixture|light|large|393",
+            "connected-tools-pause-dark-320|dark|large|320",
+            "connected-tools-accessible-320|light|accessibility3|320",
+            "skills-compact-accessibility|light|accessibility3|320"
+        ]
+        init(test: NativeVisualReviewTests) {
+            self.test = test
+            initialFailures = test.testRun?.failureCount ?? 0
+        }
+        func check(_ operation: String) throws {
+            guard started.duration(to: ContinuousClock.now) < .seconds(360),
+                  (seen.isEmpty || caseStart.duration(to: ContinuousClock.now) < .seconds(8)) else {
+                throw Stop(reason: "wall-cap: " + operation)
+            }
+            guard (test.testRun?.failureCount ?? 0) == initialFailures else {
+                throw Stop(reason: "preceding-geometry-assertion-failed")
+            }
+        }
+        func begin(_ key: String) throws {
+            try check("before case")
+            guard Self.expected.contains(key), seen.insert(key).inserted else {
+                throw Stop(reason: "unknown-or-duplicate-tuple: " + key)
+            }
+            caseStart = ContinuousClock.now
+        }
+        func attachJSON(_ object: [String: Any], name: String, test: NativeVisualReviewTests) throws {
+            let data = try JSONSerialization.data(withJSONObject: EventCaptureLedger.safe(object), options: [.sortedKeys])
+            guard data.count <= 1024 * 1024, retainedBytes + data.count <= Self.byteLimit - Self.reserve else {
+                throw Stop(reason: "JSON-or-method-aggregate-cap")
+            }
+            try check("before JSON")
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = name; attachment.lifetime = .keepAlways; test.add(attachment)
+            retainedBytes += data.count
+            try check("after JSON")
+        }
+        func capturePNG(_ window: UIWindow, key: String, position: String, test: NativeVisualReviewTests) throws {
+            guard Self.selected.contains(key) else { return }
+            try check("before PNG")
+            guard pngCount < 8, perCasePNG[key, default: 0] < 2 else { throw Stop(reason: "PNG-count-cap") }
+            var rendered = false
+            let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                rendered = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            }
+            guard rendered, let png = image.pngData() else { throw Stop(reason: "PNG-render-failed") }
+            attemptedPNGBytes += png.count
+            try check("after PNG encoding")
+            guard png.count > 15_000, png.count <= 8 * 1024 * 1024,
+                  retainedBytes + png.count <= Self.byteLimit - Self.reserve else { throw Stop(reason: "PNG-bytes-or-method-cap") }
+            let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+            attachment.name = "\(key)-\(position)"; attachment.lifetime = .keepAlways; test.add(attachment)
+            pngCount += 1; perCasePNG[key, default: 0] += 1; retainedBytes += png.count
+            photographed.insert(key)
+            try check("after PNG attachment")
+        }
+        func complete(_ key: String, steps: Int, test: NativeVisualReviewTests) throws {
+            try check("case completed")
+            guard completed.insert(key).inserted else { throw Stop(reason: "duplicate-completion") }
+            try attachJSON(["case": key, "status": "geometry-mounted", "scrollSteps": steps,
+                            "screenshotSelected": Self.selected.contains(key), "retainedPNGCount": perCasePNG[key, default: 0]],
+                           name: "connected-tools-case-\(completed.count)", test: test)
+        }
+        func finish(_ test: NativeVisualReviewTests) {
+            do {
+                try check("method finished")
+                guard Self.expected.count == 36, completed == Self.expected, seen == Self.expected,
+                      photographed == Self.selected, Self.selected.count == 4 else { throw Stop(reason: "missing-or-extra-tuple") }
+                try attachJSON(["status": "all-35-tools-plus-1-skills-cases-returned", "caseCount": completed.count,
+                                "selectedTuples": Self.selected.sorted(), "PNGCount": pngCount,
+                                "skillsRetiredExpansion": "Not activated: actual default Skills page only; no supported public fixture action to expand retired disclosure was exercised",
+                                "retainedEncodedBytesBeforeReceipt": retainedBytes,
+                                "limit": "Encoded PNG+JSON attachments only; xcresult container overhead is not measured here"],
+                               name: "connected-tools-method-ledger", test: test)
+            } catch {
+                let object: [String: Any] = ["status": "STOP", "reason": String(describing: error).prefix(512).description,
+                    "seenCount": seen.count, "completedCount": completed.count,
+                    "missingTuples": Self.expected.subtracting(completed).sorted(),
+                    "PNGCount": pngCount, "retainedBytes": retainedBytes, "attemptedPNGBytes": attemptedPNGBytes]
+                let full = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+                let fallback = Data("{\"status\":\"STOP\",\"reason\":\"minimal-receipt-fallback\",\"fullRawTraceRetained\":false}".utf8)
+                let data = full.flatMap { $0.count <= Self.reserve ? $0 : nil } ?? fallback
+                let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                attachment.name = "connected-tools-STOP"; attachment.lifetime = .keepAlways; test.add(attachment)
+                XCTFail("Connected-tools bounded fixture STOP: \(error)")
+            }
+        }
+    }
+
+    @MainActor
+    func testConnectedToolActionRowPaintedTargetsAcrossResponsiveStates() async throws {
+        let ledger = ConnectedToolCaptureLedger(test: self)
+        defer { ledger.finish(self) }
+        func captureBounded(_ page: Page, scheme: ColorScheme, size: DynamicTypeSize,
+                            scene: UIWindowScene, model: AppModel, viewportWidth: CGFloat,
+                            layoutReporter: (@MainActor ([String: CGRect]) -> Void)? = nil) async throws {
+            let key = ConnectedToolCaptureLedger.key(page.name, scheme: scheme, size: size, width: viewportWidth)
+            try ledger.begin(key)
+            let previousWindow = scene.keyWindow
+            let oldAppearance = UserDefaults.standard.string(forKey: AssistantAppearance.defaultsKey)
+            let window = UIWindow(windowScene: scene)
+            window.frame = scene.coordinateSpace.bounds
+            window.frame.size.width = viewportWidth
+            window.overrideUserInterfaceStyle = scheme == .light ? .light : .dark
+            let host = UIHostingController(rootView: Group {
+                if page.ownsNavigation { page.content }
+                else {
+                    NavigationStack(path: .constant(["review"])) {
+                        Color.clear.navigationTitle("Assistant")
+                            .navigationDestination(for: String.self) { _ in page.content }
+                    }
+                }
+            }.environment(model).environment(\.colorScheme, scheme)
+                .environment(\.dynamicTypeSize, size)
+                .environment(\.scenePhase, .active)
+                .transaction { $0.animation = nil; $0.disablesAnimations = true })
+            var selected: UIScrollView?
+            var originalOffset: CGPoint?
+            defer {
+                if let selected, let originalOffset { selected.setContentOffset(originalOffset, animated: false) }
+                window.isHidden = true
+                window.rootViewController = nil
+                previousWindow?.makeKey()
+                if let oldAppearance { UserDefaults.standard.set(oldAppearance, forKey: AssistantAppearance.defaultsKey) }
+                else { UserDefaults.standard.removeObject(forKey: AssistantAppearance.defaultsKey) }
+            }
+            try ledger.check("window setup")
+            window.rootViewController = host
+            window.makeKeyAndVisible()
+            var previousSize: CGSize?
+            var stable = 0
+            for _ in 0..<40 {
+                try ledger.check("bounded settle")
+                try await Task.sleep(for: .milliseconds(50))
+                window.layoutIfNeeded()
+                let current = host.view.systemLayoutSizeFitting(window.bounds.size)
+                stable = current == previousSize ? stable + 1 : 0
+                previousSize = current
+                if stable >= 3 { break }
+            }
+            guard stable >= 3 else { throw ConnectedToolCaptureLedger.Stop(reason: "settle-step-cap") }
+            layoutReporter?(["window.bounds": window.bounds,
+                             "window.safe-area.available": window.safeAreaLayoutGuide.layoutFrame])
+            try ledger.capturePNG(window, key: key, position: "top", test: self)
+            func scrollViews(_ view: UIView) -> [UIScrollView] {
+                ((view as? UIScrollView).map { [$0] } ?? []) + view.subviews.flatMap(scrollViews)
+            }
+            selected = scrollViews(window).filter {
+                $0.bounds.width >= window.bounds.width * 0.7 && $0.bounds.height >= window.bounds.height * 0.35 &&
+                $0.contentSize.height > $0.bounds.height - $0.adjustedContentInset.top - $0.adjustedContentInset.bottom + 2
+            }.max { $0.bounds.height < $1.bounds.height }
+            var steps = 0
+            if let scroll = selected {
+                originalOffset = scroll.contentOffset
+                for _ in 0..<8 {
+                    try ledger.check("bounded scroll")
+                    let bottom = max(-scroll.adjustedContentInset.top,
+                        scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+                    if scroll.contentOffset.y >= bottom - 2 { break }
+                    let viewport = scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom
+                    guard viewport.isFinite && viewport > 0 && bottom.isFinite else {
+                        throw ConnectedToolCaptureLedger.Stop(reason: "invalid-scroll-geometry")
+                    }
+                    scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x,
+                        y: min(bottom, scroll.contentOffset.y + viewport * 0.72)), animated: false)
+                    try await Task.sleep(for: .milliseconds(130))
+                    window.layoutIfNeeded()
+                    steps += 1
+                }
+                let bottom = max(-scroll.adjustedContentInset.top,
+                    scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+                guard bottom.isFinite && scroll.contentOffset.y >= bottom - 2 else {
+                    throw ConnectedToolCaptureLedger.Stop(reason: "scroll-step-cap-or-incomplete")
+                }
+                if steps > 0 { try ledger.capturePNG(window, key: key, position: "bottom", test: self) }
+            }
+            try ledger.complete(key, steps: steps, test: self)
+        }
+        let connection = McpConnection(
+            id: "review-tool-server",
+            name: "Home Assistant",
+            endpoint: "https://home.example.test/mcp",
+            status: "ready",
+            enabled: true,
+            hasBearerToken: false,
+            serverName: "Home Assistant",
+            serverVersion: "1.2",
+            instructions: nil,
+            tools: [McpConnectionTool(name: "get_lights", description: "Read lights", inputSchema: .object([:]))],
+            lastCheckedAt: "2026-10-23T18:00:00Z",
+            lastError: nil
+        )
+        let fixture = try NativeReviewFixture()
+        var responses = fixture.responses
+        responses["/api/mobile/v1/mcp"] = try JSONEncoder().encode(McpConnectionsResponse(connections: [connection]))
+        NativeReviewProtocol.install(responses)
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(
+            configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+            session: URLSession(configuration: configuration)
+        )
+        let suite = "assistant.connected-tools-action-geometry-review"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        let model = AppModel(apiClient: client, defaults: defaults)
+        await model.refreshAll()
+        _ = await model.refreshWorkspace()
+        _ = await model.refreshMcpConnections()
+        let workspace = try XCTUnwrap(model.workspace)
+        XCTAssertEqual(model.mcpConnections.map(\.id), [connection.id])
+
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let productionScreen = try XCTUnwrap(MoreView.visualReviewScreen("connected-tools", workspace: workspace))
+        try await captureBounded(
+            Page("connected-tools-production-get-fixture", productionScreen),
+            scheme: .light,
+            size: .large,
+            scene: scene,
+            model: model,
+            viewportWidth: 393
+        )
+        try await captureBounded(
+            Page("connected-tools-production-get-fixture-dark", productionScreen),
+            scheme: .dark,
+            size: .large,
+            scene: scene,
+            model: model,
+            viewportWidth: 393
+        )
+
+        struct RowState {
+            let name: String
+            let enabled: Bool
+            let working: Bool
+            let disabled: Bool
+        }
+        let states = [
+            RowState(name: "pause", enabled: true, working: false, disabled: false),
+            RowState(name: "enable", enabled: false, working: false, disabled: false),
+            RowState(name: "working", enabled: true, working: true, disabled: false),
+            RowState(name: "disabled", enabled: false, working: false, disabled: true)
+        ]
+        let widths: [CGFloat] = [320, 360, 390, 393, 430]
+        var baselineSizes: [String: [String: CGSize]] = [:]
+
+        func makeConnection(enabled: Bool) -> McpConnection {
+            McpConnection(
+                id: connection.id,
+                name: connection.name,
+                endpoint: connection.endpoint,
+                status: connection.status,
+                enabled: enabled,
+                hasBearerToken: connection.hasBearerToken,
+                serverName: connection.serverName,
+                serverVersion: connection.serverVersion,
+                instructions: connection.instructions,
+                tools: connection.tools,
+                lastCheckedAt: connection.lastCheckedAt,
+                lastError: connection.lastError
+            )
+        }
+
+        func assertPaintedLayout(_ frames: [String: CGRect], width: CGFloat, isAccessibility: Bool) throws {
+            let safeArea = try XCTUnwrap(frames["window.safe-area.available"], "Missing actual UIWindow safe-area frame")
+            let window = try XCTUnwrap(frames["window.bounds"], "Missing actual UIWindow bounds")
+            let card = try XCTUnwrap(frames["card.surface"], "Missing painted assistant-card bounds")
+            let row = try XCTUnwrap(frames["row.container"], "Missing actual connected-tool row bounds")
+            func contains(_ outer: CGRect, _ inner: CGRect, tolerance: CGFloat = 1) -> Bool {
+                inner.minX >= outer.minX - tolerance && inner.minY >= outer.minY - tolerance &&
+                    inner.maxX <= outer.maxX + tolerance && inner.maxY <= outer.maxY + tolerance
+            }
+            XCTAssertTrue(contains(window, safeArea), "The safe-area frame must be inside the actual window.")
+            XCTAssertTrue(contains(safeArea, card), "The painted card must stay inside the available safe-area frame.")
+            XCTAssertTrue(contains(card, row), "The action row must stay inside its painted card.")
+
+            for id in ["refresh", "toggle", "remove"] {
+                let surface = try XCTUnwrap(frames["\(id).button"], "Missing painted action surface for \(id)")
+                let group = try XCTUnwrap(frames["\(id).group"], "Missing visible icon-label group for \(id)")
+                let glyph = try XCTUnwrap(frames["\(id).glyph"], "Missing visible icon slot for \(id)")
+                let text = try XCTUnwrap(frames["\(id).text"], "Missing visible text for \(id)")
+                XCTAssertTrue(surface.minX.isFinite && surface.minY.isFinite && surface.width.isFinite && surface.height.isFinite)
+                XCTAssertGreaterThanOrEqual(surface.height, 48, "The connected-tool target must retain its 48pt baseline; Dynamic Type may grow it.")
+                XCTAssertGreaterThanOrEqual(group.minX, surface.minX - 1)
+                XCTAssertLessThanOrEqual(group.maxX, surface.maxX + 1)
+                XCTAssertGreaterThanOrEqual(group.minY, surface.minY - 1)
+                XCTAssertLessThanOrEqual(group.maxY, surface.maxY + 1)
+                XCTAssertTrue(contains(row, surface), "The \(id) painted target overflowed its actual row.")
+                XCTAssertTrue(contains(card, surface), "The \(id) painted target overflowed its card.")
+                XCTAssertTrue(contains(safeArea, surface), "The \(id) painted target overflowed the available safe area.")
+                XCTAssertTrue(contains(window, surface), "The \(id) painted target overflowed the actual window.")
+                XCTAssertEqual(group.midX, surface.midX, accuracy: 1, "The complete visible label group must be centered.")
+                XCTAssertGreaterThanOrEqual(text.minX - glyph.maxX, 8 - 1, "The scaled gap must stay outside the intrinsic glyph slot.")
+                for symbol in AssistantIntrinsicActionGlyph.reservedSymbols + ["spinner"] {
+                    let intrinsic = try XCTUnwrap(frames["\(id).intrinsic.\(symbol)"], "Missing uncompressed intrinsic extent for \(id)/\(symbol)")
+                    XCTAssertGreaterThan(intrinsic.width, 0)
+                    XCTAssertTrue(contains(glyph, intrinsic), "The symbol slot must contain every uncompressed state at the inherited Dynamic Type size.")
+                    XCTAssertGreaterThanOrEqual(text.minX - intrinsic.maxX, 8 - 1, "No intrinsic symbol state may enter the label gap.")
+                }
+                XCTAssertEqual(text.midY, glyph.midY, accuracy: 1)
+            }
+
+            let refresh = frames["refresh.button"]!
+            let toggle = frames["toggle.button"]!
+            let remove = frames["remove.button"]!
+            XCTAssertEqual(refresh.width, toggle.width, accuracy: 1)
+            XCTAssertEqual(toggle.width, remove.width, accuracy: 1)
+            XCTAssertEqual(refresh.height, toggle.height, accuracy: 1)
+            XCTAssertEqual(toggle.height, remove.height, accuracy: 1)
+
+            let horizontal = abs(refresh.midY - toggle.midY) < 1 && abs(toggle.midY - remove.midY) < 1
+            if width <= 360 || isAccessibility {
+                XCTAssertFalse(horizontal, "Narrow and Accessibility layouts must stack the complete controls.")
+                XCTAssertEqual(refresh.minX, toggle.minX, accuracy: 1)
+                XCTAssertEqual(toggle.minX, remove.minX, accuracy: 1)
+            } else if horizontal {
+                XCTAssertEqual(toggle.minX - refresh.maxX, 8, accuracy: 1)
+                XCTAssertEqual(remove.minX - toggle.maxX, 8, accuracy: 1)
+            } else {
+                XCTAssertEqual(refresh.minX, toggle.minX, accuracy: 1)
+                XCTAssertEqual(toggle.minX, remove.minX, accuracy: 1)
+                XCTAssertEqual(toggle.minY - refresh.maxY, 8, accuracy: 1)
+                XCTAssertEqual(remove.minY - toggle.maxY, 8, accuracy: 1)
+            }
+        }
+
+        func captureRow(_ row: ConnectedToolActionRow, name: String, scheme: ColorScheme, size: DynamicTypeSize,
+                        width: CGFloat, recorder: ConnectedToolActionLayoutRecorder) async throws {
+            try await captureBounded(
+                Page(name, ownsNavigation: true,
+                     ConnectedToolsActionRowReviewCard(row: row, layoutReporter: { recorder.record($0) })),
+                scheme: scheme,
+                size: size,
+                scene: scene,
+                model: model,
+                viewportWidth: width,
+                layoutReporter: { recorder.record($0) }
+            )
+        }
+
+        for width in widths {
+            for state in states {
+                let recorder = ConnectedToolActionLayoutRecorder()
+                let row = ConnectedToolActionRow(
+                    connection: makeConnection(enabled: state.enabled),
+                    viewportWidth: width,
+                    usesAccessibilityLayout: false,
+                    working: state.working,
+                    disabled: state.disabled,
+                    onAction: { _ in XCTFail("The visual fixture must not run connected-tool actions.") },
+                    onRemove: { XCTFail("The visual fixture must not remove a connection.") },
+                    layoutReporter: { recorder.record($0) },
+                    confirmationLabelReporter: { recorder.confirmationLabels.append($0) }
+                )
+                try await captureRow(row, name: "connected-tools-\(state.name)-\(Int(width))",
+                                     scheme: .light, size: .large, width: width, recorder: recorder)
+                try assertPaintedLayout(recorder.frames, width: width, isAccessibility: false)
+                XCTAssertEqual(recorder.confirmationLabels.first, "Remove")
+
+                let signature = "\(Int(width))-large"
+                let currentSizes = Dictionary(uniqueKeysWithValues: ["refresh", "toggle", "remove"].map { id in
+                    (id, recorder.frames["\(id).button"]!.size)
+                })
+                if state.name == "pause" {
+                    baselineSizes[signature] = currentSizes
+                } else if let baseline = baselineSizes[signature] {
+                    for id in ["refresh", "toggle", "remove"] {
+                        XCTAssertEqual(currentSizes[id]!.width, baseline[id]!.width, accuracy: 1,
+                                       "Label or working state changed the reserved width of \(id).")
+                        XCTAssertEqual(currentSizes[id]!.height, baseline[id]!.height, accuracy: 1,
+                                       "Label or working state changed the reserved height of \(id).")
+                    }
+                }
+            }
+        }
+
+        for width in [CGFloat(320), 393] {
+            for state in states {
+                let recorder = ConnectedToolActionLayoutRecorder()
+                let row = ConnectedToolActionRow(
+                    connection: makeConnection(enabled: state.enabled),
+                    viewportWidth: width,
+                    usesAccessibilityLayout: false,
+                    working: state.working,
+                    disabled: state.disabled,
+                    onAction: { _ in XCTFail("The dark visual fixture must not run connected-tool actions.") },
+                    onRemove: { XCTFail("The dark visual fixture must not remove a connection.") },
+                    layoutReporter: { recorder.record($0) }
+                )
+                try await captureRow(row, name: "connected-tools-\(state.name)-dark-\(Int(width))",
+                                     scheme: .dark, size: .large, width: width, recorder: recorder)
+                try assertPaintedLayout(recorder.frames, width: width, isAccessibility: false)
+            }
+        }
+
+        for width in [CGFloat(320), 360] {
+            for scheme in [ColorScheme.light, .dark] {
+                let recorder = ConnectedToolActionLayoutRecorder()
+                let row = ConnectedToolActionRow(
+                    connection: connection,
+                    viewportWidth: width,
+                    usesAccessibilityLayout: true,
+                    working: false,
+                    disabled: false,
+                    onAction: { _ in XCTFail("The accessibility visual fixture must not run actions.") },
+                    onRemove: { XCTFail("The accessibility visual fixture must not remove a connection.") },
+                    layoutReporter: { recorder.record($0) }
+                )
+                try await captureRow(row, name: "connected-tools-accessible-\(Int(width))",
+                                     scheme: scheme, size: .accessibility3, width: width, recorder: recorder)
+                try assertPaintedLayout(recorder.frames, width: width, isAccessibility: true)
+                if let regular = baselineSizes["\(Int(width))-large"] {
+                    for id in ["refresh", "toggle", "remove"] {
+                        XCTAssertGreaterThanOrEqual(recorder.frames["\(id).button"]!.height, regular[id]!.height)
+                    }
+                }
+            }
+        }
+
+        let armRecorder = ConnectedToolActionLayoutRecorder()
+        let callbacks = ConnectedToolReviewCallbacks()
+        // Layout-only fixture: seed the actual production button's initial
+        // @State and render its real armed branch. No activation is attempted.
+        // Tap/AX arming and VoiceOver delivery remain UNVERIFIED manual follow-up.
+        let armedRow = ConnectedToolActionRow(
+            connection: connection,
+            viewportWidth: 393,
+            usesAccessibilityLayout: false,
+            working: false,
+            disabled: false,
+            onAction: { callbacks.actions.append($0) },
+            onRemove: { callbacks.removals += 1 },
+            layoutReporter: { armRecorder.record($0) },
+            initiallyArmedForLayoutReview: true,
+            confirmationLabelReporter: { armRecorder.confirmationLabels.append($0) }
+        )
+        try await captureBounded(
+            Page("connected-tools-remove-initially-armed-layout-only", ownsNavigation: true,
+                 ConnectedToolsActionRowReviewCard(row: armedRow, layoutReporter: { armRecorder.record($0) })),
+            scheme: .light,
+            size: .large,
+            scene: scene,
+            model: model,
+            viewportWidth: 393,
+            layoutReporter: { armRecorder.record($0) }
+        )
+        // This is the same value supplied to the actual accessibilityLabel
+        // modifier; observing it does not prove VoiceOver delivered the label.
+        XCTAssertEqual(armRecorder.confirmationLabels.first, "Confirm remove")
+        XCTAssertEqual(callbacks.actions, [])
+        XCTAssertEqual(callbacks.removals, 0, "Mounting an initially armed layout fixture must not execute removal.")
+        try assertPaintedLayout(armRecorder.frames, width: 393, isAccessibility: false)
+        let resting393 = try XCTUnwrap(baselineSizes["393-large"])
+        for id in ["refresh", "toggle", "remove"] {
+            let armedSurface = try XCTUnwrap(armRecorder.frames["\(id).button"])
+            XCTAssertEqual(armedSurface.width, resting393[id]!.width, accuracy: 1,
+                           "Arming Remove must not grow the \(id) surface width.")
+            XCTAssertEqual(armedSurface.height, resting393[id]!.height, accuracy: 1,
+                           "Arming Remove must not grow the \(id) surface height.")
+        }
+
+        // Actual Skills composition shares the same four-case screenshot budget.
+        // Retired remains in its real default state: no private expansion injection.
+        try await captureBounded(
+            Page("skills-compact-accessibility", WorkspaceView(area: .skills)),
+            scheme: .light, size: .accessibility3, scene: scene, model: model, viewportWidth: 320
+        )
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty, "No write request may be sent by a visual review fixture.")
     }
 
     @MainActor
@@ -2210,6 +3239,340 @@ final class NativeVisualReviewTests: XCTestCase {
         )
     }
 
+    // MARK: Connection safe-area source fixtures (two selected originals; no matrix entries)
+#if DEBUG
+    @MainActor
+    private final class ConnectionLayoutRecorder {
+        var frames: [ConnectionGeometryElement: CGRect] = [:]
+        func record(_ sample: ConnectionGeometrySample) { frames[sample.element] = sample.frame }
+    }
+
+    @MainActor
+    private final class ConnectionEvidenceLedger {
+        private(set) var keys: Set<String> = []
+        private(set) var bytes = 0
+        private let allowed: Set<String> = ["connection-root-normal-initial", "connection-root-AX3-long-error"]
+
+        func capture(_ window: UIWindow, key: String, test: NativeVisualReviewTests) throws {
+            guard allowed.contains(key), !keys.contains(key), keys.count < 2 else {
+                throw NSError(domain: "ConnectionEvidenceCap", code: 1)
+            }
+            var rendered = false
+            let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                rendered = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            }
+            guard rendered, let png = image.pngData(), !png.isEmpty,
+                  png.count <= 8 * 1024 * 1024, bytes + png.count <= 16 * 1024 * 1024 else {
+                throw NSError(domain: "ConnectionEvidenceCap", code: 2)
+            }
+            keys.insert(key)
+            bytes += png.count
+            let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+            attachment.name = key
+            attachment.lifetime = .keepAlways
+            test.add(attachment)
+        }
+
+        func finish() {
+            XCTAssertEqual(keys, allowed, "Only the two selected existing mounts produce original images")
+            print("Connection selected originals: count=\(keys.count), encodedBytes=\(bytes); xcresult overhead not included")
+        }
+    }
+
+    @MainActor
+    private final class ConnectionRecordingSurfaces: AppSystemSurfaces {
+        var operations: [String] = []
+        func ensure(agentName: String, thought: AssistantThought, detail: String, pendingCount: Int) async { operations.append("ensure") }
+        func start(agentName: String, thought: AssistantThought, detail: String, pendingCount: Int) async { operations.append("start") }
+        func update(thought: AssistantThought, detail: String, pendingCount: Int) async { operations.append("update") }
+        func needsAttention(agentName: String, detail: String, pendingCount: Int) async { operations.append("needsAttention") }
+        func finish(thought: AssistantThought, detail: String, succeeded: Bool) async { operations.append("finish") }
+        func dismiss() async { operations.append("dismiss") }
+        func updateBadge(_ count: Int) async { operations.append("badge") }
+    }
+
+    @MainActor
+    private func connectionDescendants<T: UIView>(_ view: UIView, as type: T.Type) -> [T] {
+        ((view as? T).map { [$0] } ?? []) + view.subviews.flatMap { connectionDescendants($0, as: type) }
+    }
+
+    @MainActor
+    private func settleConnection(
+        window: UIWindow,
+        host: UIViewController,
+        recorder: ConnectionLayoutRecorder,
+        required: Set<ConnectionGeometryElement>
+    ) async throws {
+        var previous: [ConnectionGeometryElement: CGRect] = [:]
+        var stable = 0
+        for _ in 0..<40 {
+            try Task.checkCancellation()
+            host.view.setNeedsLayout()
+            window.layoutIfNeeded()
+            host.view.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(16))
+            let current = recorder.frames.filter { required.contains($0.key) }
+            if current.count == required.count && current == previous { stable += 1 }
+            else { stable = 0 }
+            if stable >= 3 { return }
+            previous = current
+        }
+        XCTFail("Connection geometry did not settle within 40 display opportunities; missing \(required.subtracting(recorder.frames.keys))")
+        throw NSError(domain: "ConnectionLayoutFixture", code: 1)
+    }
+
+    @MainActor
+    private func assertConnectionRect(_ frame: CGRect, inside safe: CGRect, name: String) {
+        XCTAssertTrue([frame.minX, frame.minY, frame.maxX, frame.maxY].allSatisfy { $0.isFinite }, name)
+        XCTAssertGreaterThan(frame.width, 0, name)
+        XCTAssertGreaterThan(frame.height, 0, name)
+        XCTAssertGreaterThanOrEqual(frame.minX, safe.minX - 1, "\(name) leading edge")
+        XCTAssertGreaterThanOrEqual(frame.minY, safe.minY - 1, "\(name) top edge")
+        XCTAssertLessThanOrEqual(frame.maxX, safe.maxX + 1, "\(name) trailing edge")
+        XCTAssertLessThanOrEqual(frame.maxY, safe.maxY + 1, "\(name) bottom edge")
+    }
+
+    @MainActor
+    private func revealConnectionElement(
+        _ element: ConnectionGeometryElement,
+        window: UIWindow,
+        host: UIViewController,
+        scroll: UIScrollView,
+        recorder: ConnectionLayoutRecorder,
+        required: Set<ConnectionGeometryElement>
+    ) async throws {
+        let frame = try XCTUnwrap(recorder.frames[element], "Missing production geometry: \(element)")
+        let viewport = window.safeAreaLayoutGuide.layoutFrame.intersection(scroll.convert(scroll.bounds, to: window))
+        XCTAssertGreaterThan(viewport.height, 0)
+        let minimum = -scroll.adjustedContentInset.top
+        let maximum = max(minimum, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+        let desired = scroll.contentOffset.y + frame.midY - viewport.midY
+        scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: min(maximum, max(minimum, desired))), animated: false)
+        try await settleConnection(window: window, host: host, recorder: recorder, required: required)
+        let visible = try XCTUnwrap(recorder.frames[element])
+        assertConnectionRect(visible, inside: window.safeAreaLayoutGuide.layoutFrame, name: element.rawValue)
+        assertConnectionRect(visible, inside: viewport, name: "\(element.rawValue) scroll viewport")
+    }
+
+    @MainActor
+    func testConnectionRootAndSettingsRespectActualWindowSafeAreaAtNormalAndAX3() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        // The fixture uses the allocated simulator's actual portrait window. It
+        // does not manufacture a notch inset or infer a hardware model from width.
+        XCTAssertGreaterThan(scene.coordinateSpace.bounds.height, scene.coordinateSpace.bounds.width)
+        let evidence = ConnectionEvidenceLedger()
+        defer { evidence.finish() }
+        for onboarding in [true, false] {
+            for size in [DynamicTypeSize.large, .accessibility3] {
+                try await withConnectionLayoutMount(scene: scene, onboarding: onboarding, size: size, evidence: evidence)
+            }
+        }
+    }
+
+    @MainActor
+    private func withConnectionLayoutMount(scene: UIWindowScene, onboarding: Bool, size: DynamicTypeSize, evidence: ConnectionEvidenceLedger) async throws {
+        NativeReviewProtocol.install([:])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeReviewProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        guard NotificationManager.shared.pendingDestination == nil else {
+            XCTFail("Connection fixture requires an empty notification destination; it must not consume another test's work")
+            throw NSError(domain: "ConnectionLayoutFixture", code: 2)
+        }
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"), session: session)
+        let suite = "assistant.connection-safe-area.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        let previousApprovalHandler = NotificationManager.shared.approvalDecisionHandler
+        let previousDeviceTokenHandler = NotificationManager.shared.deviceTokenHandler
+        let surfaces = ConnectionRecordingSurfaces()
+        var tokenWrites = 0
+        let model = AppModel(
+            apiClient: client, defaults: defaults,
+            storeConnectionToken: { _ in tokenWrites += 1; XCTFail("Layout must never save a connection key") },
+            enqueueAutomaticSpeech: { _ in XCTFail("No speech in connection layout fixture") },
+            scheduleLocalNotification: { _, _, _, _, _, _ in XCTFail("No notification in connection layout fixture"); return false },
+            systemSurfaces: surfaces,
+            captureCurrentPlace: { nil }
+        )
+        XCTAssertNil(model.bootstrap)
+        XCTAssertFalse(model.hasSavedConnection)
+        XCTAssertFalse(model.isLoading)
+        let hasLongError = onboarding && size == .accessibility3
+        let syntheticError = "Offline layout fixture: the assistant server could not be reached. Check the server address and this device’s connection, then review the access key before trying again. Nothing was submitted by this test. This deliberately long explanation must remain readable as the text size grows."
+        if hasLongError { model.errorMessage = syntheticError }
+        let recorder = ConnectionLayoutRecorder()
+        let content: AnyView = onboarding
+            ? AnyView(RootView())
+            : AnyView(NavigationStack { ConnectionView(isOnboarding: false, showsDoneButton: true) })
+        let host = UIHostingController(rootView: AnyView(content
+            .environment(model)
+            .environment(\.connectionGeometryReporter, ConnectionGeometryReporter(report: { recorder.record($0) }))
+            .environment(\.dynamicTypeSize, size)
+            .environment(\.scenePhase, .inactive)
+            .transaction { $0.animation = nil; $0.disablesAnimations = true }))
+        let previousWindow = scene.keyWindow
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.overrideUserInterfaceStyle = .light
+        var selectedScroll: UIScrollView?
+        var originalOffset: CGPoint?
+        defer {
+            window.endEditing(true)
+            if let selectedScroll, let originalOffset { selectedScroll.setContentOffset(originalOffset, animated: false) }
+            model.scenePhaseDidChange(SwiftUI.ScenePhase.background)
+            window.isHidden = true
+            window.rootViewController = nil
+            previousWindow?.makeKey()
+            NotificationManager.shared.approvalDecisionHandler = previousApprovalHandler
+            NotificationManager.shared.deviceTokenHandler = previousDeviceTokenHandler
+            session.invalidateAndCancel()
+            defaults.removePersistentDomain(forName: suite)
+            XCTAssertEqual(tokenWrites, 0)
+            XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+            XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+        }
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        var required: Set<ConnectionGeometryElement> = onboarding
+            ? [.rootAvailable, .scrollViewport, .scrollBody, .heading, .form, .serverField, .keyField, .primary]
+            : [.scrollViewport, .scrollBody, .form, .serverField, .keyField, .primary]
+        if hasLongError { required.insert(.error) }
+        try await settleConnection(window: window, host: host, recorder: recorder, required: required)
+        let viewport = try XCTUnwrap(recorder.frames[.scrollViewport])
+        let scroll = try XCTUnwrap(connectionDescendants(window, as: UIScrollView.self)
+            .filter { !$0.isHidden && $0.bounds.height > 0 }
+            .max { left, right in
+                left.convert(left.bounds, to: window).intersection(viewport).height < right.convert(right.bounds, to: window).intersection(viewport).height
+            })
+        selectedScroll = scroll
+        originalOffset = scroll.contentOffset
+        let windowSafe = window.safeAreaLayoutGuide.layoutFrame
+        XCTAssertGreaterThan(windowSafe.height, 0)
+        XCTAssertEqual(windowSafe.minY, window.bounds.minY + window.safeAreaInsets.top, accuracy: 1)
+        if onboarding {
+            let root = try XCTUnwrap(recorder.frames[.rootAvailable])
+            XCTAssertEqual(root.minY, windowSafe.minY, accuracy: 1, "Root must start at actual window safe-area top")
+            // Assert the initial unscrolled production layout before any test
+            // reveal can repair a heading that began under the status area.
+            XCTAssertEqual(viewport.minY, root.minY, accuracy: 1, "Initial viewport inherits the actual root safe-area top")
+            let initialHeading = try XCTUnwrap(recorder.frames[.heading])
+            XCTAssertEqual(initialHeading.minY, root.minY + 24, accuracy: 1, "Initial heading uses the designed 24pt content gap once")
+            assertConnectionRect(initialHeading, inside: windowSafe, name: "Initial unscrolled heading")
+            if size == .large { try evidence.capture(window, key: "connection-root-normal-initial", test: self) }
+            try await revealConnectionElement(.heading, window: window, host: host, scroll: scroll, recorder: recorder, required: required)
+        } else {
+            let navigation = try XCTUnwrap(connectionDescendants(window, as: UINavigationBar.self).first { !$0.isHidden })
+            XCTAssertEqual(navigation.topItem?.title, "Connection")
+            assertConnectionRect(navigation.convert(navigation.bounds, to: window), inside: windowSafe, name: "Actual settings navigation heading")
+        }
+        let form = try XCTUnwrap(recorder.frames[.form])
+        let actualViewport = windowSafe.intersection(scroll.convert(scroll.bounds, to: window))
+        XCTAssertTrue([form.minX, form.minY, form.maxX, form.maxY].allSatisfy { $0.isFinite })
+        XCTAssertGreaterThan(form.width, 0)
+        XCTAssertGreaterThan(form.height, 0)
+        XCTAssertGreaterThanOrEqual(form.minX, actualViewport.minX - 1)
+        XCTAssertLessThanOrEqual(form.maxX, actualViewport.maxX + 1)
+        if form.height <= actualViewport.height {
+            try await revealConnectionElement(.form, window: window, host: host, scroll: scroll, recorder: recorder, required: required)
+        } else {
+            // An AX card may legitimately wrap beyond one viewport. Preserve
+            // all text and prove each real field remains wholly reachable.
+            print("Connection card legitimately exceeds viewport: cardHeight=\(form.height), viewportHeight=\(actualViewport.height), AX=\(size.isAccessibilitySize)")
+        }
+        for element in [ConnectionGeometryElement.serverField, .keyField, .primary] {
+            try await revealConnectionElement(element, window: window, host: host, scroll: scroll, recorder: recorder, required: required)
+        }
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(recorder.frames[.primary]).height, 48)
+        if hasLongError {
+            XCTAssertEqual(model.errorMessage, syntheticError)
+            let error = try XCTUnwrap(recorder.frames[.error])
+            XCTAssertTrue([error.minX, error.minY, error.maxX, error.maxY].allSatisfy { $0.isFinite })
+            XCTAssertGreaterThan(error.width, 0)
+            XCTAssertGreaterThanOrEqual(error.minX, actualViewport.minX - 1)
+            XCTAssertLessThanOrEqual(error.maxX, actualViewport.maxX + 1)
+            // Match the production subheadline style at SwiftUI AX3's UIKit
+            // category. Subtract its actual 14pt-per-edge error padding before
+            // comparing with a single font line; this is allocation evidence,
+            // not terminal-glyph or complete-text rendering proof.
+            let font = UIFont.preferredFont(forTextStyle: .subheadline,
+                compatibleWith: UITraitCollection(preferredContentSizeCategory: .accessibilityExtraLarge))
+            XCTAssertGreaterThan(error.height - 28, font.lineHeight)
+            if error.height <= actualViewport.height {
+                try await revealConnectionElement(.error, window: window, host: host, scroll: scroll, recorder: recorder, required: required)
+            } else {
+                print("Connection AX3 error exceeds viewport: original shows only current scroll position; full explanation requires scrolling")
+            }
+            // A single original cannot promise the entire oversized card,
+            // error and button simultaneously. Individual control reachability
+            // was asserted above; report the actual visible context explicitly.
+            let visible = windowSafe.intersection(scroll.convert(scroll.bounds, to: window))
+            let names: [ConnectionGeometryElement] = [.form, .serverField, .keyField, .error, .primary]
+            print("Connection AX3 original visible element intersections=\(names.filter { recorder.frames[$0]?.intersects(visible) == true }.map(\.rawValue)); whole-source glyph coverage not inferred")
+            try evidence.capture(window, key: "connection-root-AX3-long-error", test: self)
+        }
+        // One explicit safe-area perturbation, only on the actual RootView normal
+        // mount. The expected shift comes from UIKit's measured hosting guide.
+        if onboarding && size == .large {
+            scroll.setContentOffset(CGPoint(x: 0, y: -scroll.adjustedContentInset.top), animated: false)
+            try await settleConnection(window: window, host: host, recorder: recorder, required: required)
+            let headingBefore = try XCTUnwrap(recorder.frames[.heading])
+            let hostTopBefore = host.view.safeAreaLayoutGuide.layoutFrame.minY
+            host.additionalSafeAreaInsets.top = 19
+            try await settleConnection(window: window, host: host, recorder: recorder, required: required)
+            let delta = host.view.safeAreaLayoutGuide.layoutFrame.minY - hostTopBefore
+            XCTAssertEqual(delta, 19, accuracy: 1)
+            XCTAssertEqual(try XCTUnwrap(recorder.frames[.rootAvailable]).minY - windowSafe.minY, delta, accuracy: 1)
+            XCTAssertEqual(try XCTUnwrap(recorder.frames[.heading]).minY - headingBefore.minY, delta, accuracy: 1, "Safe-area delta must be applied once")
+            host.additionalSafeAreaInsets = UIEdgeInsets.zero
+            try await settleConnection(window: window, host: host, recorder: recorder, required: required)
+            try await assertConnectionNativeInputBehavior(window: window, host: host, recorder: recorder, required: required)
+        }
+        XCTAssertNil(model.bootstrap, "Layout never authenticates or submits the form")
+        XCTAssertFalse(model.isLoading)
+        print("Connection safe-area source fixture: onboarding=\(onboarding), AX=\(size.isAccessibilitySize), windowInsets=\(window.safeAreaInsets), safeFrame=\(windowSafe); selectedOriginalsRetained=\(evidence.keys.count)")
+    }
+
+    @MainActor
+    private func assertConnectionNativeInputBehavior(window: UIWindow, host: UIViewController, recorder: ConnectionLayoutRecorder, required: Set<ConnectionGeometryElement>) async throws {
+        let fields = connectionDescendants(window, as: UITextField.self)
+        let server = try XCTUnwrap(fields.first { !$0.isSecureTextEntry && $0.keyboardType == .URL })
+        let key = try XCTUnwrap(fields.first { $0.isSecureTextEntry })
+        XCTAssertEqual(server.textContentType, .URL)
+        XCTAssertEqual(server.returnKeyType, .next)
+        XCTAssertEqual(server.autocapitalizationType, .none)
+        XCTAssertEqual(server.autocorrectionType, .no)
+        XCTAssertEqual(key.textContentType, .password)
+        XCTAssertEqual(key.returnKeyType, .go)
+        XCTAssertEqual(key.autocapitalizationType, .none)
+        XCTAssertEqual(key.autocorrectionType, .no)
+        XCTAssertTrue(server.becomeFirstResponder())
+        XCTAssertTrue(server.isFirstResponder)
+        XCTAssertTrue(key.becomeFirstResponder())
+        XCTAssertTrue(key.isFirstResponder)
+        XCTAssertFalse(server.isFirstResponder)
+        // Give a real software keyboard up to 24 display opportunities. No
+        // fabricated frame and no programmatic scroll repairs the focused field.
+        for _ in 0..<24 {
+            try await Task.sleep(for: .milliseconds(16))
+            window.layoutIfNeeded()
+            if window.keyboardLayoutGuide.layoutFrame.height > window.safeAreaInsets.bottom + 1 { break }
+        }
+        try await settleConnection(window: window, host: host, recorder: recorder, required: required)
+        let keyboard = window.keyboardLayoutGuide.layoutFrame
+        let observed = keyboard.height > window.safeAreaInsets.bottom + 1 && keyboard.minY < window.safeAreaLayoutGuide.layoutFrame.maxY - 1
+        print("Connection native keyboard observed=\(observed), guide=\(keyboard); absence is NOT viewport-avoidance proof")
+        if observed {
+            XCTAssertTrue(key.isFirstResponder)
+            XCTAssertLessThanOrEqual(key.convert(key.bounds, to: window).maxY, keyboard.minY + 1, "Native keyboard avoidance must reveal the focused key field without a test scroll")
+            XCTAssertGreaterThanOrEqual(key.convert(key.bounds, to: window).minY, window.safeAreaLayoutGuide.layoutFrame.minY - 1)
+        }
+        // Never sends .editingDidEndOnExit / .go: no connection or keychain write.
+        window.endEditing(true)
+    }
+#endif
+
     private struct Page {
         let name: String
         var ownsNavigation = false
@@ -2226,9 +3589,438 @@ final class NativeVisualReviewTests: XCTestCase {
         }
     }
 
+
+    // Event-only resource policy. The default capture path below is intentionally
+    // untouched; these ceilings stop with failure and never prove content fits.
+    @MainActor private final class EventCaptureLedger {
+        struct Stop: Error { let reason: String }
+        let clock = ContinuousClock()
+        let methodStart: ContinuousClock.Instant
+        let runID = UUID().uuidString
+        var caseStart: ContinuousClock.Instant
+        var ordinal = 0
+        var attemptedPNG = 0, retainedPNG = 0, caseAttemptedPNG = 0, caseRetainedPNG = 0
+        var retainedJSON = 0, caseJSON = 0
+        var failures: [String] = []
+        var minimalEmitted = false
+        var minimalUsed = 0
+        var lastRejectedPNG: [String: Any] = [:]
+        static let minimalBytes = 4096
+        init() { let now = clock.now; methodStart = now; caseStart = now }
+        var caseID: String { "\(runID)-case-\(ordinal)" }
+        func seconds(_ start: ContinuousClock.Instant) -> Double {
+            let d = start.duration(to: clock.now).components
+            return Double(d.seconds) + Double(d.attoseconds) / 1e18
+        }
+        func check(_ operation: String) throws {
+            if seconds(methodStart) >= 480 || (ordinal > 0 && seconds(caseStart) >= 60) {
+                throw Stop(reason: "wall-cap: \(operation)")
+            }
+        }
+        func beginCase(_ test: NativeVisualReviewTests) throws {
+            // Includes preceding case verification/cleanup in the old case clock.
+            do { try check("before case setup") }
+            catch { emitMinimal(test, reason: String(describing: error)); throw error }
+            ordinal += 1; caseStart = clock.now
+            caseAttemptedPNG = 0; caseRetainedPNG = 0; caseJSON = 0
+            minimalEmitted = false; minimalUsed = 0; lastRejectedPNG = [:]
+            try check("case setup")
+        }
+        func recordAttemptedPNG(_ bytes: Int) {
+            attemptedPNG += bytes; caseAttemptedPNG += bytes
+        }
+        func allowPNG(_ bytes: Int) throws {
+            let reason: String?
+            if bytes > 8 * 1024 * 1024 { reason = "PNG-each-cap" }
+            else if caseRetainedPNG + bytes > 96 * 1024 * 1024 { reason = "PNG-case-cap" }
+            else if retainedPNG + bytes > 512 * 1024 * 1024 { reason = "PNG-method-cap" }
+            else { reason = nil }
+            if let reason { throw Stop(reason: reason) }
+            try check("before PNG attachment")
+        }
+        func recordAttachedPNG(_ bytes: Int) {
+            // Only synchronous add(attachment) returning establishes retention.
+            retainedPNG += bytes; caseRetainedPNG += bytes
+        }
+        func recordRejectedPNG(_ bytes: Int, error: Error) {
+            lastRejectedPNG = ["actualBytes": bytes, "reason": String(describing: error), "attached": false]
+        }
+        func allowJSON(_ bytes: Int) throws {
+            // Reserve all thirteen minimal failure records, including this case.
+            let reserve = max(0, 14 - ordinal) * Self.minimalBytes
+            guard caseJSON + bytes <= 1024 * 1024 - Self.minimalBytes,
+                  retainedJSON + bytes <= 16 * 1024 * 1024 - reserve else {
+                throw Stop(reason: "diagnostic-cap-overflow")
+            }
+            try check("before JSON attachment")
+            retainedJSON += bytes; caseJSON += bytes
+        }
+        var totals: [String: Any] {
+            ["methodSeconds": seconds(methodStart), "caseSeconds": seconds(caseStart),
+             "attemptedPNGBytes": attemptedPNG, "retainedPNGBytes": retainedPNG,
+             "caseAttemptedPNGBytes": caseAttemptedPNG, "caseRetainedPNGBytes": caseRetainedPNG,
+             "retainedJSONBytesBeforeThisAttachment": retainedJSON, "caseJSONBytesBeforeThisAttachment": caseJSON]
+        }
+        // Observed nonfinite numbers are not replaced with plausible zeros.
+        static func safe(_ object: Any) -> Any {
+            if let dictionary = object as? [String: Any] { return dictionary.mapValues(safe) }
+            if let array = object as? [Any] { return array.map(safe) }
+            if let number = object as? NSNumber, !number.doubleValue.isFinite {
+                let value = number.doubleValue
+                return ["value": NSNull(), "observed": true,
+                        "invalidNumeric": value.isNaN ? "NaN" : (value > 0 ? "+Inf" : "-Inf")] as [String: Any]
+            }
+            return object
+        }
+        func emitMinimal(_ test: NativeVisualReviewTests, reason: String,
+                         attemptedFullBytes: Int? = nil, candidates: Int = 0, steps: Int = 0,
+                         final: [String: Any]? = nil, lastRequest: [String: Any]? = nil,
+                         restoration: String? = nil) {
+            failures.append(reason)
+            // A second failure after full diagnostics (e.g. cleanup) still gets a
+            // bounded record; no full trace is claimed by this reserved header.
+            var header: [String: Any] = ["runID": runID, "caseID": caseID, "caseOrdinal": ordinal,
+                "status": "STOP", "reason": String(reason.prefix(256)), "reasonAbbreviated": reason.count > 256, "fullRawTraceRetained": false,
+                "units": ["geometry": "pt", "elapsed": "s", "size": "B"],
+                "attemptedFullJSONBytes": attemptedFullBytes.map { $0 as Any } ?? NSNull(),
+                "omittedCandidateCount": candidates, "omittedStepCount": steps,
+                "totals": totals, "rejectedPNG": lastRejectedPNG,
+                "limits": ["steps": 64, "caseSeconds": 60, "methodSeconds": 480,
+                           "PNGEachBytes": 8388608, "PNGCaseBytes": 100663296,
+                           "PNGMethodBytes": 536870912, "JSONCaseBytes": 1048576,
+                           "JSONMethodBytes": 16777216, "minimalBytes": 4096]]
+            if let restoration { header["restorationStatusBeforeExit"] = restoration }
+            if let final { header["selectedFinalBeforeRestore"] = final }
+            if let lastRequest { header["lastAttemptedScrollRequest"] = lastRequest }
+            var data = try? JSONSerialization.data(withJSONObject: Self.safe(header), options: [.sortedKeys])
+            if data == nil || data!.count > Self.minimalBytes / 2 {
+                header.removeValue(forKey: "selectedFinalBeforeRestore")
+                header["omittedFields"] = ["selectedFinalBeforeRestore"]
+                data = try? JSONSerialization.data(withJSONObject: Self.safe(header), options: [.sortedKeys])
+            }
+            if data == nil || data!.count > Self.minimalBytes / 2 {
+                // Fixed scalar-only fallback, not a silently truncated raw trace.
+                header = ["runID": runID, "caseID": caseID, "caseOrdinal": ordinal,
+                          "status": "STOP", "reason": String(reason.prefix(128)), "reasonAbbreviated": reason.count > 128,
+                          "fullRawTraceRetained": false, "omittedFields": "all optional raw fields and totals; minimal-header-size fallback",
+                          "attemptedFullJSONBytes": attemptedFullBytes.map { $0 as Any } ?? NSNull(),
+                          "omittedCandidateCount": candidates, "omittedStepCount": steps,
+                          "caseAttemptedPNGBytes": caseAttemptedPNG, "methodAttemptedPNGBytes": attemptedPNG,
+                          "rejectedPNG": lastRejectedPNG,
+                          "caseRetainedPNGBytes": caseRetainedPNG, "methodRetainedPNGBytes": retainedPNG,
+                          "units": ["size": "B", "elapsed": "s", "geometry": "pt"]]
+                if let lastRequest { header["lastAttemptedScrollRequest"] = lastRequest }
+                if let restoration { header["restorationStatusBeforeExit"] = restoration }
+                data = try? JSONSerialization.data(withJSONObject: Self.safe(header), options: [.sortedKeys])
+            }
+            guard let data, data.count <= Self.minimalBytes / 2,
+                  minimalUsed + data.count <= Self.minimalBytes,
+                  caseJSON + data.count <= 1024 * 1024,
+                  retainedJSON + data.count <= 16 * 1024 * 1024 else {
+                XCTFail("Reserved event STOP diagnostic could not be retained: \(reason)"); return
+            }
+            retainedJSON += data.count; caseJSON += data.count; minimalUsed += data.count; minimalEmitted = true
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "event-\(caseID)-STOP"; attachment.lifetime = .keepAlways; test.add(attachment)
+        }
+        func finishMethod(_ test: NativeVisualReviewTests) {
+            do {
+                try check("method cleanup completed / before ledger serialization")
+                let data = try JSONSerialization.data(withJSONObject: [
+                    "runID": runID, "caseCount": ordinal, "totalsBeforeThisAttachment": totals,
+                    "units": ["geometry": "pt", "elapsed": "s", "size": "B"],
+                    "status": failures.isEmpty ? "method-returned" : "STOP",
+                    "limit": "Helper PNG/JSON bytes exclude xcresult container overhead; no physical gesture or full-time PNG acceptance claim."
+                ], options: [.sortedKeys])
+                try check("method ledger serialization completed")
+                try allowJSON(data.count)
+                let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                attachment.name = "event-\(runID)-method-ledger"; attachment.lifetime = .keepAlways; test.add(attachment)
+                try check("method ledger attachment completed")
+            } catch {
+                if !minimalEmitted { emitMinimal(test, reason: String(describing: error)) }
+                XCTFail("\(error)")
+            }
+        }
+    }
+
+    @MainActor private func captureEvent(_ page: Page, scheme: ColorScheme, size: DynamicTypeSize,
+                                         scene: UIWindowScene, model: AppModel, requiresScrolling: Bool,
+                                         viewportWidth: CGFloat?, ledger: EventCaptureLedger) async throws {
+        var stop: Error?
+        var steps: [[String: Any]] = []
+        var candidates: [UIScrollView] = []
+        var initialDiagnostics: [[String: Any]] = []
+        var inventoryObserved = false
+        var selected: UIScrollView?
+        var initial: CGPoint?
+        var observedOriginalOffset: CGPoint?
+        var restorationStatus = "not-performed: no selected scroll observed"
+        var finalSample: [String: Any]?
+        var finalGap: CGFloat?
+        var capturedScrollPositions = 0
+        var window: UIWindow?
+        func check(_ operation: String) throws { try ledger.check(operation) }
+        func measure(_ scroll: UIScrollView) -> [String: Any] {
+            let viewport = scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom
+            let bottom = max(-scroll.adjustedContentInset.top,
+                             scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+            let frame = window.map { scroll.convert(scroll.bounds, to: $0) }
+            return ["candidateID": "\(ledger.caseID)-\(ObjectIdentifier(scroll))",
+                    "class": String(describing: type(of: scroll)), "accessibilityIdentifier": scroll.accessibilityIdentifier ?? "",
+                    "bounds": ["x": scroll.bounds.minX, "y": scroll.bounds.minY, "width": scroll.bounds.width, "height": scroll.bounds.height],
+                    "frameInWindow": frame.map { ["x": $0.minX, "y": $0.minY, "width": $0.width, "height": $0.height] as Any } ?? NSNull(),
+                    "contentSize": ["width": scroll.contentSize.width, "height": scroll.contentSize.height],
+                    "contentInset": ["top": scroll.contentInset.top, "left": scroll.contentInset.left, "bottom": scroll.contentInset.bottom, "right": scroll.contentInset.right],
+                    "adjustedContentInset": ["top": scroll.adjustedContentInset.top, "left": scroll.adjustedContentInset.left, "bottom": scroll.adjustedContentInset.bottom, "right": scroll.adjustedContentInset.right],
+                    "offset": ["x": scroll.contentOffset.x, "y": scroll.contentOffset.y],
+                    "effectiveViewportHeight": viewport, "computedBottom": bottom,
+                    "remaining": max(0, bottom - scroll.contentOffset.y), "selected": scroll === selected]
+        }
+        func valid(_ scroll: UIScrollView) -> Bool {
+            let values = [scroll.bounds.minX, scroll.bounds.minY, scroll.bounds.width, scroll.bounds.height,
+                          scroll.contentSize.width, scroll.contentSize.height, scroll.contentOffset.x, scroll.contentOffset.y,
+                          scroll.contentInset.top, scroll.contentInset.left, scroll.contentInset.bottom, scroll.contentInset.right,
+                          scroll.adjustedContentInset.top, scroll.adjustedContentInset.left, scroll.adjustedContentInset.bottom, scroll.adjustedContentInset.right]
+            return values.allSatisfy(\.isFinite) && scroll.bounds.width > 0 && scroll.bounds.height > 0 &&
+                scroll.contentSize.width >= 0 && scroll.contentSize.height >= 0 &&
+                scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom > 0
+        }
+        defer {
+            // Mandatory single original restoration, even on STOP/cancellation.
+            if let selected, let initial { selected.setContentOffset(initial, animated: false) }
+            window?.isHidden = true; window?.rootViewController = nil
+            do { try check("case cleanup completed") }
+            catch { ledger.emitMinimal(self, reason: String(describing: error)); XCTFail("\(error)") }
+        }
+        do {
+            try check("window setup")
+            UserDefaults.standard.set((scheme == .light ? AssistantAppearance.light : .dark).rawValue,
+                                      forKey: AssistantAppearance.defaultsKey)
+            let nativeWindow = UIWindow(windowScene: scene); window = nativeWindow
+            nativeWindow.frame = scene.coordinateSpace.bounds
+            if let viewportWidth { nativeWindow.frame.size.width = viewportWidth }
+            nativeWindow.overrideUserInterfaceStyle = scheme == .light ? .light : .dark
+            let host = UIHostingController(rootView: Group {
+                if page.ownsNavigation { page.content }
+                else if page.isModal { NavigationStack { page.content } }
+                else {
+                    NavigationStack(path: .constant(["review"])) {
+                        Color.clear.navigationTitle("Assistant")
+                            .navigationDestination(for: String.self) { _ in page.content }
+                    }
+                }
+            }.environment(model).environment(\.colorScheme, scheme)
+                .environment(\.dynamicTypeSize, size).transaction { $0.animation = nil; $0.disablesAnimations = true }
+                .environment(\.scenePhase, .active))
+            nativeWindow.rootViewController = host
+            guard [nativeWindow.bounds.minX, nativeWindow.bounds.minY, nativeWindow.bounds.width, nativeWindow.bounds.height].allSatisfy(\.isFinite),
+                  nativeWindow.bounds.width > 0, nativeWindow.bounds.height > 0 else {
+                throw EventCaptureLedger.Stop(reason: "invalid-initial-window-geometry")
+            }
+            try check("window setup completed"); try check("window presentation")
+            nativeWindow.makeKeyAndVisible()
+            try check("window presentation completed"); try check("initial sleep")
+            try await Task.sleep(for: .milliseconds(500))
+            try check("initial sleep completed"); try check("initial layout")
+            nativeWindow.layoutIfNeeded()
+            try check("initial layout completed")
+            func record(_ position: String) throws {
+                try check("render")
+                var rendered = false
+                let image = UIGraphicsImageRenderer(bounds: nativeWindow.bounds).image { _ in
+                    rendered = nativeWindow.drawHierarchy(in: nativeWindow.bounds, afterScreenUpdates: true)
+                }
+                try check("render completed")
+                XCTAssertTrue(rendered, "UIKit failed to render \(page.name)")
+                try check("PNG encoding")
+                guard let data = image.pngData() else { throw EventCaptureLedger.Stop(reason: "PNG encoding failed") }
+                // Encoding completion is an attempt, not an attached artifact.
+                ledger.recordAttemptedPNG(data.count)
+                do {
+                    try check("PNG encoding completed")
+                    try ledger.allowPNG(data.count)
+                    XCTAssertGreaterThan(data.count, 15_000, "Blank capture: \(page.name)")
+                    let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.png")
+                    attachment.name = "\(page.name)-phone-\(scheme == .light ? "light" : "dark")-\(Int(nativeWindow.bounds.width))\(size.isAccessibilitySize ? "-accessible" : "")-\(position)"
+                    attachment.lifetime = .keepAlways
+                    try check("PNG attachment prepared / before add")
+                    add(attachment)
+                    ledger.recordAttachedPNG(data.count)
+                } catch {
+                    ledger.recordRejectedPNG(data.count, error: error)
+                    throw error
+                }
+                try check("PNG attachment completed")
+            }
+            try record("top")
+            try check("native candidate inventory")
+            func scrollViews(in view: UIView) -> [UIScrollView] {
+                ((view as? UIScrollView).map { [$0] } ?? []) + view.subviews.flatMap { scrollViews(in: $0) }
+            }
+            candidates = scrollViews(in: nativeWindow)
+            inventoryObserved = true
+            selected = candidates.filter({ scroll in
+                let viewportHeight = max(0, scroll.bounds.height
+                                         - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom)
+                return scroll.bounds.width >= nativeWindow.bounds.width * 0.7 && scroll.bounds.height >= nativeWindow.bounds.height * 0.35 &&
+                    scroll.contentSize.height > viewportHeight + 2
+            }).max(by: { $0.bounds.height < $1.bounds.height })
+            initialDiagnostics = candidates.map { scroll in
+                var sample = measure(scroll)
+                let viewport = max(0, scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom)
+                sample["meetsWidthPredicate"] = scroll.bounds.width >= nativeWindow.bounds.width * 0.7
+                sample["meetsHeightPredicate"] = scroll.bounds.height >= nativeWindow.bounds.height * 0.35
+                sample["meetsOverflowPredicate"] = scroll.contentSize.height > viewport + 2
+                return sample
+            }
+            try check("native candidate inventory completed")
+            guard let scroll = selected else { throw EventCaptureLedger.Stop(reason: "no-selected-candidate") }
+            let originalOffset = scroll.contentOffset
+            observedOriginalOffset = originalOffset
+            guard originalOffset.x.isFinite && originalOffset.y.isFinite else {
+                restorationStatus = "not-performed: invalid original offset; no scroll issued"
+                throw EventCaptureLedger.Stop(reason: "nonfinite-original-offset-no-scroll-no-restore")
+            }
+            initial = originalOffset
+            restorationStatus = "one original-offset restoration scheduled in defer; not yet performed"
+            guard valid(scroll) else { throw EventCaptureLedger.Stop(reason: "invalid-initial-geometry") }
+            var offset = max(scroll.contentOffset.y, -scroll.adjustedContentInset.top)
+            var smallestPositive: CGFloat?
+            var stalled = 0
+            while true {
+                try check("scroll planning")
+                guard valid(scroll) else { throw EventCaptureLedger.Stop(reason: "invalid-geometry") }
+                let bottom = max(-scroll.adjustedContentInset.top,
+                                 scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+                guard offset < bottom - 2 else { break }
+                let viewportHeight = max(1, scroll.bounds.height - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom)
+                let planned = viewportHeight * 0.72
+                let quantum = min(planned, smallestPositive ?? planned)
+                let required = ceil(max(bottom - offset - 2, 0) / quantum)
+                guard required.isFinite, quantum.isFinite, quantum > 0 else {
+                    throw EventCaptureLedger.Stop(reason: "invalid-planning-quantum")
+                }
+                guard steps.count < 64, required <= CGFloat(64 - steps.count) else {
+                    throw EventCaptureLedger.Stop(reason: "adaptive-step-cap")
+                }
+                let before = scroll.contentOffset.y
+                let previousContentHeight = scroll.contentSize.height
+                let requested = min(bottom, offset + viewportHeight * 0.72)
+                let stepIndex = steps.count
+                var sample: [String: Any] = ["index": stepIndex + 1, "phase": "request-prepared",
+                    "requestedOffsetY": requested, "preOffsetY": before, "preSnapshot": measure(scroll),
+                    "planningQuantum": quantum, "requiredAdditionalStepsBeforeStep": required,
+                    "immediateOffsetY": ["value": NSNull(), "observed": false],
+                    "settledOffsetY": ["value": NSNull(), "observed": false], "totals": ledger.totals]
+                steps.append(sample)
+                try check("forward scroll")
+                steps[stepIndex]["phase"] = "requested"
+                scroll.setContentOffset(CGPoint(x: initial!.x, y: requested), animated: false)
+                // Observe the synchronous return BEFORE a budget check can throw.
+                steps[stepIndex]["phase"] = "immediate-unsettled"
+                steps[stepIndex]["immediateOffsetY"] = scroll.contentOffset.y
+                steps[stepIndex]["immediateSnapshot"] = measure(scroll)
+                try check("forward scroll completed"); try check("step sleep")
+                try await Task.sleep(for: .milliseconds(130))
+                steps[stepIndex]["phase"] = "sleep-returned-unsettled"
+                steps[stepIndex]["postSleepSnapshot"] = measure(scroll)
+                try check("step sleep completed"); try check("step layout")
+                nativeWindow.layoutIfNeeded()
+                offset = scroll.contentOffset.y
+                let delta = offset - before
+                sample = steps[stepIndex]
+                sample["phase"] = "settled"
+                sample["settledOffsetY"] = offset; sample["settledSnapshot"] = measure(scroll)
+                sample["contentHeightChange"] = scroll.contentSize.height - previousContentHeight
+                sample["actualProgress"] = delta; sample["totals"] = ledger.totals
+                steps[stepIndex] = sample; capturedScrollPositions += 1
+                try check("step layout completed")
+                guard valid(scroll), delta.isFinite else { throw EventCaptureLedger.Stop(reason: "invalid-settled-geometry") }
+                guard delta >= 0 else { throw EventCaptureLedger.Stop(reason: "negative-progress") }
+                if delta > 0 { smallestPositive = min(smallestPositive ?? delta, delta); stalled = 0 }
+                else { stalled += 1 }
+                if stalled >= 2 { throw EventCaptureLedger.Stop(reason: "stalled-two-forward-steps") }
+                try record("scroll-\(String(format: "%02d", steps.count))")
+            }
+        } catch { stop = error }
+        // Final observation and reserved diagnostic exit are mandatory even if a
+        // resource expired. No new wait/layout/scroll is introduced here.
+        if let selected {
+            finalSample = measure(selected)
+            let bottom = max(-selected.adjustedContentInset.top,
+                             selected.contentSize.height - selected.bounds.height + selected.adjustedContentInset.bottom)
+            let gap = bottom - selected.contentOffset.y
+            if gap.isFinite { finalGap = gap }
+            else if stop == nil { stop = EventCaptureLedger.Stop(reason: "nonfinite-final-gap") }
+        }
+        var raw: [String: Any] = ["runID": ledger.runID, "caseID": ledger.caseID, "caseOrdinal": ledger.ordinal,
+            "page": page.name, "scheme": scheme == .light ? "light" : "dark",
+            "dynamicType": size.isAccessibilitySize ? "accessibility3" : "large",
+            "sourceIdentity": ["head": NSNull(), "tree": NSNull(), "reason": "not supplied to native process"],
+            "units": ["geometry": "pt", "elapsed": "s", "size": "B"],
+            "status": stop == nil ? "EOF-observed" : "STOP", "reason": stop.map { String(describing: $0) } ?? "EOF",
+            "selectedCandidateID": selected.map { "\(ledger.caseID)-\(ObjectIdentifier($0))" as Any } ?? NSNull(),
+            "candidateInventoryObserved": inventoryObserved,
+            "restorationStatusBeforeExit": restorationStatus,
+            "originalOffset": observedOriginalOffset.map { ["x": $0.x, "y": $0.y] as Any } ?? ["value": NSNull(), "observed": false],
+            "selectionObservation": inventoryObserved ? "observed" : "unobserved: native inventory not reached",
+            "allInitialNativeScrollCandidates": initialDiagnostics, "scrollSteps": steps,
+            "selectedFinalBeforeRestore": finalSample.map { $0 as Any } ?? ["value": NSNull(), "observed": false, "reason": "no observed selected scroll"],
+            "capturedScrollPositions": capturedScrollPositions, "totals": ledger.totals,
+            "rejectedPNG": ledger.lastRejectedPNG, "fullRawTraceRetained": true,
+            "selectionRule": "Existing70percentwidth/35percentheight/overflow>effectiveviewport+2; greatest bounds.height. No fallback."]
+        if let window {
+            raw["windowFrame"] = ["x": window.frame.minX, "y": window.frame.minY, "width": window.frame.width, "height": window.frame.height]
+            raw["windowBounds"] = ["x": window.bounds.minX, "y": window.bounds.minY, "width": window.bounds.width, "height": window.bounds.height]
+            if let safe = window.rootViewController?.view.safeAreaInsets {
+                raw["hostSafeAreaInsets"] = ["top": safe.top, "left": safe.left, "bottom": safe.bottom, "right": safe.right]
+            }
+        }
+        var attemptedBytes: Int?
+        do {
+            try check("diagnostic serialization")
+            let data = try JSONSerialization.data(withJSONObject: EventCaptureLedger.safe(raw), options: [.sortedKeys])
+            attemptedBytes = data.count
+            try check("diagnostic serialization completed")
+            try ledger.allowJSON(data.count)
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "event-\(ledger.caseID)-native-scroll-diagnostics"
+            attachment.lifetime = .keepAlways; add(attachment)
+            try check("diagnostic attachment completed")
+        } catch {
+            if stop == nil { stop = error }
+            let lastRequest = steps.last.map { step in
+                ["index": step["index"]!, "phase": step["phase"]!,
+                 "requestedOffsetY": step["requestedOffsetY"]!, "preOffsetY": step["preOffsetY"]!,
+                 "immediateOffsetY": step["immediateOffsetY"]!, "settledOffsetY": step["settledOffsetY"]!]
+            }
+            ledger.emitMinimal(self, reason: String(describing: error), attemptedFullBytes: attemptedBytes,
+                               candidates: candidates.count, steps: steps.count, final: finalSample, lastRequest: lastRequest,
+                               restoration: restorationStatus)
+        }
+        if let finalGap {
+            XCTAssertLessThanOrEqual(finalGap, 2, "Incomplete below-fold capture: \(page.name)")
+        } else if selected != nil { XCTFail("Unobservable/nonfinite final EOF metric: \(page.name)") }
+        if requiresScrolling {
+            XCTAssertGreaterThan(capturedScrollPositions, 0, "Long message fixture was not captured below the fold: \(page.name)")
+        }
+        if let stop { throw stop }
+    }
+
     @MainActor private func capture(_ page: Page, scheme: ColorScheme, size: DynamicTypeSize,
                                     scene: UIWindowScene, model: AppModel, requiresScrolling: Bool = false,
-                                    viewportWidth: CGFloat? = nil, increasedContrast: Bool = false) async throws {
+                                    viewportWidth: CGFloat? = nil, increasedContrast: Bool = false,
+                                    additionalSafeAreaInsets: UIEdgeInsets? = nil,
+                                    eventCapturePolicy: EventCaptureLedger? = nil,
+                                    viewportRecorder: ConversationViewportRecorder? = nil,
+                                    layoutReporter: (@MainActor ([String: CGRect]) -> Void)? = nil) async throws {
+        if let eventCapturePolicy {
+            try await captureEvent(page, scheme: scheme, size: size, scene: scene, model: model,
+                                   requiresScrolling: requiresScrolling, viewportWidth: viewportWidth, ledger: eventCapturePolicy)
+            return
+        }
+        viewportRecorder?.reset()
         UserDefaults.standard.set((scheme == .light ? AssistantAppearance.light : .dark).rawValue,
                                   forKey: AssistantAppearance.defaultsKey)
         let window = UIWindow(windowScene: scene)
@@ -2248,11 +4040,19 @@ final class NativeVisualReviewTests: XCTestCase {
             .environment(\.dynamicTypeSize, size).transaction { $0.animation = nil; $0.disablesAnimations = true }
             .environment(\.scenePhase, .active))
         window.rootViewController = host
+        if let additionalSafeAreaInsets { host.additionalSafeAreaInsets = additionalSafeAreaInsets }
         if increasedContrast { host.traitOverrides.accessibilityContrast = .high }
         window.makeKeyAndVisible()
         defer { window.isHidden = true; window.rootViewController = nil }
         try await Task.sleep(for: .milliseconds(500))
         window.layoutIfNeeded()
+        if let layoutReporter {
+            window.layoutIfNeeded()
+            layoutReporter([
+                "window.bounds": window.bounds,
+                "window.safe-area.available": window.safeAreaLayoutGuide.layoutFrame
+            ])
+        }
         func record(_ position: String) {
             var rendered = false
             let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
@@ -2273,14 +4073,45 @@ final class NativeVisualReviewTests: XCTestCase {
             ((view as? UIScrollView).map { [$0] } ?? []) + view.subviews.flatMap { scrollViews(in: $0) }
         }
         // Presented native sheets live outside the original hosting subtree.
-        if let scroll = scrollViews(in: window).filter({ scroll in
+        let nativeScrollCandidates = scrollViews(in: window)
+        let selectedScroll = nativeScrollCandidates.filter({ scroll in
             // Safe-area/navigation insets reduce the usable viewport even
             // when the content is shorter than the scroll view's bounds.
             let viewportHeight = max(0, scroll.bounds.height
                                      - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom)
             return scroll.bounds.width >= window.bounds.width * 0.7 && scroll.bounds.height >= window.bounds.height * 0.35 &&
                 scroll.contentSize.height > viewportHeight + 2
-        }).max(by: { $0.bounds.height < $1.bounds.height }) {
+        }).max(by: { $0.bounds.height < $1.bounds.height })
+        func scrollDiagnostic(_ scroll: UIScrollView, index: Int) -> [String: Any] {
+            let visibleFrame = scroll.convert(scroll.bounds, to: window)
+            let viewportHeight = max(0, scroll.bounds.height
+                                     - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom)
+            let bottom = max(-scroll.adjustedContentInset.top,
+                             scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+            func rect(_ value: CGRect) -> [String: CGFloat] {
+                ["x": value.minX, "y": value.minY, "width": value.width, "height": value.height]
+            }
+            func insets(_ value: UIEdgeInsets) -> [String: CGFloat] {
+                ["top": value.top, "left": value.left, "bottom": value.bottom, "right": value.right]
+            }
+            return ["candidateIndex": index, "nativeIdentity": String(describing: ObjectIdentifier(scroll)),
+                    "class": String(describing: type(of: scroll)), "accessibilityIdentifier": scroll.accessibilityIdentifier ?? "",
+                    "bounds": rect(scroll.bounds), "frameInWindow": rect(visibleFrame),
+                    "contentSize": ["width": scroll.contentSize.width, "height": scroll.contentSize.height],
+                    "contentInset": insets(scroll.contentInset), "adjustedContentInset": insets(scroll.adjustedContentInset),
+                    "contentOffset": ["x": scroll.contentOffset.x, "y": scroll.contentOffset.y],
+                    "effectiveViewportHeight": viewportHeight, "computedBottom": bottom,
+                    "meetsWidthPredicate": scroll.bounds.width >= window.bounds.width * 0.7,
+                    "meetsHeightPredicate": scroll.bounds.height >= window.bounds.height * 0.35,
+                    "meetsOverflowPredicate": scroll.contentSize.height > viewportHeight + 2,
+                    "selected": selectedScroll === scroll]
+        }
+        let initialScrollDiagnostics = viewportRecorder == nil ? [] : nativeScrollCandidates.enumerated().map {
+            scrollDiagnostic($0.element, index: $0.offset)
+        }
+        var scrollStepDiagnostics: [[String: Any]] = []
+        var selectedFinalDiagnostic: [String: Any]?
+        if let scroll = selectedScroll {
             let initial = scroll.contentOffset
             var offset = max(initial.y, -scroll.adjustedContentInset.top)
             var index = 0
@@ -2294,21 +4125,105 @@ final class NativeVisualReviewTests: XCTestCase {
                 let viewportHeight = max(1, scroll.bounds.height
                                          - scroll.adjustedContentInset.top - scroll.adjustedContentInset.bottom)
                 offset = min(bottom, offset + viewportHeight * 0.72)
+                let requestedOffsetY = offset
                 scroll.setContentOffset(CGPoint(x: initial.x, y: offset), animated: false)
                 try await Task.sleep(for: .milliseconds(130))
                 window.layoutIfNeeded()
                 offset = scroll.contentOffset.y
                 index += 1
                 capturedScrollPositions += 1
+                if viewportRecorder != nil {
+                    scrollStepDiagnostics.append(["index": index, "requestedOffsetY": requestedOffsetY,
+                                                  "actualOffsetY": offset, "computedBottom": bottom,
+                                                  "effectiveViewportHeight": viewportHeight])
+                }
                 record("scroll-\(String(format: "%02d", index))")
             }
             let finalBottom = max(-scroll.adjustedContentInset.top,
                                   scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
             XCTAssertLessThanOrEqual(finalBottom - offset, 2, "Incomplete below-fold capture: \(page.name)")
+            if viewportRecorder != nil, let selectedIndex = nativeScrollCandidates.firstIndex(where: { $0 === scroll }) {
+                selectedFinalDiagnostic = scrollDiagnostic(scroll, index: selectedIndex)
+            }
             scroll.setContentOffset(initial, animated: false)
+        }
+        if viewportRecorder != nil {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "page": page.name, "scheme": scheme == .light ? "light" : "dark",
+                "dynamicType": size.isAccessibilitySize ? "accessibility3" : "large",
+                "windowFrame": ["x": window.frame.minX, "y": window.frame.minY,
+                                "width": window.frame.width, "height": window.frame.height],
+                "windowBounds": ["x": window.bounds.minX, "y": window.bounds.minY,
+                                 "width": window.bounds.width, "height": window.bounds.height],
+                "hostSafeAreaInsets": ["top": host.view.safeAreaInsets.top, "left": host.view.safeAreaInsets.left,
+                                       "bottom": host.view.safeAreaInsets.bottom, "right": host.view.safeAreaInsets.right],
+                "requiresScrolling": requiresScrolling, "capturedScrollPositions": capturedScrollPositions,
+                "selectionRule": "Existing70percentwidth/35percentheight/overflow>effectiveviewport+2; greatest bounds.height. No fallback or selection-policy change.",
+                "selectedCandidateIndex": nativeScrollCandidates.firstIndex(where: { $0 === selectedScroll }).map { $0 as Any } ?? NSNull(),
+                "allInitialNativeScrollCandidates": initialScrollDiagnostics,
+                "selectedFinalBeforeRestore": selectedFinalDiagnostic.map { $0 as Any } ?? NSNull(),
+                "scrollSteps": scrollStepDiagnostics,
+                "allNativeScrollCandidatesAfterRestore": nativeScrollCandidates.enumerated().map { scrollDiagnostic($0.element, index: $0.offset) },
+                "fixtureEndMarker": "SURFACE-PADDING-END-OF-TRAVEL-PLAN-2026-10-23",
+                "reviewLimit": "The semantic long-content precondition was corrected; this does not prove the original fixture fit or identify the original zero-scroll cause. Inspect actual geometry and PNG marker in an authorized native run."
+            ], options: [.prettyPrinted, .sortedKeys])
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "\(page.name)-\(scheme == .light ? "light" : "dark")-\(Int(window.bounds.width))-\(size.isAccessibilitySize ? "AX3" : "large")-native-scroll-diagnostics"
+            attachment.lifetime = .keepAlways
+            add(attachment)
         }
         if requiresScrolling {
             XCTAssertGreaterThan(capturedScrollPositions, 0, "Long message fixture was not captured below the fold: \(page.name)")
+        }
+        if let viewportRecorder {
+            let safeArea = host.view.safeAreaInsets
+            let expectedWidth = max(0, window.bounds.width - safeArea.left - safeArea.right)
+            let rows: [[String: Any]] = viewportRecorder.measurements.keys.sorted().compactMap { id in
+                guard let measured = viewportRecorder.measurements[id] else { return nil }
+                return [
+                    "messageID": id, "rawRootWidth": measured.rawRootWidth,
+                    "outerAvailableWidth": measured.outerAvailableWidth,
+                    "leadingSafeArea": measured.leadingSafeArea, "trailingSafeArea": measured.trailingSafeArea,
+                    "effectiveInheritedWidth": measured.inheritedWidth.map { $0 as Any } ?? NSNull(),
+                    "accessibility": measured.accessibility,
+                ]
+            }
+            let data = try JSONSerialization.data(withJSONObject: [
+                "page": page.name, "scheme": scheme == .light ? "light" : "dark",
+                "dynamicType": size.isAccessibilitySize ? "accessibility3" : "large",
+                "windowWidth": window.bounds.width, "hostSafeAreaLeft": safeArea.left,
+                "hostSafeAreaRight": safeArea.right, "expectedEffectiveWidth": expectedWidth,
+                "expectedMessageIDs": viewportRecorder.expectedMessageIDs.sorted(),
+                "missingMessageIDs": viewportRecorder.expectedMessageIDs.subtracting(viewportRecorder.measurements.keys).sorted(),
+                "bubbles": rows,
+            ], options: [.prettyPrinted, .sortedKeys])
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = "\(page.name)-\(scheme == .light ? "light" : "dark")-\(Int(window.bounds.width))-\(size.isAccessibilitySize ? "AX3" : "large")-viewport-receipt"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            XCTAssertEqual(Set(viewportRecorder.measurements.keys), viewportRecorder.expectedMessageIDs,
+                           "Every production MessageBubble root must report in this capture; stale or missing receipts fail")
+            if let additionalSafeAreaInsets {
+                XCTAssertGreaterThan(safeArea.left + safeArea.right, 0, "The nonzero safe-area fixture must actually take effect")
+                XCTAssertEqual(safeArea.left, additionalSafeAreaInsets.left, accuracy: 0.5)
+                XCTAssertEqual(safeArea.right, additionalSafeAreaInsets.right, accuracy: 0.5)
+            }
+            for id in viewportRecorder.expectedMessageIDs.sorted() {
+                let measured = try XCTUnwrap(viewportRecorder.measurements[id], "Missing viewport receipt: \(id)")
+                let inheritedWidth = try XCTUnwrap(measured.inheritedWidth, "Bubble did not inherit its viewport: \(id)")
+                XCTAssertEqual(measured.rawRootWidth, window.bounds.width, accuracy: 0.5,
+                               "The ignored inner stage measures the full window before transcript gutters")
+                XCTAssertEqual(measured.outerAvailableWidth, expectedWidth, accuracy: 0.5,
+                               "The outer pre-ignore producer already measures the available horizontal safe viewport")
+                XCTAssertEqual(measured.leadingSafeArea, safeArea.left, accuracy: 0.5)
+                XCTAssertEqual(measured.trailingSafeArea, safeArea.right, accuracy: 0.5)
+                XCTAssertEqual(inheritedWidth, expectedWidth, accuracy: 0.5,
+                               "The bubble inherits the outer available width directly without a second safe-area subtraction")
+                XCTAssertEqual(measured.accessibility, size.isAccessibilitySize)
+                let inset = AssistantTheme.ConversationSpacing.horizontalInset(
+                    viewportWidth: inheritedWidth, accessibility: measured.accessibility)
+                XCTAssertEqual(inset, size.isAccessibilitySize || expectedWidth <= 360 ? 20 : 24)
+            }
         }
     }
 
@@ -2434,6 +4349,51 @@ private struct ActivitySearchRowReviewFixture: View {
         .background(AssistantTheme.canvas(for: colorScheme))
         .onAppear {
             if startsFocused { focused = true }
+        }
+    }
+}
+
+@MainActor
+private final class ConnectedToolReviewCallbacks {
+    var actions: [String] = []
+    var removals = 0
+}
+
+private struct ConnectedToolsActionCardFrameKey: PreferenceKey {
+    static var defaultValue = CGRect.zero
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if !next.isEmpty { value = next }
+    }
+}
+
+private struct ConnectedToolsActionRowReviewCard: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let row: ConnectedToolActionRow
+    let layoutReporter: (@MainActor ([String: CGRect]) -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Home Assistant")
+                .font(.headline)
+            row
+        }
+        .assistantCard(in: colorScheme)
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: ConnectedToolsActionCardFrameKey.self,
+                    value: proxy.frame(in: .global)
+                )
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AssistantTheme.canvas(for: colorScheme).ignoresSafeArea())
+        .onPreferenceChange(ConnectedToolsActionCardFrameKey.self) { frame in
+            guard !frame.isEmpty else { return }
+            layoutReporter?(["card.surface": frame])
         }
     }
 }

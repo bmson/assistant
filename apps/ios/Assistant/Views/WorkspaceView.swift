@@ -593,6 +593,7 @@ struct WorkspaceView: View {
             .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, area == .skills ? 16 : 0)
     }
 
     private var isLandscape: Bool { verticalSizeClass == .compact }
@@ -900,7 +901,8 @@ struct WorkspaceView: View {
             } else {
                 skillLibrarySummary(skills, activeCount: active.count)
 
-                sectionHeading("Ready to use", count: active.count)
+                skillSectionHeading("Ready to use", count: active.count)
+                    .padding(.horizontal, 16)
                 if active.isEmpty {
                     compactSkillEmptyState
                 } else {
@@ -1142,22 +1144,18 @@ struct WorkspaceView: View {
                 .font(.headline)
                 .fixedSize(horizontal: false, vertical: true)
             providerBillingStatusAndAmount(report)
-            Text("\(report.scope) · \(report.period) · \(report.source)").font(.caption).foregroundStyle(.secondary)
+            Text([report.scope, report.period, report.periodTimezone.map { "\($0) period" } ?? "period timezone not reported", report.source].joined(separator: " · "))
+                .font(.caption).foregroundStyle(.secondary)
             if report.status == "stale" {
                 Label("Stale snapshot", systemImage: "clock.badge.exclamationmark")
                     .font(.subheadline)
                     .foregroundStyle(AssistantTheme.warningInk(for: colorScheme))
             }
             Text(report.message).font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            if let fetched = report.fetchedAt {
-                Text("Fetched \(fetched)").font(.caption2).foregroundStyle(.secondary)
-            }
-            if let exported = report.latestExportAt {
-                Text("Latest export \(exported)").font(.caption2).foregroundStyle(.secondary)
-            }
-            if let used = report.latestUsageAt {
-                Text("Latest usage \(used)").font(.caption2).foregroundStyle(.secondary)
-            }
+            billingTimestampLine("Last checked", value: report.checkedAt)
+            billingTimestampLine("Fetched", value: report.fetchedAt)
+            billingTimestampLine("Latest export", value: report.latestExportAt)
+            billingTimestampLine("Latest usage", value: report.latestUsageAt)
             if report.forecast != nil || !report.lines.isEmpty {
                 DisclosureGroup("Run rate and service details") {
                     VStack(alignment: .leading, spacing: 12) {
@@ -1180,7 +1178,7 @@ struct WorkspaceView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         } else if report.status == "reported" {
-                            Text("Month-end estimate needs at least three days of reported usage.")
+                            Text(report.id == "openai-billing" ? "Month-end estimate unavailable: source usage freshness is not reported." : "Month-end estimate needs at least three days of reported usage.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -1188,15 +1186,24 @@ struct WorkspaceView: View {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(line.service).font(.subheadline.weight(.medium))
                                 Text(line.detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                                if let projectId = line.projectId {
+                                    Text("Project: \(projectId)").font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                                }
+                                if let apiKeyId = line.apiKeyId {
+                                    Text("API key ID: \(apiKeyId)").font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                                }
                                 Text("Currency: \(line.currency)").font(.caption2).foregroundStyle(.secondary)
-                                Text("Cost: \(line.cost.formatted(.currency(code: line.currency).precision(.fractionLength(2...8))))")
+                                Text("\(report.amountBasis == "provider_reported_cost" ? "Reported cost" : "Cost"): \(line.cost.formatted(.currency(code: line.currency).precision(.fractionLength(2...8))))")
                                     .monospacedDigit()
-                                Text("Credits: \(line.credits.formatted(.currency(code: line.currency)))")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Text("Net: \(line.net.formatted(.currency(code: line.currency).precision(.fractionLength(2...8))))")
-                                    .font(.subheadline.weight(.medium))
-                                    .monospacedDigit()
+                                if report.amountBasis == "provider_reported_cost" {
+                                    Text("Credits: Not reported").font(.caption).foregroundStyle(.secondary)
+                                    Text("Net after credits: Not reported").font(.caption).foregroundStyle(.secondary)
+                                } else {
+                                    Text("Credits: \(line.credits.formatted(.currency(code: line.currency)))")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                    Text("Net: \(line.net.formatted(.currency(code: line.currency).precision(.fractionLength(2...8))))")
+                                        .font(.subheadline.weight(.medium)).monospacedDigit()
+                                }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.vertical, 4)
@@ -1206,20 +1213,30 @@ struct WorkspaceView: View {
                 }
                 .font(.subheadline.weight(.medium))
             }
-            if report.id == "google-cloud", report.status == "not_configured" {
+            if report.setup != nil || (report.id == "google-cloud" && report.status == "not_configured") {
+                if report.id == "google-cloud", report.status == "not_configured" {
                 Text("Google Cloud costs are not available in this report. Missing costs are unknown, not zero.")
                     .font(.footnote.weight(.medium))
                     .foregroundStyle(AssistantTheme.warningInk(for: colorScheme))
                 Link("Open Google Cloud Billing", destination: URL(string: "https://console.cloud.google.com/billing")!)
                     .font(.subheadline)
-                DisclosureGroup("Export setup steps and guide") {
+                }
+                DisclosureGroup(report.setup != nil ? "Review billing setup" : "Export setup steps and guide") {
                     VStack(alignment: .leading, spacing: 8) {
+                        if let setup = report.setup {
+                            ForEach(Array(setup.steps.enumerated()), id: \.offset) { index, step in
+                                Text("\(index + 1). \(step)").font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            }
+                        } else {
                         Text("Enable standard usage export in Google Cloud Billing, then connect its BigQuery table and grant this installation read access. Initial data can take hours or days.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if report.id == "google-cloud" {
                         Link("Export setup guide", destination: URL(string: "https://docs.cloud.google.com/billing/docs/how-to/export-data-bigquery-setup")!)
                             .font(.subheadline)
+                        }
                     }
                     .padding(.top, 8)
                 }
@@ -1227,6 +1244,15 @@ struct WorkspaceView: View {
             }
         }
         .assistantCard(in: colorScheme)
+    }
+
+    @ViewBuilder
+    private func billingTimestampLine(_ label: String, value: String?) -> some View {
+        if let value, !value.isEmpty {
+            Text("\(label): \(value)").font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+        } else {
+            Text("\(label): time not reported").font(.caption2).foregroundStyle(.secondary)
+        }
     }
 
     @ViewBuilder
@@ -1267,8 +1293,13 @@ struct WorkspaceView: View {
         } else {
             let currencies = Dictionary(grouping: report.lines, by: \.currency)
             VStack(alignment: .leading, spacing: 2) {
+                if report.amountBasis == "provider_reported_cost" {
+                    Text("Reported cost").font(.caption).foregroundStyle(.secondary)
+                }
                 ForEach(currencies.keys.sorted(), id: \.self) { code in
-                    let total = currencies[code, default: []].reduce(0) { $0 + $1.net }
+                    let total = currencies[code, default: []].reduce(0) {
+                        $0 + (report.amountBasis == "provider_reported_cost" ? $1.cost : $1.net)
+                    }
                     let fractionDigits: ClosedRange<Int> =
                         total != 0 && abs(total) < 0.01 ? 2...8 : 2...2
                     Text(total, format: .currency(code: code).precision(.fractionLength(fractionDigits)))
@@ -2573,6 +2604,22 @@ struct WorkspaceView: View {
             .padding(.top, 2)
         }
         .padding(.vertical, 8)
+        .padding(.horizontal, 16)
+    }
+
+    @ViewBuilder
+    private func skillSectionHeading(_ title: String, count: Int, font: Font = .headline) -> some View {
+        if usesAccessibilityLayout {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title).font(font)
+                countTag(count)
+            }
+        } else {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(title).font(font)
+                countTag(count)
+            }
+        }
     }
 
     private func summaryMetric(_ value: String, label: String, tint: Color) -> some View {
@@ -2743,15 +2790,9 @@ struct WorkspaceView: View {
             }
             .padding(.top, 6)
         } label: {
-            HStack(spacing: 9) {
-                Image(systemName: "archivebox")
-                    .foregroundStyle(.secondary)
-                Text("Retired procedures")
-                    .font(.subheadline.weight(.semibold))
-                Spacer(minLength: 0)
-                countTag(skills.count)
-            }
+            skillSectionHeading("Retired procedures", count: skills.count, font: .subheadline.weight(.semibold))
         }
+        .padding(.horizontal, 2)
         .assistantPanel(in: colorScheme)
     }
 

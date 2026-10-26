@@ -7,7 +7,9 @@ import {
   getProviderBilling,
   googleBillingQuery,
   type ProviderBilling,
+  projectBillingForMobile,
   readGoogleBilling,
+  readOpenAIBilling,
   readOpenRouterBilling,
 } from './provider-billing.js';
 
@@ -149,6 +151,7 @@ describe('provider billing without guessed totals', () => {
       base,
       now,
     );
+    expect(report.amountBasis).toBe('provider_reported_cost');
     expect(report.lines[0]?.net).toBe(12);
     expect(report.message).toContain('not added here');
     const zero = await readOpenRouterBilling(
@@ -336,6 +339,232 @@ describe('month-end run rate', () => {
     expect(forecast?.daysInMonth).toBe(29);
     expect(forecast?.totals[0]?.projected).toBe(58);
   });
+
+  it('projects amount-only reported cost without claiming an after-credits amount', () => {
+    const forecast = billingForecast({
+      ...report,
+      id: 'openrouter',
+      amountBasis: 'provider_reported_cost',
+      period: '2026-09',
+      fetchedAt: '2026-09-16T00:00:00Z',
+      lines: [
+        { service: 'OpenRouter', detail: '', currency: 'USD', cost: 30, credits: 0, net: 99 },
+      ],
+    });
+    expect(forecast?.totals).toEqual([
+      { currency: 'USD', spent: 30, dailyAverage: 2, projected: 60 },
+    ]);
+    expect(forecast?.message).toContain('reported cost');
+    expect(forecast?.message).toContain('does not report credits');
+    expect(forecast?.message).not.toContain('after credits');
+  });
+});
+
+describe('OpenAI organization Costs adapter', () => {
+  it('opens only the dedicated sealed admin credential and will not query without explicit filters', async () => {
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    p.config.OPENAI_BILLING_ADMIN_KEY_ENCRYPTED = 'sealed-admin-fixture';
+    p.models.open = vi.fn((sealed) =>
+      sealed === 'sealed-admin-fixture' ? 'sk-admin-fixturevalue' : 'sk-project-modelvalue',
+    );
+    p.fetch = vi.fn(async () => response({ data: [], has_more: false, next_page: null }));
+    const missing = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(missing).toMatchObject({
+      status: 'not_configured',
+      setup: { code: 'openai_scope_missing' },
+    });
+    expect(p.fetch).not.toHaveBeenCalled();
+    p.config.OPENAI_BILLING_PROJECT_IDS = 'proj_fixture';
+    const start = Math.floor(Date.parse('2026-09-01T00:00:00Z') / 1_000);
+    const end = Math.floor(Date.parse('2026-09-02T00:00:00Z') / 1_000);
+    vi.mocked(p.fetch).mockResolvedValue(
+      response({
+        data: [
+          {
+            start_time: start,
+            end_time: end,
+            results: [
+              {
+                object: 'organization.costs.result',
+                amount: { value: 0, currency: 'USD' },
+                project_id: 'proj_fixture',
+                api_key_id: null,
+                line_item: 'Input',
+              },
+            ],
+          },
+        ],
+        has_more: false,
+        next_page: null,
+      }),
+    );
+    const report = (await getProviderBilling(p)).find((item) => item.id === 'openai-billing');
+    expect(report).toMatchObject({
+      status: 'reported',
+      amountBasis: 'provider_reported_cost',
+      lines: [{ cost: 0 }],
+    });
+    expect(p.models.open).toHaveBeenCalledExactlyOnceWith('sealed-admin-fixture');
+    expect(JSON.stringify(report)).not.toContain('sk-admin-fixturevalue');
+    expect(JSON.stringify(report)).not.toContain('sk-project-modelvalue');
+  });
+
+  it('uses explicit filters and complete cursor pages, preserving amount-only scope', async () => {
+    const bucket = (day: number, value: number) => ({
+      object: 'bucket',
+      start_time: Math.floor(
+        Date.parse(`2026-09-${String(day).padStart(2, '0')}T00:00:00Z`) / 1000,
+      ),
+      end_time: Math.floor(
+        Date.parse(`2026-09-${String(day + 1).padStart(2, '0')}T00:00:00Z`) / 1000,
+      ),
+      results: [
+        {
+          object: 'organization.costs.result',
+          amount: { value, currency: 'usd' },
+          line_item: 'Input tokens',
+          project_id: 'proj_a',
+          api_key_id: 'key_a',
+        },
+      ],
+    });
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response({ data: [bucket(1, 0.125)], has_more: true, next_page: 'next' }),
+      )
+      .mockResolvedValueOnce(
+        response({ data: [bucket(2, 0.375)], has_more: false, next_page: null }),
+      );
+    const result = await readOpenAIBilling(
+      request,
+      'sk-admin-testsecret',
+      base,
+      now,
+      ['proj_a'],
+      ['key_a'],
+    );
+    expect(result).toMatchObject({
+      status: 'reported',
+      amountBasis: 'provider_reported_cost',
+      latestUsageAt: null,
+      lines: [
+        {
+          cost: 0.5,
+          credits: 0,
+          net: 0.5,
+          currency: 'USD',
+          projectId: 'proj_a',
+          apiKeyId: 'key_a',
+        },
+      ],
+    });
+    const [firstUrl, firstInit] = request.mock.calls[0] as [string, RequestInit];
+    const params = new URL(firstUrl).searchParams;
+    expect(new URL(firstUrl).origin + new URL(firstUrl).pathname).toBe(
+      'https://api.openai.com/v1/organization/costs',
+    );
+    expect(params.getAll('project_ids')).toEqual(['proj_a']);
+    expect(params.getAll('api_key_ids')).toEqual(['key_a']);
+    expect(params.getAll('group_by')).toEqual(['project_id', 'api_key_id', 'line_item']);
+    expect(params.get('bucket_width')).toBe('1d');
+    expect(params.get('page')).toBeNull();
+    expect(firstInit.headers).toEqual({ Authorization: 'Bearer sk-admin-testsecret' });
+    expect(new URL(request.mock.calls[1]?.[0] as string).searchParams.get('page')).toBe('next');
+    expect(result.message).toContain('credits and net-after-credits amounts are not reported');
+    expect(billingForecast(result)).toBeUndefined();
+  });
+
+  it('rejects missing scope, invalid identity rows, repeated cursors, and empty results as unknown', async () => {
+    await expect(
+      readOpenAIBilling(vi.fn(), 'sk-admin-testsecret', base, now, [], []),
+    ).rejects.toThrow();
+    const wrongScope = vi.fn(async () =>
+      response({
+        data: [
+          {
+            start_time: 1798761600,
+            end_time: 1798848000,
+            results: [
+              {
+                object: 'organization.costs.result',
+                amount: { value: 1, currency: 'USD' },
+                project_id: 'proj_other',
+                api_key_id: null,
+              },
+            ],
+          },
+        ],
+        has_more: false,
+        next_page: null,
+      }),
+    );
+    await expect(
+      readOpenAIBilling(wrongScope, 'sk-admin-testsecret', base, now, ['proj_a'], []),
+    ).rejects.toThrow();
+    const repeated = vi
+      .fn()
+      .mockResolvedValueOnce(response({ data: [], has_more: true, next_page: 'same' }))
+      .mockResolvedValueOnce(response({ data: [], has_more: true, next_page: 'same' }));
+    await expect(
+      readOpenAIBilling(repeated, 'sk-admin-testsecret', base, now, ['proj_a'], []),
+    ).rejects.toThrow();
+    const empty = await readOpenAIBilling(
+      vi.fn(async () => response({ data: [], has_more: false, next_page: null })),
+      'sk-admin-testsecret',
+      base,
+      now,
+      ['proj_a'],
+      [],
+    );
+    expect(empty.status).toBe('unavailable');
+    expect(empty.lines).toEqual([]);
+  });
+
+  it('hides amount-only lines from old mobile clients and keeps supported reports intact', () => {
+    const amountOnly = {
+      ...base,
+      id: 'openai-billing',
+      amountBasis: 'provider_reported_cost' as const,
+      status: 'reported' as const,
+      lines: [
+        { service: 'OpenAI', detail: 'proj_a', currency: 'USD', cost: 1, credits: 0, net: 1 },
+      ],
+    };
+    expect(projectBillingForMobile([amountOnly], false)[0]).toMatchObject({
+      status: 'unavailable',
+      lines: [],
+    });
+    expect(projectBillingForMobile([amountOnly], false)[0]?.message).toContain(
+      'Update the app to view the reported-cost breakdown.',
+    );
+    expect(projectBillingForMobile([amountOnly], true)[0]).toBe(amountOnly);
+  });
+
+  it('keeps the actual OpenRouter amount-only report unavailable to older mobile clients', async () => {
+    const request = vi.fn(async () => response({ data: { usage_monthly: 12 } }));
+    const report = await readOpenRouterBilling(
+      request,
+      'fixture-key',
+      { ...base, id: 'openrouter' },
+      now,
+    );
+    expect(request).toHaveBeenCalledOnce();
+    expect(report).toMatchObject({
+      id: 'openrouter',
+      status: 'reported',
+      amountBasis: 'provider_reported_cost',
+      lines: [{ service: 'OpenRouter', cost: 12, credits: 0, net: 12 }],
+    });
+    const newerClient = projectBillingForMobile([report], true)[0];
+    expect(newerClient).toBe(report);
+    expect(newerClient?.amountBasis).toBe('provider_reported_cost');
+    const olderClient = projectBillingForMobile([report], false)[0];
+    expect(olderClient).toMatchObject({ status: 'unavailable', lines: [], forecast: undefined });
+    expect(olderClient?.amountBasis).toBe('provider_reported_cost');
+    expect(olderClient?.message).toContain('Update the app to view the reported-cost breakdown.');
+  });
 });
 
 it('marks covered Vertex billing as included without duplicating Google charges', async () => {
@@ -475,4 +704,208 @@ it('summarizes current missing and stale providers without using hypothetical ga
     'Current feeds: Google Cloud stale; OpenRouter not configured. Missing costs remain unknown, not zero.',
   );
   expect(coverage.statusSummary).not.toContain('Phone calls');
+});
+
+function ledgerEntry(
+  rows?: Parameters<typeof billingCoverageProjection>[1],
+  reports: ProviderBilling[] = [],
+) {
+  const projection = billingCoverageProjection(reports, rows);
+  expect(projection.totalState).toBe('unavailable');
+  expect(projection.title).toBe('Whole-app total unavailable');
+  const entry = projection.entries.find((value) => value.id === 'assistant-ledger');
+  if (!entry?.ledgerEvidence) throw new Error('Missing ledger evidence projection');
+  return entry;
+}
+
+it.each([{ rows: undefined }, { rows: null }, { rows: [] }])(
+  'keeps absent or empty evidence unknown without inferring zero or no activity ($rows)',
+  ({ rows }) => {
+    const entry = ledgerEntry(rows);
+    expect(entry.ledgerEvidence?.groups).toEqual([]);
+    expect(entry.ledgerEvidence?.emptyMessage).toContain(
+      'does not establish zero spending or no activity',
+    );
+    expect(entry.ledgerEvidence?.metadata).toContain('freshness are not supplied');
+    expect(entry.ledgerEvidence?.metadata).toMatch(/^Ledger aggregation in USD\./);
+    expect(entry.ledgerEvidence?.metadata).not.toContain('Monthly');
+    expect(entry.period).toBeUndefined();
+    expect(entry.source).toBeUndefined();
+  },
+);
+
+it('preserves each mixed evidence basis, exact USD representation and event count without an aggregate', () => {
+  const rows = [
+    { basis: 'provider_reported' as const, usd: '1.250000', count: 2 },
+    { basis: 'token_rate' as const, usd: '0.000003', count: 3 },
+    { basis: 'preflight_estimate' as const, usd: '2.5000', count: 4 },
+    { basis: 'component_ledger' as const, usd: '3.125', count: 5 },
+    { basis: 'unknown' as const, usd: '4.000000', count: 6 },
+  ];
+  const entry = ledgerEntry(rows);
+  expect(entry.ledgerEvidence?.currency).toBe('USD');
+  expect(
+    entry.ledgerEvidence?.groups.map((group) => ({ basis: group.basis, ...group.rows[0] })),
+  ).toEqual(rows.map((row) => ({ ...row, id: expect.any(String) })));
+  expect(entry.ledgerEvidence?.groups.map((group) => group.label)).toEqual([
+    'Provider-reported operation receipts',
+    'Token-rate estimates',
+    'Preflight estimates',
+    'Mixed reported and estimated components',
+    'Unverified ledger records',
+  ]);
+  expect(Object.keys(entry.ledgerEvidence ?? {})).not.toContain('total');
+  expect(entry.detail).toContain('not account invoices');
+});
+
+it('keeps duplicate basis groups separate with stable unique keys and no subtotal', () => {
+  const rows = [
+    { basis: 'unknown' as const, usd: '1.00', count: 2 },
+    { basis: 'unknown' as const, usd: '3.00', count: 4 },
+    { basis: 'unknown' as const, usd: '1.00', count: 2 },
+  ];
+  const first = ledgerEntry(rows).ledgerEvidence?.groups[0]?.rows ?? [];
+  const reordered = ledgerEntry([...rows].reverse()).ledgerEvidence?.groups[0]?.rows;
+  expect(first).toEqual(reordered);
+  expect(first).toHaveLength(3);
+  expect(new Set(first.map((row) => row.id)).size).toBe(3);
+  expect(first.map(({ usd, count }) => ({ usd, count }))).toEqual([
+    { usd: '1.00', count: 2 },
+    { usd: '1.00', count: 2 },
+    { usd: '3.00', count: 4 },
+  ]);
+});
+
+it('preserves explicit zero and safe amount/count under unrecognized basis while malformed fields remain unknown', () => {
+  const rows = [
+    { basis: 'provider_reported', usd: '0.000000', count: 1 },
+    { basis: 'unexpected_basis', usd: '9.125000', count: 7 },
+    { basis: 'token_rate', usd: 'NaN', count: 2 },
+    { basis: 'preflight_estimate', usd: 'Infinity', count: Number.POSITIVE_INFINITY },
+    { basis: 'component_ledger', usd: null, count: undefined },
+  ] as unknown as NonNullable<Parameters<typeof billingCoverageProjection>[1]>;
+  const groups = ledgerEntry(rows).ledgerEvidence?.groups ?? [];
+  expect(groups.find((group) => group.basis === 'provider_reported')?.rows[0]).toMatchObject({
+    usd: '0.000000',
+    count: 1,
+  });
+  expect(groups.find((group) => group.basis === 'unknown')).toMatchObject({
+    label: 'Unverified ledger records',
+    rows: [expect.objectContaining({ usd: '9.125000', count: 7 })],
+  });
+  expect(groups.find((group) => group.basis === 'token_rate')?.rows[0]).toMatchObject({
+    usd: null,
+    count: 2,
+  });
+  expect(groups.find((group) => group.basis === 'preflight_estimate')?.rows[0]).toMatchObject({
+    usd: null,
+    count: null,
+  });
+  expect(groups.find((group) => group.basis === 'component_ledger')?.rows[0]).toMatchObject({
+    usd: null,
+    count: null,
+  });
+});
+
+it('retains provider period/scope and stale or missing Vertex state without inventing metadata for ledger groups', () => {
+  const reports: ProviderBilling[] = [
+    {
+      ...base,
+      id: 'openrouter',
+      label: 'OpenRouter',
+      status: 'stale',
+      period: '2026-10',
+      scope: 'Shared saved key',
+      message: 'Includes unrelated usage; not assistant-only.',
+      lines: [],
+    },
+    {
+      ...base,
+      id: 'vertex',
+      label: 'Google Vertex AI',
+      status: 'unavailable',
+      message: 'No matching project row.',
+      lines: [],
+    },
+  ];
+  const projection = billingCoverageProjection(reports, [
+    { basis: 'provider_reported', usd: '2.00', count: 1 },
+  ]);
+  expect(projection.entries.find((entry) => entry.id === 'openrouter')).toMatchObject({
+    state: 'stale',
+    period: '2026-10',
+    scope: 'Shared saved key',
+    detail: 'Includes unrelated usage; not assistant-only.',
+  });
+  expect(projection.entries.find((entry) => entry.id === 'vertex')?.state).toBe('unknown');
+  const ledger = ledgerEntry([{ basis: 'provider_reported', usd: '2.00', count: 1 }], reports);
+  expect(ledger.period).toBeUndefined();
+  expect(ledger.scope).toContain('attribution unverified');
+  expect(ledger.ledgerEvidence?.metadata).toContain(
+    'Exact period boundaries, source/account scope and freshness are not supplied',
+  );
+});
+
+it('projects equivalent PostgreSQL and Firestore DTO shapes without reading or combining held liability', () => {
+  // Both existing readers expose basis/usd/count. No adapter/database execution is implied.
+  const postgres = {
+    byEvidence: [{ basis: 'provider_reported' as const, usd: '0.000000', count: 1 }],
+    held: [
+      {
+        id: 'held',
+        estimatedUsd: '987.654321',
+        source: 'unknown',
+        description: 'Unverified liability',
+      },
+    ],
+  };
+  const firestore = {
+    byEvidence: [{ basis: 'provider_reported' as const, usd: '0.000000', count: 1 }],
+    held: [...postgres.held],
+  };
+  expect(billingCoverageProjection([], postgres.byEvidence)).toEqual(
+    billingCoverageProjection([], firestore.byEvidence),
+  );
+  const projected = JSON.stringify(billingCoverageProjection([], postgres.byEvidence));
+  expect(projected).not.toContain('987.654321');
+  expect(postgres.held).toEqual(firestore.held);
+  expect(ledgerEntry(undefined).ledgerEvidence?.groups).toEqual([]); // unavailable upstream shape
+  expect(ledgerEntry([]).ledgerEvidence?.groups).toEqual([]);
+});
+
+it('keeps a paired same-provider report and operation receipt overlapping rather than summing the two views', () => {
+  // The synthetic fixture establishes this overlap; byEvidence itself supplies no provider attribution.
+  const report: ProviderBilling = {
+    ...base,
+    id: 'openrouter',
+    label: 'OpenRouter',
+    status: 'reported',
+    period: '2026-10',
+    scope: 'Shared saved key',
+    message: 'Key usage includes unrelated use.',
+    lines: [
+      {
+        service: 'OpenRouter',
+        detail: 'Saved-key usage',
+        currency: 'USD',
+        cost: 2.5,
+        credits: 0,
+        net: 2.5,
+      },
+    ],
+  };
+  const projection = billingCoverageProjection(
+    [report],
+    [{ basis: 'provider_reported', usd: '2.500000', count: 1 }],
+  );
+  expect(projection.overlapWarning).toContain('overlap provider bills');
+  expect(projection.totalState).toBe('unavailable');
+  expect(projection.entries.find((entry) => entry.id === 'openrouter')?.scope).toBe(
+    'Shared saved key',
+  );
+  expect(
+    ledgerEntry([{ basis: 'provider_reported', usd: '2.500000', count: 1 }]).ledgerEvidence
+      ?.groups[0]?.rows[0]?.usd,
+  ).toBe('2.500000');
+  expect(Object.hasOwn(projection, 'totalUsd')).toBe(false);
 });

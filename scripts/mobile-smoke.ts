@@ -25,7 +25,7 @@ try {
     await page.waitForURL(`${baseUrl}/settings`);
     await page.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
     await page.getByRole('heading', { name: 'Mobile app connection', exact: true }).waitFor();
-    for (const name of ['Chat', 'Settings', 'Audit trail']) {
+    for (const name of ['Chat', 'Memory', 'Settings', 'Audit trail']) {
       const link = page
         .getByRole('navigation', { name: 'Main navigation' })
         .getByRole('link', { name, exact: true });
@@ -73,7 +73,58 @@ try {
     );
     if (chatOverflowing) throw new Error(`Chat history overflows at ${viewport.width}px`);
   }
-  for (const path of ['/people', '/profile', '/tasks', '/documents']) {
+  // These exact owner pages are intentionally browseable. Check real content,
+  // not just a 200 that could be a Settings redirect or a load-error shell.
+  for (const [path, heading] of [
+    ['/profile', 'What I remember'],
+    ['/people', 'People'],
+    ['/profile/knowledge?view=library', 'Knowledge'],
+    ['/profile/knowledge?view=map', 'Knowledge'],
+  ] as const) {
+    const result = await page.goto(`${baseUrl}${path}`, { waitUntil: 'domcontentloaded' });
+    if (result?.status() !== 200 || new URL(page.url()).pathname !== path.split('?')[0])
+      throw new Error(`Memory browse route ${path} did not return its own page`);
+    await page.getByRole('heading', { name: heading, exact: true }).waitFor();
+    if (path === '/profile') {
+      await page.locator('main a[href="/people"]').waitFor();
+      await page.locator('main a[href="/profile/knowledge?view=library"]').waitFor();
+    } else if (path === '/people') {
+      await page.getByLabel('Search people', { exact: true }).waitFor();
+      if ((await page.locator('form:has(input[name="q"])').getAttribute('method')) !== 'get')
+        throw new Error('People search must remain a GET form');
+    } else {
+      await page.getByRole('navigation', { name: 'Knowledge views' }).waitFor();
+      await page
+        .getByLabel(path.endsWith('view=map') ? 'Search items' : 'Search saved notes', {
+          exact: true,
+        })
+        .waitFor();
+      if (
+        (await page.locator('form[action="/profile/knowledge"]').getAttribute('method')) !== 'get'
+      )
+        throw new Error('Knowledge filters must remain a GET form');
+    }
+  }
+  const missingPerson = '00000000-0000-4000-8000-000000000099';
+  for (const path of ['/profile', '/people', '/profile/knowledge', `/people/${missingPerson}`]) {
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
+      const result = await context.request.fetch(`${baseUrl}${path}`, {
+        method,
+        maxRedirects: 0,
+        headers: { 'next-action': 'smoke-must-not-dispatch' },
+      });
+      if (result.status() !== 405 || result.headers().location)
+        throw new Error(`Browse mutation ${method} ${path} must be rejected before dispatch`);
+    }
+  }
+  for (const path of [
+    '/tasks',
+    '/documents',
+    '/people/not-an-id',
+    `/people/${missingPerson}/extra`,
+    '/profile/about',
+    '/profile/knowledge/extra',
+  ]) {
     const result = await context.request.get(`${baseUrl}${path}`, { maxRedirects: 0 });
     const location = result.headers().location;
     const destination = location ? new URL(location, baseUrl).href : '';
@@ -81,12 +132,15 @@ try {
       throw new Error(
         `Retired route ${path} returned ${result.status()} with location ${location ?? 'missing'}`,
       );
+    const mutation = await context.request.post(`${baseUrl}${path}`, { maxRedirects: 0 });
+    if (mutation.status() !== 410 || mutation.headers().location)
+      throw new Error(`Retired mutation POST ${path} must stay unavailable`);
   }
   const health = await context.request.get(`${baseUrl}/api/health`);
   if (!health.ok()) throw new Error('Backend health check failed');
   if (failures.length) throw new Error(failures.join('\n'));
   console.log(
-    'Owner chat, chat history, Settings, mobile access, audit filters, retired routes, and browser zoom passed at three viewport sizes.',
+    'Owner chat, chat history, Memory navigation, Settings, mobile access, audit filters, and browser zoom passed at three viewport sizes; exact Memory browse content, mutation denials, and unrelated retired routes passed.',
   );
 } finally {
   await browser.close();

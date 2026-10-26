@@ -19,7 +19,14 @@ struct RootView: View {
                 safeAreaTrailingInset: geometry.safeAreaInsets.trailing,
                 isLandscape: geometry.size.width > geometry.size.height
             )
+            // This outer geometry is already constrained by horizontal safe
+            // areas, before rootContent and ChatView ignore container edges.
+            // Standalone ChatView has no known viewport and keeps the 20pt fallback.
+            .environment(\.conversationViewportWidth, geometry.size.width)
         }
+#if DEBUG
+        .onConnectionGeometry(.rootAvailable)
+#endif
         // Scoreboard cards anywhere below re-read live games through this.
         .environment(\.liveScoreboard) { [model] leagues in
             await model.liveScoreboard(leagues: leagues)
@@ -38,9 +45,9 @@ struct RootView: View {
         )
 
         return ZStack(alignment: .top) {
-            // Establishes an edge-to-edge coordinate space for the crown.
+            // Only the connected workspace establishes the crown’s edge-to-edge space.
             Color.clear
-                .ignoresSafeArea(.container, edges: .top)
+                .ignoresSafeArea(.container, edges: model.bootstrap != nil ? .top : [])
                 .allowsHitTesting(false)
 
             Group {
@@ -146,14 +153,14 @@ struct RootView: View {
                     .padding(.bottom, model.navigationPath.isEmpty ? 100 : 24)
             }
         }
-        // This is intentionally on the outer stack, not merely the clear
-        // background. Otherwise the overlay begins below the notch's safe
-        // area, leaving the visible green gap shown above the notification.
-        .ignoresSafeArea(.container, edges: .top)
+        // The connected workspace extends the outer stack as well as the clear
+        // background so the crown reaches the hardware edge. Launch/onboarding
+        // keep the system safe area instead of inheriting workspace chrome.
+        .ignoresSafeArea(.container, edges: model.bootstrap != nil ? .top : [])
         // The assistant is an edge-to-edge workspace. Its own activity crown
         // handles the top interaction space, so the clock, signal, and battery
         // status bar would only compete with the app's chrome.
-        .statusBarHidden(true)
+        .statusBarHidden(model.bootstrap != nil)
         .animation(
             .easeOut(duration: reduceMotion ? 0.12 : 0.24),
             value: model.isLoading

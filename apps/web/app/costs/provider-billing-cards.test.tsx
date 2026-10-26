@@ -21,6 +21,80 @@ const report: ProviderBilling = {
 };
 
 describe('provider billing presentation', () => {
+  it('renders OpenRouter amount-only values as reported cost without invented credits or net', () => {
+    const html = renderToStaticMarkup(
+      <ProviderBillingCards
+        reports={[
+          {
+            ...report,
+            id: 'openrouter',
+            label: 'OpenRouter',
+            status: 'reported',
+            amountBasis: 'provider_reported_cost',
+            fetchedAt: '2026-09-27T12:00:00Z',
+            message: 'Spend reported for the connected API key.',
+            lines: [
+              {
+                service: 'OpenRouter',
+                detail: 'Current API key · month to date',
+                currency: 'USD',
+                cost: 12,
+                credits: 0,
+                net: 12,
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+    expect(html).toContain('Reported cost');
+    expect(html).toContain('$12.00');
+    expect(html).toContain('Not reported');
+    expect(html).not.toContain('Credits: $0.00');
+  });
+
+  it('labels selected OpenAI amount as reported cost without inventing credits, net or freshness', () => {
+    const html = renderToStaticMarkup(
+      <ProviderBillingCards
+        reports={[
+          {
+            ...report,
+            id: 'openai-billing',
+            label: 'OpenAI organization',
+            status: 'reported',
+            periodTimezone: 'UTC',
+            checkedAt: '2026-09-27T12:00:00Z',
+            fetchedAt: '2026-09-27T12:00:00Z',
+            amountBasis: 'provider_reported_cost',
+            scope: 'Projects: proj_a; API keys: key_a',
+            message: 'Selected source scope.',
+            lines: [
+              {
+                service: 'OpenAI',
+                detail: 'proj_a · key_a · Input tokens',
+                currency: 'USD',
+                cost: 0.00000012,
+                credits: 0,
+                net: 0.00000012,
+                projectId: 'proj_a',
+                apiKeyId: 'key_a',
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+    expect(html).toContain('Reported cost');
+    expect(html).toContain('Project: proj_a');
+    expect(html).toContain('API key ID: key_a');
+    expect(html).toContain('Credits</th>');
+    expect(html).toContain('Net spend</th>');
+    expect(html).toContain('Not reported');
+    expect(html).toContain('Latest export: time not reported');
+    expect(html).toContain('Latest usage: time not reported');
+    expect(html).not.toContain('Credits: $0.00');
+  });
+
   it('shows whole-app incompleteness and source-scoped gaps without inventing an aggregate', () => {
     const coverage = billingCoverageProjection([
       {
@@ -114,7 +188,7 @@ describe('provider billing presentation', () => {
     expect(html).toContain('€3.00');
     expect(html).toContain('-$2.00');
     expect(html).toContain('Stale');
-    expect(html).toContain('Fetched 2026-09-26');
+    expect(html).toContain('Fetched: Sep 26, 2026');
     expect(html).not.toContain('$11.00');
   });
 
@@ -246,4 +320,154 @@ it('preserves nonzero sub-cent totals and credits instead of displaying zero', (
   expect(html).toContain('$0.0006');
   expect(html).toContain('-$0.0002');
   expect(html).not.toMatch(/>\$0\.00</);
+});
+
+describe('ledger evidence within the single coverage entry', () => {
+  function renderLedger(
+    rows?: Parameters<typeof billingCoverageProjection>[1],
+    reports: ProviderBilling[] = [],
+  ) {
+    const coverage = billingCoverageProjection(reports, rows);
+    const html = renderToStaticMarkup(
+      <>
+        <BillingCoverageSummary coverage={coverage} />
+        <ProviderBillingCards reports={reports} />
+      </>,
+    );
+    expect(html).toContain('Whole-app total unavailable');
+    return html;
+  }
+
+  it('names the usage breakdown on the collapsed native disclosure with a visible chevron', () => {
+    const html = renderLedger([{ basis: 'provider_reported', usd: '0.12', count: 1 }]);
+    expect(html).toContain('Cost sources and usage breakdown (5)');
+    expect(html).toMatch(
+      /<details[^>]*><summary[^>]*>.*?lucide-chevron-right.*?<span>Cost sources and usage breakdown/s,
+    );
+    expect(html).not.toMatch(/<details[^>]*\sopen(?:=|>)/);
+    expect(html.match(/Assistant ledger evidence/g)).toHaveLength(1);
+  });
+
+  it('distinguishes absent and empty evidence from a recorded explicit zero', () => {
+    for (const rows of [undefined, null, []]) {
+      const html = renderLedger(rows);
+      expect(html).toContain('Empty evidence does not establish zero spending or no activity.');
+      expect(html).not.toContain('Ledger USD 0');
+      expect(html).not.toContain('$0.00');
+    }
+    const zero = renderLedger([{ basis: 'provider_reported', usd: '0.000000', count: 1 }]);
+    expect(zero).toContain('Ledger USD 0.000000');
+    expect(zero).toContain('1 recorded event');
+    expect(zero).toContain('Provider-reported operation receipts');
+    expect(zero).toContain('coverage remains unverified');
+  });
+
+  it('renders every basis and duplicate group separately, preserving tiny amounts and counts without a subtotal', () => {
+    const html = renderLedger([
+      { basis: 'provider_reported', usd: '1.250000', count: 2 },
+      { basis: 'token_rate', usd: '0.000003', count: 3 },
+      { basis: 'preflight_estimate', usd: '2.5000', count: 4 },
+      { basis: 'component_ledger', usd: '3.125', count: 5 },
+      { basis: 'unknown', usd: '4.000000', count: 6 },
+      { basis: 'unknown', usd: '0.100', count: 7 },
+    ]);
+    for (const basis of [
+      'provider_reported',
+      'token_rate',
+      'preflight_estimate',
+      'component_ledger',
+      'unknown',
+    ]) {
+      expect(html).toContain(`data-cost-basis="${basis}"`);
+    }
+    for (const amount of ['1.250000', '0.000003', '2.5000', '3.125', '4.000000', '0.100']) {
+      expect(html).toContain(`Ledger USD ${amount}`);
+    }
+    expect(html).toContain('Separate rows; no subtotal.');
+    expect(html).toContain('Mixed reported and estimated components');
+    expect(html).toContain('Unverified ledger records');
+    expect(html).toContain('7 recorded events');
+    expect(html).toContain('Held reservations and unknown liability are separate');
+    expect(html.match(/aria-label="Assistant ledger evidence"/g)).toHaveLength(1);
+  });
+
+  it('keeps malformed values unknown and safe unknown-basis values visible as unverified', () => {
+    const malformed = [
+      { basis: 'token_rate', usd: 'Infinity', count: Number.NaN },
+      { basis: 'provider_reported', usd: undefined, count: -1 },
+      { basis: 'unexpected_basis', usd: '0.000008', count: 2 },
+    ] as unknown as NonNullable<Parameters<typeof billingCoverageProjection>[1]>;
+    const html = renderLedger(malformed);
+    expect(html).toContain('Amount unknown');
+    expect(html).toContain('Event count unknown');
+    expect(html).toContain('Unverified ledger records');
+    expect(html).toContain('Ledger USD 0.000008');
+    expect(html).not.toContain('Infinity');
+    expect(html).not.toContain('NaN');
+    expect(html).not.toContain('$0.00');
+  });
+
+  it('keeps paired provider amounts, currencies, shared-key scope and coverage gaps distinct from ledger receipts', () => {
+    const reports: ProviderBilling[] = [
+      {
+        ...report,
+        id: 'openrouter',
+        label: 'OpenRouter',
+        status: 'reported',
+        period: '2026-10',
+        scope: 'Shared key: all users',
+        message: 'Includes unrelated usage; not assistant-only.',
+        lines: [
+          {
+            service: 'OpenRouter',
+            detail: 'Saved-key usage',
+            currency: 'USD',
+            cost: 2.5,
+            credits: 0,
+            net: 2.5,
+          },
+        ],
+      },
+      {
+        ...report,
+        id: 'cloud-eur',
+        status: 'stale',
+        period: '2026-09',
+        scope: 'Project: separate',
+        message: 'Export delayed.',
+        lines: [
+          {
+            service: 'Cloud Run',
+            detail: 'Scoped export',
+            currency: 'EUR',
+            cost: 8,
+            credits: 0,
+            net: 8,
+          },
+        ],
+      },
+      {
+        ...report,
+        id: 'vertex',
+        label: 'Google Vertex AI',
+        status: 'unavailable',
+        message: 'No matching project usage row.',
+        lines: [],
+      },
+    ];
+    const html = renderLedger([{ basis: 'provider_reported', usd: '2.500000', count: 1 }], reports);
+    expect(html).toContain('$2.50');
+    expect(html).toContain('Ledger USD 2.500000');
+    expect(html).toContain('€8.00');
+    expect(html).toContain('Shared key: all users');
+    expect(html).toContain('Includes unrelated usage; not assistant-only.');
+    expect(html).toContain('2026-10');
+    expect(html).toContain('2026-09');
+    expect(html).toContain('No matching project usage row.');
+    expect(html).toContain('Assistant usage-ledger amounts may overlap provider bills.');
+    expect(html).toContain(
+      'Exact period boundaries, source/account scope and freshness are not supplied',
+    );
+    expect(html).not.toContain('$5.00');
+  });
 });
