@@ -1,6 +1,7 @@
 import {
   conversationMessageSourceRevision,
   conversationMessageSpeakerRevision,
+  type ExecutionEvidenceRecord,
 } from '@assistant/persistence';
 import { describe, expect, it } from 'vitest';
 import { refreshConversationSearchEvidence } from '../packages/core/src/workflow/executor/conversation-search-refresh.js';
@@ -83,7 +84,7 @@ describe('Firestore chat smoke extract fixture', () => {
       'open commitments for rainbow observation notes',
       'Owner-authored statements and corrections about open commitments for rainbow observation notes',
     ];
-    const evidence: ActionEvidence[] = queries.map((query, index) => ({
+    const evidence: ExecutionEvidenceRecord[] = queries.map((query, index) => ({
       id: `receipt-${index + 1}`,
       error: null,
       decision: { modelToolCallId: `model-call-${index + 1}` },
@@ -92,7 +93,7 @@ describe('Firestore chat smoke extract fixture', () => {
       status: 'succeeded',
       args: { query, limit: 8 },
       result: { mode: 'semantic', matches: [match] },
-    })) as never;
+    }));
     const refreshed = await refreshConversationSearchEvidence(evidence, {
       agentId: '5c69d0cf-e561-44ba-b0d6-d1454493054a',
       currentConversationId: '4df75f0d-45d4-4bd3-9faa-ae58429fc054',
