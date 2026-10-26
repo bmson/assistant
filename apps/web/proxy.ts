@@ -77,6 +77,8 @@ export function proxy(request: NextRequest) {
   // Browser chat and administration pages are owner surfaces. Native APIs
   // retain their existing persistence and authentication boundaries below.
   const adminPage = ['/settings', '/security', '/signin', '/setup'].includes(path);
+  // Reach only the existing owner-checked Costs page and cap Server Action.
+  const costsPage = path === '/costs' && ['GET', 'POST'].includes(request.method);
   const memoryBrowsePage =
     ['/profile', '/people', '/profile/knowledge'].includes(path) ||
     /^\/people\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
@@ -109,7 +111,12 @@ export function proxy(request: NextRequest) {
   if (!path.startsWith('/api/') && !path.startsWith('/_next/') && !asset) {
     if (
       path === '/' ||
-      (!adminPage && !auditPage && !localChatPage && !ownerChatPage && !memoryBrowseRead)
+      (!adminPage &&
+        !costsPage &&
+        !auditPage &&
+        !localChatPage &&
+        !ownerChatPage &&
+        !memoryBrowseRead)
     ) {
       if (request.method === 'GET' || request.method === 'HEAD') {
         return NextResponse.redirect(new URL('/settings', request.url));

@@ -100,8 +100,8 @@ describe.skipIf(!localEmulator)('Firestore costs page with PostgreSQL offline', 
     const { proxy } = await import('../../proxy.js');
     const request = (path: string, method = 'GET') =>
       new NextRequest(`http://localhost${path}`, { method });
-    expect(proxy(request('/costs')).status).toBe(307);
-    expect(proxy(request('/costs', 'POST')).status).toBe(410);
+    expect(proxy(request('/costs')).status).toBe(200);
+    expect(proxy(request('/costs', 'POST')).status).toBe(200);
     expect(proxy(request('/costs', 'DELETE')).status).toBe(410);
     expect(proxy(request('/api/mobile/v1/costs', 'POST')).status).toBe(503);
   });
