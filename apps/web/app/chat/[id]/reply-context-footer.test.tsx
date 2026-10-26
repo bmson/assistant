@@ -94,9 +94,33 @@ describe('reply context presentation', () => {
     expect(html).toContain('Date unavailable');
     expect(html).toContain('Saved context:');
     expect(html).toContain('whitespace-pre-wrap break-words');
-    expect(html).toContain('rewrite this reply or delete the saved source');
+    expect(html).toContain('It does not delete the saved source or change this reply.');
     expect(html.match(/Privacy controls unavailable/g)).toHaveLength(2);
+    expect(html.match(/Hiding an entry applies to this saved version only\./g)).toHaveLength(1);
+    expect(html.indexOf('Hiding an entry applies to this saved version only.')).toBeLessThan(
+      html.indexOf('<ul class="reply-context-records">'),
+    );
     expect(html).not.toContain('Helpful');
+  });
+  it('shows one scope helper and one reply rating across known and unavailable entries', () => {
+    const html = renderToStaticMarkup(
+      <ReplyContextDetails
+        id="details"
+        sources={[source, { label: 'Legacy reference', date: 'bad date' }]}
+        messageId="durable"
+        conversationId="conversation"
+        sessionScope="owner-session"
+        now={now}
+        onFeedback={vi.fn()}
+      />,
+    );
+    expect(html).toContain('Check source setting');
+    expect(html).toContain('Privacy controls unavailable for this saved reference.');
+    expect(html.match(/Hiding an entry applies to this saved version only\./g)).toHaveLength(1);
+    expect(html.match(/Was the context for this reply useful overall\?/g)).toHaveLength(1);
+    expect(html.match(/One rating covers the context listed for this reply\./g)).toHaveLength(1);
+    expect(html.match(/>Helpful</g)).toHaveLength(1);
+    expect(html.match(/>Not useful</g)).toHaveLength(1);
   });
   it('uses UTC dates, validates calendar dates, and does not infer source kinds', () => {
     expect(replyContextDate('2026-10-23', new Date('2026-10-23T23:59:59-10:00'))).toBe('Oct 23');
@@ -212,19 +236,33 @@ describe('future recall setting presentation', () => {
     for (const html of [failed, uncertain, markup('checking', null, true)]) {
       expect(html).not.toContain('Allow this version');
       expect(html).not.toContain('Hide this version');
+      expect(html).not.toContain('This version is hidden by this control.');
+      expect(html).not.toContain('This version is not hidden by this control.');
     }
     expect(markup('checking', null, true)).toContain('disabled=""');
   });
 
   it('describes verified states only for this control and saved version', () => {
     const allowed = markup('allowed');
-    expect(allowed).toContain('not hidden by this control for this saved version');
+    expect(allowed).toContain('Future recall: This version is not hidden by this control.');
     expect(allowed).toContain('Hide this version from future recall');
     const suppressed = markup('suppressed');
-    expect(suppressed).toContain('hidden by this control for this saved version');
+    expect(suppressed).toContain(
+      'Future recall: This version is hidden by this control. The saved source is not deleted.',
+    );
     expect(suppressed).toContain('The saved source is not deleted');
     expect(suppressed).toContain('Allow this version in future recall');
-    expect(markup('allowed', null, true)).toContain('disabled=""');
+    for (const status of ['stale', 'unavailable', 'unknown', 'checking'] as const) {
+      const html = markup(status);
+      expect(html).not.toContain('This version is hidden by this control.');
+      expect(html).not.toContain('This version is not hidden by this control.');
+    }
+    for (const status of ['allowed', 'suppressed'] as const) {
+      const pending = markup(status, null, true);
+      expect(pending).toContain('disabled=""');
+      expect(pending).not.toContain('This version is hidden by this control.');
+      expect(pending).not.toContain('This version is not hidden by this control.');
+    }
   });
 });
 
