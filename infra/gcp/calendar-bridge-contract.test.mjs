@@ -20,14 +20,15 @@ const manifest = (schemaVersion, contracts = contract) =>
     schemaVersion,
   });
 
-test('sharing ships schema 130 and every selected image supports its schema', () => {
-  assert.equal(deriveSchemaVersion('postgres', journal, contract), 130);
+test('identity authority ships schema 131 and every selected image supports its schema', () => {
+  assert.equal(deriveSchemaVersion('postgres', journal, contract), 131);
   for (const name of ['agent', 'web'])
-    assert.deepEqual(contract.components[name].schema.postgres, { min: 130, max: 130 });
+    assert.deepEqual(contract.components[name].schema.postgres, { min: 131, max: 131 });
   for (const name of ['browser', 'code', 'processor'])
-    assert.deepEqual(contract.components[name].schema.postgres, { min: 0, max: 130 });
+    assert.deepEqual(contract.components[name].schema.postgres, { min: 0, max: 131 });
   assert.throws(() => validateManifest(manifest(129)), /incompatible.*129/);
-  assert.equal(validateManifest(manifest(130)), true);
+  assert.throws(() => validateManifest(manifest(130)), /incompatible.*130/);
+  assert.equal(validateManifest(manifest(131)), true);
 });
 test('frozen schema-128 bridge ranges still permit rollback after additive 129', () => {
   const bridge = structuredClone(contract);
@@ -46,14 +47,14 @@ test('old artifact declarations remain insufficient for 129; future schema remai
   const historical = structuredClone(contract);
   for (const name of selected) historical.components[name].schema.postgres.max = 128;
   assert.throws(() => validateManifest(manifest(129, historical)), /incompatible.*129/);
-  assert.throws(() => validateManifest(manifest(131)), /incompatible.*131/);
+  assert.throws(() => validateManifest(manifest(132)), /incompatible.*132/);
   const webOnly = createManifest({
     release: 'bridge-fixture',
     imageRoot: 'registry/test',
     selected: ['web'],
     digests,
     contract,
-    schemaVersion: 130,
+    schemaVersion: 131,
   });
   assert.throws(
     () =>
@@ -68,7 +69,7 @@ test('old artifact declarations remain insufficient for 129; future schema remai
     validateManifest(webOnly, {
       liveAgentApi: 1,
       liveAgentSchemaMin: 128,
-      liveAgentSchemaMax: 130,
+      liveAgentSchemaMax: 131,
     }),
     true,
   );

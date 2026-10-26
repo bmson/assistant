@@ -2,7 +2,7 @@
 
 The editor supports four commands through two exact HTTP adapters. Its signed form handles do not create write authority: each driver must verify the current installation owner, complete privacy generation, editor epoch, original operation hash, live claim, and native source revisions in the same transaction as the primary write and terminal receipt. Receipt revisions identify committed operations; subsequent edits require freshly read native entity revisions.
 
-Ordinary editor commands, receipt lookups and read-only migration verification never create an editor epoch. Missing, malformed or disabled epoch metadata leaves browsing available without an editing grant. Enabling an installation is a maintenance operation, separate from shipping this source. PostgreSQL schema migration 0130 and required Firestore indexes must be installed and verified before enabling editing.
+Ordinary editor commands, receipt lookups and read-only migration verification never create an editor epoch. Missing, malformed or disabled epoch metadata leaves browsing available without an editing grant. Enabling an installation is a maintenance operation, separate from shipping this source. PostgreSQL schema migrations 0130 and 0131 (contact identity authority) and required Firestore indexes must be installed and verified before enabling editing.
 
 ## Erasure and retention
 
