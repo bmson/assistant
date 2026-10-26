@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import {
   ConsumerIndexBuildingError,
@@ -565,19 +567,11 @@ export function assertActiveGcloudPrincipal(
 
 async function main(): Promise<void> {
   const mode = assertKnownArguments(process.argv.slice(2));
-  const { stdout: baselineText } = await execFileAsync(
-    'git',
-    ['show', `${BASELINE_COMMIT}:${MANIFEST_PATH}`],
-    { maxBuffer: 4 * 1024 * 1024 },
+  const baselineBytes = readFileSync(
+    new URL('./fixtures/owner-editor-index-preparation/baseline.indexes.json', import.meta.url),
   );
-  const baselineBytes = Buffer.from(baselineText);
   const sourceDirectory = process.env.APPROVED_SOURCE_DIR || '.';
-  const { stdout: approvedText } = await execFileAsync(
-    'git',
-    ['-C', sourceDirectory, 'show', `${APPROVED_SOURCE_COMMIT}:${MANIFEST_PATH}`],
-    { maxBuffer: 4 * 1024 * 1024 },
-  );
-  const approvedBytes = Buffer.from(approvedText);
+  const approvedBytes = readFileSync(resolve(sourceDirectory, MANIFEST_PATH));
   ownerEditorIndexDelta(baselineBytes, approvedBytes);
   if (mode === '--verify-source') {
     targetIdentity();

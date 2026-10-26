@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import type { InstallationIdentity } from '../packages/setup/src/installation-manifest.js';
@@ -8,6 +8,10 @@ import {
   assertFirestoreIndexPermissions,
   assertKnownArguments,
   assertNoActiveProductionDeployRuns,
+  APPROVED_SHA256,
+  APPROVED_SOURCE_COMMIT,
+  BASELINE_COMMIT,
+  BASELINE_SHA256,
   ownerEditorIndexDelta,
   prepareOwnerEditorIndex,
   REQUIRED_FIRESTORE_PERMISSIONS,
@@ -25,18 +29,13 @@ const identity: InstallationIdentity = {
     archiveDigest: 'sha256:5baaca10aa089b2eac771de7c9086317206bd937d09a89ea6e937ac945e03cd1',
   },
 };
-const baselineBytes = Buffer.from(
-  execFileSync('git', [
-    'show',
-    '236a35a5e05163855c9b708414bf389d90cd15c2:infra/gcp/firestore/firestore.indexes.json',
-  ]),
+const baselineBytes = readFileSync(
+  new URL('./fixtures/owner-editor-index-preparation/baseline.indexes.json', import.meta.url),
 );
-const approvedBytes = Buffer.from(
-  execFileSync('git', [
-    'show',
-    '61c74edd9c67a77814d148565fb82651c0e2091e:infra/gcp/firestore/firestore.indexes.json',
-  ]),
+const approvedBytes = readFileSync(
+  new URL('./fixtures/owner-editor-index-preparation/approved.indexes.json', import.meta.url),
 );
+const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 type FixtureManifest = {
   indexes: Array<{
     collectionGroup: string;
@@ -173,6 +172,13 @@ function baselineSpec() {
 }
 
 describe('owner editor index preparation', () => {
+  it('reads immutable local index fixtures that match the pinned source hashes', () => {
+    expect(BASELINE_COMMIT).toBe('236a35a5e05163855c9b708414bf389d90cd15c2');
+    expect(APPROVED_SOURCE_COMMIT).toBe('61c74edd9c67a77814d148565fb82651c0e2091e');
+    expect(sha256(baselineBytes)).toBe(BASELINE_SHA256);
+    expect(sha256(approvedBytes)).toBe(APPROVED_SHA256);
+  });
+
   it('pins project, database, region, active principal, and accepted CLI modes', () => {
     expect(resolveTargetIdentity('bmson-assistant', 'assistant-production')).toMatchObject({
       projectId: 'bmson-assistant',
