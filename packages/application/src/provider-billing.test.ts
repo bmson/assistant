@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import type { ModelProviderPorts } from './model-providers.js';
 import {
@@ -191,6 +192,276 @@ describe('provider billing without guessed totals', () => {
     const nextMonth = await getProviderBilling(p);
     expect(nextMonth[0]?.status).toBe('unavailable');
     expect(nextMonth[0]?.lines).toEqual([]);
+  });
+
+  it('normalizes a legacy OpenRouter cache row without querying the provider', async () => {
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    const connection = {
+      id: '9f6d4e68-8d88-46d8-8ea8-5243396b3ef7',
+      kind: 'openrouter',
+      label: 'OpenRouter',
+      apiKeyEncrypted: 'encrypted-openrouter-key',
+      baseUrl: null,
+      vertexProject: null,
+      vertexLocation: null,
+      enabled: true,
+      lastTestedAt: null,
+      lastError: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    vi.mocked(p.models.connections.list).mockResolvedValue([connection]);
+    const key = `provider-billing:v1:${createHash('sha256')
+      .update(
+        JSON.stringify([
+          '2026-09',
+          [
+            'openrouter',
+            '9f6d4e68-8d88-46d8-8ea8-5243396b3ef7',
+            'OpenRouter',
+            'test-openrouter-key',
+          ],
+        ]),
+      )
+      .digest('hex')}`;
+    const legacyReport: ProviderBilling = {
+      id: '9f6d4e68-8d88-46d8-8ea8-5243396b3ef7',
+      label: 'OpenRouter',
+      status: 'reported',
+      period: '2026-09',
+      scope: 'Connection: OpenRouter',
+      source: 'openrouter',
+      message: 'Legacy cached OpenRouter amount.',
+      fetchedAt: '2026-09-16T12:00:00.000Z',
+      latestExportAt: null,
+      latestUsageAt: null,
+      lines: [
+        {
+          service: 'OpenRouter',
+          detail: 'Current API key · month to date',
+          currency: 'USD',
+          cost: 12,
+          credits: 0,
+          net: 12,
+        },
+      ],
+    };
+    p.models.open = vi.fn(() => 'test-openrouter-key');
+    p.cache.cacheGet = vi.fn(async (cacheKey) =>
+      cacheKey === key ? { result: { checkedAt: now.toISOString(), report: legacyReport } } : null,
+    );
+    p.cache.cachePut = vi.fn(async () => {});
+    p.fetch = vi.fn();
+
+    const report = (await getProviderBilling(p)).find(
+      (item) => item.id === '9f6d4e68-8d88-46d8-8ea8-5243396b3ef7',
+    );
+    expect(p.fetch).not.toHaveBeenCalled();
+    expect(p.cache.cachePut).not.toHaveBeenCalled();
+    expect(report?.amountBasis).toBe('provider_reported_cost');
+    expect(report?.lines[0]).toMatchObject({ cost: 12, credits: 0, net: 12 });
+    expect(report?.forecast?.totals[0]).toMatchObject({ currency: 'USD', spent: 12 });
+    expect(report?.forecast?.message).toContain('reported cost');
+    if (!report) throw new Error('The pre-upgrade OpenRouter cache row was not returned.');
+    expect(projectBillingForMobile([report], true)[0]?.amountBasis).toBe('provider_reported_cost');
+    expect(projectBillingForMobile([report], false)[0]).toMatchObject({
+      status: 'unavailable',
+      amountBasis: 'provider_reported_cost',
+      lines: [],
+      forecast: undefined,
+    });
+  });
+
+  it('preserves OpenRouter setup guidance for current and older mobile clients when no key exists', async () => {
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    const connection = {
+      id: 'f2a932d4-adee-4a48-8e12-2ab73b1e1fc6',
+      kind: 'openrouter',
+      label: 'OpenRouter',
+      apiKeyEncrypted: null,
+      baseUrl: null,
+      vertexProject: null,
+      vertexLocation: null,
+      enabled: true,
+      lastTestedAt: null,
+      lastError: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    vi.mocked(p.models.connections.list).mockResolvedValue([connection]);
+    p.models.config.LLM_PROVIDER = 'openrouter';
+    p.models.config.OPENROUTER_API_KEY = '';
+    p.fetch = vi.fn();
+
+    const report = (await getProviderBilling(p)).find((item) => item.id === connection.id);
+
+    if (!report) throw new Error('OpenRouter setup report is missing.');
+    expect(report).toMatchObject({
+      status: 'not_configured',
+      message: 'Connect an OpenRouter API key in AI providers to read its reported spend.',
+      lines: [],
+    });
+    expect(report).not.toHaveProperty('amountBasis');
+    expect(p.fetch).not.toHaveBeenCalled();
+    expect(projectBillingForMobile([report], true)[0]).toBe(report);
+    expect(projectBillingForMobile([report], false)[0]).toMatchObject({
+      status: 'not_configured',
+      message: report.message,
+      lines: [],
+      forecast: undefined,
+    });
+    expect(projectBillingForMobile([report], false)[0]).not.toHaveProperty('amountBasis');
+    expect(projectBillingForMobile([report], false)[0]?.message).not.toContain(
+      'Update the app to view the reported-cost breakdown.',
+    );
+  });
+
+  it('does not label cached OpenRouter unavailable rows as amount-only reports', async () => {
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    const connectionId = 'f2a932d4-adee-4a48-8e12-2ab73b1e1fc6';
+    const connection = {
+      id: connectionId,
+      kind: 'openrouter',
+      label: 'OpenRouter',
+      apiKeyEncrypted: 'encrypted-openrouter-key',
+      baseUrl: null,
+      vertexProject: null,
+      vertexLocation: null,
+      enabled: true,
+      lastTestedAt: null,
+      lastError: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    vi.mocked(p.models.connections.list).mockResolvedValue([connection]);
+    p.models.open = vi.fn(() => 'test-openrouter-key');
+    const key = `provider-billing:v1:${createHash('sha256')
+      .update(
+        JSON.stringify([
+          '2026-09',
+          ['openrouter', connectionId, 'OpenRouter', 'test-openrouter-key'],
+        ]),
+      )
+      .digest('hex')}`;
+    const unavailable: ProviderBilling = {
+      id: connectionId,
+      label: 'OpenRouter',
+      status: 'unavailable',
+      period: '2026-09',
+      scope: 'Connection: OpenRouter',
+      source: 'openrouter',
+      message: 'Provider data is unavailable. Missing spend is not zero.',
+      fetchedAt: null,
+      latestExportAt: null,
+      latestUsageAt: null,
+      lines: [],
+    };
+    p.cache.cacheGet = vi.fn(async (cacheKey) =>
+      cacheKey === key ? { result: { checkedAt: now.toISOString(), report: unavailable } } : null,
+    );
+    p.cache.cachePut = vi.fn(async () => {});
+    p.fetch = vi.fn();
+
+    const report = (await getProviderBilling(p)).find((item) => item.id === connectionId);
+
+    if (!report) throw new Error('Cached unavailable OpenRouter report is missing.');
+    expect(p.fetch).not.toHaveBeenCalled();
+    expect(p.cache.cachePut).not.toHaveBeenCalled();
+    expect(report).toMatchObject({ status: 'unavailable', lines: [] });
+    expect(report).not.toHaveProperty('amountBasis');
+    expect(projectBillingForMobile([report], false)[0]).toMatchObject({
+      status: 'unavailable',
+      lines: [],
+      forecast: undefined,
+    });
+    expect(projectBillingForMobile([report], false)[0]).not.toHaveProperty('amountBasis');
+    expect(projectBillingForMobile([report], false)[0]?.message).not.toContain(
+      'Update the app to view the reported-cost breakdown.',
+    );
+  });
+
+  it('normalizes OpenRouter cache reads on stale-error and refresh-in-progress returns', async () => {
+    const connectionId = '9f6d4e68-8d88-46d8-8ea8-5243396b3ef7';
+    const p = ports();
+    p.config.GCP_BILLING_EXPORT_TABLE = '';
+    const connection = {
+      id: connectionId,
+      kind: 'openrouter',
+      label: 'OpenRouter',
+      apiKeyEncrypted: 'encrypted-openrouter-key',
+      baseUrl: null,
+      vertexProject: null,
+      vertexLocation: null,
+      enabled: true,
+      lastTestedAt: null,
+      lastError: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    vi.mocked(p.models.connections.list).mockResolvedValue([connection]);
+    p.models.open = vi.fn(() => 'test-openrouter-key');
+    const key = `provider-billing:v1:${createHash('sha256')
+      .update(
+        JSON.stringify([
+          '2026-09',
+          ['openrouter', connectionId, 'OpenRouter', 'test-openrouter-key'],
+        ]),
+      )
+      .digest('hex')}`;
+    const legacyReport: ProviderBilling = {
+      id: connectionId,
+      label: 'OpenRouter',
+      status: 'reported',
+      period: '2026-09',
+      scope: 'Connection: OpenRouter',
+      source: 'openrouter',
+      message: 'Legacy cached OpenRouter amount.',
+      fetchedAt: '2026-09-16T12:00:00.000Z',
+      latestExportAt: null,
+      latestUsageAt: null,
+      lines: [
+        {
+          service: 'OpenRouter',
+          detail: 'Current API key · month to date',
+          currency: 'USD',
+          cost: 12,
+          credits: 0,
+          net: 12,
+        },
+      ],
+    };
+    const seedCache = (target: BillingPorts) => {
+      target.cache.cacheGet = vi.fn(async (cacheKey) =>
+        cacheKey === key
+          ? { result: { checkedAt: now.toISOString(), report: legacyReport } }
+          : null,
+      );
+    };
+    seedCache(p);
+    p.now = () => new Date(now.getTime() + 2 * 3_600_000);
+    p.fetch = vi.fn(async () => {
+      throw new Error('synthetic refresh failure');
+    });
+    const stale = (await getProviderBilling(p)).find((item) => item.id === connectionId);
+    expect(stale).toMatchObject({ status: 'stale', amountBasis: 'provider_reported_cost' });
+    expect(stale?.lines[0]).toMatchObject({ cost: 12, credits: 0, net: 12 });
+
+    const pendingPorts = ports();
+    pendingPorts.config.GCP_BILLING_EXPORT_TABLE = '';
+    vi.mocked(pendingPorts.models.connections.list).mockResolvedValue([connection]);
+    pendingPorts.models.open = vi.fn(() => 'test-openrouter-key');
+    seedCache(pendingPorts);
+    pendingPorts.now = () => new Date(now.getTime() + 2 * 3_600_000);
+    pendingPorts.refreshBudgetMs = 0;
+    pendingPorts.fetch = vi.fn(() => new Promise<Response>(() => {}));
+    const pending = (await getProviderBilling(pendingPorts)).find(
+      (item) => item.id === connectionId,
+    );
+    expect(pending).toMatchObject({ status: 'stale', amountBasis: 'provider_reported_cost' });
+    expect(pending?.lines[0]).toMatchObject({ cost: 12, credits: 0, net: 12 });
   });
 
   it('serves the last snapshot instead of waiting out a slow provider refresh', async () => {
