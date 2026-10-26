@@ -299,7 +299,7 @@ export class FirestoreProfileOverviewRepository implements ProfileOverviewReposi
           const person = peopleById.get(row.subjectContactId);
           if (person) person.factCount += 1;
         }
-        if (owner && row.subjectContactId === owner.id) {
+        if (owner && row.subjectContactId === owner.row.id) {
           ownerFactMetadata.push(row);
           ownerFactMetadata.sort(ownerFactOrder);
           if (ownerFactMetadata.length > PROFILE_FACT_LIMIT) ownerFactMetadata.pop();

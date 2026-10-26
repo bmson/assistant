@@ -514,10 +514,54 @@ describe('actual FS domain + actual canonical writer + actual claim/receipt tran
     expect(f.stats.writes).toHaveLength(writes);
     expect(f.stats.readsAfterWrites).toBe(0);
   });
-  it('reports identical identity as unchanged without a contact or graph write', async () => {
+  it('protects an identical legacy identity with a metadata-only owner promotion and an idempotent receipt', async () => {
     const f = fixture(),
       cursor = f.rows('maintenanceCursors')[0]?.cursor,
       before = await readFirestoreOwnerEditorContact(f.store, f.ownerId, f.left);
+    if (!before) throw new Error('Missing originally displayed contact');
+    const original = f.rows('contacts').find((row) => row.id === f.left);
+    if (!original) throw new Error('Missing legacy contact');
+    const request: Extract<OwnerEditorApply, { command: 'update_person_identity' }> = {
+      version: 1,
+      intent: 'apply',
+      command: 'update_person_identity',
+      operationId: randomUUID(),
+      contactId: f.left,
+      expectedContactRevision: before.revision,
+      name: 'Alex',
+      aliases: [],
+    };
+    const scope = f.scope(request);
+    const result = await f.run(request, scope);
+    expect(result).toMatchObject({ outcome: 'unchanged', authority: 'operation_receipt' });
+    expect(f.stats.writes.filter((table) => table !== 'ownerEditorOperations')).toEqual([
+      'contacts',
+      'maintenanceCursors',
+    ]);
+    const promoted = f.rows('contacts').find((row) => row.id === f.left);
+    if (!promoted) throw new Error('Missing protected contact');
+    const {
+      identityAuthority: previousAuthority,
+      updatedAt: _previousTime,
+      ...originalFields
+    } = original;
+    const { identityAuthority, updatedAt: _promotedTime, ...promotedFields } = promoted;
+    expect(previousAuthority ?? null).toBeNull();
+    expect(identityAuthority).toBe('owner');
+    expect(promotedFields).toEqual(originalFields);
+    const writes = f.stats.writes.length;
+    expect(await f.run(request, scope)).toEqual(result);
+    expect(f.stats.writes).toHaveLength(writes);
+    expect(f.rows('maintenanceCursors')[0]?.cursor).toBe(cursor);
+    expect(f.embed).not.toHaveBeenCalled();
+  });
+  it('does not rewrite an already owner-protected identical identity or its graph', async () => {
+    const f = fixture();
+    const original = f.rows('contacts').find((row) => row.id === f.left);
+    if (!original) throw new Error('Missing contact');
+    f.seed('contacts', f.left, { ...original, identityAuthority: 'owner' });
+    const before = await readFirestoreOwnerEditorContact(f.store, f.ownerId, f.left);
+    if (!before) throw new Error('Missing originally displayed contact');
     expect(
       await f.run({
         version: 1,
@@ -525,7 +569,7 @@ describe('actual FS domain + actual canonical writer + actual claim/receipt tran
         command: 'update_person_identity',
         operationId: randomUUID(),
         contactId: f.left,
-        expectedContactRevision: before!.revision,
+        expectedContactRevision: before.revision,
         name: 'Alex',
         aliases: [],
       }),
@@ -533,7 +577,6 @@ describe('actual FS domain + actual canonical writer + actual claim/receipt tran
     expect(f.stats.writes.filter((table) => table !== 'ownerEditorOperations')).toEqual([
       'maintenanceCursors',
     ]);
-    expect(f.rows('maintenanceCursors')[0]?.cursor).toBe(cursor);
     expect(f.embed).not.toHaveBeenCalled();
   });
 });
