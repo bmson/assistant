@@ -66,6 +66,38 @@ struct RecoveryNoticePresentation {
     }
 }
 
+/// Reading an existing reference never grants a control or loads another source.
+struct RecallReferenceDetails: View {
+    let sources: [MessageRecallSource]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("References recorded with this reply.")
+                .font(.caption)
+                .foregroundStyle(AssistantTheme.stageSecondary)
+            ForEach(sources.indices, id: \.self) { index in
+                if index > 0 { Divider().overlay(AssistantTheme.stageSecondary.opacity(0.2)) }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(sources[index].label)
+                        .font(.footnote)
+                        .foregroundStyle(AssistantTheme.stageStrong)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text([sources[index].displayGroup, sources[index].date]
+                        .filter { !$0.isEmpty }.joined(separator: " · "))
+                        .font(.caption)
+                        .foregroundStyle(AssistantTheme.stageSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityElement(children: .contain)
+            }
+        }
+        .multilineTextAlignment(.leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 struct MessageBubble: View {
     let message: ChatMessage
     let userPrompt: String?
@@ -113,6 +145,7 @@ struct MessageBubble: View {
     @State private var recallSourceStates: [String: Bool] = [:]
     @State private var recallSourceInFlight = Set<String>()
     @State private var recallControlNotice: String?
+    @State private var showsRecallDetails = false
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -470,25 +503,34 @@ struct MessageBubble: View {
 
     private var recallNote: some View {
         let sources = message.recallSources
-        let groups = Array(Set(sources.map(\.displayGroup))).sorted()
-        let title = "Drawing on " + groups.joined(separator: " and ")
+        let title = "Context for this reply · \(sources.count)"
         let controllable = sources.filter(\.hasCurrentLedgerReference)
         return VStack(alignment: .leading, spacing: 4) {
-            Group {
+            DisclosureGroup(isExpanded: $showsRecallDetails) {
+                RecallReferenceDetails(sources: sources)
+                    .padding(.top, 8)
                 if setRecallSourceSuppressed != nil, !controllable.isEmpty {
                     Menu {
                         ForEach(controllable) { source in
                             recallSourceMenuSection(source)
                         }
                     } label: {
-                        recallPill(title: title, sources: sources)
+                        Label("Future recall settings", systemImage: "slider.horizontal.3")
+                            .font(.caption.weight(.semibold))
+                            .frame(minHeight: 44)
                     }
-                    .accessibilityLabel("Manage recalled sources: \(sources.map(\.label).joined(separator: ", "))")
+                    .padding(.top, 8)
                     .accessibilityHint("Hide or allow a source in future recalled context.")
-                } else {
-                    recallPill(title: title, sources: sources)
                 }
+            } label: {
+                recallPill(title: title, sources: sources)
             }
+            .tint(AssistantTheme.stageSecondary)
+            .foregroundStyle(AssistantTheme.stageSecondary)
+            .padding(.horizontal, AssistantTheme.ConversationSpacing.contextHorizontalInset)
+            .padding(.vertical, AssistantTheme.ConversationSpacing.contextVerticalInset)
+            .background(AssistantTheme.stageWell(for: colorScheme), in: RoundedRectangle(
+                cornerRadius: AssistantTheme.ConversationSpacing.contextCornerRadius, style: .continuous))
             if let recallControlNotice {
                 Text(recallControlNotice)
                     .font(.caption2)
@@ -507,24 +549,22 @@ struct MessageBubble: View {
                 Text(title)
                     .font(.caption2.weight(.semibold))
                     .fixedSize(horizontal: false, vertical: true)
-                Text(sources.prefix(2).map(\.label).joined(separator: " · "))
-                    .font(.caption2)
-                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
-                    .truncationMode(.tail)
-                    .fixedSize(horizontal: false, vertical: true)
+                if !showsRecallDetails {
+                    Text(sources.prefix(2).map(\.label).joined(separator: " · "))
+                        .font(.caption2)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                        .truncationMode(.tail)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .multilineTextAlignment(.leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .foregroundStyle(AssistantTheme.stageSecondary)
-        .padding(.horizontal, AssistantTheme.ConversationSpacing.contextHorizontalInset)
-        .padding(.vertical, AssistantTheme.ConversationSpacing.contextVerticalInset)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(minHeight: setRecallSourceSuppressed != nil && sources.contains(where: \.hasCurrentLedgerReference) ? 44 : nil)
-        .background(AssistantTheme.stageWell(for: colorScheme), in: RoundedRectangle(
-            cornerRadius: AssistantTheme.ConversationSpacing.contextCornerRadius, style: .continuous))
+        .frame(minHeight: 44)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(title): \(sources.map(\.label).joined(separator: ", "))")
+        .accessibilityLabel(title)
     }
 
     @ViewBuilder
