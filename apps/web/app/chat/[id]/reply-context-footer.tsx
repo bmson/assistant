@@ -134,9 +134,10 @@ export function ReplyContextDetails({
   );
   return (
     <div id={id} className="reply-context-details">
-      <p>
-        These entries were retrieved when this reply was prepared. Changing future recall does not
-        rewrite this reply or delete the saved source.
+      <p>These entries were retrieved when this reply was prepared.</p>
+      <p className="reply-context-scope-helper">
+        Hiding an entry applies to this saved version only. Other copies or updated versions may
+        still be recalled. It does not delete the saved source or change this reply.
       </p>
       <ul className="reply-context-records">
         {records.map((source, index) => {
@@ -176,13 +177,17 @@ export function ReplyContextDetails({
         })}
       </ul>
       {onFeedback ? (
-        <RecallFeedbackControl
-          key={sourceIdentity}
-          messageId={messageId}
-          onFeedback={onFeedback}
-          identityScope={JSON.stringify([conversationId, sourceIdentity])}
-          sessionScope={sessionScope}
-        />
+        <div className="reply-context-feedback">
+          <p>Was the context for this reply useful overall?</p>
+          <p>One rating covers the context listed for this reply.</p>
+          <RecallFeedbackControl
+            key={sourceIdentity}
+            messageId={messageId}
+            onFeedback={onFeedback}
+            identityScope={JSON.stringify([conversationId, sourceIdentity])}
+            sessionScope={sessionScope}
+          />
+        </div>
       ) : null}
     </div>
   );
