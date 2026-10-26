@@ -113,6 +113,7 @@ export { FirestoreOwnerCardCompilationRepository } from './owner-card-compilatio
 export { FirestoreOwnerContextRepository } from './owner-context.js';
 export * from './owner-editor-domain.js';
 export * from './owner-editor-graph.js';
+export * from './owner-editor-maintenance.js';
 export * from './owner-editor-repository.js';
 export * from './owner-editor-retention.js';
 export { FirestoreOwnerKnowledgeGraphFactRepository } from './owner-knowledge-graph-fact.js';

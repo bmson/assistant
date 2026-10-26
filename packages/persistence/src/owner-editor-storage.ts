@@ -1,9 +1,12 @@
 import { z } from 'zod';
 import {
   OWNER_EDITOR_COMMANDS,
+  type OwnerEditorEpochCursor,
+  type OwnerEditorMaintenanceBinder,
   type OwnerEditorOperationRecord,
   type OwnerEditorTerminalResult,
 } from './owner-editor.js';
+import { ownerEditorMaintenanceTargetEpochDigest } from './owner-editor-identity.js';
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const uuid = z
@@ -83,13 +86,45 @@ export function parseOwnerEditorTerminalResult(value: unknown): OwnerEditorTermi
 export function parseOwnerEditorOperationRecord(value: unknown): OwnerEditorOperationRecord {
   return operation.parse(value);
 }
-export function parseOwnerEditorEpochCursor(value: unknown): {
-  ownerId: string;
-  epoch: string;
-  ready: boolean;
-  privacyGenerationDigest: string;
-} {
-  return z
-    .strictObject({ ownerId: uuid, epoch: uuid, ready: z.boolean(), privacyGenerationDigest: hash })
-    .parse(value);
+const maintenanceBinder = z.strictObject({
+  version: z.literal(1),
+  operationId: uuid,
+  requestDigest: hash,
+  action: z.enum(['provision-disabled', 'enable', 'disable']),
+  targetEpochDigest: hash,
+});
+const epochCursor = z
+  .strictObject({
+    ownerId: uuid,
+    epoch: uuid,
+    ready: z.boolean(),
+    privacyGenerationDigest: hash,
+    maintenanceBinder: maintenanceBinder.optional(),
+  })
+  .superRefine((cursor, ctx) => {
+    const binder = cursor.maintenanceBinder;
+    if (!binder) return;
+    if (cursor.ready !== (binder.action === 'enable'))
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Editor maintenance action does not match readiness',
+      });
+    if (binder.targetEpochDigest !== ownerEditorMaintenanceTargetEpochDigest(cursor.epoch))
+      ctx.addIssue({ code: 'custom', message: 'Editor maintenance target does not match epoch' });
+  });
+
+export function parseOwnerEditorEpochCursor(value: unknown): OwnerEditorEpochCursor {
+  return epochCursor.parse(value);
+}
+
+export function parseOwnerEditorMaintenanceBinder(value: unknown): OwnerEditorMaintenanceBinder {
+  return maintenanceBinder.parse(value);
+}
+
+export function ownerEditorEpochCursorWithoutMaintenanceBinder(
+  cursor: OwnerEditorEpochCursor,
+): Omit<OwnerEditorEpochCursor, 'maintenanceBinder'> {
+  const withoutBinder = { ...cursor };
+  delete withoutBinder.maintenanceBinder;
+  return withoutBinder;
 }

@@ -153,6 +153,22 @@ export interface OwnerEditorOperationRecord {
   createdAt: Date;
   updatedAt: Date;
 }
+/** Bounded evidence binding for one trusted maintenance rotation. */
+export interface OwnerEditorMaintenanceBinder {
+  version: 1;
+  operationId: string;
+  requestDigest: string;
+  action: 'provision-disabled' | 'enable' | 'disable';
+  targetEpochDigest: string;
+}
+/** Optional for legacy cursors; strict parsers reject unknown fields. */
+export interface OwnerEditorEpochCursor {
+  ownerId: string;
+  epoch: string;
+  ready: boolean;
+  privacyGenerationDigest: string;
+  maintenanceBinder?: OwnerEditorMaintenanceBinder;
+}
 export interface OwnerEditorReceiptProof {
   scope: OwnerEditorScope;
   requestHash: string;

@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
-import type { OwnerEditorClaim, OwnerEditorSavedIds, OwnerEditorScope } from './owner-editor.js';
+import type {
+  OwnerEditorClaim,
+  OwnerEditorEpochCursor,
+  OwnerEditorSavedIds,
+  OwnerEditorScope,
+} from './owner-editor.js';
 
 function canonical(value: unknown): string {
   if (value instanceof Date) return JSON.stringify(value.toISOString());
@@ -21,6 +26,12 @@ export function ownerEditorOperationId(
 }
 export function ownerEditorPrivacyDigest(generation: string | null): string {
   return digest('owner-editor-privacy-v1', generation);
+}
+export function ownerEditorEpochStateDigest(cursor: OwnerEditorEpochCursor | null): string {
+  return digest('owner-editor-epoch-state-v1', cursor === null ? { kind: 'absent' } : cursor);
+}
+export function ownerEditorMaintenanceTargetEpochDigest(epoch: string): string {
+  return createHash('sha256').update(epoch).digest('hex');
 }
 export function ownerEditorScopeDigest(scope: OwnerEditorScope): string {
   return digest('owner-editor-scope-v1', scope);

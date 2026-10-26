@@ -8,6 +8,7 @@ import type {
 import {
   emailAttachmentCustodyCleanupIntentId,
   notificationDashboardMessageId,
+  ownerEditorEpochCursorWithoutMaintenanceBinder,
   ownerEditorPrivacyDigest,
   parseOwnerEditorEpochCursor,
 } from '@assistant/persistence';
@@ -226,7 +227,10 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
         )
           throw new Error('Editor epoch owner mismatch');
         tx.update(epochRef, {
-          cursor: JSON.stringify({ ...epoch, epoch: randomUUID() }),
+          cursor: JSON.stringify({
+            ...ownerEditorEpochCursorWithoutMaintenanceBinder(epoch),
+            epoch: randomUUID(),
+          }),
           updatedAt: now,
         });
       }
