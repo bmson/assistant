@@ -1,5 +1,7 @@
 import importlib.util
+import json
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 import unittest
 from unittest.mock import patch
 
@@ -27,6 +29,135 @@ def version(number, state="ENABLED"):
 
 
 class CleanupTests(unittest.TestCase):
+    def recovery_config(self, **overrides):
+        agent_revision = "projects/bmson-assistant/locations/us-west1/services/assistant-agent/revisions/agent-recovery"
+        web_revision = "projects/bmson-assistant/locations/us-west1/services/assistant-web/revisions/web-recovery"
+        config = {
+            "schemaVersion": 1, "project": "bmson-assistant", "region": "us-west1",
+            "repository": "assistant",
+            "expiresAt": (datetime.now(timezone.utc) + timedelta(days=2)).isoformat(),
+            "sourceSHA": "a" * 40, "configProof": "sha256:" + "b" * 64,
+            "procedureReference": "infra/gcp/recovery-procedure.md#rollback",
+            "images": {
+                "agent": ["us-west1-docker.pkg.dev/bmson-assistant/assistant/agent@sha256:" + "c" * 64],
+                "web": ["us-west1-docker.pkg.dev/bmson-assistant/assistant/web@sha256:" + "e" * 64],
+            },
+            "revisions": [agent_revision, web_revision],
+        }
+        config.update(overrides)
+        return config
+
+    def test_recovery_allowlist_rejects_expired_wildcard_and_wrong_target(self):
+        import tempfile
+        from types import SimpleNamespace
+        args = SimpleNamespace(project="bmson-assistant", region="us-west1", repository="assistant")
+        cases = [
+            self.recovery_config(expiresAt=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()),
+            self.recovery_config(images={
+                "agent": ["us-west1-docker.pkg.dev/bmson-assistant/assistant/agent:*"],
+                "web": ["us-west1-docker.pkg.dev/bmson-assistant/assistant/web@sha256:" + "e" * 64],
+            }),
+            self.recovery_config(project="other-project"),
+        ]
+        for config in cases:
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "recovery.json"
+                path.write_text(json.dumps(config))
+                with self.assertRaises(RuntimeError):
+                    cleanup.load_recovery_allowlist(path, args)
+
+    def test_recovery_allowlist_protects_exact_existing_image_and_revision(self):
+        import tempfile
+        from types import SimpleNamespace
+        project = "bmson-assistant"
+        root = f"projects/{project}/locations/us-west1"
+        agent_service = f"{root}/services/assistant-agent"
+        web_service = f"{root}/services/assistant-web"
+        current_agent = f"{agent_service}/revisions/agent-current"
+        current_web = f"{web_service}/revisions/web-current"
+        retained_agent = f"{agent_service}/revisions/agent-recovery"
+        retained_web = f"{web_service}/revisions/web-recovery"
+        agent_image = "us-west1-docker.pkg.dev/bmson-assistant/assistant/agent@sha256:" + "c" * 64
+        web_image = "us-west1-docker.pkg.dev/bmson-assistant/assistant/web@sha256:" + "e" * 64
+
+        class RecoveryCloud:
+            def listing(self, host, resource, key, params=None):
+                if resource.endswith("/services"):
+                    return [{"name": agent_service, "latestReadyRevision": current_agent,
+                             "latestCreatedRevision": current_agent,
+                             "trafficStatuses": [{"revision": "agent-current", "percent": 100}]},
+                            {"name": web_service, "latestReadyRevision": current_web,
+                             "latestCreatedRevision": current_web,
+                             "trafficStatuses": [{"revision": "web-current", "percent": 100}]}]
+                if resource.endswith("/jobs"):
+                    return []
+                if resource.endswith("/revisions"):
+                    if agent_service in resource:
+                        return [{"name": current_agent}, {"name": retained_agent},
+                                {"name": f"{agent_service}/revisions/old"}]
+                    return [{"name": current_web}, {"name": retained_web}]
+                if resource.endswith("/dockerImages"):
+                    result = []
+                    for component, digest in (("agent", "c" * 64), ("web", "e" * 64), ("agent", "d" * 64)):
+                        result.append({"name": f"{root}/repositories/assistant/dockerImages/{component}@sha256:{digest}",
+                                       "uri": f"us-west1-docker.pkg.dev/bmson-assistant/assistant/{component}@sha256:{digest}",
+                                       "mediaType": "application/vnd.docker.distribution.manifest.v2+json"})
+                    return result
+                if resource.endswith("/tags"):
+                    return []
+                raise AssertionError(f"unexpected listing: {resource}")
+
+            def request(self, host, resource, params=None):
+                if resource == f"v2/{current_agent}":
+                    return {"name": current_agent, "containers": [{"image": agent_image}]}
+                if resource == f"v2/{current_web}":
+                    return {"name": current_web, "containers": [{"image": web_image}]}
+                if resource == f"v2/{retained_agent}":
+                    return {"name": retained_agent, "containers": [{"image": agent_image}]}
+                if resource == f"v2/{retained_web}":
+                    return {"name": retained_web, "containers": [{"image": web_image}]}
+                if resource.startswith("v1/projects/bmson-assistant/locations/us-west1/repositories/assistant"):
+                    if resource.endswith("/dockerImages"):
+                        raise AssertionError("listing expected for dockerImages")
+                    return {"sizeBytes": 10, "dockerConfig": {"immutableTags": False}}
+                if "/referrers/" in resource:
+                    return {"manifests": []}
+                raise AssertionError(f"unexpected request: {resource}")
+
+        config = self.recovery_config()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "recovery.json"
+            path.write_text(json.dumps(config))
+            args = SimpleNamespace(project=project, region="us-west1", repository="assistant")
+            plan = cleanup.inventory(RecoveryCloud(), args, path)
+        self.assertEqual(plan["deleteImages"], [f"projects/{project}/locations/us-west1/repositories/assistant/packages/agent/versions/sha256:{'d' * 64}"])
+        self.assertNotIn(retained_agent, plan["deleteRevisions"])
+        self.assertNotIn(retained_web, plan["deleteRevisions"])
+        self.assertIn(f"{agent_service}/revisions/old", plan["deleteRevisions"])
+
+    def test_allowlisted_registry_images_must_exist_uniquely_with_matching_digest(self):
+        ref = "us-west1-docker.pkg.dev/bmson-assistant/assistant/agent@sha256:" + "c" * 64
+        valid = {"name": "projects/bmson-assistant/locations/us-west1/repositories/assistant/dockerImages/agent@sha256:" + "c" * 64,
+                 "uri": ref}
+        cleanup.validate_allowlisted_images([valid], [ref])
+        for rows in ([], [valid, valid], [{**valid, "name": valid["name"].replace("c" * 64, "d" * 64)}]):
+            with self.assertRaises(RuntimeError):
+                cleanup.validate_allowlisted_images(rows, [ref])
+
+    def test_allowlist_rejects_duplicate_keys_and_symlink_before_cloud_reads(self):
+        import tempfile
+        from types import SimpleNamespace
+        args = SimpleNamespace(project="bmson-assistant", region="us-west1", repository="assistant")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "recovery.json"
+            path.write_text('{"project":"one","project":"two"}')
+            with self.assertRaises(RuntimeError):
+                cleanup.load_recovery_allowlist(path, args)
+            link = Path(directory) / "link.json"
+            link.symlink_to(path)
+            with self.assertRaises(RuntimeError):
+                cleanup.load_recovery_allowlist(link, args)
+
     def test_cleanup_inventory_accepts_the_current_revision_after_owned_candidate_tag_is_removed(self):
         current = "projects/test/locations/us-west1/services/assistant-web/revisions/web-current"
         service = {
@@ -165,7 +296,8 @@ class CleanupTests(unittest.TestCase):
     def test_cleanup_apply_never_requests_secret_history_destruction(self):
         cloud = unittest.mock.Mock()
         plan = {"fingerprint": "same", "secretFingerprint": [], "keepImages": [],
-                "deleteImages": [], "deleteSecrets": [], "deleteRevisions": []}
+                "deleteImages": [], "deleteSecrets": [], "deleteRevisions": [],
+                "recoveryRetention": None}
         with patch.object(cleanup, "inventory", side_effect=[plan, plan]):
             cleanup.apply(cloud, None, plan)
         self.assertFalse(any("secret" in str(call).lower() for call in cloud.mock_calls))
