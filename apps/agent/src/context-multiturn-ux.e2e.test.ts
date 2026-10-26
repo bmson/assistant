@@ -226,6 +226,7 @@ function recordSyntheticReadCompletion(
 describe('synthetic historical-read completion gate', () => {
   const routerFor = (state: { success: boolean }, requestQuery: string | undefined) =>
     syntheticRouter([], () => [], 'conversations.search', requestQuery, state) as unknown as {
+      object(role: string): Promise<{ object: { action: string } }>;
       step(
         role: string,
         options: { system?: string; messages?: unknown[] },
@@ -235,6 +236,7 @@ describe('synthetic historical-read completion gate', () => {
   it('finishes an explicit historical read only for the exact query with matches', async () => {
     const state = { success: false };
     const router = routerFor(state, 'earlier preference');
+    expect((await router.object('plan')).object.action).toBe('workflow');
     expect((await router.step('draft', {})).toolCalls).toHaveLength(1);
     expect(
       recordSyntheticReadCompletion('earlier preference', 'similar but different', [{}], state),
@@ -253,9 +255,11 @@ describe('synthetic historical-read completion gate', () => {
   it('finishes an ordinary turn without manufacturing a historical search', async () => {
     const state = { success: false };
     const router = routerFor(state, undefined);
+    expect((await router.object('plan')).object.action).toBe('reply');
     const result = await router.step('draft', {});
     expect(result.toolCalls).toHaveLength(0);
     expect(result.text).toBe(OWNER_REPLY);
+    expect(state.success).toBe(false);
   });
 });
 
@@ -344,7 +348,9 @@ function syntheticRouter(
             : role === 'extract'
               ? selectSyntheticExtractQuotes(options.prompt)
               : {
-                  action: 'workflow',
+                  // Keep ordinary turns on the real executor, with a plan that permits
+                  // their scripted prose-only step. Explicit reads still require receipts.
+                  action: role === 'plan' && requestQuery === undefined ? 'reply' : 'workflow',
                   reasoning: 'Synthetic test plan.',
                   steps: [],
                   missingInfo: [],
