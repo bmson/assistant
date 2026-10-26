@@ -4,12 +4,12 @@ import { describe, expect, it, vi } from 'vitest';
 import type { InstallationIdentity } from '../packages/setup/src/installation-manifest.js';
 import type { CommandResult, CommandRunner } from '../packages/setup/src/runner.js';
 import {
+  APPROVED_SHA256,
+  APPROVED_SOURCE_COMMIT,
   assertActiveGcloudPrincipal,
   assertFirestoreIndexPermissions,
   assertKnownArguments,
   assertNoActiveProductionDeployRuns,
-  APPROVED_SHA256,
-  APPROVED_SOURCE_COMMIT,
   BASELINE_COMMIT,
   BASELINE_SHA256,
   ownerEditorIndexDelta,
