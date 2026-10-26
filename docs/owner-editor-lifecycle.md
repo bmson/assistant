@@ -20,7 +20,9 @@ The browser retains one operation until its outcome is resolved. Closing an edit
 
 ## Recovery image bounds
 
-An image predating correction attribution is only a fallback before the first saved-note correction. After a correction, recovery must retain its marker and source attribution: pin an independently reviewed correction-aware and maintenance-binder-compatible image, rather than stripping markers, restoring older data or inferring attribution. A proposed activation sequence is to deploy the reviewed editor image with editing disabled, verify that exact image, and freeze it as the recovery baseline before enabling writes. Image existence, schema compatibility and these source capabilities are separate checks; this document does not establish a live recovery baseline or relax the maintenance gates.
+An image predating correction attribution is only a fallback before any marker-capable correction can commit. After a correction, recovery must retain its marker and source attribution: pin an independently reviewed correction-aware and maintenance-binder-compatible image, rather than stripping markers, restoring older data or inferring attribution.
+
+Disabled editor grants do not fence every correction writer. Legacy server actions and native/mobile corrections use the shared correction primitive and can write an owner-correction marker while those grants remain disabled. A proposed rollout must hold all marker-capable correction entrypoints until the actual retirement boundary and a verified correction-aware, binder-compatible recovery image are established, or prove an equivalent earlier boundary. A general write pause covers this only when its exact entrypoint coverage has been verified. The post-marker rollback restriction starts when any such writer can commit, rather than when browser editing is enabled. Image existence, schema compatibility, entrypoint coverage and these source capabilities are separate checks; this document does not establish a live recovery baseline or relax the maintenance gates.
 
 ## Erasure and retention
 

@@ -10769,7 +10769,7 @@
         },
         "owner_editor_operation_command": {
           "name": "owner_editor_operation_command",
-          "value": "\"owner_editor_operations\".\"command\" IN ('create_person','update_person_identity','add_family_relationship','correct_owner_family_relationship')"
+          "value": "\"owner_editor_operations\".\"command\" IN ('create_person','update_person_identity','add_family_relationship','correct_owner_family_relationship','correct_owner_memory')"
         },
         "owner_editor_operation_state": {
           "name": "owner_editor_operation_state",

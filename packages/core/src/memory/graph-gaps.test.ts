@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   contacts,
   createDb,
@@ -100,6 +101,7 @@ beforeAll(async () => {
     console.warn('graph-gaps.test: database unreachable — skipping');
     return;
   }
+  const contentHash = createHash('sha256').update(`${MARKER} source`).digest('hex');
   const [memory] = await db
     .insert(memories)
     .values({
@@ -107,14 +109,14 @@ beforeAll(async () => {
       category: 'knowledge',
       kind: 'fact',
       content: `${MARKER} source`,
-      contentHash: MARKER,
+      contentHash,
       embedding: Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0)),
     })
     .returning({ id: memories.id });
   memoryId = (memory as NonNullable<typeof memory>).id;
   await db.insert(knowledgeGraphSources).values({
     memoryId,
-    contentHash: MARKER,
+    contentHash,
     status: 'ready',
     extractionVersion: GRAPH_EXTRACTION_VERSION,
   });

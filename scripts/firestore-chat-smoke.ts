@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { type ExecutorDeps, executeTask, type ModelRouter } from '@assistant/core';
 import { GRAPH_EXTRACTION_VERSION } from '@assistant/core/memory/knowledge-graph';
 import type { Db } from '@assistant/db';
@@ -169,11 +169,13 @@ export async function firestoreChatSmoke(
       subjectId = randomUUID(),
       objectId = randomUUID(),
       relationId = randomUUID();
+    const memoryContent = 'The owner observes rainbows by the sea.';
+    const memoryContentHash = createHash('sha256').update(memoryContent).digest('hex');
     await new FirestoreMemoryRepository(store, CHAT_SMOKE_SPACE).save({
       id: memoryId,
       agentId,
-      content: 'The owner observes rainbows by the sea.',
-      contentHash: `synthetic-${memoryId}`,
+      content: memoryContent,
+      contentHash: memoryContentHash,
       createdAt: historyAt,
       expiresAt: null,
       embedding,
@@ -206,7 +208,7 @@ export async function firestoreChatSmoke(
     await store.doc('knowledgeGraphSources', memoryId).set({
       memoryId,
       status: 'ready',
-      contentHash: `synthetic-${memoryId}`,
+      contentHash: memoryContentHash,
       extractionVersion: GRAPH_EXTRACTION_VERSION,
     });
     await store.doc('knowledgeGraphRelations', relationId).set({

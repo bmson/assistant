@@ -45,6 +45,7 @@ function fact(
     kind: 'fact',
     content: `Fact ${id}`,
     contentHash: randomUUID(),
+    ownerCorrection: null,
     embedding: null,
     importance: 3,
     confidence: '0.70',

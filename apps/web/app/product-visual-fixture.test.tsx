@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { ProviderBilling } from '@assistant/application/provider-billing';
@@ -24,6 +25,7 @@ const state = vi.hoisted(() => ({
   repairState: null as RepairVisualState | null,
 }));
 const data = () => createProductVisualData(state.empty);
+const savedNoteContent = 'Synthetic saved note for visual route coverage.';
 const billingForVisualFixture = (): ProviderBilling[] => {
   if (state.costScenario === 'gcp-unconfigured')
     return [
@@ -409,6 +411,21 @@ vi.mock('@/lib/server', () => ({
         },
       },
     ),
+  loadOwnerMemoryEditorView: async () => ({
+    snapshot: {
+      ownerId: visualId,
+      memoryId: visualId,
+      content: savedNoteContent,
+      contentHash: createHash('sha256').update(savedNoteContent).digest('hex'),
+      revision: 'a'.repeat(64),
+      sourceLabel: 'Synthetic saved source',
+      ownerCorrection: null,
+      eligible: true,
+    },
+    session: null,
+    grant: null,
+    unavailableReason: 'editing_not_enabled',
+  }),
   getAgentTimezone: async () => 'America/Los_Angeles',
   getAgentIdentity: async () => ({ id: visualId, name: 'Assistant' }),
   getGeneratedCards: () => ({}),
@@ -826,6 +843,12 @@ const products: PageEntry[] = [
     empty: false,
   },
   { name: 'memory', route: '/profile', module: './profile/page' },
+  {
+    name: 'saved-note',
+    route: `/profile/knowledge/notes/${visualId}`,
+    module: './profile/knowledge/notes/[id]/page',
+    empty: false,
+  },
   { name: 'about', route: '/profile/about', module: './profile/about/page' },
   { name: 'data', route: '/profile/data', module: './profile/data/page', empty: false },
   {
@@ -1009,6 +1032,12 @@ it.each(fixtureStates)(
       expect(html).toContain('Missing costs are unknown, not zero.');
       expect(html).toContain('Coverage sources and gaps');
     }
+    if (page.productName === 'saved-note') {
+      expect(html).toContain(savedNoteContent);
+      expect(html).toContain('Editing has not been enabled for this installation.');
+      expect(html).toContain('A direct source link is unavailable');
+      expect(html).not.toContain('Save correction');
+    }
     expect(html, page.name).toContain('id="main-content"');
     if (
       process.env.PRODUCT_VISUAL_QA_CHAT === '1' &&
@@ -1037,7 +1066,7 @@ it.each(fixtureStates)(
   30_000,
 );
 
-it('accounts for all 34 source routes and asserts the legacy person redirect', async () => {
+it('accounts for all 35 source routes and asserts the legacy person redirect', async () => {
   const directory = process.env.PRODUCT_VISUAL_QA_DIR;
   const manifest: Array<Record<string, unknown>> = fixtureStates.map((page) => ({
     name: page.name,
@@ -1077,7 +1106,7 @@ it('accounts for all 34 source routes and asserts the legacy person redirect', a
           : [],
     );
   const all = pageFiles(path.resolve(process.cwd(), 'apps/web/app'));
-  expect(all).toHaveLength(34);
+  expect(all).toHaveLength(35);
   const rendered = new Set(
     products.map((entry) => path.resolve('apps/web/app', `${entry.module.slice(2)}.tsx`)),
   );

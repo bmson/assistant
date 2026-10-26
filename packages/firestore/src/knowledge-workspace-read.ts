@@ -400,11 +400,9 @@ async function eligibleRelations(input: {
     const page = ids.slice(offset, offset + GET_ALL_BATCH);
     const [docs, tombstones] = await Promise.all([
       store.db.getAll(...page.map((id) => store.doc('memories', id)), {
-        fieldMask: [
-          ...MEMORY_FIELDS,
-          'embedding',
-          ...(page.some((id) => legacyIds.has(id)) ? ['content'] : []),
-        ],
+        // The body is required for every candidate's hash proof, including
+        // current extraction versions. Broad metadata scans still omit it.
+        fieldMask: [...MEMORY_FIELDS, 'embedding', 'content'],
       }),
       store.db.getAll(
         ...page.map((id) => store.doc('memoryTombstones', memories.get(id)?.contentHash ?? id)),

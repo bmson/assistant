@@ -54,6 +54,7 @@ import { applyOwnerEditorCommand } from './owner-editor.js';
 import { createOwnerEditorDomain, createPostgresOwnerEditorDomain } from './owner-editor-domain.js';
 import { ownerEditorRequestHash } from './owner-editor-hash.js';
 import { ownerEditorPath, parseOwnerEditorRequest } from './owner-editor-wire.js';
+import { forgetLongTermMemoryWithRepository } from './profile/privacy-erasure.js';
 
 function familyFields(request: Extract<OwnerEditorApply, { command: 'add_family_relationship' }>) {
   const {
@@ -1001,6 +1002,10 @@ describe.skipIf(!loopbackEmulator)(
         source = 'synthetic-single-source',
         now = new Date(),
         content = 'Synthetic imported saved note';
+      const workspacePath = 'import/synthetic.txt';
+      const originalSourceBody = 'Synthetic original source';
+      const workspaceAssets = new Map([[workspacePath, originalSourceBody]]);
+      const deletedWorkspacePaths: string[] = [];
       const hash = (value: string) => createHash('sha256').update(value).digest('hex');
       try {
         await store.doc('agents', ownerId).set({ id: ownerId, timezone: 'UTC', locale: 'en' });
@@ -1036,7 +1041,7 @@ describe.skipIf(!loopbackEmulator)(
           source,
           status: 'done',
           kind: 'text',
-          workspacePath: 'import/synthetic.txt',
+          workspacePath,
           createdAt: now,
           updatedAt: now,
         });
@@ -1054,7 +1059,7 @@ describe.skipIf(!loopbackEmulator)(
               authorEmail: null,
               header: 'Synthetic source',
               hasQuotedContent: false,
-              unitTextHash: hash('Synthetic original source'),
+              unitTextHash: hash(originalSourceBody),
             },
           ],
           createdAt: now,
@@ -1091,14 +1096,30 @@ describe.skipIf(!loopbackEmulator)(
           provenanceState: async () => ({
             source: (await store.doc('importSources', sourceId).get()).data(),
             lineage: (await store.doc('memoryImportLineage', lineageId).get()).data(),
+            workspaceAssets: [...workspaceAssets.entries()],
           }),
           embeddingCalls: () => embedding.embed.mock.calls.length,
           rotate: () => rotateFirestoreOwnerEditorEpoch(store, ownerId, true),
           context: () => readFirestoreOwnerEditorIssuanceContext(store, ownerId),
           erase: async () => {
             const erasure = new FirestorePrivacyErasureRepository(store, ownerId);
-            await erasure.erase();
-            await erasure.complete();
+            await forgetLongTermMemoryWithRepository(erasure, {
+              delete: async (path) => {
+                expect(path).toBe(workspacePath);
+                expect(workspaceAssets.get(path)).toBe(originalSourceBody);
+                // The real data phase queues a durable asset intent. Completion
+                // must still refuse until deletion succeeds and the service acknowledges it.
+                expect(await erasure.pendingAssets()).toEqual([
+                  { kind: 'workspace_path', id: expect.any(String), workspacePath },
+                ]);
+                await expect(erasure.complete()).rejects.toThrow('Privacy erasure assets remain');
+                workspaceAssets.delete(path);
+                deletedWorkspacePaths.push(path);
+              },
+            });
+            expect(deletedWorkspacePaths).toEqual([workspacePath]);
+            expect(workspaceAssets.size).toBe(0);
+            expect(await erasure.pendingAssets()).toEqual([]);
           },
           hasMemory: async () => (await store.doc('memories', memoryId).get()).exists,
           withReceiptFault: (run) =>

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { GRAPH_EXTRACTION_VERSION } from '@assistant/application/knowledge-graph';
 import { resetConfigForTest } from '@assistant/config';
 import {
@@ -51,6 +51,7 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
     installationId: foreignInstallationId,
   });
   const now = new Date();
+  const hashContent = (content: string) => createHash('sha256').update(content).digest('hex');
   const embeddingSpace = {
     provider: 'vertex',
     model: 'example-embedding',
@@ -86,7 +87,7 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
       agentId,
       subjectContactId: contactId,
       content,
-      contentHash: `${id}-hash`,
+      contentHash: hashContent(content),
       kind: 'fact',
       category: 'knowledge',
       confidence: '0.70',
@@ -185,7 +186,7 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
       store.doc('knowledgeGraphSources', factId).set({
         memoryId: factId,
         status: 'ready',
-        contentHash: `${factId}-hash`,
+        contentHash: hashContent('Anna is close friends with Bob'),
         extractionVersion: GRAPH_EXTRACTION_VERSION,
       }),
       store.doc('knowledgeGraphRelations', 'anna-friend-bob').set({

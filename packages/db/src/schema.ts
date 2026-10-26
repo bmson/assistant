@@ -75,7 +75,7 @@ export const ownerEditorOperations = pgTable(
     ),
     check(
       'owner_editor_operation_command',
-      sql`${t.command} IN ('create_person','update_person_identity','add_family_relationship','correct_owner_family_relationship')`,
+      sql`${t.command} IN ('create_person','update_person_identity','add_family_relationship','correct_owner_family_relationship','correct_owner_memory')`,
     ),
     check(
       'owner_editor_operation_state',
