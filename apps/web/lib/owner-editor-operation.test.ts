@@ -93,6 +93,21 @@ const pending = (storage: Storage) =>
   readOwnerEditorPendingMarker(storage, session.ownerId, session.formSessionScope);
 
 describe('actual owner editor operation controller with offline named transport', () => {
+  it('calls browser fetch through the global receiver on the default transport path', async () => {
+    const storage = new Storage();
+    const browserFetch = vi.fn(function (this: unknown) {
+      if (this !== globalThis) throw new TypeError('Illegal invocation');
+      return Promise.resolve(response(saved()));
+    });
+    vi.stubGlobal('fetch', browserFetch);
+    const controller = new OwnerEditorOperation(session, () => storage);
+    controller.initialize();
+
+    await controller.apply(apply(), grant, null);
+
+    expect(browserFetch).toHaveBeenCalledTimes(1);
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'resolved', busy: false });
+  });
   it('validates with the actual shared parser before marker or dispatch', async () => {
     const { controller, storage, fetcher } = fixture();
     await controller.apply({ ...apply(), name: '' }, grant, null);
