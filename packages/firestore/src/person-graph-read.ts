@@ -138,6 +138,18 @@ function activeEdge(
   if (!subject || !object) return null;
   const outbound = row.subjectEntityId === entityId;
   const other = outbound ? object : subject;
+  const assertionTiming =
+    predicateSpec(row.predicate)?.group === 'family' &&
+    subject.kind === 'person' &&
+    object.kind === 'person' &&
+    row.assertion != null &&
+    row.assertion.polarity === 'positive' &&
+    row.assertion.modality === 'asserted' &&
+    (row.assertion.tense === 'unspecified' ||
+      row.assertion.tense === 'present' ||
+      row.assertion.tense === 'past')
+      ? row.assertion.tense
+      : null;
   return {
     id: row.id,
     predicate: row.predicate,
@@ -145,18 +157,7 @@ function activeEdge(
     reviewStatus: row.reviewStatus === 'confirmed' ? 'confirmed' : 'unreviewed',
     validFrom: row.validFrom,
     validUntil: row.validUntil,
-    assertionTiming:
-      predicateSpec(row.predicate)?.group === 'family' &&
-      subject.kind === 'person' &&
-      object.kind === 'person' &&
-      row.assertion != null &&
-      row.assertion.polarity === 'positive' &&
-      row.assertion.modality === 'asserted' &&
-      (row.assertion.tense === 'unspecified' ||
-        row.assertion.tense === 'present' ||
-        row.assertion.tense === 'past')
-        ? row.assertion.tense
-        : null,
+    ...(assertionTiming == null ? {} : { assertionTiming }),
     other: {
       id: other.id,
       label: other.preferredLabel ?? other.label,

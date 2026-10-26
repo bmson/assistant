@@ -159,7 +159,7 @@ async function verifyRetiredWorkers<Prepared>(input: {
     const next: OwnerEditorApply = {
       ...request,
       operationId: randomUUID(),
-      name: 'Fresh scoped contact',
+      name: `Fresh scoped contact ${index}`,
     };
     const nextScope = {
       ...issued(input.ownerId, epoch, next),

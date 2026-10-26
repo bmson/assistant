@@ -4,6 +4,7 @@ import {
   idempotencyIdentityDigest,
   MIGRATION_TABLES,
   modelToolCallIdentityDigest,
+  OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
   toolCallReceiptKeyId,
 } from '@assistant/persistence';
 import { drizzle } from 'drizzle-orm/postgres-js';
@@ -267,6 +268,7 @@ describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
           'email_observer_work',
         ]),
         omittedTables: [],
+        runtimeExclusions: OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
       });
       expect(
         complete.records.find(
