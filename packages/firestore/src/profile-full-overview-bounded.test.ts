@@ -1,3 +1,5 @@
+import { profileContactIdentityRevision } from '@assistant/persistence';
+import { Timestamp } from '@google-cloud/firestore';
 import { expect, it } from 'vitest';
 import { FirestoreProfileOverviewRepository } from './profile-full-overview.js';
 import { documentKey, type InstallationStore } from './store.js';
@@ -7,12 +9,16 @@ type Entry = { id: string; row: Row };
 
 class FakeDocument {
   readonly exists: boolean;
+  readonly updateTime: Timestamp | undefined;
 
   constructor(
     readonly id: string,
     private readonly row?: Row,
+    updateTime?: Timestamp,
   ) {
     this.exists = row !== undefined;
+    this.updateTime =
+      row === undefined ? undefined : (updateTime ?? new Timestamp(1_798_000_000, 123_456_789));
   }
 
   get(field: string): unknown {
@@ -70,7 +76,7 @@ class FakeQuery {
     const after = this.cursor ? matching.findIndex((entry) => entry.id === this.cursor) + 1 : 0;
     const docs = matching
       .slice(after, after + this.pageSize)
-      .map(({ id, row }) => new FakeDocument(id, row));
+      .map(({ id, row }) => new FakeDocument(id, row, new Timestamp(1_798_000_000, 123_456_789)));
     return { size: docs.length, docs };
   }
 }
@@ -183,6 +189,14 @@ it('streams canary-sized workspace collections while preserving the full profile
 
   const profile = await repository.load();
   expect(profile.owner).toMatchObject({ id: 'owner-contact', name: 'Owner' });
+  expect(profile.owner?.identityRevision).toBe(
+    profileContactIdentityRevision({
+      driver: 'firestore',
+      ownerId: 'owner',
+      id: documentKey('owner-contact'),
+      updateTime: { seconds: 1_798_000_000, nanoseconds: 123_456_789 },
+    }),
+  );
   expect(profile.people).toEqual([
     {
       contact: {
@@ -191,6 +205,12 @@ it('streams canary-sized workspace collections while preserving the full profile
         aliases: ['P'],
         relationship: 'friend',
         trust: 'known',
+        identityRevision: profileContactIdentityRevision({
+          driver: 'firestore',
+          ownerId: 'owner',
+          id: documentKey('person-contact'),
+          updateTime: { seconds: 1_798_000_000, nanoseconds: 123_456_789 },
+        }),
       },
       factCount: usable.filter((row) => row.subjectContactId === 'person-contact').length,
     },

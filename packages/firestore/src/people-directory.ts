@@ -1,4 +1,4 @@
-import type { ProfileContact, Records } from '@assistant/persistence';
+import type { ProfileContact, ProfileContactSnapshot, Records } from '@assistant/persistence';
 import { FieldPath, type Query } from '@google-cloud/firestore';
 import { decodeMemoryRecord } from './memory-record.js';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
@@ -176,7 +176,7 @@ export async function getFirestorePersonDetail(
   store: InstallationStore,
   configuredAgentId: string,
   contactId: string,
-): Promise<ProfileContact | null> {
+): Promise<ProfileContactSnapshot | null> {
   await assertConfiguredOwner(store, configuredAgentId);
   const fence = await readPrivacyErasureFence(store, configuredAgentId);
   const contact = await new FirestoreProfilePeopleReadRepository(
