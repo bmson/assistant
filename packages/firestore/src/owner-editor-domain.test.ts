@@ -557,6 +557,7 @@ describe('actual FS domain + actual canonical writer + actual claim/receipt tran
   });
   it('does not rewrite an already owner-protected identical identity or its graph', async () => {
     const f = fixture();
+    const cursor = f.rows('maintenanceCursors')[0]?.cursor;
     const original = f.rows('contacts').find((row) => row.id === f.left);
     if (!original) throw new Error('Missing contact');
     f.seed('contacts', f.left, { ...original, identityAuthority: 'owner' });
@@ -577,6 +578,7 @@ describe('actual FS domain + actual canonical writer + actual claim/receipt tran
     expect(f.stats.writes.filter((table) => table !== 'ownerEditorOperations')).toEqual([
       'maintenanceCursors',
     ]);
+    expect(f.rows('maintenanceCursors')[0]?.cursor).toBe(cursor);
     expect(f.embed).not.toHaveBeenCalled();
   });
 });
