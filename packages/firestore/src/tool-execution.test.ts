@@ -21,6 +21,7 @@ function transactionBarrier(
     reached: () => void;
     release: Promise<void>;
     ownerRead?: () => void;
+    releaseOwnerRead?: Promise<void>;
   },
 ): InstallationStore {
   const ownerPath = source.doc('agents', ownerId).path;
@@ -42,7 +43,12 @@ function transactionBarrier(
                 const get = value.bind(txTarget) as (...args: unknown[]) => Promise<unknown>;
                 return async (...args: unknown[]) => {
                   const ref = args[0] as { path?: unknown } | undefined;
-                  if (ref?.path === ownerPath) input.ownerRead?.();
+                  if (ref?.path === ownerPath) {
+                    input.ownerRead?.();
+                    // A queued callback write is not a committed transaction.
+                    // Ordered fixtures hold the loser before its actual read.
+                    if (input.releaseOwnerRead) await input.releaseOwnerRead;
+                  }
                   return get(...args);
                 };
               }
@@ -307,7 +313,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
     expect(calls.size).toBe(2); // original approved fixture plus one autonomous start
   });
 
-  it('serializes a concurrent disable before start and preserves a start that commits first', async () => {
+  it('rejects start after a committed disable and preserves a start that commits first', async () => {
     await store.doc('tasks', 'task').update({ status: 'running' });
     const policyId = 'race-policy';
     const policy = {
@@ -336,10 +342,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
       expectedPolicyFingerprint: fingerprint,
     };
 
-    // First ordering: the real policy mutation has acquired the shared owner
-    // transaction and queued its writes. The start reads that same owner while
-    // the mutation is held; after release it must retry against the disabled
-    // row and refuse the stale enabled-policy digest.
+    // Force committed mutation-first order: the stale start reaches its owner
+    // read, but does not execute it until the mutation has durably committed.
+    // This proves both ordered outcomes, not simultaneous SDK contention.
     const mutationReached = deferred();
     const releaseMutation = deferred();
     const mutationStore = transactionBarrier(store, 'owner', {
@@ -348,11 +353,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
       release: releaseMutation.promise,
     });
     const ownerRead = deferred();
+    const releaseOwnerRead = deferred();
     const startStore = transactionBarrier(store, 'owner', {
       holdAfter: 'tool-call-create',
       reached: () => {},
       release: Promise.resolve(),
       ownerRead: ownerRead.resolve,
+      releaseOwnerRead: releaseOwnerRead.promise,
     });
     const disable = new FirestoreApprovalPolicyRepository(mutationStore).setEnabled(
       'owner',
@@ -366,18 +373,19 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
       await waitBounded(ownerRead.promise, 'start owner-fence transaction read');
       releaseMutation.resolve();
       expect(await disable).toBe(true);
+      expect((await store.doc('approvalPolicies', policyId).get()).get('enabled')).toBe(false);
+      releaseOwnerRead.resolve();
       await expect(staleStart).resolves.toBeNull();
       const calls = await store.collection('toolCalls').where('taskId', '==', 'task').get();
       expect(calls.docs.filter((row) => row.get('toolName') === policy.toolName)).toHaveLength(0);
     } finally {
       releaseMutation.resolve();
+      releaseOwnerRead.resolve();
       await Promise.allSettled([disable, staleStart]);
     }
 
-    // Reverse ordering: hold the actual start transaction after it has queued
-    // its tool-call write. A real disable then contends on the shared owner
-    // document. Releasing the start commits it first; the subsequent disable
-    // cannot retroactively revoke that durable claim.
+    // Reverse committed order: gate disable before its owner read until the
+    // real start promise resolves and its executing row is read back.
     await store.doc('approvalPolicies', policyId).update({ enabled: true });
     const enabledPolicy = { ...policy, updatedAt: store.now() };
     const startReached = deferred();
@@ -388,11 +396,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
       release: releaseStart.promise,
     });
     const mutationOwnerRead = deferred();
+    const releaseMutationRead = deferred();
     const delayedMutationStore = transactionBarrier(store, 'owner', {
       holdAfter: 'owner-update',
       reached: () => {},
       release: Promise.resolve(),
       ownerRead: mutationOwnerRead.resolve,
+      releaseOwnerRead: releaseMutationRead.promise,
     });
     const committedStart = new FirestoreToolExecutionRepository(heldStartStore).start({
       ...input,
@@ -411,6 +421,11 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
       releaseStart.resolve();
       const startedRow = await committedStart;
       expect(startedRow).toMatchObject({ status: 'executing', toolName: policy.toolName });
+      const committedRows = await store.collection('toolCalls').where('taskId', '==', 'task').get();
+      expect(
+        committedRows.docs.filter((row) => row.get('toolName') === policy.toolName),
+      ).toHaveLength(1);
+      releaseMutationRead.resolve();
       expect(await laterDisable).toBe(true);
       const currentPolicy = await new FirestoreApprovalPolicyRepository(store).list('owner', {
         toolName: policy.toolName,
@@ -422,11 +437,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
       );
     } finally {
       releaseStart.resolve();
+      releaseMutationRead.resolve();
       await Promise.allSettled([committedStart, laterDisable]);
     }
   });
 
-  it('serializes a real policy deletion before start and preserves a start that commits first', async () => {
+  it('rejects start after a committed policy deletion and preserves a start that commits first', async () => {
     await store.doc('tasks', 'task').update({ status: 'running' });
     const policyId = 'delete-race-policy';
     const policy = {
@@ -463,11 +479,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
       release: releaseDelete.promise,
     });
     const ownerRead = deferred();
+    const releaseOwnerRead = deferred();
     const startStore = transactionBarrier(store, 'owner', {
       holdAfter: 'tool-call-create',
       reached: () => {},
       release: Promise.resolve(),
       ownerRead: ownerRead.resolve,
+      releaseOwnerRead: releaseOwnerRead.promise,
     });
     const deletion = new FirestoreApprovalPolicyRepository(deleteStore).delete('owner', policyId);
     let staleStart: ReturnType<FirestoreToolExecutionRepository['start']> | undefined;
@@ -477,6 +495,8 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
       await waitBounded(ownerRead.promise, 'delete-first start owner-fence read');
       releaseDelete.resolve();
       expect(await deletion).toBe(true);
+      expect((await store.doc('approvalPolicies', policyId).get()).exists).toBe(false);
+      releaseOwnerRead.resolve();
       await expect(staleStart).resolves.toBeNull();
       const calls = await store.collection('toolCalls').where('taskId', '==', 'task').get();
       expect(calls.docs.filter((row) => row.get('toolName') === policy.toolName)).toHaveLength(0);
@@ -487,6 +507,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
       ).toHaveLength(0);
     } finally {
       releaseDelete.resolve();
+      releaseOwnerRead.resolve();
       await Promise.allSettled([deletion, staleStart]);
     }
 
@@ -504,11 +525,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
       release: releaseStart.promise,
     });
     const deleteOwnerRead = deferred();
+    const releaseDeleteRead = deferred();
     const delayedDeleteStore = transactionBarrier(store, 'owner', {
       holdAfter: 'owner-update',
       reached: () => {},
       release: Promise.resolve(),
       ownerRead: deleteOwnerRead.resolve,
+      releaseOwnerRead: releaseDeleteRead.promise,
     });
     const committedStart = new FirestoreToolExecutionRepository(heldStartStore).start({
       ...input,
@@ -526,6 +549,11 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
       releaseStart.resolve();
       const startedRow = await committedStart;
       expect(startedRow).toMatchObject({ status: 'executing', toolName: policy.toolName });
+      const committedRows = await store.collection('toolCalls').where('taskId', '==', 'task').get();
+      expect(
+        committedRows.docs.filter((row) => row.get('toolName') === policy.toolName),
+      ).toHaveLength(1);
+      releaseDeleteRead.resolve();
       expect(await laterDelete).toBe(true);
       expect(
         await new FirestoreApprovalPolicyRepository(store).list('owner', {
@@ -538,6 +566,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore tool execution 
       );
     } finally {
       releaseStart.resolve();
+      releaseDeleteRead.resolve();
       await Promise.allSettled([committedStart, laterDelete]);
     }
   });
