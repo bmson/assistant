@@ -33,17 +33,95 @@ jobs:
           export DOCKER_CONFIG="$RUNNER_TEMP/agent-pdf-docker-config"
           export PROOF="$RUNNER_TEMP/agent-pdf-proof"
           [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
-          git merge-base --is-ancestor "$APP_BASE_SHA" HEAD
           python3 - <<'PY'
           import os, subprocess
-          allowed = {'.github/workflows/agent-image-pr-smoke.yml', '.github/workflows/deploy.yml',
-                     'scripts/smoke-agent-image.sh', 'infra/gcp/release-staged-services.sh',
-                     'infra/gcp/release-staged-services.test.sh'}
-          names = subprocess.check_output(['git', 'diff', '--no-renames', '--name-only', os.environ['APP_BASE_SHA'], 'HEAD'], text=True).splitlines()
-          if not set(names).issubset(allowed): raise SystemExit('unreviewed source change')
-          for name in allowed:
-              mode = subprocess.check_output(['git', 'ls-tree', 'HEAD', name], text=True).split()[0]
-              if mode not in ('100644','100755'): raise SystemExit('nonregular source input')
+
+          integration_base = '0c9a7ad7fc9c62b7ff166fe85bd023013ee88d43'
+          integration_source = 'b5a070f28f2892681b12bc8bb9914be2fe908740'
+          integration_tree = 'bad40064cc77d9587fb9d2627cc2190c02b0688e'
+          workflow = '.github/workflows/agent-image-pr-smoke.yml'
+          integration_paths = {
+              '.github/workflows/agent-image-pr-smoke.yml',
+              '.github/workflows/deploy.yml',
+              'apps/agent/runtime-dependencies/package.json',
+              'apps/ios/Assistant/AppModel.swift',
+              'apps/ios/Assistant/Components/MessageBubble.swift',
+              'apps/ios/Assistant/Models/APIModels.swift',
+              'apps/ios/Assistant/Views/WorkspaceView.swift',
+              'apps/ios/AssistantTests/APIClientRetryTests.swift',
+              'apps/ios/AssistantTests/APIModelsTests.swift',
+              'apps/web/app/api/mobile/v1/workspace/route.ts',
+              'apps/web/app/costs/page.tsx',
+              'apps/web/app/costs/unknown-cost-attempts.test.tsx',
+              'apps/web/app/costs/unknown-cost-attempts.tsx',
+              'apps/web/app/product-visual-data.ts',
+              'apps/web/lib/firestore-mobile-workspace.ts',
+              'docs/runtime-support-matrix.generated.json',
+              'infra/gcp/release-staged-services.sh',
+              'infra/gcp/release-staged-services.test.sh',
+              'packages/application/src/costs.pg.test.ts',
+              'packages/application/src/costs.ts',
+              'packages/core/package.json',
+              'packages/core/src/memory/documents.test.ts',
+              'packages/core/src/workflow/active-read-intent.test.ts',
+              'packages/core/src/workflow/active-read-intent.ts',
+              'packages/core/src/workflow/executor.ts',
+              'packages/core/src/workflow/executor/public-events-workflow.integration.test.ts',
+              'packages/firestore/src/mobile-costs.test.ts',
+              'packages/firestore/src/mobile-costs.ts',
+              'pnpm-lock.yaml',
+              'scripts/agent-runtime-dependencies.test.ts',
+              'scripts/smoke-agent-image.sh',
+          }
+
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+
+          def changed_paths(base, head):
+              raw = subprocess.check_output(['git', 'diff', '--no-renames', '--name-only', '-z', base, head])
+              return set(raw.decode().rstrip('\0').split('\0')) if raw else set()
+
+          ancestor = subprocess.run(['git', 'merge-base', '--is-ancestor', integration_source, 'HEAD'])
+          if ancestor.returncode not in (0, 1):
+              raise SystemExit('integration ancestry unavailable')
+          if ancestor.returncode == 0:
+              # A single reviewed workflow-only successor to the exact accepted integration.
+              if git('show', '-s', '--format=%P', integration_source) != integration_base:
+                  raise SystemExit('integration base identity mismatch')
+              if git('rev-parse', integration_source + '^{tree}') != integration_tree:
+                  raise SystemExit('integration tree identity mismatch')
+              if git('show', '-s', '--format=%P', 'HEAD') != integration_source:
+                  raise SystemExit('integration requires one direct successor')
+              if changed_paths(integration_base, integration_source) != integration_paths:
+                  raise SystemExit('accepted integration path inventory mismatch')
+              if changed_paths(integration_base, 'HEAD') != integration_paths:
+                  raise SystemExit('unreviewed integration path inventory')
+              if changed_paths(integration_source, 'HEAD') != {workflow}:
+                  raise SystemExit('integration successor must change only this workflow')
+              for path in sorted(integration_paths):
+                  original = git('ls-tree', integration_source, '--', path).split()
+                  current = git('ls-tree', 'HEAD', '--', path).split()
+                  if len(original) != 4 or len(current) != 4:
+                      raise SystemExit('missing integration source input')
+                  if current[0] not in ('100644', '100755') or current[1] != 'blob':
+                      raise SystemExit('nonregular integration source input')
+                  if path == workflow:
+                      if current[0] != '100644':
+                          raise SystemExit('unexpected workflow mode')
+                  elif current[:3] != original[:3]:
+                      raise SystemExit('reviewed integration blob or mode changed')
+          else:
+              # Preserve the original isolated proof lane and its ancestry/path checks.
+              subprocess.run(['git', 'merge-base', '--is-ancestor', os.environ['APP_BASE_SHA'], 'HEAD'], check=True)
+              allowed = {'.github/workflows/agent-image-pr-smoke.yml', '.github/workflows/deploy.yml',
+                         'scripts/smoke-agent-image.sh', 'infra/gcp/release-staged-services.sh',
+                         'infra/gcp/release-staged-services.test.sh'}
+              if not changed_paths(os.environ['APP_BASE_SHA'], 'HEAD').issubset(allowed):
+                  raise SystemExit('unreviewed source change')
+              for path in allowed:
+                  mode = git('ls-tree', 'HEAD', '--', path).split()[0]
+                  if mode not in ('100644', '100755'):
+                      raise SystemExit('nonregular source input')
           PY
           sha256sum -c <<'PINS'
           0b5d5aa26fcda2692c25a198a750e85cc1dc17d359836296b64e6d6b0dbcad9e  .github/workflows/deploy.yml
