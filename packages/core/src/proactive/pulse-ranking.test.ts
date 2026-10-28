@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { scoreCalendarEvent } from './calendar-salience.js';
 import type { PulseMoment } from './pulse.js';
 import {
   calendarChangeMoments,
@@ -47,6 +48,84 @@ function salient(
 }
 
 describe('pulse ranking and duplicate suppression', () => {
+  it('names the place once and drops a reason that only repeats it', () => {
+    const travelling = salient({ start: '2026-03-04T09:35:00Z', location: 'Laugavegur 12' });
+    travelling.reasons = [
+      'it is at Laugavegur 12',
+      'it ends at or after 7 PM',
+      'it ends at or after 7 PM',
+    ];
+    const [lead] = eventLeadMoments([travelling], now);
+    expect(lead?.text).toBe(
+      'Same title starts in 35 minutes at Laugavegur 12. It ends at or after 7 PM.',
+    );
+    expect(lead?.card).toMatchObject({ summary: 'It ends at or after 7 PM.' });
+    expect(lead?.card).not.toHaveProperty('score');
+  });
+
+  it('leaves no dangling full stop when the place was the only reason', () => {
+    const travelling = salient({ start: '2026-03-04T09:35:00Z', location: 'Laugavegur 12' });
+    travelling.reasons = ['it is at Laugavegur 12'];
+    const [lead] = eventLeadMoments([travelling], now);
+    expect(lead?.text).toBe('Same title starts in 35 minutes at Laugavegur 12.');
+    expect(lead?.card).not.toHaveProperty('summary');
+  });
+
+  it('reuses the source-grounded unanswered-invitation reason in the notice and card summary', () => {
+    const scored = scoreCalendarEvent(
+      {
+        summary: 'Quarterly review',
+        start: '2026-03-04T09:10:00Z',
+        end: '2026-03-04T10:00:00Z',
+        calendar: 'Work',
+        allDay: false,
+        attendees: ['owner@example.com (needsAction)'],
+      },
+      { timeZone: 'Atlantic/Reykjavik', selfEmails: ['owner@example.com'] },
+    );
+    const [lead] = eventLeadMoments([scored], now);
+    const reason = 'You have not replied to the invitation.';
+    expect(lead?.text).toBe(`Quarterly review starts in 10 minutes. ${reason}`);
+    expect(lead?.card).toMatchObject({ kind: 'proactive-alert', summary: reason });
+  });
+
+  it('omits a summary when a punctuated event title already states the same reason', () => {
+    const title = 'You have not replied to the invitation!';
+    const scored = scoreCalendarEvent(
+      {
+        summary: title,
+        start: '2026-03-04T09:10:00Z',
+        end: '2026-03-04T10:00:00Z',
+        calendar: 'Work',
+        allDay: false,
+        attendees: ['owner@example.com (needsAction)'],
+      },
+      { timeZone: 'Atlantic/Reykjavik', selfEmails: ['owner@example.com'] },
+    );
+    const [lead] = eventLeadMoments([scored], now);
+    expect(lead?.text).toBe(`${title} starts in 10 minutes.`);
+    expect(lead?.card).not.toHaveProperty('summary');
+  });
+
+  it('states combined hour and long-block reasons once in the same notice and card sentence', () => {
+    const scored = scoreCalendarEvent(
+      {
+        summary: 'Quarterly review',
+        start: '2026-03-04T07:00:00Z',
+        end: '2026-03-04T19:00:00Z',
+        calendar: 'Work',
+        allDay: false,
+        attendees: ['owner@example.com (needsAction)'],
+      },
+      { timeZone: 'Atlantic/Reykjavik', selfEmails: ['owner@example.com'] },
+    );
+    const [lead] = eventLeadMoments([scored], new Date('2026-03-04T06:50:00Z'));
+    const reason =
+      'You have not replied to the invitation; it starts before 8 AM; it ends at or after 7 PM; it runs for most of a working block.';
+    expect(lead?.text).toBe(`Quarterly review starts in 10 minutes. ${reason}`);
+    expect(lead?.card).toMatchObject({ kind: 'proactive-alert', summary: reason });
+  });
+
   it('keeps priority tiers first, then ranks known urgency and relevance with a stable key tie', () => {
     const notAsUrgent = moment({ key: 'a', urgency: 0.2, relevance: 100 });
     const moreUrgent = moment({ key: 'z', urgency: 0.8, relevance: 1 });
