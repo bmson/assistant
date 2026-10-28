@@ -111,18 +111,64 @@ describe('scoreCalendarEvent', () => {
     expect(video.reasons.some((r) => r.startsWith('it is at'))).toBe(false);
   });
 
-  it('flags events outside the usual hours at either end', () => {
+  it('states the exact early-start and late-end facts without changing their shared score', () => {
     const early = scoreCalendarEvent(
-      event({ start: '2026-03-04T06:00:00Z', end: '2026-03-04T06:30:00Z' }),
+      event({ start: '2026-03-04T07:59:00Z', end: '2026-03-04T08:30:00Z' }),
       ctx,
     );
-    expect(early.reasons).toContain('it falls outside your usual hours');
+    expect(early.score).toBe(2);
+    expect(early.reasons).toContain('it starts before 8 AM');
 
     const late = scoreCalendarEvent(
-      event({ start: '2026-03-04T18:30:00Z', end: '2026-03-04T20:00:00Z' }),
+      event({ start: '2026-03-04T18:30:00Z', end: '2026-03-04T19:00:00Z' }),
       ctx,
     );
-    expect(late.reasons).toContain('it falls outside your usual hours');
+    expect(late.score).toBe(2);
+    expect(late.reasons).toContain('it ends at or after 7 PM');
+
+    const both = scoreCalendarEvent(
+      event({ start: '2026-03-04T07:00:00Z', end: '2026-03-04T19:00:00Z' }),
+      ctx,
+    );
+    expect(both.score).toBe(3);
+    expect(both.reasons).toContain('it starts before 8 AM');
+    expect(both.reasons).toContain('it ends at or after 7 PM');
+    expect(both.reasons).toContain('it runs for most of a working block');
+
+    const longOnly = scoreCalendarEvent(
+      event({ start: '2026-03-04T08:00:00Z', end: '2026-03-04T11:00:00Z' }),
+      ctx,
+    );
+    expect(longOnly.score).toBe(1);
+    expect(longOnly.reasons).toContain('it runs for most of a working block');
+
+    const boundary = scoreCalendarEvent(
+      event({ start: '2026-03-04T08:00:00Z', end: '2026-03-04T08:30:00Z' }),
+      ctx,
+    );
+    expect(boundary.score).toBe(0);
+    expect(boundary.reasons).toEqual([]);
+  });
+
+  it('evaluates hour wording in the configured owner time zone across the DST boundary', () => {
+    const losAngeles = { ...ctx, timeZone: 'America/Los_Angeles' };
+    const beforeEight = scoreCalendarEvent(
+      event({ start: '2026-03-08T14:59:00Z', end: '2026-03-08T15:30:00Z' }),
+      losAngeles,
+    );
+    expect(beforeEight.reasons).toContain('it starts before 8 AM');
+
+    const exactlyEight = scoreCalendarEvent(
+      event({ start: '2026-03-08T15:00:00Z', end: '2026-03-08T16:00:00Z' }),
+      losAngeles,
+    );
+    expect(exactlyEight.reasons).not.toContain('it starts before 8 AM');
+
+    const exactlySevenPmEnd = scoreCalendarEvent(
+      event({ start: '2026-03-09T01:00:00Z', end: '2026-03-09T02:00:00Z' }),
+      losAngeles,
+    );
+    expect(exactlySevenPmEnd.reasons).toContain('it ends at or after 7 PM');
   });
 
   it('recognises an outside organizer but not an in-house one', () => {

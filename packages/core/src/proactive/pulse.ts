@@ -375,6 +375,26 @@ function minutesUntil(iso: string, now: Date): number | null {
   return (at - now.getTime()) / 60_000;
 }
 
+function eventLeadReasonSentence(
+  reasons: readonly string[],
+  alreadyShown: readonly string[],
+): string | undefined {
+  const normalize = (value: string) =>
+    collapseWhitespace(value)
+      .replace(/[.;!?]+$/u, '')
+      .toLowerCase();
+  const shown = new Set(alreadyShown.map(normalize));
+  const seen = new Set<string>();
+  const distinct = reasons.flatMap((reason) => {
+    const normalized = collapseWhitespace(reason).replace(/[.;!?]+$/u, '');
+    const key = normalize(normalized);
+    if (!normalized || key.startsWith('it is at') || shown.has(key) || seen.has(key)) return [];
+    seen.add(key);
+    return [normalized];
+  });
+  return distinct.length > 0 ? `${sentenceCase(distinct.join('; '))}.` : undefined;
+}
+
 /**
  * The lead-time nudge for a salient event that is about to start.
  *
@@ -408,7 +428,12 @@ export function eventLeadMoments(salient: readonly EventSalience[], now: Date): 
     // The headline already says where it is. Salience keeps `it is at …` as the
     // marker that decides the travel lead time above, but repeating the address
     // one clause later is how the owner ends up reading it twice.
-    const why = scored.reasons.filter((reason) => !reason.startsWith('it is at'));
+    const whySentence = eventLeadReasonSentence(scored.reasons, [
+      summary,
+      `Starts in ${inMinutes} min`,
+      location,
+      scored.event.calendar ?? '',
+    ]);
     const legacyKey = `event-lead:${scored.event.eventId ?? scored.event.summary}:${scored.event.start}`;
     const providerIdentity = canonicalEventLeadIdentity(scored.event);
     const key = providerIdentity
@@ -424,7 +449,7 @@ export function eventLeadMoments(salient: readonly EventSalience[], now: Date): 
         key,
         text:
           `${summary} starts in ${inMinutes} minute${inMinutes === 1 ? '' : 's'}${where}.` +
-          (why.length > 0 ? ` ${sentenceCase(collapseWhitespace(why.join('; ')))}.` : ''),
+          (whySentence ? ` ${whySentence}` : ''),
         card: {
           kind: 'proactive-alert',
           id: key,
@@ -432,6 +457,7 @@ export function eventLeadMoments(salient: readonly EventSalience[], now: Date): 
           urgencyLabel: `Starts in ${inMinutes} min`,
           title: summary,
           startsAt: scored.event.start,
+          ...(whySentence ? { summary: whySentence } : {}),
           details: [
             ...(location ? [{ label: 'Location', value: location }] : []),
             ...(scored.event.calendar?.trim()
