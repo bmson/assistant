@@ -1,0 +1,149 @@
+# PROPOSAL ONLY. Do not apply/publish until exact source/recipe/CI allocation.
+name: Agent PDF copied-assets proof (PR only)
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/agent-image-pr-smoke.yml'
+      - '.github/workflows/deploy.yml'
+      - 'scripts/smoke-agent-image.sh'
+      - 'infra/gcp/release-staged-services*'
+permissions:
+  contents: read
+jobs:
+  parse:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+      APP_BASE_SHA: f7bef31a677010cf1d5bd6e78afaa797e7f54e2c
+      DOCKER_CONFIG: ${{ runner.temp }}/agent-pdf-docker-config
+      BUILDER: agent-pdf-${{ github.run_id }}-${{ github.run_attempt }}
+      PROOF: ${{ runner.temp }}/agent-pdf-proof
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        timeout-minutes: 2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact source composition and prepare credential-free client
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          git merge-base --is-ancestor "$APP_BASE_SHA" HEAD
+          python3 - <<'PY'
+          import os, subprocess
+          allowed = {'.github/workflows/agent-image-pr-smoke.yml', '.github/workflows/deploy.yml',
+                     'scripts/smoke-agent-image.sh', 'infra/gcp/release-staged-services.sh',
+                     'infra/gcp/release-staged-services.test.sh'}
+          names = subprocess.check_output(['git', 'diff', '--no-renames', '--name-only', os.environ['APP_BASE_SHA'], 'HEAD'], text=True).splitlines()
+          if not set(names).issubset(allowed): raise SystemExit('unreviewed source change')
+          for name in allowed:
+              mode = subprocess.check_output(['git', 'ls-tree', 'HEAD', name], text=True).split()[0]
+              if mode not in ('100644','100755'): raise SystemExit('nonregular source input')
+          PY
+          sha256sum -c <<'PINS'
+          0b5d5aa26fcda2692c25a198a750e85cc1dc17d359836296b64e6d6b0dbcad9e  .github/workflows/deploy.yml
+          11f8cf680f23d3da1dd0fe6741d5b25caccbf257b4c7d6126461c26b227c230e  infra/gcp/release-staged-services.sh
+          41e4335ed9fc9b7b54113a27a968069345f11df5322eaaaf9d4ba0bccc184430  infra/gcp/release-staged-services.test.sh
+          532e6c50f38401e110521b54ebb1e8c32971361fcb049511427f9f422402515a  scripts/smoke-agent-image.sh
+          PINS
+          mkdir -m 700 "$DOCKER_CONFIG" "$PROOF" "$RUNNER_TEMP/agent-pdf-bin"
+          printf '{"auths":{}}\n' > "$DOCKER_CONFIG/config.json"
+          real_docker="$(command -v docker)"
+          printf '#!/usr/bin/env bash\nexec /usr/bin/env -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH %q --host unix:///var/run/docker.sock "$@"\n' "$real_docker" > "$RUNNER_TEMP/agent-pdf-bin/docker"
+          chmod 700 "$RUNNER_TEMP/agent-pdf-bin/docker"
+          echo "$RUNNER_TEMP/agent-pdf-bin" >> "$GITHUB_PATH"
+          echo 'CLIENT_READY=true' >> "$GITHUB_ENV"
+          printf '%s\n' "TAG=assistant-agent-pdf:${SOURCE_SHA}" >> "$GITHUB_ENV"
+      - name: Create bounded isolated builder
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          timeout --signal=TERM --kill-after=2s 10s docker version --format '{{json .Server}}' > "$PROOF/server-version.json"
+          python3 - "$PROOF/server-version.json" <<'PY'
+          import json,sys
+          value=json.load(open(sys.argv[1])); assert value['Os']=='linux' and value['Arch']=='amd64'
+          PY
+          set +e
+          timeout --signal=TERM --kill-after=2s 60s docker buildx create --name "$BUILDER" \
+            --driver docker-container --driver-opt memory=4g --driver-opt memory-swap=4g \
+            --driver-opt cpu-quota=200000 --driver-opt cpu-period=100000 --driver-opt restart-policy=no \
+            --bootstrap 2>&1 | head -c 1048577 > "$PROOF/builder.log"
+          codes=("${PIPESTATUS[@]}")
+          set -e
+          (( $(wc -c < "$PROOF/builder.log") <= 1048576 ))
+          [[ "${codes[0]}" == 0 && "${codes[1]}" == 0 ]]
+          timeout --signal=TERM --kill-after=2s 10s docker container inspect "buildx_buildkit_${BUILDER}0" > "$PROOF/builder-inspect.json"
+          python3 - "$PROOF/builder-inspect.json" <<'PY'
+          import json,sys
+          value=json.load(open(sys.argv[1]))[0]['HostConfig']
+          assert value['Memory']==4294967296 and value['MemorySwap']==4294967296
+          assert value['CpuQuota']==200000 and value['CpuPeriod']==100000
+          PY
+      - name: Build exact-source agent without credentials or registry output
+        timeout-minutes: 21
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +e
+          timeout --signal=TERM --kill-after=10s 20m docker buildx build --builder "$BUILDER" \
+            --platform linux/amd64 --load --file infra/docker/agent.Dockerfile \
+            --build-arg "GIT_SHA=$SOURCE_SHA" --tag "$TAG" \
+            --metadata-file "$PROOF/build-metadata.json" --progress plain . \
+            2>&1 | head -c 8388609 > "$PROOF/build.log"
+          codes=("${PIPESTATUS[@]}")
+          set -e
+          (( $(wc -c < "$PROOF/build.log") <= 8388608 ))
+          [[ "${codes[0]}" == 0 && "${codes[1]}" == 0 ]]
+          timeout --signal=TERM --kill-after=2s 10s docker image inspect --format '{{.Id}}' "$TAG" > "$PROOF/local-image-id.txt"
+      - name: Parse deterministic PDF with copied public package
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash scripts/smoke-agent-image.sh "$TAG" "$SOURCE_SHA" "$PROOF/agent-smoke.json"
+          python3 - "$PROOF/agent-smoke.json" "$PROOF/local-image-id.txt" "$APP_BASE_SHA" <<'PY'
+          import json,sys
+          path,image,base=sys.argv[1:]; value=json.load(open(path))
+          assert value['smoke']=='passed' and value['localImageId']==open(image).read().strip()
+          value.update(appBaseSha=base, reviewedPatchSha256='539d96275241742be57b551a32b41d96404257682b52d320e4af3d9dc8c27269',
+                       registryPushPerformed=False, registryManifestDigest=None, releaseDigestVerified=False)
+          with open(path,'w') as output: json.dump(value,output,sort_keys=True); output.write('\n')
+          PY
+      - name: Remove only this job's builder
+        if: always()
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          [[ "${CLIENT_READY:-false}" == true && -d "$PROOF" ]] || exit 0
+          set +e
+          timeout --signal=TERM --kill-after=2s 30s docker buildx rm --force "$BUILDER" > "$PROOF/builder-cleanup.log" 2>&1
+          result=$?
+          set -e
+          if [[ "$result" == 0 ]]; then
+            set +e
+            timeout --signal=TERM --kill-after=2s 10s docker container ls --all --filter "name=^/buildx_buildkit_${BUILDER}0$" --format '{{.ID}}' > "$PROOF/builder-residual.txt" 2>> "$PROOF/builder-cleanup.log"
+            closure=$?
+            set -e
+            [[ "$closure" == 0 && ! -s "$PROOF/builder-residual.txt" ]] || result=1
+          fi
+          python3 - "$PROOF/builder-cleanup.json" "$result" <<'PY'
+          import json,sys
+          with open(sys.argv[1],'w') as output: json.dump({'builderRemovalExit':int(sys.argv[2]),'scope':'owned-builder-only'},output)
+          PY
+          exit "$result"
+      - uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        if: always()
+        timeout-minutes: 2
+        with:
+          name: agent-pdf-pr-proof-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/agent-pdf-proof/*.json
+            ${{ runner.temp }}/agent-pdf-proof/local-image-id.txt
+            ${{ runner.temp }}/agent-pdf-proof/*.log
+          retention-days: 7

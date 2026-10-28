@@ -286,9 +286,8 @@ jobs:
         run: |
           IMAGE_ROOT="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${ARTIFACT_REPOSITORY}"
           args=(--file "$DOCKERFILE" --tag "${IMAGE_ROOT}/${IMAGE_NAME}:${RELEASE_SHA}")
-          # Only the web image stamps the commit it was built from; that value
-          # is what /api/health reports, and what release.sh asserts against.
-          if [ "$IMAGE_NAME" = "web" ]; then
+          # Web health and the agent image smoke both require the exact source SHA.
+          if [ "$IMAGE_NAME" = "web" ] || [ "$IMAGE_NAME" = "agent" ]; then
             args+=(--build-arg "GIT_SHA=${RELEASE_SHA}")
           fi
           docker build "${args[@]}" .
@@ -302,6 +301,13 @@ jobs:
         run: |
           IMAGE_ROOT="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${ARTIFACT_REPOSITORY}"
           bash scripts/smoke-worker-image.sh "$IMAGE_NAME" "${IMAGE_ROOT}/${IMAGE_NAME}:${RELEASE_SHA}"
+      - name: Smoke-test agent image unpdf assets
+        if: matrix.entry.name == 'agent'
+        timeout-minutes: 3
+        run: |
+          IMAGE_ROOT="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${ARTIFACT_REPOSITORY}"
+          bash scripts/smoke-agent-image.sh "${IMAGE_ROOT}/agent:${RELEASE_SHA}" \
+            "$RELEASE_SHA" "$RUNNER_TEMP/agent-image-smoke.json"
       - name: Scan the image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -317,7 +323,27 @@ jobs:
           mkdir -p sbom
           syft "${IMAGE_ROOT}/${IMAGE_NAME}:${RELEASE_SHA}" \
             -o "spdx-json=sbom/${IMAGE_NAME}.spdx.json"
-          docker push "${IMAGE_ROOT}/${IMAGE_NAME}:${RELEASE_SHA}"
+          ref="${IMAGE_ROOT}/${IMAGE_NAME}:${RELEASE_SHA}"
+          if [[ "$IMAGE_NAME" == agent ]]; then
+            push_log="$RUNNER_TEMP/agent-image-push.log"
+            smoked_id="$(jq -er '.localImageId' "$RUNNER_TEMP/agent-image-smoke.json")"
+            pre_push_local_id="$(timeout --signal=TERM --kill-after=2s 10s docker image inspect --format '{{.Id}}' "$ref")"
+            [[ "$pre_push_local_id" == "$smoked_id" ]] || { echo 'agent tag changed after smoke and before push' >&2; exit 1; }
+            docker push "$ref" >"$push_log" 2>&1
+            tail -n 8 "$push_log"
+            mapfile -t push_digests < <(sed -nE 's/.*digest: (sha256:[a-f0-9]{64}) size:.*/\1/p' "$push_log")
+            [[ "${#push_digests[@]}" -eq 1 ]] || { echo 'agent push did not return one immutable digest' >&2; exit 1; }
+            push_digest="${push_digests[0]}"
+            local_id="$(timeout --signal=TERM --kill-after=2s 10s docker image inspect --format '{{.Id}}' "$ref")"
+            [[ "$local_id" == "$smoked_id" ]] || { echo 'agent tag no longer identifies the smoke-tested image' >&2; exit 1; }
+            registry_digest="$(timeout --signal=TERM --kill-after=2s 20s gcloud artifacts docker images describe "$ref" \
+              --project "$GCP_PROJECT" --format='value(image_summary.digest)')"
+            [[ "$registry_digest" == "$push_digest" ]] || { echo 'Artifact Registry digest differs from docker push receipt' >&2; exit 1; }
+            jq --arg digest "$push_digest" '. + {registryManifestDigest: $digest}' \
+              "$RUNNER_TEMP/agent-image-smoke.json" > sbom/agent-image-smoke-receipt.json
+          else
+            docker push "$ref"
+          fi
       # One artifact per image rather than one for the release: a matrix job
       # cannot append to a shared artifact name, and merging them would mean
       # adding an action this repo has not pinned. They carry the same content
@@ -326,7 +352,7 @@ jobs:
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
         with:
           name: release-sboms-${{ needs.plan.outputs.sha }}-${{ matrix.entry.name }}
-          path: sbom/*.spdx.json
+          path: sbom/*
           retention-days: 90
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -334,6 +360,10 @@ jobs:
         run: |
           IMAGE_ROOT="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${ARTIFACT_REPOSITORY}"
           ref="${IMAGE_ROOT}/${IMAGE_NAME}:${RELEASE_SHA}"
+          if [[ "$IMAGE_NAME" == agent ]]; then
+            digest="$(jq -er '.registryManifestDigest' sbom/agent-image-smoke-receipt.json)"
+            ref="${IMAGE_ROOT}/agent@${digest}"
+          fi
           cosign sign --yes "$ref"
           cosign attest --yes --type spdxjson --predicate "sbom/${IMAGE_NAME}.spdx.json" "$ref"
 
@@ -352,6 +382,11 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.plan.outputs.sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: contains(needs.plan.outputs.components, 'agent')
+        with:
+          name: release-sboms-${{ needs.plan.outputs.sha }}-agent
+          path: ${{ runner.temp }}/agent-image-evidence
       # release.sh runs pnpm scripts against workspace packages.
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -367,6 +402,22 @@ jobs:
           project_id: ${{ vars.GCP_PROJECT }}
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - name: Verify agent smoke receipt against Artifact Registry
+        if: contains(needs.plan.outputs.components, 'agent')
+        env:
+          RELEASE_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          receipt="$RUNNER_TEMP/agent-image-evidence/agent-image-smoke-receipt.json"
+          [[ -s "$receipt" ]] || { echo 'agent image smoke receipt is missing' >&2; exit 1; }
+          [[ "$(jq -er '.sourceSha' "$receipt")" == "$RELEASE_SHA" ]] || { echo 'agent smoke receipt source SHA mismatch' >&2; exit 1; }
+          expected_tag="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${ARTIFACT_REPOSITORY}/agent:${RELEASE_SHA}"
+          [[ "$(jq -er '.imageTag' "$receipt")" == "$expected_tag" ]] || { echo 'agent smoke receipt tag mismatch' >&2; exit 1; }
+          push_digest="$(jq -er '.registryManifestDigest' "$receipt")"
+          [[ "$push_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo 'agent push receipt digest is malformed' >&2; exit 1; }
+          resolved_digest="$(timeout --signal=TERM --kill-after=2s 20s gcloud artifacts docker images describe "$expected_tag" \
+            --project "$GCP_PROJECT" --format='value(image_summary.digest)')"
+          [[ "$resolved_digest" == "$push_digest" ]] || { echo 'agent release tag no longer resolves to the smoked push digest' >&2; exit 1; }
+          echo "AGENT_IMAGE_PUSH_DIGEST=$push_digest" >> "$GITHUB_ENV"
       - name: Resolve live release path
         id: release_path
         env:
