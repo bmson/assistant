@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { readMigrationFiles } from 'drizzle-orm/migrator';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
@@ -24,6 +25,9 @@ const contact131Fixture = fileURLToPath(
   new URL('./migration-fixtures/0131_contact_identity_authority.sql', import.meta.url),
 );
 const journal = JSON.parse(await readFile(join(folder, 'meta/_journal.json'), 'utf8'));
+const expectedOwnerTail = readMigrationFiles({ migrationsFolder: folder })
+  .slice(130)
+  .map(({ hash, folderMillis }) => ({ hash, createdAt: String(folderMillis) }));
 // Snapshot at import prevents an actively authored migration being mistaken for a
 // reviewed historical prefix. The full endpoint is the current immutable journal.
 // Every shipped historical prefix is an upgrade target, including the 0020
@@ -225,6 +229,59 @@ it.each(historicalPrefixes)(
         WHERE conrelid='owner_editor_operations'::regclass
           AND conname='owner_editor_operation_command'`;
       expect(ownerEditorCommand[0]?.definition).toContain('correct_owner_memory');
+      const ownerCallTables = await client`
+        SELECT tablename FROM pg_tables WHERE schemaname='public'
+          AND tablename IN ('owner_call_grant_operations','owner_call_grant_operation_slots','owner_call_grant_usage')
+        ORDER BY tablename`;
+      expect(ownerCallTables.map((row) => row.tablename)).toEqual([
+        'owner_call_grant_operation_slots',
+        'owner_call_grant_operations',
+        'owner_call_grant_usage',
+      ]);
+      const [operationKey] = await client`
+        SELECT i.indisunique,i.indisvalid,pg_get_indexdef(i.indexrelid) AS definition
+        FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid
+        WHERE c.relname='owner_call_grant_operations_slot_key'
+          AND i.indrelid='public.owner_call_grant_operations'::regclass`;
+      expect(operationKey).toMatchObject({ indisunique: true, indisvalid: true });
+      expect(operationKey?.definition).toContain(
+        '(owner_id, approval_id, grant_id, slot_generation)',
+      );
+      const [operationSlotFk] = await client`
+        SELECT convalidated,pg_get_constraintdef(oid) AS definition FROM pg_constraint
+        WHERE conrelid='public.owner_call_grant_operation_slots'::regclass
+          AND confrelid='public.owner_call_grant_operations'::regclass
+          AND conname='owner_call_grant_operation_slots_current_fk'`;
+      expect(operationSlotFk).toMatchObject({ convalidated: true });
+      expect(operationSlotFk?.definition).toContain(
+        'FOREIGN KEY (owner_id, approval_id, current_grant_id, generation)',
+      );
+      expect(operationSlotFk?.definition).toContain(
+        '(owner_id, approval_id, grant_id, slot_generation)',
+      );
+      const [operationTransition] = await client`
+        SELECT t.tgenabled,p.prorettype::regtype::text AS result_type,
+          pg_get_triggerdef(t.oid) AS definition,pg_get_functiondef(p.oid) AS function_definition
+        FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+        WHERE t.tgrelid='public.owner_call_grant_operations'::regclass
+          AND t.tgname='owner_call_grant_operation_transition_guard' AND NOT t.tgisinternal`;
+      expect(operationTransition).toMatchObject({ tgenabled: 'O', result_type: 'trigger' });
+      expect(operationTransition?.definition).toMatch(
+        /BEFORE UPDATE ON (?:public\.)?owner_call_grant_operations/,
+      );
+      expect(operationTransition?.function_definition).toContain(
+        'owner call operation identity and deadlines are immutable',
+      );
+      expect(operationTransition?.function_definition).toContain(
+        'owner call operation terminal or invalid transition',
+      );
+      // This is the real shipped130+ ledger, not a synthetic source-only tail.
+      // Lower-history compatibility is exercised by each actual prefix above.
+      const installedOwnerTail = await client`
+        SELECT hash,created_at::text AS "createdAt" FROM drizzle.__drizzle_migrations
+        WHERE created_at >= ${expectedOwnerTail[0]!.createdAt}
+        ORDER BY created_at ASC,id ASC`;
+      expect(installedOwnerTail).toEqual(expectedOwnerTail);
       // The identity migration must leave legacy vectors explicitly unknown,
       // retain PostgreSQL's fixed width, and expose the exact-space indexes.
       const embeddingTables = [

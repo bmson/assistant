@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { configuredOwnerPhoneRecipientFingerprint } from '@assistant/config';
 import type {
   ApprovedToolCall,
   CachedToolCallInput,
@@ -13,14 +14,23 @@ import type {
 import {
   advanceExternalEffect,
   approvalPolicyFingerprint,
+  directOwnerCallRequestBinding,
   type ExternalEffectProgress,
   idempotencyIdentityDigest,
   MAX_APPROVAL_POLICY_SNAPSHOT_ROWS,
   mcpApprovalBindingFingerprint,
   modelToolCallIdentityDigest,
+  ownerAutonomyGrantBindingMatches,
+  parsePhoneCallOwnerActionIntent,
+  phoneCallOwnerActionGrantBindingMatches,
+  phoneCallOwnerActionGrantScopeFingerprint,
+  phoneCallOwnerNumberGrantBindingMatches,
+  reserveOwnerCallGrantUsage,
+  sameDirectOwnerCallRequestBinding,
   toolCallReceiptKeyId,
   toolCallReplayKeysForStart,
 } from '@assistant/persistence';
+import { readFirestoreOwnerCallRequest as ownerCallRequest } from './owner-call-request.js';
 import { createFirestorePhoneCalendarCompatibilityRepository } from './phone-calendar-compatibility.js';
 import { createFirestorePhoneCalendarSharingRepository } from './phone-calendar-sharing.js';
 import { assertPrivacyErasureInactiveInTransaction } from './privacy-erasure.js';
@@ -46,6 +56,19 @@ function validReceipt(
       ['completed', 'failed', 'unknown', 'not_executed'].includes(value.effectOutcome) &&
       value.recordedAt instanceof Date,
   );
+}
+
+function persistedOwnerActionIntent(task: { trigger?: unknown }) {
+  const trigger = task.trigger;
+  if (!trigger || typeof trigger !== 'object' || Array.isArray(trigger)) return null;
+  const payload = (trigger as { payload?: unknown }).payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const text = (payload as { text?: unknown }).text;
+  return typeof text === 'string' ? parsePhoneCallOwnerActionIntent(text) : null;
+}
+
+function ownerCallGrantUsageDocumentId(ownerId: string, policyId: string, fingerprint: string) {
+  return `${ownerId}_${policyId}_${fingerprint}`;
 }
 
 function linked(
@@ -151,6 +174,10 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
   ): Promise<Records['toolCallReceipts'] | null> {
     const digest = idempotencyIdentityDigest(idempotencyKey);
     return digest ? this.receiptForKey({ agentId, taskId, kind: 'idempotency', digest }) : null;
+  }
+
+  async ownerCallRequest(agentId: string, taskId: string) {
+    return ownerCallRequest(this.store, agentId, taskId, 'running');
   }
 
   async load(
@@ -323,6 +350,11 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
       } catch {
         return markStaleAuthorization();
       }
+      if (
+        (input.expectedPhoneCallOwnerNumberGrant || input.expectedPhoneCallOwnerActionGrant) &&
+        current.task.trust !== 'owner'
+      )
+        return markStaleAuthorization();
 
       if (toolCall.toolName === 'mcp.call') {
         const binding = input.expectedMcpBinding;
@@ -358,6 +390,86 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
       }
 
       await assertPrivacyErasureInactiveInTransaction(tx, this.store, input.agentId);
+      const directOwnerRequest =
+        input.expectedPhoneCallOwnerNumberGrant || input.expectedPhoneCallOwnerActionGrant
+          ? await ownerCallRequest(this.store, input.agentId, input.taskId, 'running', tx)
+          : null;
+      const repositoryNow = this.store.now();
+      if (
+        !(repositoryNow instanceof Date) ||
+        !Number.isFinite(repositoryNow.getTime()) ||
+        (input.expectedPhoneCallOwnerNumberGrant &&
+          (process.env.PHONE_CALL_TO_OWNER_GRANT_ENABLED !== 'true' ||
+            !sameDirectOwnerCallRequestBinding(
+              input.expectedPhoneCallOwnerNumberGrant.directOwnerRequest,
+              directOwnerRequest,
+            ) ||
+            !phoneCallOwnerNumberGrantBindingMatches(
+              input.expectedPhoneCallOwnerNumberGrant,
+              policyRows.find(
+                (row) => row.id === input.expectedPhoneCallOwnerNumberGrant?.policyId,
+              ) ?? null,
+              input.agentId,
+              (input.args as { brief?: { to?: unknown; maxMinutes?: unknown } }).brief ?? {},
+              repositoryNow,
+              input.expectedPhoneCallOwnerNumberGrant.recipientAuthority.kind ===
+                'configured_owner_phone'
+                ? configuredOwnerPhoneRecipientFingerprint(
+                    input.expectedPhoneCallOwnerNumberGrant.match.recipientE164,
+                  )
+                : null,
+            ))) ||
+        (input.expectedPhoneCallOwnerActionGrant &&
+          (process.env.PHONE_CALL_TO_OWNER_GRANT_ENABLED !== 'true' ||
+            !sameDirectOwnerCallRequestBinding(
+              input.expectedPhoneCallOwnerActionGrant.directOwnerRequest,
+              directOwnerRequest,
+            ) ||
+            !phoneCallOwnerActionGrantBindingMatches(
+              input.expectedPhoneCallOwnerActionGrant,
+              policyRows.find(
+                (row) => row.id === input.expectedPhoneCallOwnerActionGrant?.policyId,
+              ) ?? null,
+              input.agentId,
+              (input.args as { brief?: { to?: unknown; maxMinutes?: unknown } }).brief ?? {},
+              repositoryNow,
+              input.expectedPhoneCallOwnerActionGrant.recipientAuthority.kind ===
+                'configured_owner_phone'
+                ? configuredOwnerPhoneRecipientFingerprint(
+                    input.expectedPhoneCallOwnerActionGrant.match.recipientE164,
+                  )
+                : null,
+              {
+                directOwnerRequest,
+                ownerActionIntent: persistedOwnerActionIntent(task),
+              },
+            ))) ||
+        (input.expectedOwnerAutonomyGrant &&
+          !ownerAutonomyGrantBindingMatches(input.expectedOwnerAutonomyGrant, task, repositoryNow))
+      )
+        return markStaleAuthorization();
+      if (input.expectedPhoneCallOwnerActionGrant) {
+        const binding = input.expectedPhoneCallOwnerActionGrant;
+        const fingerprint = phoneCallOwnerActionGrantScopeFingerprint(binding.match);
+        if (!fingerprint) return markStaleAuthorization();
+        const usageRef = this.store.doc(
+          'ownerCallGrantUsage',
+          ownerCallGrantUsageDocumentId(input.agentId, binding.policyId, fingerprint),
+        );
+        const usageSnapshot = await tx.get(usageRef);
+        const usage = usageSnapshot.exists
+          ? decodeRecord<Records['ownerCallGrantUsage']>(usageSnapshot.data())
+          : null;
+        const reservation = reserveOwnerCallGrantUsage(
+          { ownerId: input.agentId, policyId: binding.policyId, match: binding.match },
+          usage,
+          input.toolCallId,
+          repositoryNow,
+          binding.estimatedCostUsdMicros,
+        );
+        if (!reservation.ok) return markStaleAuthorization();
+        if (!reservation.replayed) tx.set(usageRef, encodeRecord(reservation.usage));
+      }
       const startedAt = input.startedAt ?? this.store.now();
       // A write to the stable owner document serializes this claim with every
       // approval-policy writer. Firestore retries if either side raced.
@@ -546,6 +658,11 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
       } catch {
         return null;
       }
+      if (
+        (input.expectedPhoneCallOwnerNumberGrant || input.expectedPhoneCallOwnerActionGrant) &&
+        task.trust !== 'owner'
+      )
+        return null;
       const keyRefs = placeholderKeys.map((key) => this.store.doc('toolCallReceiptKeys', key.id));
       const existingKeys = keyRefs.length ? await tx.getAll(...keyRefs) : [];
       if (existingKeys.some((snapshot) => snapshot.exists)) return null;
@@ -568,7 +685,86 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
         const existing = await tx.get(mapping);
         if (existing.exists) return null;
       }
+      const directOwnerRequest =
+        input.expectedPhoneCallOwnerNumberGrant || input.expectedPhoneCallOwnerActionGrant
+          ? await ownerCallRequest(this.store, input.agentId, input.taskId, 'running', tx)
+          : null;
       const now = this.store.now();
+      if (
+        !(now instanceof Date) ||
+        !Number.isFinite(now.getTime()) ||
+        (input.expectedPhoneCallOwnerNumberGrant &&
+          (process.env.PHONE_CALL_TO_OWNER_GRANT_ENABLED !== 'true' ||
+            !sameDirectOwnerCallRequestBinding(
+              input.expectedPhoneCallOwnerNumberGrant.directOwnerRequest,
+              directOwnerRequest,
+            ) ||
+            !phoneCallOwnerNumberGrantBindingMatches(
+              input.expectedPhoneCallOwnerNumberGrant,
+              policyRows.find(
+                (row) => row.id === input.expectedPhoneCallOwnerNumberGrant?.policyId,
+              ) ?? null,
+              input.agentId,
+              (input.args as { brief?: { to?: unknown; maxMinutes?: unknown } }).brief ?? {},
+              now,
+              input.expectedPhoneCallOwnerNumberGrant.recipientAuthority.kind ===
+                'configured_owner_phone'
+                ? configuredOwnerPhoneRecipientFingerprint(
+                    input.expectedPhoneCallOwnerNumberGrant.match.recipientE164,
+                  )
+                : null,
+            ))) ||
+        (input.expectedPhoneCallOwnerActionGrant &&
+          (process.env.PHONE_CALL_TO_OWNER_GRANT_ENABLED !== 'true' ||
+            !sameDirectOwnerCallRequestBinding(
+              input.expectedPhoneCallOwnerActionGrant.directOwnerRequest,
+              directOwnerRequest,
+            ) ||
+            !phoneCallOwnerActionGrantBindingMatches(
+              input.expectedPhoneCallOwnerActionGrant,
+              policyRows.find(
+                (row) => row.id === input.expectedPhoneCallOwnerActionGrant?.policyId,
+              ) ?? null,
+              input.agentId,
+              (input.args as { brief?: { to?: unknown; maxMinutes?: unknown } }).brief ?? {},
+              now,
+              input.expectedPhoneCallOwnerActionGrant.recipientAuthority.kind ===
+                'configured_owner_phone'
+                ? configuredOwnerPhoneRecipientFingerprint(
+                    input.expectedPhoneCallOwnerActionGrant.match.recipientE164,
+                  )
+                : null,
+              {
+                directOwnerRequest,
+                ownerActionIntent: persistedOwnerActionIntent(task),
+              },
+            ))) ||
+        (input.expectedOwnerAutonomyGrant &&
+          !ownerAutonomyGrantBindingMatches(input.expectedOwnerAutonomyGrant, task, now))
+      )
+        return null;
+      if (input.expectedPhoneCallOwnerActionGrant) {
+        const binding = input.expectedPhoneCallOwnerActionGrant;
+        const fingerprint = phoneCallOwnerActionGrantScopeFingerprint(binding.match);
+        if (!fingerprint) return null;
+        const usageRef = this.store.doc(
+          'ownerCallGrantUsage',
+          ownerCallGrantUsageDocumentId(input.agentId, binding.policyId, fingerprint),
+        );
+        const usageSnapshot = await tx.get(usageRef);
+        const usage = usageSnapshot.exists
+          ? decodeRecord<Records['ownerCallGrantUsage']>(usageSnapshot.data())
+          : null;
+        const reservation = reserveOwnerCallGrantUsage(
+          { ownerId: input.agentId, policyId: binding.policyId, match: binding.match },
+          usage,
+          id,
+          now,
+          binding.estimatedCostUsdMicros,
+        );
+        if (!reservation.ok) return null;
+        if (!reservation.replayed) tx.set(usageRef, encodeRecord(reservation.usage));
+      }
       tx.update(ownerRef, { updatedAt: now });
       const call = {
         id,

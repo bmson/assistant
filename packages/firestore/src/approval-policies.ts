@@ -43,6 +43,13 @@ export class FirestoreApprovalPolicyRepository implements ApprovalPolicyReposito
       const ref = this.store.doc('approvalPolicies', policyId);
       const policy = await tx.get(ref);
       if (!policy.exists || policy.get('agentId') !== agentId) return false;
+      if (
+        enabled &&
+        ['phone.call.to_owner_number.v1', 'phone.call.owner_action.v2'].includes(
+          policy.get('templateKey'),
+        )
+      )
+        return false;
       const now = policyTime(this.store.now());
       tx.update(ownerRef, { updatedAt: now });
       tx.update(ref, encodeRecord({ enabled, updatedAt: now }));

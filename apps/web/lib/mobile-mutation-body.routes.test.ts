@@ -167,7 +167,10 @@ vi.mock('@assistant/firestore', () => ({
   getFirestoreKnowledgeGraphReviewQueue: mocks.effect,
   readPrivacyErasureFence: mocks.effect,
 }));
-vi.mock('@assistant/persistence', () => ({ TaskDiscoveryInputError: mocks.effect }));
+vi.mock('@assistant/persistence', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@assistant/persistence')>()),
+  TaskDiscoveryInputError: mocks.effect,
+}));
 
 import { POST as endpoint0 } from '../app/api/mobile/v1/activity/[id]/route';
 import { POST as endpoint1 } from '../app/api/mobile/v1/activity/route';

@@ -1,13 +1,26 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { createManifest, validateManifest } from './release-manifest.mjs';
 import { deriveSchemaVersion } from './release-schema-version.mjs';
 
-const contract = JSON.parse(await readFile(new URL('./release-contracts.json', import.meta.url)));
-const journal = JSON.parse(
-  await readFile(new URL('../../packages/db/drizzle/meta/_journal.json', import.meta.url)),
+const historicalContractBytes = await readFile(
+  new URL('./fixtures/release-contracts.schema132.json', import.meta.url),
 );
+const historicalJournalBytes = await readFile(
+  new URL('./fixtures/postgres-journal.schema132.json', import.meta.url),
+);
+assert.equal(
+  createHash('sha256').update(historicalContractBytes).digest('hex'),
+  '33370d187575b95377c36bea587f8588777d377d560ca98c549b244a34d1898b',
+);
+assert.equal(
+  createHash('sha256').update(historicalJournalBytes).digest('hex'),
+  '2088a29e71a01c6f4a5b33cc8f2af7f24194ded8135ade6827f8fea829d0ec26',
+);
+const contract = JSON.parse(historicalContractBytes.toString('utf8'));
+const journal = JSON.parse(historicalJournalBytes.toString('utf8'));
 const selected = ['agent', 'web', 'browser', 'code', 'processor'];
 const digests = Object.fromEntries(selected.map((name) => [name, `sha256:${'a'.repeat(64)}`]));
 const manifest = (schemaVersion, contracts = contract) =>

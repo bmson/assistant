@@ -14,23 +14,19 @@
  * ToolFlags) so core does not import tools.
  */
 
-import { z } from 'zod';
+import {
+  AUTONOMY_GRANT_TTL_HOURS,
+  type AutonomyGrant,
+  type AutonomyGrantSource,
+} from '@assistant/persistence';
 
-/** How a grant was armed — recorded for the audit trail and UI copy. */
-export type AutonomyGrantSource = 'card' | 'composer' | 'goal';
-
-export const AutonomyGrantSchema = z.object({
-  grantedAt: z.iso.datetime(),
-  grantedVia: z.enum(['card', 'composer', 'goal']),
-  approvalId: z.string().min(1).optional(),
-  expiresAt: z.iso.datetime(),
-  revokedAt: z.iso.datetime().nullable().optional(),
-});
-
-export type AutonomyGrant = z.infer<typeof AutonomyGrantSchema>;
-
-/** A grant expires after this window unless revoked sooner. */
-export const AUTONOMY_GRANT_TTL_HOURS = 24;
+export {
+  AUTONOMY_GRANT_TTL_HOURS,
+  type AutonomyGrant,
+  AutonomyGrantSchema,
+  type AutonomyGrantSource,
+  activeAutonomyGrant,
+} from '@assistant/persistence';
 
 /**
  * Deterministic detector for an explicit "do this on your own, don't ask me"
@@ -78,36 +74,6 @@ export function buildAutonomyGrant(input: {
     expiresAt: new Date(input.nowMs + ttl * 3_600_000).toISOString(),
     revokedAt: null,
   };
-}
-
-/**
- * The grant on a task IF it is currently in force: parsed, unrevoked, unexpired,
- * and on an owner/assistant task. Returns null otherwise. Trust is checked as
- * defense-in-depth — arming is owner-only, but a grant must never take effect on
- * an unknown/known-sender task even if one were somehow present.
- */
-export function activeAutonomyGrant(
-  task: { autonomyGrant?: unknown; trust?: string | null },
-  nowMs: number,
-): AutonomyGrant | null {
-  if (task.trust !== 'owner' && task.trust !== 'assistant') return null;
-  const parsed = AutonomyGrantSchema.safeParse(task.autonomyGrant);
-  if (!parsed.success) return null;
-  const grant = parsed.data;
-  if (grant.revokedAt != null || !Number.isFinite(nowMs)) return null;
-  const grantedAt = Date.parse(grant.grantedAt);
-  const expiresAt = Date.parse(grant.expiresAt);
-  if (
-    !Number.isFinite(grantedAt) ||
-    !Number.isFinite(expiresAt) ||
-    grantedAt > nowMs ||
-    expiresAt <= nowMs ||
-    expiresAt <= grantedAt ||
-    expiresAt - grantedAt > AUTONOMY_GRANT_TTL_HOURS * 3_600_000
-  )
-    return null;
-  if (grant.grantedVia === 'card' && !grant.approvalId) return null;
-  return grant;
 }
 
 /**

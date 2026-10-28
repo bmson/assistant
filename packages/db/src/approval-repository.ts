@@ -9,6 +9,10 @@ import type {
   ApprovalWake,
   CreateApprovalInput,
   CreatedApproval,
+  OwnerCallGrantOperationRepository,
+  OwnerCallNumberGrantReview,
+  OwnerCallOperationBinding,
+  OwnerCallOperationRegisterInput,
   RememberableApproval,
   ResolveApprovalInput,
 } from '@assistant/persistence';
@@ -16,12 +20,39 @@ import {
   approvalInboxLimit,
   approvalIsResolved,
   approvalSweepBatch,
+  MAX_APPROVAL_POLICY_SNAPSHOT_ROWS,
   parkedApprovalIds,
+  parsePhoneCallOwnerActionGrantMatch,
+  parsePhoneCallOwnerActionIntent,
+  parsePhoneCallToOwnerNumberGrantMatch,
+  phoneCallOwnerActionGrantIsLive,
+  phoneCallOwnerActionGrantMatches,
+  phoneCallOwnerActionGrantScopeFingerprint,
+  phoneCallOwnerNumberGrantFinalizationMatches,
+  phoneCallOwnerNumberReviewSourceFingerprint,
+  phoneCallToOwnerNumberGrantIsLive,
 } from '@assistant/persistence';
 import { and, asc, eq, gt, inArray, lte, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
+import {
+  admitOwnerCallGrantOperation,
+  closeOwnerCallGrantOperation,
+  commitOwnerCallGrantOperationInTransaction,
+  discoverOwnerCallGrantOperationInTransaction,
+  lockOwnerCallGrantOperationForFinalize,
+  OwnerCallGrantOperationRollbackError,
+  registerOwnerCallGrantOperation,
+} from './owner-call-operation-repository.js';
+import { readPostgresOwnerCallRequest } from './owner-call-request.js';
 import { lockPostgresPrivacyObservationFence } from './privacy-erasure-repository.js';
-import { approvalPolicies, approvals, maintenanceCursors, tasks, toolCalls } from './schema.js';
+import {
+  agents,
+  approvalPolicies,
+  approvals,
+  maintenanceCursors,
+  tasks,
+  toolCalls,
+} from './schema.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CODE_SUFFIX_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -75,6 +106,7 @@ export async function listApprovalInbox(
         taskTrust: tasks.trust,
         toolName: toolCalls.toolName,
         decision: toolCalls.decision,
+        reviewSourceArgs: toolCalls.args,
       })
       .from(approvals)
       .innerJoin(tasks, eq(approvals.taskId, tasks.id))
@@ -102,9 +134,14 @@ export async function listApprovalInbox(
         expiresAt: approvals.expiresAt,
         edited: sql<boolean>`${approvals.resolutionPayload} IS NOT NULL`,
         taskType: tasks.type,
+        toolName: toolCalls.toolName,
       })
       .from(approvals)
       .innerJoin(tasks, eq(approvals.taskId, tasks.id))
+      .innerJoin(
+        toolCalls,
+        and(eq(toolCalls.id, approvals.toolCallId), eq(toolCalls.taskId, approvals.taskId)),
+      )
       .where(
         and(
           eq(tasks.agentId, agentId),
@@ -121,8 +158,32 @@ export async function listApprovalInbox(
       .limit(recentLimit),
   ]);
   return {
-    pending,
-    resolved: resolved.map(({ taskType, ...approval }) => ({ approval, taskType })),
+    pending: await Promise.all(
+      pending.map(async ({ reviewSourceArgs, ...item }) => ({
+        ...item,
+        ownerCallAdmissionAvailable:
+          item.toolName === 'phone.call' &&
+          Boolean(
+            await readPostgresOwnerCallRequest(
+              db,
+              agentId,
+              item.approval.taskId,
+              'waiting_approval',
+            ),
+          ),
+        ownerCallSourceFingerprint: phoneCallOwnerNumberReviewSourceFingerprint({
+          args: reviewSourceArgs,
+          payload: item.approval.payload,
+          trust: item.taskTrust,
+          toolName: item.toolName,
+        }),
+      })),
+    ),
+    resolved: resolved.map(({ taskType, toolName, ...approval }) => ({
+      approval,
+      taskType,
+      ...(typeof toolName === 'string' ? { toolName } : {}),
+    })),
   };
 }
 
@@ -147,6 +208,102 @@ export async function getRememberableApproval(
     )
     .limit(1);
   return row ?? null;
+}
+
+export async function getOwnerCallNumberGrantReview(
+  db: Db,
+  agentId: string,
+  approvalId: string,
+): Promise<OwnerCallNumberGrantReview | null> {
+  const [row] = await db
+    .select({
+      approval: approvals,
+      toolCall: {
+        id: toolCalls.id,
+        taskId: toolCalls.taskId,
+        toolName: toolCalls.toolName,
+        args: toolCalls.args,
+        status: toolCalls.status,
+      },
+      task: {
+        id: tasks.id,
+        agentId: tasks.agentId,
+        trust: tasks.trust,
+        status: tasks.status,
+        trigger: tasks.trigger,
+      },
+      ownerTimeZone: agents.timezone,
+    })
+    .from(approvals)
+    .innerJoin(tasks, eq(approvals.taskId, tasks.id))
+    .innerJoin(toolCalls, eq(approvals.toolCallId, toolCalls.id))
+    .innerJoin(agents, eq(tasks.agentId, agents.id))
+    .where(
+      and(
+        eq(approvals.id, approvalId),
+        eq(approvals.status, 'pending'),
+        gt(approvals.expiresAt, sql`clock_timestamp()`),
+        eq(tasks.agentId, agentId),
+        eq(tasks.trust, 'owner'),
+        eq(tasks.status, 'waiting_approval'),
+        eq(toolCalls.taskId, approvals.taskId),
+        eq(toolCalls.toolName, 'phone.call'),
+        eq(toolCalls.status, 'awaiting_approval'),
+      ),
+    )
+    .limit(1);
+  if (!row) return null;
+  const directOwnerRequest = await readPostgresOwnerCallRequest(
+    db,
+    agentId,
+    row.task.id,
+    'waiting_approval',
+  );
+  if (!directOwnerRequest) return null;
+  const policies = await db
+    .select()
+    .from(approvalPolicies)
+    .where(and(eq(approvalPolicies.agentId, agentId), eq(approvalPolicies.toolName, 'phone.call')))
+    .limit(MAX_APPROVAL_POLICY_SNAPSHOT_ROWS + 1);
+  if (policies.length > MAX_APPROVAL_POLICY_SNAPSHOT_ROWS) return null;
+  const [clock] = await db.execute<{ now: Date | string }>(sql`select clock_timestamp() as now`);
+  const repositoryNow =
+    clock?.now instanceof Date
+      ? clock.now
+      : typeof clock?.now === 'string'
+        ? new Date(clock.now)
+        : null;
+  if (
+    !repositoryNow ||
+    !Number.isFinite(repositoryNow.getTime()) ||
+    !(row.approval.expiresAt instanceof Date) ||
+    !Number.isFinite(row.approval.expiresAt.getTime()) ||
+    row.approval.expiresAt <= repositoryNow
+  )
+    return null;
+  const recipient = (row.toolCall.args as { brief?: { to?: unknown } })?.brief?.to;
+  const existingActiveGrants = policies.flatMap((policy) => {
+    const match =
+      policy.templateKey === 'phone.call.owner_action.v2'
+        ? parsePhoneCallOwnerActionGrantMatch(policy.match)
+        : parsePhoneCallToOwnerNumberGrantMatch(policy.match);
+    return policy.enabled &&
+      policy.effect === 'allow' &&
+      ['phone.call.to_owner_number.v1', 'phone.call.owner_action.v2'].includes(
+        policy.templateKey,
+      ) &&
+      match &&
+      match.recipientE164 === recipient &&
+      (policy.templateKey === 'phone.call.owner_action.v2'
+        ? phoneCallOwnerActionGrantIsLive(match, repositoryNow)
+        : phoneCallToOwnerNumberGrantIsLive(
+            match as import('@assistant/persistence').PhoneCallToOwnerNumberGrantMatch,
+            repositoryNow,
+          ))
+      ? [{ policyId: policy.id, match }]
+      : [];
+  });
+  return { ...row, repositoryNow, existingActiveGrants, directOwnerRequest };
 }
 
 /** Atomically create the approval, its gated tool call, and their link. */
@@ -269,6 +426,66 @@ export async function resolveApproval(
   if (!input.approvalId && !input.shortCode) {
     return { ok: false, reason: 'approvalId or shortCode required' };
   }
+  const hasOwnerNumberGrantPolicy = input.policy?.templateKey === 'phone.call.to_owner_number.v1';
+  const hasOwnerActionGrantPolicy = input.policy?.templateKey === 'phone.call.owner_action.v2';
+  if (
+    hasOwnerNumberGrantPolicy !== Boolean(input.ownerCallNumberGrant) ||
+    (input.ownerCallNumberGrant &&
+      (input.decision !== 'approved' ||
+        input.via !== 'web' ||
+        !input.expectedAgentId ||
+        !input.approvalId ||
+        input.ownerCallNumberGrant.expectedAgentId !== input.expectedAgentId ||
+        input.ownerCallNumberGrant.expectedApprovalId !== input.approvalId ||
+        input.editedPayload !== undefined))
+  )
+    return { ok: false, reason: 'owner call grant review is invalid or changed' };
+
+  const actionBinding = input.ownerCallActionGrant;
+  const actionGrant = actionBinding
+    ? parsePhoneCallOwnerActionGrantMatch(actionBinding.match)
+    : null;
+  const actionScopeFingerprint = actionBinding
+    ? phoneCallOwnerActionGrantScopeFingerprint(actionBinding.match)
+    : null;
+  const actionIssuedAt = actionBinding ? Date.parse(actionBinding.reviewIssuedAt) : NaN;
+  const actionReviewExpiresAt = actionBinding ? Date.parse(actionBinding.reviewExpiresAt) : NaN;
+  if (
+    hasOwnerActionGrantPolicy !== Boolean(actionBinding) ||
+    (actionBinding &&
+      (Boolean(input.ownerCallNumberGrant) ||
+        input.decision !== 'approved' ||
+        input.via !== 'web' ||
+        !input.expectedAgentId ||
+        !input.approvalId ||
+        input.shortCode !== undefined ||
+        input.editedPayload !== undefined ||
+        actionBinding.expectedAgentId !== input.expectedAgentId ||
+        actionBinding.expectedApprovalId !== input.approvalId ||
+        actionBinding.operation.ownerId !== actionBinding.expectedAgentId ||
+        actionBinding.operation.approvalId !== actionBinding.expectedApprovalId ||
+        actionBinding.operation.taskId !== actionBinding.expectedTaskId ||
+        actionBinding.operation.toolCallId !== actionBinding.expectedToolCallId ||
+        actionBinding.operation.grantId !== actionGrant?.grantId ||
+        actionBinding.operation.requestFingerprint !== actionBinding.sourceArgsFingerprint ||
+        actionBinding.operation.grantScopeFingerprint !== actionScopeFingerprint ||
+        !actionGrant ||
+        !actionScopeFingerprint ||
+        !input.policy ||
+        input.policy.agentId !== actionBinding.expectedAgentId ||
+        input.policy.toolName !== 'phone.call' ||
+        input.policy.templateKey !== 'phone.call.owner_action.v2' ||
+        input.policy.effect !== 'allow' ||
+        JSON.stringify(parsePhoneCallOwnerActionGrantMatch(input.policy.match)) !==
+          JSON.stringify(actionGrant) ||
+        !Number.isFinite(actionIssuedAt) ||
+        !Number.isFinite(actionReviewExpiresAt) ||
+        actionReviewExpiresAt !== actionIssuedAt + 10 * 60_000 ||
+        ![1, 7, 30].includes(actionBinding.validityDays) ||
+        Date.parse(actionGrant?.expiresAt ?? '') !==
+          actionIssuedAt + actionBinding.validityDays * 24 * 60 * 60_000))
+  )
+    return { ok: false, reason: 'owner call grant review is invalid or changed' };
 
   const resolution = await db.transaction(async (tx) => {
     if (input.policy && input.via === 'web') {
@@ -294,15 +511,33 @@ export async function resolveApproval(
     const candidate = candidates[0];
     if (!candidate) return null;
 
+    const ownerCallOperationLock = actionBinding
+      ? await lockOwnerCallGrantOperationForFinalize(tx as never, actionBinding.operation)
+      : null;
+    if (actionBinding) {
+      if (!ownerCallOperationLock || !ownerCallOperationLock.ok) return null;
+      if (
+        ownerCallOperationLock.operation.phase !== 'admitted' ||
+        ownerCallOperationLock.operation.grantId !== actionGrant?.grantId
+      )
+        return null;
+    }
+
     // Match task lifecycle and tool-claim paths: task lock first, then the
     // approval row. The initial lookup only discovers the task ID; all mutable
     // approval fields are re-read after both locks are held.
     const [task] = await tx
-      .select({ id: tasks.id, agentId: tasks.agentId })
+      .select({
+        id: tasks.id,
+        agentId: tasks.agentId,
+        trust: tasks.trust,
+        status: tasks.status,
+        trigger: tasks.trigger,
+      })
       .from(tasks)
       .where(eq(tasks.id, candidate.taskId))
       .for('update');
-    if (!task) return null;
+    if (!task || (input.expectedAgentId && task.agentId !== input.expectedAgentId)) return null;
 
     const [pending] = await tx
       .select()
@@ -317,6 +552,177 @@ export async function resolveApproval(
       )
       .for('update');
     if (!pending) return null;
+
+    if (input.ownerCallNumberGrant) {
+      const [linked] = await tx
+        .select({
+          id: toolCalls.id,
+          taskId: toolCalls.taskId,
+          approvalId: toolCalls.approvalId,
+          toolName: toolCalls.toolName,
+          status: toolCalls.status,
+          args: toolCalls.args,
+        })
+        .from(toolCalls)
+        .where(and(eq(toolCalls.id, pending.toolCallId), eq(toolCalls.taskId, task.id)))
+        .for('update')
+        .limit(1);
+      const grant = parsePhoneCallToOwnerNumberGrantMatch(input.ownerCallNumberGrant.match);
+      if (
+        !linked ||
+        !grant ||
+        !input.policy ||
+        input.policy.agentId !== task.agentId ||
+        input.policy.toolName !== 'phone.call' ||
+        input.policy.templateKey !== 'phone.call.to_owner_number.v1' ||
+        input.policy.effect !== 'allow' ||
+        JSON.stringify(parsePhoneCallToOwnerNumberGrantMatch(input.policy.match)) !==
+          JSON.stringify(grant)
+      )
+        return null;
+      const directOwnerRequest = await readPostgresOwnerCallRequest(
+        tx as unknown as Db,
+        task.agentId,
+        task.id,
+        'waiting_approval',
+        true,
+      );
+      const [clock] = await tx.execute<{ now: Date | string }>(
+        sql`select clock_timestamp() as now`,
+      );
+      const ownerCallNumberGrantNow =
+        clock?.now instanceof Date ? clock.now : new Date(clock?.now ?? NaN);
+      if (!Number.isFinite(ownerCallNumberGrantNow.getTime())) return null;
+      if (
+        process.env.PHONE_CALL_TO_OWNER_GRANT_ENABLED !== 'true' ||
+        !phoneCallOwnerNumberGrantFinalizationMatches(
+          input.ownerCallNumberGrant,
+          {
+            approvalId: pending.id,
+            approvalStatus: pending.status,
+            approvalExpiresAt: pending.expiresAt,
+            agentId: task.agentId,
+            approvalTaskId: pending.taskId,
+            approvalToolCallId: pending.toolCallId,
+            taskId: task.id,
+            taskAgentId: task.agentId,
+            taskTrust: task.trust,
+            taskStatus: task.status,
+            toolCallId: linked.id,
+            toolTaskId: linked.taskId,
+            toolApprovalId: linked.approvalId,
+            toolName: linked.toolName,
+            toolStatus: linked.status,
+            toolArgs: linked.args,
+            approvalPayload: pending.payload,
+            directOwnerRequest,
+          },
+          ownerCallNumberGrantNow,
+        )
+      )
+        return null;
+    }
+
+    if (actionBinding && actionGrant) {
+      const [linked] = await tx
+        .select({
+          id: toolCalls.id,
+          taskId: toolCalls.taskId,
+          approvalId: toolCalls.approvalId,
+          toolName: toolCalls.toolName,
+          status: toolCalls.status,
+          args: toolCalls.args,
+        })
+        .from(toolCalls)
+        .where(and(eq(toolCalls.id, pending.toolCallId), eq(toolCalls.taskId, task.id)))
+        .for('update')
+        .limit(1);
+      const [owner] = await tx
+        .select({ phoneE164: agents.phoneE164 })
+        .from(agents)
+        .where(eq(agents.id, task.agentId))
+        .limit(1);
+      const directOwnerRequest = await readPostgresOwnerCallRequest(
+        tx as unknown as Db,
+        task.agentId,
+        task.id,
+        'waiting_approval',
+        true,
+      );
+      const [clock] = await tx.execute<{ now: Date | string }>(
+        sql`select clock_timestamp() as now`,
+      );
+      const checkedAt = clock?.now instanceof Date ? clock.now : new Date(clock?.now ?? NaN);
+      const args = linked?.args;
+      const brief =
+        args && typeof args === 'object' && !Array.isArray(args)
+          ? (args as { brief?: { to?: unknown; maxMinutes?: unknown } }).brief
+          : null;
+      const intent = persistedOwnerActionIntent(task);
+      const sourceFingerprint = linked
+        ? phoneCallOwnerNumberReviewSourceFingerprint(linked.args)
+        : null;
+      const approvalFingerprint = phoneCallOwnerNumberReviewSourceFingerprint(pending.payload);
+      const scopeFingerprint = phoneCallOwnerActionGrantScopeFingerprint(actionGrant);
+      const recipientMatches =
+        intent?.recipientRequest.kind === 'explicit_number'
+          ? intent.recipientRequest.recipientE164 === actionGrant.recipientE164
+          : intent?.recipientRequest.kind === 'owner_self' &&
+            typeof owner?.phoneE164 === 'string' &&
+            owner.phoneE164 === actionGrant.recipientE164;
+      const legacyProjection = {
+        schemaVersion: 1 as const,
+        grantId: actionGrant.grantId,
+        recipientE164: actionGrant.recipientE164,
+        maxMinutes: actionGrant.maxMinutes,
+        expiresAt: actionGrant.expiresAt,
+      };
+      const { match: _actionMatch, operation: _operation, ...legacyFields } = actionBinding;
+      if (
+        !linked ||
+        !owner ||
+        !directOwnerRequest ||
+        !intent ||
+        !brief ||
+        !recipientMatches ||
+        !scopeFingerprint ||
+        scopeFingerprint !== actionBinding.operation.grantScopeFingerprint ||
+        sourceFingerprint !== actionBinding.sourceArgsFingerprint ||
+        approvalFingerprint !== actionBinding.sourceArgsFingerprint ||
+        !phoneCallOwnerActionGrantMatches(actionGrant, brief) ||
+        !phoneCallOwnerActionGrantIsLive(actionGrant, checkedAt) ||
+        process.env.PHONE_CALL_TO_OWNER_GRANT_ENABLED !== 'true' ||
+        !ownerCallOperationLock?.ok ||
+        ownerCallOperationLock.operation.reviewExpiresAt.getTime() !== actionReviewExpiresAt ||
+        ownerCallOperationLock.operation.grantExpiresAt.getTime() !==
+          Date.parse(actionGrant.expiresAt) ||
+        !phoneCallOwnerNumberGrantFinalizationMatches(
+          { ...legacyFields, match: legacyProjection },
+          {
+            approvalId: pending.id,
+            approvalStatus: pending.status,
+            approvalExpiresAt: pending.expiresAt,
+            agentId: task.agentId,
+            approvalTaskId: pending.taskId,
+            approvalToolCallId: pending.toolCallId,
+            taskId: task.id,
+            taskAgentId: task.agentId,
+            taskTrust: task.trust,
+            taskStatus: task.status,
+            toolCallId: linked.id,
+            toolTaskId: linked.taskId,
+            toolApprovalId: linked.approvalId,
+            toolName: linked.toolName,
+            toolStatus: linked.status,
+            toolArgs: linked.args,
+            approvalPayload: pending.payload,
+            directOwnerRequest,
+          },
+          checkedAt,
+        )
+      )
+        return null;
+    }
 
     // transaction_timestamp()/now() can be older than a deadline reached while
     // waiting for the task or approval lock. Use the strict wall-clock predicate
@@ -352,6 +758,12 @@ export async function resolveApproval(
           eq(approvals.id, pending.id),
           eq(approvals.status, 'pending'),
           gt(approvals.expiresAt, sql`clock_timestamp()`),
+          ...(input.ownerCallNumberGrant
+            ? [sql`${input.ownerCallNumberGrant.reviewExpiresAt}::timestamptz > clock_timestamp()`]
+            : []),
+          ...(input.ownerCallActionGrant
+            ? [sql`${input.ownerCallActionGrant.reviewExpiresAt}::timestamptz > clock_timestamp()`]
+            : []),
         ),
       )
       .returning();
@@ -362,6 +774,7 @@ export async function resolveApproval(
       .set({ status: input.decision })
       .where(eq(toolCalls.id, resolved.toolCallId));
 
+    let createdPolicyId: string | undefined;
     if (input.policy && input.via === 'web') {
       const [policy] = await tx
         .insert(approvalPolicies)
@@ -380,6 +793,7 @@ export async function resolveApproval(
         })
         .returning();
       if (policy) {
+        createdPolicyId = policy.id;
         await tx
           .update(approvals)
           .set({ createdPolicyId: policy.id })
@@ -402,7 +816,16 @@ export async function resolveApproval(
       .where(and(eq(tasks.id, resolved.taskId), eq(tasks.status, 'waiting_approval')))
       .returning({ id: tasks.id, queueGeneration: tasks.queueGeneration });
 
-    return { resolved, woken };
+    if (actionBinding) {
+      if (!createdPolicyId || !woken || !ownerCallOperationLock?.ok)
+        throw new OwnerCallGrantOperationRollbackError('corrupt_or_unavailable');
+      await commitOwnerCallGrantOperationInTransaction(tx as never, ownerCallOperationLock, {
+        createdPolicyId,
+        wakeGeneration: woken.queueGeneration,
+      });
+    }
+
+    return { resolved, woken, createdPolicyId };
   });
 
   if (resolution && 'ambiguous' in resolution) {
@@ -411,13 +834,201 @@ export async function resolveApproval(
   if (!resolution) {
     return { ok: false, reason: 'no pending approval matched (already resolved or expired?)' };
   }
-  const { resolved, woken } = resolution;
+  const { resolved, woken, createdPolicyId } = resolution;
+  const savedCallGrant = input.ownerCallActionGrant?.match ?? input.ownerCallNumberGrant?.match;
   return {
     ok: true,
     taskId: resolved.taskId,
     toolCallId: resolved.toolCallId,
     approvalId: resolved.id,
+    ...(savedCallGrant && createdPolicyId
+      ? {
+          ownerCallNumberGrant: {
+            policyId: createdPolicyId,
+            grantId: savedCallGrant.grantId,
+            expiresAt: savedCallGrant.expiresAt,
+          },
+        }
+      : {}),
     ...(woken ? { wake: { taskId: woken.id, generation: woken.queueGeneration } } : {}),
+  };
+}
+
+function persistedOwnerActionIntent(task: { trigger?: unknown }) {
+  const trigger = task.trigger;
+  if (!trigger || typeof trigger !== 'object' || Array.isArray(trigger)) return null;
+  const payload = (trigger as { payload?: unknown }).payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const text = (payload as { text?: unknown }).text;
+  return typeof text === 'string' ? parsePhoneCallOwnerActionIntent(text) : null;
+}
+
+async function readOwnedOwnerCallOperationContext(
+  tx: Db,
+  ownerId: string,
+  approvalId: string,
+  taskId?: string,
+  toolCallId?: string,
+) {
+  const conditions = [
+    eq(approvals.id, approvalId),
+    eq(tasks.agentId, ownerId),
+    eq(toolCalls.taskId, approvals.taskId),
+    eq(toolCalls.id, approvals.toolCallId),
+    eq(toolCalls.approvalId, approvals.id),
+  ];
+  if (taskId) conditions.push(eq(tasks.id, taskId));
+  if (toolCallId) conditions.push(eq(toolCalls.id, toolCallId));
+  const [row] = await tx
+    .select({ approval: approvals, task: tasks, tool: toolCalls })
+    .from(approvals)
+    .innerJoin(tasks, eq(tasks.id, approvals.taskId))
+    .innerJoin(toolCalls, eq(toolCalls.id, approvals.toolCallId))
+    .where(and(...conditions))
+    .limit(1);
+  return row ?? null;
+}
+
+async function validatePostgresOwnerCallOperationReview(
+  tx: Db,
+  binding: OwnerCallOperationBinding,
+  repositoryNow: Date,
+): Promise<boolean> {
+  if (process.env.PHONE_CALL_TO_OWNER_GRANT_ENABLED !== 'true') return false;
+  const [row] = await tx
+    .select({ approval: approvals, task: tasks, tool: toolCalls, ownerPhone: agents.phoneE164 })
+    .from(approvals)
+    .innerJoin(tasks, eq(tasks.id, approvals.taskId))
+    .innerJoin(toolCalls, eq(toolCalls.id, approvals.toolCallId))
+    .innerJoin(agents, eq(agents.id, tasks.agentId))
+    .where(
+      and(
+        eq(approvals.id, binding.approvalId),
+        eq(approvals.taskId, binding.taskId),
+        eq(approvals.toolCallId, binding.toolCallId),
+        eq(approvals.status, 'pending'),
+        eq(tasks.id, binding.taskId),
+        eq(tasks.agentId, binding.ownerId),
+        eq(tasks.status, 'waiting_approval'),
+        eq(tasks.trust, 'owner'),
+        eq(toolCalls.id, binding.toolCallId),
+        eq(toolCalls.taskId, binding.taskId),
+        eq(toolCalls.approvalId, binding.approvalId),
+        eq(toolCalls.toolName, 'phone.call'),
+        eq(toolCalls.status, 'awaiting_approval'),
+      ),
+    )
+    .limit(1);
+  if (
+    !row ||
+    !(row.approval.expiresAt instanceof Date) ||
+    row.approval.expiresAt <= repositoryNow ||
+    !(repositoryNow instanceof Date) ||
+    !Number.isFinite(repositoryNow.getTime())
+  )
+    return false;
+  const argsFingerprint = phoneCallOwnerNumberReviewSourceFingerprint(row.tool.args);
+  if (
+    !argsFingerprint ||
+    argsFingerprint !== binding.requestFingerprint ||
+    argsFingerprint !== phoneCallOwnerNumberReviewSourceFingerprint(row.approval.payload)
+  )
+    return false;
+  const args = row.tool.args;
+  const brief =
+    args && typeof args === 'object' && !Array.isArray(args)
+      ? (args as { brief?: { to?: unknown; maxMinutes?: unknown } }).brief
+      : null;
+  const intent = persistedOwnerActionIntent(row.task);
+  if (
+    !intent ||
+    !brief ||
+    !Number.isSafeInteger(brief.maxMinutes) ||
+    (intent.recipientRequest.kind === 'explicit_number'
+      ? brief.to !== intent.recipientRequest.recipientE164
+      : !row.ownerPhone || brief.to !== row.ownerPhone)
+  )
+    return false;
+  const currentRequest = await readPostgresOwnerCallRequest(
+    tx,
+    binding.ownerId,
+    binding.taskId,
+    'waiting_approval',
+    true,
+  );
+  return Boolean(currentRequest);
+}
+
+async function postgresOwnerOperationBindingOwned(
+  tx: Db,
+  binding: OwnerCallOperationBinding,
+): Promise<boolean> {
+  const row = await readOwnedOwnerCallOperationContext(
+    tx,
+    binding.ownerId,
+    binding.approvalId,
+    binding.taskId,
+    binding.toolCallId,
+  );
+  return Boolean(
+    row &&
+      row.approval.id === binding.approvalId &&
+      row.approval.taskId === binding.taskId &&
+      row.approval.toolCallId === binding.toolCallId &&
+      row.task.id === binding.taskId &&
+      row.task.agentId === binding.ownerId &&
+      row.tool.id === binding.toolCallId &&
+      row.tool.taskId === binding.taskId &&
+      row.tool.approvalId === binding.approvalId,
+  );
+}
+
+function createPostgresOwnerCallOperationsRepository(db: Db): OwnerCallGrantOperationRepository {
+  return {
+    discover: (ownerId, approvalId) =>
+      db.transaction(async (tx) => {
+        const scopedTx = tx as unknown as Db;
+        const row = await readOwnedOwnerCallOperationContext(scopedTx, ownerId, approvalId);
+        if (
+          !row ||
+          row.approval.id !== approvalId ||
+          row.task.agentId !== ownerId ||
+          row.tool.taskId !== row.task.id ||
+          row.tool.approvalId !== row.approval.id
+        )
+          return { kind: 'unavailable' };
+        return discoverOwnerCallGrantOperationInTransaction(scopedTx, ownerId, approvalId);
+      }),
+    register: async (input: OwnerCallOperationRegisterInput) => {
+      const result = await registerOwnerCallGrantOperation(db, {
+        ...input,
+        validateCurrentCall: (tx, binding, now) =>
+          validatePostgresOwnerCallOperationReview(tx as unknown as Db, binding, now),
+      });
+      return result.ok
+        ? { ok: true, operation: result.operation }
+        : { ok: false, reason: result.reason };
+    },
+    admit: async (binding: OwnerCallOperationBinding) => {
+      const result = await admitOwnerCallGrantOperation(db, {
+        ...binding,
+        validateCurrentCall: (tx, current, now) =>
+          validatePostgresOwnerCallOperationReview(tx as unknown as Db, current, now),
+      });
+      return result.ok
+        ? { ok: true, operation: result.operation }
+        : { ok: false, reason: result.reason };
+    },
+    close: async (binding: OwnerCallOperationBinding) => {
+      const result = await closeOwnerCallGrantOperation(db, {
+        ...binding,
+        validateCloseAuthority: (tx, current) =>
+          postgresOwnerOperationBindingOwned(tx as unknown as Db, current),
+      });
+      return result.ok
+        ? { ok: true, operation: result.operation }
+        : { ok: false, reason: result.reason };
+    },
   };
 }
 
@@ -588,8 +1199,11 @@ export async function resumeResolvedApprovals(
 export function createPostgresApprovalRepository(db: Db): ApprovalRepository {
   return {
     kind: 'approval-repository',
+    ownerCallOperations: createPostgresOwnerCallOperationsRepository(db),
     create: (input) => createApproval(db, input),
     getRememberable: (agentId, approvalId) => getRememberableApproval(db, agentId, approvalId),
+    getOwnerCallNumberGrantReview: (agentId, approvalId) =>
+      getOwnerCallNumberGrantReview(db, agentId, approvalId),
     listInbox: (agentId, options) => listApprovalInbox(db, agentId, options),
     listStalledNotices: (options) => listStalledNotices(db, options),
     markNotified: (approvalIds, channels) => markApprovalNotified(db, approvalIds, channels),

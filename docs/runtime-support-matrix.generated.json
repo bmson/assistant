@@ -2,16 +2,16 @@
   "format": 1,
   "purpose": "Source composition and route drift evidence only; not a deployment or configured-runtime receipt.",
   "runtimeSources": {
-    "packages/config/src/index.ts": "492748104b6f0efc340dfd3153177b5889643d8aebe8b6909978da3d0ebdcae5",
+    "packages/config/src/index.ts": "8ff0a219df9d721e29b758d8be2ba80da2088aea8a35f93d5b38566cfdcbf74d",
     "apps/agent/src/deps.ts": "fb30df8600bbcf24da0d5cfa9ef1c92e28700b663429cdbbe37d65ecee0ea655",
     "apps/agent/src/index.ts": "6da57b60f853ca6622142a12b70bb31a73e8155eac30dd7d905218c19ca2fd56",
     "apps/web/lib/server.ts": "47c3906445e13f73f70ee9c341aef7d3279b8a50fd8e120a088f4528fdd57c61",
     "apps/web/proxy.ts": "89e1527d4e40564565e014ea5726807432da3d7df29ca9c9b3d72df06d34263a",
-    "packages/db/drizzle/meta/_journal.json": "2088a29e71a01c6f4a5b33cc8f2af7f24194ded8135ade6827f8fea829d0ec26",
-    "infra/gcp/release-contracts.json": "33370d187575b95377c36bea587f8588777d377d560ca98c549b244a34d1898b"
+    "packages/db/drizzle/meta/_journal.json": "a94cd8a88088e989a08f71cabb8eaf9545a675ebc056d48e5465a772ccdbbcd9",
+    "infra/gcp/release-contracts.json": "ad138e74d841bafafef26b3e4095e9d98c80e29dffd195b5a89995f1e1c0caff"
   },
-  "latestPostgresMigration": "0132_contact_identity_authority",
-  "postgresSchemaVersion": 132,
+  "latestPostgresMigration": "0133_owner_call_grant_operation_receipts",
+  "postgresSchemaVersion": 133,
   "releaseContracts": {
     "agent": {
       "apiContract": 1,
@@ -20,8 +20,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 132,
-        "max": 132
+        "min": 133,
+        "max": 133
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -33,7 +33,7 @@
       },
       "postgresSchema": {
         "min": 132,
-        "max": 132
+        "max": 133
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -45,7 +45,7 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 132
+        "max": 133
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -57,7 +57,7 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 132
+        "max": 133
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -69,7 +69,7 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 132
+        "max": 133
       },
       "currentPostgresSchemaCompatible": true
     }
@@ -147,7 +147,7 @@
     },
     "apps/web/app/api/mobile/v1/approvals/[id]/route.ts": {
       "methods": ["POST"],
-      "sha256": "180da7b2659787731ffd158076f111cd342e75732a73d2d04c3b766ae7e13ece"
+      "sha256": "684773f4eaf138adb84e0f4fdad8da55677d7c6d9997e3e8704a758adecb44c2"
     },
     "apps/web/app/api/mobile/v1/bootstrap/route.ts": {
       "methods": ["GET"],
@@ -399,7 +399,7 @@
     },
     "apps/web/app/api/mobile/v1/workspace/route.ts": {
       "methods": ["GET"],
-      "sha256": "cda4cd2db53e8db6f6135c457f4d0ef09b88f11a0c1a6e1459b5c7cac6bd4257"
+      "sha256": "46aac20eeef65c4097d6304f7495629654150ab13b9a8f6dd44186b9cbf5aeb6"
     },
     "apps/web/app/api/mobile/v1/workspace/sections/[section]/route.ts": {
       "methods": ["GET"],

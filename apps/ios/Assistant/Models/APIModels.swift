@@ -1634,6 +1634,8 @@ struct PendingApproval: Codable, Identifiable, Sendable {
     let toolName: String
     let decision: JSONValue
     var rememberLabel: String? = nil
+    var ownerNumberGrantAvailable: Bool? = nil
+    var ownerCallSourceFingerprint: String? = nil
 }
 
 /// A settled approval as the history list reads it. The server deliberately
@@ -1660,6 +1662,7 @@ struct ResolvedApproval: Codable, Identifiable, Sendable {
     var id: String { approval.id }
     let approval: ResolvedApprovalRecord
     let taskType: String
+    var toolName: String? = nil
 }
 
 struct ApprovalInbox: Codable, Sendable {
@@ -2571,8 +2574,30 @@ struct WorkspacePolicy: Codable, Identifiable, Sendable {
     let createdVia: String
 
     var scope: String? = nil
+    var effectiveAvailability: String? = nil
+    var phonePermissionKind: String? = nil
+    var opaqueDetails: String? = nil
+    var phoneCallPresentation: WorkspacePhoneCallPolicyPresentation? = nil
+    var phoneCallRecipient: String? = nil
+    var phoneCallState: String? = nil
+    var phoneCallLimitLine: String? = nil
 
     var displayName: String { label ?? templateKey.sentenceCaseIdentifier }
+}
+
+struct WorkspacePhoneCallPolicyPresentation: Codable, Sendable {
+    let kind: String
+    var recipient: String? = nil
+    var contactName: String? = nil
+    var maxMinutes: Int? = nil
+    var goal: String? = nil
+    var mayShare: String? = nil
+    var mayAgreeTo: String? = nil
+    var mustNot: String? = nil
+    var language: String? = nil
+    var voicemailMode: String? = nil
+    var voicemailMessage: String? = nil
+    var details: String? = nil
 }
 
 struct WorkspaceCosts: Codable, Sendable {
@@ -3232,6 +3257,7 @@ enum ToolStepLabel {
 }
 
 struct ApprovalResult: Codable, Sendable {
+    var ownerCallNumberGrant: OwnerCallGrantReceipt? = nil
     let ok: Bool
     let taskId: String
     let toolCallId: String
@@ -3494,4 +3520,83 @@ struct RepairPresentation: Equatable, Sendable {
             detail = "Refresh to check this report’s current state."
         }
     }
+}
+
+
+struct OwnerCallNumberGrant: Codable, Sendable {
+    let schemaVersion: Int
+    let grantId: String
+    let recipientE164: String
+    let maxMinutes: Int
+    let expiresAt: String
+    var action: String? = nil
+    var maxCallsPerHour: Int? = nil
+    var maxCallsPerDay: Int? = nil
+    var maxCostUsdMicrosPerCall: Int? = nil
+    var maxCostUsdMicrosPerDay: Int? = nil
+}
+
+struct OwnerCallGrantLimits: Codable, Sendable {
+    let maxCallsPerHour: Int
+    let maxCallsPerDay: Int
+    let maxCostUsdMicrosPerCall: Int
+    let maxCostUsdMicrosPerDay: Int
+    static let defaults = OwnerCallGrantLimits(maxCallsPerHour: 1, maxCallsPerDay: 3, maxCostUsdMicrosPerCall: 1_000_000, maxCostUsdMicrosPerDay: 3_000_000)
+}
+
+struct OwnerCallGrantOperationStatus: Codable, Sendable {
+    let ok: Bool
+    var status: String? = nil
+    var permission: String? = nil
+    var availability: String? = nil
+    var closeToken: String? = nil
+    var grantId: String? = nil
+    var checkedAt: String? = nil
+}
+
+struct OwnerCallNumberBrief: Codable, Sendable {
+    let to: String
+    let contactName: String?
+    let goal: String
+    let context: String?
+    let mayAgreeTo: String?
+    let mustNot: String?
+    let maxMinutes: Int
+    let onVoicemail: String
+    let voicemailMessage: String?
+    let language: String?
+}
+
+struct OwnerCallNumberGrantPreview: Codable, Sendable {
+    let ok: Bool
+    let reviewToken: String
+    let approvalId: String
+    let brief: OwnerCallNumberBrief
+    let grant: OwnerCallNumberGrant
+    let reviewExpiresAt: String
+    let ownerTimeZone: String
+    let configuredMaxMinutes: Int
+    var existingActiveGrants: [OwnerCallExistingGrant] = []
+}
+
+struct OwnerCallExistingGrant: Codable, Identifiable, Sendable {
+    var id: String { policyId }
+    let policyId: String
+    let match: OwnerCallNumberGrant
+}
+
+struct OwnerCallGrantActionBody: Encodable {
+    let action: String
+    var validityChoice: String? = nil
+    var reviewToken: String? = nil
+    var acknowledgement: String? = nil
+    var limits: OwnerCallGrantLimits? = nil
+    var closeToken: String? = nil
+    var confirmation: String? = nil
+}
+
+struct OwnerCallGrantReceipt: Codable, Sendable {
+    let policyId: String
+    let grantId: String
+    let expiresAt: String
 }

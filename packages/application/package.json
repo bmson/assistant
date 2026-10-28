@@ -46,7 +46,9 @@
     "./http-body": "./src/http-body.ts",
     "./owner-editor-wire": "./src/owner-editor-wire.ts",
     "./owner-editor": "./src/owner-editor.ts",
-    "./owner-editor-domain": "./src/owner-editor-domain.ts"
+    "./owner-editor-domain": "./src/owner-editor-domain.ts",
+    "./phone-call-owner-grants": "./src/phone-call-owner-grants.ts",
+    "./approval-policy-presentation": "./src/approval-policy-presentation.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
