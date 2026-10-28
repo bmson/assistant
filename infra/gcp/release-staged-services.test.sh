@@ -181,6 +181,59 @@ import json,sys
 s=json.load(open(sys.argv[1])); assert s['assistant-agent']['traffic']=={'agent-old':100}; assert s['assistant-web']['traffic']=={'web-old':100}
 PY
 }
+# Proposed insertion immediately after assert_old_traffic() in
+# infra/gcp/release-staged-services.test.sh. All copied-source setup, helper
+# definitions, fixture resets, and schema-133 calls are isolated in this
+# subshell; the caller's sourced production functions and schema-132 state stay
+# untouched. The explicit parent reset restores the existing next fixture.
+(
+  bridge_test_root="$TEST_ROOT/schema132-bridge-preflight"
+  mkdir -p "$bridge_test_root/infra/gcp" "$bridge_test_root/packages/db/drizzle/meta"
+  cp "$ROOT/release-staged-services.sh" "$bridge_test_root/infra/gcp/"
+  cp "$ROOT/release-schema-version.mjs" "$bridge_test_root/infra/gcp/"
+  cp "$ROOT/release-contracts.json" "$bridge_test_root/infra/gcp/"
+  cp "$ROOT/../../packages/db/drizzle/meta/_journal.json" "$bridge_test_root/packages/db/drizzle/meta/"
+  python3 - "$bridge_test_root/packages/db/drizzle/meta/_journal.json" <<'PY'
+import json,sys
+p=sys.argv[1]; j=json.load(open(p)); prior=j['entries'][-1]['idx']; idx=prior+1
+j['entries'].append({**j['entries'][-1], 'idx':idx, 'tag':f'{idx:04d}_schema132_bridge_fixture'})
+open(p,'w').write(json.dumps(j))
+PY
+  source "$bridge_test_root/infra/gcp/release-staged-services.sh"
+  [[ "$(node "$bridge_test_root/infra/gcp/release-schema-version.mjs" postgres)" == 133 ]] || fail 'synthetic bridge fixture must derive schema 133'
+
+  set_live_postgres_schema() {
+    python3 - "$TEST_ROOT/state.json" "$1" "$2" <<'PY'
+import json,sys
+p,minimum,maximum=sys.argv[1:]; s=json.load(open(p))
+for name in ('assistant-agent','assistant-web'):
+    env=s[name]['env']; env['ASSISTANT_RELEASE_SCHEMA_DRIVER']='postgres'
+    env['ASSISTANT_RELEASE_SCHEMA_MIN']=minimum; env['ASSISTANT_RELEASE_SCHEMA_MAX']=maximum
+open(p,'w').write(json.dumps(s))
+PY
+  }
+
+  reset_case
+  set_live_postgres_schema 132 133
+  release_preflight_compatibility agent,web || fail 'schema-133 bridge must admit live agent and web declarations through 133'
+  release_preflight_compatibility web || fail 'web-only preflight must admit a live agent proven through schema 133'
+
+  reset_case
+  set_live_postgres_schema 132 132
+  if output="$(release_preflight_compatibility agent,web 2>&1)"; then
+    fail 'historical schema-132-only live pair must fail the schema-133 preflight'
+  fi
+  [[ "$output" == *'live assistant-agent does not declare compatibility with postgres schema 133'* ]] || fail "historical preflight failed for an unexpected reason: $output"
+  [[ ! -s "$STUB_SERVICE_UPDATE_CALLS" && ! -s "$STUB_RELEASE_CALLS" ]] || fail 'historical schema-132-only preflight reached staging or traffic mutation'
+
+  reset_case
+  set_live_postgres_schema 131 132
+  if output="$(release_preflight_compatibility agent,web 2>&1)"; then
+    fail 'live agent ending at 132 must reject schema 133'
+  fi
+  [[ "$output" == *'live assistant-agent does not declare compatibility with postgres schema 133'* ]] || fail "upper-bound preflight failed for an unexpected reason: $output"
+)
+reset_case
 reset_case; export FAIL_AGENT_BUILD=1
 if release_staged_services; then fail 'agent image failure should stop before staging'; fi
 assert_old_traffic
