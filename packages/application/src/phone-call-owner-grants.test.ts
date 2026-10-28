@@ -214,8 +214,9 @@ describe('durable reviewed owner-call permission flow', () => {
         maxCostUsdMicrosPerDay: 1,
       }),
     ).resolves.toMatchObject({ ok: false });
-    expect(repository.ownerCallOperations?.register).not.toHaveBeenCalled();
-    delete repository.ownerCallOperations;
+    const { ownerCallOperations, ...withoutDurableStorage } = repository;
+    expect(ownerCallOperations?.register).not.toHaveBeenCalled();
+    repository = withoutDurableStorage;
     await expect(previewOwnerCallNumberGrant(store(), approvalId, 7)).resolves.toMatchObject({
       ok: false,
     });
