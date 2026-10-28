@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { scoreCalendarEvent, type EventSalience } from './calendar-salience.js';
+import { type EventSalience, scoreCalendarEvent } from './calendar-salience.js';
 import type { PulseMoment } from './pulse.js';
 import {
   calendarChangeMoments,
