@@ -17,9 +17,7 @@ jobs:
     env:
       SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
       APP_BASE_SHA: f7bef31a677010cf1d5bd6e78afaa797e7f54e2c
-      DOCKER_CONFIG: ${{ runner.temp }}/agent-pdf-docker-config
       BUILDER: agent-pdf-${{ github.run_id }}-${{ github.run_attempt }}
-      PROOF: ${{ runner.temp }}/agent-pdf-proof
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         timeout-minutes: 2
@@ -32,6 +30,8 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          export DOCKER_CONFIG="$RUNNER_TEMP/agent-pdf-docker-config"
+          export PROOF="$RUNNER_TEMP/agent-pdf-proof"
           [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
           git merge-base --is-ancestor "$APP_BASE_SHA" HEAD
           python3 - <<'PY'
@@ -57,6 +57,7 @@ jobs:
           printf '#!/usr/bin/env bash\nexec /usr/bin/env -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH %q --host unix:///var/run/docker.sock "$@"\n' "$real_docker" > "$RUNNER_TEMP/agent-pdf-bin/docker"
           chmod 700 "$RUNNER_TEMP/agent-pdf-bin/docker"
           echo "$RUNNER_TEMP/agent-pdf-bin" >> "$GITHUB_PATH"
+          printf 'DOCKER_CONFIG=%s\nPROOF=%s\n' "$DOCKER_CONFIG" "$PROOF" >> "$GITHUB_ENV"
           echo 'CLIENT_READY=true' >> "$GITHUB_ENV"
           printf '%s\n' "TAG=assistant-agent-pdf:${SOURCE_SHA}" >> "$GITHUB_ENV"
       - name: Create bounded isolated builder
