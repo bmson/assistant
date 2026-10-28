@@ -230,6 +230,18 @@ export interface PulseResult {
   heldBy: 'no-candidates' | 'min-gap' | 'daily-cap' | 'already-said' | 'stale-source' | null;
 }
 
+/** Remove a provider-calendar label only from a proactive card with array details. */
+function withoutCalendarDetail(card: ResponseCard): ResponseCard {
+  if (card.kind !== 'proactive-alert' || !Array.isArray(card.details)) return card;
+  return {
+    ...card,
+    details: card.details.filter((detail: unknown) => {
+      if (detail === null || typeof detail !== 'object' || Array.isArray(detail)) return true;
+      return !('label' in detail && detail.label === 'Calendar');
+    }),
+  };
+}
+
 /**
  * Pick what to say. Pure, so the ranking is testable without a database.
  *
@@ -288,8 +300,8 @@ export async function persistNextPulseMoment(
       ? new Set(await store.momentKeys(input.agentId, 'event-lead'))
       : new Set<string>();
   const ranked = [...input.candidates]
-    .filter((candidate) =>
-      !(candidate.legacyMomentKeys ?? []).some((key) => existingLegacyKeys.has(key)),
+    .filter(
+      (candidate) => !(candidate.legacyMomentKeys ?? []).some((key) => existingLegacyKeys.has(key)),
     )
     .sort(comparePulseMoments)
     .filter((moment) => {
@@ -464,13 +476,7 @@ export function eventLeadMoments(salient: readonly EventSalience[], now: Date): 
       const legacyMomentKeys = [
         ...new Set(moments.flatMap((moment) => moment.legacyMomentKeys ?? [])),
       ].sort();
-      const card =
-        group.length > 1 && selected.card.kind === 'proactive-alert'
-          ? {
-              ...selected.card,
-              details: selected.card.details?.filter((detail) => detail.label !== 'Calendar'),
-            }
-          : selected.card;
+      const card = group.length > 1 ? withoutCalendarDetail(selected.card) : selected.card;
       const withAliases = {
         ...selected,
         ...(legacyMomentKeys.length > 0 ? { legacyMomentKeys } : {}),
@@ -488,7 +494,9 @@ export function eventLeadMoments(salient: readonly EventSalience[], now: Date): 
 function canonicalEventLeadIdentity(event: BriefingCalendarEvent): string | undefined {
   const valid = (value: string | undefined) => Boolean(value && Number.isFinite(Date.parse(value)));
   const occurrence = (value: string) =>
-    /^\d{4}-\d{2}-\d{2}$/.test(value) ? `date:${value}` : `instant:${new Date(value).toISOString()}`;
+    /^\d{4}-\d{2}-\d{2}$/.test(value)
+      ? `date:${value}`
+      : `instant:${new Date(value).toISOString()}`;
   const uid = event.iCalUID?.trim();
   if (uid && event.originalStartTime && valid(event.originalStartTime)) {
     return `ical:${uid}\0instance:${occurrence(event.originalStartTime)}`;
@@ -497,7 +505,12 @@ function canonicalEventLeadIdentity(event: BriefingCalendarEvent): string | unde
     return `ical:${uid}\0bounds:${occurrence(event.start)}\0${occurrence(event.end)}`;
   }
   // This identifies only this calendar's provider row, never a cross-calendar copy.
-  if (event.calendarId && event.eventId && event.originalStartTime && valid(event.originalStartTime)) {
+  if (
+    event.calendarId &&
+    event.eventId &&
+    event.originalStartTime &&
+    valid(event.originalStartTime)
+  ) {
     return `calendar:${event.calendarId}\0event:${event.eventId}\0instance:${occurrence(event.originalStartTime)}`;
   }
   if (event.calendarId && event.eventId && !event.recurringEventId) {
@@ -515,7 +528,9 @@ function eventLeadFacts(event: BriefingCalendarEvent): unknown[] {
   const normalizedTime = (value: string) => {
     if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return `date:${value}`;
     const timestamp = Date.parse(value);
-    return Number.isFinite(timestamp) ? `instant:${new Date(timestamp).toISOString()}` : `raw:${value}`;
+    return Number.isFinite(timestamp)
+      ? `instant:${new Date(timestamp).toISOString()}`
+      : `raw:${value}`;
   };
   const attendance = event.ownerParticipation?.identityVerified
     ? [event.ownerParticipation.status, event.ownerParticipation.basis]

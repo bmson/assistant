@@ -112,7 +112,17 @@ describe('pulse ranking and duplicate suppression', () => {
     expect(forward[0]?.card.id).toBe(forward[0]?.key);
     expect(forward[0]?.card).toMatchObject({ kind: 'proactive-alert' });
     if (forward[0]?.card.kind === 'proactive-alert') {
-      expect(forward[0].card.details?.some((detail) => detail.label === 'Calendar')).toBe(false);
+      const details = forward[0].card.details;
+      expect(Array.isArray(details)).toBe(true);
+      if (Array.isArray(details)) {
+        expect(
+          details.some((detail: unknown) => {
+            if (detail === null || typeof detail !== 'object' || Array.isArray(detail))
+              return false;
+            return 'label' in detail && detail.label === 'Calendar';
+          }),
+        ).toBe(false);
+      }
     }
     const reweighted = eventLeadMoments(
       [
@@ -354,14 +364,14 @@ describe('pulse ranking and duplicate suppression', () => {
     const lowerRanked = moment({ key: 'event-lead:other', priority: 50 });
     const admitNotice = vi.fn(async ({ moment: candidate }: { moment: { key: string } }) =>
       candidate.key === duplicate.key
-        ? ({ status: 'already-said' as const })
-        : ({
+        ? { status: 'already-said' as const }
+        : {
             status: 'persisted' as const,
             momentId: 'moment-1',
             messageId: 'message-1',
             conversationId: 'conversation-1',
             suggestionCreated: false,
-          }),
+          },
     );
     const result = await persistNextPulseMoment(
       { admitNotice },
@@ -374,7 +384,9 @@ describe('pulse ranking and duplicate suppression', () => {
       },
     );
     expect(result.moment?.key).toBe(lowerRanked.key);
-    expect(admitNotice.mock.calls.filter(([call]) => call.moment.key === duplicate.key)).toHaveLength(1);
+    expect(
+      admitNotice.mock.calls.filter(([call]) => call.moment.key === duplicate.key),
+    ).toHaveLength(1);
     expect(admitNotice).toHaveBeenCalledTimes(2);
   });
 });
