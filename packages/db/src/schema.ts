@@ -5,7 +5,9 @@ import type {
   EmailContentProvenanceSnapshot,
   ImportArchiveDiagnostics,
   ImportUnitProvenance,
+  OwnerCallGrantOperation,
   OwnerCallGrantOperationPhase,
+  OwnerCallGrantOperationSlot,
   OwnerCorrection,
   OwnerEditorCommand,
   OwnerEditorTerminalResult,
@@ -997,9 +999,18 @@ export const ownerCallGrantOperations = pgTable(
     ownerId: uuid('owner_id').notNull(),
     approvalId: uuid('approval_id').notNull(),
     grantId: uuid('grant_id').notNull(),
-    purpose: text('purpose').notNull().default('owner-call-grant-operation.v1'),
-    schemaVersion: smallint('schema_version').notNull().default(1),
-    operationVersion: smallint('operation_version').notNull().default(1),
+    purpose: text('purpose')
+      .$type<OwnerCallGrantOperation['purpose']>()
+      .notNull()
+      .default('owner-call-grant-operation.v1'),
+    schemaVersion: smallint('schema_version')
+      .$type<OwnerCallGrantOperation['schemaVersion']>()
+      .notNull()
+      .default(1),
+    operationVersion: smallint('operation_version')
+      .$type<OwnerCallGrantOperation['operationVersion']>()
+      .notNull()
+      .default(1),
     taskId: uuid('task_id').notNull(),
     toolCallId: uuid('tool_call_id').notNull(),
     slotGeneration: integer('slot_generation').notNull(),
@@ -1070,8 +1081,14 @@ export const ownerCallGrantOperationSlots = pgTable(
   {
     ownerId: uuid('owner_id').notNull(),
     approvalId: uuid('approval_id').notNull(),
-    purpose: text('purpose').notNull().default('owner-call-grant-operation.v1'),
-    schemaVersion: smallint('schema_version').notNull().default(1),
+    purpose: text('purpose')
+      .$type<OwnerCallGrantOperationSlot['purpose']>()
+      .notNull()
+      .default('owner-call-grant-operation.v1'),
+    schemaVersion: smallint('schema_version')
+      .$type<OwnerCallGrantOperationSlot['schemaVersion']>()
+      .notNull()
+      .default(1),
     generation: integer('generation').notNull().default(0),
     currentGrantId: uuid('current_grant_id'),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),

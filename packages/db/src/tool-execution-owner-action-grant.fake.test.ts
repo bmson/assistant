@@ -48,6 +48,12 @@ function required<T>(value: T | null | undefined, label: string): T {
   return value;
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 class FakeAwaitable<T> implements PromiseLike<T> {
   constructor(private readonly execute: () => T | Promise<T>) {}
 
@@ -74,6 +80,59 @@ interface FakeQueryBuilder extends PromiseLike<unknown[]> {
   values(value: unknown): FakeQueryBuilder;
   onConflictDoNothing(): FakeQueryBuilder;
   returning(...args: unknown[]): Promise<unknown[]>;
+}
+
+type FakeToolCallRow = typeof toolCalls.$inferSelect;
+
+function insertedToolCall(values: Record<string, unknown>): FakeToolCallRow {
+  const {
+    id,
+    taskId,
+    step,
+    toolName,
+    args = {},
+    risk,
+    status = 'proposed',
+    idempotencyKey = null,
+    result = null,
+    error = null,
+    approvalId = null,
+    decision = {},
+    startedAt = null,
+    finishedAt = null,
+  } = values;
+  if (
+    typeof id !== 'string' ||
+    typeof taskId !== 'string' ||
+    typeof step !== 'number' ||
+    !Number.isInteger(step) ||
+    typeof toolName !== 'string' ||
+    typeof risk !== 'string' ||
+    typeof status !== 'string' ||
+    (idempotencyKey !== null && typeof idempotencyKey !== 'string') ||
+    (error !== null && typeof error !== 'string') ||
+    (approvalId !== null && typeof approvalId !== 'string') ||
+    (startedAt !== null && !(startedAt instanceof Date)) ||
+    (finishedAt !== null && !(finishedAt instanceof Date))
+  )
+    throw new Error('Fake tool call insert must match the modeled row');
+  return {
+    id,
+    taskId,
+    step,
+    toolName,
+    args,
+    risk,
+    status,
+    idempotencyKey,
+    result,
+    error,
+    approvalId,
+    decision,
+    startedAt,
+    finishedAt,
+    createdAt: now,
+  };
 }
 
 function fixture(withApprovedCall: boolean) {
@@ -133,14 +192,14 @@ function fixture(withApprovedCall: boolean) {
     updatedAt: now,
     createdVia: 'owner',
   };
-  const approvedCall = withApprovedCall
+  const approvedCall: FakeToolCallRow | null = withApprovedCall
     ? {
         id: toolCallId,
         taskId,
         step: 0,
         toolName: 'phone.call',
         args: {},
-        risk: 'high',
+        risk: 'approval',
         status: 'approved',
         idempotencyKey: null,
         decision: {},
@@ -149,6 +208,7 @@ function fixture(withApprovedCall: boolean) {
         approvalId: null,
         startedAt: null,
         finishedAt: null,
+        createdAt: now,
       }
     : null;
   return { task, conversation, message, policy, approvedCall };
@@ -221,12 +281,16 @@ function fakeDb(seed: ReturnType<typeof fixture>) {
       };
       builder.onConflictDoNothing = () => required(builder, 'insert query builder');
       builder.returning = async () => {
-        if (table === toolCalls) {
-          const inserted = { ...values, createdAt: now };
-          state.calls.push(inserted);
-          return [inserted];
+        if (table === toolCalls || table === ownerCallGrantUsage) {
+          if (!isPlainRecord(values)) throw new Error('Fake insert values must be a plain record');
+          const insertValues = values;
+          if (table === toolCalls) {
+            const inserted = insertedToolCall(insertValues);
+            state.calls.push(inserted);
+            return [inserted];
+          }
+          if (!state.usage) state.usage = insertValues;
         }
-        if (table === ownerCallGrantUsage && !state.usage) state.usage = values;
         return [];
       };
       return required(builder, 'insert query builder');
