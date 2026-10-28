@@ -7,12 +7,64 @@ import type {
 import { useRouter } from 'next/navigation';
 import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { memoryNoteHref } from '@/lib/memory-note-context';
-import { OwnerEditorOperation, type OwnerEditorOperationState } from '@/lib/owner-editor-operation';
+import {
+  OwnerEditorOperation,
+  type OwnerEditorOperationState,
+  ownerEditorOutcomeMessage,
+} from '@/lib/owner-editor-operation';
 import type { OwnerMemoryEditorView } from '@/lib/owner-memory-editor-view';
 import { btn, textareaClass } from '@/lib/ui';
 import { Modal } from '@/lib/ui-client';
 
 type Capture = { snapshot: OwnerMemoryEditorView['snapshot']; grant: OwnerEditorFormGrant };
+
+export function ownerMemoryRecoveryPresentation(
+  state: OwnerEditorOperationState,
+  capture: Capture | null,
+  memoryId: string,
+): { hasDraft: boolean; ownReply: boolean; message: string } {
+  const hasDraft = capture !== null;
+  const reply = state.reply;
+  const ownReply =
+    reply?.authority === 'operation_receipt' &&
+    reply.command === 'correct_owner_memory' &&
+    state.reviewTargetId === memoryId &&
+    ((reply.outcome !== 'saved' && reply.outcome !== 'unchanged') ||
+      reply.ids.memoryId === memoryId);
+  const ordinaryPendingMessages = [
+    'An earlier save could not be confirmed. Check its result before saving again.',
+    'Save could not be confirmed. Check its result before saving again.',
+  ];
+  const canUsePendingCopy =
+    state.phase === 'pending' &&
+    !state.busy &&
+    ordinaryPendingMessages.includes(state.message) &&
+    (reply === null || reply.authority === 'unresolved');
+  if (canUsePendingCopy) {
+    return {
+      hasDraft,
+      ownReply,
+      message: hasDraft
+        ? 'Save result unknown. Check result before saving again.'
+        : 'The result of an earlier save is still unknown. Check result to confirm it.',
+    };
+  }
+  const isOwnSavedRefreshReceipt =
+    state.phase === 'resolved' &&
+    !state.busy &&
+    reply?.authority === 'operation_receipt' &&
+    ownReply &&
+    reply.outcome === 'saved' &&
+    reply.refreshPending === true &&
+    state.message === ownerEditorOutcomeMessage(reply);
+  return {
+    hasDraft,
+    ownReply,
+    message: isOwnSavedRefreshReceipt
+      ? 'Saved. Related information may still show older details.'
+      : state.message,
+  };
+}
 
 /** Keeps the original operation and draft mounted even if a refreshed capability disappears. */
 export function OwnerMemoryEditor({ view }: { view: OwnerMemoryEditorView }) {
@@ -51,12 +103,12 @@ function EditableSavedNote({
   const refreshed = useRef<unknown>(null);
   const resolvedView = useRef<OwnerMemoryEditorView | null>(null);
   const [awaitingReadback, setAwaitingReadback] = useState(false);
-  const ownReply =
-    state.reply?.authority === 'operation_receipt' &&
-    state.reply.command === 'correct_owner_memory' &&
-    state.reviewTargetId === view.snapshot.memoryId &&
-    ((state.reply.outcome !== 'saved' && state.reply.outcome !== 'unchanged') ||
-      state.reply.ids.memoryId === view.snapshot.memoryId);
+  const recoveryPresentation = ownerMemoryRecoveryPresentation(
+    state,
+    capture,
+    view.snapshot.memoryId,
+  );
+  const { hasDraft, ownReply } = recoveryPresentation;
   const saved =
     ownReply &&
     state.reply?.authority === 'operation_receipt' &&
@@ -167,8 +219,8 @@ function EditableSavedNote({
   };
   const pending = state.phase === 'pending' || state.busy;
   const keptDraft =
-    capture !== null &&
-    (pending || state.phase === 'blocked' || review || !view.grant || !sessionMatches);
+    hasDraft && (pending || state.phase === 'blocked' || review || !view.grant || !sessionMatches);
+  const recoveryMessage = recoveryPresentation.message;
   const otherNote =
     state.reviewTargetId &&
     state.reviewTargetId !== view.snapshot.memoryId &&
@@ -176,7 +228,9 @@ function EditableSavedNote({
       ? memoryNoteHref(state.reviewTargetId, '/profile/knowledge?view=library')
       : null;
   const recoveryProps = {
-    state,
+    state: { ...state, message: recoveryMessage },
+    hasDraft,
+    editorOpen: open,
     awaitingReadback,
     sessionMatches,
     otherNote,
@@ -235,8 +289,8 @@ function EditableSavedNote({
           <h2 className="font-display text-xl font-semibold">Edit saved note</h2>
           <SavedNoteRecovery {...recoveryProps} />
           <p className="text-sm text-muted">
-            This records your correction to the saved note. Its linked source remains provenance;
-            the original email or document is unchanged.
+            Your correction changes this saved note. It does not change the original email or
+            document.
           </p>
           <div>
             <h3 className="text-sm font-semibold">Note when you opened this editor</h3>
@@ -251,7 +305,8 @@ function EditableSavedNote({
                 {view.snapshot.content}
               </p>
               <p className="mt-2 text-sm text-muted">
-                Your draft is kept below. Review the current note before starting a new save.
+                Review the saved note before saving your draft. Refresh saved note checks for newer
+                saved text and keeps your draft.
               </p>
               <button
                 type="button"
@@ -266,7 +321,7 @@ function EditableSavedNote({
                 }
                 onClick={acknowledgeCurrent}
               >
-                I have reviewed the current note
+                I reviewed the saved note — keep my draft
               </button>
               <button
                 type="button"
@@ -274,7 +329,7 @@ function EditableSavedNote({
                 disabled={pending}
                 onClick={() => router.refresh()}
               >
-                Load current note
+                Refresh saved note
               </button>
             </div>
           ) : null}
@@ -304,34 +359,18 @@ function EditableSavedNote({
               Editing is no longer available for this view. Your draft is kept here.
             </p>
           ) : null}
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              className={btn.primary}
-              disabled={
-                savedThisDraft ||
-                state.phase !== 'ready' ||
-                pending ||
-                review ||
-                changed ||
-                !view.grant ||
-                !sessionMatches ||
-                draft.trim().length < 3 ||
-                draft.trim().length > 4000
-              }
-              onClick={() => void save()}
-            >
-              Save correction
-            </button>
-            <button type="button" className={btn.outline} onClick={close}>
-              Close
-            </button>
-          </div>
-          {pending ? (
-            <p role="status" className="text-sm text-muted">
-              The original save is being tracked. Close does not cancel it.
-            </p>
-          ) : null}
+          <SavedNoteActions
+            state={state}
+            pending={pending}
+            savedThisDraft={savedThisDraft}
+            review={review}
+            changed={changed}
+            hasGrant={!!view.grant}
+            sessionMatches={sessionMatches}
+            draft={draft}
+            onSave={() => void save()}
+            onClose={close}
+          />
         </Modal>
       ) : null}
     </div>
@@ -345,9 +384,63 @@ export function checkSavedNotePendingResult(
   return controller.canReconcile() ? controller.reconcile() : controller.check();
 }
 
+export function SavedNoteActions({
+  state,
+  pending,
+  savedThisDraft,
+  review,
+  changed,
+  hasGrant,
+  sessionMatches,
+  draft,
+  onSave,
+  onClose,
+}: {
+  state: Pick<OwnerEditorOperationState, 'phase'>;
+  pending: boolean;
+  savedThisDraft: boolean;
+  review: boolean;
+  changed: boolean;
+  hasGrant: boolean;
+  sessionMatches: boolean;
+  draft: string;
+  onSave: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {state.phase !== 'pending' ? (
+        <button
+          type="button"
+          className={btn.primary}
+          disabled={
+            savedThisDraft ||
+            state.phase !== 'ready' ||
+            pending ||
+            review ||
+            changed ||
+            !hasGrant ||
+            !sessionMatches ||
+            draft.trim().length < 3 ||
+            draft.trim().length > 4000
+          }
+          onClick={onSave}
+        >
+          Save correction
+        </button>
+      ) : null}
+      <button type="button" className={btn.outline} onClick={onClose}>
+        Close
+      </button>
+    </div>
+  );
+}
+
 /** Rendered inside the dialog while it owns focus, or on the page after Close. */
 export function SavedNoteRecovery({
   state,
+  hasDraft,
+  editorOpen,
   awaitingReadback,
   sessionMatches,
   otherNote,
@@ -355,6 +448,8 @@ export function SavedNoteRecovery({
   checkResult,
 }: {
   state: Pick<OwnerEditorOperationState, 'message' | 'phase' | 'busy'>;
+  hasDraft: boolean;
+  editorOpen: boolean;
   awaitingReadback: boolean;
   sessionMatches: boolean;
   otherNote: string | null;
@@ -370,9 +465,9 @@ export function SavedNoteRecovery({
       ) : null}
       {awaitingReadback ? (
         <div className="text-sm text-muted">
-          <p>Loading the current saved note before another edit.</p>
+          <p>Loading the saved note…</p>
           <button type="button" className={`${btn.outline} mt-2`} onClick={reload}>
-            Reload saved note
+            Refresh saved note
           </button>
         </div>
       ) : null}
@@ -388,14 +483,19 @@ export function SavedNoteRecovery({
         </a>
       ) : null}
       {state.phase === 'pending' ? (
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-start gap-2">
           <button type="button" className={btn.primary} disabled={state.busy} onClick={checkResult}>
             Check result
           </button>
-          <p className="w-full text-sm text-muted">
-            Closing this editor does not cancel a save. Keep your draft until its result is
-            confirmed. Draft text is not kept across a page reload.
-          </p>
+          {sessionMatches ? (
+            <p className="w-full text-sm text-muted">
+              {hasDraft
+                ? editorOpen
+                  ? 'Closing keeps this draft on this page and does not cancel the save. Reloading loses the draft text.'
+                  : 'Your draft is kept on this page. Check result before saving again. Reloading loses the draft text.'
+                : 'Check the earlier save before making another change. Draft text is not restored after reloading.'}
+            </p>
+          ) : null}
         </div>
       ) : null}
     </div>
