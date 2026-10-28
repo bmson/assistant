@@ -5236,6 +5236,52 @@ extension APIClientRetryTests {
     }
 
     @MainActor
+    func testEmptyIdlePollPreservesTranscriptObservationAndStillAdvancesCursor() async throws {
+        let model = try await notificationModel()
+        model.scenePhaseDidChange(.active)
+        defer { model.scenePhaseDidChange(.background) }
+        let original = model.messages
+        let messagesChanged = NativeObservationSignal()
+        withObservationTracking { _ = model.messages } onChange: { messagesChanged.mark() }
+
+        let quiet = ChatUpdates(taskStatus: nil, messages: [], refreshed: [], superseded: nil,
+            nextCursor: "quiet-cursor", hasMore: false, activity: [])
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat/status": [.success(status: 200, body: try JSONEncoder().encode(quiet))]
+        ])
+        let quietChanged = await model.refreshIdleConversation()
+        XCTAssertEqual(quietChanged, false)
+        XCTAssertEqual(model.messages, original)
+        XCTAssertFalse(messagesChanged.changed, "An empty held poll must not publish an unchanged transcript")
+
+        var refreshed = try XCTUnwrap(original.first)
+        refreshed.parts = [.init(type: "text", text: "The existing reply was refreshed")]
+        let update = ChatUpdates(taskStatus: nil, messages: [], refreshed: [refreshed], superseded: nil,
+            nextCursor: "refresh-cursor", hasMore: false, activity: [])
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat/status": [.success(status: 200, body: try JSONEncoder().encode(update))]
+        ])
+        let refreshChanged = await model.refreshIdleConversation()
+        XCTAssertEqual(refreshChanged, true)
+        XCTAssertTrue(messagesChanged.changed, "A nonempty refresh still publishes its changed message")
+        XCTAssertEqual(model.messages.first(where: { $0.id == refreshed.id }), refreshed)
+        let statusURL = try XCTUnwrap(StubURLProtocol.urls.first(where: { $0.path == "/api/mobile/v1/chat/status" }))
+        let components = try XCTUnwrap(URLComponents(url: statusURL, resolvingAgainstBaseURL: false))
+        XCTAssertEqual(components.queryItems?.first(where: { $0.name == "cursor" })?.value, "quiet-cursor",
+            "An empty poll still advances the cursor used by the next read")
+
+        let removal = ChatUpdates(taskStatus: nil, messages: [], refreshed: [], superseded: [refreshed.id],
+            nextCursor: nil, hasMore: false, activity: [])
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat/status": [.success(status: 200, body: try JSONEncoder().encode(removal))]
+        ])
+        let removalChanged = await model.refreshIdleConversation()
+        XCTAssertEqual(removalChanged, true)
+        XCTAssertFalse(model.messages.contains(where: { $0.id == refreshed.id }),
+            "Superseded-only updates must still remove rows when both merge inputs are empty")
+    }
+
+    @MainActor
     func testIdleReconciliationIgnoresToolOnlyAndRetractedRepliesAndKeepsNewerErrors() async throws {
         let taskId = "33333333-3333-4333-8333-333333333333"
         let exactReply = ChatMessage(
