@@ -467,6 +467,40 @@ describe('admitted public city events through the complete offline executor', ()
     expect(f.commitmentReads).not.toHaveBeenCalled();
   });
 
+  it.each(['matching', 'failed'] as const)(
+    'clarifies an earlier comparison after %s public evidence without claiming prior verification state',
+    async (mode) => {
+      const f = fixture(mode);
+      const first = await f.turn('Find public events in San Francisco this weekend.');
+      expect(first.calls.map((call) => call.toolName)).toEqual(['web.search', 'web.fetch']);
+      if (mode === 'matching') {
+        expect(first.reply?.text).toContain('[Art Walk]');
+        expect(first.reply?.text).toMatch(
+          /occurrences, times, venues, admission prices.*availability remain unverified/,
+        );
+      } else {
+        expect(first.reply?.text).not.toContain('[Art Walk]');
+      }
+      expect(first.reply?.text).not.toMatch(/Secret Hall|10:00|\$15|Sold out/);
+
+      const dispatchCount = f.dispatched.length;
+      const ledgerCount = f.ledger.length;
+      const followup = await f.turn('Anything earlier?');
+      expect(followup.result.outcome).toBe('done');
+      expect(followup.reply?.text).toBe('Which event or time should I compare against?');
+      expect(followup.reply?.text).not.toContain('[Art Walk]');
+      expect(followup.calls).toEqual([]);
+      expect(followup.objectRoles).toEqual([]);
+      expect(f.dispatched).toHaveLength(dispatchCount);
+      expect(f.ledger).toHaveLength(ledgerCount);
+      expect(f.ledger.filter((row) => row.taskId === followup.id)).toEqual([]);
+      expect(f.router.step).not.toHaveBeenCalled();
+      expect(f.router.embed).not.toHaveBeenCalled();
+      expect(f.forbidden).not.toHaveBeenCalled();
+      expect(f.commitmentReads).not.toHaveBeenCalled();
+    },
+  );
+
   it('excludes prior-task successful pages and private history, and performs a fresh current-task search', async () => {
     const f = fixture('snippet');
     const oldTaskId = randomUUID();
