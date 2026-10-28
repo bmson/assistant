@@ -54,6 +54,7 @@ import type {
   BriefingCalendarReader,
   CalendarEventReader,
 } from '../workflow/briefing.js';
+import { canonicalOccurrenceGroups } from '../workflow/calendar-relationship.js';
 import type { ResponseCard } from '../workflow/response-cards.js';
 import {
   type AttendeeResponseDigest,
@@ -206,6 +207,11 @@ export interface PulseMoment {
   text: string;
   /** Higher wins when several moments are live at once. */
   priority: number;
+  /** Evidence-based tie-breaks inside a priority tier; higher values win. */
+  urgency?: number;
+  relevance?: number;
+  /** Read-only compatibility aliases for pre-v2 event-lead keys. Never persisted. */
+  legacyMomentKeys?: string[];
   /** Grounded presentation for chat; text remains the push and compatibility fallback. */
   card: ResponseCard;
   /** An optional proposal to attach, promoted only if the owner accepts it. */
@@ -227,9 +233,8 @@ export interface PulseResult {
 /**
  * Pick what to say. Pure, so the ranking is testable without a database.
  *
- * Ties break on the key rather than input order: two moments of equal priority
- * must resolve the same way on every run, or the "said once" fence would race
- * itself across concurrent sweeps.
+ * Within a priority tier, stronger time urgency and source relevance win.
+ * Exact ties break on the key, so concurrent sweeps resolve the same moment.
  */
 export function selectPulseMoment(candidates: readonly PulseMoment[]): PulseMoment | null {
   if (candidates.length === 0) return null;
@@ -237,7 +242,18 @@ export function selectPulseMoment(candidates: readonly PulseMoment[]): PulseMome
 }
 
 function comparePulseMoments(a: PulseMoment, b: PulseMoment): number {
-  return b.priority - a.priority || a.key.localeCompare(b.key);
+  return (
+    b.priority - a.priority ||
+    (b.urgency ?? 0) - (a.urgency ?? 0) ||
+    (b.relevance ?? 0) - (a.relevance ?? 0) ||
+    a.key.localeCompare(b.key)
+  );
+}
+
+function timeUrgency(iso: string, now: Date, horizonMinutes: number): number {
+  const away = minutesUntil(iso, now);
+  if (away === null || !Number.isFinite(away) || away <= 0 || horizonMinutes <= 0) return 0;
+  return Math.max(0, Math.min(1, 1 - away / horizonMinutes));
 }
 
 /**
@@ -246,7 +262,7 @@ function comparePulseMoments(a: PulseMoment, b: PulseMoment): number {
  * current pacing, preference and privacy checks.
  */
 export async function persistNextPulseMoment(
-  store: Pick<PulseRepository, 'admitNotice'>,
+  store: Pick<PulseRepository, 'admitNotice'> & Partial<Pick<PulseRepository, 'momentKeys'>>,
   input: {
     agentId: string;
     taskId?: string;
@@ -261,7 +277,26 @@ export async function persistNextPulseMoment(
   alreadySaidKeys: string[];
   heldBy: 'no-candidates' | 'already-said' | 'min-gap' | 'daily-cap' | 'stale-source' | null;
 }> {
-  const ranked = [...input.candidates].sort(comparePulseMoments);
+  const seenCandidateKeys = new Set<string>();
+  const observedLegacyKeys = new Set(
+    input.candidates.flatMap((candidate) => candidate.legacyMomentKeys ?? []),
+  );
+  // This lookup only protects aliases represented by the current observation.
+  // It is intentionally not described as an atomic mixed-version writer fence.
+  const existingLegacyKeys =
+    observedLegacyKeys.size > 0 && store.momentKeys
+      ? new Set(await store.momentKeys(input.agentId, 'event-lead'))
+      : new Set<string>();
+  const ranked = [...input.candidates]
+    .filter((candidate) =>
+      !(candidate.legacyMomentKeys ?? []).some((key) => existingLegacyKeys.has(key)),
+    )
+    .sort(comparePulseMoments)
+    .filter((moment) => {
+      if (seenCandidateKeys.has(moment.key)) return false;
+      seenCandidateKeys.add(moment.key);
+      return true;
+    });
   const alreadySaidKeys: string[] = [];
   let staleSource = false;
   for (const moment of ranked) {
@@ -336,19 +371,20 @@ function minutesUntil(iso: string, now: Date): number | null {
  * treating it as one is how a proactive assistant becomes a muted one.
  */
 export function eventLeadMoments(salient: readonly EventSalience[], now: Date): PulseMoment[] {
-  const moments: PulseMoment[] = [];
+  const candidates: Array<{ event: BriefingCalendarEvent; moment: PulseMoment }> = [];
   for (const scored of salient) {
     // This path has no booking-source reconciliation. Keep the calendar row in
     // normal agenda/snapshot handling, but do not turn an unverified flight
     // label into a time-specific travel lead.
-    if (isFlightLikeCalendarEvent(scored.event)) continue;
+    if (isFlightLikeCalendarEvent(scored.event) || scored.event.status === 'cancelled') continue;
     if (scored.event.allDay) continue;
     const away = minutesUntil(scored.event.start, now);
-    if (away === null || away <= 0) continue;
+    if (away === null || !Number.isFinite(away) || away <= 0) continue;
     const travels = scored.reasons.some((reason) => reason.startsWith('it is at'));
     const lead = travels ? LEAD_MINUTES_TRAVEL : LEAD_MINUTES_DESK;
     if (away > lead) continue;
     const inMinutes = Math.max(1, Math.round(away));
+    const urgency = timeUrgency(scored.event.start, now, lead);
     // Collapsed on the way in: a Google Calendar location routinely carries an
     // embedded newline ("Venue\nStreet, City"), and that would otherwise end
     // the sentence early.
@@ -361,35 +397,137 @@ export function eventLeadMoments(salient: readonly EventSalience[], now: Date): 
     // marker that decides the travel lead time above, but repeating the address
     // one clause later is how the owner ends up reading it twice.
     const why = scored.reasons.filter((reason) => !reason.startsWith('it is at'));
-    moments.push({
-      kind: 'event-lead',
-      // Keyed on the event and its start so a moved event earns a fresh nudge.
-      key: `event-lead:${scored.event.eventId ?? scored.event.summary}:${scored.event.start}`,
-      text:
-        `${summary} starts in ${inMinutes} minute${inMinutes === 1 ? '' : 's'}${where}.` +
-        (why.length > 0 ? ` ${sentenceCase(collapseWhitespace(why.join('; ')))}.` : ''),
-      card: {
-        kind: 'proactive-alert',
-        id: `event-lead:${scored.event.eventId ?? scored.event.summary}:${scored.event.start}`,
-        category: 'event',
-        urgencyLabel: `Starts in ${inMinutes} min`,
-        title: summary,
-        startsAt: scored.event.start,
-        details: [
-          ...(location ? [{ label: 'Location', value: location }] : []),
-          ...(scored.event.calendar?.trim()
-            ? [{ label: 'Calendar', value: collapseWhitespace(scored.event.calendar) }]
-            : []),
-        ],
+    const legacyKey = `event-lead:${scored.event.eventId ?? scored.event.summary}:${scored.event.start}`;
+    const providerIdentity = canonicalEventLeadIdentity(scored.event);
+    const key = providerIdentity
+      ? `event-lead:v2:${createHash('sha256')
+          .update(JSON.stringify([providerIdentity, eventLeadFacts(scored.event)]))
+          .digest('hex')}`
+      : legacyKey;
+    candidates.push({
+      event: scored.event,
+      moment: {
+        kind: 'event-lead',
+        // This provider-and-facts key is stable across calendar-copy membership.
+        key,
+        text:
+          `${summary} starts in ${inMinutes} minute${inMinutes === 1 ? '' : 's'}${where}.` +
+          (why.length > 0 ? ` ${sentenceCase(collapseWhitespace(why.join('; ')))}.` : ''),
+        card: {
+          kind: 'proactive-alert',
+          id: key,
+          category: 'event',
+          urgencyLabel: `Starts in ${inMinutes} min`,
+          title: summary,
+          startsAt: scored.event.start,
+          details: [
+            ...(location ? [{ label: 'Location', value: location }] : []),
+            ...(scored.event.calendar?.trim()
+              ? [{ label: 'Calendar', value: collapseWhitespace(scored.event.calendar) }]
+              : []),
+          ],
+        },
+        // Keep category priority intact; these source-derived values only
+        // decide between event leads in the same priority tier.
+        priority: CANCELLED_OR_LEAD_PRIORITY,
+        urgency,
+        relevance: scored.score,
+        ...(providerIdentity && key !== legacyKey ? { legacyMomentKeys: [legacyKey] } : {}),
       },
-      // Time-boxed and about to expire: nothing the pulse finds outranks
-      // something the owner is about to be late for — except learning there is
-      // nothing left to be on time for at all (`calendarChangeMoments` below,
-      // same priority tier, for the same reason).
-      priority: CANCELLED_OR_LEAD_PRIORITY,
     });
   }
-  return moments;
+  const byEvent = new Map(candidates.map((candidate) => [candidate.event, candidate.moment]));
+  const groups = canonicalOccurrenceGroups(candidates.map((candidate) => candidate.event));
+  const safeGroups = groups.flatMap((group) => {
+    const facts = new Set(group.map((event) => JSON.stringify(eventLeadFacts(event))));
+    const verifiedResponses = new Set(
+      group.flatMap((event) => {
+        const response = event.ownerParticipation;
+        return response?.identityVerified && response.basis === 'attendee-email'
+          ? [response.status]
+          : [];
+      }),
+    );
+    // Conflicting owner RSVP evidence may describe distinct attendance; leave
+    // those alerts separate rather than silently treating them as one event.
+    return facts.size > 1 || verifiedResponses.size > 1 ? group.map((event) => [event]) : [group];
+  });
+  return safeGroups
+    .flatMap((group) => {
+      const moments = group.flatMap((event) => {
+        const moment = byEvent.get(event);
+        return moment ? [moment] : [];
+      });
+      const selected = [...moments].sort(comparePulseMoments)[0];
+      if (!selected) return [];
+      // Keep every observed alias, but make its order independent of provider iteration order.
+      const legacyMomentKeys = [
+        ...new Set(moments.flatMap((moment) => moment.legacyMomentKeys ?? [])),
+      ].sort();
+      const card =
+        group.length > 1 && selected.card.kind === 'proactive-alert'
+          ? {
+              ...selected.card,
+              details: selected.card.details?.filter((detail) => detail.label !== 'Calendar'),
+            }
+          : selected.card;
+      const withAliases = {
+        ...selected,
+        ...(legacyMomentKeys.length > 0 ? { legacyMomentKeys } : {}),
+        card,
+      };
+      if (moments.length === 1 || selected.key.startsWith('event-lead:v2:')) return [withAliases];
+      const stableKey = moments.map((moment) => moment.key).sort()[0];
+      if (!stableKey || selected.key === stableKey) return [withAliases];
+      return [{ ...withAliases, key: stableKey, card: { ...selected.card, id: stableKey } }];
+    })
+    .sort(comparePulseMoments);
+}
+
+/** Cross-calendar identity requires an exact provider UID and occurrence instance. */
+function canonicalEventLeadIdentity(event: BriefingCalendarEvent): string | undefined {
+  const valid = (value: string | undefined) => Boolean(value && Number.isFinite(Date.parse(value)));
+  const occurrence = (value: string) =>
+    /^\d{4}-\d{2}-\d{2}$/.test(value) ? `date:${value}` : `instant:${new Date(value).toISOString()}`;
+  const uid = event.iCalUID?.trim();
+  if (uid && event.originalStartTime && valid(event.originalStartTime)) {
+    return `ical:${uid}\0instance:${occurrence(event.originalStartTime)}`;
+  }
+  if (uid && !event.recurringEventId && valid(event.start) && valid(event.end)) {
+    return `ical:${uid}\0bounds:${occurrence(event.start)}\0${occurrence(event.end)}`;
+  }
+  // This identifies only this calendar's provider row, never a cross-calendar copy.
+  if (event.calendarId && event.eventId && event.originalStartTime && valid(event.originalStartTime)) {
+    return `calendar:${event.calendarId}\0event:${event.eventId}\0instance:${occurrence(event.originalStartTime)}`;
+  }
+  if (event.calendarId && event.eventId && !event.recurringEventId) {
+    return `calendar:${event.calendarId}\0event:${event.eventId}`;
+  }
+  return undefined;
+}
+
+/** Material current display facts only; ranking and generated prose never change identity. */
+function eventLeadFacts(event: BriefingCalendarEvent): unknown[] {
+  const normalizedTitle = (value: string | undefined) =>
+    (value ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLocaleLowerCase('en-US');
+  const normalizedLocation = (value: string | undefined) =>
+    (value ?? '').replace(/\s+/g, ' ').trim();
+  const normalizedTime = (value: string) => {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return `date:${value}`;
+    const timestamp = Date.parse(value);
+    return Number.isFinite(timestamp) ? `instant:${new Date(timestamp).toISOString()}` : `raw:${value}`;
+  };
+  const attendance = event.ownerParticipation?.identityVerified
+    ? [event.ownerParticipation.status, event.ownerParticipation.basis]
+    : ['unverified'];
+  return [
+    normalizedTitle(event.summary),
+    normalizedTime(event.start),
+    normalizedTime(event.end),
+    Boolean(event.allDay),
+    normalizedLocation(event.location),
+    attendance,
+  ];
 }
 
 /**
@@ -410,15 +548,19 @@ export function eventLeadMoments(salient: readonly EventSalience[], now: Date): 
 export function calendarChangeMoments(
   changes: readonly CalendarChange[],
   timeZone: string,
+  now?: Date,
 ): PulseMoment[] {
   return changes.map((change): PulseMoment => {
     const id = `calendar-${change.kind}:${change.calendarId}:${change.eventId}`;
     // Collapsed once, at the point the provider's summary enters — the same
     // discipline as `calendar-salience.ts`'s `describeSalience`.
     const summary = collapseWhitespace(change.summary);
+    const urgency = now ? timeUrgency(change.start, now, CALENDAR_WINDOW_HOURS * 60) : undefined;
+    const withUrgency = <T extends PulseMoment>(moment: T): T =>
+      urgency === undefined ? moment : { ...moment, urgency };
     if (change.kind === 'unverified') {
       const key = `${id}:${change.start}`;
-      return {
+      return withUrgency({
         kind: 'calendar-unverified',
         key,
         text: `"${summary}" is no longer in this calendar window. I could not confirm whether it moved or was cancelled; keep the existing plan until you verify it.`,
@@ -432,10 +574,10 @@ export function calendarChangeMoments(
           summary: 'Missing from the current window; cancellation has not been confirmed.',
           details: [{ label: 'Last confirmed start', value: change.start }],
         },
-      };
+      });
     }
     if (change.kind === 'cancelled') {
-      return {
+      return withUrgency({
         kind: 'calendar-cancelled',
         key: id,
         text: `"${summary}" (was ${ownerDateTime(change.start, timeZone)}) has been cancelled.`,
@@ -448,12 +590,12 @@ export function calendarChangeMoments(
           title: summary,
           summary: `Was scheduled for ${ownerDateTime(change.start, timeZone)}.`,
         },
-      };
+      });
     }
     if (change.kind === 'moved') {
       const key = `${id}:${change.start}`;
       const previous = change.previousStart ? ownerDateTime(change.previousStart, timeZone) : '';
-      return {
+      return withUrgency({
         kind: 'calendar-moved',
         key,
         text: `"${summary}" moved from ${previous} to ${ownerDateTime(change.start, timeZone)}.`,
@@ -472,12 +614,12 @@ export function calendarChangeMoments(
               : []),
           ],
         },
-      };
+      });
     }
     // 'declined'
     const who = (change.declinedEmails ?? []).join(', ');
     const key = `${id}:${who}`;
-    return {
+    return withUrgency({
       kind: 'calendar-declined',
       key,
       text: `${who} declined "${summary}" (${ownerDateTime(change.start, timeZone)}), having previously accepted.`,
@@ -490,7 +632,7 @@ export function calendarChangeMoments(
         title: summary,
         summary: `${who} had accepted, now declined.`,
       },
-    };
+    });
   });
 }
 
@@ -577,7 +719,7 @@ export function mailMoment(row: {
   };
 }
 
-function commitmentMoment(
+export function commitmentMoment(
   row: {
     id: string;
     title: string;
@@ -585,8 +727,14 @@ function commitmentMoment(
     dueAt: Date;
   },
   timeZone: string,
+  now: Date,
 ): PulseMoment {
   const when = ownerDateTime(row.dueAt.toISOString(), timeZone);
+  const until = (row.dueAt.getTime() - now.getTime()) / 3_600_000;
+  const urgency =
+    Number.isFinite(until) && until > 0
+      ? Math.max(0, Math.min(1, 1 - until / COMMITMENT_HORIZON_HOURS))
+      : 0;
   const title = collapseWhitespace(row.title);
   const nextAction = collapseWhitespace(row.nextAction);
   return {
@@ -604,6 +752,7 @@ function commitmentMoment(
       details: [{ label: 'Due', value: row.dueAt.toISOString() }],
     },
     priority: 50,
+    urgency,
   };
 }
 
@@ -964,7 +1113,7 @@ export async function runPulse(
           calendar.complete,
         )
       : [];
-    const changedCalendarMoments = calendarChangeMoments(calendarChanges, agent.timezone);
+    const changedCalendarMoments = calendarChangeMoments(calendarChanges, agent.timezone, now);
     const acknowledgedCalendarKeys = new Set<string>();
     const saveCalendarSnapshot = async () => {
       if (!calendar) return;
@@ -1020,7 +1169,7 @@ export async function runPulse(
           obligationVersion: row.obligationVersion!,
         },
       })),
-      ...dueCommitments.map((row) => commitmentMoment(row, agent.timezone)),
+      ...dueCommitments.map((row) => commitmentMoment(row, agent.timezone, now)),
     ];
     result.candidates = candidates.length;
 
