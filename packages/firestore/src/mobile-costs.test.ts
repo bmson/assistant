@@ -1,7 +1,171 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getFirestoreMobileCosts } from './mobile-costs.js';
+import {
+  getFirestoreMobileCosts,
+  summarizeUnknownAttemptEstimates,
+  unknownAttemptSummary,
+} from './mobile-costs.js';
 import type { InstallationStore } from './store.js';
 import { disposeStore, emulatorStore, seedBudget } from './test-store.js';
+
+describe('unknown cost attempt summary', () => {
+  it('reports exact empty coverage as zero', () => {
+    expect(summarizeUnknownAttemptEstimates([], false)).toEqual({
+      count: 0,
+      countComplete: true,
+      estimatedUsd: '0.000000',
+      estimateComplete: true,
+    });
+  });
+
+  it('reports exact coverage at the 500-row boundary', () => {
+    const summary = summarizeUnknownAttemptEstimates(
+      Array.from({ length: 500 }, () => '0.01'),
+      false,
+    );
+    expect(summary).toEqual({
+      count: 500,
+      countComplete: true,
+      estimatedUsd: '5.000000',
+      estimateComplete: true,
+    });
+  });
+
+  it('sums retained estimates only for a complete bounded snapshot', () => {
+    expect(summarizeUnknownAttemptEstimates(['0.125000', '0.250000'], false)).toEqual({
+      count: 2,
+      countComplete: true,
+      estimatedUsd: '0.375000',
+      estimateComplete: true,
+    });
+  });
+
+  it('suppresses the amount when the bounded snapshot may be partial', () => {
+    expect(
+      summarizeUnknownAttemptEstimates(
+        Array.from({ length: 501 }, () => '1.00'),
+        true,
+      ),
+    ).toEqual({
+      count: 501,
+      countComplete: false,
+      estimatedUsd: null,
+      estimateComplete: false,
+    });
+  });
+
+  it('keeps the count while withholding the estimate if any value is invalid', () => {
+    expect(summarizeUnknownAttemptEstimates(['0.10', 'NaN'], false)).toEqual({
+      count: 2,
+      countComplete: true,
+      estimatedUsd: null,
+      estimateComplete: false,
+    });
+  });
+
+  it('withholds the estimate for blank or out-of-range values', () => {
+    for (const estimate of ['', '999999999999999999999999']) {
+      expect(summarizeUnknownAttemptEstimates([estimate], false)).toMatchObject({
+        count: 1,
+        countComplete: true,
+        estimatedUsd: null,
+        estimateComplete: false,
+      });
+    }
+  });
+});
+
+describe('unknown reservation Firestore query', () => {
+  it('uses one selected, bounded status query and returns a complete total below the limit', async () => {
+    const calls: unknown[][] = [];
+    const query = {
+      where: (...args: unknown[]) => {
+        calls.push(['where', ...args]);
+        return query;
+      },
+      select: (...args: unknown[]) => {
+        calls.push(['select', ...args]);
+        return query;
+      },
+      limit: (...args: unknown[]) => {
+        calls.push(['limit', ...args]);
+        return query;
+      },
+      get: async () => {
+        calls.push(['get']);
+        return {
+          size: 2,
+          docs: [
+            {
+              get: (field: string) => {
+                calls.push(['doc.get', field]);
+                return '0.125000';
+              },
+            },
+            {
+              get: (field: string) => {
+                calls.push(['doc.get', field]);
+                return '0.250000';
+              },
+            },
+          ],
+        };
+      },
+    };
+    const store = {
+      collection: (name: string) => {
+        calls.push(['collection', name]);
+        return query;
+      },
+    };
+
+    await expect(unknownAttemptSummary(store as unknown as InstallationStore)).resolves.toEqual({
+      count: 2,
+      countComplete: true,
+      estimatedUsd: '0.375000',
+      estimateComplete: true,
+    });
+    expect(calls).toEqual([
+      ['collection', 'costReservations'],
+      ['where', 'status', '==', 'unknown'],
+      ['select', 'estimatedUsd'],
+      ['limit', 501],
+      ['get'],
+      ['doc.get', 'estimatedUsd'],
+      ['doc.get', 'estimatedUsd'],
+    ]);
+  });
+
+  it('withholds amount at the limit because the snapshot may be truncated', async () => {
+    let getCount = 0;
+    const query = {
+      where: () => query,
+      select: () => query,
+      limit: (amount: number) => {
+        expect(amount).toBe(501);
+        return query;
+      },
+      get: async () => {
+        getCount += 1;
+        return {
+          size: 501,
+          docs: Array.from({ length: 501 }, () => ({
+            get: () => {
+              throw new Error('Truncated snapshot must not read row values');
+            },
+          })),
+        };
+      },
+    };
+    const store = { collection: () => query };
+    await expect(unknownAttemptSummary(store as unknown as InstallationStore)).resolves.toEqual({
+      count: 501,
+      countComplete: false,
+      estimatedUsd: null,
+      estimateComplete: false,
+    });
+    expect(getCount).toBe(1);
+  });
+});
 
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore mobile cost dashboard', () => {
   let store: InstallationStore;
