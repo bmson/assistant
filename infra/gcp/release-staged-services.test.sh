@@ -158,7 +158,7 @@ JSON
     CANDIDATE_WEB_PROBE_FAIL FINAL_NEW_PAIR_PROBE_FAIL RESUME_WEB_PROBE_FAIL RESUME_LIVE_PROBE_FAIL \
     FAIL_AGENT_PROMOTE FAIL_WEB_PROMOTE FAIL_REPAUSE FAIL_RESUME_DRAIN STUB_WEB_TIMEOUT_SECONDS STUB_WEB_TIMEOUT_MISSING \
     FAIL_WORKER_UPDATE STALE_WORKER_IMAGE FAIL_TAG_REMOVAL MUTATE_TRAFFIC_AFTER_TAG_REMOVAL \
-    ADD_FOREIGN_TAG_TO_PROMOTED_REVISION
+    ADD_FOREIGN_TAG_TO_PROMOTED_REVISION AGENT_IMAGE_PUSH_DIGEST
  : >"$STUB_CURL_CALLS"
  : >"$STUB_RELEASE_CALLS"
  : >"$STUB_SERVICE_UPDATE_CALLS"
@@ -181,6 +181,12 @@ import json,sys
 s=json.load(open(sys.argv[1])); assert s['assistant-agent']['traffic']=={'agent-old':100}; assert s['assistant-web']['traffic']=={'web-old':100}
 PY
 }
+reset_case; export AGENT_IMAGE_PUSH_DIGEST=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+if release_staged_services; then fail 'agent release must reject a digest that differs from the smoke/push receipt'; fi
+assert_old_traffic
+[[ ! -s "$STUB_SERVICE_UPDATE_CALLS" ]] || fail 'digest mismatch must fail before staging services'
+reset_case; export AGENT_IMAGE_PUSH_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+release_staged_services || fail 'matching agent smoke/push digest should reach the existing release path'
 reset_case; export FAIL_AGENT_BUILD=1
 if release_staged_services; then fail 'agent image failure should stop before staging'; fi
 assert_old_traffic
