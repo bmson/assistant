@@ -99,6 +99,7 @@ export type ResolvedReadIntent =
         | 'missing_provenance'
         | 'missing_location'
         | 'missing_time'
+        | 'missing_reference_time'
         | 'ambiguous'
         | 'unsupported';
       partial: PartialPublicActivityData;
@@ -154,6 +155,9 @@ function isPublicContinuation(text: string): boolean {
     dateOnlyContinuation(text) ||
     /^\s*(?:not\s+my\s+calendar|not\s+(?:my\s+)?(?:inbox|email))\b/i.test(text)
   );
+}
+function isPublicComparison(text: string): boolean {
+  return /^anything earlier[?!.]*$/iu.test(text.trim());
 }
 function place(text: string): string | undefined {
   if (/\b(?:San\s+Francisco|SF)\b/i.test(text)) return 'San Francisco';
@@ -218,7 +222,8 @@ export function resolveActiveReadIntent(input: ResolveActiveReadIntentInput): Re
   const text = input.text.trim();
   const prior = parsePublicActivityScope(input.previousPublic);
   const currentPublic = isPublicRequest(text);
-  const continuing = isPublicContinuation(text);
+  const comparative = isPublicComparison(text);
+  const continuing = isPublicContinuation(text) || comparative;
   const p = input.provenance;
   const rows = (input.ownerTurns ?? []).filter(
     (r) =>
@@ -238,14 +243,22 @@ export function resolveActiveReadIntent(input: ResolveActiveReadIntentInput): Re
   const recent = rows.slice(-8);
   const activeRows: VerifiedOwnerReadTurn[] = [];
   for (const row of [...recent].reverse()) {
-    if (row.id !== current?.id && !isPublicRequest(row.text) && !isPublicContinuation(row.text))
+    if (
+      row.id !== current?.id &&
+      !isPublicRequest(row.text) &&
+      !isPublicContinuation(row.text) &&
+      !isPublicComparison(row.text)
+    )
       break;
     activeRows.unshift(row);
   }
   const previousPublicRow = [...activeRows]
     .reverse()
     .find((r) => r.id !== current?.id && isPublicRequest(r.text));
-  const publicRequest = currentPublic || (continuing && Boolean(prior || previousPublicRow));
+  const comparisonHasVerifiedPublicContext = comparative && Boolean(current && previousPublicRow);
+  const publicRequest = comparative
+    ? comparisonHasVerifiedPublicContext
+    : currentPublic || (continuing && Boolean(prior || previousPublicRow));
   if (!publicRequest) {
     const personal = detectPersonalReadRequest(
       input.personalHistory ?? [{ role: 'user', content: text }],
@@ -263,6 +276,7 @@ export function resolveActiveReadIntent(input: ResolveActiveReadIntentInput): Re
     !recent.some((r) => r.id === current.id)
   )
     return { kind: 'clarify_public', reason: 'missing_provenance', partial };
+  if (comparative) return { kind: 'clarify_public', reason: 'missing_reference_time', partial };
   const usablePrior =
     prior &&
     prior.conversationId === p.conversationId &&
@@ -434,6 +448,7 @@ export function publicActivityFollowupDisposition(
   if (sourceCorrection) return 'superseded';
   const linked =
     isPublicContinuation(value) ||
+    isPublicComparison(value) ||
     /^(?:no\b|rather\b|instead\b|i\s+mean\b|not\s+my\s+(?:calendar|inbox|email)\b)/i.test(value) ||
     /\b(?:rather\s+than|instead\s+of|change\s+(?:the\s+)?(?:city|date|search)|make\s+(?:it|that))\b/i.test(
       value,
