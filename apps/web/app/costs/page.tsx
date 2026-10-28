@@ -6,6 +6,7 @@ import { COST_BASIS_LABELS, costBasis } from '@assistant/persistence';
 import Link from 'next/link';
 import { BudgetCapsForm } from '@/app/costs/budget-caps-form';
 import { BillingCoverageSummary, ProviderBillingCards } from '@/app/costs/provider-billing-cards';
+import { UnknownCostAttempts } from '@/app/costs/unknown-cost-attempts';
 import { requireOwner } from '@/auth';
 import { formatDateTime, formatUsd, truncate } from '@/lib/format';
 import { getBillingOverview, getDb } from '@/lib/server';
@@ -113,7 +114,7 @@ export default async function CostsPage() {
               <InfoItem label="Limit">
                 {Number.isFinite(p.limit) ? formatUsd(p.limit.toFixed(2)) : 'No cap'}
               </InfoItem>
-              <InfoItem label="Reserved">{formatUsd(totals.heldUsd.toFixed(4))}</InfoItem>
+              <InfoItem label="Budget holds">{formatUsd(totals.heldUsd.toFixed(4))}</InfoItem>
             </InfoGrid>
           </div>
         ))}
@@ -142,9 +143,9 @@ export default async function CostsPage() {
         <div className="border-t border-edge px-5 pb-5">
           {held.length > 0 ? (
             <section className="mt-5">
-              <h2 className="text-sm font-medium">In-progress work</h2>
+              <h2 className="text-sm font-medium">Budget holds</h2>
               <p className="mt-1 text-xs text-muted">
-                Estimated costs reserved for work that has not finished yet.
+                Estimated reservations for assistant work, not confirmed provider charges.
               </p>
               <div className="mt-3 flex flex-col gap-2">
                 {held.map((r) => (
@@ -163,6 +164,8 @@ export default async function CostsPage() {
               </div>
             </section>
           ) : null}
+
+          <UnknownCostAttempts summary={dashboard.unknownAttempts} />
 
           <section className="mt-5 grid gap-6 sm:grid-cols-2">
             <div>

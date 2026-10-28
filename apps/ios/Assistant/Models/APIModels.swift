@@ -2544,6 +2544,7 @@ struct WorkspaceCosts: Codable, Sendable {
     var billing: [WorkspaceProviderBilling]? = nil
     var billingCoverage: WorkspaceBillingCoverage? = nil
     var byEvidence: [WorkspaceCostEvidence]? = nil
+    var unknownAttempts: WorkspaceUnknownCostAttempts? = nil
     let dailySpentUsd: Double
     let monthlySpentUsd: Double
     let heldUsd: Double
@@ -2556,6 +2557,13 @@ struct WorkspaceCosts: Codable, Sendable {
     let held: [WorkspaceHeldCost]
     let topTasks: [WorkspaceCostTask]
     let recent: [WorkspaceCostEvent]
+}
+
+struct WorkspaceUnknownCostAttempts: Codable, Sendable {
+    let count: Int
+    let countComplete: Bool
+    let estimatedUsd: String?
+    let estimateComplete: Bool
 }
 
 struct WorkspaceBillingCoverage: Codable, Sendable {
