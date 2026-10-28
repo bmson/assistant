@@ -177,14 +177,11 @@ function EditableSavedNote({
       : null;
   const recoveryProps = {
     state,
-    saved,
     awaitingReadback,
     sessionMatches,
     otherNote,
-    canReconcile: controller.canReconcile(),
     reload: () => router.refresh(),
-    check: () => void controller.check(),
-    reconcile: () => void controller.reconcile(),
+    checkResult: () => void checkSavedNotePendingResult(controller),
   };
   return (
     <div className="mt-4 grid gap-3">
@@ -341,38 +338,34 @@ function EditableSavedNote({
   );
 }
 
+/** Dispatches the existing pending-result path using proof held at click time. */
+export function checkSavedNotePendingResult(
+  controller: Pick<OwnerEditorOperation, 'canReconcile' | 'check' | 'reconcile'>,
+): Promise<void> {
+  return controller.canReconcile() ? controller.reconcile() : controller.check();
+}
+
 /** Rendered inside the dialog while it owns focus, or on the page after Close. */
 export function SavedNoteRecovery({
   state,
-  saved,
   awaitingReadback,
   sessionMatches,
   otherNote,
-  canReconcile,
   reload,
-  check,
-  reconcile,
+  checkResult,
 }: {
   state: Pick<OwnerEditorOperationState, 'message' | 'phase' | 'busy'>;
-  saved: boolean;
   awaitingReadback: boolean;
   sessionMatches: boolean;
   otherNote: string | null;
-  canReconcile: boolean;
   reload: () => void;
-  check: () => void;
-  reconcile: () => void;
+  checkResult: () => void;
 }) {
   return (
     <div className="grid gap-3">
       {state.message ? (
         <p role="status" className="text-sm text-muted">
           {state.message}
-        </p>
-      ) : null}
-      {saved ? (
-        <p role="status" className="text-sm text-muted">
-          Your correction is saved. Connections and the profile summary may still need to refresh.
         </p>
       ) : null}
       {awaitingReadback ? (
@@ -396,16 +389,8 @@ export function SavedNoteRecovery({
       ) : null}
       {state.phase === 'pending' ? (
         <div className="flex flex-wrap gap-2">
-          <button type="button" className={btn.outline} disabled={state.busy} onClick={check}>
-            Check earlier save
-          </button>
-          <button
-            type="button"
-            className={btn.outline}
-            disabled={state.busy || !canReconcile}
-            onClick={reconcile}
-          >
-            Resolve earlier save
+          <button type="button" className={btn.primary} disabled={state.busy} onClick={checkResult}>
+            Check result
           </button>
           <p className="w-full text-sm text-muted">
             Closing this editor does not cancel a save. Keep your draft until its result is
