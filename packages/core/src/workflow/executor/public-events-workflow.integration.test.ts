@@ -266,13 +266,14 @@ function fixture(mode: Mode = 'matching') {
     },
   };
   const deps = { db, persistence, router, dispatcher } as unknown as ExecutorDeps;
-  async function turn(text: string) {
+  async function turn(text: string, createdAt: Date = requestAt) {
     const id = randomUUID();
     const ownerMessage = await append({
       conversationId,
       taskId: id,
       role: 'user',
       origin: 'owner',
+      createdAt,
       text,
       parts: [{ type: 'text', text }],
     });
@@ -283,7 +284,7 @@ function fixture(mode: Mode = 'matching') {
       type: 'chat_turn',
       trust: 'owner',
       status: 'pending',
-      createdAt: requestAt,
+      createdAt,
       trigger: {
         source: 'chat',
         agentId,
@@ -396,6 +397,107 @@ describe('admitted public city events through the complete offline executor', ()
       expect(f.forbidden).not.toHaveBeenCalled();
       expect(f.commitmentReads).not.toHaveBeenCalled();
       expect(f.router.step).not.toHaveBeenCalled();
+    },
+  );
+
+  it('re-anchors DST date correction to each persisted task and excludes stale/private history', async () => {
+    const f = fixture();
+    const oldTaskId = randomUUID();
+    f.ledger.push({
+      id: randomUUID(),
+      taskId: oldTaskId,
+      toolName: 'web.fetch',
+      args: { url },
+      status: 'succeeded',
+      step: 1,
+      result: { title: 'STALE_CANARY', url, text: listing },
+    });
+    f.messages.push({
+      id: randomUUID(),
+      conversationId: f.conversationId,
+      taskId: oldTaskId,
+      role: 'assistant',
+      origin: 'assistant',
+      text: 'PRIVATE_PRIOR_ASSISTANT_CANARY',
+      hiddenAt: null,
+      parts: [],
+      createdAt: new Date('2026-10-31T05:00:00.000Z'),
+    } as Records['messages']);
+
+    const beforeFallback = new Date('2026-11-01T06:30:00.000Z');
+    const first = await f.turn('Find public events in San Francisco this weekend.', beforeFallback);
+    const firstScope = PublicActivityScopeDataSchema.parse(
+      TaskStateSchema.parse(first.task.state).plannerState.publicActivityScope,
+    );
+    expect(first.task.createdAt.toISOString()).toBe(beforeFallback.toISOString());
+    expect(firstScope).toMatchObject({
+      civilWindow: { startDate: '2026-10-31', endDateExclusive: '2026-11-02' },
+      clock: {
+        referenceAt: beforeFallback.toISOString(),
+        timeZone: zone,
+        source: 'task_created_at',
+      },
+    });
+    expect(first.calls.map((call) => call.toolName)).toEqual(['web.search', 'web.fetch']);
+    expect(first.calls.every((call) => call.scopes.join(',') === 'external_read')).toBe(true);
+    expect(first.calls[0]?.args.query).toContain('2026-10-31 to before 2026-11-02');
+    expect(first.reply?.text).not.toMatch(/STALE_CANARY|PRIVATE_/);
+
+    const afterFallback = new Date('2026-11-01T09:30:00.000Z');
+    const corrected = await f.turn('2026-11-07 instead', afterFallback);
+    const correctedScope = PublicActivityScopeDataSchema.parse(
+      TaskStateSchema.parse(corrected.task.state).plannerState.publicActivityScope,
+    );
+    expect(corrected.task.createdAt.toISOString()).toBe(afterFallback.toISOString());
+    expect(correctedScope).toMatchObject({
+      civilWindow: { startDate: '2026-11-07', endDateExclusive: '2026-11-08' },
+      clock: {
+        referenceAt: afterFallback.toISOString(),
+        timeZone: zone,
+        source: 'task_created_at',
+      },
+    });
+    expect(corrected.calls.map((call) => call.toolName)).toEqual(['web.search', 'web.fetch']);
+    expect(corrected.calls.every((call) => call.scopes.join(',') === 'external_read')).toBe(true);
+    expect(corrected.calls[0]?.args.query).toContain('2026-11-07 to before 2026-11-08');
+    expect(corrected.reply?.text).not.toMatch(/STALE_CANARY|PRIVATE_/);
+    expect(f.dispatched.every((call) => /^web\.(search|fetch)$/.test(call.toolName))).toBe(true);
+    expect(f.router.step).not.toHaveBeenCalled();
+    expect(f.forbidden).not.toHaveBeenCalled();
+    expect(f.commitmentReads).not.toHaveBeenCalled();
+  });
+
+  it.each(['matching', 'failed'] as const)(
+    'clarifies an earlier comparison after %s public evidence without claiming prior verification state',
+    async (mode) => {
+      const f = fixture(mode);
+      const first = await f.turn('Find public events in San Francisco this weekend.');
+      expect(first.calls.map((call) => call.toolName)).toEqual(['web.search', 'web.fetch']);
+      if (mode === 'matching') {
+        expect(first.reply?.text).toContain('[Art Walk]');
+        expect(first.reply?.text).toMatch(
+          /occurrences, times, venues, admission prices.*availability remain unverified/,
+        );
+      } else {
+        expect(first.reply?.text).not.toContain('[Art Walk]');
+      }
+      expect(first.reply?.text).not.toMatch(/Secret Hall|10:00|\$15|Sold out/);
+
+      const dispatchCount = f.dispatched.length;
+      const ledgerCount = f.ledger.length;
+      const followup = await f.turn('Anything earlier?');
+      expect(followup.result.outcome).toBe('done');
+      expect(followup.reply?.text).toBe('Which event or time should I compare against?');
+      expect(followup.reply?.text).not.toContain('[Art Walk]');
+      expect(followup.calls).toEqual([]);
+      expect(followup.objectRoles).toEqual([]);
+      expect(f.dispatched).toHaveLength(dispatchCount);
+      expect(f.ledger).toHaveLength(ledgerCount);
+      expect(f.ledger.filter((row) => row.taskId === followup.id)).toEqual([]);
+      expect(f.router.step).not.toHaveBeenCalled();
+      expect(f.router.embed).not.toHaveBeenCalled();
+      expect(f.forbidden).not.toHaveBeenCalled();
+      expect(f.commitmentReads).not.toHaveBeenCalled();
     },
   );
 

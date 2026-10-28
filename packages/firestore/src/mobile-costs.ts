@@ -13,6 +13,7 @@ import { FirestoreSettingsRepository } from './settings.js';
 import { decodeRecord, type InstallationStore } from './store.js';
 
 const PAGE_SIZE = 1000;
+const UNKNOWN_ATTEMPT_SCAN_LIMIT = 501;
 
 interface CostEvent {
   evidence?: CostEvidence;
@@ -36,6 +37,76 @@ interface Reservation {
   description: string;
   estimatedUsd: string;
   status: string;
+}
+
+interface UnknownAttemptSummary {
+  count: number;
+  countComplete: boolean;
+  estimatedUsd: string | null;
+  estimateComplete: boolean;
+}
+
+export function summarizeUnknownAttemptEstimates(
+  estimates: readonly unknown[],
+  truncated: boolean,
+): UnknownAttemptSummary {
+  if (truncated)
+    return {
+      count: UNKNOWN_ATTEMPT_SCAN_LIMIT,
+      countComplete: false,
+      estimatedUsd: null,
+      estimateComplete: false,
+    };
+  let micros = 0;
+  for (const value of estimates) {
+    if (
+      typeof value !== 'string' ||
+      value.trim() === '' ||
+      !Number.isFinite(Number(value)) ||
+      Number(value) < 0
+    ) {
+      return {
+        count: estimates.length,
+        countComplete: true,
+        estimatedUsd: null,
+        estimateComplete: false,
+      };
+    }
+    try {
+      micros = addMicros(micros, usdToMicros(Number(value)));
+    } catch {
+      return {
+        count: estimates.length,
+        countComplete: true,
+        estimatedUsd: null,
+        estimateComplete: false,
+      };
+    }
+  }
+  return {
+    count: estimates.length,
+    countComplete: true,
+    estimatedUsd: microsToUsd(micros).toFixed(6),
+    estimateComplete: true,
+  };
+}
+
+/** One bounded snapshot prevents a count/sum race; 501 means the amount is unknown. */
+export async function unknownAttemptSummary(
+  store: Pick<InstallationStore, 'collection'>,
+): Promise<UnknownAttemptSummary> {
+  const snapshot = await store
+    .collection('costReservations')
+    .where('status', '==', 'unknown')
+    .select('estimatedUsd')
+    .limit(UNKNOWN_ATTEMPT_SCAN_LIMIT)
+    .get();
+  const complete = snapshot.size < UNKNOWN_ATTEMPT_SCAN_LIMIT;
+  if (!complete) return summarizeUnknownAttemptEstimates([], true);
+  return summarizeUnknownAttemptEstimates(
+    snapshot.docs.map((doc) => doc.get('estimatedUsd')),
+    false,
+  );
 }
 
 /** Reads every matching page. A dashboard must never present a partial spend total. */
@@ -117,18 +188,25 @@ export async function getFirestoreMobileCosts(store: InstallationStore, agentId:
   const taskIds = [...byTask.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .slice(0, 10);
-  const [taskDefault, heldSnapshot, recentSnapshot, parkedSnapshot, ...taskSnapshots] =
-    await Promise.all([
-      store.doc('budgets', 'task_default').get(),
-      store
-        .collection('costReservations')
-        .where('status', '==', 'held')
-        .orderBy('createdAt', 'desc')
-        .get(),
-      store.collection('costEvents').orderBy('createdAt', 'desc').limit(15).get(),
-      store.collection('tasks').where('status', '==', 'waiting_budget').count().get(),
-      ...taskIds.map(([id]) => store.doc('tasks', id).get()),
-    ]);
+  const [
+    taskDefault,
+    heldSnapshot,
+    unknownAttempts,
+    recentSnapshot,
+    parkedSnapshot,
+    ...taskSnapshots
+  ] = await Promise.all([
+    store.doc('budgets', 'task_default').get(),
+    store
+      .collection('costReservations')
+      .where('status', '==', 'held')
+      .orderBy('createdAt', 'desc')
+      .get(),
+    unknownAttemptSummary(store),
+    store.collection('costEvents').orderBy('createdAt', 'desc').limit(15).get(),
+    store.collection('tasks').where('status', '==', 'waiting_budget').count().get(),
+    ...taskIds.map(([id]) => store.doc('tasks', id).get()),
+  ]);
   const topTasks = taskIds.flatMap(([taskId, micros], index) => {
     const snapshot = taskSnapshots[index];
     if (!snapshot?.exists) return [];
@@ -169,6 +247,7 @@ export async function getFirestoreMobileCosts(store: InstallationStore, agentId:
     byModel: ranked(byModel).map(({ key, ...value }) => ({ model: key, ...value })),
     topTasks,
     held,
+    unknownAttempts,
     recent,
     parkedTasks: parkedSnapshot.data().count,
     taskDefaultLimit: defaultBudget?.limitUsd ?? null,
