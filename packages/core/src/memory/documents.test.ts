@@ -87,6 +87,49 @@ describe('document intelligence — pure helpers', () => {
     expect(extractorFor('application/x-tar', 'archive.tar')).toBe('unsupported');
   });
 
+  it('extracts text from an actual PDF through unpdf', async () => {
+    const stream = Buffer.from('BT /F1 30 Tf 72 700 Td (WORKER IMAGE SMOKE) Tj ET\n', 'ascii');
+    const objects = [
+      Buffer.from('<< /Type /Catalog /Pages 2 0 R >>', 'ascii'),
+      Buffer.from('<< /Type /Pages /Kids [3 0 R] /Count 1 >>', 'ascii'),
+      Buffer.from(
+        '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
+        'ascii',
+      ),
+      Buffer.concat([
+        Buffer.from(`<< /Length ${stream.length} >>\nstream\n`, 'ascii'),
+        stream,
+        Buffer.from('endstream', 'ascii'),
+      ]),
+      Buffer.from('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>', 'ascii'),
+    ];
+    const header = Buffer.from('%PDF-1.4\n%\u00e2\u00e3\u00cf\u00d3\n', 'latin1');
+    const parts: Buffer[] = [header];
+    const offsets: number[] = [0];
+    let length = header.length;
+    for (const [index, object] of objects.entries()) {
+      offsets.push(length);
+      const wrapped = Buffer.concat([
+        Buffer.from(`${index + 1} 0 obj\n`, 'ascii'),
+        object,
+        Buffer.from('\nendobj\n', 'ascii'),
+      ]);
+      parts.push(wrapped);
+      length += wrapped.length;
+    }
+    const xrefOffset = length;
+    const xref = [
+      `xref\n0 ${objects.length + 1}\n`,
+      '0000000000 65535 f \n',
+      ...offsets.slice(1).map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`),
+      `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`,
+    ].join('');
+    parts.push(Buffer.from(xref, 'ascii'));
+
+    const text = await extractDocumentText('pdf', Buffer.concat(parts), 'application/pdf');
+    expect(text).toMatch(/WORKER\s+IMAGE\s+SMOKE/i);
+  });
+
   it('chunks text with overlap and honors boundaries', () => {
     expect(() =>
       chunkText('abcdefghij', { size: 4, overlap: 0, max: 2, requireComplete: true }),

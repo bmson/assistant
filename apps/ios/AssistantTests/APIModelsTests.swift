@@ -22,6 +22,40 @@ extension APIModelsTests {
         XCTAssertEqual(current.billingCoverage?.entries.first?.period, "2026-10")
     }
 
+    func testWorkspaceCostsUnknownAttemptSummaryDecodesLegacyCompleteAndIncompletePayloads() throws {
+        let decoder = JSONDecoder()
+        let requiredFields = #"{"dailySpentUsd":0,"monthlySpentUsd":0,"heldUsd":0,"parkedTasks":0,"bySource":[],"byModel":[],"held":[],"topTasks":[],"recent":[]}"#
+
+        let legacy = try decoder.decode(WorkspaceCosts.self, from: Data(requiredFields.utf8))
+        XCTAssertNil(legacy.unknownAttempts)
+
+        let completeZeroJSON = requiredFields.replacingOccurrences(
+            of: "}",
+            with: #","unknownAttempts":{"count":0,"countComplete":true,"estimatedUsd":"0.000000","estimateComplete":true}}"#
+        )
+        let completeZero = try decoder.decode(
+            WorkspaceCosts.self,
+            from: Data(completeZeroJSON.utf8)
+        )
+        XCTAssertEqual(completeZero.unknownAttempts?.count, 0)
+        XCTAssertEqual(completeZero.unknownAttempts?.countComplete, true)
+        XCTAssertEqual(completeZero.unknownAttempts?.estimatedUsd, "0.000000")
+        XCTAssertEqual(completeZero.unknownAttempts?.estimateComplete, true)
+
+        let incompleteJSON = requiredFields.replacingOccurrences(
+            of: "}",
+            with: #","unknownAttempts":{"count":501,"countComplete":false,"estimatedUsd":null,"estimateComplete":false}}"#
+        )
+        let incomplete = try decoder.decode(
+            WorkspaceCosts.self,
+            from: Data(incompleteJSON.utf8)
+        )
+        XCTAssertEqual(incomplete.unknownAttempts?.count, 501)
+        XCTAssertEqual(incomplete.unknownAttempts?.countComplete, false)
+        XCTAssertNil(incomplete.unknownAttempts?.estimatedUsd)
+        XCTAssertEqual(incomplete.unknownAttempts?.estimateComplete, false)
+    }
+
     func testDocumentListPresentationKeepsEmptyDistinctFromIncompleteAndUnloaded() throws {
         func overview(
             documents: [DocumentRecord] = [],

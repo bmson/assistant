@@ -365,6 +365,12 @@ export async function GET(request: Request): Promise<Response> {
           billing: billing ?? [],
           billingCoverage: billingCoverageProjection(billing ?? []),
           byEvidence: costs?.byEvidence ?? [],
+          unknownAttempts: costs?.unknownAttempts ?? {
+            count: 0,
+            countComplete: false,
+            estimatedUsd: null,
+            estimateComplete: false,
+          },
           dailySpentUsd: costs?.totals.dailySpentUsd ?? 0,
           monthlySpentUsd: costs?.totals.monthlySpentUsd ?? 0,
           heldUsd: costs?.totals.heldUsd ?? 0,

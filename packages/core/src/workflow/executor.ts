@@ -1054,11 +1054,13 @@ async function runSteps(deps: ExecutorDeps, task: TaskLease): Promise<ExecuteRes
 
   if (resolvedReadIntent.kind === 'clarify_public') {
     const text =
-      resolvedReadIntent.reason === 'missing_location'
-        ? 'Which city should I search for public events in?'
-        : resolvedReadIntent.reason === 'missing_time'
-          ? 'What date or date range should I search for public events?'
-          : 'Please restate the city, dates and any requirements for the public events search so I can keep the search within your request.';
+      resolvedReadIntent.reason === 'missing_reference_time'
+        ? 'Which event or time should I compare against?'
+        : resolvedReadIntent.reason === 'missing_location'
+          ? 'Which city should I search for public events in?'
+          : resolvedReadIntent.reason === 'missing_time'
+            ? 'What date or date range should I search for public events?'
+            : 'Please restate the city, dates and any requirements for the public events search so I can keep the search within your request.';
     return stageFinalResponse(deps, lease, state, rc.window, {
       text,
       progress: 'Public search needs clarification; no private lookup was substituted.',

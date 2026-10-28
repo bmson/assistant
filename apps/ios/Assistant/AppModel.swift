@@ -5248,6 +5248,9 @@ final class AppModel {
     }
 
     private func merge(_ incoming: [ChatMessage]) {
+        // Held polls commonly return no rows. Nothing changed in the set, so
+        // avoid sorting and publishing the same transcript again.
+        guard !incoming.isEmpty else { return }
         for incomingMessage in incoming {
             let message = withLocalDecisions(incomingMessage)
             if let index = messages.firstIndex(where: { $0.id == message.id }) {
