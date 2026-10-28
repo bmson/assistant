@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { scoreCalendarEvent } from './calendar-salience.js';
+import { scoreCalendarEvent, type EventSalience } from './calendar-salience.js';
 import type { PulseMoment } from './pulse.js';
 import {
   calendarChangeMoments,
@@ -31,7 +31,7 @@ function moment(overrides: Partial<PulseMoment>): PulseMoment {
 function salient(
   event: Partial<Parameters<typeof eventLeadMoments>[0][number]['event']>,
   score = 5,
-) {
+): EventSalience {
   return {
     event: {
       summary: 'Same title',
