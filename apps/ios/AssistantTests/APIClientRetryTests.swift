@@ -8503,6 +8503,131 @@ extension APIClientRetryTests {
 }
 
 extension APIClientRetryTests {
+    func testPersonIdentityUpdateSendsDisplayedRevisionOnceAndPreservesConflict() async throws {
+        let revision = String(repeating: "a", count: 64)
+        StubURLProtocol.prime([
+            .success(status: 409, body: Data(#"{"error":"conflict"}"#.utf8)),
+        ])
+
+        do {
+            try await makeClient().updatePerson(
+                id: "contact-1",
+                person: PersonMutation(
+                    name: "Rae New",
+                    relationship: "friend",
+                    aliases: "Rae",
+                    expectedContactRevision: revision
+                )
+            )
+            XCTFail("A stale displayed revision must remain a conflict")
+        } catch APIError.server(let status, let message) {
+            XCTAssertEqual(status, 409)
+            XCTAssertEqual(message, "conflict")
+        }
+
+        XCTAssertEqual(StubURLProtocol.attempts, ["PATCH"])
+        XCTAssertEqual(StubURLProtocol.urls.map(\.path), ["/api/mobile/v1/memory/people/contact-1"])
+        let body = try XCTUnwrap(StubURLProtocol.bodies.first)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+        XCTAssertEqual(payload["expectedContactRevision"], revision)
+        XCTAssertEqual(payload["name"], "Rae New")
+        XCTAssertEqual(StubURLProtocol.bodies.count, 1, "A stale conflict is not automatically retried")
+    }
+
+    func testPersonIdentityUpdateWithoutRevisionStopsBeforeNetwork() async throws {
+        StubURLProtocol.prime([])
+        do {
+            try await makeClient().updatePerson(
+                id: "contact-1",
+                person: PersonMutation(name: "Rae New", relationship: "friend", aliases: "Rae")
+            )
+            XCTFail("An identity update without a displayed revision must be refused")
+        } catch APIError.invalidResponse {}
+        XCTAssertTrue(StubURLProtocol.urls.isEmpty)
+    }
+
+    @MainActor
+    func testPersonSaveConflictReturnsFailureWithoutChangingCachedSnapshot() async {
+        let revision = String(repeating: "a", count: 64)
+        let personID = "22222222-2222-4222-8222-222222222222"
+        StubURLProtocol.prime([
+            .success(status: 409, body: Data(#"{"error":"conflict"}"#.utf8)),
+        ])
+        let model = AppModel(apiClient: makeClient())
+        model.edits.updateRemote { state in
+            state.personProfiles[personID] = PersonProfileResponse(
+                contact: PersonProfileContact(
+                    id: personID,
+                    name: "Rae",
+                    aliases: ["R"],
+                    relationship: "friend",
+                    trust: "known",
+                    identityRevision: revision
+                ),
+                occasions: [],
+                mergeOptions: []
+            )
+        }
+
+        let saved = await model.savePerson(
+            id: personID,
+            mutation: PersonMutation(
+                name: "Rae New",
+                relationship: "friend",
+                aliases: "R",
+                expectedContactRevision: revision
+            )
+        )
+
+        XCTAssertFalse(saved, "A stale conflict is not treated as a successful save")
+        XCTAssertEqual(model.edits.serverSnapshot.personProfiles[personID]?.contact.name, "Rae")
+        XCTAssertEqual(model.errorMessage, "This person changed. Review the current details before applying your edit.")
+        XCTAssertTrue(model.personIdentityReviewRequired)
+        XCTAssertEqual(StubURLProtocol.attempts, ["PATCH"], "The failed update is not retried")
+    }
+
+    @MainActor
+    func testExistingPersonSaveDoesNotCompleteBeforeServerAcknowledgement() async {
+        let revision = String(repeating: "b", count: 64)
+        let personID = "33333333-3333-4333-8333-333333333333"
+        let mutationPath = "/api/mobile/v1/memory/people/\(personID)"
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/workspace": [.success(status: 401, body: Data(#"{"error":"expired"}"#.utf8))],
+            "/api/mobile/v1/people": [.success(status: 401, body: Data(#"{"error":"expired"}"#.utf8))],
+            "/api/mobile/v1/memory/people/\(personID)": [
+                .held(status: 200, body: Data(#"{"ok":true}"#.utf8)),
+                .success(status: 401, body: Data(#"{"error":"expired"}"#.utf8)),
+            ],
+            "/api/mobile/v1/people/\(personID)": [.success(status: 401, body: Data(#"{"error":"expired"}"#.utf8))],
+        ])
+        let model = AppModel(apiClient: makeClient())
+        var result: Bool?
+        let save = Task { @MainActor in
+            result = await model.savePerson(
+                id: personID,
+                mutation: PersonMutation(
+                    name: "Sam New",
+                    relationship: "friend",
+                    aliases: "Sam",
+                    expectedContactRevision: revision
+                )
+            )
+        }
+
+        for _ in 0..<100 where !StubURLProtocol.isHoldingResponse(path: mutationPath) {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: mutationPath))
+        XCTAssertNil(result, "The editor must not dismiss while the save is unresolved")
+
+        StubURLProtocol.releaseHeldResponse(path: mutationPath)
+        await save.value
+        XCTAssertEqual(result, true, "A successful server acknowledgement completes the save")
+        XCTAssertEqual(StubURLProtocol.attempts.first, "PATCH")
+    }
+}
+
+extension APIClientRetryTests {
     private enum CalendarPreflightDraftEdit: Equatable {
         case none
         case followUp

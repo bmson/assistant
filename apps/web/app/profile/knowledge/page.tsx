@@ -22,6 +22,7 @@ import {
 } from '@/lib/firestore-knowledge';
 import { relativeTime } from '@/lib/format';
 import { entityKindLabel } from '@/lib/knowledge';
+import { memoryNoteHref } from '@/lib/memory-note-context';
 import { withPostgresMemoryBrowseRead } from '@/lib/server';
 import {
   btn,
@@ -77,6 +78,7 @@ function fact(
       ? `${memory.validFrom.toISOString().slice(0, 10)}–${memory.validUntil?.toISOString().slice(0, 10) ?? 'now'}`
       : '',
     mapHref: href({ ...context, view: 'map', memory: memory.id }),
+    noteHref: memoryNoteHref(memory.id, href({ ...context, view: 'library' })) ?? undefined,
   };
 }
 /** Reuse bounded queries; no cleanup/header scan is needed for PostgreSQL browse. */
@@ -226,7 +228,8 @@ export default async function KnowledgePage({
         intro="Browse saved notes and their connections."
       />
       <p className="mt-4 text-sm text-muted">
-        Browse only. Editing and cleanup are unavailable here.
+        Open a saved note or person to review available edits. Editing availability is checked with
+        its source.
       </p>
       <nav aria-label="Knowledge views" className={`${segmentedControlClass} mt-5`}>
         {(['library', 'map'] as const).map((item) => (
@@ -414,7 +417,7 @@ export default async function KnowledgePage({
       ) : null}
       {raw.view === 'cleanup' || raw.mode === 'review' || raw.mode === 'edit' ? (
         <p className="mt-3 text-sm text-muted">
-          Editing and cleanup are unavailable. Showing the browse {view}.
+          Open a saved note or person to review available edits. Cleanup is unavailable here.
         </p>
       ) : null}
       {view === 'library' && library ? (

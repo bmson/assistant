@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { FirestoreProfileOverviewRepository } from './profile-full-overview.js';
+import { FirestoreProfilePeopleReadRepository } from './profile-people-read.js';
 import { disposeStore, emulatorStore } from './test-store.js';
 
 const now = new Date('2026-09-22T12:00:00Z');
@@ -104,7 +105,17 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore full Profile ov
         collectionReads.mock.calls.filter(([name]) => name === 'memories').length,
       ).toBeGreaterThan(0);
       expect(result.owner?.id).toBe(ownerId);
-      expect(result.people).toMatchObject([{ contact: { id: personId }, factCount: 1 }]);
+      expect(result.owner?.identityRevision).toMatch(/^[0-9a-f]{64}$/);
+      expect(result.people).toMatchObject([
+        {
+          contact: { id: personId, identityRevision: expect.stringMatching(/^[0-9a-f]{64}$/) },
+          factCount: 1,
+        },
+      ]);
+      const personRead = await new FirestoreProfilePeopleReadRepository(store, agentId).getContact(
+        personId,
+      );
+      expect(personRead?.identityRevision).toBe(result.people[0]?.contact.identityRevision);
       expect(result.ownerFacts.map((row) => row.id)).toEqual([ownerFactId]);
       expect(result.quarantined).toHaveLength(1);
       expect(result.memoryHealth).toMatchObject({ totalUsable: 2, awaitingReview: 1 });

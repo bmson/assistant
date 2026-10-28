@@ -544,9 +544,25 @@ final class NativeVisualReviewTests: XCTestCase {
                     && rect.maxX.isFinite && rect.maxY.isFinite
             }
 
+            // Numeric-only public UIKit state; no layout, scrolling, content or capture work.
+            func logScrollGeometry(_ stage: String, olderOffset: CGFloat? = nil) {
+                print("FULLHEIGHT_SCROLL_DIAGNOSTIC variant=\(variant) stage=\(stage) "
+                    + "newestOffset=\(newestOffset) olderOffset=\(olderOffset.map { String(describing: $0) } ?? "not-sampled") "
+                    + "offsetY=\(transcript.contentOffset.y) top=\(top) bottom=\(bottom) "
+                    + "boundsX=\(transcript.bounds.minX) boundsY=\(transcript.bounds.minY) "
+                    + "boundsWidth=\(transcript.bounds.width) boundsHeight=\(transcript.bounds.height) "
+                    + "contentWidth=\(transcript.contentSize.width) contentHeight=\(transcript.contentSize.height) "
+                    + "viewportX=\(viewport.minX) viewportY=\(viewport.minY) "
+                    + "viewportWidth=\(viewport.width) viewportHeight=\(viewport.height) "
+                    + "frameX=\(transcript.frame.minX) frameY=\(transcript.frame.minY) "
+                    + "frameWidth=\(transcript.frame.width) frameHeight=\(transcript.frame.height) "
+                    + "insetTop=\(transcript.adjustedContentInset.top) insetBottom=\(transcript.adjustedContentInset.bottom)")
+            }
+
             // Attach the initial/newest state and its geometry before assertions
             // so a failing simulator run remains reviewable.
             attach("newest-recovery")
+            logScrollGeometry("newest-before-assertions")
             XCTAssertLessThanOrEqual(abs(newestOffset - bottom), 1,
                 "The newest-state capture must begin at the actual transcript bottom")
             XCTAssertEqual(transcript.frame.height, viewport.height, accuracy: 1)
@@ -559,6 +575,7 @@ final class NativeVisualReviewTests: XCTestCase {
             window.layoutIfNeeded()
             let olderOffset = transcript.contentOffset.y
             attach("older-transcript")
+            logScrollGeometry("older-before-assertions", olderOffset: olderOffset)
             XCTAssertEqual(transcript.frame.height, viewport.height, accuracy: 1,
                 "Floating recovery and Jump controls must not reserve a transcript viewport lane")
             XCTAssertLessThan(olderOffset, newestOffset - 2,

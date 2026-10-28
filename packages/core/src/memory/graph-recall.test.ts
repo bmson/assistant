@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { GraphRecallRepository } from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
 import { recallKnowledgeGraph, recallWithGraphFallback } from './graph-recall.js';
@@ -472,4 +473,64 @@ describe('current graph context eligibility', () => {
     expect(paths).toHaveLength(2);
     expect(paths[0]?.surfaceKey).not.toBe(paths[1]?.surfaceKey);
   });
+});
+
+it('graph attribution requires matching marker and includes marker in canonical suppression revision', async () => {
+  const row = {
+    relationId: 'correction',
+    subjectEntityId: 'owner',
+    subjectLabel: 'Owner',
+    predicate: 'works_at',
+    assertion: {
+      tense: 'present' as const,
+      polarity: 'positive' as const,
+      modality: 'asserted' as const,
+    },
+    objectEntityId: 'company',
+    objectLabel: 'Example',
+    sourceMemoryId: 'saved-note',
+    content: 'Owner works at Example',
+    evidenceQuote: 'Owner works at Example',
+    createdAt: new Date('2026-01-01'),
+    confidence: '0.99',
+    validFrom: null,
+    validUntil: null,
+    similarity: 0.99,
+    sourceContentHash: createHash('sha256').update('Owner works at Example').digest('hex'),
+    sourceOwnerCorrection: {
+      version: 1,
+      correctedByOwner: true,
+      priorContentHash: 'a'.repeat(64),
+      currentContentHash: createHash('sha256').update('Owner works at Example').digest('hex'),
+      correctedAt: '2026-10-25T00:00:00.000Z',
+    },
+  };
+  const run = (sourceOwnerCorrection: unknown) =>
+    recallKnowledgeGraph(
+      {
+        kind: 'graph-recall-repository',
+        seeds: async () => [{ ...row, sourceOwnerCorrection }],
+        connected: async () => [],
+      },
+      { agentId: 'owner', queryText: 'where work', queryEmbedding: [1] },
+    );
+  const corrected = await run(row.sourceOwnerCorrection),
+    legacy = await run(undefined),
+    invalid = await run({ ...row.sourceOwnerCorrection, currentContentHash: 'c'.repeat(64) });
+  expect(corrected.sources[0]?.ownerCorrected).toBe(true);
+  expect(corrected.block).toContain('linked source is provenance, not original document wording');
+  expect(legacy.sources[0]?.ownerCorrected).toBeUndefined();
+  expect(invalid.sources[0]?.ownerCorrected).toBeUndefined();
+  expect(corrected.sources[0]?.sourceRevision).not.toBe(legacy.sources[0]?.sourceRevision);
+  expect(JSON.stringify(corrected.sources)).not.toContain('priorContentHash');
+  const altered = await recallKnowledgeGraph(
+    {
+      kind: 'graph-recall-repository',
+      seeds: async () => [{ ...row, content: 'Altered body with stale extracted graph assertion' }],
+      connected: async () => [],
+    },
+    { agentId: 'owner', queryText: 'where work', queryEmbedding: [1] },
+  );
+  expect(altered.sources).toEqual([]);
+  expect(altered.block).not.toContain('Example');
 });

@@ -20,6 +20,9 @@ import {
 const exec = promisify(execFile);
 const folder = fileURLToPath(new URL('../drizzle/', import.meta.url));
 const cwd = fileURLToPath(new URL('../', import.meta.url));
+const contact131Fixture = fileURLToPath(
+  new URL('./migration-fixtures/0131_contact_identity_authority.sql', import.meta.url),
+);
 const journal = JSON.parse(await readFile(join(folder, 'meta/_journal.json'), 'utf8'));
 // Snapshot at import prevents an actively authored migration being mistaken for a
 // reviewed historical prefix. The full endpoint is the current immutable journal.
@@ -207,6 +210,21 @@ it.each(historicalPrefixes)(
       expect(
         receiptColumns.filter((column) => ['args', 'result', 'error'].includes(column.column_name)),
       ).toEqual([]);
+      const ownerEditorColumns = await client`
+        SELECT table_name,column_name,is_nullable FROM information_schema.columns
+        WHERE table_schema='public' AND (
+          (table_name='contacts' AND column_name='identity_authority') OR
+          (table_name='memories' AND column_name='owner_correction')
+        ) ORDER BY table_name,column_name`;
+      expect(ownerEditorColumns).toEqual([
+        { table_name: 'contacts', column_name: 'identity_authority', is_nullable: 'YES' },
+        { table_name: 'memories', column_name: 'owner_correction', is_nullable: 'YES' },
+      ]);
+      const ownerEditorCommand = await client`
+        SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
+        WHERE conrelid='owner_editor_operations'::regclass
+          AND conname='owner_editor_operation_command'`;
+      expect(ownerEditorCommand[0]?.definition).toContain('correct_owner_memory');
       // The identity migration must leave legacy vectors explicitly unknown,
       // retain PostgreSQL's fixed width, and expose the exact-space indexes.
       const embeddingTables = [
@@ -263,6 +281,103 @@ it.each(historicalPrefixes)(
   },
   120000,
 );
+
+it('rejects the historical contact-only 0131 ledger before any shipped migration write', async () => {
+  assertAllocatedTestTarget({
+    databaseUrl: process.env.DATABASE_URL,
+    testDatabaseUrl: process.env.TEST_DATABASE_URL,
+    token: process.env.ASSISTANT_TEST_TARGET_TOKEN,
+  });
+  const target = allocateTestTarget(process.env.DATABASE_URL);
+  const adminUrl = new URL(target.databaseUrl);
+  adminUrl.pathname = '/postgres';
+  const admin = postgres(adminUrl.toString(), { max: 1, onnotice: () => {} });
+  const prefixDir = await mkdtemp(join(tmpdir(), 'assistant-contact-131-'));
+  let created = false;
+  let client: ReturnType<typeof postgres> | undefined;
+  try {
+    await admin.unsafe(`CREATE DATABASE "${target.databaseName}"`);
+    created = true;
+    await admin.unsafe(
+      `COMMENT ON DATABASE "${target.databaseName}" IS 'assistant-test-target:${target.token}'`,
+    );
+    client = postgres(target.databaseUrl, { max: 1, onnotice: () => {} });
+    await mkdir(join(prefixDir, 'meta'));
+    const historicalContact131 = {
+      idx: 131,
+      version: '7',
+      when: 1793040000000,
+      tag: '0131_contact_identity_authority',
+      breakpoints: true,
+    };
+    const entries = [...journal.entries.slice(0, 131), historicalContact131];
+    await writeFile(join(prefixDir, 'meta/_journal.json'), JSON.stringify({ ...journal, entries }));
+    for (const entry of entries)
+      await writeFile(
+        join(prefixDir, `${entry.tag}.sql`),
+        entry.tag === historicalContact131.tag
+          ? await readFile(contact131Fixture)
+          : await readFile(join(folder, `${entry.tag}.sql`)),
+      );
+    await migrate(drizzle(client), { migrationsFolder: prefixDir });
+    const beforeLedger = await client`
+        SELECT hash,created_at::text AS "createdAt" FROM drizzle.__drizzle_migrations ORDER BY id`;
+    const beforeContact = await client`
+        SELECT column_name,is_nullable FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='contacts' AND column_name='identity_authority'`;
+    const beforeMemory = await client`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='memories' AND column_name='owner_correction'`;
+    const beforeCommand = await client`
+        SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
+        WHERE conrelid='owner_editor_operations'::regclass
+          AND conname='owner_editor_operation_command'`;
+    expect(beforeContact).toEqual([{ column_name: 'identity_authority', is_nullable: 'YES' }]);
+    expect(beforeMemory).toEqual([]);
+    expect(beforeCommand[0]?.definition).not.toContain('correct_owner_memory');
+    await client.end();
+    client = undefined;
+
+    const env = {
+      ...isolatedTestEnvironment(process.env),
+      DATABASE_URL: target.databaseUrl,
+      TEST_DATABASE_URL: target.databaseUrl,
+      ASSISTANT_TEST_TARGET_TOKEN: target.token,
+    };
+    const migrationFailure = await exec('pnpm', ['migrate'], {
+      cwd,
+      env,
+      timeout: 45_000,
+      maxBuffer: 2 * 1024 * 1024,
+    }).then(
+      () => undefined,
+      (error: { code?: number; stderr?: string }) => error,
+    );
+    expect(migrationFailure?.code).toBe(1);
+    expect(migrationFailure?.stderr).toContain(
+      'Database migration history is incompatible; inspect the migration ledger and schema, then use a reviewed forward-only bridge before retrying.',
+    );
+
+    client = postgres(target.databaseUrl, { max: 1, onnotice: () => {} });
+    const afterLedger = await client`
+        SELECT hash,created_at::text AS "createdAt" FROM drizzle.__drizzle_migrations ORDER BY id`;
+    const afterMemory = await client`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='memories' AND column_name='owner_correction'`;
+    const afterCommand = await client`
+        SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
+        WHERE conrelid='owner_editor_operations'::regclass
+          AND conname='owner_editor_operation_command'`;
+    expect(afterLedger).toEqual(beforeLedger);
+    expect(afterMemory).toEqual([]);
+    expect(afterCommand[0]?.definition).not.toContain('correct_owner_memory');
+  } finally {
+    if (client) await client.end({ timeout: 5 });
+    if (created) await dropOwnedUpgradeDatabase(admin, target);
+    await admin.end({ timeout: 5 });
+    await rm(prefixDir, { recursive: true, force: true });
+  }
+}, 120_000);
 
 async function dropOwnedUpgradeDatabase(
   admin: ReturnType<typeof postgres>,

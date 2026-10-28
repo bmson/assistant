@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   agents,
   contacts,
@@ -627,7 +627,9 @@ describe('knowledge graph sync and recall', () => {
         category: 'knowledge',
         kind: 'fact',
         content: `${MARKER} Owner works at ${MARKER} Acme.`,
-        contentHash: `${MARKER}-works`,
+        contentHash: createHash('sha256')
+          .update(`${MARKER} Owner works at ${MARKER} Acme.`)
+          .digest('hex'),
         embedding: unit(41),
         originTrust: 'owner',
       })
@@ -637,7 +639,9 @@ describe('knowledge graph sync and recall', () => {
       category: 'knowledge',
       kind: 'project',
       content: `${MARKER} Acme operates ${MARKER} Project Fox.`,
-      contentHash: `${MARKER}-operates`,
+      contentHash: createHash('sha256')
+        .update(`${MARKER} Acme operates ${MARKER} Project Fox.`)
+        .digest('hex'),
       embedding: unit(42),
       originTrust: 'owner',
     });
@@ -697,7 +701,11 @@ describe('knowledge graph sync and recall', () => {
         category: 'knowledge',
         kind: 'fact',
         content: `${MARKER} Owner worked at ${MARKER} Acme from 2019 to March 2023. ${MARKER} Owner visited ${MARKER} Acme often.`,
-        contentHash: `${MARKER}-qualifiers`,
+        contentHash: createHash('sha256')
+          .update(
+            `${MARKER} Owner worked at ${MARKER} Acme from 2019 to March 2023. ${MARKER} Owner visited ${MARKER} Acme often.`,
+          )
+          .digest('hex'),
         embedding: unit(44),
         originTrust: 'owner',
       })
@@ -794,7 +802,9 @@ describe('knowledge graph sync and recall', () => {
         category: 'knowledge',
         kind: 'fact',
         content: `${MARKER} Owner works at ${MARKER} Versioned Employer.`,
-        contentHash: `${MARKER}-legacy-evidence`,
+        contentHash: createHash('sha256')
+          .update(`${MARKER} Owner works at ${MARKER} Versioned Employer.`)
+          .digest('hex'),
         embedding: unit(50),
         originTrust: 'owner',
       })

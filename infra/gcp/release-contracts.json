@@ -12,8 +12,8 @@
       },
       "schema": {
         "postgres": {
-          "min": 129,
-          "max": 129
+          "min": 132,
+          "max": 132
         },
         "firestore": {
           "min": 1,
@@ -29,8 +29,8 @@
       },
       "schema": {
         "postgres": {
-          "min": 129,
-          "max": 129
+          "min": 132,
+          "max": 132
         },
         "firestore": {
           "min": 1,
@@ -47,7 +47,7 @@
       "schema": {
         "postgres": {
           "min": 0,
-          "max": 129
+          "max": 132
         },
         "firestore": {
           "min": 1,
@@ -64,7 +64,7 @@
       "schema": {
         "postgres": {
           "min": 0,
-          "max": 129
+          "max": 132
         },
         "firestore": {
           "min": 1,
@@ -81,7 +81,7 @@
       "schema": {
         "postgres": {
           "min": 0,
-          "max": 129
+          "max": 132
         },
         "firestore": {
           "min": 1,

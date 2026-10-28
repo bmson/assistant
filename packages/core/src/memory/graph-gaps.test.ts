@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   contacts,
   createDb,
@@ -23,6 +24,7 @@ import { predicateSpec } from './predicate-vocabulary.js';
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgres://assistant@localhost:5432/assistant';
 const MARKER = `xtest-gaps-${Date.now()}`;
+const SOURCE_BODY_HASH = createHash('sha256').update(`${MARKER} source`).digest('hex');
 
 let db: Db;
 let dbUp = false;
@@ -107,14 +109,14 @@ beforeAll(async () => {
       category: 'knowledge',
       kind: 'fact',
       content: `${MARKER} source`,
-      contentHash: MARKER,
+      contentHash: SOURCE_BODY_HASH,
       embedding: Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0)),
     })
     .returning({ id: memories.id });
   memoryId = (memory as NonNullable<typeof memory>).id;
   await db.insert(knowledgeGraphSources).values({
     memoryId,
-    contentHash: MARKER,
+    contentHash: SOURCE_BODY_HASH,
     status: 'ready',
     extractionVersion: GRAPH_EXTRACTION_VERSION,
   });
@@ -257,9 +259,12 @@ describe('findGraphGaps', () => {
       await db.update(memories).set({ quarantined: false }).where(eq(memories.id, memoryId));
       await db
         .update(knowledgeGraphSources)
-        .set({ contentHash: MARKER })
+        .set({ contentHash: SOURCE_BODY_HASH })
         .where(eq(knowledgeGraphSources.memoryId, memoryId));
     }
+    expect((await findGraphGaps(db, agentId)).some((gap) => gap.question.includes(MARKER))).toBe(
+      true,
+    );
   });
 
   it('ranks the best-connected gaps first', async (ctx) => {

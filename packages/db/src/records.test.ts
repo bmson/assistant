@@ -64,7 +64,14 @@ it('keeps portable record types compatible with all PostgreSQL tables', () => {
   expectTypeOf<Records['improvementProposals']>().toEqualTypeOf<
     typeof schema.improvementProposals.$inferSelect
   >();
-  expectTypeOf<Records['memories']>().toEqualTypeOf<typeof schema.memories.$inferSelect>();
+  // Historical portable rows may omit the additive marker; native SQL rows
+  // always expose its nullable column after schema 131.
+  expectTypeOf<Omit<Records['memories'], 'ownerCorrection'>>().toEqualTypeOf<
+    Omit<typeof schema.memories.$inferSelect, 'ownerCorrection'>
+  >();
+  expectTypeOf<NonNullable<Records['memories']['ownerCorrection']> | null>().toEqualTypeOf<
+    typeof schema.memories.$inferSelect.ownerCorrection
+  >();
   expectTypeOf<Records['memoryEmbeddingRefreshes']>().toEqualTypeOf<
     typeof schema.memoryEmbeddingRefreshes.$inferSelect
   >();
@@ -72,7 +79,22 @@ it('keeps portable record types compatible with all PostgreSQL tables', () => {
     typeof schema.memoryTombstones.$inferSelect
   >();
   expectTypeOf<Records['ownerCard']>().toEqualTypeOf<typeof schema.ownerCard.$inferSelect>();
-  expectTypeOf<Records['contacts']>().toEqualTypeOf<typeof schema.contacts.$inferSelect>();
+  type PortableContact = Records['contacts'];
+  type SqlContact = typeof schema.contacts.$inferSelect;
+  expectTypeOf<Omit<PortableContact, 'identityAuthority'>>().toEqualTypeOf<
+    Omit<SqlContact, 'identityAuthority'>
+  >();
+  // Legacy Firestore/import rows may omit protected unknown authority; SQL materializes null.
+  expectTypeOf<PortableContact['identityAuthority']>().toEqualTypeOf<
+    SqlContact['identityAuthority'] | undefined
+  >();
+  expectTypeOf<NonNullable<PortableContact['identityAuthority']>>().toEqualTypeOf<
+    NonNullable<SqlContact['identityAuthority']>
+  >();
+  expectTypeOf<Required<Pick<PortableContact, 'identityAuthority'>>>().toEqualTypeOf<
+    Pick<SqlContact, 'identityAuthority'>
+  >();
+  expectTypeOf<SqlContact>().toExtend<PortableContact>();
   expectTypeOf<Records['knowledgeGraphEntities']>().toEqualTypeOf<
     typeof schema.knowledgeGraphEntities.$inferSelect
   >();

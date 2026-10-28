@@ -1250,6 +1250,9 @@ struct OccasionEditor: View {
 struct PersonEditor: View {
     /// The id being edited; nil creates a new person.
     private let personId: String?
+    /// Revision of the identity values displayed when this form opened.
+    /// Kept as-is through save; never refreshed behind the owner's draft.
+    private let expectedContactRevision: String?
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -1257,9 +1260,12 @@ struct PersonEditor: View {
     @State private var relationship: String
     @State private var aliases: String
     @State private var isSaving = false
+    @State private var saveError: String?
+    @State private var requiresFreshReview = false
 
     init(person: WorkspacePerson?) {
         personId = person?.id
+        expectedContactRevision = nil
         _name = State(initialValue: person?.name ?? "")
         _relationship = State(initialValue: person?.relationship ?? "")
         _aliases = State(initialValue: person?.aliases.joined(separator: ", ") ?? "")
@@ -1269,6 +1275,7 @@ struct PersonEditor: View {
     /// directory has rather than a workspace row.
     init(contact: PersonProfileContact) {
         personId = contact.id
+        expectedContactRevision = contact.identityRevision
         _name = State(initialValue: contact.name)
         _relationship = State(initialValue: contact.relationship)
         _aliases = State(initialValue: contact.aliases.joined(separator: ", "))
@@ -1277,6 +1284,18 @@ struct PersonEditor: View {
     var body: some View {
         AssistantForm {
             Section("Person") {
+                if personId != nil && !hasDisplayedIdentityRevision {
+                    Text(
+                        "This server did not provide a revision for the person you opened. Reload the person before editing."
+                    )
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                if let saveError {
+                    Text(saveError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
                 AssistantField("Name") {
                     TextField("Name", text: $name)
                 }
@@ -1297,21 +1316,48 @@ struct PersonEditor: View {
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button(isSaving ? "Saving…" : "Save") { save() }
-                    .disabled(isSaving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(
+                        isSaving ||
+                            name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                            (personId != nil && (!hasDisplayedIdentityRevision || requiresFreshReview))
+                    )
             }
         }
     }
 
     private func save() {
+        guard personId == nil || hasDisplayedIdentityRevision else { return }
+        guard !requiresFreshReview else { return }
+        saveError = nil
         isSaving = true
         Task {
             let saved = await model.savePerson(
                 id: personId,
-                mutation: .init(name: name, relationship: relationship, aliases: aliases)
+                mutation: .init(
+                    name: name,
+                    relationship: relationship,
+                    aliases: aliases,
+                    expectedContactRevision: expectedContactRevision
+                )
             )
             isSaving = false
-            if saved { dismiss() }
+            if saved {
+                dismiss()
+            } else {
+                saveError = model.errorMessage ?? "The change could not be confirmed. Your draft is still here."
+                if personId != nil && model.personIdentityReviewRequired {
+                    requiresFreshReview = true
+                }
+            }
         }
+    }
+
+    private var hasDisplayedIdentityRevision: Bool {
+        guard let expectedContactRevision else { return false }
+        return expectedContactRevision.range(
+            of: "^[a-f0-9]{64}$",
+            options: .regularExpression
+        ) != nil
     }
 }
 

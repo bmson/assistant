@@ -7,13 +7,24 @@ import {
   type PersonGroup,
 } from '@assistant/application/people-presentation';
 import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
-import { createInstallationStore } from '@assistant/firestore';
+import {
+  assertFirestoreInstallationOwner,
+  assertPrivacyErasureFenceUnchanged,
+  createInstallationStore,
+  readFirestoreOwnerEditorIssuanceContext,
+  readPrivacyErasureFence,
+} from '@assistant/firestore';
 import { CalendarDays, MapPin, Search } from 'lucide-react';
 import Link from 'next/link';
+import {
+  OwnerEditorControls,
+  type OwnerEditorControlsProps,
+} from '@/app/people/owner-editor-controls';
 import { PersonAvatar } from '@/app/people/person-avatar';
 import { requireOwner } from '@/auth';
 import { listFirestorePeopleDirectory } from '@/lib/firestore-people';
-import { withPostgresMemoryBrowseRead } from '@/lib/server';
+import { buildOwnerEditorView } from '@/lib/owner-editor-view';
+import { readPostgresOwnerEditorViewInputs, withPostgresMemoryBrowseRead } from '@/lib/server';
 import {
   Badge,
   btn,
@@ -41,10 +52,38 @@ function matches(person: PersonSummary, query: string): boolean {
   );
 }
 
-async function loadPeopleDirectory(now: Date): Promise<PersonSummary[]> {
+async function loadPeopleDirectory(
+  now: Date,
+  formSessionScope: string | undefined,
+): Promise<{
+  data: PersonSummary[];
+  editor: OwnerEditorControlsProps | null;
+}> {
   const config = loadConfig();
+  const enabled =
+    !config.ASSISTANT_RELEASE_WRITES_PAUSED &&
+    !config.RESTORE_REHEARSAL &&
+    !(config.PERSISTENCE_DRIVER !== 'firestore' && config.POSTGRES_SOURCE_WRITES_FENCED);
   if (config.PERSISTENCE_DRIVER !== 'firestore')
-    return withPostgresMemoryBrowseRead((db) => listPeopleDirectory(db, { now, browseOnly: true }));
+    return withPostgresMemoryBrowseRead(async (db) => {
+      const data = await listPeopleDirectory(db, { now, browseOnly: true });
+      let editor: OwnerEditorControlsProps | null = null;
+      if (enabled && formSessionScope && config.AUTH_SECRET) {
+        try {
+          const inputs = await readPostgresOwnerEditorViewInputs(db, {});
+          if (inputs)
+            editor = buildOwnerEditorView({
+              ...inputs,
+              enabled,
+              formSessionScope,
+              secret: config.AUTH_SECRET,
+            });
+        } catch {
+          /* Editor availability never substitutes an empty browse result. */
+        }
+      }
+      return { data, editor };
+    });
   const problems = validateAgentPersistenceConfig(config);
   if (problems.length) throw new Error(problems.join('; '));
   const store = createInstallationStore({
@@ -53,7 +92,30 @@ async function loadPeopleDirectory(now: Date): Promise<PersonSummary[]> {
     databaseId: config.FIRESTORE_DATABASE_ID,
   });
   try {
-    return await listFirestorePeopleDirectory(store, config.FIRESTORE_AGENT_ID, now);
+    await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
+    const fence = await readPrivacyErasureFence(store, config.FIRESTORE_AGENT_ID);
+    const data = await listFirestorePeopleDirectory(store, config.FIRESTORE_AGENT_ID, now);
+    let editor: OwnerEditorControlsProps | null = null;
+    if (enabled && formSessionScope && config.AUTH_SECRET) {
+      try {
+        const context = await readFirestoreOwnerEditorIssuanceContext(
+          store,
+          config.FIRESTORE_AGENT_ID,
+        );
+        editor = buildOwnerEditorView({
+          enabled,
+          context,
+          snapshot: { ownerId: config.FIRESTORE_AGENT_ID },
+          formSessionScope,
+          secret: config.AUTH_SECRET,
+        });
+      } catch {
+        /* Keep the valid fenced directory usable when issuance is unavailable. */
+      }
+    }
+    await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
+    await assertPrivacyErasureFenceUnchanged(store, config.FIRESTORE_AGENT_ID, fence);
+    return { data, editor };
   } finally {
     await store.db.terminate();
   }
@@ -64,7 +126,7 @@ export default async function PeoplePage({
 }: {
   searchParams: Promise<Record<string, string | undefined>>;
 }) {
-  await requireOwner();
+  const session = await requireOwner();
   const { q } = await searchParams;
   const query = (typeof q === 'string' ? q : '').trim().slice(0, 120);
   const personHref = (id: string) =>
@@ -72,8 +134,11 @@ export default async function PeoplePage({
 
   const now = new Date();
   let everyone: PersonSummary[];
+  let editor: OwnerEditorControlsProps | null = null;
   try {
-    everyone = await loadPeopleDirectory(now);
+    const loaded = await loadPeopleDirectory(now, session.formSessionScope);
+    everyone = loaded.data;
+    editor = loaded.editor;
   } catch {
     return (
       <PageShell size="reading">
@@ -139,6 +204,7 @@ export default async function PeoplePage({
             count={people.length}
             hint={`${people.length} shown in this view`}
           />
+          {editor ? <OwnerEditorControls {...editor} /> : null}
         </div>
 
         {/* A GET form, so a search is a URL the owner can bookmark or share
@@ -208,7 +274,9 @@ export default async function PeoplePage({
                           </span>
                           <MetaLine
                             segments={[
-                              person.relationship || 'Relationship not set',
+                              person.relationship
+                                ? `Relationship to you: ${person.relationship}`
+                                : 'Relationship to you: not recorded',
                               person.location ? (
                                 <>
                                   <MapPin className="size-3" aria-hidden="true" />

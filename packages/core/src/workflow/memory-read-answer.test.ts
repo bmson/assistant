@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   conversationMessageSourceRevision,
   conversationMessageSpeakerRevision,
@@ -1803,4 +1804,270 @@ describe('exact historical source projection', () => {
     });
     expect(invalidResult).toMatchObject({ status: 'unavailable', failureReason: 'invalid_result' });
   });
+});
+
+it('selects, validates, and renders an owner-corrected saved note as confirmed owner history', async () => {
+  const content = 'The memorial date is October 14.';
+  const hash = createHash('sha256').update(content, 'utf8').digest('hex');
+  const marker = {
+    version: 1,
+    correctedByOwner: true,
+    priorContentHash: 'a'.repeat(64),
+    currentContentHash: hash,
+    correctedAt: '2026-10-25T00:00:00.000Z',
+  };
+  const candidates: ActionEvidence[] = [
+    {
+      toolName: 'memory.recall',
+      status: 'succeeded',
+      result: {
+        memories: [
+          {
+            id: 'saved-note',
+            content,
+            contentHash: hash,
+            ownerCorrection: marker,
+            ownerConfirmed: true,
+            source: 'original-import',
+          },
+        ],
+      },
+    },
+  ];
+  const object = vi
+    .fn()
+    .mockResolvedValueOnce({ ok: true, object: { selections: [] } })
+    .mockImplementationOnce(async (_role: string, options: Record<string, unknown>) => {
+      const prompt = JSON.parse(String(options.prompt)) as {
+        recovery?: string;
+        sources: Array<{ key: string; speaker: string }>;
+      };
+      expect(prompt.recovery).toContain('owner-authored and owner-confirmed');
+      expect(prompt.sources).toEqual([
+        expect.objectContaining({
+          key: 'memory:saved-note',
+          speaker: 'Owner-corrected saved note',
+        }),
+      ]);
+      return {
+        ok: true,
+        object: { selections: [{ sourceKey: 'memory:saved-note', quote: content }] },
+      };
+    });
+  const request = 'What did I previously tell you about the memorial date?';
+  const result = await selectMemoryReadAnswer({
+    router: { object } as never,
+    taskId: 'qa',
+    request,
+    evidence: candidates,
+  });
+  expect(result).toMatchObject({
+    status: 'complete',
+    selections: [{ sourceKey: 'memory:saved-note' }],
+  });
+  expect(validMemoryReadSelection(result, candidates, request)).toBe(true);
+  const answer = renderMemoryReadAnswer(result, candidates, request);
+  expect(answer).toContain('Owner-corrected saved note');
+  expect(answer).toContain('October 14');
+  expect(answer).toContain('linked source is provenance, not original document wording');
+  expect(object).toHaveBeenCalledTimes(2);
+});
+
+it('does not attribute a correction marker when actual content hash changed or owner confirmation is absent', () => {
+  const content = 'Corrected saved note text';
+  const hash = createHash('sha256').update(content, 'utf8').digest('hex');
+  const marker = {
+    version: 1,
+    correctedByOwner: true,
+    priorContentHash: 'a'.repeat(64),
+    currentContentHash: hash,
+    correctedAt: '2026-10-25T00:00:00.000Z',
+  };
+  const source = (
+    body: string,
+    contentHash: string,
+    ownerConfirmed: boolean,
+    ownerCorrection: unknown = marker,
+  ) =>
+    memoryReadSources([
+      {
+        toolName: 'memory.recall',
+        status: 'succeeded',
+        result: {
+          memories: [
+            {
+              id: 'saved-note',
+              content: body,
+              contentHash,
+              ownerCorrection,
+              ownerConfirmed,
+              source: 'original-import',
+            },
+          ],
+        },
+      },
+    ])[0];
+  const unchanged = source(content, hash, true);
+  expect(unchanged).toMatchObject({ speaker: 'Owner-corrected saved note', ownerConfirmed: true });
+  expect(unchanged?.provenance).toContain(
+    'linked source is provenance, not original document wording',
+  );
+  const alteredBody = source('Altered body with stale correction marker', hash, true);
+  expect(alteredBody).toBeUndefined();
+  const unconfirmed = source(content, hash, false);
+  expect(unconfirmed).toMatchObject({ speaker: 'Unconfirmed saved fact', ownerConfirmed: false });
+  expect(unconfirmed?.provenance).not.toContain('Owner-corrected saved note');
+  const staleMarker = source(content, 'c'.repeat(64), true);
+  expect(staleMarker).toBeUndefined();
+  expect(source(content, hash, true, { ...marker, privateText: 'not allowed' })?.speaker).toBe(
+    'Saved fact marked owner-confirmed',
+  );
+});
+
+it('excludes body/hash-mismatched memory from owner history without changing raw speaker contrast', async () => {
+  const content = 'The owner corrected the memorial date to October 14.';
+  const altered = 'The stale body claims October 12.';
+  const hash = createHash('sha256').update(content, 'utf8').digest('hex');
+  const ownerMessage = 'My correction: the memorial date is October 14.';
+  const assistantMessage = 'The earlier note says October 12.';
+  const candidates: ActionEvidence[] = [
+    {
+      toolName: 'memory.recall',
+      status: 'succeeded',
+      result: {
+        memories: [{ id: 'stale', content: altered, contentHash: hash, ownerConfirmed: true }],
+      },
+    },
+    {
+      toolName: 'conversations.search',
+      status: 'succeeded',
+      result: {
+        matches: [
+          message('owner-raw', ownerMessage, 'user', 'owner'),
+          message('assistant-raw', assistantMessage, 'assistant', 'assistant'),
+        ],
+      },
+    },
+  ];
+  const request = 'Separate my correction from your earlier statement about the memorial date.';
+  const object = vi.fn(async (_role: string, options: Record<string, unknown>) => {
+    const prompt = JSON.parse(String(options.prompt)) as {
+      sources: Array<{ key: string; speaker: string; body: string }>;
+    };
+    expect(prompt.sources.map((source) => source.key)).toEqual([
+      'message:owner-raw',
+      'message:assistant-raw',
+    ]);
+    expect(prompt.sources.some((source) => source.body.includes(altered))).toBe(false);
+    return {
+      ok: true,
+      object: {
+        selections: [
+          { sourceKey: 'message:owner-raw', quote: ownerMessage },
+          { sourceKey: 'message:assistant-raw', quote: assistantMessage },
+        ],
+      },
+    };
+  });
+  const result = await selectMemoryReadAnswer({
+    router: { object } as never,
+    taskId: 'qa',
+    request,
+    evidence: candidates,
+  });
+  expect(result).toMatchObject({ status: 'complete' });
+  expect(validMemoryReadSelection(result, candidates, request)).toBe(true);
+  const answer = renderMemoryReadAnswer(result, candidates, request);
+  expect(answer).toContain('Recorded owner message');
+  expect(answer).toContain('Earlier assistant claim (not verified fact)');
+  expect(answer).toContain(ownerMessage);
+  expect(answer).toContain(assistantMessage);
+  expect(answer).not.toContain(altered);
+});
+
+it('does not select, validate, or render a body/hash-mismatched confirmed memory as owner history', async () => {
+  const altered = 'A stale body with the claimed memorial date of October 12.';
+  const claimedContentHash = createHash('sha256')
+    .update('Different corrected body from October 14.', 'utf8')
+    .digest('hex');
+  const candidates: ActionEvidence[] = [
+    {
+      toolName: 'memory.recall',
+      status: 'succeeded',
+      result: {
+        memories: [
+          {
+            id: 'mismatched-confirmed',
+            content: altered,
+            contentHash: claimedContentHash,
+            ownerConfirmed: true,
+          },
+        ],
+      },
+    },
+  ];
+  expect(
+    memoryReadSources(candidates).some((source) => source.key === 'memory:mismatched-confirmed'),
+  ).toBe(false);
+  const request = 'What did I previously tell you about the memorial date?';
+  const object = vi.fn();
+  const result = await selectMemoryReadAnswer({
+    router: { object } as never,
+    taskId: 'qa',
+    request,
+    evidence: candidates,
+  });
+  expect(result).toMatchObject({ status: 'complete', selections: [] });
+  expect(object).not.toHaveBeenCalled();
+  expect(validMemoryReadSelection(result, candidates, request)).toBe(false);
+  const answer = renderMemoryReadAnswer(result, candidates, request);
+  expect(answer).toContain('could not reliably select passages answering your question');
+  expect(answer).not.toContain(altered);
+});
+
+it('does not satisfy owner-history coverage with an unconfirmed corrected note', async () => {
+  const content = 'The memorial date is October 14.';
+  const hash = createHash('sha256').update(content, 'utf8').digest('hex');
+  const candidates: ActionEvidence[] = [
+    {
+      toolName: 'memory.recall',
+      status: 'succeeded',
+      result: {
+        memories: [
+          {
+            id: 'unconfirmed-note',
+            content,
+            contentHash: hash,
+            ownerCorrection: {
+              version: 1,
+              correctedByOwner: true,
+              priorContentHash: 'a'.repeat(64),
+              currentContentHash: hash,
+              correctedAt: '2026-10-25T00:00:00.000Z',
+            },
+            ownerConfirmed: false,
+          },
+        ],
+      },
+    },
+  ];
+  const object = vi
+    .fn()
+    .mockResolvedValueOnce({
+      ok: true,
+      object: { selections: [{ sourceKey: 'memory:unconfirmed-note', quote: content }] },
+    })
+    .mockResolvedValueOnce({ ok: true, object: { selections: [] } });
+  const request = 'What did I previously tell you about the memorial date?';
+  const result = await selectMemoryReadAnswer({
+    router: { object } as never,
+    taskId: 'qa',
+    request,
+    evidence: candidates,
+  });
+  expect(result).toMatchObject({ status: 'unavailable', failureReason: 'incomplete_selection' });
+  expect(validMemoryReadSelection(result, candidates, request)).toBe(false);
+  expect(renderMemoryReadAnswer(result, candidates, request)).toContain(
+    'candidate owner-authored records',
+  );
 });
