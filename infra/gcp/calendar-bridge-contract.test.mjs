@@ -4,7 +4,9 @@ import { test } from 'node:test';
 import { createManifest, validateManifest } from './release-manifest.mjs';
 import { deriveSchemaVersion } from './release-schema-version.mjs';
 
-const contract = JSON.parse(await readFile(new URL('./release-contracts.json', import.meta.url)));
+const contract = JSON.parse(
+  await readFile(new URL('./fixtures/release-contracts.schema132-legacy.json', import.meta.url)),
+);
 const journal = JSON.parse(
   await readFile(new URL('../../packages/db/drizzle/meta/_journal.json', import.meta.url)),
 );

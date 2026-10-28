@@ -7,6 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Every selected image must truthfully cover the bounded calendar schema bridge.
 node --test "$ROOT/calendar-bridge-contract.test.mjs"
+node --test "$ROOT/schema132-bridge-contract.test.mjs"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/assistant-release-test.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/dispatch"
