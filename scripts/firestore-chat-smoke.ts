@@ -532,11 +532,12 @@ export async function firestoreChatSmoke(
       recallSurfaceKey('chat:summary_with_excerpt', [historyMessageId]),
       recallSurfaceKey('knowledge_graph', [relationId]),
     ].sort();
+    const memoryContentHash = createHash('sha256').update(SMOKE_GRAPH_EVIDENCE).digest('hex');
     await new FirestoreMemoryRepository(store, CHAT_SMOKE_SPACE).save({
       id: memoryId,
       agentId,
       content: SMOKE_GRAPH_EVIDENCE,
-      contentHash: createHash('sha256').update(SMOKE_GRAPH_EVIDENCE).digest('hex'),
+      contentHash: memoryContentHash,
       createdAt: historyAt,
       expiresAt: null,
       embedding,
