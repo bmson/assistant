@@ -233,7 +233,7 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
     expect(proxy(request('/people/not-a-uuid', 'POST')).status).toBe(410);
   });
 
-  it('renders the full dossier and every editing control without PostgreSQL', async () => {
+  it('renders the browse dossier without edit controls when the owner cookie lacks a form scope', async () => {
     const html = renderToStaticMarkup(await page.default(params(contactId)));
     expect(mocks.owner).toHaveBeenCalled();
     expect(mocks.db).not.toHaveBeenCalled();
@@ -247,13 +247,13 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
     expect(html).toContain('Browse this person');
     expect(html).toContain('Bobby');
     expect(html).toContain(`href="/people/${friendId}"`);
-    // Every control the PostgreSQL page offers.
+    // This fixture has an owner cookie but no form-session scope, so editing stays unavailable.
     expect(html).not.toContain('Add a fact about Anna Example');
     expect(html).not.toContain('Add connection');
     expect(html).not.toContain('Save changes');
     expect(html).not.toContain('merge into…');
-    expect(html).not.toContain('merge into…');
-    expect(html).not.toContain('Delete person');
+    expect(html).not.toContain('Delete person…');
+    expect(html).toContain('Deleting people is not available in this release.');
   });
 
   it('edits the person and adds an occasion through the shared Server Actions', async () => {
@@ -307,7 +307,7 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
     expect(mocks.pgBrowse).not.toHaveBeenCalled();
   });
 
-  it('deletes a person through the shared Server Action', async () => {
+  it('keeps the legacy delete Server Action behavior and renders a privacy-safe missing page', async () => {
     const { deleteContactAction } = await import('@/app/profile/actions');
     const doomedId = randomUUID();
     await person(doomedId, 'Temporary Example');
@@ -315,15 +315,26 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
       'Temporary Example',
     );
     expect(await deleteContactAction(doomedId)).toEqual({});
-    await expect(page.default(params(doomedId))).rejects.toThrow('NEXT_HTTP_ERROR_FALLBACK;404');
+    const html = renderToStaticMarkup(await page.default(params(doomedId)));
+    expect(html).toContain('Person unavailable');
+    expect(html).toContain('This person is no longer available in this view.');
+    expect(html).toContain('Open People');
+    expect(html).not.toContain('Temporary Example');
   });
 
   it('authenticates before reading and hides absent, foreign, and owner contacts', async () => {
     mocks.owner.mockRejectedValueOnce(new Error('owner authentication required'));
     await expect(page.default(params(contactId))).rejects.toThrow('owner authentication required');
     for (const id of [randomUUID(), foreignContactId, ownerContactId]) {
-      await expect(page.default(params(id))).rejects.toThrow('NEXT_HTTP_ERROR_FALLBACK;404');
+      const html = renderToStaticMarkup(await page.default(params(id)));
+      expect(html).toContain('Person unavailable');
+      expect(html).toContain('This person is no longer available in this view.');
+      expect(html).not.toContain(id);
+      expect(html).not.toContain('Foreign private person');
+      expect(html).not.toContain('Owner private contact');
     }
+    expect(mocks.db).not.toHaveBeenCalled();
+    expect(mocks.pgBrowse).not.toHaveBeenCalled();
   });
 
   async function expectUnavailable(
