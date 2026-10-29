@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./skill-library": "./src/skill-library.ts",
+    "./owner-editor-maintenance": "./src/owner-editor-maintenance.ts",
     "./validation-admin": "./src/validation-admin.ts",
     "./workspace-migration": "./src/workspace-migration.ts"
   },

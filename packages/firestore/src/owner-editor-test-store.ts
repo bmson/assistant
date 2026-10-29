@@ -61,6 +61,9 @@ export function ownerEditorTestStore() {
     limit(cap: number) {
       return new Query(this.table, this.filters, cap);
     }
+    select(..._fields: string[]) {
+      return this;
+    }
     orderBy() {
       return this;
     }
@@ -130,10 +133,12 @@ export function ownerEditorTestStore() {
             checkRead();
             return ref instanceof Ref ? readDoc(ref) : readQuery(ref);
           },
-          async getAll(...refs: Ref[]) {
+          async getAll(...refs: Array<Ref | { fieldMask: string[] }>) {
             checkRead();
             stats.requests++;
-            return refs.map((ref) => readDoc(ref, false));
+            return refs
+              .filter((ref): ref is Ref => ref instanceof Ref)
+              .map((ref) => readDoc(ref, false));
           },
           create(ref: Ref, row: Row) {
             wrote = true;

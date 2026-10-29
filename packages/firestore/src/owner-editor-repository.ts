@@ -26,6 +26,7 @@ import {
   parseOwnerEditorTerminalResult,
 } from '@assistant/persistence';
 import { type DocumentSnapshot, FieldValue, type Transaction } from '@google-cloud/firestore';
+import { buildFirestoreOwnerEditorEpochRecord } from './owner-editor-epoch-record.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
 const epochName = (owner: string) => `owner-editor-epoch:${owner}`;
@@ -318,15 +319,12 @@ export async function rotateFirestoreOwnerEditorEpochInTransaction(
   const name = epochName(ownerId);
   tx.set(
     store.doc('maintenanceCursors', name),
-    encodeRecord({
-      name,
+    buildFirestoreOwnerEditorEpochRecord({
+      ownerId,
+      epoch,
+      ready,
+      privacyGeneration: generation,
       updatedAt: store.now(),
-      cursor: JSON.stringify({
-        ownerId,
-        epoch,
-        ready,
-        privacyGenerationDigest: ownerEditorPrivacyDigest(generation),
-      }),
     }),
   );
   return epoch;
