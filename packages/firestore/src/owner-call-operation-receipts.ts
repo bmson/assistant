@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
+  compareExactTimestamps,
+  isValidExactTimestamp,
   type OwnerCallGrantOperation,
   type OwnerCallGrantOperationSlot,
   ownerCallGrantOperationMatchesSlot,
@@ -13,7 +15,8 @@ import {
   phoneCallToOwnerNumberGrantIsLive,
 } from '@assistant/persistence';
 import type { DocumentReference, Transaction } from '@google-cloud/firestore';
-import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
+import { decodeOwnerCallRecord, encodeOwnerCallRecord } from './owner-call-timestamps.js';
+import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HEX256 = /^[a-f0-9]{64}$/;
@@ -61,7 +64,7 @@ function readSlot(snapshot: {
   data(): unknown;
 }): OwnerCallGrantOperationSlot | null {
   if (!snapshot.exists) return null;
-  const value = parseOwnerCallGrantOperationSlot(decodeRecord(snapshot.data()));
+  const value = parseOwnerCallGrantOperationSlot(decodeOwnerCallRecord(snapshot.data()));
   if (!value) return null;
   try {
     return documentKey(tupleKey(['owner-call-grant-slot-v1', value.ownerId, value.approvalId])) ===
@@ -79,7 +82,7 @@ function readOperation(snapshot: {
   data(): unknown;
 }): OwnerCallGrantOperation | null {
   if (!snapshot.exists) return null;
-  const value = parseOwnerCallGrantOperation(decodeRecord(snapshot.data()));
+  const value = parseOwnerCallGrantOperation(decodeOwnerCallRecord(snapshot.data()));
   if (!value) return null;
   try {
     return documentKey(
@@ -205,10 +208,8 @@ export async function registerOwnerCallGrantOperationInTransaction(
     input.expectedGeneration < 0 ||
     !HEX256.test(input.requestFingerprint) ||
     !HEX256.test(input.grantScopeFingerprint) ||
-    !(input.reviewExpiresAt instanceof Date) ||
-    !Number.isFinite(input.reviewExpiresAt.getTime()) ||
-    !(input.grantExpiresAt instanceof Date) ||
-    !Number.isFinite(input.grantExpiresAt.getTime())
+    !isValidExactTimestamp(input.reviewExpiresAt) ||
+    !isValidExactTimestamp(input.grantExpiresAt)
   )
     return { kind: 'unavailable' };
 
@@ -253,10 +254,9 @@ export async function registerOwnerCallGrantOperationInTransaction(
   if (nextSnapshot.exists) return { kind: 'conflict' };
   const registeredAt = store.now();
   if (
-    !(registeredAt instanceof Date) ||
-    !Number.isFinite(registeredAt.getTime()) ||
-    input.reviewExpiresAt <= registeredAt ||
-    input.grantExpiresAt <= registeredAt
+    !isValidExactTimestamp(registeredAt) ||
+    compareExactTimestamps(input.reviewExpiresAt, registeredAt) <= 0 ||
+    compareExactTimestamps(input.grantExpiresAt, registeredAt) <= 0
   )
     return { kind: 'conflict' };
   const operation: OwnerCallGrantOperation = {
@@ -300,7 +300,7 @@ export async function registerOwnerCallGrantOperationInTransaction(
   if (prior?.phase === 'registered' && priorRef && input.replaceUnadmittedRegistration === true) {
     tx.update(
       priorRef,
-      encodeRecord({
+      encodeOwnerCallRecord({
         ...prior,
         phase: 'closed_no_effect',
         closedAt: registeredAt,
@@ -308,9 +308,9 @@ export async function registerOwnerCallGrantOperationInTransaction(
       }),
     );
   }
-  tx.create(nextRef, encodeRecord({ ...operation }));
-  if (pointerSnapshot.exists) tx.update(pointer, encodeRecord({ ...nextSlot }));
-  else tx.create(pointer, encodeRecord({ ...nextSlot }));
+  tx.create(nextRef, encodeOwnerCallRecord({ ...operation }));
+  if (pointerSnapshot.exists) tx.update(pointer, encodeOwnerCallRecord({ ...nextSlot }));
+  else tx.create(pointer, encodeOwnerCallRecord({ ...nextSlot }));
   return { kind: 'registered', operation };
 }
 
@@ -364,7 +364,7 @@ export async function admitOwnerCallGrantOperationInTransaction(
   const current = await readCurrentInTransaction(tx, store, expected.ownerId, expected.approvalId);
   if (current.kind !== 'current') return { kind: 'unavailable' };
   const now = store.now();
-  if (!(now instanceof Date) || !Number.isFinite(now.getTime())) return { kind: 'unavailable' };
+  if (!isValidExactTimestamp(now)) return { kind: 'unavailable' };
   const op = current.operation;
   if (
     op.grantId !== expected.grantId ||
@@ -373,8 +373,8 @@ export async function admitOwnerCallGrantOperationInTransaction(
     op.requestFingerprint !== expected.requestFingerprint ||
     op.grantScopeFingerprint !== expected.grantScopeFingerprint ||
     op.phase !== 'registered' ||
-    op.reviewExpiresAt <= now ||
-    op.grantExpiresAt <= now
+    compareExactTimestamps(op.reviewExpiresAt, now) <= 0 ||
+    compareExactTimestamps(op.grantExpiresAt, now) <= 0
   )
     return { kind: 'conflict' };
   const admitted: OwnerCallGrantOperation = {
@@ -384,7 +384,7 @@ export async function admitOwnerCallGrantOperationInTransaction(
     updatedAt: now,
   };
   if (!parseOwnerCallGrantOperation(admitted)) return { kind: 'unavailable' };
-  tx.update(current.operationRef, encodeRecord({ ...admitted }));
+  tx.update(current.operationRef, encodeOwnerCallRecord({ ...admitted }));
   return {
     kind: 'admitted',
     operation: admitted,
@@ -533,8 +533,7 @@ export async function readOwnerCallGrantOperationStatus(
             policyAvailability = 'changed';
           } else {
             const checkedAt = store.now();
-            if (!(checkedAt instanceof Date) || !Number.isFinite(checkedAt.getTime()))
-              return { kind: 'unavailable' };
+            if (!isValidExactTimestamp(checkedAt)) return { kind: 'unavailable' };
             const live = legacyMatch
               ? phoneCallToOwnerNumberGrantIsLive(legacyMatch, checkedAt)
               : actionMatch
@@ -553,8 +552,7 @@ export async function readOwnerCallGrantOperationStatus(
         }
       }
       const checkedAt = store.now();
-      if (!(checkedAt instanceof Date) || !Number.isFinite(checkedAt.getTime()))
-        return { kind: 'unavailable' };
+      if (!isValidExactTimestamp(checkedAt)) return { kind: 'unavailable' };
       return {
         kind: 'status',
         operation,
@@ -616,7 +614,7 @@ export async function closeOwnerCallGrantOperationInTransaction(
   if (current.operation.phase !== 'registered' && current.operation.phase !== 'admitted')
     return 'conflict';
   const closedAt = store.now();
-  if (!(closedAt instanceof Date) || !Number.isFinite(closedAt.getTime())) return 'unavailable';
+  if (!isValidExactTimestamp(closedAt)) return 'unavailable';
   const closed: OwnerCallGrantOperation = {
     ...current.operation,
     phase: 'closed_no_effect',
@@ -624,7 +622,7 @@ export async function closeOwnerCallGrantOperationInTransaction(
     updatedAt: closedAt,
   };
   if (!parseOwnerCallGrantOperation(closed)) return 'unavailable';
-  tx.update(current.operationRef, encodeRecord({ ...closed }));
+  tx.update(current.operationRef, encodeOwnerCallRecord({ ...closed }));
   return 'closed_no_effect';
 }
 
@@ -673,7 +671,7 @@ export async function rejectOwnerCallGrantOperationInTransaction(
   if (current.operation.phase !== 'registered' && current.operation.phase !== 'admitted')
     return 'conflict';
   const rejectedAt = store.now();
-  if (!(rejectedAt instanceof Date) || !Number.isFinite(rejectedAt.getTime())) return 'unavailable';
+  if (!isValidExactTimestamp(rejectedAt)) return 'unavailable';
   const rejected: OwnerCallGrantOperation = {
     ...current.operation,
     phase: 'rejected_no_effect',
@@ -681,7 +679,7 @@ export async function rejectOwnerCallGrantOperationInTransaction(
     updatedAt: rejectedAt,
   };
   if (!parseOwnerCallGrantOperation(rejected)) return 'unavailable';
-  tx.update(current.operationRef, encodeRecord({ ...rejected }));
+  tx.update(current.operationRef, encodeOwnerCallRecord({ ...rejected }));
   return 'rejected_no_effect';
 }
 
@@ -719,7 +717,7 @@ export async function prepareOwnerCallGrantCommitInTransaction(
   // Resample only after transaction document reads; a timestamp captured by the handler before a
   // slow read cannot extend either original expiry.
   const now = store.now();
-  if (!(now instanceof Date) || !Number.isFinite(now.getTime())) return null;
+  if (!isValidExactTimestamp(now)) return null;
   const op = current.operation;
   if (
     op.grantId !== expected.grantId ||
@@ -728,8 +726,8 @@ export async function prepareOwnerCallGrantCommitInTransaction(
     op.requestFingerprint !== expected.requestFingerprint ||
     op.grantScopeFingerprint !== expected.grantScopeFingerprint ||
     op.phase !== 'admitted' ||
-    op.reviewExpiresAt <= now ||
-    op.grantExpiresAt <= now
+    compareExactTimestamps(op.reviewExpiresAt, now) <= 0 ||
+    compareExactTimestamps(op.grantExpiresAt, now) <= 0
   )
     return null;
   return { slotRef: current.slotRef, operationRef: current.operationRef, operation: op };
@@ -768,10 +766,9 @@ export function commitOwnerCallGrantOperationInTransaction(
   // before writing the receipt; stale handler-supplied time never decides commit eligibility.
   const committedAt = store.now();
   if (
-    !(committedAt instanceof Date) ||
-    !Number.isFinite(committedAt.getTime()) ||
-    plan.operation.reviewExpiresAt <= committedAt ||
-    plan.operation.grantExpiresAt <= committedAt
+    !isValidExactTimestamp(committedAt) ||
+    compareExactTimestamps(plan.operation.reviewExpiresAt, committedAt) <= 0 ||
+    compareExactTimestamps(plan.operation.grantExpiresAt, committedAt) <= 0
   )
     throw new OwnerCallOperationCommitAbort();
   const committed: OwnerCallGrantOperation = {
@@ -784,7 +781,7 @@ export function commitOwnerCallGrantOperationInTransaction(
   };
   if (!parseOwnerCallGrantOperation(committed)) throw new OwnerCallOperationCommitAbort();
   try {
-    tx.update(plan.operationRef, encodeRecord({ ...committed }));
+    tx.update(plan.operationRef, encodeOwnerCallRecord({ ...committed }));
   } catch {
     throw new OwnerCallOperationCommitAbort();
   }

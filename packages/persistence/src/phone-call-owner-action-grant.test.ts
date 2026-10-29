@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ExactTimestamp } from './exact-timestamp.js';
 import {
   type OwnerCallActionGrantMatch,
   parsePhoneCallOwnerActionGrantMatch,
@@ -185,6 +186,22 @@ describe('phone.call.owner_action.v2 stored scope', () => {
         current,
       ),
     ).toBe(false);
+  });
+});
+
+describe('phone.call.owner_action.v2 exact expiry', () => {
+  it('keeps the exact expiry exclusive within one millisecond', () => {
+    const grant = { ...valid, expiresAt: '2026-10-23T12:00:00.123457Z' };
+    const seconds = BigInt(Date.parse('2026-10-23T12:00:00.000Z') / 1000);
+    expect(phoneCallOwnerActionGrantIsLive(grant, new ExactTimestamp(seconds, 123_456_000))).toBe(
+      true,
+    );
+    expect(phoneCallOwnerActionGrantIsLive(grant, new ExactTimestamp(seconds, 123_457_000))).toBe(
+      false,
+    );
+    expect(phoneCallOwnerActionGrantIsLive(grant, new ExactTimestamp(seconds, 123_458_000))).toBe(
+      false,
+    );
   });
 });
 

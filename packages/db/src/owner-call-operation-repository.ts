@@ -1,4 +1,5 @@
 import {
+  compareExactTimestamps,
   OWNER_CALL_OPERATION_PURPOSE,
   type OwnerCallGrantOperation,
   type OwnerCallGrantOperationSlot,
@@ -6,9 +7,30 @@ import {
   parseOwnerCallGrantOperation,
   parseOwnerCallGrantOperationSlot,
 } from '@assistant/persistence';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, getTableColumns } from 'drizzle-orm';
 import type { Db } from './client.js';
+import {
+  decodePostgresOwnerCallTimestamp,
+  postgresOwnerCallClock,
+  postgresOwnerCallTimestamp,
+} from './owner-call-timestamps.js';
 import { ownerCallGrantOperationSlots, ownerCallGrantOperations } from './schema.js';
+
+const slotSelection = {
+  ...getTableColumns(ownerCallGrantOperationSlots),
+  updatedAt: postgresOwnerCallTimestamp(ownerCallGrantOperationSlots.updatedAt),
+};
+const operationSelection = {
+  ...getTableColumns(ownerCallGrantOperations),
+  registeredAt: postgresOwnerCallTimestamp(ownerCallGrantOperations.registeredAt),
+  reviewExpiresAt: postgresOwnerCallTimestamp(ownerCallGrantOperations.reviewExpiresAt),
+  grantExpiresAt: postgresOwnerCallTimestamp(ownerCallGrantOperations.grantExpiresAt),
+  admittedAt: postgresOwnerCallTimestamp(ownerCallGrantOperations.admittedAt),
+  committedAt: postgresOwnerCallTimestamp(ownerCallGrantOperations.committedAt),
+  closedAt: postgresOwnerCallTimestamp(ownerCallGrantOperations.closedAt),
+  rejectedAt: postgresOwnerCallTimestamp(ownerCallGrantOperations.rejectedAt),
+  updatedAt: postgresOwnerCallTimestamp(ownerCallGrantOperations.updatedAt),
+};
 
 type OperationTx = Pick<Db, 'execute' | 'insert' | 'select' | 'update'>;
 
@@ -66,10 +88,8 @@ function validFingerprint(value: string): boolean {
 }
 
 async function databaseNow(tx: OperationTx): Promise<Date | null> {
-  const [row] = await tx.execute<{ now: Date | string }>(sql`select clock_timestamp() as now`);
-  const now =
-    row?.now instanceof Date ? row.now : typeof row?.now === 'string' ? new Date(row.now) : null;
-  return now && Number.isFinite(now.getTime()) ? now : null;
+  const [row] = await tx.execute<{ now: Date | string }>(postgresOwnerCallClock);
+  return decodePostgresOwnerCallTimestamp(row?.now);
 }
 
 /** Lock order is always per-approval slot, current operation, then caller's task/approval/policy reads. */
@@ -94,7 +114,7 @@ async function lockCurrentState(
   }
 
   const [rawSlot] = await tx
-    .select()
+    .select(slotSelection)
     .from(ownerCallGrantOperationSlots)
     .where(
       and(
@@ -109,7 +129,7 @@ async function lockCurrentState(
   if (slot.currentGrantId === null) return { ok: true, slot, operation: null };
 
   const [rawOperation] = await tx
-    .select()
+    .select(operationSelection)
     .from(ownerCallGrantOperations)
     .where(
       and(
@@ -163,7 +183,7 @@ export async function discoverOwnerCallGrantOperationInTransaction(
 ): Promise<OwnerCallGrantOperationDiscovery> {
   if (!validUuid(ownerId) || !validUuid(approvalId)) return { kind: 'unavailable' };
   const [row] = await db
-    .select({ slot: ownerCallGrantOperationSlots, operation: ownerCallGrantOperations })
+    .select({ slot: slotSelection, operation: operationSelection })
     .from(ownerCallGrantOperationSlots)
     .leftJoin(
       ownerCallGrantOperations,
@@ -227,6 +247,8 @@ export async function registerOwnerCallGrantOperation(
     validateCurrentCall: CurrentCallValidator;
   },
 ): Promise<OwnerCallGrantOperationWriteResult> {
+  const reviewExpiresAt = decodePostgresOwnerCallTimestamp(input.reviewExpiresAt);
+  const grantExpiresAt = decodePostgresOwnerCallTimestamp(input.grantExpiresAt);
   if (
     !validUuid(input.ownerId) ||
     !validUuid(input.approvalId) ||
@@ -237,10 +259,8 @@ export async function registerOwnerCallGrantOperation(
     input.expectedSlotGeneration < 0 ||
     !validFingerprint(input.requestFingerprint) ||
     !validFingerprint(input.grantScopeFingerprint) ||
-    !(input.reviewExpiresAt instanceof Date) ||
-    !Number.isFinite(input.reviewExpiresAt.getTime()) ||
-    !(input.grantExpiresAt instanceof Date) ||
-    !Number.isFinite(input.grantExpiresAt.getTime())
+    !reviewExpiresAt ||
+    !grantExpiresAt
   )
     return { ok: false, reason: 'corrupt_or_unavailable' };
 
@@ -268,7 +288,10 @@ export async function registerOwnerCallGrantOperation(
         return { ok: false, reason: 'binding_changed' };
       const now = await databaseNow(tx);
       if (!now) return { ok: false, reason: 'corrupt_or_unavailable' };
-      if (input.reviewExpiresAt <= now || input.grantExpiresAt <= now)
+      if (
+        compareExactTimestamps(reviewExpiresAt, now) <= 0 ||
+        compareExactTimestamps(grantExpiresAt, now) <= 0
+      )
         return { ok: false, reason: 'binding_changed' };
 
       if (locked.operation) {
@@ -298,8 +321,8 @@ export async function registerOwnerCallGrantOperation(
         ...binding,
         phase: 'registered' as const,
         registeredAt: now,
-        reviewExpiresAt: input.reviewExpiresAt,
-        grantExpiresAt: input.grantExpiresAt,
+        reviewExpiresAt,
+        grantExpiresAt,
         admittedAt: null,
         committedAt: null,
         closedAt: null,
@@ -312,7 +335,7 @@ export async function registerOwnerCallGrantOperation(
         .insert(ownerCallGrantOperations)
         .values(operationInput)
         .onConflictDoNothing()
-        .returning();
+        .returning(operationSelection);
       const operation = parseOwnerCallGrantOperation(inserted);
       if (!operation) throw new OwnerCallGrantOperationRollbackError('corrupt_or_unavailable');
       const [updatedSlot] = await tx
@@ -329,7 +352,7 @@ export async function registerOwnerCallGrantOperation(
             eq(ownerCallGrantOperationSlots.generation, input.expectedSlotGeneration),
           ),
         )
-        .returning();
+        .returning(slotSelection);
       const slot = parseOwnerCallGrantOperationSlot(updatedSlot);
       if (!slot || !ownerCallGrantOperationMatchesSlot(slot, operation))
         throw new OwnerCallGrantOperationRollbackError('corrupt_or_unavailable');
@@ -365,7 +388,8 @@ export async function admitOwnerCallGrantOperation(
       return { ok: false, reason: 'binding_changed' };
     const now = await databaseNow(tx);
     if (!now) return { ok: false, reason: 'corrupt_or_unavailable' };
-    if (locked.operation.reviewExpiresAt <= now) return { ok: false, reason: 'review_expired' };
+    if (compareExactTimestamps(locked.operation.reviewExpiresAt, now) <= 0)
+      return { ok: false, reason: 'review_expired' };
     const [row] = await tx
       .update(ownerCallGrantOperations)
       .set({ phase: 'admitted', admittedAt: now, updatedAt: now })
@@ -377,7 +401,7 @@ export async function admitOwnerCallGrantOperation(
           eq(ownerCallGrantOperations.phase, 'registered'),
         ),
       )
-      .returning();
+      .returning(operationSelection);
     const operation = parseOwnerCallGrantOperation(row);
     if (!operation) throw new OwnerCallGrantOperationRollbackError('corrupt_or_unavailable');
     return { ok: true, slot: locked.slot, operation };
@@ -403,7 +427,7 @@ export async function readOwnerCallGrantOperationCheck(
   if (!validUuid(ownerId) || !validUuid(approvalId) || !validUuid(expectedGrantId))
     return { status: 'unavailable' };
   const [row] = await db
-    .select({ slot: ownerCallGrantOperationSlots, operation: ownerCallGrantOperations })
+    .select({ slot: slotSelection, operation: operationSelection })
     .from(ownerCallGrantOperations)
     .leftJoin(
       ownerCallGrantOperationSlots,
@@ -478,7 +502,7 @@ export async function closeOwnerCallGrantOperation(
           eq(ownerCallGrantOperations.phase, locked.operation.phase),
         ),
       )
-      .returning();
+      .returning(operationSelection);
     const operation = parseOwnerCallGrantOperation(row);
     if (!operation) throw new OwnerCallGrantOperationRollbackError('corrupt_or_unavailable');
     return { ok: true, slot: locked.slot, operation };
@@ -518,9 +542,9 @@ export async function commitOwnerCallGrantOperationInTransaction(
     !ownerCallGrantOperationMatchesSlot(locked.slot, locked.operation)
   )
     throw new OwnerCallGrantOperationRollbackError('operation_not_admitted');
-  if (now >= locked.operation.reviewExpiresAt)
+  if (compareExactTimestamps(now, locked.operation.reviewExpiresAt) >= 0)
     throw new OwnerCallGrantOperationRollbackError('review_expired');
-  if (now >= locked.operation.grantExpiresAt)
+  if (compareExactTimestamps(now, locked.operation.grantExpiresAt) >= 0)
     throw new OwnerCallGrantOperationRollbackError('grant_expired');
   const [row] = await tx
     .update(ownerCallGrantOperations)
@@ -539,7 +563,7 @@ export async function commitOwnerCallGrantOperationInTransaction(
         eq(ownerCallGrantOperations.phase, 'admitted'),
       ),
     )
-    .returning();
+    .returning(operationSelection);
   const operation = parseOwnerCallGrantOperation(row);
   if (!operation || operation.phase !== 'committed')
     throw new OwnerCallGrantOperationRollbackError('corrupt_or_unavailable');
@@ -569,7 +593,7 @@ export async function rejectOwnerCallGrantOperationInTransaction(
         eq(ownerCallGrantOperations.phase, 'admitted'),
       ),
     )
-    .returning();
+    .returning(operationSelection);
   const operation = parseOwnerCallGrantOperation(row);
   if (!operation || operation.phase !== 'rejected_no_effect')
     throw new OwnerCallGrantOperationRollbackError('corrupt_or_unavailable');

@@ -1,8 +1,12 @@
 import { createHash } from 'node:crypto';
 import {
+  deserializeMigrationValue,
+  type PreciseMigrationTimestamp,
   phoneCallOwnerActionGrantScopeFingerprint,
   phoneCallOwnerNumberGrantScopeFingerprint,
+  serializeMigrationTimestamp,
 } from '@assistant/persistence';
+import { Timestamp } from '@google-cloud/firestore';
 import { describe, expect, it, vi } from 'vitest';
 import { createWakeIntent, wakeIntentId } from './outbox.js';
 import {
@@ -104,6 +108,77 @@ describe('Firestore owner-call operation storage', () => {
     });
     expect(dangling.writes).toHaveLength(0);
   });
+
+  for (const [fraction, expectedKind] of [
+    ['123998', 'admitted'],
+    ['123999', 'conflict'],
+    ['124000', 'conflict'],
+  ] as const) {
+    it(`retains restored receipt precision at admission ${fraction}`, async () => {
+      const f = fixture();
+      const exact = (fraction: string) =>
+        deserializeMigrationValue(
+          serializeMigrationTimestamp(`2026-10-26 12:00:00.${fraction}+00`),
+        ) as PreciseMigrationTimestamp;
+      f.store.setNow(exact('123456'));
+      const binding = {
+        ownerId,
+        approvalId,
+        grantId,
+        taskId,
+        toolCallId,
+        requestFingerprint: fingerprint,
+        grantScopeFingerprint: scopeFingerprint,
+      };
+      const registered = await f.store.db.runTransaction((tx: any) =>
+        registerOwnerCallGrantOperationInTransaction(
+          tx,
+          f.store,
+          {
+            ...binding,
+            expectedGeneration: 0,
+            reviewExpiresAt: exact('123999'),
+            grantExpiresAt: exact('123999'),
+          },
+          async () => true,
+        ),
+      );
+      expect(registered.kind).toBe('registered');
+      const receipt = [...f.rows.entries()].find(([path]) =>
+        path.startsWith('ownerCallGrantOperations/'),
+      );
+      if (!receipt) throw new Error('receipt missing');
+      expect((receipt[1] as { registeredAt: unknown }).registeredAt).toBeInstanceOf(Timestamp);
+      expect(await discoverOwnerCallGrantOperation(f.store, ownerId, approvalId)).toMatchObject({
+        kind: 'current',
+      });
+      f.rows.set(f.store.doc('approvals', approvalId).path, {
+        id: approvalId,
+        taskId,
+        toolCallId,
+        status: 'pending',
+      });
+      f.rows.set(f.store.doc('tasks', taskId).path, { id: taskId, agentId: ownerId });
+      f.rows.set(f.store.doc('toolCalls', toolCallId).path, { id: toolCallId, taskId });
+      expect(
+        await readOwnerCallGrantOperationStatus(f.store, { ownerId, approvalId, grantId }),
+      ).toMatchObject({ kind: 'status' });
+      f.store.setNow(exact(fraction));
+      const admitted = await f.store.db.runTransaction((tx: any) =>
+        admitOwnerCallGrantOperationInTransaction(tx, f.store, binding, async () => true),
+      );
+      expect(admitted.kind).toBe(expectedKind);
+      const stored = f.rows.get(receipt[0]) as {
+        registeredAt: Timestamp;
+        reviewExpiresAt: Timestamp;
+        admittedAt: Timestamp | null;
+      };
+      expect(stored.registeredAt.nanoseconds).toBe(123_456_000);
+      expect(stored.reviewExpiresAt.nanoseconds).toBe(123_999_000);
+      if (expectedKind === 'admitted') expect(stored.admittedAt?.nanoseconds).toBe(123_998_000);
+      else expect(stored.admittedAt).toBeNull();
+    });
+  }
 
   it('does not register when current review fences fail and writes nothing', async () => {
     const f = fixture();

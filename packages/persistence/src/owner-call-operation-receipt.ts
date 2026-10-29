@@ -1,3 +1,5 @@
+import { compareExactTimestamps, isValidExactTimestamp } from './exact-timestamp.js';
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const FINGERPRINT = /^[a-f0-9]{64}$/;
 
@@ -67,7 +69,7 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
 }
 
 function isDate(value: unknown): value is Date {
-  return value instanceof Date && Number.isFinite(value.getTime());
+  return isValidExactTimestamp(value);
 }
 
 function isNullableDate(value: unknown): value is Date | null {
@@ -184,7 +186,11 @@ export function parseOwnerCallGrantOperation(value: unknown): OwnerCallGrantOper
   const rejectedAt = value.rejectedAt as Date | null;
   const updatedAt = value.updatedAt as Date;
   const phase = value.phase as OwnerCallGrantOperationPhase;
-  if (reviewExpiresAt <= registeredAt || grantExpiresAt <= registeredAt) return null;
+  if (
+    compareExactTimestamps(reviewExpiresAt, registeredAt) <= 0 ||
+    compareExactTimestamps(grantExpiresAt, registeredAt) <= 0
+  )
+    return null;
 
   if (phase === 'registered') {
     if (
@@ -194,58 +200,62 @@ export function parseOwnerCallGrantOperation(value: unknown): OwnerCallGrantOper
       rejectedAt ||
       value.createdPolicyId ||
       value.wakeGeneration ||
-      updatedAt < registeredAt
+      compareExactTimestamps(updatedAt, registeredAt) < 0
     )
       return null;
   } else if (phase === 'admitted') {
     if (
       !admittedAt ||
-      admittedAt < registeredAt ||
-      admittedAt >= reviewExpiresAt ||
+      compareExactTimestamps(admittedAt, registeredAt) < 0 ||
+      compareExactTimestamps(admittedAt, reviewExpiresAt) >= 0 ||
       committedAt ||
       closedAt ||
       rejectedAt ||
       value.createdPolicyId ||
       value.wakeGeneration ||
-      updatedAt < admittedAt
+      compareExactTimestamps(updatedAt, admittedAt) < 0
     )
       return null;
   } else if (phase === 'committed') {
     if (
       !admittedAt ||
-      admittedAt < registeredAt ||
-      admittedAt >= reviewExpiresAt ||
+      compareExactTimestamps(admittedAt, registeredAt) < 0 ||
+      compareExactTimestamps(admittedAt, reviewExpiresAt) >= 0 ||
       !committedAt ||
-      committedAt < admittedAt ||
-      committedAt >= reviewExpiresAt ||
+      compareExactTimestamps(committedAt, admittedAt) < 0 ||
+      compareExactTimestamps(committedAt, reviewExpiresAt) >= 0 ||
       closedAt ||
       rejectedAt ||
       !value.createdPolicyId ||
       !value.wakeGeneration ||
-      updatedAt < committedAt
+      compareExactTimestamps(updatedAt, committedAt) < 0
     )
       return null;
   } else if (phase === 'closed_no_effect') {
     if (
       !closedAt ||
-      (admittedAt !== null && (admittedAt < registeredAt || admittedAt >= reviewExpiresAt)) ||
-      closedAt < (admittedAt ?? registeredAt) ||
+      (admittedAt !== null &&
+        (compareExactTimestamps(admittedAt, registeredAt) < 0 ||
+          compareExactTimestamps(admittedAt, reviewExpiresAt) >= 0)) ||
+      compareExactTimestamps(closedAt, admittedAt ?? registeredAt) < 0 ||
       committedAt ||
       rejectedAt ||
       value.createdPolicyId ||
       value.wakeGeneration ||
-      updatedAt < closedAt
+      compareExactTimestamps(updatedAt, closedAt) < 0
     )
       return null;
   } else if (
     !rejectedAt ||
-    (admittedAt !== null && (admittedAt < registeredAt || admittedAt >= reviewExpiresAt)) ||
-    rejectedAt < (admittedAt ?? registeredAt) ||
+    (admittedAt !== null &&
+      (compareExactTimestamps(admittedAt, registeredAt) < 0 ||
+        compareExactTimestamps(admittedAt, reviewExpiresAt) >= 0)) ||
+    compareExactTimestamps(rejectedAt, admittedAt ?? registeredAt) < 0 ||
     committedAt ||
     closedAt ||
     value.createdPolicyId ||
     value.wakeGeneration ||
-    updatedAt < rejectedAt
+    compareExactTimestamps(updatedAt, rejectedAt) < 0
   ) {
     return null;
   }

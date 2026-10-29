@@ -7,12 +7,15 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
+  approvalPolicyFingerprint,
   chatAdmissionExternalEventId,
   directOwnerCallRequestBinding,
+  type ExpectedOwnerCallActionGrantBinding,
+  parsePhoneCallOwnerActionIntent,
   phoneCallOwnerActionGrantScopeFingerprint,
   phoneCallOwnerNumberReviewSourceFingerprint,
 } from '@assistant/persistence';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
@@ -24,6 +27,18 @@ import {
 import { createPostgresApprovalRepository } from './approval-repository.js';
 import { createDb, type Db } from './client.js';
 import {
+  admitOwnerCallGrantOperation,
+  commitOwnerCallGrantOperationInTransaction,
+  discoverOwnerCallGrantOperation,
+  lockOwnerCallGrantOperationForFinalize,
+  readOwnerCallGrantOperationCheck,
+  registerOwnerCallGrantOperation,
+} from './owner-call-operation-repository.js';
+import {
+  decodePostgresOwnerCallTimestamp,
+  postgresOwnerCallClock,
+} from './owner-call-timestamps.js';
+import {
   agents,
   approvalPolicies,
   approvals,
@@ -31,6 +46,7 @@ import {
   messages,
   ownerCallGrantOperationSlots,
   ownerCallGrantOperations,
+  ownerCallGrantUsage,
   tasks,
   toolCalls,
 } from './schema.js';
@@ -40,6 +56,7 @@ import {
   isolatedTestEnvironment,
   testTargetMarkerPath,
 } from './test-target.js';
+import { createPostgresToolExecutionRepository } from './tool-execution-repository.js';
 
 const exec = promisify(execFile);
 const folder = fileURLToPath(new URL('../drizzle/', import.meta.url));
@@ -395,7 +412,343 @@ async function insertOperation(row: OperationSeed) {
     )`;
 }
 
+// The clock adapter changes only the exact shared clock query. All clock text
+// projection, receipt/usage reads, locks, writes and returning maps still execute
+// on the allocated PostgreSQL fixture. It avoids elapsed-time flakes at 1us.
+function withOwnerCallFixtureClock(database: Db, instant: string): Db {
+  return new Proxy(database, {
+    get(target, key, receiver) {
+      if (key !== 'transaction') return Reflect.get(target, key, receiver);
+      return (body: Parameters<Db['transaction']>[0]) =>
+        target.transaction((tx) =>
+          body(
+            new Proxy(tx, {
+              get(transaction, field, transactionReceiver) {
+                if (field !== 'execute')
+                  return Reflect.get(transaction, field, transactionReceiver);
+                return (query: Parameters<typeof transaction.execute>[0]) =>
+                  transaction.execute(
+                    query === postgresOwnerCallClock
+                      ? sql`select to_char(${instant}::timestamptz at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as now`
+                      : query,
+                  );
+              },
+            }),
+          ),
+        );
+    },
+  });
+}
+
 describe('owner-call operation migration 0133 on allocated PostgreSQL', () => {
+  it('preserves actual PostgreSQL receipt projections, clock text and within-millisecond ordering', async () => {
+    if (!db || !client) throw new Error('Allocated PostgreSQL fixture is not available');
+    const database = db;
+    const [clock] = await database.execute<{ now: string }>(postgresOwnerCallClock);
+    expect(clock?.now).toMatch(/\.\d{6}Z$/);
+    expect(decodePostgresOwnerCallTimestamp(clock?.now)?.toISOString()).toBe(clock?.now);
+    const ordinary = new Date('2026-10-28T12:00:00.123Z');
+    expect(decodePostgresOwnerCallTimestamp(ordinary)).toBe(ordinary);
+    const exact = (fraction: string) => {
+      const value = decodePostgresOwnerCallTimestamp(`2026-10-28T12:00:00.${fraction}Z`);
+      if (!value) throw new Error('invalid precise fixture instant');
+      return value;
+    };
+    for (const [deadline, grantDeadline, admission, accepted] of [
+      ['123457', '123457', '123456', true],
+      ['123999', '123999', '123998', true],
+      ['123999', '123999', '123999', false],
+      ['123999', '123999', '124000', false],
+      ['123999', '123457', '123456', true],
+    ] as const) {
+      const seed = operationSeed();
+      const binding = {
+        ownerId: seed.ownerId,
+        approvalId: seed.approvalId,
+        grantId: seed.grantId,
+        taskId: seed.taskId,
+        toolCallId: seed.toolCallId,
+        slotGeneration: 1,
+        requestFingerprint: seed.requestFingerprint,
+        grantScopeFingerprint: seed.grantScopeFingerprint,
+      };
+      const registered = await registerOwnerCallGrantOperation(
+        withOwnerCallFixtureClock(database, '2026-10-28T12:00:00.123456Z'),
+        {
+          ...binding,
+          expectedSlotGeneration: 0,
+          replaceUnadmittedRegistration: false,
+          reviewExpiresAt: exact(deadline),
+          grantExpiresAt: exact(grantDeadline),
+          validateCurrentCall: async () => true,
+        },
+      );
+      expect(registered.ok).toBe(true);
+      if (!registered.ok) throw new Error('precise SQL registration rejected');
+      expect(registered.operation.registeredAt.toISOString()).toBe('2026-10-28T12:00:00.123456Z');
+      expect(registered.operation.reviewExpiresAt.toISOString()).toBe(
+        `2026-10-28T12:00:00.${deadline}Z`,
+      );
+      expect(
+        await discoverOwnerCallGrantOperation(database, seed.ownerId, seed.approvalId),
+      ).toMatchObject({ kind: 'current' });
+      const checked = await readOwnerCallGrantOperationCheck(
+        database,
+        seed.ownerId,
+        seed.approvalId,
+        seed.grantId,
+      );
+      expect(checked.status).toBe('available');
+      if (checked.status !== 'available') throw new Error('precise SQL receipt unavailable');
+      expect(checked.operation.registeredAt.toISOString()).toBe('2026-10-28T12:00:00.123456Z');
+      const admitted = await admitOwnerCallGrantOperation(
+        withOwnerCallFixtureClock(database, `2026-10-28T12:00:00.${admission}Z`),
+        { ...binding, validateCurrentCall: async () => true },
+      );
+      if (!accepted) {
+        expect(admitted).toMatchObject({ ok: false, reason: 'review_expired' });
+        continue;
+      }
+      expect(admitted.ok).toBe(true);
+      if (!admitted.ok) throw new Error('precise SQL admission rejected');
+      expect(admitted.operation.admittedAt?.toISOString()).toBe(
+        `2026-10-28T12:00:00.${admission}Z`,
+      );
+      const finalize = (instant: string) =>
+        withOwnerCallFixtureClock(database, instant).transaction(async (tx) => {
+          const locked = await lockOwnerCallGrantOperationForFinalize(tx, binding);
+          if (!locked.ok) throw new Error('precise SQL operation lock unavailable');
+          return commitOwnerCallGrantOperationInTransaction(tx, locked, {
+            createdPolicyId: randomUUID(),
+            wakeGeneration: 1,
+          });
+        });
+      await expect(finalize(`2026-10-28T12:00:00.${grantDeadline}Z`)).rejects.toMatchObject({
+        reason: grantDeadline < deadline ? 'grant_expired' : 'review_expired',
+      });
+      const committed = await finalize(`2026-10-28T12:00:00.${admission}Z`);
+      expect(committed.committedAt?.toISOString()).toBe(`2026-10-28T12:00:00.${admission}Z`);
+      const [raw] =
+        await client`select to_char(registered_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as registered_at from owner_call_grant_operations where owner_id=${seed.ownerId} and approval_id=${seed.approvalId} and grant_id=${seed.grantId}`;
+      expect(raw?.registered_at).toBe('2026-10-28T12:00:00.123456Z');
+    }
+    const ordinarySeed = operationSeed();
+    const ordinaryDeadline = new Date('2026-10-28T12:00:00.124Z');
+    const ordinaryRegistered = await registerOwnerCallGrantOperation(
+      withOwnerCallFixtureClock(database, '2026-10-28T12:00:00.123456Z'),
+      {
+        ownerId: ordinarySeed.ownerId,
+        approvalId: ordinarySeed.approvalId,
+        grantId: ordinarySeed.grantId,
+        taskId: ordinarySeed.taskId,
+        toolCallId: ordinarySeed.toolCallId,
+        expectedSlotGeneration: 0,
+        replaceUnadmittedRegistration: false,
+        requestFingerprint: ordinarySeed.requestFingerprint,
+        grantScopeFingerprint: ordinarySeed.grantScopeFingerprint,
+        reviewExpiresAt: ordinaryDeadline,
+        grantExpiresAt: ordinaryDeadline,
+        validateCurrentCall: async () => true,
+      },
+    );
+    expect(ordinaryRegistered.ok).toBe(true);
+    if (!ordinaryRegistered.ok) throw new Error('ordinary Date registration rejected');
+    expect(ordinaryRegistered.operation.reviewExpiresAt.getTime()).toBe(ordinaryDeadline.getTime());
+    expect(ordinaryRegistered.operation.reviewExpiresAt.toISOString()).toBe(
+      '2026-10-28T12:00:00.124000Z',
+    );
+  });
+
+  for (const port of ['start', 'claim'] as const) {
+    for (const window of ['hour', 'day'] as const) {
+      for (const microseconds of [-1, 0, 1]) {
+        it(`preserves actual PostgreSQL ${port} usage at ${window} cutoff ${microseconds}us`, async () => {
+          if (!db || !client) throw new Error('Allocated PostgreSQL fixture is not available');
+          vi.stubEnv('PHONE_CALL_TO_OWNER_GRANT_ENABLED', 'true');
+          try {
+            const ownerId = randomUUID(),
+              conversationId = randomUUID(),
+              taskId = randomUUID();
+            const messageId = randomUUID(),
+              toolCallId = randomUUID(),
+              policyId = randomUUID();
+            const operationId = randomUUID(),
+              historicalId = randomUUID();
+            const text = 'Call +14155550123 now.';
+            const args = { brief: { to: '+14155550123', maxMinutes: 8 } };
+            const match = {
+              schemaVersion: 2 as const,
+              grantId: randomUUID(),
+              action: 'phone.call' as const,
+              recipientE164: '+14155550123',
+              maxMinutes: 8,
+              maxCallsPerHour: 1,
+              maxCallsPerDay: window === 'hour' ? 2 : 1,
+              maxCostUsdMicrosPerCall: 800_000,
+              maxCostUsdMicrosPerDay: 1_600_000,
+              expiresAt: '2099-11-01T12:00:00.000Z',
+            };
+            await db.insert(agents).values({
+              id: ownerId,
+              name: `precision-${ownerId}`,
+              email: `${ownerId}@precision.invalid`,
+              workspacePrefix: `precision/${ownerId}`,
+            });
+            await db
+              .insert(conversations)
+              .values({ id: conversationId, agentId: ownerId, channel: 'chat', trust: 'owner' });
+            await db.insert(tasks).values({
+              id: taskId,
+              agentId: ownerId,
+              conversationId,
+              type: 'chat_turn',
+              trust: 'owner',
+              status: 'running',
+              externalEventId: chatAdmissionExternalEventId({
+                agentId: ownerId,
+                conversationId,
+                clientOperationId: operationId,
+              }),
+              trigger: {
+                source: 'chat',
+                agentId: ownerId,
+                conversationId,
+                trust: 'owner',
+                payload: {
+                  text,
+                  triggerMessageId: messageId,
+                  chatAdmission: {
+                    protocol: 'owner-chat-v1',
+                    clientOperationId: operationId,
+                    requestHash: 'a'.repeat(64),
+                    triggerMessageId: messageId,
+                    phase: 'queued',
+                  },
+                },
+              },
+            });
+            await db.insert(messages).values({
+              id: messageId,
+              taskId,
+              conversationId,
+              role: 'user',
+              origin: 'owner',
+              text,
+            });
+            const [policy] = await db
+              .insert(approvalPolicies)
+              .values({
+                id: policyId,
+                agentId: ownerId,
+                toolName: 'phone.call',
+                templateKey: 'phone.call.owner_action.v2',
+                effect: 'allow',
+                enabled: true,
+                match,
+                version: 1,
+                createdVia: 'settings',
+              })
+              .returning();
+            if (!policy) throw new Error('precise usage policy missing');
+            if (port === 'claim')
+              await db.insert(toolCalls).values({
+                id: toolCallId,
+                taskId,
+                step: 0,
+                toolName: 'phone.call',
+                args: {},
+                risk: 'approval',
+                status: 'approved',
+                decision: {},
+              });
+            const fixedNow = '2026-10-28T12:00:00.000000Z';
+            const cutoff = Date.parse(fixedNow) - (window === 'hour' ? 3_600_000 : 86_400_000);
+            const second = new Date(cutoff + (microseconds < 0 ? -1000 : 0))
+              .toISOString()
+              .slice(0, 19);
+            const eventAt = `${second}.${microseconds < 0 ? '999999' : microseconds === 0 ? '000000' : '000001'}Z`;
+            const fingerprint = phoneCallOwnerActionGrantScopeFingerprint(match);
+            if (!fingerprint) throw new Error('precise usage scope missing');
+            await client`insert into owner_call_grant_usage(owner_id,policy_id,grant_scope_fingerprint,events,updated_at)
+              values (${ownerId},${policyId},${fingerprint},${JSON.stringify([{ toolCallId: historicalId, at: eventAt, costUsdMicros: 400_000 }])}::jsonb,${fixedNow}::timestamptz)`;
+            const repository = createPostgresToolExecutionRepository(
+              withOwnerCallFixtureClock(db, fixedNow),
+            );
+            const directOwnerRequest = await repository.ownerCallRequest!(ownerId, taskId);
+            const intent = parsePhoneCallOwnerActionIntent(text);
+            if (!directOwnerRequest || !intent)
+              throw new Error('precise usage owner request missing');
+            const binding: ExpectedOwnerCallActionGrantBinding = {
+              policyId,
+              match,
+              directOwnerRequest,
+              ownerActionIntent: {
+                intent,
+                ownerMessageFingerprint: directOwnerRequest.ownerMessageFingerprint,
+              },
+              recipientAuthority: { kind: 'explicit_number', recipientE164: match.recipientE164 },
+              estimatedCostUsdMicros: 400_000,
+            };
+            const common = {
+              agentId: ownerId,
+              taskId,
+              args,
+              decision: {},
+              expectedPolicyFingerprint: approvalPolicyFingerprint([policy]),
+              expectedPhoneCallOwnerActionGrant: binding,
+            };
+            const result =
+              port === 'start'
+                ? await repository.start({
+                    ...common,
+                    step: 1,
+                    toolName: 'phone.call',
+                    idempotencyKey: null,
+                  })
+                : await repository.claim({
+                    ...common,
+                    toolCallId,
+                    expectedApprovalId: null,
+                    expectedResolutionPayload: null,
+                    expectedTaskTrust: 'owner',
+                    expectedTaskStatus: 'running',
+                  });
+            const [stored] =
+              await client`select events,to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as updated_at from owner_call_grant_usage where owner_id=${ownerId} and policy_id=${policyId} and grant_scope_fingerprint=${fingerprint}`;
+            if (microseconds > 0) {
+              if (port === 'claim') {
+                expect(result).toMatchObject({ type: 'stale_authorization' });
+                const [call] =
+                  await client`select status,started_at from tool_calls where id=${toolCallId}`;
+                expect(call).toMatchObject({ status: 'failed', started_at: null });
+              } else {
+                expect(result).toBeNull();
+                const [calls] =
+                  await client`select count(*)::int as count from tool_calls where task_id=${taskId}`;
+                expect(calls?.count).toBe(0);
+              }
+              expect(stored?.events).toEqual([
+                { toolCallId: historicalId, at: eventAt, costUsdMicros: 400_000 },
+              ]);
+            } else {
+              expect(result).not.toBeNull();
+              expect(stored?.events).toHaveLength(window === 'hour' ? 2 : 1);
+              if (window === 'hour')
+                expect(stored?.events).toContainEqual({
+                  toolCallId: historicalId,
+                  at: eventAt,
+                  costUsdMicros: 400_000,
+                });
+              expect(stored?.updated_at).toBe(fixedNow);
+            }
+          } finally {
+            vi.unstubAllEnvs();
+          }
+        });
+      }
+    }
+  }
+
   it('installs exact catalog objects and preserves the empty slot sentinel and bounded usage checks', async () => {
     if (!client) throw new Error('Allocated PostgreSQL fixture is not available');
     const tables = await client`

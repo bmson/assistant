@@ -1,10 +1,15 @@
 import {
   approvalPolicyFingerprint,
   chatAdmissionExternalEventId,
+  deserializeMigrationValue,
   directOwnerCallRequestBinding,
   type ExpectedOwnerCallActionGrantBinding,
+  type PreciseMigrationTimestamp,
   parsePhoneCallOwnerActionIntent,
+  phoneCallOwnerActionGrantScopeFingerprint,
+  serializeMigrationTimestamp,
 } from '@assistant/persistence';
+import { Timestamp } from '@google-cloud/firestore';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 import { FirestoreToolExecutionRepository } from './tool-execution.js';
@@ -104,6 +109,27 @@ class Query {
   }
 }
 
+// Firestore snapshots return SDK Timestamp instances; structuredClone erases their prototype.
+function cloneFirestoreValue(value: unknown): unknown {
+  if (value instanceof Timestamp) return new Timestamp(value.seconds, value.nanoseconds);
+  if (Array.isArray(value)) return value.map(cloneFirestoreValue);
+  if (
+    value &&
+    typeof value === 'object' &&
+    (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)
+  )
+    return Object.fromEntries(
+      Object.entries(value).map(([key, field]) => [key, cloneFirestoreValue(field)]),
+    );
+  return structuredClone(value);
+}
+
+function cloneFirestoreRow(value: Row): Row {
+  return Object.fromEntries(
+    Object.entries(value).map(([key, field]) => [key, cloneFirestoreValue(field)]),
+  );
+}
+
 let rows = new Map<string, Row>();
 function fakeStore(): InstallationStore {
   let tail: Promise<unknown> = Promise.resolve();
@@ -119,7 +145,7 @@ function fakeStore(): InstallationStore {
           release = resolve;
         });
         await prior;
-        const working = new Map([...rows].map(([key, value]) => [key, structuredClone(value)]));
+        const working = new Map([...rows].map(([key, value]) => [key, cloneFirestoreRow(value)]));
         const tx = {
           get: async (target: Ref | Query) =>
             target instanceof Query ? target.snapshot(working) : target.snapshot(working),
@@ -245,6 +271,99 @@ async function bindingFor(repository: FirestoreToolExecutionRepository) {
 }
 
 describe('Firestore owner-action grant execution transaction (fake transaction port)', () => {
+  for (const port of ['start', 'claim'] as const) {
+    for (const window of ['hour', 'day'] as const) {
+      for (const microseconds of [-1, 0, 1]) {
+        it(`${port} preserves exact usage at ${window} cutoff ${microseconds} microseconds`, async () => {
+          vi.stubEnv('PHONE_CALL_TO_OWNER_GRANT_ENABLED', 'true');
+          const fixture = seedFixture(port === 'claim');
+          const selectedMatch =
+            window === 'hour'
+              ? { ...match, maxCallsPerDay: 2, maxCostUsdMicrosPerDay: 1_600_000 }
+              : { ...match };
+          fixture.policy.match = selectedMatch;
+          const repository = new FirestoreToolExecutionRepository(fixture.store);
+          const binding = { ...(await bindingFor(repository)), match: selectedMatch };
+          const fingerprint = phoneCallOwnerActionGrantScopeFingerprint(selectedMatch);
+          if (!fingerprint) throw new Error('invalid usage scope');
+          const cutoff = now.getTime() - (window === 'hour' ? 3_600_000 : 86_400_000);
+          const second = new Date(cutoff + (microseconds < 0 ? -1000 : 0))
+            .toISOString()
+            .slice(0, 19)
+            .replace('T', ' ');
+          const fraction = microseconds < 0 ? '999999' : microseconds === 0 ? '000000' : '000001';
+          // Use the exporter timestamp encoding and native SDK value restored by the importer.
+          const exact = deserializeMigrationValue(
+            serializeMigrationTimestamp(`${second}.${fraction}+00`),
+          ) as PreciseMigrationTimestamp;
+          const eventAt = new Timestamp(Number(exact.seconds), exact.nanoseconds);
+          const usageRef = fixture.store.doc(
+            'ownerCallGrantUsage',
+            `${ownerId}_${policyId}_${fingerprint}`,
+          );
+          const historicalId = '10000000-0000-4000-8000-000000000009';
+          rows.set(usageRef.path, {
+            ownerId,
+            policyId,
+            grantScopeFingerprint: fingerprint,
+            updatedAt: now,
+            events: [{ toolCallId: historicalId, at: eventAt, costUsdMicros: 400_000 }],
+          });
+          const common = {
+            agentId: ownerId,
+            taskId,
+            args,
+            decision: {},
+            expectedPolicyFingerprint: approvalPolicyFingerprint([fixture.policy]),
+            expectedPhoneCallOwnerActionGrant: binding,
+          };
+          const result =
+            port === 'start'
+              ? await repository.start({
+                  ...common,
+                  step: 1,
+                  toolName: 'phone.call',
+                  idempotencyKey: null,
+                })
+              : await repository.claim({
+                  ...common,
+                  toolCallId,
+                  expectedApprovalId: null,
+                  expectedResolutionPayload: null,
+                  expectedTaskTrust: 'owner',
+                  expectedTaskStatus: 'running',
+                });
+          if (microseconds > 0) {
+            if (port === 'claim') {
+              expect(result).toMatchObject({ type: 'stale_authorization' });
+              expect(rows.get(`toolCalls/${documentKey(toolCallId)}`)).toMatchObject({
+                status: 'failed',
+              });
+            } else {
+              expect(result).toBeNull();
+              expect([...rows.keys()].some((path) => path.startsWith('toolCalls/'))).toBe(false);
+            }
+            expect(rows.get(usageRef.path)?.events).toEqual([
+              { toolCallId: historicalId, at: eventAt, costUsdMicros: 400_000 },
+            ]);
+          } else {
+            expect(result).not.toBeNull();
+            const events = rows.get(usageRef.path)?.events as Array<{
+              toolCallId: string;
+              at: unknown;
+            }>;
+            expect(events).toHaveLength(window === 'hour' ? 2 : 1);
+            if (window === 'hour') {
+              const retained = events.find((event) => event.toolCallId === historicalId)?.at;
+              expect(retained).toBeInstanceOf(Timestamp);
+              expect((retained as Timestamp).isEqual(eventAt)).toBe(true);
+            }
+          }
+        });
+      }
+    }
+  }
+
   it('serializes autonomous starts against the rolling call budget and never starts the loser', async () => {
     vi.stubEnv('PHONE_CALL_TO_OWNER_GRANT_ENABLED', 'true');
     const fixture = seedFixture(false);

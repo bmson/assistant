@@ -1,5 +1,11 @@
 import { createHash } from 'node:crypto';
-import { parseExactTimestamp } from './exact-timestamp.js';
+import {
+  compareExactTimestamps,
+  ExactTimestamp,
+  isValidExactTimestamp,
+  offsetExactTimestamp,
+  parseExactTimestamp,
+} from './exact-timestamp.js';
 import type { OwnerCallActionIntent } from './phone-call-owner-action-intent.js';
 import type { OwnerPhoneRecipientRequest } from './phone-call-owner-intent.js';
 import type { DirectOwnerCallRequestBinding } from './phone-call-owner-number-grant.js';
@@ -68,7 +74,7 @@ export type OwnerCallActionGrantUsageReservation =
   | { ok: false; reason: string };
 
 function validDate(value: unknown): value is Date {
-  return value instanceof Date && Number.isFinite(value.getTime());
+  return isValidExactTimestamp(value);
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
@@ -155,7 +161,13 @@ export function phoneCallOwnerActionGrantScopeFingerprint(value: unknown): strin
 export function phoneCallOwnerActionGrantIsLive(value: unknown, repositoryNow: Date): boolean {
   const grant = parsePhoneCallOwnerActionGrantMatch(value);
   if (!grant || !validDate(repositoryNow)) return false;
-  return Date.parse(grant.expiresAt) > repositoryNow.getTime();
+  const expiresAt = parseExactTimestamp(grant.expiresAt);
+  return (
+    compareExactTimestamps(
+      new ExactTimestamp(BigInt(expiresAt.seconds), expiresAt.nanoseconds),
+      repositoryNow,
+    ) > 0
+  );
 }
 
 export function phoneCallOwnerActionGrantMatches(
@@ -316,7 +328,7 @@ function parseUsage(
     value.policyId !== scope.policyId ||
     value.grantScopeFingerprint !== fingerprint ||
     !validDate(value.updatedAt) ||
-    value.updatedAt.getTime() > now.getTime() ||
+    compareExactTimestamps(value.updatedAt, now) > 0 ||
     !Array.isArray(value.events) ||
     value.events.length > MAX_DAILY_EVENTS
   )
@@ -325,7 +337,8 @@ function parseUsage(
   const ids = new Set<string>();
   for (const raw of value.events) {
     const event = parseUsageEvent(raw);
-    if (!event || event.at.getTime() > now.getTime() || ids.has(event.toolCallId)) return null;
+    if (!event || compareExactTimestamps(event.at, now) > 0 || ids.has(event.toolCallId))
+      return null;
     ids.add(event.toolCallId);
     events.push(event);
   }
@@ -372,14 +385,17 @@ export function reserveOwnerCallGrantUsage(
       return { ok: false, reason: 'owner-call grant usage replay quote changed' };
     return { ok: true, usage: current, replayed: true };
   }
-  const cutoff = now.getTime() - DAY_MS;
-  const events = current.events.filter((event) => event.at.getTime() > cutoff);
-  const hourCutoff = now.getTime() - HOUR_MS;
+  const cutoff = offsetExactTimestamp(now, -DAY_MS);
+  const events = current.events.filter((event) => compareExactTimestamps(event.at, cutoff) > 0);
+  const hourCutoff = offsetExactTimestamp(now, -HOUR_MS);
   if (events.length >= MAX_DAILY_EVENTS)
     return { ok: false, reason: 'owner-call grant usage receipt bound reached' };
   if (events.length >= grant.maxCallsPerDay)
     return { ok: false, reason: 'owner-call grant daily call limit reached' };
-  if (events.filter((event) => event.at.getTime() > hourCutoff).length >= grant.maxCallsPerHour)
+  if (
+    events.filter((event) => compareExactTimestamps(event.at, hourCutoff) > 0).length >=
+    grant.maxCallsPerHour
+  )
     return { ok: false, reason: 'owner-call grant hourly call limit reached' };
   let spent = 0;
   for (const event of events) {

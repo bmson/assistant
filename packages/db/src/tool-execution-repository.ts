@@ -28,9 +28,14 @@ import {
   toolCallReceiptKeyId,
   toolCallReplayKeysForStart,
 } from '@assistant/persistence';
-import { and, desc, eq, isNull, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, getTableColumns, isNull, lte, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { readPostgresOwnerCallRequest as ownerCallRequest } from './owner-call-request.js';
+import {
+  decodePostgresOwnerCallTimestamp,
+  postgresOwnerCallClock,
+  postgresOwnerCallTimestamp,
+} from './owner-call-timestamps.js';
 import { createPostgresPhoneCalendarCompatibilityRepository } from './phone-calendar-compatibility.js';
 import { createPostgresPhoneCalendarSharingRepository } from './phone-calendar-sharing-repository.js';
 import { lockPostgresPrivacyObservationFence } from './privacy-erasure-repository.js';
@@ -130,7 +135,7 @@ function decodePostgresOwnerCallGrantUsage(value: unknown): OwnerCallActionGrant
         const event = raw as Record<string, unknown>;
         return {
           ...event,
-          at: typeof event.at === 'string' ? new Date(event.at) : event.at,
+          at: decodePostgresOwnerCallTimestamp(event.at) ?? event.at,
         };
       })
     : row.events;
@@ -358,12 +363,9 @@ export function createPostgresToolExecutionRepository(db: Db): ToolExecutionRepo
               'running',
               true,
             );
-          const [clock] = await tx.execute<{ now: Date | string }>(
-            sql`select clock_timestamp() as now`,
-          );
-          const repositoryNow =
-            clock?.now instanceof Date ? clock.now : new Date(clock?.now ?? NaN);
-          if (!Number.isFinite(repositoryNow.getTime())) return markStaleAuthorization();
+          const [clock] = await tx.execute<{ now: Date | string }>(postgresOwnerCallClock);
+          const repositoryNow = decodePostgresOwnerCallTimestamp(clock?.now);
+          if (!repositoryNow) return markStaleAuthorization();
           if (input.expectedPhoneCallOwnerNumberGrant) {
             if (
               !sameDirectOwnerCallRequestBinding(
@@ -440,7 +442,10 @@ export function createPostgresToolExecutionRepository(db: Db): ToolExecutionRepo
               })
               .onConflictDoNothing();
             const [storedUsage] = await tx
-              .select()
+              .select({
+                ...getTableColumns(ownerCallGrantUsage),
+                updatedAt: postgresOwnerCallTimestamp(ownerCallGrantUsage.updatedAt),
+              })
               .from(ownerCallGrantUsage)
               .where(
                 and(
@@ -711,12 +716,9 @@ export function createPostgresToolExecutionRepository(db: Db): ToolExecutionRepo
                 'running',
                 true,
               );
-            const [clock] = await tx.execute<{ now: Date | string }>(
-              sql`select clock_timestamp() as now`,
-            );
-            const repositoryNow =
-              clock?.now instanceof Date ? clock.now : new Date(clock?.now ?? NaN);
-            if (!Number.isFinite(repositoryNow.getTime())) return null;
+            const [clock] = await tx.execute<{ now: Date | string }>(postgresOwnerCallClock);
+            const repositoryNow = decodePostgresOwnerCallTimestamp(clock?.now);
+            if (!repositoryNow) return null;
             if (input.expectedPhoneCallOwnerNumberGrant) {
               if (
                 !sameDirectOwnerCallRequestBinding(
@@ -791,11 +793,9 @@ export function createPostgresToolExecutionRepository(db: Db): ToolExecutionRepo
             const usageToolCallId = generatedToolCallId;
             const fingerprint = phoneCallOwnerActionGrantScopeFingerprint(binding.match);
             if (!fingerprint || !usageToolCallId) throw grantReservationRefused;
-            const [clock] = await tx.execute<{ now: Date | string }>(
-              sql`select clock_timestamp() as now`,
-            );
-            const usageNow = clock?.now instanceof Date ? clock.now : new Date(clock?.now ?? NaN);
-            if (!Number.isFinite(usageNow.getTime())) throw grantReservationRefused;
+            const [clock] = await tx.execute<{ now: Date | string }>(postgresOwnerCallClock);
+            const usageNow = decodePostgresOwnerCallTimestamp(clock?.now);
+            if (!usageNow) throw grantReservationRefused;
             await tx
               .insert(ownerCallGrantUsage)
               .values({
@@ -807,7 +807,10 @@ export function createPostgresToolExecutionRepository(db: Db): ToolExecutionRepo
               })
               .onConflictDoNothing();
             const [storedUsage] = await tx
-              .select()
+              .select({
+                ...getTableColumns(ownerCallGrantUsage),
+                updatedAt: postgresOwnerCallTimestamp(ownerCallGrantUsage.updatedAt),
+              })
               .from(ownerCallGrantUsage)
               .where(
                 and(

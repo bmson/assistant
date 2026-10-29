@@ -31,6 +31,7 @@ import {
   toolCallReplayKeysForStart,
 } from '@assistant/persistence';
 import { readFirestoreOwnerCallRequest as ownerCallRequest } from './owner-call-request.js';
+import { decodeOwnerCallRecord, encodeOwnerCallRecord } from './owner-call-timestamps.js';
 import { createFirestorePhoneCalendarCompatibilityRepository } from './phone-calendar-compatibility.js';
 import { createFirestorePhoneCalendarSharingRepository } from './phone-calendar-sharing.js';
 import { assertPrivacyErasureInactiveInTransaction } from './privacy-erasure.js';
@@ -458,7 +459,7 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
         );
         const usageSnapshot = await tx.get(usageRef);
         const usage = usageSnapshot.exists
-          ? decodeRecord<Records['ownerCallGrantUsage']>(usageSnapshot.data())
+          ? decodeOwnerCallRecord<Records['ownerCallGrantUsage']>(usageSnapshot.data())
           : null;
         const reservation = reserveOwnerCallGrantUsage(
           { ownerId: input.agentId, policyId: binding.policyId, match: binding.match },
@@ -468,7 +469,7 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
           binding.estimatedCostUsdMicros,
         );
         if (!reservation.ok) return markStaleAuthorization();
-        if (!reservation.replayed) tx.set(usageRef, encodeRecord(reservation.usage));
+        if (!reservation.replayed) tx.set(usageRef, encodeOwnerCallRecord(reservation.usage));
       }
       const startedAt = input.startedAt ?? this.store.now();
       // A write to the stable owner document serializes this claim with every
@@ -753,7 +754,7 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
         );
         const usageSnapshot = await tx.get(usageRef);
         const usage = usageSnapshot.exists
-          ? decodeRecord<Records['ownerCallGrantUsage']>(usageSnapshot.data())
+          ? decodeOwnerCallRecord<Records['ownerCallGrantUsage']>(usageSnapshot.data())
           : null;
         const reservation = reserveOwnerCallGrantUsage(
           { ownerId: input.agentId, policyId: binding.policyId, match: binding.match },
@@ -763,7 +764,7 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
           binding.estimatedCostUsdMicros,
         );
         if (!reservation.ok) return null;
-        if (!reservation.replayed) tx.set(usageRef, encodeRecord(reservation.usage));
+        if (!reservation.replayed) tx.set(usageRef, encodeOwnerCallRecord(reservation.usage));
       }
       tx.update(ownerRef, { updatedAt: now });
       const call = {
