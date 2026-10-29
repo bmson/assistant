@@ -17,7 +17,8 @@ export default async function MemoryPage() {
         intro="Browse saved notes, people, and their connections."
       />
       <p className="mt-4 text-sm text-muted">
-        Browse only. Editing and cleanup are unavailable here.
+        Open a saved note or person to review available changes. Editing availability is checked
+        with each item’s source.
       </p>
       <div className="mt-6 grid gap-3 sm:grid-cols-2">
         {[

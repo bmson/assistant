@@ -331,6 +331,113 @@ final class NativeVisualReviewTests: XCTestCase {
     }
 
     @MainActor
+    func testStandingPhoneCallPolicySettingsPresentation() async throws {
+        let fixture = try NativeReviewFixture(withPhoneCallPolicies: true)
+        let workspaceData = try XCTUnwrap(fixture.responses["/api/mobile/v1/workspace"])
+        let decoded = try JSONDecoder().decode(WorkspaceResponse.self, from: workspaceData)
+        let policies = decoded.settings.policies
+        let leaveMessageRule = try XCTUnwrap(policies.first(where: { $0.id == "call-rule" }))
+        XCTAssertEqual(leaveMessageRule.phoneCallPresentation?.kind, "same_brief")
+        XCTAssertEqual(leaveMessageRule.label, "Repeat approved call")
+        XCTAssertTrue(leaveMessageRule.phoneCallPresentation?.mayShare?.hasSuffix("do not add unrelated personal details.") == true)
+        XCTAssertTrue(leaveMessageRule.phoneCallPresentation?.mayAgreeTo?.hasSuffix("ask Alex to decide.") == true)
+        XCTAssertTrue(leaveMessageRule.phoneCallPresentation?.mustNot?.hasSuffix("outside the approved context.") == true)
+        let hangUpRule = try XCTUnwrap(policies.first(where: { $0.id == "hang-up-call-rule" }))
+        XCTAssertEqual(hangUpRule.label, "Front desk calls")
+        XCTAssertEqual(hangUpRule.phoneCallPresentation?.recipient, "+14155550123")
+        XCTAssertEqual(hangUpRule.phoneCallPresentation?.maxMinutes, 4)
+        XCTAssertEqual(hangUpRule.phoneCallPresentation?.voicemailMode, "hang_up")
+        XCTAssertEqual(hangUpRule.phoneCallPresentation?.voicemailMessage, "Saved only for reference; do not leave this message.")
+        XCTAssertEqual(policies.first(where: { $0.id == "malformed-call-rule" })?.phoneCallPresentation?.kind, "opaque")
+        XCTAssertEqual(policies.first(where: { $0.id == "unknown-call-rule" })?.phoneCallPresentation?.kind, "opaque")
+
+        NativeReviewProtocol.install(fixture.responses)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"),
+                               session: URLSession(configuration: configuration))
+        let suite = "assistant.standing-call-visual-review.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.set("https://native-review.test", forKey: "assistant.server-url")
+        defaults.set(true, forKey: "assistant.push-prompted")
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(apiClient: client, defaults: defaults, storeConnectionToken: { _ in })
+        await model.refreshAll()
+        _ = await model.refreshWorkspace()
+        XCTAssertEqual(model.workspace?.settings.policies.count, 4)
+
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        for scheme in [ColorScheme.light, .dark] {
+            try await capture(
+                Page("more-standing-call-policy", MoreView()),
+                scheme: scheme,
+                size: .large,
+                scene: scene,
+                model: model,
+                viewportWidth: 320
+            )
+        }
+        try await capture(
+            Page("more-standing-call-policy-390", MoreView()),
+            scheme: .light,
+            size: .large,
+            scene: scene,
+            model: model,
+            viewportWidth: 390
+        )
+        try await capture(
+            Page("more-standing-call-policy-accessible", MoreView()),
+            scheme: .light,
+            size: .accessibility3,
+            scene: scene,
+            model: model,
+            viewportWidth: 320,
+            increasedContrast: true
+        )
+        let exactBrief = try XCTUnwrap(leaveMessageRule.phoneCallPresentation)
+        try await capture(
+            Page(
+                "more-standing-call-policy-expanded-390",
+                ownsNavigation: true,
+                PhoneCallPolicyScopePresentation(
+                    policyId: "call-rule",
+                    presentation: exactBrief,
+                    initiallyExpanded: true
+                )
+            ),
+            scheme: .light,
+            size: .large,
+            scene: scene,
+            model: model,
+            viewportWidth: 390
+        )
+        let hangUpBrief = try XCTUnwrap(hangUpRule.phoneCallPresentation)
+        try await capture(
+            Page(
+                "more-standing-call-hangup-message-expanded-390",
+                ownsNavigation: true,
+                PhoneCallPolicyScopePresentation(
+                    policyId: hangUpRule.id,
+                    presentation: hangUpBrief,
+                    initiallyExpanded: true
+                )
+            ),
+            scheme: .light,
+            size: .large,
+            scene: scene,
+            model: model,
+            viewportWidth: 390
+        )
+
+        let fixtureAttachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: fixture.responses.mapValues { $0.base64EncodedString() }, options: [.sortedKeys]), uniformTypeIdentifier: "public.json")
+        fixtureAttachment.name = "standing-call-policy-settings-fixtures"
+        fixtureAttachment.lifetime = .keepAlways
+        add(fixtureAttachment)
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+    }
+
+    @MainActor
     func testFullHeightChatWithRecoveryAndJump() async throws {
         // Keep the shared review inventory compact. This case alone needs a
         // transcript tall enough to exercise real older-message scrolling.
@@ -544,9 +651,25 @@ final class NativeVisualReviewTests: XCTestCase {
                     && rect.maxX.isFinite && rect.maxY.isFinite
             }
 
+            // Numeric-only public UIKit state; no layout, scrolling, content or capture work.
+            func logScrollGeometry(_ stage: String, olderOffset: CGFloat? = nil) {
+                print("FULLHEIGHT_SCROLL_DIAGNOSTIC variant=\(variant) stage=\(stage) "
+                    + "newestOffset=\(newestOffset) olderOffset=\(olderOffset.map { String(describing: $0) } ?? "not-sampled") "
+                    + "offsetY=\(transcript.contentOffset.y) top=\(top) bottom=\(bottom) "
+                    + "boundsX=\(transcript.bounds.minX) boundsY=\(transcript.bounds.minY) "
+                    + "boundsWidth=\(transcript.bounds.width) boundsHeight=\(transcript.bounds.height) "
+                    + "contentWidth=\(transcript.contentSize.width) contentHeight=\(transcript.contentSize.height) "
+                    + "viewportX=\(viewport.minX) viewportY=\(viewport.minY) "
+                    + "viewportWidth=\(viewport.width) viewportHeight=\(viewport.height) "
+                    + "frameX=\(transcript.frame.minX) frameY=\(transcript.frame.minY) "
+                    + "frameWidth=\(transcript.frame.width) frameHeight=\(transcript.frame.height) "
+                    + "insetTop=\(transcript.adjustedContentInset.top) insetBottom=\(transcript.adjustedContentInset.bottom)")
+            }
+
             // Attach the initial/newest state and its geometry before assertions
             // so a failing simulator run remains reviewable.
             attach("newest-recovery")
+            logScrollGeometry("newest-before-assertions")
             XCTAssertLessThanOrEqual(abs(newestOffset - bottom), 1,
                 "The newest-state capture must begin at the actual transcript bottom")
             XCTAssertEqual(transcript.frame.height, viewport.height, accuracy: 1)
@@ -559,6 +682,7 @@ final class NativeVisualReviewTests: XCTestCase {
             window.layoutIfNeeded()
             let olderOffset = transcript.contentOffset.y
             attach("older-transcript")
+            logScrollGeometry("older-before-assertions", olderOffset: olderOffset)
             XCTAssertEqual(transcript.frame.height, viewport.height, accuracy: 1,
                 "Floating recovery and Jump controls must not reserve a transcript viewport lane")
             XCTAssertLessThan(olderOffset, newestOffset - 2,
@@ -3160,6 +3284,44 @@ final class NativeVisualReviewTests: XCTestCase {
     }
 
     @MainActor
+    func testOwnerCallPermissionReviewFixtures() async throws {
+        guard ProcessInfo.processInfo.environment["ASSISTANT_OWNER_CALL_GRANT_REVIEW_RENDER"] == "1" else {
+            throw XCTSkip("Opt-in, fixture-only owner-call review render; no runtime or activation proof.")
+        }
+        let fixture = try NativeReviewFixture()
+        NativeReviewProtocol.install(fixture.responses)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"), session: URLSession(configuration: configuration))
+        let suite = "assistant.owner-call-grant-visual-review"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        let model = AppModel(apiClient: client, defaults: defaults)
+        await model.refreshAll()
+        _ = await model.refreshWorkspace()
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        for stage in ["draft", "review", "other-active", "ambiguous", "saved"] {
+            try await capture(Page("owner-call-\(stage)", ApprovalsView.visualReviewOwnerCallPermission(stage)), scheme: .light, size: .large, scene: scene, model: model, viewportWidth: 320)
+        }
+        for (width, size) in [(CGFloat(390), DynamicTypeSize.large), (CGFloat(320), .accessibility3)] {
+            try await capture(Page("owner-call-other-active", ApprovalsView.visualReviewOwnerCallPermission("other-active")), scheme: .dark, size: size, scene: scene, model: model, requiresScrolling: true, viewportWidth: width)
+        }
+        for state in ["available", "disabled", "expired", "paused", "opaque"] {
+            var responses = fixture.responses
+            var workspace = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(responses["/api/mobile/v1/workspace"])) as? [String: Any])
+            var settings = try XCTUnwrap(workspace["settings"] as? [String: Any])
+            settings["policies"] = [["id": "fixture-\(state)", "toolName": "phone.call", "templateKey": "phone.call.to_owner_number.v1", "label": state == "opaque" ? "Stored phone permission" : "Future calls to an approved number", "effect": "allow", "enabled": state != "paused", "createdVia": "approval_dialog", "phonePermissionKind": state == "opaque" ? "opaque" : "owner_number", "scope": state == "opaque" ? "Stored permission details are unavailable." : "Exact number: +14155550123; requested duration ceiling 12 minutes; anyone may answer; expires October 30, 2099 (UTC).", "effectiveAvailability": state == "available" ? "Available for a matching direct request from you, subject to expiry and current checks." : state == "disabled" ? "Saved, but future owner-number calls are disabled by the system." : state == "expired" ? "Expired. A fresh review is required for new authorization." : state == "paused" ? "Paused. A fresh review creates a new permission." : "Stored permission details are unavailable.", "opaqueDetails": state == "opaque" ? "{\"futureSchema\":2,\"unknownScope\":\"uninterpreted\"}" : NSNull()]]
+            workspace["settings"] = settings
+            responses["/api/mobile/v1/workspace"] = try JSONSerialization.data(withJSONObject: workspace)
+            NativeReviewProtocol.install(responses)
+            _ = await model.refreshWorkspace()
+            try await capture(Page("owner-call-saved-\(state)", MoreView()), scheme: state == "disabled" || state == "paused" ? .dark : .light, size: state == "opaque" ? .accessibility3 : .large, scene: scene, model: model, viewportWidth: 320)
+            XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty, "Fixture renders never activate a call or permission.")
+            XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty, "Fixture transport rejects every external request.")
+        }
+    }
+
+    @MainActor
     private func assertDocumentCardFrames(
         _ recorder: DocumentLayoutFrameRecorder,
         width: CGFloat,
@@ -4419,7 +4581,7 @@ private struct NativeReviewFixture {
         result[path] = try JSONSerialization.data(withJSONObject: workspace)
         return result
     }
-    init(transcriptMessageCount: Int? = nil, emptyDocuments: Bool = false, longDocumentTitle: Bool = false) throws {
+    init(transcriptMessageCount: Int? = nil, emptyDocuments: Bool = false, withPhoneCallPolicies: Bool = false, longDocumentTitle: Bool = false) throws {
         let encoder = JSONEncoder()
         func json(_ value: Any) throws -> Data { try JSONSerialization.data(withJSONObject: value) }
         let stamp = "2026-10-03T09:00:00Z"
@@ -4449,6 +4611,48 @@ private struct NativeReviewFixture {
             stats: emptyDocuments ? .init(total: 0, ready: 0, pending: 0, chunks: 0)
                 : .init(total: 1, ready: 1, pending: 0, chunks: 4),
             primaryConversationId: "main")
+        let phoneCallPolicies: [[String: Any]] = withPhoneCallPolicies ? [
+            [
+                "id": "call-rule", "toolName": "phone.call", "templateKey": "phone.call.same_brief",
+                "label": "Repeat approved call", "effect": "allow", "enabled": true, "createdVia": "owner",
+                "scope": "Repeat a call to Harbor Hotel under the same approved brief.",
+                "phoneCallPresentation": [
+                    "kind": "same_brief", "recipient": "+14155550123", "contactName": "Harbor Hotel",
+                    "maxMinutes": 4, "goal": "Confirm the late check-in time",
+                    "mayShare": "Booking HARBOR-42 is for Friday evening. The train is expected at 8:15 PM, and the front desk asked for an arrival estimate before 9 PM. Share only this booking and arrival context; do not add unrelated personal details.",
+                    "mayAgreeTo": "Accept check-in until 10 PM only if there is no new fee, the room remains the existing reservation, and the hotel confirms the booking reference. If any condition is unclear, do not agree and ask Alex to decide.",
+                    "mustNot": "Do not change the reservation, room type, dates, guest count, payment method, or cancellation terms. Do not accept a deposit, fee, upgrade, or other charge. Do not disclose a home address or any detail outside the approved context.",
+                    "language": "English", "voicemailMode": "leave_message",
+                    "voicemailMessage": "This is Alex confirming a late arrival."
+                ]
+            ],
+            [
+                "id": "hang-up-call-rule", "toolName": "phone.call", "templateKey": "phone.call.same_brief",
+                "label": "Front desk calls", "effect": "allow", "enabled": false, "createdVia": "owner",
+                "scope": "Repeat a call to Harbor Hotel under the saved phone-call brief.",
+                "phoneCallPresentation": [
+                    "kind": "same_brief", "recipient": "+14155550123", "contactName": "Harbor Hotel",
+                    "maxMinutes": 4, "goal": "Confirm the late check-in time",
+                    "mayShare": "Use only booking HARBOR-42 and the Friday arrival estimate.",
+                    "mayAgreeTo": "Do not accept a changed fee or reservation term.",
+                    "mustNot": "Do not change the booking or share unrelated personal details.",
+                    "language": "English", "voicemailMode": "hang_up",
+                    "voicemailMessage": "Saved only for reference; do not leave this message."
+                ]
+            ],
+            [
+                "id": "malformed-call-rule", "toolName": "phone.call", "templateKey": "phone.call.same_brief",
+                "label": "Phone call rule with unknown condition", "effect": "allow", "enabled": false, "createdVia": "owner",
+                "scope": "Saved phone-call rule data.",
+                "phoneCallPresentation": ["kind": "opaque", "details": "{\"brief\":{\"futureField\":true}}"]
+            ],
+            [
+                "id": "unknown-call-rule", "toolName": "phone.call", "templateKey": "phone.call.future_template",
+                "label": "Future phone rule", "effect": "allow", "enabled": true, "createdVia": "owner",
+                "scope": "Saved phone-call rule data.",
+                "phoneCallPresentation": ["kind": "opaque", "details": "{\"futureScope\":\"all calls\"}"]
+            ]
+        ] : []
         overview = OverviewResponse(generatedAt: stamp, activity: .init(items: [
             .init(id: "task", type: "chat_turn", status: "waiting_approval", title: "Share the arrival plan", progress: "Your message is ready. Waiting for your approval before sending.", trust: "owner", spentUsd: "0.012", budgetUsdLimit: "0.50", updatedAt: stamp, archivedAt: nil, hasPendingApproval: true),
             .init(id: "completed", type: "scheduled", status: "done", title: "Check the weekend forecast", progress: "Expect mild weather with some rain on Sunday.", trust: "owner", spentUsd: "0.006", budgetUsdLimit: "0.10", updatedAt: stamp, archivedAt: nil, hasPendingApproval: false)
@@ -4458,7 +4662,7 @@ private struct NativeReviewFixture {
             "memory": ["ownerName": "Alex", "ownerContactId": "owner", "health": try JSONSerialization.jsonObject(with: encoder.encode(health)), "facts": try JSONSerialization.jsonObject(with: encoder.encode([fact])), "awaitingReview": [], "peopleCount": 3, "people": [["id": "robin", "name": "Robin Morgan", "aliases": ["Robin"], "relationship": "Friend", "trust": "owner", "factCount": 7]], "card": ["content": "Alex prefers quiet places, clear plans, and a little room to be spontaneous.\n\nThe assistant checks before making a booking or sending a message.", "compiledAt": stamp], "voiceStats": ["total": 12, "auto": 9, "uploaded": 3]],
             "skills": [["id": "skill", "name": "Prepare a weekend plan", "preconditions": "Dates and destination are confirmed.", "steps": "Compare travel times.\nCheck cancellation terms.\nKeep booking details together.", "gotchas": "Ask before making a booking.", "ownerAuthored": true, "deprecated": false, "useCount": 8, "successCount": 7, "failureCount": 1, "updatedAt": stamp]],
             "capabilities": [["id": "google", "title": "Email and calendar", "summary": "Keep your plans and messages in view.", "enabled": true, "ready": true, "status": "ready", "detail": "Connected to your account."], ["id": "browser", "title": "Browser", "summary": "Research places and compare options.", "enabled": true, "ready": false, "status": "setup_needed", "detail": "Finish connecting your browser to use this tool."]],
-            "settings": ["agent": ["name": "Assistant", "timezone": "America/Los_Angeles", "locale": "en-US", "signature": "Alex"], "schedules": [], "reminders": [["id": "reminder", "text": "Check in for the Friday train", "kind": "once", "status": "scheduled", "nextRunAt": "2026-10-08T15:00:00Z"]], "policies": [], "goalAutomationCount": 1],
+            "settings": ["agent": ["name": "Assistant", "timezone": "America/Los_Angeles", "locale": "en-US", "signature": "Alex"], "schedules": [], "reminders": [["id": "reminder", "text": "Check in for the Friday train", "kind": "once", "status": "scheduled", "nextRunAt": "2026-10-08T15:00:00Z"]], "policies": phoneCallPolicies, "goalAutomationCount": 1],
             "costs": ["dailySpentUsd": 0.24, "monthlySpentUsd": 7.84, "heldUsd": 0.05, "dailyLimitUsd": 2.0, "monthlyLimitUsd": 25.0, "taskDefaultLimit": "0.50", "parkedTasks": 0, "bySource": [["source": "models", "usd": "7.84", "count": 83]], "byModel": [["model": "review-model", "usd": "7.84", "count": 83]], "held": [], "topTasks": [], "recent": []],
             "anomalies": [["id": "anomaly", "kind": "approval_policy", "toolName": "gmail.send", "detail": "A standing permission was requested more often than expected.", "observed": 4, "expected": 1, "citationCount": 3, "hasPolicy": false, "createdAt": stamp]],
             "improvements": [["id": "improvement", "kind": "prompt", "title": "Ask one clearer question before planning", "rationale": "Several recent requests needed the same clarification.", "suggestion": "Confirm the destination before comparing hotels.", "evidenceCount": 3, "applyable": false, "createdAt": stamp]],

@@ -109,8 +109,14 @@ export {
   type OwnerSecretPurpose,
   ownerSecretVerifier,
 } from './owner-auth.js';
+export * from './owner-call-operation-receipts.js';
 export { FirestoreOwnerCardCompilationRepository } from './owner-card-compilation.js';
 export { FirestoreOwnerContextRepository } from './owner-context.js';
+export * from './owner-editor-domain.js';
+export * from './owner-editor-graph.js';
+export * from './owner-editor-memory.js';
+export * from './owner-editor-repository.js';
+export * from './owner-editor-retention.js';
 export { FirestoreOwnerKnowledgeGraphFactRepository } from './owner-knowledge-graph-fact.js';
 export { FirestoreOwnerNoticeRepository, firestoreOwnerNotices } from './owner-notices.js';
 export {

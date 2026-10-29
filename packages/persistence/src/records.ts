@@ -3,8 +3,19 @@ import type { DocumentExtractionMetadata } from './document-extraction-metadata.
 /** Portable record shapes. PostgreSQL compatibility is checked by records.test.ts.
  * These types are owned by persistence: change them intentionally, not on every SQL migration. */
 import type { KnowledgeGraphAssertion } from './knowledge-graph-sync.js';
+import type {
+  OwnerCallGrantOperation,
+  OwnerCallGrantOperationSlot,
+} from './owner-call-operation-receipt.js';
+import type { OwnerEditorOperationRecord } from './owner-editor.js';
+import type { OwnerCorrection } from './owner-memory-correction.js';
+import type { OwnerCallActionGrantUsage } from './phone-call-owner-action-grant.js';
 
 export interface Records {
+  ownerEditorOperations: OwnerEditorOperationRecord;
+  ownerCallGrantOperations: OwnerCallGrantOperation;
+  ownerCallGrantOperationSlots: OwnerCallGrantOperationSlot;
+  ownerCallGrantUsage: OwnerCallActionGrantUsage;
   phoneCalendarSharing: {
     id: string;
     agentId: string;
@@ -473,6 +484,7 @@ export interface Records {
     kind: string;
     confidence: string;
     contentHash: string;
+    ownerCorrection?: OwnerCorrection | null;
     goalId: string | null;
     originTrust: string;
     category: string;
@@ -517,6 +529,8 @@ export interface Records {
     createdAt: Date;
     updatedAt: Date;
     trust: string;
+    /** Null/absent legacy metadata is unknown and cannot authorize inferred renames. */
+    identityAuthority?: 'owner' | 'inferred' | null;
     aliases: string[];
     emails: string[];
     phones: string[];

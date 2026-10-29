@@ -1,7 +1,9 @@
 import type { PersonConnection, PersonRelation } from '@assistant/application/people';
 import { relationSpanLabel } from '@assistant/application/people-presentation';
 import Link from 'next/link';
+import type { ReactNode } from 'react';
 import { PersonAvatar } from '@/app/people/person-avatar';
+import { memoryNoteHref } from '@/lib/memory-note-context';
 import { Badge } from '@/lib/ui';
 
 const rowClass = 'flex min-w-0 items-center gap-3 rounded-xl bg-raised p-3.5 ring-1 ring-edge/60';
@@ -19,15 +21,28 @@ export function RelationshipList({
   relations,
   now,
   peopleQuery = '',
+  editControls,
+  readOnlyReasons,
 }: {
   relations: PersonRelation[];
   now: Date;
   peopleQuery?: string;
+  editControls?: Record<string, ReactNode>;
+  readOnlyReasons?: Record<string, { reason: string; sourceMemoryId?: string }>;
 }) {
   return (
     <ul className="mt-3 flex flex-col gap-2">
       {relations.map((relation) => {
-        const span = relationSpanLabel(relation.validFrom, relation.validUntil, now);
+        // Recorded owner meaning is already present in the authoritative
+        // sentence. A clock-derived duration can contradict its stated tense.
+        const span = relation.assertionTiming
+          ? ''
+          : relationSpanLabel(relation.validFrom, relation.validUntil, now);
+        const unavailable = readOnlyReasons?.[relation.id];
+        const sourceHref = memoryNoteHref(
+          unavailable?.sourceMemoryId ?? relation.sourceMemoryId ?? '',
+          '/profile/knowledge?view=library',
+        );
         const body = (
           <>
             <PersonAvatar name={relation.otherLabel} size="sm" />
@@ -59,11 +74,41 @@ export function RelationshipList({
               // A person named only inside a fact has no page to open.
               <div className={rowClass}>{body}</div>
             )}
+            {editControls?.[relation.id] ? (
+              <div className="mt-2">{editControls[relation.id]}</div>
+            ) : null}
+            {!editControls?.[relation.id] && unavailable ? (
+              <div className="mt-2 text-sm text-muted">
+                <p>{relationshipReadOnlyMessage(unavailable.reason)}</p>
+                {sourceHref ? (
+                  <Link className="inline-block min-h-11 text-accent underline" href={sourceHref}>
+                    Open saved source note
+                  </Link>
+                ) : null}
+              </div>
+            ) : null}
           </li>
         );
       })}
     </ul>
   );
+}
+
+function relationshipReadOnlyMessage(reason: string): string {
+  switch (reason) {
+    case 'source_note':
+      return 'This connection comes from a saved note. Review that note instead of replacing the relationship here.';
+    case 'shared_evidence':
+      return 'This relationship has shared or multiple evidence. Its sources cannot be replaced by one edit.';
+    case 'historical_source':
+      return 'This relationship’s source has expired, been replaced or already corrected.';
+    case 'source_dates_unverified':
+      return 'The source dates cannot be preserved safely by a direct relationship edit.';
+    case 'editing_unavailable':
+      return 'Direct editing is unavailable in this view. Open its source note to check available corrections.';
+    default:
+      return 'The exact source of this relationship could not be verified for direct editing.';
+  }
 }
 
 /** Connections to a place, employer, or event rather than to a person. */

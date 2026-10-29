@@ -189,7 +189,13 @@ export async function updateContactIdentityAction(
   contactId: string,
   name: string,
   aliasesText: string,
-): Promise<{ error?: string }> {
+  expectedContactRevision: string | undefined,
+  relationship?: string,
+): Promise<{
+  error?: string;
+  code?: 'review_required' | 'conflict' | 'not_found';
+  refreshPending?: boolean;
+}> {
   await requireOwner();
   const config = loadConfig();
   const commands = config.PERSISTENCE_DRIVER === 'firestore' ? getFirestoreProfileCommands() : null;
@@ -198,10 +204,19 @@ export async function updateContactIdentityAction(
     contactId,
     name,
     aliasesText,
+    expectedContactRevision,
+    relationship,
   );
-  if (commands && !result.error) await recompileFirestoreProfileCard(commands);
+  let refreshPending = false;
+  if (commands && !result.error) {
+    try {
+      await recompileFirestoreProfileCard(commands);
+    } catch {
+      refreshPending = true;
+    }
+  }
   revalidateProfile();
-  return result;
+  return refreshPending ? { ...result, refreshPending: true } : result;
 }
 
 export async function deleteContactAction(contactId: string): Promise<{ error?: string }> {

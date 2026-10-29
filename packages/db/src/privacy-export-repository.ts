@@ -66,6 +66,7 @@ export function createPostgresPrivacyExportRepository(db: Db): PrivacyExportRepo
           .select({
             id: memories.id,
             contentHash: memories.contentHash,
+            ownerCorrection: memories.ownerCorrection,
             category: memories.category,
             kind: memories.kind,
             content: memories.content,

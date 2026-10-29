@@ -32,7 +32,14 @@ export function isProfileVoiceOverviewRepository(
 }
 
 export interface ProfileMemoryHubOverview {
-  owner?: { id: string; name: string; aliases: string[]; relationship: string; trust: string };
+  owner?: {
+    id: string;
+    name: string;
+    aliases: string[];
+    relationship: string;
+    trust: string;
+    identityRevision?: string;
+  };
   quarantined: Array<{
     id: string;
     content: string;
@@ -85,15 +92,17 @@ export function isProfileMemoryHubRepository(value: unknown): value is ProfileMe
   );
 }
 
+export type ProfileOverviewContact = NonNullable<ProfileMemoryHubOverview['owner']> & {
+  identityRevision: string;
+};
+
 export type ProfileOverviewRead = Pick<
   ProfileMemoryHubOverview,
-  'owner' | 'quarantined' | 'memoryHealth' | 'latestOrganizer'
+  'quarantined' | 'memoryHealth' | 'latestOrganizer'
 > &
   ProfileVoiceOverview & {
-    people: Array<{
-      contact: NonNullable<ProfileMemoryHubOverview['owner']>;
-      factCount: number;
-    }>;
+    owner?: ProfileOverviewContact;
+    people: Array<{ contact: ProfileOverviewContact; factCount: number }>;
     ownerFacts: ProfileMemoryHubOverview['quarantined'];
     card: { content: string; compiledAt: Date } | null;
   };

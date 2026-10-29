@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   agents,
   approvals,
@@ -76,7 +77,7 @@ beforeAll(async () => {
         category: 'knowledge',
         kind: 'fact',
         content: `${MARKER} original fact`,
-        contentHash: `${MARKER}-original`,
+        contentHash: createHash('sha256').update(`${MARKER} original fact`).digest('hex'),
         confidence: '0.70',
         embedding: unitVector(),
       })
@@ -111,6 +112,17 @@ describe('memory correction graph refresh (integration)', () => {
     expect(
       (await memoryCommands.correctMemory(memoryId, `${MARKER} corrected again`)).error,
     ).toBeUndefined();
+
+    const [corrected] = await db
+      .select({ ownerCorrection: memories.ownerCorrection })
+      .from(memories)
+      .where(eq(memories.id, memoryId));
+    expect(corrected?.ownerCorrection).toMatchObject({
+      version: 1,
+      correctedByOwner: true,
+      priorContentHash: createHash('sha256').update(`${MARKER} corrected fact`).digest('hex'),
+      currentContentHash: createHash('sha256').update(`${MARKER} corrected again`).digest('hex'),
+    });
 
     const queued = await db
       .select({ id: tasks.id, job: sql<string>`${tasks.trigger} #>> '{payload,job}'` })
@@ -260,7 +272,7 @@ describe('memory correction graph refresh (integration)', () => {
         category: 'knowledge',
         kind: 'fact',
         content: `${MARKER} foreign fact`,
-        contentHash: `${MARKER}-foreign`,
+        contentHash: createHash('sha256').update(`${MARKER} foreign fact`).digest('hex'),
         confidence: '0.70',
         quarantined: true,
         embedding: unitVector(),

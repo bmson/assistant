@@ -3,7 +3,7 @@ import {
   MAX_APPROVAL_POLICY_SNAPSHOT_ROWS,
   type Records,
 } from '@assistant/persistence';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, ne, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { lockPostgresPrivacyObservationFence } from './privacy-erasure-repository.js';
 import { approvalPolicies } from './schema.js';
@@ -43,7 +43,14 @@ export async function setApprovalPolicyEnabled(
     const [updated] = await tx
       .update(approvalPolicies)
       .set({ enabled, updatedAt: sql`clock_timestamp()` })
-      .where(and(eq(approvalPolicies.agentId, agentId), eq(approvalPolicies.id, policyId)))
+      .where(
+        and(
+          eq(approvalPolicies.agentId, agentId),
+          eq(approvalPolicies.id, policyId),
+          enabled ? ne(approvalPolicies.templateKey, 'phone.call.to_owner_number.v1') : undefined,
+          enabled ? ne(approvalPolicies.templateKey, 'phone.call.owner_action.v2') : undefined,
+        ),
+      )
       .returning({ id: approvalPolicies.id });
     return Boolean(updated);
   });

@@ -1,8 +1,10 @@
+import { createHash } from 'node:crypto';
 import type { ConversationSearchSourceRef } from '@assistant/persistence';
 import {
   conversationMessageSourceRevision,
   validatedConversationSourceUrl,
   validConversationSpeaker,
+  validOwnerCorrection,
 } from '@assistant/persistence';
 import { z } from 'zod';
 import type { ModelRouter } from '../model-router/router.js';
@@ -234,11 +236,23 @@ function directSelectedContrastAnswer(
   return 'That wording appears in the assistant’s suggestion. Your cited message doesn’t use it, so I can’t verify it as your instruction.';
 }
 
-function memorySourcePriority(source: { speaker: string }): number {
+function memorySourcePriority(source: { speaker: string; ownerConfirmed?: boolean }): number {
   if (source.speaker === 'Recorded owner message') return 0;
-  if (source.speaker === 'Saved fact marked owner-confirmed') return 1;
+  if (
+    source.speaker === 'Saved fact marked owner-confirmed' ||
+    (source.speaker === 'Owner-corrected saved note' && source.ownerConfirmed)
+  )
+    return 1;
   if (source.speaker === 'Earlier assistant claim (not verified fact)') return 2;
   return 3;
+}
+
+function isOwnerConfirmedMemorySource(source: MemoryReadSource): boolean {
+  return (
+    source.ownerConfirmed === true &&
+    (source.speaker === 'Saved fact marked owner-confirmed' ||
+      source.speaker === 'Owner-corrected saved note')
+  );
 }
 
 /** Give each successful search pass a chance before one pass fills the source budget. */
@@ -317,23 +331,34 @@ export function memoryReadSources(
         const fact = record(raw);
         if (!fact || !text(fact.id) || !text(fact.content)) continue;
         const confirmed = fact.ownerConfirmed === true && fact.unconfirmed !== true;
+        const content = text(fact.content);
+        const contentHash = text(fact.contentHash);
+        const actualContentHash = createHash('sha256').update(content, 'utf8').digest('hex');
+        if (contentHash && actualContentHash !== contentHash) continue;
+        const corrected =
+          actualContentHash === contentHash &&
+          validOwnerCorrection(fact.ownerCorrection, contentHash);
+        const correctedConfirmed =
+          corrected && confirmed && fact.quarantined !== true && !fact.supersededById;
         const inference = fact.source === 'dream' || fact.originTrust === 'assistant';
         const confidence = Number(fact.confidence);
         if (text(fact.content).length > 4000) onUnassessed?.();
         append(
           {
             key: `memory:${text(fact.id)}`,
-            body: text(fact.content).slice(0, 4000),
+            body: content.slice(0, 4000),
             ownerConfirmed: confirmed && fact.quarantined !== true && !fact.supersededById,
             ...(text(fact.subjectContactId)
               ? { subjectContactId: text(fact.subjectContactId) }
               : {}),
-            speaker: inference
-              ? 'Saved assistant inference'
-              : confirmed
-                ? 'Saved fact marked owner-confirmed'
-                : 'Unconfirmed saved fact',
-            provenance: `memory ${text(fact.id)}; ${text(fact.source) || 'source type unknown'}${Number.isFinite(confidence) ? `; confidence ${Math.round(confidence * 100)}%` : ''}${text(fact.sourceTaskId) ? `; source task ${text(fact.sourceTaskId)}` : ''}`,
+            speaker: correctedConfirmed
+              ? 'Owner-corrected saved note'
+              : inference
+                ? 'Saved assistant inference'
+                : confirmed
+                  ? 'Saved fact marked owner-confirmed'
+                  : 'Unconfirmed saved fact',
+            provenance: `${correctedConfirmed ? 'Owner-corrected saved note; linked source is provenance, not original document wording; ' : ''}memory ${text(fact.id)}; ${text(fact.source) || 'source type unknown'}${Number.isFinite(confidence) ? `; confidence ${Math.round(confidence * 100)}%` : ''}${text(fact.sourceTaskId) ? `; source task ${text(fact.sourceTaskId)}` : ''}`,
           },
           pass,
         );
@@ -959,7 +984,12 @@ function coversOwnerHistory(
   if (!asksAboutOwnerHistory(request)) return true;
   const speakers = selectedSpeakers(selections, sources);
   return (
-    speakers.has('Recorded owner message') || speakers.has('Saved fact marked owner-confirmed')
+    speakers.has('Recorded owner message') ||
+    sources.some(
+      (source) =>
+        selections.some((selection) => selection.sourceKey === source.key) &&
+        isOwnerConfirmedMemorySource(source),
+    )
   );
 }
 
@@ -1990,7 +2020,8 @@ export async function selectMemoryReadAnswer(input: {
     allSources.filter(
       (source) =>
         source.speaker === 'Recorded owner message' ||
-        source.speaker === 'Saved fact marked owner-confirmed',
+        source.speaker === 'Saved fact marked owner-confirmed' ||
+        isOwnerConfirmedMemorySource(source),
     ),
   ).slice(0, 12);
 
@@ -2059,11 +2090,14 @@ export async function selectMemoryReadAnswer(input: {
     };
   }
 
-  if (
-    ownerHistoryQuestion &&
-    ownerSources.length > 0 &&
-    !coversOwnerHistory(input.request, first.selections, sources)
-  ) {
+  if (ownerHistoryQuestion && !coversOwnerHistory(input.request, first.selections, sources)) {
+    if (!ownerSources.length)
+      return {
+        version: 1,
+        status: 'unavailable',
+        selections: [],
+        failureReason: 'incomplete_selection',
+      };
     const recovered = await selectFromSources({
       router: input.router,
       taskId: input.taskId,

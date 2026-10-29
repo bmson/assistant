@@ -13,6 +13,7 @@ type MemoryExportRow = Pick<
   | 'quarantined'
   | 'domain'
   | 'ownerConfirmed'
+  | 'ownerCorrection'
   | 'pinned'
   | 'source'
   | 'createdAt'

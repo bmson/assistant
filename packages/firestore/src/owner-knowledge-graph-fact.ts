@@ -11,13 +11,24 @@ import {
   type OwnerKnowledgeGraphFactContext,
   type OwnerKnowledgeGraphFactRepository,
   type OwnerKnowledgeGraphFactResult,
+  ownerEditorCommitRevision,
   type Records,
   snapshotEmbeddingSpace,
   validateEmbedding,
 } from '@assistant/persistence';
+import { statedPeriodEnd, statedPeriodStart } from '@assistant/persistence/knowledge-validity';
+import {
+  eligibleOwnerFamilyCorrection,
+  validOwnerFamilyMeaning,
+} from '@assistant/persistence/owner-family-scope';
 import { type DocumentSnapshot, FieldValue, type Transaction } from '@google-cloud/firestore';
 import { embeddingSpaceKey } from './memory.js';
 import { decodeMemoryRecord } from './memory-record.js';
+import { readFirestoreOwnerEditorFamily } from './owner-editor-graph.js';
+import {
+  beginFirestoreOwnerEditorWrite,
+  completeFirestoreOwnerEditorWrite,
+} from './owner-editor-repository.js';
 import { privacyErasureIsActive } from './privacy-erasure.js';
 import { deterministicUuid } from './stable-id.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
@@ -306,6 +317,13 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
   async createAtomic(
     input: OwnerKnowledgeGraphFactAtomicInput,
   ): Promise<OwnerKnowledgeGraphFactResult> {
+    if (
+      (input.validity || input.timing) &&
+      (!input.validity ||
+        !input.timing ||
+        !validOwnerFamilyMeaning({ validity: input.validity, timing: input.timing }))
+    )
+      throw new Error('Unsupported family validity');
     if (input.embeddingSpaceKey !== embeddingSpaceKey(this.embeddingSpace))
       throw new Error('Knowledge graph embedding space changed');
     validateEmbedding(this.embeddingSpace, input.embedding);
@@ -324,6 +342,100 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
       ? this.store.doc('memories', input.correction.target.sourceMemoryId)
       : null;
     return this.store.db.runTransaction(async (tx) => {
+      const editor = input.editor;
+      const admitted = editor
+        ? await beginFirestoreOwnerEditorWrite(this.store, tx, editor.claim, this.store.now())
+        : null;
+      if (admitted?.kind === 'reply') return { editorReply: admitted.reply };
+      if (editor && admitted?.kind === 'admitted') {
+        const expectedCommand = input.correction
+          ? 'correct_owner_family_relationship'
+          : 'add_family_relationship';
+        if (
+          editor.claim.scope.ownerId !== input.agentId ||
+          editor.claim.scope.command !== expectedCommand ||
+          (input.correction
+            ? editor.claim.scope.targetId !== input.correction.target.relationId
+            : ![input.subject.contactId, input.object.contactId].includes(
+                editor.claim.scope.targetId ?? '',
+              ))
+        )
+          throw new Error('Prepared family operation does not match its claim');
+        if (!input.subject.contactId || !input.object.contactId || !input.validity || !input.timing)
+          throw new Error('Incomplete family editor preparation');
+        const fields = {
+          subjectContactId: input.subject.contactId,
+          objectContactId: input.object.contactId,
+          expectedSubjectRevision: editor.expected.subjectContactRevision,
+          expectedObjectRevision: editor.expected.objectContactRevision,
+          predicate: input.predicate,
+          timing: input.timing,
+          validity: input.validity,
+          note: '',
+          expectedCanonicalState: editor.expected.canonical,
+        };
+        const state = await readFirestoreOwnerEditorFamily(
+          this.store,
+          input.agentId,
+          fields,
+          editor.expected.target?.relationId,
+          tx,
+        );
+        const changed =
+          !state ||
+          state.subject.revision !== editor.expected.subjectContactRevision ||
+          state.object.revision !== editor.expected.objectContactRevision ||
+          state.canonicalConflict ||
+          (state.canonicalIds &&
+            (!state.canonicalScope || !eligibleOwnerFamilyCorrection(state.canonicalScope))) ||
+          (editor.expected.canonical.kind === 'absent'
+            ? state.canonicalRevision !== null &&
+              Boolean(editor.expected.target) &&
+              state.canonicalIds?.assertionId !== state.target?.assertion.id
+            : state.canonicalRevision !== editor.expected.canonical.revision) ||
+          (editor.expected.target &&
+            (!state.target ||
+              state.target.revision !== editor.expected.target.revision ||
+              !eligibleOwnerFamilyCorrection(state.target)));
+        if (changed)
+          return {
+            editorReply: completeFirestoreOwnerEditorWrite(
+              this.store,
+              tx,
+              admitted,
+              { outcome: 'conflict', reason: 'family_snapshot_changed' },
+              this.store.now(),
+            ),
+          };
+        if (state.canonicalIds && !editor.expected.target)
+          return {
+            editorReply: completeFirestoreOwnerEditorWrite(
+              this.store,
+              tx,
+              admitted,
+              {
+                outcome: 'unchanged',
+                ids: state.canonicalIds,
+                revision: ownerEditorCommitRevision(editor.claim, state.canonicalIds),
+              },
+              this.store.now(),
+            ),
+          };
+        if (
+          state.canonicalIds &&
+          state.target &&
+          state.canonicalIds.assertionId !== state.target.assertion.id
+        )
+          return {
+            editorReply: completeFirestoreOwnerEditorWrite(
+              this.store,
+              tx,
+              admitted,
+              { outcome: 'conflict', reason: 'canonical_statement_exists' },
+              this.store.now(),
+            ),
+          };
+      }
       const ownerId = await this.configuredOwnerInTransaction(tx);
       if (ownerId !== input.agentId) throw new Error('Knowledge graph owner changed');
       const [memory, hash, tombstone, erasure] = await tx.getAll(
@@ -408,11 +520,10 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
             return {
               error: 'This source is not a standalone owner fact; choose graph-only correction.',
             };
-          const siblingRelations = await tx.get(
-            this.store
-              .collection('knowledgeGraphRelations')
-              .where('sourceMemoryId', '==', oldMemory.id),
-          );
+          const siblingQuery = this.store
+            .collection('knowledgeGraphRelations')
+            .where('sourceMemoryId', '==', oldMemory.id);
+          const siblingRelations = await tx.get(editor ? siblingQuery.limit(2) : siblingQuery);
           if (siblingRelations.docs.some((doc) => doc.id !== oldRelationSnapshot?.id))
             return {
               error: 'This source supports other relationships; choose graph-only correction.',
@@ -485,9 +596,9 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
         subjectEntityId: subject.id,
         predicate: input.predicate,
         objectEntityId: object.id,
-        assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
-        validFrom: null,
-        validUntil: null,
+        assertion: { tense: input.timing ?? 'present', polarity: 'positive', modality: 'asserted' },
+        validFrom: input.validity?.validFrom ?? null,
+        validUntil: input.validity?.validUntil ?? null,
       });
       const semanticKey = knowledgeAssertionSemanticKey(input.agentId, ownerMeaning);
       const assertionId = knowledgeAssertionId(input.agentId, semanticKey);
@@ -496,6 +607,22 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
       const existingAssertion = assertionSnapshot.exists
         ? decodeRecord<Records['knowledgeGraphAssertions']>(assertionSnapshot.data())
         : null;
+      if (
+        editor &&
+        admitted?.kind === 'admitted' &&
+        existingAssertion &&
+        editor.expected.canonical.kind === 'absent' &&
+        (!editor.expected.target || oldAssertionSnapshot?.id !== assertionRef.id)
+      )
+        return {
+          editorReply: completeFirestoreOwnerEditorWrite(
+            this.store,
+            tx,
+            admitted,
+            { outcome: 'conflict', reason: 'canonical_statement_exists' },
+            this.store.now(),
+          ),
+        };
       if (existingAssertion && existingAssertion.agentId !== input.agentId)
         throw new Error('Canonical knowledge assertion belongs to another owner');
       const evidenceId = knowledgeAssertionEvidenceId(
@@ -529,8 +656,8 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
         quarantined: false,
         subjectContactId: input.subjectContactId,
         domain: 'other',
-        validFrom: null,
-        validUntil: null,
+        validFrom: statedPeriodStart(input.validity?.validFrom),
+        validUntil: statedPeriodEnd(input.validity?.validUntil),
         supersededById: null,
         ownerConfirmed: true,
         pinned: false,
@@ -558,11 +685,11 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
         agentId: input.agentId,
         sourceFingerprint: fingerprint,
         confidence: '1.00',
-        validFrom: null,
-        validUntil: null,
+        validFrom: input.validity?.validFrom ?? null,
+        validUntil: input.validity?.validUntil ?? null,
         subjectEntityId: subject.id,
         predicate: input.predicate,
-        assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
+        assertion: { tense: input.timing ?? 'present', polarity: 'positive', modality: 'asserted' },
         assertionId,
         objectEntityId: object.id,
         sourceMemoryId: memoryId,
@@ -661,7 +788,10 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
           correctionSourceContentHash: input.correction.target.sourceContentHash,
           correctionDisposition: input.correction.disposition,
         });
-        if (oldAssertionSnapshot?.exists) {
+        if (
+          oldAssertionSnapshot?.exists &&
+          (!editor || oldAssertionSnapshot.id !== assertionRef.id)
+        ) {
           const oldAssertion = decodeRecord<Records['knowledgeGraphAssertions']>(
             oldAssertionSnapshot.data(),
           );
@@ -679,9 +809,32 @@ export class FirestoreOwnerKnowledgeGraphFactRepository
           });
         }
       }
+      const ids = {
+        memoryId,
+        relationId,
+        assertionId,
+        ...(input.correction ? { previousRelationId: input.correction.target.relationId } : {}),
+      };
+      const editorReply =
+        editor && admitted?.kind === 'admitted'
+          ? completeFirestoreOwnerEditorWrite(
+              this.store,
+              tx,
+              admitted,
+              {
+                outcome: 'saved',
+                ids,
+                revision: ownerEditorCommitRevision(editor.claim, ids),
+                refreshPending: true,
+              },
+              now,
+            )
+          : undefined;
       return {
         memoryId,
         relationId,
+        assertionId,
+        ...(editorReply ? { editorReply } : {}),
         ...(input.correction ? { sourceDisposition: input.correction.disposition } : {}),
       };
     });

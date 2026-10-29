@@ -1,6 +1,16 @@
 import { createHash } from 'node:crypto';
-import { parseExactTimestamp } from './exact-timestamp.js';
+import { ExactTimestamp, parseExactTimestamp } from './exact-timestamp.js';
+import {
+  ownerCallGrantOperationMatchesSlot,
+  parseOwnerCallGrantOperation,
+  parseOwnerCallGrantOperationSlot,
+} from './owner-call-operation-receipt.js';
+import { parseOwnerCorrection } from './owner-memory-correction.js';
+import { parseContactIdentityAuthority } from './profile-contact-identity.js';
 import { toolCallReceiptKeyId } from './tool-call-receipts.js';
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const FINGERPRINT = /^[a-f0-9]{64}$/;
 
 /**
  * Complete installation coverage for the PostgreSQL schema. Adding a table to
@@ -215,6 +225,24 @@ export const MIGRATION_TABLES = [
   },
   { table: 'owner_card', collection: 'ownerCards', id: 'id', scope: 'agent' },
   {
+    table: 'owner_call_grant_operations',
+    collection: 'ownerCallGrantOperations',
+    id: 'grant_id',
+    scope: 'agent',
+  },
+  {
+    table: 'owner_call_grant_operation_slots',
+    collection: 'ownerCallGrantOperationSlots',
+    id: 'approval_id',
+    scope: 'agent',
+  },
+  {
+    table: 'owner_call_grant_usage',
+    collection: 'ownerCallGrantUsage',
+    id: 'policy_id',
+    scope: 'agent',
+  },
+  {
     table: 'phone_calendar_sharing',
     collection: 'phoneCalendarSharing',
     id: 'id',
@@ -281,6 +309,18 @@ export type MigrationRecord = {
   checksum: string;
 };
 
+export type MigrationRuntimeExclusionsV1 = {
+  version: 1;
+  tables: ['owner_editor_operations'];
+  maintenanceCursorPrefixes: ['owner-editor-epoch:'];
+};
+
+export const OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1: MigrationRuntimeExclusionsV1 = {
+  version: 1,
+  tables: ['owner_editor_operations'],
+  maintenanceCursorPrefixes: ['owner-editor-epoch:'],
+};
+
 export type MigrationManifest = {
   format: 'assistant-workspace-migration';
   /**
@@ -303,7 +343,12 @@ export type MigrationManifest = {
     MigrationTable,
     { collection: MigrationCollection; count: number; checksum: string }
   >;
-  coverage: { complete: boolean; supportedTables: MigrationTable[]; omittedTables: string[] };
+  coverage: {
+    complete: boolean;
+    supportedTables: MigrationTable[];
+    omittedTables: string[];
+    runtimeExclusions?: MigrationRuntimeExclusionsV1;
+  };
   recordCount: number;
   bundleChecksum: string;
   unsupportedTables: string[];
@@ -318,11 +363,92 @@ export function tableDefinition(table: string) {
   return MIGRATION_TABLES.find((definition) => definition.table === table);
 }
 
+export function isOwnerEditorRuntimeCursorName(name: unknown): name is string {
+  return typeof name === 'string' && name.startsWith('owner-editor-epoch:');
+}
+
+export function migrationCoverageOmittedTables(
+  sourceTables: readonly string[],
+  selectedTables: readonly string[],
+  runtimeExclusions?: MigrationRuntimeExclusionsV1,
+): string[] {
+  const selected = new Set(selectedTables);
+  const excluded = new Set<string>(runtimeExclusions?.tables ?? []);
+  return sourceTables.filter((table) => !selected.has(table) && !excluded.has(table));
+}
+
+export function migrationCoverageIsComplete(
+  sourceTables: readonly string[],
+  selectedTables: readonly string[],
+  runtimeExclusions?: MigrationRuntimeExclusionsV1,
+): boolean {
+  const selected = new Set(selectedTables);
+  const source = new Set(sourceTables);
+  return (
+    selected.size === MIGRATION_TABLES.length &&
+    MIGRATION_TABLES.every(({ table }) => selected.has(table)) &&
+    MIGRATION_TABLES.every(({ table }) => source.has(table)) &&
+    migrationCoverageOmittedTables(sourceTables, selectedTables, runtimeExclusions).length === 0
+  );
+}
+
+/** New v3 bundles bind the explicit exclusion declaration; older bundles retain their checksum. */
+export function migrationBundleChecksum(
+  records: readonly MigrationRecord[],
+  version: MigrationManifest['formatVersion'],
+  runtimeExclusions?: MigrationRuntimeExclusionsV1,
+): string {
+  return runtimeExclusions
+    ? checksumForMigrationVersion({ records, runtimeExclusions }, version)
+    : checksumForMigrationVersion(records, version);
+}
+
+function validateRuntimeExclusions(value: unknown): value is MigrationRuntimeExclusionsV1 {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const exclusion = value as Record<string, unknown>;
+  const keys = Object.keys(exclusion).sort();
+  return (
+    keys.length === 3 &&
+    keys[0] === 'maintenanceCursorPrefixes' &&
+    keys[1] === 'tables' &&
+    keys[2] === 'version' &&
+    exclusion.version === 1 &&
+    Array.isArray(exclusion.tables) &&
+    exclusion.tables.length === 1 &&
+    exclusion.tables[0] === 'owner_editor_operations' &&
+    Array.isArray(exclusion.maintenanceCursorPrefixes) &&
+    exclusion.maintenanceCursorPrefixes.length === 1 &&
+    exclusion.maintenanceCursorPrefixes[0] === 'owner-editor-epoch:'
+  );
+}
+
 /** Stable Firestore document IDs for provenance junctions with composite keys. */
 export function compositeMigrationId(
   table: MigrationTable,
   data: Record<string, unknown>,
 ): string | null {
+  if (table === 'owner_call_grant_operations') {
+    const values = [data.ownerId, data.approvalId, data.grantId];
+    if (values.some((value) => typeof value !== 'string' || !value))
+      throw new Error(`Invalid composite migration identity: ${table}`);
+    return createHash('sha256')
+      .update(JSON.stringify(['owner-call-grant-operation-v1', ...values]), 'utf8')
+      .digest('hex');
+  }
+  if (table === 'owner_call_grant_operation_slots') {
+    const values = [data.ownerId, data.approvalId];
+    if (values.some((value) => typeof value !== 'string' || !value))
+      throw new Error(`Invalid composite migration identity: ${table}`);
+    return createHash('sha256')
+      .update(JSON.stringify(['owner-call-grant-slot-v1', ...values]), 'utf8')
+      .digest('hex');
+  }
+  if (table === 'owner_call_grant_usage') {
+    const values = [data.ownerId, data.policyId, data.grantScopeFingerprint];
+    if (values.some((value) => typeof value !== 'string' || !value))
+      throw new Error(`Invalid composite migration identity: ${table}`);
+    return `${values[0]}_${values[1]}_${values[2]}`;
+  }
   const fields =
     table === 'memory_import_lineage'
       ? ['source', 'memoryId']
@@ -395,13 +521,13 @@ export function serializeMigrationValueV3(value: unknown): SerializedValue {
 }
 
 /** Exact PostgreSQL timestamp retained beyond JavaScript Date's millisecond precision. */
-export class PreciseMigrationTimestamp extends Date {
+export class PreciseMigrationTimestamp extends ExactTimestamp {
   constructor(
-    readonly seconds: bigint,
-    readonly nanoseconds: number,
+    seconds: bigint,
+    nanoseconds: number,
     readonly postgresql: string,
   ) {
-    super(Number(seconds * 1000n + BigInt(Math.floor(nanoseconds / 1_000_000))));
+    super(seconds, nanoseconds);
   }
 }
 
@@ -558,14 +684,35 @@ export function validateMigrationBundle(
     manifest.unsupportedTables.length !== 0
   )
     throw new Error('Invalid migration coverage metadata');
+  if (
+    manifest.coverage.runtimeExclusions !== undefined &&
+    !validateRuntimeExclusions(manifest.coverage.runtimeExclusions)
+  )
+    throw new Error('Invalid migration runtime exclusions');
+  const excludedRuntimeTables = new Set<string>(manifest.coverage.runtimeExclusions?.tables ?? []);
+  if (
+    manifest.coverage.runtimeExclusions &&
+    manifest.coverage.omittedTables.some((table) => excludedRuntimeTables.has(table))
+  )
+    throw new Error('Runtime-excluded tables cannot also be omitted');
   if (manifest.coverage.complete && manifest.coverage.omittedTables.length)
     throw new Error('Complete migration coverage cannot omit tables');
   if (
     manifest.coverage.complete &&
     (selectedTables.length !== MIGRATION_TABLES.length ||
       MIGRATION_TABLES.some(({ table }) => !selectedTables.includes(table)))
-  )
+  ) {
+    const missingOwnerCallTables = [
+      'owner_call_grant_operations',
+      'owner_call_grant_operation_slots',
+      'owner_call_grant_usage',
+    ].filter((table) => !selectedTables.includes(table));
+    if (missingOwnerCallTables.length)
+      throw new Error(
+        `Migration bundle is missing owner-call replay, slot, or usage state (${missingOwnerCallTables.join(', ')}). Re-export the workspace with the current exporter before importing.`,
+      );
     throw new Error('Complete migration coverage must include every supported table');
+  }
   if (
     manifest.source.embeddingSpace &&
     (typeof manifest.source.embeddingSpace.provider !== 'string' ||
@@ -600,9 +747,17 @@ export function validateMigrationBundle(
   if (bundle.manifest.recordCount !== sorted.length)
     throw new Error('Migration record count mismatch');
   const seen = new Set<string>();
-  if (versionChecksum(sorted) !== bundle.manifest.bundleChecksum)
+  if (
+    migrationBundleChecksum(sorted, manifest.formatVersion, manifest.coverage.runtimeExclusions) !==
+    bundle.manifest.bundleChecksum
+  )
     throw new Error('Migration bundle checksum mismatch');
   for (const record of sorted) {
+    if (
+      (record.table as string) === 'owner_editor_operations' ||
+      (record.table === 'maintenance_cursors' && isOwnerEditorRuntimeCursorName(record.data.name))
+    )
+      throw new Error('Owner editor runtime metadata cannot be imported');
     const key = `${record.table}:${record.id}`;
     if (seen.has(key)) throw new Error(`Duplicate migration record: ${key}`);
     seen.add(key);
@@ -685,6 +840,11 @@ export function validateMigrationReferences(
       .map((record) => [record.id, record]),
   );
   const compactKeys = records.filter((record) => record.table === 'tool_call_receipt_keys');
+  const ownerCallOperations = new Map<
+    string,
+    NonNullable<ReturnType<typeof parseOwnerCallGrantOperation>>
+  >();
+  const ownerCallSlots: NonNullable<ReturnType<typeof parseOwnerCallGrantOperationSlot>>[] = [];
   if (!ids.get('agents')?.has(sourceAgentId))
     throw new Error('Migration bundle must include the source agent record');
   if ((ids.get('agents')?.size ?? 0) !== 1)
@@ -719,6 +879,55 @@ export function validateMigrationReferences(
       target.data[parentField] !== expectedParent
     )
       throw new Error(`Inconsistent ${record.table}/${record.id} parent linkage: ${field}`);
+  };
+  const decodedData = (record: MigrationRecord): Record<string, unknown> =>
+    Object.fromEntries(
+      Object.entries(record.data).map(([key, value]) => [key, deserializeMigrationValue(value)]),
+    );
+  const ownerCallGrantKey = (
+    ownerId: string,
+    approvalId: string,
+    grantId: string,
+    generation: number,
+  ) => `${ownerId}:${approvalId}:${grantId}:${generation}`;
+  const validOwnerCallUsage = (value: Record<string, unknown>): boolean => {
+    const keys = ['events', 'grantScopeFingerprint', 'ownerId', 'policyId', 'updatedAt'];
+    if (
+      Object.keys(value).length !== keys.length ||
+      !keys.every((key) => Object.hasOwn(value, key)) ||
+      typeof value.ownerId !== 'string' ||
+      !UUID.test(value.ownerId) ||
+      typeof value.policyId !== 'string' ||
+      !UUID.test(value.policyId) ||
+      typeof value.grantScopeFingerprint !== 'string' ||
+      !FINGERPRINT.test(value.grantScopeFingerprint) ||
+      !(value.updatedAt instanceof Date) ||
+      !Number.isFinite(value.updatedAt.getTime()) ||
+      !Array.isArray(value.events) ||
+      value.events.length > 100
+    )
+      return false;
+    const eventIds = new Set<string>();
+    return value.events.every((raw) => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+      const event = raw as Record<string, unknown>;
+      const eventKeys = ['at', 'costUsdMicros', 'toolCallId'];
+      if (
+        Object.keys(event).length !== eventKeys.length ||
+        !eventKeys.every((key) => Object.hasOwn(event, key)) ||
+        typeof event.toolCallId !== 'string' ||
+        !UUID.test(event.toolCallId) ||
+        !(event.at instanceof Date) ||
+        !Number.isFinite(event.at.getTime()) ||
+        typeof event.costUsdMicros !== 'number' ||
+        !Number.isSafeInteger(event.costUsdMicros) ||
+        event.costUsdMicros < 1 ||
+        eventIds.has(event.toolCallId)
+      )
+        return false;
+      eventIds.add(event.toolCallId);
+      return true;
+    });
   };
   const directlyOwned = new Set<MigrationTable>([
     'ambient_snapshots',
@@ -776,6 +985,7 @@ export function validateMigrationReferences(
     'writing_samples',
   ]);
   for (const record of records) {
+    if (record.table === 'contacts') parseContactIdentityAuthority(record.data.identityAuthority);
     if (
       record.table !== 'agents' &&
       'agentId' in record.data &&
@@ -783,6 +993,56 @@ export function validateMigrationReferences(
     )
       throw new Error(`Record outside source workspace: ${record.table}/${record.id}`);
     if (directlyOwned.has(record.table)) requireReference(record, 'agentId', 'agents', true);
+    if (record.table === 'owner_call_grant_operations') {
+      const operation = parseOwnerCallGrantOperation(decodedData(record));
+      if (!operation || operation.ownerId !== sourceAgentId)
+        throw new Error(`Invalid owner call grant operation: ${record.id}`);
+      ownerCallOperations.set(
+        ownerCallGrantKey(
+          operation.ownerId,
+          operation.approvalId,
+          operation.grantId,
+          operation.slotGeneration,
+        ),
+        operation,
+      );
+      const task = linked('tasks', operation.taskId);
+      if (task && task.data.agentId !== operation.ownerId)
+        throw new Error(`Owner call operation task is outside source workspace: ${record.id}`);
+      const call = linked('tool_calls', operation.toolCallId);
+      if (
+        call &&
+        (call.data.taskId !== operation.taskId ||
+          (call.data.approvalId != null && call.data.approvalId !== operation.approvalId))
+      )
+        throw new Error(`Owner call operation tool linkage is inconsistent: ${record.id}`);
+      const approval = linked('approvals', operation.approvalId);
+      if (
+        approval &&
+        (approval.data.taskId !== operation.taskId ||
+          approval.data.toolCallId !== operation.toolCallId)
+      )
+        throw new Error(`Owner call operation approval linkage is inconsistent: ${record.id}`);
+      if (operation.createdPolicyId) {
+        const policy = linked('approval_policies', operation.createdPolicyId);
+        if (policy && policy.data.agentId !== operation.ownerId)
+          throw new Error(`Owner call operation policy is outside source workspace: ${record.id}`);
+      }
+    }
+    if (record.table === 'owner_call_grant_operation_slots') {
+      const slot = parseOwnerCallGrantOperationSlot(decodedData(record));
+      if (!slot || slot.ownerId !== sourceAgentId)
+        throw new Error(`Invalid owner call grant operation slot: ${record.id}`);
+      ownerCallSlots.push(slot);
+    }
+    if (record.table === 'owner_call_grant_usage') {
+      const usage = decodedData(record);
+      if (!validOwnerCallUsage(usage) || usage.ownerId !== sourceAgentId)
+        throw new Error(`Invalid owner call grant usage record: ${record.id}`);
+      const policy = linked('approval_policies', String(usage.policyId));
+      if (policy && policy.data.agentId !== usage.ownerId)
+        throw new Error(`Owner call grant usage policy is outside source workspace: ${record.id}`);
+    }
     if (record.table === 'tool_call_receipts') {
       if (
         record.data.agentId !== sourceAgentId ||
@@ -933,6 +1193,7 @@ export function validateMigrationReferences(
     if (record.table === 'skill_library_revisions')
       requireReference(record, 'agentId', 'agents', true);
     if (record.table === 'memories') {
+      parseOwnerCorrection(record.data.ownerCorrection, String(record.data.contentHash));
       requireReference(record, 'subjectContactId', 'contacts');
       requireReference(record, 'sourceTaskId', 'tasks');
       requireReference(record, 'goalId', 'goals');
@@ -1063,5 +1324,13 @@ export function validateMigrationReferences(
       requireReference(record, 'conversationId', 'conversations');
     }
     if (record.table === 'recall_feedback') requireReference(record, 'messageId', 'messages', true);
+  }
+  for (const slot of ownerCallSlots) {
+    if (slot.currentGrantId === null) continue;
+    const operation = ownerCallOperations.get(
+      ownerCallGrantKey(slot.ownerId, slot.approvalId, slot.currentGrantId, slot.generation),
+    );
+    if (!operation || !ownerCallGrantOperationMatchesSlot(slot, operation))
+      throw new Error(`Owner call grant slot has no matching operation: ${slot.approvalId}`);
   }
 }
