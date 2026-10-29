@@ -670,7 +670,7 @@ describe('owner-call operation migration 0133 on allocated PostgreSQL', () => {
             const fingerprint = phoneCallOwnerActionGrantScopeFingerprint(match);
             if (!fingerprint) throw new Error('precise usage scope missing');
             await client`insert into owner_call_grant_usage(owner_id,policy_id,grant_scope_fingerprint,events,updated_at)
-              values (${ownerId},${policyId},${fingerprint},${JSON.stringify([{ toolCallId: historicalId, at: eventAt, costUsdMicros: 400_000 }])}::jsonb,${fixedNow}::timestamptz)`;
+              values (${ownerId},${policyId},${fingerprint},${client.json([{ toolCallId: historicalId, at: eventAt, costUsdMicros: 400_000 }])}::jsonb,${fixedNow}::timestamptz)`;
             const repository = createPostgresToolExecutionRepository(
               withOwnerCallFixtureClock(db, fixedNow),
             );
@@ -807,7 +807,7 @@ describe('owner-call operation migration 0133 on allocated PostgreSQL', () => {
       code: '23514',
     });
     await expect(client`INSERT INTO owner_call_grant_usage(owner_id,policy_id,grant_scope_fingerprint,events)
-      VALUES (${usageOwner},${policyId},${'d'.repeat(64)},${JSON.stringify(Array.from({ length: 101 }, (_, i) => ({ toolCallId: `${i}`, at: new Date().toISOString(), costUsdMicros: 1 })))}::jsonb)`).rejects.toMatchObject(
+      VALUES (${usageOwner},${policyId},${'d'.repeat(64)},${client.json(Array.from({ length: 101 }, (_, i) => ({ toolCallId: `${i}`, at: new Date().toISOString(), costUsdMicros: 1 })))}::jsonb)`).rejects.toMatchObject(
       { code: '23514' },
     );
   });
