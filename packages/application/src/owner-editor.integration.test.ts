@@ -85,6 +85,8 @@ const router = () => ({
   ),
 });
 function issued(ownerId: string, epoch: string, request: OwnerEditorApply): OwnerEditorScope {
+  if (request.command === 'remove_person' || request.command === 'remove_owner_family_relationship')
+    throw new Error('Unsupported command in basic-editor fixture');
   const now = Date.now();
   return {
     ownerId,

@@ -86,8 +86,11 @@ try {
       throw new Error(`Memory browse route ${path} did not return its own page`);
     await page.getByRole('heading', { name: heading, exact: true }).waitFor();
     if (path === '/profile') {
-      await page.locator('main a[href="/people"]').waitFor();
-      await page.locator('main a[href="/profile/knowledge?view=library"]').waitFor();
+      await page.locator('main').getByRole('link', { name: 'People', exact: true }).waitFor();
+      await page
+        .getByRole('navigation', { name: 'Memory', exact: true })
+        .getByRole('link', { name: 'Saved notes', exact: true })
+        .waitFor();
     } else if (path === '/people') {
       await page.getByLabel('Search people', { exact: true }).waitFor();
       if ((await page.locator('form:has(input[name="q"])').getAttribute('method')) !== 'get')

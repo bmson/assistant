@@ -8,7 +8,6 @@ export type OwnerEditorAvailability =
   | {
       kind: 'sign_in_again';
       message: string;
-      signInHref: '/signin';
     }
   | {
       kind: 'unavailable';
@@ -71,8 +70,8 @@ export function ownerEditorAvailability(input: {
   return returnPath
     ? {
         kind: 'sign_in_again',
-        message: 'Your sign-in needs refreshing before you can edit. Sign in again to continue.',
-        signInHref: '/signin',
+        message:
+          'Your sign-in needs refreshing before you can edit. Open Account, choose Sign out of this browser, then sign in again.',
       }
     : {
         kind: 'unavailable',

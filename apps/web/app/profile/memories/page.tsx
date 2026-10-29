@@ -17,11 +17,11 @@ type Overview = Awaited<ReturnType<typeof getMemoryHubOverview>>;
 function ReadOnlyMemoryHub({
   overview,
   now,
-  signInHref,
+  sessionRefreshMessage,
 }: {
   overview: Overview;
   now: Date;
-  signInHref: string | null;
+  sessionRefreshMessage: string | null;
 }) {
   const { owner, memoryHealth, recallFeedback, quarantined, latestOrganizer, card } = overview;
   return (
@@ -32,13 +32,9 @@ function ReadOnlyMemoryHub({
         intro={`See what shapes the assistant’s understanding of ${owner?.name ?? 'you'} and what still needs review.`}
       />
       <MemoryNavigation />
-      {signInHref ? (
+      {sessionRefreshMessage ? (
         <p role="status" className="mt-4 text-sm text-muted">
-          Your sign-in needs refreshing before you can edit saved information.{' '}
-          <Link href={signInHref} className="text-accent underline">
-            Sign in again
-          </Link>
-          .
+          {sessionRefreshMessage}
         </p>
       ) : null}
 
@@ -177,8 +173,8 @@ export default async function MemoryHubPage({
       <ReadOnlyMemoryHub
         overview={overview}
         now={new Date()}
-        signInHref={
-          editorAvailability.kind === 'sign_in_again' ? editorAvailability.signInHref : null
+        sessionRefreshMessage={
+          editorAvailability.kind === 'sign_in_again' ? editorAvailability.message : null
         }
       />
     );

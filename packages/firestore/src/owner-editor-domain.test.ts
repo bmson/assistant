@@ -74,27 +74,34 @@ function fixture() {
     router: { embeddingSpace: async () => space, embed },
   });
   const operations = createFirestoreOwnerEditorOperationRepository(f.store, ownerId);
-  const scope = (request: OwnerEditorApply): OwnerEditorScope => ({
-    ownerId,
-    epoch,
-    privacyGeneration: null,
-    command: request.command,
-    operationId: request.operationId,
-    targetId:
-      request.command === 'create_person'
-        ? null
-        : request.command === 'correct_owner_memory'
-          ? request.memoryId
-          : request.command === 'update_person_identity'
-            ? request.contactId
-            : request.command === 'correct_owner_family_relationship'
-              ? request.targetRelationId
-              : request.subjectContactId,
-    sessionDigest: 'a'.repeat(64),
-    nonce: randomUUID(),
-    issuedAt: now.getTime(),
-    expiresAt: now.getTime() + 600000,
-  });
+  const scope = (request: OwnerEditorApply): OwnerEditorScope => {
+    if (
+      request.command === 'remove_person' ||
+      request.command === 'remove_owner_family_relationship'
+    )
+      throw new Error('Unsupported command in basic-editor fixture');
+    return {
+      ownerId,
+      epoch,
+      privacyGeneration: null,
+      command: request.command,
+      operationId: request.operationId,
+      targetId:
+        request.command === 'create_person'
+          ? null
+          : request.command === 'correct_owner_memory'
+            ? request.memoryId
+            : request.command === 'update_person_identity'
+              ? request.contactId
+              : request.command === 'correct_owner_family_relationship'
+                ? request.targetRelationId
+                : request.subjectContactId,
+      sessionDigest: 'a'.repeat(64),
+      nonce: randomUUID(),
+      issuedAt: now.getTime(),
+      expiresAt: now.getTime() + 600000,
+    };
+  };
   const run = (request: OwnerEditorApply, issued = scope(request)) => {
     const parsed = parseOwnerEditorRequest(request, ownerEditorPath(request.command));
     if (!parsed.ok || parsed.request.intent !== 'apply')

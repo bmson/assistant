@@ -276,8 +276,9 @@ describe('actual page + real issuance builder composition, named reader/fence po
     expect(ports.pgEditor).not.toHaveBeenCalled();
     expect(html).not.toContain('Add person');
     expect(html).toContain('Your sign-in needs refreshing');
-    expect(html).toContain('href="/signin"');
-    expect(html).toContain('Sign in again');
+    expect(html).toContain('Open Account, choose Sign out of this browser, then sign in again.');
+    expect(html).not.toContain('href="/signin"');
+    expect(html).not.toContain('Sign in again</a>');
     expect(html).toContain('method="get"');
   });
   it('valid form scope with release writes paused keeps the generic unavailable reason', async () => {

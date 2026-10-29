@@ -87,17 +87,9 @@ export default async function SavedNotePage({
         )}
         {!view.grant ? (
           <p role="status" className="mt-4 text-sm text-muted">
-            {editorAvailability.kind === 'sign_in_again' ? (
-              <>
-                {editorAvailability.message}{' '}
-                <Link href={editorAvailability.signInHref} className="text-accent underline">
-                  Sign in again
-                </Link>
-                .
-              </>
-            ) : (
-              ownerMemoryReadOnlyMessage(view.unavailableReason)
-            )}
+            {editorAvailability.kind === 'sign_in_again'
+              ? editorAvailability.message
+              : ownerMemoryReadOnlyMessage(view.unavailableReason)}
           </p>
         ) : null}
         <OwnerMemoryEditor key={`${snapshot.ownerId}:${snapshot.memoryId}`} view={view} />

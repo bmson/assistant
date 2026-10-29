@@ -198,11 +198,7 @@ export default async function PeoplePage({
           </p>
         ) : editorAvailability.kind === 'sign_in_again' ? (
           <p role="status" className="mt-3 text-sm text-muted">
-            {editorAvailability.message}{' '}
-            <Link href={editorAvailability.signInHref} className="text-accent underline">
-              Sign in again
-            </Link>
-            .
+            {editorAvailability.message}
           </p>
         ) : (
           <p className="mt-3 text-sm text-muted">

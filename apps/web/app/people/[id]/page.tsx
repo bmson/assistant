@@ -323,14 +323,6 @@ export default async function PersonPage({
             {editorAvailability.kind === 'available'
               ? 'Changes are unavailable in this view.'
               : editorAvailability.message}
-            {editorAvailability.kind === 'sign_in_again' ? (
-              <>
-                {' '}
-                <Link href={editorAvailability.signInHref} className="underline">
-                  Sign in again
-                </Link>
-              </>
-            ) : null}
           </p>
         ) : null}
         {contact.aliases.length ? (
