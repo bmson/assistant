@@ -367,6 +367,8 @@ jobs:
           project_id: ${{ vars.GCP_PROJECT }}
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+        with:
+          version: 576.0.0
       - name: Resolve live release path
         id: release_path
         env:
@@ -379,11 +381,33 @@ jobs:
             postgres|firestore) ;;
             *) echo "live assistant-agent has an unknown persistence driver" >&2; exit 1 ;;
           esac
+          if [[ -f apps/web/lib/owner-editor-runtime.ts && "$driver" != firestore ]]; then
+            echo 'basic editor delivery requires the reviewed Firestore production path' >&2
+            exit 1
+          fi
+          if [[ "$driver" == firestore && -f apps/web/lib/owner-editor-runtime.ts && "$RELEASE_COMPONENTS" != agent,web ]]; then
+            echo 'basic editor Firestore delivery requires the paired agent and web release' >&2
+            exit 1
+          fi
           if [[ "$driver" == firestore && "$RELEASE_COMPONENTS" == agent,web ]]; then
             echo 'firestore_pair=true' >> "$GITHUB_OUTPUT"
           else
             echo 'firestore_pair=false' >> "$GITHUB_OUTPUT"
           fi
+      - name: Check declared basic editor prerequisites before delivery guard mutations
+        if: steps.release_path.outputs.firestore_pair == 'true'
+        env:
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+        run: pnpm exec tsx scripts/owner-editor-release-inventory.ts --release-preflight
+      - name: Archive basic editor prerequisite observation
+        if: always() && steps.release_path.outputs.firestore_pair == 'true'
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: basic-editor-preflight-${{ needs.plan.outputs.sha }}-${{ github.run_id }}
+          path: owner-editor-release-inventory.json
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Release Firestore pair with delivery guard
         if: steps.release_path.outputs.firestore_pair == 'true'
         env:

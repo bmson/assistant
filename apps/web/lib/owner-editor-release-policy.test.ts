@@ -1,5 +1,6 @@
 import { OWNER_EDITOR_COMMANDS } from '@assistant/persistence/owner-editor';
 import { describe, expect, it } from 'vitest';
+import releaseContracts from '../../../infra/gcp/release-contracts.json';
 import {
   BASIC_OWNER_EDITOR_COMMANDS,
   isBasicOwnerEditorCommand,
@@ -34,6 +35,10 @@ describe('basic owner-editor release policy', () => {
     {},
   ])('rejects unsupported command values (%s)', (value) => {
     expect(isBasicOwnerEditorCommand(value)).toBe(false);
+  });
+
+  it('declares the same five commands for deployment readiness', () => {
+    expect(releaseContracts.components.web.ownerEditorV1).toEqual(BASIC_OWNER_EDITOR_COMMANDS);
   });
 
   it('keeps the shared release allowlist immutable', () => {

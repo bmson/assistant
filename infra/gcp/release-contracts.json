@@ -36,7 +36,14 @@
           "min": 1,
           "max": 1
         }
-      }
+      },
+      "ownerEditorV1": [
+        "create_person",
+        "update_person_identity",
+        "add_family_relationship",
+        "correct_owner_family_relationship",
+        "correct_owner_memory"
+      ]
     },
     "browser": {
       "apiContract": 1,

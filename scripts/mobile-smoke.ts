@@ -97,14 +97,13 @@ try {
         throw new Error('People search must remain a GET form');
     } else {
       await page.getByRole('navigation', { name: 'Knowledge views' }).waitFor();
-      await page
-        .getByLabel(path.endsWith('view=map') ? 'Search items' : 'Search saved notes', {
+      const filters = page.locator('form[action="/profile/knowledge"]');
+      await filters
+        .getByLabel(path.endsWith('view=map') ? 'Search items by name' : 'Search saved notes', {
           exact: true,
         })
         .waitFor();
-      if (
-        (await page.locator('form[action="/profile/knowledge"]').getAttribute('method')) !== 'get'
-      )
+      if ((await filters.getAttribute('method')) !== 'get')
         throw new Error('Knowledge filters must remain a GET form');
     }
   }
