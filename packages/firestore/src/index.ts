@@ -109,6 +109,7 @@ export {
   type OwnerSecretPurpose,
   ownerSecretVerifier,
 } from './owner-auth.js';
+export * from './owner-call-operation-receipts.js';
 export { FirestoreOwnerCardCompilationRepository } from './owner-card-compilation.js';
 export { FirestoreOwnerContextRepository } from './owner-context.js';
 export * from './owner-editor-domain.js';

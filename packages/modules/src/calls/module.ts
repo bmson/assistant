@@ -4,7 +4,7 @@ import { ACTIVE_CALL_STATUSES, type CallSessionRepository } from '@assistant/per
 import { registerCallTools, TwilioVoiceClient } from '@assistant/tools/calls';
 import { defineModule, type ModuleServices } from '../platform.js';
 import { handleMediaStream, type MediaSocket } from './bridge.js';
-import { CallRefusedError, staleCallCutoff, startCall } from './dial.js';
+import { CallRefusedError, quoteCallCost, staleCallCutoff, startCall } from './dial.js';
 import { deliverCallFinish, finishCall } from './finish.js';
 import { callsMeta } from './meta.js';
 import { handleCallStatus, handleInboundCall } from './status.js';
@@ -48,21 +48,27 @@ export const callsModule = defineModule<CallBridge>({
       config.WEB_URL ? new URL(`/calls/${callId}`, config.WEB_URL).toString() : 'the Calls page';
 
     if (dialer.configured()) {
+      const dialDeps = {
+        config,
+        calls,
+        costs: persistence.costs,
+        dialer,
+        ownerId,
+        voiceModel: () => selectVoiceRoute(persistence, config),
+      };
       registerCallTools(registry, {
         allowedCountryCodes: config.CALL_ALLOWED_COUNTRY_CODES,
         maxMinutes: config.CALL_MAX_MINUTES,
+        ownerNumberGrantEnabled: config.PHONE_CALL_TO_OWNER_GRANT_ENABLED,
+        quoteOwnerCallCostUsdMicros: async ({ brief }) => {
+          try {
+            return (await quoteCallCost(dialDeps, brief)).estimatedUsdMicros;
+          } catch {
+            return null;
+          }
+        },
         startCall: (input) =>
-          startCall(
-            {
-              config,
-              calls,
-              costs: persistence.costs,
-              dialer,
-              ownerId,
-              voiceModel: () => selectVoiceRoute(persistence, config),
-            },
-            input,
-          ).catch((error) => {
+          startCall(dialDeps, input).catch((error) => {
             // Owner-readable refusals reach the model as the tool's error text.
             if (error instanceof CallRefusedError || error instanceof VoiceModelUnavailableError)
               throw new Error(error.message);
@@ -80,7 +86,11 @@ export const callsModule = defineModule<CallBridge>({
           dialer,
           resolveVoice: async (session) => resolveSessionVoiceRoute(session, persistence, config),
           notifyOwner: async (input) => {
-            await services.ownerNotifier.notifyOwner({ ...input, urgency: 'interrupt' });
+            const receipt = await services.ownerNotifier.notifyOwner({
+              ...input,
+              urgency: 'interrupt',
+            });
+            return typeof receipt === 'object' && receipt !== null ? receipt : undefined;
           },
           callUrl,
           ownerName: config.OWNER_NAME,

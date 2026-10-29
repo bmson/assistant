@@ -31,6 +31,13 @@ export interface ToolContext {
   tainted: boolean;
   /** Typed owner-authored intent; external text never contributes authorized scopes. */
   ownerIntent?: OwnerIntent;
+  /** Server-derived admission provenance used only by the C policy matcher. */
+  ownerCallRequest?: import('@assistant/persistence').DirectOwnerCallRequestBinding;
+  /** Exact current owner-authored call action, parsed from the persisted trigger. */
+  ownerCallActionIntent?: import('@assistant/persistence').OwnerCallActionIntent;
+  /** Server-derived quote for the v2 grant; never populated from model arguments. */
+  ownerCallGrantCostUsdMicros?: number;
+  ownerCallRecipient?: string;
   /**
    * Email addresses and phone numbers the owner/thread actually provided (from
    * the seed conversation window + trigger payload). The dispatcher treats a
@@ -124,6 +131,8 @@ export interface AssistantTool<S extends z.ZodType = z.ZodType, Out = unknown> {
     description?: string;
     evidence?: CostEvidence;
   } | null;
+  /** Read-only server quote for a v2 owner-call grant; actual dial path reserves once. */
+  quoteOwnerCallCostUsdMicros?: (args: z.infer<S>, ctx: ToolContext) => Promise<number | null>;
   /** Provider-reported usage/price that should replace the preflight estimate. */
   reconcileCost?: (args: z.infer<S>, result: Out) => Partial<ReservationActual>;
   execute: (args: z.infer<S>, ctx: ToolContext) => Promise<Out>;

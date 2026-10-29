@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   idempotencyIdentityDigest,
@@ -112,6 +112,12 @@ describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
     message2: randomUUID(),
     sample: randomUUID(),
     activeToolCall: randomUUID(),
+    ownerCallToolCall: randomUUID(),
+    ownerCallApproval: randomUUID(),
+    ownerCallGrantHistorical: randomUUID(),
+    ownerCallGrantCurrent: randomUUID(),
+    ownerCallEmptySlotApproval: randomUUID(),
+    ownerCallUsagePolicy: randomUUID(),
     callSession: randomUUID(),
     compactToolCall: randomUUID(),
     failedReceipt: randomUUID(),
@@ -208,6 +214,33 @@ describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
       const idempotencyHash = idempotencyIdentityDigest(idempotencyKey);
       if (!modelHash || !idempotencyHash) throw new Error('receipt identity fixture invalid');
       await client`insert into tool_calls (id, task_id, step, tool_name, args, risk, status, decision) values (${ids.activeToolCall}, ${ids.task}, 1, 'gmail.send', ${JSON.stringify({ to: 'private@example.test', body: 'private active payload' })}::jsonb, 'approval', 'approved', ${JSON.stringify({ modelToolCallId, privateContext: 'do not compact active row' })}::jsonb)`;
+      await client`insert into tool_calls (id, task_id, step, tool_name, args, risk, status, decision) values (${ids.ownerCallToolCall}, ${ids.task}, 2, 'phone.call', ${JSON.stringify({ brief: { to: '+14155550123', maxMinutes: 8 } })}::jsonb, 'approval', 'approved', '{}'::jsonb)`;
+      await client`insert into approvals (id, task_id, tool_call_id, short_code, summary, status, expires_at) values (${ids.ownerCallApproval}, ${ids.task}, ${ids.ownerCallToolCall}, 'A20001', 'Owner approved a bounded call request', 'approved', '2026-12-01 00:00:00+00')`;
+      await client`update tool_calls set approval_id = ${ids.ownerCallApproval} where id = ${ids.ownerCallToolCall}`;
+      const historicalRequestFingerprint = 'c'.repeat(64);
+      const historicalScopeFingerprint = 'b'.repeat(64);
+      const currentRequestFingerprint = 'd'.repeat(64);
+      const currentScopeFingerprint = 'a'.repeat(64);
+      await client`insert into owner_call_grant_operations (owner_id, approval_id, grant_id, purpose, schema_version, operation_version, task_id, tool_call_id, slot_generation, request_fingerprint, grant_scope_fingerprint, phase, registered_at, review_expires_at, grant_expires_at, admitted_at, committed_at, closed_at, rejected_at, created_policy_id, wake_generation, updated_at) values
+        (${owner.id}, ${ids.ownerCallApproval}, ${ids.ownerCallGrantHistorical}, 'owner-call-grant-operation.v1', 1, 1, ${ids.task}, ${ids.ownerCallToolCall}, 1, ${historicalRequestFingerprint}, ${historicalScopeFingerprint}, 'closed_no_effect', '2026-10-19 08:00:00.000001+00', '2026-10-19 09:00:00.000001+00', '2026-10-20 08:00:00.000001+00', null, null, '2026-10-19 08:01:00.000002+00', null, null, null, '2026-10-19 08:01:00.000002+00'),
+        (${owner.id}, ${ids.ownerCallApproval}, ${ids.ownerCallGrantCurrent}, 'owner-call-grant-operation.v1', 1, 1, ${ids.task}, ${ids.ownerCallToolCall}, 2, ${currentRequestFingerprint}, ${currentScopeFingerprint}, 'admitted', '2026-10-20 10:15:16.123456+00', '2026-10-20 10:45:16.123456+00', '2026-10-21 10:15:16.123456+00', '2026-10-20 10:16:17.654321+00', null, null, null, null, null, '2026-10-20 10:16:17.654321+00')`;
+      await client`insert into owner_call_grant_operation_slots (owner_id, approval_id, purpose, schema_version, generation, current_grant_id, updated_at) values
+        (${owner.id}, ${ids.ownerCallApproval}, 'owner-call-grant-operation.v1', 1, 2, ${ids.ownerCallGrantCurrent}, '2026-10-20 10:16:17.654321+00'),
+        (${owner.id}, ${ids.ownerCallEmptySlotApproval}, 'owner-call-grant-operation.v1', 1, 0, null, '2026-10-20 10:16:17.654321+00')`;
+      await client`insert into owner_call_grant_usage (owner_id, policy_id, grant_scope_fingerprint, events, updated_at) values (${owner.id}, ${ids.ownerCallUsagePolicy}, ${'e'.repeat(64)}, ${JSON.stringify(
+        [
+          {
+            toolCallId: ids.ownerCallToolCall,
+            at: '2026-10-20T10:17:18.123456Z',
+            costUsdMicros: 500000,
+          },
+          {
+            toolCallId: ids.failedReceipt,
+            at: '2026-10-20T10:17:19.654321Z',
+            costUsdMicros: 250000,
+          },
+        ],
+      )}::jsonb, '2026-10-20 10:17:19.654321+00')`;
       const voiceReceipt = {
         id: 'c'.repeat(64),
         provider: 'openai',
@@ -246,6 +279,15 @@ describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
           revision: '1',
         },
       });
+      const physicalTables = await client<{ table_name: string }[]>`
+        select table_name from information_schema.tables
+        where table_schema = 'public' and table_type = 'BASE TABLE'
+        order by table_name
+      `;
+      const runtimeExclusions = new Set<string>(OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1.tables);
+      expect(
+        physicalTables.map((row) => row.table_name).filter((name) => !runtimeExclusions.has(name)),
+      ).toEqual(MIGRATION_TABLES.map(({ table }) => table).sort());
       expect(Object.keys(complete.manifest.tables)).toHaveLength(MIGRATION_TABLES.length);
       const exportedModel = complete.records.find((record) => record.table === 'models');
       expect(exportedModel?.data).toHaveProperty('promptCostPerMTok');
@@ -266,10 +308,144 @@ describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
           'email_observer_budgets',
           'email_observer_sources',
           'email_observer_work',
+          'owner_call_grant_operations',
+          'owner_call_grant_operation_slots',
+          'owner_call_grant_usage',
         ]),
         omittedTables: [],
         runtimeExclusions: OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
       });
+      const tupleDocumentId = (parts: string[]) =>
+        createHash('sha256').update(JSON.stringify(parts), 'utf8').digest('hex');
+      const historicalOperationId = tupleDocumentId([
+        'owner-call-grant-operation-v1',
+        owner.id,
+        ids.ownerCallApproval,
+        ids.ownerCallGrantHistorical,
+      ]);
+      const currentOperationId = tupleDocumentId([
+        'owner-call-grant-operation-v1',
+        owner.id,
+        ids.ownerCallApproval,
+        ids.ownerCallGrantCurrent,
+      ]);
+      const currentSlotId = tupleDocumentId([
+        'owner-call-grant-slot-v1',
+        owner.id,
+        ids.ownerCallApproval,
+      ]);
+      const emptySlotId = tupleDocumentId([
+        'owner-call-grant-slot-v1',
+        owner.id,
+        ids.ownerCallEmptySlotApproval,
+      ]);
+      const historicalOperation = complete.records.find(
+        (record) =>
+          record.table === 'owner_call_grant_operations' && record.id === historicalOperationId,
+      );
+      expect(historicalOperation?.data).toEqual({
+        ownerId: owner.id,
+        approvalId: ids.ownerCallApproval,
+        grantId: ids.ownerCallGrantHistorical,
+        purpose: 'owner-call-grant-operation.v1',
+        schemaVersion: 1,
+        operationVersion: 1,
+        taskId: ids.task,
+        toolCallId: ids.ownerCallToolCall,
+        slotGeneration: 1,
+        requestFingerprint: historicalRequestFingerprint,
+        grantScopeFingerprint: historicalScopeFingerprint,
+        phase: 'closed_no_effect',
+        registeredAt: { $assistantMigration: ['timestamp', '2026-10-19T08:00:00.000001Z'] },
+        reviewExpiresAt: { $assistantMigration: ['timestamp', '2026-10-19T09:00:00.000001Z'] },
+        grantExpiresAt: { $assistantMigration: ['timestamp', '2026-10-20T08:00:00.000001Z'] },
+        admittedAt: null,
+        committedAt: null,
+        closedAt: { $assistantMigration: ['timestamp', '2026-10-19T08:01:00.000002Z'] },
+        rejectedAt: null,
+        createdPolicyId: null,
+        wakeGeneration: null,
+        updatedAt: { $assistantMigration: ['timestamp', '2026-10-19T08:01:00.000002Z'] },
+      });
+      const currentOperation = complete.records.find(
+        (record) =>
+          record.table === 'owner_call_grant_operations' && record.id === currentOperationId,
+      );
+      expect(currentOperation?.data).toEqual({
+        ownerId: owner.id,
+        approvalId: ids.ownerCallApproval,
+        grantId: ids.ownerCallGrantCurrent,
+        purpose: 'owner-call-grant-operation.v1',
+        schemaVersion: 1,
+        operationVersion: 1,
+        taskId: ids.task,
+        toolCallId: ids.ownerCallToolCall,
+        slotGeneration: 2,
+        requestFingerprint: currentRequestFingerprint,
+        grantScopeFingerprint: currentScopeFingerprint,
+        phase: 'admitted',
+        registeredAt: { $assistantMigration: ['timestamp', '2026-10-20T10:15:16.123456Z'] },
+        reviewExpiresAt: { $assistantMigration: ['timestamp', '2026-10-20T10:45:16.123456Z'] },
+        grantExpiresAt: { $assistantMigration: ['timestamp', '2026-10-21T10:15:16.123456Z'] },
+        admittedAt: { $assistantMigration: ['timestamp', '2026-10-20T10:16:17.654321Z'] },
+        committedAt: null,
+        closedAt: null,
+        rejectedAt: null,
+        createdPolicyId: null,
+        wakeGeneration: null,
+        updatedAt: { $assistantMigration: ['timestamp', '2026-10-20T10:16:17.654321Z'] },
+      });
+      expect(
+        complete.records.filter((record) => record.table === 'owner_call_grant_operations'),
+      ).toHaveLength(2);
+      const grantSlots = complete.records.filter(
+        (record) => record.table === 'owner_call_grant_operation_slots',
+      );
+      expect(grantSlots).toHaveLength(2);
+      expect(grantSlots.find((record) => record.id === currentSlotId)?.data).toEqual({
+        ownerId: owner.id,
+        approvalId: ids.ownerCallApproval,
+        purpose: 'owner-call-grant-operation.v1',
+        schemaVersion: 1,
+        generation: 2,
+        currentGrantId: ids.ownerCallGrantCurrent,
+        updatedAt: { $assistantMigration: ['timestamp', '2026-10-20T10:16:17.654321Z'] },
+      });
+      expect(grantSlots.find((record) => record.id === emptySlotId)?.data).toEqual({
+        ownerId: owner.id,
+        approvalId: ids.ownerCallEmptySlotApproval,
+        purpose: 'owner-call-grant-operation.v1',
+        schemaVersion: 1,
+        generation: 0,
+        currentGrantId: null,
+        updatedAt: { $assistantMigration: ['timestamp', '2026-10-20T10:16:17.654321Z'] },
+      });
+      const usageFingerprint = 'e'.repeat(64);
+      const usageRecordId = `${owner.id}_${ids.ownerCallUsagePolicy}_${usageFingerprint}`;
+      const usageRecord = complete.records.find(
+        (record) => record.table === 'owner_call_grant_usage' && record.id === usageRecordId,
+      );
+      expect(usageRecord?.data).toEqual({
+        ownerId: owner.id,
+        policyId: ids.ownerCallUsagePolicy,
+        grantScopeFingerprint: usageFingerprint,
+        events: [
+          {
+            toolCallId: ids.ownerCallToolCall,
+            at: { $assistantMigration: ['timestamp', '2026-10-20T10:17:18.123456Z'] },
+            costUsdMicros: 500_000,
+          },
+          {
+            toolCallId: ids.failedReceipt,
+            at: { $assistantMigration: ['timestamp', '2026-10-20T10:17:19.654321Z'] },
+            costUsdMicros: 250_000,
+          },
+        ],
+        updatedAt: { $assistantMigration: ['timestamp', '2026-10-20T10:17:19.654321Z'] },
+      });
+      expect(
+        complete.records.filter((record) => record.table === 'owner_call_grant_usage'),
+      ).toHaveLength(1);
       expect(
         complete.records.find(
           (record) => record.table === 'gmail_sync_state' && record.id === ids.mailbox,
@@ -353,6 +529,74 @@ describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
           )
           .map((record) => record.data.effectOutcome),
       ).toEqual(expect.arrayContaining(['failed', 'completed']));
+    });
+  });
+
+  it('exports only the selected owner’s owner-call grant rows from a multi-agent database', async () => {
+    await withDisposableWorkspaceDatabase(async (client, isolatedUrl) => {
+      const ownerId = randomUUID();
+      const otherOwnerId = randomUUID();
+      const approvalIds = [randomUUID(), randomUUID()] as const;
+      const grantIds = [randomUUID(), randomUUID()] as const;
+      const taskIds = [randomUUID(), randomUUID()] as const;
+      const toolCallIds = [randomUUID(), randomUUID()] as const;
+      const fingerprints = ['a'.repeat(64), 'b'.repeat(64)] as const;
+      await client`insert into agents (id, name, email, workspace_prefix) values
+        (${ownerId}, 'Selected owner', ${`${ownerId}@example.test`}, ${`workspace/${ownerId}`}),
+        (${otherOwnerId}, 'Other owner', ${`${otherOwnerId}@example.test`}, ${`workspace/${otherOwnerId}`})`;
+      await client`insert into owner_call_grant_operations (owner_id, approval_id, grant_id, purpose, schema_version, operation_version, task_id, tool_call_id, slot_generation, request_fingerprint, grant_scope_fingerprint, phase, registered_at, review_expires_at, grant_expires_at, admitted_at, committed_at, closed_at, rejected_at, created_policy_id, wake_generation, updated_at) values
+        (${ownerId}, ${approvalIds[0]}, ${grantIds[0]}, 'owner-call-grant-operation.v1', 1, 1, ${taskIds[0]}, ${toolCallIds[0]}, 1, ${fingerprints[0]}, ${fingerprints[0]}, 'registered', '2026-10-20 10:00:00+00', '2026-10-20 11:00:00+00', '2026-10-21 10:00:00+00', null, null, null, null, null, null, '2026-10-20 10:00:00+00'),
+        (${otherOwnerId}, ${approvalIds[1]}, ${grantIds[1]}, 'owner-call-grant-operation.v1', 1, 1, ${taskIds[1]}, ${toolCallIds[1]}, 1, ${fingerprints[1]}, ${fingerprints[1]}, 'registered', '2026-10-20 10:00:00+00', '2026-10-20 11:00:00+00', '2026-10-21 10:00:00+00', null, null, null, null, null, null, '2026-10-20 10:00:00+00')`;
+      await client`insert into owner_call_grant_operation_slots (owner_id, approval_id, purpose, schema_version, generation, current_grant_id, updated_at) values
+        (${ownerId}, ${approvalIds[0]}, 'owner-call-grant-operation.v1', 1, 1, ${grantIds[0]}, '2026-10-20 10:00:00+00'),
+        (${otherOwnerId}, ${approvalIds[1]}, 'owner-call-grant-operation.v1', 1, 1, ${grantIds[1]}, '2026-10-20 10:00:00+00')`;
+      await client`insert into owner_call_grant_usage (owner_id, policy_id, grant_scope_fingerprint, events, updated_at) values
+        (${ownerId}, ${randomUUID()}, ${fingerprints[0]}, '[]'::jsonb, '2026-10-20 10:00:00+00'),
+        (${otherOwnerId}, ${randomUUID()}, ${fingerprints[1]}, '[]'::jsonb, '2026-10-20 10:00:00+00')`;
+
+      const exported = await exportWorkspaceSnapshot({
+        databaseUrl: isolatedUrl,
+        agentId: ownerId,
+        target: {
+          projectId: 'demo-assistant-test',
+          databaseId: '(default)',
+          installationId: 'migration-test',
+        },
+        tables: [
+          'agents',
+          'owner_call_grant_operations',
+          'owner_call_grant_operation_slots',
+          'owner_call_grant_usage',
+        ],
+      });
+      expect(
+        exported.records.filter((record) => record.table === 'agents').map((record) => record.id),
+      ).toEqual([ownerId]);
+      expect([...new Set(exported.records.map((record) => record.table))].sort()).toEqual(
+        [
+          'agents',
+          'owner_call_grant_operations',
+          'owner_call_grant_operation_slots',
+          'owner_call_grant_usage',
+        ].sort(),
+      );
+      for (const table of [
+        'owner_call_grant_operations',
+        'owner_call_grant_operation_slots',
+        'owner_call_grant_usage',
+      ]) {
+        const rows = exported.records.filter((record) => record.table === table);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.data.ownerId).toBe(ownerId);
+        expect(rows[0]?.data.ownerId).not.toBe(otherOwnerId);
+      }
+      expect(exported.manifest.coverage.complete).toBe(false);
+      expect(exported.manifest.coverage.supportedTables).toEqual([
+        'agents',
+        'owner_call_grant_operations',
+        'owner_call_grant_operation_slots',
+        'owner_call_grant_usage',
+      ]);
     });
   });
 

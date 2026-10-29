@@ -979,8 +979,19 @@ export async function importWorkspaceBundle(
     bundle.manifest.formatVersion >= 3
       ? deterministicMigrationCompare
       : (left: string, right: string) => left.localeCompare(right);
-  const records = [...bundle.records].sort((a, b) =>
-    recordCompare(`${a.collection}:${a.id}`, `${b.collection}:${b.id}`),
+  // Ordinary parent records precede durable receipts; a slot is written only
+  // after all of its possible operations. The progress marker and activation
+  // gate still protect partial batches; no receipt is finalized during import.
+  const dependencyRank = (record: MigrationRecord): number => {
+    if (record.table === 'owner_call_grant_operations') return 1;
+    if (record.table === 'owner_call_grant_usage') return 2;
+    if (record.table === 'owner_call_grant_operation_slots') return 3;
+    return 0;
+  };
+  const records = [...bundle.records].sort(
+    (a, b) =>
+      dependencyRank(a) - dependencyRank(b) ||
+      recordCompare(`${a.collection}:${a.id}`, `${b.collection}:${b.id}`),
   );
   const memoryProjections = new Map(
     records

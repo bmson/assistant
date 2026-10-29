@@ -42,7 +42,7 @@ vi.mock('@assistant/core', async (importOriginal) => ({
 const { handleMediaStream } = await import('./bridge.js');
 const { deliverCallFinish } = await import('./finish.js');
 type MediaSocket = import('./bridge.js').MediaSocket;
-const { startCall, mediaStreamUrl } = await import('./dial.js');
+const { quoteCallCost, startCall, mediaStreamUrl } = await import('./dial.js');
 const { handleCallStatus } = await import('./status.js');
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -493,6 +493,21 @@ describe('placing a call', () => {
     const token = /name="token" value="([0-9a-f]+)"/.exec(placed.twiml)?.[1] ?? '';
     expect(sha(token)).toBe(session?.streamTokenHash);
     expect(placed.timeLimitSeconds).toBe(8 * 60 + 20);
+  });
+
+  it('rechecks a v2 grant quote against current rates before reserving or dialing', async () => {
+    const calls = memoryCalls();
+    const dialer = fakeDialer();
+    const deps = dialDeps(calls, dialer);
+    const priorQuote = await quoteCallCost(deps, brief);
+    core.getRate.mockResolvedValueOnce({ unitPriceUsd: 1, unit: 'minute' });
+    const input = toolInput();
+    (input.ctx as unknown as Record<string, unknown>).ownerCallGrantCostUsdMicros =
+      priorQuote.estimatedUsdMicros;
+
+    await expect(startCall(deps, input)).rejects.toThrow('cost changed beyond the approved limit');
+    expect(core.reserveCost).not.toHaveBeenCalled();
+    expect(dialer.placeCall).not.toHaveBeenCalled();
   });
 
   it('refuses a second concurrent call and enforces the daily cap', async () => {

@@ -26,6 +26,45 @@ describe('phone.call tool', () => {
     expect(registered.tool.acceptsUntrustedInput).toBe(false);
   });
 
+  it('adds the owner-number grant template only behind the explicit feature flag', () => {
+    const registry = new ToolRegistry();
+    registerCallTools(registry, {
+      allowedCountryCodes: '1',
+      maxMinutes: 5,
+      ownerNumberGrantEnabled: true,
+      startCall: async () => ({ callSid: `CA${'b'.repeat(32)}` }),
+    });
+    expect(registry.get('phone.call')?.flags.scopedAllowTemplates).toEqual([
+      'phone.call.same_brief',
+      'phone.call.to_owner_number.v1',
+      'phone.call.owner_action.v2',
+    ]);
+  });
+
+  it('keeps the v2 cost quote read-only and separate from the generic reservation hook', async () => {
+    const registry = new ToolRegistry();
+    const quoteOwnerCallCostUsdMicros = vi.fn(async () => 123_456);
+    registerCallTools(registry, {
+      allowedCountryCodes: '1',
+      maxMinutes: 5,
+      ownerNumberGrantEnabled: true,
+      quoteOwnerCallCostUsdMicros,
+      startCall: async () => ({ callSid: `CA${'c'.repeat(32)}` }),
+    });
+    const tool = registry.get('phone.call')?.tool;
+    expect(tool?.estimateCost).toBeUndefined();
+    const quote = tool?.quoteOwnerCallCostUsdMicros;
+    expect(quote).toBeDefined();
+    if (!quote) throw new Error('call quote hook missing');
+    await expect(
+      quote(
+        { brief: { to: '+14155550123', goal: 'Ask about hours', maxMinutes: 3 } },
+        {} as ToolContext,
+      ),
+    ).resolves.toBe(123_456);
+    expect(quoteOwnerCallCostUsdMicros).toHaveBeenCalledTimes(1);
+  });
+
   it('refuses an undialable number before any approval card exists, and caps the length', async () => {
     const { registered } = setup();
     const prepare = registered.tool.prepare as NonNullable<typeof registered.tool.prepare>;

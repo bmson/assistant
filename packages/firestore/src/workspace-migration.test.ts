@@ -16,6 +16,7 @@ import {
   modelToolCallIdentityDigest,
   OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
   type OwnerEditorScope,
+  type SerializedValue,
   serializeMigrationTimestamp,
   serializeMigrationValue,
   serializeMigrationVector,
@@ -25,6 +26,10 @@ import { FieldValue, Timestamp } from '@google-cloud/firestore';
 import { describe, expect, it, vi } from 'vitest';
 import { FirestoreCardFormAdmissionRepository } from './card-form-admission.js';
 import { FirestoreMemoryEmbeddingRefreshRepository } from './memory-embedding-refresh.js';
+import {
+  discoverOwnerCallGrantOperation,
+  readOwnerCallGrantOperationStatus,
+} from './owner-call-operation-receipts.js';
 import {
   createFirestoreOwnerEditorOperationRepository,
   readFirestoreOwnerEditorIssuanceContext,
@@ -421,6 +426,201 @@ function cardFormBundle(
   };
 }
 
+function addOwnerCallMigrationState(source: MigrationBundle) {
+  const ownerId = source.manifest.source.agentId;
+  const taskId = source.records.find((record) => record.table === 'tasks')?.id;
+  if (!taskId) throw new Error('owner-call migration task missing');
+  const approvalId = randomUUID();
+  const toolCallId = randomUUID();
+  const grantId = randomUUID();
+  const priorGrantId = randomUUID();
+  const emptyApprovalId = randomUUID();
+  const policyId = randomUUID();
+  const policyGrantId = randomUUID();
+  const spentToolCallId = randomUUID();
+  const otherSpentToolCallId = randomUUID();
+  const at = serializeMigrationTimestamp('2026-10-20 12:00:00.123456+00');
+  const admittedAt = serializeMigrationTimestamp('2026-10-20 12:00:01.123456+00');
+  const closedAt = serializeMigrationTimestamp('2026-10-20 12:00:02.123456+00');
+  const receiptAdmittedAt = serializeMigrationTimestamp('2026-10-20 12:00:00.123457+00');
+  const operation = {
+    purpose: 'owner-call-grant-operation.v1',
+    schemaVersion: 1,
+    operationVersion: 1,
+    ownerId,
+    approvalId,
+    grantId,
+    taskId,
+    toolCallId,
+    slotGeneration: 2,
+    requestFingerprint: 'b'.repeat(64),
+    grantScopeFingerprint: 'c'.repeat(64),
+    phase: 'admitted',
+    registeredAt: at,
+    reviewExpiresAt: serializeMigrationTimestamp('2026-10-20 12:00:00.123999+00'),
+    grantExpiresAt: serializeMigrationTimestamp('2026-10-21 12:00:00.123456+00'),
+    admittedAt: receiptAdmittedAt,
+    committedAt: null,
+    closedAt: null,
+    rejectedAt: null,
+    createdPolicyId: null,
+    wakeGeneration: null,
+    updatedAt: receiptAdmittedAt,
+  };
+  const history = {
+    ...operation,
+    grantId: priorGrantId,
+    slotGeneration: 1,
+    phase: 'closed_no_effect',
+    admittedAt: null,
+    closedAt,
+    updatedAt: closedAt,
+  };
+  const slot = {
+    purpose: 'owner-call-grant-operation.v1',
+    schemaVersion: 1,
+    ownerId,
+    approvalId,
+    generation: 2,
+    currentGrantId: grantId,
+    updatedAt: admittedAt,
+  };
+  const emptySlot = { ...slot, approvalId: emptyApprovalId, generation: 0, currentGrantId: null };
+  const usage = {
+    ownerId,
+    policyId,
+    grantScopeFingerprint: 'e'.repeat(64),
+    events: [
+      { toolCallId: spentToolCallId, at, costUsdMicros: 500_000 },
+      { toolCallId: otherSpentToolCallId, at: admittedAt, costUsdMicros: 250_000 },
+    ],
+    updatedAt: at,
+  };
+  addRecord(source, {
+    table: 'tool_calls',
+    collection: 'toolCalls',
+    id: toolCallId,
+    data: {
+      id: toolCallId,
+      taskId,
+      approvalId,
+      step: 1,
+      toolName: 'phone.call',
+      args: { brief: { to: '+14155550123', maxMinutes: 3 } },
+      risk: 'approval',
+      status: 'awaiting_approval',
+      decision: {},
+      result: null,
+      error: null,
+      idempotencyKey: null,
+      startedAt: null,
+      finishedAt: null,
+      createdAt: at,
+    },
+    checksum: '',
+  });
+  addRecord(source, {
+    table: 'approvals',
+    collection: 'approvals',
+    id: approvalId,
+    data: {
+      id: approvalId,
+      taskId,
+      toolCallId,
+      shortCode: 'A1',
+      status: 'pending',
+      summary: 'Bounded owner call review',
+      payload: {},
+      resolutionPayload: null,
+      requestedAt: at,
+      expiresAt: operation.reviewExpiresAt,
+      resolvedAt: null,
+      resolvedVia: null,
+      notifiedChannels: [],
+      createdPolicyId: null,
+    },
+    checksum: '',
+  });
+  addRecord(source, {
+    table: 'approval_policies',
+    collection: 'approvalPolicies',
+    id: policyId,
+    data: {
+      id: policyId,
+      agentId: ownerId,
+      toolName: 'phone.call',
+      templateKey: 'phone.call.owner_action.v2',
+      effect: 'allow',
+      enabled: false,
+      version: 1,
+      createdVia: 'settings',
+      createdAt: at,
+      updatedAt: at,
+      match: {
+        schemaVersion: 2,
+        grantId: policyGrantId,
+        action: 'phone.call',
+        recipientE164: '+14155550123',
+        maxMinutes: 3,
+        maxCallsPerHour: 1,
+        maxCallsPerDay: 2,
+        maxCostUsdMicrosPerCall: 300_000,
+        maxCostUsdMicrosPerDay: 600_000,
+        expiresAt: '2027-01-01T00:00:00.000Z',
+      },
+    },
+    checksum: '',
+  });
+  const addComposite = (
+    table: MigrationRecord['table'],
+    collection: MigrationRecord['collection'],
+    data: Record<string, SerializedValue>,
+  ) => {
+    const id = compositeMigrationId(table, data);
+    if (!id) throw new Error('owner-call migration composite identity missing');
+    addRecord(source, { table, collection, id, data, checksum: '' });
+    return id;
+  };
+  const operationId = addComposite(
+    'owner_call_grant_operations',
+    'ownerCallGrantOperations',
+    operation,
+  );
+  const historyId = addComposite(
+    'owner_call_grant_operations',
+    'ownerCallGrantOperations',
+    history,
+  );
+  const slotId = addComposite(
+    'owner_call_grant_operation_slots',
+    'ownerCallGrantOperationSlots',
+    slot,
+  );
+  const emptySlotId = addComposite(
+    'owner_call_grant_operation_slots',
+    'ownerCallGrantOperationSlots',
+    emptySlot,
+  );
+  const usageId = addComposite('owner_call_grant_usage', 'ownerCallGrantUsage', usage);
+  return {
+    ownerId,
+    approvalId,
+    grantId,
+    policyId,
+    spentToolCallId,
+    otherSpentToolCallId,
+    operationId,
+    historyId,
+    slotId,
+    emptySlotId,
+    usageId,
+    operation,
+    history,
+    slot,
+    usage,
+  };
+}
+
 describe('Firestore migration preview', () => {
   const target = {
     projectId: 'demo-assistant-test',
@@ -428,6 +628,185 @@ describe('Firestore migration preview', () => {
     installationId: 'preview',
   };
   const previewStore = {} as Parameters<typeof importWorkspaceBundle>[0];
+
+  it('rejects dangling owner-call slots and unknown operation phases before writes', async () => {
+    const source = completeV3Bundle(target);
+    const state = addOwnerCallMigrationState(source);
+    const slot = source.records.find((record) => record.id === state.slotId);
+    const operation = source.records.find((record) => record.id === state.operationId);
+    if (!slot || !operation) throw new Error('owner-call migration records missing');
+    slot.data.generation = 3;
+    refreshRecord(source, slot);
+    await expect(
+      importWorkspaceBundle(previewStore, source, {
+        sourceAgentId: state.ownerId,
+        target,
+        mode: 'preview',
+      }),
+    ).rejects.toThrow('no matching operation');
+    slot.data.generation = 2;
+    refreshRecord(source, slot);
+    operation.data.phase = 'unknown_pending';
+    refreshRecord(source, operation);
+    await expect(
+      importWorkspaceBundle(previewStore, source, {
+        sourceAgentId: state.ownerId,
+        target,
+        mode: 'preview',
+      }),
+    ).rejects.toThrow('Invalid owner call grant operation');
+  });
+
+  it.skipIf(!enabled)(
+    'resumes owner-call state import without losing replay barriers or usage',
+    async () => {
+      const store = emulatorStore();
+      const target = {
+        projectId: 'demo-assistant-test',
+        databaseId: '(default)',
+        installationId: store.installationId,
+      };
+      try {
+        const source = completeV3Bundle(target);
+        const state = addOwnerCallMigrationState(source);
+        // 448 ordinary rows place an operation, but no slot, at the first
+        // 449-record transaction boundary (one additional write is the marker).
+        const ordinaryCount = source.records.filter(
+          (record) => !record.table.startsWith('owner_call_grant_'),
+        ).length;
+        for (let index = ordinaryCount; index < 448; index++) {
+          const id = randomUUID();
+          addRecord(source, {
+            table: 'tasks',
+            collection: 'tasks',
+            id,
+            data: { id, agentId: state.ownerId, type: 'adhoc', status: 'pending' },
+            checksum: '',
+          });
+        }
+        await expect(
+          importWorkspaceBundle(store, source, {
+            sourceAgentId: state.ownerId,
+            target,
+            mode: 'write',
+            failAfterBatches: 1,
+          }),
+        ).rejects.toThrow('Injected migration batch failure');
+        expect((await store.doc('coordination', 'migration').get()).get('status')).toBe(
+          'importing',
+        );
+        expect((await store.collection('ownerCallGrantOperations').get()).size).toBe(1);
+        expect((await store.collection('ownerCallGrantOperationSlots').get()).empty).toBe(true);
+        const result = await importWorkspaceBundle(store, source, {
+          sourceAgentId: state.ownerId,
+          target,
+          mode: 'write',
+        });
+        expect(result).toMatchObject({ resumed: true, verified: true });
+        expect((await store.doc('coordination', 'migration').get()).get('status')).toBe(
+          'pending_activation',
+        );
+        const current = await discoverOwnerCallGrantOperation(
+          store,
+          state.ownerId,
+          state.approvalId,
+        );
+        expect(current).toMatchObject({
+          kind: 'current',
+          slot: { generation: 2, currentGrantId: state.grantId },
+          operation: { phase: 'admitted', grantId: state.grantId },
+        });
+        if (current.kind !== 'current') throw new Error('precise restored receipt unavailable');
+        expect(current.operation.registeredAt).toMatchObject({ nanoseconds: 123_456_000 });
+        expect(current.operation.admittedAt).toMatchObject({ nanoseconds: 123_457_000 });
+        expect(current.operation.reviewExpiresAt).toMatchObject({ nanoseconds: 123_999_000 });
+        expect(
+          await readOwnerCallGrantOperationStatus(store, {
+            ownerId: state.ownerId,
+            approvalId: state.approvalId,
+            grantId: state.grantId,
+          }),
+        ).toMatchObject({
+          kind: 'status',
+          relation: 'current',
+          operation: { phase: 'admitted' },
+          policyAvailability: 'not_applicable',
+        });
+        for (const id of [
+          state.operationId,
+          state.historyId,
+          state.slotId,
+          state.emptySlotId,
+          state.usageId,
+        ]) {
+          const record = source.records.find((candidate) => candidate.id === id);
+          if (!record) throw new Error('owner-call source record missing');
+          const imported = await store.doc(record.collection, id).get();
+          expect(imported.exists).toBe(true);
+          // Verify mode checks every full materialized record/checksum, including
+          // all timestamps and fields rather than just the selected assertions.
+        }
+        const registeredAt = (
+          await store.doc('ownerCallGrantOperations', state.operationId).get()
+        ).get('registeredAt');
+        if (!(registeredAt instanceof Timestamp)) throw new Error('imported timestamp missing');
+        expect(registeredAt.nanoseconds).toBe(123_456_000);
+        const history = decodeRecord<Record<string, unknown>>(
+          (await store.doc('ownerCallGrantOperations', state.historyId).get()).data(),
+        );
+        expect(history).toMatchObject({
+          phase: 'closed_no_effect',
+          grantId: state.history.grantId,
+          slotGeneration: 1,
+        });
+        const empty = decodeRecord<Record<string, unknown>>(
+          (await store.doc('ownerCallGrantOperationSlots', state.emptySlotId).get()).data(),
+        );
+        expect(empty).toMatchObject({ generation: 0, currentGrantId: null });
+        const usage = (await store.doc('ownerCallGrantUsage', state.usageId).get()).data();
+        const rawEvents: unknown = usage?.events;
+        if (!Array.isArray(rawEvents)) throw new Error('imported usage events missing');
+        const eventAt: unknown = rawEvents[0]?.at;
+        if (!(eventAt instanceof Timestamp)) throw new Error('imported usage timestamp missing');
+        expect(eventAt.nanoseconds).toBe(123_456_000);
+        const decoded = decodeRecord<{
+          ownerId: string;
+          policyId: string;
+          grantScopeFingerprint: string;
+          events: Array<{ toolCallId: string; at: Date; costUsdMicros: number }>;
+        }>(usage);
+        expect(decoded).toMatchObject({
+          ownerId: state.ownerId,
+          policyId: state.policyId,
+          grantScopeFingerprint: 'e'.repeat(64),
+        });
+        expect(decoded.events).toEqual([
+          {
+            toolCallId: state.spentToolCallId,
+            at: new Date('2026-10-20T12:00:00.123Z'),
+            costUsdMicros: 500_000,
+          },
+          {
+            toolCallId: state.otherSpentToolCallId,
+            at: new Date('2026-10-20T12:00:01.123Z'),
+            costUsdMicros: 250_000,
+          },
+        ]);
+        expect((await store.doc('approvalPolicies', state.policyId).get()).get('enabled')).toBe(
+          false,
+        );
+        expect(
+          await importWorkspaceBundle(store, source, {
+            sourceAgentId: state.ownerId,
+            target,
+            mode: 'verify',
+          }),
+        ).toMatchObject({ verified: true });
+      } finally {
+        await disposeStore(store);
+      }
+    },
+  );
 
   it('fails closed before writes when the import target editor epoch is ready', async () => {
     const source = bundle(target);

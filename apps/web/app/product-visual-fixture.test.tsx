@@ -391,7 +391,11 @@ vi.mock('@/app/chat/[id]/chat-client', async () => {
         : createElement(actual.ChatClient, props),
   };
 });
-vi.mock('@/lib/approval-store', () => ({ getApprovalStore: () => ({}) }));
+vi.mock('@/lib/approval-store', () => ({
+  getApprovalStore: () => ({}),
+  getApprovalPolicyStore: () => ({}),
+}));
+vi.mock('@assistant/application/settings', () => ({ getApprovalPolicySettings: async () => [] }));
 vi.mock('@/lib/server', () => ({
   getEmailObligationRepository: () => ({
     mailbox: async () => ({

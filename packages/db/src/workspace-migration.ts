@@ -77,6 +77,26 @@ function serializeTypedColumn(
   column: string,
   value: unknown,
 ): ReturnType<typeof serializeMigrationValueV3> {
+  if (table === 'owner_call_grant_usage' && column === 'events') {
+    if (!Array.isArray(value)) throw new Error('Invalid owner call usage events');
+    return value.map((event) => {
+      if (
+        !event ||
+        typeof event !== 'object' ||
+        Array.isArray(event) ||
+        !('at' in event) ||
+        typeof event.at !== 'string'
+      )
+        throw new Error('Invalid owner call usage event timestamp');
+      const at = serializeMigrationTimestamp(event.at.replace('T', ' '));
+      return Object.fromEntries(
+        Object.entries(event).map(([key, item]) => [
+          key,
+          key === 'at' ? at : serializeMigrationValueV3(item),
+        ]),
+      );
+    });
+  }
   if (table === 'gmail_sync_state' && column === 'last_history_id' && typeof value === 'string') {
     if (!/^-?\d+$/.test(value)) throw new Error(`Invalid bigint ${table}.${column}`);
     return serializeMigrationValueV3(BigInt(value));
@@ -193,6 +213,15 @@ export async function exportWorkspaceSnapshot(
         ) {
           rows = await connection.unsafe(
             `select ${select} from ${quoteIdentifier(table)} x join tasks t on t.id = x.task_id where t.agent_id = $1 order by x.${quoteIdentifier(definition.id)}`,
+            [options.agentId],
+          );
+        } else if (
+          table === 'owner_call_grant_operations' ||
+          table === 'owner_call_grant_operation_slots' ||
+          table === 'owner_call_grant_usage'
+        ) {
+          rows = await connection.unsafe(
+            `select ${select} from ${quoteIdentifier(table)} x where x.owner_id = $1 order by x.${quoteIdentifier(definition.id)}`,
             [options.agentId],
           );
         } else if (table === 'generated_card_revisions') {

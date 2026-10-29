@@ -48,6 +48,35 @@ export class CallRefusedError extends Error {
   }
 }
 
+export interface CallCostQuote {
+  minutes: number;
+  estimatedUsd: number;
+  estimatedUsdMicros: number;
+  voice: Awaited<ReturnType<DialDeps['voiceModel']>>;
+  lineRate: { unit: string; unitPriceUsd: number };
+}
+
+/** Same configured route and live database rate used by the one dial reservation. */
+export async function quoteCallCost(
+  deps: DialDeps,
+  brief: StartCallInput['brief'],
+): Promise<CallCostQuote> {
+  const voice = await deps.voiceModel();
+  const minutes = Math.min(brief.maxMinutes, deps.config.CALL_MAX_MINUTES);
+  const lineRate = await getRate(deps.costs, 'twilio_voice_min');
+  const estimatedUsd =
+    minutes * (lineRate.unitPriceUsd + realtimeEstimatePerMinuteUsd(voice.resolved.rates));
+  const estimatedUsdMicros = Math.ceil(estimatedUsd * 1_000_000);
+  if (
+    !Number.isFinite(estimatedUsd) ||
+    estimatedUsd <= 0 ||
+    !Number.isSafeInteger(estimatedUsdMicros) ||
+    estimatedUsdMicros < 1
+  )
+    throw new CallRefusedError('The current call cost could not be quoted safely.');
+  return { minutes, estimatedUsd, estimatedUsdMicros, voice, lineRate };
+}
+
 /** wss:// form of the agent's public URL, where Twilio opens the media stream. */
 export function mediaStreamUrl(publicUrl: string): string {
   const url = new URL('/voice/stream', publicUrl);
@@ -66,18 +95,29 @@ export async function startCall(
   if (!deps.dialer.configured())
     throw new CallRefusedError('Phone calls are not set up yet (run pnpm setup:phone).');
   const agentId = await deps.ownerId();
-  const voice = await deps.voiceModel();
   const brief = input.brief;
-  const minutes = Math.min(brief.maxMinutes, deps.config.CALL_MAX_MINUTES);
+  const quote = await quoteCallCost(deps, brief);
+  const { minutes, voice, lineRate } = quote;
+
+  // A standing v2 permission carries the earlier server quote as a hard cap.
+  // Recompute against current route/rates and stop before reserving or dialing
+  // if the cost grew after policy evaluation.
+  const authorizedGrantQuote = input.ctx.ownerCallGrantCostUsdMicros;
+  if (
+    authorizedGrantQuote !== undefined &&
+    (!Number.isSafeInteger(authorizedGrantQuote) ||
+      authorizedGrantQuote < 1 ||
+      quote.estimatedUsdMicros > authorizedGrantQuote)
+  )
+    throw new CallRefusedError(
+      'The call cost changed beyond the approved limit; request approval again.',
+    );
 
   // Hold the worst case — every allowed minute of line time and live model —
   // before anything rings. The hold is reconciled to actual use at the end.
-  const lineRate = await getRate(deps.costs, 'twilio_voice_min');
-  const estimatedUsd =
-    minutes * (lineRate.unitPriceUsd + realtimeEstimatePerMinuteUsd(voice.resolved.rates));
   const reservation = await reserveCost(deps.costs, {
     source: 'twilio_voice_min',
-    estimatedUsd,
+    estimatedUsd: quote.estimatedUsd,
     taskId: input.ctx.taskId,
     description: `phone call to ${brief.to} (up to ${minutes} min)`,
   });

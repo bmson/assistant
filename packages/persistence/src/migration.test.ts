@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import {
   assertSupportedMigrationTables,
@@ -10,6 +11,7 @@ import {
   MIGRATION_TABLES,
   type MigrationBundle,
   type MigrationRecord,
+  type MigrationTable,
   migrationBundleChecksum,
   migrationCoverageIsComplete,
   migrationCoverageOmittedTables,
@@ -19,6 +21,7 @@ import {
   serializeMigrationValue,
   serializeMigrationValueV3,
   serializeMigrationVector,
+  snakeToCamel,
   validateMigrationBundle,
   validateMigrationReferences,
 } from './migration.js';
@@ -179,8 +182,8 @@ describe('workspace migration format', () => {
 
   it('enumerates the complete PostgreSQL schema without duplicate tables', async () => {
     const { MIGRATION_TABLES } = await import('./migration.js');
-    expect(MIGRATION_TABLES).toHaveLength(93);
-    expect(new Set(MIGRATION_TABLES.map(({ table }) => table))).toHaveProperty('size', 93);
+    expect(MIGRATION_TABLES).toHaveLength(96);
+    expect(new Set(MIGRATION_TABLES.map(({ table }) => table))).toHaveProperty('size', 96);
     expect(MIGRATION_TABLES.some(({ table }) => table === 'recall_surfaces')).toBe(true);
     expect(MIGRATION_TABLES.map(({ table }) => table)).toEqual(
       expect.arrayContaining([
@@ -198,7 +201,224 @@ describe('workspace migration format', () => {
         'email_observer_budgets',
         'email_observer_sources',
         'email_observer_work',
+        'owner_call_grant_operations',
+        'owner_call_grant_operation_slots',
+        'owner_call_grant_usage',
       ]),
+    );
+  });
+
+  it('uses the Firestore document identities for owner-call grant migration rows', () => {
+    const ownerId = '20000000-0000-4000-8000-000000000001';
+    const approvalId = '20000000-0000-4000-8000-000000000002';
+    const grantId = '20000000-0000-4000-8000-000000000003';
+    const policyId = '20000000-0000-4000-8000-000000000004';
+    const fingerprint = 'a'.repeat(64);
+    const tupleId = (parts: string[]) =>
+      createHash('sha256').update(JSON.stringify(parts), 'utf8').digest('hex');
+    expect(
+      compositeMigrationId('owner_call_grant_operations', { ownerId, approvalId, grantId }),
+    ).toBe(tupleId(['owner-call-grant-operation-v1', ownerId, approvalId, grantId]));
+    expect(compositeMigrationId('owner_call_grant_operation_slots', { ownerId, approvalId })).toBe(
+      tupleId(['owner-call-grant-slot-v1', ownerId, approvalId]),
+    );
+    expect(
+      compositeMigrationId('owner_call_grant_usage', {
+        ownerId,
+        policyId,
+        grantScopeFingerprint: fingerprint,
+      }),
+    ).toBe(`${ownerId}_${policyId}_${fingerprint}`);
+  });
+
+  it('validates owner-call operation slots and preserves historical usage receipts', () => {
+    const ownerId = '20000000-0000-4000-8000-000000000001';
+    const approvalId = '20000000-0000-4000-8000-000000000002';
+    const grantId = '20000000-0000-4000-8000-000000000003';
+    const policyId = '20000000-0000-4000-8000-000000000004';
+    const taskId = '20000000-0000-4000-8000-000000000005';
+    const toolCallId = '20000000-0000-4000-8000-000000000006';
+    const eventToolCallId = '20000000-0000-4000-8000-000000000007';
+    const at = new Date('2026-10-20T12:00:00.000Z');
+    const fingerprint = 'a'.repeat(64);
+    const row = (table: MigrationTable, data: Record<string, unknown>): MigrationRecord => {
+      const definition = MIGRATION_TABLES.find((candidate) => candidate.table === table);
+      if (!definition) throw new Error(`Missing fixture table definition: ${table}`);
+      const id =
+        compositeMigrationId(table, data) ?? String(data[snakeToCamel(definition.id)] ?? '');
+      return {
+        table,
+        collection: definition.collection,
+        id,
+        data: serializeMigrationValueV3(data) as unknown as Record<string, SerializedValue>,
+        checksum: '',
+      };
+    };
+    const operationData = {
+      purpose: 'owner-call-grant-operation.v1',
+      schemaVersion: 1,
+      operationVersion: 1,
+      ownerId,
+      approvalId,
+      grantId,
+      taskId,
+      toolCallId,
+      slotGeneration: 1,
+      requestFingerprint: fingerprint,
+      grantScopeFingerprint: fingerprint,
+      phase: 'closed_no_effect',
+      registeredAt: at,
+      reviewExpiresAt: new Date('2026-10-20T12:05:00.000Z'),
+      grantExpiresAt: new Date('2026-10-21T12:00:00.000Z'),
+      admittedAt: null,
+      committedAt: null,
+      closedAt: at,
+      rejectedAt: null,
+      createdPolicyId: null,
+      wakeGeneration: null,
+      updatedAt: at,
+    };
+    // Exercise the actual SQL text encoder -> exact Date -> receipt parser path.
+    const precise = (fraction: string) =>
+      deserializeMigrationValue(serializeMigrationTimestamp(`2026-10-20 12:00:00.${fraction}+00`));
+    for (const [registered, admitted, deadline, valid] of [
+      ['123456', '123456', '123457', true],
+      ['123456', '123998', '123999', true],
+      ['123456', '123999', '123999', false],
+      ['123456', '123457', '123456', false],
+      ['123456', '123455', '123999', false],
+    ] as const) {
+      const receipt = row('owner_call_grant_operations', {
+        ...operationData,
+        phase: 'admitted',
+        closedAt: null,
+        registeredAt: precise(registered),
+        admittedAt: precise(admitted),
+        reviewExpiresAt: precise(deadline),
+        grantExpiresAt: precise(deadline),
+        updatedAt: precise(admitted),
+      });
+      const validate = () => validateMigrationReferences([agent(ownerId), receipt], ownerId);
+      if (valid) expect(validate).not.toThrow();
+      else expect(validate).toThrow();
+    }
+    const operation = row('owner_call_grant_operations', operationData);
+    const slot = row('owner_call_grant_operation_slots', {
+      purpose: 'owner-call-grant-operation.v1',
+      schemaVersion: 1,
+      ownerId,
+      approvalId,
+      generation: 1,
+      currentGrantId: grantId,
+      updatedAt: at,
+    });
+    const usage = row('owner_call_grant_usage', {
+      ownerId,
+      policyId,
+      grantScopeFingerprint: fingerprint,
+      events: [{ toolCallId: eventToolCallId, at, costUsdMicros: 500_000 }],
+      updatedAt: at,
+    });
+    const preservedUsage = JSON.stringify(usage.data);
+    expect(() =>
+      validateMigrationReferences([agent(ownerId), operation, slot, usage], ownerId),
+    ).not.toThrow();
+    expect(JSON.stringify(usage.data)).toBe(preservedUsage);
+
+    const task = row('tasks', { id: taskId, agentId: ownerId });
+    const call = row('tool_calls', { id: toolCallId, taskId, approvalId });
+    const approval = row('approvals', { id: approvalId, taskId, toolCallId });
+    expect(() =>
+      validateMigrationReferences([agent(ownerId), task, call, approval, operation], ownerId),
+    ).not.toThrow();
+
+    const otherTaskId = '20000000-0000-4000-8000-000000000009';
+    const otherToolCallId = '20000000-0000-4000-8000-000000000010';
+    const otherTask = row('tasks', { id: otherTaskId, agentId: ownerId });
+    const otherCall = row('tool_calls', {
+      id: otherToolCallId,
+      taskId: otherTaskId,
+      approvalId,
+    });
+    const differentlyLinkedApproval = row('approvals', {
+      id: approvalId,
+      taskId: otherTaskId,
+      toolCallId: otherToolCallId,
+    });
+    expect(() =>
+      validateMigrationReferences(
+        [agent(ownerId), task, call, otherTask, otherCall, differentlyLinkedApproval, operation],
+        ownerId,
+      ),
+    ).toThrow('approval linkage is inconsistent');
+
+    const foreignOwnerTask = row('tasks', {
+      id: taskId,
+      agentId: '20000000-0000-4000-8000-000000000008',
+    });
+    expect(() =>
+      validateMigrationReferences(
+        [agent(ownerId), foreignOwnerTask, call, approval, operation],
+        ownerId,
+      ),
+    ).toThrow('outside source workspace');
+
+    const extraKeyOperation = row('owner_call_grant_operations', {
+      ...operationData,
+      unexpected: true,
+    });
+    expect(() => validateMigrationReferences([agent(ownerId), extraKeyOperation], ownerId)).toThrow(
+      'Invalid owner call grant operation',
+    );
+    const extraKeySlot = row('owner_call_grant_operation_slots', {
+      purpose: 'owner-call-grant-operation.v1',
+      schemaVersion: 1,
+      ownerId,
+      approvalId,
+      generation: 0,
+      currentGrantId: null,
+      updatedAt: at,
+      unexpected: true,
+    });
+    expect(() => validateMigrationReferences([agent(ownerId), extraKeySlot], ownerId)).toThrow(
+      'Invalid owner call grant operation slot',
+    );
+    expect(() =>
+      validateMigrationReferences(
+        [
+          agent(ownerId),
+          row('owner_call_grant_operations', {
+            ...operationData,
+            ownerId: '20000000-0000-4000-8000-000000000008',
+          }),
+        ],
+        ownerId,
+      ),
+    ).toThrow('Invalid owner call grant operation');
+    expect(() => validateMigrationReferences([agent(ownerId), slot], ownerId)).toThrow(
+      'no matching operation',
+    );
+    const wrongGenerationSlot = row('owner_call_grant_operation_slots', {
+      purpose: 'owner-call-grant-operation.v1',
+      schemaVersion: 1,
+      ownerId,
+      approvalId,
+      generation: 2,
+      currentGrantId: grantId,
+      updatedAt: at,
+    });
+    expect(() =>
+      validateMigrationReferences([agent(ownerId), operation, wrongGenerationSlot], ownerId),
+    ).toThrow('no matching operation');
+    const invalidUsage = row('owner_call_grant_usage', {
+      ownerId,
+      policyId,
+      grantScopeFingerprint: fingerprint,
+      events: [{ toolCallId: eventToolCallId, at, costUsdMicros: 0 }],
+      updatedAt: at,
+    });
+    expect(() => validateMigrationReferences([agent(ownerId), invalidUsage], ownerId)).toThrow(
+      'Invalid owner call grant usage record',
     );
   });
 
@@ -332,6 +552,33 @@ describe('migration format integrity', () => {
   function validate(input: MigrationBundle) {
     validateMigrationBundle(input, { sourceAgentId: 'owner', target: input.manifest.target });
   }
+  it('requests re-export when a complete legacy bundle omits owner-call state', () => {
+    const input = bundle();
+    const oldTables = MIGRATION_TABLES.filter(
+      ({ table }) =>
+        ![
+          'owner_call_grant_operations',
+          'owner_call_grant_operation_slots',
+          'owner_call_grant_usage',
+        ].includes(table),
+    );
+    input.manifest.tables = Object.fromEntries(
+      oldTables.map(({ table, collection }) => [
+        table,
+        { collection, count: table === 'agents' ? 1 : 0, checksum: checksum([]) },
+      ]),
+    ) as MigrationBundle['manifest']['tables'];
+    input.manifest.coverage = {
+      complete: true,
+      supportedTables: oldTables.map(({ table }) => table),
+      omittedTables: [],
+    };
+    expect(() => validate(input)).toThrow(
+      'owner_call_grant_operations, owner_call_grant_operation_slots, owner_call_grant_usage',
+    );
+    expect(() => validate(input)).toThrow('Re-export the workspace');
+  });
+
   it('rejects unsupported source and fabricated coverage metadata', () => {
     const input = bundle();
     input.manifest.coverage.supportedTables = [];

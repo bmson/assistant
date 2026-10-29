@@ -932,6 +932,13 @@
       "when": 1793040000000,
       "tag": "0132_contact_identity_authority",
       "breakpoints": true
+    },
+    {
+      "idx": 133,
+      "version": "7",
+      "when": 1793211324481,
+      "tag": "0133_owner_call_grant_operation_receipts",
+      "breakpoints": true
     }
   ]
 }
