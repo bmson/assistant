@@ -1,8 +1,8 @@
 /** Localhost emulator only; production operator entrypoint rejects emulator configuration. */
 import { randomUUID } from 'node:crypto';
 import { type DocumentReference, type DocumentSnapshot, Firestore } from '@google-cloud/firestore';
-import { OAuth2Client } from 'google-auth-library';
 import { afterEach, describe, expect, it } from 'vitest';
+import { ownerEditorEmulatorAuth } from './owner-editor-emulator-auth.js';
 import { buildFirestoreOwnerEditorEpochRecord } from './owner-editor-epoch-record.js';
 import {
   prepareOwnerEditorMaintenance,
@@ -46,10 +46,7 @@ describe.skipIf(!host)('V1 editor maintenance real localhost Firestore transacti
       ssl: false,
       universeDomain: 'googleapis.com',
       preferRest: true,
-      authClient: new OAuth2Client({
-        universeDomain: 'googleapis.com',
-        credentials: { access_token: 'emulator-only-token', expiry_date: Number.MAX_SAFE_INTEGER },
-      }),
+      authClient: ownerEditorEmulatorAuth(host),
     } as ConstructorParameters<typeof Firestore>[0]);
     store = new InstallationStore(
       db,
