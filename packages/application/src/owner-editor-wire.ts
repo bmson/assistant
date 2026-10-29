@@ -126,6 +126,10 @@ export function ownerEditorPath(command: OwnerEditorCommand): string {
       return '/api/profile/knowledge/family';
     case 'correct_owner_memory':
       return '/api/profile/knowledge/memory';
+    case 'remove_person':
+      return '/api/people/editor';
+    case 'remove_owner_family_relationship':
+      return '/api/profile/knowledge/family';
   }
 }
 
@@ -147,9 +151,16 @@ export function ownerEditorApplyMatchesScope(
         return scope.targetId === request.targetRelationId;
       case 'correct_owner_memory':
         return scope.targetId === request.memoryId;
+      case 'remove_person':
+      case 'remove_owner_family_relationship':
+        return false;
     }
   })();
-  return target && scope.operationId === request.operationId && scope.command === request.command;
+  return (
+    target === true &&
+    scope.operationId === request.operationId &&
+    scope.command === request.command
+  );
 }
 
 export type OwnerEditorParseResult =

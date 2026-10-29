@@ -6,10 +6,13 @@ import {
   type OwnerEditorControlsProps,
   OwnerEditorDraftCache,
   OwnerEditorPeopleSelectors,
+  OwnerEditorRemovalActions,
+  OwnerEditorRemovalSummary,
   OwnerEditorTimingHelp,
   ownerEditorAliasesFromText,
   ownerEditorAliasesToText,
   ownerEditorConflictIntent,
+  selectCreatedFamilyPerson,
 } from './owner-editor-controls';
 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ refresh: vi.fn() }) }));
@@ -27,6 +30,94 @@ const base: OwnerEditorControlsProps = {
   },
   createGrant,
 };
+describe('removal dialog actions distinguish close from cancellation', () => {
+  const noop = () => {};
+  it('offers Cancel and one destructive submit only before dispatch', () => {
+    const html = renderToStaticMarkup(
+      <OwnerEditorRemovalActions
+        phase="ready"
+        busy={false}
+        finished={false}
+        hasGrant={true}
+        person={false}
+        onClose={noop}
+        onSubmit={noop}
+        onCheck={noop}
+      />,
+    );
+    expect(html).toContain('>Cancel</button>');
+    expect(html).toContain('>Remove connection</button>');
+    expect(html).not.toContain('>Close</button>');
+  });
+  it.each(['pending', 'resolved', 'blocked', 'checking'] as const)(
+    'uses Close without destructive repeat for %s',
+    (phase) => {
+      const html = renderToStaticMarkup(
+        <OwnerEditorRemovalActions
+          phase={phase}
+          busy={false}
+          finished={false}
+          hasGrant={true}
+          person={true}
+          onClose={noop}
+          onSubmit={noop}
+          onCheck={noop}
+        />,
+      );
+      expect(html).toContain('>Close</button>');
+      expect(html).not.toContain('Cancel');
+      expect(html).not.toContain('Delete person');
+      expect(html).not.toContain('type="submit"');
+      if (phase === 'pending') {
+        expect(html).toContain('>Check result</button>');
+        expect(html).toContain('bg-accent');
+      } else expect(html).not.toContain('Check result');
+    },
+  );
+  it('keeps Close after a completed removal even when fresh grants become ready', () => {
+    const html = renderToStaticMarkup(
+      <OwnerEditorRemovalActions
+        phase="ready"
+        busy={false}
+        finished={true}
+        hasGrant={true}
+        person={true}
+        onClose={noop}
+        onSubmit={noop}
+        onCheck={noop}
+      />,
+    );
+    expect(html).toContain('>Close</button>');
+    expect(html).not.toContain('Cancel');
+    expect(html).not.toContain('type="submit"');
+  });
+});
+it('distinguishes the exact person deletion impact from removing one retained-source connection', () => {
+  const impact = {
+    contactId: contact,
+    revision: 'a'.repeat(64),
+    facts: 2,
+    occasions: 3,
+    connections: 4,
+    retainedSourceNotes: 5,
+    entityLinks: 1,
+    sourceLinks: 1,
+  };
+  const person = renderToStaticMarkup(<OwnerEditorRemovalSummary name="Sam" impact={impact} />);
+  expect(person).toContain('2 saved facts');
+  expect(person).toContain('3 saved dates');
+  expect(person).toContain('4 recorded connections');
+  expect(person).toContain('5 other saved source notes stay saved');
+  const connection = renderToStaticMarkup(
+    <OwnerEditorRemovalSummary sentence="Sam is Alex’s parent." />,
+  );
+  expect(connection).toContain('Sam is Alex');
+  expect(connection).toContain('This marks this recorded connection as rejected.');
+  expect(connection).toContain('Both people and the saved source note stay saved');
+  expect(connection).toContain('Other supported connections may remain.');
+  expect(connection).toContain('This does not record that the relationship ended.');
+  expect(connection).not.toContain('saved person details');
+});
 describe('actual owner editor controls server boundary (not mounted browser proof)', () => {
   it('exports create/identity/family controls only for supplied server snapshots and keeps initial saves locked', () => {
     const html = renderToStaticMarkup(
@@ -66,6 +157,22 @@ describe('actual owner editor controls server boundary (not mounted browser proo
 
 describe('actual selector and memory-only draft lifecycle regressions', () => {
   const other = '44444444-4444-4444-8444-444444444444';
+  it('returns a newly created person to the free endpoint without replacing the page anchor', () => {
+    const created = '55555555-5555-4555-8555-555555555555';
+    for (const swapped of [false, true]) {
+      const draft = {
+        subject: swapped ? '' : contact,
+        object: swapped ? contact : '',
+        predicate: 'parent_of',
+        note: 'Keep my draft',
+      };
+      const selected = selectCreatedFamilyPerson(draft, contact, created);
+      expect(selected.subject).toBe(swapped ? created : contact);
+      expect(selected.object).toBe(swapped ? contact : created);
+      expect(selected.predicate).toBe('parent_of');
+      expect(selected.note).toBe('Keep my draft');
+    }
+  });
   it('locks only the explicit anchor and excludes the opposite endpoint after direction swap', () => {
     const people = [
       { contactId: contact, name: 'Sam', revision: 'a'.repeat(64) },
@@ -267,4 +374,17 @@ it('actual alias codec preserves commas on name-only edit and freshly reopened b
     aliases: ownerEditorAliasesToText([...saved, 'Previous, Name']),
   });
   expect(ownerEditorAliasesFromText(fresh.aliases)).toEqual([...saved, 'Previous, Name']);
+});
+
+it('describes rejecting a recorded claim without implying an end date or a visual-only hide', () => {
+  // Source audit: bounded PG and Firestore removal adapters mark the selected
+  // assertion+relation rejected; neither writes validity or removes source/people.
+  // This actual component assertion checks that UI meaning, not adapter execution.
+  const html = renderToStaticMarkup(<OwnerEditorRemovalSummary sentence="Sam is Alex’s parent." />);
+  expect(html).not.toContain('from the connections view');
+  expect(html).not.toMatch(
+    /merely hidden|only hidden|ends this relationship|no longer true|end date/i,
+  );
+  expect(html).toContain('rejected');
+  expect(html).toContain('does not record that the relationship ended');
 });

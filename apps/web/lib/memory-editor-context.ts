@@ -1,4 +1,4 @@
-/** Only an internal Memory map URL can become a dossier return destination. */
+/** Only an internal Memory connections/map URL can become a dossier return destination. */
 export function memoryMapReturnTo(value: unknown): string | null {
   if (typeof value !== 'string' || value.length > 2048 || !value.startsWith('/profile/knowledge?'))
     return null;
@@ -7,7 +7,7 @@ export function memoryMapReturnTo(value: unknown): string | null {
     if (
       url.origin !== 'https://internal.invalid' ||
       url.pathname !== '/profile/knowledge' ||
-      url.searchParams.get('view') !== 'map'
+      !['map', 'connections'].includes(url.searchParams.get('view') ?? '')
     )
       return null;
     return `${url.pathname}${url.search}${url.hash === '#knowledge-item' ? url.hash : ''}`;

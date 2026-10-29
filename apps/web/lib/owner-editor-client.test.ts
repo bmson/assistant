@@ -48,6 +48,24 @@ function receipt(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+it('routes and decodes removal receipts with exact saved target identities', () => {
+  expect(ownerEditorRoute('remove_person')).toBe('/api/people/editor');
+  expect(ownerEditorRoute('remove_owner_family_relationship')).toBe(
+    '/api/profile/knowledge/family',
+  );
+  expect(decodeOwnerEditorReply(receipt({ command: 'remove_person' }))?.command).toBe(
+    'remove_person',
+  );
+  const family = receipt({
+    command: 'remove_owner_family_relationship',
+    ids: { relationId: operationId, memoryId: marker.targetId, assertionId: operationId },
+  });
+  expect(decodeOwnerEditorReply(family)?.command).toBe('remove_owner_family_relationship');
+  expect(decodeOwnerEditorReply({ ...family, ids: { contactId: marker.targetId } })).toBeNull();
+  expect(
+    decodeOwnerEditorReply(receipt({ command: 'remove_person', ids: { memoryId: operationId } })),
+  ).toBeNull();
+});
 
 function seededStorage() {
   const storage = new MemoryStorage();

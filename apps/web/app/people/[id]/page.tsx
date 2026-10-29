@@ -26,10 +26,12 @@ import { PersonAvatar } from '@/app/people/person-avatar';
 import { ConnectionList, RelationshipList } from '@/app/people/relationship-list';
 import { BrowseFact } from '@/app/profile/browse-fact';
 import type { FactView } from '@/app/profile/fact-row';
+import { MemoryNavigation } from '@/app/profile/memory-navigation';
 import { requireOwner } from '@/auth';
 import { getFirestorePersonDossier } from '@/lib/firestore-people';
 import { relativeTime } from '@/lib/format';
 import { memoryMapReturnTo } from '@/lib/memory-editor-context';
+import { ownerEditorAvailability } from '@/lib/owner-editor-availability';
 import { buildOwnerEditorView } from '@/lib/owner-editor-view';
 import { readPostgresOwnerEditorViewInputs, withPostgresMemoryBrowseRead } from '@/lib/server';
 import {
@@ -209,7 +211,14 @@ export default async function PersonPage({
     return (
       <PageShell size="reading">
         <PageHeader
-          back={{ href: backHref, label: mapReturnTo ? 'Memory map' : 'People' }}
+          back={{
+            href: backHref,
+            label: mapReturnTo
+              ? mapReturnTo.includes('view=connections')
+                ? 'Connections'
+                : 'Memory map'
+              : 'People',
+          }}
           title="Person unavailable"
         />
         <p role="alert" className="mt-4 text-muted">
@@ -224,20 +233,50 @@ export default async function PersonPage({
       </PageShell>
     );
   }
-  if (!dossier) notFound();
+  if (!dossier)
+    return (
+      <PageShell size="reading">
+        <PageHeader back={{ href: backHref, label: 'People' }} title="Person unavailable" />
+        <p className="mt-4 text-sm text-muted">
+          This person is no longer available in this view. If a deletion result could not be
+          confirmed, open People to check that same request.
+        </p>
+        <Link
+          href={`/people${query ? `?q=${encodeURIComponent(query)}` : ''}`}
+          className="mt-4 inline-flex min-h-11 items-center text-accent underline"
+        >
+          Open People
+        </Link>
+      </PageShell>
+    );
 
   const { profile, location, origins, relations, connections, events } = dossier;
   const { contact, facts, totalFacts, occasions } = profile;
+  const editorAvailability = ownerEditorAvailability({
+    formSessionScope: session.formSessionScope,
+    editorAvailable: Boolean(
+      editor?.identity?.grant || editor?.family?.grant || editor?.corrections?.length,
+    ),
+    currentPath: `/people/${id}`,
+  });
   const lastContact = lastContactLabel(dossier.lastContactAt, now);
   const groupLabel = dossier.group === 'other' ? null : PERSON_GROUP_LABELS[dossier.group];
 
   return (
-    <OwnerEditorContextualHost editor={editor}>
+    <OwnerEditorContextualHost editor={editor ? { ...editor, personReturnTo: backHref } : null}>
       <PageShell size="reading">
         <PageHeader
-          back={{ href: backHref, label: mapReturnTo ? 'Memory map' : 'People' }}
+          back={{
+            href: backHref,
+            label: mapReturnTo
+              ? mapReturnTo.includes('view=connections')
+                ? 'Connections'
+                : 'Memory map'
+              : 'People',
+          }}
           title={contact.name}
         />
+        <MemoryNavigation current="people" />
 
         {/* The identity line: who they are to you, where they are, when you last
             spoke. Every segment is dropped when its source is empty, so this
@@ -275,14 +314,100 @@ export default async function PersonPage({
           </div>
         </div>
 
-        <div className="mt-4">
+        <div className="mt-4 flex flex-wrap gap-2">
           <OwnerEditorContextTrigger entry="identity" />
+          <OwnerEditorContextTrigger entry="create" />
         </div>
+        {!editor && contact.trust !== 'owner' ? (
+          <p className="mt-3 text-sm text-muted">
+            {editorAvailability.kind === 'available'
+              ? 'Changes are unavailable in this view.'
+              : editorAvailability.message}
+            {editorAvailability.kind === 'sign_in_again' ? (
+              <>
+                {' '}
+                <Link href={editorAvailability.signInHref} className="underline">
+                  Sign in again
+                </Link>
+              </>
+            ) : null}
+          </p>
+        ) : null}
         {contact.aliases.length ? (
           <p className="mt-3 break-words text-sm text-muted">
             Also known as {contact.aliases.join(', ')}
           </p>
         ) : null}
+        {/* Relationships to other people — the section this page exists for, so
+            it is on the page rather than behind a disclosure, and adding one
+            happens here instead of sending the owner to the knowledge graph to
+            look this person up again. */}
+        <section id="person-connections" tabIndex={-1} className="mt-8">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <SectionHeading title="Connections between people" count={relations.length} />
+            <OwnerEditorContextTrigger entry="family" />
+          </div>
+          <p className="mt-2 text-sm text-muted">
+            Removing connections is not available in this release. Eligible family relationships can
+            still be edited.
+          </p>
+          {relations.length === 0 ? (
+            <EmptyState>
+              {editor?.family
+                ? 'No connections are recorded yet. Add a family relationship to connect this person with someone else.'
+                : 'No connections to other people are recorded yet.'}
+            </EmptyState>
+          ) : (
+            <RelationshipList
+              relations={relations}
+              now={now}
+              peopleQuery={query}
+              editControls={
+                editor
+                  ? Object.fromEntries(
+                      (editor.corrections ?? []).map((correction) => [
+                        correction.eligibility.relationId,
+                        <div
+                          key={correction.eligibility.relationId}
+                          className="flex flex-wrap gap-2"
+                        >
+                          <OwnerEditorContextTrigger
+                            entry={{ correction: correction.eligibility.relationId }}
+                          />
+                          <OwnerEditorContextTrigger
+                            entry={{ removal: correction.eligibility.relationId }}
+                          />
+                        </div>,
+                      ]),
+                    )
+                  : undefined
+              }
+              readOnlyReasons={Object.fromEntries(
+                relations
+                  .filter(
+                    (relation) =>
+                      !(editor?.corrections ?? []).some(
+                        (item) => item.eligibility.relationId === relation.id,
+                      ),
+                  )
+                  .map((relation) => {
+                    const reason = editor?.readOnlyCorrections?.find(
+                      (item) => item.relationId === relation.id,
+                    );
+                    return [
+                      relation.id,
+                      {
+                        reason:
+                          reason?.reason ?? (editor ? 'source_unverified' : 'editing_unavailable'),
+                        sourceMemoryId: reason?.sourceMemoryId ?? relation.sourceMemoryId,
+                      },
+                    ];
+                  }),
+              )}
+            />
+          )}
+        </section>
+
         {origins.length > 0 ? (
           <Panel className="mt-6">
             <InfoGrid columns={1}>
@@ -328,64 +453,6 @@ export default async function PersonPage({
             </Link>
           </p>
         ) : null}
-
-        {/* Relationships to other people — the section this page exists for, so
-            it is on the page rather than behind a disclosure, and adding one
-            happens here instead of sending the owner to the knowledge graph to
-            look this person up again. */}
-        <section className="mt-8">
-          <div className="flex flex-wrap items-end justify-between gap-3">
-            <SectionHeading title="Connections between people" count={relations.length} />
-            <OwnerEditorContextTrigger entry="family" />
-          </div>
-          {relations.length === 0 ? (
-            <EmptyState>
-              No connections to other people are recorded yet. They are picked up from what you tell
-              the assistant.
-            </EmptyState>
-          ) : (
-            <RelationshipList
-              relations={relations}
-              now={now}
-              peopleQuery={query}
-              editControls={
-                editor
-                  ? Object.fromEntries(
-                      (editor.corrections ?? []).map((correction) => [
-                        correction.eligibility.relationId,
-                        <OwnerEditorContextTrigger
-                          key={correction.eligibility.relationId}
-                          entry={{ correction: correction.eligibility.relationId }}
-                        />,
-                      ]),
-                    )
-                  : undefined
-              }
-              readOnlyReasons={Object.fromEntries(
-                relations
-                  .filter(
-                    (relation) =>
-                      !(editor?.corrections ?? []).some(
-                        (item) => item.eligibility.relationId === relation.id,
-                      ),
-                  )
-                  .map((relation) => {
-                    const reason = editor?.readOnlyCorrections?.find(
-                      (item) => item.relationId === relation.id,
-                    );
-                    return [
-                      relation.id,
-                      {
-                        reason:
-                          reason?.reason ?? (editor ? 'source_unverified' : 'editing_unavailable'),
-                        sourceMemoryId: reason?.sourceMemoryId ?? relation.sourceMemoryId,
-                      },
-                    ];
-                  }),
-              )}
-            />
-          )}
-        </section>
 
         {/* Everything else the graph knows: employers, places, events. */}
         {connections.length > 0 ? (
@@ -475,6 +542,16 @@ export default async function PersonPage({
               ))}
             </div>
           )}
+        </section>
+        <section className="mt-8 border-t border-edge pt-5" aria-label="Delete person">
+          <OwnerEditorContextTrigger entry="remove-person" />
+          {!editor?.personRemoval ? (
+            <p className="text-sm text-muted">
+              {contact.trust === 'owner'
+                ? 'Your own profile cannot be deleted here.'
+                : 'Deleting people is not available in this release. You can still edit their saved details and eligible connections.'}
+            </p>
+          ) : null}
         </section>
       </PageShell>
     </OwnerEditorContextualHost>

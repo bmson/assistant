@@ -82,6 +82,7 @@ describe('actual owner editor HMAC issuance boundary (not driver/write authority
     'update_person_identity',
     'add_family_relationship',
     'correct_owner_family_relationship',
+    'correct_owner_memory',
   ] as const)(
     'roundtrips exact owner/session/command/target/operation for %s with fresh nonce and UUID',
     (command) => {
@@ -115,6 +116,21 @@ describe('actual owner editor HMAC issuance boundary (not driver/write authority
       expect(first.scope.nonce).not.toBe(second.scope.nonce);
       expect(a.operationId).not.toBe(b.operationId);
       expect(a.issuedOperationHandle).not.toBe(b.issuedOperationHandle);
+    },
+  );
+  it.each(['remove_person', 'remove_owner_family_relationship'] as const)(
+    'release policy refuses to issue a %s grant before signing',
+    (command) => {
+      expect(() =>
+        issueOwnerEditorFormGrant({
+          context,
+          session,
+          command,
+          targetId: target,
+          secret,
+          now,
+        }),
+      ).toThrow('Editor command is unavailable in this release');
     },
   );
   it('tampering a real signed owner/session/command/target/operation payload is invalid, never retirement', () => {

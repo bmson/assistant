@@ -6,7 +6,14 @@ export const OWNER_EDITOR_COMMANDS = [
   'correct_owner_family_relationship',
   'correct_owner_memory',
 ] as const;
-export type OwnerEditorCommand = (typeof OWNER_EDITOR_COMMANDS)[number];
+/**
+ * Shared UI command names. The release parser's OWNER_EDITOR_COMMANDS remains
+ * the narrower set of commands with current wire/storage implementations.
+ */
+export type OwnerEditorCommand =
+  | (typeof OWNER_EDITOR_COMMANDS)[number]
+  | 'remove_person'
+  | 'remove_owner_family_relationship';
 export type OwnerEditorTiming = 'unspecified' | 'present' | 'past';
 
 /** Civil dates, validated before conversion; null means not recorded. */
@@ -49,6 +56,17 @@ export type OwnerEditorApply = ApplyEnvelope &
         targetRelationId: string;
         expectedTargetRevision: string;
         replacement: OwnerEditorFamilyFields;
+      }
+    | {
+        command: 'remove_person';
+        contactId: string;
+        expectedContactRevision: string;
+        expectedImpactRevision: string;
+      }
+    | {
+        command: 'remove_owner_family_relationship';
+        targetRelationId: string;
+        expectedTargetRevision: string;
       }
     | {
         command: 'correct_owner_memory';
@@ -220,4 +238,16 @@ export interface OwnerEditorCorrectionEligibility {
   revision: string;
   original: OwnerEditorFamilyFields;
   sourceText: string;
+}
+
+/** Exact bounded preview data; it is not itself removal authority. */
+export interface OwnerEditorPersonRemovalImpact {
+  contactId: string;
+  revision: string;
+  facts: number;
+  occasions: number;
+  connections: number;
+  retainedSourceNotes: number;
+  entityLinks: number;
+  sourceLinks: number;
 }

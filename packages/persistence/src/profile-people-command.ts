@@ -56,5 +56,7 @@ export interface OwnerEditorPeopleReadSnapshot {
     revision: string;
   } | null;
   corrections: import('./owner-editor.js').OwnerEditorCorrectionEligibility[];
+  personRemovalUnavailableReason?: string;
+  personRemoval?: import('./owner-editor.js').OwnerEditorPersonRemovalImpact;
   readOnlyCorrections?: { relationId: string; sourceMemoryId: string; reason: string }[];
 }

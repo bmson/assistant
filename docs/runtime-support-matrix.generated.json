@@ -6,7 +6,7 @@
     "apps/agent/src/deps.ts": "fb30df8600bbcf24da0d5cfa9ef1c92e28700b663429cdbbe37d65ecee0ea655",
     "apps/agent/src/index.ts": "6da57b60f853ca6622142a12b70bb31a73e8155eac30dd7d905218c19ca2fd56",
     "apps/web/lib/server.ts": "47c3906445e13f73f70ee9c341aef7d3279b8a50fd8e120a088f4528fdd57c61",
-    "apps/web/proxy.ts": "89e1527d4e40564565e014ea5726807432da3d7df29ca9c9b3d72df06d34263a",
+    "apps/web/proxy.ts": "0d3bae71bd7a094b3e70615c89bd82db8b2fa1196e7ccde8a1d7b2e6c4872cc6",
     "packages/db/drizzle/meta/_journal.json": "a94cd8a88088e989a08f71cabb8eaf9545a675ebc056d48e5465a772ccdbbcd9",
     "infra/gcp/release-contracts.json": "ad138e74d841bafafef26b3e4095e9d98c80e29dffd195b5a89995f1e1c0caff"
   },

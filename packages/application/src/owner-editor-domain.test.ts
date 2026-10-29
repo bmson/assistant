@@ -48,6 +48,12 @@ function fixture() {
     expiresAt: Date.now() + 600000,
   };
   const embed = vi.fn(async (texts: string[]) => texts.map(() => [1, 0, 0]));
+  const embeddingSpace = vi.fn(async () => ({
+    provider: 'test',
+    model: 'unit',
+    dimensions: 3,
+    revision: '1',
+  }));
   const graphApply = vi.fn(async () => {
     throw new Error('Preparation cannot write source');
   });
@@ -112,12 +118,7 @@ function fixture() {
   const domain = createOwnerEditorDomain({
     storage,
     router: {
-      embeddingSpace: async () => ({
-        provider: 'test',
-        model: 'unit',
-        dimensions: 3,
-        revision: '1',
-      }),
+      embeddingSpace,
       embed: async (texts) => {
         expect(insideCommit).toBe(false);
         return embed(texts);
@@ -138,6 +139,7 @@ function fixture() {
     scope,
     claim,
     embed,
+    embeddingSpace,
     graphApply,
     family,
     left,
@@ -256,4 +258,58 @@ describe('actual owner editor domain preparation and transaction handoff', () =>
     expect(f.embed).not.toHaveBeenCalled();
     expect(f.family).not.toHaveBeenCalled();
   });
+  it.each(['remove_person', 'remove_owner_family_relationship'] as const)(
+    'refuses typed %s before storage reads, providers, or writers',
+    async (command) => {
+      const f = fixture();
+      const operationId = randomUUID();
+      const request: OwnerEditorApply =
+        command === 'remove_person'
+          ? {
+              version: 1,
+              intent: 'apply',
+              command,
+              operationId,
+              contactId: f.left.id,
+              expectedContactRevision: f.left.revision,
+              expectedImpactRevision: 'c'.repeat(64),
+            }
+          : {
+              version: 1,
+              intent: 'apply',
+              command,
+              operationId,
+              targetRelationId: randomUUID(),
+              expectedTargetRevision: 'd'.repeat(64),
+            };
+      const scope: OwnerEditorScope = {
+        ...f.scope,
+        command,
+        operationId,
+        targetId: command === 'remove_person' ? f.left.id : randomUUID(),
+      };
+      const contactRead = vi.spyOn(f.storage, 'contact');
+      const contextRead = vi.spyOn(f.storage, 'context');
+      const graphContextRead = vi.spyOn(f.storage.graph, 'context');
+      const entityRead = vi.spyOn(f.storage.graph, 'entity');
+      const correctionRead = vi.spyOn(f.storage.graph, 'correctionTarget');
+
+      await expect(f.domain.prepare(request, scope)).resolves.toEqual({
+        ok: false,
+        result: { outcome: 'unavailable', reason: 'editor_command_unavailable' },
+      });
+      expect(contactRead).not.toHaveBeenCalled();
+      expect(f.family).not.toHaveBeenCalled();
+      expect(contextRead).not.toHaveBeenCalled();
+      expect(graphContextRead).not.toHaveBeenCalled();
+      expect(entityRead).not.toHaveBeenCalled();
+      expect(correctionRead).not.toHaveBeenCalled();
+      expect(f.embeddingSpace).not.toHaveBeenCalled();
+      expect(f.embed).not.toHaveBeenCalled();
+      expect(f.graphApply).not.toHaveBeenCalled();
+      expect(f.commitPerson).not.toHaveBeenCalled();
+      expect(f.commitFamily).not.toHaveBeenCalled();
+      expect(f.commitUnchangedFamily).not.toHaveBeenCalled();
+    },
+  );
 });

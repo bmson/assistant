@@ -80,7 +80,10 @@ export function proxy(request: NextRequest) {
   // Reach only the existing owner-checked Costs page and cap Server Action.
   const costsPage = path === '/costs' && ['GET', 'POST'].includes(request.method);
   const memoryBrowsePage =
-    ['/profile', '/people', '/profile/knowledge'].includes(path) ||
+    ['/profile', '/profile/memories', '/people', '/profile/knowledge'].includes(path) ||
+    /^\/profile\/knowledge\/notes\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      path,
+    ) ||
     /^\/people\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
       path,
     );

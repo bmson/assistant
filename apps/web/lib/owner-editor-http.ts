@@ -15,6 +15,7 @@ import type {
 } from '@assistant/persistence/owner-editor';
 import { isValidFormSessionScope } from '../app/auth-form-session-scope';
 import { readBoundedJson } from './bounded-json';
+import { isBasicOwnerEditorCommand } from './owner-editor-release-policy';
 import {
   issueOwnerEditorReceiptProof,
   verifyOwnerEditorHandle,
@@ -126,6 +127,8 @@ export function createOwnerEditorHttpHandlers(
     });
     if (checked.kind === 'invalid') return rejection('invalid_form_scope', 403);
     if (checked.kind === 'retired') return json(ownerEditorRetired(checked.scope));
+    if (!isBasicOwnerEditorCommand(checked.scope.command))
+      return rejection('command_unavailable', 403, checked.scope);
     if (ownerEditorPath(checked.scope.command) !== path)
       return rejection('issuance_mismatch', 409, checked.scope);
     if (
@@ -181,6 +184,8 @@ export function createOwnerEditorHttpHandlers(
       const parsed = parseOwnerEditorRequest(body.value, path);
       if (!parsed.ok) return rejection('invalid_command', 422, scope, parsed.fieldErrors);
       const command = parsed.request;
+      if (!isBasicOwnerEditorCommand(command.command))
+        return rejection('command_unavailable', 403, scope);
       if (command.operationId !== scope.operationId || command.command !== scope.command)
         return rejection('issuance_mismatch', 409, scope);
       if (command.intent === 'apply' && !ownerEditorApplyMatchesScope(command, scope))

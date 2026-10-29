@@ -8,8 +8,10 @@ export type OwnerEditorRoute =
 const COMMAND_ROUTE: Record<OwnerEditorCommand, OwnerEditorRoute> = {
   create_person: '/api/people/editor',
   update_person_identity: '/api/people/editor',
+  remove_person: '/api/people/editor',
   add_family_relationship: '/api/profile/knowledge/family',
   correct_owner_family_relationship: '/api/profile/knowledge/family',
+  remove_owner_family_relationship: '/api/profile/knowledge/family',
   correct_owner_memory: '/api/profile/knowledge/memory',
 };
 
@@ -23,6 +25,8 @@ const COMMANDS = new Set<string>([
   'add_family_relationship',
   'correct_owner_family_relationship',
   'correct_owner_memory',
+  'remove_person',
+  'remove_owner_family_relationship',
 ]);
 const TERMINAL_OUTCOMES = new Set([
   'saved',
@@ -108,7 +112,9 @@ export function decodeOwnerEditorReply(value: unknown): OwnerEditorReply | null 
       ]);
       if (Object.keys(value.ids).some((key) => !allowedIds.has(key))) return null;
       const requiredIds =
-        value.command === 'create_person' || value.command === 'update_person_identity'
+        value.command === 'create_person' ||
+        value.command === 'update_person_identity' ||
+        value.command === 'remove_person'
           ? ['contactId']
           : value.command === 'correct_owner_memory'
             ? ['memoryId']

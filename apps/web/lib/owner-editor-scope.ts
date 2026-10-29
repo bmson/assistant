@@ -1,6 +1,5 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
-  OWNER_EDITOR_COMMANDS,
   type OwnerEditorCommand,
   type OwnerEditorFormGrant,
   type OwnerEditorIssuanceContext,
@@ -13,6 +12,7 @@ import {
 } from '@assistant/persistence';
 import { z } from 'zod';
 import { isValidFormSessionScope } from '../app/auth-form-session-scope';
+import { isBasicOwnerEditorCommand } from './owner-editor-release-policy';
 
 const uuid = z
   .string()
@@ -21,13 +21,26 @@ const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const formMs = 10 * 60_000;
 const proofMs = 2 * 60_000;
 const replayMs = 24 * 60 * 60_000;
+// The signed-scope decoder recognizes historic wire values so the release
+// policy can reject them explicitly before any backend access. Issuance below
+// remains limited to the active basic-editing allowlist, and request/storage
+// schemas remain independently strict.
+const signedScopeCommands = [
+  'create_person',
+  'update_person_identity',
+  'add_family_relationship',
+  'correct_owner_family_relationship',
+  'correct_owner_memory',
+  'remove_person',
+  'remove_owner_family_relationship',
+] as const satisfies readonly OwnerEditorCommand[];
 const scopeSchema = z
   .strictObject({
     ownerId: uuid,
     sessionDigest: hash,
     epoch: uuid,
     privacyGeneration: z.string().max(2048).nullable(),
-    command: z.enum(OWNER_EDITOR_COMMANDS),
+    command: z.enum(signedScopeCommands),
     operationId: uuid,
     targetId: uuid.nullable(),
     nonce: uuid,
@@ -94,6 +107,8 @@ export function issueOwnerEditorFormGrant(input: {
   secret: string;
   now?: number;
 }): OwnerEditorFormGrant {
+  if (!isBasicOwnerEditorCommand(input.command))
+    throw new Error('Editor command is unavailable in this release');
   if (!isValidFormSessionScope(input.session.formSessionScope))
     throw new Error('Editor session is unavailable');
   if (input.context.ownerId !== input.session.ownerId) throw new Error('Editor owner mismatch');

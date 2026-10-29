@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import {
   type OwnerEditorApply,
   type OwnerEditorCommand,
@@ -44,19 +45,43 @@ const paths = {
 function fixture(command: OwnerEditorCommand = 'create_person') {
   let clock = NOW;
   const path =
-    command === 'create_person' || command === 'update_person_identity'
+    command === 'create_person' ||
+    command === 'update_person_identity' ||
+    command === 'remove_person'
       ? paths.people
       : command === 'correct_owner_memory'
         ? paths.memory
         : paths.family;
-  const grant = issueOwnerEditorFormGrant({
+  const grantCommand: OwnerEditorCommand =
+    command === 'remove_person'
+      ? 'update_person_identity'
+      : command === 'remove_owner_family_relationship'
+        ? 'correct_owner_family_relationship'
+        : command;
+  const issuedGrant = issueOwnerEditorFormGrant({
     context: { ownerId: owner, epoch, privacyGeneration: 'fixture-generation' },
     session,
-    command,
-    targetId: command === 'create_person' ? null : target,
+    command: grantCommand,
+    targetId: grantCommand === 'create_person' ? null : target,
     secret,
     now: NOW,
   });
+  let grant = issuedGrant;
+  if (grantCommand !== command) {
+    const parts = issuedGrant.issuedOperationHandle.split('.');
+    const payload = JSON.parse(Buffer.from(parts[1] ?? '', 'base64url').toString('utf8')) as Record<
+      string,
+      unknown
+    >;
+    payload.command = command;
+    const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const signature = createHmac('sha256', secret).update(`oe1.${data}`).digest('base64url');
+    grant = {
+      ...issuedGrant,
+      command,
+      issuedOperationHandle: `oe1.${data}.${signature}`,
+    };
+  }
   const checked = verifyOwnerEditorHandle({
     token: grant.issuedOperationHandle,
     session,
@@ -74,7 +99,9 @@ function fixture(command: OwnerEditorCommand = 'create_person') {
     requestHash: hash,
     statusVersion: 2,
     ids:
-      command === 'create_person' || command === 'update_person_identity'
+      command === 'create_person' ||
+      command === 'update_person_identity' ||
+      command === 'remove_person'
         ? { contactId: target }
         : command === 'correct_owner_memory'
           ? { memoryId: target }
@@ -138,24 +165,34 @@ function fixture(command: OwnerEditorCommand = 'create_person') {
             contactId: target,
             expectedContactRevision: hash,
           }
-        : command === 'correct_owner_memory'
+        : command === 'remove_person'
           ? {
               ...envelope,
               command,
-              memoryId: target,
-              expectedContentHash: hash,
-              expectedMemoryRevision: 'd'.repeat(64),
-              content: 'A corrected saved note',
+              contactId: target,
+              expectedContactRevision: hash,
+              expectedImpactRevision: hash,
             }
-          : command === 'add_family_relationship'
-            ? { ...envelope, command, ...fields }
-            : {
-                ...envelope,
-                command,
-                targetRelationId: target,
-                expectedTargetRevision: hash,
-                replacement: fields,
-              };
+          : command === 'remove_owner_family_relationship'
+            ? { ...envelope, command, targetRelationId: target, expectedTargetRevision: hash }
+            : command === 'correct_owner_memory'
+              ? {
+                  ...envelope,
+                  command,
+                  memoryId: target,
+                  expectedContentHash: hash,
+                  expectedMemoryRevision: 'd'.repeat(64),
+                  content: 'A corrected saved note',
+                }
+              : command === 'add_family_relationship'
+                ? { ...envelope, command, ...fields }
+                : {
+                    ...envelope,
+                    command,
+                    targetRelationId: target,
+                    expectedTargetRevision: hash,
+                    replacement: fields,
+                  };
   function request(
     method: string,
     options: {
@@ -270,6 +307,40 @@ describe('actual two HTTP factories, actual crypto/parser/body guards, offline b
       expect(f.lookup).not.toHaveBeenCalled();
     },
   );
+  it.each(['remove_person', 'remove_owner_family_relationship'] as const)(
+    'rejects a correctly signed %s scope before GET or POST reaches the backend',
+    async (command) => {
+      const f = fixture(command);
+      await rejection(await f.handlers().POST(f.request('POST')), 403);
+      assertNoDomain(f);
+
+      await rejection(await f.handlers().GET(f.request('GET')), 403);
+      assertNoDomain(f);
+    },
+  );
+  it('strict request parsing rejects a removal command under an otherwise allowed handle before backend access', async () => {
+    const f = fixture('update_person_identity');
+    const response = await f.handlers().POST(
+      f.request('POST', {
+        body: {
+          version: 1,
+          intent: 'apply',
+          command: 'remove_person',
+          operationId: f.scope.operationId,
+          contactId: target,
+          expectedContactRevision: hash,
+          expectedImpactRevision: hash,
+        },
+      }),
+    );
+    expect(response.status).toBe(422);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toMatchObject({
+      authority: 'request_rejection',
+      reason: 'invalid_command',
+    });
+    assertNoDomain(f);
+  });
   it.each([null, 'https://hostile.example.test', 'null', `${origin}:444`])(
     'rejects missing/foreign POST Origin %s before owner resolution',
     async (value) => {

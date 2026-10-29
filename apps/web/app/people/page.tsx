@@ -21,8 +21,10 @@ import {
   type OwnerEditorControlsProps,
 } from '@/app/people/owner-editor-controls';
 import { PersonAvatar } from '@/app/people/person-avatar';
+import { MemoryNavigation } from '@/app/profile/memory-navigation';
 import { requireOwner } from '@/auth';
 import { listFirestorePeopleDirectory } from '@/lib/firestore-people';
+import { ownerEditorAvailability } from '@/lib/owner-editor-availability';
 import { buildOwnerEditorView } from '@/lib/owner-editor-view';
 import { readPostgresOwnerEditorViewInputs, withPostgresMemoryBrowseRead } from '@/lib/server';
 import {
@@ -165,37 +167,20 @@ export default async function PeoplePage({
   const upcoming = everyone
     .filter((person) => person.birthday && person.birthday.daysUntil <= BIRTHDAY_HORIZON_DAYS)
     .sort((a, b) => (a.birthday?.daysUntil ?? 0) - (b.birthday?.daysUntil ?? 0));
+  const editorAvailability = ownerEditorAvailability({
+    formSessionScope: session.formSessionScope,
+    editorAvailable: Boolean(editor?.createGrant),
+    currentPath: '/people',
+  });
 
   return (
     <PageShell size="reading">
       <PageHeader
         back={{ href: '/profile', label: 'Memory' }}
         title="People"
-        intro="Browse people and their recorded connections. Search the people loaded in this view."
+        intro="Open a person to view their details and family connections."
       />
-
-      {/* Birthdays first — the one thing on this page that is time-sensitive. */}
-      {upcoming.length > 0 && !query ? (
-        <section className="mt-6">
-          <SectionHeading title="Coming up in this view" count={upcoming.length} />
-          <ul className="mt-3 flex flex-col gap-2">
-            {upcoming.map((person) => (
-              <li key={person.id}>
-                <Link
-                  href={personHref(person.id)}
-                  className="mobile-touch-target flex min-w-0 items-center gap-3 rounded-xl border border-accent/25 bg-accent/[0.06] p-3.5 motion-safe:transition-colors hover:bg-accent/10"
-                >
-                  <CalendarDays className="size-4 shrink-0 text-accent" aria-hidden="true" />
-                  <span className="min-w-0 flex-1 text-sm text-strong">
-                    <span className="font-medium">{person.name}</span>
-                    {person.birthday ? ` · ${birthdayLabel(person.birthday, now)}` : null}
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
+      <MemoryNavigation current="people" />
 
       <section className="mt-8">
         <div className="flex flex-wrap items-end justify-between gap-3">
@@ -206,6 +191,24 @@ export default async function PeoplePage({
           />
           {editor ? <OwnerEditorControls {...editor} /> : null}
         </div>
+
+        {editor?.createGrant ? (
+          <p className="mt-3 text-sm text-muted">
+            Add people here, then open a person to connect them with someone else.
+          </p>
+        ) : editorAvailability.kind === 'sign_in_again' ? (
+          <p role="status" className="mt-3 text-sm text-muted">
+            {editorAvailability.message}{' '}
+            <Link href={editorAvailability.signInHref} className="text-accent underline">
+              Sign in again
+            </Link>
+            .
+          </p>
+        ) : (
+          <p className="mt-3 text-sm text-muted">
+            Changes are unavailable in this view. You can still browse saved people and connections.
+          </p>
+        )}
 
         {/* A GET form, so a search is a URL the owner can bookmark or share
             with themselves, and the page stays a server component. */}
@@ -238,7 +241,11 @@ export default async function PeoplePage({
         </form>
 
         {everyone.length === 0 ? (
-          <EmptyState>No people are available in this view yet.</EmptyState>
+          <EmptyState>
+            {editor?.createGrant
+              ? 'No people are available in this view yet. Add a person to start recording their connections.'
+              : 'No people are available in this view yet.'}
+          </EmptyState>
         ) : people.length === 0 ? (
           <EmptyState>No people match “{query}” in this view.</EmptyState>
         ) : (
@@ -297,6 +304,28 @@ export default async function PeoplePage({
           </div>
         )}
       </section>
+      {/* Upcoming dates follow the people management controls. */}
+      {upcoming.length > 0 && !query ? (
+        <section className="mt-6">
+          <SectionHeading title="Coming up in this view" count={upcoming.length} />
+          <ul className="mt-3 flex flex-col gap-2">
+            {upcoming.map((person) => (
+              <li key={person.id}>
+                <Link
+                  href={personHref(person.id)}
+                  className="mobile-touch-target flex min-w-0 items-center gap-3 rounded-xl border border-accent/25 bg-accent/[0.06] p-3.5 motion-safe:transition-colors hover:bg-accent/10"
+                >
+                  <CalendarDays className="size-4 shrink-0 text-accent" aria-hidden="true" />
+                  <span className="min-w-0 flex-1 text-sm text-strong">
+                    <span className="font-medium">{person.name}</span>
+                    {person.birthday ? ` · ${birthdayLabel(person.birthday, now)}` : null}
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
     </PageShell>
   );
 }

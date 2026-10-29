@@ -3,8 +3,10 @@ import { loadConfig } from '@assistant/config';
 import { createInstallationStore, FirestoreProfileMemoryHubRepository } from '@assistant/firestore';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
+import { MemoryNavigation } from '@/app/profile/memory-navigation';
 import { requireOwner } from '@/auth';
 import { relativeTime } from '@/lib/format';
+import { ownerEditorAvailability } from '@/lib/owner-editor-availability';
 import { cardShellClass, PageHeader, PageShell, SectionHeading } from '@/lib/ui';
 
 export const metadata = { title: 'Memory' };
@@ -12,7 +14,15 @@ export const dynamic = 'force-dynamic';
 
 type Overview = Awaited<ReturnType<typeof getMemoryHubOverview>>;
 
-function ReadOnlyMemoryHub({ overview, now }: { overview: Overview; now: Date }) {
+function ReadOnlyMemoryHub({
+  overview,
+  now,
+  signInHref,
+}: {
+  overview: Overview;
+  now: Date;
+  signInHref: string | null;
+}) {
   const { owner, memoryHealth, recallFeedback, quarantined, latestOrganizer, card } = overview;
   return (
     <PageShell size="reading">
@@ -21,6 +31,16 @@ function ReadOnlyMemoryHub({ overview, now }: { overview: Overview; now: Date })
         title="What I remember"
         intro={`See what shapes the assistant’s understanding of ${owner?.name ?? 'you'} and what still needs review.`}
       />
+      <MemoryNavigation />
+      {signInHref ? (
+        <p role="status" className="mt-4 text-sm text-muted">
+          Your sign-in needs refreshing before you can edit saved information.{' '}
+          <Link href={signInHref} className="text-accent underline">
+            Sign in again
+          </Link>
+          .
+        </p>
+      ) : null}
 
       <section className="mt-8">
         <SectionHeading title="Memory health" />
@@ -138,7 +158,12 @@ export default async function MemoryHubPage({
     redirect(`/profile/knowledge?${next.toString()}`);
   }
 
-  await requireOwner();
+  const session = await requireOwner();
+  const editorAvailability = ownerEditorAvailability({
+    formSessionScope: session.formSessionScope,
+    editorAvailable: false,
+    currentPath: '/profile/memories',
+  });
   const store = createInstallationStore({
     projectId: config.GCP_PROJECT,
     installationId: config.ASSISTANT_WORKSPACE_ID,
@@ -148,7 +173,15 @@ export default async function MemoryHubPage({
     const overview = await getMemoryHubOverview(
       new FirestoreProfileMemoryHubRepository(store, config.FIRESTORE_AGENT_ID),
     );
-    return <ReadOnlyMemoryHub overview={overview} now={new Date()} />;
+    return (
+      <ReadOnlyMemoryHub
+        overview={overview}
+        now={new Date()}
+        signInHref={
+          editorAvailability.kind === 'sign_in_again' ? editorAvailability.signInHref : null
+        }
+      />
+    );
   } finally {
     await store.db.terminate();
   }

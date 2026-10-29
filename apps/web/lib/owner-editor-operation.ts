@@ -76,9 +76,7 @@ export class OwnerEditorOperation {
       this.publish({
         phase: marker ? 'pending' : 'ready',
         marker,
-        message: marker
-          ? 'An earlier save could not be confirmed. Check its result before saving again.'
-          : '',
+        message: marker ? ownerEditorUncertaintyMessage(marker.command, true) : '',
       });
     } catch {
       this.blockStorage();
@@ -310,8 +308,7 @@ export class OwnerEditorOperation {
         this.publish({
           reply,
           busy: false,
-          message:
-            'This request was not accepted. The earlier save is still unresolved; check its result.',
+          message: `This request was not accepted. The earlier ${ownerEditorActionNoun(marker.command)} is still unresolved; check its result.`,
         });
         return;
       }
@@ -320,7 +317,7 @@ export class OwnerEditorOperation {
         this.publish({
           reply,
           busy: false,
-          message: 'Save could not be confirmed. Check its result before saving again.',
+          message: ownerEditorUncertaintyMessage(marker.command),
         });
         return;
       }
@@ -390,17 +387,53 @@ export class OwnerEditorOperation {
   private unknown() {
     this.publish({
       busy: false,
-      message: 'Save could not be confirmed. Check its result before saving again.',
+      message: ownerEditorUncertaintyMessage(this.state.marker?.command),
     });
   }
 }
 
+function ownerEditorActionNoun(command: OwnerEditorFormGrant['command'] | null | undefined) {
+  return command === 'remove_person'
+    ? 'person deletion'
+    : command === 'remove_owner_family_relationship'
+      ? 'connection removal'
+      : command
+        ? 'save'
+        : 'operation';
+}
+
+/** Presentation only; the command comes from the tracked original, never a new form. */
+export function ownerEditorUncertaintyMessage(
+  command: OwnerEditorFormGrant['command'] | null | undefined,
+  earlier = false,
+): string {
+  const noun = ownerEditorActionNoun(command);
+  const subject = earlier ? `An earlier ${noun}` : noun[0].toUpperCase() + noun.slice(1);
+  const next =
+    command === 'remove_person'
+      ? 'trying to delete again'
+      : command === 'remove_owner_family_relationship'
+        ? 'removing it again'
+        : command
+          ? 'saving again'
+          : 'trying again';
+  return `${subject} could not be confirmed. Check its result before ${next}.`;
+}
+
 export function ownerEditorOutcomeMessage(reply: OwnerEditorReply): string {
   if (reply.authority === 'scope_retirement')
-    return 'This earlier form has expired or been retired. This does not confirm whether its save happened. Refresh saved details before editing again.';
-  if (reply.authority !== 'operation_receipt') return 'Save could not be confirmed.';
+    return `This earlier form has expired or been retired. This does not confirm whether ${reply.command === 'remove_person' ? 'the person was deleted' : reply.command === 'remove_owner_family_relationship' ? 'the connection was removed' : 'its save happened'}. Refresh saved details before editing again.`;
+  if (reply.authority !== 'operation_receipt') return ownerEditorUncertaintyMessage(reply.command);
   switch (reply.outcome) {
     case 'saved':
+      if (reply.command === 'remove_person')
+        return reply.refreshPending
+          ? 'Person deleted. Some derived details still need to refresh.'
+          : 'Person deleted.';
+      if (reply.command === 'remove_owner_family_relationship')
+        return reply.refreshPending
+          ? 'Connection removed. Some derived details still need to refresh.'
+          : 'Connection removed.';
       return reply.refreshPending ? 'Saved. Some derived details still need to refresh.' : 'Saved.';
     case 'unchanged':
       return 'Already saved. No additional change was needed.';

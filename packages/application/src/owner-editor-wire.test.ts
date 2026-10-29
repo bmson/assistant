@@ -1,4 +1,4 @@
-import type { OwnerEditorApply } from '@assistant/persistence';
+import { OWNER_EDITOR_COMMANDS, type OwnerEditorApply } from '@assistant/persistence';
 import { describe, expect, it } from 'vitest';
 import { ownerEditorRequestHash } from './owner-editor-hash.js';
 import {
@@ -242,5 +242,52 @@ describe('owner editor civil meaning and strict wire boundary', () => {
     expect(parseOwnerEditorRequest({ ...reconcile, note: 'overwrite' }, family).ok).toBe(false);
     expect(parseOwnerEditorRequest({ ...reconcile, requestHash: revision }, family).ok).toBe(false);
     expect(parseOwnerEditorRequest(reconcile, people).ok).toBe(false);
+  });
+
+  it('keeps UI removal names outside the five-command parser and scope admission', () => {
+    expect(OWNER_EDITOR_COMMANDS).toEqual([
+      'create_person',
+      'update_person_identity',
+      'add_family_relationship',
+      'correct_owner_family_relationship',
+      'correct_owner_memory',
+    ]);
+    const removals: OwnerEditorApply[] = [
+      {
+        version: 1,
+        intent: 'apply',
+        command: 'remove_person',
+        operationId,
+        contactId: subject,
+        expectedContactRevision: revision,
+        expectedImpactRevision: 'b'.repeat(64),
+      },
+      {
+        version: 1,
+        intent: 'apply',
+        command: 'remove_owner_family_relationship',
+        operationId,
+        targetRelationId: memoryId,
+        expectedTargetRevision: revision,
+      },
+    ];
+    for (const request of removals) {
+      const route = ownerEditorPath(request.command);
+      const scope = {
+        ownerId: subject,
+        sessionDigest: revision,
+        epoch: object,
+        privacyGeneration: null,
+        command: request.command,
+        operationId,
+        targetId: request.command === 'remove_person' ? subject : memoryId,
+        nonce: object,
+        issuedAt: 1,
+        expiresAt: 2,
+      };
+      expect(route).toBe(request.command === 'remove_person' ? people : family);
+      expect(parseOwnerEditorRequest(request, route).ok).toBe(false);
+      expect(ownerEditorApplyMatchesScope(request, scope)).toBe(false);
+    }
   });
 });

@@ -10,9 +10,11 @@ import type {
   OwnerEditorFamilyFields,
   OwnerEditorFormGrant,
   OwnerEditorPersonOption,
+  OwnerEditorPersonRemovalImpact,
   OwnerEditorReply,
   OwnerEditorSessionView,
 } from '@assistant/persistence/owner-editor';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   createContext,
@@ -27,7 +29,9 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react';
-import { OwnerEditorOperation } from '@/lib/owner-editor-operation';
+import { OwnerEditorOperation, type OwnerEditorOperationState } from '@/lib/owner-editor-operation';
+import { isBasicOwnerEditorCommand } from '@/lib/owner-editor-release-policy';
+import { OwnerEditorDialogStatus, type OwnerEditorDisplayScope } from '@/lib/owner-editor-status';
 import { btn, btnSm, inputClass, labelClass, selectClass, textareaClass } from '@/lib/ui';
 import { Modal } from '@/lib/ui-client';
 
@@ -56,9 +60,20 @@ export interface OwnerEditorControlsProps {
     }[];
   };
   corrections?: { grant: OwnerEditorFormGrant; eligibility: OwnerEditorCorrectionEligibility }[];
+  removals?: { grant: OwnerEditorFormGrant; eligibility: OwnerEditorCorrectionEligibility }[];
+  personRemoval?: { grant: OwnerEditorFormGrant; impact: OwnerEditorPersonRemovalImpact };
+  personRemovalUnavailableReason?: string;
+  personReturnTo?: string;
   readOnlyCorrections?: { relationId: string; sourceMemoryId: string; reason: string }[];
 }
-type Active = 'create' | 'identity' | 'family' | { correction: string } | null;
+type Active =
+  | 'create'
+  | 'identity'
+  | 'family'
+  | 'remove-person'
+  | { correction: string }
+  | { removal: string }
+  | null;
 interface IdentityDraft {
   name: string;
   aliases: string;
@@ -93,6 +108,15 @@ export function OwnerEditorTimingHelp() {
 /** Serializable owner-bound snapshot only. No grant/record authority is minted here. */
 export function OwnerEditorControls(props: OwnerEditorControlsProps) {
   const { session, createGrant, identity, family, corrections = [] } = props;
+  // Backlog removal props never enable controls in the basic five-command release.
+  const removals = useMemo(
+    () => (props.removals ?? []).filter((entry) => isBasicOwnerEditorCommand(entry.grant.command)),
+    [props.removals],
+  );
+  const personRemoval =
+    props.personRemoval && isBasicOwnerEditorCommand(props.personRemoval.grant.command)
+      ? props.personRemoval
+      : undefined;
   const router = useRouter();
   const { ownerId, formSessionScope } = session;
   const controller = useMemo(
@@ -131,6 +155,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
   const [displayedGrant, setDisplayedGrant] = useState<OwnerEditorFormGrant | null>(null);
   const [displayedIdentity, setDisplayedIdentity] = useState(identity);
   const [displayedFamily, setDisplayedFamily] = useState(family);
+  const [displayedRemoval, setDisplayedRemoval] = useState(personRemoval);
   const [returnToFamily, setReturnToFamily] = useState(false);
   const [selectCreatedId, setSelectCreatedId] = useState<string | null>(null);
   const [correctionSnapshot, setCorrectionSnapshot] =
@@ -145,16 +170,29 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
   }, [controller]);
   useEffect(() => {
     controller.acceptFreshSnapshot(
-      [createGrant, identity?.grant, family?.grant, ...corrections.map((c) => c.grant)].filter(
-        (g): g is OwnerEditorFormGrant => !!g,
-      ),
+      [
+        createGrant,
+        identity?.grant,
+        family?.grant,
+        personRemoval?.grant,
+        ...corrections.map((c) => c.grant),
+        ...removals.map((c) => c.grant),
+      ].filter((g): g is OwnerEditorFormGrant => !!g),
     );
-  }, [controller, createGrant, identity, family, corrections]);
+  }, [controller, createGrant, identity, family, corrections, personRemoval, removals]);
   useEffect(() => {
     if (state.phase !== 'resolved' || !state.reply || refreshed.current === state.reply) return;
     refreshed.current = state.reply;
     setFinished(true);
     const reply = state.reply;
+    if (
+      reply.authority === 'operation_receipt' &&
+      (reply.outcome === 'saved' || reply.outcome === 'unchanged') &&
+      reply.command === 'remove_person'
+    ) {
+      router.push(props.personReturnTo ?? '/people');
+      return;
+    }
     const completed = familyDrafts.current.complete(reply, state.reviewTargetId);
     if (completed === 'update_person_identity') setIdentityDraftState(null);
     if (completed === 'create_person') setPerson(emptyPerson);
@@ -173,10 +211,19 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
     )
       setSelectCreatedId(reply.ids.contactId);
     router.refresh(); // Read fresh native record CAS; receipt.revision is NOT CAS.
-  }, [state.phase, state.reply, state.reviewTargetId, router, returnToFamily]);
+  }, [
+    state.phase,
+    state.reply,
+    state.reviewTargetId,
+    router,
+    returnToFamily,
+    props.personReturnTo,
+  ]);
   useEffect(() => {
     if (!selectCreatedId || !family?.people.some((p) => p.contactId === selectCreatedId)) return;
-    setFamilyDraft((d) => (d ? { ...d, object: selectCreatedId } : d));
+    setFamilyDraft((d) =>
+      d ? selectCreatedFamilyPerson(d, family.anchorContactId, selectCreatedId) : d,
+    );
   }, [selectCreatedId, family, setFamilyDraft]);
   useEffect(() => {
     if (Object.keys(state.fieldErrors).length)
@@ -191,13 +238,18 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
           ? identity?.grant
           : next === 'family'
             ? family?.grant
-            : next
-              ? corrections.find((c) => c.eligibility.relationId === next.correction)?.grant
-              : null;
+            : next === 'remove-person'
+              ? personRemoval?.grant
+              : next
+                ? 'removal' in next
+                  ? removals.find((c) => c.eligibility.relationId === next.removal)?.grant
+                  : corrections.find((c) => c.eligibility.relationId === next.correction)?.grant
+                : null;
     if (!state.reviewRequired) {
       setDisplayedGrant(nextGrant ?? null);
       setDisplayedIdentity(identity);
       setDisplayedFamily(family);
+      setDisplayedRemoval(personRemoval);
     }
     lastActive.current = next;
     trigger.current = element;
@@ -206,7 +258,10 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
   };
   const close = () => {
     setActive(null);
-    queueMicrotask(() => trigger.current?.focus());
+    queueMicrotask(() => {
+      if (trigger.current?.isConnected) trigger.current.focus();
+      else document.getElementById('person-connections')?.focus();
+    });
   };
   const beginFamily = (element: HTMLElement) => {
     if (!family) return;
@@ -228,7 +283,28 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
     open('family', element);
   };
   const grant = displayedGrant;
-  const familyMode = active === 'family' || (active !== null && typeof active === 'object');
+  // These records/grant were captured when this form was opened or explicitly
+  // reviewed. Fresh server props must not relabel a still-visible old receipt.
+  const displayedTargetId =
+    active === 'create'
+      ? null
+      : active === 'identity' || active === 'remove-person'
+        ? displayedIdentity?.contactId
+        : active === 'family'
+          ? displayedFamily?.anchorContactId
+          : active && typeof active === 'object'
+            ? correctionSnapshot?.relationId
+            : undefined;
+  const displayedStatusScope: OwnerEditorDisplayScope | null =
+    grant && displayedTargetId !== undefined
+      ? { command: grant.command, operationId: grant.operationId, targetId: displayedTargetId }
+      : null;
+  const familyMode =
+    active === 'family' ||
+    (active !== null && typeof active === 'object' && 'correction' in active);
+  const removalMode =
+    active === 'remove-person' ||
+    (active !== null && typeof active === 'object' && 'removal' in active);
   const draft = active === 'create' ? person : (identityDraft ?? emptyPerson);
   const setDraft = active === 'create' ? setPerson : setIdentityDraft;
   const error = (name: string) =>
@@ -272,7 +348,28 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
       command: grant.command,
       operationId: grant.operationId,
     };
-    if (active === 'create') {
+    if (active === 'remove-person' && displayedIdentity && displayedRemoval) {
+      await controller.apply(
+        {
+          ...envelope,
+          contactId: displayedIdentity.contactId,
+          expectedContactRevision: displayedIdentity.revision,
+          expectedImpactRevision: displayedRemoval.impact.revision,
+        },
+        grant,
+        displayedIdentity.contactId,
+      );
+    } else if (active && typeof active === 'object' && 'removal' in active && correctionSnapshot) {
+      await controller.apply(
+        {
+          ...envelope,
+          targetRelationId: correctionSnapshot.relationId,
+          expectedTargetRevision: correctionSnapshot.revision,
+        },
+        grant,
+        correctionSnapshot.relationId,
+      );
+    } else if (active === 'create') {
       await controller.apply(
         { ...envelope, name: person.name, aliases: ownerEditorAliasesFromText(person.aliases) },
         grant,
@@ -327,6 +424,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
   const latestCorrection = corrections.find(
     (c) => c.eligibility.relationId === state.reviewTargetId,
   );
+  const latestRemoval = removals.find((c) => c.eligibility.relationId === state.reviewTargetId);
   const latestGrant =
     reviewCommand === 'create_person'
       ? createGrant
@@ -337,14 +435,23 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
           ? family.grant
           : reviewCommand === 'correct_owner_family_relationship'
             ? latestCorrection?.grant
-            : null;
-  const reviewMissing = reviewCommand === 'correct_owner_family_relationship' && !latestCorrection;
+            : reviewCommand === 'remove_person' && identity?.contactId === state.reviewTargetId
+              ? personRemoval?.grant
+              : reviewCommand === 'remove_owner_family_relationship'
+                ? latestRemoval?.grant
+                : null;
+  const reviewMissing =
+    (reviewCommand === 'correct_owner_family_relationship' && !latestCorrection) ||
+    (reviewCommand === 'remove_owner_family_relationship' && !latestRemoval) ||
+    (reviewCommand === 'remove_person' && !personRemoval);
   const review = () => {
     if (!latestGrant || reviewMissing || !controller.reviewFreshSnapshot([latestGrant])) return;
     setDisplayedGrant(latestGrant);
     setDisplayedIdentity(identity);
     setDisplayedFamily(family);
+    setDisplayedRemoval(personRemoval);
     if (latestCorrection) setCorrectionSnapshot(latestCorrection.eligibility);
+    if (latestRemoval) setCorrectionSnapshot(latestRemoval.eligibility);
     setFinished(false);
   };
   const conflictReview = state.reviewRequired ? (
@@ -376,7 +483,19 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
           : 'Correct family relationship';
   const openContextual = (entry: OwnerEditorEntryPoint, element: HTMLElement) => {
     if (locked || state.busy) return;
-    if (entry === 'identity') {
+    if (entry === 'remove-person') {
+      if (!personRemoval || !identity) return;
+      open('remove-person', element);
+    } else if (typeof entry === 'object' && 'removal' in entry) {
+      const target = removals.find((c) => c.eligibility.relationId === entry.removal);
+      if (!target) return;
+      setCorrectionSnapshot(target.eligibility);
+      open(entry, element);
+    } else if (entry === 'create') {
+      if (!createGrant) return;
+      setReturnToFamily(false);
+      open('create', element);
+    } else if (entry === 'identity') {
       if (!identity) return;
       setIdentityDraft(
         (d) =>
@@ -415,9 +534,12 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
     <OwnerEditorEntryContext.Provider
       value={{
         locked: locked || state.busy,
+        create: !!createGrant,
         identity: !!identity,
         family: !!family,
         correctionIds: corrections.map((c) => c.eligibility.relationId),
+        removalIds: removals.map((c) => c.eligibility.relationId),
+        personRemoval: !!personRemoval && !!identity,
         open: openContextual,
       }}
     >
@@ -538,7 +660,80 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
             Refresh saved details
           </button>
         ) : null}
-        {active ? (
+        {active && removalMode ? (
+          <Modal
+            label={active === 'remove-person' ? 'Delete person' : 'Remove connection'}
+            onClose={close}
+            dismissible={!state.busy}
+          >
+            <h2 className="text-lg font-semibold text-strong">
+              {active === 'remove-person'
+                ? `Delete ${displayedIdentity?.name ?? 'this person'}?`
+                : 'Remove this connection?'}
+            </h2>
+            <OwnerEditorRemovalSummary
+              name={displayedIdentity?.name}
+              impact={active === 'remove-person' ? displayedRemoval?.impact : undefined}
+              sentence={active === 'remove-person' ? undefined : correctionSnapshot?.sourceText}
+            />
+            {state.reviewRequired ? (
+              <section
+                className="rounded-xl bg-sunken p-3 text-sm"
+                aria-label="Review changed removal details"
+              >
+                <h3 className="font-semibold">Latest saved details</h3>
+                {reviewMissing ? (
+                  <p role="alert">
+                    Removal is no longer available for this item. Refresh the saved details to
+                    review it.
+                  </p>
+                ) : (
+                  <>
+                    <OwnerEditorRemovalSummary
+                      name={identity?.name}
+                      impact={reviewCommand === 'remove_person' ? personRemoval?.impact : undefined}
+                      sentence={
+                        reviewCommand === 'remove_owner_family_relationship'
+                          ? latestRemoval?.eligibility.sourceText
+                          : undefined
+                      }
+                    />
+                    <button
+                      type="button"
+                      className={btn.outline}
+                      disabled={
+                        !latestGrant || latestGrant.operationId === state.reply?.operationId
+                      }
+                      onClick={review}
+                    >
+                      I reviewed these details
+                    </button>
+                  </>
+                )}
+              </section>
+            ) : null}
+            <p className="text-sm text-muted">
+              Closing does not cancel a request already sent. If the result cannot be confirmed,
+              check that same request before trying again.
+            </p>
+            <OwnerEditorDialogStatus state={state} displayed={displayedStatusScope} />
+            {Object.entries(state.fieldErrors).map(([key, value]) => (
+              <p key={key} role="alert" className="text-sm text-red-600 dark:text-red-400">
+                {value}
+              </p>
+            ))}
+            <OwnerEditorRemovalActions
+              phase={state.phase}
+              busy={state.busy}
+              finished={finished}
+              hasGrant={!!grant}
+              person={active === 'remove-person'}
+              onClose={close}
+              onSubmit={() => void submit()}
+              onCheck={() => void controller.checkPendingResult()}
+            />
+          </Modal>
+        ) : active ? (
           <Modal label={title} onClose={close} dismissible={!state.busy}>
             <h2 className="text-lg font-semibold text-strong">{title}</h2>
             <p className="text-sm text-muted">
@@ -701,7 +896,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                       </div>
                     ))}
                     <label className={labelClass} htmlFor={id('note')}>
-                      Owner note (optional)
+                      Note (optional)
                     </label>
                     <textarea
                       {...fieldProps('note')}
@@ -728,7 +923,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                     setFinished(false);
                   }}
                 >
-                  Create a person separately
+                  Add someone new
                 </button>
               ) : null}
               {Object.entries(state.fieldErrors)
@@ -738,11 +933,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                     {value}
                   </p>
                 ))}
-              {state.message ? (
-                <p role="status" className="text-sm">
-                  {state.message}
-                </p>
-              ) : null}
+              <OwnerEditorDialogStatus state={state} displayed={displayedStatusScope} />
               {state.phase === 'pending' ? (
                 <div className="flex flex-wrap gap-2">
                   <button
@@ -756,6 +947,18 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                 </div>
               ) : null}
               <div className="flex flex-wrap gap-2">
+                {active === 'create' &&
+                finished &&
+                !returnToFamily &&
+                state.reply?.authority === 'operation_receipt' &&
+                (state.reply.outcome === 'saved' || state.reply.outcome === 'unchanged') &&
+                state.reply.command === 'create_person' &&
+                state.reply.operationId === displayedGrant?.operationId &&
+                state.reply.ids.contactId ? (
+                  <Link href={`/people/${state.reply.ids.contactId}`} className={btn.primary}>
+                    Open person
+                  </Link>
+                ) : null}
                 {!finished && state.phase !== 'pending' ? (
                   <button type="submit" className={btn.primary} disabled={locked || !grant}>
                     {state.busy
@@ -779,6 +982,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                       setActive('family');
                       setFinished(false);
                       setReturnToFamily(false);
+                      setSelectCreatedId(null);
                     }}
                   >
                     Return to family relationship
@@ -793,6 +997,104 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
         ) : null}
       </div>
     </OwnerEditorEntryContext.Provider>
+  );
+}
+
+/** Keep the person whose page is open fixed, including after swapping direction. */
+export function selectCreatedFamilyPerson<T extends { subject: string; object: string }>(
+  draft: T,
+  anchorContactId: string,
+  createdContactId: string,
+): T {
+  return {
+    ...draft,
+    [draft.subject === anchorContactId ? 'object' : 'subject']: createdContactId,
+  };
+}
+
+export function OwnerEditorRemovalSummary({
+  name,
+  impact,
+  sentence,
+}: {
+  name?: string;
+  impact?: OwnerEditorPersonRemovalImpact;
+  sentence?: string;
+}) {
+  return impact ? (
+    <div className="space-y-2 text-sm leading-6">
+      <p>This deletes {name ?? 'this person'}’s saved person details and:</p>
+      <ul className="list-disc space-y-1 pl-5">
+        <li>{impact.facts} saved facts attributed to this person</li>
+        <li>{impact.occasions} saved dates</li>
+        <li>{impact.connections} recorded connections</li>
+      </ul>
+      <p>
+        {impact.retainedSourceNotes} other saved source notes stay saved. Links from retained notes
+        and items to this person’s profile are cleared.
+      </p>
+      <p>Original emails and documents are not deleted. This cannot be undone here.</p>
+    </div>
+  ) : (
+    <div className="space-y-2 text-sm leading-6">
+      <p className="font-medium">{sentence}</p>
+      <p>
+        This marks this recorded connection as rejected. Both people and the saved source note stay
+        saved. Other supported connections may remain. This does not record that the relationship
+        ended.
+      </p>
+    </div>
+  );
+}
+
+export function OwnerEditorRemovalActions(props: {
+  phase: OwnerEditorOperationState['phase'];
+  busy: boolean;
+  finished: boolean;
+  hasGrant: boolean;
+  person: boolean;
+  onClose(): void;
+  onSubmit(): void;
+  onCheck(): void;
+}) {
+  const beforeDispatch = props.phase === 'ready' && !props.finished;
+  return (
+    <div className="flex flex-col gap-3">
+      {props.phase === 'pending' ? (
+        <button type="button" className={btn.primary} disabled={props.busy} onClick={props.onCheck}>
+          Check result
+        </button>
+      ) : null}
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          props.onSubmit();
+        }}
+        aria-busy={props.busy}
+      >
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            className={btn.outline}
+            disabled={props.busy}
+            onClick={props.onClose}
+          >
+            {beforeDispatch ? 'Cancel' : 'Close'}
+          </button>
+          {beforeDispatch ? (
+            <button type="submit" className={btn.danger} disabled={props.busy || !props.hasGrant}>
+              {props.busy
+                ? props.person
+                  ? 'Deleting…'
+                  : 'Removing…'
+                : props.person
+                  ? 'Delete person'
+                  : 'Remove connection'}
+            </button>
+          ) : null}
+        </div>
+      </form>
+    </div>
   );
 }
 
@@ -971,14 +1273,25 @@ export function ownerEditorConflictIntent(input: {
     return { intendedIdentity: input.createDraft ?? undefined };
   if (input.command === 'update_person_identity')
     return { intendedIdentity: input.identityDraft ?? undefined };
+  if (input.command === 'remove_person' || input.command === 'remove_owner_family_relationship')
+    return {};
   return { intendedFamily: input.familyDraft ? input.familyPreview : undefined };
 }
-type OwnerEditorEntryPoint = 'identity' | 'family' | { correction: string };
+type OwnerEditorEntryPoint =
+  | 'create'
+  | 'identity'
+  | 'family'
+  | 'remove-person'
+  | { correction: string }
+  | { removal: string };
 const OwnerEditorEntryContext = createContext<{
   locked: boolean;
+  create: boolean;
   identity: boolean;
   family: boolean;
   correctionIds: string[];
+  removalIds: string[];
+  personRemoval: boolean;
   open(entry: OwnerEditorEntryPoint, element: HTMLElement): void;
 } | null>(null);
 
@@ -987,24 +1300,40 @@ export function OwnerEditorContextTrigger({ entry }: { entry: OwnerEditorEntryPo
   const context = useContext(OwnerEditorEntryContext);
   const eligible =
     !!context &&
-    (entry === 'identity'
-      ? context.identity
-      : entry === 'family'
-        ? context.family
-        : context.family && context.correctionIds.includes(entry.correction));
+    (entry === 'remove-person'
+      ? context.personRemoval
+      : typeof entry === 'object' && 'removal' in entry
+        ? context.removalIds.includes(entry.removal)
+        : entry === 'create'
+          ? context.create
+          : entry === 'identity'
+            ? context.identity
+            : entry === 'family'
+              ? context.family
+              : context.family && context.correctionIds.includes(entry.correction));
   if (!eligible || !context) return null;
   return (
     <button
       type="button"
-      className={btnSm.outline}
+      className={
+        entry === 'remove-person' || (typeof entry === 'object' && 'removal' in entry)
+          ? btnSm.dangerOutline
+          : btnSm.outline
+      }
       disabled={context.locked}
       onClick={(event) => context.open(entry, event.currentTarget)}
     >
-      {entry === 'identity'
-        ? 'Edit details'
-        : entry === 'family'
-          ? 'Add family relationship'
-          : 'Edit relationship'}
+      {entry === 'remove-person'
+        ? 'Delete person…'
+        : typeof entry === 'object' && 'removal' in entry
+          ? 'Remove connection…'
+          : entry === 'create'
+            ? 'Add person'
+            : entry === 'identity'
+              ? 'Edit details'
+              : entry === 'family'
+                ? 'Add family relationship'
+                : 'Edit relationship'}
     </button>
   );
 }

@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { requireOwner } from '@/auth';
 import { memoryNoteReturnTo } from '@/lib/memory-note-context';
+import { ownerEditorAvailability } from '@/lib/owner-editor-availability';
 import { loadOwnerMemoryEditorView } from '@/lib/owner-memory-editor-server';
 import { ownerMemoryReadOnlyMessage } from '@/lib/owner-memory-editor-view';
 import { Badge, btn, cardShellClass, PageHeader, PageShell } from '@/lib/ui';
@@ -46,6 +47,11 @@ export default async function SavedNotePage({
   }
   if (!view) notFound();
   const { snapshot } = view;
+  const editorAvailability = ownerEditorAvailability({
+    formSessionScope: session.formSessionScope,
+    editorAvailable: Boolean(view.grant),
+    currentPath: `/profile/knowledge/notes/${id}`,
+  });
   const sourceHref = verifiedSourceHref(snapshot.sourceHref);
   return (
     <PageShell size="reading">
@@ -81,7 +87,17 @@ export default async function SavedNotePage({
         )}
         {!view.grant ? (
           <p role="status" className="mt-4 text-sm text-muted">
-            {ownerMemoryReadOnlyMessage(view.unavailableReason)}
+            {editorAvailability.kind === 'sign_in_again' ? (
+              <>
+                {editorAvailability.message}{' '}
+                <Link href={editorAvailability.signInHref} className="text-accent underline">
+                  Sign in again
+                </Link>
+                .
+              </>
+            ) : (
+              ownerMemoryReadOnlyMessage(view.unavailableReason)
+            )}
           </p>
         ) : null}
         <OwnerMemoryEditor key={`${snapshot.ownerId}:${snapshot.memoryId}`} view={view} />

@@ -12,7 +12,11 @@ import {
   readOwnerEditorPendingMarker,
   writeOwnerEditorPendingMarker,
 } from './owner-editor-client';
-import { OwnerEditorOperation, ownerEditorOutcomeMessage } from './owner-editor-operation';
+import {
+  OwnerEditorOperation,
+  ownerEditorOutcomeMessage,
+  ownerEditorUncertaintyMessage,
+} from './owner-editor-operation';
 
 const op = '11111111-1111-4111-8111-111111111111';
 const nextOp = '44444444-4444-4444-8444-444444444444';
@@ -93,6 +97,111 @@ const pending = (storage: Storage) =>
   readOwnerEditorPendingMarker(storage, session.ownerId, session.formSessionScope);
 
 describe('actual owner editor operation controller with offline named transport', () => {
+  it.each(['add_family_relationship', 'correct_owner_family_relationship'] as const)(
+    'keeps unknown %s pending and checks its result without sending another save',
+    async (command) => {
+      const f = fixture();
+      const familyGrant = { ...grant, command };
+      const familyFields = {
+        subjectContactId: contact,
+        objectContactId: second,
+        expectedSubjectRevision: 'a'.repeat(64),
+        expectedObjectRevision: 'b'.repeat(64),
+        predicate: 'parent_of',
+        timing: 'unspecified' as const,
+        validity: { validFrom: null, validUntil: null },
+        note: '',
+        expectedCanonicalState: { kind: 'absent' as const },
+      };
+      const value = {
+        version: 1,
+        intent: 'apply',
+        command,
+        operationId: op,
+        ...(command === 'add_family_relationship'
+          ? familyFields
+          : {
+              targetRelationId: relation,
+              expectedTargetRevision: 'c'.repeat(64),
+              replacement: familyFields,
+            }),
+      };
+      const path = '/api/profile/knowledge/family';
+      const parsed = parseOwnerEditorRequest(value, path);
+      if (!parsed.ok || parsed.request.intent !== 'apply') throw Error('Invalid family fixture');
+      f.fetcher.mockRejectedValueOnce(Error('response lost'));
+      await f.controller.apply(
+        value,
+        familyGrant,
+        command === 'add_family_relationship' ? contact : relation,
+      );
+      expect(f.controller.getSnapshot().phase).toBe('pending');
+      expect(f.controller.getSnapshot().message).toBe(ownerEditorUncertaintyMessage(command));
+      expect(f.controller.getSnapshot().message).not.toBe('Saving…');
+      const originalMarker = pending(f.storage);
+      const storageBeforeReload = [...f.storage.values];
+      const reloaded = new OwnerEditorOperation(session, () => f.storage, f.fetcher);
+      reloaded.initialize();
+      expect(reloaded.getSnapshot().message).toBe(ownerEditorUncertaintyMessage(command, true));
+      expect(reloaded.getSnapshot().marker).toEqual(originalMarker);
+      expect([...f.storage.values]).toEqual(storageBeforeReload);
+      expect(f.fetcher).toHaveBeenCalledTimes(1);
+      await f.controller.apply(
+        value,
+        familyGrant,
+        command === 'add_family_relationship' ? contact : relation,
+      );
+      expect(f.fetcher).toHaveBeenCalledTimes(1);
+      expect(pending(f.storage)?.command).toBe(command);
+      f.fetcher.mockResolvedValueOnce(
+        response(
+          saved({
+            command,
+            requestHash: ownerEditorRequestHash(parsed.request),
+            ids: { relationId: relation, memoryId: contact, assertionId: second },
+          }),
+        ),
+      );
+      await f.controller.checkPendingResult();
+      expect(f.fetcher).toHaveBeenCalledTimes(2);
+      expect(f.fetcher.mock.calls[1]?.[1]?.method ?? 'GET').toBe('GET');
+      expect(f.controller.getSnapshot().phase).toBe('resolved');
+      expect(f.controller.getSnapshot().message).toBe('Saved.');
+      expect(pending(f.storage)).toBeNull();
+    },
+  );
+  it.each(['remove_person', 'remove_owner_family_relationship'] as const)(
+    'does not create a pending operation for unsupported %s commands',
+    async (command) => {
+      const { controller, storage, fetcher } = fixture();
+      const unsupported = { ...grant, command };
+      const value =
+        command === 'remove_person'
+          ? {
+              version: 1,
+              intent: 'apply',
+              command,
+              operationId: op,
+              contactId: contact,
+              expectedContactRevision: 'a'.repeat(64),
+              expectedImpactRevision: 'b'.repeat(64),
+            }
+          : {
+              version: 1,
+              intent: 'apply',
+              command,
+              operationId: op,
+              targetRelationId: relation,
+              expectedTargetRevision: 'c'.repeat(64),
+            };
+      await controller.apply(value, unsupported, command === 'remove_person' ? contact : relation);
+      expect(controller.getSnapshot().phase).toBe('ready');
+      expect(Object.keys(controller.getSnapshot().fieldErrors)).not.toHaveLength(0);
+      expect(controller.getSnapshot().message).toBe('Check the highlighted fields.');
+      expect(storage.values.size).toBe(0);
+      expect(fetcher).not.toHaveBeenCalled();
+    },
+  );
   it('calls browser fetch through the global receiver on the default transport path', async () => {
     const storage = new Storage();
     const browserFetch = vi.fn(function (this: unknown) {
@@ -573,4 +682,47 @@ describe('independent live request identity and explicit conflict review', () =>
     expect(controller.reviewFreshSnapshot([fresh])).toBe(true);
     expect(controller.getSnapshot()).toMatchObject({ phase: 'ready', reviewRequired: false });
   });
+});
+
+describe('command-specific uncertainty remains uncertainty', () => {
+  it.each([
+    ['create_person', 'Save', 'saving again'],
+    ['update_person_identity', 'Save', 'saving again'],
+    ['add_family_relationship', 'Save', 'saving again'],
+    ['correct_owner_family_relationship', 'Save', 'saving again'],
+    ['correct_owner_memory', 'Save', 'saving again'],
+  ] as const)('formats original and restored %s with its own action', (command, subject, next) => {
+    expect(ownerEditorUncertaintyMessage(command)).toBe(
+      `${subject} could not be confirmed. Check its result before ${next}.`,
+    );
+    expect(ownerEditorUncertaintyMessage(command, true)).toBe(
+      `An earlier ${subject.toLowerCase()} could not be confirmed. Check its result before ${next}.`,
+    );
+    const reply = unknown({ command }) as OwnerEditorReply;
+    expect(ownerEditorOutcomeMessage(reply)).toBe(ownerEditorUncertaintyMessage(command));
+    expect(ownerEditorOutcomeMessage(reply)).not.toMatch(
+      /was deleted|was removed|not applied|success/,
+    );
+  });
+  it.each([
+    ['remove_person', 'the person was deleted'],
+    ['remove_owner_family_relationship', 'the connection was removed'],
+  ] as const)('retired %s scope never confirms that its action happened', (command, action) => {
+    const message = ownerEditorOutcomeMessage({
+      version: 1,
+      authority: 'scope_retirement',
+      command,
+      operationId: op,
+      outcome: 'voided',
+      reason: 'scope_retired',
+    });
+    expect(message).toContain(`does not confirm whether ${action}`);
+    expect(message).not.toContain('its save happened');
+  });
+});
+
+it('does not guess a removal or save when an untrusted reply has no command', () => {
+  expect(ownerEditorUncertaintyMessage(null)).toBe(
+    'Operation could not be confirmed. Check its result before trying again.',
+  );
 });

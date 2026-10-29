@@ -2,6 +2,7 @@ import { Library, Users } from 'lucide-react';
 import Link from 'next/link';
 import { requireOwner } from '@/auth';
 import { cardInteractiveClass, PageHeader, PageShell } from '@/lib/ui';
+import { MemoryNavigation } from './memory-navigation';
 
 export const metadata = { title: 'Memory' };
 export const dynamic = 'force-dynamic';
@@ -16,6 +17,7 @@ export default async function MemoryPage() {
         title="What I remember"
         intro="Browse saved notes, people, and their connections."
       />
+      <MemoryNavigation />
       <p className="mt-4 text-sm text-muted">
         Open a saved note or person to review available changes. Editing availability is checked
         with each item’s source.

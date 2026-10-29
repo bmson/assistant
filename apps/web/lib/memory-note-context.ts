@@ -7,7 +7,7 @@ export function memoryNoteReturnTo(value: unknown): string | null {
     if (
       url.origin !== 'https://internal.invalid' ||
       url.pathname !== '/profile/knowledge' ||
-      !['library', 'map'].includes(url.searchParams.get('view') ?? '')
+      !['library', 'map', 'connections'].includes(url.searchParams.get('view') ?? '')
     )
       return null;
     return `${url.pathname}${url.search}${url.hash === '#knowledge-item' ? url.hash : ''}`;

@@ -102,6 +102,14 @@ export function createOwnerEditorDomain(input: {
       request: OwnerEditorApply,
       scope: OwnerEditorScope,
     ): ReturnType<OwnerEditorDomainPort<PreparedOwnerEditor>['prepare']> {
+      if (
+        request.command === 'remove_person' ||
+        request.command === 'remove_owner_family_relationship'
+      )
+        return {
+          ok: false,
+          result: { outcome: 'unavailable', reason: 'editor_command_unavailable' },
+        };
       const targetMatches =
         request.command === 'create_person'
           ? scope.targetId === null

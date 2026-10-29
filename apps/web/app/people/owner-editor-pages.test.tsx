@@ -173,11 +173,30 @@ beforeEach(() => {
   });
 });
 describe('actual page + real issuance builder composition, named reader/fence ports only', () => {
+  it('returns to the filtered Connections list by name and places connections before saved dates', async () => {
+    const context = '/profile/knowledge?view=connections&q=Alex';
+    const html = renderToStaticMarkup(
+      await Person({
+        params: Promise.resolve({ id: contact.id }),
+        searchParams: Promise.resolve({ returnTo: context }),
+      }),
+    );
+    const back = html.match(
+      /href="\/profile\/knowledge\?view=connections&amp;q=Alex"[\s\S]*?<\/a>/,
+    )?.[0];
+    expect(back).toContain('Connections');
+    expect(back).not.toContain('Memory map');
+    expect(html).toContain('id="important-dates"');
+    expect(html.indexOf('id="person-connections"')).toBeLessThan(
+      html.indexOf('id="important-dates"'),
+    );
+  });
   it('PG directory issues only create scope inside same read lease and preserves GET q links', async () => {
     const html = renderToStaticMarkup(await directory());
     expect(ports.trace).toEqual(['pg-before', 'browse', 'editor', 'pg-after']);
     expect(ports.pgEditor).toHaveBeenCalledExactlyOnceWith(leased, {});
     expect(html).toContain('Add person');
+    expect(html).toContain('open a person to connect them with someone else');
     expect(html).toContain('method="get"');
     expect(html).toContain(`?q=${encodeURIComponent(contact.name)}`);
     expect(html).not.toContain('Edit details');
@@ -204,6 +223,7 @@ describe('actual page + real issuance builder composition, named reader/fence po
     expect(ports.trace).toEqual(['pg-before', 'browse', 'editor', 'pg-after']);
     expect(ports.pgEditor.mock.calls[0]?.[1]).toMatchObject({ contactId: contact.id });
     expect(html).toContain('Edit details');
+    expect(html).toContain('Add person');
     expect(html).toContain('Add family relationship');
     expect(html).toContain('/people?q=retained%20search');
     expect(html).toContain(contact.name);
@@ -214,10 +234,13 @@ describe('actual page + real issuance builder composition, named reader/fence po
     let html = renderToStaticMarkup(await dossier());
     expect(html).toContain(contact.name);
     expect(html).not.toContain('Edit details');
+    expect(html).toContain('Editing is temporarily unavailable.');
+    expect(html).not.toContain('Sign in again');
     ports.pgEditor.mockRejectedValue(Error('bounded editor contact cap'));
     html = renderToStaticMarkup(await dossier());
     expect(html).toContain(contact.name);
     expect(html).not.toContain('Could not load this view');
+    expect(html).not.toContain('Sign in again');
     expect(ports.trace.at(-1)).toBe('pg-after');
   });
   it('mismatched native/displayed identity never publishes edit grants', async () => {
@@ -247,17 +270,25 @@ describe('actual page + real issuance builder composition, named reader/fence po
       if (driver === 'firestore') expect(ports.pgRead).not.toHaveBeenCalled();
     },
   );
-  it.each(['disabled', 'legacy'] as const)(
-    '%s skips optional PG editor reads and keeps browse',
-    async (mode) => {
-      if (mode === 'disabled') ports.enabled = false;
-      else ports.owner.mockResolvedValue({ user: { email: 'offline-owner@example.test' } });
-      const html = renderToStaticMarkup(await directory());
-      expect(ports.pgEditor).not.toHaveBeenCalled();
-      expect(html).not.toContain('Add person');
-      expect(html).toContain('method="get"');
-    },
-  );
+  it('old owner cookie without a form scope gets a visible sign-in recovery link, with no grant read', async () => {
+    ports.owner.mockResolvedValue({ user: { email: 'offline-owner@example.test' } });
+    const html = renderToStaticMarkup(await directory());
+    expect(ports.pgEditor).not.toHaveBeenCalled();
+    expect(html).not.toContain('Add person');
+    expect(html).toContain('Your sign-in needs refreshing');
+    expect(html).toContain('href="/signin"');
+    expect(html).toContain('Sign in again');
+    expect(html).toContain('method="get"');
+  });
+  it('valid form scope with release writes paused keeps the generic unavailable reason', async () => {
+    ports.enabled = false;
+    const html = renderToStaticMarkup(await directory());
+    expect(ports.pgEditor).not.toHaveBeenCalled();
+    expect(html).not.toContain('Add person');
+    expect(html).toContain('Changes are unavailable in this view.');
+    expect(html).not.toContain('Sign in again');
+    expect(html).toContain('method="get"');
+  });
   it('failure after the combined PG read discards both browse and prepared grants', async () => {
     ports.pgRead.mockImplementation(async (read) => {
       await read(leased);

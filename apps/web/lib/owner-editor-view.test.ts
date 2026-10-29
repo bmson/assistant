@@ -38,6 +38,35 @@ const snapshot: OwnerEditorViewSnapshot = {
   corrections: [],
 };
 const input = { enabled: true, context, snapshot, formSessionScope, secret, displayedContact, now };
+const personRemoval = {
+  contactId,
+  revision,
+  facts: 2,
+  occasions: 1,
+  connections: 3,
+  retainedSourceNotes: 4,
+  entityLinks: 1,
+  sourceLinks: 2,
+};
+it('keeps all basic editor grants available while never reading or issuing removal impact', () => {
+  const suppliedImpact = { ...snapshot, personRemoval };
+  const view = buildOwnerEditorView({ ...input, snapshot: suppliedImpact });
+  expect(view).not.toBeNull();
+  expect(view?.createGrant?.command).toBe('create_person');
+  expect(view?.identity?.grant.command).toBe('update_person_identity');
+  expect(view?.family?.grant.command).toBe('add_family_relationship');
+  expect(view?.personRemoval).toBeUndefined();
+  expect(view?.removals).toBeUndefined();
+  expect(view?.personRemovalUnavailableReason).toContain('not available in this release');
+  const unreadableImpact = {
+    ...snapshot,
+    get personRemoval(): typeof personRemoval {
+      throw new Error('unsupported impact read');
+    },
+  };
+  expect(buildOwnerEditorView({ ...input, snapshot: unreadableImpact })).not.toBeNull();
+});
+
 describe('server editor view builds real grants only for the same displayed native snapshot', () => {
   it('directory creates only actual create-person scope; never needs private contact fields', () => {
     const props = buildOwnerEditorView({

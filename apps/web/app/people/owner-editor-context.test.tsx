@@ -119,6 +119,8 @@ describe('one reviewed controller contextual entry points (SSR, not mounted focu
         />
         <OwnerEditorContextTrigger entry={{ correction: 'different' }} />
         <OwnerEditorContextTrigger entry="family" />
+        <OwnerEditorContextTrigger entry="remove-person" />
+        <OwnerEditorContextTrigger entry={{ removal: relation }} />
       </OwnerEditorContextualHost>,
     );
     expect(html.match(/Edit details/g)).toHaveLength(1);
@@ -134,12 +136,77 @@ describe('one reviewed controller contextual entry points (SSR, not mounted focu
     const html = renderToStaticMarkup(
       <OwnerEditorContextualHost editor={null}>
         <p>Read saved facts</p>
+        <OwnerEditorContextTrigger entry="create" />
         <OwnerEditorContextTrigger entry="identity" />
         <OwnerEditorContextTrigger entry="family" />
       </OwnerEditorContextualHost>,
     );
     expect(html).toContain('Read saved facts');
     expect(html).not.toContain('<button');
+  });
+  it('offers contextual creation only when its own server grant is present', () => {
+    const child = <OwnerEditorContextTrigger entry="create" />;
+    const without = renderToStaticMarkup(
+      <OwnerEditorContextualHost editor={editor}>{child}</OwnerEditorContextualHost>,
+    );
+    expect(without).not.toContain('Add person');
+    const withCreate = renderToStaticMarkup(
+      <OwnerEditorContextualHost
+        editor={{ ...editor, createGrant: { ...grant, command: 'create_person' } }}
+      >
+        {child}
+      </OwnerEditorContextualHost>,
+    );
+    expect(withCreate).toMatch(/<button[^>]*disabled=""[^>]*>Add person<\/button>/);
+    expect(withCreate).not.toContain('private-issued-handle');
+  });
+  it('keeps removal unavailable even when backlog removal capabilities are supplied', () => {
+    const eligibility = editor.corrections?.[0]?.eligibility;
+    if (!eligibility) throw Error('Missing eligible relationship fixture');
+    const children = (
+      <>
+        <OwnerEditorContextTrigger entry="remove-person" />
+        <OwnerEditorContextTrigger entry={{ removal: relation }} />
+        <OwnerEditorContextTrigger entry={{ removal: 'different' }} />
+      </>
+    );
+    expect(
+      renderToStaticMarkup(
+        <OwnerEditorContextualHost editor={editor}>{children}</OwnerEditorContextualHost>,
+      ),
+    ).not.toContain('<button');
+    const html = renderToStaticMarkup(
+      <OwnerEditorContextualHost
+        editor={{
+          ...editor,
+          personRemoval: {
+            grant: { ...grant, command: 'remove_person' },
+            impact: {
+              contactId: contact,
+              revision: 'a'.repeat(64),
+              facts: 2,
+              occasions: 0,
+              connections: 1,
+              retainedSourceNotes: 1,
+              entityLinks: 1,
+              sourceLinks: 0,
+            },
+          },
+          removals: [
+            {
+              grant: { ...grant, command: 'remove_owner_family_relationship' },
+              eligibility,
+            },
+          ],
+        }}
+      >
+        {children}
+      </OwnerEditorContextualHost>,
+    );
+    expect(html).not.toContain('Delete person');
+    expect(html).not.toContain('Remove connection');
+    expect(html).not.toContain('<button');
+    expect(html).not.toContain('private-issued-handle');
   });
   it('preserves exact selected map context and filters via contact-bound People destination', () => {
     const context =

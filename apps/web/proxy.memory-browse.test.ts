@@ -13,7 +13,14 @@ vi.mock('@assistant/config', () => ({ loadConfig: () => runtime }));
 import { proxy } from './proxy';
 
 const person = '123e4567-e89b-42d3-a456-426614174000';
-const pages = ['/profile', '/people', `/people/${person}`, '/profile/knowledge'];
+const pages = [
+  '/profile',
+  '/profile/memories',
+  '/people',
+  `/people/${person}`,
+  '/profile/knowledge',
+  `/profile/knowledge/notes/${person}`,
+];
 
 describe.each(['postgres', 'firestore'])('Memory browse ingress in %s', (driver) => {
   beforeEach(() => {
@@ -57,6 +64,10 @@ describe.each(['postgres', 'firestore'])('Memory browse ingress in %s', (driver)
       '/profile/about',
       '/profile/data',
       '/profile/knowledge/extra',
+      '/profile/knowledge/notes/not-an-id',
+      '/profile/knowledge/notes/123e4567-e89b-02d3-a456-426614174000',
+      `/profile/knowledge/notes/${person}/extra`,
+      `/profile/knowledge/notes/${person}/`,
       `/profile/people/${person}`,
       '/people/not-an-id',
       '/people/123e4567-e89b-02d3-a456-426614174000',

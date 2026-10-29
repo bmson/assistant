@@ -2,6 +2,7 @@ import type {
   OwnerEditorCorrectionEligibility,
   OwnerEditorIssuanceContext,
   OwnerEditorPersonOption,
+  OwnerEditorPersonRemovalImpact,
 } from '@assistant/persistence/owner-editor';
 import type { OwnerEditorControlsProps } from '@/app/people/owner-editor-controls';
 import { isValidFormSessionScope } from '../app/auth-form-session-scope';
@@ -19,6 +20,8 @@ export interface OwnerEditorViewSnapshot {
   } | null;
   people?: OwnerEditorPersonOption[];
   corrections?: OwnerEditorCorrectionEligibility[];
+  personRemoval?: OwnerEditorPersonRemovalImpact;
+  personRemovalUnavailableReason?: string;
   readOnlyCorrections?: { relationId: string; sourceMemoryId: string; reason: string }[];
 }
 export interface OwnerEditorDisplayedContact {
@@ -57,8 +60,7 @@ export function buildOwnerEditorView(input: {
   const identity = snapshot.identity;
   if (
     identity &&
-    (!displayedContact ||
-      !displayedContact.identityRevision ||
+    (!displayedContact?.identityRevision ||
       !/^[a-f0-9]{64}$/.test(displayedContact.identityRevision) ||
       !identity ||
       identity.contactId !== displayedContact.id ||
@@ -100,6 +102,8 @@ export function buildOwnerEditorView(input: {
               aliases: identity.aliases,
               revision: displayedContact?.identityRevision ?? '',
             },
+            personRemovalUnavailableReason:
+              'Deleting people is not available in this release. You can still edit saved details and relationships.',
             family: {
               grant: grant('add_family_relationship', identity.contactId),
               anchorContactId: identity.contactId,
