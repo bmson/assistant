@@ -1,4 +1,10 @@
 /** Rejection diagnostics only. No provider values, IDs, URLs or error text escape. */
+import {
+  sanitizeTrafficDetails,
+  type TrafficSnapshot,
+  trafficDetails,
+} from './owner-editor-traffic-details.js';
+
 const UNKNOWN = Symbol('unreadable');
 const MAX_ROWS = 1000;
 const fields = [
@@ -51,6 +57,7 @@ type Audit = {
   counts: Counts;
   invalidEnvFields: (typeof fields)[number][];
   diagnosticHintsOnly: true;
+  trafficDetails: ReturnType<typeof trafficDetails>;
 };
 function array(value: unknown): boolean {
   try {
@@ -125,6 +132,12 @@ export function auditServiceFacts(raw: unknown, service: 'agent' | 'web'): Audit
   );
   const containers = rows(containerRaw),
     traffic = rows(trafficRaw);
+  const trafficSnapshots: TrafficSnapshot[] = (traffic ?? []).map((entry) => ({
+    revision: own(entry, 'revision'),
+    percent: own(entry, 'percent'),
+    tag: own(entry, 'tag'),
+    uri: own(entry, 'uri'),
+  }));
   counts.containers = containers?.length ?? null;
   counts.trafficRows = traffic?.length ?? null;
   issues.container = containerRaw === UNKNOWN ? null : containers?.length !== 1;
@@ -264,9 +277,9 @@ export function auditServiceFacts(raw: unknown, service: 'agent' | 'web'): Audit
     counts.trafficInvalid = 0;
     issues.revision = false;
     issues.percent = false;
-    for (const entry of traffic) {
-      const revision = own(entry, 'revision'),
-        percent = own(entry, 'percent');
+    for (const entry of trafficSnapshots) {
+      const revision = entry.revision,
+        percent = entry.percent;
       const badRevision = invalid(revision, (v) =>
         string(v, new RegExp(`^assistant-${service}-[a-z0-9-]{1,63}$`)),
       );
@@ -302,6 +315,7 @@ export function auditServiceFacts(raw: unknown, service: 'agent' | 'web'): Audit
     counts,
     invalidEnvFields: fields.filter((f) => invalidFields.has(f)),
     diagnosticHintsOnly: true,
+    trafficDetails: trafficDetails(traffic === null ? null : trafficSnapshots, service),
   };
 }
 
@@ -327,6 +341,7 @@ export function sanitizeServiceAudit(raw: unknown) {
     counts,
     invalidEnvFields: fields.filter((f) => fieldRows.includes(f)),
     diagnosticHintsOnly: true,
+    trafficDetails: sanitizeTrafficDetails(own(raw, 'trafficDetails')),
   };
 }
 export class InventoryServiceFactsError extends Error {
