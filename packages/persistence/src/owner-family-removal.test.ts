@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { KnowledgeAssertionMeaning } from './knowledge-assertions.js';
 import {
   canonicalizeKnowledgeAssertionDirection,
   knowledgeAssertionSemanticKey,
@@ -180,6 +181,60 @@ function fixture() {
   return { scope, entities, contacts, request, plan, sourceText, evidence };
 }
 
+function inverseFixture() {
+  const f = fixture();
+  const sourceText = `${presentOwnerFamilyFact({
+    subjectLabel: 'Alex',
+    predicate: 'child_of',
+    objectLabel: 'Sam',
+    timing: 'unspecified',
+    validity: { validFrom: '2020-01-01', validUntil: '2024-12-31' },
+  })} Owner note: I recorded this wording after we discussed it.`;
+  const relation = {
+    ...f.scope.relation,
+    predicate: 'child_of',
+    evidenceQuote: sourceText,
+  };
+  const canonical = canonicalizeKnowledgeAssertionDirection(
+    relation as unknown as KnowledgeAssertionMeaning,
+  );
+  const semanticKey = knowledgeAssertionSemanticKey(ids.owner, canonical);
+  const assertion = {
+    ...f.scope.assertion,
+    semanticKey,
+    subjectEntityId: canonical.subjectEntityId,
+    predicate: canonical.predicate,
+    objectEntityId: canonical.objectEntityId,
+    assertion: relation.assertion,
+    qualifiers: canonical.qualifiers,
+    reviewedPayloadHash: semanticKey,
+  };
+  const evidence = { ...f.evidence, evidenceQuote: sourceText };
+  const scope = {
+    ...f.scope,
+    relation,
+    source: { ...f.scope.source, content: sourceText },
+    assertion,
+    evidence: [evidence],
+    sourceRelations: [relation],
+    canonicalRelations: [relation],
+  } as unknown as typeof f.scope;
+  return {
+    ...f,
+    scope,
+    evidence,
+    sourceText,
+    plan: (overrides: Partial<Parameters<typeof planOwnerFamilyRemoval>[0]> = {}) =>
+      planOwnerFamilyRemoval({
+        request: f.request,
+        scope,
+        entities: f.entities,
+        contacts: f.contacts,
+        ...overrides,
+      }),
+  };
+}
+
 describe('owner family removal planning', () => {
   it('plans rejection of only the exact standalone claim and retains both endpoints and source note', () => {
     const f = fixture();
@@ -238,6 +293,116 @@ describe('owner family removal planning', () => {
         contacts: f.contacts,
       }),
     ).toBeNull();
+  });
+
+  it('cross-checks the selected relation meaning against the stored canonical assertion payload', () => {
+    const changedClaimPayload = fixture();
+    expect(
+      changedClaimPayload.plan({
+        scope: {
+          ...changedClaimPayload.scope,
+          assertion: {
+            ...changedClaimPayload.scope.assertion,
+            assertion: {
+              ...changedClaimPayload.scope.assertion.assertion,
+              polarity: 'negative',
+            },
+          },
+        },
+      }),
+    ).toBeNull();
+
+    const changedEndpoints = fixture();
+    expect(
+      changedEndpoints.plan({
+        scope: {
+          ...changedEndpoints.scope,
+          assertion: {
+            ...changedEndpoints.scope.assertion,
+            subjectEntityId: ids.objectEntity,
+          },
+        },
+      }),
+    ).toBeNull();
+
+    const changedObjectEndpoint = fixture();
+    expect(
+      changedObjectEndpoint.plan({
+        scope: {
+          ...changedObjectEndpoint.scope,
+          assertion: {
+            ...changedObjectEndpoint.scope.assertion,
+            objectEntityId: ids.subjectEntity,
+          },
+        },
+      }),
+    ).toBeNull();
+
+    const changedPredicate = fixture();
+    expect(
+      changedPredicate.plan({
+        scope: {
+          ...changedPredicate.scope,
+          assertion: { ...changedPredicate.scope.assertion, predicate: 'mother_of' },
+        },
+      }),
+    ).toBeNull();
+
+    const changedValidity = fixture();
+    expect(
+      changedValidity.plan({
+        scope: {
+          ...changedValidity.scope,
+          assertion: { ...changedValidity.scope.assertion, validUntil: '2023-12-31' },
+        },
+      }),
+    ).toBeNull();
+
+    const changedValidityStart = fixture();
+    expect(
+      changedValidityStart.plan({
+        scope: {
+          ...changedValidityStart.scope,
+          assertion: { ...changedValidityStart.scope.assertion, validFrom: '2021-01-01' },
+        },
+      }),
+    ).toBeNull();
+
+    const changedSelectedMeaning = fixture();
+    const selectedClaim = changedSelectedMeaning.scope.relation.assertion;
+    if (!selectedClaim) throw new Error('Fixture relation needs an assertion');
+    expect(
+      changedSelectedMeaning.plan({
+        scope: {
+          ...changedSelectedMeaning.scope,
+          relation: {
+            ...changedSelectedMeaning.scope.relation,
+            assertion: {
+              ...selectedClaim,
+              polarity: 'negative',
+            },
+          },
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it('accepts a relation in legitimate inverse direction when stored assertion is canonical', () => {
+    const f = inverseFixture();
+    expect(f.plan()).toMatchObject({
+      action: 'reject_recorded_claim',
+      target: { relation: { id: ids.relation, assertionId: ids.assertion } },
+      retained: {
+        subjectContactId: ids.subjectContact,
+        objectContactId: ids.objectContact,
+        sourceText: f.sourceText,
+      },
+    });
+    expect(f.scope.assertion).toMatchObject({
+      subjectEntityId: ids.objectEntity,
+      predicate: 'parent_of',
+      objectEntityId: ids.subjectEntity,
+    });
   });
 
   it('fails closed on missing or shared source, evidence, or canonical relation scope', () => {

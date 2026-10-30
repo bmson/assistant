@@ -1,4 +1,8 @@
 import { z } from 'zod';
+import {
+  canonicalizeKnowledgeAssertionDirection,
+  knowledgeAssertionSemanticKey,
+} from './knowledge-assertions.js';
 import type { OwnerEditorCorrectionEligibility } from './owner-editor.js';
 import {
   eligibleOwnerFamilyCorrection,
@@ -65,6 +69,32 @@ export interface OwnerFamilyRemovalPlan {
 
 type ContactWithRevision = Records['contacts'] & { revision: string };
 
+function assertionMeaningMatchesScope(scope: OwnerFamilyScopeRows): boolean {
+  const relationMeaning = canonicalizeKnowledgeAssertionDirection({
+    subjectEntityId: scope.relation.subjectEntityId,
+    predicate: scope.relation.predicate,
+    objectEntityId: scope.relation.objectEntityId,
+    assertion: scope.relation.assertion,
+    validFrom: scope.relation.validFrom,
+    validUntil: scope.relation.validUntil,
+  });
+  const relationKey = knowledgeAssertionSemanticKey(scope.ownerId, relationMeaning);
+  const actualAssertionKey = knowledgeAssertionSemanticKey(scope.ownerId, {
+    subjectEntityId: scope.assertion.subjectEntityId,
+    predicate: scope.assertion.predicate,
+    objectEntityId: scope.assertion.objectEntityId,
+    assertion: scope.assertion.assertion,
+    validFrom: scope.assertion.validFrom,
+    validUntil: scope.assertion.validUntil,
+    qualifiers: scope.assertion.qualifiers,
+  });
+  return (
+    hash.safeParse(scope.assertion.semanticKey).success &&
+    relationKey === scope.assertion.semanticKey &&
+    actualAssertionKey === scope.assertion.semanticKey
+  );
+}
+
 function exactEndpointRows(
   scope: OwnerFamilyScopeRows,
   projection: OwnerEditorCorrectionEligibility,
@@ -128,7 +158,8 @@ export function planOwnerFamilyRemoval(input: {
       !Number.isSafeInteger(scope.evidence[0]?.evidenceRevision) ||
       (scope.evidence[0]?.evidenceRevision ?? 0) < 1 ||
       scope.evidence[0]?.evidenceRevision !== scope.assertion.evidenceRevision ||
-      !eligibleOwnerFamilyCorrection(scope)
+      !eligibleOwnerFamilyCorrection(scope) ||
+      !assertionMeaningMatchesScope(scope)
     )
       return null;
 
