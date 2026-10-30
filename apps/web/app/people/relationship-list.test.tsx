@@ -81,6 +81,23 @@ describe('RelationshipList', () => {
     expect(html).not.toContain('Unreviewed');
   });
 
+  it('highlights only the selected loaded relationship, keeping parallel claims separate', () => {
+    const html = renderToStaticMarkup(
+      <RelationshipList
+        relations={[
+          relation({ id: 'rel-1' }),
+          relation({ id: 'rel-2', sentence: 'A second source also says they are partners.' }),
+        ]}
+        selectedRelationId="rel-2"
+        now={NOW}
+      />,
+    );
+    expect(html).toContain('id="person-connection-rel-1"');
+    expect(html).toContain('id="person-connection-rel-2"');
+    expect(html.match(/aria-current="location"/g)).toHaveLength(1);
+    expect(html).toContain('aria-current="location" class="scroll-mt-24 rounded-xl');
+  });
+
   it('renders nothing but an empty list when there are no relations', () => {
     const html = renderToStaticMarkup(<RelationshipList relations={[]} now={NOW} />);
     expect(html).toBe('<ul class="mt-3 flex flex-col gap-2"></ul>');

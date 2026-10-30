@@ -20,6 +20,48 @@ describe('bounded connections list navigation', () => {
     expect(html).toContain('check available changes');
     expect(html).not.toContain('Manage connection');
   });
+  it('links each parallel person claim to its own exact dossier row and preserves the return context', () => {
+    const snapshot = createProductVisualData(false).map;
+    const firstId = '33333333-3333-4333-8333-333333333333';
+    const secondId = '44444444-4444-4444-8444-444444444444';
+    const source = snapshot.edges[0];
+    if (!source) throw Error('Expected a synthetic graph edge');
+    const html = renderToStaticMarkup(
+      <ConnectionsList
+        snapshot={{
+          ...snapshot,
+          edges: [
+            { ...source, id: firstId },
+            { ...source, id: secondId },
+          ],
+        }}
+        contextHref="/profile/knowledge?view=connections&q=Alex"
+      />,
+    );
+    expect(html).toContain('to review this connection');
+    for (const id of [firstId, secondId]) {
+      expect(html).toContain(`connectionId=${id}#person-connection-${id}`);
+      expect(html).toContain('returnTo=%2Fprofile%2Fknowledge%3Fview%3Dconnections%26q%3DAlex');
+    }
+  });
+  it('keeps the generic person route when a graph edge id is not a UUID', () => {
+    const snapshot = createProductVisualData(false).map;
+    const source = snapshot.edges[0];
+    if (!source) throw Error('Expected a synthetic graph edge');
+    const html = renderToStaticMarkup(
+      <ConnectionsList
+        snapshot={{ ...snapshot, edges: [{ ...source, id: 'untrusted-edge-id' }] }}
+        contextHref="/profile/knowledge?view=connections"
+      />,
+    );
+    expect(html).toContain('href="/people/00000000-0000-4000-8000-000000000001?returnTo=');
+    expect(html).not.toContain('connectionId=');
+    const personLabels = [...html.matchAll(/<a\b[^>]*href="\/people\/[^"]*"[^>]*>([\s\S]*?)<\/a>/g)]
+      .map((match) => (match[1] ?? '').replace(/<[^>]*>/g, ''))
+      .join(' ');
+    expect(personLabels).toContain('to review');
+    expect(personLabels).not.toContain('this connection');
+  });
   it('does not invent contact routes for people known only in a saved note', () => {
     const snapshot = createProductVisualData(false).map;
     const html = renderToStaticMarkup(

@@ -1,6 +1,6 @@
 import type { KnowledgeMapSnapshot } from '@assistant/application';
 import Link from 'next/link';
-import { memoryPersonEditorHref } from '@/lib/memory-editor-context';
+import { memoryPersonConnectionHref } from '@/lib/memory-editor-context';
 import { memoryNoteHref } from '@/lib/memory-note-context';
 import { Badge, EmptyState } from '@/lib/ui';
 
@@ -21,7 +21,7 @@ export function ConnectionsList({
           .filter((node) => !!node);
         const sourceHref = memoryNoteHref(edge.sourceMemoryId, contextHref);
         const people = endpoints.flatMap((node) => {
-          const href = memoryPersonEditorHref(node.contactId, contextHref);
+          const href = memoryPersonConnectionHref(node.contactId, edge.id, contextHref);
           return href ? [{ node, href }] : [];
         });
         return (
@@ -49,6 +49,7 @@ export function ConnectionsList({
                   className="inline-flex min-h-11 min-w-0 items-center break-words text-accent underline"
                 >
                   Open {node.label} to review
+                  {href.includes('#person-connection-') ? ' this connection' : ''}
                 </Link>
               ))}
               {sourceHref ? (

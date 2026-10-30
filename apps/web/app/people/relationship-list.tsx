@@ -21,18 +21,22 @@ export function RelationshipList({
   relations,
   now,
   peopleQuery = '',
+  selectedRelationId,
   editControls,
   readOnlyReasons,
 }: {
   relations: PersonRelation[];
   now: Date;
   peopleQuery?: string;
+  selectedRelationId?: string;
   editControls?: Record<string, ReactNode>;
   readOnlyReasons?: Record<string, { reason: string; sourceMemoryId?: string }>;
 }) {
   return (
     <ul className="mt-3 flex flex-col gap-2">
       {relations.map((relation) => {
+        const normalizedId = relation.id.toLowerCase();
+        const selected = normalizedId === selectedRelationId;
         // Recorded owner meaning is already present in the authoritative
         // sentence. A clock-derived duration can contradict its stated tense.
         const span = relation.assertionTiming
@@ -62,7 +66,16 @@ export function RelationshipList({
           </>
         );
         return (
-          <li key={relation.id}>
+          <li
+            key={relation.id}
+            id={`person-connection-${normalizedId}`}
+            aria-current={selected ? 'location' : undefined}
+            className={
+              selected
+                ? 'scroll-mt-24 rounded-xl border border-accent/25 bg-accent/[0.06] p-2'
+                : undefined
+            }
+          >
             {relation.otherContactId ? (
               <Link
                 href={`/people/${relation.otherContactId}${peopleQuery ? `?q=${encodeURIComponent(peopleQuery.slice(0, 120))}` : ''}`}
