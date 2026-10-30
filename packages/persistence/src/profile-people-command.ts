@@ -1,9 +1,17 @@
+import type { ProfileContactIdentityMutation } from './profile-contact-identity.js';
+
 /** Owner-scoped person mutations that are safe to implement per persistence provider. */
 export interface ProfilePeopleCommandRepository {
   readonly kind: 'profile-people-command-repository';
   create(input: { name: string; relationship: string; aliases: string[] }): Promise<string>;
   updateRelationship(contactId: string, relationship: string): Promise<void>;
-  updateIdentity(contactId: string, name: string, aliases: string[]): Promise<void>;
+  updateIdentity(
+    contactId: string,
+    name: string,
+    aliases: string[],
+    expectedContactRevision?: string,
+    relationship?: string,
+  ): Promise<ProfileContactIdentityMutation>;
 }
 
 export function isProfilePeopleCommandRepository(
@@ -34,4 +42,21 @@ export interface ProfilePeopleRemovalRepository {
   finishDelete(contactId: string): Promise<{ deletedOccasions: number }>;
   /** Move occasions, union identity fields into the target, then remove the source. */
   finishMerge(sourceId: string, targetId: string): Promise<{ movedOccasions: number }>;
+}
+
+/** Complete bounded editor read projection; issuance stays in the authenticated composition. */
+export interface OwnerEditorPeopleReadSnapshot {
+  ownerId: string;
+  people: import('./owner-editor.js').OwnerEditorPersonOption[];
+  identity: {
+    contactId: string;
+    name: string;
+    aliases: string[];
+    trust: string;
+    revision: string;
+  } | null;
+  corrections: import('./owner-editor.js').OwnerEditorCorrectionEligibility[];
+  personRemovalUnavailableReason?: string;
+  personRemoval?: import('./owner-editor.js').OwnerEditorPersonRemovalImpact;
+  readOnlyCorrections?: { relationId: string; sourceMemoryId: string; reason: string }[];
 }

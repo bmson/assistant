@@ -50,30 +50,85 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore profile people 
         name: 'New person',
         relationship: 'friend',
         trust: 'known',
+        identityAuthority: 'owner',
         aliases: ['N. Person'],
         emails: [],
         phones: [],
         notes: '',
       });
 
-      await expect(repository.updateIdentity(legacyContactId, 'New person', [])).rejects.toThrow(
-        'A person with that name already exists.',
-      );
-      await repository.updateIdentity(legacyContactId, 'New name', ['Former name']);
-      await repository.updateRelationship(legacyContactId, 'colleague');
+      const legacyBefore = await repository.editorContact(legacyContactId);
+      if (!legacyBefore) throw new Error('missing editable legacy contact');
+      await expect(
+        repository.updateIdentity(legacyContactId, 'New person', [], legacyBefore.revision),
+      ).resolves.toMatchObject({ status: 'conflict' });
+      await expect(repository.updateIdentity(legacyContactId, 'No revision', [])).resolves.toEqual({
+        status: 'review_required',
+      });
+      await expect(
+        repository.updateIdentity(
+          legacyContactId,
+          'New name',
+          ['Former name'],
+          legacyBefore.revision,
+          'colleague',
+        ),
+      ).resolves.toMatchObject({ status: 'updated', name: 'New name' });
       expect((await store.doc('contacts', legacyContactId).get()).data()).toMatchObject({
         name: 'New name',
         aliases: ['Former name', 'Old name'],
         relationship: 'colleague',
-        trust: 'known',
+        trust: 'unknown',
+        identityAuthority: 'owner',
+      });
+
+      const beforeNativeFailure = await repository.editorContact(legacyContactId);
+      if (!beforeNativeFailure) throw new Error('missing pre-failure contact');
+      await expect(
+        repository.updateIdentity(
+          legacyContactId,
+          'Failed compound name',
+          ['Failed compound alias'],
+          beforeNativeFailure.revision,
+          'x'.repeat(1_100_000), // Exceeds Firestore's document size limit at native commit.
+        ),
+      ).rejects.toThrow();
+      expect((await store.doc('contacts', legacyContactId).get()).data()).toMatchObject({
+        name: 'New name',
+        aliases: ['Former name', 'Old name'],
+        relationship: 'colleague',
+        trust: 'unknown',
+        identityAuthority: 'owner',
+      });
+
+      const staleDisplayed = await repository.editorContact(legacyContactId);
+      if (!staleDisplayed) throw new Error('missing post-relationship contact');
+      await store.doc('contacts', legacyContactId).update({
+        name: 'Owner latest name',
+        aliases: ['Owner selected alias'],
+        relationship: 'intervening relationship',
+      });
+      await expect(
+        repository.updateIdentity(
+          legacyContactId,
+          'Delayed inferred name',
+          [],
+          staleDisplayed.revision,
+          'stale relationship',
+        ),
+      ).resolves.toEqual({ status: 'conflict' });
+      expect((await store.doc('contacts', legacyContactId).get()).data()).toMatchObject({
+        name: 'Owner latest name',
+        aliases: ['Owner selected alias'],
+        relationship: 'intervening relationship',
       });
 
       await expect(repository.updateRelationship(foreignContactId, 'friend')).rejects.toThrow(
         'Person not found.',
       );
-      await expect(repository.updateIdentity(foreignContactId, 'Changed', [])).rejects.toThrow(
-        'Person not found or cannot be renamed.',
-      );
+      await expect(
+        repository.updateIdentity(foreignContactId, 'Changed', [], 'a'.repeat(64)),
+      ).resolves.toEqual({ status: 'not_found' });
       expect((await store.doc('contacts', foreignContactId).get()).get('name')).toBe(
         'Foreign name',
       );

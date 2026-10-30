@@ -37,6 +37,12 @@
   },
   "overrides": [
     {
+      "includes": ["infra/gcp/fixtures/postgres-journal.schema132.json"],
+      "formatter": {
+        "enabled": false
+      }
+    },
+    {
       "includes": ["scripts/**"],
       "linter": {
         "rules": {

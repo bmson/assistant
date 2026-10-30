@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { loadConfig } from '@assistant/config';
 import {
   agents,
+  beginPostgresOwnerEditorWrite,
+  completePostgresOwnerEditorWrite,
   contacts,
   createPostgresKnowledgeGraphSyncRepository,
   type Db,
@@ -15,6 +17,7 @@ import {
   memories,
   modelCalls,
   namePrefixMatch,
+  readPostgresOwnerEditorFamily,
 } from '@assistant/db';
 import {
   canonicalizeKnowledgeAssertionDirection,
@@ -29,10 +32,12 @@ import {
   knowledgeAssertionEvidenceId,
   knowledgeAssertionId,
   knowledgeAssertionSemanticKey,
+  type OwnerEditorReply,
   type OwnerGraphCorrectionDisposition,
   type OwnerGraphCorrectionTarget,
   type OwnerKnowledgeGraphEntityEndpoint,
   type OwnerKnowledgeGraphFactRepository,
+  ownerEditorCommitRevision,
 } from '@assistant/persistence';
 import { and, desc, eq, inArray, isNull, ne, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -42,11 +47,18 @@ import { isUnparseableObjectError, type ModelRouter } from '../model-router/rout
 import { withSpan } from '../otel.js';
 import { canonicalizeDateLabel } from './date-labels.js';
 import {
+  eligibleOwnerFamilyCorrection,
+  type OwnerFamilyScopeRows,
+  presentOwnerFamilyFact,
+  validOwnerFamilyMeaning,
+} from './owner-family-fact.js';
+import {
   canonicalPredicate,
   extractionVocabularyLines,
   GRAPH_ENTITY_KINDS,
   type GraphEntityKind,
 } from './predicate-vocabulary.js';
+import { statedPeriodEnd, statedPeriodStart } from './validity.js';
 
 /**
  * Explainable GraphRAG over the personal memory library. The graph only stores
@@ -1604,12 +1616,14 @@ export interface OwnerGraphFactInput {
    */
   subject: { label: string; kind: GraphEntityKind; id?: string; contactId?: string };
   predicate: string;
-  object: { label: string; kind: GraphEntityKind; id?: string };
+  object: { label: string; kind: GraphEntityKind; id?: string; contactId?: string };
   /**
    * Optional context in the owner's words. The owner stating the relationship
    * is itself the provenance, so an empty note still saves a readable source.
    */
   note: string;
+  validity?: { validFrom: string | null; validUntil: string | null };
+  timing?: 'unspecified' | 'present' | 'past';
 }
 
 /**
@@ -1627,6 +1641,8 @@ function ownerFactContent(
 }
 
 export interface OwnerGraphFactResult {
+  editorReply?: OwnerEditorReply;
+  assertionId?: string;
   memoryId?: string;
   relationId?: string;
   error?: string;
@@ -1752,6 +1768,126 @@ export async function createOwnerKnowledgeGraphFact(
         ? contactForLabel(subjectPeople, subject.label)
         : undefined;
 
+  return writeOwnerKnowledgeGraphFactPostgres(deps.db, {
+    agentId,
+    correction,
+    contentHash,
+    content,
+    embedding,
+    embeddingSpaceKey,
+    subjectContact,
+    subjectRow,
+    objectRow,
+    subject,
+    object,
+    subjectPeople,
+    people,
+    context,
+    predicate,
+  });
+}
+
+async function upsertPreparedOwnerEntity(
+  db: Db,
+  agentId: string,
+  endpoint: OwnerKnowledgeGraphEntityEndpoint,
+) {
+  const [existing] = await db
+    .select()
+    .from(knowledgeGraphEntities)
+    .where(
+      and(
+        eq(knowledgeGraphEntities.agentId, agentId),
+        eq(knowledgeGraphEntities.canonicalKey, endpoint.canonicalKey),
+      ),
+    )
+    .limit(1);
+  if (existing) {
+    if (
+      existing.kind !== endpoint.kind ||
+      existing.contactId !== endpoint.contactId ||
+      (endpoint.id && endpoint.id !== existing.id)
+    )
+      throw new Error('Person entity binding changed');
+    return { id: existing.id, key: existing.canonicalKey };
+  }
+  if (
+    endpoint.id ||
+    !endpoint.contactId ||
+    endpoint.kind !== 'person' ||
+    endpoint.canonicalKey !== `contact:${endpoint.contactId}`
+  )
+    throw new Error('Person entity binding changed');
+  const alias = await aliasedEntityId(db, agentId, endpoint.canonicalKey);
+  if (alias) throw new Error('Person entity was merged; refresh before editing');
+  const [created] = await db
+    .insert(knowledgeGraphEntities)
+    .values({
+      agentId,
+      canonicalKey: endpoint.canonicalKey,
+      label: endpoint.label,
+      kind: 'person',
+      contactId: endpoint.contactId,
+    })
+    .onConflictDoNothing()
+    .returning({ id: knowledgeGraphEntities.id });
+  if (!created) throw new Error('Person entity changed during save');
+  return { id: created.id, key: endpoint.canonicalKey };
+}
+
+async function writeOwnerKnowledgeGraphFactPostgres(
+  db: Db,
+  values: {
+    agentId: string;
+    correction?: {
+      target: OwnerGraphCorrectionTarget;
+      disposition: OwnerGraphCorrectionDisposition;
+    };
+    contentHash: string;
+    content: string;
+    embedding: number[];
+    embeddingSpaceKey: string;
+    subjectContact?: { id: string; name: string; aliases: string[] };
+    subjectRow: {
+      label: string;
+      kind: string;
+      id?: string;
+      canonicalKey?: string;
+      contactId?: string | null;
+    };
+    objectRow: {
+      label: string;
+      kind: string;
+      id?: string;
+      canonicalKey?: string;
+      contactId?: string | null;
+    };
+    subject: z.infer<typeof GraphEntitySchema>;
+    object: z.infer<typeof GraphEntitySchema>;
+    subjectPeople: Array<{ id: string; name: string; aliases: string[] }>;
+    people: Array<{ id: string; name: string; aliases: string[] }>;
+    context: ResolutionContext;
+    predicate: string;
+  },
+  prepared?: import('@assistant/persistence').OwnerKnowledgeGraphFactAtomicInput,
+): Promise<OwnerGraphFactResult> {
+  const {
+    agentId,
+    correction,
+    contentHash,
+    content,
+    embedding,
+    embeddingSpaceKey,
+    subjectContact,
+    subjectRow,
+    objectRow,
+    subject,
+    object,
+    subjectPeople,
+    people,
+    context,
+    predicate,
+  } = values;
   /**
    * A duplicate memory means the whole fact already exists. Thrown inside the
    * transaction so it rolls back cleanly and surfaces as the duplicate error.
@@ -1763,280 +1899,434 @@ export async function createOwnerKnowledgeGraphFact(
   // between the memory insert and the relation insert left an owner-confirmed
   // memory with no graph edge and no checkpoint to recover it.
   try {
-    return await deps.db.transaction(async (tx) => {
-      const txDb = tx as unknown as Db;
-      const correctionRows = correction
-        ? await txDb
+    return await db.transaction(
+      async (tx) => {
+        const txDb = tx as unknown as Db;
+        const editor = prepared?.editor;
+        const admitted = editor
+          ? await beginPostgresOwnerEditorWrite(tx, editor.claim, new Date())
+          : null;
+        if (admitted?.kind === 'reply') return { editorReply: admitted.reply };
+        if (editor && admitted?.kind === 'admitted') {
+          const expectedCommand = prepared.correction
+            ? 'correct_owner_family_relationship'
+            : 'add_family_relationship';
+          if (
+            editor.claim.scope.ownerId !== agentId ||
+            editor.claim.scope.command !== expectedCommand ||
+            (prepared.correction
+              ? editor.claim.scope.targetId !== prepared.correction.target.relationId
+              : ![prepared.subject.contactId, prepared.object.contactId].includes(
+                  editor.claim.scope.targetId ?? '',
+                ))
+          )
+            throw new Error('Prepared family operation does not match its claim');
+          if (
+            !prepared.subject.contactId ||
+            !prepared.object.contactId ||
+            !prepared.validity ||
+            !prepared.timing
+          )
+            throw new Error('Incomplete family editor preparation');
+          const fields = {
+            subjectContactId: prepared.subject.contactId,
+            objectContactId: prepared.object.contactId,
+            expectedSubjectRevision: editor.expected.subjectContactRevision,
+            expectedObjectRevision: editor.expected.objectContactRevision,
+            predicate,
+            timing: prepared.timing,
+            validity: prepared.validity,
+            note: '',
+            expectedCanonicalState: editor.expected.canonical,
+          };
+          const state = await readPostgresOwnerEditorFamily(
+            txDb,
+            agentId,
+            fields,
+            editor.expected.target?.relationId,
+            true,
+          );
+          const changed =
+            !state ||
+            state.subject.revision !== editor.expected.subjectContactRevision ||
+            state.object.revision !== editor.expected.objectContactRevision ||
+            state.canonicalConflict ||
+            (state.canonicalIds &&
+              (!state.canonicalScope ||
+                !eligibleOwnerFamilyCorrection(state.canonicalScope as OwnerFamilyScopeRows))) ||
+            (editor.expected.canonical.kind === 'absent'
+              ? state.canonicalRevision !== null &&
+                Boolean(editor.expected.target) &&
+                state.canonicalIds?.assertionId !== state.target?.assertion.id &&
+                Boolean(editor.expected.target) &&
+                state.canonicalIds?.assertionId !== state.target?.assertion.id
+              : state.canonicalRevision !== editor.expected.canonical.revision) ||
+            (editor.expected.target &&
+              (!state.target ||
+                state.target.revision !== editor.expected.target.revision ||
+                !eligibleOwnerFamilyCorrection(state.target as OwnerFamilyScopeRows)));
+          if (changed)
+            return {
+              editorReply: await completePostgresOwnerEditorWrite(
+                tx,
+                admitted,
+                { outcome: 'conflict', reason: 'family_snapshot_changed' },
+                new Date(),
+              ),
+            };
+          if (state.canonicalIds && !editor.expected.target) {
+            return {
+              editorReply: await completePostgresOwnerEditorWrite(
+                tx,
+                admitted,
+                {
+                  outcome: 'unchanged',
+                  ids: state.canonicalIds,
+                  revision: ownerEditorCommitRevision(editor.claim, state.canonicalIds),
+                },
+                new Date(),
+              ),
+            };
+          }
+          if (
+            state.canonicalIds &&
+            state.target &&
+            state.canonicalIds.assertionId !== state.target.assertion.id
+          )
+            return {
+              editorReply: await completePostgresOwnerEditorWrite(
+                tx,
+                admitted,
+                { outcome: 'conflict', reason: 'canonical_statement_exists' },
+                new Date(),
+              ),
+            };
+        }
+        const correctionRows = correction
+          ? await txDb
+              .select({
+                relationId: knowledgeGraphRelations.id,
+                assertionId: knowledgeGraphRelations.assertionId,
+                sourceMemoryId: knowledgeGraphRelations.sourceMemoryId,
+                reviewStatus: knowledgeGraphRelations.reviewStatus,
+                correctedByRelationId: knowledgeGraphRelations.correctedByRelationId,
+                correctionSourceContentHash: knowledgeGraphRelations.correctionSourceContentHash,
+                correctionDisposition: knowledgeGraphRelations.correctionDisposition,
+                sourceContentHash: memories.contentHash,
+                source: memories.source,
+                originTrust: memories.originTrust,
+                ownerConfirmed: memories.ownerConfirmed,
+                supersededById: memories.supersededById,
+                expiresAt: memories.expiresAt,
+              })
+              .from(knowledgeGraphRelations)
+              .innerJoin(memories, eq(knowledgeGraphRelations.sourceMemoryId, memories.id))
+              .where(
+                and(
+                  eq(knowledgeGraphRelations.id, correction.target.relationId),
+                  eq(knowledgeGraphRelations.agentId, agentId),
+                ),
+              )
+              .for('update')
+          : [];
+        const currentCorrection = correctionRows[0];
+        if (correction && currentCorrection?.correctedByRelationId) {
+          const [prior] = await txDb
             .select({
-              relationId: knowledgeGraphRelations.id,
-              assertionId: knowledgeGraphRelations.assertionId,
+              id: knowledgeGraphRelations.id,
               sourceMemoryId: knowledgeGraphRelations.sourceMemoryId,
-              reviewStatus: knowledgeGraphRelations.reviewStatus,
-              correctedByRelationId: knowledgeGraphRelations.correctedByRelationId,
-              correctionSourceContentHash: knowledgeGraphRelations.correctionSourceContentHash,
-              correctionDisposition: knowledgeGraphRelations.correctionDisposition,
-              sourceContentHash: memories.contentHash,
-              source: memories.source,
-              originTrust: memories.originTrust,
-              ownerConfirmed: memories.ownerConfirmed,
-              supersededById: memories.supersededById,
-              expiresAt: memories.expiresAt,
             })
             .from(knowledgeGraphRelations)
-            .innerJoin(memories, eq(knowledgeGraphRelations.sourceMemoryId, memories.id))
+            .where(
+              and(
+                eq(knowledgeGraphRelations.id, currentCorrection.correctedByRelationId),
+                eq(knowledgeGraphRelations.agentId, agentId),
+              ),
+            )
+            .limit(1);
+          if (!prior) throw new Error('Knowledge graph correction receipt is incomplete');
+          return {
+            relationId: prior.id,
+            memoryId: prior.sourceMemoryId,
+            sourceDisposition:
+              currentCorrection.correctionDisposition === 'whole_fact'
+                ? 'whole_fact'
+                : 'graph_only',
+            alreadyApplied: true,
+          };
+        }
+        if (
+          correction &&
+          (!currentCorrection ||
+            currentCorrection.sourceMemoryId !== correction.target.sourceMemoryId ||
+            currentCorrection.reviewStatus !== correction.target.reviewStatus ||
+            currentCorrection.sourceContentHash !== correction.target.sourceContentHash ||
+            currentCorrection.supersededById !== correction.target.sourceSupersededById ||
+            currentCorrection.expiresAt?.getTime() !==
+              correction.target.sourceExpiresAt?.getTime() ||
+            !['confirmed', 'unreviewed'].includes(currentCorrection.reviewStatus))
+        )
+          throw new Error(
+            'The source changed while this relationship was being corrected. Review it again.',
+          );
+        if (correction?.disposition === 'whole_fact') {
+          if (
+            currentCorrection?.source !== 'knowledge-graph-owner' ||
+            currentCorrection.originTrust !== 'owner' ||
+            !currentCorrection.ownerConfirmed ||
+            currentCorrection.supersededById !== null ||
+            currentCorrection.expiresAt !== null
+          )
+            throw new Error(
+              'This source contains more than the corrected fact; choose graph-only correction.',
+            );
+          const [sibling] = await txDb
+            .select({ id: knowledgeGraphRelations.id })
+            .from(knowledgeGraphRelations)
+            .where(
+              and(
+                eq(knowledgeGraphRelations.agentId, agentId),
+                eq(knowledgeGraphRelations.sourceMemoryId, correction.target.sourceMemoryId),
+                ne(knowledgeGraphRelations.id, correction.target.relationId),
+              ),
+            )
+            .limit(1);
+          if (sibling)
+            throw new Error(
+              'This source supports other relationships; choose graph-only correction.',
+            );
+        }
+        const [memory] = await txDb
+          .insert(memories)
+          .values({
+            agentId,
+            category: 'knowledge',
+            kind: 'fact',
+            content,
+            contentHash,
+            embedding,
+            embeddingSpaceKey,
+            confidence: '1.00',
+            originTrust: 'owner',
+            ownerConfirmed: true,
+            subjectContactId: subjectContact?.id,
+            domain: 'other',
+            source: 'knowledge-graph-owner',
+            ...(prepared?.validity
+              ? {
+                  validFrom: statedPeriodStart(prepared.validity.validFrom),
+                  validUntil: statedPeriodEnd(prepared.validity.validUntil),
+                }
+              : {}),
+          })
+          .onConflictDoNothing({ target: memories.contentHash })
+          .returning({ id: memories.id });
+        if (!memory) throw new OwnerFactDuplicate();
+
+        const graphSubject = prepared
+          ? await upsertPreparedOwnerEntity(txDb, prepared.agentId, prepared.subject)
+          : typeof subjectRow.id === 'string' && typeof subjectRow.canonicalKey === 'string'
+            ? { id: subjectRow.id, key: subjectRow.canonicalKey }
+            : await upsertEntity(txDb, agentId, subject, subjectPeople, context);
+        const graphObject = prepared
+          ? await upsertPreparedOwnerEntity(txDb, prepared.agentId, prepared.object)
+          : typeof objectRow.id === 'string' && typeof objectRow.canonicalKey === 'string'
+            ? { id: objectRow.id, key: objectRow.canonicalKey }
+            : await upsertEntity(txDb, agentId, object, people, context);
+        if (!graphSubject || !graphObject) {
+          // Unreachable in practice: the date endpoints were validated above and
+          // no other kind can fail to resolve. Kept because upsertEntity's
+          // contract permits null, and a silent crash here would strand the
+          // memory row — which the transaction now rolls back instead.
+          throw new Error('owner fact endpoints could not be recorded');
+        }
+        const fingerprint = relationshipFingerprint(graphSubject.key, predicate, graphObject.key);
+        const ownerMeaning = canonicalizeKnowledgeAssertionDirection({
+          subjectEntityId: graphSubject.id,
+          predicate,
+          objectEntityId: graphObject.id,
+          assertion: {
+            tense: prepared?.timing ?? 'present',
+            polarity: 'positive',
+            modality: 'asserted',
+          },
+          validFrom: prepared?.validity?.validFrom ?? null,
+          validUntil: prepared?.validity?.validUntil ?? null,
+        });
+        const semanticKey = knowledgeAssertionSemanticKey(agentId, ownerMeaning);
+        const assertionId = knowledgeAssertionId(agentId, semanticKey);
+        await txDb
+          .insert(knowledgeGraphAssertions)
+          .values({
+            id: assertionId,
+            agentId,
+            semanticKey,
+            subjectEntityId: ownerMeaning.subjectEntityId,
+            predicate: ownerMeaning.predicate,
+            objectEntityId: ownerMeaning.objectEntityId,
+            assertion: ownerMeaning.assertion,
+            qualifiers: ('qualifiers' in ownerMeaning ? ownerMeaning.qualifiers : {}) as Record<
+              string,
+              string | number | boolean | null
+            >,
+            validFrom: ownerMeaning.validFrom,
+            validUntil: ownerMeaning.validUntil,
+            reviewStatus: 'confirmed',
+            reviewedRevision: 1,
+            reviewedPayloadHash: semanticKey,
+            ownerAuthored: true,
+            ...(editor ? { evidenceRevision: 1 } : {}),
+          })
+          .onConflictDoUpdate({
+            target: knowledgeGraphAssertions.id,
+            set: editor
+              ? {
+                  evidenceRevision: sql`${knowledgeGraphAssertions.evidenceRevision} + 1`,
+                  updatedAt: new Date(),
+                }
+              : { lifecycle: 'current', ownerAuthored: true, updatedAt: new Date() },
+          });
+        await txDb
+          .insert(knowledgeGraphAssertionEvidence)
+          .values({
+            id: knowledgeAssertionEvidenceId(agentId, assertionId, memory.id, fingerprint),
+            agentId,
+            assertionId,
+            sourceMemoryId: memory.id,
+            sourceFingerprint: fingerprint,
+            sourceContentHash: contentHash,
+            evidenceQuote: content,
+            sourceAuthor: 'owner',
+            sourceTrust: 'owner',
+            independent: false,
+            spanStart: 0,
+            spanEnd: content.length,
+            extractionVersion: GRAPH_EXTRACTION_VERSION,
+            observedAt: context.anchor,
+          })
+          .onConflictDoNothing();
+        const [relation] = await txDb
+          .insert(knowledgeGraphRelations)
+          .values({
+            agentId,
+            subjectEntityId: graphSubject.id,
+            predicate,
+            objectEntityId: graphObject.id,
+            ...(prepared?.validity
+              ? { validFrom: ownerMeaning.validFrom, validUntil: ownerMeaning.validUntil }
+              : {}),
+            sourceMemoryId: memory.id,
+            assertionId,
+            assertion: ownerMeaning.assertion,
+            evidenceQuote: content,
+            sourceFingerprint: fingerprint,
+            ordinal: 1,
+            confidence: '1.00',
+            reviewStatus: 'confirmed',
+            reviewedAt: sql`now()`,
+          })
+          .returning({ id: knowledgeGraphRelations.id });
+        await markSource(
+          txDb,
+          {
+            id: memory.id,
+            agentId,
+            content,
+            contentHash,
+            confidence: '1.00',
+            subjectContactId: subjectContact?.id ?? null,
+            createdAt: context.anchor,
+          },
+          { status: 'ready', lastError: null },
+        );
+        if (correction && relation?.id) {
+          const retired = await txDb
+            .update(knowledgeGraphRelations)
+            .set({
+              reviewStatus: 'rejected',
+              reviewedAt: sql`now()`,
+              correctedByRelationId: relation.id,
+              correctionSourceContentHash: correction.target.sourceContentHash,
+              correctionDisposition: correction.disposition,
+            })
             .where(
               and(
                 eq(knowledgeGraphRelations.id, correction.target.relationId),
                 eq(knowledgeGraphRelations.agentId, agentId),
+                eq(knowledgeGraphRelations.sourceMemoryId, correction.target.sourceMemoryId),
+                eq(knowledgeGraphRelations.reviewStatus, correction.target.reviewStatus),
               ),
             )
-            .for('update')
-        : [];
-      const currentCorrection = correctionRows[0];
-      if (correction && currentCorrection?.correctedByRelationId) {
-        const [prior] = await txDb
-          .select({
-            id: knowledgeGraphRelations.id,
-            sourceMemoryId: knowledgeGraphRelations.sourceMemoryId,
-          })
-          .from(knowledgeGraphRelations)
-          .where(
-            and(
-              eq(knowledgeGraphRelations.id, currentCorrection.correctedByRelationId),
-              eq(knowledgeGraphRelations.agentId, agentId),
-            ),
-          )
-          .limit(1);
-        if (!prior) throw new Error('Knowledge graph correction receipt is incomplete');
-        return {
-          relationId: prior.id,
-          memoryId: prior.sourceMemoryId,
-          sourceDisposition:
-            currentCorrection.correctionDisposition === 'whole_fact' ? 'whole_fact' : 'graph_only',
-          alreadyApplied: true,
+            .returning({ id: knowledgeGraphRelations.id });
+          if (!retired.length) throw new Error('The relationship changed while being corrected.');
+          if (
+            currentCorrection?.assertionId &&
+            (!editor || currentCorrection.assertionId !== assertionId)
+          ) {
+            await txDb
+              .update(knowledgeGraphAssertions)
+              .set({
+                reviewStatus: 'rejected',
+                reviewedRevision: sql`${knowledgeGraphAssertions.semanticRevision}`,
+                reviewedPayloadHash: sql`${knowledgeGraphAssertions.semanticKey}`,
+                updatedAt: new Date(),
+              })
+              .where(
+                and(
+                  eq(knowledgeGraphAssertions.id, currentCorrection.assertionId),
+                  eq(knowledgeGraphAssertions.agentId, agentId),
+                ),
+              );
+          }
+          if (correction.disposition === 'whole_fact') {
+            const updated = await txDb
+              .update(memories)
+              .set({ supersededById: memory.id, expiresAt: new Date() })
+              .where(
+                and(
+                  eq(memories.id, correction.target.sourceMemoryId),
+                  eq(memories.agentId, agentId),
+                  eq(memories.contentHash, correction.target.sourceContentHash),
+                  isNull(memories.supersededById),
+                  isNull(memories.expiresAt),
+                ),
+              )
+              .returning({ id: memories.id });
+            if (!updated.length) throw new Error('The source changed while being corrected.');
+          }
+        }
+        if (!relation?.id)
+          throw new Error('Relationship write did not return its durable identity');
+        const ids = {
+          memoryId: memory.id,
+          relationId: relation.id,
+          assertionId,
+          ...(correction ? { previousRelationId: correction.target.relationId } : {}),
         };
-      }
-      if (
-        correction &&
-        (!currentCorrection ||
-          currentCorrection.sourceMemoryId !== correction.target.sourceMemoryId ||
-          currentCorrection.reviewStatus !== correction.target.reviewStatus ||
-          currentCorrection.sourceContentHash !== correction.target.sourceContentHash ||
-          currentCorrection.supersededById !== correction.target.sourceSupersededById ||
-          currentCorrection.expiresAt?.getTime() !== correction.target.sourceExpiresAt?.getTime() ||
-          !['confirmed', 'unreviewed'].includes(currentCorrection.reviewStatus))
-      )
-        throw new Error(
-          'The source changed while this relationship was being corrected. Review it again.',
-        );
-      if (correction?.disposition === 'whole_fact') {
-        if (
-          currentCorrection?.source !== 'knowledge-graph-owner' ||
-          currentCorrection.originTrust !== 'owner' ||
-          !currentCorrection.ownerConfirmed ||
-          currentCorrection.supersededById !== null ||
-          currentCorrection.expiresAt !== null
-        )
-          throw new Error(
-            'This source contains more than the corrected fact; choose graph-only correction.',
-          );
-        const [sibling] = await txDb
-          .select({ id: knowledgeGraphRelations.id })
-          .from(knowledgeGraphRelations)
-          .where(
-            and(
-              eq(knowledgeGraphRelations.agentId, agentId),
-              eq(knowledgeGraphRelations.sourceMemoryId, correction.target.sourceMemoryId),
-              ne(knowledgeGraphRelations.id, correction.target.relationId),
-            ),
-          )
-          .limit(1);
-        if (sibling)
-          throw new Error(
-            'This source supports other relationships; choose graph-only correction.',
-          );
-      }
-      const [memory] = await txDb
-        .insert(memories)
-        .values({
-          agentId,
-          category: 'knowledge',
-          kind: 'fact',
-          content,
-          contentHash,
-          embedding,
-          embeddingSpaceKey,
-          confidence: '1.00',
-          originTrust: 'owner',
-          ownerConfirmed: true,
-          subjectContactId: subjectContact?.id,
-          domain: 'other',
-          source: 'knowledge-graph-owner',
-        })
-        .onConflictDoNothing({ target: memories.contentHash })
-        .returning({ id: memories.id });
-      if (!memory) throw new OwnerFactDuplicate();
-
-      const graphSubject =
-        'canonicalKey' in subjectRow
-          ? { id: subjectRow.id, key: subjectRow.canonicalKey }
-          : await upsertEntity(txDb, agentId, subject, subjectPeople, context);
-      const graphObject =
-        'canonicalKey' in objectRow
-          ? { id: objectRow.id, key: objectRow.canonicalKey }
-          : await upsertEntity(txDb, agentId, object, people, context);
-      if (!graphSubject || !graphObject) {
-        // Unreachable in practice: the date endpoints were validated above and
-        // no other kind can fail to resolve. Kept because upsertEntity's
-        // contract permits null, and a silent crash here would strand the
-        // memory row — which the transaction now rolls back instead.
-        throw new Error('owner fact endpoints could not be recorded');
-      }
-      const fingerprint = relationshipFingerprint(graphSubject.key, predicate, graphObject.key);
-      const ownerMeaning = canonicalizeKnowledgeAssertionDirection({
-        subjectEntityId: graphSubject.id,
-        predicate,
-        objectEntityId: graphObject.id,
-        assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
-        validFrom: null,
-        validUntil: null,
-      });
-      const semanticKey = knowledgeAssertionSemanticKey(agentId, ownerMeaning);
-      const assertionId = knowledgeAssertionId(agentId, semanticKey);
-      await txDb
-        .insert(knowledgeGraphAssertions)
-        .values({
-          id: assertionId,
-          agentId,
-          semanticKey,
-          subjectEntityId: ownerMeaning.subjectEntityId,
-          predicate: ownerMeaning.predicate,
-          objectEntityId: ownerMeaning.objectEntityId,
-          assertion: ownerMeaning.assertion,
-          qualifiers: ('qualifiers' in ownerMeaning ? ownerMeaning.qualifiers : {}) as Record<
-            string,
-            string | number | boolean | null
-          >,
-          validFrom: ownerMeaning.validFrom,
-          validUntil: ownerMeaning.validUntil,
-          reviewStatus: 'confirmed',
-          reviewedRevision: 1,
-          reviewedPayloadHash: semanticKey,
-          ownerAuthored: true,
-        })
-        .onConflictDoUpdate({
-          target: knowledgeGraphAssertions.id,
-          set: { lifecycle: 'current', ownerAuthored: true, updatedAt: new Date() },
-        });
-      await txDb
-        .insert(knowledgeGraphAssertionEvidence)
-        .values({
-          id: knowledgeAssertionEvidenceId(agentId, assertionId, memory.id, fingerprint),
-          agentId,
+        const editorReply =
+          editor && admitted?.kind === 'admitted'
+            ? await completePostgresOwnerEditorWrite(
+                tx,
+                admitted,
+                {
+                  outcome: 'saved',
+                  ids,
+                  revision: ownerEditorCommitRevision(editor.claim, ids),
+                  refreshPending: true,
+                },
+                new Date(),
+              )
+            : undefined;
+        return {
+          memoryId: memory.id,
+          relationId: relation.id,
           assertionId,
-          sourceMemoryId: memory.id,
-          sourceFingerprint: fingerprint,
-          sourceContentHash: contentHash,
-          evidenceQuote: content,
-          sourceAuthor: 'owner',
-          sourceTrust: 'owner',
-          independent: false,
-          spanStart: 0,
-          spanEnd: content.length,
-          extractionVersion: GRAPH_EXTRACTION_VERSION,
-          observedAt: context.anchor,
-        })
-        .onConflictDoNothing();
-      const [relation] = await txDb
-        .insert(knowledgeGraphRelations)
-        .values({
-          agentId,
-          subjectEntityId: graphSubject.id,
-          predicate,
-          objectEntityId: graphObject.id,
-          sourceMemoryId: memory.id,
-          assertionId,
-          assertion: ownerMeaning.assertion,
-          evidenceQuote: content,
-          sourceFingerprint: fingerprint,
-          ordinal: 1,
-          confidence: '1.00',
-          reviewStatus: 'confirmed',
-          reviewedAt: sql`now()`,
-        })
-        .returning({ id: knowledgeGraphRelations.id });
-      await markSource(
-        txDb,
-        {
-          id: memory.id,
-          agentId,
-          content,
-          contentHash,
-          confidence: '1.00',
-          subjectContactId: subjectContact?.id ?? null,
-          createdAt: context.anchor,
-        },
-        { status: 'ready', lastError: null },
-      );
-      if (correction && relation?.id) {
-        const retired = await txDb
-          .update(knowledgeGraphRelations)
-          .set({
-            reviewStatus: 'rejected',
-            reviewedAt: sql`now()`,
-            correctedByRelationId: relation.id,
-            correctionSourceContentHash: correction.target.sourceContentHash,
-            correctionDisposition: correction.disposition,
-          })
-          .where(
-            and(
-              eq(knowledgeGraphRelations.id, correction.target.relationId),
-              eq(knowledgeGraphRelations.agentId, agentId),
-              eq(knowledgeGraphRelations.sourceMemoryId, correction.target.sourceMemoryId),
-              eq(knowledgeGraphRelations.reviewStatus, correction.target.reviewStatus),
-            ),
-          )
-          .returning({ id: knowledgeGraphRelations.id });
-        if (!retired.length) throw new Error('The relationship changed while being corrected.');
-        if (currentCorrection?.assertionId) {
-          await txDb
-            .update(knowledgeGraphAssertions)
-            .set({
-              reviewStatus: 'rejected',
-              reviewedRevision: sql`${knowledgeGraphAssertions.semanticRevision}`,
-              reviewedPayloadHash: sql`${knowledgeGraphAssertions.semanticKey}`,
-              updatedAt: new Date(),
-            })
-            .where(
-              and(
-                eq(knowledgeGraphAssertions.id, currentCorrection.assertionId),
-                eq(knowledgeGraphAssertions.agentId, agentId),
-              ),
-            );
-        }
-        if (correction.disposition === 'whole_fact') {
-          const updated = await txDb
-            .update(memories)
-            .set({ supersededById: memory.id, expiresAt: new Date() })
-            .where(
-              and(
-                eq(memories.id, correction.target.sourceMemoryId),
-                eq(memories.agentId, agentId),
-                eq(memories.contentHash, correction.target.sourceContentHash),
-                isNull(memories.supersededById),
-                isNull(memories.expiresAt),
-              ),
-            )
-            .returning({ id: memories.id });
-          if (!updated.length) throw new Error('The source changed while being corrected.');
-        }
-      }
-      return {
-        memoryId: memory.id,
-        relationId: relation?.id,
-        ...(correction ? { sourceDisposition: correction.disposition } : {}),
-      };
-    });
+          ...(editorReply ? { editorReply } : {}),
+          ...(correction ? { sourceDisposition: correction.disposition } : {}),
+        };
+      },
+      prepared?.editor ? { isolationLevel: 'serializable' } : undefined,
+    );
   } catch (err) {
     if (err instanceof OwnerFactDuplicate) {
       return { error: 'That source fact is already in the knowledge library.' };
@@ -2045,18 +2335,55 @@ export async function createOwnerKnowledgeGraphFact(
   }
 }
 
+/** Commit previously prepared source-backed input; caller performs no provider work here. */
+export function commitPreparedOwnerKnowledgeGraphFactPostgres(
+  db: Db,
+  prepared: import('@assistant/persistence').OwnerKnowledgeGraphFactAtomicInput,
+): Promise<OwnerGraphFactResult> {
+  const people = [prepared.subject, prepared.object].flatMap((endpoint) =>
+    endpoint.contactId
+      ? [{ id: endpoint.contactId, name: endpoint.label, aliases: [] as string[] }]
+      : [],
+  );
+  return writeOwnerKnowledgeGraphFactPostgres(
+    db,
+    {
+      agentId: prepared.agentId,
+      correction: prepared.correction,
+      contentHash: prepared.contentHash,
+      content: prepared.content,
+      embedding: prepared.embedding,
+      embeddingSpaceKey: prepared.embeddingSpaceKey,
+      subjectContact: people.find((person) => person.id === prepared.subjectContactId),
+      subjectRow: prepared.subject,
+      objectRow: prepared.object,
+      subject: { label: prepared.subject.label, kind: prepared.subject.kind },
+      object: { label: prepared.object.label, kind: prepared.object.kind },
+      subjectPeople: people.filter((person) => person.id === prepared.subject.contactId),
+      people,
+      context: { anchor: prepared.createdAt, timeZone: 'UTC', locale: 'en' },
+      predicate: prepared.predicate,
+    },
+    prepared,
+  );
+}
+
 /** Shared domain preparation for non-SQL owner graph stores. The repository owns
  * the final atomic memory/source/entity/relation transaction. */
-export async function createOwnerKnowledgeGraphFactWithRepository(
+export async function prepareOwnerKnowledgeGraphFactWithRepository(
   deps: {
     repository: OwnerKnowledgeGraphFactRepository;
     router: Pick<ModelRouter, 'embed' | 'embeddingSpace'>;
     agentId?: string;
+    context?: import('@assistant/persistence').OwnerKnowledgeGraphFactContext;
   },
   input: OwnerGraphFactInput,
   correction?: { target: OwnerGraphCorrectionTarget; disposition: OwnerGraphCorrectionDisposition },
-): Promise<OwnerGraphFactResult> {
-  const context = await deps.repository.context(deps.agentId);
+): Promise<
+  | { error: string }
+  | { prepared: import('@assistant/persistence').OwnerKnowledgeGraphFactAtomicInput }
+> {
+  const context = deps.context ?? (await deps.repository.context(deps.agentId));
   const anchor = new Date();
   const resolveEndpoint = async (
     endpoint: OwnerGraphFactInput['subject'],
@@ -2079,7 +2406,24 @@ export async function createOwnerKnowledgeGraphFactWithRepository(
   const subject = { ...subjectParsed.data, label: cleanLabel(subjectParsed.data.label) };
   const object = { ...objectParsed.data, label: cleanLabel(objectParsed.data.label) };
   if (!subject.label || !object.label) return { error: 'Entity names cannot be empty.' };
-  const content = ownerFactContent(subject.label, predicate, object.label, note);
+  if (
+    (input.validity || input.timing) &&
+    (!input.validity ||
+      !input.timing ||
+      !validOwnerFamilyMeaning({ timing: input.timing, validity: input.validity }))
+  )
+    return { error: 'Unsupported family validity.' };
+  const content =
+    input.validity && input.timing
+      ? presentOwnerFamilyFact({
+          subjectLabel: subject.label,
+          objectLabel: object.label,
+          predicate,
+          note,
+          validity: input.validity,
+          timing: input.timing,
+        })
+      : ownerFactContent(subject.label, predicate, object.label, note);
   const contentHash = createHash('sha256').update(content).digest('hex');
   for (const [endpoint, row] of [
     [subject, subjectRow],
@@ -2139,27 +2483,44 @@ export async function createOwnerKnowledgeGraphFactWithRepository(
         : `${entity.kind}:${normalized(entity.label)}`,
       contactId: contact?.id ?? null,
       authoritativeLabel: Boolean(contact),
-      ...(contact ? { matchedContactLabel: entity.label } : {}),
+      ...(contact && !input.subject.contactId && !input.object.contactId
+        ? { matchedContactLabel: entity.label }
+        : {}),
     };
   };
   const preparedSubject = prepareEntity(subject, subjectRow, subjectPeople);
-  const preparedObject = prepareEntity(object, objectRow, context.contacts);
+  const objectPeople = input.object.contactId
+    ? context.contacts.filter((contact) => contact.id === input.object.contactId)
+    : context.contacts;
+  const preparedObject = prepareEntity(object, objectRow, objectPeople);
   if (!preparedSubject || !preparedObject)
     return { error: 'One of those knowledge items could not be resolved.' };
-  return deps.repository.createAtomic({
-    agentId: context.agentId,
-    content,
-    contentHash,
-    embedding,
-    embeddingSpaceKey,
-    subject: preparedSubject,
-    predicate,
-    object: preparedObject,
-    subjectContactId,
-    createdAt: anchor,
-    extractionVersion: GRAPH_EXTRACTION_VERSION,
-    ...(correction ? { correction } : {}),
-  });
+  return {
+    prepared: {
+      agentId: context.agentId,
+      content,
+      contentHash,
+      embedding,
+      embeddingSpaceKey,
+      subject: preparedSubject,
+      predicate,
+      object: preparedObject,
+      subjectContactId,
+      createdAt: anchor,
+      extractionVersion: GRAPH_EXTRACTION_VERSION,
+      ...(input.validity ? { validity: input.validity, timing: input.timing } : {}),
+      ...(correction ? { correction } : {}),
+    },
+  };
+}
+
+export async function createOwnerKnowledgeGraphFactWithRepository(
+  deps: Parameters<typeof prepareOwnerKnowledgeGraphFactWithRepository>[0],
+  input: OwnerGraphFactInput,
+  correction?: { target: OwnerGraphCorrectionTarget; disposition: OwnerGraphCorrectionDisposition },
+): Promise<OwnerGraphFactResult> {
+  const prepared = await prepareOwnerKnowledgeGraphFactWithRepository(deps, input, correction);
+  return 'error' in prepared ? prepared : deps.repository.createAtomic(prepared.prepared);
 }
 
 /** Prepare and atomically apply a source-backed owner correction on a portable store. */

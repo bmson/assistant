@@ -9,9 +9,11 @@ import {
   type KnowledgeWorkspaceFocus,
   type KnowledgeWorkspaceReadRepository,
   type KnowledgeWorkspaceSnapshot,
+  type OwnerEditorTiming,
   type Records,
   snapshotEmbeddingSpace,
 } from '@assistant/persistence';
+import { predicateSpec } from '@assistant/persistence/predicate-vocabulary';
 import { type DocumentSnapshot, FieldPath, type Query } from '@google-cloud/firestore';
 import { graphSourceEligible } from './graph-source-eligibility.js';
 import { assertConfiguredOwner } from './knowledge-graph-read.js';
@@ -28,6 +30,27 @@ const ENTITY_LIMIT = 50_000;
 const RELATION_LIMIT = 50_000;
 const ASSERTION_LIMIT = 50_000;
 const ASSERTION_EVIDENCE_LIMIT = 100_000;
+
+function ownerFamilyTiming(
+  predicate: string,
+  subjectKind: string,
+  objectKind: string,
+  assertion: Records['knowledgeGraphRelations']['assertion'] | null | undefined,
+): OwnerEditorTiming | null {
+  if (
+    !assertion ||
+    predicateSpec(predicate)?.group !== 'family' ||
+    subjectKind !== 'person' ||
+    objectKind !== 'person' ||
+    assertion.polarity !== 'positive' ||
+    assertion.modality !== 'asserted' ||
+    (assertion.tense !== 'unspecified' &&
+      assertion.tense !== 'present' &&
+      assertion.tense !== 'past')
+  )
+    return null;
+  return assertion.tense;
+}
 /** Incident relations scanned per direction for one neighbourhood before failing explicitly. */
 const NEIGHBOR_SCAN_LIMIT = 5_000;
 const FOCUS_RELATION_LIMIT = 80;
@@ -377,11 +400,9 @@ async function eligibleRelations(input: {
     const page = ids.slice(offset, offset + GET_ALL_BATCH);
     const [docs, tombstones] = await Promise.all([
       store.db.getAll(...page.map((id) => store.doc('memories', id)), {
-        fieldMask: [
-          ...MEMORY_FIELDS,
-          'embedding',
-          ...(page.some((id) => legacyIds.has(id)) ? ['content'] : []),
-        ],
+        // The body is required for every candidate's hash proof, including
+        // current extraction versions. Broad metadata scans still omit it.
+        fieldMask: [...MEMORY_FIELDS, 'embedding', 'content'],
       }),
       store.db.getAll(
         ...page.map((id) => store.doc('memoryTombstones', memories.get(id)?.contentHash ?? id)),
@@ -720,6 +741,12 @@ export class FirestoreKnowledgeWorkspaceReadRepository implements KnowledgeWorks
             evidenceQuote: row.evidenceQuote,
             validFrom: row.validFrom,
             validUntil: row.validUntil,
+            assertionTiming: ownerFamilyTiming(
+              row.predicate,
+              subject.kind,
+              object.kind,
+              row.assertion,
+            ),
             assertionContext: (() => {
               const assertion = row.assertionId ? assertions.get(row.assertionId) : undefined;
               if (
@@ -843,6 +870,14 @@ export class FirestoreKnowledgeWorkspaceReadRepository implements KnowledgeWorks
                 subject: entityView(subject),
                 predicate: row.predicate,
                 object: entityView(object),
+                validFrom: row.validFrom,
+                validUntil: row.validUntil,
+                assertionTiming: ownerFamilyTiming(
+                  row.predicate,
+                  subject.kind,
+                  object.kind,
+                  row.assertion,
+                ),
                 reviewStatus: reviewStatus(row.reviewStatus),
                 inRecall: activeIds.has(row.id),
                 source: { memoryId: row.sourceMemoryId, content: sourceContent },

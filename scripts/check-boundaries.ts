@@ -64,7 +64,8 @@ for (const file of sourceFiles(path.join(repoRoot, 'apps/web'))) {
 const allowedWorkspaceDependencies: Record<string, readonly string[]> = {
   '@assistant/config': [],
   '@assistant/persistence': [],
-  '@assistant/firestore': ['@assistant/persistence'],
+  // Atomic owner-number reuse reads only the authoritative process-loaded config snapshot.
+  '@assistant/firestore': ['@assistant/config', '@assistant/persistence'],
   '@assistant/db': ['@assistant/config', '@assistant/persistence'],
   '@assistant/core': ['@assistant/config', '@assistant/db', '@assistant/persistence'],
   '@assistant/application': [

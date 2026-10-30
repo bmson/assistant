@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./skill-library": "./src/skill-library.ts",
+    "./owner-editor-maintenance": "./src/owner-editor-maintenance.ts",
     "./validation-admin": "./src/validation-admin.ts",
     "./workspace-migration": "./src/workspace-migration.ts"
   },
@@ -14,6 +15,7 @@
     "workspace-import-job": "tsx src/workspace-import-job-cli.ts"
   },
   "dependencies": {
+    "@assistant/config": "workspace:*",
     "@assistant/persistence": "workspace:*",
     "@google-cloud/firestore": "^9.3.1",
     "google-auth-library": "^10.9.1"

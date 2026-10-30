@@ -1,9 +1,10 @@
 'use client';
 
 import { Check, LoaderCircle } from 'lucide-react';
-import type { ReactNode, ToggleEvent } from 'react';
+import type { ComponentProps, ReactNode, ToggleEvent } from 'react';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useFormStatus } from 'react-dom';
+import { containModalBoundaryTab } from './modal-focus';
 import { btn, btnSm } from './ui';
 
 type BtnVariant = keyof typeof btn;
@@ -425,6 +426,11 @@ export function ConfirmButton({
  * and spaces the card inside it, a bottom sheet on a phone and centred from
  * `sm` up.
  */
+/** Native element shared by Modal; callers retain its native cancel/close/ref behavior. */
+export function NativeModalDialog(props: Omit<ComponentProps<'dialog'>, 'onKeyDown' | 'tabIndex'>) {
+  return <dialog {...props} tabIndex={-1} onKeyDown={containModalBoundaryTab} />;
+}
+
 export function Modal({
   label,
   onClose,
@@ -462,8 +468,7 @@ export function Modal({
   return (
     // The click is light dismiss, not an interactive element: the keyboard
     // equivalent is Escape, which the dialog already handles natively.
-    // biome-ignore lint/a11y/useKeyWithClickEvents: see above
-    <dialog
+    <NativeModalDialog
       ref={dialogRef}
       aria-label={label}
       onCancel={(event) => {
@@ -492,6 +497,6 @@ export function Modal({
       >
         {children}
       </div>
-    </dialog>
+    </NativeModalDialog>
   );
 }

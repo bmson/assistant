@@ -9,6 +9,8 @@ import {
   entityKindPaint,
   humanizeEntityLabel,
 } from '@/lib/knowledge';
+import { memoryPersonEditorHref } from '@/lib/memory-editor-context';
+import { memoryNoteHref } from '@/lib/memory-note-context';
 import { btnSm, focusRing } from '@/lib/ui';
 import { knowledgeConnections, layoutFocusRing, layoutKnowledgeMap } from './knowledge-map-model';
 import { MapFocusCanvas } from './map-focus-canvas';
@@ -135,6 +137,15 @@ export function KnowledgeMap({
       <h2 className="mt-1 break-words font-display text-2xl font-semibold text-strong">
         {humanizeEntityLabel(selected.label)}
       </h2>
+      {selected.kind === 'person' &&
+      memoryPersonEditorHref(selected.contactId, focusedHref(selected.id)) ? (
+        <a
+          className={`${btnSm.outline} mt-3 min-h-11 whitespace-normal`}
+          href={memoryPersonEditorHref(selected.contactId, focusedHref(selected.id)) ?? undefined}
+        >
+          Open {humanizeEntityLabel(selected.label)} in People to edit details and relationships
+        </a>
+      ) : null}
       <p className="mt-1 text-sm text-muted">
         {connections.length} {connections.length === 1 ? 'connection' : 'connections'} in this view
         · {new Set(selectedEdges.map((edge) => edge.sourceMemoryId)).size} saved source notes
@@ -203,6 +214,21 @@ export function KnowledgeMap({
                           source.sourceContent ||
                           'Source preview unavailable in this view.'}
                       </blockquote>
+                      {memoryNoteHref(source.sourceMemoryId, focusedHref(selected.id)) ? (
+                        <a
+                          className="mt-2 inline-block min-h-11 text-sm text-accent underline"
+                          href={
+                            memoryNoteHref(source.sourceMemoryId, focusedHref(selected.id)) ??
+                            undefined
+                          }
+                        >
+                          Review / edit saved note
+                        </a>
+                      ) : (
+                        <p className="mt-2 text-xs text-muted">
+                          This source note cannot be verified in this view.
+                        </p>
+                      )}
                       {source.evidenceQuote &&
                       source.sourceContent &&
                       source.evidenceQuote !== source.sourceContent ? (

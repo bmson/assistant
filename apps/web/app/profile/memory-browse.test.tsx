@@ -20,6 +20,9 @@ const mocks = vi.hoisted(() => ({
   fsFocus: vi.fn(),
   fsMap: vi.fn(),
   terminate: vi.fn(),
+  fsOwnerFence: vi.fn(),
+  fsPrivacyRead: vi.fn(),
+  fsPrivacyAssert: vi.fn(),
 }));
 vi.mock('@/auth', () => ({ requireOwner: mocks.owner }));
 vi.mock('@assistant/config', async (original) => ({
@@ -55,6 +58,9 @@ vi.mock('@/lib/server', () => ({ withPostgresMemoryBrowseRead: mocks.pgRead }));
 vi.mock('@assistant/firestore', async (original) => ({
   ...(await original<Record<string, unknown>>()),
   createInstallationStore: () => ({ db: { terminate: mocks.terminate } }),
+  assertFirestoreInstallationOwner: mocks.fsOwnerFence,
+  readPrivacyErasureFence: mocks.fsPrivacyRead,
+  assertPrivacyErasureFenceUnchanged: mocks.fsPrivacyAssert,
 }));
 vi.mock('@/lib/firestore-people', () => ({
   listFirestorePeopleDirectory: mocks.fsPeople,
@@ -90,6 +96,9 @@ const emptyLibrary = { rows: [], total: 0, page: 1, totalPages: 0 };
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.driver = 'postgres';
+  mocks.fsOwnerFence.mockResolvedValue('owner');
+  mocks.fsPrivacyRead.mockResolvedValue(null);
+  mocks.fsPrivacyAssert.mockResolvedValue(undefined);
   mocks.owner.mockResolvedValue({ user: { email: 'owner@example.test' } });
   mocks.pgRead.mockImplementation(async (read) => read({}));
   mocks.people.mockResolvedValue([]);
@@ -106,9 +115,11 @@ beforeEach(() => {
   mocks.fsLoad.mockResolvedValue({ focus: mocks.fsFocus, map: mocks.fsMap });
 });
 function noWrites(html: string) {
-  expect(html).not.toMatch(
-    /method="post"|Add connection|Save changes|Delete person|Cleanup<|Forget source|Add person/i,
-  );
+  expect(html).not.toMatch(/<form\b[^>]*\bmethod="post"/i);
+  const buttonLabels = [...html.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/gi)]
+    .map((match) => (match[1] ?? '').replace(/<[^>]*>/g, '').trim())
+    .join(' ');
+  expect(buttonLabels).not.toMatch(/Save changes|Delete person|Forget source|Add person/i);
 }
 describe('Memory browse server composition', () => {
   it('authenticates a static two-tile hub without reading omitted private panels', async () => {
@@ -177,9 +188,12 @@ describe('Memory browse server composition', () => {
       'NOT_FOUND',
     );
     expect(mocks.person).not.toHaveBeenCalled();
-    await expect(Person({ params: Promise.resolve({ id: personId }) })).rejects.toThrow(
-      'NOT_FOUND',
+    const missing = renderToStaticMarkup(
+      await Person({ params: Promise.resolve({ id: personId }) }),
     );
+    expect(missing).toContain('Person unavailable');
+    expect(missing).toContain('This person is no longer available in this view.');
+    expect(mocks.person).toHaveBeenCalledOnce();
     mocks.pgRead.mockRejectedValueOnce(new Error('erasure'));
     const html = renderToStaticMarkup(
       await Person({
@@ -200,7 +214,9 @@ describe('Memory browse server composition', () => {
         }),
       );
       noWrites(html);
-      expect(html).toContain('Editing and cleanup are unavailable');
+      expect(html).toContain('Cleanup is unavailable here');
+      expect(html).toContain('Open a saved note or person to review available edits');
+      expect(html).not.toContain('Browse only. Editing and cleanup are unavailable');
       expect(html).toContain('method="get"');
       expect(mocks.graph).not.toHaveBeenCalled();
       expect(mocks.map).not.toHaveBeenCalled();
@@ -458,11 +474,16 @@ it.each(firestoreFailureCases)(
 );
 
 function activeKnowledgeTab(html: string): string[] {
-  const nav = /<nav\b[^>]*aria-label="Knowledge views"[\s\S]*?<\/nav>/.exec(html)?.[0];
-  if (!nav) throw new Error('Expected actual knowledge-view tabs');
+  const nav = knowledgeViewNav(html);
   return [...nav.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/g)]
     .filter((match) => match[1]?.includes('aria-current="page"'))
     .map((match) => (match[2] ?? '').replace(/<[^>]*>/g, '').trim());
+}
+
+function knowledgeViewNav(html: string): string {
+  const nav = /<nav\b[^>]*aria-label="Knowledge views"[\s\S]*?<\/nav>/.exec(html)?.[0];
+  if (!nav) throw new Error('Expected actual knowledge-view tabs');
+  return nav;
 }
 
 it.each(['postgres', 'firestore'])(
@@ -510,7 +531,7 @@ it.each(['postgres', 'firestore'])(
     expect(libraryRead).not.toHaveBeenCalled();
     expect(mapInput()).toMatchObject({ entityId: selected.id, sourceMemoryId: source.id });
     const libraryHref = savedHref(
-      focused,
+      knowledgeViewNav(focused),
       (url) => url.pathname === '/profile/knowledge' && url.searchParams.get('view') === 'library',
     );
     const libraryURL = new URL(libraryHref, 'https://assistant.test');
@@ -531,7 +552,7 @@ it.each(['postgres', 'firestore'])(
     expect(library).toContain('Map source note filter retained (not applied to the Library)');
     expect(library).not.toContain('aria-label="Selected knowledge item"');
     const mapHref = savedHref(
-      library,
+      knowledgeViewNav(library),
       (url) => url.pathname === '/profile/knowledge' && url.searchParams.get('view') === 'map',
     );
     const mapURL = new URL(mapHref, 'https://assistant.test');
@@ -546,5 +567,45 @@ it.each(['postgres', 'firestore'])(
     noWrites(library);
     noWrites(restored);
     if (driver === 'firestore') expect(mocks.pgRead).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['postgres', 'firestore'])(
+  'composes compact Connections GET controls once without losing per-row review context (%s)',
+  async (driver) => {
+    mocks.driver = driver;
+    const data = createProductVisualData(false);
+    mocks.map.mockResolvedValue(data.map);
+    mocks.fsMap.mockResolvedValue(data.map);
+    const html = renderToStaticMarkup(
+      await Knowledge({
+        searchParams: Promise.resolve({
+          view: 'connections',
+          q: 'Alex',
+          kind: 'person',
+          family: 'family',
+          review: 'unreviewed',
+        }),
+      }),
+    );
+    expect(activeKnowledgeTab(html)).toEqual(['Connections list']);
+    const nav = /<nav[^>]*aria-label="Knowledge views"[\s\S]*?<\/nav>/.exec(html)?.[0] ?? '';
+    expect(nav).not.toContain('Library');
+    expect(nav).toContain('Map');
+    expect(html).toContain('aria-label="Memory"');
+    expect(html).toContain('Saved notes');
+    expect(html.match(/Add connection/g)).toHaveLength(1);
+    expect(html.match(/<form/g)).toHaveLength(1);
+    expect(html).toContain('Filters (3 active)');
+    expect(html.indexOf('Add connection')).toBeLessThan(html.indexOf('<details'));
+    expect(html).toContain('Open Alex to review');
+    expect(html).toContain('Editing and removal are unavailable from this list');
+    expect(html).toContain('returnTo=');
+    const read = driver === 'postgres' ? mocks.map : mocks.fsMap;
+    expect(read).toHaveBeenCalledTimes(1);
+    const input = driver === 'postgres' ? read.mock.lastCall?.[1] : read.mock.lastCall?.[0];
+    expect(input).toMatchObject({ query: 'Alex', kind: 'person', review: 'unreviewed' });
+    expect(input.predicates.length).toBeGreaterThan(0);
+    expect(html).not.toContain('method="post"');
   },
 );

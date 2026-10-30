@@ -12,8 +12,8 @@
       },
       "schema": {
         "postgres": {
-          "min": 129,
-          "max": 129
+          "min": 133,
+          "max": 133
         },
         "firestore": {
           "min": 1,
@@ -29,14 +29,21 @@
       },
       "schema": {
         "postgres": {
-          "min": 129,
-          "max": 129
+          "min": 132,
+          "max": 133
         },
         "firestore": {
           "min": 1,
           "max": 1
         }
-      }
+      },
+      "ownerEditorV1": [
+        "create_person",
+        "update_person_identity",
+        "add_family_relationship",
+        "correct_owner_family_relationship",
+        "correct_owner_memory"
+      ]
     },
     "browser": {
       "apiContract": 1,
@@ -47,7 +54,7 @@
       "schema": {
         "postgres": {
           "min": 0,
-          "max": 129
+          "max": 133
         },
         "firestore": {
           "min": 1,
@@ -64,7 +71,7 @@
       "schema": {
         "postgres": {
           "min": 0,
-          "max": 129
+          "max": 133
         },
         "firestore": {
           "min": 1,
@@ -81,7 +88,7 @@
       "schema": {
         "postgres": {
           "min": 0,
-          "max": 129
+          "max": 133
         },
         "firestore": {
           "min": 1,

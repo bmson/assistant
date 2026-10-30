@@ -1,0 +1,390 @@
+import { renderToStaticMarkup } from 'react-dom/server';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  OwnerEditorConflictReview,
+  OwnerEditorControls,
+  type OwnerEditorControlsProps,
+  OwnerEditorDraftCache,
+  OwnerEditorPeopleSelectors,
+  OwnerEditorRemovalActions,
+  OwnerEditorRemovalSummary,
+  OwnerEditorTimingHelp,
+  ownerEditorAliasesFromText,
+  ownerEditorAliasesToText,
+  ownerEditorConflictIntent,
+  selectCreatedFamilyPerson,
+} from './owner-editor-controls';
+
+vi.mock('next/navigation', () => ({ useRouter: () => ({ refresh: vi.fn() }) }));
+const contact = '22222222-2222-4222-8222-222222222222';
+const operation = '11111111-1111-4111-8111-111111111111';
+const createGrant = {
+  command: 'create_person' as const,
+  operationId: operation,
+  issuedOperationHandle: 'issued-test-handle',
+};
+const base: OwnerEditorControlsProps = {
+  session: {
+    ownerId: '33333333-3333-4333-8333-333333333333',
+    formSessionScope: 'owner-session-fixture',
+  },
+  createGrant,
+};
+describe('removal dialog actions distinguish close from cancellation', () => {
+  const noop = () => {};
+  it('offers Cancel and one destructive submit only before dispatch', () => {
+    const html = renderToStaticMarkup(
+      <OwnerEditorRemovalActions
+        phase="ready"
+        busy={false}
+        finished={false}
+        hasGrant={true}
+        person={false}
+        onClose={noop}
+        onSubmit={noop}
+        onCheck={noop}
+      />,
+    );
+    expect(html).toContain('>Cancel</button>');
+    expect(html).toContain('>Remove connection</button>');
+    expect(html).not.toContain('>Close</button>');
+  });
+  it.each(['pending', 'resolved', 'blocked', 'checking'] as const)(
+    'uses Close without destructive repeat for %s',
+    (phase) => {
+      const html = renderToStaticMarkup(
+        <OwnerEditorRemovalActions
+          phase={phase}
+          busy={false}
+          finished={false}
+          hasGrant={true}
+          person={true}
+          onClose={noop}
+          onSubmit={noop}
+          onCheck={noop}
+        />,
+      );
+      expect(html).toContain('>Close</button>');
+      expect(html).not.toContain('Cancel');
+      expect(html).not.toContain('Delete person');
+      expect(html).not.toContain('type="submit"');
+      if (phase === 'pending') {
+        expect(html).toContain('>Check result</button>');
+        expect(html).toContain('bg-accent');
+      } else expect(html).not.toContain('Check result');
+    },
+  );
+  it('keeps Close after a completed removal even when fresh grants become ready', () => {
+    const html = renderToStaticMarkup(
+      <OwnerEditorRemovalActions
+        phase="ready"
+        busy={false}
+        finished={true}
+        hasGrant={true}
+        person={true}
+        onClose={noop}
+        onSubmit={noop}
+        onCheck={noop}
+      />,
+    );
+    expect(html).toContain('>Close</button>');
+    expect(html).not.toContain('Cancel');
+    expect(html).not.toContain('type="submit"');
+  });
+});
+it('distinguishes the exact person deletion impact from removing one retained-source connection', () => {
+  const impact = {
+    contactId: contact,
+    revision: 'a'.repeat(64),
+    facts: 2,
+    occasions: 3,
+    connections: 4,
+    retainedSourceNotes: 5,
+    entityLinks: 1,
+    sourceLinks: 1,
+  };
+  const person = renderToStaticMarkup(<OwnerEditorRemovalSummary name="Sam" impact={impact} />);
+  expect(person).toContain('2 saved facts');
+  expect(person).toContain('3 saved dates');
+  expect(person).toContain('4 recorded connections');
+  expect(person).toContain('5 other saved source notes stay saved');
+  const connection = renderToStaticMarkup(
+    <OwnerEditorRemovalSummary sentence="Sam is Alex’s parent." />,
+  );
+  expect(connection).toContain('Sam is Alex');
+  expect(connection).toContain('This marks this recorded connection as rejected.');
+  expect(connection).toContain('Both people and the saved source note stay saved');
+  expect(connection).toContain('Other supported connections may remain.');
+  expect(connection).toContain('This does not record that the relationship ended.');
+  expect(connection).not.toContain('saved person details');
+});
+describe('actual owner editor controls server boundary (not mounted browser proof)', () => {
+  it('exports create/identity/family controls only for supplied server snapshots and keeps initial saves locked', () => {
+    const html = renderToStaticMarkup(
+      <OwnerEditorControls
+        {...base}
+        identity={{
+          contactId: contact,
+          name: 'Sam',
+          aliases: [],
+          revision: 'a'.repeat(64),
+          grant: { ...createGrant, command: 'update_person_identity' },
+        }}
+        family={{
+          anchorContactId: contact,
+          people: [{ contactId: contact, name: 'Sam', revision: 'a'.repeat(64) }],
+          expectedCanonicalState: { kind: 'absent' },
+          grant: { ...createGrant, command: 'add_family_relationship' },
+        }}
+      />,
+    );
+    expect(html).toContain('Add person');
+    expect(html).toContain('Edit name and aliases');
+    expect(html).toContain('Add family relationship');
+    expect((html.match(/disabled=""/g) ?? []).length).toBe(3);
+    expect(html).not.toContain('issued-test-handle'); // Not a hidden writable action/form ID.
+    expect(html).not.toContain('updateContactRelationship');
+  });
+  it('does not invent a grant, implicit entity endpoint, or correction when server supplied none', () => {
+    const html = renderToStaticMarkup(
+      <OwnerEditorControls session={base.session} createGrant={null} />,
+    );
+    expect(html).not.toContain('Add person');
+    expect(html).not.toContain('Correct');
+    expect(html).not.toContain('<form');
+  });
+});
+
+describe('actual selector and memory-only draft lifecycle regressions', () => {
+  const other = '44444444-4444-4444-8444-444444444444';
+  it('returns a newly created person to the free endpoint without replacing the page anchor', () => {
+    const created = '55555555-5555-4555-8555-555555555555';
+    for (const swapped of [false, true]) {
+      const draft = {
+        subject: swapped ? '' : contact,
+        object: swapped ? contact : '',
+        predicate: 'parent_of',
+        note: 'Keep my draft',
+      };
+      const selected = selectCreatedFamilyPerson(draft, contact, created);
+      expect(selected.subject).toBe(swapped ? created : contact);
+      expect(selected.object).toBe(swapped ? contact : created);
+      expect(selected.predicate).toBe('parent_of');
+      expect(selected.note).toBe('Keep my draft');
+    }
+  });
+  it('locks only the explicit anchor and excludes the opposite endpoint after direction swap', () => {
+    const people = [
+      { contactId: contact, name: 'Sam', revision: 'a'.repeat(64) },
+      { contactId: other, name: 'Alex', revision: 'b'.repeat(64) },
+    ];
+    for (const swapped of [false, true]) {
+      const html = renderToStaticMarkup(
+        <OwnerEditorPeopleSelectors
+          idPrefix="pair"
+          draft={{ subject: swapped ? other : contact, object: swapped ? contact : other }}
+          people={people}
+          anchorPosition={swapped ? 'object' : 'subject'}
+          onChange={() => {}}
+        />,
+      );
+      const selects = html.match(/<select[\s\S]*?<\/select>/g) ?? [];
+      expect(selects.filter((s) => s.includes('disabled=""'))).toHaveLength(1);
+      expect(selects[swapped ? 0 : 1]).not.toContain(`value="${contact}"`);
+      expect(selects[swapped ? 0 : 1]).toContain('Choose an existing named person');
+      expect(selects[swapped ? 0 : 1]).not.toContain('Sam · 22222222');
+    }
+  });
+  it('uses names by default and only adds an ID prefix to disambiguate duplicate names', () => {
+    const html = renderToStaticMarkup(
+      <OwnerEditorPeopleSelectors
+        idPrefix="pair"
+        draft={{ subject: '', object: '' }}
+        people={[
+          { contactId: contact, name: 'Sam', revision: 'a'.repeat(64) },
+          { contactId: other, name: 'Sam', revision: 'b'.repeat(64) },
+          {
+            contactId: '55555555-5555-4555-8555-555555555555',
+            name: 'Alex',
+            revision: 'c'.repeat(64),
+          },
+        ]}
+        onChange={() => {}}
+      />,
+    );
+    expect(html).toContain('Sam · 22222222');
+    expect(html).toContain('Sam · 44444444');
+    expect(html).toContain('>Alex</option>');
+    expect(html).not.toContain('Alex · 55555555');
+  });
+  it('shows latest ALL aliases separately from intended aliases before explicit review', () => {
+    const html = renderToStaticMarkup(
+      <OwnerEditorConflictReview
+        latestIdentity={{ name: 'New saved name', aliases: ['Old name', 'Another alias'] }}
+        intendedIdentity={{ name: 'My intended name', aliases: 'My alias' }}
+        relationships={[]}
+        missing={false}
+        canReview={true}
+        onReview={() => {}}
+      />,
+    );
+    for (const text of [
+      'Latest',
+      'Your draft',
+      'New saved name',
+      'Old name, Another alias',
+      'My intended name',
+      'My alias',
+      'I reviewed the latest values — keep my draft for editing',
+    ])
+      expect(html).toContain(text);
+    expect(html).toContain('aria-label="Review changed saved details"');
+  });
+  it('successful identity clears only completed draft; next open includes backend retained old-name alias', () => {
+    const cache = new OwnerEditorDraftCache();
+    cache.setIdentity({ name: 'Intended', aliases: 'Local' });
+    const family = {
+      subject: contact,
+      object: other,
+      predicate: 'parent_of',
+      timing: 'past' as const,
+      from: '',
+      until: '',
+      note: 'private intent',
+    };
+    cache.setFamily('family', family);
+    cache.setFamily('correction:one', family);
+    const reply = {
+      version: 1 as const,
+      authority: 'operation_receipt' as const,
+      command: 'update_person_identity' as const,
+      operationId: operation,
+      requestHash: 'a'.repeat(64),
+      statusVersion: 2,
+      outcome: 'saved' as const,
+      ids: { contactId: contact },
+      revision: 'b'.repeat(64),
+    };
+    expect(cache.complete(reply, null)).toBe('update_person_identity');
+    expect(cache.identity({ name: 'Saved', aliases: 'Local, Previous saved name' })).toEqual({
+      name: 'Saved',
+      aliases: 'Local, Previous saved name',
+    });
+    expect(cache.family('family')).toEqual(family);
+    expect(cache.family('correction:one')).toEqual(family);
+    cache.setIdentity({ name: 'New intent', aliases: 'Preserved' });
+    cache.complete({ ...reply, outcome: 'conflict', reason: 'contact_changed' }, contact);
+    expect(cache.identity({ name: 'Latest', aliases: 'Different' }).name).toBe('New intent');
+    cache.complete({ ...reply, command: 'correct_owner_family_relationship' }, 'one');
+    expect(cache.family('correction:one')).toBeUndefined();
+    expect(cache.family('family')).toEqual(family);
+  });
+});
+
+it('missing correction has no draft comparison and offers no review adoption', () => {
+  const html = renderToStaticMarkup(
+    <OwnerEditorConflictReview
+      relationships={[]}
+      missing={true}
+      canReview={false}
+      onReview={() => {
+        throw Error('No target may be adopted');
+      }}
+    />,
+  );
+  expect(html).toContain('No draft is available to compare.');
+  expect(html).toContain('This relationship is no longer editable here.');
+  expect(html).toContain('No different relationship will be substituted.');
+  expect(html).not.toContain('Your intended edit stays');
+  expect(html).not.toContain('I reviewed the latest saved values');
+  expect(html).not.toContain('<button');
+});
+
+it('actual caller intent helper distinguishes missing family draft from placeholder and live create intent', () => {
+  const input = {
+    command: 'add_family_relationship' as const,
+    identityDraft: null,
+    createDraft: null,
+    familyDraft: null,
+    familyPreview: 'Choose two named people and a relationship to preview the statement.',
+  };
+  const absent = ownerEditorConflictIntent(input);
+  expect(absent.intendedFamily).toBeUndefined();
+  const html = renderToStaticMarkup(
+    <OwnerEditorConflictReview
+      {...absent}
+      relationships={[]}
+      missing={false}
+      canReview={true}
+      onReview={() => {}}
+    />,
+  );
+  expect(html).toContain('No draft is available to compare.');
+  expect(html).toContain('start a new edit');
+  expect(html).not.toContain('keep my draft');
+  expect(html).not.toContain(input.familyPreview);
+  const live = ownerEditorConflictIntent({
+    ...input,
+    command: 'create_person',
+    createDraft: { name: 'Private intended name', aliases: 'Sam, Jr.' },
+  });
+  const liveHTML = renderToStaticMarkup(
+    <OwnerEditorConflictReview
+      {...live}
+      relationships={[]}
+      missing={false}
+      canReview={true}
+      onReview={() => {}}
+    />,
+  );
+  expect(liveHTML).toContain('Private intended name');
+  expect(liveHTML).toContain('Sam, Jr.');
+  expect(liveHTML).toContain('keep my draft');
+  expect(liveHTML).not.toContain('No draft is available');
+});
+
+it('renders timing help that matches the stored timing and separate date contract', () => {
+  const html = renderToStaticMarkup(<OwnerEditorTimingHelp />);
+  expect(html).toContain(
+    'Choose how this relationship is described. This choice is separate from the dates below.',
+  );
+});
+it('actual alias codec preserves commas on name-only edit and freshly reopened backend aliases', () => {
+  const saved = ['Sam, Jr.', 'Another alias'];
+  expect(ownerEditorAliasesFromText(ownerEditorAliasesToText(saved))).toEqual(saved);
+  expect(ownerEditorAliasesFromText('Sam, Jr.\r\n Another alias \r\n')).toEqual(saved);
+  const cache = new OwnerEditorDraftCache();
+  cache.setIdentity({ name: 'Intended rename', aliases: ownerEditorAliasesToText(saved) });
+  cache.complete(
+    {
+      version: 1,
+      authority: 'operation_receipt',
+      command: 'update_person_identity',
+      operationId: operation,
+      requestHash: 'a'.repeat(64),
+      statusVersion: 2,
+      outcome: 'saved',
+      ids: { contactId: contact },
+      revision: 'b'.repeat(64),
+    },
+    contact,
+  );
+  const fresh = cache.identity({
+    name: 'Saved rename',
+    aliases: ownerEditorAliasesToText([...saved, 'Previous, Name']),
+  });
+  expect(ownerEditorAliasesFromText(fresh.aliases)).toEqual([...saved, 'Previous, Name']);
+});
+
+it('describes rejecting a recorded claim without implying an end date or a visual-only hide', () => {
+  // Source audit: bounded PG and Firestore removal adapters mark the selected
+  // assertion+relation rejected; neither writes validity or removes source/people.
+  // This actual component assertion checks that UI meaning, not adapter execution.
+  const html = renderToStaticMarkup(<OwnerEditorRemovalSummary sentence="Sam is Alex’s parent." />);
+  expect(html).not.toContain('from the connections view');
+  expect(html).not.toMatch(
+    /merely hidden|only hidden|ends this relationship|no longer true|end date/i,
+  );
+  expect(html).toContain('rejected');
+  expect(html).toContain('does not record that the relationship ended');
+});

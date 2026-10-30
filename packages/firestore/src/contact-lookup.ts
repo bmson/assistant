@@ -104,6 +104,7 @@ export function stageNewContact(
     createdAt: input.now,
     updatedAt: input.now,
     trust: 'unknown',
+    identityAuthority: 'inferred',
     aliases: [],
     emails: [],
     phones: [],

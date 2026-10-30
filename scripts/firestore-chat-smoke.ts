@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { loadConfig } from '@assistant/config';
 import { type ExecutorDeps, executeTask, type ModelRouter } from '@assistant/core';
 import { fuseOwnerContext } from '@assistant/core/memory/fused-owner-context';
@@ -532,11 +532,12 @@ export async function firestoreChatSmoke(
       recallSurfaceKey('chat:summary_with_excerpt', [historyMessageId]),
       recallSurfaceKey('knowledge_graph', [relationId]),
     ].sort();
+    const memoryContentHash = createHash('sha256').update(SMOKE_GRAPH_EVIDENCE).digest('hex');
     await new FirestoreMemoryRepository(store, CHAT_SMOKE_SPACE).save({
       id: memoryId,
       agentId,
       content: SMOKE_GRAPH_EVIDENCE,
-      contentHash: `synthetic-${memoryId}`,
+      contentHash: memoryContentHash,
       createdAt: historyAt,
       expiresAt: null,
       embedding,
@@ -569,7 +570,7 @@ export async function firestoreChatSmoke(
     await store.doc('knowledgeGraphSources', memoryId).set({
       memoryId,
       status: 'ready',
-      contentHash: `synthetic-${memoryId}`,
+      contentHash: memoryContentHash,
       extractionVersion: GRAPH_EXTRACTION_VERSION,
     });
     await store.doc('knowledgeGraphRelations', relationId).set({

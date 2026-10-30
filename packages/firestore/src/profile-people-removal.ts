@@ -210,6 +210,7 @@ export class FirestoreProfilePeopleRemovalRepository implements ProfilePeopleRem
           phones: [...new Set([...target.phones, ...source.phones])],
           relationship: target.relationship || source.relationship,
           notes: [target.notes, source.notes].filter(Boolean).join('\n'),
+          identityAuthority: 'owner',
           updatedAt: now,
         }),
       );

@@ -57,16 +57,16 @@ if a[:3]==['run','services','describe']:
  if 'value(status.url)' in ' '.join(a): print(f'https://{name}.example'); sys.exit(0)
 if a[:3]==['run','revisions','describe']:
  revision=a[3]
- if os.getenv('FAIL_RESUME_DRAIN')=='1' and revision=='assistant-web-new2': sys.exit(1)
+ if os.getenv('FAIL_RESUME_DRAIN')=='1' and revision=='assistant-web-new2' and not any(x.get('revision')==revision for x in s['assistant-web'].get('staged',[])): sys.exit(1)
  for name,svc in s.items():
   if not isinstance(svc,dict): continue
   if svc.setdefault('revision',None) and svc.get('revision') not in svc.setdefault('revisions',{}):
    svc['revisions'][svc['revision']]={'env':dict(svc.get('env',{}))}; save()
   if revision in svc['revisions']:
    env=svc['revisions'][revision].get('env',{})
-   spec={'containers':[{'env':[{'name':k,'value':v} for k,v in env.items()]}]}
+   spec={'containers':[{'image':svc['revisions'][revision].get('image','legacy-image'),'env':[{'name':k,'value':v} for k,v in env.items()]}]}
    if os.getenv('STUB_WEB_TIMEOUT_MISSING')!='1': spec['timeoutSeconds']=int(os.getenv('STUB_WEB_TIMEOUT_SECONDS','300'))
-   print(json.dumps({'spec':spec})); sys.exit(0)
+   print(json.dumps({'metadata':{'name':revision},'spec':spec})); sys.exit(0)
   for stage in svc.get('staged',[]):
    if revision==stage['revision']:
     env=stage.get('env',{})
@@ -84,7 +84,9 @@ if a[:3]==['run','services','update']:
  for item in val('--update-env-vars').split(','):
   if '=' in item:
    k,v=item.split('=',1); svc['env'][k]=v
- svc.setdefault('staged',[]).append({'revision':rev,'tag':val('--tag'),'image':val('--image'),'env':dict(svc['env'])}); svc.setdefault('revisions',{})[rev]={'env':dict(svc['env'])}; save(); sys.exit(0)
+ svc.setdefault('staged',[]).append({'revision':rev,'tag':val('--tag'),'image':val('--image'),'env':dict(svc['env'])}); svc.setdefault('revisions',{})[rev]={'env':dict(svc['env']),'image':val('--image')}; save()
+ if name=='assistant-web' and svc['env'].get('ASSISTANT_RELEASE_WRITES_PAUSED')=='false' and os.getenv('FAIL_RESUME_STAGE_UNCERTAIN')=='1': sys.exit(1)
+ sys.exit(0)
 if a[:3]==['run','services','update-traffic']:
  name=a[3]; mapping=val('--to-revisions'); svc=s[name]
  if '--remove-tags' in a:
@@ -97,6 +99,9 @@ if a[:3]==['run','services','update-traffic']:
  if name=='assistant-agent' and os.getenv('FAIL_AGENT_PROMOTE')=='1' and 'agent-new' in mapping: sys.exit(1)
  if name=='assistant-web' and os.getenv('FAIL_WEB_PROMOTE')=='1' and 'web-new' in mapping: sys.exit(1)
  if name=='assistant-web' and os.getenv('FAIL_REPAUSE')=='1' and 'assistant-web-new1=100' in mapping and 'assistant-web-new2' in svc.get('traffic',{}): sys.exit(1)
+ if name=='assistant-web' and mapping=='assistant-web-new1=100' and 'assistant-web-new2' in svc.get('traffic',{}) and os.getenv('REASSIGN_RESUME_TAG_ON_REPAUSE')=='1':
+  for stage in svc.get('staged',[]):
+   if stage['tag'].startswith('resume-'): stage['revision']='foreign-revision'
  svc['traffic']={}
  for item in mapping.split(','):
   r,pct=item.split('=',1); svc['traffic'][r]=int(pct)
@@ -158,7 +163,7 @@ JSON
     CANDIDATE_WEB_PROBE_FAIL FINAL_NEW_PAIR_PROBE_FAIL RESUME_WEB_PROBE_FAIL RESUME_LIVE_PROBE_FAIL \
     FAIL_AGENT_PROMOTE FAIL_WEB_PROMOTE FAIL_REPAUSE FAIL_RESUME_DRAIN STUB_WEB_TIMEOUT_SECONDS STUB_WEB_TIMEOUT_MISSING \
     FAIL_WORKER_UPDATE STALE_WORKER_IMAGE FAIL_TAG_REMOVAL MUTATE_TRAFFIC_AFTER_TAG_REMOVAL \
-    ADD_FOREIGN_TAG_TO_PROMOTED_REVISION
+    ADD_FOREIGN_TAG_TO_PROMOTED_REVISION FAIL_RESUME_STAGE_UNCERTAIN REASSIGN_RESUME_TAG_ON_REPAUSE
  : >"$STUB_CURL_CALLS"
  : >"$STUB_RELEASE_CALLS"
  : >"$STUB_SERVICE_UPDATE_CALLS"
@@ -437,36 +442,75 @@ assert own_candidate in agent_tags, agent_tags
 drains=[int(line.strip()) for line in open(sys.argv[3])]
 assert drains and all(0<=x<=30 for x in drains) and sum(drains)==310, drains
 PY
-reset_case; prepare_firestore_state; export RESUME_WEB_PROBE_FAIL=1
-if release_staged_services; then fail 'unpaused tagged revision failure must roll back without moving traffic to it'; fi
+# Before any unpaused tagged revision exists, old-pair rollback still applies.
+reset_case; prepare_firestore_state; export RELEASE_MODULES=browser FINAL_NEW_PAIR_PROBE_FAIL=1
+if release_staged_services; then fail 'paused preadmission probe failure must roll back'; fi
 assert_old_traffic
-python3 - "$STUB_RELEASE_CALLS" "$STUB_SERVICE_UPDATE_CALLS" "$TEST_ROOT/state.json" <<'PY'
+python3 - "$TEST_ROOT/state.json" "$STUB_SERVICE_UPDATE_CALLS" <<'PYCASE'
 import json,sys
-calls=open(sys.argv[1]).read().splitlines()
+state=json.load(open(sys.argv[1])); updates=[json.loads(x) for x in open(sys.argv[2])]
+assert state['assistant-browser']['image']=='registry/old-browser', state
+assert not any('ASSISTANT_RELEASE_WRITES_PAUSED=false' in x[x.index('--update-env-vars')+1] for x in updates), updates
+PYCASE
+
+assert_basic5_retained() { python3 - "$TEST_ROOT/state.json" "$STUB_RELEASE_CALLS" <<'PYCASE'
+import json,sys
+state=json.load(open(sys.argv[1])); calls=open(sys.argv[2]).read().splitlines()
+assert state['assistant-agent']['traffic']=={'assistant-agent-new1':100}, state
+assert state['assistant-web']['traffic']=={'assistant-web-new1':100}, state
+assert state['assistant-browser']['image']!='registry/old-browser', state
+assert not any('agent-old=100' in x or 'web-old=100' in x for x in calls), calls
+PYCASE
+}
+reset_case; prepare_firestore_state; export RELEASE_MODULES=browser RESUME_WEB_PROBE_FAIL=1
+if release_staged_services; then fail 'unpaused tagged probe failure must retain current pair even before traffic promotion'; fi
+assert_basic5_retained
+python3 - "$STUB_RELEASE_CALLS" "$TEST_ROOT/state.json" <<'PYCASE'
+import json,sys
+calls=open(sys.argv[1]).read().splitlines(); state=json.load(open(sys.argv[2]))
 assert not any('assistant-web-new2=100' in x for x in calls), calls
-assert not any('--remove-tags' in x for x in calls), calls
-agent_rollback=next(i for i,x in enumerate(calls) if 'update-traffic assistant-agent ' in x and 'agent-old=100' in x)
-web_rollback=next(i for i,x in enumerate(calls) if 'update-traffic assistant-web ' in x and 'web-old=100' in x)
-assert agent_rollback<web_rollback, calls
-updates=[json.loads(line) for line in open(sys.argv[2])]
-own_candidate=next(x[x.index('--tag')+1] for x in updates if x[3]=='assistant-web')
-state=json.load(open(sys.argv[3]))
-assert own_candidate in {x['tag'] for x in state['assistant-web'].get('staged',[])}, state
-PY
-reset_case; prepare_firestore_state; export RESUME_LIVE_PROBE_FAIL=1
-if release_staged_services; then fail 'live unpaused probe failure must repause before rolling the agent back'; fi
-assert_old_traffic
-python3 - "$STUB_RELEASE_CALLS" "$STUB_DRAIN_CALLS" <<'PY'
+assert any('--remove-tags resume-' in x for x in calls), calls
+assert not any(x['tag'].startswith('resume-') for x in state['assistant-web']['staged']), state
+assert any(x['tag'].startswith('candidate-') for x in state['assistant-web']['staged']), state
+PYCASE
+reset_case; prepare_firestore_state; export RELEASE_MODULES=browser RESUME_LIVE_PROBE_FAIL=1
+if release_staged_services; then fail 'postadmission failure must repause and retain marker-aware runtimes'; fi
+assert_basic5_retained
+python3 - "$STUB_RELEASE_CALLS" "$STUB_DRAIN_CALLS" <<'PYCASE'
 import sys
 calls=open(sys.argv[1]).read().splitlines()
-resume=next(i for i,x in enumerate(calls) if 'update-traffic assistant-web ' in x and 'assistant-web-new2=100' in x)
-repause=next(i for i,x in enumerate(calls) if 'update-traffic assistant-web ' in x and 'assistant-web-new1=100' in x and i>resume)
-agent=next(i for i,x in enumerate(calls) if 'update-traffic assistant-agent ' in x and 'agent-old=100' in x)
-web=next(i for i,x in enumerate(calls) if 'update-traffic assistant-web ' in x and 'web-old=100' in x)
-assert resume<repause<agent<web, calls
-drains=[int(x.strip()) for x in open(sys.argv[2])]
-assert sum(drains)==620 and all(0<=x<=30 for x in drains), drains
-PY
+resume=next(i for i,x in enumerate(calls) if 'assistant-web-new2=100' in x)
+repause=next(i for i,x in enumerate(calls) if 'assistant-web-new1=100' in x and i>resume)
+retire=next(i for i,x in enumerate(calls) if '--remove-tags resume-' in x)
+assert resume<repause<retire, calls
+assert sum(int(x) for x in open(sys.argv[2]))==620
+PYCASE
+reset_case; prepare_firestore_state; export RELEASE_MODULES=browser FAIL_RESUME_STAGE_UNCERTAIN=1
+if release_staged_services; then fail 'uncertain unpaused revision create must not restore old runtimes'; fi
+assert_basic5_retained
+python3 - "$STUB_RELEASE_CALLS" <<'PYCASE'
+import sys
+calls=open(sys.argv[1]).read().splitlines()
+assert not any('--remove-tags' in x for x in calls), calls
+PYCASE
+reset_case; prepare_firestore_state; export RELEASE_MODULES=browser RESUME_LIVE_PROBE_FAIL=1 REASSIGN_RESUME_TAG_ON_REPAUSE=1
+if release_staged_services; then fail 'reassigned tag must stop recovery without deletion or old rollback'; fi
+assert_basic5_retained
+python3 - "$STUB_RELEASE_CALLS" "$TEST_ROOT/state.json" <<'PYCASE'
+import json,sys
+calls=open(sys.argv[1]).read().splitlines(); state=json.load(open(sys.argv[2]))
+assert not any('--remove-tags' in x for x in calls), calls
+assert any(x['revision']=='foreign-revision' for x in state['assistant-web']['staged']), state
+PYCASE
+reset_case; prepare_firestore_state; export RELEASE_MODULES=browser RESUME_LIVE_PROBE_FAIL=1 FAIL_TAG_REMOVAL=1
+if release_staged_services; then fail 'failed owned-tag retirement must retain new paused pair'; fi
+assert_basic5_retained
+
+# Source without BASIC5 keeps its existing rollback policy; no operator opt-out exists.
+reset_case; prepare_firestore_state; export RESUME_LIVE_PROBE_FAIL=1
+if (release_basic_editor_forward_only() { printf false; }; release_staged_services); then fail 'legacy failure must still return failure'; fi
+assert_old_traffic
+
 reset_case; prepare_firestore_state; export RELEASE_MODULES=browser RESUME_LIVE_PROBE_FAIL=1 FAIL_REPAUSE=1
 if release_staged_services; then fail 'failed repause must stop automatic rollback'; fi
 python3 - "$TEST_ROOT/state.json" "$STUB_RELEASE_CALLS" <<'PY'
@@ -557,4 +601,23 @@ export TAG=abc123
  unset GITHUB_RUN_ID GITHUB_RUN_ATTEMPT
  [[ "$(release_traffic_tag_suffix)" =~ ^[0-9a-f]{20}$ ]] || fail 'local aliases must fit the same budget'
 )
+# Intrinsic capability is validated from source, including a legacy-absent case.
+CAP_FIXTURE_ROOT="$TEST_ROOT/capability"
+mkdir -p "$CAP_FIXTURE_ROOT/infra/gcp" "$CAP_FIXTURE_ROOT/apps/web/lib"
+cp "$ROOT/release-staged-services.sh" "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh"
+cp "$ROOT/release-contracts.json" "$CAP_FIXTURE_ROOT/infra/gcp/release-contracts.json"
+: >"$CAP_FIXTURE_ROOT/apps/web/lib/owner-editor-runtime.ts"
+[[ "$(bash -c 'source "$1"; release_basic_editor_forward_only' -- "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh")" == true ]] || fail 'intrinsic five-command source capability not detected'
+python3 - "$CAP_FIXTURE_ROOT/infra/gcp/release-contracts.json" <<'PYCASE'
+import json,sys
+p=sys.argv[1]; c=json.load(open(p)); c['components']['web']['ownerEditorV1'].append('remove_person'); open(p,'w').write(json.dumps(c))
+PYCASE
+if bash -c 'source "$1"; release_basic_editor_forward_only' -- "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh"; then fail 'broadened capability must fail closed'; fi
+python3 - "$CAP_FIXTURE_ROOT/infra/gcp/release-contracts.json" <<'PYCASE'
+import json,sys
+p=sys.argv[1]; c=json.load(open(p)); del c['components']['web']['ownerEditorV1']; open(p,'w').write(json.dumps(c))
+PYCASE
+if bash -c 'source "$1"; release_basic_editor_forward_only' -- "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh"; then fail 'runtime without capability must fail closed'; fi
+rm "$CAP_FIXTURE_ROOT/apps/web/lib/owner-editor-runtime.ts"
+[[ "$(bash -c 'source "$1"; release_basic_editor_forward_only' -- "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh")" == false ]] || fail 'older source without runtime/capability must remain legacy'
 echo 'staged release protocol tests passed'

@@ -17,11 +17,28 @@ function fixture(occasionCounts: number[], edgeCount = 0) {
   const person = {
     id: 'person',
     name: 'Person',
+    identityAuthority: 'inferred',
     trust: 'known',
     relationship: 'friend',
     aliases: [],
     emails: [],
     phones: [],
+    notes: '',
+    createdAt: new Date('2026-10-26T12:00:00.000Z'),
+    updatedAt: new Date('2026-10-26T12:00:00.000Z'),
+  };
+  const nativePerson = {
+    id: 'person',
+    name: 'Person',
+    identity_authority: 'inferred',
+    trust: 'known',
+    relationship: 'friend',
+    aliases: [],
+    emails: [],
+    phones: [],
+    notes: '',
+    created_at: '2026-10-26T12:00:00.000Z',
+    updated_at: '2026-10-26T12:00:00.000Z',
   };
   const db = {
     select(fields?: Record<string, unknown>) {
@@ -53,7 +70,8 @@ function fixture(occasionCounts: number[], edgeCount = 0) {
         then(resolve: (value: unknown[]) => unknown, reject: (reason: unknown) => unknown) {
           try {
             let rows: unknown[] = [];
-            if (call.table === contacts) rows = [person];
+            if (call.table === contacts)
+              rows = fields?.contact ? [{ contact: person, native: nativePerson }] : [person];
             if (call.table === memories && fields?.value) rows = [{ value: 0 }];
             if (call.table === occasions)
               rows = Array.from({ length: occasionCounts[occasionRead++] ?? 0 }, (_, i) => ({
