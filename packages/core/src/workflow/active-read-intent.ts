@@ -141,6 +141,9 @@ const EXPLICIT_PUBLIC =
   /\b(?:public\s+(?:events?|activities)|city\s+events?|things?\s+to\s+do|(?:events?|activities)\b[^.!?]{0,40}\battend)\b/i;
 const CONTINUATION =
   /^(?:please\s+)?(?:search\s+for\s+events?\s+for\s+me|(?:but\s+)?look\s+for\s+events?|anything\s+free|try\s+again|search\s+the\s+web|public\s+events?|i\s+mean\s+city\s+events?)\b/i;
+const FREE_OUTDOOR_PREFERENCE = /\b(?:only\s+)?free\s+outdoor\s+(?:things|activities|events?)\b/gi;
+const FREE_OUTDOOR_PREFERENCE_FOLLOWUP =
+  /^\s*(?:only\s+)?free\s+outdoor\s+(?:things|activities|events?)\b[\s\S]{0,120}$/i;
 const TEMPORAL =
   /\b(?:today|tonight|tomorrow|weekend|week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2})\b/i;
 function dateOnlyContinuation(text: string): boolean {
@@ -151,6 +154,7 @@ function dateOnlyContinuation(text: string): boolean {
 function isPublicContinuation(text: string): boolean {
   return (
     CONTINUATION.test(text) ||
+    FREE_OUTDOOR_PREFERENCE_FOLLOWUP.test(text) ||
     dateOnlyContinuation(text) ||
     /^\s*(?:not\s+my\s+calendar|not\s+(?:my\s+)?(?:inbox|email))\b/i.test(text)
   );
@@ -282,16 +286,20 @@ export function resolveActiveReadIntent(input: ResolveActiveReadIntentInput): Re
   ];
   if (basisIds.length > 8 || !validZone(input.timeZone) || !Number.isFinite(input.now.getTime()))
     return { kind: 'clarify_public', reason: 'unsupported', partial };
-  const locationRow = [...basisRows].reverse().find((r) => place(r.text));
+  const preferenceFollowup = FREE_OUTDOOR_PREFERENCE_FOLLOWUP.test(text);
+  const locationRow = [...basisRows]
+    .reverse()
+    .find((r) => (!preferenceFollowup || r.id !== current.id) && place(r.text));
   const currentPlace = place(text);
   const historicalPlace = locationRow ? place(locationRow.text) : undefined;
-  const location = currentPlace
-    ? { label: currentPlace, basisMessageId: current.id }
-    : locationRow && historicalPlace
-      ? { label: historicalPlace, basisMessageId: locationRow.id }
-      : continuing
-        ? usablePrior?.location
-        : undefined;
+  const location =
+    !preferenceFollowup && currentPlace
+      ? { label: currentPlace, basisMessageId: current.id }
+      : locationRow && historicalPlace
+        ? { label: historicalPlace, basisMessageId: locationRow.id }
+        : continuing
+          ? usablePrior?.location
+          : undefined;
   partial.location = location;
   if (!location) return { kind: 'clarify_public', reason: 'missing_location', partial };
   const timeRow = [...basisRows].reverse().find((r) => TEMPORAL.test(r.text));
@@ -334,16 +342,27 @@ export function resolveActiveReadIntent(input: ResolveActiveReadIntentInput): Re
   const filters = [...(continuing && usablePrior ? usablePrior.filters : [])];
   for (const row of basisRows) {
     const content = publicText(row.text);
+    const supportedPreferences = content.match(FREE_OUTDOOR_PREFERENCE) ?? [];
+    const unsupportedCheckText = content.replace(FREE_OUTDOOR_PREFERENCE, ' ');
+    const preferenceOnlyRemainder = unsupportedCheckText.replace(/[.,;!?]/g, '').trim();
+    if (FREE_OUTDOOR_PREFERENCE_FOLLOWUP.test(content) && preferenceOnlyRemainder)
+      return { kind: 'clarify_public', reason: 'unsupported', partial };
     // Unsupported material constraints must remain visible instead of disappearing
-    // into a broader search. These require a narrower owner clarification.
+    // into a broader search. Only the exact supported preference above is removed
+    // before this check; other uses of "only" still require clarification.
     if (
       /\b(?:wheelchair|accessible|accessibility|under\s*18|adults?[- ]only|kids?|children|food|vegan|vegetarian|family[- ]friendly|only|must|without|budget|less than|under\s*\$)\b/i.test(
-        content,
+        unsupportedCheckText,
       )
     )
       return { kind: 'clarify_public', reason: 'unsupported', partial };
     if (/\bfree\b(?!\s+time)/i.test(content) && !filters.some((f) => f.kind === 'free'))
       filters.push({ kind: 'free', value: 'free admission', basisMessageId: row.id });
+    if (
+      supportedPreferences.length > 0 &&
+      !filters.some((f) => f.kind === 'category' && f.value === 'outdoor activities')
+    )
+      filters.push({ kind: 'category', value: 'outdoor activities', basisMessageId: row.id });
   }
   const topic =
     activityTopic(publicText(text)) ??
