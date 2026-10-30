@@ -15,11 +15,13 @@
     "./card-form": "./src/card-form.ts",
     "./gmail-search-identity": "./src/gmail-search-identity.ts",
     "./owner-editor": "./src/owner-editor.ts",
+    "./owner-family-rejection-storage": "./src/owner-family-rejection-storage.ts",
     "./contact-names": "./src/contact-names.ts",
     "./predicate-vocabulary": "./src/predicate-vocabulary.ts",
     "./knowledge-validity": "./src/knowledge-validity.ts",
     "./owner-family-presentation": "./src/owner-family-presentation.ts",
     "./owner-family-scope": "./src/owner-family-scope.ts",
+    "./owner-family-removal": "./src/owner-family-removal.ts",
     "./owner-memory-correction": "./src/owner-memory-correction.ts"
   },
   "dependencies": {
