@@ -154,6 +154,17 @@ describe('active read source resolution', () => {
     }
     expect(resolve('Only free outdoor things.').kind).not.toBe('public_activity');
   });
+  it('accepts the same exact preference when included in a complete public request', () => {
+    const result = resolve(
+      'Find public events in San Francisco this weekend; only free outdoor things.',
+    );
+    expect(result.kind).toBe('public_activity');
+    if (result.kind !== 'public_activity') throw new Error('public scope');
+    expect(result.public.filters).toEqual([
+      { kind: 'free', value: 'free admission', basisMessageId: 'm1' },
+      { kind: 'category', value: 'outdoor activities', basisMessageId: 'm1' },
+    ]);
+  });
   it.each(['wheelchair accessible', 'under 18', 'food', 'vegan only'])(
     'does not silently discard unsupported owner constraint %s',
     (constraint) => {
