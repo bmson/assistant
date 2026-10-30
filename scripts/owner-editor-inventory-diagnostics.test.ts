@@ -179,6 +179,15 @@ describe('bounded content-free inventory failure diagnostics', () => {
           httpStatus: null,
         });
         expect(result.stdout + result.stderr).not.toContain(secret);
+        if (stage === 'cli_composites')
+          expect(diagnostic).toMatchObject({
+            errorClass: 'ProcessError',
+            processFailure: 'nonzero_exit',
+            exitCode: 1,
+            signalClass: null,
+            causeHint: 'unknown',
+            diagnosticHintsOnly: true,
+          });
         expect(existsSync(join(dir, 'owner-editor-release-inventory.json'))).toBe(false);
         if (stage === 'credential_file') expect(existsSync(join(dir, 'commands'))).toBe(false);
         else
