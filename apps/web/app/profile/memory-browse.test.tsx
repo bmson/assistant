@@ -598,7 +598,9 @@ it.each(['postgres', 'firestore'])(
     expect(html.match(/<form/g)).toHaveLength(1);
     expect(html).toContain('Filters (3 active)');
     expect(html.indexOf('Add connection')).toBeLessThan(html.indexOf('<details'));
-    expect(html).toContain('Open Alex to review');
+    expect(html).toContain('Browse Alex');
+    expect(html).not.toContain('connectionId=');
+    expect(html).not.toContain('to review this connection');
     expect(html).toContain('Editing and removal are unavailable from this list');
     expect(html).toContain('returnTo=');
     const read = driver === 'postgres' ? mocks.map : mocks.fsMap;
