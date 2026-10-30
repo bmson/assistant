@@ -142,8 +142,12 @@ const EXPLICIT_PUBLIC =
 const CONTINUATION =
   /^(?:please\s+)?(?:search\s+for\s+events?\s+for\s+me|(?:but\s+)?look\s+for\s+events?|anything\s+free|try\s+again|search\s+the\s+web|public\s+events?|i\s+mean\s+city\s+events?)\b/i;
 const FREE_OUTDOOR_PREFERENCE = /\b(?:only\s+)?free\s+outdoor\s+(?:things|activities|events?)\b/gi;
+const FREE_OUTDOOR_PREFERENCE_SUFFIX =
+  /(?:[,;:]\s*)?\b(?:only\s+)?free\s+outdoor\s+(?:things|activities|events?)\b[.!?]*\s*$/i;
 const FREE_OUTDOOR_PREFERENCE_FOLLOWUP =
   /^\s*(?:only\s+)?free\s+outdoor\s+(?:things|activities|events?)\b[\s\S]{0,120}$/i;
+const COMPLETE_PUBLIC_PREFERENCE_BASE =
+  /^\s*(?:please\s+)?(?:find|search\s+for|show\s+me|recommend)\s+(?:public\s+)?events?\s+in\s+[\p{L}][\p{L}.'-]*(?:\s+[\p{L}][\p{L}.'-]*){0,3}\s+(?:today|tonight|tomorrow|(?:this|next)\s+(?:weekend|week)|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2})\s*$/iu;
 const TEMPORAL =
   /\b(?:today|tonight|tomorrow|weekend|week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2})\b/i;
 function dateOnlyContinuation(text: string): boolean {
@@ -343,15 +347,23 @@ export function resolveActiveReadIntent(input: ResolveActiveReadIntentInput): Re
   for (const row of basisRows) {
     const content = publicText(row.text);
     const supportedPreferences = content.match(FREE_OUTDOOR_PREFERENCE) ?? [];
+    if (
+      supportedPreferences.length > 0 &&
+      (supportedPreferences.length !== 1 || !FREE_OUTDOOR_PREFERENCE_SUFFIX.test(content))
+    )
+      return { kind: 'clarify_public', reason: 'unsupported', partial };
     const unsupportedCheckText = content.replace(FREE_OUTDOOR_PREFERENCE, ' ');
-    const preferenceOnlyRemainder = unsupportedCheckText.replace(/[.,;!?]/g, '').trim();
-    if (FREE_OUTDOOR_PREFERENCE_FOLLOWUP.test(content) && preferenceOnlyRemainder)
+    if (
+      supportedPreferences.length > 0 &&
+      !FREE_OUTDOOR_PREFERENCE_FOLLOWUP.test(content) &&
+      !COMPLETE_PUBLIC_PREFERENCE_BASE.test(unsupportedCheckText.replace(/[.!?,;:]/g, '').trim())
+    )
       return { kind: 'clarify_public', reason: 'unsupported', partial };
     // Unsupported material constraints must remain visible instead of disappearing
     // into a broader search. Only the exact supported preference above is removed
     // before this check; other uses of "only" still require clarification.
     if (
-      /\b(?:wheelchair|accessible|accessibility|under\s*18|adults?[- ]only|kids?|children|food|vegan|vegetarian|family[- ]friendly|near(?:by)?|at|only|must|without|budget|less than|under\s*\$)\b/i.test(
+      /\b(?:wheelchair|accessible|accessibility|under\s*18|adults?[- ]only|kids?|children|food|vegan|vegetarian|family[- ]friendly|near(?:by)?|at|within|walking distance|only|must|without|budget|less than|under\s*\$)\b/i.test(
         unsupportedCheckText,
       )
     )

@@ -46,7 +46,14 @@ function fetchEvidence(text = listing, source = url): ActionEvidence {
     toolName: 'web.fetch',
     status: 'succeeded',
     args: { url: source },
-    result: { status: 200, url: source, finalUrl: source, title: 'Art Walk', text },
+    result: {
+      status: 200,
+      contentType: 'text/plain',
+      finalUrl: source,
+      title: 'Art Walk',
+      text,
+      truncated: false,
+    },
     fromCurrentTask: true,
   };
 }

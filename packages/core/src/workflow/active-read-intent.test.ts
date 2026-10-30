@@ -182,6 +182,10 @@ describe('active read source resolution', () => {
     'Find public events in San Francisco this weekend; only free outdoor things near BART',
     'Find public events in San Francisco this weekend; only free outdoor things at BART',
     'Only free outdoor things at BART',
+    'Only free outdoor things within walking distance',
+    'Find public events in San Francisco this weekend; only free outdoor things within walking distance',
+    'Find public events in San Francisco this weekend within walking distance; only free outdoor things',
+    'Find public events in San Francisco this weekend with family; only free outdoor things',
   ])('keeps unsupported constraints visible after a supported public preference: %s', (text) => {
     const initialText = 'Find public events in San Francisco this weekend';
     const initial = resolve(initialText);

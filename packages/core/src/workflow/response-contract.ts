@@ -4754,7 +4754,7 @@ export function publicActivitySourceLeads(
     const result = record(row.result);
     const finalUrl = typeof result?.finalUrl === 'string' ? normalizeUrl(result.finalUrl) : null;
     if (
-      typeof result?.url !== 'string' ||
+      !result ||
       typeof result.status !== 'number' ||
       result.status < 200 ||
       result.status >= 300 ||
@@ -4796,7 +4796,7 @@ export function publicActivitySourceLeads(
       /\bnot\s+free\b|\b(?:tickets?|admission|entry)\b[^.!?\n]{0,24}[$€£]\s*[1-9]/i.test(source)
     )
       continue;
-    const url = normalizeUrl(result.url);
+    const url = finalUrl;
     if (!url || !/^https?:$/.test(url.protocol) || url.username || url.password) continue;
     const title = (typeof result.title === 'string' ? result.title : url.hostname)
       .replace(/[\r\n\t]+/g, ' ')
