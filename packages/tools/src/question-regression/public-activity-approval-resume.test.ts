@@ -194,7 +194,6 @@ function fixtureDispatcher(
             listingByUrl.set(url, {
               status: 200,
               contentType: 'text/plain',
-              title: 'Synthetic Art Walk',
               text,
               truncated: false,
               finalUrl: url,
@@ -425,7 +424,7 @@ describe('public activity actual approval lifecycle (isolated PostgreSQL)', () =
           /\d{4}-\d{2}-\d{2}/,
         )?.[0];
         expect(requestedDate).toBeDefined();
-        expect(finalText).toContain('Synthetic Art Walk');
+        expect(finalText).toContain('example.test');
         expect(finalText).toContain(`https://example.test/art-${requestedDate}`);
         expect(finalText).toContain(requestedDate);
         expect(finalText).toContain('remain unverified');
