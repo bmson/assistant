@@ -152,7 +152,10 @@ function fixtureDispatcher(
   executions: Execution[],
   failure: boolean | 'wrong_date' | 'wrong_city' | 'fetch_failure' = false,
 ) {
-  const listingByUrl = new Map<string, { url: string; title: string; text: string }>();
+  const listingByUrl = new Map<
+    string,
+    { status: number; contentType: string; text: string; truncated: boolean; finalUrl: string }
+  >();
   const registry = new ToolRegistry();
   for (const name of ['web.search', 'web.fetch']) {
     registry.register(
