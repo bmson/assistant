@@ -381,3 +381,120 @@ it('actual dossier returns to the selected Memory map with filters and anchor re
   );
   expect(html).toContain('Edit details');
 });
+
+it('selects only the exact loaded connection without adding an edit or removal grant', async () => {
+  const relationId = '33333333-3333-4333-8333-333333333333';
+  const relation = {
+    id: relationId,
+    sentence: 'Sam Rivera is Alex’s friend.',
+    label: 'Friend',
+    otherLabel: 'Alex',
+    otherContactId: ownerId,
+    otherEntityId: ownerId,
+    validFrom: null,
+    validUntil: null,
+    reviewStatus: 'confirmed' as const,
+  };
+  ports.person.mockImplementationOnce(async () => ({
+    ...data.dossier,
+    relations: [relation],
+  }));
+  const html = renderToStaticMarkup(
+    await Person({
+      params: Promise.resolve({ id: contact.id }),
+      searchParams: Promise.resolve({
+        returnTo: '/profile/knowledge?view=connections&q=Alex',
+        connectionId: relationId,
+      }),
+    }),
+  );
+  expect(html).toContain(`id="person-connection-${relationId}"`);
+  expect(html).toContain('aria-current="location"');
+  expect(html).toContain('Sam Rivera is Alex’s friend.');
+  expect(html).not.toContain('Remove connection');
+  expect(html).not.toContain('Edit relationship');
+  expect(ports.pgEditor.mock.calls[0]?.[1]).toMatchObject({
+    contactId: contact.id,
+    relationIds: [relationId],
+  });
+  expect(ports.pgEditor).toHaveBeenCalledOnce();
+});
+
+it('selects a loaded non-person connection without adding it to family editor authority', async () => {
+  const connectionId = '66666666-6666-4666-8666-666666666666';
+  const sourceMemoryId = '88888888-8888-4888-8888-888888888888';
+  const relationIds = data.dossier.relations.map((relation) => relation.id);
+  ports.person.mockImplementationOnce(async () => ({
+    ...data.dossier,
+    connections: [
+      {
+        id: connectionId,
+        sentence: 'Sam Rivera worked at Praça Studio.',
+        label: 'Worked at',
+        otherLabel: 'Praça Studio',
+        otherKind: 'organization',
+        validFrom: '2018',
+        validUntil: null,
+        sourceMemoryId,
+      },
+    ],
+  }));
+  const html = renderToStaticMarkup(
+    await Person({
+      params: Promise.resolve({ id: contact.id }),
+      searchParams: Promise.resolve({ connectionId }),
+    }),
+  );
+  expect(html).toContain(`id="person-connection-${connectionId}"`);
+  expect(html).toContain('aria-current="location"');
+  expect(html).toContain('Sam Rivera worked at Praça Studio.');
+  expect(html).toContain('not a relationship between people');
+  expect(html).toContain(`/profile/knowledge/notes/${sourceMemoryId}`);
+  expect(html).not.toContain('Edit relationship');
+  expect(html).not.toContain('Remove connection');
+  expect(ports.pgEditor.mock.calls[0]?.[1]).toMatchObject({
+    contactId: contact.id,
+    relationIds,
+  });
+  expect(ports.pgEditor.mock.calls[0]?.[1].relationIds).not.toContain(connectionId);
+});
+
+it.each([
+  ['stale or foreign connection', '55555555-5555-4555-8555-555555555555'],
+  ['invalid connection identifier', '../private-note'],
+])('%s is reported without revealing or loading a selected row', async (_label, connectionId) => {
+  const html = renderToStaticMarkup(
+    await Person({
+      params: Promise.resolve({ id: contact.id }),
+      searchParams: Promise.resolve({
+        returnTo: '/profile/knowledge?view=connections&q=Alex',
+        connectionId,
+      }),
+    }),
+  );
+  expect(html).toContain('The selected connection is unavailable in this view.');
+  expect(html).not.toContain(connectionId);
+  expect(html).not.toContain('aria-current="location"');
+  expect(ports.pgEditor.mock.calls[0]?.[1]).toMatchObject({
+    contactId: contact.id,
+    relationIds: [],
+  });
+  expect(html).not.toContain('Remove connection');
+});
+
+it('retains a validated selected connection and return context when a dossier read must be retried', async () => {
+  ports.pgRead.mockRejectedValue(Error('bounded read unavailable'));
+  const selected = '33333333-3333-4333-8333-333333333333';
+  const returnTo = '/profile/knowledge?view=connections&q=Alex';
+  const html = renderToStaticMarkup(
+    await Person({
+      params: Promise.resolve({ id: contact.id }),
+      searchParams: Promise.resolve({ connectionId: selected, returnTo }),
+    }),
+  );
+  expect(html).toContain('Could not load this view');
+  expect(html).toContain(`connectionId=${selected}#person-connection-${selected}`);
+  expect(html).toContain(`returnTo=${encodeURIComponent(returnTo)}`);
+  expect(html).not.toContain('Edit relationship');
+  expect(ports.pgEditor).not.toHaveBeenCalled();
+});

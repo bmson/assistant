@@ -21,18 +21,22 @@ export function RelationshipList({
   relations,
   now,
   peopleQuery = '',
+  selectedRelationId,
   editControls,
   readOnlyReasons,
 }: {
   relations: PersonRelation[];
   now: Date;
   peopleQuery?: string;
+  selectedRelationId?: string;
   editControls?: Record<string, ReactNode>;
   readOnlyReasons?: Record<string, { reason: string; sourceMemoryId?: string }>;
 }) {
   return (
     <ul className="mt-3 flex flex-col gap-2">
       {relations.map((relation) => {
+        const normalizedId = relation.id.toLowerCase();
+        const selected = normalizedId === selectedRelationId;
         // Recorded owner meaning is already present in the authoritative
         // sentence. A clock-derived duration can contradict its stated tense.
         const span = relation.assertionTiming
@@ -62,7 +66,16 @@ export function RelationshipList({
           </>
         );
         return (
-          <li key={relation.id}>
+          <li
+            key={relation.id}
+            id={`person-connection-${normalizedId}`}
+            aria-current={selected ? 'location' : undefined}
+            className={
+              selected
+                ? 'scroll-mt-24 rounded-xl border border-accent/25 bg-accent/[0.06] p-2'
+                : undefined
+            }
+          >
             {relation.otherContactId ? (
               <Link
                 href={`/people/${relation.otherContactId}${peopleQuery ? `?q=${encodeURIComponent(peopleQuery.slice(0, 120))}` : ''}`}
@@ -115,20 +128,53 @@ function relationshipReadOnlyMessage(reason: string): string {
 export function ConnectionList({
   connections,
   now,
+  selectedConnectionId,
 }: {
   connections: PersonConnection[];
   now: Date;
+  selectedConnectionId?: string;
 }) {
   return (
     <ul className="mt-3 flex flex-col gap-2">
       {connections.map((connection) => {
+        const selected = connection.id.toLowerCase() === selectedConnectionId;
         const span = relationSpanLabel(connection.validFrom, connection.validUntil, now);
+        const sourceHref = connection.sourceMemoryId
+          ? memoryNoteHref(connection.sourceMemoryId, '/profile/knowledge?view=library')
+          : null;
         return (
-          <li key={connection.id} className={rowClass}>
-            <span className="min-w-0 flex-1 text-sm leading-6 text-pretty break-words text-strong">
-              {connection.sentence}
-            </span>
-            {span ? <span className="text-xs text-muted">{span}</span> : null}
+          <li
+            key={connection.id}
+            id={`person-connection-${connection.id.toLowerCase()}`}
+            aria-current={selected ? 'location' : undefined}
+            className={
+              selected
+                ? 'scroll-mt-24 rounded-xl border border-accent/25 bg-accent/[0.06] p-2'
+                : undefined
+            }
+          >
+            <div className={rowClass}>
+              <span className="min-w-0 flex-1 text-sm leading-6 text-pretty break-words text-strong">
+                {connection.sentence}
+              </span>
+              {span ? <span className="text-xs text-muted">{span}</span> : null}
+            </div>
+            {selected ? (
+              <div className="mt-2 text-sm text-muted">
+                <p>
+                  This is a connection to {connection.otherKind}, not a relationship between people.
+                  It can be reviewed here, but it cannot be edited or removed as a family
+                  relationship.
+                </p>
+                {sourceHref ? (
+                  <Link className="inline-block min-h-11 text-accent underline" href={sourceHref}>
+                    Open saved source note
+                  </Link>
+                ) : (
+                  <p>A source note link is not available for this connection.</p>
+                )}
+              </div>
+            ) : null}
           </li>
         );
       })}

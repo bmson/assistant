@@ -50,6 +50,8 @@ export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Person' };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CONNECTION_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const FACT_LIMIT = 250;
 
 function toFactView(memory: MemorySnapshot, now: Date, subjectLabel: string): FactView {
@@ -189,7 +191,7 @@ export default async function PersonPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams?: Promise<{ q?: string; returnTo?: string }>;
+  searchParams?: Promise<{ q?: string; returnTo?: string; connectionId?: string }>;
 }) {
   const session = await requireOwner();
   const { id } = await params;
@@ -199,7 +201,16 @@ export default async function PersonPage({
   const rawQuery = search?.q;
   const mapReturnTo = memoryMapReturnTo(search?.returnTo);
   const query = (typeof rawQuery === 'string' ? rawQuery : '').trim().slice(0, 120);
+  const rawConnectionId = search?.connectionId;
+  const requestedConnectionId =
+    typeof rawConnectionId === 'string' && CONNECTION_UUID_RE.test(rawConnectionId)
+      ? rawConnectionId.toLowerCase()
+      : null;
   const backHref = mapReturnTo ?? `/people${query ? `?q=${encodeURIComponent(query)}` : ''}`;
+  const retryBase = `/people/${id}${mapReturnTo ? `?returnTo=${encodeURIComponent(mapReturnTo)}` : query ? `?q=${encodeURIComponent(query)}` : ''}`;
+  const retryHref = requestedConnectionId
+    ? `${retryBase}${retryBase.includes('?') ? '&' : '?'}connectionId=${requestedConnectionId}#person-connection-${requestedConnectionId}`
+    : retryBase;
   const now = new Date();
   let dossier: PersonDossier | null;
   let editor: OwnerEditorControlsProps | null = null;
@@ -224,10 +235,7 @@ export default async function PersonPage({
         <p role="alert" className="mt-4 text-muted">
           Could not load this view. Your search is preserved.
         </p>
-        <Link
-          href={`/people/${id}${mapReturnTo ? `?returnTo=${encodeURIComponent(mapReturnTo)}` : query ? `?q=${encodeURIComponent(query)}` : ''}`}
-          className="mt-4 inline-block underline"
-        >
+        <Link href={retryHref} className="mt-4 inline-block underline">
           Try again
         </Link>
       </PageShell>
@@ -252,6 +260,16 @@ export default async function PersonPage({
 
   const { profile, location, origins, relations, connections, events } = dossier;
   const { contact, facts, totalFacts, occasions } = profile;
+  const selectedRelation = requestedConnectionId
+    ? relations.find((relation) => relation.id.toLowerCase() === requestedConnectionId)
+    : undefined;
+  const selectedNonPersonConnection =
+    !selectedRelation && requestedConnectionId
+      ? connections.find((connection) => connection.id.toLowerCase() === requestedConnectionId)
+      : undefined;
+  const selectedConnectionId = (selectedRelation ?? selectedNonPersonConnection)?.id.toLowerCase();
+  const unavailableConnectionSelection =
+    rawConnectionId !== undefined && !selectedRelation && !selectedNonPersonConnection;
   const editorAvailability = ownerEditorAvailability({
     formSessionScope: session.formSessionScope,
     editorAvailable: Boolean(
@@ -343,6 +361,12 @@ export default async function PersonPage({
             Removing connections is not available in this release. Eligible family relationships can
             still be edited.
           </p>
+          {unavailableConnectionSelection ? (
+            <p role="status" className="mt-2 text-sm text-muted">
+              The selected connection is unavailable in this view. Return to Connections and refresh
+              the list to choose a current connection.
+            </p>
+          ) : null}
           {relations.length === 0 ? (
             <EmptyState>
               {editor?.family
@@ -354,6 +378,7 @@ export default async function PersonPage({
               relations={relations}
               now={now}
               peopleQuery={query}
+              selectedRelationId={selectedRelation?.id.toLowerCase()}
               editControls={
                 editor
                   ? Object.fromEntries(
@@ -365,9 +390,6 @@ export default async function PersonPage({
                         >
                           <OwnerEditorContextTrigger
                             entry={{ correction: correction.eligibility.relationId }}
-                          />
-                          <OwnerEditorContextTrigger
-                            entry={{ removal: correction.eligibility.relationId }}
                           />
                         </div>,
                       ]),
@@ -450,7 +472,11 @@ export default async function PersonPage({
         {connections.length > 0 ? (
           <section className="mt-8">
             <SectionHeading title="Also connected" count={connections.length} />
-            <ConnectionList connections={connections} now={now} />
+            <ConnectionList
+              connections={connections}
+              now={now}
+              selectedConnectionId={selectedNonPersonConnection ? selectedConnectionId : undefined}
+            />
           </section>
         ) : null}
 

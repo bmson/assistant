@@ -140,6 +140,8 @@ export interface PersonConnection {
   otherKind: string;
   validFrom: string | null;
   validUntil: string | null;
+  /** Exact backing saved memory, when the read adapter can identify it. */
+  sourceMemoryId?: string;
 }
 
 /**
@@ -341,6 +343,7 @@ export async function getPersonDossier(
           otherKind: edge.other.kind,
           validFrom: edge.validFrom,
           validUntil: edge.validUntil,
+          sourceMemoryId: edge.sourceMemoryId,
         });
       }
       continue;
@@ -354,6 +357,7 @@ export async function getPersonDossier(
       otherKind: edge.other.kind,
       validFrom: edge.validFrom,
       validUntil: edge.validUntil,
+      sourceMemoryId: edge.sourceMemoryId,
     };
 
     // Only an open `lives_in` is where they live now; a closed one is a past
