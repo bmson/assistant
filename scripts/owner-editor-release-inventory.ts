@@ -670,7 +670,8 @@ async function main(mark: InventoryStageMarker) {
         `--project=${PROJECT}`,
         '--database=assistant-production',
         '--format=json',
-        '--page-size=100',
+        // Leave page size to the API: composite listing rejects nonzero sizes.
+        // The pinned CLI still follows every nextPageToken without a --limit.
         '--quiet',
       ]),
     );
