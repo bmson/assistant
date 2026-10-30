@@ -191,7 +191,14 @@ function fixtureDispatcher(
             const sourceCity = failure === 'wrong_city' ? 'Seattle' : city;
             const url = `https://example.test/art-${requestedDate}`;
             const text = `${sourceCity}, ${date}: Synthetic Art Walk — ${date}, 10:00 am, ${sourceCity}. Admission $15. ${url}`;
-            listingByUrl.set(url, { url, title: 'Synthetic Art Walk', text });
+            listingByUrl.set(url, {
+              status: 200,
+              contentType: 'text/plain',
+              title: 'Synthetic Art Walk',
+              text,
+              truncated: false,
+              finalUrl: url,
+            });
             return { results: [{ title: 'Synthetic Art Walk', url, snippet: text }] };
           }
           const listing = listingByUrl.get(String(values.url));
