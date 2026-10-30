@@ -1,4 +1,8 @@
 /** Fixed, content-free failure diagnostics. Never serialize an exception or provider payload. */
+import {
+  InventoryServiceFactsError,
+  sanitizeServiceAudit,
+} from './owner-editor-service-facts-diagnostics.js';
 export const INVENTORY_STAGES = [
   'arguments',
   'source_capability',
@@ -140,7 +144,10 @@ export function inventoryFailureDiagnostic(stage: unknown, error: unknown) {
   let httpStatus: number | null = null;
   let detail = {};
   try {
-    if (error instanceof InventoryProcessError) {
+    if (error instanceof InventoryServiceFactsError) {
+      errorClass = 'ServiceFactsError';
+      detail = { serviceFacts: sanitizeServiceAudit(ownValue(error, 'facts')) };
+    } else if (error instanceof InventoryProcessError) {
       errorClass = 'ProcessError';
       detail = {
         processFailure: allowed(ownValue(error, 'processFailure'), processFailures) ?? 'unknown',
