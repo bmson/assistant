@@ -2,6 +2,15 @@ name: Observe owner editor release prerequisites
 
 on:
   workflow_dispatch:
+    inputs:
+      diagnostic_source_sha:
+        description: Exact reviewed current main SHA, required only for encrypted failure diagnosis
+        type: string
+        required: false
+      diagnostic_recipient_public_key:
+        description: Ephemeral RSA public key only; private key stays with the local reviewer
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -21,6 +30,8 @@ jobs:
       GCP_PROJECT: ${{ vars.GCP_PROJECT }}
       GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
       GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      OWNER_EDITOR_DIAGNOSTIC_SOURCE_SHA: ${{ inputs.diagnostic_source_sha }}
+      OWNER_EDITOR_DIAGNOSTIC_RECIPIENT_PUBLIC_KEY: ${{ inputs.diagnostic_recipient_public_key }}
     steps:
       - name: Checkout trusted workflow source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -60,3 +71,11 @@ jobs:
           path: owner-editor-release-inventory.json
           if-no-files-found: error
           retention-days: 14
+      - name: Retain encrypted bounded command failure only
+        if: ${{ always() && inputs.diagnostic_recipient_public_key != '' }}
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: owner-editor-inventory-encrypted-failure-${{ github.sha }}-${{ github.run_id }}
+          path: owner-editor-inventory-failure.encrypted.json
+          if-no-files-found: ignore
+          retention-days: 1
