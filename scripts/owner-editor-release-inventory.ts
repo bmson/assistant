@@ -4,6 +4,12 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import {
+  InventoryHttpError,
+  type InventoryStage,
+  type InventoryStageMarker,
+  inventoryFailureDiagnostic,
+} from './owner-editor-inventory-diagnostics.js';
 import { compareIndexInventory } from './owner-editor-release-index-inventory.js';
 import {
   createEditorMetadataRead,
@@ -124,8 +130,8 @@ export function createReadOnlyGet(
         signal: controller.signal,
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
       });
-      if (!response.ok || !response.body || Date.now() >= deadline)
-        throw new Error('read unavailable');
+      if (!response.ok) throw new InventoryHttpError(response.status);
+      if (!response.body || Date.now() >= deadline) throw new Error('read unavailable');
       reader = response.body.getReader();
       const chunks: Uint8Array[] = [];
       let size = 0;
@@ -343,8 +349,11 @@ export async function collectInventory(
   now = Date.now(),
   global?: GlobalIndexLists,
   observeEditor?: (target: EditorMetadataTarget) => Promise<unknown>,
+  mark: InventoryStageMarker = () => undefined,
 ) {
+  mark('source_manifest');
   const { groups } = verifyManifest(manifest);
+  mark('index_comparison');
   const composites =
     global?.composites ??
     (await listPages(
@@ -365,11 +374,14 @@ export async function collectInventory(
   // REST scope cannot prove global coverage. The production path uses the audited,
   // version-pinned CLI global commands with no filters/limit added by this script.
   const complete = global?.evidence === 'pinned-gcloud-576-complete-lists';
+  mark('index_comparison');
   const indexes = await compareIndexInventory(manifest, composites, fields, {
     compositesComplete: true,
     fieldsComplete: complete,
   });
+  mark('database_metadata');
   const database = record(await read(`https://firestore.googleapis.com/v1/${DATABASE}`));
+  mark('recovery_metadata');
   const backups =
     database.pointInTimeRecoveryEnablement === 'POINT_IN_TIME_RECOVERY_ENABLED'
       ? []
@@ -382,10 +394,12 @@ export async function collectInventory(
   const services = [];
   const editorTargets: (EditorMetadataTarget | null)[] = [];
   for (const service of ['agent', 'web'] as const) {
+    mark(service === 'agent' ? 'agent_service' : 'web_service');
     const facts = serviceFacts(
       await read(`https://run.googleapis.com/v2/${RUN_ROOT}/services/assistant-${service}`),
       service,
     );
+    mark(service === 'agent' ? 'agent_revision' : 'web_revision');
     const revision = record(
       await read(
         `https://run.googleapis.com/v2/${RUN_ROOT}/services/assistant-${service}/revisions/${facts.revision}`,
@@ -424,6 +438,7 @@ export async function collectInventory(
       observedRevisionHash: hash(JSON.stringify(revision)),
     });
   }
+  mark('editor_metadata');
   const firstTarget = editorTargets[0];
   const editorReadiness =
     firstTarget &&
@@ -555,7 +570,8 @@ export function requireBasicEditorReadiness(receipt: unknown): void {
   )
     throw new Error('basic editor release prerequisites unproven');
 }
-async function main() {
+async function main(mark: InventoryStageMarker) {
+  mark('arguments');
   const mode = process.argv[2];
   if (
     process.argv.length !== 3 ||
@@ -563,6 +579,7 @@ async function main() {
   )
     throw new Error('invalid arguments');
   const releasePreflight = mode === '--release-preflight';
+  mark('source_capability');
   if (
     releasePreflight &&
     !requiresBasicEditorPreflight(
@@ -571,21 +588,25 @@ async function main() {
     )
   )
     return;
+  mark('source_manifest');
   const manifest = readFileSync(
     releasePreflight
       ? 'infra/gcp/firestore/firestore.indexes.json'
       : '.approved-index-source/infra/gcp/firestore/firestore.indexes.json',
   );
   verifyManifest(manifest);
+  mark('protected_context');
   verifyPreAuthEnvironment(process.env);
   if (mode === '--verify-source') return;
   const started = Date.now();
+  mark('credential_file');
   const identity = verifyWifEnvironment(process.env, (file) => {
     const stat = lstatSync(file);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 32768)
       throw new Error('invalid credential file');
     return JSON.parse(readFileSync(file, 'utf8'));
   });
+  mark('cli_context');
   const runnerTemp = process.env.RUNNER_TEMP;
   if (!runnerTemp) throw new Error('invalid context');
   const cloudConfig = resolve(runnerTemp, 'owner-editor-inventory-gcloud');
@@ -614,10 +635,12 @@ async function main() {
     if (retainedBytes > 4 * LIMIT) throw new Error('inventory bound');
     return result.stdout;
   };
+  mark('cli_version');
   const version = record(JSON.parse(await command(['version', '--format=json'], 32768)));
   if (version['Google Cloud SDK'] !== '576.0.0') throw new Error('unaudited CLI');
   const lists: unknown[][] = [];
   for (const kind of ['composite', 'fields']) {
+    mark(kind === 'composite' ? 'cli_composites' : 'cli_fields');
     const value: unknown = JSON.parse(
       await command([
         'firestore',
@@ -634,6 +657,7 @@ async function main() {
     if (!Array.isArray(value) || value.length > 1000) throw new Error('incomplete inventory');
     lists.push(value);
   }
+  mark('access_token');
   const token = await command(['auth', 'print-access-token', '--quiet'], 16384);
   const receipt = await collectInventory(
     createReadOnlyGet(token.trim(), started + 60000),
@@ -649,7 +673,9 @@ async function main() {
         createEditorMetadataRead(token.trim(), started + 60000, target),
         target,
       ),
+    mark,
   );
+  mark('receipt_serialization');
   const output = JSON.stringify({
     ...receipt,
     observationIdentity: {
@@ -661,11 +687,19 @@ async function main() {
     workflowRun: process.env.GITHUB_RUN_ID,
   });
   if (Buffer.byteLength(output) > 65536) throw new Error('receipt bound');
+  mark('receipt_write');
   writeFileSync('owner-editor-release-inventory.json', `${output}\n`, { flag: 'wx', mode: 0o600 });
-  if (releasePreflight) requireBasicEditorReadiness(receipt);
+  if (releasePreflight) {
+    mark('release_readiness');
+    requireBasicEditorReadiness(receipt);
+  }
 }
-if (process.argv[1]?.endsWith('/owner-editor-release-inventory.ts'))
-  main().catch(() => {
-    process.stderr.write('Read-only inventory failed; no readiness or authority established.\n');
+if (process.argv[1]?.endsWith('/owner-editor-release-inventory.ts')) {
+  let stage: InventoryStage = 'arguments';
+  main((current) => {
+    stage = current;
+  }).catch((error: unknown) => {
+    process.stderr.write(`${JSON.stringify(inventoryFailureDiagnostic(stage, error))}\n`);
     process.exitCode = 1;
   });
+}
