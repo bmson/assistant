@@ -4752,7 +4752,20 @@ export function publicActivitySourceLeads(
     if (row.fromCurrentTask === false || row.status !== 'succeeded' || row.toolName !== 'web.fetch')
       continue;
     const result = record(row.result);
-    if (typeof result?.url !== 'string') continue;
+    const finalUrl = typeof result?.finalUrl === 'string' ? normalizeUrl(result.finalUrl) : null;
+    if (
+      typeof result?.url !== 'string' ||
+      typeof result.status !== 'number' ||
+      result.status < 200 ||
+      result.status >= 300 ||
+      typeof result.text !== 'string' ||
+      !result.text.trim() ||
+      !finalUrl ||
+      !/^https?:$/.test(finalUrl.protocol) ||
+      finalUrl.username ||
+      finalUrl.password
+    )
+      continue;
     const source = [result.title, result.text, result.content]
       .filter((value) => typeof value === 'string')
       .join(' ')
@@ -4850,6 +4863,21 @@ export function classifyPublicActivityEvidence(
 
   const fetchedUrls = new Set<string>();
   for (const row of rows.filter((item) => item.toolName === 'web.fetch')) {
+    const result = record(row.result);
+    const finalUrl = typeof result?.finalUrl === 'string' ? normalizeUrl(result.finalUrl) : null;
+    if (
+      !result ||
+      typeof result.status !== 'number' ||
+      result.status < 200 ||
+      result.status >= 300 ||
+      typeof result.text !== 'string' ||
+      !result.text.trim() ||
+      !finalUrl ||
+      !/^https?:$/.test(finalUrl.protocol) ||
+      finalUrl.username ||
+      finalUrl.password
+    )
+      return 'incomplete';
     const raw = record(row.args)?.url;
     if (typeof raw !== 'string') continue;
     const url = normalizeUrl(raw);

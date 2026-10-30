@@ -46,7 +46,7 @@ function fetchEvidence(text = listing, source = url): ActionEvidence {
     toolName: 'web.fetch',
     status: 'succeeded',
     args: { url: source },
-    result: { url: source, title: 'Art Walk', text },
+    result: { status: 200, url: source, finalUrl: source, title: 'Art Walk', text },
     fromCurrentTask: true,
   };
 }
@@ -122,6 +122,21 @@ describe('public activity response source contract', () => {
     );
     expect(malformed.publicActivityEvidenceStatus).toBe('incomplete');
     expect(malformed.text).toContain('lookup may be incomplete');
+
+    const malformedFetch = enforceResponseContract(
+      'No events exist.',
+      [search, { ...fetchEvidence(), result: { finalUrl: url } }],
+      { publicActivity: scope() },
+    );
+    expect(malformedFetch.publicActivityEvidenceStatus).toBe('incomplete');
+    expect(malformedFetch.text).toContain('lookup may be incomplete');
+
+    const emptyFetch = enforceResponseContract(
+      'No events exist.',
+      [search, { ...fetchEvidence(), result: { status: 200, finalUrl: url, text: '  ' } }],
+      { publicActivity: scope() },
+    );
+    expect(emptyFetch.publicActivityEvidenceStatus).toBe('incomplete');
   });
   it('marks missing public attempts separately and ignores private or prior-task evidence', () => {
     const none = enforceResponseContract('No events exist.', [], { publicActivity: scope() });

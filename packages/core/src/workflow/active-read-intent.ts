@@ -351,7 +351,7 @@ export function resolveActiveReadIntent(input: ResolveActiveReadIntentInput): Re
     // into a broader search. Only the exact supported preference above is removed
     // before this check; other uses of "only" still require clarification.
     if (
-      /\b(?:wheelchair|accessible|accessibility|under\s*18|adults?[- ]only|kids?|children|food|vegan|vegetarian|family[- ]friendly|near(?:by)?|only|must|without|budget|less than|under\s*\$)\b/i.test(
+      /\b(?:wheelchair|accessible|accessibility|under\s*18|adults?[- ]only|kids?|children|food|vegan|vegetarian|family[- ]friendly|near(?:by)?|at|only|must|without|budget|less than|under\s*\$)\b/i.test(
         unsupportedCheckText,
       )
     )
