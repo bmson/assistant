@@ -178,6 +178,12 @@ struct MessageBubble: View {
             }
         }
         .onScrollVisibilityChange(threshold: 0.5) { visible in
+            // Once delivery is acknowledged, scrolling this row has no more
+            // delivery work to do. Keep tracking an in-flight or failed request
+            // so leaving and re-entering can still retry when needed.
+            guard message.role == .assistant,
+                  acknowledgeDelivery != nil,
+                  !deliveryAcknowledged else { return }
             deliveryRowVisible = visible
             acknowledgeVisibleReplyIfReady()
         }
