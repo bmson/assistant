@@ -82,6 +82,33 @@ describe('bounded content-free inventory failure diagnostics', () => {
     });
     expect(inventoryFailureDiagnostic('credential_file', error).errorClass).toBe('Error');
   });
+  it.each(['changing', 'throwing'] as const)(
+    'rejects a %s HTTP status getter without invoking it',
+    (mode) => {
+      const error = new InventoryHttpError(403);
+      let reads = 0;
+      Object.defineProperty(error, 'status', {
+        get() {
+          reads += 1;
+          if (mode === 'throwing') throw new Error(secret);
+          return reads <= 4 ? 403 : secret;
+        },
+      });
+      const result = inventoryFailureDiagnostic('database_metadata', error);
+      expect(result).toEqual({
+        format: 1,
+        outcome: 'inventory_failed',
+        stage: 'database_metadata',
+        errorClass: 'HttpError',
+        httpStatus: null,
+        readiness: 'unknown',
+        authorityEstablished: false,
+        mutationAuthorized: false,
+      });
+      expect(reads).toBe(0);
+      expect(JSON.stringify(result)).not.toContain(secret);
+    },
+  );
   it.each(['credential_file', 'cli_version', 'cli_composites'] as const)(
     'real CLI fails closed at %s without a receipt or leaking failed payload',
     (stage) => {

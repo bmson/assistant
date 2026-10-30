@@ -39,13 +39,10 @@ export function inventoryFailureDiagnostic(stage: unknown, error: unknown) {
   try {
     if (error instanceof InventoryHttpError) {
       errorClass = 'HttpError';
-      if (
-        typeof error.status === 'number' &&
-        Number.isInteger(error.status) &&
-        error.status >= 100 &&
-        error.status <= 599
-      )
-        httpStatus = error.status;
+      const descriptor = Object.getOwnPropertyDescriptor(error, 'status');
+      const status: unknown = descriptor && 'value' in descriptor ? descriptor.value : null;
+      if (typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599)
+        httpStatus = status;
     } else if (error instanceof SyntaxError) errorClass = 'SyntaxError';
     else if (error instanceof TypeError) errorClass = 'TypeError';
     else if (error instanceof RangeError) errorClass = 'RangeError';
