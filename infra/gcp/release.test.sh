@@ -79,7 +79,19 @@ case "$args" in
   *'run revisions describe'*'--format=json'*)
     revision="${*:4:1}"
     if [[ "$revision" == *agent* ]]; then SERVICE_NAME=assistant-agent; driver="${STUB_AGENT_DRIVER-firestore}"; else SERVICE_NAME=assistant-web; driver="${STUB_WEB_DRIVER-firestore}"; fi
-    service_json "$driver" | node -e 'let s="";process.stdin.on("data",x=>s+=x).on("end",()=>{const x=JSON.parse(s);const env=x.spec.template.spec.containers[0].env;process.stdout.write(JSON.stringify({spec:{timeoutSeconds:300,containers:[{env}]}}))})' ;;
+    # Revision describe is immutable native metadata, not the mutable service template.
+    if [[ "$revision" == *agent* ]]; then component=agent; digest_letter=a; else component=web; digest_letter=b; fi
+    digest="$(printf '%064d' 0 | tr 0 "$digest_letter")"
+    image="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${ARTIFACT_REPOSITORY:-assistant}/${component}@sha256:${digest}"
+    paused=false
+    if [[ "$revision" == *-candidate ]]; then paused=true; fi
+    service_json "$driver" | node -e '
+      let s="";process.stdin.on("data",x=>s+=x).on("end",()=>{
+        const x=JSON.parse(s),name=process.argv[1],image=process.argv[2];
+        const env=x.spec.template.spec.containers[0].env.filter(e=>e.name!=="ASSISTANT_RELEASE_WRITES_PAUSED");
+        if(name.startsWith("assistant-web"))env.push({name:"ASSISTANT_RELEASE_WRITES_PAUSED",value:process.argv[3]});
+        process.stdout.write(JSON.stringify({metadata:{name},spec:{timeoutSeconds:300,containers:[{image,env}]}}));
+      })' "$revision" "$image" "$paused" ;;
   *'run services update assistant-web'*)
     capture_traffic_tag "$@"
     if [[ "$args" == *'ASSISTANT_RELEASE_WRITES_PAUSED='* ]]; then
@@ -299,6 +311,16 @@ reset
 export STUB_JOB_SHAPE=v1
 out="$(firestore_release)" || fail "Firestore release should succeed with the standard Cloud Run v1 job JSON: $out"
 grep -q 'Firestore release abc123 is live' <<<"$out" || fail "release did not finish: $out"
+# The composed fake must return the native revision identity required by BASIC5,
+# rather than making the new guard accept an incomplete service-shaped response.
+gcloud run revisions describe assistant-web-resume --format=json | node -e '
+  let s="";process.stdin.on("data",x=>s+=x).on("end",()=>{
+    const r=JSON.parse(s),c=r.spec.containers[0];
+    const image=`${process.env.GCP_REGION}-docker.pkg.dev/${process.env.GCP_PROJECT}/${process.env.ARTIFACT_REPOSITORY||"assistant"}/web@sha256:${"b".repeat(64)}`;
+    const paused=c.env.filter(e=>e.name==="ASSISTANT_RELEASE_WRITES_PAUSED");
+    if(r.metadata.name!=="assistant-web-resume"||c.image!==image||paused.length!==1||paused[0].value!=="false")process.exit(1);
+  })' || fail "resume fixture must carry exact immutable name, digest and unpaused state"
+
 grep -q 'Recovery point: assistant-production at .* (point-in-time recovery' <<<"$out" ||
   fail "release must print its PITR recovery point: $out"
 grep -q 'pnpm -s firestore:indexes verify --project=test-project --database=assistant-production' "$STUB_CALLS" ||
