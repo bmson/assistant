@@ -6,9 +6,12 @@ import { dirname, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import {
   InventoryHttpError,
+  InventoryLimitError,
+  InventoryProcessError,
   type InventoryStage,
   type InventoryStageMarker,
   inventoryFailureDiagnostic,
+  parseInventoryList,
 } from './owner-editor-inventory-diagnostics.js';
 import { compareIndexInventory } from './owner-editor-release-index-inventory.js';
 import {
@@ -624,15 +627,17 @@ async function main(mark: InventoryStageMarker) {
   let retainedBytes = 0;
   const command = async (args: readonly string[], maxBuffer = LIMIT / 2) => {
     const remaining = started + 60000 - Date.now();
-    if (remaining <= 0) throw new Error('inventory bound');
+    if (remaining <= 0) throw new InventoryLimitError('time_bound');
     const result = await exec('gcloud', [...args], {
       timeout: Math.min(8000, remaining),
       maxBuffer,
       env: childEnv,
       killSignal: 'SIGKILL',
+    }).catch((error: unknown) => {
+      throw new InventoryProcessError(error);
     });
     retainedBytes += Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr);
-    if (retainedBytes > 4 * LIMIT) throw new Error('inventory bound');
+    if (retainedBytes > 4 * LIMIT) throw new InventoryLimitError('output_bound');
     return result.stdout;
   };
   mark('cli_version');
@@ -641,7 +646,7 @@ async function main(mark: InventoryStageMarker) {
   const lists: unknown[][] = [];
   for (const kind of ['composite', 'fields']) {
     mark(kind === 'composite' ? 'cli_composites' : 'cli_fields');
-    const value: unknown = JSON.parse(
+    const value = parseInventoryList(
       await command([
         'firestore',
         'indexes',
@@ -654,7 +659,6 @@ async function main(mark: InventoryStageMarker) {
         '--quiet',
       ]),
     );
-    if (!Array.isArray(value) || value.length > 1000) throw new Error('incomplete inventory');
     lists.push(value);
   }
   mark('access_token');
