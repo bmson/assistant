@@ -486,6 +486,30 @@ describe('inactive exact owner-family source rejection transaction', () => {
     },
   );
 
+  it.each([
+    { label: 'both missing', value: undefined },
+    { label: 'equal numeric strings', value: '1' },
+    { label: 'equal fractions', value: 1.5 },
+  ])('refuses paired extraction versions: $label', async ({ value }) => {
+    const f = fixture();
+    replaceStoredField(f, 'knowledgeGraphSources', 'extractionVersion', value);
+    replaceStoredField(f, 'knowledgeGraphAssertionEvidence', 'extractionVersion', value);
+    await expectMalformedNativeClosure(f);
+  });
+
+  it.each([
+    { label: 'both missing', value: undefined },
+    { label: 'equal empty strings', value: '' },
+    { label: 'equal whitespace', value: '   ' },
+    { label: 'equal non-string values', value: 123 },
+    { label: 'equal oversized UTF-8 strings', value: 'é'.repeat(257) },
+  ])('refuses paired source fingerprints: $label', async ({ value }) => {
+    const f = fixture();
+    replaceStoredField(f, 'knowledgeGraphRelations', 'sourceFingerprint', value);
+    replaceStoredField(f, 'knowledgeGraphAssertionEvidence', 'sourceFingerprint', value);
+    await expectMalformedNativeClosure(f);
+  });
+
   it('retains the note and evidence, rejects only its projection, retracts zero support, advances the cursor and replays the same receipt', async () => {
     const f = fixture();
     const preparedValue = await prepared(f);
