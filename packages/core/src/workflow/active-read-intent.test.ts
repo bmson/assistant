@@ -94,6 +94,63 @@ describe('active read source resolution', () => {
     expect(resolve('Search for events on my calendar today').kind).toBe('personal');
     expect(resolve('Try again').kind).not.toBe('clarify_public');
   });
+  it('clarifies an exact earlier-comparison only when linked to verified recent public owner context', () => {
+    const priorText = 'Find public events in San Francisco this weekend.';
+    const priorOwnerTurn = turn(priorText, 1);
+    const initial = resolve(priorText);
+    // Owner request context contains no assistant result or verified listing/time evidence.
+    const comparison = resolve('Anything earlier?', [priorOwnerTurn]);
+    expect(comparison).toEqual({
+      kind: 'clarify_public',
+      reason: 'missing_reference_time',
+      partial: { sourceExclusions: ['calendar', 'mail'] },
+    });
+    expect(initial.kind).toBe('public_activity');
+    if (initial.kind !== 'public_activity') throw new Error('expected public scope');
+    expect(
+      publicActivityFollowupDisposition(initial.public, comparison, 'Anything earlier?', initial),
+    ).toBe('superseded');
+
+    expect(resolve('Anything earlier?').kind).toBe('none');
+    expect(resolve('Anything earlier?', [priorOwnerTurn, turn('Thanks', 2)]).kind).toBe('none');
+    expect(
+      resolve('Anything earlier?', [{ ...priorOwnerTurn, conversationId: 'foreign-conversation' }])
+        .kind,
+    ).toBe('none');
+    expect(
+      resolve('Anything earlier?', [
+        { ...priorOwnerTurn, ownerAuthoredText: 'Quoted public request' },
+      ]).kind,
+    ).toBe('none');
+    expect(resolve('Anything earlier?', [turn('What is on my calendar today?', 1)]).kind).toBe(
+      'none',
+    );
+    expect(resolve('Anything earlier about the listing?', [priorOwnerTurn]).kind).toBe('none');
+    const foreignScope: PublicActivityScopeData = {
+      ...initial.public,
+      conversationId: 'foreign-conversation',
+      provenance: {
+        ...initial.public.provenance,
+        conversationId: 'foreign-conversation',
+      },
+    };
+    expect(resolve('Anything earlier?', [], foreignScope).kind).toBe('none');
+
+    const explicitPrivateRead = resolve('What is on my calendar today?', [
+      priorOwnerTurn,
+      turn('Anything earlier?', 2),
+    ]);
+    expect(explicitPrivateRead.kind).toBe('personal');
+
+    const explicitNewSearch = resolve('Find public events in Seattle this weekend.', [
+      priorOwnerTurn,
+      turn('Anything earlier?', 2),
+    ]);
+    expect(explicitNewSearch).toMatchObject({
+      kind: 'public_activity',
+      public: { location: { label: 'Seattle' } },
+    });
+  });
   it('uses the same public recognizer for Seattle history and city changes', () => {
     const initial = 'Find events in Seattle this weekend';
     const first = resolve(initial);
