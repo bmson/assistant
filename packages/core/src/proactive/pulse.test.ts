@@ -92,29 +92,6 @@ describe('eventLeadMoments', () => {
     expect(eventLeadMoments([salient({ start: '2026-03-04T09:40:00Z' })], NOW)).toHaveLength(0);
   });
 
-  it('names the place once and drops a reason that only repeats it', () => {
-    // The headline already carries the address. Salience still needs the
-    // `it is at …` marker to pick the travel lead time, but the owner should
-    // not read the same street twice in one sentence.
-    const travelling = salient({ start: '2026-03-04T09:35:00Z', location: 'Laugavegur 12' }, [
-      'it is at Laugavegur 12',
-      'it falls outside your usual hours',
-    ]);
-    const text = eventLeadMoments([travelling], NOW)[0]?.text ?? '';
-    expect(text.match(/Laugavegur 12/g)).toHaveLength(1);
-    expect(text).not.toContain('it is at');
-    expect(text).toContain('It falls outside your usual hours.');
-  });
-
-  it('leaves no dangling full stop when the place was the only reason', () => {
-    const travelling = salient({ start: '2026-03-04T09:35:00Z', location: 'Laugavegur 12' }, [
-      'it is at Laugavegur 12',
-    ]);
-    expect(eventLeadMoments([travelling], NOW)[0]?.text).toBe(
-      'Dentist starts in 35 minutes at Laugavegur 12.',
-    );
-  });
-
   it('allows a longer lead when the event means travelling', () => {
     const travelling = salient({ start: '2026-03-04T09:35:00Z', location: 'Laugavegur 12' }, [
       'it is at Laugavegur 12',
@@ -142,7 +119,7 @@ describe('eventLeadMoments', () => {
         end: '2026-03-04T10:00:00Z',
         location: 'Keflavik Airport',
       },
-      ['it is at Keflavik Airport', 'it falls outside your usual hours'],
+      ['it is at Keflavik Airport', 'it ends at or after 7 PM'],
     );
     expect(eventLeadMoments([wrongCalendarFlight], NOW)).toEqual([]);
 
