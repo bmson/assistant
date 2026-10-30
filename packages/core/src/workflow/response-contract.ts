@@ -4821,7 +4821,6 @@ export function classifyPublicActivityEvidence(
   evidence: ActionEvidence[],
   sourceLeadsFound: boolean,
 ): PublicActivityEvidenceStatus {
-  if (sourceLeadsFound) return 'source_leads_found';
   const rows = evidence.filter(
     (row) =>
       row.fromCurrentTask !== false &&
@@ -4840,7 +4839,6 @@ export function classifyPublicActivityEvidence(
     return succeeded ? 'incomplete' : 'lookup_not_completed';
 
   const searches = rows.filter((row) => row.toolName === 'web.search');
-  if (searches.length === 0) return 'incomplete';
   const resultSets: Record<string, unknown>[][] = [];
   for (const search of searches) {
     const items = record(search.result)?.results;
@@ -4849,8 +4847,6 @@ export function classifyPublicActivityEvidence(
     if (records.some((item) => !item)) return 'incomplete';
     resultSets.push(records as Record<string, unknown>[]);
   }
-  if (resultSets.every((items) => items.length === 0)) return 'no_relevant_evidence';
-
   const candidateUrls = new Set<string>();
   for (const items of resultSets)
     for (const item of items) {
@@ -4885,7 +4881,7 @@ export function classifyPublicActivityEvidence(
       fetchedUrls.add(url.href);
   }
   if ([...candidateUrls].some((url) => !fetchedUrls.has(url))) return 'incomplete';
-  return 'no_relevant_evidence';
+  return sourceLeadsFound ? 'source_leads_found' : 'no_relevant_evidence';
 }
 
 function publicActivityStatusText(

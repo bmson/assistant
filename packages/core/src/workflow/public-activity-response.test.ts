@@ -120,6 +120,32 @@ describe('public activity response source contract', () => {
     expect(fetchFailed.text).toContain('lookup may be incomplete');
     expect(fetchFailed.text).toContain('does not establish that no matching events exist');
 
+    const partialWithLead = enforceResponseContract(
+      'Draft details are ignored.',
+      [
+        searchEvidence([
+          { title: 'Art Walk', url },
+          { title: 'Another event', url: 'https://example.test/another' },
+        ]),
+        fetchEvidence(),
+      ],
+      { publicActivity: scope() },
+    );
+    expect(partialWithLead.publicActivityEvidenceStatus).toBe('incomplete');
+    expect(partialWithLead.text).toContain('[Art Walk](https://example.test/art-walk)');
+
+    const failedWithLead = enforceResponseContract(
+      'Draft details are ignored.',
+      [
+        search,
+        fetchEvidence(),
+        { ...fetchEvidence('bad', 'https://example.test/other'), status: 'failed' },
+      ],
+      { publicActivity: scope() },
+    );
+    expect(failedWithLead.publicActivityEvidenceStatus).toBe('incomplete');
+    expect(failedWithLead.text).toContain('[Art Walk](https://example.test/art-walk)');
+
     const malformed = enforceResponseContract(
       'No events exist.',
       [searchEvidence({ error: 'bad' })],
