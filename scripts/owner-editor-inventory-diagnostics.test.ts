@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { generateKeyPairSync } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +9,7 @@ import {
   InventoryHttpError,
   inventoryFailureDiagnostic,
 } from './owner-editor-inventory-diagnostics.js';
+import { decryptInventoryFailure } from './owner-editor-inventory-failure-envelope.js';
 import { createReadOnlyGet, DATABASE } from './owner-editor-release-inventory.js';
 
 const secret = 'DO_NOT_LEAK_private-owner-token-generation';
@@ -139,6 +141,8 @@ describe('bounded content-free inventory failure diagnostics', () => {
             service_account_impersonation_url: `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${principal}:generateAccessToken`,
           }),
         );
+        const diagnosticKeys =
+          stage === 'cli_composites' ? generateKeyPairSync('rsa', { modulusLength: 3072 }) : null;
         const result = spawnSync(
           process.execPath,
           [
@@ -166,6 +170,14 @@ describe('bounded content-free inventory failure diagnostics', () => {
               RUNNER_TEMP: dir,
               CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: credential,
               GOOGLE_APPLICATION_CREDENTIALS: credential,
+              ...(diagnosticKeys
+                ? {
+                    OWNER_EDITOR_DIAGNOSTIC_RECIPIENT_PUBLIC_KEY: diagnosticKeys.publicKey
+                      .export({ type: 'spki', format: 'pem' })
+                      .toString(),
+                    OWNER_EDITOR_DIAGNOSTIC_SOURCE_SHA: 'a'.repeat(40),
+                  }
+                : {}),
             },
           },
         );
@@ -189,6 +201,26 @@ describe('bounded content-free inventory failure diagnostics', () => {
             diagnosticHintsOnly: true,
           });
         expect(existsSync(join(dir, 'owner-editor-release-inventory.json'))).toBe(false);
+        if (diagnosticKeys) {
+          const encrypted = readFileSync(
+            join(dir, 'owner-editor-inventory-failure.encrypted.json'),
+            'utf8',
+          );
+          expect(encrypted).not.toContain(secret);
+          const payload = decryptInventoryFailure(
+            JSON.parse(encrypted),
+            diagnosticKeys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+          );
+          expect(payload).toMatchObject({
+            sourceSha: 'a'.repeat(40),
+            runId: '123',
+            stage: 'cli_composites',
+            stderr: secret,
+          });
+        } else
+          expect(existsSync(join(dir, 'owner-editor-inventory-failure.encrypted.json'))).toBe(
+            false,
+          );
         if (stage === 'credential_file') expect(existsSync(join(dir, 'commands'))).toBe(false);
         else
           expect(readFileSync(join(dir, 'commands'), 'utf8').trim().split('\n')).toEqual(
