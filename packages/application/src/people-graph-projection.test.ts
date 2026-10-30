@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { personDossierFromStoredParts } from './people.js';
 import { type PersonGraphEdgeInput, projectPersonGraph } from './people-graph-projection.js';
+import type { PersonProfile } from './profile/queries.js';
 
 const contactId = '12345678-1234-4234-8234-123456789abc';
 const edge = (patch: Partial<PersonGraphEdgeInput>): PersonGraphEdgeInput => ({
@@ -19,6 +21,53 @@ const edge = (patch: Partial<PersonGraphEdgeInput>): PersonGraphEdgeInput => ({
 });
 
 describe('person graph projection', () => {
+  it('keeps the saved-memory source id when stored non-person edges are composed into a dossier', () => {
+    const profile: PersonProfile = {
+      contact: {
+        id: contactId,
+        name: 'Anna',
+        aliases: [],
+        relationship: 'friend',
+        trust: 'known',
+      },
+      facts: [],
+      totalFacts: 0,
+      occasions: [],
+      occasionSuggestions: [],
+      mergeOptions: [],
+    };
+    const sourceMemoryId = '88888888-8888-4888-8888-888888888888';
+    const dossier = personDossierFromStoredParts(
+      {
+        profile,
+        entity: null,
+        edges: [
+          edge({
+            id: 'work-edge',
+            sourceMemoryId,
+            predicate: 'works_at',
+            other: {
+              id: 'organization-1',
+              label: 'Praça Studio',
+              kind: 'organization',
+              canonicalKey: 'organization:praça-studio',
+            },
+          }),
+        ],
+        events: [],
+        occasions: [],
+      },
+      new Date('2026-09-02T12:00:00.000Z'),
+    );
+    expect(dossier.connections).toEqual([
+      expect.objectContaining({
+        id: 'work-edge',
+        sentence: 'Anna works at Praça Studio.',
+        sourceMemoryId,
+      }),
+    ]);
+  });
+
   it('preserves stored direction for people and contact links', () => {
     const result = projectPersonGraph('Anna', [
       edge({

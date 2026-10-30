@@ -9,6 +9,7 @@ import {
 
 export interface PersonGraphEdgeInput {
   id: string;
+  sourceMemoryId?: string;
   predicate: string;
   outbound: boolean;
   reviewStatus: 'confirmed' | 'unreviewed';
@@ -86,6 +87,7 @@ export function projectPersonGraph(
     });
     const shared = {
       id: edge.id,
+      ...(edge.sourceMemoryId ? { sourceMemoryId: edge.sourceMemoryId } : {}),
       sentence: presentation.sentence,
       label: presentation.label,
       otherLabel,

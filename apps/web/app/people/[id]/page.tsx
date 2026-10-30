@@ -263,8 +263,13 @@ export default async function PersonPage({
   const selectedRelation = requestedConnectionId
     ? relations.find((relation) => relation.id.toLowerCase() === requestedConnectionId)
     : undefined;
-  const selectedRelationId = selectedRelation?.id.toLowerCase();
-  const unavailableConnectionSelection = rawConnectionId !== undefined && !selectedRelation;
+  const selectedNonPersonConnection =
+    !selectedRelation && requestedConnectionId
+      ? connections.find((connection) => connection.id.toLowerCase() === requestedConnectionId)
+      : undefined;
+  const selectedConnectionId = (selectedRelation ?? selectedNonPersonConnection)?.id.toLowerCase();
+  const unavailableConnectionSelection =
+    rawConnectionId !== undefined && !selectedRelation && !selectedNonPersonConnection;
   const editorAvailability = ownerEditorAvailability({
     formSessionScope: session.formSessionScope,
     editorAvailable: Boolean(
@@ -373,7 +378,7 @@ export default async function PersonPage({
               relations={relations}
               now={now}
               peopleQuery={query}
-              selectedRelationId={selectedRelationId}
+              selectedRelationId={selectedRelation?.id.toLowerCase()}
               editControls={
                 editor
                   ? Object.fromEntries(
@@ -467,7 +472,11 @@ export default async function PersonPage({
         {connections.length > 0 ? (
           <section className="mt-8">
             <SectionHeading title="Also connected" count={connections.length} />
-            <ConnectionList connections={connections} now={now} />
+            <ConnectionList
+              connections={connections}
+              now={now}
+              selectedConnectionId={selectedNonPersonConnection ? selectedConnectionId : undefined}
+            />
           </section>
         ) : null}
 

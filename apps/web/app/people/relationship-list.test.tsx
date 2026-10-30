@@ -128,4 +128,32 @@ describe('ConnectionList', () => {
     expect(html).toContain('worked at Praça Studio');
     expect(html).not.toContain('rounded-full');
   });
+
+  it('selects a non-person connection with a stable anchor, exact statement, read-only reason, and source link', () => {
+    const id = '33333333-3333-4333-8333-333333333333';
+    const sourceMemoryId = '88888888-8888-4888-8888-888888888888';
+    const html = renderToStaticMarkup(
+      <ConnectionList
+        connections={[connection({ id, sourceMemoryId })]}
+        selectedConnectionId={id}
+        now={NOW}
+      />,
+    );
+    expect(html).toContain(`id="person-connection-${id}"`);
+    expect(html).toContain('aria-current="location"');
+    expect(html).toContain('Tomás Ferreira worked at Praça Studio.');
+    expect(html).toContain('not a relationship between people');
+    expect(html).toContain('cannot be edited or removed as a family relationship');
+    expect(html).toContain(`/profile/knowledge/notes/${sourceMemoryId}`);
+    expect(html).not.toContain('Edit family');
+    expect(html).not.toContain('Remove connection');
+  });
+
+  it('states when no exact source note link is available for the selected connection', () => {
+    const html = renderToStaticMarkup(
+      <ConnectionList connections={[connection()]} selectedConnectionId="con-1" now={NOW} />,
+    );
+    expect(html).toContain('A source note link is not available for this connection.');
+    expect(html).not.toContain('/profile/knowledge/notes/');
+  });
 });

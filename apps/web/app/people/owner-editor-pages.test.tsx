@@ -420,6 +420,45 @@ it('selects only the exact loaded connection without adding an edit or removal g
   expect(ports.pgEditor).toHaveBeenCalledOnce();
 });
 
+it('selects a loaded non-person connection without adding it to family editor authority', async () => {
+  const connectionId = '66666666-6666-4666-8666-666666666666';
+  const sourceMemoryId = '88888888-8888-4888-8888-888888888888';
+  const relationIds = data.dossier.relations.map((relation) => relation.id);
+  ports.person.mockImplementationOnce(async () => ({
+    ...data.dossier,
+    connections: [
+      {
+        id: connectionId,
+        sentence: 'Sam Rivera worked at Praça Studio.',
+        label: 'Worked at',
+        otherLabel: 'Praça Studio',
+        otherKind: 'organization',
+        validFrom: '2018',
+        validUntil: null,
+        sourceMemoryId,
+      },
+    ],
+  }));
+  const html = renderToStaticMarkup(
+    await Person({
+      params: Promise.resolve({ id: contact.id }),
+      searchParams: Promise.resolve({ connectionId }),
+    }),
+  );
+  expect(html).toContain(`id="person-connection-${connectionId}"`);
+  expect(html).toContain('aria-current="location"');
+  expect(html).toContain('Sam Rivera worked at Praça Studio.');
+  expect(html).toContain('not a relationship between people');
+  expect(html).toContain(`/profile/knowledge/notes/${sourceMemoryId}`);
+  expect(html).not.toContain('Edit relationship');
+  expect(html).not.toContain('Remove connection');
+  expect(ports.pgEditor.mock.calls[0]?.[1]).toMatchObject({
+    contactId: contact.id,
+    relationIds,
+  });
+  expect(ports.pgEditor.mock.calls[0]?.[1].relationIds).not.toContain(connectionId);
+});
+
 it.each([
   ['stale or foreign connection', '55555555-5555-4555-8555-555555555555'],
   ['invalid connection identifier', '../private-note'],
