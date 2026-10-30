@@ -18,6 +18,8 @@ RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
 
 COPY packages ./packages
 COPY apps/web ./apps/web
+# Next typechecks the release-policy parity test against this public source declaration.
+COPY infra/gcp/release-contracts.json ./infra/gcp/release-contracts.json
 ARG GIT_SHA=unknown
 ENV BUILD_SHA=${GIT_SHA}
 RUN pnpm --filter @assistant/web build
