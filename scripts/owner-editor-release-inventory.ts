@@ -24,6 +24,7 @@ import {
   editorMetadataTarget,
   observeEditorReadiness,
 } from './owner-editor-release-readiness.js';
+import { InventoryServiceFactsError } from './owner-editor-service-facts-diagnostics.js';
 
 export const PROJECT = 'bmson-assistant';
 export const DATABASE = `projects/${PROJECT}/databases/assistant-production`;
@@ -284,6 +285,13 @@ const allowedEnv = new Set([
 ]);
 /** Retain only immutable image/config hashes and explicit nonsecret release fields. */
 export function serviceFacts(raw: unknown, service: 'agent' | 'web') {
+  try {
+    return strictServiceFacts(raw, service);
+  } catch {
+    throw new InventoryServiceFactsError(raw, service);
+  }
+}
+function strictServiceFacts(raw: unknown, service: 'agent' | 'web') {
   const value = record(raw);
   if (value.name !== `${RUN_ROOT}/services/assistant-${service}`) throw new Error('wrong service');
   const template = record(value.template);
