@@ -13,6 +13,10 @@ import {
   inventoryFailureDiagnostic,
   parseInventoryList,
 } from './owner-editor-inventory-diagnostics.js';
+import {
+  encryptInventoryFailure,
+  verifyFailureRecipient,
+} from './owner-editor-inventory-failure-envelope.js';
 import { compareIndexInventory } from './owner-editor-release-index-inventory.js';
 import {
   createEditorMetadataRead,
@@ -20,6 +24,7 @@ import {
   editorMetadataTarget,
   observeEditorReadiness,
 } from './owner-editor-release-readiness.js';
+import { InventoryServiceFactsError } from './owner-editor-service-facts-diagnostics.js';
 
 export const PROJECT = 'bmson-assistant';
 export const DATABASE = `projects/${PROJECT}/databases/assistant-production`;
@@ -280,6 +285,13 @@ const allowedEnv = new Set([
 ]);
 /** Retain only immutable image/config hashes and explicit nonsecret release fields. */
 export function serviceFacts(raw: unknown, service: 'agent' | 'web') {
+  try {
+    return strictServiceFacts(raw, service);
+  } catch {
+    throw new InventoryServiceFactsError(raw, service);
+  }
+}
+function strictServiceFacts(raw: unknown, service: 'agent' | 'web') {
   const value = record(raw);
   if (value.name !== `${RUN_ROOT}/services/assistant-${service}`) throw new Error('wrong service');
   const template = record(value.template);
@@ -600,6 +612,7 @@ async function main(mark: InventoryStageMarker) {
   verifyManifest(manifest);
   mark('protected_context');
   verifyPreAuthEnvironment(process.env);
+  const diagnosticRecipient = verifyFailureRecipient(process.env);
   if (mode === '--verify-source') return;
   const started = Date.now();
   mark('credential_file');
@@ -634,6 +647,16 @@ async function main(mark: InventoryStageMarker) {
       env: childEnv,
       killSignal: 'SIGKILL',
     }).catch((error: unknown) => {
+      if (
+        diagnosticRecipient &&
+        args.slice(0, 4).join(' ') === 'firestore indexes composite list'
+      ) {
+        writeFileSync(
+          'owner-editor-inventory-failure.encrypted.json',
+          `${JSON.stringify(encryptInventoryFailure(error, diagnosticRecipient, { sourceSha: process.env.GITHUB_SHA ?? '', runId: process.env.GITHUB_RUN_ID ?? '' }))}\n`,
+          { flag: 'wx', mode: 0o600 },
+        );
+      }
       throw new InventoryProcessError(error);
     });
     retainedBytes += Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr);
@@ -655,7 +678,8 @@ async function main(mark: InventoryStageMarker) {
         `--project=${PROJECT}`,
         '--database=assistant-production',
         '--format=json',
-        '--page-size=100',
+        // Leave page size to the API: composite listing rejects nonzero sizes.
+        // The pinned CLI still follows every nextPageToken without a --limit.
         '--quiet',
       ]),
     );

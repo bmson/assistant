@@ -104,6 +104,8 @@ export interface ResponseContractResult {
   text: string;
   blocked: boolean;
   unsupported: ActionKind[];
+  /** Typed disposition of the public source lookup, when this is a public-event answer. */
+  publicActivityEvidenceStatus?: PublicActivityEvidenceStatus;
   /** The draft was replaced because it contained an obvious generation loop. */
   qualityFallback?: boolean;
   /**
@@ -117,6 +119,14 @@ export interface ResponseContractResult {
   /** Structured evidence for a weekly review; drives task status without parsing prose. */
   weeklyPlanAssessment?: { coverageComplete: boolean; slotCount: number };
 }
+
+export type PublicActivityEvidenceStatus =
+  | 'source_leads_found'
+  | 'no_relevant_evidence'
+  | 'tool_failure'
+  | 'lookup_not_completed'
+  | 'incomplete'
+  | 'not_attempted';
 
 interface ResponseContractOptions {
   /** The same admitted public scope used for query construction. */
@@ -4742,7 +4752,20 @@ export function publicActivitySourceLeads(
     if (row.fromCurrentTask === false || row.status !== 'succeeded' || row.toolName !== 'web.fetch')
       continue;
     const result = record(row.result);
-    if (typeof result?.url !== 'string') continue;
+    const finalUrl = typeof result?.finalUrl === 'string' ? normalizeUrl(result.finalUrl) : null;
+    if (
+      !result ||
+      typeof result.status !== 'number' ||
+      result.status < 200 ||
+      result.status >= 300 ||
+      typeof result.text !== 'string' ||
+      !result.text.trim() ||
+      !finalUrl ||
+      !/^https?:$/.test(finalUrl.protocol) ||
+      finalUrl.username ||
+      finalUrl.password
+    )
+      continue;
     const source = [result.title, result.text, result.content]
       .filter((value) => typeof value === 'string')
       .join(' ')
@@ -4773,7 +4796,7 @@ export function publicActivitySourceLeads(
       /\bnot\s+free\b|\b(?:tickets?|admission|entry)\b[^.!?\n]{0,24}[$€£]\s*[1-9]/i.test(source)
     )
       continue;
-    const url = normalizeUrl(result.url);
+    const url = finalUrl;
     if (!url || !/^https?:$/.test(url.protocol) || url.username || url.password) continue;
     const title = (typeof result.title === 'string' ? result.title : url.hostname)
       .replace(/[\r\n\t]+/g, ' ')
@@ -4793,6 +4816,93 @@ export function publicActivitySourceLeads(
   ].join('\n\n');
 }
 
+/** Classifies only current-task web receipts; no model prose or private source can affect it. */
+export function classifyPublicActivityEvidence(
+  evidence: ActionEvidence[],
+  sourceLeadsFound: boolean,
+): PublicActivityEvidenceStatus {
+  const rows = evidence.filter(
+    (row) =>
+      row.fromCurrentTask !== false &&
+      (row.toolName === 'web.search' || row.toolName === 'web.fetch'),
+  );
+  if (rows.length === 0) return 'not_attempted';
+
+  const succeeded = rows.some(successful);
+  const failed = rows.some((row) => {
+    if (row.status === 'failed') return true;
+    const result = record(row.result);
+    return result?.ok === false || (typeof result?.status === 'number' && result.status >= 400);
+  });
+  if (failed) return succeeded ? 'incomplete' : 'tool_failure';
+  if (rows.some((row) => !successful(row)))
+    return succeeded ? 'incomplete' : 'lookup_not_completed';
+
+  const searches = rows.filter((row) => row.toolName === 'web.search');
+  const resultSets: Record<string, unknown>[][] = [];
+  for (const search of searches) {
+    const items = record(search.result)?.results;
+    if (!Array.isArray(items)) return 'incomplete';
+    const records = items.map(record);
+    if (records.some((item) => !item)) return 'incomplete';
+    resultSets.push(records as Record<string, unknown>[]);
+  }
+  const candidateUrls = new Set<string>();
+  for (const items of resultSets)
+    for (const item of items) {
+      if (typeof item.url !== 'string') return 'incomplete';
+      const url = normalizeUrl(item.url);
+      if (!url || !/^https?:$/.test(url.protocol) || url.username || url.password)
+        return 'incomplete';
+      candidateUrls.add(url.href);
+    }
+
+  const fetchedUrls = new Set<string>();
+  for (const row of rows.filter((item) => item.toolName === 'web.fetch')) {
+    const result = record(row.result);
+    const finalUrl = typeof result?.finalUrl === 'string' ? normalizeUrl(result.finalUrl) : null;
+    if (
+      !result ||
+      typeof result.status !== 'number' ||
+      result.status < 200 ||
+      result.status >= 300 ||
+      typeof result.text !== 'string' ||
+      !result.text.trim() ||
+      !finalUrl ||
+      !/^https?:$/.test(finalUrl.protocol) ||
+      finalUrl.username ||
+      finalUrl.password
+    )
+      return 'incomplete';
+    const raw = record(row.args)?.url;
+    if (typeof raw !== 'string') continue;
+    const url = normalizeUrl(raw);
+    if (url && /^https?:$/.test(url.protocol) && !url.username && !url.password)
+      fetchedUrls.add(url.href);
+  }
+  if ([...candidateUrls].some((url) => !fetchedUrls.has(url))) return 'incomplete';
+  return sourceLeadsFound ? 'source_leads_found' : 'no_relevant_evidence';
+}
+
+function publicActivityStatusText(
+  status: Exclude<PublicActivityEvidenceStatus, 'source_leads_found'>,
+  scope: PublicActivityScopeData,
+): string {
+  const range = `${scope.location.label}, from ${scope.civilWindow.startDate} to before ${scope.civilWindow.endDateExclusive}`;
+  switch (status) {
+    case 'no_relevant_evidence':
+      return `I searched public sources for ${range}, but could not verify a relevant listing. That does not establish that no public events exist.`;
+    case 'tool_failure':
+      return `I could not verify matching listings for ${range} because the public web lookup failed. I cannot tell whether matching events are listed.`;
+    case 'lookup_not_completed':
+      return `I could not complete a public web lookup for ${range}. I cannot tell whether matching events are listed.`;
+    case 'incomplete':
+      return `I could not verify enough public sources for ${range}; the lookup may be incomplete. This does not establish that no matching events exist.`;
+    case 'not_attempted':
+      return `I could not verify matching listings for ${range} because I have not completed a public web lookup yet.`;
+  }
+}
+
 export function enforceResponseContract(
   text: string,
   evidence: ActionEvidence[],
@@ -4804,12 +4914,20 @@ export function enforceResponseContract(
     // the routing repair useful without calling page-wide substring matches a
     // verified shortlist or publishing unsupported model-written details.
     const leads = publicActivitySourceLeads(evidence, opts.publicActivity);
+    const publicActivityEvidenceStatus = classifyPublicActivityEvidence(evidence, Boolean(leads));
+    const fallbackText =
+      leads ??
+      publicActivityStatusText(
+        publicActivityEvidenceStatus === 'source_leads_found'
+          ? 'no_relevant_evidence'
+          : publicActivityEvidenceStatus,
+        opts.publicActivity,
+      );
     return {
-      text:
-        leads ??
-        `I could not verify matching public events for ${opts.publicActivity.location.label}, from ${opts.publicActivity.civilWindow.startDate} to before ${opts.publicActivity.civilWindow.endDateExclusive}. I cannot recommend a matching event from these results yet.`,
+      text: fallbackText,
       blocked: false,
       unsupported: [],
+      publicActivityEvidenceStatus,
       groundingFallback: ['public_event_occurrence_unverified'],
     };
   }

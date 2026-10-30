@@ -127,6 +127,44 @@ describe('active read source resolution', () => {
     expect(query.kind === 'query' && query.query).toMatch(/jazz concerts/);
     expect(query.kind === 'query' && query.query).toMatch(/free admission/);
   });
+  it('carries a narrowly supported free-outdoor preference only from verified public context', () => {
+    const initialText = 'Find public events in San Francisco this weekend';
+    const initial = resolve(initialText);
+    expect(initial.kind).toBe('public_activity');
+    if (initial.kind !== 'public_activity') throw new Error('public scope');
+
+    const refined = resolve('Only free outdoor things.', [turn(initialText, 1)], initial.public);
+    expect(refined.kind).toBe('public_activity');
+    if (refined.kind !== 'public_activity') throw new Error('refined public scope');
+    expect(refined.public).toMatchObject({
+      location: { label: 'San Francisco' },
+      civilWindow: initial.public.civilWindow,
+      sourceExclusions: ['calendar', 'mail'],
+      filters: [
+        { kind: 'free', value: 'free admission', basisMessageId: 'm2' },
+        { kind: 'category', value: 'outdoor activities', basisMessageId: 'm2' },
+      ],
+    });
+    const query = buildPublicActivityQuery(refined.public);
+    expect(query.kind).toBe('query');
+    if (query.kind === 'query') {
+      expect(query.query).toContain('San Francisco');
+      expect(query.query).toContain('free admission');
+      expect(query.query).toContain('outdoor activities');
+    }
+    expect(resolve('Only free outdoor things.').kind).not.toBe('public_activity');
+  });
+  it('accepts the same exact preference when included in a complete public request', () => {
+    const result = resolve(
+      'Find public events in San Francisco this weekend; only free outdoor things.',
+    );
+    expect(result.kind).toBe('public_activity');
+    if (result.kind !== 'public_activity') throw new Error('public scope');
+    expect(result.public.filters).toEqual([
+      { kind: 'free', value: 'free admission', basisMessageId: 'm1' },
+      { kind: 'category', value: 'outdoor activities', basisMessageId: 'm1' },
+    ]);
+  });
   it.each(['wheelchair accessible', 'under 18', 'food', 'vegan only'])(
     'does not silently discard unsupported owner constraint %s',
     (constraint) => {
@@ -136,6 +174,28 @@ describe('active read source resolution', () => {
       });
     },
   );
+  it.each([
+    'Only free outdoor things for kids',
+    'Only free outdoor things under $20',
+    'Only free outdoor things near BART',
+    'Find public events in San Francisco this weekend; only outdoor things near BART',
+    'Find public events in San Francisco this weekend; only free outdoor things near BART',
+    'Find public events in San Francisco this weekend; only free outdoor things at BART',
+    'Only free outdoor things at BART',
+    'Only free outdoor things within walking distance',
+    'Find public events in San Francisco this weekend; only free outdoor things within walking distance',
+    'Find public events in San Francisco this weekend within walking distance; only free outdoor things',
+    'Find public events in San Francisco this weekend with family; only free outdoor things',
+  ])('keeps unsupported constraints visible after a supported public preference: %s', (text) => {
+    const initialText = 'Find public events in San Francisco this weekend';
+    const initial = resolve(initialText);
+    if (initial.kind !== 'public_activity') throw new Error('public scope');
+    expect(resolve(text, [turn(initialText, 1)], initial.public)).toMatchObject({
+      kind: 'clarify_public',
+      reason: 'unsupported',
+      partial: { location: { label: 'San Francisco' } },
+    });
+  });
 
   it('resolves distinct-task terse and date-only followups from actual prior rows without checkpoint', () => {
     const priorText = 'Find public events in San Francisco today';
