@@ -1,4 +1,9 @@
-import { parseInactiveOwnerFamilyRemovalOperationRecord } from '@assistant/persistence/owner-family-rejection-storage';
+import {
+  parseInactiveOwnerFamilyRejectionMarker,
+  parseInactiveOwnerFamilyRemovalCacheCursor,
+  parseInactiveOwnerFamilyRemovalOperationRecord,
+  parseInactiveOwnerFamilyRemovalRequest,
+} from '@assistant/persistence/owner-family-rejection-storage';
 import { describe, expect, it } from 'vitest';
 import { parseOwnerEditorOperationRecord } from './owner-editor-storage.js';
 
@@ -45,6 +50,39 @@ function committed(outcome: 'saved' | 'unchanged' = 'saved') {
       ids: { relationId, memoryId, assertionId },
       revision: 'e'.repeat(64),
     },
+  };
+}
+
+function marker() {
+  return {
+    version: 2,
+    id: 'a'.repeat(64),
+    installationLineageId: 'test-lineage',
+    ownerId,
+    sourceMemoryId: memoryId,
+    state: 'active',
+    stableContactMeaningKey: 'b'.repeat(64),
+    meaning: {
+      subjectContactId: ownerId,
+      objectContactId: '88888888-8888-4888-8888-888888888888',
+      predicate: 'knows',
+      assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
+      validFrom: null,
+      validUntil: null,
+      qualifiers: { source: 'owner' },
+    },
+    original: {
+      relationId,
+      assertionId,
+      evidenceId: '99999999-9999-4999-8999-999999999999',
+      subjectEntityId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      objectEntityId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      sourceContentHash: 'c'.repeat(64),
+    },
+    operationId,
+    requestHash: 'd'.repeat(64),
+    reviewClosureHash: 'e'.repeat(64),
+    createdAt: now,
   };
 }
 
@@ -110,5 +148,97 @@ describe('inactive owner family removal storage codec', () => {
 
   it('keeps the active parser refusing the inactive family removal command', () => {
     expect(() => parseOwnerEditorOperationRecord(baseRecord())).toThrow();
+  });
+
+  it('accepts the strict inactive request and cache cursor shapes', () => {
+    expect(
+      parseInactiveOwnerFamilyRemovalRequest({
+        version: 1,
+        intent: 'apply',
+        command: 'remove_owner_family_relationship',
+        operationId,
+        targetRelationId: relationId,
+        expectedTargetRevision: 'f'.repeat(64),
+      }).targetRelationId,
+    ).toBe(relationId);
+    expect(
+      parseInactiveOwnerFamilyRemovalCacheCursor({
+        version: 1,
+        ownerId,
+        installationLineageId: 'test-lineage',
+        revision: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        protocolVersion: 1,
+        state: 'active',
+      }).ownerId,
+    ).toBe(ownerId);
+  });
+
+  it('rejects request and cursor scope changes, malformed hashes, and extra keys', () => {
+    const request = {
+      version: 1,
+      intent: 'apply',
+      command: 'remove_owner_family_relationship',
+      operationId,
+      targetRelationId: relationId,
+      expectedTargetRevision: 'f'.repeat(64),
+    };
+    const cursor = {
+      version: 1,
+      ownerId,
+      installationLineageId: 'test-lineage',
+      revision: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      protocolVersion: 1,
+      state: 'active',
+    };
+    expect(() =>
+      parseInactiveOwnerFamilyRemovalRequest({ ...request, targetRelationId: 'bad' }),
+    ).toThrow();
+    expect(() =>
+      parseInactiveOwnerFamilyRemovalRequest({ ...request, unrecognized: true }),
+    ).toThrow();
+    expect(() =>
+      parseInactiveOwnerFamilyRemovalCacheCursor({ ...cursor, ownerId: 'bad-owner' }),
+    ).toThrow();
+    expect(() =>
+      parseInactiveOwnerFamilyRemovalCacheCursor({ ...cursor, state: 'retired' }),
+    ).toThrow();
+    expect(() => parseInactiveOwnerFamilyRemovalCacheCursor({ ...cursor, extra: true })).toThrow();
+  });
+
+  it('accepts a bounded strict rejection marker and rejects malformed meaning or lineage fields', () => {
+    expect(parseInactiveOwnerFamilyRejectionMarker(marker()).sourceMemoryId).toBe(memoryId);
+    expect(() =>
+      parseInactiveOwnerFamilyRejectionMarker({ ...marker(), unexpected: true }),
+    ).toThrow();
+    expect(() =>
+      parseInactiveOwnerFamilyRejectionMarker({ ...marker(), ownerId: 'wrong' }),
+    ).toThrow();
+    expect(() =>
+      parseInactiveOwnerFamilyRejectionMarker({
+        ...marker(),
+        meaning: {
+          ...marker().meaning,
+          assertion: { tense: 'future', polarity: 'positive', modality: 'asserted' },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      parseInactiveOwnerFamilyRejectionMarker({
+        ...marker(),
+        meaning: {
+          ...marker().meaning,
+          qualifiers: Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`k${i}`, i])),
+        },
+      }),
+    ).toThrow();
+  });
+
+  it('bounds the complete marker by UTF-8 bytes, including qualifier text', () => {
+    expect(() =>
+      parseInactiveOwnerFamilyRejectionMarker({
+        ...marker(),
+        meaning: { ...marker().meaning, qualifiers: { note: '界'.repeat(1400) } },
+      }),
+    ).toThrow('UTF-8 storage limit');
   });
 });

@@ -105,3 +105,73 @@ export const ownerEditorEpochCursorSchema = z.strictObject({
   ready: z.boolean(),
   privacyGenerationDigest: hash,
 });
+
+export const inactiveOwnerFamilyRemovalRequestSchema = z.strictObject({
+  version: z.literal(1),
+  intent: z.literal('apply'),
+  command: z.literal('remove_owner_family_relationship'),
+  operationId: uuid,
+  targetRelationId: uuid,
+  expectedTargetRevision: hash,
+});
+
+export const inactiveOwnerFamilyRemovalCacheCursorSchema = z.strictObject({
+  version: z.literal(1),
+  ownerId: uuid,
+  installationLineageId: z.string().min(1).max(200),
+  revision: uuid,
+  protocolVersion: z.literal(1),
+  state: z.literal('active'),
+});
+
+export const inactiveOwnerFamilyRejectionMarkerSchema = z
+  .strictObject({
+    version: z.literal(2),
+    id: hash,
+    installationLineageId: z.string().min(1).max(200),
+    ownerId: uuid,
+    sourceMemoryId: uuid,
+    state: z.literal('active'),
+    stableContactMeaningKey: hash,
+    meaning: z.strictObject({
+      subjectContactId: uuid,
+      objectContactId: uuid,
+      predicate: z.string().min(1).max(120),
+      assertion: z.strictObject({
+        tense: z.enum(['unspecified', 'present', 'past']),
+        polarity: z.literal('positive'),
+        modality: z.literal('asserted'),
+      }),
+      validFrom: z.string().nullable(),
+      validUntil: z.string().nullable(),
+      qualifiers: z
+        .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]))
+        .refine((value) => Object.keys(value).length <= 64),
+    }),
+    original: z.strictObject({
+      relationId: uuid,
+      assertionId: uuid,
+      evidenceId: uuid,
+      subjectEntityId: uuid,
+      objectEntityId: uuid,
+      sourceContentHash: hash,
+    }),
+    operationId: uuid,
+    requestHash: hash,
+    reviewClosureHash: hash,
+    createdAt: z.date(),
+  })
+  .refine(
+    (value) => new TextEncoder().encode(JSON.stringify(value)).byteLength <= 4096,
+    'Source rejection marker exceeds its UTF-8 storage limit',
+  );
+
+export type InactiveOwnerFamilyRemovalRequest = z.infer<
+  typeof inactiveOwnerFamilyRemovalRequestSchema
+>;
+export type InactiveOwnerFamilyRemovalCacheCursor = z.infer<
+  typeof inactiveOwnerFamilyRemovalCacheCursorSchema
+>;
+export type InactiveOwnerFamilyRejectionMarker = z.infer<
+  typeof inactiveOwnerFamilyRejectionMarkerSchema
+>;
