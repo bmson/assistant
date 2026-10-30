@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { generateKeyPairSync } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +9,7 @@ import {
   InventoryHttpError,
   inventoryFailureDiagnostic,
 } from './owner-editor-inventory-diagnostics.js';
+import { decryptInventoryFailure } from './owner-editor-inventory-failure-envelope.js';
 import { createReadOnlyGet, DATABASE } from './owner-editor-release-inventory.js';
 
 const secret = 'DO_NOT_LEAK_private-owner-token-generation';
@@ -109,7 +111,7 @@ describe('bounded content-free inventory failure diagnostics', () => {
       expect(JSON.stringify(result)).not.toContain(secret);
     },
   );
-  it.each(['credential_file', 'cli_version', 'cli_composites'] as const)(
+  it.each(['credential_file', 'cli_version', 'cli_composites', 'access_token'] as const)(
     'real CLI fails closed at %s without a receipt or leaking failed payload',
     (stage) => {
       const dir = mkdtempSync(join(tmpdir(), 'inventory-diagnostic-'));
@@ -124,7 +126,7 @@ describe('bounded content-free inventory failure diagnostics', () => {
         mkdirSync(bin);
         writeFileSync(
           join(bin, 'gcloud'),
-          `#!/bin/sh\nprintf '%s\\n' "$1" >> '${dir}/commands'\nif [ '${stage}' = 'cli_version' ]; then printf '%s' '${secret}'; exit 0; fi\nif [ "$1" = version ]; then printf '%s' '{"Google Cloud SDK":"576.0.0"}'; exit 0; fi\nprintf '%s' '${secret}' >&2\nexit 1\n`,
+          `#!/bin/sh\nprintf '%s\\n' "$1" >> '${dir}/commands'\nif [ '${stage}' = 'cli_version' ]; then printf '%s' '${secret}'; exit 0; fi\nif [ "$1" = version ]; then printf '%s' '{"Google Cloud SDK":"576.0.0"}'; exit 0; fi\nif [ '${stage}' = 'access_token' ] && [ "$1" = firestore ]; then\n  printf '%s\\n' "$*" >> '${dir}/index-args'\n  case "$*" in *--page-size=100*) printf '%s' 'INVALID_ARGUMENT: Invalid page size; only 0 supported' >&2; exit 1;; esac\n  printf '%s' '[{"name":"first-page"},{"name":"later-page"}]'; exit 0\nfi\nprintf '%s' '${secret}' >&2\nexit 1\n`,
           { mode: 0o700 },
         );
         const credential = join(dir, 'gha-creds-test.json'),
@@ -139,6 +141,20 @@ describe('bounded content-free inventory failure diagnostics', () => {
             service_account_impersonation_url: `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${principal}:generateAccessToken`,
           }),
         );
+        const diagnosticKeys =
+          stage === 'cli_composites' ? generateKeyPairSync('rsa', { modulusLength: 3072 }) : null;
+        if (stage === 'access_token') {
+          // Fake API reproduces rejection of the former nonzero page size.
+          const old = spawnSync(
+            join(bin, 'gcloud'),
+            ['firestore', 'indexes', 'composite', 'list', '--page-size=100'],
+            { encoding: 'utf8' },
+          );
+          expect(old.status).toBe(1);
+          expect(old.stderr).toContain('INVALID_ARGUMENT: Invalid page size');
+          rmSync(join(dir, 'commands'));
+          rmSync(join(dir, 'index-args'));
+        }
         const result = spawnSync(
           process.execPath,
           [
@@ -166,6 +182,14 @@ describe('bounded content-free inventory failure diagnostics', () => {
               RUNNER_TEMP: dir,
               CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: credential,
               GOOGLE_APPLICATION_CREDENTIALS: credential,
+              ...(diagnosticKeys
+                ? {
+                    OWNER_EDITOR_DIAGNOSTIC_RECIPIENT_PUBLIC_KEY: diagnosticKeys.publicKey
+                      .export({ type: 'spki', format: 'pem' })
+                      .toString(),
+                    OWNER_EDITOR_DIAGNOSTIC_SOURCE_SHA: 'a'.repeat(40),
+                  }
+                : {}),
             },
           },
         );
@@ -189,11 +213,48 @@ describe('bounded content-free inventory failure diagnostics', () => {
             diagnosticHintsOnly: true,
           });
         expect(existsSync(join(dir, 'owner-editor-release-inventory.json'))).toBe(false);
+        if (diagnosticKeys) {
+          const encrypted = readFileSync(
+            join(dir, 'owner-editor-inventory-failure.encrypted.json'),
+            'utf8',
+          );
+          expect(encrypted).not.toContain(secret);
+          const payload = decryptInventoryFailure(
+            JSON.parse(encrypted),
+            diagnosticKeys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+          );
+          expect(payload).toMatchObject({
+            sourceSha: 'a'.repeat(40),
+            runId: '123',
+            stage: 'cli_composites',
+            stderr: secret,
+          });
+        } else
+          expect(existsSync(join(dir, 'owner-editor-inventory-failure.encrypted.json'))).toBe(
+            false,
+          );
         if (stage === 'credential_file') expect(existsSync(join(dir, 'commands'))).toBe(false);
         else
           expect(readFileSync(join(dir, 'commands'), 'utf8').trim().split('\n')).toEqual(
-            stage === 'cli_version' ? ['version'] : ['version', 'firestore'],
+            stage === 'cli_version'
+              ? ['version']
+              : stage === 'access_token'
+                ? ['version', 'firestore', 'firestore', 'auth']
+                : ['version', 'firestore'],
           );
+        if (stage === 'access_token') {
+          expect(readFileSync(join(dir, 'index-args'), 'utf8').trim().split('\n')).toEqual(
+            ['composite', 'fields'].map(
+              (kind) =>
+                `firestore indexes ${kind} list --project=bmson-assistant --database=assistant-production --format=json --quiet`,
+            ),
+          );
+          expect(diagnostic).toMatchObject({
+            errorClass: 'ProcessError',
+            processFailure: 'nonzero_exit',
+            exitCode: 1,
+          });
+        }
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
