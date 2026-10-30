@@ -12,7 +12,7 @@ import {
 } from '@assistant/persistence';
 import { presentOwnerFamilyFact } from '@assistant/persistence/owner-family-presentation';
 import { parseInactiveOwnerFamilyRemovalOperationRecord } from '@assistant/persistence/owner-family-rejection-storage';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ownerEditorTestStore } from './owner-editor-test-store.js';
 import {
   readOwnerFamilyRejectionReview,
@@ -345,7 +345,147 @@ function apply(f: ReturnType<typeof fixture>, preparedValue: Awaited<ReturnType<
   });
 }
 
+function replaceStoredField(
+  f: ReturnType<typeof fixture>,
+  table: string,
+  field: string,
+  value: unknown,
+) {
+  const row = f.rows(table)[0];
+  if (!row) throw new Error(`Missing ${table} fixture row`);
+  if (value === undefined) delete row[field];
+  else row[field] = value;
+}
+
+async function expectMalformedNativeClosure(f: ReturnType<typeof fixture>) {
+  const preparedValue = await preparedWithExpectedRevision(f, 'a'.repeat(64));
+  expect(
+    await readOwnerFamilyRejectionReview({
+      store: f.store,
+      ownerId: ids.owner,
+      relationId: ids.relation,
+      scope: preparedValue.claim.scope,
+    }),
+  ).toBeNull();
+  const writes = [...f.stats.writes];
+  expect(await apply(f, preparedValue)).toMatchObject({
+    authority: 'unresolved',
+    outcome: 'outcome_unknown',
+  });
+  expect(f.stats.writes).toEqual(writes);
+}
+
+const invalidExtractionVersions = [
+  { label: 'missing', table: 'knowledgeGraphSources', value: undefined },
+  { label: 'NaN', table: 'knowledgeGraphSources', value: Number.NaN },
+  { label: 'string', table: 'knowledgeGraphSources', value: '1' },
+  { label: 'fractional', table: 'knowledgeGraphSources', value: 1.5 },
+  { label: 'zero', table: 'knowledgeGraphSources', value: 0 },
+  { label: 'infinite', table: 'knowledgeGraphSources', value: Number.POSITIVE_INFINITY },
+  { label: 'missing', table: 'knowledgeGraphAssertionEvidence', value: undefined },
+  { label: 'NaN', table: 'knowledgeGraphAssertionEvidence', value: Number.NaN },
+  { label: 'string', table: 'knowledgeGraphAssertionEvidence', value: '1' },
+  { label: 'fractional', table: 'knowledgeGraphAssertionEvidence', value: 1.5 },
+  { label: 'zero', table: 'knowledgeGraphAssertionEvidence', value: 0 },
+  { label: 'infinite', table: 'knowledgeGraphAssertionEvidence', value: Number.POSITIVE_INFINITY },
+] as const;
+
+const invalidSourceFingerprints = [
+  { label: 'missing', table: 'knowledgeGraphRelations', value: undefined },
+  { label: 'blank', table: 'knowledgeGraphRelations', value: '' },
+  { label: 'oversized UTF-8', table: 'knowledgeGraphRelations', value: 'é'.repeat(257) },
+  { label: 'missing', table: 'knowledgeGraphAssertionEvidence', value: undefined },
+  { label: 'blank', table: 'knowledgeGraphAssertionEvidence', value: '' },
+  { label: 'oversized UTF-8', table: 'knowledgeGraphAssertionEvidence', value: 'é'.repeat(257) },
+] as const;
+
+const invalidContactTrust = [
+  { label: 'missing', value: undefined },
+  { label: 'unknown', value: 'unknown' },
+  { label: 'unexpected', value: 'unexpected' },
+] as const;
+
 describe('inactive exact owner-family source rejection transaction', () => {
+  it('fails closed on invalid caller or process clocks and retires saved replay after 24 hours without writes', async () => {
+    const f = fixture();
+    const preparedValue = await prepared(f);
+    expect(await apply(f, preparedValue)).toMatchObject({
+      authority: 'operation_receipt',
+      outcome: 'saved',
+    });
+    const writes = [...f.stats.writes];
+    const afterTwentyFiveHours = new Date(f.now.getTime() + 25 * 60 * 60 * 1000);
+
+    const invalidInputClock = await rejectOwnerFamilyClaimInFirestore({
+      store: f.store,
+      configuredOwnerId: ids.owner,
+      claim: preparedValue.claim,
+      request: preparedValue.request,
+      now: new Date(Number.NaN),
+    });
+    expect(invalidInputClock).toMatchObject({
+      authority: 'unresolved',
+      outcome: 'outcome_unknown',
+    });
+    expect(invalidInputClock).not.toHaveProperty('requestHash');
+    expect(f.stats.writes).toEqual(writes);
+
+    const processClock = vi.spyOn(f.store, 'now').mockReturnValue(new Date(Number.NaN));
+    const invalidProcessClock = await rejectOwnerFamilyClaimInFirestore({
+      store: f.store,
+      configuredOwnerId: ids.owner,
+      claim: preparedValue.claim,
+      request: preparedValue.request,
+      now: afterTwentyFiveHours,
+    });
+    expect(invalidProcessClock).toMatchObject({
+      authority: 'unresolved',
+      outcome: 'outcome_unknown',
+    });
+    expect(invalidProcessClock).not.toHaveProperty('requestHash');
+    expect(f.stats.writes).toEqual(writes);
+
+    processClock.mockReturnValue(afterTwentyFiveHours);
+    const expiredReplay = await rejectOwnerFamilyClaimInFirestore({
+      store: f.store,
+      configuredOwnerId: ids.owner,
+      claim: preparedValue.claim,
+      request: preparedValue.request,
+      now: afterTwentyFiveHours,
+    });
+    expect(expiredReplay).toMatchObject({ authority: 'scope_retirement', outcome: 'voided' });
+    expect(expiredReplay).not.toHaveProperty('requestHash');
+    processClock.mockRestore();
+    expect(f.stats.writes).toEqual(writes);
+  });
+
+  it.each(invalidExtractionVersions)(
+    'refuses $label extractionVersion in $table before review or any operation write',
+    async ({ table, value }) => {
+      const f = fixture();
+      replaceStoredField(f, table, 'extractionVersion', value);
+      await expectMalformedNativeClosure(f);
+    },
+  );
+
+  it.each(invalidSourceFingerprints)(
+    'refuses $label sourceFingerprint in $table before review or any operation write',
+    async ({ table, value }) => {
+      const f = fixture();
+      replaceStoredField(f, table, 'sourceFingerprint', value);
+      await expectMalformedNativeClosure(f);
+    },
+  );
+
+  it.each(invalidContactTrust)(
+    'refuses contact trust $label before review or any operation write',
+    async ({ value }) => {
+      const f = fixture();
+      replaceStoredField(f, 'contacts', 'trust', value);
+      await expectMalformedNativeClosure(f);
+    },
+  );
+
   it('retains the note and evidence, rejects only its projection, retracts zero support, advances the cursor and replays the same receipt', async () => {
     const f = fixture();
     const preparedValue = await prepared(f);

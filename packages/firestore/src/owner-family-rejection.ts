@@ -13,6 +13,7 @@ import {
   ownerEditorRejected,
   ownerEditorRetired,
   ownerEditorSnapshotRevision,
+  ownerEditorUnknown,
   parseOwnerEditorEpochCursor,
   type Records,
 } from '@assistant/persistence';
@@ -41,6 +42,39 @@ import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from 
 const epochName = (ownerId: string) => `owner-editor-epoch:${ownerId}`;
 const cacheBarrierName = (ownerId: string) => `owner-source-rejection:${ownerId}`;
 type Marker = InactiveOwnerFamilyRejectionMarker;
+
+function validClock(value: unknown): number | null {
+  try {
+    if (!(value instanceof Date)) return null;
+    const milliseconds = Date.prototype.getTime.call(value);
+    return Number.isFinite(milliseconds) ? milliseconds : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Process clocks are not Firestore transaction snapshot readTime. */
+function currentTime(store: InstallationStore, supplied: unknown): Date | null {
+  try {
+    const processTime = validClock(store.now());
+    const suppliedTime = validClock(supplied);
+    return processTime === null || suppliedTime === null
+      ? null
+      : new Date(Math.max(processTime, suppliedTime));
+  } catch {
+    return null;
+  }
+}
+
+function validExtractionVersion(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function validSourceFingerprint(value: unknown): value is string {
+  return (
+    typeof value === 'string' && value.trim().length > 0 && Buffer.byteLength(value, 'utf8') <= 512
+  );
+}
 
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
@@ -386,7 +420,8 @@ async function closureInTransaction(
     !checkpoint.retrievalRevision ||
     typeof memoryDoc.get('retrievalRevision') !== 'string' ||
     checkpoint.retrievalRevision !== memoryDoc.get('retrievalRevision') ||
-    checkpoint.extractionVersion < 1 ||
+    !validExtractionVersion(checkpoint.extractionVersion) ||
+    !validSourceFingerprint(relation.sourceFingerprint) ||
     source.quarantined ||
     source.expiresAt !== null ||
     source.supersededById !== null ||
@@ -414,6 +449,8 @@ async function closureInTransaction(
   if (
     evidenceRows.some(
       (row) =>
+        !validExtractionVersion(row.extractionVersion) ||
+        !validSourceFingerprint(row.sourceFingerprint) ||
         row.extractionVersion !== checkpoint.extractionVersion ||
         row.sourceFingerprint !== relation.sourceFingerprint ||
         row.sourceContentHash !== source.contentHash,
@@ -473,6 +510,7 @@ async function closureInTransaction(
   const contacts = contactDocs.map((doc) => {
     if (!doc.updateTime) throw new Error('Family contact native revision unavailable');
     const row = decodeRecord<Records['contacts']>(doc.data());
+    if (row.trust !== 'known') throw new Error('Family contact trust is unavailable');
     return {
       ...row,
       revision: ownerEditorSnapshotRevision({
@@ -582,6 +620,7 @@ export async function rejectOwnerFamilyClaimInFirestore(input: {
   now: Date;
 }): Promise<OwnerEditorReply> {
   const { store, configuredOwnerId, claim } = input;
+  if (!currentTime(store, input.now)) return ownerEditorUnknown(claim.scope);
   let request: InactiveOwnerFamilyRemovalRequest;
   try {
     request = parseInactiveOwnerFamilyRemovalRequest(input.request);
@@ -599,7 +638,8 @@ export async function rejectOwnerFamilyClaimInFirestore(input: {
     return ownerEditorRejected(claim.scope, 'request_binding_mismatch');
   return store.db.runTransaction(async (tx) => {
     const reader = snapshotReader(tx);
-    const now = new Date(Math.max(store.now().getTime(), input.now.getTime()));
+    const now = currentTime(store, input.now);
+    if (!now) return ownerEditorUnknown(claim.scope);
     const operationRef = store.doc('ownerEditorOperations', ownerEditorOperationId(claim.scope));
     const operationSnapshot = await point(reader, operationRef, false);
     if (!operationSnapshot.exists)
