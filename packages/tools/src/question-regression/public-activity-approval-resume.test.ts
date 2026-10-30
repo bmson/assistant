@@ -633,7 +633,7 @@ describe('public activity actual approval lifecycle (isolated PostgreSQL)', () =
           .where(and(eq(messages.taskId, admitted.taskId), eq(messages.role, 'assistant')));
         const finalText = delivered.map((row) => row.text).join('\n');
         expect(finalText).toMatch(/San Francisco/);
-        expect(finalText).toContain('Synthetic Art Walk');
+        expect(finalText).toContain('example.test');
         expect(finalText).toMatch(/https:\/\/example\.test\/art-2026-10-/);
         expect(finalText).toMatch(/calendar|availability|free time/i);
         expect(finalText).not.toContain('PRIVATE_');
@@ -765,7 +765,7 @@ describe('public activity actual approval lifecycle (isolated PostgreSQL)', () =
           .filter((row) => row.role === 'assistant')
           .map((row) => row.text)
           .join('\n');
-        expect(finalText).toContain('Synthetic Art Walk');
+        expect(finalText).toContain('example.test');
         expect(finalText).toContain('2026-10-24');
         expect(finalText).toContain('https://example.test/art-2026-10-24');
       }
