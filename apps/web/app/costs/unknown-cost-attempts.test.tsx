@@ -55,6 +55,22 @@ describe('unknown cost attempt presentation', () => {
     expect(html).toContain('Do not add this estimate to spend totals.');
   });
 
+  it('keeps a one-microdollar estimate visible', () => {
+    const html = renderToStaticMarkup(
+      createElement(UnknownCostAttempts, {
+        summary: {
+          count: 1,
+          countComplete: true,
+          estimatedUsd: '0.000001',
+          estimateComplete: true,
+        },
+      }),
+    );
+
+    expect(html).toContain('Retained reservation estimate $0.000001');
+    expect(html).toContain('Do not add this estimate to spend totals.');
+  });
+
   it('shows a lower-bound count and withholds an unavailable estimate', () => {
     const html = renderToStaticMarkup(
       createElement(UnknownCostAttempts, {

@@ -39,6 +39,24 @@ describe('unknown cost attempt summary', () => {
     });
   });
 
+  it('preserves one microdollar and rejects noncanonical stored amounts', () => {
+    expect(summarizeUnknownAttemptEstimates(['0.000001'], false)).toEqual({
+      count: 1,
+      countComplete: true,
+      estimatedUsd: '0.000001',
+      estimateComplete: true,
+    });
+
+    for (const estimate of ['0.0000004', '0.0000001', '1e-6', '0x10', ' 0.10', '0.10 ', '-0.10']) {
+      expect(summarizeUnknownAttemptEstimates([estimate], false)).toMatchObject({
+        count: 1,
+        countComplete: true,
+        estimatedUsd: null,
+        estimateComplete: false,
+      });
+    }
+  });
+
   it('suppresses the amount when the bounded snapshot may be partial', () => {
     expect(
       summarizeUnknownAttemptEstimates(

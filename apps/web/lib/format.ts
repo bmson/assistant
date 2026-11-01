@@ -102,6 +102,16 @@ export function formatUsd(value: string | null | undefined): string {
   return `$${n.toFixed(2)}`;
 }
 
+/** Keep all stored microdollars visible when showing a retained estimate. */
+export function formatUsdExposure(value: string | null | undefined): string {
+  const n = Number(value ?? '0');
+  if (!Number.isFinite(n)) return '$0.00';
+  if (n !== 0 && Math.abs(n) < 0.01) {
+    return `$${n.toFixed(6).replace(/0+$/, '').replace(/\.$/, '')}`;
+  }
+  return formatUsd(value);
+}
+
 export function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }

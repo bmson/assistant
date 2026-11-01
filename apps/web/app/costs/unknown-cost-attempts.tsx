@@ -1,5 +1,5 @@
 import type { UnknownCostAttemptSummary } from '@assistant/application/costs';
-import { formatUsd } from '@/lib/format';
+import { formatUsdExposure } from '@/lib/format';
 
 export function UnknownCostAttempts({ summary }: { summary: UnknownCostAttemptSummary }) {
   if (summary.count === 0 && summary.countComplete) return null;
@@ -16,8 +16,8 @@ export function UnknownCostAttempts({ summary }: { summary: UnknownCostAttemptSu
           </p>
           {summary.estimateComplete && summary.estimatedUsd !== null ? (
             <p className="mt-1 text-muted">
-              Retained reservation estimate {formatUsd(summary.estimatedUsd)}. Estimate only, not
-              confirmed spend. Do not add this estimate to spend totals.
+              Retained reservation estimate {formatUsdExposure(summary.estimatedUsd)}. Estimate
+              only, not confirmed spend. Do not add this estimate to spend totals.
             </p>
           ) : (
             <p className="mt-1 text-muted">

@@ -4,6 +4,7 @@ import {
   type CostEvidence,
   costBasis,
   microsToUsd,
+  storedLedgerUsdToMicros,
   usdToMicros,
 } from '@assistant/persistence';
 import type { Query, QueryDocumentSnapshot } from '@google-cloud/firestore';
@@ -58,30 +59,17 @@ export function summarizeUnknownAttemptEstimates(
       estimateComplete: false,
     };
   let micros = 0;
-  for (const value of estimates) {
-    if (
-      typeof value !== 'string' ||
-      value.trim() === '' ||
-      !Number.isFinite(Number(value)) ||
-      Number(value) < 0
-    ) {
-      return {
-        count: estimates.length,
-        countComplete: true,
-        estimatedUsd: null,
-        estimateComplete: false,
-      };
+  try {
+    for (const value of estimates) {
+      micros = addMicros(micros, storedLedgerUsdToMicros(value));
     }
-    try {
-      micros = addMicros(micros, usdToMicros(Number(value)));
-    } catch {
-      return {
-        count: estimates.length,
-        countComplete: true,
-        estimatedUsd: null,
-        estimateComplete: false,
-      };
-    }
+  } catch {
+    return {
+      count: estimates.length,
+      countComplete: true,
+      estimatedUsd: null,
+      estimateComplete: false,
+    };
   }
   return {
     count: estimates.length,

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { formatFriendlyDateTime, formatUsd, relativeTime, stripMarkdown, truncate } from './format';
+import {
+  formatFriendlyDateTime,
+  formatUsd,
+  formatUsdExposure,
+  relativeTime,
+  stripMarkdown,
+  truncate,
+} from './format';
 
 // A fixed "now": 2026-07-22 21:30 UTC = 2026-07-22 14:30 in Los Angeles.
 const NOW = new Date('2026-07-22T21:30:00Z');
@@ -120,5 +127,14 @@ describe('formatUsd', () => {
     expect(formatUsd(null)).toBe('$0.00');
     expect(formatUsd(undefined)).toBe('$0.00');
     expect(formatUsd('not-a-number')).toBe('$0.00');
+  });
+});
+
+describe('formatUsdExposure', () => {
+  it('keeps the smallest stored positive estimate visible', () => {
+    expect(formatUsdExposure('0.000001')).toBe('$0.000001');
+    expect(formatUsdExposure('0.000004')).toBe('$0.000004');
+    expect(formatUsdExposure('0.005500')).toBe('$0.0055');
+    expect(formatUsdExposure('0.375000')).toBe('$0.38');
   });
 });
