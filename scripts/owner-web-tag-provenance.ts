@@ -569,6 +569,7 @@ export function resolveProtectedOwnedWebTag(input: {
   if (
     receipt.runId !== run.runId ||
     receipt.runAttempt !== run.runAttempt ||
+    receipt.source !== run.headSha ||
     receipt.source !== manifest.release ||
     receipt.manifestSha256 !== sha256(manifestMember) ||
     artifact.name !== creationArtifactName(receipt.source, receipt.runId, receipt.runAttempt)

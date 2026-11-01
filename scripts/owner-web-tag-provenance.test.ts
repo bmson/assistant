@@ -13,7 +13,7 @@ import { tagHash, WEB_SERVICE } from './owner-web-tag-retirement.js';
 const hex = (character: string) => character.repeat(64);
 const sha256 = (value: Uint8Array | string) => createHash('sha256').update(value).digest('hex');
 const source = 'a'.repeat(40);
-const deployHead = 'b'.repeat(40);
+const deployHead = source;
 const imageDigest = `sha256:${hex('c')}`;
 const image = `us-west1-docker.pkg.dev/bmson-assistant/assistant/web@${imageDigest}`;
 const runMetadata = {
@@ -314,7 +314,18 @@ describe('protected web-tag creation provenance resolver', () => {
         ...f.input,
         artifactMetadata: {
           ...f.input.artifactMetadata,
-          workflowRun: { ...f.input.artifactMetadata.workflowRun, headSha: source },
+          workflowRun: { ...f.input.artifactMetadata.workflowRun, headSha: 'd'.repeat(40) },
+        },
+      }),
+    ],
+    [
+      'run and artifact head SHA do not bind receipt source',
+      (f: ReturnType<typeof fixture>) => ({
+        ...f.input,
+        runMetadata: { ...f.input.runMetadata, headSha: 'd'.repeat(40) },
+        artifactMetadata: {
+          ...f.input.artifactMetadata,
+          workflowRun: { ...f.input.artifactMetadata.workflowRun, headSha: 'd'.repeat(40) },
         },
       }),
     ],
