@@ -41,6 +41,14 @@ Provider responses, runtime environment variables and credentials are never
 retained in the plan or result. An incomplete operation produces no success
 receipt.
 
+Failures retain only allowlisted stage/reason codes, reviewed-source/run metadata,
+and whether a native write may have been attempted. The helper distinguishes WIF,
+runner/binary checks, SDK version and token minting before fixed native reads and
+planner validation. Raw exceptions, child output, credentials and resource payloads
+are never included. The failure receipt does not qualify readiness or authorize
+retry. After entering a PATCH attempt, an error remains possibly mutating even if
+no success receipt exists; investigate before deciding any next operation.
+
 Source/CI approval for this workflow is separate from operational permission.
 Actual execution remains held for the manager's concrete plan review and the
 paired rollout lifecycle fix: retire every captured proven old web alias after

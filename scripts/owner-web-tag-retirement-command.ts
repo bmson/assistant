@@ -9,6 +9,7 @@ import {
   planOwnedWebTagRetirement,
   type RetirementPlan,
 } from './owner-web-tag-retirement.js';
+import { retirementFailureTracker } from './owner-web-tag-retirement-failure.js';
 
 const WORKFLOW = 'bmson/assistant/.github/workflows/owner-web-tag-retirement.yml@refs/heads/main';
 export function verifyRetirementContext(env: NodeJS.ProcessEnv) {
@@ -40,12 +41,14 @@ export function verifyReviewedPacketTime(value: unknown, now: number): string {
     throw new Error('Reviewed retirement observation expired');
   return value;
 }
-async function main() {
+export async function runRetirementCommand(tracker: ReturnType<typeof retirementFailureTracker>) {
   const mode = process.argv[2];
   if (process.argv.length !== 3 || !['--verify-source', '--plan', '--apply'].includes(mode ?? ''))
     throw new Error('Invalid retirement mode');
+  tracker.mark('protected_context');
   verifyRetirementContext(process.env);
   if (mode === '--verify-source') return;
+  tracker.mark('reviewed_packet_time');
   const observedAt =
     mode === '--apply'
       ? verifyReviewedPacketTime(process.env.OWNER_TAG_REVIEWED_OBSERVED_AT, Date.now())
@@ -55,13 +58,17 @@ async function main() {
     !/^[a-f0-9]{64}$/.test(process.env.OWNER_TAG_REVIEWED_PLAN_SHA256 ?? '')
   )
     throw new Error('Missing reviewed retirement hash');
-  const io = await protectedWebTagCloud();
+  const io = await protectedWebTagCloud(tracker.mark);
   const [old, current] = HISTORICAL_WEB_TAGS;
   if (!old || !current) throw new Error('Missing historical pins');
+  tracker.mark('plan_read_service');
   const before = await io.readService();
   const native: Record<string, unknown> = {};
-  for (const proof of [old, current])
+  for (const proof of [old, current]) {
+    tracker.mark(proof === old ? 'plan_read_historical_revision' : 'plan_read_current_revision');
     native[proof.revision] = await io.readRevision(proof.revision);
+  }
+  tracker.mark('plan_validation');
   const plan = planOwnedWebTagRetirement(before, native, [old], {
     revision: current.revision,
     image: current.image,
@@ -72,23 +79,45 @@ async function main() {
   const packet = retirementPacket(plan, process.env.GITHUB_SHA ?? '', observedAt);
   const packetSha256 = retirementPacketHash(packet);
   // Receipt contains only public resource identities, hashes and CAS metadata, no native env/spec.
+  tracker.mark('packet_write');
   writeFileSync(
     'owner-web-tag-retirement-plan.json',
     `${JSON.stringify({ packet, packetSha256 })}\n`,
     { flag: 'wx', mode: 0o600 },
   );
   if (mode === '--plan') return;
+  tracker.mark('reviewed_packet_match');
   verifyReviewedPacketTime(observedAt, Date.now());
   if (packetSha256 !== process.env.OWNER_TAG_REVIEWED_PLAN_SHA256)
     throw new Error('Fresh retirement state differs from reviewed packet; no write attempted');
   const result = await executeOwnedWebTagRetirement(plan, {
     ...io,
+    readService: () => {
+      tracker.mark('apply_service_read');
+      return io.readService();
+    },
+    readRevision: (name) => {
+      tracker.mark('apply_revision_read');
+      return io.readRevision(name);
+    },
     patchTraffic: (body) => {
+      tracker.mark('apply_write_boundary');
       // Fresh reads may consume the remaining review lifetime; check at the write boundary.
       verifyReviewedPacketTime(observedAt, Date.now());
+      tracker.markMutationPossible();
+      tracker.mark('apply_patch');
       return io.patchTraffic(body);
     },
+    waitOperation: (operation) => {
+      tracker.mark('apply_wait_operation');
+      return io.waitOperation(operation);
+    },
+    drain: (seconds) => {
+      tracker.mark('apply_drain');
+      return io.drain(seconds);
+    },
   });
+  tracker.mark('result_write');
   writeFileSync(
     'owner-web-tag-retirement-result.json',
     `${JSON.stringify({ source: process.env.GITHUB_SHA, packetSha256, ...result })}\n`,
@@ -96,11 +125,19 @@ async function main() {
   );
 }
 if (process.argv[1]?.endsWith('/owner-web-tag-retirement-command.ts')) {
-  main().catch(() => {
+  const tracker = retirementFailureTracker(process.env, process.argv[2]);
+  runRetirementCommand(tracker).catch((error: unknown) => {
     // No raw provider exceptions, token values, request bodies or credential paths in logs.
-    process.stderr.write(
-      'Exact-owned web tag retirement stopped; do not retry uncertain apply or admit writes.\n',
-    );
+    const receipt = tracker.receipt(error);
+    process.stderr.write(`${JSON.stringify(receipt)}\n`);
+    try {
+      writeFileSync('owner-web-tag-retirement-failure.json', `${JSON.stringify(receipt)}\n`, {
+        flag: 'wx',
+        mode: 0o600,
+      });
+    } catch {
+      /* Preserve the original failure; never expose filesystem exceptions. */
+    }
     process.exitCode = 1;
   });
 }
