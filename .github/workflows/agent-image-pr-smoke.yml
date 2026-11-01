@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 30
     env:
       SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
-      APP_BASE_SHA: f0bc77ae4095968f61d60fe6502b7b5a4f0ee9d8
+      APP_BASE_SHA: c856675a8dd45d35e62b482aaac5a3db2c73c9e2
       BUILDER: agent-pdf-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -42,7 +42,7 @@ jobs:
           git merge-base --is-ancestor "$APP_BASE_SHA" HEAD
           python3 - <<'PY'
           import os, subprocess
-          allowed = {'.github/workflows/deploy.yml', 'infra/gcp/release-staged-services.test.sh', 'infra/gcp/release-staged-services.sh', 'scripts/smoke-agent-image.sh', 'packages/core/src/memory/documents.test.ts', 'scripts/agent-runtime-dependencies.test.ts', '.github/workflows/agent-image-pr-smoke.yml'}
+          allowed = set(['.github/workflows/agent-image-pr-smoke.yml', '.github/workflows/deploy.yml', 'scripts/smoke-agent-image.sh', 'infra/gcp/release-staged-services.sh', 'infra/gcp/release-staged-services.test.sh', 'packages/core/src/memory/documents.test.ts', 'scripts/agent-runtime-dependencies.test.ts', 'apps/agent/runtime-dependencies/package.json', 'packages/core/package.json', 'pnpm-lock.yaml'])
           names = subprocess.check_output(['git', 'diff', '--no-renames', '--name-only', os.environ['APP_BASE_SHA'], 'HEAD'], text=True).splitlines()
           if not set(names).issubset(allowed): raise SystemExit('unreviewed source change')
           for name in allowed:
@@ -55,11 +55,12 @@ jobs:
           37b2312786f004ba43af8effb5c9d0839b2857a28dc7cd8ee2089bad859326b5  infra/gcp/release-staged-services.sh
           5864824e2fe550b66308522c5ba7d7e1b73e64543e60a5eed2f41381e44d0976  infra/gcp/release-staged-services.test.sh
           d70eb1cdb90b3a4bf660e52d834a5093ada691fe228e5d18860becd4cedb8390  packages/core/src/memory/documents.test.ts
-          9f2d0eb9c05c49f3b4907f2e02a8d861c4cc8adab6149e38217d539ee6ff3cfc  scripts/agent-runtime-dependencies.test.ts
-          a98aa57421a4ad9a6c7fc1b4f761ffb498cdb70f45cbdb7c1edda642ec292278  apps/agent/runtime-dependencies/package.json
-          ef3a3a072bceb16567bdf591feae7f6109bff7575d12748f90ea8b0113249646  packages/core/package.json
-          c0efc89b494d6bead504cb4723dbea81aef6dcbede8cc254ac9c20366bfd3095  pnpm-lock.yaml
+          ce9c8ef20165fb1a3f51b39bc01ef16ccb6bbd9feff98018013533473e68b172  scripts/agent-runtime-dependencies.test.ts
+          49c928072953ea99b4cadb517d37b3893c2297c35353388d2b1e24fd47ba0fab  apps/agent/runtime-dependencies/package.json
+          2aa727515d542c8076116e1c8d1fbd7f50193208b55a4cb0ec94ff600a2fff02  packages/core/package.json
+          c87daf447c7fa6755b5edec1cdb7b5e5ee03425cfc1ef7a93b56c1ca63768c59  pnpm-lock.yaml
           4a1cc9a7244e8f84ec862678a2fe3128076cc0de35f001aa61d54c13bd3e41a4  infra/docker/agent.Dockerfile
+          d4988950b656079e9b10f3071c10cf4a37151ce7733f203b3b856a47e7f0742e  package.json
           PINS
           mkdir -m 700 "$DOCKER_CONFIG" "$PROOF" "$RUNNER_TEMP/agent-pdf-bin"
           printf '{"auths":{}}\n' > "$DOCKER_CONFIG/config.json"
