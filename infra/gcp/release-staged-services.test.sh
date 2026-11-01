@@ -4,7 +4,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/assistant-staged-release.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 mkdir -p "$TEST_ROOT/bin"
-export STUB_ROOT="$TEST_ROOT" STUB_CURL_CALLS="$TEST_ROOT/curl-calls" STUB_RELEASE_CALLS="$TEST_ROOT/release-calls" STUB_SERVICE_UPDATE_CALLS="$TEST_ROOT/service-update-calls" STUB_DRAIN_CALLS="$TEST_ROOT/drain-calls" PROJECT=test-project REGION=us-west1 TAG=abc123
+export STUB_ROOT="$TEST_ROOT" STUB_CURL_CALLS="$TEST_ROOT/curl-calls" STUB_RELEASE_CALLS="$TEST_ROOT/release-calls" STUB_SERVICE_UPDATE_CALLS="$TEST_ROOT/service-update-calls" STUB_DRAIN_CALLS="$TEST_ROOT/drain-calls" STUB_ADMISSION_CALLS="$TEST_ROOT/admission-calls" STUB_ADMISSION_COMMANDS="$TEST_ROOT/admission-commands" PROJECT=test-project REGION=us-west1 TAG=abc123
 export IMAGE_ROOT=us-west1-docker.pkg.dev/test-project/assistant RELEASE_HEALTH_ATTEMPTS=1 RELEASE_HEALTH_INTERVAL_SECONDS=0 RELEASE_MANIFEST_PATH="$TEST_ROOT/manifest.json"
 POSTGRES_SCHEMA_VERSION="$(node "$ROOT/release-schema-version.mjs" postgres)"
 POSTGRES_PREVIOUS_SCHEMA_VERSION=$((POSTGRES_SCHEMA_VERSION - 1))
@@ -24,6 +24,8 @@ def val(k):
   if x==k and i+1<len(a): return a[i+1]
   if x.startswith(k+'='): return x.split('=',1)[1]
  return ''
+if a[:3]==['run','services','update-traffic']:
+ with open(os.environ['STUB_ADMISSION_CALLS'],'a') as f: f.write('traffic:'+a[3]+':'+val('--to-revisions')+'\n')
 def save(): p.write_text(json.dumps(s))
 if a[:3]==['artifacts','docker','images']:
  image=a[4] if len(a)>4 else ''
@@ -70,9 +72,9 @@ if a[:3]==['run','revisions','describe']:
   for stage in svc.get('staged',[]):
    if revision==stage['revision']:
     env=stage.get('env',{})
-    spec={'containers':[{'env':[{'name':k,'value':v} for k,v in env.items()]}]}
+    spec={'containers':[{'image':stage.get('image',''),'env':[{'name':k,'value':v} for k,v in env.items()]}]}
     if os.getenv('STUB_WEB_TIMEOUT_MISSING')!='1': spec['timeoutSeconds']=int(os.getenv('STUB_WEB_TIMEOUT_SECONDS','300'))
-    print(json.dumps({'spec':spec})); sys.exit(0)
+    print(json.dumps({'metadata':{'name':revision},'spec':spec})); sys.exit(0)
  print('{}'); sys.exit(1)
 if a[:3]==['run','services','update']:
  with open(os.environ['STUB_SERVICE_UPDATE_CALLS'],'a') as f: f.write(json.dumps(a)+'\n')
@@ -85,6 +87,7 @@ if a[:3]==['run','services','update']:
   if '=' in item:
    k,v=item.split('=',1); svc['env'][k]=v
  svc.setdefault('staged',[]).append({'revision':rev,'tag':val('--tag'),'image':val('--image'),'env':dict(svc['env'])}); svc.setdefault('revisions',{})[rev]={'env':dict(svc['env']),'image':val('--image')}; save()
+ with open(os.environ['STUB_ADMISSION_CALLS'],'a') as f: f.write('stage:'+name+':'+val('--tag')+':'+svc['env'].get('ASSISTANT_RELEASE_WRITES_PAUSED','')+'\n')
  if name=='assistant-web' and svc['env'].get('ASSISTANT_RELEASE_WRITES_PAUSED')=='false' and os.getenv('FAIL_RESUME_STAGE_UNCERTAIN')=='1': sys.exit(1)
  sys.exit(0)
 if a[:3]==['run','services','update-traffic']:
@@ -147,14 +150,74 @@ cat >"$TEST_ROOT/bin/sleep" <<'PY'
 #!/usr/bin/env python3
 import os,sys
 with open(os.environ['STUB_DRAIN_CALLS'],'a') as f: f.write(sys.argv[1]+'\n')
+with open(os.environ['STUB_ADMISSION_CALLS'],'a') as f: f.write('drain:'+sys.argv[1]+'\n')
 PY
 chmod +x "$TEST_ROOT/bin/sleep"
 source "$ROOT/release-staged-services.sh"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+cat >"$TEST_ROOT/bin/pnpm" <<'PY'
+#!/usr/bin/env python3
+import json,os,sys
+with open(os.environ['STUB_ADMISSION_COMMANDS'],'a') as f:
+ f.write(json.dumps({'source':os.getenv('OWNER_TAG_RELEASE_SOURCE'),
+  'manifestPath':os.getenv('OWNER_TAG_MANIFEST_PATH'),
+  'manifestDigest':os.getenv('OWNER_TAG_MANIFEST_DIGEST'),
+  'stagingTag':os.getenv('OWNER_TAG_STAGING_TAG'),
+  'args':sys.argv[1:]})+'\n')
+PY
+chmod +x "$TEST_ROOT/bin/pnpm"
+admission_source='a8f6d2e3b74265c9a10f4d8e6b2c7a9012345678'
+admission_digest='f3a41b7298d65c0e4b1a73d9c5e8f201a4b6c8d0e2f517394b6d8a0c2e4f6173'
+release_capture_owned_web_tags "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" candidate-12345-1 || fail 'capture wrapper should invoke the fixed observation command'
+release_retire_captured_web_tags "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" candidate-12345-1 || fail 'retirement wrapper should invoke the fixed barrier command'
+release_verify_owned_web_tag_admission "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" candidate-12345-1 || fail 'verification wrapper should invoke the fixed admission command'
+release_record_owned_web_tag candidate "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" candidate-12345-1 || fail 'candidate receipt wrapper should invoke the fixed record command'
+release_record_owned_web_tag resume "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" resume-12345-1 || fail 'resume receipt wrapper should invoke the fixed record command'
+python3 - "$STUB_ADMISSION_COMMANDS" "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" <<'PY'
+import json,sys
+rows=[json.loads(x) for x in open(sys.argv[1])]
+assert [x['args'] for x in rows]==[
+ ['exec','tsx','scripts/owner-web-tag-admission.ts','--capture'],
+ ['exec','tsx','scripts/owner-web-tag-admission.ts','--retire-after-paused'],
+ ['exec','tsx','scripts/owner-web-tag-admission.ts','--verify-admission'],
+ ['exec','tsx','scripts/owner-web-tag-admission.ts','--record-candidate'],
+ ['exec','tsx','scripts/owner-web-tag-admission.ts','--record-resume'],
+], rows
+for row in rows:
+ assert row['source']==sys.argv[2] and row['manifestPath']==sys.argv[3] and row['manifestDigest']==sys.argv[4], row
+assert [x['stagingTag'] for x in rows]==['candidate-12345-1']*4+['resume-12345-1'], rows
+PY
+TEST_BASIC5_CAPABILITY=false
+release_basic_editor_forward_only() { printf '%s' "$TEST_BASIC5_CAPABILITY"; }
+release_capture_owned_web_tags() {
+  printf 'capture:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" >>"$STUB_ADMISSION_CALLS"
+  [[ "${FAIL_ADMISSION_CAPTURE:-0}" != 1 ]]
+}
+release_retire_captured_web_tags() {
+  printf 'retire:%s:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" "${OWNED_TAGS_ALREADY_ABSENT:-0}" >>"$STUB_ADMISSION_CALLS"
+  [[ "${FAIL_ADMISSION_RETIRE:-0}" != 1 ]] || return 1
+  python3 - "$STUB_ROOT/state.json" "$4" <<'PY'
+import json,sys
+p,tag=sys.argv[1:]; s=json.load(open(p)); web=s['assistant-web']
+web['staged']=[row for row in web.get('staged',[]) if row.get('tag')!=tag]
+web['tags']=[row for row in web.get('tags',[]) if row.get('tag')!=tag]
+open(p,'w').write(json.dumps(s))
+PY
+}
+release_verify_owned_web_tag_admission() {
+  printf 'verify:%s:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" "${FAIL_ADMISSION_VERIFY:-0}" >>"$STUB_ADMISSION_CALLS"
+  [[ "${FAIL_ADMISSION_VERIFY:-0}" != 1 ]]
+}
+release_record_owned_web_tag() {
+  printf 'record:%s:%s:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" "$5" "${FAIL_CANDIDATE_RECEIPT:-0}:${FAIL_RESUME_RECEIPT:-0}" >>"$STUB_ADMISSION_CALLS"
+  if [[ "$1" == candidate && "${FAIL_CANDIDATE_RECEIPT:-0}" == 1 ]]; then return 1; fi
+  if [[ "$1" == resume && "${FAIL_RESUME_RECEIPT:-0}" == 1 ]]; then return 1; fi
+  return 0
+}
 v1_job='{"spec":{"template":{"spec":{"template":{"spec":{"containers":[{"image":"registry/v1-image"}]}}}}}}'
 v2_job='{"template":{"template":{"containers":[{"image":"registry/v2-image"}]}}}'
 [[ "$(release_job_image "$v1_job")" == registry/v1-image ]] || { echo 'v1 job image path not parsed' >&2; exit 1; }
 [[ "$(release_job_image "$v2_job")" == registry/v2-image ]] || { echo 'v2 job image path not parsed' >&2; exit 1; }
-fail() { echo "FAIL: $*" >&2; exit 1; }
 reset_case() {
  cat >"$TEST_ROOT/state.json" <<JSON
 {"assistant-agent":{"revision":"agent-old","traffic":{"agent-old":100},"env":{"QUEUE_DRIVER":"cloudtasks","ASSISTANT_RELEASE_API_CONTRACT":"1","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_VERSION":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_WEB_API_MIN":"1","ASSISTANT_RELEASE_WEB_API_MAX":"1","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-web":{"revision":"web-old","traffic":{"web-old":100},"env":{"ASSISTANT_RELEASE_API_CONTRACT":"1","ASSISTANT_RELEASE_AGENT_API_MIN":"1","ASSISTANT_RELEASE_AGENT_API_MAX":"1","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-browser":{"image":"registry/old-browser","next":0},"assistant-processor":{"image":"registry/old-processor","next":0}}
@@ -163,16 +226,21 @@ JSON
     CANDIDATE_WEB_PROBE_FAIL FINAL_NEW_PAIR_PROBE_FAIL RESUME_WEB_PROBE_FAIL RESUME_LIVE_PROBE_FAIL \
     FAIL_AGENT_PROMOTE FAIL_WEB_PROMOTE FAIL_REPAUSE FAIL_RESUME_DRAIN STUB_WEB_TIMEOUT_SECONDS STUB_WEB_TIMEOUT_MISSING \
     FAIL_WORKER_UPDATE STALE_WORKER_IMAGE FAIL_TAG_REMOVAL MUTATE_TRAFFIC_AFTER_TAG_REMOVAL \
-    ADD_FOREIGN_TAG_TO_PROMOTED_REVISION FAIL_RESUME_STAGE_UNCERTAIN REASSIGN_RESUME_TAG_ON_REPAUSE
+    ADD_FOREIGN_TAG_TO_PROMOTED_REVISION FAIL_RESUME_STAGE_UNCERTAIN REASSIGN_RESUME_TAG_ON_REPAUSE \
+    FAIL_ADMISSION_CAPTURE FAIL_ADMISSION_RETIRE FAIL_ADMISSION_VERIFY FAIL_CANDIDATE_RECEIPT FAIL_RESUME_RECEIPT OWNED_TAGS_ALREADY_ABSENT
  : >"$STUB_CURL_CALLS"
  : >"$STUB_RELEASE_CALLS"
  : >"$STUB_SERVICE_UPDATE_CALLS"
  : >"$STUB_DRAIN_CALLS"
+ : >"$STUB_ADMISSION_CALLS"
+ TEST_BASIC5_CAPABILITY=false
  unset RELEASE_EMAIL_OBSERVER_WORKER_ENABLED
  export RELEASE_COMPONENTS=agent,web RELEASE_MODULES=none RELEASE_PERSISTENCE_DRIVER=postgres
 }
 prepare_firestore_state() {
  export RELEASE_PERSISTENCE_DRIVER=firestore
+ export TAG=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa GITHUB_RUN_ID=12345 GITHUB_RUN_ATTEMPT=1
+ TEST_BASIC5_CAPABILITY=true
  python3 - "$TEST_ROOT/state.json" <<'PY'
 import json,sys
 p=sys.argv[1]; s=json.load(open(p))
@@ -411,12 +479,13 @@ s['assistant-web'].setdefault('staged',[]).append({'revision':'web-foreign','tag
 s['assistant-web'].setdefault('revisions',{})['web-foreign']={'env':dict(s['assistant-web']['env'])}
 open(p,'w').write(json.dumps(s))
 PY
+export OWNED_TAGS_ALREADY_ABSENT=1
 release_staged_services || fail 'Firestore compatible pair should promote'
 python3 - "$TEST_ROOT/manifest.json" <<'PY'
 import json,sys
 m=json.load(open(sys.argv[1])); assert m['storageDriver']=='firestore'; assert m['schemaVersion']==1
 PY
-python3 - "$STUB_SERVICE_UPDATE_CALLS" "$STUB_RELEASE_CALLS" "$STUB_DRAIN_CALLS" "$TEST_ROOT/state.json" <<'PY'
+python3 - "$STUB_SERVICE_UPDATE_CALLS" "$STUB_RELEASE_CALLS" "$STUB_DRAIN_CALLS" "$TEST_ROOT/state.json" "$STUB_ADMISSION_CALLS" <<'PY'
 import json,sys
 updates=[json.loads(line) for line in open(sys.argv[1])]
 web_updates=[x[x.index('--update-env-vars')+1] for x in updates if x[3]=='assistant-web']
@@ -429,10 +498,9 @@ agent=next(i for i,x in enumerate(calls) if 'update-traffic assistant-agent ' in
 web_resume=next(i for i,x in enumerate(calls) if 'update-traffic assistant-web ' in x and 'assistant-web-new2=100' in x)
 assert web_pause<agent<web_resume, calls
 remove_calls=[x for x in calls if '--remove-tags' in x]
-assert len(remove_calls)==1 and 'update-traffic assistant-web' in remove_calls[0], remove_calls
+assert not remove_calls, remove_calls
 own_candidate=next(x[x.index('--tag')+1] for x in updates if x[3]=='assistant-web')
 resume_tag=next(x[x.index('--tag')+1] for x in updates if x[3]=='assistant-web' and 'ASSISTANT_RELEASE_WRITES_PAUSED=false' in x[x.index('--update-env-vars')+1])
-assert remove_calls[0].split('--remove-tags ',1)[1].split()[0]==own_candidate, remove_calls
 s=json.load(open(sys.argv[4]))
 web_tags={x['tag'] for x in s['assistant-web'].get('staged',[])}
 agent_tags={x['tag'] for x in s['assistant-agent'].get('staged',[])}
@@ -441,6 +509,30 @@ assert {'candidate-foreign',resume_tag}.issubset(web_tags), web_tags
 assert own_candidate in agent_tags, agent_tags
 drains=[int(line.strip()) for line in open(sys.argv[3])]
 assert drains and all(0<=x<=30 for x in drains) and sum(drains)==310, drains
+events=open(sys.argv[5]).read().splitlines()
+capture=next(i for i,x in enumerate(events) if x.startswith('capture:'))
+agent_stage=next(i for i,x in enumerate(events) if x.startswith('stage:assistant-agent:'))
+pause=next(i for i,x in enumerate(events) if x=='traffic:assistant-web:assistant-web-new1=100')
+old_drain=max(i for i,x in enumerate(events) if x.startswith('drain:'))
+retire=next(i for i,x in enumerate(events) if x.startswith('retire:'))
+agent_promote=next(i for i,x in enumerate(events) if x=='traffic:assistant-agent:assistant-agent-new1=100')
+unpaused_create=next(i for i,x in enumerate(events) if x.startswith('stage:assistant-web:resume-') and x.endswith(':false'))
+assert capture<agent_stage, events
+assert pause<old_drain<retire<agent_promote<unpaused_create, events
+assert events[retire].endswith(':1'), events
+verify=next(i for i,x in enumerate(events) if x.startswith('verify:'))
+resume_stage=next(i for i,x in enumerate(events) if x.startswith('stage:assistant-web:resume-'))
+assert retire<verify<resume_stage, events
+assert any(x.startswith('record:candidate:') for x in events), events
+assert any(x.startswith('record:resume:') for x in events), events
+assert all(key in web_updates[0] for key in (
+ 'ASSISTANT_RELEASE_WORKFLOW_RUN_ID=12345',
+ 'ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT=1',
+ 'ASSISTANT_RELEASE_SOURCE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'))
+assert all(key in web_updates[1] for key in (
+ 'ASSISTANT_RELEASE_WORKFLOW_RUN_ID=12345',
+ 'ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT=1',
+ 'ASSISTANT_RELEASE_SOURCE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'))
 PY
 # Before any unpaused tagged revision exists, old-pair rollback still applies.
 reset_case; prepare_firestore_state; export RELEASE_MODULES=browser FINAL_NEW_PAIR_PROBE_FAIL=1
@@ -453,6 +545,53 @@ assert state['assistant-browser']['image']=='registry/old-browser', state
 assert not any('ASSISTANT_RELEASE_WRITES_PAUSED=false' in x[x.index('--update-env-vars')+1] for x in updates), updates
 PYCASE
 
+# BASIC5 must never enter the staging path outside a paired Firestore release.
+reset_case; TEST_BASIC5_CAPABILITY=true
+if release_staged_services; then fail 'BASIC5 PostgreSQL release must be rejected before staging'; fi
+[[ ! -s "$STUB_SERVICE_UPDATE_CALLS" && ! -s "$STUB_RELEASE_CALLS" ]] || fail 'non-Firestore BASIC5 path reached a mutation'
+reset_case; prepare_firestore_state; export RELEASE_COMPONENTS=web RELEASE_SCHEMA_UNCHANGED=true
+if release_staged_services; then fail 'BASIC5 web-only Firestore release must be rejected before staging'; fi
+[[ ! -s "$STUB_SERVICE_UPDATE_CALLS" && ! -s "$STUB_RELEASE_CALLS" ]] || fail 'non-paired BASIC5 path reached a mutation'
+
+# Capture and candidate-record failures stop before any user traffic promotion.
+reset_case; prepare_firestore_state; export FAIL_ADMISSION_CAPTURE=1
+if release_staged_services; then fail 'failed owned-tag capture must refuse staging'; fi
+[[ ! -s "$STUB_SERVICE_UPDATE_CALLS" && ! -s "$STUB_RELEASE_CALLS" ]] || fail 'failed capture reached a staging or traffic mutation'
+grep -q '^capture:' "$STUB_ADMISSION_CALLS" || fail 'capture failure event was not recorded'
+reset_case; prepare_firestore_state; export FAIL_CANDIDATE_RECEIPT=1
+if release_staged_services; then fail 'failed paused candidate receipt must refuse promotion'; fi
+assert_old_traffic
+[[ ! -s "$STUB_RELEASE_CALLS" ]] || fail 'candidate receipt failure reached traffic promotion'
+python3 - "$STUB_ADMISSION_CALLS" "$STUB_SERVICE_UPDATE_CALLS" <<'PY'
+import json,sys
+events=open(sys.argv[1]).read().splitlines(); updates=[json.loads(x) for x in open(sys.argv[2])]
+assert any(x.startswith('record:candidate:') for x in events), events
+assert not any(x[3]=='assistant-web' and 'ASSISTANT_RELEASE_WRITES_PAUSED=false' in x[x.index('--update-env-vars')+1] for x in updates), updates
+PY
+
+# An uncertain captured-tag retirement rolls back canonical traffic only; it does not restore aliases.
+reset_case; prepare_firestore_state; export FAIL_ADMISSION_RETIRE=1
+python3 - "$TEST_ROOT/state.json" <<'PY'
+import json,sys
+p=sys.argv[1]; s=json.load(open(p)); s['assistant-web']['tags']=[
+ {'revision':'web-old','tag':'resume-111-1'}, {'revision':'web-old','tag':'manual-preview'}]
+open(p,'w').write(json.dumps(s))
+PY
+if release_staged_services; then fail 'failed captured-tag retirement must stop before agent promotion'; fi
+python3 - "$TEST_ROOT/state.json" "$STUB_RELEASE_CALLS" "$STUB_ADMISSION_CALLS" "$STUB_SERVICE_UPDATE_CALLS" <<'PY'
+import json,sys
+state=json.load(open(sys.argv[1])); calls=open(sys.argv[2]).read().splitlines(); events=open(sys.argv[3]).read().splitlines()
+updates=[json.loads(x) for x in open(sys.argv[4])]
+assert state['assistant-web']['traffic']=={'web-old':100}, state['assistant-web']['traffic']
+assert state['assistant-web']['tags']==[
+ {'revision':'web-old','tag':'resume-111-1'}, {'revision':'web-old','tag':'manual-preview'}], state['assistant-web']['tags']
+assert any(x.startswith('retire:') for x in events), events
+assert any('assistant-web ' in x and 'web-old=100' in x for x in calls), calls
+assert not any('assistant-agent-new1=100' in x or 'assistant-web-new2=100' in x for x in calls), calls
+assert not any(x[3]=='assistant-web' and 'ASSISTANT_RELEASE_WRITES_PAUSED=false' in x[x.index('--update-env-vars')+1] for x in updates), updates
+assert not any('--remove-tags' in x for x in calls), calls
+PY
+
 assert_basic5_retained() { python3 - "$TEST_ROOT/state.json" "$STUB_RELEASE_CALLS" <<'PYCASE'
 import json,sys
 state=json.load(open(sys.argv[1])); calls=open(sys.argv[2]).read().splitlines()
@@ -462,6 +601,17 @@ assert state['assistant-browser']['image']!='registry/old-browser', state
 assert not any('agent-old=100' in x or 'web-old=100' in x for x in calls), calls
 PYCASE
 }
+# A fresh admission check failure must prevent creating any unpaused revision.
+reset_case; prepare_firestore_state; export RELEASE_MODULES=browser FAIL_ADMISSION_VERIFY=1
+if release_staged_services; then fail 'failed fresh admission verification must stop before unpaused creation'; fi
+assert_old_traffic
+python3 - "$STUB_ADMISSION_CALLS" "$STUB_SERVICE_UPDATE_CALLS" "$STUB_RELEASE_CALLS" <<'PYCASE'
+import json,sys
+events=open(sys.argv[1]).read().splitlines(); updates=[json.loads(x) for x in open(sys.argv[2])]; calls=open(sys.argv[3]).read().splitlines()
+assert any(x.startswith('verify:') for x in events), events
+assert not any(x[3]=='assistant-web' and 'ASSISTANT_RELEASE_WRITES_PAUSED=false' in x[x.index('--update-env-vars')+1] for x in updates), updates
+assert not any('assistant-web-new2=100' in x for x in calls), calls
+PYCASE
 reset_case; prepare_firestore_state; export RELEASE_MODULES=browser RESUME_WEB_PROBE_FAIL=1
 if release_staged_services; then fail 'unpaused tagged probe failure must retain current pair even before traffic promotion'; fi
 assert_basic5_retained
@@ -471,7 +621,16 @@ calls=open(sys.argv[1]).read().splitlines(); state=json.load(open(sys.argv[2]))
 assert not any('assistant-web-new2=100' in x for x in calls), calls
 assert any('--remove-tags resume-' in x for x in calls), calls
 assert not any(x['tag'].startswith('resume-') for x in state['assistant-web']['staged']), state
-assert any(x['tag'].startswith('candidate-') for x in state['assistant-web']['staged']), state
+assert not any(x['tag'].startswith('candidate-') for x in state['assistant-web']['staged']), state
+PYCASE
+reset_case; prepare_firestore_state; export RELEASE_MODULES=browser FAIL_RESUME_RECEIPT=1
+if release_staged_services; then fail 'failed unpaused resume receipt must prevent unpaused traffic promotion'; fi
+assert_basic5_retained
+python3 - "$STUB_RELEASE_CALLS" "$STUB_ADMISSION_CALLS" <<'PYCASE'
+import sys
+calls=open(sys.argv[1]).read().splitlines(); events=open(sys.argv[2]).read().splitlines()
+assert not any('assistant-web-new2=100' in x for x in calls), calls
+assert any(x.startswith('record:resume:') for x in events), events
 PYCASE
 reset_case; prepare_firestore_state; export RELEASE_MODULES=browser RESUME_LIVE_PROBE_FAIL=1
 if release_staged_services; then fail 'postadmission failure must repause and retain marker-aware runtimes'; fi
