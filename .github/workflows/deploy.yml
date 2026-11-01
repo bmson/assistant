@@ -399,6 +399,10 @@ jobs:
           RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}
         run: |
           source infra/gcp/release-staged-services.sh
+          if ! declare -F release_validate_basic_editor_preflight_context >/dev/null; then
+            echo 'Release source lacks the protected BASIC5 preflight validator; refusing an older checkout with this workflow before cloud authentication.' >&2
+            exit 2
+          fi
           PROJECT="$GCP_PROJECT"
           REGION="$GCP_REGION"
           REPO="$ARTIFACT_REPOSITORY"
