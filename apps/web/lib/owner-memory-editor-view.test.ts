@@ -5,6 +5,7 @@ import { buildOwnerMemoryEditorView, ownerMemoryReadOnlyMessage } from './owner-
 
 const ownerId = '33333333-3333-4333-8333-333333333333';
 const memoryId = '11111111-1111-4111-8111-111111111111';
+const personId = '44444444-4444-4444-8444-444444444444';
 const context = { ownerId, epoch: '22222222-2222-4222-8222-222222222222', privacyGeneration: null };
 const session = { ownerId, formSessionScope: 'a-valid-owner-session-scope' };
 const snapshot: OwnerMemoryEditorSnapshot = {
@@ -90,6 +91,11 @@ describe('memory note context links', () => {
     ],
     ['/profile/knowledge?view=other', null],
     ['/profile/knowledge?view=library#other', '/profile/knowledge?view=library'],
+    [`/people/${personId}`, `/people/${personId}`],
+    [`/people/${personId}?q=Anna`, null],
+    [`/people/${personId}#details`, null],
+    [`https://example.test/people/${personId}`, null],
+    ['/people/not-a-uuid', null],
   ])('validates return destination %s', (candidate, expected) => {
     expect(memoryNoteReturnTo(candidate)).toBe(expected);
   });
@@ -102,5 +108,11 @@ describe('memory note context links', () => {
       `/profile/knowledge/notes/${memoryId}?returnTo=${encodeURIComponent('/profile/knowledge?view=map&memory=source')}`,
     );
     expect(memoryNoteHref('not-a-uuid', '/profile/knowledge?view=library')).toBeNull();
+  });
+
+  it('returns an exact person detail link to that person page', () => {
+    expect(memoryNoteHref(memoryId, `/people/${personId}`)).toBe(
+      `/profile/knowledge/notes/${memoryId}?returnTo=${encodeURIComponent(`/people/${personId}`)}`,
+    );
   });
 });
