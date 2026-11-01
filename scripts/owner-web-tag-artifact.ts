@@ -78,7 +78,7 @@ export function createProtectedWebTagArtifactReader({
       return fail('Invalid protected creation run');
     const deadline = now() + TOTAL_BUDGET_MS;
     async function fetchWithinBudget(url: string, init: RequestInit, limit: number) {
-      const remaining = Math.min(REQUEST_BUDGET_MS, deadline - now());
+      const remaining = Math.floor(Math.min(REQUEST_BUDGET_MS, deadline - now()));
       if (remaining <= 0) return fail('Protected artifact read exceeded its time bound');
       let response: Response;
       try {
@@ -153,7 +153,7 @@ export function createProtectedWebTagArtifactReader({
       return fail('Invalid creation artifact identity');
 
     const downloadPath = `/repos/${REPOSITORY}/actions/artifacts/${artifactMetadata.id}/zip`;
-    const remaining = Math.min(REQUEST_BUDGET_MS, deadline - now());
+    const remaining = Math.floor(Math.min(REQUEST_BUDGET_MS, deadline - now()));
     if (remaining <= 0) return fail('Protected artifact read exceeded its time bound');
     let redirect: Response;
     try {

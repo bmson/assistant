@@ -88,6 +88,34 @@ describe('protected web-tag artifact transport', () => {
     expect(new Headers(blob?.init.headers).has('Authorization')).toBe(false);
   });
 
+  it('supports fractional monotonic-clock remainder without an invalid AbortSignal timeout', async () => {
+    const f = baseFixture();
+    let clock = 0.5;
+    const read = createProtectedWebTagArtifactReader({
+      token,
+      now: () => {
+        const instant = clock;
+        clock += 0.25;
+        return instant;
+      },
+      request: async (input) => {
+        const url = new URL(String(input));
+        if (url.hostname === 'api.github.com') clock += 14_999.99;
+        if (url.pathname.includes('/attempts/')) return json(f.run);
+        if (url.pathname.endsWith('/artifacts')) return json({ artifacts: [f.artifact] });
+        if (url.pathname.endsWith('/zip'))
+          return new Response(null, {
+            status: 302,
+            headers: { Location: 'https://productionresultssa0.blob.core.windows.net/archive' },
+          });
+        return new Response(f.bytes, { status: 200 });
+      },
+    });
+    expect((await read(runId, attempt)).archiveBytes).toEqual(f.bytes);
+    expect(clock).toBeGreaterThan(45_000);
+    expect(clock).toBeLessThan(60_000);
+  });
+
   it.each([
     ['non-GitHub blob host', 'https://evil.example/archive.zip'],
     ['HTTP blob URL', 'http://productionresultssa0.blob.core.windows.net/archive.zip'],
