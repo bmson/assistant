@@ -225,6 +225,51 @@ describe('exact proven legacy web tag retirement', () => {
       );
     },
   );
+  it.each(['etag', 'generation', 'restoreThenRemove'] as const)(
+    'rejects %s drift during an already-absent drain even when final traffic/config match',
+    async (kind) => {
+      const f = fixture(true);
+      const plan = planOwnedWebTagRetirement(f.service, f.native, [f.old], f.expected);
+      let state = structuredClone(f.service);
+      const events: string[] = [];
+      const io: RetirementIO = {
+        readService: async () => structuredClone(state),
+        readRevision: async (name) => f.native[name],
+        patchTraffic: async () => {
+          throw new Error('Already-absent path must not PATCH');
+        },
+        waitOperation: async () => {},
+        drain: async (seconds) => {
+          expect(seconds).toBe(600);
+          if (kind === 'restoreThenRemove') {
+            const before = structuredClone(state);
+            state.traffic.push({
+              type: 'TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION',
+              revision: f.old.revision,
+              tag: f.old.tag,
+            });
+            events.push('external-restore');
+            state = before;
+            state.etag = 'etag-after-external-remove';
+            state.generation = '3';
+            state.observedGeneration = '3';
+            events.push('external-remove');
+          } else if (kind === 'etag') state.etag = 'etag-changed';
+          else {
+            state.generation = '2';
+            state.observedGeneration = '2';
+          }
+          // The prior final-state-only check would accept this exact traffic/config.
+          expect(() => verifyOwnedWebTagRetirement(state, plan)).not.toThrow();
+        },
+      };
+      await expect(executeOwnedWebTagRetirement(plan, io)).rejects.toThrow(
+        'Service version changed',
+      );
+      if (kind === 'restoreThenRemove')
+        expect(events).toEqual(['external-restore', 'external-remove']);
+    },
+  );
   it.each(['stale', 'casConflict', 'uncertainPatch', 'badPost', 'drainFailure'] as const)(
     'stops on %s without retry or alias restoration/admission',
     async (kind) => {

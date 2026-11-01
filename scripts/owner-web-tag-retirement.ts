@@ -200,6 +200,17 @@ function serviceState(raw: unknown) {
     configurationSha256: digest(configuration),
   };
 }
+/** Bounded public traffic projection; native templates/env never leave the parser. */
+export function webTagTrafficSnapshot(raw: unknown) {
+  const state = serviceState(raw);
+  return {
+    uid: state.uid,
+    rows: state.observed.map((row) => ({
+      ...trafficIdentity(row, true),
+      ...(row.uri === undefined ? {} : { uri: text(row.uri, /^https:\/\/[^\s]{1,512}$/) }),
+    })),
+  };
+}
 export interface RetirementPlan {
   format: 1;
   service: typeof WEB_SERVICE;
@@ -340,11 +351,28 @@ export function verifyOwnedWebTagRetirement(raw: unknown, plan: RetirementPlan) 
     outcome: 'exact_tags_absent_current_unchanged' as const,
     service: WEB_SERVICE,
     currentRevision: plan.current.revision,
+    serviceEtag: state.etag,
+    serviceGeneration: state.generation,
     templateSha256: state.templateSha256,
     trafficSha256: digest(state.desired),
     operationReadiness: 'drain_still_required' as const,
     editingAuthorized: false,
   };
+}
+/** The same settled version must remain throughout the drain and until admission. */
+export function requireRetirementDrainStability(
+  observed: ReturnType<typeof verifyOwnedWebTagRetirement>,
+  completed: { serviceEtag?: unknown; serviceGeneration?: unknown },
+) {
+  if (
+    typeof completed.serviceEtag !== 'string' ||
+    !/^[ -~]{1,512}$/.test(completed.serviceEtag) ||
+    typeof completed.serviceGeneration !== 'string' ||
+    !/^[0-9]+$/.test(completed.serviceGeneration) ||
+    observed.serviceEtag !== completed.serviceEtag ||
+    observed.serviceGeneration !== completed.serviceGeneration
+  )
+    throw new Error('Service version changed or drain stability evidence is missing');
 }
 export const retirementPlanHash = (plan: RetirementPlan) => digest(plan);
 export interface RetirementIO {
@@ -367,9 +395,11 @@ export async function executeOwnedWebTagRetirement(plan: RetirementPlan, io: Ret
   const post = verifyOwnedWebTagRetirement(await io.readService(), fresh);
   // ALWAYS wait, including already-absent recovery after a prior runner failure.
   await io.drain(600);
-  verifyOwnedWebTagRetirement(await io.readService(), fresh);
+  const final = verifyOwnedWebTagRetirement(await io.readService(), fresh);
+  requireRetirementDrainStability(final, post);
   return {
-    ...post,
+    ...final,
+    operationReadiness: 'retirement_drain_completed' as const,
     action: fresh.action,
     planSha256: retirementPlanHash(fresh),
     drainSeconds: 600,

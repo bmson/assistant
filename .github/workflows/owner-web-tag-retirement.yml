@@ -34,7 +34,8 @@ jobs:
   retire:
     if: github.ref == 'refs/heads/main' && github.run_attempt == 1
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Reserve the full post-PATCH600s drain after setup and bounded native reads/LRO.
+    timeout-minutes: 45
     environment: production
     env:
       GCP_PROJECT: ${{ vars.GCP_PROJECT }}
@@ -66,6 +67,7 @@ jobs:
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
         with:
           version: 576.0.0
+          cache: true
       - name: Plan exact historical alias retirement
         if: inputs.mode == 'plan'
         run: pnpm exec tsx scripts/owner-web-tag-retirement-command.ts --plan

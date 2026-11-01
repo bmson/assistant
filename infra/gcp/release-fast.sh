@@ -23,6 +23,12 @@ case "$TARGET" in
     ;;
 esac
 
+# This source-only scope check precedes even gcloud project discovery. BASIC5
+# cannot use a single-service path; genuine legacy source keeps discovery below.
+# shellcheck source=infra/gcp/release-staged-services.sh
+source "$(dirname "${BASH_SOURCE[0]}")/release-staged-services.sh"
+release_validate_basic_editor_preflight_context web "${IMAGE_TAG:-}" || exit $?
+
 # Resolve the project the same way deploy.sh does: an explicit shell variable
 # wins, then the repo .env, then the gcloud CLI's configured project. Reading
 # .env here means the fast path works from the same file the full provisioner
@@ -60,8 +66,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/release-persistence.sh"
 RELEASE_PERSISTENCE_DRIVER="$(resolve_release_persistence)" || exit $?
 export RELEASE_PERSISTENCE_DRIVER
 export RELEASE_COMPONENTS=web RELEASE_SCHEMA_UNCHANGED=true RELEASE_MODULES=none
-# shellcheck source=infra/gcp/release-staged-services.sh
-source "$(dirname "${BASH_SOURCE[0]}")/release-staged-services.sh"
 release_validate_worker_override || exit $?
 release_preflight_compatibility web
 

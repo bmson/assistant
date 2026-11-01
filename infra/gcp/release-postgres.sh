@@ -30,6 +30,7 @@ case "$RELEASE_COMPONENTS" in
   *) echo 'RELEASE_COMPONENTS must be agent,web (default) or web' >&2; exit 2 ;;
 esac
 export RELEASE_COMPONENTS
+release_validate_basic_editor_context "$RELEASE_COMPONENTS" postgres "$TAG" || exit $?
 
 IMAGE_ROOT="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}"
 AGENT_SERVICE_ACCOUNT="assistant-agent@${PROJECT}.iam.gserviceaccount.com"

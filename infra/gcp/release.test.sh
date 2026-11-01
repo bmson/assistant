@@ -11,6 +11,26 @@ TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/assistant-release-test.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/dispatch"
 
+# The long-standing Firestore protocol tests cover a pre-BASIC5 release source.
+# Keep that source isolated so the real checkout's intrinsic capability and
+# runtime file remain available for separate current-source guard assertions.
+LEGACY_RELEASE_ROOT="$TEST_ROOT/legacy-release-source"
+mkdir -p "$LEGACY_RELEASE_ROOT/infra/gcp" "$LEGACY_RELEASE_ROOT/packages/db/drizzle/meta"
+LEGACY_RELEASE_ROOT="$(cd "$LEGACY_RELEASE_ROOT" && pwd -P)"
+for file in release-firestore.sh release-fast.sh release-persistence.sh release-staged-services.sh release-legacy-bootstrap.sh \
+  release-schema-version.mjs release-manifest.mjs release-contracts.json; do
+  cp "$ROOT/$file" "$LEGACY_RELEASE_ROOT/infra/gcp/$file"
+done
+cp "${ROOT%/infra/gcp}/packages/db/drizzle/meta/_journal.json" \
+  "$LEGACY_RELEASE_ROOT/packages/db/drizzle/meta/_journal.json"
+node - "$LEGACY_RELEASE_ROOT/infra/gcp/release-contracts.json" <<'NODE'
+const fs = require('node:fs');
+const path = process.argv[2];
+const contracts = JSON.parse(fs.readFileSync(path, 'utf8'));
+delete contracts.components?.web?.ownerEditorV1;
+fs.writeFileSync(path, `${JSON.stringify(contracts, null, 2)}\n`);
+NODE
+
 export GCP_PROJECT="test-project"
 export GCP_REGION="test-region"
 export STUB_CALLS="$TEST_ROOT/calls"
@@ -175,6 +195,22 @@ python3 "$ROOT/firestore-delivery-guard.test.py" || fail "Firestore delivery hol
 
 workflow="$ROOT/../../.github/workflows/deploy.yml"
 env_example="$ROOT/../../.env.example"
+python3 - "$workflow" <<'PYWORKFLOW'
+import sys
+workflow=open(sys.argv[1]).read()
+release=workflow.split('\n  release:\n',1)[1]
+start=release.index('      - name: Check intrinsic BASIC5 context before cloud authentication\n')
+end=release.index('      - run: pnpm install --frozen-lockfile\n',start)
+precheck=release[start:end]
+auth=release.index('uses: google-github-actions/auth@')
+resolver=release.index('      - name: Resolve live release path\n')
+assert start < end < auth < resolver, 'pure BASIC5 check must precede install/auth/live resolution'
+assert 'IMAGE_TAG: ${{ needs.plan.outputs.sha }}' in precheck
+assert 'RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}' in precheck
+assert 'release_validate_basic_editor_preflight_context "$RELEASE_COMPONENTS" "$TAG"' in precheck
+assert 'PROJECT="$GCP_PROJECT"' in precheck and 'REGION="$GCP_REGION"' in precheck and 'REPO="$ARTIFACT_REPOSITORY"' in precheck
+assert 'gcloud ' not in precheck and 'driver=' not in precheck, 'precheck cannot read or invent driver authority'
+PYWORKFLOW
 for worker_mapping in browser:BROWSER code:CODE processor:PROCESSOR; do
   worker="${worker_mapping%:*}"
   worker_env="${worker_mapping#*:}"
@@ -203,12 +239,15 @@ reset() {
 }
 
 # ── release.sh selects the path from the live services ──────────────────────
-cp "$ROOT/release.sh" "$ROOT/release-persistence.sh" "$TEST_ROOT/dispatch/"
-printf '#!/usr/bin/env bash\necho SELECTED:postgres\n' >"$TEST_ROOT/dispatch/release-postgres.sh"
-printf '#!/usr/bin/env bash\necho SELECTED:firestore\n' >"$TEST_ROOT/dispatch/release-firestore.sh"
+DISPATCH_RELEASE_ROOT="$TEST_ROOT/dispatch/infra/gcp"
+mkdir -p "$DISPATCH_RELEASE_ROOT"
+cp "$ROOT/release.sh" "$ROOT/release-persistence.sh" "$ROOT/release-staged-services.sh" "$DISPATCH_RELEASE_ROOT/"
+cp "$LEGACY_RELEASE_ROOT/infra/gcp/release-contracts.json" "$DISPATCH_RELEASE_ROOT/"
+printf '#!/usr/bin/env bash\necho SELECTED:postgres\n' >"$DISPATCH_RELEASE_ROOT/release-postgres.sh"
+printf '#!/usr/bin/env bash\necho SELECTED:firestore\n' >"$DISPATCH_RELEASE_ROOT/release-firestore.sh"
 
 dispatch() {
-  bash "$TEST_ROOT/dispatch/release.sh" 2>&1
+  bash "$DISPATCH_RELEASE_ROOT/release.sh" 2>&1
 }
 
 reset
@@ -285,8 +324,19 @@ export IMAGE_TAG="abc123" SKIP_IMAGE_BUILD=true RELEASE_HEALTH_INTERVAL_SECONDS=
 export ASSISTANT_MODULES="google,browser"
 
 firestore_release() {
-  bash "$ROOT/release-firestore.sh" 2>&1
+  bash "$LEGACY_RELEASE_ROOT/infra/gcp/release-firestore.sh" 2>&1
 }
+fast_firestore_web_release() {
+  bash "$LEGACY_RELEASE_ROOT/infra/gcp/release-fast.sh" web 2>&1
+}
+node - "$LEGACY_RELEASE_ROOT" <<'NODE' || fail "legacy fixture must not advertise or contain BASIC5 runtime"
+const fs = require('node:fs');
+const path = require('node:path');
+const root = process.argv[2];
+const contracts = JSON.parse(fs.readFileSync(path.join(root, 'infra/gcp/release-contracts.json'), 'utf8'));
+if (contracts.components?.web?.ownerEditorV1 !== undefined) process.exit(1);
+if (fs.existsSync(path.join(root, 'apps/web/lib/owner-editor-runtime.ts'))) process.exit(1);
+NODE
 
 reset
 export RELEASE_EMAIL_OBSERVER_WORKER_ENABLED='true,EXTRA=1'
@@ -299,6 +349,126 @@ if out="$(GCP_PROJECT=test-project RELEASE_EMAIL_OBSERVER_WORKER_ENABLED=1 bash 
 fi
 grep -q 'must be exactly true or false' <<<"$out" || fail "invalid worker override needs a clear PostgreSQL error: $out"
 [[ ! -s "$STUB_CALLS" ]] || fail "invalid worker override must fail before PostgreSQL release mutations"
+
+# Running the current BASIC5 source directly without protected workflow
+# identity must fail before staging a candidate, traffic, or worker template.
+reset
+actual_unbound_basic5_release() {
+  unset GITHUB_ACTIONS GITHUB_REPOSITORY GITHUB_REF GITHUB_WORKFLOW_REF GITHUB_WORKFLOW_SHA GITHUB_SHA \
+    GITHUB_EVENT_NAME GITHUB_RUN_ID GITHUB_RUN_ATTEMPT
+  actual_basic5_direct_release agent,web firestore
+}
+actual_basic5_direct_release() {
+  export IMAGE_TAG='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  export RELEASE_COMPONENTS="$1" RELEASE_SCHEMA_UNCHANGED=true SKIP_IMAGE_BUILD=false
+  # Exercise the actual entry scripts, including their build/migration/scheduler
+  # bookkeeping, rather than merely calling the later staging helper.
+  case "$2" in
+    firestore) bash "$ROOT/release-firestore.sh" ;;
+    postgres) bash "$ROOT/release-postgres.sh" ;;
+    *) fail "unsupported negative fixture driver" ;;
+  esac
+}
+
+set_valid_basic5_context() {
+  export GITHUB_ACTIONS=true GITHUB_REPOSITORY=bmson/assistant GITHUB_REF=refs/heads/main
+  export GITHUB_WORKFLOW_REF=bmson/assistant/.github/workflows/deploy.yml@refs/heads/main
+  export GITHUB_WORKFLOW_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  export GITHUB_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_RUN_ID=12345 GITHUB_RUN_ATTEMPT=1
+}
+if out="$(actual_unbound_basic5_release 2>&1)"; then
+  fail "direct unbound BASIC5 release must fail closed"
+fi
+grep -Eiq 'requires .*GitHub .*identity|requires .*workflow identity' <<<"$out" ||
+  fail "direct unbound BASIC5 release needs a clear pre-staging error: $out"
+[[ ! -s "$STUB_CALLS" ]] || fail "direct unbound BASIC5 release must stop before any provider reads or mutations"
+
+# Valid protected metadata cannot authorize BASIC5 with the wrong driver or
+# component scope. Both refusals must happen before any provider call.
+reset
+set_valid_basic5_context
+if out="$(actual_basic5_direct_release agent,web postgres 2>&1)"; then
+  fail "BASIC5 with the PostgreSQL driver must fail before Cloud Run reads"
+fi
+grep -q 'requires a paired Firestore release' <<<"$out" || fail "wrong-driver BASIC5 error was unclear: $out"
+[[ ! -s "$STUB_CALLS" ]] || fail "wrong-driver BASIC5 path made a provider call"
+
+reset
+set_valid_basic5_context
+if out="$(actual_basic5_direct_release web firestore 2>&1)"; then
+  fail "BASIC5 web-only Firestore path must fail before Cloud Run reads"
+fi
+grep -q 'requires a paired Firestore release' <<<"$out" || fail "web-only BASIC5 error was unclear: $out"
+[[ ! -s "$STUB_CALLS" ]] || fail "web-only BASIC5 path made a provider call"
+
+# Even otherwise valid workflow metadata must not redirect BASIC5 to a different
+# project/region/repository before its fixed native client can reject it later.
+reset
+set_valid_basic5_context
+if out="$(actual_basic5_direct_release agent,web firestore 2>&1)"; then
+  fail "BASIC5 with a foreign provider target must stop at wrapper entry"
+fi
+grep -q 'requires the fixed bmson-assistant/us-west1/assistant target' <<<"$out" ||
+  fail "foreign-target BASIC5 refusal was unclear: $out"
+[[ ! -s "$STUB_CALLS" ]] || fail "foreign-target BASIC5 wrapper made a provider call"
+
+# Fast release must reject current BASIC5 before project discovery itself.
+reset
+actual_basic5_fast_release() {
+  unset GCP_PROJECT
+  export ASSISTANT_ENV_FILE="$TEST_ROOT/absent.env" IMAGE_TAG=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  bash "$ROOT/release-fast.sh" web
+}
+if out="$(actual_basic5_fast_release 2>&1)"; then
+  fail "BASIC5 fast web release must reject before project discovery or build"
+fi
+grep -q 'requires a paired Firestore release' <<<"$out" || fail "fast BASIC5 refusal was unclear: $out"
+[[ ! -s "$STUB_CALLS" ]] || fail "fast BASIC5 path accessed a provider before refusal"
+
+# The top-level dispatcher must validate identity before resolving any driver.
+reset
+actual_unbound_basic5_dispatch() {
+  unset GITHUB_ACTIONS GITHUB_REPOSITORY GITHUB_REF GITHUB_WORKFLOW_REF GITHUB_WORKFLOW_SHA GITHUB_SHA \
+    GITHUB_EVENT_NAME GITHUB_RUN_ID GITHUB_RUN_ATTEMPT
+  export IMAGE_TAG=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa RELEASE_COMPONENTS=agent,web
+  bash "$ROOT/release.sh"
+}
+if out="$(actual_unbound_basic5_dispatch 2>&1)"; then
+  fail "unbound BASIC5 dispatcher must stop before live driver reads"
+fi
+grep -Eiq 'requires .*GitHub .*identity|requires .*workflow identity' <<<"$out" ||
+  fail "unbound dispatcher refusal was unclear: $out"
+[[ ! -s "$STUB_CALLS" ]] || fail "unbound BASIC5 dispatcher made a provider call"
+
+reset
+set_valid_basic5_context
+if out="$(IMAGE_TAG=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa RELEASE_COMPONENTS=agent,web bash "$ROOT/release.sh" 2>&1)"; then
+  fail "foreign-target BASIC5 dispatcher must stop before driver reads"
+fi
+grep -q 'requires the fixed bmson-assistant/us-west1/assistant target' <<<"$out" ||
+  fail "foreign-target dispatcher refusal was unclear: $out"
+[[ ! -s "$STUB_CALLS" ]] || fail "foreign-target dispatcher made a provider call"
+
+# Only a bound fixed-target identity can auto-read the actual driver. A genuine
+# PostgreSQL observation then refuses before entering a mutating child wrapper.
+reset
+set_valid_basic5_context
+actual_bound_wrong_driver_dispatch() {
+  export GCP_PROJECT=bmson-assistant GCP_REGION=us-west1 ARTIFACT_REPOSITORY=assistant
+  export IMAGE_TAG=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa RELEASE_COMPONENTS=agent,web
+  export STUB_AGENT_DRIVER=postgres STUB_WEB_DRIVER=postgres
+  unset RELEASE_PERSISTENCE_DRIVER
+  bash "$ROOT/release.sh"
+}
+if out="$(actual_bound_wrong_driver_dispatch 2>&1)"; then
+  fail "BASIC5 dispatcher must reject the actual PostgreSQL driver"
+fi
+grep -q 'requires a paired Firestore release' <<<"$out" || fail "resolved wrong-driver refusal was unclear: $out"
+[[ "$(wc -l <"$STUB_CALLS" | tr -d ' ')" == 2 ]] || fail "bound auto detection must only read both services"
+if grep -Ev '^gcloud run services describe (assistant-agent|assistant-web) --project bmson-assistant --region us-west1 --format=json$' "$STUB_CALLS"; then
+  fail "bound wrong-driver dispatcher made an unauthorized call"
+fi
 
 assert_no_database_calls() {
   if grep -Eiq 'database-url|DATABASE_URL|assistant-migrate|assistant-backup|secrets|neon|pg_dump' "$STUB_CALLS"; then
@@ -340,7 +510,7 @@ fi
 
 reset
 export IMAGE_TAG=abc123
-out="$(bash "$ROOT/release-fast.sh" web 2>&1)" || fail "fast Firestore web release should use live compatibility metadata: $out"
+out="$(fast_firestore_web_release)" || fail "fast Firestore web release should use live compatibility metadata: $out"
 grep -q 'assistant-web abc123 is live' <<<"$out" || fail "fast release did not prove the serving SHA: $out"
 grep -q 'run services update assistant-web' "$STUB_CALLS" || fail "fast release did not stage a web candidate"
 grep -q -- '--no-traffic' "$STUB_CALLS" || fail "fast release skipped no-traffic staging"
