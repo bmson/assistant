@@ -19,6 +19,7 @@ const ports = vi.hoisted(() => ({
   fsOwner: vi.fn(),
   fsFence: vi.fn(),
   fsAfter: vi.fn(),
+  getStore: vi.fn(),
   terminate: vi.fn(),
 }));
 vi.mock('@/auth', () => ({ requireOwner: ports.owner }));
@@ -49,6 +50,7 @@ vi.mock('@assistant/application/people', async (original) => ({
   getPersonDossier: ports.person,
 }));
 vi.mock('@/lib/server', () => ({
+  getFirestoreInstallationStore: ports.getStore,
   withPostgresMemoryBrowseRead: ports.pgRead,
   readPostgresOwnerEditorViewInputs: ports.pgEditor,
 }));
@@ -58,7 +60,6 @@ vi.mock('@/lib/firestore-people', () => ({
 }));
 vi.mock('@assistant/firestore', async (original) => ({
   ...(await original<Record<string, unknown>>()),
-  createInstallationStore: () => ({ fixture: 'same-store', db: { terminate: ports.terminate } }),
   assertFirestoreInstallationOwner: ports.fsOwner,
   readPrivacyErasureFence: ports.fsFence,
   assertPrivacyErasureFenceUnchanged: ports.fsAfter,
@@ -70,6 +71,10 @@ import Person from './[id]/page';
 import People from './page';
 
 const ownerId = '11111111-1111-4111-8111-111111111111';
+const firestoreStore = Object.freeze({
+  fixture: 'configured-firestore-transport',
+  db: Object.freeze({ terminate: ports.terminate }),
+});
 const context = {
   ownerId,
   epoch: '44444444-4444-4444-8444-444444444444',
@@ -113,6 +118,7 @@ beforeEach(() => {
   ports.driver = 'postgres';
   ports.enabled = true;
   ports.trace = [];
+  ports.getStore.mockReturnValue(firestoreStore);
   ports.owner.mockResolvedValue({
     user: { email: 'offline-owner@example.test' },
     formSessionScope: 'offline_page_form_session',
@@ -143,31 +149,45 @@ beforeEach(() => {
         : { ownerId, people: [], identity: null, corrections: [] },
     };
   });
-  ports.fsOwner.mockImplementation(async () => {
+  ports.fsOwner.mockImplementation(async (store, configuredOwnerId) => {
+    expect(store).toBe(firestoreStore);
+    expect(configuredOwnerId).toBe(ownerId);
     ports.trace.push('fs-owner');
     return ownerId;
   });
-  ports.fsFence.mockImplementation(async () => {
+  ports.fsFence.mockImplementation(async (store, configuredOwnerId) => {
+    expect(store).toBe(firestoreStore);
+    expect(configuredOwnerId).toBe(ownerId);
     ports.trace.push('fs-before');
     return fence;
   });
-  ports.fsAfter.mockImplementation(async (_store, _owner, observed) => {
+  ports.fsAfter.mockImplementation(async (store, configuredOwnerId, observed) => {
+    expect(store).toBe(firestoreStore);
+    expect(configuredOwnerId).toBe(ownerId);
     expect(observed).toBe(fence);
     ports.trace.push('fs-after');
   });
-  ports.fsPeople.mockImplementation(async () => {
+  ports.fsPeople.mockImplementation(async (store, configuredOwnerId) => {
+    expect(store).toBe(firestoreStore);
+    expect(configuredOwnerId).toBe(ownerId);
     ports.trace.push('browse');
     return data.people;
   });
-  ports.fsPerson.mockImplementation(async () => {
+  ports.fsPerson.mockImplementation(async (store, configuredOwnerId) => {
+    expect(store).toBe(firestoreStore);
+    expect(configuredOwnerId).toBe(ownerId);
     ports.trace.push('browse');
     return data.dossier;
   });
-  ports.fsContext.mockImplementation(async () => {
+  ports.fsContext.mockImplementation(async (store, configuredOwnerId) => {
+    expect(store).toBe(firestoreStore);
+    expect(configuredOwnerId).toBe(ownerId);
     ports.trace.push('context');
     return context;
   });
-  ports.fsSnapshot.mockImplementation(async () => {
+  ports.fsSnapshot.mockImplementation(async (store, configuredOwnerId) => {
+    expect(store).toBe(firestoreStore);
+    expect(configuredOwnerId).toBe(ownerId);
     ports.trace.push('snapshot');
     return snapshot;
   });
@@ -314,7 +334,8 @@ describe('actual page + real issuance builder composition, named reader/fence po
     expect(ports.fsSnapshot).not.toHaveBeenCalled();
     expect(ports.pgRead).not.toHaveBeenCalled();
     expect(html).toContain('Add person');
-    expect(ports.terminate).toHaveBeenCalledOnce();
+    expect(ports.getStore).toHaveBeenCalledOnce();
+    expect(ports.terminate).not.toHaveBeenCalled();
     expect(ports.fsContext.mock.calls[0]?.[0]).toBe(ports.fsPeople.mock.calls[0]?.[0]);
   });
   it('FS dossier native editor snapshots stay inside the same owner/privacy read window', async () => {
@@ -333,6 +354,8 @@ describe('actual page + real issuance builder composition, named reader/fence po
     expect(ports.fsSnapshot.mock.calls[0]?.[0]).toBe(ports.fsPerson.mock.calls[0]?.[0]);
     expect(html).toContain('Edit details');
     expect(ports.pgRead).not.toHaveBeenCalled();
+    expect(ports.getStore).toHaveBeenCalledOnce();
+    expect(ports.terminate).not.toHaveBeenCalled();
   });
   it('FS missing epoch skips optional native options and retains browse', async () => {
     ports.driver = 'firestore';
@@ -353,7 +376,37 @@ describe('actual page + real issuance builder composition, named reader/fence po
     expect(ports.fsOwner).toHaveBeenCalledTimes(2);
     expect(ports.fsAfter).toHaveBeenCalledOnce();
     expect(ports.pgRead).not.toHaveBeenCalled();
-    expect(ports.terminate).toHaveBeenCalledOnce();
+    expect(ports.terminate).not.toHaveBeenCalled();
+  });
+  it('reuses only the configured transport while every sequential and overlapping page read stays fresh', async () => {
+    ports.driver = 'firestore';
+    await directory();
+    await dossier();
+    await Promise.all([directory(), dossier()]);
+
+    expect(ports.getStore).toHaveBeenCalledTimes(4);
+    expect(ports.getStore.mock.results.map((result) => result.value)).toEqual(
+      Array(4).fill(firestoreStore),
+    );
+    expect(ports.fsPeople).toHaveBeenCalledTimes(2);
+    expect(ports.fsPerson).toHaveBeenCalledTimes(2);
+    expect(ports.fsOwner).toHaveBeenCalledTimes(8);
+    expect(ports.fsFence).toHaveBeenCalledTimes(4);
+    expect(ports.fsAfter).toHaveBeenCalledTimes(4);
+    expect(ports.fsContext).toHaveBeenCalledTimes(4);
+    expect(ports.fsSnapshot).toHaveBeenCalledTimes(2);
+    expect(ports.terminate).not.toHaveBeenCalled();
+  });
+  it('does not terminate the shared Firestore client when a page read fails', async () => {
+    ports.driver = 'firestore';
+    ports.fsPerson.mockRejectedValueOnce(Error('person read unavailable'));
+    const html = renderToStaticMarkup(await dossier());
+
+    expect(html).toContain('Could not load this view');
+    expect(ports.getStore).toHaveBeenCalledOnce();
+    expect(ports.fsOwner).toHaveBeenCalledOnce();
+    expect(ports.fsFence).toHaveBeenCalledOnce();
+    expect(ports.terminate).not.toHaveBeenCalled();
   });
   it('FS changed erasure after optional issuance discards prepared grants rather than return success', async () => {
     ports.driver = 'firestore';
@@ -362,7 +415,7 @@ describe('actual page + real issuance builder composition, named reader/fence po
     expect(html).toContain('Could not load this view');
     expect(html).not.toContain('Edit details');
     expect(ports.pgRead).not.toHaveBeenCalled();
-    expect(ports.terminate).toHaveBeenCalledOnce();
+    expect(ports.terminate).not.toHaveBeenCalled();
   });
 });
 
