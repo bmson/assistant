@@ -148,6 +148,36 @@ jobs:
             exit 1
           fi
 
+      # Normally unarmed. Later allocation permits ONE ordinary push of the
+      # final local commit after Manager arms that exact SHA, then clears the
+      # flag at terminal. No force/reset/delete/recreate/repeated push while
+      # armed; no PR/manual/main/deletion/rerun capture. No late-vars assumption.
+      # This is CPU-tool feasibility, not an iPhone FPS gate.
+      - name: Optional single Debug profiling capability attempt
+        if: github.event_name == 'push' && github.ref == 'refs/heads/codex/native-profiling-capability' && !github.event.deleted && github.run_attempt == '1' && vars.NATIVE_PROFILING_CAPABILITY_SHA == github.sha
+        env:
+          ASSISTANT_PROFILE_CAPABILITY: '1'
+          DESTINATION_UDID: ${{ steps.simulator.outputs.udid }}
+          PROFILE_OUTPUT_PARENT: ${{ runner.temp }}/Assistant-profile
+        run: |
+          mkdir -p "$PROFILE_OUTPUT_PARENT"
+          profile_test_run="$(find "${RUNNER_TEMP}/Assistant-build/Build/Products" -maxdepth 1 -name '*.xctestrun' -type f)"
+          if [ -z "$profile_test_run" ] || [ "$(printf '%s\n' "$profile_test_run" | wc -l | tr -d ' ')" != '1' ]; then
+            echo '::error::Expected exactly one prebuilt xctestrun; no fallback build.'
+            exit 1
+          fi
+          export PROFILE_XCTESTRUN="$profile_test_run"
+          python3 infra/ios-profiling-capability.py
+
+      - name: Preserve optional profiling evidence including STOP
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/codex/native-profiling-capability' && !github.event.deleted && github.run_attempt == '1' && vars.NATIVE_PROFILING_CAPABILITY_SHA == github.sha
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: ios-profile-capability-${{ github.sha }}
+          path: ${{ runner.temp }}/Assistant-profile
+          retention-days: 14
+          if-no-files-found: error
+
       # xcodebuild interleaves its diagnostics with thousands of lines of
       # compile commands, and the errors land wherever the parallel jobs
       # happened to be. Anyone reading this from a terminal — or through the

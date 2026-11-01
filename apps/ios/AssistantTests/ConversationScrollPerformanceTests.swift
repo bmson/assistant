@@ -80,6 +80,118 @@ final class ConversationScrollPerformanceTests: XCTestCase {
         print("CONVERSATION_SCROLL_BENCHMARK \(String(decoding: data, as: UTF8.self))")
     }
 
+    /// Opt-in tooling feasibility only. Debug synthetic CPU capture is not FPS.
+    @MainActor
+    func testOwnedTranscriptProfilingCapability() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let token = environment["ASSISTANT_PROFILE_TOKEN"],
+              UUID(uuidString: token) != nil else { throw XCTSkip("Profiling capability is explicitly opt-in") }
+        guard !UserDefaults.standard.bool(forKey: "assistant.connection-configured") else {
+            XCTFail("Profiling fixture forbids a saved connection and automatic bootstrap")
+            return
+        }
+        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("profiling-capability-" + token, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let previousWindow = scene.keyWindow
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+        // Immutable payload; existing mixed Markdown/recall/card factory, no IO.
+        let messages = Self.fixtureMessages(count: 100)
+        let rows = ChatTranscriptRows(
+            messages: messages, isSending: false,
+            openApprovals: {}, send: { _, _ in },
+            decideApproval: { _, _ in false }, rememberApproval: { _ in false },
+            decideSuggestion: { _, _ in nil }, openActivity: {},
+            refreshCard: { _, _ in nil }, hideMessage: { _ in },
+            setRecallSourceSuppressed: { _, _, _ in .failed },
+            recallSourceSuppressed: { _, _ in nil }, acknowledgeMessageDelivery: { _ in false },
+            cardFormActions: nil, cardFormStateRevision: 0, cardFormTaskRevision: 0
+        )
+        let host = UIHostingController(rootView: ConversationColumn {
+            ScrollView { rows.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 100) }
+        } composer: {
+            ProfilingCapabilityComposer().frame(height: 52)
+        }.environment(\.colorScheme, .light).environment(\.dynamicTypeSize, .large))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousWindow?.makeKey()
+        }
+        try await Task.sleep(for: .milliseconds(350))
+        window.layoutIfNeeded()
+        host.view.layoutIfNeeded()
+        let scroll = try XCTUnwrap(Self.scrollView(in: window))
+        let bottom = Self.bottomOffset(of: scroll)
+        XCTAssertGreaterThan(bottom, scroll.bounds.height * 2)
+        func composerView(in view: UIView) -> UIView? {
+            if view.accessibilityIdentifier == "profiling-capability-composer" { return view }
+            for child in view.subviews {
+                if let result = composerView(in: child) { return result }
+            }
+            return nil
+        }
+        let composer = try XCTUnwrap(composerView(in: window))
+        let viewportFrame = scroll.convert(scroll.bounds, to: window)
+        let composerFrame = composer.convert(composer.bounds, to: window)
+        XCTAssertFalse(composer.isDescendant(of: scroll))
+        XCTAssertTrue(viewportFrame.intersects(composerFrame))
+        XCTAssertGreaterThan(viewportFrame.height, composerFrame.height)
+        guard bottom > scroll.bounds.height * 2,
+              !composer.isDescendant(of: scroll),
+              viewportFrame.intersects(composerFrame),
+              viewportFrame.height > composerFrame.height else { return }
+        let ready: [String: Any] = [
+            "version": 1, "token": token, "pid": ProcessInfo.processInfo.processIdentifier,
+            "configuration": "Debug-testability", "messageCount": messages.count,
+            "messageIDs": messages.map(\.id), "fixture": "existing-mixed-scroll-fixture-v1",
+            "contentHeight": scroll.contentSize.height, "viewportHeight": scroll.bounds.height,
+            "bottomOffset": bottom, "windowWidth": window.bounds.width, "windowHeight": window.bounds.height,
+            "viewportInWindow": [viewportFrame.minX, viewportFrame.minY, viewportFrame.width, viewportFrame.height],
+            "composerInWindow": [composerFrame.minX, composerFrame.minY, composerFrame.width, composerFrame.height],
+            "coverage": "100 loaded messages; scroll path traverses full native content range, visible-row count not instrumented",
+            "savedConnectionConfigured": false,
+            "readinessMonotonic": CACurrentMediaTime(), "presentedFrames": "unavailable"
+        ]
+        try JSONSerialization.data(withJSONObject: ready, options: [.sortedKeys])
+            .write(to: directory.appendingPathComponent("ready.json"), options: .atomic)
+        // Readiness and layout checks occur before the capture starts. The
+        // controller writes start only after xctrace's tracing-started notification.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(45))
+        while !FileManager.default.fileExists(atPath: directory.appendingPathComponent("start").path),
+              ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        guard FileManager.default.fileExists(atPath: directory.appendingPathComponent("start").path) else {
+            XCTFail("No confirmed capture-start barrier before bounded deadline")
+            return
+        }
+        let recorder = TranscriptScrollRecorder(scrollView: scroll, duration: 5)
+        await recorder.run()
+        // No geometry observers, screenshots or attachment writes in workload.
+        let result: [String: Any] = [
+            "version": 1, "token": token, "elapsed": recorder.elapsed,
+            "timedOut": recorder.timedOut, "callbackIntervals": recorder.intervals,
+            "finalOffset": scroll.contentOffset.y, "expectedBottom": bottom,
+            "completedMonotonic": CACurrentMediaTime(),
+            "claim": "Debug synthetic callback pacing and CPU-tool feasibility only; no presented-frame/FPS claim"
+        ]
+        try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
+            .write(to: directory.appendingPathComponent("done.json"), options: .atomic)
+        XCTAssertFalse(recorder.timedOut)
+        XCTAssertGreaterThanOrEqual(recorder.elapsed, 5)
+        XCTAssertGreaterThanOrEqual(scroll.contentOffset.y, bottom - 2)
+        // Keep this exact app PID alive while xctrace closes its bounded trace.
+        let finishDeadline = ContinuousClock.now.advanced(by: .seconds(30))
+        while !FileManager.default.fileExists(atPath: directory.appendingPathComponent("release").path),
+              ContinuousClock.now < finishDeadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+    }
+
     private static func fixtureMessages(count: Int) -> [ChatMessage] {
         let sources = [
             MessageRecallSource(date: "2026-10-18", label: "A previous conversation about the weekend plan and the confirmed arrival details", kind: "chat", hops: 1, surfaceKey: nil, sourceRevision: nil),
@@ -201,4 +313,16 @@ private final class TranscriptScrollRecorder: NSObject {
         completion?.resume()
         completion = nil
     }
+}
+
+/// Test-only sibling composer with directly observable UIKit geometry. No IO.
+private struct ProfilingCapabilityComposer: UIViewRepresentable {
+    func makeUIView(context: Context) -> UILabel {
+        let label = UILabel()
+        label.text = "Offline profiling fixture composer"
+        label.backgroundColor = .secondarySystemBackground
+        label.accessibilityIdentifier = "profiling-capability-composer"
+        return label
+    }
+    func updateUIView(_ view: UILabel, context: Context) {}
 }
