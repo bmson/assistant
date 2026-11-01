@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getFirestoreKnowledgeGraphRelation } from './knowledge-graph-read.js';
 import { FirestoreKnowledgeGraphRelationMutationRepository } from './knowledge-graph-relation-mutations.js';
@@ -6,6 +6,7 @@ import { embeddingSpaceKey } from './memory.js';
 import { createInstallationStore } from './store.js';
 
 const space = { provider: 'vertex', model: 'fixture', dimensions: 1, revision: 'v1' };
+const contentHash = createHash('sha256').update('Owner lives in Home.').digest('hex');
 const emulator = /^(?:127\.0\.0\.1|localhost):\d+$/.test(process.env.FIRESTORE_EMULATOR_HOST ?? '');
 
 describe.skipIf(!emulator)('Firestore owner knowledge relationship review', () => {
@@ -46,7 +47,7 @@ describe.skipIf(!emulator)('Firestore owner knowledge relationship review', () =
       agentId,
       category: 'knowledge',
       content: 'Owner lives in Home.',
-      contentHash: 'review-source-hash',
+      contentHash,
       createdAt: now,
       expiresAt: null,
       quarantined: false,
@@ -58,7 +59,7 @@ describe.skipIf(!emulator)('Firestore owner knowledge relationship review', () =
     batch.set(store.doc('knowledgeGraphSources', memoryId), {
       memoryId,
       status: 'ready',
-      contentHash: 'review-source-hash',
+      contentHash,
       extractionVersion: 1,
     });
     batch.set(store.doc('knowledgeGraphRelations', relationId), {

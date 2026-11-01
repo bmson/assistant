@@ -33,10 +33,13 @@ function fixture(tables: Record<string, Row[]>) {
   const control = {
     repeat: false,
     invalidSize: false,
+    missingContactUpdateTime: false,
     error: null as Error | null,
     fence: 0,
     changed: false,
   };
+  const contactUpdateTime = () =>
+    control.missingContactUpdateTime ? undefined : new Timestamp(1_798_000_000, 123_456_789);
   class FakeQuery {
     constructor(
       readonly table: string,
@@ -70,7 +73,14 @@ function fixture(tables: Record<string, Row[]>) {
             op === 'in' ? (value as unknown[]).includes(row[field]) : row[field] === value,
           ),
         )
-        .map((row) => new Doc(documentKey(String(row.physicalId ?? row.id)), row))
+        .map(
+          (row) =>
+            new Doc(
+              documentKey(String(row.physicalId ?? row.id)),
+              row,
+              this.table === 'contacts' ? contactUpdateTime() : undefined,
+            ),
+        )
         .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
         .filter((doc) => control.repeat || doc.id > this.cursor)
         .slice(0, this.cap);
@@ -99,6 +109,7 @@ function fixture(tables: Record<string, Row[]>) {
         return new Doc(
           documentKey(id),
           tables[table]?.find((row) => row.id === id),
+          table === 'contacts' ? contactUpdateTime() : undefined,
         );
       },
     }),
@@ -109,6 +120,7 @@ function fixture(tables: Record<string, Row[]>) {
           return new Doc(
             documentKey(id),
             tables[table]?.find((row) => row.id === id),
+            table === 'contacts' ? contactUpdateTime() : undefined,
           );
         }),
     },
@@ -148,6 +160,15 @@ const input = {
 } as const;
 
 describe('bounded actual profile repository reads (offline)', () => {
+  it('requires native updateTime metadata for contact identity revisions', async () => {
+    const f = fixture({ contacts: rows(1) });
+    f.control.missingContactUpdateTime = true;
+    await expect(
+      new FirestoreProfilePeopleReadRepository(f.store, 'owner').listContacts(),
+    ).rejects.toThrow('Contact identity revision is unavailable');
+    expect(f.calls).toHaveLength(1);
+  });
+
   it.each([199, 200, 9999, 10000])(
     'returns complete contacts for %i raw documents with bounded EOF proof',
     async (count) => {

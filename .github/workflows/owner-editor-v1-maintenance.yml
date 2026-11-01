@@ -1,0 +1,96 @@
+name: Review or apply basic editor V1 metadata
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Reviewed operation (prepare and dry-run never write database data)
+        type: choice
+        required: true
+        options: [prepare-initialize, prepare-disable, dry-run, apply]
+      release_sha:
+        description: Exact reviewed current main SHA
+        type: string
+        required: true
+      recipient_public_key:
+        description: RSA public encryption key for prepare only (never a private key)
+        type: string
+        required: false
+      reviewed_packet_sha256:
+        description: Canonical digest of privately reviewed packet for dry-run/apply
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  maintenance:
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      OWNER_EDITOR_MAINTENANCE_MODE: ${{ inputs.mode }}
+      OWNER_EDITOR_RELEASE_SHA: ${{ inputs.release_sha }}
+      OWNER_EDITOR_PACKET_RECIPIENT_PUBLIC_KEY: ${{ inputs.recipient_public_key }}
+      OWNER_EDITOR_V1_REVIEWED_PACKET_SHA256: ${{ inputs.reviewed_packet_sha256 }}
+    steps:
+      - name: Checkout trusted operator source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Checkout approved index manifest as data
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: 04c17b04ab9d76d005b04121927c189baa6edaf9
+          path: .approved-index-source
+          sparse-checkout: infra/gcp/firestore
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify main source and fixed context before authentication
+        run: pnpm exec tsx scripts/owner-editor-v1-maintenance.ts --verify-source
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          project_id: ${{ env.GCP_PROJECT }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+        with:
+          version: 576.0.0
+      - name: Refresh read-only recovery and index observation
+        run: pnpm exec tsx scripts/owner-editor-release-inventory.ts --collect
+      - name: Execute bounded metadata operation
+        env:
+          OWNER_EDITOR_V1_REVIEWED_PACKET: ${{ (inputs.mode == 'apply' || inputs.mode == 'dry-run') && secrets.OWNER_EDITOR_V1_REVIEWED_PACKET || '' }}
+        run: pnpm exec tsx scripts/owner-editor-v1-maintenance.ts
+      - name: Retain encrypted proposal only
+        if: success() && startsWith(inputs.mode, 'prepare-')
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: owner-editor-v1-encrypted-proposal-${{ github.run_id }}
+          path: owner-editor-v1-packet.encrypted.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain sanitized prerequisite observation
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: owner-editor-v1-prerequisites-${{ github.run_id }}
+          path: owner-editor-release-inventory.json
+          if-no-files-found: ignore
+          retention-days: 14

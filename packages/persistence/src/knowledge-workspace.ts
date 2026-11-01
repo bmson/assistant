@@ -2,6 +2,7 @@ import type {
   DerivedKnowledgeView,
   KnowledgeAssertionEndpointView,
 } from './knowledge-assertions.js';
+import type { OwnerEditorTiming } from './owner-editor.js';
 
 /** Display projection of one knowledge graph entity. */
 export interface KnowledgeWorkspaceEntity {
@@ -41,6 +42,8 @@ export interface KnowledgeMapEdgeRecord {
   evidenceQuote: string | null;
   validFrom: string | null;
   validUntil: string | null;
+  /** Stored positive/asserted family timing when supported; omitted on legacy rows. */
+  assertionTiming?: OwnerEditorTiming | null;
   /** Absent for pre-assertion/legacy edges; the UI keeps its generic wording. */
   assertionContext?: KnowledgeMapAssertionContext | null;
 }
@@ -110,8 +113,11 @@ export interface KnowledgeWorkspaceFocus {
     subject: KnowledgeWorkspaceEntity;
     predicate: string;
     object: KnowledgeWorkspaceEntity;
+    validFrom?: string | null;
+    validUntil?: string | null;
     reviewStatus: 'unreviewed' | 'confirmed' | 'rejected';
     inRecall: boolean;
+    assertionTiming?: OwnerEditorTiming | null;
     endpointViews?: KnowledgeAssertionEndpointView[];
     source: { memoryId: string; content: string };
   }>;

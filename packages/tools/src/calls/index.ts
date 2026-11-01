@@ -25,6 +25,10 @@ export interface StartCallInput {
 export interface CallToolDeps {
   allowedCountryCodes: string;
   maxMinutes: number;
+  /** Enables the separate versioned owner-number and owner-action standing grants. */
+  ownerNumberGrantEnabled?: boolean;
+  /** Read-only quote from the same route/rate inputs used by the dial path. */
+  quoteOwnerCallCostUsdMicros?(input: { brief: CallBrief }): Promise<number | null>;
   /** Refuses (throws) when a cap, the budget, or configuration stops the call; otherwise dials. */
   startCall(input: StartCallInput): Promise<{ callSid: string }>;
 }
@@ -38,7 +42,7 @@ export function registerCallTools(registry: ToolRegistry, deps: CallToolDeps): T
   const tool: AssistantTool<typeof InputSchema, CallPendingResult> = {
     name: 'phone.call',
     description:
-      "Place a phone call from the assistant's own number and hold the conversation live, on the owner's behalf, to achieve one goal (book a table, ask opening hours, chase an order). Every call needs the owner's approval of the brief unless a saved rule permits the same brief within its time limit. The other party always hears that you are an AI assistant. Put in `context` only the facts you may share, in `mayAgreeTo` exactly what you may accept, and in `mustNot` the hard limits. During the call you can check with the owner. The result (outcome, summary, facts noted, transcript) arrives in the next turn — call ONCE and wait.",
+      "Place a phone call from the assistant's own number and hold the conversation live, on the owner's behalf, to achieve one goal (book a table, ask opening hours, chase an order). Every call needs the owner's approval of the brief unless a saved rule permits it. Exact-brief rules cover only that brief. A separate enabled owner-action permission may cover a direct owner call request to its exact number within duration, rate, cost, and expiry limits. The request must come from an authenticated current owner chat. The other party always hears that you are an AI assistant. Put in `context` only the facts you may share, in `mayAgreeTo` exactly what you may accept, and in `mustNot` the hard limits. During the call you can check with the owner. The result (outcome, summary, facts noted, transcript) arrives in the next turn — call ONCE and wait.",
     inputSchema: InputSchema,
     risk: 'approval',
     acceptsUntrustedInput: false,
@@ -66,6 +70,12 @@ export function registerCallTools(registry: ToolRegistry, deps: CallToolDeps): T
     },
     idempotencyKey: (args, ctx) =>
       `phone-call-${ctx.taskId}-${args.brief.to}-${args.brief.goal.slice(0, 60)}`,
+    ...(deps.quoteOwnerCallCostUsdMicros
+      ? {
+          quoteOwnerCallCostUsdMicros: (args: z.infer<typeof InputSchema>) =>
+            deps.quoteOwnerCallCostUsdMicros!({ brief: args.brief }),
+        }
+      : {}),
     execute: async (args, ctx) => {
       if (
         !ctx.execution?.dbToolCallId ||
@@ -120,7 +130,11 @@ export function registerCallTools(registry: ToolRegistry, deps: CallToolDeps): T
   registry.register(tool as unknown as AssistantTool, {
     outwardFacing: true,
     blanketAllowIneligible: true,
-    scopedAllowTemplates: ['phone.call.same_brief'],
+    scopedAllowTemplates: [
+      'phone.call.same_brief',
+      ...(deps.ownerNumberGrantEnabled ? ['phone.call.to_owner_number.v1'] : []),
+      ...(deps.ownerNumberGrantEnabled ? ['phone.call.owner_action.v2'] : []),
+    ],
     autonomyFloor: true,
     // The other party's words come back in the transcript.
     returnsUntrustedContent: true,

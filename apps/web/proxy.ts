@@ -80,7 +80,10 @@ export function proxy(request: NextRequest) {
   // Reach only the existing owner-checked Costs page and cap Server Action.
   const costsPage = path === '/costs' && ['GET', 'POST'].includes(request.method);
   const memoryBrowsePage =
-    ['/profile', '/people', '/profile/knowledge'].includes(path) ||
+    ['/profile', '/profile/memories', '/people', '/profile/knowledge'].includes(path) ||
+    /^\/profile\/knowledge\/notes\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      path,
+    ) ||
     /^\/people\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
       path,
     );
@@ -89,6 +92,19 @@ export function proxy(request: NextRequest) {
   // authenticates its owner before any configured-owner read.
   if (memoryBrowsePage && !memoryBrowseRead)
     return Response.json({ error: 'Memory browsing is read-only.' }, { status: 405 });
+  // These exact adapters enforce owner, origin, session, signed issuance and
+  // transactional receipt authority themselves. No prefix/action dispatch.
+  if (
+    path === '/api/people/editor' ||
+    path === '/api/profile/knowledge/family' ||
+    path === '/api/profile/knowledge/memory'
+  )
+    return ['GET', 'POST'].includes(request.method)
+      ? NextResponse.next()
+      : Response.json(
+          { error: 'Method not allowed.' },
+          { status: 405, headers: { Allow: 'GET, POST' } },
+        );
   const auditApi = /^\/api\/audit\/[0-9a-f-]{36}$/i.test(path);
   if (auditApi)
     return ['GET', 'HEAD'].includes(request.method)

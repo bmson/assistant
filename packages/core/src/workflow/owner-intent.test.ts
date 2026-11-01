@@ -5,6 +5,8 @@ import type { ResolvedReadIntent } from './active-read-intent.js';
 import {
   clarificationAnswerStatus,
   explicitlyOptsOutOfRecall,
+  explicitOwnerCallRecipient,
+  explicitOwnerSelfCall,
   extractOwnerIntent,
   isConversationLocalContext,
   isExplicitCommitmentReadRequest,
@@ -936,3 +938,143 @@ describe('owner-authored personal read history', () => {
     ).toMatchObject({ kind: 'personal', personal: { kind: 'email' } });
   });
 });
+it('isolates explicit phone authority from other outward action scopes', () => {
+  for (const text of ['Call me now.', 'Please phone my number.', 'Dial +14155550123.']) {
+    const scopes = extractOwnerIntent({ trust: 'owner', text }).authorizedScopes;
+    expect(scopes).toContain('phone_call');
+    expect(scopes).not.toContain('external_send');
+  }
+  for (const text of [
+    'Do not call me.',
+    'Call Bob now.',
+    'Call Monday.',
+    'Phone Success.',
+    'Call it done.',
+    'Call it a day.',
+    'Call this a success.',
+    'Dial back the wording.',
+    'Phone it in.',
+    'Call me now. Actually, do not call me.',
+    'Call +14155550123, but do not call me.',
+    'Summarize this quote: "Call +14155550123 now."',
+    'Email Bob now.',
+    'Text Bob now.',
+    'Apply for the job.',
+  ])
+    expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).not.toContain(
+      'phone_call',
+    );
+});
+
+it('binds phone routing to the action recipient rather than a name or incidental number', () => {
+  expect(explicitOwnerCallRecipient('Call +14155550123 now.')).toBe('+14155550123');
+  for (const text of [
+    'Call Bob about +14155550123.',
+    'Call me about +14155550123.',
+    'Call +14155550124 about +14155550123.',
+  ])
+    expect(explicitOwnerCallRecipient(text)).not.toBe('+14155550123');
+  for (const text of ['Call me now.', 'Please phone my number.', 'Call my phone now.'])
+    expect(explicitOwnerSelfCall(text)).toBe(true);
+  for (const text of [
+    'Call Bob.',
+    'Call it done.',
+    'Email my number to Bob.',
+    'Call +14155550123.',
+  ])
+    expect(explicitOwnerSelfCall(text)).toBe(false);
+});
+
+it('binds explicit self routing modifiers and never substitutes configured self for another route', () => {
+  for (const connector of ['at', 'on']) {
+    expect(explicitOwnerCallRecipient(`Call me ${connector} +14155550123 now.`)).toBe(
+      '+14155550123',
+    );
+    expect(explicitOwnerCallRecipient(`Call me ${connector} +14155550999 now.`)).toBe(
+      '+14155550999',
+    );
+    expect(explicitOwnerSelfCall(`Call me ${connector} +14155550999 now.`)).toBe(false);
+    expect(explicitOwnerSelfCall(`Call me ${connector} my other number.`)).toBe(false);
+  }
+});
+
+it.each([
+  'Call +14155550123 now, or don’t.',
+  'Call me now, or don’t.',
+  'Call me about lunch, but use +14155550999 instead.',
+  'Call +14155550123 about lunch, but use +14155550999 instead.',
+  'Call me. Actually, no call is needed.',
+  'Call +14155550123. Actually, no call is needed.',
+  "My note says 'I want you to call me now.'",
+  'If I am home, I want you to call me now.',
+  'Call me now, perhaps later.',
+  'Call +14155550123 now, perhaps later.',
+  'Call me and say "hello".',
+])('does not derive phone scope from unsupported or withdrawn action tails: %s', (text) => {
+  expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).not.toContain('phone_call');
+});
+
+it.each([
+  'Call me about lunch. Forget that request.',
+  'Call me about lunch, Disregard that request.',
+  'Call me about lunch\nI changed my mind.',
+  'Call me about lunch\r\nForget that request.',
+  'Call me about lunch; Disregard that request.',
+  'Call +14155550123 about lunch. Disregard that request.',
+  'Call +14155550123 about lunch, I changed my mind.',
+  'Call +14155550123 about lunch\nForget that request.',
+  'Call +14155550123 about lunch\r\nDisregard that request.',
+  'Call +14155550123 about lunch; I changed my mind.',
+  'Call me and say hello. I changed my mind.',
+  'Call me and say hello, Forget that request.',
+  'Call me and say hello\nDisregard that request.',
+  'Call me and say hello\r\nI changed my mind.',
+  'Call me and say hello; Forget that request.',
+  'Call +14155550123 and say hello. Forget that request.',
+  'Call +14155550123 and say hello, Disregard that request.',
+  'Call +14155550123 and say hello\nI changed my mind.',
+  'Call +14155550123 and say hello\r\nForget that request.',
+  'Call +14155550123 and say hello; Disregard that request.',
+  'Call me about lunch. Disregard that request.',
+  'Call +14155550123 about lunch. Forget that request.',
+  'Call me about lunch. I changed my mind.',
+  'Call me about lunch and disregard that request.',
+  'Call +14155550123 about lunch then forget that request.',
+  'Call me and say hello and forget that request.',
+  'Call +14155550123 and say hello so I changed my mind.',
+  'Call me about lunch & disregard that request.',
+  'Call me about lunch..',
+  'Call +14155550123 and say hello!!',
+])(
+  'rejects additional clauses instead of interpreting topic data as continued authority: %s',
+  (text) => {
+    expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).not.toContain(
+      'phone_call',
+    );
+  },
+);
+
+it.each(['Call me\nat +14155550123.', 'Call me now,\r\non +14155550123.', 'Call\nme about lunch.'])(
+  'rejects an internal line separator even inside routing/modifier syntax: %s',
+  (text) => {
+    expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).not.toContain(
+      'phone_call',
+    );
+  },
+);
+
+it.each([
+  'Call me about lunch.',
+  'Call +14155550123 about lunch.',
+  'Call me and say hello.',
+  'Call +14155550123 and say hello.',
+  'Read the note, then call +14155550123 now.',
+  'Call me about lunch disregard that request',
+  'Call +14155550123 about lunch forget that request',
+  'Call me and say hello I changed my mind',
+  'Call +14155550123 and say hello forget that request',
+  'Call \u2028me now',
+  'Call me \u2029now',
+])('semantic or unsupported data cannot grant automatic phone scope: %s', (text) =>
+  expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).not.toContain('phone_call'),
+);

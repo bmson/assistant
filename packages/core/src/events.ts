@@ -13,6 +13,7 @@ export const OwnerIntentScopeSchema = z.enum([
   'external_read',
   'private_read',
   'external_send',
+  'phone_call',
   'workspace_write',
   'personal_write',
   'watch_create',
@@ -27,7 +28,7 @@ export const ClarificationContinuationSchema = z.object({
   sourceTaskId: z.string().min(1).max(128),
   ownerAuthoredText: z.string().max(8_000),
   question: z.string().min(1).max(2_000),
-  authorizedScopes: z.array(OwnerIntentScopeSchema).max(9),
+  authorizedScopes: z.array(OwnerIntentScopeSchema).max(10),
   tainted: z.boolean(),
   answerStatus: z.enum(['answer', 'refusal', 'deferred', 'uncertain', 'unrelated']),
 });
@@ -37,7 +38,7 @@ export const ClarificationPromptSchema = z.object({
   version: z.literal(1),
   question: z.string().min(1).max(2_000),
   ownerAuthoredText: z.string().max(8_000),
-  authorizedScopes: z.array(OwnerIntentScopeSchema).max(9),
+  authorizedScopes: z.array(OwnerIntentScopeSchema).max(10),
   tainted: z.boolean(),
 });
 export type ClarificationPrompt = z.infer<typeof ClarificationPromptSchema>;

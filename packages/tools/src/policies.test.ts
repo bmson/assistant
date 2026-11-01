@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { policyTemplates } from './policies.js';
 import type { ToolContext } from './types.js';
+
+afterEach(() => vi.unstubAllEnvs());
 
 const ctx = { trust: 'owner' } as ToolContext;
 
@@ -45,6 +47,109 @@ describe('policy templates', () => {
 });
 
 describe('owner-approved scoped actions', () => {
+  it('phone.call.owner_action.v2: binds a live grant to the direct owner action and bounded brief', () => {
+    const t = policyTemplates['phone.call.owner_action.v2'] as NonNullable<
+      (typeof policyTemplates)[string]
+    >;
+    const now = new Date('2026-10-23T12:00:00.000Z');
+    const match = {
+      schemaVersion: 2,
+      grantId: '11111111-1111-4111-8111-111111111111',
+      action: 'phone.call',
+      recipientE164: '+14155550123',
+      maxMinutes: 12,
+      maxCallsPerHour: 2,
+      maxCallsPerDay: 4,
+      maxCostUsdMicrosPerCall: 2_000_000,
+      maxCostUsdMicrosPerDay: 4_000_000,
+      expiresAt: '2026-10-30T12:00:00.000Z',
+    };
+    vi.stubEnv('PHONE_CALL_TO_OWNER_GRANT_ENABLED', 'true');
+    const ownerCtx = {
+      ...ctx,
+      agentId: 'owner',
+      taskId: 'task',
+      now: () => now,
+      ownerCallRecipient: '+14155550123',
+      ownerCallRequest: { agentId: 'owner', taskId: 'task' },
+      ownerCallActionIntent: {
+        action: 'phone.call' as const,
+        recipientRequest: { kind: 'explicit_number' as const, recipientE164: '+14155550123' },
+      },
+      ownerIntent: { sourceActor: 'owner', authorizedScopes: [] },
+    } as unknown as ToolContext;
+    const brief = { brief: { to: '+14155550123', maxMinutes: 8 } };
+
+    expect(t(match, brief, ownerCtx)).toBe(true);
+    expect(t(match, { brief: { ...brief.brief, to: '+14155550999' } }, ownerCtx)).toBe(false);
+    expect(t(match, { brief: { ...brief.brief, maxMinutes: 13 } }, ownerCtx)).toBe(false);
+    expect(t(match, brief, { ...ownerCtx, ownerCallActionIntent: undefined })).toBe(false);
+    expect(t({ ...match, expiresAt: '2026-10-23T12:00:00.000Z' }, brief, ownerCtx)).toBe(false);
+  });
+
+  it('phone.call.to_owner_number.v1: requires exact owner number, bounded duration, owner trust, and a live grant', () => {
+    const t = policyTemplates['phone.call.to_owner_number.v1'] as NonNullable<
+      (typeof policyTemplates)[string]
+    >;
+    const now = new Date('2026-10-23T12:00:00.000Z');
+    const match = {
+      schemaVersion: 1,
+      grantId: '11111111-1111-4111-8111-111111111111',
+      recipientE164: '+14155550123',
+      maxMinutes: 10,
+      expiresAt: '2026-10-30T12:00:00.000Z',
+    };
+    vi.stubEnv('PHONE_CALL_TO_OWNER_GRANT_ENABLED', 'true');
+    const ownerCtx = {
+      ...ctx,
+      ownerCallRecipient: '+14155550123',
+      agentId: 'owner',
+      taskId: 'task',
+      now: () => now,
+      ownerCallRequest: {
+        agentId: 'owner',
+        taskId: 'task',
+        conversationId: 'chat',
+        ownerMessageId: 'message',
+        requestHash: 'a'.repeat(64),
+        clientOperationId: '11111111-1111-4111-8111-111111111111',
+        taskTriggerFingerprint: 'b'.repeat(64),
+        recipientRequest: { kind: 'explicit_number' as const, recipientE164: '+14155550123' },
+        ownerMessageFingerprint: 'c'.repeat(64),
+      },
+      ownerIntent: {
+        sourceActor: 'owner' as const,
+        requestKind: 'new_request' as const,
+        ownerAuthoredText: 'Call me',
+        externalText: '',
+        authorizedScopes: ['phone_call' as const],
+        separation: 'clear' as const,
+      },
+    };
+    const brief = { to: '+14155550123', maxMinutes: 8 };
+    expect(t(match, { brief }, ownerCtx)).toBe(true);
+    expect(t(match, { brief }, { ...ownerCtx, ownerCallRequest: undefined })).toBe(false);
+    expect(
+      t(
+        match,
+        { brief },
+        { ...ownerCtx, ownerIntent: { ...ownerCtx.ownerIntent, sourceActor: 'mixed' } },
+      ),
+    ).toBe(false);
+    expect(
+      t(
+        match,
+        { brief },
+        { ...ownerCtx, ownerIntent: { ...ownerCtx.ownerIntent, authorizedScopes: [] } },
+      ),
+    ).toBe(false);
+    expect(t(match, { brief: { ...brief, to: '+14155550999' } }, ownerCtx)).toBe(false);
+    expect(t(match, { brief: { ...brief, maxMinutes: 11 } }, ownerCtx)).toBe(false);
+    expect(t({ ...match, extra: true }, { brief }, ownerCtx)).toBe(false);
+    expect(t(match, { brief }, { ...ownerCtx, trust: 'assistant' })).toBe(false);
+    expect(t({ ...match, expiresAt: '2026-10-23T12:00:00.000Z' }, { brief }, ownerCtx)).toBe(false);
+  });
+
   it('texts match only the approved phone and owner trust', () => {
     const t = policyTemplates['sms.send.to_recipient'] as NonNullable<
       (typeof policyTemplates)[string]
