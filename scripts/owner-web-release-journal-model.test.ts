@@ -2,9 +2,12 @@
 import { describe, expect, it } from 'vitest';
 import * as J from './owner-web-release-journal-model.js';
 import {
+  beginLifecycleAttempt,
+  bindLifecycleOperation,
   type Context,
   captureLifecycle,
   planLifecycleAction,
+  settleLifecycleAttempt,
   verifyLifecycleState,
 } from './owner-web-release-lifecycle-model.js';
 import { projectNativeWebSnapshot } from './owner-web-release-native-proof.js';
@@ -101,7 +104,12 @@ function bump(raw: Raw, annotations?: Record<string, string>): Raw {
   a.observedGeneration = a.generation;
   return a;
 }
-function event(raw: Raw, head: J.Head): J.HistoryEvent {
+function event(
+  raw: Raw,
+  head: J.Head,
+  resolution: J.SimulatedResolution | null = null,
+  barrier: J.BarrierProjection | null = null,
+): J.HistoryEvent {
   const postDigest = digest(raw),
     base = {
       head: copy(head),
@@ -111,11 +119,18 @@ function event(raw: Raw, head: J.Head): J.HistoryEvent {
     };
   return {
     ...base,
+    postRaw: copy(raw),
+    resolution: copy(resolution),
+    barrier: copy(barrier),
     archive: {
       id: head.sequence + 101,
       name: `web-journal-${head.genesis.slice(0, 12)}-${head.owner.source}-${head.owner.runId}-1-${head.sequence}`,
       digest: 'c'.repeat(64),
-      memberDigest: digest(base),
+      memberDigest: digest({
+        ...base,
+        resolutionDigest: resolution ? digest(resolution) : null,
+        barrier,
+      }),
       expired: false,
       expiresAt: '2026-12-01T00:00:00.000Z',
       source: head.owner.source,
@@ -136,13 +151,25 @@ function fixture(known = false) {
 function commitMeta(s: J.JournalSimulation, p: J.MetadataPlan) {
   const started = J.bindJournalPrepareOperation(J.beginJournalPrepare(s, p), op),
     raw = bump(s.raw, p.request.body.annotations);
-  return J.confirmJournalPrepare(started, raw, event(raw, p.next), now, completed);
+  return J.confirmJournalPrepare(
+    started,
+    raw,
+    event(raw, p.next, p.resolution, p.barrier),
+    now,
+    completed,
+  );
 }
 function commitSpecial(s: J.JournalSimulation) {
   const started = J.bindJournalPrepareOperation(s, op),
     p = started.pending!.plan,
     raw = bump(started.raw, p.request.body.annotations);
-  return J.confirmJournalPrepare(started, raw, event(raw, p.next), now, completed);
+  return J.confirmJournalPrepare(
+    started,
+    raw,
+    event(raw, p.next, p.resolution, p.barrier),
+    now,
+    completed,
+  );
 }
 const trafficRequest = (raw: Raw): J.LogicalAction => ({
   method: 'PATCH',
@@ -758,5 +785,199 @@ describe('durable head nested allowlist', () => {
     const f = rawFixture(),
       bad = { ...owner, privateValue };
     expect(() => J.simulateGenesis(f.raw, bad, 'b'.repeat(64))).toThrow();
+  });
+});
+
+describe('terminal action replay and pending read recovery', () => {
+  it('rejects a second confirmation and a generic confirmed-to-unknown downgrade', () => {
+    const f = confirmed();
+    expect(() =>
+      J.confirmJournalAction(f.state, bump(f.state.raw), f.request, completed),
+    ).toThrow();
+    expect(() => J.unknownJournalAction(f.state)).toThrow();
+  });
+  it('permits originally bound unknown-to-confirmed once, then rejects replay', () => {
+    const f = prepared(),
+      pending = J.bindJournalOperation(J.beginJournalAction(f.state, f.state.raw, f.request), op),
+      unknown = J.unknownJournalAction(pending),
+      done = J.confirmJournalAction(unknown, bump(unknown.raw), f.request, completed);
+    expect(done.action?.outcome).toBe('confirmed');
+    expect(() => J.confirmJournalAction(done, bump(done.raw), f.request, completed)).toThrow();
+  });
+});
+describe('history requires matching prepared intent resolution', () => {
+  function forged(mode: 'skipped' | 'altered' | 'operation' | 'native' | 'idleComplete') {
+    const f = mode === 'idleComplete' ? fixture() : mode === 'skipped' ? prepared() : terminal(),
+      base =
+        mode === 'altered' || mode === 'operation' || mode === 'native'
+          ? f.state.history.slice(0, -1)
+          : f.state.history,
+      prior = base.at(-1)!,
+      next: J.Head = {
+        ...copy(prior.head),
+        sequence: prior.head.sequence + 1,
+        parent: digest(prior.head),
+        previousArchive: { id: prior.archive.id, digest: prior.archive.digest },
+        status: 'complete',
+      };
+    const resolution: J.SimulatedResolution | null =
+      mode === 'skipped' || mode === 'idleComplete'
+        ? null
+        : copy(f.state.history.at(-1)!.resolution);
+    if (mode === 'altered')
+      next.intent = { kind: 'attachP', logicalDigest: prior.head.intent!.logicalDigest };
+    if (mode === 'operation') resolution!.boundOperation = `${op}other`;
+    if (mode === 'native') resolution!.after.traffic = [];
+    const after = bump(resolution?.after ?? prior.postRaw, {
+        ...(prior.postRaw.annotations as Record<string, string>),
+        [J.JOURNAL_KEY]: JSON.stringify(next),
+      }),
+      events = [...base, event(after, next, resolution)];
+    const fake = {
+      ...copy(f.state),
+      head: next,
+      raw: after,
+      history: events,
+      action: null,
+      pending: null,
+      drain: null,
+    };
+    const { seal: _old, ...body } = fake;
+    return { state: { ...body, seal: digest(body) }, raw: after, events, anchor: f.state.anchor };
+  }
+  it.each(['skipped', 'altered', 'operation', 'native', 'idleComplete'] as const)(
+    'refuses correctly chained but illegal %s history and subsequent owner claim',
+    (kind) => {
+      const f = forged(kind),
+        n = {
+          ...owner,
+          source: 'd'.repeat(40),
+          runId: '700002',
+          jobId: '9002',
+          checkRunId: '8002',
+        },
+        m = oldMetadata();
+      expect(() => J.validateSimulatedHistory(f.raw, f.anchor, f.events, now)).toThrow();
+      expect(() => J.planJournalClaim(f.state, n, m.run, m.job)).toThrow();
+    },
+  );
+  it('requires the matching confirmed resolution even when completion is constructed by the current controller', () => {
+    const f = confirmed(),
+      p = J.planJournalCompletion(f.state),
+      s = J.bindJournalPrepareOperation(J.beginJournalPrepare(f.state, p), op),
+      raw = bump(s.raw, p.request.body.annotations);
+    expect(() =>
+      J.confirmJournalPrepare(s, raw, event(raw, p.next, null), now, completed),
+    ).toThrow();
+  });
+});
+
+describe('sequential native lifecycle with prepare AND completion rebases', () => {
+  it('runs createP → native confirm → journal complete → prepare attachP without manual lifecycle reset/reseal', () => {
+    const f = fixture(),
+      c: Context = {
+        source: owner.source,
+        runId: owner.runId,
+        attempt: '1',
+        manifest: 'b'.repeat(64),
+        image: `us-west1-docker.pkg.dev/bmson-assistant/assistant/web@sha256:${'c'.repeat(64)}`,
+        canonical: f.current.revision,
+        retiredTags: [],
+        releaseEnv: {},
+      };
+    c.releaseEnv = {
+      ASSISTANT_RELEASE_API_CONTRACT: '1',
+      ASSISTANT_RELEASE_AGENT_API_MIN: '1',
+      ASSISTANT_RELEASE_AGENT_API_MAX: '1',
+      ASSISTANT_RELEASE_SCHEMA_DRIVER: 'firestore',
+      ASSISTANT_RELEASE_SCHEMA_MIN: '133',
+      ASSISTANT_RELEASE_SCHEMA_MAX: '133',
+      ASSISTANT_RELEASE_SCHEMA_VERSION: '133',
+      ASSISTANT_RELEASE_MANIFEST: c.manifest,
+      ASSISTANT_RELEASE_WORKFLOW_RUN_ID: c.runId,
+      ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT: c.attempt,
+      ASSISTANT_RELEASE_SOURCE_SHA: c.source,
+    };
+    const initial = captureLifecycle(c, projectNativeWebSnapshot(f.state.raw, f.native, c)),
+      plan = planLifecycleAction(initial, 'createP'),
+      { etag: _etag, ...body } = plan.request.body,
+      request: J.LogicalAction = { method: 'PATCH', updateMask: 'template', body },
+      jp = commitMeta(f.state, J.prepareJournalSimulation(f.state, 'createP', digest(request))),
+      prepared = J.rebaseLifecycleJournalSimulation(jp, initial, f.native);
+    const lifecyclePending = bindLifecycleOperation(
+        beginLifecycleAttempt(prepared.state, prepared.plan),
+        op,
+      ),
+      journalPending = J.bindJournalOperation(J.beginJournalAction(jp, jp.raw, request), op),
+      after = bump(jp.raw),
+      template = copy(request.body.template as Raw),
+      { revision, ...fields } = template;
+    after.template = template;
+    after.latestReadyRevision = after.latestCreatedRevision = revision;
+    const native = {
+        ...f.native,
+        [revision]: {
+          ...fields,
+          name: `${WEB_SERVICE}/revisions/${revision}`,
+          uid: 'native-new-paused',
+          service: WEB_SERVICE,
+          conditions: [{ type: 'Ready', state: 'CONDITION_SUCCEEDED' }],
+        },
+      },
+      nativeProjection = projectNativeWebSnapshot(after, native, c),
+      lifeConfirmed = settleLifecycleAttempt(lifecyclePending, completed, nativeProjection),
+      jConfirmed = J.confirmJournalAction(journalPending, after, request, completed),
+      jComplete = commitMeta(jConfirmed, J.planJournalCompletion(jConfirmed)),
+      completion = J.rebaseLifecycleJournalCompletionSimulation(jComplete, lifeConfirmed, native);
+    expect(completion.state.phase).toBe('createdP');
+    expect(completion.state.previousReceipt).toBe(lifeConfirmed.receipt);
+    expect(completion.state.ordinal).toBe(lifeConfirmed.ordinal + 1);
+    expect(completion.state.snapshot.stableConfigSha256).not.toBe(
+      lifeConfirmed.snapshot.stableConfigSha256,
+    );
+    expect(() => verifyLifecycleState(completion.state)).not.toThrow();
+    const attach = planLifecycleAction(completion.state, 'attachP'),
+      { etag: _secondEtag, ...attachBody } = attach.request.body,
+      attachRequest: J.LogicalAction = { method: 'PATCH', updateMask: 'traffic', body: attachBody },
+      nextJ = commitMeta(
+        jComplete,
+        J.prepareJournalSimulation(jComplete, 'attachP', digest(attachRequest)),
+      ),
+      next = J.rebaseLifecycleJournalSimulation(nextJ, completion.state, native);
+    expect(next.plan.mode).toBe('attachP');
+    expect(next.plan.request.body.etag).toBe(nextJ.raw.etag);
+    expect(next.state.previousReceipt).toBe(completion.state.receipt);
+    expect(next.state.phase).toBe('createdP');
+    expect(jComplete.history.at(-1)?.resolution?.boundOperation).toBe(op);
+    expect(next.mutationAuthorized).toBe(false);
+  });
+});
+
+describe('redacted public history member', () => {
+  it('publishes only hashes and allowlisted metadata, never the native before/after or private template', () => {
+    const f = terminal(),
+      e = f.state.history.at(-1)!,
+      summary = J.journalEventPublicSummary(e);
+    expect(digest(summary)).toBe(e.archive.memberDigest);
+    expect(JSON.stringify(summary)).not.toContain(privateValue);
+    expect(Object.keys(summary).sort()).toEqual([
+      'barrier',
+      'head',
+      'postDigest',
+      'postEtag',
+      'postGeneration',
+      'resolutionDigest',
+    ]);
+    expect(summary.resolutionDigest).toBe(digest(e.resolution));
+  });
+});
+
+describe('stored owner consistency', () => {
+  it('refuses a rehashed local frame whose owner was replaced without a claim transition', () => {
+    const s = copy(fixture().state);
+    s.origin = { ...owner, runId: '700002', jobId: '9002', checkRunId: '8002' };
+    const { seal: _old, ...body } = s;
+    const forged = { ...body, seal: digest(body) };
+    expect(() => J.prepareJournalSimulation(forged, 'promoteP', digest({}))).toThrow();
   });
 });

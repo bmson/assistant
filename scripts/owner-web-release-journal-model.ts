@@ -47,7 +47,26 @@ export type Head = {
   retiredTags: string[];
 };
 export type Anchor = { genesis: string; serviceUid: string; genesisDigest: string };
+export type SimulatedResolution = {
+  request: LogicalAction;
+  before: Obj;
+  after: Obj;
+  boundOperation: string;
+  completion: { name: string; done: boolean; error?: unknown; responseService: string };
+  knownEvidence: { packet: KnownHandoffPacket; native: unknown } | null;
+};
+export type BarrierProjection = {
+  etag: string;
+  generation: string;
+  startedAt: number;
+  completedAt: number;
+  verifiedAt: number;
+  consumedAt: number;
+};
 export type HistoryEvent = {
+  postRaw: Obj;
+  resolution: SimulatedResolution | null;
+  barrier: BarrierProjection | null;
   head: Head;
   postEtag: string;
   postGeneration: string;
@@ -73,6 +92,7 @@ export type JournalSimulation = {
   anchor: Anchor;
   raw: Obj;
   history: HistoryEvent[];
+  historyObservedAt: number;
   head: Head;
   pending: null | {
     plan: MetadataPlan;
@@ -84,6 +104,7 @@ export type JournalSimulation = {
     intentDigest: string;
     outcome: 'prepared' | 'attempted' | 'unknown' | 'confirmed';
     operation: string | null;
+    resolution: SimulatedResolution | null;
   };
   drain: null | {
     etag: string;
@@ -99,6 +120,8 @@ export type MetadataPlan = {
   mutationAuthorized: false;
   origin: Origin;
   purpose: 'prepare' | 'complete' | 'claim' | 'consumeBarrier';
+  resolution: SimulatedResolution | null;
+  barrier: BarrierProjection | null;
   beforeDigest: string;
   beforeHeadDigest: string;
   next: Head;
@@ -315,6 +338,10 @@ function verify(s: JournalSimulation) {
   origin(s.origin);
   validateHead(s.head);
   check(equal(head(s.raw), s.head));
+  check(
+    equal(s.head.owner, s.origin) ||
+      (s.pending?.plan.purpose === 'claim' && equal(s.pending.plan.next.owner, s.origin)),
+  );
 }
 export function validateSimulatedHistory(
   raw: Obj,
@@ -353,13 +380,7 @@ export function validateSimulatedHistory(
     ids.add(a.id);
     hash(a.digest);
     check(
-      a.memberDigest ===
-        digest({
-          head: e.head,
-          postEtag: e.postEtag,
-          postGeneration: e.postGeneration,
-          postDigest: e.postDigest,
-        }) &&
+      a.memberDigest === digest(journalEventPublicSummary(e)) &&
         a.name ===
           `web-journal-${e.head.genesis.slice(0, 12)}-${e.head.owner.source}-${e.head.owner.runId}-1-${i}` &&
         a.source === e.head.owner.source &&
@@ -371,12 +392,20 @@ export function validateSimulatedHistory(
     text(e.postEtag, /^[ -~]{1,512}$/);
     generation(e.postGeneration);
     hash(e.postDigest);
+    settled(e.postRaw, anchor.serviceUid);
+    check(
+      digest(e.postRaw) === e.postDigest &&
+        e.postRaw.etag === e.postEtag &&
+        e.postRaw.generation === e.postGeneration &&
+        equal(head(e.postRaw), e.head),
+    );
     if (previous) {
       const priorArchive = events[i - 1]?.archive;
       check(
         priorArchive &&
           equal(e.head.previousArchive, { id: priorArchive.id, digest: priorArchive.digest }),
       );
+      validateHistoryTransition(events[i - 1] as HistoryEvent, e);
       check(previous.retiredTags.every((t) => e.head.retiredTags.includes(t)));
       if (equal(previous.owner, e.head.owner))
         check(!previous.admissionPossible || e.head.admissionPossible);
@@ -387,12 +416,14 @@ export function validateSimulatedHistory(
             e.head.status === 'idle' &&
             !e.head.admissionPossible,
         );
-    } else
+    } else {
+      check(e.resolution === null && e.barrier === null);
       check(
         digest(e.head) === anchor.genesisDigest &&
           e.head.sequence === 0 &&
           e.head.previousArchive === null,
       );
+    }
     previous = e.head;
   });
   check(equal(previous, h));
@@ -422,6 +453,7 @@ export function enrollJournalSimulation(
     anchor: copy(anchor),
     raw: copy(raw),
     history: copy(events),
+    historyObservedAt: now,
     head: h,
     pending: null,
     preparedBefore: null,
@@ -505,6 +537,8 @@ export function prepareJournalSimulation(
     mutationAuthorized: false,
     origin: copy(s.origin),
     purpose: 'prepare',
+    resolution: null,
+    barrier: null,
     beforeDigest: digest(s.raw),
     beforeHeadDigest: digest(s.head),
     next,
@@ -586,6 +620,8 @@ export function confirmJournalPrepare(
   );
   check(
     equal(event.head, p.next) &&
+      equal(event.resolution, p.resolution) &&
+      equal(event.barrier, p.barrier) &&
       event.postEtag === after.etag &&
       event.postGeneration === after.generation,
   );
@@ -596,13 +632,19 @@ export function confirmJournalPrepare(
     raw: copy(after),
     head: copy(p.next),
     history,
+    historyObservedAt: now,
     pending: null,
     preparedBefore: copy(s.raw),
     origin: copy(p.origin),
     drain: p.purpose === 'consumeBarrier' ? null : s.drain,
     action:
       p.next.status === 'prepared'
-        ? { intentDigest: hash(p.next.intent?.logicalDigest), outcome: 'prepared', operation: null }
+        ? {
+            intentDigest: hash(p.next.intent?.logicalDigest),
+            outcome: 'prepared',
+            operation: null,
+            resolution: null,
+          }
         : null,
   });
 }
@@ -629,7 +671,7 @@ function beginAction(
 }
 export function unknownJournalAction(s: JournalSimulation): JournalSimulation {
   verify(s);
-  check(s.action && s.action.outcome !== 'prepared');
+  check(s.action && ['attempted', 'unknown'].includes(s.action.outcome));
   return seal({ ...copy(s), action: { ...copy(s.action), outcome: 'unknown' } });
 }
 /** Operation name is retained by the simulation before uncertainty; late adoption is forbidden. */
@@ -653,53 +695,139 @@ function logical(a: LogicalAction, kind: IntentKind) {
 function operation(name: string) {
   text(name, /^projects\/bmson-assistant\/locations\/us-west1\/operations\/[A-Za-z0-9_-]{1,128}$/);
 }
-/** Supplied action projections are simulation hypotheses, NOT evidence of actual provider execution. */
-function confirmAction(
-  s: JournalSimulation,
-  after: Obj,
-  request: LogicalAction,
-  completion: { name: string; done: boolean; error?: unknown; responseService: string },
-  known = false,
-): JournalSimulation {
-  verify(s);
-  check(known || s.head.intent?.kind !== 'reconcileKnown');
+function validateResolution(h: Head, r: SimulatedResolution) {
   check(
-    s.action &&
-      s.action.outcome !== 'prepared' &&
-      s.action.operation === completion.name &&
-      completion.done === true &&
-      completion.error === undefined &&
-      completion.responseService === WEB_SERVICE,
+    h.status === 'prepared' &&
+      h.intent &&
+      digest(r.request) === h.intent.logicalDigest &&
+      r.boundOperation === r.completion.name &&
+      r.completion.done === true &&
+      r.completion.error === undefined &&
+      r.completion.responseService === WEB_SERVICE,
   );
-  operation(completion.name);
-  check(s.head.intent && digest(request) === s.head.intent.logicalDigest);
-  logical(request, s.head.intent.kind);
-  settled(after, s.anchor.serviceUid);
+  operation(r.boundOperation);
+  logical(r.request, h.intent.kind);
+  settled(r.before, h.serviceUid);
+  settled(r.after, h.serviceUid);
   check(
-    equal(head(after), s.head) &&
-      after.etag !== s.raw.etag &&
-      BigInt(after.generation as string) > BigInt(s.raw.generation as string),
+    equal(head(r.before), h) &&
+      equal(head(r.after), h) &&
+      r.after.etag !== r.before.etag &&
+      BigInt(r.after.generation as string) > BigInt(r.before.generation as string),
   );
-  const field = request.updateMask,
+  const field = r.request.updateMask,
     omit = (raw: Obj) =>
       Object.fromEntries(
         Object.entries(raw).filter(
           ([k]) =>
             !VOLATILE.has(k) &&
             k !== field &&
-            !(field === 'traffic' && k === 'trafficStatuses') &&
-            !(
-              field === 'template' && ['latestReadyRevision', 'latestCreatedRevision'].includes(k)
-            ) &&
-            !(field === 'traffic' && k === 'urls'),
+            !(field === 'traffic' && ['trafficStatuses', 'urls'].includes(k)) &&
+            !(field === 'template' && ['latestReadyRevision', 'latestCreatedRevision'].includes(k)),
         ),
       );
-  check(equal(omit(s.raw), omit(after)) && equal(after[field], request.body[field]));
-  // The existing lifecycle/retirement/reconciliation verifier must additionally validate its phase's raw semantic poststate.
+  check(equal(omit(r.before), omit(r.after)) && equal(r.after[field], r.request.body[field]));
+  if (h.intent.kind === 'reconcileKnown') {
+    const k = r.knownEvidence;
+    check(
+      k &&
+        equal(k.packet.origin, h.owner) &&
+        k.packet.headDigest === digest(h) &&
+        equal(
+          k.packet.knownPlan,
+          planWebTrafficReconciliation(r.before, k.native, h.owner.source, k.packet.observedAt),
+        ),
+    );
+    verifyWebTrafficReconciliationPost(r.after, k.native, k.packet.knownPlan);
+  } else check(r.knownEvidence === null);
+}
+function metadataDelta(before: Obj, after: Obj, next: Head) {
+  settled(after, next.serviceUid);
+  check(
+    before.etag !== after.etag &&
+      BigInt(after.generation as string) >= BigInt(before.generation as string) &&
+      journalPreservedDigest(before) === journalPreservedDigest(after) &&
+      equal(head(after), next),
+  );
+}
+function validateHistoryTransition(previous: HistoryEvent, current: HistoryEvent) {
+  const old = previous.head,
+    next = current.head;
+  if (!equal(old.owner, next.owner)) {
+    check(
+      (old.status === 'complete' || (old.sequence === 0 && old.status === 'idle')) &&
+        next.status === 'idle' &&
+        next.intent === null &&
+        current.resolution === null &&
+        current.barrier === null,
+    );
+    metadataDelta(previous.postRaw, current.postRaw, next);
+    return;
+  }
+  if (old.status === 'prepared') {
+    const r = current.resolution;
+    check(r && digest(r.before) === previous.postDigest);
+    validateResolution(old, r);
+    if (next.status === 'complete') {
+      check(equal(next.intent, old.intent) && current.barrier === null);
+    } else {
+      const d = current.barrier;
+      check(
+        old.intent?.kind === 'retireCaptured' &&
+          next.status === 'prepared' &&
+          next.intent?.kind === 'createR' &&
+          next.admissionPossible &&
+          d &&
+          [d.startedAt, d.completedAt, d.verifiedAt, d.consumedAt].every(Number.isFinite) &&
+          d.completedAt - d.startedAt >= 600000 &&
+          d.verifiedAt >= d.completedAt &&
+          d.consumedAt >= d.verifiedAt &&
+          d.consumedAt - d.verifiedAt <= 15000 &&
+          r.after.etag === d.etag &&
+          r.after.generation === d.generation,
+      );
+    }
+    metadataDelta(r.after, current.postRaw, next);
+    return;
+  }
+  check(
+    ['idle', 'complete'].includes(old.status) &&
+      next.status === 'prepared' &&
+      next.intent?.kind !== 'createR' &&
+      current.resolution === null &&
+      current.barrier === null,
+  );
+  metadataDelta(previous.postRaw, current.postRaw, next);
+}
+/** Private phase projections are hypotheses until a future authenticated raw verifier supplies them. */
+function confirmAction(
+  s: JournalSimulation,
+  after: Obj,
+  request: LogicalAction,
+  completion: { name: string; done: boolean; error?: unknown; responseService: string },
+  known = false,
+  knownEvidence: SimulatedResolution['knownEvidence'] = null,
+): JournalSimulation {
+  verify(s);
+  check(
+    (known || s.head.intent?.kind !== 'reconcileKnown') &&
+      s.action &&
+      ['attempted', 'unknown'].includes(s.action.outcome) &&
+      s.action.operation === completion.name,
+  );
+  const resolution: SimulatedResolution = {
+    before: copy(s.raw),
+    after: copy(after),
+    request: copy(request),
+    boundOperation: completion.name,
+    completion: copy(completion),
+    knownEvidence: copy(knownEvidence),
+  };
+  validateResolution(s.head, resolution);
   return seal({
     ...copy(s),
     raw: copy(after),
-    action: { ...copy(s.action), outcome: 'confirmed' },
+    action: { ...copy(s.action), outcome: 'confirmed', resolution },
   });
 }
 function metadataPlan(
@@ -712,7 +840,6 @@ function metadataPlan(
   check(last);
   next = { ...copy(next), previousArchive: { id: last.archive.id, digest: last.archive.digest } };
   validateHead(next);
-  annotations({ annotations: { ...annotations(s.raw), [JOURNAL_KEY]: JSON.stringify(next) } });
   annotations({ annotations: { ...annotations(s.raw), [JOURNAL_KEY]: JSON.stringify(next) } });
   return {
     simulationOnly: true,
@@ -731,6 +858,11 @@ function metadataPlan(
       },
     },
     purpose,
+    resolution:
+      purpose === 'complete' || purpose === 'consumeBarrier'
+        ? copy(s.action?.resolution ?? null)
+        : null,
+    barrier: null,
   };
 }
 export function planJournalCompletion(s: JournalSimulation): MetadataPlan {
@@ -741,6 +873,8 @@ export function planJournalCompletion(s: JournalSimulation): MetadataPlan {
       s.action?.outcome === 'confirmed' &&
       s.head.intent?.kind !== 'retireCaptured',
   );
+  check(s.action?.resolution && equal(s.action.resolution.after, s.raw));
+  validateResolution(s.head, s.action.resolution);
   return metadataPlan(
     s,
     {
@@ -759,6 +893,7 @@ export function planJournalClaim(
   priorJob: Obj,
 ): MetadataPlan {
   verify(s);
+  validateSimulatedHistory(s.raw, s.anchor, s.history, s.historyObservedAt);
   origin(newOwner);
   check(
     !s.pending &&
@@ -800,6 +935,8 @@ export function startJournalDrain(s: JournalSimulation, now: number): JournalSim
   verify(s);
   check(!s.pending && !s.drain && s.action?.outcome === 'confirmed');
   check(s.head.intent?.kind === 'retireCaptured' && Number.isFinite(now));
+  check(s.action?.resolution && equal(s.action.resolution.after, s.raw));
+  validateResolution(s.head, s.action.resolution);
   return seal({
     ...copy(s),
     drain: {
@@ -865,7 +1002,7 @@ export function planConsumeJournalBarrier(
       s.action?.outcome === 'confirmed',
   );
   logical(createR, 'createR');
-  return metadataPlan(
+  const plan = metadataPlan(
     s,
     {
       ...copy(s.head),
@@ -877,6 +1014,19 @@ export function planConsumeJournalBarrier(
     },
     'consumeBarrier',
   );
+  const d = s.drain;
+  check(d && d.completedAt !== null && d.verifiedAt !== null);
+  return {
+    ...plan,
+    barrier: {
+      etag: d.etag,
+      generation: d.generation,
+      startedAt: d.startedAt,
+      completedAt: d.completedAt,
+      verifiedAt: d.verifiedAt,
+      consumedAt: now,
+    },
+  };
 }
 export function journalSimulationSafety(s: JournalSimulation) {
   verify(s);
@@ -1104,6 +1254,7 @@ export function confirmKnownJournalReconciliation(
     { method: 'PATCH', updateMask: 'traffic', body },
     completion,
     true,
+    { packet: copy(packet), native: copy(native) },
   );
   return {
     simulationOnly: true as const,
@@ -1121,4 +1272,93 @@ export function confirmJournalAction(
   completion: { name: string; done: boolean; error?: unknown; responseService: string },
 ): JournalSimulation {
   return confirmAction(s, after, request, completion);
+}
+
+/** Explicit completion-metadata bridge; never resets a lifecycle or excludes all annotations. */
+export function rebaseLifecycleJournalCompletionSimulation(
+  s: JournalSimulation,
+  lifecycle: import('./owner-web-release-lifecycle-model.js').State,
+  native: Record<string, unknown>,
+) {
+  verify(s);
+  verifyLifecycleState(lifecycle);
+  const event = s.history.at(-1),
+    kind = s.head.intent?.kind;
+  const phases: Partial<
+    Record<IntentKind, import('./owner-web-release-lifecycle-model.js').Phase>
+  > = {
+    createP: 'createdP',
+    attachP: 'attachedP',
+    promoteP: 'promotedP',
+    createR: 'createdR',
+    attachR: 'attachedR',
+    promoteR: 'promotedR',
+    closeP: 'complete',
+    restoreC: 'restoredC',
+    repauseP: 'repausedP',
+    closeR: 'closedR',
+  };
+  check(
+    s.head.status === 'complete' &&
+      !s.pending &&
+      !s.action &&
+      !s.drain &&
+      s.preparedBefore &&
+      event?.resolution &&
+      kind &&
+      phases[kind] === lifecycle.phase &&
+      !lifecycle.pending &&
+      equal(event.resolution.after, s.preparedBefore) &&
+      s.origin.source === lifecycle.context.source &&
+      s.origin.runId === lifecycle.context.runId &&
+      s.origin.attempt === lifecycle.context.attempt &&
+      journalPreservedDigest(s.preparedBefore) === journalPreservedDigest(s.raw),
+  );
+  validateSimulatedHistory(s.raw, s.anchor, s.history, s.historyObservedAt);
+  const before = projectNativeWebSnapshot(s.preparedBefore, native, lifecycle.context),
+    after = projectNativeWebSnapshot(s.raw, native, lifecycle.context);
+  check(digest(before) === digest(lifecycle.snapshot));
+  const { receipt, ...body } = copy(lifecycle),
+    nextBody = {
+      ...body,
+      previousReceipt: receipt,
+      ordinal: lifecycle.ordinal + 1,
+      snapshot: after,
+      admissionPossible: lifecycle.admissionPossible || s.head.admissionPossible,
+      retiredTags: [...new Set([...lifecycle.retiredTags, ...s.head.retiredTags])].sort(),
+    },
+    state = { ...nextBody, receipt: digest(nextBody) };
+  verifyLifecycleState(state);
+  return { simulationOnly: true as const, mutationAuthorized: false as const, state };
+}
+
+/** Redacted member shape only. Never serialize the private history event/resolution wholesale. */
+export function journalEventPublicSummary(e: HistoryEvent) {
+  validateHead(e.head);
+  hash(e.postDigest);
+  text(e.postEtag, /^[ -~]{1,512}$/);
+  generation(e.postGeneration);
+  const d = e.barrier;
+  if (d)
+    check(
+      Object.keys(d).sort().join(',') ===
+        'completedAt,consumedAt,etag,generation,startedAt,verifiedAt',
+    );
+  return {
+    head: copy(e.head),
+    postEtag: e.postEtag,
+    postGeneration: e.postGeneration,
+    postDigest: e.postDigest,
+    resolutionDigest: e.resolution ? digest(e.resolution) : null,
+    barrier: d
+      ? {
+          etag: d.etag,
+          generation: d.generation,
+          startedAt: d.startedAt,
+          completedAt: d.completedAt,
+          verifiedAt: d.verifiedAt,
+          consumedAt: d.consumedAt,
+        }
+      : null,
+  };
 }

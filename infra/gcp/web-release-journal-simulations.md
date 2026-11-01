@@ -105,3 +105,39 @@ a later etag as the one drained. The unpaused action is then planned against the
 prepared state. No metadata mutation is slipped into the immutable drain interval.
 Actual permission, native metadata semantics, authoritative barrier proof and
 protected caller history remain gates before any adapter or production run.
+
+## Review corrections and sequential composition
+
+History now validates legal status edges, not just hash continuity. A prepared head
+can become complete only with its matching private resolution: same intent/body,
+original bound successful operation, exact native before/after delta and preserved
+state. The known reconciliation resolution reruns its existing strict planner and
+post-verifier. The retirement→prepareR edge additionally carries exact600s/fresh
+barrier timing and native etag/generation. Idle→complete, altered intents, missing
+resolution, foreign operation or wrong native postcondition are refused. Owner claim
+revalidates this history rather than trusting a local complete flag or unkeyed seal.
+
+The private simulation history includes raw frames to test those contracts. It is
+NOT a public artifact format. journalEventPublicSummary builds the closed redacted
+member shape: head, native post hashes/etag/generation, resolution digest and bounded
+barrier fields. Raw templates, unowned annotations and native resolution frames must
+never be serialized wholesale into an artifact. Obtaining authentic historical raw
+proof/qualified private projections in an actual adapter remains a runtime design
+gate; hashes and archive flags alone do not establish it.
+
+Action confirmation is accepted only for attempted or unknown input and is terminal
+once confirmed. Generic confirmed→unknown downgrade and repeated confirmation of
+the same LRO are refused. There is no journal-model completion-upload callback or
+implicit terminal reset. A real completion-archive failure remains HOLD; any future
+recovery must retain and validate the exact original private pending proof (as the
+separately reviewed unwired transport already does), not feed a completed state into
+a generic downgrade API or manufacture a new generation.
+
+Completion metadata has its own explicit lifecycle rebase. It rebuilds actual raw
+before/after projections, validates the matching resolved phase and sole owned-key
+delta, advances the private lifecycle receipt chain, and preserves phase/monotonic
+flags. A sequential fixture uses existing lifecycle validators for createP native
+confirmation, then journal completion, completion rebase, prepare attachP and prepare
+rebase. It does not manually reseal/reset lifecycle state or exclude broad config
+fields. This closes the PREPARE-only composition gap without introducing a provider
+adapter or making the public summary a capability token.
