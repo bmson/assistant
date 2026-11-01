@@ -27,6 +27,18 @@ import { assertAllocatedTestTarget } from './test-target.js';
 
 const enabled = Boolean(process.env.ASSISTANT_TEST_TARGET_TOKEN);
 const contentHash = (content: string) => createHash('sha256').update(content).digest('hex');
+function hasInjectedReceiptFailure(error: unknown): boolean {
+  const seen = new Set<object>();
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current && typeof current === 'object'; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const record = current as Record<string, unknown>;
+    if (record.code === 'P0001' && record.message === 'injected receipt failure') return true;
+    current = record.cause;
+  }
+  return false;
+}
 
 describe.skipIf(!enabled)('PostgreSQL owner-editor person-note creation', () => {
   let db: Db;
@@ -595,6 +607,21 @@ describe.skipIf(!enabled)('PostgreSQL owner-editor person-note creation', () => 
 
   it('rolls back the inserted note and card invalidation when the terminal receipt update fails', async () => {
     const f = await prepareCase(`Rollback note ${randomUUID()}`);
+    const beforeOperation = await db
+      .select()
+      .from(ownerEditorOperations)
+      .where(eq(ownerEditorOperations.operationId, f.scope.operationId));
+    expect(beforeOperation).toHaveLength(1);
+    expect(beforeOperation[0]).toMatchObject({ status: 'preparing', result: null });
+    const beforeHashMemories = await db
+      .select({ id: memories.id, agentId: memories.agentId })
+      .from(memories)
+      .where(eq(memories.contentHash, f.prepared.contentHash));
+    expect(beforeHashMemories).toHaveLength(0);
+    const beforeTombstones = await db
+      .select()
+      .from(memoryTombstones)
+      .where(eq(memoryTombstones.contentHash, f.prepared.contentHash));
     const beforeCard =
       (
         await db
@@ -617,15 +644,31 @@ describe.skipIf(!enabled)('PostgreSQL owner-editor person-note creation', () => 
       sql`CREATE TRIGGER owner_editor_create_receipt_test_failure BEFORE UPDATE ON owner_editor_operations FOR EACH ROW EXECUTE FUNCTION owner_editor_create_receipt_test_failure()`,
     );
     try {
-      await expect(
-        commitPostgresOwnerMemoryCreation(db, f.claim, f.prepared, f.now),
-      ).rejects.toThrow('injected receipt failure');
+      let failure: unknown;
+      try {
+        await commitPostgresOwnerMemoryCreation(db, f.claim, f.prepared, f.now);
+      } catch (error) {
+        failure = error;
+      }
+      expect(hasInjectedReceiptFailure(failure)).toBe(true);
       expect(
         await db
           .select({ id: memories.id })
           .from(memories)
           .where(eq(memories.id, f.prepared.memoryId)),
       ).toHaveLength(0);
+      expect(
+        await db
+          .select({ id: memories.id, agentId: memories.agentId })
+          .from(memories)
+          .where(eq(memories.contentHash, f.prepared.contentHash)),
+      ).toEqual(beforeHashMemories);
+      expect(
+        await db
+          .select()
+          .from(memoryTombstones)
+          .where(eq(memoryTombstones.contentHash, f.prepared.contentHash)),
+      ).toEqual(beforeTombstones);
       const afterCard =
         (
           await db
@@ -635,12 +678,12 @@ describe.skipIf(!enabled)('PostgreSQL owner-editor person-note creation', () => 
             .limit(1)
         )[0] ?? null;
       expect(afterCard).toEqual(beforeCard);
-      expect(
-        await db
-          .select({ status: ownerEditorOperations.status })
-          .from(ownerEditorOperations)
-          .where(eq(ownerEditorOperations.operationId, f.scope.operationId)),
-      ).toMatchObject([{ status: 'preparing' }]);
+      const afterOperation = await db
+        .select()
+        .from(ownerEditorOperations)
+        .where(eq(ownerEditorOperations.operationId, f.scope.operationId));
+      expect(afterOperation).toEqual(beforeOperation);
+      expect(afterOperation[0]).toMatchObject({ status: 'preparing', result: null });
     } finally {
       await db.execute(
         sql`DROP TRIGGER IF EXISTS owner_editor_create_receipt_test_failure ON owner_editor_operations`,
