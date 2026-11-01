@@ -468,6 +468,12 @@ release_staged_services() {
     --update-env-vars "$web_candidate_env" --quiet || return 1
   local staged_web_json
   staged_web_json="$(release_service_json assistant-web)" || return 1
+  if [[ "$basic_editor_forward_only" == true ]]; then
+    release_record_owned_web_tag candidate "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || {
+      echo '  could not record the freshly observed paused web candidate; refusing to promote it.' >&2
+      return 1
+    }
+  fi
   web_candidate_url="$(release_tag_url "$staged_web_json" "$staging_tag")" || return 1
   release_wait_http "$web_candidate_url" /api/health "$TAG" sha || return 1
   # Persistence readiness and the secret-safe web-to-agent canary both run
@@ -475,14 +481,6 @@ release_staged_services() {
   release_wait_http "$web_candidate_url" /api/ready true ready || return 1
   release_wait_http "$web_candidate_url" /api/release-probe true ready || return 1
   release_wait_http "$web_candidate_url" /api/release-probe "$web_writes_paused" writesPaused || return 1
-  if [[ "$basic_editor_forward_only" == true ]]; then
-    staged_web_json="$(release_service_json assistant-web)" || return 1
-    release_record_owned_web_tag candidate "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || {
-      echo '  could not record the freshly observed paused web candidate; refusing to promote it.' >&2
-      return 1
-    }
-  fi
-
   # Cloud Run Jobs do not support traffic tags. Update their templates only
   # after both service candidates pass readiness, remember the old image, and
   # restore those templates if any later promotion check fails.
@@ -622,6 +620,10 @@ release_staged_services() {
               promoted_ok=false
             fi
           fi
+          if [[ "$promoted_ok" == true ]] &&
+             ! release_record_owned_web_tag resume "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
+            promoted_ok=false
+          fi
         fi
         if [[ "$promoted_ok" == true ]]; then
           resume_web_url="$(release_tag_url "$staged_resume_web_json" "$web_resume_tag")" || promoted_ok=false
@@ -641,10 +643,6 @@ release_staged_services() {
               if [[ "$promoted_ok" == true ]]; then
                 fresh_resume_revision="$(node -e 'const s=JSON.parse(process.argv[1]);const rows=(s.status?.traffic??[]).filter(t=>t.tag===process.argv[2]&&t.revisionName);if(rows.length!==1)process.exit(2);process.stdout.write(rows[0].revisionName)' "$staged_resume_web_json" "$web_resume_tag")" || promoted_ok=false
                 if [[ "$promoted_ok" == true && "$fresh_resume_revision" != "$web_resume_revision" ]]; then promoted_ok=false; fi
-              fi
-              if [[ "$promoted_ok" == true ]] &&
-                 ! release_record_owned_web_tag resume "$TAG" "$manifest_path" "$manifest_sha" "$web_resume_tag"; then
-                promoted_ok=false
               fi
             fi
             if [[ "$promoted_ok" == true ]]; then
@@ -752,7 +750,7 @@ release_staged_services() {
   # cleanup treat the paused intermediate as a reachable URL. Retire only that
   # run's tag, and only after confirming it is non-serving and outside the
   # captured rollback map. Candidate/resume tags on live revisions remain.
-  if [[ "$basic_editor_forward_only" != true && "$selected" == agent,web && "$RELEASE_STORAGE_DRIVER" == firestore &&
+  if [[ "$selected" == agent,web && "$RELEASE_STORAGE_DRIVER" == firestore &&
         "$web_resume_promotion_attempted" == true && -n "$web_paused_revision" ]]; then
     if ! release_retire_nonserving_candidate_tag assistant-web "$staging_tag" "$web_old_traffic" "$web_serving_revision" "$web_paused_revision"; then
       echo '  warning: staged release is healthy, but its retired candidate tag needs guarded cleanup.' >&2

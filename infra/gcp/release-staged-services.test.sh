@@ -120,6 +120,7 @@ import json,os,sys
 url=sys.argv[-1]; path=url.split('.example',1)[-1]
 s=json.load(open(os.path.join(os.environ['STUB_ROOT'],'state.json')))
 with open(os.environ['STUB_CURL_CALLS'],'a') as f: f.write(json.dumps({'url':url,'web':s['assistant-web']['traffic'],'agent':s['assistant-agent']['traffic']})+'\n')
+with open(os.environ['STUB_ADMISSION_CALLS'],'a') as f: f.write('probe:'+url+'\n')
 agent_new=any('new' in r for r in s['assistant-agent']['traffic'])
 web_new=any('new' in r for r in s['assistant-web']['traffic'])
 legacy_live_web=url.startswith('https://assistant-web.example/') and not web_new
@@ -172,7 +173,7 @@ release_capture_owned_web_tags "$admission_source" "$RELEASE_MANIFEST_PATH" "$ad
 release_retire_captured_web_tags "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" candidate-12345-1 || fail 'retirement wrapper should invoke the fixed barrier command'
 release_verify_owned_web_tag_admission "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" candidate-12345-1 || fail 'verification wrapper should invoke the fixed admission command'
 release_record_owned_web_tag candidate "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" candidate-12345-1 || fail 'candidate receipt wrapper should invoke the fixed record command'
-release_record_owned_web_tag resume "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" resume-12345-1 || fail 'resume receipt wrapper should invoke the fixed record command'
+release_record_owned_web_tag resume "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" candidate-12345-1 || fail 'resume receipt wrapper should invoke the fixed record command'
 python3 - "$STUB_ADMISSION_COMMANDS" "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" <<'PY'
 import json,sys
 rows=[json.loads(x) for x in open(sys.argv[1])]
@@ -185,7 +186,7 @@ assert [x['args'] for x in rows]==[
 ], rows
 for row in rows:
  assert row['source']==sys.argv[2] and row['manifestPath']==sys.argv[3] and row['manifestDigest']==sys.argv[4], row
-assert [x['stagingTag'] for x in rows]==['candidate-12345-1']*4+['resume-12345-1'], rows
+assert [x['stagingTag'] for x in rows]==['candidate-12345-1']*5, rows
 PY
 TEST_BASIC5_CAPABILITY=false
 release_basic_editor_forward_only() { printf '%s' "$TEST_BASIC5_CAPABILITY"; }
@@ -196,13 +197,6 @@ release_capture_owned_web_tags() {
 release_retire_captured_web_tags() {
   printf 'retire:%s:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" "${OWNED_TAGS_ALREADY_ABSENT:-0}" >>"$STUB_ADMISSION_CALLS"
   [[ "${FAIL_ADMISSION_RETIRE:-0}" != 1 ]] || return 1
-  python3 - "$STUB_ROOT/state.json" "$4" <<'PY'
-import json,sys
-p,tag=sys.argv[1:]; s=json.load(open(p)); web=s['assistant-web']
-web['staged']=[row for row in web.get('staged',[]) if row.get('tag')!=tag]
-web['tags']=[row for row in web.get('tags',[]) if row.get('tag')!=tag]
-open(p,'w').write(json.dumps(s))
-PY
 }
 release_verify_owned_web_tag_admission() {
   printf 'verify:%s:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" "${FAIL_ADMISSION_VERIFY:-0}" >>"$STUB_ADMISSION_CALLS"
@@ -475,8 +469,6 @@ release_preflight_compatibility agent,web || fail 'Firestore contract metadata s
 python3 - "$TEST_ROOT/state.json" <<'PY'
 import json,sys
 p=sys.argv[1]; s=json.load(open(p))
-s['assistant-web'].setdefault('staged',[]).append({'revision':'web-foreign','tag':'candidate-foreign','env':dict(s['assistant-web']['env'])})
-s['assistant-web'].setdefault('revisions',{})['web-foreign']={'env':dict(s['assistant-web']['env'])}
 open(p,'w').write(json.dumps(s))
 PY
 export OWNED_TAGS_ALREADY_ABSENT=1
@@ -498,14 +490,14 @@ agent=next(i for i,x in enumerate(calls) if 'update-traffic assistant-agent ' in
 web_resume=next(i for i,x in enumerate(calls) if 'update-traffic assistant-web ' in x and 'assistant-web-new2=100' in x)
 assert web_pause<agent<web_resume, calls
 remove_calls=[x for x in calls if '--remove-tags' in x]
-assert not remove_calls, remove_calls
+assert len(remove_calls)==1 and 'assistant-web' in remove_calls[0] and 'candidate-12345-1' in remove_calls[0], remove_calls
 own_candidate=next(x[x.index('--tag')+1] for x in updates if x[3]=='assistant-web')
 resume_tag=next(x[x.index('--tag')+1] for x in updates if x[3]=='assistant-web' and 'ASSISTANT_RELEASE_WRITES_PAUSED=false' in x[x.index('--update-env-vars')+1])
 s=json.load(open(sys.argv[4]))
 web_tags={x['tag'] for x in s['assistant-web'].get('staged',[])}
 agent_tags={x['tag'] for x in s['assistant-agent'].get('staged',[])}
 assert own_candidate not in web_tags, web_tags
-assert {'candidate-foreign',resume_tag}.issubset(web_tags), web_tags
+assert resume_tag in web_tags and 'candidate-foreign' not in web_tags, web_tags
 assert own_candidate in agent_tags, agent_tags
 drains=[int(line.strip()) for line in open(sys.argv[3])]
 assert drains and all(0<=x<=30 for x in drains) and sum(drains)==310, drains
@@ -525,6 +517,12 @@ resume_stage=next(i for i,x in enumerate(events) if x.startswith('stage:assistan
 assert retire<verify<resume_stage, events
 assert any(x.startswith('record:candidate:') for x in events), events
 assert any(x.startswith('record:resume:') for x in events), events
+candidate_receipt=next(i for i,x in enumerate(events) if x.startswith('record:candidate:'))
+candidate_probe=next(i for i,x in enumerate(events) if x.startswith('probe:https://candidate-') and 'assistant-web.example' in x)
+resume_receipt=next(i for i,x in enumerate(events) if x.startswith('record:resume:'))
+resume_probe=next(i for i,x in enumerate(events) if x.startswith('probe:https://resume-'))
+assert candidate_receipt<candidate_probe, events
+assert resume_receipt<resume_probe, events
 assert all(key in web_updates[0] for key in (
  'ASSISTANT_RELEASE_WORKFLOW_RUN_ID=12345',
  'ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT=1',
@@ -621,7 +619,7 @@ calls=open(sys.argv[1]).read().splitlines(); state=json.load(open(sys.argv[2]))
 assert not any('assistant-web-new2=100' in x for x in calls), calls
 assert any('--remove-tags resume-' in x for x in calls), calls
 assert not any(x['tag'].startswith('resume-') for x in state['assistant-web']['staged']), state
-assert not any(x['tag'].startswith('candidate-') for x in state['assistant-web']['staged']), state
+assert any(x['tag'].startswith('candidate-') for x in state['assistant-web']['staged']), state
 PYCASE
 reset_case; prepare_firestore_state; export RELEASE_MODULES=browser FAIL_RESUME_RECEIPT=1
 if release_staged_services; then fail 'failed unpaused resume receipt must prevent unpaused traffic promotion'; fi
