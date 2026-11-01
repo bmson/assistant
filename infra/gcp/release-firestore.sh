@@ -36,6 +36,7 @@ case "$RELEASE_COMPONENTS" in
   *) echo 'RELEASE_COMPONENTS must be agent,web (default) or web' >&2; exit 2 ;;
 esac
 export RELEASE_COMPONENTS
+release_validate_basic_editor_context "$RELEASE_COMPONENTS" firestore "$TAG" || exit $?
 ASSISTANT_RELEASE_WRITES_PAUSED=false
 if [[ "$RELEASE_COMPONENTS" == agent,web ]]; then ASSISTANT_RELEASE_WRITES_PAUSED=true; fi
 export ASSISTANT_RELEASE_WRITES_PAUSED

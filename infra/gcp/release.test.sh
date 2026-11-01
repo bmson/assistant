@@ -340,12 +340,17 @@ actual_unbound_basic5_release() {
   actual_basic5_direct_release agent,web firestore
 }
 actual_basic5_direct_release() {
-  source "$ROOT/release-staged-services.sh"
-  export PROJECT=test-project REGION=test-region TAG='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-  export IMAGE_ROOT="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/assistant"
-  export RELEASE_COMPONENTS="$1" RELEASE_PERSISTENCE_DRIVER="$2" RELEASE_SCHEMA_UNCHANGED=true
-  release_staged_services
+  export IMAGE_TAG='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  export RELEASE_COMPONENTS="$1" RELEASE_SCHEMA_UNCHANGED=true SKIP_IMAGE_BUILD=false
+  # Exercise the actual entry scripts, including their build/migration/scheduler
+  # bookkeeping, rather than merely calling the later staging helper.
+  case "$2" in
+    firestore) bash "$ROOT/release-firestore.sh" ;;
+    postgres) bash "$ROOT/release-postgres.sh" ;;
+    *) fail "unsupported negative fixture driver" ;;
+  esac
 }
+
 set_valid_basic5_context() {
   export GITHUB_ACTIONS=true GITHUB_REPOSITORY=bmson/assistant GITHUB_REF=refs/heads/main
   export GITHUB_WORKFLOW_REF=bmson/assistant/.github/workflows/deploy.yml@refs/heads/main
@@ -358,17 +363,17 @@ if out="$(actual_unbound_basic5_release 2>&1)"; then
 fi
 grep -Eiq 'requires .*GitHub .*identity|requires .*workflow identity' <<<"$out" ||
   fail "direct unbound BASIC5 release needs a clear pre-staging error: $out"
-[[ ! -s "$STUB_CALLS" ]] || fail "direct unbound BASIC5 release must stop before any Cloud Run reads or writes"
+[[ ! -s "$STUB_CALLS" ]] || fail "direct unbound BASIC5 release must stop before any provider reads or mutations"
 
 # Valid protected metadata cannot authorize BASIC5 with the wrong driver or
-# component scope. Both refusals must happen before the first Cloud Run read.
+# component scope. Both refusals must happen before any provider call.
 reset
 set_valid_basic5_context
 if out="$(actual_basic5_direct_release agent,web postgres 2>&1)"; then
   fail "BASIC5 with the PostgreSQL driver must fail before Cloud Run reads"
 fi
 grep -q 'requires a paired Firestore release' <<<"$out" || fail "wrong-driver BASIC5 error was unclear: $out"
-[[ ! -s "$STUB_CALLS" ]] || fail "wrong-driver BASIC5 path reached Cloud Run"
+[[ ! -s "$STUB_CALLS" ]] || fail "wrong-driver BASIC5 path made a provider call"
 
 reset
 set_valid_basic5_context
@@ -376,7 +381,18 @@ if out="$(actual_basic5_direct_release web firestore 2>&1)"; then
   fail "BASIC5 web-only Firestore path must fail before Cloud Run reads"
 fi
 grep -q 'requires a paired Firestore release' <<<"$out" || fail "web-only BASIC5 error was unclear: $out"
-[[ ! -s "$STUB_CALLS" ]] || fail "web-only BASIC5 path reached Cloud Run"
+[[ ! -s "$STUB_CALLS" ]] || fail "web-only BASIC5 path made a provider call"
+
+# Even otherwise valid workflow metadata must not redirect BASIC5 to a different
+# project/region/repository before its fixed native client can reject it later.
+reset
+set_valid_basic5_context
+if out="$(actual_basic5_direct_release agent,web firestore 2>&1)"; then
+  fail "BASIC5 with a foreign provider target must stop at wrapper entry"
+fi
+grep -q 'requires the fixed bmson-assistant/us-west1/assistant target' <<<"$out" ||
+  fail "foreign-target BASIC5 refusal was unclear: $out"
+[[ ! -s "$STUB_CALLS" ]] || fail "foreign-target BASIC5 wrapper made a provider call"
 
 assert_no_database_calls() {
   if grep -Eiq 'database-url|DATABASE_URL|assistant-migrate|assistant-backup|secrets|neon|pg_dump' "$STUB_CALLS"; then

@@ -343,6 +343,32 @@ release_basic_editor_forward_only() {
   ' "${BASH_SOURCE[0]%/*}"
 }
 
+# Entry-point refusal is repeated in staging so direct wrappers cannot build,
+# migrate or refresh delivery configuration before the BASIC5 context is checked.
+release_validate_basic_editor_context() {
+  local selected="$1" driver="$2" source_sha="$3" basic_editor
+  basic_editor="$(release_basic_editor_forward_only)" || return 1
+  [[ "$basic_editor" == true ]] || return 0
+  if [[ "$selected" != agent,web || "$driver" != firestore ]]; then
+    echo '  BASIC5 requires a paired Firestore release; refusing a path without the captured owned-web-tag admission barrier.' >&2
+    return 2
+  fi
+  if [[ ! "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]{0,19}$ ||
+        "${GITHUB_RUN_ATTEMPT:-}" != 1 || ! "$source_sha" =~ ^[a-f0-9]{40}$ ||
+        "${GITHUB_ACTIONS:-}" != true || "${GITHUB_REPOSITORY:-}" != bmson/assistant ||
+        "${GITHUB_REF:-}" != refs/heads/main ||
+        "${GITHUB_WORKFLOW_REF:-}" != bmson/assistant/.github/workflows/deploy.yml@refs/heads/main ||
+        "${GITHUB_WORKFLOW_SHA:-}" != "$source_sha" || "${GITHUB_SHA:-}" != "$source_sha" ||
+        ( "${GITHUB_EVENT_NAME:-}" != workflow_run && "${GITHUB_EVENT_NAME:-}" != workflow_dispatch ) ]]; then
+    echo '  BASIC5 requires the protected GitHub main workflow identity and full source SHA; refusing a local or unbound write path.' >&2
+    return 2
+  fi
+  if [[ "${PROJECT:-}" != bmson-assistant || "${REGION:-}" != us-west1 || "${REPO:-assistant}" != assistant ]]; then
+    echo '  BASIC5 requires the fixed bmson-assistant/us-west1/assistant target before any provider call.' >&2
+    return 2
+  fi
+}
+
 release_staged_services() {
   local selected="${RELEASE_COMPONENTS:-agent,web}" traffic_tag_suffix staging_tag
   traffic_tag_suffix="$(release_traffic_tag_suffix)" || return $?
@@ -373,18 +399,7 @@ release_staged_services() {
     return 2
   fi
   release_read_contract || return 1
-  if [[ "$basic_editor_forward_only" == true &&
-        ( "$selected" != agent,web || "$RELEASE_STORAGE_DRIVER" != firestore ) ]]; then
-    echo '  BASIC5 requires a paired Firestore release; refusing a path without the captured owned-web-tag admission barrier.' >&2
-    return 2
-  fi
-  if [[ "$basic_editor_forward_only" == true &&
-        ( ! "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]{0,19}$ ||
-          ! "${GITHUB_RUN_ATTEMPT:-}" =~ ^[1-9][0-9]{0,9}$ ||
-          ! "$TAG" =~ ^[a-f0-9]{40}$ ) ]]; then
-    echo '  BASIC5 requires a GitHub run identity and full source SHA; refusing a local or unbound write path.' >&2
-    return 2
-  fi
+  release_validate_basic_editor_context "$selected" "$RELEASE_STORAGE_DRIVER" "$TAG" || return $?
   if [[ "$selected" == agent,web && "$RELEASE_STORAGE_DRIVER" == firestore ]]; then
     web_writes_paused=true
   fi

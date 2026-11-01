@@ -220,6 +220,31 @@ describe('paired native admission command', () => {
     });
     await expect(runWebTagAdmission('--verify-admission')).rejects.toThrow();
   });
+  it.each(['etag', 'generation'] as const)(
+    'refuses metadata-only %s drift after the drain before admission',
+    async (kind) => {
+      await completeBarrier();
+      if (kind === 'etag') service.etag = 'etag-external-change';
+      else {
+        service.generation = '2';
+        service.observedGeneration = '2';
+      }
+      await expect(runWebTagAdmission('--verify-admission')).rejects.toThrow(
+        'Service version changed',
+      );
+    },
+  );
+  it.each(['serviceEtag', 'serviceGeneration'] as const)(
+    'refuses a barrier missing required %s evidence',
+    async (field) => {
+      await completeBarrier();
+      const file = join(temp, 'owner-web-tag-barrier.json');
+      const receipt = JSON.parse(readFileSync(file, 'utf8'));
+      delete receipt.result[field];
+      writeFileSync(file, JSON.stringify(receipt));
+      await expect(runWebTagAdmission('--verify-admission')).rejects.toThrow('barrier incomplete');
+    },
+  );
   it('records candidate then verified resume with completed barrier in public receipt only', async () => {
     await completeBarrier();
     await runWebTagAdmission('--verify-admission');

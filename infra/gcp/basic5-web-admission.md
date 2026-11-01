@@ -6,6 +6,11 @@ pin or match a protected deployment's creation receipt, manifest and fresh
 immutable native revision. A naming pattern selects a run to inspect; it never
 establishes ownership. Unknown operator aliases are preserved and block release.
 
+Both direct release wrappers check the intrinsic capability, paired Firestore
+scope and protected GitHub main/source identity before their first provider
+read, build, migration or scheduler action. Staging repeats the check. Genuine
+legacy source without the capability and runtime retains its existing paths.
+
 The required order is paused web promotion, old canonical request drain, native
 etag traffic-only retirement of captured proven aliases, fresh postcheck and a
 full 600 second post-retirement drain. A final fresh check then precedes the first
@@ -13,6 +18,12 @@ unpaused resume-tag creation, which itself can admit requests before canonical
 promotion. Barrier failure uses existing pre-admission rollback of canonical
 traffic and never recreates aliases. Existing post-admission forward recovery
 continues to keep the compatible paused web/agent/jobs pair.
+
+The settled post-retirement etag and generation are recorded in the completed
+barrier. Both must remain unchanged at the end of the full drain and at the
+immediate pre-admission check. A change fails closed even if the final traffic
+and configuration look identical after a transient alias restoration/removal.
+Missing version evidence cannot authorize admission.
 
 Even already-absent aliases require native immutable timeout proof and the full
 600 second drain. Before the first marker-aware cutover, both historical pinned

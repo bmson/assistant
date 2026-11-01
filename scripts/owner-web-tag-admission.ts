@@ -19,6 +19,7 @@ import {
   immutableWebRevision,
   planOwnedWebTagRetirement,
   type RetirementPlan,
+  requireRetirementDrainStability,
   tagHash,
   validateOwnedProof,
   verifyOwnedWebTagRetirement,
@@ -315,13 +316,21 @@ export async function runWebTagAdmission(mode: string | undefined) {
       value.runAttempt !== runAttempt ||
       value.uid !== snapshot.uid ||
       result.drainCompleted !== true ||
-      result.drainSeconds !== 600
+      result.drainSeconds !== 600 ||
+      typeof result.serviceEtag !== 'string' ||
+      !/^[ -~]{1,512}$/.test(result.serviceEtag) ||
+      typeof result.serviceGeneration !== 'string' ||
+      !/^[0-9]+$/.test(result.serviceGeneration)
     )
       throw new Error('Mandatory retirement/drain barrier incomplete');
-    return value.plan as RetirementPlan;
+    return { plan: value.plan as RetirementPlan, evidence: result };
   };
   if (mode === '--verify-admission') {
-    verifyOwnedWebTagRetirement(service, barrier());
+    const completed = barrier();
+    requireRetirementDrainStability(
+      verifyOwnedWebTagRetirement(service, completed.plan),
+      completed.evidence,
+    );
     return;
   }
   const kind = mode === '--record-candidate' ? 'candidate' : 'resume';

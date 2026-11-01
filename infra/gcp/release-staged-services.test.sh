@@ -230,10 +230,15 @@ JSON
  TEST_BASIC5_CAPABILITY=false
  unset RELEASE_EMAIL_OBSERVER_WORKER_ENABLED
  export RELEASE_COMPONENTS=agent,web RELEASE_MODULES=none RELEASE_PERSISTENCE_DRIVER=postgres
+ export PROJECT=test-project REGION=us-west1 REPO=assistant IMAGE_ROOT=us-west1-docker.pkg.dev/test-project/assistant
 }
 prepare_firestore_state() {
  export RELEASE_PERSISTENCE_DRIVER=firestore
+ export PROJECT=bmson-assistant REGION=us-west1 REPO=assistant IMAGE_ROOT=us-west1-docker.pkg.dev/bmson-assistant/assistant
  export TAG=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa GITHUB_RUN_ID=12345 GITHUB_RUN_ATTEMPT=1
+ export GITHUB_ACTIONS=true GITHUB_REPOSITORY=bmson/assistant GITHUB_REF=refs/heads/main
+ export GITHUB_EVENT_NAME=workflow_run GITHUB_WORKFLOW_REF=bmson/assistant/.github/workflows/deploy.yml@refs/heads/main
+ export GITHUB_SHA="$TAG" GITHUB_WORKFLOW_SHA="$TAG"
  TEST_BASIC5_CAPABILITY=true
  python3 - "$TEST_ROOT/state.json" <<'PY'
 import json,sys
@@ -734,6 +739,7 @@ PY
 fi
 reset_case; prepare_firestore_state
 export TAG=c77cd3152d27364316451a1a055f2e9edc176fc3
+export GITHUB_SHA="$TAG" GITHUB_WORKFLOW_SHA="$TAG"
 release_staged_services || fail 'full 40-character release SHA must fit Cloud Run traffic tags'
 python3 - "$TEST_ROOT/state.json" "$TEST_ROOT/manifest.json" "$TAG" <<'PYTEST'
 import json,sys
