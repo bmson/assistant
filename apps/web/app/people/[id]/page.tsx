@@ -31,6 +31,7 @@ import { requireOwner } from '@/auth';
 import { getFirestorePersonDossier } from '@/lib/firestore-people';
 import { relativeTime } from '@/lib/format';
 import { memoryMapReturnTo } from '@/lib/memory-editor-context';
+import { memoryNoteHref } from '@/lib/memory-note-context';
 import { ownerEditorAvailability } from '@/lib/owner-editor-availability';
 import { buildOwnerEditorView } from '@/lib/owner-editor-view';
 import { readPostgresOwnerEditorViewInputs, withPostgresMemoryBrowseRead } from '@/lib/server';
@@ -54,7 +55,12 @@ const CONNECTION_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const FACT_LIMIT = 250;
 
-function toFactView(memory: MemorySnapshot, now: Date, subjectLabel: string): FactView {
+function toFactView(
+  memory: MemorySnapshot,
+  now: Date,
+  subjectLabel: string,
+  personId: string,
+): FactView {
   const from = memory.validFrom?.toISOString().slice(0, 10);
   const until = memory.validUntil?.toISOString().slice(0, 10);
   return {
@@ -74,6 +80,7 @@ function toFactView(memory: MemorySnapshot, now: Date, subjectLabel: string): Fa
     subjectLabel,
     createdLabel: relativeTime(memory.createdAt, now),
     validityLabel: from ? `${from}–${until ?? 'now'}` : '',
+    noteHref: memoryNoteHref(memory.id, `/people/${personId}`) ?? undefined,
   };
 }
 
@@ -556,7 +563,7 @@ export default async function PersonPage({
           ) : (
             <div className="mt-3 flex flex-col gap-2">
               {facts.map((fact) => (
-                <BrowseFact key={fact.id} fact={toFactView(fact, now, contact.name)} />
+                <BrowseFact key={fact.id} fact={toFactView(fact, now, contact.name, id)} />
               ))}
             </div>
           )}
