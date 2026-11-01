@@ -188,3 +188,14 @@ If verified R was never attached, a separate supplied full600s drain proof close
 recovery without inventing an alias. If attached but still0, closeR follows the
 read-only checkpoint. If R was promoted100, a new repauseP CAS plan is necessary.
 No unknown attempt can enter those confirmed-state recovery paths.
+
+Review corrections: every intent, operation binding, unknown marker and confirmed
+transition now advances a sealed state receipt with its predecessor digest and
+ordinal. Every state consumer verifies the complete state digest before using it;
+changes to pending plans, captured canonical identity, admission state or tombstones
+invalidate the seal. This detects changed projections, not a forged origin or
+replay of an older valid state: the future durable protected adapter still needs
+origin validation, chain history and monotonic storage/CAS. Unknown-without-operation
+cannot later bind a discovered operation for either creation or retirement. Rollback
+uses the captured100 row's exact tag (including an empty tag), never the first other
+alias on that revision; if that captured tag was retired it uses untagged C100.

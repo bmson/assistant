@@ -20,6 +20,7 @@ import {
   settleLifecycleAttempt,
   unknownCapturedRetirement,
   unknownLifecycleOutcome,
+  verifyLifecycleState,
 } from './owner-web-release-lifecycle-model.js';
 import { WEB_SERVICE } from './owner-web-tag-retirement.js';
 import { reconciliationDigest as digest } from './owner-web-traffic-reconciliation-model.js';
@@ -28,7 +29,7 @@ const secret = 'DO_NOT_LOG_NATIVE_SECRET_REFERENCE';
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v));
 const operation = 'projects/bmson-assistant/locations/us-west1/operations/fixed-1';
 const completed = (name = operation) => ({ name, done: true, responseService: WEB_SERVICE });
-function fixture() {
+function fixture(change?: (snapshot: Snapshot) => void) {
   const c: Context = {
     source: 'a'.repeat(40),
     runId: '123456',
@@ -104,6 +105,7 @@ function fixture() {
       },
     },
   };
+  change?.(s);
   return captureLifecycle(c, s);
 }
 function post(s: State, mode: Mode): Snapshot {
@@ -144,8 +146,8 @@ function step(s: State, mode: Mode) {
     after,
   );
 }
-function paused() {
-  return step(step(step(fixture(), 'createP'), 'attachP'), 'promoteP');
+function paused(initial = fixture()) {
+  return step(step(step(initial, 'createP'), 'attachP'), 'promoteP');
 }
 function retired(overrides: Record<string, unknown> = {}) {
   const s = bindCapturedRetirementOperation(beginCapturedRetirement(paused()), operation),
@@ -403,7 +405,7 @@ describe('source-only lifecycle model', () => {
     if (kind === 'tooManyContainers') (s.snapshot.template.containers as unknown[]).push({});
     expect(() => planLifecycleAction(s, 'createP')).toThrow();
   });
-  it.each(['shortDrain', 'wrongEtag', 'foreignRun', 'wrongReceipt'] as const)(
+  it.each(['wrongGeneration', 'wrongEtag', 'foreignRun', 'wrongReceipt'] as const)(
     'refuses invalid external retirement/agent evidence: %s',
     (kind) => {
       const s = retired(),
@@ -413,7 +415,7 @@ describe('source-only lifecycle model', () => {
           stableEtag: s.snapshot.etag,
           stableGeneration: s.snapshot.generation,
         };
-      if (kind === 'shortDrain') e.stableGeneration = '999';
+      if (kind === 'wrongGeneration') e.stableGeneration = '999';
       if (kind === 'wrongEtag') e.stableEtag = 'foreign';
       if (kind === 'foreignRun') e.agentProofSha256 = 'invalid';
       if (kind === 'wrongReceipt') e.beforeReceipt = 'invalid';
@@ -474,5 +476,94 @@ describe('same-operation terminal evidence', () => {
     expect(() => settleLifecycleAttempt(a, e, post(s, 'createP'))).toThrow(
       'Web lifecycle model held',
     );
+  });
+});
+
+describe('reviewed intent and canonical rollback corrections', () => {
+  it('refuses late operation adoption after unknown outcome for both lifecycle and retirement', () => {
+    const s = fixture(),
+      a = unknownLifecycleOutcome(beginLifecycleAttempt(s, planLifecycleAction(s, 'createP')));
+    expect(() => bindLifecycleOperation(a, operation)).toThrow();
+    const r = unknownCapturedRetirement(beginCapturedRetirement(paused()));
+    expect(() => bindCapturedRetirementOperation(r, operation)).toThrow();
+  });
+  it('chains intent, operation binding and uncertainty before any settle', () => {
+    const s = agentReady(),
+      a = beginLifecycleAttempt(s, planLifecycleAction(s, 'createR')),
+      b = bindLifecycleOperation(a, operation),
+      u = unknownLifecycleOutcome(b);
+    expect(a.receipt).not.toBe(s.receipt);
+    expect(a.previousReceipt).toBe(s.receipt);
+    expect(b.previousReceipt).toBe(a.receipt);
+    expect(u.previousReceipt).toBe(b.receipt);
+    expect(u.ordinal).toBe(s.ordinal + 3);
+    expect(() => verifyLifecycleState(u)).not.toThrow();
+    const r = beginCapturedRetirement(paused());
+    expect(r.receipt).not.toBe(r.previousReceipt);
+  });
+  it.each([
+    'admission',
+    'tombstones',
+    'pending',
+    'context',
+    'snapshot',
+    'canonical',
+    'previousReceipt',
+  ] as const)('rejects altered sealed intent: %s', (kind) => {
+    const s = agentReady(),
+      a = beginLifecycleAttempt(s, planLifecycleAction(s, 'createR'));
+    if (kind === 'admission') a.admissionPossible = false;
+    if (kind === 'tombstones') a.retiredTags = [];
+    if (kind === 'pending') a.pending = null;
+    if (kind === 'context') a.context.runId = '77';
+    if (kind === 'snapshot') a.snapshot.etag = 'stale';
+    if (kind === 'canonical') a.canonicalIdentity.tag = 'resume-888-1';
+    if (kind === 'previousReceipt') a.previousReceipt = digest('other');
+    expect(() => verifyLifecycleState(a)).toThrow();
+    expect(() => unknownLifecycleOutcome(a)).toThrow();
+  });
+  it('preserves captured untagged canonical allocation without promoting an incidental zero alias', () => {
+    const base = fixture((s) => {
+      s.desired[0]!.percent = 0;
+      s.desired.push({ ...s.desired[0]!, tag: '', percent: 100 });
+      s.observed = clone(s.desired);
+    });
+    const a = step(paused(base), 'restoreC');
+    expect(a.snapshot.desired.find((t) => t.percent === 100)?.tag).toBe('');
+    expect(a.snapshot.desired.find((t) => t.tag === 'resume-999-1')?.percent).toBe(0);
+  });
+  it('restores exact captured serving tag when an earlier zero-percent alias exists', () => {
+    const base = fixture((s) => {
+      s.desired.unshift({ ...s.desired[0]!, tag: 'resume-888-1', percent: 0 });
+      s.observed = clone(s.desired);
+      s.tagUris['resume-888-1'] = digest('incidental');
+      s.urls.push(digest('incidental'));
+    });
+    const a = step(paused(base), 'restoreC');
+    expect(a.snapshot.desired.find((t) => t.percent === 100)?.tag).toBe('resume-999-1');
+    expect(a.snapshot.desired.find((t) => t.tag === 'resume-888-1')?.percent).toBe(0);
+  });
+  it.each(['599', '601', 'incomplete', 'wrongRevision', 'wrongReceipt'])(
+    'refuses invalid unattached R drain %s',
+    (kind) => {
+      const s = acceptAlreadyPausedRecovery(
+          step(agentReady(), 'createR'),
+          step(agentReady(), 'createR').snapshot,
+        ),
+        e = {
+          beforeReceipt: s.receipt,
+          revision: releaseIdentity(s.context, 'R').revision,
+          drainSeconds: 600,
+          drainCompleted: true,
+        };
+      if (kind === '599' || kind === '601') e.drainSeconds = Number(kind);
+      if (kind === 'incomplete') e.drainCompleted = false;
+      if (kind === 'wrongRevision') e.revision = s.context.canonical;
+      if (kind === 'wrongReceipt') e.beforeReceipt = digest('other');
+      expect(() => acceptUnattachedRDrain(s, e)).toThrow();
+    },
+  );
+  it('requires exact600 in captured retirement evidence', () => {
+    expect(() => retired({ drainSeconds: 601 })).toThrow();
   });
 });

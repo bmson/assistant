@@ -88,6 +88,8 @@ export type State = {
   phase: Phase;
   snapshot: Snapshot;
   receipt: string;
+  previousReceipt: string | null;
+  canonicalIdentity: Row;
   ordinal: number;
   retiredTags: string[];
   admissionPossible: boolean;
@@ -272,6 +274,8 @@ export function captureLifecycle(c: Context, s: Snapshot): State {
   const state = {
     context: clone(c),
     phase: 'captured' as const,
+    previousReceipt: null,
+    canonicalIdentity: clone(s.desired.find((r) => r.percent === 100) as Row),
     snapshot: clone(s),
     ordinal: 0,
     retiredTags: [...c.retiredTags].sort(),
@@ -280,6 +284,23 @@ export function captureLifecycle(c: Context, s: Snapshot): State {
     pending: null,
   };
   return { ...state, receipt: digest(state) };
+}
+/** Detects changes to a sealed projection. Durable origin/anti-replay remains an adapter requirement. */
+export function verifyLifecycleState(s: State): void {
+  const { receipt, ...body } = s;
+  hash(receipt);
+  assert(equal(digest(body), receipt));
+  if (s.previousReceipt !== null) hash(s.previousReceipt);
+}
+function seal(s: State, changes: Partial<State>): State {
+  verifyLifecycleState(s);
+  const { receipt: _prior, ...body } = {
+    ...clone(s),
+    ...clone(changes),
+    previousReceipt: s.receipt,
+    ordinal: s.ordinal + 1,
+  };
+  return { ...body, receipt: digest(body) };
 }
 function allowed(s: State, mode: Mode) {
   assert(!s.pending && !s.retirementAttempt);
@@ -299,6 +320,7 @@ function allowed(s: State, mode: Mode) {
   else assert(stage[mode] === s.phase);
 }
 export function planLifecycleAction(s: State, mode: Mode): Plan {
+  verifyLifecycleState(s);
   context(s.context);
   assert(s.context.retiredTags.every((t) => s.retiredTags.includes(t)));
   validateSnapshot(s.snapshot, s.retiredTags);
@@ -324,7 +346,14 @@ export function planLifecycleAction(s: State, mode: Mode): Plan {
     traffic = traffic.filter((t) => t.tag !== id.tag);
   } else {
     const rev = mode === 'restoreC' ? c.canonical : mode === 'promoteR' ? r.revision : p.revision;
-    let target = traffic.find((t) => t.revision === rev && t.tag);
+    const canonicalTag = s.canonicalIdentity.tag;
+    let target = traffic.find(
+      (t) =>
+        t.revision === rev &&
+        (mode === 'restoreC'
+          ? t.tag === canonicalTag && !s.retiredTags.includes(t.tag)
+          : t.tag === (mode === 'promoteR' ? r.tag : p.tag)),
+    );
     if (!target) {
       assert(mode === 'restoreC');
       target = row(rev, '', 0);
@@ -363,51 +392,31 @@ export function beginLifecycleAttempt(s: State, p: Plan): State {
   const retired = [...s.retiredTags];
   if (p.mode === 'closeP' || p.mode === 'closeR')
     retired.push(releaseIdentity(s.context, p.mode === 'closeP' ? 'P' : 'R').tag);
-  return {
-    ...clone(s),
+  return seal(s, {
     retiredTags: [...new Set(retired)].sort(),
     admissionPossible: s.admissionPossible || p.mode === 'createR',
     pending: { plan: clone(p), operation: null, outcome: 'attempted' },
-  };
+  });
 }
 export function bindLifecycleOperation(s: State, name: string): State {
-  assert(s.pending && !s.pending.operation);
+  verifyLifecycleState(s);
+  assert(s.pending && !s.pending.operation && s.pending.outcome === 'attempted');
   operationName({ name });
-  return { ...clone(s), pending: { ...clone(s.pending), operation: name } };
+  return seal(s, { pending: { ...clone(s.pending), operation: name } });
 }
 export function unknownLifecycleOutcome(s: State): State {
+  verifyLifecycleState(s);
   assert(s.pending);
-  return { ...clone(s), pending: { ...clone(s.pending), outcome: 'unknown' } };
+  return seal(s, { pending: { ...clone(s.pending), outcome: 'unknown' } });
 }
 function advance(s: State, phase: Phase, after: Snapshot, retired = s.retiredTags): State {
-  const next = {
-    ...clone(s),
+  return seal(s, {
     phase,
     snapshot: clone(after),
     retiredTags: [...retired].sort(),
-    ordinal: s.ordinal + 1,
     pending: null,
     retirementAttempt: null,
-  };
-  return {
-    ...next,
-    receipt: digest({
-      prior: s.receipt,
-      contextSha256: digest(s.context),
-      reviewedPlanSha256: s.pending ? digest(s.pending.plan) : null,
-      operation: s.pending?.operation ?? s.retirementAttempt?.operation ?? null,
-      ordinal: next.ordinal,
-      phase,
-      source: s.context.source,
-      manifest: s.context.manifest,
-      runId: s.context.runId,
-      attempt: s.context.attempt,
-      before: digest(s.snapshot),
-      after: digest(after),
-      retired: next.retiredTags,
-      admissionPossible: next.admissionPossible,
-    }),
-  };
+  });
 }
 function changed(before: Snapshot, after: Snapshot, tombstones: string[]) {
   validateSnapshot(after, tombstones);
@@ -433,6 +442,7 @@ export function settleLifecycleAttempt(
       completion.responseService === WEB_SERVICE,
   );
   const operation = completion.name;
+  verifyLifecycleState(s);
   const pending = s.pending;
   assert(pending && pending.operation === operation);
   operationName({ name: operation });
@@ -494,10 +504,10 @@ export function settleLifecycleAttempt(
 }
 /** Durable intent for the existing retirement executor; conservatively tombstone all possible removals. */
 export function beginCapturedRetirement(s: State): State {
+  verifyLifecycleState(s);
   assert(!s.pending && !s.retirementAttempt && s.phase === 'promotedP' && !s.admissionPossible);
   const keep = releaseIdentity(s.context, 'P').tag;
-  return {
-    ...clone(s),
+  return seal(s, {
     retiredTags: [
       ...new Set([
         ...s.retiredTags,
@@ -505,16 +515,22 @@ export function beginCapturedRetirement(s: State): State {
       ]),
     ].sort(),
     retirementAttempt: { operation: null, outcome: 'attempted' },
-  };
+  });
 }
 export function bindCapturedRetirementOperation(s: State, name: string): State {
-  assert(s.retirementAttempt && !s.retirementAttempt.operation);
+  verifyLifecycleState(s);
+  assert(
+    s.retirementAttempt &&
+      !s.retirementAttempt.operation &&
+      s.retirementAttempt.outcome === 'attempted',
+  );
   operationName({ name });
-  return { ...clone(s), retirementAttempt: { ...clone(s.retirementAttempt), operation: name } };
+  return seal(s, { retirementAttempt: { ...clone(s.retirementAttempt), operation: name } });
 }
 export function unknownCapturedRetirement(s: State): State {
+  verifyLifecycleState(s);
   assert(s.retirementAttempt);
-  return { ...clone(s), retirementAttempt: { ...clone(s.retirementAttempt), outcome: 'unknown' } };
+  return seal(s, { retirementAttempt: { ...clone(s.retirementAttempt), outcome: 'unknown' } });
 }
 /** Consumes supplied existing retirement evidence; does not replace its planner/executor/drain. */
 export function acceptCapturedRetirement(
@@ -534,6 +550,7 @@ export function acceptCapturedRetirement(
     operation: string;
   },
 ): State {
+  verifyLifecycleState(s);
   assert(
     !s.pending &&
       s.phase === 'promotedP' &&
@@ -577,6 +594,7 @@ export function acceptAgentReady(
     stableGeneration: string;
   },
 ): State {
+  verifyLifecycleState(s);
   assert(
     !s.pending &&
       s.phase === 'retired' &&
@@ -589,6 +607,7 @@ export function acceptAgentReady(
 }
 /** Already paused is a read-only recovery checkpoint, not a redundant mutation. */
 export function acceptAlreadyPausedRecovery(s: State, fresh: Snapshot): State {
+  verifyLifecycleState(s);
   assert(!s.pending && s.admissionPossible && ['createdR', 'attachedR'].includes(s.phase));
   validateSnapshot(fresh, s.retiredTags);
   assert(equal(fresh, s.snapshot));
