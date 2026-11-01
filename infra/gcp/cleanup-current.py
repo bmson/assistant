@@ -8,6 +8,7 @@ import argparse
 import concurrent.futures
 import datetime
 import json
+from pathlib import Path
 import re
 import subprocess
 import threading
@@ -103,6 +104,100 @@ class Cloud:
 RUN = "run.googleapis.com"
 ARTIFACTS = "artifactregistry.googleapis.com"
 CONTAINER_FIELDS = "containers(image,env(valueSource)),volumes(secret)"
+RECOVERY_ALLOWLIST = Path(__file__).with_name("recovery-retention.json")
+RECOVERY_PROJECT = "bmson-assistant"
+RECOVERY_REGION = "us-west1"
+RECOVERY_REPOSITORY = "assistant"
+RECOVERY_COMPONENTS = {"agent", "web", "browser", "code", "processor"}
+
+
+def _strict_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise RuntimeError(f"Recovery retention configuration has duplicate key: {key}")
+        result[key] = value
+    return result
+
+
+def load_recovery_allowlist(path, args, now=None):
+    """Load an optional exact recovery set. Patterns and mutable tags are rejected."""
+    if path.is_symlink():
+        raise RuntimeError("Recovery retention configuration must not be a symlink")
+    if not path.exists():
+        return None
+    if not path.is_file() or path.stat().st_size > 65536:
+        raise RuntimeError("Recovery retention configuration must be a bounded regular file")
+    try:
+        config = json.loads(path.read_text(), object_pairs_hook=_strict_json_object)
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"Recovery retention configuration is invalid: {error}") from None
+    required = {
+        "schemaVersion", "project", "region", "repository", "expiresAt",
+        "sourceSHA", "configProof", "procedureReference", "images", "revisions",
+    }
+    if not isinstance(config, dict) or set(config) != required:
+        raise RuntimeError("Recovery retention configuration has unknown or missing fields")
+    if (type(config["schemaVersion"]) is not int or config["schemaVersion"] != 1 or
+            config["project"] != RECOVERY_PROJECT or config["region"] != RECOVERY_REGION or
+            config["repository"] != RECOVERY_REPOSITORY or args.project != RECOVERY_PROJECT or
+            args.region != RECOVERY_REGION or args.repository != RECOVERY_REPOSITORY):
+        raise RuntimeError("Recovery retention is pinned to bmson-assistant/us-west1/assistant")
+    if not isinstance(config["sourceSHA"], str) or not re.fullmatch(r"[0-9a-f]{40}", config["sourceSHA"]):
+        raise RuntimeError("Recovery retention sourceSHA must be a full lowercase git SHA")
+    if not isinstance(config["configProof"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", config["configProof"]):
+        raise RuntimeError("Recovery retention configProof must be a sha256 digest")
+    procedure = config["procedureReference"]
+    if not isinstance(procedure, str) or not procedure.strip() or len(procedure) > 500:
+        raise RuntimeError("Recovery retention requires a bounded procedureReference")
+    try:
+        expiry_text = config["expiresAt"]
+        rfc3339 = (r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+                   r"(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)")
+        if not isinstance(expiry_text, str) or not re.fullmatch(rfc3339, expiry_text):
+            raise ValueError("RFC3339 timestamp required")
+        expiry = datetime.datetime.fromisoformat(expiry_text.replace("Z", "+00:00"))
+        if expiry.tzinfo is None:
+            raise ValueError("timezone required")
+        expiry = expiry.astimezone(datetime.timezone.utc)
+    except (AttributeError, TypeError, ValueError):
+        raise RuntimeError("Recovery retention expiresAt must be an RFC3339 timestamp with timezone") from None
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if expiry <= now or expiry > now + datetime.timedelta(days=7):
+        raise RuntimeError("Recovery retention expiry must be in the future and no more than seven days away")
+
+    images = config["images"]
+    if not isinstance(images, dict) or set(images) - RECOVERY_COMPONENTS:
+        raise RuntimeError("Recovery retention images must name only agent, web, browser, code, or processor")
+    image_refs, refs_by_component = [], {}
+    for component, refs in images.items():
+        if not isinstance(refs, list) or not refs:
+            raise RuntimeError(f"Recovery retention {component} images must be a nonempty list")
+        pattern = (rf"{re.escape(RECOVERY_REGION)}-docker\.pkg\.dev/{RECOVERY_PROJECT}/"
+                   rf"{RECOVERY_REPOSITORY}/{component}@sha256:[0-9a-f]{{64}}")
+        for ref in refs:
+            if not isinstance(ref, str) or not re.fullmatch(pattern, ref):
+                raise RuntimeError(f"Recovery retention has a non-exact {component} image reference")
+            image_refs.append(ref)
+            refs_by_component.setdefault(component, []).append(ref)
+    if len(image_refs) != len(set(image_refs)):
+        raise RuntimeError("Recovery retention contains duplicate image references")
+
+    revisions = config["revisions"]
+    revision_pattern = (rf"projects/{RECOVERY_PROJECT}/locations/{RECOVERY_REGION}/"
+                        r"services/assistant-(?:agent|web)/revisions/[a-z0-9-]+")
+    if not isinstance(revisions, list) or any(
+        not isinstance(name, str) or not re.fullmatch(revision_pattern, name) for name in revisions
+    ):
+        raise RuntimeError("Recovery retention has a non-exact or unsupported revision name")
+    if len(revisions) != len(set(revisions)):
+        raise RuntimeError("Recovery retention contains duplicate revision names")
+    components = [name.split("/services/assistant-", 1)[1].split("/", 1)[0] for name in revisions]
+    if (len(refs_by_component.get("agent", [])) != 1 or len(refs_by_component.get("web", [])) != 1 or
+            components.count("agent") != 1 or components.count("web") != 1 or len(components) != 2):
+        raise RuntimeError("Recovery retention requires one exact agent and web image and revision")
+    return {**config, "imageRefs": image_refs, "imageRefsByComponent": refs_by_component,
+            "revisionNames": revisions}
 
 
 def execution_is_active(execution):
@@ -355,7 +450,7 @@ def _validate_service_settled(service, project, region):
     return current
 
 
-def runtime_inventory(cloud, project, region, repository="assistant"):
+def runtime_inventory(cloud, project, region, repository="assistant", recovery=None):
     root = f"projects/{project}/locations/{region}"
     services = cloud.listing(RUN, f"v2/{root}/services", "services", {
         "fields": "services(name,generation,observedGeneration,reconciling,terminalCondition,latestReadyRevision,latestCreatedRevision,traffic,trafficStatuses,uri,urls),nextPageToken",
@@ -382,6 +477,7 @@ def runtime_inventory(cloud, project, region, repository="assistant"):
     if len(job_names) != len(set(job_names)):
         raise RuntimeError("Cloud Run job inventory contains duplicate resources")
     specs, retired_revisions, revision_inventory = [], [], []
+    observed_recovery_revisions = set()
     for service, service_name in zip(services, service_names):
         current = _validate_service_settled(service, project, region)
         addressable_targets = _normalize_traffic_rows(service, current)
@@ -397,7 +493,12 @@ def runtime_inventory(cloud, project, region, repository="assistant"):
             if full_name in revision_names:
                 raise RuntimeError(f"Cloud Run revision inventory is duplicated: {service['name']}")
             revision_names.append(full_name)
-        retained_names = sorted({current, *addressable_targets.values()})
+        recovery_names = sorted(
+            name for name in (recovery["revisionNames"] if recovery else [])
+            if name.startswith(f"{service_name}/revisions/")
+        )
+        observed_recovery_revisions.update(recovery_names)
+        retained_names = sorted({current, *addressable_targets.values(), *recovery_names})
         if not set(retained_names).issubset(set(revision_names)):
             raise RuntimeError(f"A current or tagged Cloud Run revision is missing from the revision inventory: {service_name}")
         retained_specs = {}
@@ -407,6 +508,16 @@ def runtime_inventory(cloud, project, region, repository="assistant"):
                 raise RuntimeError(f"Cloud Run retained revision spec is missing or mismatched: {service_name}")
             target_prefix = f"{region}-docker.pkg.dev/{project}/{repository}/"
             _validate_runtime_spec(spec, service_name, target_prefix)
+            if name in recovery_names:
+                component = service_name.rsplit("/", 1)[-1].removeprefix("assistant-")
+                containers = spec.get("containers")
+                if not isinstance(containers, list) or len(containers) != 1:
+                    raise RuntimeError(f"Allowlisted recovery revision has ambiguous containers: {name}")
+                image_ref = containers[0].get("image")
+                expected_prefix = f"{RECOVERY_REGION}-docker.pkg.dev/{RECOVERY_PROJECT}/{RECOVERY_REPOSITORY}/{component}@sha256:"
+                if (not isinstance(image_ref, str) or not image_ref.startswith(expected_prefix) or
+                        image_ref not in recovery["imageRefsByComponent"].get(component, [])):
+                    raise RuntimeError(f"Allowlisted recovery revision image is not in its exact component allowlist: {name}")
             retained_specs[name] = spec
             specs.append(spec)
         revision_inventory.append({
@@ -418,6 +529,8 @@ def runtime_inventory(cloud, project, region, repository="assistant"):
         # Only remove this app's history, never another service's revisions.
         if service_name.rsplit("/", 1)[-1] in ("assistant-agent", "assistant-web"):
             retired_revisions.extend(name for name in revision_names if name not in retained_names)
+    if recovery and observed_recovery_revisions != set(recovery["revisionNames"]):
+        raise RuntimeError("Allowlisted recovery revision is missing from the owned service inventory")
     for job, job_name in zip(jobs, job_names):
         if not isinstance(job, dict) or set(job) - {"name", "template"}:
             raise RuntimeError("Cloud Run job inventory row is malformed")
@@ -451,6 +564,21 @@ def image_version(image):
     prefix, suffix = image["name"].split("/dockerImages/", 1)
     package, digest = urllib.parse.unquote(suffix).rsplit("@", 1)
     return f"{prefix}/packages/{urllib.parse.quote(package, safe='')}/versions/{digest}"
+
+
+def validate_allowlisted_images(images, refs):
+    """Require every recovery digest to resolve to one exact registry object."""
+    for ref in refs:
+        matches = [image for image in images if image.get("uri") == ref]
+        if len(matches) != 1:
+            state = "missing" if not matches else "ambiguous"
+            raise RuntimeError(f"Allowlisted recovery image is {state}: {ref}")
+        component = ref.rsplit("/", 1)[-1].split("@", 1)[0]
+        digest = ref.rsplit("@", 1)[-1]
+        expected = (f"projects/{RECOVERY_PROJECT}/locations/{RECOVERY_REGION}/repositories/"
+                    f"{RECOVERY_REPOSITORY}/packages/{component}/versions/{digest}")
+        if image_version(matches[0]) != expected:
+            raise RuntimeError(f"Allowlisted recovery image did not match its registry digest: {ref}")
 
 
 def plan_images(images, tags, runtime_images, related=None):
@@ -569,13 +697,18 @@ def delete_image(cloud, name):
             raise
 
 
-def inventory(cloud, args):
-    specs, revisions, fingerprint = runtime_inventory(cloud, args.project, args.region, args.repository)
+def inventory(cloud, args, recovery_path=RECOVERY_ALLOWLIST):
+    recovery = load_recovery_allowlist(recovery_path, args)
+    specs, revisions, fingerprint = runtime_inventory(
+        cloud, args.project, args.region, args.repository, recovery,
+    )
     root = f"projects/{args.project}/locations/{args.region}/repositories/{args.repository}"
     repository = cloud.request(ARTIFACTS, f"v1/{root}")
     if repository.get("dockerConfig", {}).get("immutableTags"):
         raise RuntimeError("Cleanup requires a repository with mutable tags")
     images = cloud.listing(ARTIFACTS, f"v1/{root}/dockerImages", "dockerImages")
+    if recovery:
+        validate_allowlisted_images(images, recovery["imageRefs"])
     packages = sorted({image_version(image).split("/versions/", 1)[0] for image in images})
     tags = []
     for package in packages:
@@ -586,9 +719,12 @@ def inventory(cloud, args):
                              if container["image"].startswith(image_root)})
     if not runtime_images:
         raise RuntimeError("No current images found in this repository; refusing to empty it")
-    kept_images, _ = plan_images(images, tags, runtime_images)
+    retained_refs = runtime_images + (recovery["imageRefs"] if recovery else [])
+    kept_images, _ = plan_images(images, tags, retained_refs)
     related = image_referrers(cloud, images, kept_images)
-    kept_images, delete_images = plan_images(images, tags, runtime_images, related)
+    kept_images, delete_images = plan_images(images, tags, retained_refs, related)
+    if recovery:
+        revisions = [name for name in revisions if name not in recovery["revisionNames"]]
     return {
         "repository": root, "repositoryBytes": int(repository.get("sizeBytes", 0)),
         "runtimeImages": runtime_images, "keepImages": kept_images, "deleteImages": delete_images,
@@ -596,6 +732,9 @@ def inventory(cloud, args):
         # history: this region's Cloud Run inventory cannot prove ownership.
         "keepSecrets": [], "deleteSecrets": [], "deleteRevisions": revisions,
         "fingerprint": fingerprint, "secretFingerprint": [],
+        "recoveryRetention": ({key: recovery[key] for key in (
+            "expiresAt", "sourceSHA", "configProof", "procedureReference", "imageRefs", "revisionNames",
+        )} if recovery else None),
     }
 
 
@@ -603,7 +742,8 @@ def apply(cloud, args, plan):
     # Re-read everything before the first mutation. No partially assembled plan
     # or changed live deployment is allowed to trigger deletion.
     fresh = inventory(cloud, args)
-    for key in ("fingerprint", "secretFingerprint", "keepImages", "deleteImages", "deleteRevisions"):
+    for key in ("fingerprint", "secretFingerprint", "keepImages", "deleteImages",
+                "deleteRevisions", "recoveryRetention"):
         if plan[key] != fresh[key]:
             raise RuntimeError("Inventory changed during planning; rerun cleanup after deployment settles")
 
