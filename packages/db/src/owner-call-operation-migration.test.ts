@@ -286,14 +286,14 @@ beforeAll(async () => {
     await exec('pnpm', ['migrate'], { cwd, env, timeout: 45_000, maxBuffer: 2 * 1024 * 1024 });
     client = postgres(target.databaseUrl, { max: 1, onnotice: () => {} });
     const expectedFinalHash = createHash('sha256')
-      .update(await readFile(join(folder, '0133_owner_call_grant_operation_receipts.sql')))
+      .update(await readFile(join(folder, '0134_owner_memory_creation.sql')))
       .digest('hex');
     const [endpoint] = await client`
       SELECT hash FROM drizzle.__drizzle_migrations ORDER BY id DESC LIMIT 1`;
     expect(endpoint?.hash).toBe(expectedFinalHash);
     const [ledgerCount] =
       await client`SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations`;
-    expect(ledgerCount?.count).toBe(134);
+    expect(ledgerCount?.count).toBe(135);
     const ledgerBeforeRerun = await client`
       SELECT hash,created_at::text AS "createdAt"
       FROM drizzle.__drizzle_migrations ORDER BY id`;
