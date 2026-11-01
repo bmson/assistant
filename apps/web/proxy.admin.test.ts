@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 const config = vi.hoisted(() => ({
   PERSISTENCE_DRIVER: 'firestore',
   RESTORE_REHEARSAL: false,
+  ASSISTANT_RELEASE_WRITES_PAUSED: false,
   WEB_APP_PREVIEW_ENABLED: false,
   AUTH_URL: '',
 }));
@@ -28,6 +29,54 @@ describe.each(['firestore', 'postgres'])('mobile administration in %s mode', (dr
         expect(response.status).toBe(200);
         expect(response.headers.get('location')).toBeNull();
         expect(response.headers.get('x-middleware-next')).toBe('1');
+      }
+    }
+  });
+  it('admits the exact Costs page GET and cap-action POST to existing owner checks', () => {
+    config.PERSISTENCE_DRIVER = driver;
+    for (const path of ['/costs', '/costs?period=2026-10']) {
+      for (const method of ['GET', 'POST']) {
+        const response = proxy(new NextRequest(`https://assistant.test${path}`, { method }));
+        expect(response.status).toBe(200);
+        expect(response.headers.get('location')).toBeNull();
+        expect(response.headers.get('x-middleware-next')).toBe('1');
+      }
+    }
+  });
+  it('preserves unsupported Costs methods and descendant route boundaries', () => {
+    config.PERSISTENCE_DRIVER = driver;
+    for (const method of ['PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
+      const response = proxy(new NextRequest('https://assistant.test/costs', { method }));
+      expect(response.status).toBe(410);
+      expect(response.headers.get('x-middleware-next')).toBeNull();
+    }
+    for (const path of ['/costs', '/costs/extra', '/costs-export']) {
+      const response = proxy(new NextRequest(`https://assistant.test${path}`, { method: 'HEAD' }));
+      expect(response.status).toBe(307);
+      expect(response.headers.get('location')).toBe('https://assistant.test/settings');
+      expect(response.headers.get('x-middleware-next')).toBeNull();
+    }
+    for (const path of ['/costs/extra', '/costs-export']) {
+      expect(proxy(new NextRequest(`https://assistant.test${path}`)).status).toBe(307);
+      expect(
+        proxy(new NextRequest(`https://assistant.test${path}`, { method: 'POST' })).status,
+      ).toBe(410);
+    }
+  });
+  it('keeps Costs behind the earlier release-pause and restore-rehearsal fences', () => {
+    config.PERSISTENCE_DRIVER = driver;
+    for (const fence of ['pause', 'rehearsal']) {
+      config.ASSISTANT_RELEASE_WRITES_PAUSED = fence === 'pause';
+      config.RESTORE_REHEARSAL = fence === 'rehearsal';
+      try {
+        for (const method of ['GET', 'POST', 'HEAD', 'DELETE']) {
+          const response = proxy(new NextRequest('https://assistant.test/costs', { method }));
+          expect(response.status).toBe(503);
+          expect(response.headers.get('x-middleware-next')).toBeNull();
+        }
+      } finally {
+        config.ASSISTANT_RELEASE_WRITES_PAUSED = false;
+        config.RESTORE_REHEARSAL = false;
       }
     }
   });

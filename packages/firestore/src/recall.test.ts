@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { EmbeddingSpace, Records } from '@assistant/persistence';
 import { FieldValue, Query } from '@google-cloud/firestore';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -18,6 +18,7 @@ const space: EmbeddingSpace = {
 const vector = Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1 : 0));
 const now = new Date('2026-09-12T12:00:00Z');
 const before = new Date(now.getTime() - 3600000);
+const hashContent = (content: string) => createHash('sha256').update(content).digest('hex');
 
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
   'Firestore private history and graph recall',
@@ -417,7 +418,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         id,
         agentId: 'owner',
         content: `Fact ${id}`,
-        contentHash: `hash-${id}`,
+        contentHash: hashContent(`Fact ${id}`),
         createdAt: before,
         expiresAt: null,
         embedding: vector,
@@ -496,11 +497,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       await store.doc('knowledgeGraphRelations', connected).update({ reviewStatus: 'pending' });
       await store.doc('knowledgeGraphSources', 'neighbor').update({ contentHash: 'changed' });
       expect(await repo.connected(follow)).toEqual([]);
-      await store.doc('knowledgeGraphSources', 'neighbor').update({ contentHash: 'hash-neighbor' });
+      await store
+        .doc('knowledgeGraphSources', 'neighbor')
+        .update({ contentHash: hashContent('Fact neighbor') });
       await store.doc('knowledgeGraphEntities', 'c').update({ agentId: 'foreign' });
       expect(await repo.connected(follow)).toEqual([]);
       await store.doc('knowledgeGraphEntities', 'c').update({ agentId: 'owner' });
-      await new FirestoreMemoryRepository(store, space).forget('hash-neighbor');
+      await new FirestoreMemoryRepository(store, space).forget(hashContent('Fact neighbor'));
       expect(await repo.connected(follow)).toEqual([]);
     });
 

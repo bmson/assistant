@@ -383,6 +383,32 @@ describe('admitted public city events through the complete offline executor', ()
     expect(f.router.step).not.toHaveBeenCalled();
   });
 
+  it('applies a supported free-outdoor filter to a linked public followup without private reads', async () => {
+    const f = fixture();
+    const first = await f.turn('Find public events in San Francisco this weekend.');
+    expect(first.calls.map((call) => call.toolName)).toEqual(['web.search', 'web.fetch']);
+    const refined = await f.turn('Only free outdoor things.');
+    expect(refined.calls.map((call) => call.toolName)).toEqual(['web.search', 'web.fetch']);
+    expect(refined.calls[0]?.args.query).toContain('San Francisco');
+    expect(refined.calls[0]?.args.query).toContain('2026-10-24 to before 2026-10-26');
+    expect(refined.calls[0]?.args.query).toContain('free admission');
+    expect(refined.calls[0]?.args.query).toContain('outdoor activities');
+    const scope = PublicActivityScopeDataSchema.parse(
+      TaskStateSchema.parse(refined.task.state).plannerState.publicActivityScope,
+    );
+    expect(scope.filters).toEqual([
+      { kind: 'free', value: 'free admission', basisMessageId: expect.any(String) },
+      { kind: 'category', value: 'outdoor activities', basisMessageId: expect.any(String) },
+    ]);
+    expect(scope.sourceExclusions).toEqual(['calendar', 'mail']);
+    expect(refined.reply?.text).not.toMatch(/Secret Hall|10:00|\$15|Sold out|PRIVATE_/);
+    expect(f.dispatched.every((call) => /^web\.(search|fetch)$/.test(call.toolName))).toBe(true);
+    expect(f.dispatched.every((call) => call.scopes.join(',') === 'external_read')).toBe(true);
+    expect(f.forbidden).not.toHaveBeenCalled();
+    expect(f.commitmentReads).not.toHaveBeenCalled();
+    expect(f.router.step).not.toHaveBeenCalled();
+  });
+
   it.each(['snippet', 'wrong-city', 'wrong-year', 'failed'] as const)(
     'rejects %s evidence without private fallback',
     async (mode) => {

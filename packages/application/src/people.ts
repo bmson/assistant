@@ -34,7 +34,11 @@ import {
   type KnowledgeGraphEntityView,
   type KnowledgeGraphNeighborEdge,
 } from './knowledge-graph.js';
-import { type PersonGraphEdgeInput, projectPersonGraph } from './people-graph-projection.js';
+import {
+  type PersonGraphEdgeInput,
+  presentPersonGraphRelation,
+  projectPersonGraph,
+} from './people-graph-projection.js';
 import {
   type BirthdayView,
   derivePersonGroup,
@@ -42,7 +46,6 @@ import {
   turningAge,
 } from './people-presentation.js';
 import { getPersonProfile, type MemorySnapshot, type PersonProfile } from './profile/queries.js';
-import { presentKnowledgeGraphRelation } from './relationship-presentation.js';
 
 export type {
   BirthdayView,
@@ -124,6 +127,8 @@ export interface PersonRelation {
   validFrom: string | null;
   validUntil: string | null;
   reviewStatus: 'unreviewed' | 'confirmed' | 'rejected';
+  assertionTiming?: 'unspecified' | 'present' | 'past';
+  sourceMemoryId?: string;
 }
 
 /** A connection to something that is not a person — a place, employer, event. */
@@ -135,6 +140,8 @@ export interface PersonConnection {
   otherKind: string;
   validFrom: string | null;
   validUntil: string | null;
+  /** Exact backing saved memory, when the read adapter can identify it. */
+  sourceMemoryId?: string;
 }
 
 /**
@@ -243,17 +250,15 @@ function presentEdge(edge: KnowledgeGraphNeighborEdge, selfLabel: string) {
   // `label` already carries the owner's preferred spelling — the neighbourhood
   // query coalesces it in SQL.
   const otherLabel = edge.other.label;
-  return edge.outbound
-    ? presentKnowledgeGraphRelation({
-        subjectLabel: selfLabel,
-        predicate: edge.predicate,
-        objectLabel: otherLabel,
-      })
-    : presentKnowledgeGraphRelation({
-        subjectLabel: otherLabel,
-        predicate: edge.predicate,
-        objectLabel: selfLabel,
-      });
+  return presentPersonGraphRelation({
+    subjectLabel: edge.outbound ? selfLabel : otherLabel,
+    predicate: edge.predicate,
+    objectLabel: edge.outbound ? otherLabel : selfLabel,
+    otherIsPerson: edge.other.kind === 'person',
+    validFrom: edge.validFrom,
+    validUntil: edge.validUntil,
+    assertionTiming: edge.assertionTiming,
+  });
 }
 
 /**
@@ -326,6 +331,8 @@ export async function getPersonDossier(
         validFrom: edge.validFrom,
         validUntil: edge.validUntil,
         reviewStatus: edge.reviewStatus,
+        ...(edge.assertionTiming ? { assertionTiming: edge.assertionTiming } : {}),
+        sourceMemoryId: edge.sourceMemoryId,
       });
       if (ORIGIN_PREDICATES.has(edge.predicate)) {
         origins.push({
@@ -336,6 +343,7 @@ export async function getPersonDossier(
           otherKind: edge.other.kind,
           validFrom: edge.validFrom,
           validUntil: edge.validUntil,
+          sourceMemoryId: edge.sourceMemoryId,
         });
       }
       continue;
@@ -349,6 +357,7 @@ export async function getPersonDossier(
       otherKind: edge.other.kind,
       validFrom: edge.validFrom,
       validUntil: edge.validUntil,
+      sourceMemoryId: edge.sourceMemoryId,
     };
 
     // Only an open `lives_in` is where they live now; a closed one is a past

@@ -297,6 +297,7 @@ describe('production proxy and authenticated recall source route', () => {
     '/profile',
     '/people',
     '/profile/knowledge',
+    '/profile/memories',
     '/people/123e4567-e89b-42d3-a456-426614174000',
   ])('admits exact owner-authenticated browse pages without write authority: %s', (path) => {
     for (const method of ['GET', 'HEAD']) {
@@ -321,7 +322,7 @@ describe('production proxy and authenticated recall source route', () => {
   });
   it.each([
     '/profile/about',
-    '/profile/memories',
+    '/profile/memories/extra',
     '/profile/voice',
     '/profile/data',
     '/profile/knowledge/extra',

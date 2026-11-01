@@ -1,9 +1,102 @@
 import { randomUUID } from 'node:crypto';
-import type { MemoryMutation, ProfileMemoryManagementRepository } from '@assistant/persistence';
+import {
+  type MemoryMutation,
+  nextOwnerCorrection,
+  type ProfileMemoryManagementRepository,
+} from '@assistant/persistence';
 import { and, eq, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { OWNER_CARD_ADVISORY_LOCK } from './owner-card-compilation-repository.js';
 import { agents, contacts, memories, memoryTombstones, ownerCard } from './schema.js';
+
+const ownedForMutation = async (tx: Db, agentId: string, id: string) =>
+  (
+    await tx
+      .select()
+      .from(memories)
+      .where(and(eq(memories.id, id), eq(memories.agentId, agentId)))
+      .for('update')
+      .limit(1)
+  )[0];
+const tombstoned = async (tx: Db, contentHash: string) =>
+  Boolean(
+    (
+      await tx
+        .select({ id: memoryTombstones.id })
+        .from(memoryTombstones)
+        .where(eq(memoryTombstones.contentHash, contentHash))
+        .limit(1)
+    )[0],
+  );
+
+/** Existing correction primitive: caller owns the transaction/serialization policy. No nested lease or advisory lock. */
+export async function correctPostgresProfileMemoryInTransaction(
+  tx: Db,
+  agentId: string,
+  input: Parameters<ProfileMemoryManagementRepository['correct']>[0],
+): Promise<MemoryMutation> {
+  const current = await ownedForMutation(tx, agentId, input.memoryId);
+  if (!current) return { status: 'not-found' };
+  if (current.contentHash !== input.expectedContentHash) return { status: 'stale' };
+  if (await tombstoned(tx, current.contentHash)) return { status: 'tombstoned' };
+  const ownerCorrection = nextOwnerCorrection({
+    previous: current.ownerCorrection,
+    priorContentHash: current.contentHash,
+    currentContentHash: input.contentHash,
+    correctedAt: new Date(),
+  });
+  if (input.contentHash !== current.contentHash) {
+    if (await tombstoned(tx, input.contentHash)) return { status: 'tombstoned' };
+    const duplicate = (
+      await tx
+        .select({ id: memories.id })
+        .from(memories)
+        .where(eq(memories.contentHash, input.contentHash))
+        .limit(1)
+    )[0];
+    if (duplicate) return { status: 'duplicate' };
+    await tx
+      .insert(memoryTombstones)
+      .values({ contentHash: current.contentHash, reason: 'owner_correct' })
+      .onConflictDoNothing();
+  }
+  const row = (
+    await tx
+      .update(memories)
+      .set({
+        content: input.content,
+        contentHash: input.contentHash,
+        ownerCorrection,
+        embedding: input.embedding,
+        embeddingSpaceKey: input.embeddingSpaceKey ?? null,
+        confidence: '1.00',
+        ownerConfirmed: true,
+        originTrust: 'owner',
+        quarantined: false,
+      })
+      .where(
+        and(
+          eq(memories.id, input.memoryId),
+          eq(memories.agentId, agentId),
+          eq(memories.contentHash, input.expectedContentHash),
+        ),
+      )
+      .returning({
+        id: memories.id,
+        agentId: memories.agentId,
+        contentHash: memories.contentHash,
+      })
+  )[0];
+  return row ? { status: 'updated', memory: row } : { status: 'stale' };
+}
+
+/** Shared primary invalidation; compilation happens only after the durable correction. */
+export async function invalidatePostgresProfileOwnerCard(tx: Pick<Db, 'insert'>): Promise<void> {
+  await tx
+    .insert(ownerCard)
+    .values({ id: 1, content: '', compiledAt: sql`now()` })
+    .onConflictDoUpdate({ target: ownerCard.id, set: { content: '', compiledAt: sql`now()` } });
+}
 
 export function createPostgresProfileMemoryManagementRepository(
   db: Db,
@@ -24,14 +117,7 @@ export function createPostgresProfileMemoryManagementRepository(
       const ownerId = configuredAgentId ?? configured[0]?.id;
       if (!ownerId) throw new Error('Memory management requires exactly one configured agent');
       const result = await run(tx as unknown as Db, ownerId);
-      if (result.status === 'updated')
-        await tx
-          .insert(ownerCard)
-          .values({ id: 1, content: '', compiledAt: sql`now()` })
-          .onConflictDoUpdate({
-            target: ownerCard.id,
-            set: { content: '', compiledAt: sql`now()` },
-          });
+      if (result.status === 'updated') await invalidatePostgresProfileOwnerCard(tx);
       return result;
     });
   const owned = async (tx: Db, agentId: string, id: string) =>
@@ -44,25 +130,6 @@ export function createPostgresProfileMemoryManagementRepository(
     )[0];
   // Legacy profile writers do not share the owner-card advisory lock. Lock the
   // source row before reading its hash so a stale CAS cannot commit a tombstone.
-  const ownedForMutation = async (tx: Db, agentId: string, id: string) =>
-    (
-      await tx
-        .select()
-        .from(memories)
-        .where(and(eq(memories.id, id), eq(memories.agentId, agentId)))
-        .for('update')
-        .limit(1)
-    )[0];
-  const tombstoned = async (tx: Db, contentHash: string) =>
-    Boolean(
-      (
-        await tx
-          .select({ id: memoryTombstones.id })
-          .from(memoryTombstones)
-          .where(eq(memoryTombstones.contentHash, contentHash))
-          .limit(1)
-      )[0],
-    );
   const changed = (
     row: { id: string; agentId: string; contentHash: string } | undefined,
   ): MemoryMutation => (row ? { status: 'updated', memory: row } : { status: 'not-found' });
@@ -129,54 +196,7 @@ export function createPostgresProfileMemoryManagementRepository(
       ),
     ),
     correct: (input) =>
-      mutate(async (tx, agentId) => {
-        const current = await ownedForMutation(tx, agentId, input.memoryId);
-        if (!current) return { status: 'not-found' };
-        if (current.contentHash !== input.expectedContentHash) return { status: 'stale' };
-        if (await tombstoned(tx, current.contentHash)) return { status: 'tombstoned' };
-        if (input.contentHash !== current.contentHash) {
-          if (await tombstoned(tx, input.contentHash)) return { status: 'tombstoned' };
-          const duplicate = (
-            await tx
-              .select({ id: memories.id })
-              .from(memories)
-              .where(eq(memories.contentHash, input.contentHash))
-              .limit(1)
-          )[0];
-          if (duplicate) return { status: 'duplicate' };
-          await tx
-            .insert(memoryTombstones)
-            .values({ contentHash: current.contentHash, reason: 'owner_correct' })
-            .onConflictDoNothing();
-        }
-        const row = (
-          await tx
-            .update(memories)
-            .set({
-              content: input.content,
-              contentHash: input.contentHash,
-              embedding: input.embedding,
-              embeddingSpaceKey: input.embeddingSpaceKey ?? null,
-              confidence: '1.00',
-              ownerConfirmed: true,
-              originTrust: 'owner',
-              quarantined: false,
-            })
-            .where(
-              and(
-                eq(memories.id, input.memoryId),
-                eq(memories.agentId, agentId),
-                eq(memories.contentHash, input.expectedContentHash),
-              ),
-            )
-            .returning({
-              id: memories.id,
-              agentId: memories.agentId,
-              contentHash: memories.contentHash,
-            })
-        )[0];
-        return row ? { status: 'updated', memory: row } : { status: 'stale' };
-      }),
+      mutate((tx, agentId) => correctPostgresProfileMemoryInTransaction(tx, agentId, input)),
     forget: (id, reason) =>
       mutate(async (tx, agentId) => {
         const current = await ownedForMutation(tx, agentId, id);

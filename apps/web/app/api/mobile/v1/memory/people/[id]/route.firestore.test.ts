@@ -14,7 +14,7 @@ vi.mock('next/cache', () => ({ revalidatePath: vi.fn(), unstable_cache: (run: un
 
 import { getDb } from '@/lib/server';
 import { proxy } from '@/proxy';
-import { DELETE, POST } from './route';
+import { DELETE, GET, PATCH, POST } from './route';
 
 const emulatorHost = process.env.FIRESTORE_EMULATOR_HOST ?? '';
 const localEmulator = /^(?:127\.0\.0\.1|localhost):\d+$/.test(emulatorHost);
@@ -23,6 +23,7 @@ describe.skipIf(!localEmulator)('Firestore mobile people delete and merge', () =
   const installationId = `mobile-people-removal-${randomUUID()}`;
   const agentId = randomUUID();
   const ownerContactId = randomUUID();
+  const personContactId = randomUUID();
   const store = createInstallationStore({ projectId: 'demo-assistant-test', installationId });
 
   beforeAll(() => {
@@ -226,5 +227,133 @@ describe.skipIf(!localEmulator)('Firestore mobile people delete and merge', () =
     const response = await merge(ownerContactId, targetId);
     expect(response.status).toBe(409);
     expect((await store.doc('contacts', ownerContactId).get()).exists).toBe(true);
+  });
+
+  it('binds legacy identity edits to the revision shown by detail GET', async () => {
+    await person(personContactId, 'Rae Friend');
+    const detail = await GET(
+      new Request(`http://localhost/api/mobile/v1/memory/people/${personContactId}`),
+      { params: Promise.resolve({ id: personContactId }) },
+    );
+    expect(detail.status).toBe(200);
+    const profile = await detail.json();
+    const displayedRevision = profile.contact.identityRevision as string;
+    expect(displayedRevision).toMatch(/^[a-f0-9]{64}$/);
+
+    const missingRevision = await PATCH(
+      new Request(`http://localhost/api/mobile/v1/memory/people/${personContactId}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Unreviewed rename', relationship: 'friend', aliases: '' }),
+      }),
+      { params: Promise.resolve({ id: personContactId }) },
+    );
+    expect(missingRevision.status).toBe(428);
+    expect(await missingRevision.json()).toEqual({ error: 'review_required' });
+    expect((await store.doc('contacts', personContactId).get()).get('name')).toBe('Rae Friend');
+
+    const malformedRevision = await PATCH(
+      new Request(`http://localhost/api/mobile/v1/memory/people/${personContactId}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Malformed rename',
+          relationship: 'friend',
+          aliases: '',
+          expectedContactRevision: 'not-a-native-revision',
+        }),
+      }),
+      { params: Promise.resolve({ id: personContactId }) },
+    );
+    expect(malformedRevision.status).toBe(428);
+    expect(await malformedRevision.json()).toEqual({ error: 'review_required' });
+    expect((await store.doc('contacts', personContactId).get()).get('name')).toBe('Rae Friend');
+
+    const malformedRelationship = await PATCH(
+      new Request(`http://localhost/api/mobile/v1/memory/people/${personContactId}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Malformed compound edit',
+          relationship: 12,
+          aliases: '',
+          expectedContactRevision: displayedRevision,
+        }),
+      }),
+      { params: Promise.resolve({ id: personContactId }) },
+    );
+    expect(malformedRelationship.status).toBe(400);
+    expect((await store.doc('contacts', personContactId).get()).get('name')).toBe('Rae Friend');
+
+    const saved = await PATCH(
+      new Request(`http://localhost/api/mobile/v1/memory/people/${personContactId}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Rae New',
+          relationship: 'friend',
+          aliases: '',
+          expectedContactRevision: displayedRevision,
+        }),
+      }),
+      { params: Promise.resolve({ id: personContactId }) },
+    );
+    expect(saved.status).toBe(200);
+    expect((await store.doc('contacts', personContactId).get()).get('name')).toBe('Rae New');
+    expect((await store.doc('contacts', personContactId).get()).get('relationship')).toBe('friend');
+
+    const stale = await PATCH(
+      new Request(`http://localhost/api/mobile/v1/memory/people/${personContactId}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Overwrite from stale form',
+          relationship: 'friend',
+          aliases: '',
+          expectedContactRevision: displayedRevision,
+        }),
+      }),
+      { params: Promise.resolve({ id: personContactId }) },
+    );
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toEqual({ error: 'conflict' });
+    expect((await store.doc('contacts', personContactId).get()).get('name')).toBe('Rae New');
+  });
+
+  it('reports a committed identity edit when the follow-up profile-card refresh fails', async () => {
+    await person(personContactId, 'Mina Friend');
+    const detail = await GET(
+      new Request(`http://localhost/api/mobile/v1/memory/people/${personContactId}`),
+      { params: Promise.resolve({ id: personContactId }) },
+    );
+    const profile = await detail.json();
+    const expectedContactRevision = profile.contact.identityRevision as string;
+    const profileCommands = await import('@/lib/firestore-profile-commands');
+    const refresh = vi
+      .spyOn(profileCommands, 'recompileFirestoreProfileCard')
+      .mockRejectedValueOnce(new Error('derived refresh failed'));
+
+    try {
+      const saved = await PATCH(
+        new Request(`http://localhost/api/mobile/v1/memory/people/${personContactId}`, {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            name: 'Mina Renamed',
+            relationship: 'colleague',
+            aliases: '',
+            expectedContactRevision,
+          }),
+        }),
+        { params: Promise.resolve({ id: personContactId }) },
+      );
+      expect(saved.status).toBe(200);
+      expect(await saved.json()).toEqual({ ok: true, refreshPending: true });
+      const stored = await store.doc('contacts', personContactId).get();
+      expect(stored.get('name')).toBe('Mina Renamed');
+      expect(stored.get('relationship')).toBe('colleague');
+    } finally {
+      refresh.mockRestore();
+    }
   });
 });

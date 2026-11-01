@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { GRAPH_EXTRACTION_VERSION } from '@assistant/application/knowledge-graph';
 import { resetConfigForTest } from '@assistant/config';
 import {
@@ -31,6 +31,7 @@ import { POST as create, GET as list } from './route';
 
 const emulatorHost = process.env.FIRESTORE_EMULATOR_HOST ?? '';
 const localEmulator = /^(?:127\.0\.0\.1|localhost):\d+$/.test(emulatorHost);
+const contentHash = (content: string) => createHash('sha256').update(content).digest('hex');
 
 describe.skipIf(!localEmulator)('Firestore mobile Knowledge graph with PostgreSQL offline', () => {
   const installationId = `mobile-knowledge-${randomUUID()}`;
@@ -73,7 +74,7 @@ describe.skipIf(!localEmulator)('Firestore mobile Knowledge graph with PostgreSQ
       dimensions: 1536,
       revision: 'fixture-v1',
     }),
-    contentHash: `hash-${id}`,
+    contentHash: contentHash(content),
     subjectContactId: null,
     createdAt: now,
     ownerConfirmed: true,
@@ -132,21 +133,21 @@ describe.skipIf(!localEmulator)('Firestore mobile Knowledge graph with PostgreSQ
       store.doc('knowledgeGraphSources', activeMemoryId).set({
         memoryId: activeMemoryId,
         status: 'ready',
-        contentHash: `hash-${activeMemoryId}`,
+        contentHash: contentHash('Anna knows Baldvin'),
         subjectContactId: null,
         extractionVersion: GRAPH_EXTRACTION_VERSION,
       }),
       store.doc('knowledgeGraphSources', staleMemoryId).set({
         memoryId: staleMemoryId,
         status: 'failed',
-        contentHash: `hash-${staleMemoryId}`,
+        contentHash: contentHash('Old claim'),
         subjectContactId: null,
         extractionVersion: GRAPH_EXTRACTION_VERSION,
       }),
       store.doc('knowledgeGraphSources', foreignMemoryId).set({
         memoryId: foreignMemoryId,
         status: 'ready',
-        contentHash: `hash-${foreignMemoryId}`,
+        contentHash: contentHash('Foreign claim'),
         subjectContactId: null,
         extractionVersion: GRAPH_EXTRACTION_VERSION,
       }),
@@ -303,7 +304,7 @@ describe.skipIf(!localEmulator)('Firestore mobile Knowledge graph with PostgreSQ
     const prepared = {
       agentId,
       content: 'Anna parent of Baldvin. Owner note: family',
-      contentHash: `owner-fact-${randomUUID()}`,
+      contentHash: contentHash('Anna parent of Baldvin. Owner note: family'),
       embedding: Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0)),
       embeddingSpaceKey: embeddingSpaceKey({
         provider: 'vertex',
@@ -405,7 +406,7 @@ describe.skipIf(!localEmulator)('Firestore mobile Knowledge graph with PostgreSQ
     const base = {
       agentId,
       content: 'Anna parent of Baldvin. Owner note: family',
-      contentHash: `owner-fact-${randomUUID()}`,
+      contentHash: contentHash('Anna parent of Baldvin. Owner note: family'),
       embedding: Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0)),
       embeddingSpaceKey: embeddingSpaceKey({
         provider: 'vertex',

@@ -72,6 +72,10 @@ enum APIError: LocalizedError {
         case .invalidResponse: "The server returned an unreadable response."
         case .chatTurnCancelledBeforeAdmission: "This turn was cancelled before it was admitted."
         case .unauthorized: "The access key was not accepted by this Assistant server."
+        case let .server(status, message) where status == 428 && message == "review_required":
+            "Open this person again to review their current details before saving."
+        case let .server(status, message) where status == 409 && message == "conflict":
+            "This person changed. Review the current details before applying your edit."
         case let .server(_, message): message
         case let .decoding(model, detail): "Could not read the \(model) response: \(detail)."
         case let .transport(error): Self.transportDescription(error)
@@ -1433,6 +1437,10 @@ struct APIClient: Sendable {
     }
 
     func updatePerson(id: String, person: PersonMutation) async throws {
+        guard let expectedContactRevision = person.expectedContactRevision,
+              Self.isDigest(expectedContactRevision) else {
+            throw APIError.invalidResponse
+        }
         var request = makeRequest(
             url: configuration.baseURL.appending(path: "api/mobile/v1/memory/people/\(id)")
         )
@@ -1587,6 +1595,40 @@ struct APIClient: Sendable {
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try JSONEncoder().encode(["decision": decision])
         return try await perform(request, as: SuggestionResult.self)
+    }
+
+    func previewOwnerCallNumberGrant(id: String, validityChoice: String, limits: OwnerCallGrantLimits = .defaults) async throws -> OwnerCallNumberGrantPreview {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/approvals/\(id)"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(OwnerCallGrantActionBody(action: "preview_reusable_call_v2", validityChoice: validityChoice, limits: limits))
+        return try await perform(request, as: OwnerCallNumberGrantPreview.self)
+    }
+
+    /// A final submission is never retried automatically after an uncertain response.
+    func approveOwnerCallNumberGrant(id: String, reviewToken: String) async throws -> ApprovalResult {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/approvals/\(id)"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(OwnerCallGrantActionBody(action: "approve_reusable_call_v2", reviewToken: reviewToken, acknowledgement: "owner_call_action_and_limits_any_answerer_v2"))
+        return try await perform(request, as: ApprovalResult.self)
+    }
+
+    /// Read/check never resubmits review or approval. Mutation requests use perform without read retry.
+    func checkOwnerCallGrantOperation(id: String) async throws -> OwnerCallGrantOperationStatus {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/approvals/\(id)"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(OwnerCallGrantActionBody(action: "check_reusable_call_v2"))
+        return try await perform(request, as: OwnerCallGrantOperationStatus.self)
+    }
+
+    func closeOwnerCallGrantOperation(id: String, closeToken: String) async throws -> OwnerCallGrantOperationStatus {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/approvals/\(id)"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(OwnerCallGrantActionBody(action: "close_reusable_call_v2", acknowledgement: "close_this_permission_operation_only_v1", closeToken: closeToken, confirmation: "confirmed"))
+        return try await perform(request, as: OwnerCallGrantOperationStatus.self)
     }
 
     func approveAndRemember(id: String) async throws -> ApprovalResult {
@@ -2152,6 +2194,7 @@ struct PersonMutation: Encodable, Sendable {
     let name: String
     let relationship: String
     let aliases: String
+    var expectedContactRevision: String? = nil
 }
 
 struct OccasionMutation: Encodable, Sendable {

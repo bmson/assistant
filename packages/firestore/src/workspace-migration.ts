@@ -12,14 +12,22 @@ import {
   type MigrationBundle,
   type MigrationRecord,
   type MigrationTarget,
+  ownerEditorOperationId,
+  ownerEditorPrivacyDigest,
   PreciseMigrationTimestamp,
+  parseOwnerEditorEpochCursor,
+  parseOwnerEditorOperationRecord,
   snapshotEmbeddingSpace,
   tableDefinition,
   validateMigrationBundle,
 } from '@assistant/persistence';
-import { FieldValue, Timestamp } from '@google-cloud/firestore';
+import { FieldPath, FieldValue, Timestamp } from '@google-cloud/firestore';
 import { assertFirestoreInstallationOwner } from './installation-owner.js';
-import { decodeRecord, encodeRecord, type InstallationStore } from './store.js';
+import {
+  ownerEditorFirestorePrivacyToken,
+  rotateFirestoreOwnerEditorEpochInTransaction,
+} from './owner-editor-repository.js';
+import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
 export type WorkspaceImportMode = 'preview' | 'write' | 'verify';
 export type WorkspaceImportResult = {
@@ -45,6 +53,8 @@ const MAX_DOCUMENT_ESTIMATED_BYTES = 900_000;
 // marker update, transaction envelope, path encoding, and protobuf framing.
 const MAX_IMPORT_TRANSACTION_WRITES = 450;
 const MAX_IMPORT_TRANSACTION_BYTES = 8 * 1024 * 1024;
+const RUNTIME_EDITOR_RECEIPT_PAGE_SIZE = 50;
+const MAX_RUNTIME_EDITOR_RECEIPTS_TO_VERIFY = 5_000;
 
 export type WorkspaceActivationEvidence = {
   /** Operator-recorded identifier for the external PostgreSQL write fence. */
@@ -61,6 +71,31 @@ export type WorkspaceActivationResult = {
   alreadyActivated: boolean;
   bundleChecksum: string;
 };
+
+async function assertEditorEpochDisabledBeforeImport(
+  store: InstallationStore,
+  ownerId: string,
+): Promise<void> {
+  const name = `owner-editor-epoch:${ownerId}`;
+  const snapshot = await store.doc('maintenanceCursors', name).get();
+  if (!snapshot.exists) return;
+  if (snapshot.get('name') !== name || typeof snapshot.get('cursor') !== 'string')
+    throw new Error('Owner editor metadata is malformed; disable the editor before importing.');
+  let cursor: unknown;
+  try {
+    cursor = JSON.parse(snapshot.get('cursor'));
+  } catch {
+    throw new Error('Owner editor metadata is malformed; disable the editor before importing.');
+  }
+  let epoch: ReturnType<typeof parseOwnerEditorEpochCursor>;
+  try {
+    epoch = parseOwnerEditorEpochCursor(cursor);
+  } catch {
+    throw new Error('Owner editor metadata is malformed; disable the editor before importing.');
+  }
+  if (epoch.ownerId !== ownerId || epoch.ready)
+    throw new Error('Owner editor is active; disable it before importing this workspace.');
+}
 
 function preciseTimestamp(timestamp: Timestamp): PreciseMigrationTimestamp {
   if (timestamp.nanoseconds % 1_000 !== 0)
@@ -242,10 +277,75 @@ async function verifyDestination(
     marker.get('totalWrites') !== writes.length
   )
     throw new Error('Migration marker does not prove a complete import for this bundle');
+  const runtimeExclusions = bundle.manifest.coverage.runtimeExclusions;
+  const runtimeEditorStateDeclared = Boolean(
+    runtimeExclusions?.tables.includes('owner_editor_operations') &&
+      runtimeExclusions.maintenanceCursorPrefixes.includes('owner-editor-epoch:'),
+  );
+  // An old v3 bundle can be activated by editor-aware code without this
+  // declaration. Active markers may therefore carry validated runtime state.
+  // Pre-editor active installations with no epoch require explicit maintenance;
+  // verification must never provision authority. Pending legacy stays empty.
+  const runtimeEditorEpochAllowed = runtimeEditorStateDeclared || marker.get('status') === 'active';
+  let runtimeEpochCount = 0;
+  let runtimeReceiptCount = 0;
+  let runtimePrivacyJobCount = 0;
+  if (runtimeEditorEpochAllowed) {
+    const ownerId = bundle.manifest.source.agentId;
+    const markerStatus = marker.get('status');
+    const epochName = `owner-editor-epoch:${ownerId}`;
+    const epoch = await store.doc('maintenanceCursors', epochName).get();
+    if (epoch.exists) {
+      let parsedEpoch: ReturnType<typeof parseOwnerEditorEpochCursor>;
+      try {
+        if (
+          epoch.id !== documentKey(epochName) ||
+          epoch.ref.id !== documentKey(epochName) ||
+          epoch.get('name') !== epochName
+        )
+          throw new Error('Editor epoch physical identity is malformed');
+        const cursor = epoch.get('cursor');
+        if (typeof cursor !== 'string') throw new Error('Editor epoch cursor is malformed');
+        parsedEpoch = parseOwnerEditorEpochCursor(JSON.parse(cursor));
+      } catch {
+        throw new Error('Editor epoch identity is malformed');
+      }
+      if (parsedEpoch.ownerId !== ownerId) throw new Error('Editor epoch belongs to another owner');
+      if (markerStatus === 'pending_activation' && parsedEpoch.ready)
+        throw new Error('Editor epoch readiness conflicts with migration lifecycle');
+      const privacyJob = await store.doc('privacyErasureJobs', ownerId).get();
+      if (privacyJob.exists) {
+        if (privacyJob.id !== documentKey(ownerId) || privacyJob.ref.id !== documentKey(ownerId))
+          throw new Error('Editor privacy state identity is malformed');
+        runtimePrivacyJobCount = 1;
+      }
+      const privacyGeneration = ownerEditorFirestorePrivacyToken(privacyJob, ownerId);
+      if (parsedEpoch.privacyGenerationDigest !== ownerEditorPrivacyDigest(privacyGeneration))
+        throw new Error('Editor epoch privacy generation is stale');
+      runtimeEpochCount = 1;
+    } else if (markerStatus === 'active') {
+      throw new Error(
+        'Active migration owner editor epoch is missing; controlled maintenance must provision a disabled epoch before retrying verification',
+      );
+    }
+    runtimeReceiptCount = await verifyRuntimeEditorReceipts(
+      store,
+      ownerId,
+      markerStatus === 'active',
+    );
+  }
+  const expectedCounts = { ...collections };
+  if (runtimeEpochCount)
+    expectedCounts.maintenanceCursors =
+      (expectedCounts.maintenanceCursors ?? 0) + runtimeEpochCount;
+  if (runtimePrivacyJobCount)
+    expectedCounts.privacyErasureJobs =
+      (expectedCounts.privacyErasureJobs ?? 0) + runtimePrivacyJobCount;
+  if (runtimeReceiptCount) expectedCounts.ownerEditorOperations = runtimeReceiptCount;
   const actualCollectionNames = (await store.root.listCollections())
     .map((collection) => collection.id)
     .sort();
-  const expectedCollectionNames = Object.keys(collections).sort();
+  const expectedCollectionNames = Object.keys(expectedCounts).sort();
   if (JSON.stringify(actualCollectionNames) !== JSON.stringify(expectedCollectionNames))
     throw new Error('Imported installation contains unexpected or missing collections');
   for (let index = 0; index < writes.length; index += 100) {
@@ -266,13 +366,66 @@ async function verifyDestination(
         throw new Error(`Imported destination checksum mismatch: ${write.collection}/${write.id}`);
     }
   }
-  for (const [collection, count] of Object.entries(collections)) {
+  for (const [collection, count] of Object.entries(expectedCounts)) {
     const snapshot = await store.collection(collection).count().get();
     const expected = count + (collection === 'coordination' ? 1 : 0);
     if (snapshot.data().count !== expected)
       throw new Error(
         `Imported collection count mismatch: ${collection} expected ${expected}, found ${snapshot.data().count}`,
       );
+  }
+}
+
+/**
+ * Runtime receipts are outside the portable snapshot. During active verification,
+ * inventory them in bounded pages and validate every row before accounting for
+ * their collection. The hard ceiling fails closed instead of treating unseen
+ * rows as verified.
+ */
+async function verifyRuntimeEditorReceipts(
+  store: InstallationStore,
+  ownerId: string,
+  allowReceipts: boolean,
+): Promise<number> {
+  let count = 0;
+  let cursor: FirebaseFirestore.QueryDocumentSnapshot | undefined;
+  while (true) {
+    let query = store
+      .collection('ownerEditorOperations')
+      .orderBy(FieldPath.documentId())
+      .limit(RUNTIME_EDITOR_RECEIPT_PAGE_SIZE);
+    if (cursor) query = query.startAfter(cursor);
+    const page = await query.get();
+    if (page.empty) return count;
+    if (!allowReceipts)
+      throw new Error('Pending migration contains unexpected owner editor receipts');
+    for (const snapshot of page.docs) {
+      count += 1;
+      if (count > MAX_RUNTIME_EDITOR_RECEIPTS_TO_VERIFY)
+        throw new Error('Owner editor receipt inventory exceeds verification limit');
+      let record: ReturnType<typeof parseOwnerEditorOperationRecord>;
+      try {
+        record = parseOwnerEditorOperationRecord(decodeRecord(snapshot.data()));
+      } catch {
+        throw new Error('Owner editor receipt is malformed');
+      }
+      if (
+        snapshot.id !== documentKey(record.id) ||
+        snapshot.ref.id !== documentKey(record.id) ||
+        record.ownerId !== ownerId ||
+        record.id !==
+          ownerEditorOperationId({
+            ownerId: record.ownerId,
+            epoch: record.epoch,
+            operationId: record.operationId,
+          })
+      )
+        throw new Error('Owner editor receipt identity is malformed');
+    }
+    if (page.size < RUNTIME_EDITOR_RECEIPT_PAGE_SIZE) return count;
+    const last = page.docs.at(-1);
+    if (!last) throw new Error('Owner editor receipt inventory is incomplete');
+    cursor = last;
   }
 }
 
@@ -826,8 +979,19 @@ export async function importWorkspaceBundle(
     bundle.manifest.formatVersion >= 3
       ? deterministicMigrationCompare
       : (left: string, right: string) => left.localeCompare(right);
-  const records = [...bundle.records].sort((a, b) =>
-    recordCompare(`${a.collection}:${a.id}`, `${b.collection}:${b.id}`),
+  // Ordinary parent records precede durable receipts; a slot is written only
+  // after all of its possible operations. The progress marker and activation
+  // gate still protect partial batches; no receipt is finalized during import.
+  const dependencyRank = (record: MigrationRecord): number => {
+    if (record.table === 'owner_call_grant_operations') return 1;
+    if (record.table === 'owner_call_grant_usage') return 2;
+    if (record.table === 'owner_call_grant_operation_slots') return 3;
+    return 0;
+  };
+  const records = [...bundle.records].sort(
+    (a, b) =>
+      dependencyRank(a) - dependencyRank(b) ||
+      recordCompare(`${a.collection}:${a.id}`, `${b.collection}:${b.id}`),
   );
   const memoryProjections = new Map(
     records
@@ -900,6 +1064,7 @@ export async function importWorkspaceBundle(
   if (store.databaseId !== options.target.databaseId)
     throw new Error('Firestore database identity does not match migration target');
   await assertFirestoreInstallationOwner(store, options.sourceAgentId, true);
+  if (mode === 'write') await assertEditorEpochDisabledBeforeImport(store, options.sourceAgentId);
   const marker = store.doc('coordination', 'migration');
   const markerSnapshot = await marker.get();
   const markerData = markerSnapshot.exists ? markerSnapshot.data() : undefined;
@@ -1158,6 +1323,7 @@ export async function activateWorkspaceBundle(
       !Number.isSafeInteger(current.get('totalWrites'))
     )
       throw new Error('Migration marker does not prove a complete pending import');
+    await rotateFirestoreOwnerEditorEpochInTransaction(store, tx, input.sourceAgentId, true);
     tx.update(marker, {
       status: 'active',
       activation: encodeRecord(activation),
