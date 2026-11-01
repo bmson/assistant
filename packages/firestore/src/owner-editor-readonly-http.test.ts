@@ -30,6 +30,22 @@ describe('bounded read-only Google transport with invented responses', () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it('allows pageSize=2 only for Cloud Run task listing', async () => {
+    const fetcher = vi.fn(async () => new Response('{"tasks":[]}'));
+    const lease = createOwnerEditorReadOnlyJsonClient({
+      getAccessToken: async () => 'private-token',
+      fetch: fetcher,
+    });
+    const tasksUrl = new URL(`${endpoint().href}/tasks?pageSize=2`);
+
+    await expect(lease.client.get(tasksUrl)).resolves.toEqual({ tasks: [] });
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith(
+      tasksUrl.href,
+      expect.objectContaining({ method: 'GET' }),
+    );
+    await lease.disposeClients();
+  });
+
   it.each([
     'https://attacker.example/collect-token',
     'https://run.googleapis.com/v2/projects/example-project/locations/us-central1/jobs/maintenance:run',
@@ -63,8 +79,12 @@ describe('bounded read-only Google transport with invented responses', () => {
   it.each([
     'https://example.com/v2/projects/example-project',
     'https://run.googleapis.com/v2/projects/example-project/locations/us-central1/jobs/maintenance:run',
+    'https://run.googleapis.com/v2/projects/example-project/locations/us-central1/jobs/maintenance/executions/run-one?pageSize=2',
+    'https://run.googleapis.com/v2/projects/example-project/locations/us-central1/jobs/maintenance/executions/run-one/tasks?pageSize=100',
     'https://firestore.googleapis.com/v1/projects/example-project/databases/(default)/documents/secrets',
     'https://firestore.googleapis.com/v1/projects/example-project/databases/(default)/collectionGroups/contacts/indexes?unknown=1',
+    'https://firestore.googleapis.com/v1/projects/example-project/databases/(default)/collectionGroups/contacts/fields?pageSize=2',
+    'https://firestore.googleapis.com/v1/projects/example-project/databases/(default)/collectionGroups/contacts/indexes?pageSize=100',
     'https://user@run.googleapis.com/v2/projects/example-project/locations/us-central1/jobs/maintenance/executions/run-one',
   ])('rejects an unsupported resource before acquiring credentials: %s', async (url) => {
     const token = vi.fn(async () => 'private-token');

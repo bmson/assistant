@@ -105,7 +105,7 @@ describe('observeOwnerEditorIndexes', () => {
     });
     expect(requests).toHaveLength(2);
     expect(requests.every((url) => url.origin === 'https://firestore.googleapis.com')).toBe(true);
-    expect(requests.every((url) => url.searchParams.get('pageSize') === '100')).toBe(true);
+    expect(requests.every((url) => !url.searchParams.has('pageSize'))).toBe(true);
     const fieldsUrl = requests.find((url) => url.pathname.endsWith('/fields'));
     expect(fieldsUrl?.searchParams.get('filter')).toBe('indexConfig.usesAncestorConfig:false');
   });
@@ -175,12 +175,45 @@ describe('observeOwnerEditorIndexes', () => {
     expect(requests).toHaveLength(4);
     const secondPages = requests.filter((url) => url.searchParams.has('pageToken'));
     expect(secondPages).toHaveLength(2);
-    expect(secondPages.every((url) => url.searchParams.get('pageSize') === '100')).toBe(true);
+    expect(requests.every((url) => !url.searchParams.has('pageSize'))).toBe(true);
+    expect(secondPages.every((url) => !url.searchParams.has('pageSize'))).toBe(true);
     expect(
       secondPages
         .filter((url) => url.pathname.endsWith('/fields'))
         .every((url) => url.searchParams.get('filter') === 'indexConfig.usesAncestorConfig:false'),
     ).toBe(true);
+  });
+
+  it('accepts a default Firestore page larger than 100 while enforcing the group cap', async () => {
+    const { client, requests } = responseClient((url) =>
+      url.pathname.endsWith('/indexes')
+        ? { indexes: [] }
+        : { fields: Array.from({ length: 101 }, (_, index) =>
+            readyField({ name: `${fieldName}Extra${index}` }),
+          ) },
+    );
+
+    const report = await observeOwnerEditorIndexes(input(), client);
+
+    expect(report.scopedIndexParity).toBe('unknown');
+    expect(report.diagnostics).toEqual(['scoped_parity_differs']);
+    expect(report.counts.observedFieldOverrides).toBe(101);
+    expect(requests.every((url) => !url.searchParams.has('pageSize'))).toBe(true);
+  });
+
+  it('rejects a default Firestore page over the per-group result cap', async () => {
+    const { client } = responseClient((url) =>
+      url.pathname.endsWith('/indexes')
+        ? { indexes: [] }
+        : { fields: Array.from({ length: 1_001 }, (_, index) =>
+            readyField({ name: `${fieldName}Extra${index}` }),
+          ) },
+    );
+
+    const report = await observeOwnerEditorIndexes(input(), client);
+
+    expect(report.scopedIndexParity).toBe('unknown');
+    expect(report.diagnostics).toEqual(['observation_failed']);
   });
 
   it('marks a matching but building index as not ready', async () => {

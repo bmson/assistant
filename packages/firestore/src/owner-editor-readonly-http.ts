@@ -23,6 +23,9 @@ function allowedRead(url: URL): boolean {
   const execution = new RegExp(
     `^/v2/projects/${segment}/locations/${segment}/jobs/${segment}/executions/${segment}(/tasks)?$`,
   );
+  const cloudRunTasks =
+    url.origin === 'https://run.googleapis.com' && execution.test(url.pathname) &&
+    url.pathname.endsWith('/tasks');
   const indexes = new RegExp(
     `^/v1/projects/${segment}/databases/${segment}/collectionGroups/${segment}/(indexes|fields)$`,
   );
@@ -37,7 +40,7 @@ function allowedRead(url: URL): boolean {
   for (const [key, value] of url.searchParams) {
     if (seen.has(key)) return false;
     seen.add(key);
-    if (key === 'pageSize' && !/^(2|100)$/.test(value)) return false;
+    if (key === 'pageSize' && (!cloudRunTasks || value !== '2')) return false;
     if (key === 'pageToken' && (!value || value.length > 4096)) return false;
     if (key === 'filter' && value !== 'indexConfig.usesAncestorConfig:false') return false;
     if (!['pageSize', 'pageToken', 'filter'].includes(key)) return false;

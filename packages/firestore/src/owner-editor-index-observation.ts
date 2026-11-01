@@ -4,7 +4,6 @@ import type { ReadOnlyJsonClient } from './owner-editor-readonly-http.js';
 const MAX_MANIFEST_BYTES = 512 * 1024;
 const MAX_GROUPS = 256;
 const MAX_PAGES_PER_GROUP = 8;
-const PAGE_SIZE = 100;
 const MAX_RESULTS_PER_GROUP = 1_000;
 const FIRESTORE_API_ORIGIN = 'https://firestore.googleapis.com';
 const FIELD_FILTER = 'indexConfig.usesAncestorConfig:false';
@@ -307,7 +306,8 @@ async function listGroup(
   let pageToken: string | undefined;
   for (let page = 0; page < MAX_PAGES_PER_GROUP; page++) {
     const url = endpoint(project, database, group, kind);
-    url.searchParams.set('pageSize', String(PAGE_SIZE));
+    // Firestore Admin list endpoints reject an explicit pageSize. Bound results
+    // across the server-default pages below instead.
     if (kind === 'fields') url.searchParams.set('filter', FIELD_FILTER);
     if (pageToken) url.searchParams.set('pageToken', pageToken);
     let response: unknown;
@@ -324,7 +324,6 @@ async function listGroup(
     const rows = rawRows === undefined ? [] : rawRows;
     if (
       !Array.isArray(rows) ||
-      rows.length > PAGE_SIZE ||
       results.length + rows.length > MAX_RESULTS_PER_GROUP
     )
       throw new ObservationFailure('observation_failed');
