@@ -191,6 +191,55 @@ describe('actual page + real issuance builder composition, named reader/fence po
       html.indexOf('id="important-dates"'),
     );
   });
+  it.each(['postgres', 'firestore'] as const)(
+    '%s person dossier renders malformed saved-note dates as unknown without changing browse authority',
+    async (driver) => {
+      ports.driver = driver;
+      const createdAt = new Date(Number.NaN);
+      const validFrom = new Date(Number.NaN);
+      const validUntil = new Date('2024-03-01T23:00:00.000Z');
+      const source = data.dossier.profile.facts[0];
+      if (!source) throw Error('Expected an existing synthetic person fact');
+      const malformedFact = Object.freeze({ ...source, createdAt, validFrom, validUntil });
+      const openEndedFact = Object.freeze({
+        ...source,
+        id: '99999999-9999-4999-8999-999999999999',
+        content: 'A note with no recorded validity bounds.',
+        createdAt: new Date('2024-03-01T12:00:00.000Z'),
+        validFrom: null,
+        validUntil: null,
+      });
+      const dossierWithMalformedDate = {
+        ...data.dossier,
+        profile: { ...data.dossier.profile, facts: [malformedFact, openEndedFact], totalFacts: 2 },
+      };
+      const read = driver === 'postgres' ? ports.person : ports.fsPerson;
+      read.mockResolvedValueOnce(dossierWithMalformedDate);
+
+      const html = renderToStaticMarkup(await dossier());
+
+      expect(html).toContain('Date unavailable');
+      expect(html).toContain('Saved facts');
+      expect(html).toContain('date unavailable–2024-03-01');
+      expect(html).toContain('A note with no recorded validity bounds.');
+      expect(html.match(/date unavailable–/g)).toHaveLength(1);
+      expect(html).toContain('Edit details');
+      expect(html).toContain('Add person');
+      expect(html).not.toContain('NaN');
+      expect(Number.isNaN(createdAt.getTime())).toBe(true);
+      expect(Number.isNaN(validFrom.getTime())).toBe(true);
+      expect(validUntil.getTime()).toBe(new Date('2024-03-01T23:00:00.000Z').getTime());
+      expect(read).toHaveBeenCalledOnce();
+      if (driver === 'postgres') {
+        expect(ports.pgEditor).toHaveBeenCalledOnce();
+        expect(ports.fsSnapshot).not.toHaveBeenCalled();
+      } else {
+        expect(ports.fsSnapshot).toHaveBeenCalledOnce();
+        expect(ports.pgEditor).not.toHaveBeenCalled();
+        expect(ports.terminate).toHaveBeenCalledOnce();
+      }
+    },
+  );
   it('PG directory issues only create scope inside same read lease and preserves GET q links', async () => {
     const html = renderToStaticMarkup(await directory());
     expect(ports.trace).toEqual(['pg-before', 'browse', 'editor', 'pg-after']);
