@@ -252,10 +252,11 @@ revision, changes any other field, fails CAS, returns an uncertain operation, or
 artifact readback/provenance fails: HOLD, no inverse PATCH, retry or next stage.
 
 A new fresh reconciliation packet must then bind the actual post-journal state and
-protected ownership transition. Manager must choose/review the exact same-run or
-new-run handoff/packet composition before any traffic apply; an ownership metadata
-change cannot be hidden from the packet's configuration/etag checks. **This handoff
-is an explicit unresolved design gate, not implemented authority.** Reconciliation
+protected ownership transition. The subsequent pure simulation selects SAME run AND SAME actual job/check-run
+for review consumption; any new owner must claim before PREPARE and packet creation.
+A different post-packet run/job is refused; an ownership metadata
+change cannot be hidden from the packet's configuration/etag checks. **The logical handoff is fixed in the pure simulation; authenticated delivery of
+that review to the same live job remains an explicit unresolved runtime gate.** Reconciliation
 success then requires a NEW normal retirement plan and full600s drain. The first
 paired rollout remains its own reviewed source/run qualification with strict stop
 at each unsupported provider shape. Do not infer native acceptance from fixtures.
