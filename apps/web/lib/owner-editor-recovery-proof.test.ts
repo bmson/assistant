@@ -13,6 +13,7 @@ import {
   issueOwnerEditorRecoveryProof,
   type OwnerEditorRecoveryPostAuthorization,
   verifyOwnerEditorRecoveryProof,
+  verifyOwnerEditorRecoveryReceiptProof,
 } from './owner-editor-recovery-proof';
 import { ownerEditorSessionDigest } from './owner-editor-scope';
 
@@ -63,7 +64,7 @@ function fixture(now = NOW, issuedAt = now - 60 * 60_000) {
   };
   const authorization: OwnerEditorRecoveryPostAuthorization = {
     method: 'POST',
-    intent: 'reconcile',
+    intent: 'authorize_original_reconcile',
     sameOrigin: true,
     originalFormHandleVerified: true,
     session,
@@ -100,6 +101,15 @@ function issue(f = fixture()) {
   return token;
 }
 
+function reconcileInput<T extends { authorization: OwnerEditorRecoveryPostAuthorization }>(
+  input: T,
+) {
+  return {
+    ...input,
+    authorization: { ...input.authorization, intent: 'reconcile_original' as const },
+  };
+}
+
 function reboundInputForCommand(command: OwnerEditorCommand) {
   const f = fixture();
   const scope = { ...f.scope, command };
@@ -127,7 +137,7 @@ describe('owner-editor recovery proof', () => {
       issuedAt: NOW,
       expiresAt: NOW + 120_000,
     });
-    expect(verifyOwnerEditorRecoveryProof({ ...f.input, token })).toMatchObject({
+    expect(verifyOwnerEditorRecoveryProof({ ...reconcileInput(f.input), token })).toMatchObject({
       purpose: 'owner-editor-recovery.v2',
       requestHash: f.operation.requestHash,
       statusVersion: f.operation.statusVersion,
@@ -145,6 +155,18 @@ describe('owner-editor recovery proof', () => {
     const f = fixture();
     const authorization = { ...f.authorization, ...change } as OwnerEditorRecoveryPostAuthorization;
     expect(issueOwnerEditorRecoveryProof({ ...f.input, authorization })).toBeNull();
+  });
+
+  it('keeps the V2 authorize and reconcile intents purpose-specific', () => {
+    const f = fixture();
+    const token = issue(f);
+    expect(
+      issueOwnerEditorRecoveryProof({
+        ...f.input,
+        authorization: reconcileInput(f.input).authorization,
+      }),
+    ).toBeNull();
+    expect(verifyOwnerEditorRecoveryProof({ ...f.input, token })).toBeNull();
   });
 
   it.each(['remove_person', 'remove_owner_family_relationship'] as const)(
@@ -171,9 +193,9 @@ describe('owner-editor recovery proof', () => {
     const changedSession = { ...f.session, formSessionScope: 'rotated_scope_0123456789' };
     expect(
       verifyOwnerEditorRecoveryProof({
-        ...f.input,
+        ...reconcileInput(f.input),
         token,
-        authorization: { ...f.authorization, session: changedSession },
+        authorization: { ...reconcileInput(f.input).authorization, session: changedSession },
       }),
     ).toBeNull();
     expect(
@@ -261,7 +283,9 @@ describe('owner-editor recovery proof', () => {
     expect(token).not.toBeNull();
     expect(Buffer.byteLength(token ?? '', 'utf8')).toBeGreaterThan(8188);
     expect(Buffer.byteLength(token ?? '', 'utf8')).toBeLessThanOrEqual(8192);
-    expect(verifyOwnerEditorRecoveryProof({ ...input, token: token ?? '' })).not.toBeNull();
+    expect(
+      verifyOwnerEditorRecoveryProof({ ...reconcileInput(input), token: token ?? '' }),
+    ).not.toBeNull();
     expect(issueOwnerEditorRecoveryProof(withPrivacy('界'.repeat(largestAccepted + 1)))).toBeNull();
     expect(issueOwnerEditorRecoveryProof(withPrivacy('界'.repeat(1800)))).toBeNull();
   });
@@ -270,22 +294,38 @@ describe('owner-editor recovery proof', () => {
     const f = fixture();
     const token = issue(f);
     for (const malformed of ['', 'oer2.only-two-parts', 'oer2.$$$.$$$'])
-      expect(verifyOwnerEditorRecoveryProof({ ...f.input, token: malformed })).toBeNull();
-    expect(verifyOwnerEditorRecoveryProof({ ...f.input, token: `${token}x` })).toBeNull();
+      expect(
+        verifyOwnerEditorRecoveryProof({ ...reconcileInput(f.input), token: malformed }),
+      ).toBeNull();
     expect(
-      verifyOwnerEditorRecoveryProof({ ...f.input, token, secret: 'wrong-secret' }),
+      verifyOwnerEditorRecoveryProof({ ...reconcileInput(f.input), token: `${token}x` }),
     ).toBeNull();
     expect(
-      verifyOwnerEditorRecoveryProof({ ...f.input, token: token.replace(/^oer2/, 'oer1') }),
+      verifyOwnerEditorRecoveryProof({ ...reconcileInput(f.input), token, secret: 'wrong-secret' }),
     ).toBeNull();
     expect(
-      verifyOwnerEditorRecoveryProof({ ...f.input, token: token.replace(/^oer2/, 'oep1') }),
+      verifyOwnerEditorRecoveryProof({
+        ...reconcileInput(f.input),
+        token: token.replace(/^oer2/, 'oer1'),
+      }),
     ).toBeNull();
     expect(
-      verifyOwnerEditorRecoveryProof({ ...f.input, token: token.replace(/^oer2/, 'oe1') }),
+      verifyOwnerEditorRecoveryProof({
+        ...reconcileInput(f.input),
+        token: token.replace(/^oer2/, 'oep1'),
+      }),
     ).toBeNull();
     expect(
-      verifyOwnerEditorRecoveryProof({ ...f.input, token: `oer2.${'x'.repeat(8_200)}` }),
+      verifyOwnerEditorRecoveryProof({
+        ...reconcileInput(f.input),
+        token: token.replace(/^oer2/, 'oe1'),
+      }),
+    ).toBeNull();
+    expect(
+      verifyOwnerEditorRecoveryProof({
+        ...reconcileInput(f.input),
+        token: `oer2.${'x'.repeat(8_200)}`,
+      }),
     ).toBeNull();
   });
 
@@ -310,29 +350,43 @@ describe('owner-editor recovery proof', () => {
       { ...f.input, operation: changedOperation({ claimExpiresAt: new Date(NOW - 2) }) },
       { ...f.input, scope: changedScope },
     ])
-      expect(verifyOwnerEditorRecoveryProof({ ...input, token })).toBeNull();
+      expect(verifyOwnerEditorRecoveryProof({ ...reconcileInput(input), token })).toBeNull();
   });
 
   it('enforces proof time bounds, future timestamps and the original 24-hour replay limit', () => {
     const f = fixture();
     const token = issue(f);
-    expect(verifyOwnerEditorRecoveryProof({ ...f.input, token, now: NOW - 1 })).toBeNull();
-    expect(verifyOwnerEditorRecoveryProof({ ...f.input, token, now: NOW + 120_000 })).toBeNull();
+    expect(
+      verifyOwnerEditorRecoveryProof({ ...reconcileInput(f.input), token, now: NOW - 1 }),
+    ).toBeNull();
+    expect(
+      verifyOwnerEditorRecoveryProof({ ...reconcileInput(f.input), token, now: NOW + 120_000 }),
+    ).toBeNull();
     const future = { ...unpack(token), issuedAt: NOW + 1, expiresAt: NOW + 120_001 };
-    expect(verifyOwnerEditorRecoveryProof({ ...f.input, token: signedPayload(future) })).toBeNull();
+    expect(
+      verifyOwnerEditorRecoveryProof({ ...reconcileInput(f.input), token: signedPayload(future) }),
+    ).toBeNull();
     const tooLong = { ...unpack(token), expiresAt: NOW + 120_001 };
     expect(
-      verifyOwnerEditorRecoveryProof({ ...f.input, token: signedPayload(tooLong) }),
+      verifyOwnerEditorRecoveryProof({ ...reconcileInput(f.input), token: signedPayload(tooLong) }),
     ).toBeNull();
 
     const nearReplay = fixture(NOW, NOW - 24 * 60 * 60_000 + 25_000);
     const capped = issue(nearReplay);
     expect(unpack(capped).expiresAt).toBe(NOW + 25_000);
     expect(
-      verifyOwnerEditorRecoveryProof({ ...nearReplay.input, token: capped, now: NOW + 24_999 }),
+      verifyOwnerEditorRecoveryProof({
+        ...reconcileInput(nearReplay.input),
+        token: capped,
+        now: NOW + 24_999,
+      }),
     ).not.toBeNull();
     expect(
-      verifyOwnerEditorRecoveryProof({ ...nearReplay.input, token: capped, now: NOW + 25_000 }),
+      verifyOwnerEditorRecoveryProof({
+        ...reconcileInput(nearReplay.input),
+        token: capped,
+        now: NOW + 25_000,
+      }),
     ).toBeNull();
     expect(
       issueOwnerEditorRecoveryProof({
@@ -347,7 +401,7 @@ describe('owner-editor recovery proof', () => {
     const token = issue(f);
     expect(
       verifyOwnerEditorRecoveryProof({
-        ...f.input,
+        ...reconcileInput(f.input),
         token: signedPayload({ ...unpack(token), extra: 'not allowed' }),
       }),
     ).toBeNull();
@@ -358,14 +412,59 @@ describe('owner-editor recovery proof', () => {
     };
     expect(
       verifyOwnerEditorRecoveryProof({
-        ...f.input,
+        ...reconcileInput(f.input),
         token: signedPayload(payloadWithNestedUnknown),
       }),
     ).toBeNull();
     expect(
       verifyOwnerEditorRecoveryProof({
-        ...f.input,
+        ...reconcileInput(f.input),
         token: signedPayload({ ...unpack(token), purpose: 'owner-editor-recovery.v1' }),
+      }),
+    ).toBeNull();
+  });
+
+  it('verifies a live recovery proof for the original raced terminal receipt only', () => {
+    const f = fixture();
+    const token = issue(f);
+    const terminal: OwnerEditorOperationRecord = {
+      ...f.operation,
+      claimToken: null,
+      claimExpiresAt: null,
+      status: 'abandoned',
+      statusVersion: f.operation.statusVersion + 1,
+      result: { outcome: 'not_applied', reason: 'claim_abandoned' },
+      updatedAt: new Date(NOW),
+    };
+    const input = {
+      ...reconcileInput(f.input),
+      operation: terminal,
+      current: { ...f.current, ready: false },
+      now: NOW + 1,
+      token,
+    };
+    expect(verifyOwnerEditorRecoveryProof(input)).toBeNull();
+    expect(verifyOwnerEditorRecoveryReceiptProof(input)).not.toBeNull();
+    expect(
+      verifyOwnerEditorRecoveryReceiptProof({ ...input, token: 'oep1.invalid.signature' }),
+    ).toBeNull();
+    expect(verifyOwnerEditorRecoveryReceiptProof({ ...input, now: NOW + 120_000 })).toBeNull();
+    expect(
+      verifyOwnerEditorRecoveryReceiptProof({
+        ...input,
+        operation: { ...terminal, requestHash: 'b'.repeat(64) },
+      }),
+    ).toBeNull();
+    expect(
+      verifyOwnerEditorRecoveryReceiptProof({
+        ...input,
+        operation: { ...terminal, statusVersion: f.operation.statusVersion },
+      }),
+    ).toBeNull();
+    expect(
+      verifyOwnerEditorRecoveryReceiptProof({
+        ...input,
+        operation: { ...terminal, result: null },
       }),
     ).toBeNull();
   });

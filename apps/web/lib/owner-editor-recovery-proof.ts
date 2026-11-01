@@ -8,6 +8,7 @@ import {
   ownerEditorPrivacyDigest,
   ownerEditorScopeDigest,
   ownerEditorSnapshotRevision,
+  parseOwnerEditorOperationRecord,
 } from '@assistant/persistence';
 import { z } from 'zod';
 import { isValidFormSessionScope } from '../app/auth-form-session-scope';
@@ -78,7 +79,7 @@ const proofSchema = z
  */
 export interface OwnerEditorRecoveryPostAuthorization {
   method: 'POST';
-  intent: 'reconcile';
+  intent: 'authorize_original_reconcile' | 'reconcile_original';
   sameOrigin: true;
   originalFormHandleVerified: true;
   session: OwnerEditorSessionView;
@@ -122,7 +123,7 @@ function validBase(input: Omit<ProofInput, 'now'> | ProofInput, now: number): bo
     !Number.isSafeInteger(now) ||
     now < 0 ||
     authorization.method !== 'POST' ||
-    authorization.intent !== 'reconcile' ||
+    !['authorize_original_reconcile', 'reconcile_original'].includes(authorization.intent) ||
     authorization.sameOrigin !== true ||
     authorization.originalFormHandleVerified !== true ||
     authorization.command !== scope.command ||
@@ -216,7 +217,8 @@ function decode(token: string, secret: string): OwnerEditorRecoveryProofPayload 
 /** Mint only during an authorized POST for the exact existing expired claim. */
 export function issueOwnerEditorRecoveryProof(input: ProofInput): string | null {
   const now = input.now ?? Date.now();
-  if (!validBase(input, now)) return null;
+  if (input.authorization.intent !== 'authorize_original_reconcile' || !validBase(input, now))
+    return null;
   const operation = input.operation;
   if (!operation?.claimExpiresAt) return null;
   const replayExpiresAt = input.scope.issuedAt + REPLAY_WINDOW_MS;
@@ -246,7 +248,7 @@ export function verifyOwnerEditorRecoveryProof(
   input: ProofInput & { token: string },
 ): OwnerEditorRecoveryProofPayload | null {
   const now = input.now ?? Date.now();
-  if (!validBase(input, now)) return null;
+  if (input.authorization.intent !== 'reconcile_original' || !validBase(input, now)) return null;
   const proof = decode(input.token, input.secret);
   if (
     !proof ||
@@ -262,6 +264,71 @@ export function verifyOwnerEditorRecoveryProof(
         token: input.operation?.claimToken,
         expiresAt: input.operation?.claimExpiresAt?.toISOString() ?? null,
       })
+  )
+    return null;
+  return proof;
+}
+
+/**
+ * Verifies a recovery token only for disclosing the exact original terminal
+ * receipt after a race. This does not establish authority to mutate or abandon
+ * an operation; use verifyOwnerEditorRecoveryProof for that purpose.
+ */
+export function verifyOwnerEditorRecoveryReceiptProof(
+  input: ProofInput & { token: string },
+): OwnerEditorRecoveryProofPayload | null {
+  const now = input.now ?? Date.now();
+  const { authorization, scope, operation, current } = input;
+  if (
+    !Number.isSafeInteger(now) ||
+    now < 0 ||
+    authorization.intent !== 'reconcile_original' ||
+    authorization.method !== 'POST' ||
+    authorization.sameOrigin !== true ||
+    authorization.originalFormHandleVerified !== true ||
+    authorization.command !== scope.command ||
+    authorization.operationId !== scope.operationId ||
+    authorization.session.ownerId !== scope.ownerId ||
+    !isValidFormSessionScope(authorization.session.formSessionScope) ||
+    !scopeSchema.safeParse(scope).success ||
+    typeof current.ready !== 'boolean' ||
+    scope.sessionDigest !== ownerEditorSessionDigest(authorization.session) ||
+    current.ownerId !== scope.ownerId ||
+    current.epoch !== scope.epoch ||
+    current.privacyGeneration !== scope.privacyGeneration ||
+    !operation ||
+    operation.status === 'preparing' ||
+    !operation.result
+  )
+    return null;
+  let parsedOperation: OwnerEditorOperationRecord;
+  try {
+    parsedOperation = parseOwnerEditorOperationRecord(operation);
+  } catch {
+    return null;
+  }
+  if (
+    parsedOperation.id !== ownerEditorOperationId(scope) ||
+    parsedOperation.ownerId !== scope.ownerId ||
+    parsedOperation.epoch !== scope.epoch ||
+    parsedOperation.privacyGenerationDigest !== ownerEditorPrivacyDigest(scope.privacyGeneration) ||
+    parsedOperation.operationId !== scope.operationId ||
+    parsedOperation.command !== scope.command ||
+    parsedOperation.scopeDigest !== ownerEditorScopeDigest(scope) ||
+    parsedOperation.formIssuedAt.getTime() !== scope.issuedAt ||
+    parsedOperation.formExpiresAt.getTime() !== scope.expiresAt
+  )
+    return null;
+  const proof = decode(input.token, input.secret);
+  if (
+    !proof ||
+    proof.issuedAt > now ||
+    proof.issuedAt < scope.issuedAt ||
+    proof.expiresAt <= now ||
+    proof.expiresAt > scope.issuedAt + REPLAY_WINDOW_MS ||
+    ownerEditorScopeDigest(proof.scope) !== ownerEditorScopeDigest(scope) ||
+    proof.requestHash !== parsedOperation.requestHash ||
+    parsedOperation.statusVersion <= proof.statusVersion
   )
     return null;
   return proof;
