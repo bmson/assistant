@@ -42,3 +42,12 @@ and stale queued workflow-run sources fail closed; they need a separately
 reviewed source/recovery procedure. Legacy paths are unchanged. Actual cloud
 execution remains a separate manager-reviewed operation after ordinary exact
 source CI; fake protocol tests are not a native CAS or live drain receipt.
+
+The paired release inherits the normal GitHub 360 minute job ceiling. The delivery
+guard's 600 second quiescence deadline applies before its child starts; it is not
+a deadline on the child release. The two web drains may consume 1200 seconds,
+plus the 180 second native operation budget, bounded metadata/immutable reads
+and ordinary staging/probes. The separate manual retirement workflow has a
+45 minute job ceiling for its single drain; its bounded command portion is at
+most about 935 seconds before ordinary process scheduling, leaving setup margin.
+A timeout or interrupted drain still produces no completed barrier receipt.

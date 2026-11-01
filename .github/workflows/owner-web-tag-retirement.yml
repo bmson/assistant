@@ -34,7 +34,8 @@ jobs:
   retire:
     if: github.ref == 'refs/heads/main' && github.run_attempt == 1
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Reserve the full post-PATCH600s drain after setup and bounded native reads/LRO.
+    timeout-minutes: 45
     environment: production
     env:
       GCP_PROJECT: ${{ vars.GCP_PROJECT }}
