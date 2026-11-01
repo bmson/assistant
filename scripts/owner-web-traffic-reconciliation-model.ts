@@ -259,6 +259,8 @@ function model(raw: unknown, native: unknown, source: string, observedAt: string
   const wantedDesired = [row(current, 100, false), row(current, 0), row(old, 0)],
     wantedObserved = [row(current, 100), row(old, 0)];
   if (
+    revisionIdentity(before.s.latestReadyRevision) !== current.revision ||
+    revisionIdentity(before.s.latestCreatedRevision) !== current.revision ||
     before.desired.length !== 3 ||
     before.observed.length !== 2 ||
     trafficHash(before.desired) !== trafficHash(wantedDesired) ||

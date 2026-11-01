@@ -184,6 +184,9 @@ describe('separate explicit known web traffic reconciliation model', () => {
     'string_percent',
     'observed_latest',
     'missing_latest',
+    'ready_wrong',
+    'created_wrong',
+    'both_latest_wrong',
     'missing_native_uid',
   ] as const)('refuses any topology/provenance variant: %s', (kind) => {
     const f = fixture(),
@@ -227,6 +230,10 @@ describe('separate explicit known web traffic reconciliation model', () => {
     if (kind === 'observed_latest')
       s.trafficStatuses[0]!.type = 'TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST';
     if (kind === 'missing_latest') Reflect.deleteProperty(s, 'latestCreatedRevision');
+    if (kind === 'ready_wrong' || kind === 'both_latest_wrong')
+      s.latestReadyRevision = f.old.revision;
+    if (kind === 'created_wrong' || kind === 'both_latest_wrong')
+      s.latestCreatedRevision = f.old.revision;
     if (kind === 'missing_native_uid') Reflect.deleteProperty(n[f.old.revision]!, 'uid');
     expect(() => planWebTrafficReconciliation(s, n, source, observedAt)).toThrow(
       TrafficReconciliationStop,
