@@ -236,9 +236,9 @@ export function issueOwnerEditorRecoveryProof(input: ProofInput): string | null 
     expiresAt,
   };
   const checked = proofSchema.safeParse(payload);
-  return checked.success
-    ? sign(checked.data as OwnerEditorRecoveryProofPayload, input.secret)
-    : null;
+  if (!checked.success) return null;
+  const token = sign(checked.data as OwnerEditorRecoveryProofPayload, input.secret);
+  return Buffer.byteLength(token, 'utf8') <= MAX_TOKEN_BYTES ? token : null;
 }
 
 /** Verify against a fresh POST context and fresh current-state/operation reads. */

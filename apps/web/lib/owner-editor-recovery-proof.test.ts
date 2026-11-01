@@ -231,6 +231,41 @@ describe('owner-editor recovery proof', () => {
     ).toBeNull();
   });
 
+  it('roundtrips near-limit Unicode proofs and refuses an oversized encoded token', () => {
+    const f = fixture();
+    const withPrivacy = (privacyGeneration: string) => {
+      const scope = { ...f.scope, privacyGeneration };
+      return {
+        ...f.input,
+        scope,
+        current: { ...f.current, privacyGeneration },
+        operation: {
+          ...f.operation,
+          id: ownerEditorOperationId(scope),
+          scopeDigest: ownerEditorScopeDigest(scope),
+          privacyGenerationDigest: ownerEditorPrivacyDigest(privacyGeneration),
+        },
+      };
+    };
+    // Derive the byte boundary independently using a signed fixture payload.
+    const payload = unpack(issue(f));
+    let largestAccepted = 0;
+    for (let count = 1; count <= 2048; count++) {
+      const scope = { ...f.scope, privacyGeneration: '界'.repeat(count) };
+      const candidate = signedPayload({ ...payload, scope });
+      if (Buffer.byteLength(candidate, 'utf8') <= 8192) largestAccepted = count;
+      else break;
+    }
+    const input = withPrivacy('界'.repeat(largestAccepted));
+    const token = issueOwnerEditorRecoveryProof(input);
+    expect(token).not.toBeNull();
+    expect(Buffer.byteLength(token ?? '', 'utf8')).toBeGreaterThan(8188);
+    expect(Buffer.byteLength(token ?? '', 'utf8')).toBeLessThanOrEqual(8192);
+    expect(verifyOwnerEditorRecoveryProof({ ...input, token: token ?? '' })).not.toBeNull();
+    expect(issueOwnerEditorRecoveryProof(withPrivacy('界'.repeat(largestAccepted + 1)))).toBeNull();
+    expect(issueOwnerEditorRecoveryProof(withPrivacy('界'.repeat(1800)))).toBeNull();
+  });
+
   it('rejects proof tampering, wrong key, prior-version and old locator/form tokens', () => {
     const f = fixture();
     const token = issue(f);
