@@ -1039,8 +1039,35 @@ struct WorkspaceView: View {
             }
 
             if costs.heldUsd > 0 {
-                Label("\(currency(costs.heldUsd)) reserved for work in progress", systemImage: "clock.arrow.circlepath")
+                Label("\(currency(costs.heldUsd)) in budget holds", systemImage: "clock.arrow.circlepath")
                     .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Text("Budget holds are reservation estimates, not confirmed provider charges.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            if let unknown = costs.unknownAttempts, unknown.count > 0 || !unknown.countComplete {
+                VStack(alignment: .leading, spacing: 4) {
+                    if !unknown.countComplete && unknown.count == 0 {
+                        Text("Unknown outcome coverage unavailable.")
+                            .font(.subheadline.weight(.medium))
+                    } else {
+                        Text("Outstanding unknown outcomes: \(unknown.countComplete ? "\(unknown.count)" : "at least \(unknown.count)")")
+                            .font(.subheadline.weight(.medium))
+                        if unknown.estimateComplete, let amount = unknown.estimatedUsd, let value = Double(amount) {
+                            Text("Retained reservation estimate \(currency(value)). Estimate only, not confirmed spend. Do not add this estimate to spend totals.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("Retained reservation estimate unavailable. Do not add an unknown estimate to spend totals.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            } else if costs.unknownAttempts == nil {
+                Text("Unknown outcome coverage unavailable.")
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
             }
 

@@ -8,10 +8,11 @@ import {
   costBasis,
   normalizeBudgetCaps,
 } from '@assistant/persistence';
-import { desc, eq, gte, sql, sum } from 'drizzle-orm';
+import { count, desc, eq, gte, sql, sum } from 'drizzle-orm';
 
 export interface CostsDashboard {
   byEvidence: CostEvidenceTotal[];
+  unknownAttempts: UnknownCostAttemptSummary;
   timezone: string;
   totals: CostTotals;
   bySource: Array<{ source: string; usd: string | null; count: number }>;
@@ -33,6 +34,16 @@ export interface CostsDashboard {
   }>;
   parkedTasks: number;
   taskDefaultLimit: string | null;
+}
+
+/** Outstanding unknown-outcome reservations are exposure estimates, not spend. */
+export interface UnknownCostAttemptSummary {
+  /** Exact when countComplete; a lower bound when false. */
+  count: number;
+  countComplete: boolean;
+  /** Sum of retained reservation estimates, only when estimateComplete. */
+  estimatedUsd: string | null;
+  estimateComplete: boolean;
 }
 
 /** Load the cost-governance dashboard as a stable presentation contract. */
@@ -107,15 +118,21 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
         .where(eq(budgets.scope, 'task_default')),
     ]);
 
-  const evidenceRows = await db
-    .select({
-      basis: sql<string>`${costEvents.evidence}->>'basis'`,
-      usd: sum(costEvents.usd),
-      count: sql<number>`count(*)`,
-    })
-    .from(costEvents)
-    .where(gte(costEvents.createdAt, monthStart))
-    .groupBy(sql`${costEvents.evidence}->>'basis'`);
+  const [evidenceRows, [unknownReservations]] = await Promise.all([
+    db
+      .select({
+        basis: sql<string>`${costEvents.evidence}->>'basis'`,
+        usd: sum(costEvents.usd),
+        count: sql<number>`count(*)`,
+      })
+      .from(costEvents)
+      .where(gte(costEvents.createdAt, monthStart))
+      .groupBy(sql`${costEvents.evidence}->>'basis'`),
+    db
+      .select({ count: count(), estimatedUsd: sum(costReservations.estimatedUsd) })
+      .from(costReservations)
+      .where(eq(costReservations.status, 'unknown')),
+  ]);
 
   return {
     byEvidence: evidenceRows.map((row) => ({
@@ -123,6 +140,12 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
       usd: row.usd ?? '0',
       count: Number(row.count),
     })),
+    unknownAttempts: {
+      count: Number(unknownReservations?.count ?? 0),
+      countComplete: true,
+      estimatedUsd: unknownReservations?.estimatedUsd ?? '0.000000',
+      estimateComplete: true,
+    },
     timezone: agent.timezone,
     totals,
     bySource,

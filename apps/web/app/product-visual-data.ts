@@ -568,6 +568,12 @@ export function createProductVisualData(empty: boolean) {
       softPct: 80,
     },
     byEvidence: empty ? [] : [{ basis: 'token_rate', usd: '8.42', count: 128 }],
+    unknownAttempts: {
+      count: 0,
+      countComplete: true,
+      estimatedUsd: '0.000000',
+      estimateComplete: true,
+    },
     bySource: empty ? [] : [{ source: 'Model calls', usd: '8.42', count: 128 }],
     byModel: empty ? [] : [{ model: 'Configured assistant model', usd: '8.42', count: 128 }],
     topTasks: empty
