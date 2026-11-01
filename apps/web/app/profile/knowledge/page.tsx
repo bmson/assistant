@@ -55,12 +55,25 @@ function href(params: Record<string, string | number | undefined>) {
     if (value !== undefined && value !== '') query.set(key, String(value));
   return `/profile/knowledge?${query}`;
 }
+function usableDate(value: unknown): Date | null {
+  return value instanceof Date && Number.isFinite(value.getTime()) ? value : null;
+}
+function isoDay(value: unknown): string | null {
+  const date = usableDate(value);
+  return date ? date.toISOString().slice(0, 10) : null;
+}
 function fact(
   memory: MemorySnapshot,
   subjectLabel: string | null,
   now: Date,
   context: Record<string, string | number | undefined>,
 ): FactView {
+  const createdAt = usableDate(memory.createdAt);
+  const validFrom = isoDay(memory.validFrom);
+  const validityLabel =
+    memory.validFrom === null && memory.validUntil === null
+      ? ''
+      : `${validFrom ?? 'date unavailable'}–${memory.validUntil === null ? 'now' : (isoDay(memory.validUntil) ?? 'date unavailable')}`;
   return {
     id: memory.id,
     content: memory.content,
@@ -76,10 +89,8 @@ function fact(
     originTrust: memory.originTrust,
     sourceTaskId: memory.sourceTaskId,
     subjectLabel,
-    createdLabel: relativeTime(memory.createdAt, now),
-    validityLabel: memory.validFrom
-      ? `${memory.validFrom.toISOString().slice(0, 10)}–${memory.validUntil?.toISOString().slice(0, 10) ?? 'now'}`
-      : '',
+    createdLabel: createdAt ? relativeTime(createdAt, now) : 'Date unavailable',
+    validityLabel,
     mapHref: href({ ...context, view: 'map', memory: memory.id }),
     noteHref: memoryNoteHref(memory.id, href({ ...context, view: 'library' })) ?? undefined,
   };

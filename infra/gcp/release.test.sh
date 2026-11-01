@@ -196,7 +196,7 @@ python3 "$ROOT/firestore-delivery-guard.test.py" || fail "Firestore delivery hol
 workflow="$ROOT/../../.github/workflows/deploy.yml"
 env_example="$ROOT/../../.env.example"
 python3 - "$workflow" <<'PYWORKFLOW'
-import sys
+import os, pathlib, subprocess, sys, tempfile
 workflow=open(sys.argv[1]).read()
 release=workflow.split('\n  release:\n',1)[1]
 start=release.index('      - name: Check intrinsic BASIC5 context before cloud authentication\n')
@@ -210,6 +210,25 @@ assert 'RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}' in precheck
 assert 'release_validate_basic_editor_preflight_context "$RELEASE_COMPONENTS" "$TAG"' in precheck
 assert 'PROJECT="$GCP_PROJECT"' in precheck and 'REGION="$GCP_REGION"' in precheck and 'REPO="$ARTIFACT_REPOSITORY"' in precheck
 assert 'gcloud ' not in precheck and 'driver=' not in precheck, 'precheck cannot read or invent driver authority'
+# Run the actual workflow step against an older workflow_run source checkout.
+# This reproduces the new-workflow/old-source combination without cloud access.
+script='\n'.join(line[10:] for line in precheck.split('        run: |\n',1)[1].splitlines())
+with tempfile.TemporaryDirectory() as directory:
+    staged=pathlib.Path(directory)/'infra/gcp/release-staged-services.sh'
+    staged.parent.mkdir(parents=True)
+    staged.write_text('release_staged_services() { :; }\n')
+    env={**os.environ, 'GITHUB_EVENT_NAME':'workflow_run',
+         'GITHUB_WORKFLOW_SHA':'9'*40, 'GITHUB_SHA':'9'*40, 'IMAGE_TAG':'3'*40}
+    result=subprocess.run(['bash','-euo','pipefail','-c',script],cwd=directory,env=env,text=True,capture_output=True)
+    assert result.returncode == 2, result.stderr
+    assert 'Release source lacks the protected BASIC5 preflight validator' in result.stderr
+    assert 'command not found' not in result.stderr
+    # A source that supplies the validator must still execute it and preserve
+    # its refusal; presence alone never authorizes a release.
+    staged.write_text('release_validate_basic_editor_preflight_context() { echo source-refused >&2; return 23; }\n')
+    env.update(GCP_PROJECT='bmson-assistant',GCP_REGION='us-west1',ARTIFACT_REPOSITORY='assistant',RELEASE_COMPONENTS='agent,web')
+    result=subprocess.run(['bash','-euo','pipefail','-c',script],cwd=directory,env=env,text=True,capture_output=True)
+    assert result.returncode == 23 and 'source-refused' in result.stderr, result.stderr
 PYWORKFLOW
 for worker_mapping in browser:BROWSER code:CODE processor:PROCESSOR; do
   worker="${worker_mapping%:*}"

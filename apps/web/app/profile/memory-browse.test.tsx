@@ -122,6 +122,146 @@ function noWrites(html: string) {
   expect(buttonLabels).not.toMatch(/Save changes|Delete person|Forget source|Add person/i);
 }
 describe('Memory browse server composition', () => {
+  it.each(['postgres', 'firestore'])(
+    'renders legacy and malformed library dates without inventing dates (%s)',
+    async (driver) => {
+      mocks.driver = driver;
+      const fixture = createProductVisualData(false).library.rows[0]?.memory;
+      if (!fixture) throw new Error('Expected a saved note fixture');
+      const library = {
+        rows: [
+          {
+            memory: {
+              ...fixture,
+              id: '00000000-0000-4000-8000-000000000021',
+              content: 'Malformed legacy timestamps',
+              createdAt: new Date('invalid'),
+              validFrom: new Date('invalid'),
+              validUntil: new Date('invalid'),
+            },
+            subjectLabel: null,
+          },
+          {
+            memory: {
+              ...fixture,
+              id: '00000000-0000-4000-8000-000000000022',
+              content: 'String timestamp with an invalid end',
+              createdAt: '2026-01-02T00:00:00.000Z',
+              validFrom: new Date('2026-01-02T00:00:00.000Z'),
+              validUntil: new Date('invalid'),
+            },
+            subjectLabel: null,
+          },
+          {
+            memory: {
+              ...fixture,
+              id: '00000000-0000-4000-8000-000000000023',
+              content: 'Numeric timestamp with missing end',
+              createdAt: 1767312000000,
+              validFrom: new Date('2026-01-02T00:00:00.000Z'),
+              validUntil: undefined,
+            },
+            subjectLabel: null,
+          },
+          {
+            memory: {
+              ...fixture,
+              id: '00000000-0000-4000-8000-000000000024',
+              content: 'Valid dates with an open end',
+              createdAt: new Date(),
+              validFrom: new Date('2026-01-02T00:00:00.000Z'),
+              validUntil: null,
+            },
+            subjectLabel: null,
+          },
+          {
+            memory: {
+              ...fixture,
+              id: '00000000-0000-4000-8000-000000000025',
+              content: 'String validity start',
+              createdAt: new Date(),
+              validFrom: '2026-01-02T00:00:00.000Z',
+              validUntil: null,
+            },
+            subjectLabel: null,
+          },
+          {
+            memory: {
+              ...fixture,
+              id: '00000000-0000-4000-8000-000000000026',
+              content: 'Invalid start with known end',
+              createdAt: new Date(),
+              validFrom: new Date('invalid'),
+              validUntil: new Date('2026-01-03T00:00:00.000Z'),
+            },
+            subjectLabel: null,
+          },
+          {
+            memory: {
+              ...fixture,
+              id: '00000000-0000-4000-8000-000000000027',
+              content: 'Both validity bounds invalid',
+              createdAt: new Date(),
+              validFrom: new Date('invalid'),
+              validUntil: new Date('invalid'),
+            },
+            subjectLabel: null,
+          },
+          {
+            memory: {
+              ...fixture,
+              id: '00000000-0000-4000-8000-000000000028',
+              content: 'Null start with known end',
+              createdAt: new Date(),
+              validFrom: null,
+              validUntil: new Date('2026-01-04T00:00:00.000Z'),
+            },
+            subjectLabel: null,
+          },
+          {
+            memory: {
+              ...fixture,
+              id: '00000000-0000-4000-8000-000000000029',
+              content: 'Both validity bounds null',
+              createdAt: new Date(),
+              validFrom: null,
+              validUntil: null,
+            },
+            subjectLabel: null,
+          },
+        ],
+        total: 9,
+        page: 1,
+        totalPages: 1,
+      };
+      mocks.library.mockResolvedValue(library as never);
+      mocks.fsLibrary.mockResolvedValue([library, { subjects: [], sources: [] }] as never);
+      const originalRows = structuredClone(library.rows);
+      const html = renderToStaticMarkup(
+        await Knowledge({ searchParams: Promise.resolve({ view: 'library' }) }),
+      );
+      expect(html).toContain('Malformed legacy timestamps');
+      expect(html).toContain('String timestamp with an invalid end');
+      expect(html).toContain('Numeric timestamp with missing end');
+      expect(html).toContain('Valid dates with an open end');
+      expect(html).toContain('String validity start');
+      expect(html).toContain('Invalid start with known end');
+      expect(html).toContain('Both validity bounds invalid');
+      expect(html).toContain('Null start with known end');
+      expect(html).toContain('Both validity bounds null');
+      expect(html.match(/Date unavailable/g)).toHaveLength(3);
+      expect(html.match(/date unavailable/g)).toHaveLength(9);
+      expect(html).toContain('2026-01-02–now');
+      expect(html).toContain('2026-01-02–date unavailable');
+      expect(html).toContain('date unavailable–2026-01-03');
+      expect(html).toContain('date unavailable–date unavailable');
+      expect(html).toContain('date unavailable–2026-01-04');
+      expect(html).not.toContain('2026-01-02T00:00:00.000Z');
+      expect(html).not.toContain('Invalid Date');
+      expect(library.rows).toEqual(originalRows);
+    },
+  );
+
   it('authenticates a static two-tile hub without reading omitted private panels', async () => {
     const html = renderToStaticMarkup(await Hub());
     expect(html).toContain('What I remember');
