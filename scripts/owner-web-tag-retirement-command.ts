@@ -96,6 +96,10 @@ export async function runRetirementCommand(tracker: ReturnType<typeof retirement
       tracker.mark('apply_service_read');
       return io.readService();
     },
+    readRevision: (name) => {
+      tracker.mark('apply_revision_read');
+      return io.readRevision(name);
+    },
     patchTraffic: (body) => {
       tracker.mark('apply_write_boundary');
       // Fresh reads may consume the remaining review lifetime; check at the write boundary.

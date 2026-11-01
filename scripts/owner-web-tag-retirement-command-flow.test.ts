@@ -138,6 +138,24 @@ describe('retirement command diagnostic boundaries with fake transport only', ()
     });
     expect(ports.patchTraffic).not.toHaveBeenCalled();
   });
+  it('identifies fresh apply revision reads separately from service reads before any PATCH', async () => {
+    ports.readRevision
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(new Error('Native read rejected'));
+    ports.execute.mockImplementation(async (_plan, io) => {
+      await io.readService();
+      return io.readRevision('assistant-web-current');
+    });
+    const tracker = trackerFor('--apply');
+    const error = await runRetirementCommand(tracker).catch((error: unknown) => error);
+    expect(tracker.receipt(error)).toMatchObject({
+      stage: 'apply_revision_read',
+      reason: 'native_read_rejected',
+      mutationState: 'not_attempted',
+    });
+    expect(ports.patchTraffic).not.toHaveBeenCalled();
+  });
   it('records possible mutation on one uncertain PATCH and never retries', async () => {
     ports.patchTraffic.mockRejectedValue(new Error('Native PATCH outcome uncertain; do not retry'));
     ports.execute.mockImplementation(async (_plan, io) => io.patchTraffic({}));
@@ -146,6 +164,23 @@ describe('retirement command diagnostic boundaries with fake transport only', ()
     expect(tracker.receipt(error)).toMatchObject({
       stage: 'apply_patch',
       reason: 'patch_uncertain',
+      mutationState: 'may_have_been_attempted',
+      retryAuthorized: false,
+    });
+    expect(ports.patchTraffic).toHaveBeenCalledTimes(1);
+  });
+  it('retains possible mutation when PATCH returned but the following operation fails', async () => {
+    ports.patchTraffic.mockResolvedValue({});
+    ports.waitOperation.mockRejectedValue(new Error('Native operation failed'));
+    ports.execute.mockImplementation(async (_plan, io) => {
+      const operation = await io.patchTraffic({});
+      return io.waitOperation(operation);
+    });
+    const tracker = trackerFor('--apply');
+    const error = await runRetirementCommand(tracker).catch((error: unknown) => error);
+    expect(tracker.receipt(error)).toMatchObject({
+      stage: 'apply_wait_operation',
+      reason: 'operation_failed',
       mutationState: 'may_have_been_attempted',
       retryAuthorized: false,
     });

@@ -13,6 +13,7 @@ export type RetirementStage =
   | 'packet_write'
   | 'reviewed_packet_match'
   | 'apply_service_read'
+  | 'apply_revision_read'
   | 'apply_write_boundary'
   | 'apply_patch'
   | 'apply_wait_operation'
@@ -35,6 +36,7 @@ const stages = new Set<RetirementStage>([
   'packet_write',
   'reviewed_packet_match',
   'apply_service_read',
+  'apply_revision_read',
   'apply_write_boundary',
   'apply_patch',
   'apply_wait_operation',
