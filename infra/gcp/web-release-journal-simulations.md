@@ -141,3 +141,11 @@ confirmation, then journal completion, completion rebase, prepare attachP and pr
 rebase. It does not manually reseal/reset lifecycle state or exclude broad config
 fields. This closes the PREPARE-only composition gap without introducing a provider
 adapter or making the public summary a capability token.
+
+Final narrow corrections require the known resolution's exact method/mask/non-etag
+body to equal the strict known planner request, current-time expiry revalidation at
+every owner claim, and bounded formats/finite integer timing before public barrier
+serialization. Reordering the known wire representation or omitting zero is refused
+here even if a normalized poststate would compare equal. See the converged
+qualification plan for the chosen no-cold-continuation policy: public digests never
+reconstruct private resolution evidence or authorize a cross-run continuation.

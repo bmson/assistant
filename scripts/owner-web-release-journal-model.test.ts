@@ -12,7 +12,10 @@ import {
 } from './owner-web-release-lifecycle-model.js';
 import { projectNativeWebSnapshot } from './owner-web-release-native-proof.js';
 import { HISTORICAL_WEB_TAGS, WEB_SERVICE } from './owner-web-tag-retirement.js';
-import { reconciliationDigest as digest } from './owner-web-traffic-reconciliation-model.js';
+import {
+  reconciliationDigest as digest,
+  planWebTrafficReconciliation,
+} from './owner-web-traffic-reconciliation-model.js';
 
 const copy = <T>(v: T): T => JSON.parse(JSON.stringify(v));
 const at = '2026-11-01T23:00:00.000Z',
@@ -364,7 +367,7 @@ describe('journal same-resource CAS simulation', () => {
         checkRunId: '8002',
       },
       meta = oldMetadata(),
-      claimed = commitSpecial(J.beginJournalClaim(done.state, nextOwner, meta.run, meta.job));
+      claimed = commitSpecial(J.beginJournalClaim(done.state, nextOwner, meta.run, meta.job, now));
     expect(() => J.beginJournalAction(old.state, claimed.raw, old.request)).toThrow();
     const forged = copy(old.state);
     forged.raw.etag = claimed.raw.etag;
@@ -380,18 +383,18 @@ describe('journal same-resource CAS simulation', () => {
     const f = prepared(),
       n = { ...owner, runId: '700002', jobId: '9002', checkRunId: '8002' },
       m = oldMetadata();
-    expect(() => J.planJournalClaim(f.state, n, m.run, m.job)).toThrow();
+    expect(() => J.planJournalClaim(f.state, n, m.run, m.job, now)).toThrow();
     expect(() =>
-      J.planJournalClaim(terminal().state, { ...n, attempt: '2' } as never, m.run, m.job),
+      J.planJournalClaim(terminal().state, { ...n, attempt: '2' } as never, m.run, m.job, now),
     ).toThrow();
   });
   it('transfers anchored genesis only after the original bootstrap run/job are completed', () => {
     const f = fixture(),
       n = { ...owner, runId: '700002', jobId: '9002', checkRunId: '8002' },
       m = oldMetadata();
-    expect(commitSpecial(J.beginJournalClaim(f.state, n, m.run, m.job)).head.owner).toEqual(n);
+    expect(commitSpecial(J.beginJournalClaim(f.state, n, m.run, m.job, now)).head.owner).toEqual(n);
     m.job.status = 'in_progress';
-    expect(() => J.beginJournalClaim(f.state, n, m.run, m.job)).toThrow();
+    expect(() => J.beginJournalClaim(f.state, n, m.run, m.job, now)).toThrow();
   });
   it('keeps unknown action pending, refuses retry and refuses a late adopted operation', () => {
     const f = prepared(),
@@ -858,7 +861,7 @@ describe('history requires matching prepared intent resolution', () => {
         },
         m = oldMetadata();
       expect(() => J.validateSimulatedHistory(f.raw, f.anchor, f.events, now)).toThrow();
-      expect(() => J.planJournalClaim(f.state, n, m.run, m.job)).toThrow();
+      expect(() => J.planJournalClaim(f.state, n, m.run, m.job, now)).toThrow();
     },
   );
   it('requires the matching confirmed resolution even when completion is constructed by the current controller', () => {
@@ -980,4 +983,119 @@ describe('stored owner consistency', () => {
     const forged = { ...body, seal: digest(body) };
     expect(() => J.prepareJournalSimulation(forged, 'promoteP', digest({}))).toThrow();
   });
+});
+
+describe('final exact validation corrections', () => {
+  it('revalidates artifact expiry at current claim time, not old enrollment time', () => {
+    const f = terminal(),
+      n = { ...owner, runId: '700002', jobId: '9002', checkRunId: '8002' },
+      m = oldMetadata();
+    expect(() =>
+      J.planJournalClaim(f.state, n, m.run, m.job, Date.parse('2026-12-02T00:00:00.000Z')),
+    ).toThrow();
+    expect(() =>
+      J.beginJournalClaim(f.state, n, m.run, m.job, Date.parse('2026-12-02T00:00:00.000Z')),
+    ).toThrow();
+    expect(() => J.planJournalClaim(f.state, n, m.run, m.job, now - 1)).toThrow();
+  });
+  it.each([
+    'etagObject',
+    'etagLong',
+    'etagNewline',
+    'generationObject',
+    'generationLong',
+    'generationOverflow',
+    'infinite',
+    'nan',
+    'negative',
+    'unsafeInteger',
+    'nonNumeric',
+  ] as const)('refuses hostile barrier serialization value %s', (kind) => {
+    const f = terminal(),
+      e = copy(f.state.history.at(-1)!);
+    const d: Raw = {
+      etag: 'etag-safe',
+      generation: '10',
+      startedAt: now,
+      completedAt: now + 600000,
+      verifiedAt: now + 600001,
+      consumedAt: now + 600002,
+    };
+    if (kind === 'etagObject') d.etag = { privateValue };
+    if (kind === 'etagLong') d.etag = privateValue.repeat(50);
+    if (kind === 'etagNewline') d.etag = `private\n${privateValue}`;
+    if (kind === 'generationObject') d.generation = { privateValue };
+    if (kind === 'generationLong') d.generation = '1'.repeat(512);
+    if (kind === 'generationOverflow') d.generation = '9223372036854775808';
+    if (kind === 'infinite') d.startedAt = Infinity;
+    if (kind === 'nan') d.verifiedAt = NaN;
+    if (kind === 'negative') d.startedAt = -1;
+    if (kind === 'unsafeInteger') d.consumedAt = Number.MAX_SAFE_INTEGER + 1;
+    if (kind === 'nonNumeric') d.completedAt = privateValue;
+    e.barrier = d as J.BarrierProjection;
+    let error: unknown;
+    try {
+      J.journalEventPublicSummary(e);
+    } catch (v) {
+      error = v;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).not.toContain(privateValue);
+    expect(JSON.stringify(error)).not.toContain(privateValue);
+  });
+  it.each(['reordered', 'omittedZero'] as const)(
+    'refuses an alternate known reconciliation wire request in a coherent projected history: %s',
+    (kind) => {
+      const f = fixture(true),
+        p = J.prepareKnownJournalReconciliation(f.state, f.native, at),
+        s = commitMeta(f.state, p),
+        plan = planWebTrafficReconciliation(s.raw, f.native, owner.source, at),
+        { etag: _etag, ...body } = plan.request.body,
+        request: J.LogicalAction = { method: 'PATCH', updateMask: 'traffic', body: copy(body) };
+      const traffic = request.body.traffic as Raw[];
+      if (kind === 'reordered') traffic.reverse();
+      else delete traffic.find((r) => r.percent === 0)!.percent;
+      const preparedHead = copy(s.head);
+      preparedHead.intent!.logicalDigest = digest(request);
+      const before = copy(s.raw) as Raw;
+      before.annotations[J.JOURNAL_KEY] = JSON.stringify(preparedHead);
+      const exactPlan = planWebTrafficReconciliation(before, f.native, owner.source, at),
+        packet: J.KnownHandoffPacket = {
+          simulationOnly: true,
+          mutationAuthorized: false,
+          origin: owner,
+          headDigest: digest(preparedHead),
+          observedAt: at,
+          knownPlan: exactPlan,
+        };
+      const after = bump(before);
+      after.traffic = copy(traffic);
+      after.trafficStatuses = exactPlan.request.body.traffic.map((r) => ({
+        ...r,
+        uri: `https://${r.tag}---assistant-web-3gimfiaifa-uw.a.run.app`,
+      }));
+      const r: J.SimulatedResolution = {
+          before,
+          after,
+          request,
+          boundOperation: op,
+          completion: completed,
+          knownEvidence: { packet, native: f.native },
+        },
+        preparedEvent = event(before, preparedHead),
+        doneHead: J.Head = {
+          ...copy(preparedHead),
+          sequence: preparedHead.sequence + 1,
+          parent: digest(preparedHead),
+          previousArchive: { id: preparedEvent.archive.id, digest: preparedEvent.archive.digest },
+          status: 'complete',
+        },
+        doneRaw = bump(after, {
+          ...(after.annotations as Record<string, string>),
+          [J.JOURNAL_KEY]: JSON.stringify(doneHead),
+        }),
+        events = [s.history[0]!, preparedEvent, event(doneRaw, doneHead, r)];
+      expect(() => J.validateSimulatedHistory(doneRaw, s.anchor, events, now)).toThrow();
+    },
+  );
 });

@@ -738,6 +738,8 @@ function validateResolution(h: Head, r: SimulatedResolution) {
           planWebTrafficReconciliation(r.before, k.native, h.owner.source, k.packet.observedAt),
         ),
     );
+    const { etag: _etag, ...exactBody } = k.packet.knownPlan.request.body;
+    check(equal(r.request, { method: 'PATCH', updateMask: 'traffic', body: exactBody }));
     verifyWebTrafficReconciliationPost(r.after, k.native, k.packet.knownPlan);
   } else check(r.knownEvidence === null);
 }
@@ -891,9 +893,11 @@ export function planJournalClaim(
   newOwner: Origin,
   priorRun: Obj,
   priorJob: Obj,
+  now: number,
 ): MetadataPlan {
   verify(s);
-  validateSimulatedHistory(s.raw, s.anchor, s.history, s.historyObservedAt);
+  check(Number.isFinite(now) && now >= s.historyObservedAt);
+  validateSimulatedHistory(s.raw, s.anchor, s.history, now);
   origin(newOwner);
   check(
     !s.pending &&
@@ -1136,8 +1140,9 @@ export function beginJournalClaim(
   newOwner: Origin,
   priorRun: Obj,
   priorJob: Obj,
+  now: number,
 ): JournalSimulation {
-  const p = planJournalClaim(s, newOwner, priorRun, priorJob);
+  const p = planJournalClaim(s, newOwner, priorRun, priorJob, now);
   return seal({
     ...copy(s),
     origin: copy(newOwner),
@@ -1339,11 +1344,25 @@ export function journalEventPublicSummary(e: HistoryEvent) {
   text(e.postEtag, /^[ -~]{1,512}$/);
   generation(e.postGeneration);
   const d = e.barrier;
-  if (d)
+  if (d) {
     check(
       Object.keys(d).sort().join(',') ===
         'completedAt,consumedAt,etag,generation,startedAt,verifiedAt',
     );
+    text(d.etag, /^[ -~]{1,512}$/);
+    generation(d.generation);
+    check(
+      [d.startedAt, d.completedAt, d.verifiedAt, d.consumedAt].every(
+        (value) => Number.isSafeInteger(value) && value >= 0,
+      ),
+    );
+    check(
+      d.completedAt - d.startedAt >= 600000 &&
+        d.verifiedAt >= d.completedAt &&
+        d.consumedAt >= d.verifiedAt &&
+        d.consumedAt - d.verifiedAt <= 15000,
+    );
+  }
   return {
     head: copy(e.head),
     postEtag: e.postEtag,
