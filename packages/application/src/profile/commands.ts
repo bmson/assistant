@@ -752,6 +752,8 @@ export async function createPostgresOwnerEditorDomain(input: {
     postgresOwnerEditorEntity,
     readPostgresOwnerMemoryEditorSnapshot,
     commitPostgresOwnerMemoryCorrection,
+    readPostgresOwnerMemoryCreationTarget,
+    commitPostgresOwnerMemoryCreation,
     readPostgresOwnerEditorIssuanceContext,
   } = await import('@assistant/db');
   const { commitPreparedOwnerKnowledgeGraphFactPostgres } = await import(
@@ -784,6 +786,16 @@ export async function createPostgresOwnerEditorDomain(input: {
   const storage: OwnerEditorDomainStorage = {
     graph,
     context,
+    memoryCreationTarget: (ownerId, subjectContactId, contentHash, scope) =>
+      readPostgresOwnerMemoryCreationTarget(
+        input.db,
+        ownerId,
+        subjectContactId,
+        contentHash,
+        scope,
+      ),
+    commitCreateMemory: (claim, prepared, now) =>
+      commitPostgresOwnerMemoryCreation(input.db, claim, prepared, now),
     memory: (ownerId, id, scope) =>
       input.db.transaction(async (tx) => {
         const current = await readPostgresOwnerEditorIssuanceContext(tx, ownerId);

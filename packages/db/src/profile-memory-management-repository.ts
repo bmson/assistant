@@ -18,7 +18,7 @@ const ownedForMutation = async (tx: Db, agentId: string, id: string) =>
       .for('update')
       .limit(1)
   )[0];
-const tombstoned = async (tx: Db, contentHash: string) =>
+const tombstoned = async (tx: Pick<Db, 'select'>, contentHash: string) =>
   Boolean(
     (
       await tx
@@ -88,6 +88,75 @@ export async function correctPostgresProfileMemoryInTransaction(
       })
   )[0];
   return row ? { status: 'updated', memory: row } : { status: 'stale' };
+}
+
+type PostgresProfileMemoryCreateInput = Parameters<
+  ProfileMemoryManagementRepository['create']
+>[0] & { memoryId: string };
+
+/** Transaction-local create primitive shared by the legacy writer and owner-editor commit. */
+export async function createPostgresProfileMemoryInTransaction(
+  tx: Db,
+  agentId: string,
+  input: PostgresProfileMemoryCreateInput,
+): Promise<MemoryMutation> {
+  if (await tombstoned(tx, input.contentHash)) return { status: 'tombstoned' };
+  if (
+    !(
+      await tx
+        .select({ id: contacts.id })
+        .from(contacts)
+        .where(eq(contacts.id, input.subjectContactId))
+        .limit(1)
+    )[0]
+  )
+    return { status: 'not-found' };
+  const duplicate = (
+    await tx
+      .select({ id: memories.id, agentId: memories.agentId, contentHash: memories.contentHash })
+      .from(memories)
+      .where(eq(memories.contentHash, input.contentHash))
+      .limit(1)
+  )[0];
+  if (duplicate)
+    return duplicate.agentId === agentId
+      ? { status: 'duplicate', memory: duplicate }
+      : { status: 'duplicate' };
+  const row = (
+    await tx
+      .insert(memories)
+      .values({
+        id: input.memoryId,
+        agentId,
+        category: 'knowledge',
+        kind: 'fact',
+        content: input.content,
+        contentHash: input.contentHash,
+        embedding: input.embedding,
+        embeddingSpaceKey: input.embeddingSpaceKey ?? null,
+        importance: input.importance,
+        confidence: '1.00',
+        originTrust: 'owner',
+        ownerConfirmed: true,
+        pinned: input.pinned,
+        subjectContactId: input.subjectContactId,
+        domain: input.domain,
+        source: 'manual',
+      })
+      .onConflictDoNothing({ target: memories.contentHash })
+      .returning({ id: memories.id, agentId: memories.agentId, contentHash: memories.contentHash })
+  )[0];
+  if (row) return { status: 'updated', memory: row };
+  const racedDuplicate = (
+    await tx
+      .select({ id: memories.id, agentId: memories.agentId, contentHash: memories.contentHash })
+      .from(memories)
+      .where(eq(memories.contentHash, input.contentHash))
+      .limit(1)
+  )[0];
+  return racedDuplicate?.agentId === agentId
+    ? { status: 'duplicate', memory: racedDuplicate }
+    : { status: 'duplicate' };
 }
 
 /** Shared primary invalidation; compilation happens only after the durable correction. */
@@ -265,59 +334,11 @@ export function createPostgresProfileMemoryManagementRepository(
         ),
       )(id),
     create: (input) =>
-      mutate(async (tx, agentId) => {
-        if (await tombstoned(tx, input.contentHash)) return { status: 'tombstoned' };
-        if (
-          !(
-            await tx
-              .select({ id: contacts.id })
-              .from(contacts)
-              .where(eq(contacts.id, input.subjectContactId))
-              .limit(1)
-          )[0]
-        )
-          return { status: 'not-found' };
-        const row = (
-          await tx
-            .insert(memories)
-            .values({
-              id: randomUUID(),
-              agentId,
-              category: 'knowledge',
-              kind: 'fact',
-              content: input.content,
-              contentHash: input.contentHash,
-              embedding: input.embedding,
-              embeddingSpaceKey: input.embeddingSpaceKey ?? null,
-              importance: input.importance,
-              confidence: '1.00',
-              originTrust: 'owner',
-              ownerConfirmed: true,
-              pinned: input.pinned,
-              subjectContactId: input.subjectContactId,
-              domain: input.domain,
-              source: 'manual',
-            })
-            .onConflictDoNothing({ target: memories.contentHash })
-            .returning({
-              id: memories.id,
-              agentId: memories.agentId,
-              contentHash: memories.contentHash,
-            })
-        )[0];
-        if (row) return { status: 'updated', memory: row };
-        const duplicate = (
-          await tx
-            .select({
-              id: memories.id,
-              agentId: memories.agentId,
-              contentHash: memories.contentHash,
-            })
-            .from(memories)
-            .where(and(eq(memories.contentHash, input.contentHash), eq(memories.agentId, agentId)))
-            .limit(1)
-        )[0];
-        return duplicate ? { status: 'duplicate', memory: duplicate } : { status: 'duplicate' };
-      }),
+      mutate((tx, agentId) =>
+        createPostgresProfileMemoryInTransaction(tx, agentId, {
+          ...input,
+          memoryId: randomUUID(),
+        }),
+      ),
   };
 }

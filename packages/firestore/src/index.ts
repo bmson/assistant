@@ -115,6 +115,7 @@ export { FirestoreOwnerContextRepository } from './owner-context.js';
 export * from './owner-editor-domain.js';
 export * from './owner-editor-graph.js';
 export * from './owner-editor-memory.js';
+export * from './owner-editor-memory-create.js';
 export * from './owner-editor-repository.js';
 export * from './owner-editor-retention.js';
 export { FirestoreOwnerKnowledgeGraphFactRepository } from './owner-knowledge-graph-fact.js';

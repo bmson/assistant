@@ -18,6 +18,10 @@ import {
   readFirestoreOwnerMemoryEditorSnapshot,
 } from './owner-editor-memory.js';
 import {
+  commitFirestoreOwnerMemoryCreation,
+  readFirestoreOwnerMemoryCreationTarget,
+} from './owner-editor-memory-create.js';
+import {
   beginFirestoreOwnerEditorWrite,
   completeFirestoreOwnerEditorWrite,
   readFirestoreOwnerEditorIssuanceContext,
@@ -59,6 +63,26 @@ export function createFirestoreOwnerEditorDomainStorage(
       prepared: import('./owner-editor-memory.js').PreparedFirestoreOwnerMemoryCorrection,
       now: Date,
     ) => commitFirestoreOwnerMemoryCorrection(store, embeddingSpace, claim, prepared, now),
+    memoryCreationTarget: (
+      expected: string,
+      subjectContactId: string,
+      contentHash: string,
+      scope: import('@assistant/persistence').OwnerEditorScope,
+    ) => {
+      if (expected !== ownerId) throw new Error('Owner changed');
+      return readFirestoreOwnerMemoryCreationTarget(
+        store,
+        ownerId,
+        subjectContactId,
+        contentHash,
+        scope,
+      );
+    },
+    commitCreateMemory: (
+      claim: OwnerEditorClaim,
+      prepared: import('@assistant/persistence').PreparedOwnerMemoryCreation,
+      now: Date,
+    ) => commitFirestoreOwnerMemoryCreation(store, embeddingSpace, claim, prepared, now),
     memoryFollowup: createFirestoreProfileMemoryCommandPersistence(store, embeddingSpace),
     context: (expected: string) => {
       if (expected !== ownerId) throw new Error('Owner changed');

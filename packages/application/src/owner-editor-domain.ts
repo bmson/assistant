@@ -12,8 +12,11 @@ import {
   type OwnerGraphCorrectionTarget,
   type OwnerKnowledgeGraphFactAtomicInput,
   type OwnerKnowledgeGraphFactRepository,
+  type OwnerMemoryCreationTarget,
+  type PreparedOwnerMemoryCreation,
 } from '@assistant/persistence';
 import type { OwnerEditorDomainPort } from './owner-editor.js';
+import { prepareOwnerMemoryCreation, refreshOwnerMemoryCreation } from './owner-memory-create.js';
 import {
   type PreparedOwnerMemoryCorrection,
   prepareOwnerMemoryCorrection,
@@ -37,6 +40,17 @@ export interface OwnerEditorFamilySnapshot {
 }
 /** Bounded snapshot adapters on the existing driver; commit rechecks these under its claim lock. */
 export interface OwnerEditorDomainStorage {
+  memoryCreationTarget?(
+    ownerId: string,
+    subjectContactId: string,
+    contentHash: string,
+    scope: OwnerEditorScope,
+  ): Promise<OwnerMemoryCreationTarget | null>;
+  commitCreateMemory?(
+    claim: OwnerEditorClaim,
+    prepared: PreparedOwnerMemoryCreation,
+    now: Date,
+  ): Promise<OwnerEditorReply>;
   contact(ownerId: string, contactId: string): Promise<OwnerEditorContactSnapshot | null>;
   memory?(
     ownerId: string,
@@ -77,6 +91,7 @@ export interface OwnerEditorDomainStorage {
   ): Promise<OwnerEditorReply>;
 }
 export type PreparedOwnerEditor =
+  | { kind: 'memory-create'; memory: PreparedOwnerMemoryCreation }
   | { kind: 'memory'; memory: PreparedOwnerMemoryCorrection }
   | {
       kind: 'person';
@@ -91,7 +106,7 @@ export type PreparedOwnerEditor =
       expected: OwnerEditorGraphExpectations;
     };
 
-/** Owner-memory creation stays unavailable until its atomic storage port is implemented. */
+/** Provider preparation is outside commit; release admission remains a separate gate. */
 export function createOwnerEditorDomain(input: {
   storage: OwnerEditorDomainStorage;
   router: EmbeddingPort;
@@ -103,7 +118,6 @@ export function createOwnerEditorDomain(input: {
       scope: OwnerEditorScope,
     ): ReturnType<OwnerEditorDomainPort<PreparedOwnerEditor>['prepare']> {
       if (
-        request.command === 'create_owner_memory' ||
         request.command === 'remove_person' ||
         request.command === 'remove_owner_family_relationship'
       )
@@ -111,6 +125,22 @@ export function createOwnerEditorDomain(input: {
           ok: false,
           result: { outcome: 'unavailable', reason: 'editor_command_unavailable' },
         };
+      if (request.command === 'create_owner_memory') {
+        if (!storage.memoryCreationTarget || !storage.commitCreateMemory)
+          return {
+            ok: false,
+            result: { outcome: 'unavailable', reason: 'editor_command_unavailable' },
+          };
+        const result = await prepareOwnerMemoryCreation(
+          request,
+          scope,
+          storage.memoryCreationTarget.bind(storage),
+          router,
+        );
+        return result.ok
+          ? { ok: true, prepared: { kind: 'memory-create', memory: result.prepared } }
+          : result;
+      }
       const targetMatches =
         request.command === 'create_person'
           ? scope.targetId === null
@@ -273,6 +303,17 @@ export function createOwnerEditorDomain(input: {
       };
     },
     async commit(claim, prepared, now) {
+      if (prepared.kind === 'memory-create') {
+        if (!storage.commitCreateMemory) throw new Error('Memory creation writer unavailable');
+        const reply = await storage.commitCreateMemory(claim, prepared.memory, now);
+        if (
+          reply.authority === 'operation_receipt' &&
+          reply.outcome === 'saved' &&
+          storage.memoryFollowup
+        )
+          await refreshOwnerMemoryCreation(storage.memoryFollowup.ownerCards, claim.scope.ownerId);
+        return reply;
+      }
       if (prepared.kind === 'memory') {
         if (!storage.commitMemory) throw new Error('Memory writer unavailable');
         const reply = await storage.commitMemory(claim, prepared.memory, now);

@@ -7,11 +7,11 @@
     "apps/agent/src/index.ts": "6da57b60f853ca6622142a12b70bb31a73e8155eac30dd7d905218c19ca2fd56",
     "apps/web/lib/server.ts": "47c3906445e13f73f70ee9c341aef7d3279b8a50fd8e120a088f4528fdd57c61",
     "apps/web/proxy.ts": "0d3bae71bd7a094b3e70615c89bd82db8b2fa1196e7ccde8a1d7b2e6c4872cc6",
-    "packages/db/drizzle/meta/_journal.json": "a94cd8a88088e989a08f71cabb8eaf9545a675ebc056d48e5465a772ccdbbcd9",
-    "infra/gcp/release-contracts.json": "af6c360573bf79003d5ac3ba10fae4ac97acf94ebbbb02da351906a27c60fddd"
+    "packages/db/drizzle/meta/_journal.json": "ac17b3e7559af6f8d95401ca274579fec87011f3c17cb62ca996f91acae3bb72",
+    "infra/gcp/release-contracts.json": "7e9166bef85bb64fb010d04301af4338fbd1aa861d44b1644b9512b28fae18f8"
   },
-  "latestPostgresMigration": "0133_owner_call_grant_operation_receipts",
-  "postgresSchemaVersion": 133,
+  "latestPostgresMigration": "0134_owner_memory_creation",
+  "postgresSchemaVersion": 134,
   "releaseContracts": {
     "agent": {
       "apiContract": 1,
@@ -21,7 +21,7 @@
       },
       "postgresSchema": {
         "min": 133,
-        "max": 133
+        "max": 134
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -33,7 +33,7 @@
       },
       "postgresSchema": {
         "min": 132,
-        "max": 133
+        "max": 134
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -45,7 +45,7 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 133
+        "max": 134
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -57,7 +57,7 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 133
+        "max": 134
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -69,7 +69,7 @@
       },
       "postgresSchema": {
         "min": 0,
-        "max": 133
+        "max": 134
       },
       "currentPostgresSchemaCompatible": true
     }

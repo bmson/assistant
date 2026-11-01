@@ -939,6 +939,13 @@
       "when": 1793211324481,
       "tag": "0133_owner_call_grant_operation_receipts",
       "breakpoints": true
+    },
+    {
+      "idx": 134,
+      "version": "7",
+      "when": 1793555900804,
+      "tag": "0134_owner_memory_creation",
+      "breakpoints": true
     }
   ]
 }

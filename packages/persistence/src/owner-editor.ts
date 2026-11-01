@@ -17,6 +17,30 @@ export type OwnerEditorCommand =
   | 'remove_owner_family_relationship';
 export type OwnerEditorTiming = 'unspecified' | 'present' | 'past';
 
+/** Frozen outside native transaction callbacks; no provider work occurs in commit. */
+export interface PreparedOwnerMemoryCreation {
+  memoryId: string;
+  retrievalRevision: string;
+  subjectContactId: string;
+  expectedSubjectRevision: string;
+  content: string;
+  contentHash: string;
+  domain: string;
+  importance: number;
+  pinned: boolean;
+  embedding: number[];
+  embeddingSpaceKey: string;
+}
+
+/** Owner/epoch/privacy and hash eligibility observed in one short driver lease. */
+export interface OwnerMemoryCreationTarget {
+  ownerId: string;
+  subjectContactId: string;
+  subjectRevision: string;
+  subjectTrust: string;
+  status: 'eligible' | 'duplicate' | 'tombstoned';
+}
+
 /** Civil dates, validated before conversion; null means not recorded. */
 export interface OwnerEditorValidity {
   validFrom: string | null;

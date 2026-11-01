@@ -8,18 +8,16 @@ const existingCommands = [
   'add_family_relationship',
   'correct_owner_family_relationship',
   'correct_owner_memory',
+  'create_owner_memory',
 ] as const;
 
 describe('PostgreSQL owner editor command storage boundary', () => {
-  it('keeps the physical check limited to the five existing commands', () => {
-    // Source-schema evidence only. PostgreSQL cannot contain a create_owner_memory receipt unless
-    // a future migration changes this physical constraint; no native database is contacted.
+  it('recognizes the new receipt command in storage without activating a writer', () => {
     const commandCheck = getTableConfig(ownerEditorOperations).checks.find(
       ({ name }) => name === 'owner_editor_operation_command',
     );
     if (!commandCheck) throw new Error('PostgreSQL owner editor command check is missing');
     const sql = new PgDialect().sqlToQuery(commandCheck.value).sql;
     for (const command of existingCommands) expect(sql).toContain(`'${command}'`);
-    expect(sql).not.toContain("'create_owner_memory'");
   });
 });

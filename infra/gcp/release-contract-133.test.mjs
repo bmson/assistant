@@ -11,6 +11,12 @@ const journal = JSON.parse(
   await readFile(new URL('../../packages/db/drizzle/meta/_journal.json', import.meta.url)),
 );
 const selected = ['agent', 'web', 'browser', 'code', 'processor'];
+// Keep the previous bridge/target contract as a historical regression fixture.
+for (const name of selected) sourceContract.components[name].schema.postgres.max = 133;
+const historicalJournal = {
+  ...journal,
+  entries: journal.entries.filter((entry) => entry.idx <= 133),
+};
 const digests = Object.fromEntries(selected.map((name) => [name, `sha256:${'a'.repeat(64)}`]));
 
 function bridgeContract() {
@@ -49,7 +55,7 @@ test('final 133 target ranges are exact and keep API and Firestore contracts unc
     assert.deepEqual(target.components[name].schema.firestore, { min: 1, max: 1 });
   }
   assert.deepEqual(target.storageSchemaVersion, { firestore: 1 });
-  assert.equal(deriveSchemaVersion('postgres', journal, target), 133);
+  assert.equal(deriveSchemaVersion('postgres', historicalJournal, target), 133);
   assert.equal(validateManifest(manifest(133, target)), true);
   assert.throws(() => validateManifest(manifest(132, target)), /agent is incompatible.*132/);
 });

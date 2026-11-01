@@ -1,5 +1,7 @@
 # Person-note creation: reader compatibility stage
 
+This document records the reader-only boundary at commit `b8bbe967`. The later [atomic source stage](person-note-create-atomic.md) updates internal writer and schema support while keeping production admission closed.
+
 This source slice recognizes an explicit `create_owner_memory` request under wire/storage protocol version 1. It does not enable creation. The BASIC owner-editor issuer, HTTP release policy, deployment capability list, atomic storage writers and PostgreSQL command constraint still support exactly the existing five commands. The domain rejects creation before storage or provider work. General notes and all removal commands remain unfinished capabilities.
 
 The first creation MVP is **Add a note about this person**. A request must name the displayed person UUID and exact subject revision; it cannot omit the subject, infer an owner contact, or substitute null authority. Its signed target is that subject UUID. General/owner notes need a separate explicitly owner/agent-bound contract.
