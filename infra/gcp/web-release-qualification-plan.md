@@ -83,8 +83,12 @@ plan neither creates the harness/workflow nor dispatches anything.
 ## One bounded hosted READ-ONLY dispatch, only after that authorization
 
 Application probe budget: at most20 HTTP requests,15s each,120s overall; fixed
-origins and body bounds. The already pinned WIF setup/auth is separately bounded
-by its reviewed helper and never logs tokens. No permission probe POST, provider
+origins and body bounds. This includes OIDC/JWKS, existing WIF STS/IAM token exchange,
+redirect/blob and any SDK/library HTTP. No opaque auth action, remote-JWKS fetch or
+SDK retry may run outside that shared budget. Use budget-owned fetches and local
+JWK verification with the existing library; zero SDK network calls. The only allowed
+POSTs are the existing fixed WIF token-exchange/impersonation endpoints, never a
+Cloud Run write. Tokens stay private. The audit upload is separately accounted output. No permission probe POST, provider
 log sample, native/tag HTTP probe, IAM change, ADC fallback or credential inspection.
 No automatic retries or broader capability request on failure.
 
@@ -95,16 +99,47 @@ exact GitHub check_run_url and numeric job/run/source metadata, never its name.
 Use the existing job capability for fixed GitHub metadata calls. Missing claim,
 invalid signature, wrong workflow/source/job, denied read or incomplete mapping is
 UNKNOWN/HOLD, not a weaker environment-variable substitute.
-2. Test READ access to ONE already-known bounded release manifest artifact under
-the actual job capability: exact run/source/id/metadata/digest/size, bounded redirect
-allowlist and ZIP bytes/member schema. Public metadata alone is insufficient.
-Use the existing protected artifact-reader contract. No new artifact upload or
+2. Test READ access under the actual job capability to this ONE exact archive:
+- Repository bmson/assistant; deploy run40403696377, attempt1;
+  source0c9a7ad7fc9c62b7ff166fe85bd023013ee88d43.
+- Artifact ID12690736934; exact name
+  release-manifest-0c9a7ad7fc9c62b7ff166fe85bd023013ee88d43;837archive bytes;
+  archive SHA2562d4ea8eb94aafc85d1ae2f07c2009378eea7178e61c7dfd57f4e553c14c05d61.
+- Expected single member assistant-release-0c9a7ad7fc9c62b7ff166fe85bd023013ee88d43.json,
+  from the recorded direct-file upload path; payload SHA256
+  88111506b65187b3b24e40e910251420184168ffff7d4fbfe0d2aeb4cc4bf23c.
+  The hosted probe must verify the actual ZIP member; a different layout is HOLD.
+
+These pins come from the retained provenance packet and exact historical upload
+log, not a new artifact download. Public metadata alone is insufficient. This needs
+a NEW bounded manifest-only reader in the authorized implementation scope, sharing
+the request/redirect/byte/timeout budget and exact one-member ZIP restrictions.
+Do not broaden owner-web-tag-artifact.ts: that reader expects the DIFFERENT
+owner-web-tag-creation-<source>-<run>-<attempt> archive with owner-web-tag-creation.json
+AND release-manifest.json members. No known existing creation archive is presumed.
+This probe qualifies manifest ZIP access only, not creation proof or cold recovery. No new artifact upload or
 permission is required by this read-only probe. Failure stops; do not try a PAT,
 connector token, anonymous fallback or new actions permission. This does not qualify
 streaming upload, finalize/collision behavior, durable private history or cold recovery.
-3. Observe the fixed known operational workflows' active/queued/waiting runs in a
-bounded complete listing, including attempt/source/hosted job status and completion
-times. Exclude only this exact source/run/job's read-only qualifier. An old writer,
+3. The exact reviewed operative set is:
+  .github/workflows/deploy.yml, cleanup.yml, owner-web-tag-retirement.yml,
+  owner-editor-v1-maintenance.yml, prepare-owner-editor-index.yml,
+  workspace-import.yml, workspace-export.yml, owner-editor-release-inventory.yml
+  (all basenames after the first are under .github/workflows/).
+  The inventory includes the diagnostic WIF holder conservatively. ci.yml and
+  self-repair.yml use the demo emulator without production WIF auth in reviewed
+  source; ios.yml and agent-image-pr-smoke.yml are not production writers.
+  Unknown active workflow paths are HOLD, never silently excluded.
+
+Query scope: five repository-wide GETs to /repos/bmson/assistant/actions/runs,
+per_page=100&page=1, one each status=in_progress, queued, waiting, pending, requested;
+no branch/event/created-time filter. Match exact workflow paths. total_count>100,
+next-page link, missing status/source/path or unsupported query is UNKNOWN; do not
+page/retry beyond the budget. Any operative run other than the exact qualifier
+is HOLD. Exclude the qualifier only after its authenticated current jobs listing
+shows all mutating jobs skipped. Lists are non-atomic and are observations, not
+process/token quiescence proof. Completion/teardown/lifetime facts not present in
+this bounded inventory remain UNKNOWN for separate owner review. Exclude only this exact source/run/job's read-only qualifier. An old writer,
 pending old mutation, self-hosted/unknown runner, incomplete page, uncertain teardown
 or unbounded prior credential lifetime leaves quiescence UNKNOWN. Workflow status
 alone is not process death or token revocation. Bound maximum old-writer credential
@@ -121,8 +156,8 @@ drift or unsupported shape stops. Do not normalize the known mismatch as equalit
 redacted audit artifact; this must be included explicitly in the future dispatch
 authorization. It is not an upload/concurrency experiment or mutation capability.
 Publish ONE redacted qualification packet using the already supported end-of-job
-artifact archival mechanism and STOP. Verify its readback under the job capability
-if within the fixed budget; failure stays UNKNOWN. No result carries mutationAuthority.
+artifact archival mechanism and STOP. Do not add an unbudgeted audit readback. The existing-manifest ZIP probe already
+checks the job read path; audit publication output is not mutation authority. No result carries mutationAuthority.
 The source must not turn a successful read-only result into an automatic next stage.
 
 No current read authorization remains. The above counts are a proposal for the
@@ -169,3 +204,14 @@ uses the fail-closed owner recovery rule above. A fresh separately reviewed know
 reconciliation packet, supported real approval channel, normal retirement+600s
 barrier, first paired serving proof/delivery restoration and phone installation
 remain separate decisions and evidence gates.
+
+### Shared request allocation for the future read-only implementation
+
+The worst-case20application requests are: two OIDC requests (journal audience and
+existing provider audience), discovery+JWKS2, existing STS+IAM exchange2, current
+run+complete current-job listing2, pinned artifact run-attempt+metadata+ZIP redirect+
+blob4, five status listings5, and three fixed native GETs3. Library/SDK requests
+consume these same slots; no hidden retries. If a supported flow requires more,
+STOP with UNKNOWN and no native/write fallback. Publication of the one redacted
+audit artifact is separately bounded/accounted as output; no duplicate-upload
+experiment. No qualifier is currently implemented or dispatched.
