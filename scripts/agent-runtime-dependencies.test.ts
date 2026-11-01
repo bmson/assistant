@@ -11,7 +11,7 @@ describe('agent image runtime dependency closure', () => {
       readFileSync(resolve(root, 'apps/agent/runtime-dependencies/package.json'), 'utf8'),
     ) as { dependencies: Record<string, string> };
     expect(runtime.dependencies).toEqual({
-      '@google-cloud/firestore': '9.3.1',
+      '@google-cloud/firestore': '9.4.0',
       unpdf: '1.9.1',
     });
 
@@ -21,8 +21,8 @@ describe('agent image runtime dependency closure', () => {
       ?.split('\n  apps/')[0];
     expect(runtimeImporter).toContain(`    dependencies:
       '@google-cloud/firestore':
-        specifier: 9.3.1
-        version: 9.3.1
+        specifier: 9.4.0
+        version: 9.4.0
       unpdf:
         specifier: 1.9.1
         version: 1.9.1`);
