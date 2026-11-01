@@ -10,6 +10,7 @@ import { AddFact } from '@/app/profile/add-fact';
 import { FactRow, type FactView } from '@/app/profile/fact-row';
 import { requireOwner } from '@/auth';
 import { relativeTime } from '@/lib/format';
+import { savedNoteCreatedLabel, savedNoteValidityLabel } from '@/lib/saved-note-date-display';
 import { getDb, getFirestoreInstallationStore } from '@/lib/server';
 import {
   Badge,
@@ -40,8 +41,6 @@ const DOMAIN_ORDER = [
 ] as const;
 
 function toFactView(m: MemorySnapshot, now: Date, inCard: boolean): FactView {
-  const from = m.validFrom?.toISOString().slice(0, 10);
-  const until = m.validUntil?.toISOString().slice(0, 10);
   return {
     id: m.id,
     content: m.content,
@@ -56,8 +55,8 @@ function toFactView(m: MemorySnapshot, now: Date, inCard: boolean): FactView {
     aboutOwner: true,
     originTrust: m.originTrust,
     sourceTaskId: m.sourceTaskId,
-    createdLabel: relativeTime(m.createdAt, now),
-    validityLabel: from ? `${from}–${until ?? 'now'}` : '',
+    createdLabel: savedNoteCreatedLabel(m.createdAt, now),
+    validityLabel: savedNoteValidityLabel(m.validFrom, m.validUntil),
   };
 }
 

@@ -29,10 +29,10 @@ import type { FactView } from '@/app/profile/fact-row';
 import { MemoryNavigation } from '@/app/profile/memory-navigation';
 import { requireOwner } from '@/auth';
 import { getFirestorePersonDossier } from '@/lib/firestore-people';
-import { relativeTime } from '@/lib/format';
 import { memoryMapReturnTo } from '@/lib/memory-editor-context';
 import { ownerEditorAvailability } from '@/lib/owner-editor-availability';
 import { buildOwnerEditorView } from '@/lib/owner-editor-view';
+import { savedNoteCreatedLabel, savedNoteValidityLabel } from '@/lib/saved-note-date-display';
 import { readPostgresOwnerEditorViewInputs, withPostgresMemoryBrowseRead } from '@/lib/server';
 import {
   Badge,
@@ -55,8 +55,6 @@ const CONNECTION_UUID_RE =
 const FACT_LIMIT = 250;
 
 function toFactView(memory: MemorySnapshot, now: Date, subjectLabel: string): FactView {
-  const from = memory.validFrom?.toISOString().slice(0, 10);
-  const until = memory.validUntil?.toISOString().slice(0, 10);
   return {
     id: memory.id,
     content: memory.content,
@@ -72,8 +70,8 @@ function toFactView(memory: MemorySnapshot, now: Date, subjectLabel: string): Fa
     originTrust: memory.originTrust,
     sourceTaskId: memory.sourceTaskId,
     subjectLabel,
-    createdLabel: relativeTime(memory.createdAt, now),
-    validityLabel: from ? `${from}–${until ?? 'now'}` : '',
+    createdLabel: savedNoteCreatedLabel(memory.createdAt, now),
+    validityLabel: savedNoteValidityLabel(memory.validFrom, memory.validUntil),
   };
 }
 
