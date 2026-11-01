@@ -231,6 +231,63 @@ export function hasFreshPersonNoteGrant(input: {
   );
 }
 
+export function canReviewPersonNoteDraft(input: {
+  capture: {
+    session: OwnerEditorSessionView;
+    snapshot: PersonNoteCreateSnapshot;
+    grant: OwnerEditorFormGrant;
+  } | null;
+  session: OwnerEditorSessionView | null;
+  snapshot: PersonNoteCreateSnapshot | null;
+  grant: OwnerEditorFormGrant | null;
+  phase: ReturnType<OwnerEditorOperation['getSnapshot']>['phase'];
+}): boolean {
+  const { capture, session, snapshot, grant, phase } = input;
+  return Boolean(
+    capture &&
+      session &&
+      snapshot &&
+      grant &&
+      phase === 'ready' &&
+      validSnapshot(session, snapshot) &&
+      validGrant(grant) &&
+      capture.session.ownerId === session.ownerId &&
+      capture.session.formSessionScope === session.formSessionScope &&
+      capture.snapshot.contactId.toLowerCase() === snapshot.contactId.toLowerCase() &&
+      grant.operationId !== capture.grant.operationId,
+  );
+}
+
+export function personNoteDraftFreshnessAction(input: {
+  capture: {
+    session: OwnerEditorSessionView;
+    snapshot: PersonNoteCreateSnapshot;
+    grant: OwnerEditorFormGrant;
+  } | null;
+  session: OwnerEditorSessionView | null;
+  snapshot: PersonNoteCreateSnapshot | null;
+  grant: OwnerEditorFormGrant | null;
+  phase: ReturnType<OwnerEditorOperation['getSnapshot']>['phase'];
+}): 'review' | 'refresh' | null {
+  const { capture, session, snapshot, grant, phase } = input;
+  if (
+    !capture ||
+    !session ||
+    !snapshot ||
+    !grant ||
+    phase !== 'ready' ||
+    !validSnapshot(session, snapshot) ||
+    !validGrant(grant) ||
+    capture.session.ownerId !== session.ownerId ||
+    capture.session.formSessionScope !== session.formSessionScope ||
+    capture.snapshot.contactId.toLowerCase() !== snapshot.contactId.toLowerCase() ||
+    (capture.snapshot.revision === snapshot.revision &&
+      capture.grant.operationId === grant.operationId)
+  )
+    return null;
+  return canReviewPersonNoteDraft(input) ? 'review' : 'refresh';
+}
+
 const noSubscribe = () => () => {};
 const EMPTY_STATE = Object.freeze({
   phase: 'checking' as const,
@@ -370,14 +427,10 @@ export function PersonNoteCreator({ session, snapshot, grant }: PersonNoteCreato
   };
   const reviewUnsentDraftWithFreshPerson = () => {
     if (
-      !capture ||
       !session ||
       !snapshot ||
       !grant ||
-      !currentEligible ||
-      !sessionMatches ||
-      state.phase !== 'ready' ||
-      grant.operationId === capture.grant.operationId
+      !canReviewPersonNoteDraft({ capture, session, snapshot, grant, phase: state.phase })
     )
       return;
     setCapture({ session, snapshot, grant });
@@ -391,12 +444,13 @@ export function PersonNoteCreator({ session, snapshot, grant }: PersonNoteCreato
     snapshot,
     grant,
   });
-  const canReviewUnsentDraft = Boolean(
-    capture && currentEligible && sessionMatches && state.phase === 'ready' && !captureMatches,
-  );
-  const hasFreshUnsentGrant = Boolean(
-    capture && currentEligible && grant && grant.operationId !== capture.grant.operationId,
-  );
+  const unsentDraftAction = personNoteDraftFreshnessAction({
+    capture,
+    session,
+    snapshot,
+    grant,
+    phase: state.phase,
+  });
 
   return (
     <section className="mt-5 rounded-xl border border-edge bg-raised p-4">
@@ -423,7 +477,17 @@ export function PersonNoteCreator({ session, snapshot, grant }: PersonNoteCreato
           <p className="text-sm text-muted">
             This note will be saved about {capture.snapshot.name}.
           </p>
-          {!captureMatches && !pending ? (
+          {snapshot &&
+          capture.snapshot.contactId.toLowerCase() !== snapshot.contactId.toLowerCase() ? (
+            <p role="status" className="text-sm text-muted">
+              This draft belongs to {capture.snapshot.name} and cannot be moved to another person.
+              Reload the person page to start a note for {snapshot.name}; reloading loses this
+              draft.
+            </p>
+          ) : null}
+          {!captureMatches &&
+          !pending &&
+          capture.snapshot.contactId.toLowerCase() === snapshot?.contactId.toLowerCase() ? (
             <p role="status" className="text-sm text-muted">
               The saved person details changed. Review the latest details before saving.
             </p>
@@ -512,15 +576,17 @@ export function PersonNoteCreator({ session, snapshot, grant }: PersonNoteCreato
             >
               Close and keep this draft on the page
             </button>
-            {canReviewUnsentDraft ? (
+            {unsentDraftAction ? (
               <button
                 type="button"
                 className={btn.outline}
                 onClick={
-                  hasFreshUnsentGrant ? reviewUnsentDraftWithFreshPerson : () => router.refresh()
+                  unsentDraftAction === 'review'
+                    ? reviewUnsentDraftWithFreshPerson
+                    : () => router.refresh()
                 }
               >
-                {hasFreshUnsentGrant
+                {unsentDraftAction === 'review'
                   ? 'I reviewed the latest person details; keep my note'
                   : 'Refresh saved person details'}
               </button>

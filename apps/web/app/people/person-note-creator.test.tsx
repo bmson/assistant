@@ -8,6 +8,7 @@ import { OwnerEditorOperation, type OwnerEditorOperationState } from '@/lib/owne
 import { ownerEditorRequestHash } from '../../../../packages/application/src/owner-editor-hash';
 import {
   buildPersonNoteCreateRequest,
+  canReviewPersonNoteDraft,
   hasFreshPersonNoteGrant,
   type PersonNoteCreateSnapshot,
   PersonNoteCreator,
@@ -16,6 +17,7 @@ import {
   personNoteCreateConflictMessage,
   personNoteCreatedMemoryId,
   personNoteDraftAfterFreshReview,
+  personNoteDraftFreshnessAction,
 } from './person-note-creator';
 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ refresh: vi.fn() }) }));
@@ -105,6 +107,83 @@ afterEach(() => {
 });
 
 describe('dormant person-note request and receipt contract', () => {
+  it('allows stale-draft review only for the captured person with a fresh revision and grant', () => {
+    const capture = { session, snapshot, grant };
+    expect(
+      canReviewPersonNoteDraft({
+        capture,
+        session,
+        snapshot: { ...snapshot, contactId: memoryId, revision: 'c'.repeat(64) },
+        grant: { ...grant, operationId: nextOperationId, issuedOperationHandle: 'fresh-handle' },
+        phase: 'ready',
+      }),
+    ).toBe(false);
+    expect(
+      canReviewPersonNoteDraft({
+        capture,
+        session,
+        snapshot: { ...snapshot, revision: 'c'.repeat(64) },
+        grant: { ...grant, operationId: nextOperationId, issuedOperationHandle: 'fresh-handle' },
+        phase: 'ready',
+      }),
+    ).toBe(true);
+  });
+
+  it('keeps refresh available for stale A, and offers review only for same A with a new grant', () => {
+    const capture = { session, snapshot, grant };
+    const staleA = { ...snapshot, revision: 'c'.repeat(64) };
+    expect(
+      personNoteDraftFreshnessAction({
+        capture,
+        session,
+        snapshot: staleA,
+        grant,
+        phase: 'ready',
+      }),
+    ).toBe('refresh');
+    expect(
+      personNoteDraftFreshnessAction({
+        capture,
+        session,
+        snapshot: { ...staleA, contactId: memoryId },
+        grant: { ...grant, operationId: nextOperationId, issuedOperationHandle: 'fresh-handle' },
+        phase: 'ready',
+      }),
+    ).toBeNull();
+    expect(
+      personNoteDraftFreshnessAction({
+        capture,
+        session,
+        snapshot: staleA,
+        grant: { ...grant, operationId: nextOperationId, issuedOperationHandle: 'fresh-handle' },
+        phase: 'ready',
+      }),
+    ).toBe('review');
+  });
+
+  it('keeps the original draft and sends no create when the current person changes', async () => {
+    // Pure guard/controller model; the dormant component is not mounted in this test.
+    vi.stubGlobal('crypto', webcrypto);
+    const fetcher = vi.fn<typeof fetch>();
+    const storage = new MemoryStorage();
+    const controller = new OwnerEditorOperation(session, () => storage, fetcher);
+    controller.initialize();
+    const originalDraft = content;
+    const capture = { session, snapshot, grant };
+    const action = personNoteDraftFreshnessAction({
+      capture,
+      session,
+      snapshot: { ...snapshot, contactId: memoryId, revision: 'c'.repeat(64) },
+      grant: { ...grant, operationId: nextOperationId, issuedOperationHandle: 'fresh-handle' },
+      phase: controller.getSnapshot().phase,
+    });
+    if (action === 'review') await controller.apply(createRequest(), grant, subjectId);
+    expect(action).toBeNull();
+    expect(originalDraft).toBe(content);
+    expect(controller.getSnapshot().phase).toBe('ready');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it('builds only the strict existing create command with subject revision and normalized content', () => {
     const request = createRequest();
     expect(request).toEqual({
