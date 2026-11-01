@@ -200,6 +200,17 @@ function serviceState(raw: unknown) {
     configurationSha256: digest(configuration),
   };
 }
+/** Bounded public traffic projection; native templates/env never leave the parser. */
+export function webTagTrafficSnapshot(raw: unknown) {
+  const state = serviceState(raw);
+  return {
+    uid: state.uid,
+    rows: state.observed.map((row) => ({
+      ...trafficIdentity(row, true),
+      ...(row.uri === undefined ? {} : { uri: text(row.uri, /^https:\/\/[^\s]{1,512}$/) }),
+    })),
+  };
+}
 export interface RetirementPlan {
   format: 1;
   service: typeof WEB_SERVICE;

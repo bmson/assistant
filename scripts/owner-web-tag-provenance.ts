@@ -438,7 +438,7 @@ interface WebManifest {
   image: string;
   digest: string;
 }
-function parseWebManifest(bytes: Uint8Array): WebManifest {
+export function parseWebManifest(bytes: Uint8Array): WebManifest {
   const manifest = object(parseJson(bytes, MAX_MANIFEST_BYTES), [
     'format',
     'release',

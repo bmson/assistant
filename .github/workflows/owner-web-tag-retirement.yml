@@ -66,6 +66,7 @@ jobs:
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
         with:
           version: 576.0.0
+          cache: true
       - name: Plan exact historical alias retirement
         if: inputs.mode == 'plan'
         run: pnpm exec tsx scripts/owner-web-tag-retirement-command.ts --plan

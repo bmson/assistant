@@ -369,6 +369,7 @@ jobs:
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
         with:
           version: 576.0.0
+          cache: true
       - name: Resolve live release path
         id: release_path
         env:
@@ -408,9 +409,19 @@ jobs:
           path: owner-editor-release-inventory.json
           if-no-files-found: ignore
           retention-days: 14
+      - name: Stage existing GitHub read capability for exact creation proof only
+        if: steps.release_path.outputs.firestore_pair == 'true'
+        env:
+          OWNER_TAG_EXISTING_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -o noclobber
+          umask 077
+          printf '%s' "$OWNER_TAG_EXISTING_GITHUB_TOKEN" > "${RUNNER_TEMP}/owner-web-tag-github-token"
       - name: Release Firestore pair with delivery guard
         if: steps.release_path.outputs.firestore_pair == 'true'
         env:
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
           IMAGE_TAG: ${{ needs.plan.outputs.sha }}
           ASSISTANT_MODULES: ${{ needs.plan.outputs.modules }}
           RELEASE_PERSISTENCE_DRIVER: ${{ needs.plan.outputs.persistence }}
@@ -465,6 +476,27 @@ jobs:
         with:
           name: release-manifest-${{ needs.plan.outputs.sha }}
           path: ${{ runner.temp }}/assistant-release-${{ needs.plan.outputs.sha }}.json
+          if-no-files-found: ignore
+          retention-days: 90
+      - name: Remove only the task's temporary GitHub read capability
+        if: always() && steps.release_path.outputs.firestore_pair == 'true'
+        run: /usr/bin/rm -f -- "${RUNNER_TEMP}/owner-web-tag-github-token"
+      - name: Archive exact web alias creation proofs and matching manifest
+        if: always() && steps.release_path.outputs.firestore_pair == 'true'
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: owner-web-tag-creation-${{ needs.plan.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/owner-web-tag-creation.json
+            ${{ runner.temp }}/release-manifest.json
+          if-no-files-found: ignore
+          retention-days: 90
+      - name: Archive completed pre-admission retirement and drain only
+        if: always() && steps.release_path.outputs.firestore_pair == 'true'
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: owner-web-tag-barrier-${{ needs.plan.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/owner-web-tag-barrier.json
           if-no-files-found: ignore
           retention-days: 90
       - name: Keep only the current deployment

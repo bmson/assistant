@@ -1,14 +1,8 @@
 /** Protected one-time historical retirement. Fixed pins only, no general admin inputs. */
-import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { promisify } from 'node:util';
-import {
-  verifyPreAuthEnvironment,
-  verifyWifEnvironment,
-} from './owner-editor-release-inventory.js';
-import { nativeRetirementClient } from './owner-web-tag-native.js';
+import { writeFileSync } from 'node:fs';
+import { verifyPreAuthEnvironment } from './owner-editor-release-inventory.js';
+import { protectedWebTagCloud } from './owner-web-tag-cloud.js';
 import {
   executeOwnedWebTagRetirement,
   HISTORICAL_WEB_TAGS,
@@ -16,7 +10,6 @@ import {
   type RetirementPlan,
 } from './owner-web-tag-retirement.js';
 
-const exec = promisify(execFile);
 const WORKFLOW = 'bmson/assistant/.github/workflows/owner-web-tag-retirement.yml@refs/heads/main';
 export function verifyRetirementContext(env: NodeJS.ProcessEnv) {
   verifyPreAuthEnvironment(env);
@@ -62,40 +55,7 @@ async function main() {
     !/^[a-f0-9]{64}$/.test(process.env.OWNER_TAG_REVIEWED_PLAN_SHA256 ?? '')
   )
     throw new Error('Missing reviewed retirement hash');
-  const identity = verifyWifEnvironment(process.env, (file) => {
-    const stat = lstatSync(file);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 32768)
-      throw new Error('Invalid WIF file');
-    return JSON.parse(readFileSync(file, 'utf8'));
-  });
-  if (!process.env.RUNNER_TEMP) throw new Error('Missing protected temporary directory');
-  const childEnv = {
-    PATH: process.env.PATH,
-    HOME: process.env.HOME,
-    CLOUDSDK_CONFIG: resolve(process.env.RUNNER_TEMP, 'owner-tag-retirement-gcloud'),
-    CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: identity.file,
-    CLOUDSDK_CORE_PROJECT: 'bmson-assistant',
-    CLOUDSDK_CORE_DISABLE_PROMPTS: '1',
-    CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK: 'true',
-  };
-  async function command(args: string[]) {
-    try {
-      return (
-        await exec('gcloud', args, {
-          env: childEnv,
-          timeout: 10_000,
-          maxBuffer: 32768,
-          killSignal: 'SIGKILL',
-        })
-      ).stdout;
-    } catch {
-      throw new Error('Protected cloud credential command failed');
-    }
-  }
-  const version = JSON.parse(await command(['version', '--format=json']));
-  if (version['Google Cloud SDK'] !== '576.0.0') throw new Error('Unaudited cloud CLI');
-  const token = (await command(['auth', 'print-access-token', '--quiet'])).trim();
-  const io = nativeRetirementClient(token);
+  const io = await protectedWebTagCloud();
   const [old, current] = HISTORICAL_WEB_TAGS;
   if (!old || !current) throw new Error('Missing historical pins');
   const before = await io.readService();

@@ -1,5 +1,7 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+// @ts-expect-error Native ESM release generator has no declaration; exercise its actual wire output.
 import { createManifest } from '../infra/gcp/release-manifest.mjs';
 import {
   CREATION_ARTIFACT_MEMBER,
@@ -209,6 +211,49 @@ describe('protected web-tag creation provenance resolver', () => {
     const f = fixture();
     expect(f.manifest.components.web.schema).toEqual({ min: 132, max: 133 });
     expect(resolveProtectedOwnedWebTag(f.input).image).toBe(image);
+  });
+
+  it('accepts a standard-library streaming deflated ZIP with data descriptors', () => {
+    const f = fixture();
+    const archiveBytes = execFileSync(
+      'python3',
+      [
+        '-c',
+        `
+import base64,io,json,sys,zipfile
+class Stream(io.RawIOBase):
+    def __init__(self): self.data=bytearray()
+    def writable(self): return True
+    def seekable(self): return False
+    def write(self,b): self.data.extend(b); return len(b)
+output=Stream()
+with zipfile.ZipFile(output,'w',compression=zipfile.ZIP_DEFLATED) as archive:
+    for name,data in json.load(sys.stdin): archive.writestr(name,base64.b64decode(data))
+sys.stdout.buffer.write(output.data)
+`,
+      ],
+      {
+        input: JSON.stringify([
+          [CREATION_ARTIFACT_MEMBER, f.receiptBytes.toString('base64')],
+          [RELEASE_MANIFEST_MEMBER, f.manifestBytes.toString('base64')],
+        ]),
+        timeout: 5000,
+        maxBuffer: 1024 * 1024,
+      },
+    );
+    expect((archiveBytes.readUInt16LE(6) & 8) !== 0).toBe(true);
+    expect(archiveBytes.readUInt16LE(8)).toBe(8);
+    expect(
+      resolveProtectedOwnedWebTag({
+        ...f.input,
+        archiveBytes,
+        artifactMetadata: {
+          ...f.input.artifactMetadata,
+          digest: `sha256:${sha256(archiveBytes)}`,
+          sizeInBytes: archiveBytes.length,
+        },
+      }).revision,
+    ).toBe(f.selectedRecord.revision);
   });
 
   it('binds a resume tag to its protected run artifact, manifest, immutable revision and exact URI', () => {
