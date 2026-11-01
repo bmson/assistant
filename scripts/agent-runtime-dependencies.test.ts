@@ -16,9 +16,21 @@ describe('agent image runtime dependency closure', () => {
     });
 
     const lock = readFileSync(resolve(root, 'pnpm-lock.yaml'), 'utf8');
-    expect(lock).toContain('apps/agent/runtime-dependencies:');
-    expect(lock).toContain('specifier: 9.3.1\n        version: 9.3.1');
-    expect(lock).toContain('specifier: 1.9.0\n        version: 1.9.0');
+    const runtimeImporter = lock
+      .split('  apps/agent/runtime-dependencies:\n')[1]
+      ?.split('\n  apps/')[0];
+    expect(runtimeImporter).toContain(`    dependencies:
+      '@google-cloud/firestore':
+        specifier: 9.3.1
+        version: 9.3.1
+      unpdf:
+        specifier: 1.9.0
+        version: 1.9.0`);
+
+    const coreImporter = lock.split('  packages/core:\n')[1]?.split('\n  packages/')[0];
+    expect(coreImporter).toContain(`      unpdf:
+        specifier: ^1.9.0
+        version: 1.9.0`);
   });
 
   it('ships the pnpm closure and leaves runtime JavaScript in the image scan', () => {

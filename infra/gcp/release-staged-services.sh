@@ -215,6 +215,12 @@ release_component_digest() {
     echo "  ${component}:${TAG} did not resolve to an immutable sha256 digest" >&2
     return 1
   }
+  if [[ "$component" == agent && -n "${AGENT_IMAGE_PUSH_DIGEST:-}" ]]; then
+    if [[ ! "$AGENT_IMAGE_PUSH_DIGEST" =~ ^sha256:[a-f0-9]{64}$ || "$digest" != "$AGENT_IMAGE_PUSH_DIGEST" ]]; then
+      echo '  agent release digest does not match the verified image smoke/push receipt' >&2
+      return 1
+    fi
+  fi
   printf '%s' "$digest"
 }
 
