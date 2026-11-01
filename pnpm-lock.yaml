@@ -177,8 +177,8 @@ importers:
         specifier: 9.4.0
         version: 9.4.0
       unpdf:
-        specifier: 1.9.0
-        version: 1.9.0
+        specifier: 1.9.1
+        version: 1.9.1
 
   apps/web:
     dependencies:
@@ -352,8 +352,8 @@ importers:
         specifier: 4.1.4
         version: 4.1.4
       unpdf:
-        specifier: ^1.9.0
-        version: 1.9.0
+        specifier: ^1.9.1
+        version: 1.9.1
       ws:
         specifier: 8.22.0
         version: 8.22.0
@@ -3736,8 +3736,8 @@ packages:
     resolution: {integrity: sha512-gptHNQghINnc/vTGIk0SOFGFNXw7JVrlRUtConJRlvaw6DuX0wO5Jeko9sWrMBhh+PsYAZ7oXAiOnf/UKogyiw==}
     engines: {node: '>= 10.0.0'}
 
-  unpdf@1.9.0:
-    resolution: {integrity: sha512-YIXl+jZUBneP22IkRUwFA1b71l+Ad2uX7o7dMfxLSLuCOtaKAQvak7Sz3MtdVsWTsocblznSIGidfXyhnBgBMA==}
+  unpdf@1.9.1:
+    resolution: {integrity: sha512-nO1npM2kNyd4hj1fKzUVU6bvnWjDSxI97eycM/DgzI83dYyW+pNRI9NeMQVEfef8fI3Q06i9lkMeE1HxrQqKoA==}
     engines: {node: '>=22'}
     peerDependencies:
       '@napi-rs/canvas': ^0.1.69 || ^1.0.0
@@ -7223,7 +7223,7 @@ snapshots:
 
   universalify@2.0.1: {}
 
-  unpdf@1.9.0: {}
+  unpdf@1.9.1: {}
 
   unzipper@0.12.5:
     dependencies:
