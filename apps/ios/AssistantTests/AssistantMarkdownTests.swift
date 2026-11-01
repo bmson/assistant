@@ -2111,7 +2111,17 @@ extension AssistantMarkdownTests {
             "Child-local and default parent transaction checks must preserve the row-local sheet")
 
         state.rowSheetRequest += 1
-        try await waitForTranscriptHostCondition("the row-local sheet dismisses") {
+        try await waitForTranscriptHostCondition(
+            "the row-local sheet dismisses",
+            timeout: .seconds(8),
+            onTimeout: {
+                attachOwnedTranscriptBoundarySnapshot(
+                    stage: "row-sheet-dismiss-timeout", state: state, root: root,
+                    window: window, scroll: initialScroll, input: input,
+                    expectedSheet: presentedSheet, includeScreenshot: true
+                )
+            }
+        ) {
             ownedPresentedController(in: root) == nil
         }
     }
