@@ -71,6 +71,7 @@ final class PhoneCalendarSharingCoordinator {
     @ObservationIgnored private let recordStore: any PhoneCalendarSharingRecordStore
     @ObservationIgnored private let deviceTimeZone: TimeZone
     @ObservationIgnored private let installationID: String
+    @ObservationIgnored private let nowProvider: () -> Date
     @ObservationIgnored private var requestRevision = 0
     @ObservationIgnored private var activeWorkCount = 0
     @ObservationIgnored private var completedSnapshotPublicationRevision = 0
@@ -85,11 +86,13 @@ final class PhoneCalendarSharingCoordinator {
         source: (any PhoneCalendarSource)? = nil,
         recordStore: (any PhoneCalendarSharingRecordStore)? = nil,
         deviceTimeZone: TimeZone = .autoupdatingCurrent,
+        now: @escaping () -> Date = { Date() },
         installationID: String = PhoneCalendarInstallationIdentity.current
     ) {
         self.source = source ?? EventKitCalendarSource()
         self.recordStore = recordStore ?? KeychainPhoneCalendarSharingRecordStore()
         self.deviceTimeZone = deviceTimeZone
+        self.nowProvider = now
         self.installationID = installationID
         access = self.source.access
     }
@@ -704,7 +707,7 @@ final class PhoneCalendarSharingCoordinator {
         }
         let selected = state.calendars
         guard !selected.isEmpty else { return }
-        let now = Date()
+        let now = nowProvider()
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = timeZone
         let today = calendar.startOfDay(for: now)

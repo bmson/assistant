@@ -3776,12 +3776,14 @@ private final class PhoneCalendarSharingFixtureSource: PhoneCalendarSource {
     var availableCalendars: [PhoneCalendar] = [.init(id: "work", title: "Work", account: "Personal")]
     var sharedEvents: [PhoneCalendarShareEvent] = []
     private(set) var shareQueryCount = 0
+    private(set) var shareIntervals: [DateInterval] = []
 
     func requestAccess() async throws -> Bool { true }
     func calendars() -> [PhoneCalendar] { availableCalendars }
     func events(in interval: DateInterval, calendarIDs: Set<String>) -> [PhoneCalendarEvent] { [] }
     func shareEvents(in interval: DateInterval, calendarIDs: Set<String>, verifiedOwnerEmail: String) -> [PhoneCalendarShareEvent] {
         shareQueryCount += 1
+        shareIntervals.append(interval)
         return sharedEvents
     }
 }
@@ -4599,6 +4601,7 @@ extension APIClientRetryTests {
         deviceCalendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
         let allDayStart = deviceCalendar.date(from: DateComponents(year: 2026, month: 10, day: 22))!
         let dstInstant = ISO8601DateFormatter().date(from: "2026-11-01T08:30:00Z")!
+        let fixedNow = ISO8601DateFormatter().date(from: "2026-10-22T12:00:00Z")!
         source.sharedEvents = [
             .init(eventId: "all-day", calendarId: "work", providerExternalIdentifier: nil,
                   status: "confirmed", calendarTimeZone: nil, ownerParticipant: nil,
@@ -4626,11 +4629,16 @@ extension APIClientRetryTests {
             ]
         ])
         let coordinator = PhoneCalendarSharingCoordinator(
-            source: source, recordStore: store, deviceTimeZone: TimeZone(identifier: "America/Los_Angeles")!
+            source: source, recordStore: store, deviceTimeZone: TimeZone(identifier: "America/Los_Angeles")!,
+            now: { fixedNow }
         )
         let client = makeClient()
         await coordinator.refresh(client: client, expectedOwnerID: "owner-1", publishIfEnabled: false)
         await coordinator.enable(client: client, expectedOwnerID: "owner-1", selectedCalendars: roster)
+
+        let queriedInterval = try XCTUnwrap(source.shareIntervals.last)
+        XCTAssertLessThanOrEqual(queriedInterval.start, allDayStart)
+        XCTAssertGreaterThan(queriedInterval.end, dstInstant)
 
         let put = try XCTUnwrap(StubURLProtocol.requests.first { $0.0 == "PUT" })
         let post = try XCTUnwrap(StubURLProtocol.requests.first { $0.0 == "POST" })
