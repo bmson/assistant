@@ -322,10 +322,7 @@ async function listGroup(
     // https://protobuf.dev/programming-guides/json/#presence-and-default-values
     const rawRows = response[kind];
     const rows = rawRows === undefined ? [] : rawRows;
-    if (
-      !Array.isArray(rows) ||
-      results.length + rows.length > MAX_RESULTS_PER_GROUP
-    )
+    if (!Array.isArray(rows) || results.length + rows.length > MAX_RESULTS_PER_GROUP)
       throw new ObservationFailure('observation_failed');
     results.push(...rows);
     const next = response.nextPageToken;

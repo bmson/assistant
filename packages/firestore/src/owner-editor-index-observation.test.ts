@@ -188,9 +188,11 @@ describe('observeOwnerEditorIndexes', () => {
     const { client, requests } = responseClient((url) =>
       url.pathname.endsWith('/indexes')
         ? { indexes: [] }
-        : { fields: Array.from({ length: 101 }, (_, index) =>
-            readyField({ name: `${fieldName}Extra${index}` }),
-          ) },
+        : {
+            fields: Array.from({ length: 101 }, (_, index) =>
+              readyField({ name: `${fieldName}Extra${index}` }),
+            ),
+          },
     );
 
     const report = await observeOwnerEditorIndexes(input(), client);
@@ -205,9 +207,11 @@ describe('observeOwnerEditorIndexes', () => {
     const { client } = responseClient((url) =>
       url.pathname.endsWith('/indexes')
         ? { indexes: [] }
-        : { fields: Array.from({ length: 1_001 }, (_, index) =>
-            readyField({ name: `${fieldName}Extra${index}` }),
-          ) },
+        : {
+            fields: Array.from({ length: 1_001 }, (_, index) =>
+              readyField({ name: `${fieldName}Extra${index}` }),
+            ),
+          },
     );
 
     const report = await observeOwnerEditorIndexes(input(), client);

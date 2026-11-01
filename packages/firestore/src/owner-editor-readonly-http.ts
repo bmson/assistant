@@ -24,7 +24,8 @@ function allowedRead(url: URL): boolean {
     `^/v2/projects/${segment}/locations/${segment}/jobs/${segment}/executions/${segment}(/tasks)?$`,
   );
   const cloudRunTasks =
-    url.origin === 'https://run.googleapis.com' && execution.test(url.pathname) &&
+    url.origin === 'https://run.googleapis.com' &&
+    execution.test(url.pathname) &&
     url.pathname.endsWith('/tasks');
   const indexes = new RegExp(
     `^/v1/projects/${segment}/databases/${segment}/collectionGroups/${segment}/(indexes|fields)$`,
