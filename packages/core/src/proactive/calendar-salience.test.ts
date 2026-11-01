@@ -9,6 +9,7 @@ import {
 } from './calendar-salience.js';
 
 const ctx: SalienceContext = {
+  explicitHourReasons: true,
   timeZone: 'Atlantic/Reykjavik',
   selfEmails: ['owner@example.com', 'assistant@example.com'],
 };

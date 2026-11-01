@@ -2,12 +2,20 @@ import { describe, expect, it, vi } from 'vitest';
 import { type EventSalience, scoreCalendarEvent } from './calendar-salience.js';
 import type { PulseMoment } from './pulse.js';
 import {
+  persistNextPulseMoment as admitPulseMoment,
+  eventLeadMoments as buildEventLeadMoments,
   calendarChangeMoments,
   commitmentMoment,
-  eventLeadMoments,
-  persistNextPulseMoment,
   selectPulseMoment,
 } from './pulse.js';
+
+// Every v2 fixture explicitly opts in; production defaults remain legacy.
+const eventLeadMoments = (salient: Parameters<typeof buildEventLeadMoments>[0], now: Date) =>
+  buildEventLeadMoments(salient, now, true);
+const persistNextPulseMoment = (
+  store: Parameters<typeof admitPulseMoment>[0],
+  input: Parameters<typeof admitPulseMoment>[1],
+) => admitPulseMoment(store, { ...input, rankingDedupeV2: true });
 
 const now = new Date('2026-03-04T09:00:00.000Z');
 
@@ -81,7 +89,11 @@ describe('pulse ranking and duplicate suppression', () => {
         allDay: false,
         attendees: ['owner@example.com (needsAction)'],
       },
-      { timeZone: 'Atlantic/Reykjavik', selfEmails: ['owner@example.com'] },
+      {
+        timeZone: 'Atlantic/Reykjavik',
+        selfEmails: ['owner@example.com'],
+        explicitHourReasons: true,
+      },
     );
     const [lead] = eventLeadMoments([scored], now);
     const reason = 'You have not replied to the invitation.';
@@ -100,7 +112,11 @@ describe('pulse ranking and duplicate suppression', () => {
         allDay: false,
         attendees: ['owner@example.com (needsAction)'],
       },
-      { timeZone: 'Atlantic/Reykjavik', selfEmails: ['owner@example.com'] },
+      {
+        timeZone: 'Atlantic/Reykjavik',
+        selfEmails: ['owner@example.com'],
+        explicitHourReasons: true,
+      },
     );
     const [lead] = eventLeadMoments([scored], now);
     expect(lead?.text).toBe(`${title} starts in 10 minutes.`);
@@ -117,7 +133,11 @@ describe('pulse ranking and duplicate suppression', () => {
         allDay: false,
         attendees: ['owner@example.com (needsAction)'],
       },
-      { timeZone: 'Atlantic/Reykjavik', selfEmails: ['owner@example.com'] },
+      {
+        timeZone: 'Atlantic/Reykjavik',
+        selfEmails: ['owner@example.com'],
+        explicitHourReasons: true,
+      },
     );
     const [lead] = eventLeadMoments([scored], new Date('2026-03-04T06:50:00Z'));
     const reason =

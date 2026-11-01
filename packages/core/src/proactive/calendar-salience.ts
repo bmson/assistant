@@ -59,6 +59,8 @@ export interface SalienceContext {
    * from an outside one. Compared case-insensitively.
    */
   selfEmails: readonly string[];
+  /** Opt in only with pulse ranking/dedupe v2; other consumers retain their wording. */
+  explicitHourReasons?: boolean;
 }
 
 export interface EventSalience {
@@ -201,8 +203,12 @@ export function scoreCalendarEvent(
     const endsLate = endHour !== null && endHour >= LATE_HOUR;
     if (startsEarly || endsLate) {
       score += WEIGHTS.unusualHour;
-      if (startsEarly) reasons.push(`it starts before ${EARLY_HOUR} AM`);
-      if (endsLate) reasons.push(`it ends at or after ${LATE_HOUR - 12} PM`);
+      if (ctx.explicitHourReasons) {
+        if (startsEarly) reasons.push(`it starts before ${EARLY_HOUR} AM`);
+        if (endsLate) reasons.push(`it ends at or after ${LATE_HOUR - 12} PM`);
+      } else {
+        reasons.push('it falls outside your usual hours');
+      }
     }
     const startMs = Date.parse(event.start);
     const endMs = Date.parse(event.end);

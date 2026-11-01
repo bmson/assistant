@@ -282,6 +282,7 @@ export async function persistNextPulseMoment(
     observationFence: string | null;
     dailyCap: number;
     candidates: readonly PulseMoment[];
+    rankingDedupeV2?: boolean;
   },
 ): Promise<{
   moment: PulseMoment | null;
@@ -291,7 +292,9 @@ export async function persistNextPulseMoment(
 }> {
   const seenCandidateKeys = new Set<string>();
   const observedLegacyKeys = new Set(
-    input.candidates.flatMap((candidate) => candidate.legacyMomentKeys ?? []),
+    (input.rankingDedupeV2 ? input.candidates : []).flatMap(
+      (candidate) => candidate.legacyMomentKeys ?? [],
+    ),
   );
   // This lookup only protects aliases represented by the current observation.
   // It is intentionally not described as an atomic mixed-version writer fence.
@@ -305,6 +308,7 @@ export async function persistNextPulseMoment(
     )
     .sort(comparePulseMoments)
     .filter((moment) => {
+      if (!input.rankingDedupeV2) return true;
       if (seenCandidateKeys.has(moment.key)) return false;
       seenCandidateKeys.add(moment.key);
       return true;
@@ -402,7 +406,70 @@ function eventLeadReasonSentence(
  * meeting the owner has every day is not something to buzz a phone for, and
  * treating it as one is how a proactive assistant becomes a muted one.
  */
-export function eventLeadMoments(salient: readonly EventSalience[], now: Date): PulseMoment[] {
+function legacyEventLeadMoments(salient: readonly EventSalience[], now: Date): PulseMoment[] {
+  const moments: PulseMoment[] = [];
+  for (const scored of salient) {
+    // This path has no booking-source reconciliation. Keep the calendar row in
+    // normal agenda/snapshot handling, but do not turn an unverified flight
+    // label into a time-specific travel lead.
+    if (isFlightLikeCalendarEvent(scored.event)) continue;
+    if (scored.event.allDay) continue;
+    const away = minutesUntil(scored.event.start, now);
+    if (away === null || away <= 0) continue;
+    const travels = scored.reasons.some((reason) => reason.startsWith('it is at'));
+    const lead = travels ? LEAD_MINUTES_TRAVEL : LEAD_MINUTES_DESK;
+    if (away > lead) continue;
+    const inMinutes = Math.max(1, Math.round(away));
+    // Collapsed on the way in: a Google Calendar location routinely carries an
+    // embedded newline ("Venue\nStreet, City"), and that would otherwise end
+    // the sentence early.
+    const summary = collapseWhitespace(scored.event.summary);
+    const location = collapseWhitespace(scored.event.location ?? '');
+    // The venue, not the postal address: the full address is on the card.
+    const place = shortPlace(scored.event.location ?? '');
+    const where = travels && place ? ` at ${place}` : '';
+    // The headline already says where it is. Salience keeps `it is at …` as the
+    // marker that decides the travel lead time above, but repeating the address
+    // one clause later is how the owner ends up reading it twice.
+    const why = scored.reasons.filter((reason) => !reason.startsWith('it is at'));
+    moments.push({
+      kind: 'event-lead',
+      // Keyed on the event and its start so a moved event earns a fresh nudge.
+      key: `event-lead:${scored.event.eventId ?? scored.event.summary}:${scored.event.start}`,
+      text:
+        `${summary} starts in ${inMinutes} minute${inMinutes === 1 ? '' : 's'}${where}.` +
+        (why.length > 0 ? ` ${sentenceCase(collapseWhitespace(why.join('; ')))}.` : ''),
+      card: {
+        kind: 'proactive-alert',
+        id: `event-lead:${scored.event.eventId ?? scored.event.summary}:${scored.event.start}`,
+        category: 'event',
+        urgencyLabel: `Starts in ${inMinutes} min`,
+        title: summary,
+        startsAt: scored.event.start,
+        details: [
+          ...(location ? [{ label: 'Location', value: location }] : []),
+          ...(scored.event.calendar?.trim()
+            ? [{ label: 'Calendar', value: collapseWhitespace(scored.event.calendar) }]
+            : []),
+        ],
+      },
+      // Time-boxed and about to expire: nothing the pulse finds outranks
+      // something the owner is about to be late for — except learning there is
+      // nothing left to be on time for at all (`calendarChangeMoments` below,
+      // same priority tier, for the same reason).
+      priority: CANCELLED_OR_LEAD_PRIORITY,
+    });
+  }
+  return moments;
+}
+
+/** V2 is inactive until its legacy/mixed-writer activation barriers are reviewed. */
+export function eventLeadMoments(
+  salient: readonly EventSalience[],
+  now: Date,
+  rankingDedupeV2 = false,
+): PulseMoment[] {
+  if (!rankingDedupeV2) return legacyEventLeadMoments(salient, now);
   const candidates: Array<{ event: BriefingCalendarEvent; moment: PulseMoment }> = [];
   for (const scored of salient) {
     // This path has no booking-source reconciliation. Keep the calendar row in
@@ -1064,6 +1131,7 @@ export async function runPulse(
 ): Promise<PulseResult> {
   const { db } = deps;
   const now = opts.now ?? new Date();
+  const rankingDedupeV2 = loadConfig().PROACTIVE_PULSE_RANKING_DEDUPE_V2_ENABLED;
   const context = deps.persistence?.executionContext;
   const store = deps.persistence?.pulse ?? postgresPulseRepository(db);
 
@@ -1125,6 +1193,7 @@ export async function runPulse(
       ? salientEvents(calendar.events, {
           timeZone: agent.timezone,
           selfEmails: [loadConfig().OWNER_EMAIL, agent.email],
+          explicitHourReasons: rankingDedupeV2,
         })
       : [];
 
@@ -1154,7 +1223,11 @@ export async function runPulse(
           calendar.complete,
         )
       : [];
-    const changedCalendarMoments = calendarChangeMoments(calendarChanges, agent.timezone, now);
+    const changedCalendarMoments = calendarChangeMoments(
+      calendarChanges,
+      agent.timezone,
+      rankingDedupeV2 ? now : undefined,
+    );
     const acknowledgedCalendarKeys = new Set<string>();
     const saveCalendarSnapshot = async () => {
       if (!calendar) return;
@@ -1199,7 +1272,7 @@ export async function runPulse(
       );
     const candidates: PulseMoment[] = [
       ...packMoments,
-      ...eventLeadMoments(salient, now),
+      ...eventLeadMoments(salient, now, rankingDedupeV2),
       ...changedCalendarMoments,
       ...mail.map((row) => ({
         ...mailMoment(row),
@@ -1219,7 +1292,10 @@ export async function runPulse(
     const { moment, notice, alreadySaidKeys, heldBy } = await persistNextPulseMoment(store, {
       agentId: agent.id,
       now,
-      candidates,
+      candidates: rankingDedupeV2
+        ? candidates
+        : candidates.map(({ urgency: _urgency, relevance: _relevance, ...moment }) => moment),
+      rankingDedupeV2,
       observationFence,
       dailyCap,
       ...(opts.taskId ? { taskId: opts.taskId } : {}),
