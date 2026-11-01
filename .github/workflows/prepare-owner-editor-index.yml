@@ -1,0 +1,62 @@
+name: Prepare owner editor Firestore index
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    env:
+      GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+      FIRESTORE_DATABASE_ID: assistant-production
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      APPROVED_SOURCE_DIR: .approved-index-source
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      GITHUB_RUN_ID: ${{ github.run_id }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout trusted workflow source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout pinned index manifest source as data only
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: ${{ github.repository }}
+          ref: 61c74edd9c67a77814d148565fb82651c0e2091e
+          path: .approved-index-source
+          sparse-checkout: infra/gcp/firestore
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify pinned manifest provenance before cloud authentication
+        run: pnpm exec tsx scripts/firestore-owner-editor-index-preparation.ts --verify-source
+      - name: Authenticate with the existing production identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          project_id: ${{ env.GCP_PROJECT }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - name: Verify or prepare the approved index and wait for READY
+        run: pnpm exec tsx scripts/firestore-owner-editor-index-preparation.ts

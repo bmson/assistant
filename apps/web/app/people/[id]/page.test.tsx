@@ -1,17 +1,28 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { GRAPH_EXTRACTION_VERSION } from '@assistant/application/knowledge-graph';
 import { resetConfigForTest } from '@assistant/config';
-import { createInstallationStore, embeddingSpaceKey } from '@assistant/firestore';
+import {
+  createInstallationStore,
+  embeddingSpaceKey,
+  getFirestorePersonDetail,
+} from '@assistant/firestore';
 import { FieldValue } from '@google-cloud/firestore';
 import { NextRequest } from 'next/server';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ owner: vi.fn(), db: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  owner: vi.fn(),
+  db: vi.fn(),
+  pgBrowse: vi.fn(() => {
+    throw new Error('Unexpected PostgreSQL browse fallback');
+  }),
+}));
 vi.mock('@/auth', () => ({ requireOwner: mocks.owner }));
 vi.mock('@/lib/server', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/server')>()),
   getDb: mocks.db,
+  withPostgresMemoryBrowseRead: mocks.pgBrowse,
 }));
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn(), unstable_cache: (run: unknown) => run }));
 // The client controls call useRouter, which needs a mounted App Router.
@@ -40,6 +51,7 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
     installationId: foreignInstallationId,
   });
   const now = new Date();
+  const hashContent = (content: string) => createHash('sha256').update(content).digest('hex');
   const embeddingSpace = {
     provider: 'vertex',
     model: 'example-embedding',
@@ -75,7 +87,7 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
       agentId,
       subjectContactId: contactId,
       content,
-      contentHash: `${id}-hash`,
+      contentHash: hashContent(content),
       kind: 'fact',
       category: 'knowledge',
       confidence: '0.70',
@@ -174,7 +186,7 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
       store.doc('knowledgeGraphSources', factId).set({
         memoryId: factId,
         status: 'ready',
-        contentHash: `${factId}-hash`,
+        contentHash: hashContent('Anna is close friends with Bob'),
         extractionVersion: GRAPH_EXTRACTION_VERSION,
       }),
       store.doc('knowledgeGraphRelations', 'anna-friend-bob').set({
@@ -210,44 +222,59 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
     resetConfigForTest();
   });
 
-  it('admits UUID detail GET and Server Action POST through the Firestore proxy', async () => {
+  it('admits UUID detail reads and blocks Server Actions through the Firestore proxy', async () => {
     const { proxy } = await import('../../../proxy.js');
     const request = (path: string, method = 'GET') =>
       new NextRequest(`http://localhost${path}`, { method });
-    expect(proxy(request(`/people/${contactId}`)).status).toBe(307);
-    expect(proxy(request(`/people/${contactId}`, 'POST')).status).toBe(410);
-    expect(proxy(request(`/people/${contactId}`, 'DELETE')).status).toBe(410);
+    expect(proxy(request(`/people/${contactId}`)).status).toBe(200);
+    expect(proxy(request(`/people/${contactId}`, 'POST')).status).toBe(405);
+    expect(proxy(request(`/people/${contactId}`, 'DELETE')).status).toBe(405);
     expect(proxy(request('/people/not-a-uuid')).status).toBe(307);
     expect(proxy(request('/people/not-a-uuid', 'POST')).status).toBe(410);
   });
 
-  it('renders the full dossier and every editing control without PostgreSQL', async () => {
+  it('renders the browse dossier without edit controls when the owner cookie lacks a form scope', async () => {
     const html = renderToStaticMarkup(await page.default(params(contactId)));
     expect(mocks.owner).toHaveBeenCalled();
     expect(mocks.db).not.toHaveBeenCalled();
+    expect(mocks.pgBrowse).not.toHaveBeenCalled();
     expect(html).toContain('Anna Example');
     expect(html).toContain('daughter');
     // Saved facts, the timeline, occasions, and graph relations.
     expect(html).toContain('Anna is close friends with Bob');
     expect(html).toContain('Went hiking with Anna');
     expect(html).toContain('id="important-dates"');
-    expect(html).toContain('Explore connections');
+    expect(html).toContain('Browse this person');
     expect(html).toContain('Bobby');
     expect(html).toContain(`href="/people/${friendId}"`);
-    // Every control the PostgreSQL page offers.
-    expect(html).toContain('Add a fact about Anna Example');
-    expect(html).toContain('Add connection');
-    expect(html).toContain('Save changes');
-    expect(html).toContain('merge into…');
-    expect(html).toContain('Bob Example (friend)');
-    expect(html).toContain('Delete person');
+    // This fixture has an owner cookie but no form-session scope, so editing stays unavailable.
+    expect(html).not.toContain('Add a fact about Anna Example');
+    expect(html).not.toContain('Add connection');
+    expect(html).not.toContain('Save changes');
+    expect(html).not.toContain('merge into…');
+    expect(html).not.toContain('Delete person…');
+    expect(html).toContain('Deleting people is not available in this release.');
   });
 
   it('edits the person and adds an occasion through the shared Server Actions', async () => {
     const { addOccasionAction, updateContactIdentityAction } = await import(
       '@/app/profile/actions'
     );
-    expect(await updateContactIdentityAction(contactId, 'Anna Renamed', 'Annie, Nan')).toEqual({});
+    const displayedContact = await getFirestorePersonDetail(store, agentId, contactId);
+    expect(displayedContact?.identityRevision).toMatch(/^[a-f0-9]{64}$/);
+    expect(
+      await updateContactIdentityAction(contactId, 'Unreviewed rename', '', undefined, 'son'),
+    ).toMatchObject({ code: 'review_required' });
+    expect((await store.doc('contacts', contactId).get()).get('name')).toBe('Anna Example');
+    expect(
+      await updateContactIdentityAction(
+        contactId,
+        'Anna Renamed',
+        'Annie, Nan',
+        displayedContact?.identityRevision,
+        'daughter',
+      ),
+    ).toEqual({});
     expect(
       await addOccasionAction(contactId, {
         kind: 'anniversary',
@@ -262,6 +289,7 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
 
     const saved = await store.doc('contacts', contactId).get();
     expect(saved.get('name')).toBe('Anna Renamed');
+    expect(saved.get('relationship')).toBe('daughter');
     // The previous name is kept as an alias, as in PostgreSQL.
     expect(saved.get('aliases')).toEqual(['Annie', 'Nan', 'Anna Example']);
     const occasions = await store
@@ -276,9 +304,10 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
     expect(html).toContain('Anna Renamed');
     expect(html).toContain('Wedding day');
     expect(mocks.db).not.toHaveBeenCalled();
+    expect(mocks.pgBrowse).not.toHaveBeenCalled();
   });
 
-  it('deletes a person through the shared Server Action', async () => {
+  it('keeps the legacy delete Server Action behavior and renders a privacy-safe missing page', async () => {
     const { deleteContactAction } = await import('@/app/profile/actions');
     const doomedId = randomUUID();
     await person(doomedId, 'Temporary Example');
@@ -286,29 +315,78 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
       'Temporary Example',
     );
     expect(await deleteContactAction(doomedId)).toEqual({});
-    await expect(page.default(params(doomedId))).rejects.toThrow('NEXT_HTTP_ERROR_FALLBACK;404');
+    const html = renderToStaticMarkup(await page.default(params(doomedId)));
+    expect(html).toContain('Person unavailable');
+    expect(html).toContain('This person is no longer available in this view.');
+    expect(html).toContain('Open People');
+    expect(html).not.toContain('Temporary Example');
   });
 
   it('authenticates before reading and hides absent, foreign, and owner contacts', async () => {
     mocks.owner.mockRejectedValueOnce(new Error('owner authentication required'));
     await expect(page.default(params(contactId))).rejects.toThrow('owner authentication required');
     for (const id of [randomUUID(), foreignContactId, ownerContactId]) {
-      await expect(page.default(params(id))).rejects.toThrow('NEXT_HTTP_ERROR_FALLBACK;404');
+      const html = renderToStaticMarkup(await page.default(params(id)));
+      expect(html).toContain('Person unavailable');
+      expect(html).toContain('This person is no longer available in this view.');
+      expect(html).not.toContain(id);
+      expect(html).not.toContain('Foreign private person');
+      expect(html).not.toContain('Owner private contact');
     }
+    expect(mocks.db).not.toHaveBeenCalled();
+    expect(mocks.pgBrowse).not.toHaveBeenCalled();
   });
 
-  it('rejects a configured agent mismatch and ambiguous installation', async () => {
+  async function expectUnavailable(
+    configuredAgentId = agentId,
+    reason = 'exactly one configured agent',
+  ) {
+    await expect(getFirestorePersonDetail(store, configuredAgentId, contactId)).rejects.toThrow(
+      reason,
+    );
+    const ownerChecks = mocks.owner.mock.calls.length;
+    const html = renderToStaticMarkup(
+      await page.default({
+        ...params(contactId),
+        searchParams: Promise.resolve({ q: 'Anna & Bob' }),
+      }),
+    );
+    expect(mocks.owner).toHaveBeenCalledTimes(ownerChecks + 1);
+    expect(mocks.db).not.toHaveBeenCalled();
+    expect(mocks.pgBrowse).not.toHaveBeenCalled();
+    expect(html).toContain('Person unavailable');
+    expect(html).toContain('role="alert"');
+    expect(html).toContain('Could not load this view. Your search is preserved.');
+    expect(html).toContain(`href="/people/${contactId}?q=Anna%20%26%20Bob"`);
+    expect(html).toContain('href="/people?q=Anna%20%26%20Bob"');
+    expect(html).toContain('Try again');
+    expect(html).not.toContain('<form');
+    for (const canary of [
+      'Anna Example',
+      'Anna Renamed',
+      'Bob Example',
+      'Owner private contact',
+      'Foreign private person',
+      'Anna is close friends with Bob',
+      'Went hiking with Anna',
+      'Wedding day',
+    ]) {
+      expect(html).not.toContain(canary);
+    }
+  }
+
+  it('shows unavailable without private data for configured owner mismatch or ambiguity', async () => {
     vi.stubEnv('FIRESTORE_AGENT_ID', otherAgentId);
     resetConfigForTest();
     try {
-      await expect(page.default(params(contactId))).rejects.toThrow('exactly one configured agent');
+      await expectUnavailable(otherAgentId);
     } finally {
       vi.stubEnv('FIRESTORE_AGENT_ID', agentId);
       resetConfigForTest();
     }
     await store.doc('agents', otherAgentId).set({ id: otherAgentId });
     try {
-      await expect(page.default(params(contactId))).rejects.toThrow('exactly one configured agent');
+      await expectUnavailable();
     } finally {
       await store.doc('agents', otherAgentId).delete();
     }
@@ -317,9 +395,7 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
   it('fails closed while privacy erasure is active', async () => {
     await store.doc('privacyErasureJobs', agentId).set({ agentId, status: 'active' });
     try {
-      await expect(page.default(params(contactId))).rejects.toThrow(
-        'Privacy erasure is in progress',
-      );
+      await expectUnavailable(agentId, 'Privacy erasure is in progress');
     } finally {
       await store.doc('privacyErasureJobs', agentId).delete();
     }

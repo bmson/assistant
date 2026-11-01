@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { createDb, createPostgresProfilePeopleReadRepository } from '@assistant/db';
 import { agents, contacts, memories, occasions } from '@assistant/db/schema';
 import { FirestoreProfilePeopleReadRepository } from '@assistant/firestore';
-import type { ProfileContact, ProfileFact } from '@assistant/persistence';
+import {
+  type ProfileContact,
+  type ProfileContactSnapshot,
+  type ProfileFact,
+  parseContactIdentityAuthority,
+  profileContactIdentityRevision,
+} from '@assistant/persistence';
 import { Timestamp } from '@google-cloud/firestore';
 import { eq, sql } from 'drizzle-orm';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -16,6 +22,15 @@ import { firestoreProfilePeopleSmoke } from './firestore-profile-people-smoke.js
 
 const now = new Date('2026-09-22T12:00:00.000Z');
 const rolledBack = Symbol('transaction rolled back');
+
+/** Native CAS versions are driver-scoped; absent legacy authority and SQL NULL both mean unknown. */
+function portableContact(snapshot: ProfileContactSnapshot) {
+  const { identityRevision: _nativeRevision, ...contact } = snapshot;
+  return {
+    ...contact,
+    identityAuthority: parseContactIdentityAuthority(contact.identityAuthority),
+  };
+}
 
 function contact(id: string, name: string, trust = 'known'): ProfileContact {
   return {
@@ -45,6 +60,7 @@ function fact(
     kind: 'fact',
     content: `Fact ${id}`,
     contentHash: randomUUID(),
+    ownerCorrection: null,
     embedding: null,
     importance: 3,
     confidence: '0.70',
@@ -195,7 +211,45 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('profile people read parit
             getOwnerFactsView(pg),
             getOwnerFactsView(fs),
           ]);
-          expect(fsPerson).toEqual(pgPerson);
+          const [pgContact, fsContact, fsNative, pgNativeRows] = await Promise.all([
+            pg.getContact(personId),
+            fs.getContact(personId),
+            installation.doc('contacts', personId).get(),
+            tx
+              .select({ native: sql<Record<string, unknown>>`to_jsonb(${contacts})` })
+              .from(contacts)
+              .where(eq(contacts.id, personId)),
+          ]);
+          const pgNative = pgNativeRows[0]?.native;
+          if (!pgContact || !fsContact || !fsNative.updateTime || !pgNative)
+            throw new Error('Missing original native contact snapshots');
+          expect(pgContact.identityRevision).toBe(
+            profileContactIdentityRevision({
+              driver: 'postgres',
+              ownerId: agent.id,
+              native: pgNative,
+            }),
+          );
+          expect(fsContact.identityRevision).toBe(
+            profileContactIdentityRevision({
+              driver: 'firestore',
+              ownerId: agent.id,
+              id: fsNative.id,
+              updateTime: {
+                seconds: fsNative.updateTime.seconds,
+                nanoseconds: fsNative.updateTime.nanoseconds,
+              },
+            }),
+          );
+          expect(pgContact.identityRevision).toMatch(/^[a-f0-9]{64}$/);
+          expect(fsContact.identityRevision).toMatch(/^[a-f0-9]{64}$/);
+          expect(fsContact.identityRevision).not.toBe(pgContact.identityRevision);
+          expect(pgPerson?.contact).toEqual(pgContact);
+          expect(fsPerson?.contact).toEqual(fsContact);
+          expect({ ...fsPerson, contact: portableContact(fsContact) }).toEqual({
+            ...pgPerson,
+            contact: portableContact(pgContact),
+          });
           expect(await getPersonProfile(tx as never, personId, 2)).toEqual(pgPerson);
           expect(fsPerson?.totalFacts).toBe(208);
           const [allPgFacts, allFsFacts] = await Promise.all([

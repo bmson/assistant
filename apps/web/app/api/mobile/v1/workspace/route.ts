@@ -1,8 +1,12 @@
 import { visibleWorkspaceCapabilityModules } from '@assistant/application';
-import { billingCoverageProjection } from '@assistant/application/provider-billing';
+import {
+  billingCoverageProjection,
+  type ProviderBilling,
+  projectBillingForMobile,
+} from '@assistant/application/provider-billing';
 import { loadConfig } from '@assistant/config';
 import { assistantModuleMetas } from '@assistant/modules/meta';
-import { policyLabels, policyScope, scheduleLabels } from '@/app/settings/labels';
+import { scheduleLabels } from '@/app/settings/labels';
 import { getAgentReadinessSource } from '@/lib/agent-readiness-source';
 import { capabilityStatus, getCapabilityDiagnostics } from '@/lib/capabilities';
 import { getFirestoreMobileWorkspace } from '@/lib/firestore-mobile-workspace';
@@ -13,6 +17,7 @@ import {
   MOBILE_BILLING_REFRESH_BUDGET_MS,
   withPostgresMobileWorkspaceRead,
 } from '@/lib/server';
+import { projectStandingApprovalPolicy } from '@/lib/standing-approval-view';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
 export const dynamic = 'force-dynamic';
@@ -24,6 +29,7 @@ function workspaceResponse(
   },
 ): Response {
   const supportsSections = request.headers.get('x-assistant-workspace-sections') === '1';
+  const supportsAmountOnlyBilling = request.headers.get('x-assistant-billing-amounts') === '1';
   const unavailable = Object.values(payload.sectionAvailability).some(
     (section) => section.status !== 'available' || section.version !== 1,
   );
@@ -37,7 +43,15 @@ function workspaceResponse(
       },
       { status: 503 },
     );
-  return mobileJson(payload);
+  const costs = (
+    payload as typeof payload & { costs?: { billing?: ProviderBilling[]; [key: string]: unknown } }
+  ).costs;
+  if (!costs) return mobileJson(payload);
+  const billing = projectBillingForMobile(costs.billing ?? [], supportsAmountOnlyBilling);
+  return mobileJson({
+    ...payload,
+    costs: { ...costs, billing, billingCoverage: billingCoverageProjection(billing) },
+  });
 }
 
 /**
@@ -329,16 +343,12 @@ export async function GET(request: Request): Promise<Response> {
                   lastRunAt: schedule.lastRunAt,
                 })),
               reminders: settings.reminders,
-              policies: settings.policies.map((policy) => ({
-                id: policy.id,
-                toolName: policy.toolName,
-                templateKey: policy.templateKey,
-                label: policyLabels[policy.templateKey] ?? null,
-                scope: policyScope(policy.templateKey, policy.match),
-                effect: policy.effect,
-                enabled: policy.enabled,
-                createdVia: policy.createdVia,
-              })),
+              policies: settings.policies.map((policy) =>
+                projectStandingApprovalPolicy(
+                  policy,
+                  loadConfig().PHONE_CALL_TO_OWNER_GRANT_ENABLED,
+                ),
+              ),
               goalAutomationCount: settings.goalAutomationCount,
             }
           : {

@@ -46,10 +46,10 @@ import {
 import { startMissionWithReceipt, wakeMission } from '../missions.js';
 import {
   explicitlyOptsOutOfRecall,
-  isConversationLocalContext,
   isSelfContainedTextTransformation,
   latestOwnerIntent,
   ownerAuthoredWindow,
+  resolveRecallMode,
 } from '../owner-intent.js';
 import { PLANNER_VERSION, PlanningUnavailableError, planTask } from '../planner.js';
 import { detectPersonalReadRequest } from '../read-intent.js';
@@ -185,7 +185,11 @@ export async function preparePlanningRecall(rc: RunContext): Promise<boolean> {
   state.recall = undefined;
   const intent =
     rc.ctx.ownerIntent ??
-    latestOwnerIntent(window, { trust: task.trust as Trust, trigger: task.trigger });
+    latestOwnerIntent(window, {
+      trust: task.trust as Trust,
+      trigger: task.trigger,
+      clarificationContinuation: state.clarificationContinuation,
+    });
   const text = intent.ownerAuthoredText;
   const ownerWindow = ownerAuthoredWindow(window, intent);
   const noRead = explicitlyOptsOutOfRecall(text);
@@ -193,20 +197,20 @@ export async function preparePlanningRecall(rc: RunContext): Promise<boolean> {
   const localTransformation =
     intent.authorizedScopes.length === 0 &&
     isSelfContainedTextTransformation(text, intent.externalText);
-  const eligible =
-    loadConfig().CHAT_RECALL_ENABLED &&
-    !noRead &&
-    !privateRead &&
-    !localTransformation &&
-    !isConversationLocalContext(text) &&
-    !state.untrustedContext &&
-    task.trust === 'owner' &&
-    (task.type === 'chat_turn' || task.type === 'sms_turn' || task.type === 'email_triage') &&
-    Boolean(task.conversationId) &&
-    intent.requestKind === 'new_request' &&
-    text.length > 0;
-
-  if (!eligible) {
+  const recallMode = resolveRecallMode({
+    resolvedReadIntent: rc.resolvedReadIntent ?? { kind: 'none' },
+    ownerIntent: intent,
+    clarificationContinuation: state.clarificationContinuation,
+    enabled: loadConfig().CHAT_RECALL_ENABLED,
+    untrustedContext: state.untrustedContext,
+    trustedTask: task.trust === 'owner',
+    taskType: task.type,
+    conversationId: task.conversationId ?? undefined,
+    localOnly: localTransformation,
+    explicitReadRequested: privateRead,
+    requireNewRequest: true,
+  });
+  if (recallMode !== 'automatic' && recallMode !== 'continuation') {
     state.plannerState = {
       ...state.plannerState,
       planningRecall: { status: noRead ? 'skipped_by_owner' : 'not_applicable' },
@@ -229,10 +233,12 @@ export async function preparePlanningRecall(rc: RunContext): Promise<boolean> {
       db,
       persistence: deps.persistence,
       router,
+      mode: recallMode,
       taskId: task.id,
       agentId: agent.id,
       conversationId: task.conversationId as string,
       queryText,
+      eligibilityText: text,
       discussionTurns: window
         .filter((_, index) => index !== window.findLastIndex((message) => message.role === 'user'))
         .flatMap((message) =>

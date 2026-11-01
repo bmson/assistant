@@ -10,6 +10,10 @@ import {
 } from '@assistant/persistence';
 import { and, asc, eq, gt, inArray, like, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
+import {
+  erasePostgresEditorReceiptPage,
+  rotateExistingPostgresEditorForErasure,
+} from './owner-editor-lifecycle.js';
 import { erasePostgresPhoneCalendarSharing } from './phone-calendar-compatibility.js';
 import {
   agents,
@@ -43,7 +47,6 @@ import {
   situationPacks,
   situationPreviews,
   tasks,
-  toolCache,
   toolCallReceiptKeys,
   toolCallReceipts,
   voiceProfile,
@@ -290,6 +293,9 @@ async function ensureActiveErasure(db: Db, agentId: string): Promise<void> {
       phase: 'attachments',
       afterId: null,
     };
+    // Invalidate all issued editor handles before any private receipt is scrubbed.
+    // The active erasure fence prevents both new claims and late worker commits.
+    await rotateExistingPostgresEditorForErasure(tx, agentId);
     await tx.insert(maintenanceCursors).values({
       name: activeName(agentId),
       cursor: JSON.stringify(state),
@@ -549,21 +555,24 @@ export async function assertPostgresPrivacyObservationFence(
   if (current !== observed) throw new Error('Privacy erasure changed during observation');
 }
 
+export type PostgresPrivacyObservationTransaction = Parameters<Parameters<Db['transaction']>[0]>[0];
+
 /**
  * Keep an owner-scoped read composition ordered against privacy erasure. The
  * owner row lock serializes this read with the erasure transaction, and the
  * generation check catches a completed erase between an earlier discovery
- * step and acquiring the lock. The callback may use the same pool for its
- * ordinary reads; it must remain bounded so the lock is short lived.
+ * step and acquiring the lock. The callback receives the leased transaction
+ * for its ordinary reads, including on single-connection pools. Reads must
+ * remain bounded so the lock is short lived.
  */
 export async function withPostgresPrivacyObservationFence<T>(
   db: Db,
   agentId: string,
-  read: () => Promise<T>,
+  read: (tx: PostgresPrivacyObservationTransaction) => Promise<T>,
 ): Promise<T> {
   return db.transaction(async (tx) => {
     const observed = await lockPostgresPrivacyObservationFence(tx, agentId);
-    const value = await read();
+    const value = await read(tx);
     await assertPostgresPrivacyObservationFence(tx, agentId, observed);
     return value;
   });
@@ -602,6 +611,20 @@ export function createPostgresPrivacyErasureRepository(db: Db): PrivacyErasureRe
     async erase() {
       const agentId = await soleOwner(db);
       await ensureActiveErasure(db, agentId);
+      for (;;) {
+        const done = await db.transaction(async (tx) => {
+          const [owner] = await tx
+            .select({ id: agents.id })
+            .from(agents)
+            .where(eq(agents.id, agentId))
+            .for('update')
+            .limit(1);
+          if (!owner) throw new Error('Privacy erasure owner is unavailable');
+          await readActiveErasure(tx, agentId);
+          return erasePostgresEditorReceiptPage(tx, agentId);
+        });
+        if (done) break;
+      }
       while (!(await eraseAttachmentCustodyPage(db, agentId))) {
         // Each page commits its tombstones and cursor independently. A later
         // call resumes from that cursor while the active owner fence remains.
@@ -1156,6 +1179,13 @@ export function createPostgresPrivacyErasureRepository(db: Db): PrivacyErasureRe
           .where(like(maintenanceCursors.name, `${assetPrefix(agentId)}%`))
           .limit(1);
         if (asset) throw new Error('Privacy erasure assets remain');
+        const [generation] = await tx
+          .select({ cursor: maintenanceCursors.cursor })
+          .from(maintenanceCursors)
+          .where(eq(maintenanceCursors.name, generationName(agentId)))
+          .limit(1);
+        if (!generation?.cursor) throw new Error('Privacy erasure generation is unavailable');
+        await rotateExistingPostgresEditorForErasure(tx, agentId, generation.cursor);
         await tx
           .delete(maintenanceCursors)
           .where(inArray(maintenanceCursors.name, [resultName(agentId), activeName(agentId)]));

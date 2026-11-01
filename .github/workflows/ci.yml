@@ -131,8 +131,8 @@ jobs:
 
   firestore:
     runs-on: ubuntu-latest
-    # The emulator suite takes about 13 minutes; include setup and owned cleanup.
-    timeout-minutes: 20
+    # The documented ~13m emulator suite plus 8m59s observed setup leaves about 8m for owned cleanup and headroom.
+    timeout-minutes: 30
     env:
       FIRESTORE_EMULATOR_HOST: 127.0.0.1:8789
       GCLOUD_PROJECT: demo-assistant-test

@@ -134,10 +134,13 @@ import {
 } from '../memory-read-answer.js';
 import {
   isConversationLocalContext,
+  isExplicitCommitmentReadRequest,
   isSelfContainedTextTransformation,
   latestOwnerIntent,
   type OwnerIntent,
   ownerAuthoredWindow,
+  resolveRecallMode,
+  shouldRunFallbackRecall,
 } from '../owner-intent.js';
 import { isConceptualNoToolRequest, PLANNER_VERSION } from '../planner.js';
 import {
@@ -1049,20 +1052,32 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // can still use contacts.lookup / memory.recall there.
   let recallBlock: string | undefined;
   let openLoops: string | undefined;
+  const commitmentPurposeRequested = isExplicitCommitmentReadRequest(ownerIntent);
+  const recallMode = resolveRecallMode({
+    resolvedReadIntent: rc.resolvedReadIntent ?? { kind: 'none' },
+    ownerIntent,
+    clarificationContinuation: state.clarificationContinuation,
+    enabled: loadConfig().CHAT_RECALL_ENABLED,
+    untrustedContext: state.untrustedContext,
+    trustedTask: privilegedTask,
+    taskType: task.type,
+    conversationId: task.conversationId ?? undefined,
+    localOnly: localTransformation || restrictedChecklistResume,
+    explicitReadRequested: Boolean(readRequest) || commitmentPurposeRequested,
+  });
+  const fallbackRecallMode =
+    recallMode === 'automatic' || recallMode === 'continuation' ? recallMode : undefined;
   if (
-    !publicScope &&
-    loadConfig().CHAT_RECALL_ENABLED &&
-    state.plannerState.planningRecall === undefined &&
-    !localTransformation &&
-    !isConversationLocalContext(ownerText) &&
-    !restrictedChecklistResume &&
-    !readRequest &&
-    privilegedTask &&
-    !state.untrustedContext &&
-    (task.type === 'chat_turn' || task.type === 'email_triage' || task.type === 'sms_turn') &&
-    task.conversationId
+    fallbackRecallMode &&
+    shouldRunFallbackRecall({
+      mode: fallbackRecallMode,
+      publicScope: Boolean(publicScope),
+      planningRecallPrepared: state.plannerState.planningRecall !== undefined,
+      restrictedChecklistResume,
+      conversationId: task.conversationId ?? undefined,
+    })
   ) {
-    const conversationId = task.conversationId;
+    const conversationId = task.conversationId ?? '';
     const lastUser = [...rc.window].reverse().find((m) => m.role === 'user');
     const payload = (task.trigger as { payload?: Record<string, unknown> } | null)?.payload ?? {};
     const emailMeta =
@@ -1079,10 +1094,12 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           db,
           persistence: deps.persistence,
           router,
+          mode: fallbackRecallMode,
           taskId: task.id,
           agentId: agent.id,
           conversationId,
           queryText,
+          eligibilityText: ownerText,
           discussionTurns: rc.window
             .filter(
               (_, index) => index !== rc.window.findLastIndex((message) => message.role === 'user'),
@@ -1131,7 +1148,13 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     !isConversationLocalContext(ownerText) &&
     privilegedTask &&
     !state.untrustedContext &&
-    task.conversationId
+    task.conversationId &&
+    // Automatic and continuation recall already pass through the shared
+    // eligibility and two-source fuser above. Explicit reads of another
+    // private source do not authorize this separate commitment lookup; only
+    // an admitted owner request to review open commitments/follow-ups does.
+    commitmentPurposeRequested &&
+    recallMode === 'explicit'
   ) {
     try {
       const lastUser = [...rc.window].reverse().find((m) => m.role === 'user');

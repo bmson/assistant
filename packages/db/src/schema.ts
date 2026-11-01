@@ -5,6 +5,13 @@ import type {
   EmailContentProvenanceSnapshot,
   ImportArchiveDiagnostics,
   ImportUnitProvenance,
+  OwnerCallGrantOperation,
+  OwnerCallGrantOperationPhase,
+  OwnerCallGrantOperationSlot,
+  OwnerCorrection,
+  OwnerEditorCommand,
+  OwnerEditorTerminalResult,
+  Records,
 } from '@assistant/persistence';
 import { sql } from 'drizzle-orm';
 import {
@@ -19,6 +26,7 @@ import {
   jsonb,
   numeric,
   pgTable,
+  primaryKey,
   smallint,
   text,
   timestamp,
@@ -31,6 +39,55 @@ const timestamps = {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 };
+
+/** Short-lived editor receipts, intentionally excluded from portable replay. */
+export const ownerEditorOperations = pgTable(
+  'owner_editor_operations',
+  {
+    id: text('id').primaryKey(),
+    ownerId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    epoch: uuid('epoch').notNull(),
+    privacyGenerationDigest: text('privacy_generation_digest').notNull(),
+    operationId: uuid('operation_id').notNull(),
+    requestHash: text('request_hash').notNull(),
+    scopeDigest: text('scope_digest').notNull(),
+    command: text('command').$type<OwnerEditorCommand>().notNull(),
+    protocolVersion: integer('protocol_version').$type<1>().notNull(),
+    formIssuedAt: timestamp('form_issued_at', { withTimezone: true }).notNull(),
+    formExpiresAt: timestamp('form_expires_at', { withTimezone: true }).notNull(),
+    claimToken: uuid('claim_token'),
+    claimExpiresAt: timestamp('claim_expires_at', { withTimezone: true }),
+    status: text('status')
+      .$type<'preparing' | 'committed' | 'terminal_rejected' | 'abandoned'>()
+      .notNull(),
+    statusVersion: integer('status_version').notNull(),
+    result: jsonb('result').$type<OwnerEditorTerminalResult>(),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('owner_editor_operation_identity').on(t.ownerId, t.epoch, t.operationId),
+    index('owner_editor_operation_owner').on(t.ownerId, t.createdAt),
+    index('owner_editor_operation_retention').on(t.ownerId, t.formIssuedAt, t.id),
+    check(
+      'owner_editor_operation_hashes',
+      sql`${t.id} ~ '^[a-f0-9]{64}$' AND ${t.requestHash} ~ '^[a-f0-9]{64}$' AND ${t.scopeDigest} ~ '^[a-f0-9]{64}$' AND ${t.privacyGenerationDigest} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      'owner_editor_operation_version',
+      sql`${t.protocolVersion} = 1 AND ${t.statusVersion} >= 1 AND ${t.formExpiresAt} > ${t.formIssuedAt}`,
+    ),
+    check(
+      'owner_editor_operation_command',
+      sql`${t.command} IN ('create_person','update_person_identity','add_family_relationship','correct_owner_family_relationship','correct_owner_memory')`,
+    ),
+    check(
+      'owner_editor_operation_state',
+      sql`(${t.status} = 'preparing' AND ${t.claimToken} IS NOT NULL AND ${t.claimExpiresAt} IS NOT NULL AND ${t.result} IS NULL) OR (${t.status} IN ('committed','terminal_rejected','abandoned') AND ${t.claimToken} IS NULL AND ${t.claimExpiresAt} IS NULL AND ${t.result} IS NOT NULL)`,
+    ),
+  ],
+);
 
 // Situation packs keep bounded planning state, not a second scheduler. Source
 // snapshots and dependencies are reviewed explicitly before a correction lands.
@@ -935,6 +992,159 @@ export const approvalPolicies = pgTable(
   ],
 );
 
+/** Content-free replay barrier for owner-call-grant-operation.v1. */
+export const ownerCallGrantOperations = pgTable(
+  'owner_call_grant_operations',
+  {
+    ownerId: uuid('owner_id').notNull(),
+    approvalId: uuid('approval_id').notNull(),
+    grantId: uuid('grant_id').notNull(),
+    purpose: text('purpose')
+      .$type<OwnerCallGrantOperation['purpose']>()
+      .notNull()
+      .default('owner-call-grant-operation.v1'),
+    schemaVersion: smallint('schema_version')
+      .$type<OwnerCallGrantOperation['schemaVersion']>()
+      .notNull()
+      .default(1),
+    operationVersion: smallint('operation_version')
+      .$type<OwnerCallGrantOperation['operationVersion']>()
+      .notNull()
+      .default(1),
+    taskId: uuid('task_id').notNull(),
+    toolCallId: uuid('tool_call_id').notNull(),
+    slotGeneration: integer('slot_generation').notNull(),
+    requestFingerprint: text('request_fingerprint').notNull(),
+    grantScopeFingerprint: text('grant_scope_fingerprint').notNull(),
+    phase: text('phase').$type<OwnerCallGrantOperationPhase>().notNull(),
+    registeredAt: timestamp('registered_at', { withTimezone: true }).notNull(),
+    reviewExpiresAt: timestamp('review_expires_at', { withTimezone: true }).notNull(),
+    grantExpiresAt: timestamp('grant_expires_at', { withTimezone: true }).notNull(),
+    admittedAt: timestamp('admitted_at', { withTimezone: true }),
+    committedAt: timestamp('committed_at', { withTimezone: true }),
+    closedAt: timestamp('closed_at', { withTimezone: true }),
+    rejectedAt: timestamp('rejected_at', { withTimezone: true }),
+    createdPolicyId: uuid('created_policy_id'),
+    wakeGeneration: integer('wake_generation'),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({
+      name: 'owner_call_grant_operations_pk',
+      columns: [t.ownerId, t.approvalId, t.grantId],
+    }),
+    uniqueIndex('owner_call_grant_operations_slot_key').on(
+      t.ownerId,
+      t.approvalId,
+      t.grantId,
+      t.slotGeneration,
+    ),
+    check(
+      'owner_call_grant_operations_purpose_check',
+      sql`${t.purpose} = 'owner-call-grant-operation.v1'`,
+    ),
+    check(
+      'owner_call_grant_operations_version_check',
+      sql`${t.schemaVersion} = 1 AND ${t.operationVersion} = 1`,
+    ),
+    check('owner_call_grant_operations_generation_check', sql`${t.slotGeneration} > 0`),
+    check(
+      'owner_call_grant_operations_fingerprint_check',
+      sql`${t.requestFingerprint} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      'owner_call_grant_operations_scope_fingerprint_check',
+      sql`${t.grantScopeFingerprint} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      'owner_call_grant_operations_phase_check',
+      sql`
+      isfinite(${t.registeredAt}) AND isfinite(${t.reviewExpiresAt}) AND isfinite(${t.grantExpiresAt}) AND
+      isfinite(${t.updatedAt}) AND ${t.reviewExpiresAt} > ${t.registeredAt} AND ${t.grantExpiresAt} > ${t.registeredAt} AND
+      (${t.admittedAt} IS NULL OR isfinite(${t.admittedAt})) AND (${t.committedAt} IS NULL OR isfinite(${t.committedAt})) AND
+      (${t.closedAt} IS NULL OR isfinite(${t.closedAt})) AND (${t.rejectedAt} IS NULL OR isfinite(${t.rejectedAt})) AND
+      CASE ${t.phase}
+        WHEN 'registered' THEN ${t.admittedAt} IS NULL AND ${t.committedAt} IS NULL AND ${t.closedAt} IS NULL AND ${t.rejectedAt} IS NULL AND ${t.createdPolicyId} IS NULL AND ${t.wakeGeneration} IS NULL AND ${t.updatedAt} >= ${t.registeredAt}
+        WHEN 'admitted' THEN ${t.admittedAt} IS NOT NULL AND ${t.admittedAt} >= ${t.registeredAt} AND ${t.admittedAt} < ${t.reviewExpiresAt} AND ${t.committedAt} IS NULL AND ${t.closedAt} IS NULL AND ${t.rejectedAt} IS NULL AND ${t.createdPolicyId} IS NULL AND ${t.wakeGeneration} IS NULL AND ${t.updatedAt} >= ${t.admittedAt}
+        WHEN 'committed' THEN ${t.admittedAt} IS NOT NULL AND ${t.admittedAt} >= ${t.registeredAt} AND ${t.admittedAt} < ${t.reviewExpiresAt} AND ${t.committedAt} IS NOT NULL AND ${t.committedAt} >= ${t.admittedAt} AND ${t.committedAt} < ${t.reviewExpiresAt} AND ${t.closedAt} IS NULL AND ${t.rejectedAt} IS NULL AND ${t.createdPolicyId} IS NOT NULL AND ${t.wakeGeneration} IS NOT NULL AND ${t.wakeGeneration} > 0 AND ${t.updatedAt} >= ${t.committedAt}
+        WHEN 'closed_no_effect' THEN ${t.closedAt} IS NOT NULL AND (${t.admittedAt} IS NULL OR (${t.admittedAt} >= ${t.registeredAt} AND ${t.admittedAt} < ${t.reviewExpiresAt})) AND ${t.closedAt} >= COALESCE(${t.admittedAt}, ${t.registeredAt}) AND ${t.committedAt} IS NULL AND ${t.rejectedAt} IS NULL AND ${t.createdPolicyId} IS NULL AND ${t.wakeGeneration} IS NULL AND ${t.updatedAt} >= ${t.closedAt}
+        WHEN 'rejected_no_effect' THEN ${t.rejectedAt} IS NOT NULL AND (${t.admittedAt} IS NULL OR (${t.admittedAt} >= ${t.registeredAt} AND ${t.admittedAt} < ${t.reviewExpiresAt})) AND ${t.rejectedAt} >= COALESCE(${t.admittedAt}, ${t.registeredAt}) AND ${t.committedAt} IS NULL AND ${t.closedAt} IS NULL AND ${t.createdPolicyId} IS NULL AND ${t.wakeGeneration} IS NULL AND ${t.updatedAt} >= ${t.rejectedAt}
+        ELSE false
+      END
+    `,
+    ),
+  ],
+);
+
+export const ownerCallGrantOperationSlots = pgTable(
+  'owner_call_grant_operation_slots',
+  {
+    ownerId: uuid('owner_id').notNull(),
+    approvalId: uuid('approval_id').notNull(),
+    purpose: text('purpose')
+      .$type<OwnerCallGrantOperationSlot['purpose']>()
+      .notNull()
+      .default('owner-call-grant-operation.v1'),
+    schemaVersion: smallint('schema_version')
+      .$type<OwnerCallGrantOperationSlot['schemaVersion']>()
+      .notNull()
+      .default(1),
+    generation: integer('generation').notNull().default(0),
+    currentGrantId: uuid('current_grant_id'),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: 'owner_call_grant_operation_slots_pk', columns: [t.ownerId, t.approvalId] }),
+    check(
+      'owner_call_grant_operation_slots_purpose_check',
+      sql`${t.purpose} = 'owner-call-grant-operation.v1'`,
+    ),
+    check('owner_call_grant_operation_slots_version_check', sql`${t.schemaVersion} = 1`),
+    check(
+      'owner_call_grant_operation_slots_generation_check',
+      sql`(${t.generation} = 0 AND ${t.currentGrantId} IS NULL) OR (${t.generation} > 0 AND ${t.currentGrantId} IS NOT NULL)`,
+    ),
+    check('owner_call_grant_operation_slots_updated_at_check', sql`isfinite(${t.updatedAt})`),
+    foreignKey({
+      name: 'owner_call_grant_operation_slots_current_fk',
+      columns: [t.ownerId, t.approvalId, t.currentGrantId, t.generation],
+      foreignColumns: [
+        ownerCallGrantOperations.ownerId,
+        ownerCallGrantOperations.approvalId,
+        ownerCallGrantOperations.grantId,
+        ownerCallGrantOperations.slotGeneration,
+      ],
+    }),
+  ],
+);
+
+/** Rolling bounded idempotency/cost receipts; caller enforces policy and clock transactionally. */
+export const ownerCallGrantUsage = pgTable(
+  'owner_call_grant_usage',
+  {
+    ownerId: uuid('owner_id').notNull(),
+    policyId: uuid('policy_id').notNull(),
+    grantScopeFingerprint: text('grant_scope_fingerprint').notNull(),
+    events: jsonb('events').$type<Records['ownerCallGrantUsage']['events']>().notNull().default([]),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({
+      name: 'owner_call_grant_usage_pk',
+      columns: [t.ownerId, t.policyId, t.grantScopeFingerprint],
+    }),
+    check(
+      'owner_call_grant_usage_fingerprint_check',
+      sql`${t.grantScopeFingerprint} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      'owner_call_grant_usage_events_check',
+      sql`jsonb_typeof(${t.events}) = 'array' AND jsonb_array_length(${t.events}) <= 100`,
+    ),
+    check('owner_call_grant_usage_updated_at_check', sql`isfinite(${t.updatedAt})`),
+  ],
+);
+
 /**
  * Approval anomaly detection (Phase 18): a nightly scan over `tool_calls.decision`
  * flags policies auto-executing far above their baseline, outward-facing actions
@@ -1107,6 +1317,7 @@ export const memories = pgTable(
     kind: text('kind').notNull(),
     content: text('content').notNull(),
     contentHash: text('content_hash').notNull().unique(),
+    ownerCorrection: jsonb('owner_correction').$type<OwnerCorrection>(),
     embedding: vector('embedding', { dimensions: 1536 }),
     /** Provider/model/width revision for the stored vector; null means legacy/unknown. */
     embeddingSpaceKey: text('embedding_space_key'),
@@ -1248,10 +1459,17 @@ export const contacts = pgTable(
     phones: text('phones').array().notNull().default([]),
     relationship: text('relationship').notNull().default(''),
     trust: text('trust').notNull().default('unknown'),
+    identityAuthority: text('identity_authority', { enum: ['owner', 'inferred'] }),
     notes: text('notes').notNull().default(''),
     ...timestamps,
   },
-  (t) => [check('contacts_trust_check', sql`${t.trust} IN ('owner','known','unknown')`)],
+  (t) => [
+    check('contacts_trust_check', sql`${t.trust} IN ('owner','known','unknown')`),
+    check(
+      'contacts_identity_authority_check',
+      sql`${t.identityAuthority} IS NULL OR ${t.identityAuthority} IN ('owner','inferred')`,
+    ),
+  ],
 );
 
 // ── Knowledge graph ────────────────────────────────────────────────────────
@@ -3240,6 +3458,9 @@ export type ToolCallRow = typeof toolCalls.$inferSelect;
 export type ApprovalRow = typeof approvals.$inferSelect;
 export type ApplicationConfirmationRow = typeof applicationConfirmations.$inferSelect;
 export type ApprovalPolicyRow = typeof approvalPolicies.$inferSelect;
+export type OwnerCallGrantOperationRow = typeof ownerCallGrantOperations.$inferSelect;
+export type OwnerCallGrantOperationSlotRow = typeof ownerCallGrantOperationSlots.$inferSelect;
+export type OwnerCallGrantUsageRow = typeof ownerCallGrantUsage.$inferSelect;
 export type MemoryRow = typeof memories.$inferSelect;
 export type MemoryTombstoneRow = typeof memoryTombstones.$inferSelect;
 export type OwnerCardRow = typeof ownerCard.$inferSelect;

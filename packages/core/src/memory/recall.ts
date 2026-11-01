@@ -60,6 +60,8 @@ export interface RecallOptions {
 
 /** One injected recollection, for the UI transparency affordance (Phase 4). */
 export interface RecallSource {
+  /** Server-verified matching correction marker; no private marker bytes. */
+  ownerCorrected?: true;
   /** UTC date of the recalled discussion (YYYY-MM-DD). */
   date: string;
   /** A short human label — the segment summary or the matched line. */
@@ -93,11 +95,12 @@ export interface RecallResult {
   /** What was pulled in, for the "recalled from earlier" UI affordance. */
   sources: RecallSource[];
   /** Candidate text retained internally so the shared fuser can rerank source types. */
-  rankedContext?: Array<{ text: string; score: number; source: RecallSource }>;
+  rankedContext?: Array<{ text: string; meaning?: string; score: number; source: RecallSource }>;
 }
 
 interface RankedRecallEntry {
   content: string;
+  meaning: string;
   source: RecallSource;
   similarity: number;
 }
@@ -234,6 +237,7 @@ export async function recallRelevantContext(
     sources,
     rankedContext: included.map((entry) => ({
       text: entry.content,
+      meaning: entry.meaning,
       score: entry.similarity,
       source: entry.source,
     })),
@@ -246,6 +250,7 @@ function withoutRanking(result: TierRecallResult): RecallResult {
     ...publicResult,
     rankedContext: ranked.map((entry) => ({
       text: entry.content,
+      meaning: entry.meaning,
       score: entry.similarity,
       source: entry.source,
     })),
@@ -310,6 +315,7 @@ async function recallFromSegments(
     });
     ranked.push({
       content: entry,
+      meaning: [seg.summary, keyMessage?.text ?? ''].filter(Boolean).join(' '),
       source: sources[sources.length - 1] as RecallSource,
       similarity: Number(seg.similarity),
     });
@@ -393,6 +399,7 @@ async function recallFromMessages(
     });
     ranked.push({
       content: entry,
+      meaning: unseen.map((message) => message.text).join(' '),
       source: sources[sources.length - 1] as RecallSource,
       similarity: Number(anchor.similarity),
     });

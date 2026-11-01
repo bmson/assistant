@@ -1,28 +1,66 @@
-import type { ProfilePeopleReadRepository } from '@assistant/persistence';
-import { and, asc, count, desc, eq, gt, isNull, or } from 'drizzle-orm';
+import {
+  type ProfileContact,
+  type ProfileContactSnapshot,
+  type ProfilePeopleReadRepository,
+  profileContactIdentityRevision,
+} from '@assistant/persistence';
+import { and, asc, count, desc, eq, gt, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { agents, contacts, memories, occasions, ownerCard } from './schema.js';
+
+export const PROFILE_BROWSE_OCCASION_MAX_ROWS = 1_000;
+export class PostgresProfileOccasionLimitError extends Error {
+  readonly code = 'POSTGRES_PROFILE_OCCASION_LIMIT';
+  constructor() {
+    super('Person occasions are unavailable because the bounded output limit was reached');
+    this.name = 'PostgresProfileOccasionLimitError';
+  }
+}
 
 export function createPostgresProfilePeopleReadRepository(
   db: Db,
   agentId: string,
   now: () => Date = () => new Date(),
+  opts: { browseOnly?: boolean } = {},
 ): ProfilePeopleReadRepository {
+  const snapshot = (
+    contact: ProfileContact,
+    native: Record<string, unknown>,
+  ): ProfileContactSnapshot => ({
+    ...contact,
+    identityRevision: profileContactIdentityRevision({
+      driver: 'postgres',
+      ownerId: agentId,
+      native,
+    }),
+  });
   return {
     kind: 'profile-people-read-repository',
 
-    async getOwnerContact() {
-      const [row] = await db.select().from(contacts).where(eq(contacts.trust, 'owner')).limit(1);
-      return row ?? null;
+    async getOwnerContact(): Promise<ProfileContactSnapshot | null> {
+      const [selected] = await db
+        .select({ contact: contacts, native: sql<Record<string, unknown>>`to_jsonb(${contacts})` })
+        .from(contacts)
+        .where(eq(contacts.trust, 'owner'))
+        .limit(1);
+      return selected ? snapshot(selected.contact, selected.native) : null;
     },
 
     async getContact(id) {
-      const [row] = await db.select().from(contacts).where(eq(contacts.id, id)).limit(1);
-      return row ?? null;
+      const [selected] = await db
+        .select({ contact: contacts, native: sql<Record<string, unknown>>`to_jsonb(${contacts})` })
+        .from(contacts)
+        .where(eq(contacts.id, id))
+        .limit(1);
+      return selected ? snapshot(selected.contact, selected.native) : null;
     },
 
-    listContacts() {
-      return db.select().from(contacts).orderBy(asc(contacts.name), asc(contacts.id));
+    async listContacts() {
+      const selected = await db
+        .select({ contact: contacts, native: sql<Record<string, unknown>>`to_jsonb(${contacts})` })
+        .from(contacts)
+        .orderBy(asc(contacts.name), asc(contacts.id));
+      return selected.map(({ contact, native }) => snapshot(contact, native));
     },
 
     async getFacts(contactId, limit) {
@@ -64,12 +102,18 @@ export function createPostgresProfilePeopleReadRepository(
       return row ?? null;
     },
 
-    listOccasions(contactId) {
-      return db
+    async listOccasions(contactId) {
+      const query = db
         .select()
         .from(occasions)
         .where(and(eq(occasions.agentId, agentId), eq(occasions.contactId, contactId)))
         .orderBy(asc(occasions.month), asc(occasions.day), asc(occasions.id));
+      if (!opts.browseOnly) return query;
+      const rows = await query.limit(PROFILE_BROWSE_OCCASION_MAX_ROWS + 1);
+      if (rows.length > PROFILE_BROWSE_OCCASION_MAX_ROWS) {
+        throw new PostgresProfileOccasionLimitError();
+      }
+      return rows;
     },
   };
 }

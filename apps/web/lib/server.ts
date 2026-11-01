@@ -128,6 +128,7 @@ import {
 } from '@assistant/core/workflow/schedules';
 import {
   anomalies,
+  assertPostgresInstallationOwner,
   assertPostgresRestoreRehearsalReadOnly,
   createDb,
   createPostgresApplicationChatPersistence,
@@ -430,6 +431,30 @@ export async function startFirestoreGoalWork(id: string) {
   return goalWorkResult(await repository.startWork(id, goalWorkAutomation));
 }
 
+// Driver plumbing stays at the web composition root; editor adapters consume
+// these ports without introducing a second persistence composition boundary.
+export {
+  assertPostgresInstallationOwner,
+  createPostgresOwnerEditorOperationRepository,
+} from '@assistant/db';
+
+/** Use only the caller's already fenced leased read handle, including pool-max-one installations. */
+export async function readPostgresOwnerEditorViewInputs(
+  db: Db,
+  input: { contactId?: string; relationIds?: readonly string[] },
+) {
+  const { readPostgresOwnerEditorIssuanceContext, postgresOwnerEditorViewSnapshot } = await import(
+    '@assistant/db'
+  );
+  const ownerId = await assertPostgresInstallationOwner(db);
+  const context = await readPostgresOwnerEditorIssuanceContext(db, ownerId);
+  if (!context) return null;
+  if (!input.contactId)
+    return { context, snapshot: { ownerId, identity: null, people: [], corrections: [] } };
+  const snapshot = await postgresOwnerEditorViewSnapshot(db, ownerId, input);
+  return { context, snapshot: { ...snapshot, ownerId } };
+}
+
 export function getDb(): Db {
   const config = loadConfig();
   if (config.PERSISTENCE_DRIVER === 'firestore') {
@@ -448,6 +473,21 @@ export function getDb(): Db {
     });
   }
   return globalCache.__assistantDb;
+}
+
+/** Bounded browse reads share the installation identity and erasure fence. */
+export async function withPostgresMemoryBrowseRead<T>(read: (db: Db) => Promise<T>): Promise<T> {
+  const db = getDb();
+  const ownerId = await assertPostgresInstallationOwner(db);
+  return withPostgresPrivacyObservationFence(db, ownerId, async (tx) => {
+    // Retained read APIs accept Db; Drizzle's transaction has the same query
+    // surface but omits the pool's $client. Preserve the actual leased handle.
+    const leasedDb = tx as unknown as Db;
+    await assertPostgresInstallationOwner(leasedDb, ownerId);
+    const result = await read(leasedDb);
+    await assertPostgresInstallationOwner(leasedDb, ownerId);
+    return result;
+  });
 }
 
 export function getEmailObligationRepository() {
@@ -1827,4 +1867,62 @@ export async function getTaskDiscoveryPorts() {
     repository: createPostgresTaskDiscoveryRepository(getDb()),
     agentId: (await getAgent(getDb())).id,
   };
+}
+
+/** One exact note read, never a per-card provenance scan or an authoring call. */
+export async function loadOwnerMemoryEditorView(
+  memoryId: string,
+  formSessionScope: string | undefined,
+) {
+  const [
+    { readPostgresOwnerEditorIssuanceContext, readPostgresOwnerMemoryEditorSnapshot },
+    { readFirestoreOwnerEditorIssuanceContext, readFirestoreOwnerMemoryEditorSnapshot },
+    { buildOwnerMemoryEditorView },
+  ] = await Promise.all([
+    import('@assistant/db'),
+    import('@assistant/firestore'),
+    import('./owner-memory-editor-view'),
+  ]);
+  const config = loadConfig();
+  const enabled =
+    !config.ASSISTANT_RELEASE_WRITES_PAUSED &&
+    !config.RESTORE_REHEARSAL &&
+    !(config.PERSISTENCE_DRIVER !== 'firestore' && config.POSTGRES_SOURCE_WRITES_FENCED);
+  const finish = (
+    snapshot: NonNullable<Awaited<ReturnType<typeof readPostgresOwnerMemoryEditorSnapshot>>>,
+    context: Awaited<ReturnType<typeof readPostgresOwnerEditorIssuanceContext>>,
+  ) =>
+    buildOwnerMemoryEditorView({
+      snapshot,
+      context,
+      formSessionScope,
+      secret: config.AUTH_SECRET,
+      enabled,
+    });
+  if (config.PERSISTENCE_DRIVER !== 'firestore')
+    return withPostgresMemoryBrowseRead(async (tx) => {
+      const ownerId = await assertPostgresInstallationOwner(tx);
+      const snapshot = await readPostgresOwnerMemoryEditorSnapshot(tx, ownerId, memoryId);
+      if (!snapshot) return null;
+      const context = await readPostgresOwnerEditorIssuanceContext(tx, ownerId);
+      return finish(snapshot, context);
+    });
+  if (validateAgentPersistenceConfig(config).length)
+    throw new Error('Memory persistence is unavailable');
+  const store = getFirestoreInstallationStore();
+  return store.db.runTransaction(async (tx) => {
+    const snapshot = await readFirestoreOwnerMemoryEditorSnapshot(
+      store,
+      config.FIRESTORE_AGENT_ID,
+      memoryId,
+      tx,
+    );
+    if (!snapshot) return null;
+    const context = await readFirestoreOwnerEditorIssuanceContext(
+      store,
+      config.FIRESTORE_AGENT_ID,
+      tx,
+    );
+    return finish(snapshot, context);
+  });
 }

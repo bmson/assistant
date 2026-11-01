@@ -11,6 +11,8 @@ import type {
   KnowledgeWorkspaceReadRepository,
 } from '@assistant/persistence';
 import { knowledgeAssertionEndpointView } from '@assistant/persistence';
+import type { OwnerEditorTiming } from '@assistant/persistence/owner-editor';
+import { predicateSpec } from '@assistant/persistence/predicate-vocabulary';
 import type {
   KnowledgeGraphDuplicate,
   KnowledgeGraphEntityView,
@@ -19,7 +21,9 @@ import type {
 } from './knowledge-graph.js';
 import {
   presentKnowledgeGraphRelation,
+  presentOwnerFamilyFact,
   type RelationshipPresentation,
+  validOwnerFamilyMeaning,
 } from './relationship-presentation.js';
 
 export type KnowledgeCleanupKind =
@@ -131,6 +135,37 @@ export const MAP_OVERVIEW_NODE_LIMIT = 1000;
 export const MAP_OVERVIEW_EDGE_LIMIT = 10000;
 /** Visible-topology completion: at most this many edges in total, fetched one past the cap. */
 const MAP_VISIBLE_EDGE_LIMIT = 1000;
+
+function presentWorkspaceRelation(input: {
+  subjectLabel: string;
+  subjectKind: string;
+  predicate: string;
+  objectLabel: string;
+  objectKind: string;
+  validFrom: string | null;
+  validUntil: string | null;
+  assertionTiming?: OwnerEditorTiming | null;
+}): RelationshipPresentation {
+  const fallback = presentKnowledgeGraphRelation(input);
+  const validity = { validFrom: input.validFrom, validUntil: input.validUntil };
+  if (
+    input.subjectKind !== 'person' ||
+    input.objectKind !== 'person' ||
+    predicateSpec(input.predicate)?.group !== 'family' ||
+    input.assertionTiming == null ||
+    (input.predicate.startsWith('former_') && input.assertionTiming !== 'past') ||
+    !validOwnerFamilyMeaning({ timing: input.assertionTiming, validity })
+  )
+    return fallback;
+  const sentence = presentOwnerFamilyFact({
+    subjectLabel: input.subjectLabel,
+    predicate: input.predicate,
+    objectLabel: input.objectLabel,
+    timing: input.assertionTiming,
+    validity,
+  });
+  return { ...fallback, sentence, accessibleLabel: sentence };
+}
 /**
  * First paint of the interactive map. 150 keeps a hub readable while covering
  * nearly every real entity; the server clamps anything larger to 250.
@@ -324,7 +359,7 @@ export async function assembleKnowledgeMapSnapshot(input: {
       sourceMemoryId: row.sourceMemoryId,
       sourceContent: row.sourceContent,
       evidenceQuote: row.evidenceQuote,
-      presentation: presentKnowledgeGraphRelation(row),
+      presentation: presentWorkspaceRelation(row),
       validFrom: row.validFrom,
       validUntil: row.validUntil,
       endpointViews: endpointViewsFor(row),
@@ -452,6 +487,9 @@ export function knowledgeWorkspaceQueries(repository: KnowledgeWorkspaceReadRepo
             id: string;
             reviewStatus: KnowledgeGraphReviewStatus;
             inRecall: boolean;
+            validFrom?: string | null;
+            validUntil?: string | null;
+            assertionTiming?: OwnerEditorTiming | null;
             presentation: RelationshipPresentation;
             source: { memoryId: string; content: string };
           }>;
@@ -465,10 +503,15 @@ export function knowledgeWorkspaceQueries(repository: KnowledgeWorkspaceReadRepo
               id: relation.id,
               reviewStatus: relation.reviewStatus,
               inRecall: relation.inRecall,
-              presentation: presentKnowledgeGraphRelation({
+              presentation: presentWorkspaceRelation({
                 subjectLabel: relation.subject.label,
+                subjectKind: relation.subject.kind,
                 predicate: relation.predicate,
                 objectLabel: relation.object.label,
+                objectKind: relation.object.kind,
+                validFrom: relation.validFrom ?? null,
+                validUntil: relation.validUntil ?? null,
+                assertionTiming: relation.assertionTiming,
               }),
               source: relation.source,
             })),

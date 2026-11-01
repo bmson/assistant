@@ -23,10 +23,14 @@ struct ConnectionView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 26) {
+            VStack(alignment: .leading, spacing: 24) {
                 if isOnboarding { introduction }
 
                 VStack(alignment: .leading, spacing: 16) {
+                    Text("On your assistant’s website, open Settings → Mobile app to find the server address and create a mobile access key.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+
                     VStack(alignment: .leading, spacing: 7) {
                         Text("Assistant server").font(.subheadline.weight(.semibold))
                         connectionFieldSurface(isFocused: focusedField == .server) {
@@ -39,6 +43,9 @@ struct ConnectionView: View {
                                 .focused($focusedField, equals: .server)
                                 .onSubmit { focusedField = .token }
                         }
+#if DEBUG
+                        .onConnectionGeometry(.serverField)
+#endif
                     }
 
                     VStack(alignment: .leading, spacing: 7) {
@@ -52,12 +59,18 @@ struct ConnectionView: View {
                                 .focused($focusedField, equals: .token)
                                 .onSubmit(connect)
                         }
-                        Text("Generate a mobile access key in your assistant’s web Settings, then paste it here. It stays in this device’s Keychain.")
+#if DEBUG
+                        .onConnectionGeometry(.keyField)
+#endif
+                        Text("Stored securely in this iPhone’s Keychain.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
                 .assistantCard(in: colorScheme)
+#if DEBUG
+                .onConnectionGeometry(.form)
+#endif
 
                 if let error = model.errorMessage {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
@@ -70,6 +83,9 @@ struct ConnectionView: View {
                             in: RoundedRectangle(cornerRadius: 14, style: .continuous)
                         )
                         .accessibilityElement(children: .combine)
+#if DEBUG
+                        .onConnectionGeometry(.error)
+#endif
                 }
 
                 Button(action: connect) {
@@ -77,21 +93,26 @@ struct ConnectionView: View {
                         if connecting { ProgressView().tint(.white) }
                         Text(connecting ? "Connecting…" : "Save and connect")
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 13)
                 }
-                .buttonStyle(AssistantActionButtonStyle(kind: .primary))
+                .buttonStyle(AssistantActionButtonStyle(kind: .primary, fillsWidth: true, minimumHeight: 48))
                 .tint(AssistantTheme.accent(for: colorScheme))
                 .disabled(connecting || serverURL.trimmingCharacters(in: .whitespaces).isEmpty)
 
-                Text("Open Settings → Mobile app on your assistant’s website to find the server address and generate an access key.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+#if DEBUG
+                .onConnectionGeometry(.primary)
+#endif
             }
-            .padding(20)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 24)
             .frame(maxWidth: 620)
             .frame(maxWidth: .infinity)
+#if DEBUG
+            .onConnectionGeometry(.scrollBody)
+#endif
         }
+#if DEBUG
+        .onConnectionGeometry(.scrollViewport)
+#endif
         .scrollBounceBehavior(.basedOnSize)
         .scrollDismissesKeyboard(.interactively)
         .background(AssistantTheme.canvas(for: colorScheme).ignoresSafeArea())
@@ -165,10 +186,13 @@ struct ConnectionView: View {
     }
 
     private var introduction: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Your assistant, at home on iPhone.")
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Connect your assistant")
                 .font(.largeTitle.bold())
-            Text("Chat, follow long-running work, manage goals, and approve real-world actions from a native interface. Your data and agent stay on the server you control.")
+#if DEBUG
+                .onConnectionGeometry(.heading)
+#endif
+            Text("Use your assistant on iPhone. Connect to the server you control.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .lineSpacing(4)
@@ -180,3 +204,55 @@ private enum ConnectionField: Hashable {
     case server
     case token
 }
+
+#if DEBUG
+/// Passive, opt-in measurements of the actual connection layout. No custom layout.
+enum ConnectionGeometryElement: String, Hashable {
+    case rootAvailable, scrollViewport, scrollBody, heading, form
+    case serverField, keyField, error, primary
+}
+
+struct ConnectionGeometrySample {
+    let element: ConnectionGeometryElement
+    let frame: CGRect
+}
+
+struct ConnectionGeometryReporter {
+    let report: @MainActor (ConnectionGeometrySample) -> Void
+}
+
+private struct ConnectionGeometryReporterKey: EnvironmentKey {
+    static let defaultValue: ConnectionGeometryReporter? = nil
+}
+
+extension EnvironmentValues {
+    var connectionGeometryReporter: ConnectionGeometryReporter? {
+        get { self[ConnectionGeometryReporterKey.self] }
+        set { self[ConnectionGeometryReporterKey.self] = newValue }
+    }
+}
+
+private struct ConnectionGeometryObserver: ViewModifier {
+    @Environment(\.connectionGeometryReporter) private var reporter
+    let element: ConnectionGeometryElement
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let reporter {
+            content.onGeometryChange(for: CGRect.self) { geometry in
+                geometry.frame(in: .global)
+            } action: { frame in
+                reporter.report(ConnectionGeometrySample(element: element, frame: frame))
+            }
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    func onConnectionGeometry(_ element: ConnectionGeometryElement) -> some View {
+        modifier(ConnectionGeometryObserver(element: element))
+    }
+}
+#endif

@@ -1,6 +1,13 @@
-import type { TaskLease } from '@assistant/persistence';
+import {
+  conversationMessageSourceRevision,
+  conversationMessageSpeakerRevision,
+  type TaskLease,
+} from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
 import { type PendingFinal, TaskStateSchema } from '../../events.js';
+import { selectMemoryReadAnswer } from '../memory-read-answer.js';
+import { buildReadToolInput, detectPersonalReadRequest } from '../read-intent.js';
+import { type ActionEvidence, enforceResponseContract } from '../response-contract.js';
 import { finalizePendingResponse } from './finalize.js';
 import type { ExecutorDeps } from './types.js';
 
@@ -67,6 +74,84 @@ function fixture(type = 'email_triage') {
 }
 
 describe('final channel delivery receipts', () => {
+  it('delivers the exact incomplete-selection diagnostic produced by the private-read contract', async () => {
+    const requestText = 'What did I tell you about open commitments for rainbow observation notes?';
+    const readRequest = detectPersonalReadRequest([{ role: 'user', content: requestText }]);
+    if (!readRequest) throw new Error('Expected an explicit private history request');
+    expect(readRequest.kind).toBe('memory');
+    const historyText = 'The owner observed coastal rainbows by the sea.';
+    const evidence: ActionEvidence[] = [
+      {
+        toolName: 'conversations.search',
+        status: 'succeeded',
+        fromCurrentTask: true,
+        args: buildReadToolInput(readRequest, 'conversations.search', []),
+        result: {
+          matches: [
+            {
+              messageId: 'rainbow-history',
+              conversationId: 'historic-chat',
+              text: historyText,
+              role: 'user',
+              origin: 'owner',
+              speakerRevision: conversationMessageSpeakerRevision(
+                'rainbow-history',
+                historyText,
+                'user',
+                'owner',
+              ),
+              sourceRevision: conversationMessageSourceRevision('rainbow-history', historyText),
+              createdAt: '2026-10-10T12:00:00.000Z',
+            },
+          ],
+        },
+      },
+    ];
+    const selection = await selectMemoryReadAnswer({
+      router: {
+        object: async () => ({ ok: true, object: { selections: [] } }),
+      } as never,
+      taskId: 'incomplete-private-read',
+      request: requestText,
+      evidence,
+    });
+    expect(selection).toMatchObject({
+      status: 'unavailable',
+      failureReason: 'incomplete_selection',
+      selections: [],
+    });
+    const checked = enforceResponseContract('', evidence, {
+      readRequest,
+      requestText,
+      memoryReadSelection: selection,
+    });
+    const diagnostic =
+      'I found candidate owner-authored records, but could not reliably select a directly relevant passage.';
+    expect(checked.text).toContain(diagnostic);
+
+    const f = fixture('chat_turn');
+    f.pending.text = checked.text;
+    f.pending.progress = checked.text.slice(0, 200);
+    f.pending.terminalStatus = 'needs_attention';
+    f.pending.outcome = 'needs_attention';
+    f.pending.contractBlocked = checked.blocked;
+    f.deps.deliverFinal = vi.fn(async (_task, text, attemptId) => {
+      expect(text).toBe(checked.text);
+      return { channel: 'dashboard', status: 'not_applicable' as const, attemptId };
+    });
+
+    const result = await finalizePendingResponse(f.deps, f.task, f.pending, f.state);
+
+    expect(result.outcome).toBe('needs_attention');
+    expect(f.deps.deliverFinal).toHaveBeenCalledOnce();
+    expect(f.deps.deliverFinal).toHaveBeenCalledWith(
+      f.task,
+      expect.stringContaining(diagnostic),
+      expect.any(String),
+      undefined,
+    );
+  });
+
   it('blocks completion when a required channel has no valid target', async () => {
     const f = fixture();
     f.deps.deliverFinal = vi.fn(async (_task, _text, attemptId) => ({

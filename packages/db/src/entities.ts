@@ -1,7 +1,19 @@
-import { normalizeContactAliases, normalizeContactName } from '@assistant/persistence';
-import { and, eq, inArray, ne, sql } from 'drizzle-orm';
+import {
+  isContactIdentityRevision,
+  normalizeContactAliases,
+  normalizeContactName,
+  profileContactIdentityRevision,
+} from '@assistant/persistence';
+import { and, asc, eq, inArray, ne, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
-import { type ContactRow, contacts, memories, memoryTombstones, occasions } from './schema.js';
+import {
+  agents,
+  type ContactRow,
+  contacts,
+  memories,
+  memoryTombstones,
+  occasions,
+} from './schema.js';
 
 export { normalizeContactAliases, normalizeContactName } from '@assistant/persistence';
 
@@ -19,20 +31,43 @@ export function namePrefixMatch(a: string, b: string): boolean {
 }
 
 /** Update canonical name and aliases while remembering the old name after a rename. */
-export async function updateContactIdentity(
+async function writeContactIdentity(
   db: Db,
-  input: { contactId: string; name: string; aliases?: string[] },
-): Promise<{ name: string; aliases: string[] }> {
+  input: {
+    contactId: string;
+    name: string;
+    aliases?: string[];
+    expectedContactRevision?: string;
+    relationship?: string;
+    authority: 'owner' | 'inferred';
+  },
+): Promise<
+  | { status: 'updated'; name: string; aliases: string[] }
+  | { status: 'review_required' | 'conflict' | 'not_found' }
+> {
+  if (!isContactIdentityRevision(input.expectedContactRevision))
+    return { status: 'review_required' };
   const name = normalizeContactName(input.name);
   return db.transaction(async (tx) => {
-    const [contact] = await tx
-      .select()
+    const configured = await tx.select({ id: agents.id }).from(agents).limit(2);
+    if (configured.length !== 1 || !configured[0]) return { status: 'review_required' };
+    const [selected] = await tx
+      .select({ contact: contacts, native: sql<Record<string, unknown>>`to_jsonb(${contacts})` })
       .from(contacts)
       .where(eq(contacts.id, input.contactId))
       .for('update');
-    if (!contact || contact.trust === 'owner') {
-      throw new Error('Person not found or cannot be renamed.');
+    if (!selected || selected.contact.trust === 'owner') {
+      return { status: 'not_found' };
     }
+    const contact = selected.contact;
+    if (
+      profileContactIdentityRevision({
+        driver: 'postgres',
+        ownerId: configured[0].id,
+        native: selected.native,
+      }) !== input.expectedContactRevision
+    )
+      return { status: 'conflict' };
     const renamed = contact.name.toLocaleLowerCase() !== name.toLocaleLowerCase();
     const aliases = normalizeContactAliases(
       [...(input.aliases ?? contact.aliases), ...(renamed ? [contact.name] : [])],
@@ -40,21 +75,43 @@ export async function updateContactIdentity(
     );
     const [updated] = await tx
       .update(contacts)
-      .set({ name, aliases, updatedAt: sql`now()` })
+      .set({
+        name,
+        aliases,
+        identityAuthority: input.authority,
+        ...(input.relationship !== undefined ? { relationship: input.relationship } : {}),
+        updatedAt: sql`now()`,
+      })
       .where(and(eq(contacts.id, input.contactId), ne(contacts.trust, 'owner')))
       .returning({ name: contacts.name, aliases: contacts.aliases });
-    if (!updated) throw new Error('Person not found or cannot be renamed.');
-    return updated;
+    if (!updated) return { status: 'not_found' };
+    return { status: 'updated', ...updated };
   });
+}
+
+export function updateContactIdentity(
+  db: Db,
+  input: {
+    contactId: string;
+    name: string;
+    aliases?: string[];
+    expectedContactRevision?: string;
+    relationship?: string;
+  },
+): ReturnType<typeof writeContactIdentity> {
+  return writeContactIdentity(db, { ...input, authority: 'owner' });
 }
 
 /** Rename a non-owner person. The owner identity is managed separately. */
 export async function renameContact(
   db: Db,
-  input: { contactId: string; name: string },
-): Promise<{ name: string }> {
+  input: { contactId: string; name: string; expectedContactRevision?: string },
+): Promise<
+  | { status: 'updated'; name: string; aliases: string[] }
+  | { status: 'review_required' | 'conflict' | 'not_found' }
+> {
   const renamed = await updateContactIdentity(db, input);
-  return { name: renamed.name };
+  return renamed;
 }
 
 export interface DuplicateContactSuggestion {
@@ -166,11 +223,12 @@ export async function deleteContact(
  * Entity resolution for memory attribution: "who is this fact about?"
  * 'owner' (any casing) or any name-prefix variant of the owner's name → the
  * owner contact; other names match contacts case-insensitively, treating
- * "Anna" and "Anna Jónsdóttir" as the same person (the fuller name wins and
- * is written back). New people become trust:'unknown' contacts. Subjects
- * that are the assistant itself resolve to null — the assistant is not a
- * contact. Pure data access — lives in @assistant/db so both core and tools
- * can use it without a package cycle.
+ * "Anna" and "Anna Jónsdóttir" as the same person. Only an originally inferred
+ * contact with a matching native revision may adopt the fuller name; reviewed
+ * or legacy-unknown identities are not replaced by extraction. New people are
+ * marked inferred. Subjects that are the assistant itself resolve to null —
+ * the assistant is not a contact. Pure data access — lives in @assistant/db so
+ * both core and tools can use it without a package cycle.
  */
 export async function resolveSubjectContact(
   db: Db,
@@ -181,23 +239,27 @@ export async function resolveSubjectContact(
   const lower = name.toLowerCase();
   if (ASSISTANT_ALIASES.has(lower)) return null;
 
-  const candidates = await db.select().from(contacts);
-  const exact = candidates.filter((contact) =>
+  const configured = await db.select({ id: agents.id }).from(agents).limit(2);
+  const agentId = configured.length === 1 ? configured[0]?.id : undefined;
+  const candidates = await db
+    .select({ contact: contacts, native: sql<Record<string, unknown>>`to_jsonb(${contacts})` })
+    .from(contacts);
+  const exact = candidates.filter(({ contact }) =>
     [contact.name, ...contact.aliases].some(
       (candidate) => candidate.trim().toLocaleLowerCase() === lower,
     ),
   );
   if (lower !== 'owner') {
     if (exact.length > 1) return null;
-    if (exact[0]) return { contactId: exact[0].id, created: false };
-    const prefixes = candidates.filter((contact) =>
+    if (exact[0]) return { contactId: exact[0].contact.id, created: false };
+    const prefixes = candidates.filter(({ contact }) =>
       [contact.name, ...contact.aliases].some((candidate) =>
         namePrefixMatch(lower, candidate.toLocaleLowerCase()),
       ),
     );
     if (prefixes.length > 1) return null;
   }
-  const owner = candidates.find((contact) => contact.trust === 'owner');
+  const owner = candidates.find(({ contact }) => contact.trust === 'owner')?.contact;
   const ownerMatch = owner
     ? [owner.name, ...owner.aliases].find((candidate) =>
         namePrefixMatch(lower, candidate.toLocaleLowerCase()),
@@ -205,39 +267,49 @@ export async function resolveSubjectContact(
     : undefined;
   if (lower === 'owner' || ownerMatch) {
     if (!owner) return null;
-    // Adopt the fuller name when an existing short name gains a surname.
-    if (name.length > owner.name.length && ownerMatch === owner.name && lower !== 'owner') {
-      await db
-        .update(contacts)
-        .set({
-          name,
-          aliases: normalizeContactAliases([...owner.aliases, owner.name], name),
-          updatedAt: sql`now()`,
-        })
-        .where(eq(contacts.id, owner.id));
-    }
+    // An inferred mention never edits the owner's protected identity.
     return { contactId: owner.id, created: false };
   }
 
   const match = candidates
-    .filter((contact) => contact.trust !== 'owner')
-    .map((contact) => ({
+    .filter(({ contact }) => contact.trust !== 'owner')
+    .map(({ contact, native }) => ({
       contact,
+      native,
       matchedName: [contact.name, ...contact.aliases].find((candidate) =>
         namePrefixMatch(lower, candidate.toLocaleLowerCase()),
       ),
     }))
     .find((candidate) => candidate.matchedName);
   if (match) {
-    if (name.length > match.contact.name.length && match.matchedName === match.contact.name) {
-      await updateContactIdentity(db, { contactId: match.contact.id, name });
+    if (
+      name.length > match.contact.name.length &&
+      match.matchedName === match.contact.name &&
+      match.contact.identityAuthority === 'inferred' &&
+      agentId
+    ) {
+      await writeContactIdentity(db, {
+        contactId: match.contact.id,
+        name,
+        authority: 'inferred',
+        expectedContactRevision: profileContactIdentityRevision({
+          driver: 'postgres',
+          ownerId: agentId,
+          native: match.native,
+        }),
+      });
     }
     return { contactId: match.contact.id, created: false };
   }
 
   const [created] = await db
     .insert(contacts)
-    .values({ name, relationship: input.relationship?.trim() ?? '', trust: 'unknown' })
+    .values({
+      name,
+      relationship: input.relationship?.trim() ?? '',
+      trust: 'unknown',
+      identityAuthority: 'inferred',
+    })
     .returning();
   return created ? { contactId: created.id, created: true } : null;
 }
@@ -277,8 +349,14 @@ export async function mergeContacts(
 ): Promise<{ movedMemories: number; movedOccasions: number }> {
   if (input.sourceId === input.targetId) throw new Error('cannot merge a contact into itself');
   return db.transaction(async (tx) => {
-    const [source] = await tx.select().from(contacts).where(eq(contacts.id, input.sourceId));
-    const [target] = await tx.select().from(contacts).where(eq(contacts.id, input.targetId));
+    const locked = await tx
+      .select()
+      .from(contacts)
+      .where(inArray(contacts.id, [input.sourceId, input.targetId]))
+      .orderBy(asc(contacts.id))
+      .for('update');
+    const source = locked.find((contact) => contact.id === input.sourceId);
+    const target = locked.find((contact) => contact.id === input.targetId);
     if (!source || !target) throw new Error('merge: contact not found');
     if (source.trust === 'owner') throw new Error('cannot merge the owner away');
 
@@ -339,6 +417,7 @@ export async function mergeContacts(
         phones: [...new Set([...target.phones, ...source.phones])],
         relationship: target.relationship || source.relationship,
         notes: [target.notes, source.notes].filter(Boolean).join('\n'),
+        identityAuthority: 'owner',
         updatedAt: sql`now()`,
       })
       .where(eq(contacts.id, target.id));

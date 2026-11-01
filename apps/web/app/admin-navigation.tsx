@@ -9,6 +9,7 @@ export function AdminNavigation({ passkey }: { passkey: boolean }) {
   const pathname = usePathname();
   const links = [
     { href: '/chat', label: 'Chat' },
+    { href: '/profile', label: 'Memory' },
     { href: '/settings', label: 'Settings' },
     ...(passkey ? [{ href: '/security', label: 'Security' }] : []),
     { href: '/audit', label: 'Audit trail' },
@@ -19,7 +20,13 @@ export function AdminNavigation({ passkey }: { passkey: boolean }) {
       className="flex min-w-0 items-center gap-1 overflow-x-auto overscroll-x-contain py-[4px]"
     >
       {links.map(({ href, label }) => {
-        const active = pathname === href || pathname.startsWith(`${href}/`);
+        const active =
+          href === '/profile'
+            ? pathname === '/profile' ||
+              pathname.startsWith('/profile/') ||
+              pathname === '/people' ||
+              pathname.startsWith('/people/')
+            : pathname === href || pathname.startsWith(`${href}/`);
         return (
           <Link
             key={href}

@@ -65,6 +65,8 @@ export interface ContactSnapshot {
   aliases: string[];
   relationship: string;
   trust: string;
+  /** Exact native version of these displayed values; absent on older read adapters. */
+  identityRevision?: string | null;
 }
 
 export interface ProfileOverview {
@@ -167,10 +169,13 @@ export interface OwnerFactsView {
 
 async function profilePeopleReads(
   store: Db | ProfilePeopleReadRepository,
+  opts: { includeEditingSuggestions?: boolean } = {},
 ): Promise<ProfilePeopleReadRepository> {
   if (isProfilePeopleReadRepository(store)) return store;
   const agent = await getAgent(store);
-  return createPostgresProfilePeopleReadRepository(store, agent.id);
+  return createPostgresProfilePeopleReadRepository(store, agent.id, undefined, {
+    browseOnly: opts.includeEditingSuggestions === false,
+  });
 }
 
 export async function getOwnerFactsView(
@@ -250,13 +255,14 @@ export async function getPersonProfile(
   store: Db | ProfilePeopleReadRepository,
   contactId: string,
   factLimit = 250,
+  opts: { includeEditingSuggestions?: boolean } = {},
 ): Promise<PersonProfile | null> {
-  const reads = await profilePeopleReads(store);
+  const reads = await profilePeopleReads(store, opts);
   const contact = await reads.getContact(contactId);
   if (!contact || contact.trust === 'owner') return null;
   const [{ rows: facts, total }, allContacts, occasionRows] = await Promise.all([
     reads.getFacts(contact.id, factLimit),
-    reads.listContacts(),
+    opts.includeEditingSuggestions === false ? Promise.resolve([]) : reads.listContacts(),
     reads.listOccasions(contact.id),
   ]);
   const existingDates = new Set(

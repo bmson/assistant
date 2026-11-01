@@ -21,6 +21,7 @@ import {
   type WhereFilterOp,
 } from '@google-cloud/firestore';
 import { embeddingSpaceKey } from './memory.js';
+import { pruneExpiredFirestoreOwnerEditorReceipts } from './owner-editor-retention.js';
 import { FirestoreOwnerNoticeRepository } from './owner-notices.js';
 import { assertPrivacyErasureInactiveInTransaction } from './privacy-erasure.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
@@ -357,6 +358,7 @@ export class FirestoreMaintenanceRepository implements MaintenanceRepository {
   }): Promise<ExpiredDataCounts> {
     const now = validDate(input.now ?? this.store.now(), 'Invalid retention time');
     const limit = batchLimit(input.batch);
+    await pruneExpiredFirestoreOwnerEditorReceipts(this.store, this.agentId, now);
     const pingDays = Number.isFinite(input.proactivePingRetentionDays)
       ? Math.max(1, Math.trunc(input.proactivePingRetentionDays))
       : 90;

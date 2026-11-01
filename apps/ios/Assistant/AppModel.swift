@@ -5,6 +5,59 @@ import SwiftUI
 import UIKit
 import CoreLocation
 
+/// Per-model system presentation keeps routing tests independent of OS surface
+/// work. Production forwards each operation with the same await semantics.
+@MainActor
+protocol AppSystemSurfaces {
+    func ensure(agentName: String, thought: AssistantThought, detail: String, pendingCount: Int) async
+    func start(agentName: String, thought: AssistantThought, detail: String, pendingCount: Int) async
+    func update(thought: AssistantThought, detail: String, pendingCount: Int) async
+    func needsAttention(agentName: String, detail: String, pendingCount: Int) async
+    func finish(thought: AssistantThought, detail: String, succeeded: Bool) async
+    func dismiss() async
+    func updateBadge(_ count: Int) async
+}
+
+extension AppSystemSurfaces {
+    func ensure(agentName: String, thought: AssistantThought, detail: String) async {
+        await ensure(agentName: agentName, thought: thought, detail: detail, pendingCount: 0)
+    }
+
+    func start(agentName: String, thought: AssistantThought, detail: String) async {
+        await start(agentName: agentName, thought: thought, detail: detail, pendingCount: 0)
+    }
+
+    func update(thought: AssistantThought, detail: String) async {
+        await update(thought: thought, detail: detail, pendingCount: 0)
+    }
+}
+
+@MainActor
+private struct ProductionAppSystemSurfaces: AppSystemSurfaces {
+    func ensure(agentName: String, thought: AssistantThought, detail: String, pendingCount: Int) async {
+        await LiveActivityManager.shared.ensure(agentName: agentName, thought: thought, detail: detail, pendingCount: pendingCount)
+    }
+
+    func start(agentName: String, thought: AssistantThought, detail: String, pendingCount: Int) async {
+        await LiveActivityManager.shared.start(agentName: agentName, thought: thought, detail: detail, pendingCount: pendingCount)
+    }
+
+    func update(thought: AssistantThought, detail: String, pendingCount: Int) async {
+        await LiveActivityManager.shared.update(thought: thought, detail: detail, pendingCount: pendingCount)
+    }
+
+    func needsAttention(agentName: String, detail: String, pendingCount: Int) async {
+        await LiveActivityManager.shared.needsAttention(agentName: agentName, detail: detail, pendingCount: pendingCount)
+    }
+
+    func finish(thought: AssistantThought, detail: String, succeeded: Bool) async {
+        await LiveActivityManager.shared.finish(thought: thought, detail: detail, succeeded: succeeded)
+    }
+
+    func dismiss() async { await LiveActivityManager.shared.dismiss() }
+    func updateBadge(_ count: Int) async { await NotificationManager.shared.updateBadge(count) }
+}
+
 #if DEBUG
 /// Opt-in metadata for a scoped draft save. Draft text and owner identifiers
 /// never enter this receipt; unknown callers have no raw-location fallback.
@@ -297,6 +350,7 @@ final class AppModel {
             errorNotice = errorMessage.map { AssistantErrorNotice(message: $0) }
         }
     }
+    private(set) var personIdentityReviewRequired = false
     @ObservationIgnored private var missingTaskReplyNotice: MissingTaskReplyNotice?
     private(set) var errorNotice: AssistantErrorNotice?
     @ObservationIgnored private var errorSource: AssistantErrorSource?
@@ -429,6 +483,7 @@ final class AppModel {
     private let storeConnectionToken: (String) throws -> Void
     private let enqueueAutomaticSpeech: @MainActor (ChatMessage) -> Void
     private let scheduleLocalNotification: LocalNotificationScheduler
+    private let systemSurfaces: any AppSystemSurfaces
     private let serverKey = "assistant.server-url"
     private let configuredKey = "assistant.connection-configured"
     /// More → Assistant context owns this toggle; the model only reads it.
@@ -454,12 +509,14 @@ final class AppModel {
             SpeechPlayer.shared.enqueue(SpeakableText.passages(for: message), for: message.id)
         },
         scheduleLocalNotification: LocalNotificationScheduler? = nil,
+        systemSurfaces: (any AppSystemSurfaces)? = nil,
         phoneCalendarSharing: PhoneCalendarSharingCoordinator? = nil,
         captureCurrentPlace: @escaping @MainActor () async -> (location: CLLocation, label: String)? = {
             await LocationManager.shared.captureCurrentPlace()
         }
     ) {
         self.defaults = defaults
+        self.systemSurfaces = systemSurfaces ?? ProductionAppSystemSurfaces()
         self.phoneCalendarSharing = phoneCalendarSharing ?? PhoneCalendarSharingCoordinator()
         self.storeConnectionToken = storeConnectionToken
         self.enqueueAutomaticSpeech = enqueueAutomaticSpeech
@@ -3796,6 +3853,47 @@ final class AppModel {
 
     func savePerson(id: String? = nil, mutation: PersonMutation) async -> Bool {
         guard id?.hasPrefix("local:") != true else { return false }
+        if let id {
+            personIdentityReviewRequired = false
+            guard let expectedContactRevision = mutation.expectedContactRevision,
+                  expectedContactRevision.range(
+                    of: "^[a-f0-9]{64}$",
+                    options: .regularExpression
+                  ) != nil else {
+                personIdentityReviewRequired = true
+                errorMessage = "Open this person again to review their current details before saving."
+                return false
+            }
+            guard let client else {
+                errorMessage = "Connect to your assistant before saving."
+                return false
+            }
+            let version = connectionVersion
+            errorMessage = nil
+            do {
+                try await client.updatePerson(id: id, person: mutation)
+                guard connectionIsCurrent(client, version: version) else {
+                    personIdentityReviewRequired = true
+                    errorMessage = "Your assistant connection changed before this save could be confirmed. " +
+                        "Reload the person before trying again."
+                    return false
+                }
+                // The write is acknowledged before local views are refreshed.
+                // A failed follow-up read must not turn the save into a retry.
+                _ = await reconcileEdits([.people, .personCaches, .workspace, .person(id)])
+                return true
+            } catch {
+                guard connectionIsCurrent(client, version: version) else { return false }
+                personIdentityReviewRequired = Self.personIdentityFailureRequiresReview(error)
+                if let apiError = error as? APIError, case .transport = apiError {
+                    errorMessage = "Couldn’t confirm whether this person saved. " +
+                        "Reopen the person and review it before trying again."
+                } else {
+                    reportError(error)
+                }
+                return false
+            }
+        }
         let localID = id ?? "local:" + UUID().uuidString
         let aliases = mutation.aliases.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let initials = mutation.name.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined()
@@ -3829,6 +3927,12 @@ final class AppModel {
             if let id { try await client.updatePerson(id: id, person: mutation) }
             else { try await client.createPerson(mutation) }
         }
+    }
+
+    private static func personIdentityFailureRequiresReview(_ error: Error) -> Bool {
+        guard let apiError = error as? APIError else { return true }
+        if case let .server(status, _) = apiError { return status != 400 }
+        return true
     }
 
     func deletePerson(id: String) async -> Bool {
@@ -4189,7 +4293,7 @@ final class AppModel {
             // `ensure`, not `start`: starting ends every live activity first,
             // so a message sent while background work was already on the island
             // collapsed it and replayed the whole attach animation.
-            await LiveActivityManager.shared.ensure(
+            await systemSurfaces.ensure(
                 agentName: agentName,
                 thought: .thinking,
                 detail: text
@@ -4269,7 +4373,7 @@ final class AppModel {
                 self.isCancellingSend = false
                 self.resumableTurn = nil
                 self.setActivityThought(.stopped, proposedDetail: error.localizedDescription)
-                await LiveActivityManager.shared.finish(
+                await systemSurfaces.finish(
                     thought: .stopped,
                     detail: error.localizedDescription,
                     succeeded: false
@@ -4443,13 +4547,13 @@ final class AppModel {
     /// whether or not a turn is running.
     private func syncApprovalSurfaces() async {
         if let next = overview?.approvals.pending.first {
-            await LiveActivityManager.shared.needsAttention(
+            await systemSurfaces.needsAttention(
                 agentName: agentName,
                 detail: next.approval.summary,
                 pendingCount: pendingApprovalCount
             )
         } else {
-            await LiveActivityManager.shared.dismiss()
+            await systemSurfaces.dismiss()
         }
         await syncNotificationBadge()
     }
@@ -4460,6 +4564,71 @@ final class AppModel {
         guard let client else { return false }
         return await performApprovalMutation(id: id, status: decision) {
             try await client.decideApproval(id: id, decision: decision)
+        }
+    }
+
+    /// Read the current owner inbox, not properties captured by an older View.
+    /// A removed row retires local review publication; an accepted durable receipt
+    /// remains authoritative and continues through ordinary reconciliation.
+    func ownerCallReviewSourceIsCurrent(_ origin: OwnerCallReviewSourceIdentity) -> Bool {
+        guard activityConnectionRevision == origin.connectionRevision, client != nil,
+              let pending = overview?.approvals.pending.first(where: { $0.id == origin.approvalID }) else { return false }
+        return pending.taskTrust == "owner" && pending.toolName == "phone.call"
+            && pending.approval.status == "pending" && pending.ownerNumberGrantAvailable == true
+            && pending.ownerCallSourceFingerprint == origin.sourceFingerprint
+            && pending.approval.payload == origin.source
+    }
+
+#if DEBUG
+    /// Pure native fixture projection: no notifications, badges, Live Activities or reads.
+    func installOwnerCallReviewProjectionForTesting(_ projection: OverviewResponse, connectionRevision: Int) {
+        overview = projection
+        activityConnectionRevision = connectionRevision
+    }
+#endif
+
+    func previewOwnerCallNumberGrant(id: String, validityChoice: String, limits: OwnerCallGrantLimits = .defaults) async throws -> OwnerCallNumberGrantPreview {
+        guard let client else { throw APIError.invalidServerURL }
+        let version = connectionVersion
+        let review = try await client.previewOwnerCallNumberGrant(id: id, validityChoice: validityChoice, limits: limits)
+        guard connectionIsCurrent(client, version: version) else { throw APIError.invalidResponse }
+        return review
+    }
+
+    func checkOwnerCallGrantOperation(id: String) async throws -> OwnerCallGrantOperationStatus {
+        guard let client else { throw APIError.invalidServerURL }
+        let version = connectionVersion
+        let result = try await client.checkOwnerCallGrantOperation(id: id)
+        guard connectionIsCurrent(client, version: version) else { throw APIError.invalidResponse }
+        return result
+    }
+
+    func closeOwnerCallGrantOperation(id: String, closeToken: String) async throws -> OwnerCallGrantOperationStatus {
+        guard let client else { throw APIError.invalidServerURL }
+        let version = connectionVersion
+        let result = try await client.closeOwnerCallGrantOperation(id: id, closeToken: closeToken)
+        guard connectionIsCurrent(client, version: version) else { throw APIError.invalidResponse }
+        return result
+    }
+
+    /// Keep permission off locally until the atomic approval-and-grant response arrives.
+    func approveOwnerCallNumberGrant(id: String, reviewToken: String) async -> String? {
+        guard let client else { return "Connect to your assistant to review again." }
+        let version = connectionVersion
+        guard approvalsBeingDecided.insert(id).inserted else { return "This decision is still being saved." }
+        defer { if connectionVersion == version { approvalsBeingDecided.remove(id) } }
+        do {
+            let receipt = try await client.approveOwnerCallNumberGrant(id: id, reviewToken: reviewToken)
+            guard connectionIsCurrent(client, version: version), receipt.ok, receipt.ownerCallNumberGrant != nil else { throw APIError.invalidResponse }
+            setDecisionStatus(id: id, status: "approved")
+            scheduleApprovalReconciliation(refreshingWorkspace: true)
+            return nil
+        } catch {
+            if case APIError.server(status: 409, message: "This review expired or changed. Review again.") = error {
+                return "This review expired or changed. Review again."
+            }
+            if connectionIsCurrent(client, version: version) { _ = await refreshOverview(reportFailure: false) }
+            return "The result is not confirmed. Check the permission operation before reviewing again."
         }
     }
 
@@ -4612,7 +4781,7 @@ final class AppModel {
         stopSpeaking()
         let detail = "Stop requested. Checking the server status."
         setActivityThought(.thinking, proposedDetail: detail)
-        Task { await LiveActivityManager.shared.ensure(agentName: agentName, thought: .thinking, detail: detail) }
+        Task { await systemSurfaces.ensure(agentName: agentName, thought: .thinking, detail: detail) }
         if var turn = ordinaryTurn, let client, let conversationId,
            turn.conversationId == conversationId {
             turn.cancellationRequested = true
@@ -4762,7 +4931,7 @@ final class AppModel {
         Task { [weak self] in
             guard let self else { return }
             self.setActivityThought(.thinking, proposedDetail: "Preparing a focused brief")
-            await LiveActivityManager.shared.start(
+            await systemSurfaces.start(
                 agentName: self.agentName,
                 thought: .thinking,
                 detail: "Preparing a focused brief"
@@ -4771,11 +4940,11 @@ final class AppModel {
             guard !Task.isCancelled else { return }
             let working = AssistantThought(label: "Reviewing recent activity", tone: .working)
             self.setActivityThought(working, proposedDetail: "Step 1")
-            await LiveActivityManager.shared.update(thought: working, detail: "Step 1")
+            await systemSurfaces.update(thought: working, detail: "Step 1")
             try? await Task.sleep(for: .seconds(3))
             guard !Task.isCancelled else { return }
             self.setActivityThought(.needsYou, proposedDetail: "Review the proposed next step")
-            await LiveActivityManager.shared.needsAttention(
+            await systemSurfaces.needsAttention(
                 agentName: agentName,
                 detail: "Review the proposed next step",
                 pendingCount: 1
@@ -5105,7 +5274,7 @@ final class AppModel {
             if let matchingApproval {
                 let summary = matchingApproval.approval.summary
                 setActivityThought(.needsYou, proposedDetail: summary)
-                await LiveActivityManager.shared.needsAttention(
+                await systemSurfaces.needsAttention(
                     agentName: self.agentName,
                     detail: summary,
                     pendingCount: pendingApprovalCount
@@ -5162,7 +5331,7 @@ final class AppModel {
             )
             guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
                   ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
-            await LiveActivityManager.shared.finish(
+            await systemSurfaces.finish(
                 thought: thought,
                 detail: detail,
                 succeeded: succeeded
@@ -5192,6 +5361,9 @@ final class AppModel {
     }
 
     private func merge(_ incoming: [ChatMessage]) {
+        // Held polls commonly return no rows. Nothing changed in the set, so
+        // avoid sorting and publishing the same transcript again.
+        guard !incoming.isEmpty else { return }
         for incomingMessage in incoming {
             let message = withLocalDecisions(incomingMessage)
             if let index = messages.firstIndex(where: { $0.id == message.id }) {
@@ -5361,7 +5533,7 @@ final class AppModel {
     /// owner. Anything else (finished work, replies) has a banner or the Live
     /// Activity, so the badge staying specific keeps it meaningful.
     private func syncNotificationBadge() async {
-        await NotificationManager.shared.updateBadge(pendingApprovalCount)
+        await systemSurfaces.updateBadge(pendingApprovalCount)
     }
 
     private func publishThought(_ thought: AssistantThought, detail: String) async {
@@ -5369,7 +5541,7 @@ final class AppModel {
         guard activityThought != thought || activityDetail != safeDetail else { return }
         activityThought = thought
         activityDetail = safeDetail
-        await LiveActivityManager.shared.update(thought: thought, detail: detail)
+        await systemSurfaces.update(thought: thought, detail: detail)
     }
 
     private func setActivityThought(_ thought: AssistantThought?, proposedDetail: String? = nil) {
@@ -5422,25 +5594,25 @@ final class AppModel {
     private func reconcileBaselineActivity() async {
         guard !isSending else { return }
         guard let thought = baselineThought else {
-            await LiveActivityManager.shared.dismiss()
+            await systemSurfaces.dismiss()
             return
         }
         switch thought {
         case .backgroundWork:
             setActivityThought(thought, proposedDetail: "Your assistant is continuing a task.")
-            await LiveActivityManager.shared.dismiss()
+            await systemSurfaces.dismiss()
         case .needsYou:
             let summary = overview?.approvals.pending.first?.approval.summary
                 ?? "Open the assistant to review the next step."
             setActivityThought(thought, proposedDetail: summary)
-            await LiveActivityManager.shared.ensure(
+            await systemSurfaces.ensure(
                 agentName: agentName,
                 thought: .needsYou,
                 detail: summary,
                 pendingCount: pendingApprovalCount
             )
         default:
-            await LiveActivityManager.shared.dismiss()
+            await systemSurfaces.dismiss()
         }
     }
 

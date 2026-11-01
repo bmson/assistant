@@ -5,12 +5,20 @@ import { createInstallationStore } from '@assistant/firestore';
 import { NextRequest } from 'next/server';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { listFirestorePeopleDirectory } from '@/lib/firestore-people';
 
-const mocks = vi.hoisted(() => ({ owner: vi.fn(), db: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  owner: vi.fn(),
+  db: vi.fn(),
+  pgBrowse: vi.fn(() => {
+    throw new Error('Unexpected PostgreSQL browse fallback');
+  }),
+}));
 vi.mock('@/auth', () => ({ requireOwner: mocks.owner }));
 vi.mock('@/lib/server', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/server')>()),
   getDb: mocks.db,
+  withPostgresMemoryBrowseRead: mocks.pgBrowse,
 }));
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn(), unstable_cache: (run: unknown) => run }));
 // The client controls call useRouter, which needs a mounted App Router.
@@ -167,21 +175,22 @@ describe.skipIf(!localEmulator)('Firestore people directory with PostgreSQL offl
 
   const params = (q?: string) => ({ searchParams: Promise.resolve(q ? { q } : {}) });
 
-  it('admits the directory and its Server Actions through the Firestore proxy', async () => {
+  it('admits directory reads and blocks Server Actions through the Firestore proxy', async () => {
     const { proxy } = await import('../../proxy.js');
     const request = (path: string, method = 'GET') =>
       new NextRequest(`http://localhost${path}`, { method });
-    expect(proxy(request('/people')).status).toBe(307);
-    expect(proxy(request('/people', 'POST')).status).toBe(410);
-    expect(proxy(request('/people', 'DELETE')).status).toBe(410);
+    expect(proxy(request('/people')).status).toBe(200);
+    expect(proxy(request('/people', 'POST')).status).toBe(405);
+    expect(proxy(request('/people', 'DELETE')).status).toBe(405);
     expect(proxy(request('/people/anna')).status).toBe(307);
   });
 
-  it('renders the full directory and the add-person control without PostgreSQL', async () => {
+  it('renders the browse directory without add-person controls or PostgreSQL', async () => {
     const html = renderToStaticMarkup(await page.default(params()));
     expect(mocks.owner).toHaveBeenCalled();
     expect(mocks.db).not.toHaveBeenCalled();
-    expect(html).toContain('Add person');
+    expect(mocks.pgBrowse).not.toHaveBeenCalled();
+    expect(html).not.toContain('Add person');
     expect(html).toContain('Coming up');
     expect(html).toContain('Anna Example');
     expect(html).toContain('Reykjavík');
@@ -210,6 +219,7 @@ describe.skipIf(!localEmulator)('Firestore people directory with PostgreSQL offl
     expect(html).toContain('Grace Example');
     expect(html).toContain(`href="/people/${result.contactId}"`);
     expect(mocks.db).not.toHaveBeenCalled();
+    expect(mocks.pgBrowse).not.toHaveBeenCalled();
   });
 
   it('searches names, relationships, and places', async () => {
@@ -226,18 +236,49 @@ describe.skipIf(!localEmulator)('Firestore people directory with PostgreSQL offl
     await expect(page.default(params())).rejects.toThrow('owner authentication required');
   });
 
-  it('rejects a configured agent mismatch and ambiguous installation', async () => {
+  async function expectUnavailable(
+    configuredAgentId = agentId,
+    reason = 'exactly one configured agent',
+  ) {
+    // Keep exercising the actual configured-owner/privacy guard, independently
+    // of the page's deliberate error-to-unavailable presentation.
+    await expect(
+      listFirestorePeopleDirectory(store, configuredAgentId, new Date()),
+    ).rejects.toThrow(reason);
+    const ownerChecks = mocks.owner.mock.calls.length;
+    const html = renderToStaticMarkup(await page.default(params('Anna & Bob')));
+    expect(mocks.owner).toHaveBeenCalledTimes(ownerChecks + 1);
+    expect(mocks.db).not.toHaveBeenCalled();
+    expect(mocks.pgBrowse).not.toHaveBeenCalled();
+    expect(html).toContain('role="alert"');
+    expect(html).toContain('Could not load this view. Your search is preserved.');
+    expect(html).toContain('href="/people?q=Anna%20%26%20Bob"');
+    expect(html).toContain('Try again');
+    expect(html).not.toContain('<form');
+    for (const canary of [
+      'Anna Example',
+      'Max Example',
+      'Grace Example',
+      'Private owner',
+      'Foreign private person',
+      'Reykjavík',
+    ]) {
+      expect(html).not.toContain(canary);
+    }
+  }
+
+  it('shows unavailable without private data for configured owner mismatch or ambiguity', async () => {
     vi.stubEnv('FIRESTORE_AGENT_ID', foreignAgentId);
     resetConfigForTest();
     try {
-      await expect(page.default(params())).rejects.toThrow('exactly one configured agent');
+      await expectUnavailable(foreignAgentId);
     } finally {
       vi.stubEnv('FIRESTORE_AGENT_ID', agentId);
       resetConfigForTest();
     }
     await store.doc('agents', foreignAgentId).set({ id: foreignAgentId });
     try {
-      await expect(page.default(params())).rejects.toThrow('exactly one configured agent');
+      await expectUnavailable();
     } finally {
       await store.doc('agents', foreignAgentId).delete();
     }
@@ -246,7 +287,7 @@ describe.skipIf(!localEmulator)('Firestore people directory with PostgreSQL offl
   it('fails closed while privacy erasure is active', async () => {
     await store.doc('privacyErasureJobs', agentId).set({ agentId, status: 'active' });
     try {
-      await expect(page.default(params())).rejects.toThrow('Privacy erasure is in progress');
+      await expectUnavailable(agentId, 'Privacy erasure is in progress');
     } finally {
       await store.doc('privacyErasureJobs', agentId).delete();
     }

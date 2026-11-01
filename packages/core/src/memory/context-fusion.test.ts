@@ -12,6 +12,7 @@ function candidate(
 ): ContextCandidate {
   return {
     text: label,
+    meaning: label,
     score,
     source: {
       date,
@@ -173,12 +174,14 @@ describe('bounded fused owner context selection', () => {
 
   it('fuses active decisions with their pack revision and skips an owner-muted revision', async () => {
     const fused = await fuseOwnerContext({
-      queryText: 'why did we reject the Cedar plan',
-      rankedContext: [candidate(26, 'Earlier message about Cedar', 0.82)],
+      queryText: 'Find the Cedar rail option we rejected',
+      eligibilityText: 'Find the Cedar rail option we rejected',
+      mode: 'automatic',
+      rankedContext: [candidate(26, 'Earlier message about Cedar rail', 0.82)],
       decisions: [
         {
           decisionId: 'cedar',
-          option: 'Cedar plan',
+          option: 'Cedar rail option',
           outcome: 'rejected',
           reason: 'The launch window conflicts with support coverage.',
           scope: 'situation',
@@ -191,7 +194,7 @@ describe('bounded fused owner context selection', () => {
       ],
       isSuppressed: async (_key, revision) =>
         revision === (26 + 100).toString(16).padStart(64, '0'),
-      limit: 3,
+      limit: 8,
     });
     expect(fused.selected).toHaveLength(1);
     expect(fused.sources[0]?.kind).toBe('decision');
@@ -199,4 +202,140 @@ describe('bounded fused owner context selection', () => {
     expect(fused.block).toContain('version 4');
     expect(fused.block).toContain('rejected');
   });
+
+  it('applies eligibility before the fixed two-source cap and ignores decision metadata', async () => {
+    const fused = await fuseOwnerContext({
+      queryText: 'Find clinics with wheelchair-accessible entrances',
+      eligibilityText: 'Find clinics with wheelchair-accessible entrances',
+      mode: 'automatic',
+      rankedContext: [
+        candidate(31, 'An unrelated source with a misleading display label', 0.99),
+        candidate(32, 'Earlier confirmation of wheelchair-accessible entrances', 0.92),
+        candidate(33, 'Wheelchair-accessible entrances are required', 0.88),
+      ].map((entry, index) =>
+        index === 0
+          ? { ...entry, source: { ...entry.source, label: 'wheelchair-accessible entrances' } }
+          : entry,
+      ),
+      decisions: [
+        {
+          decisionId: 'metadata-only',
+          option: 'Keep the current layout',
+          outcome: 'chosen',
+          reason: 'Preserve the lobby flow.',
+          scope: 'situation',
+          packId: 'wheelchair-accessible-entrances',
+          packTitle: 'Wheelchair-accessible entrances',
+          packVersion: 4,
+          packUpdatedAt: '2026-10-01T12:00:00.000Z',
+          relevance: 100,
+        },
+      ],
+      limit: 8,
+    });
+
+    expect(fused.selected).toHaveLength(2);
+    expect(fused.selected.map((entry) => entry.text)).toEqual([
+      'Earlier confirmation of wheelchair-accessible entrances',
+      'Wheelchair-accessible entrances are required',
+    ]);
+    expect(fused.block).not.toContain('misleading display label');
+    expect(fused.sources.map((source) => source.label)).not.toContain(
+      'wheelchair-accessible-entrances',
+    );
+  });
+
+  it('eligibility sees raw source meaning instead of history or graph display metadata', async () => {
+    const datedHistory = candidate(
+      41,
+      '[2026-10-01] Summary excerpt: Launch group meets weekly.',
+      1,
+    );
+    datedHistory.meaning = 'Launch group meets weekly.';
+    const hopGraph = candidate(
+      42,
+      '[1 hop] Owner —works_at→ Northwind [unverified]\n  Evidence: Owner works at Northwind.',
+      1,
+      'knowledge_graph',
+    );
+    hopGraph.meaning = 'Owner works at Northwind.';
+    const statusCommitment = candidate(43, '[question; open] Launch checklist', 1, 'commitment');
+    statusCommitment.meaning = 'question Launch checklist confirm dates';
+    const genuine = candidate(
+      44,
+      '[2026-10-01] Summary excerpt: Cedar rail is wheelchair accessible.',
+      1,
+    );
+    genuine.meaning = 'Cedar rail is wheelchair accessible.';
+
+    const results = await Promise.all([
+      fuseOwnerContext({
+        queryText: 'Find 2026-10',
+        eligibilityText: 'Find 2026-10',
+        mode: 'automatic',
+        rankedContext: [datedHistory],
+      }),
+      fuseOwnerContext({
+        queryText: 'Find 1 hop',
+        eligibilityText: 'Find 1 hop',
+        mode: 'automatic',
+        rankedContext: [hopGraph],
+      }),
+      fuseOwnerContext({
+        queryText: 'Find open launch',
+        eligibilityText: 'Find open launch',
+        mode: 'automatic',
+        rankedContext: [statusCommitment],
+      }),
+      fuseOwnerContext({
+        queryText: 'Find Cedar rail accessibility',
+        eligibilityText: 'Find Cedar rail accessibility',
+        mode: 'automatic',
+        rankedContext: [genuine],
+      }),
+    ]);
+
+    expect(results.slice(0, 3).every((result) => result.selected.length === 0)).toBe(true);
+    expect(results[3]?.selected.map((entry) => entry.source.surfaceKey)).toEqual([
+      genuine.source.surfaceKey,
+    ]);
+  });
+
+  it('never fuses automatic commitments, even on matching owner-work topics', async () => {
+    const commitment = candidate(45, 'Rainbow observation notes', 1, 'commitment');
+    const requests = [
+      'What does open commitments mean for rainbow observation notes?',
+      'Find an article about open commitments for rainbow observation notes.',
+      'Find an article explaining how authors write rainbow observation notes for my class.',
+      'Prepare a list of articles about open commitments for rainbow notes for my class.',
+      'Can you help me prepare my list of articles about rainbow observation notes?',
+      'Can you help me understand what open commitments mean for rainbow observation notes?',
+      'Please help me prepare my observation notes and research articles about coastal rainbows.',
+      'Help me prepare my observation notes about coastal rainbows by the sea.',
+    ];
+
+    for (const request of requests) {
+      const fused = await fuseOwnerContext({
+        queryText: request,
+        eligibilityText: request,
+        mode: 'automatic',
+        rankedContext: [commitment],
+      });
+      expect(fused.sources).toEqual([]);
+    }
+  });
+
+  it.each(['explicit', 'disabled'] as const)(
+    'does not surface automatic candidates in %s mode',
+    async (mode) => {
+      const fused = await fuseOwnerContext({
+        queryText: 'Find wheelchair-accessible entrances',
+        eligibilityText: 'Find wheelchair-accessible entrances',
+        mode,
+        rankedContext: [candidate(34, 'Wheelchair-accessible entrances', 1)],
+      });
+      expect(fused.selected).toEqual([]);
+      expect(fused.block).toBe('');
+    },
+  );
 });

@@ -1,17 +1,159 @@
 import { describe, expect, it } from 'vitest';
 import { buildEmailContentProvenance } from '../email-provenance.js';
 import type { ClarificationContinuation } from '../events.js';
+import type { ResolvedReadIntent } from './active-read-intent.js';
 import {
   clarificationAnswerStatus,
   explicitlyOptsOutOfRecall,
+  explicitOwnerCallRecipient,
+  explicitOwnerSelfCall,
   extractOwnerIntent,
   isConversationLocalContext,
+  isExplicitCommitmentReadRequest,
   isSelfContainedCalculationRequest,
   isSelfContainedTextTransformation,
   latestOwnerIntent,
   ownerAuthoredReadWindow,
   resolveActiveReadIntent,
+  resolveRecallMode,
+  shouldRunFallbackRecall,
 } from './owner-intent.js';
+
+describe('shared recall mode', () => {
+  const ownerIntent = extractOwnerIntent({
+    trust: 'owner',
+    text: 'Find clinics with wheelchair-accessible entrances.',
+  });
+  const continuation: ClarificationContinuation = {
+    sourceTaskId: 'source-task',
+    ownerAuthoredText: 'Find clinics with wheelchair-accessible entrances.',
+    question: 'Which city?',
+    authorizedScopes: [],
+    tainted: false,
+    answerStatus: 'answer',
+  };
+  const base = {
+    resolvedReadIntent: { kind: 'none' } as ResolvedReadIntent,
+    ownerIntent,
+    enabled: true,
+    untrustedContext: false,
+    trustedTask: true,
+    taskType: 'chat_turn',
+    conversationId: 'conversation-1',
+  };
+
+  it('admits a normal owner request and a verified continuation to the shared eligibility gate', () => {
+    expect(resolveRecallMode(base)).toBe('automatic');
+    expect(resolveRecallMode({ ...base, clarificationContinuation: continuation })).toBe(
+      'continuation',
+    );
+    const opinion = extractOwnerIntent({
+      trust: 'owner',
+      text: 'Do you think a daily check-in makes sense for launch?',
+    });
+    expect(resolveRecallMode({ ...base, ownerIntent: opinion })).toBe('automatic');
+  });
+
+  it('admits verified continuation at the actual fallback-callsite gate and preserves its bypasses', () => {
+    const base = {
+      mode: 'continuation' as const,
+      publicScope: false,
+      planningRecallPrepared: false,
+      restrictedChecklistResume: false,
+      conversationId: 'conversation-1',
+    };
+    expect(shouldRunFallbackRecall(base)).toBe(true);
+    expect(shouldRunFallbackRecall({ ...base, publicScope: true })).toBe(false);
+    expect(shouldRunFallbackRecall({ ...base, planningRecallPrepared: true })).toBe(false);
+    expect(shouldRunFallbackRecall({ ...base, restrictedChecklistResume: true })).toBe(false);
+    expect(shouldRunFallbackRecall({ ...base, conversationId: undefined })).toBe(false);
+    expect(shouldRunFallbackRecall({ ...base, mode: 'disabled' })).toBe(false);
+  });
+
+  it('keeps explicit personal reads separate and disables public and combined projections', () => {
+    const personal = { kind: 'personal', personal: {} } as unknown as ResolvedReadIntent;
+    const publicActivity = { kind: 'public_activity', public: {} } as unknown as ResolvedReadIntent;
+    const combined = {
+      kind: 'combined',
+      public: {},
+      personal: {},
+      combinationPurpose: {},
+    } as unknown as ResolvedReadIntent;
+    expect(resolveRecallMode({ ...base, resolvedReadIntent: personal })).toBe('explicit');
+    expect(resolveRecallMode({ ...base, resolvedReadIntent: publicActivity })).toBe('disabled');
+    expect(resolveRecallMode({ ...base, resolvedReadIntent: combined })).toBe('disabled');
+  });
+
+  it.each([
+    { enabled: false },
+    { untrustedContext: true },
+    { trustedTask: false },
+    { conversationId: undefined },
+    { localOnly: true },
+    { taskType: 'adhoc' },
+  ])('disables automatic recall under a hard gate: %o', (override) => {
+    expect(resolveRecallMode({ ...base, ...override })).toBe('disabled');
+  });
+
+  it.each([
+    { answerStatus: 'uncertain' as const, tainted: false },
+    { answerStatus: 'answer' as const, tainted: true },
+  ])('does not admit an unverified or tainted continuation: %o', (override) => {
+    expect(
+      resolveRecallMode({
+        ...base,
+        clarificationContinuation: { ...continuation, ...override },
+      }),
+    ).toBe('disabled');
+  });
+});
+
+describe('explicit commitment read purpose', () => {
+  it('admits direct owner-list questions and imperatives, not phrase-matched research requests', () => {
+    const intent = (text: string) => extractOwnerIntent({ trust: 'owner', text });
+    for (const text of [
+      'What are my open commitments?',
+      'What are my open commitments about rainbow observation notes?',
+      'What are our open commitments?',
+      'Which follow-ups am I waiting on?',
+      'Which commitments do I owe?',
+      'List my open commitments.',
+      'Show my open follow-ups.',
+      'Review our outstanding commitments.',
+    ]) {
+      expect(isExplicitCommitmentReadRequest(intent(text))).toBe(true);
+    }
+    for (const text of [
+      'What does open commitments mean?',
+      'What does open commitments mean for rainbow observation notes?',
+      'Find an article about open commitments.',
+      'Find an email about open commitments.',
+      'Search my inbox for open commitments.',
+      'Show me an article about open commitments.',
+      'List commitments for countries under the Paris Agreement.',
+      'List promises for political parties about climate change.',
+      'Show the open commitments about rainbow observation notes.',
+      'List your open commitments about rainbow observation notes.',
+      "List my coworker's open commitments about rainbow observation notes.",
+      "List my team's open commitments about rainbow observation notes.",
+      'Explain this quoted request: “List my open commitments about rainbow observation notes.”',
+      'Which commitments are outstanding?',
+      'Which promises remain open?',
+      'What open commitments are still open?',
+      'What is on my calendar tomorrow?',
+      'Search my inbox for newsletter messages.',
+      'What did I tell you about a rainbow?',
+      'Do not use tools. List my open commitments.',
+    ]) {
+      expect(isExplicitCommitmentReadRequest(intent(text))).toBe(false);
+    }
+    expect(
+      isExplicitCommitmentReadRequest(
+        extractOwnerIntent({ trust: 'unknown', text: 'What are my open commitments?' }),
+      ),
+    ).toBe(false);
+  });
+});
 
 describe('owner intent provenance', () => {
   it.each([
@@ -796,3 +938,143 @@ describe('owner-authored personal read history', () => {
     ).toMatchObject({ kind: 'personal', personal: { kind: 'email' } });
   });
 });
+it('isolates explicit phone authority from other outward action scopes', () => {
+  for (const text of ['Call me now.', 'Please phone my number.', 'Dial +14155550123.']) {
+    const scopes = extractOwnerIntent({ trust: 'owner', text }).authorizedScopes;
+    expect(scopes).toContain('phone_call');
+    expect(scopes).not.toContain('external_send');
+  }
+  for (const text of [
+    'Do not call me.',
+    'Call Bob now.',
+    'Call Monday.',
+    'Phone Success.',
+    'Call it done.',
+    'Call it a day.',
+    'Call this a success.',
+    'Dial back the wording.',
+    'Phone it in.',
+    'Call me now. Actually, do not call me.',
+    'Call +14155550123, but do not call me.',
+    'Summarize this quote: "Call +14155550123 now."',
+    'Email Bob now.',
+    'Text Bob now.',
+    'Apply for the job.',
+  ])
+    expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).not.toContain(
+      'phone_call',
+    );
+});
+
+it('binds phone routing to the action recipient rather than a name or incidental number', () => {
+  expect(explicitOwnerCallRecipient('Call +14155550123 now.')).toBe('+14155550123');
+  for (const text of [
+    'Call Bob about +14155550123.',
+    'Call me about +14155550123.',
+    'Call +14155550124 about +14155550123.',
+  ])
+    expect(explicitOwnerCallRecipient(text)).not.toBe('+14155550123');
+  for (const text of ['Call me now.', 'Please phone my number.', 'Call my phone now.'])
+    expect(explicitOwnerSelfCall(text)).toBe(true);
+  for (const text of [
+    'Call Bob.',
+    'Call it done.',
+    'Email my number to Bob.',
+    'Call +14155550123.',
+  ])
+    expect(explicitOwnerSelfCall(text)).toBe(false);
+});
+
+it('binds explicit self routing modifiers and never substitutes configured self for another route', () => {
+  for (const connector of ['at', 'on']) {
+    expect(explicitOwnerCallRecipient(`Call me ${connector} +14155550123 now.`)).toBe(
+      '+14155550123',
+    );
+    expect(explicitOwnerCallRecipient(`Call me ${connector} +14155550999 now.`)).toBe(
+      '+14155550999',
+    );
+    expect(explicitOwnerSelfCall(`Call me ${connector} +14155550999 now.`)).toBe(false);
+    expect(explicitOwnerSelfCall(`Call me ${connector} my other number.`)).toBe(false);
+  }
+});
+
+it.each([
+  'Call +14155550123 now, or don’t.',
+  'Call me now, or don’t.',
+  'Call me about lunch, but use +14155550999 instead.',
+  'Call +14155550123 about lunch, but use +14155550999 instead.',
+  'Call me. Actually, no call is needed.',
+  'Call +14155550123. Actually, no call is needed.',
+  "My note says 'I want you to call me now.'",
+  'If I am home, I want you to call me now.',
+  'Call me now, perhaps later.',
+  'Call +14155550123 now, perhaps later.',
+  'Call me and say "hello".',
+])('does not derive phone scope from unsupported or withdrawn action tails: %s', (text) => {
+  expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).not.toContain('phone_call');
+});
+
+it.each([
+  'Call me about lunch. Forget that request.',
+  'Call me about lunch, Disregard that request.',
+  'Call me about lunch\nI changed my mind.',
+  'Call me about lunch\r\nForget that request.',
+  'Call me about lunch; Disregard that request.',
+  'Call +14155550123 about lunch. Disregard that request.',
+  'Call +14155550123 about lunch, I changed my mind.',
+  'Call +14155550123 about lunch\nForget that request.',
+  'Call +14155550123 about lunch\r\nDisregard that request.',
+  'Call +14155550123 about lunch; I changed my mind.',
+  'Call me and say hello. I changed my mind.',
+  'Call me and say hello, Forget that request.',
+  'Call me and say hello\nDisregard that request.',
+  'Call me and say hello\r\nI changed my mind.',
+  'Call me and say hello; Forget that request.',
+  'Call +14155550123 and say hello. Forget that request.',
+  'Call +14155550123 and say hello, Disregard that request.',
+  'Call +14155550123 and say hello\nI changed my mind.',
+  'Call +14155550123 and say hello\r\nForget that request.',
+  'Call +14155550123 and say hello; Disregard that request.',
+  'Call me about lunch. Disregard that request.',
+  'Call +14155550123 about lunch. Forget that request.',
+  'Call me about lunch. I changed my mind.',
+  'Call me about lunch and disregard that request.',
+  'Call +14155550123 about lunch then forget that request.',
+  'Call me and say hello and forget that request.',
+  'Call +14155550123 and say hello so I changed my mind.',
+  'Call me about lunch & disregard that request.',
+  'Call me about lunch..',
+  'Call +14155550123 and say hello!!',
+])(
+  'rejects additional clauses instead of interpreting topic data as continued authority: %s',
+  (text) => {
+    expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).not.toContain(
+      'phone_call',
+    );
+  },
+);
+
+it.each(['Call me\nat +14155550123.', 'Call me now,\r\non +14155550123.', 'Call\nme about lunch.'])(
+  'rejects an internal line separator even inside routing/modifier syntax: %s',
+  (text) => {
+    expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).not.toContain(
+      'phone_call',
+    );
+  },
+);
+
+it.each([
+  'Call me about lunch.',
+  'Call +14155550123 about lunch.',
+  'Call me and say hello.',
+  'Call +14155550123 and say hello.',
+  'Read the note, then call +14155550123 now.',
+  'Call me about lunch disregard that request',
+  'Call +14155550123 about lunch forget that request',
+  'Call me and say hello I changed my mind',
+  'Call +14155550123 and say hello forget that request',
+  'Call \u2028me now',
+  'Call me \u2029now',
+])('semantic or unsupported data cannot grant automatic phone scope: %s', (text) =>
+  expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).not.toContain('phone_call'),
+);

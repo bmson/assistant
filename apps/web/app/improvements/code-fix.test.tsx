@@ -90,7 +90,8 @@ it('labels PR evidence as recorded, shows freshness without claiming it was chec
   );
 
   expect(markup).toContain('Pull request recorded');
-  expect(markup).toContain('The pull request may have changed since that review.');
+  expect(markup).toContain('Current pull request state is unverified.');
+  expect(markup).toContain('This saved review may not describe the current pull request revision.');
   expect(markup).toContain('Last recorded update');
   expect(markup).not.toContain('Last checked');
   expect(markup).not.toContain('PR ready to review');

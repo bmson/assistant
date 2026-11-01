@@ -3,6 +3,7 @@ import type {
   ProfileOverviewRepository,
   Records,
 } from '@assistant/persistence';
+import { profileContactIdentityRevision } from '@assistant/persistence';
 import { FieldPath, type Query, type QueryDocumentSnapshot } from '@google-cloud/firestore';
 import { decodeMemoryRecord } from './memory-record.js';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
@@ -36,13 +37,14 @@ async function scanPages(
   }
 }
 
-function contactView(row: Records['contacts']) {
+function contactView(row: Records['contacts'], identityRevision: string) {
   return {
     id: row.id,
     name: row.name,
     aliases: row.aliases,
     relationship: row.relationship,
     trust: row.trust,
+    identityRevision,
   };
 }
 
@@ -192,7 +194,7 @@ export class FirestoreProfileOverviewRepository implements ProfileOverviewReposi
     // unhandled rejections on their own.
     for (const pending of [organizerRead, cardRead, voiceRead]) pending.catch(() => {});
 
-    const contacts: Records['contacts'][] = [];
+    const contacts: Array<{ row: Records['contacts']; identityRevision: string }> = [];
     await scanPages(
       this.store
         .collection('contacts')
@@ -200,20 +202,35 @@ export class FirestoreProfileOverviewRepository implements ProfileOverviewReposi
       'contact',
       (doc) => {
         const row = decodeRecord<Records['contacts']>(doc.data());
-        if (!row.id || documentKey(row.id) !== doc.id)
+        if (!row.id || documentKey(row.id) !== doc.id || !doc.updateTime)
           throw new Error('Malformed Memory hub contact');
-        contacts.push(row);
+        contacts.push({
+          row,
+          identityRevision: profileContactIdentityRevision({
+            driver: 'firestore',
+            ownerId: agentId,
+            id: doc.id,
+            updateTime: {
+              seconds: doc.updateTime.seconds,
+              nanoseconds: doc.updateTime.nanoseconds,
+            },
+          }),
+        });
         if (contacts.length > PROFILE_CONTACT_LIMIT)
           throw new Error('Profile contact count exceeds the view limit');
       },
     );
     contacts.sort(
-      (left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id),
+      (left, right) =>
+        left.row.name.localeCompare(right.row.name) || left.row.id.localeCompare(right.row.id),
     );
-    const owner = contacts.find((contact) => contact.trust === 'owner');
+    const owner = contacts.find(({ row }) => row.trust === 'owner');
     const people = contacts
-      .filter((contact) => contact.trust !== 'owner')
-      .map((contact) => ({ contact: contactView(contact), factCount: 0 }));
+      .filter(({ row }) => row.trust !== 'owner')
+      .map(({ row, identityRevision }) => ({
+        contact: contactView(row, identityRevision),
+        factCount: 0,
+      }));
     const peopleById = new Map(people.map((person) => [person.contact.id, person]));
 
     let totalUsable = 0;
@@ -282,7 +299,7 @@ export class FirestoreProfileOverviewRepository implements ProfileOverviewReposi
           const person = peopleById.get(row.subjectContactId);
           if (person) person.factCount += 1;
         }
-        if (owner && row.subjectContactId === owner.id) {
+        if (owner && row.subjectContactId === owner.row.id) {
           ownerFactMetadata.push(row);
           ownerFactMetadata.sort(ownerFactOrder);
           if (ownerFactMetadata.length > PROFILE_FACT_LIMIT) ownerFactMetadata.pop();
@@ -338,7 +355,7 @@ export class FirestoreProfileOverviewRepository implements ProfileOverviewReposi
     await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
 
     return {
-      ...(owner ? { owner: contactView(owner) } : {}),
+      ...(owner ? { owner: contactView(owner.row, owner.identityRevision) } : {}),
       people,
       ownerFacts: ownerFacts.map(memoryFact),
       quarantined: selectedQuarantined.map((row) => {

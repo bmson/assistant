@@ -1,3 +1,4 @@
+import { loadConfig } from '@assistant/config';
 import { approvalRule } from '@assistant/core/approval-rule';
 
 import { getAgent } from '@assistant/core/chat';
@@ -72,6 +73,12 @@ export async function listApprovalInbox(
     pending: inbox.pending.map((item) => ({
       ...item,
       rememberLabel: approvalRule(item.toolName, item.approval.payload)?.label ?? null,
+      ownerNumberGrantAvailable:
+        loadConfig().PHONE_CALL_TO_OWNER_GRANT_ENABLED &&
+        item.taskTrust === 'owner' &&
+        item.ownerCallAdmissionAvailable === true &&
+        item.toolName === 'phone.call' &&
+        item.approval.expiresAt > now,
     })),
   };
 }
@@ -156,4 +163,16 @@ export async function approveAndRememberApproval(
     ...(portable ? { expectedAgentId: agentId } : {}),
     ...(policy ? { policy } : {}),
   });
+}
+
+/** Existing composition seam shared by dedicated owner-call review and ordinary decisions. */
+export type ApprovalDecisionStore = Db | ApprovalRememberStore;
+export async function ownerApprovalRepository(
+  store: ApprovalDecisionStore,
+): Promise<ApprovalRememberStore> {
+  if ('approvals' in store) return store;
+  return {
+    agentId: (await getAgent(store)).id,
+    approvals: createPostgresApprovalRepository(store),
+  };
 }

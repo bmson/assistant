@@ -152,7 +152,10 @@ function fixtureDispatcher(
   executions: Execution[],
   failure: boolean | 'wrong_date' | 'wrong_city' | 'fetch_failure' = false,
 ) {
-  const listingByUrl = new Map<string, { url: string; title: string; text: string }>();
+  const listingByUrl = new Map<
+    string,
+    { status: number; contentType: string; text: string; truncated: boolean; finalUrl: string }
+  >();
   const registry = new ToolRegistry();
   for (const name of ['web.search', 'web.fetch']) {
     registry.register(
@@ -191,7 +194,13 @@ function fixtureDispatcher(
             const sourceCity = failure === 'wrong_city' ? 'Seattle' : city;
             const url = `https://example.test/art-${requestedDate}`;
             const text = `${sourceCity}, ${date}: Synthetic Art Walk — ${date}, 10:00 am, ${sourceCity}. Admission $15. ${url}`;
-            listingByUrl.set(url, { url, title: 'Synthetic Art Walk', text });
+            listingByUrl.set(url, {
+              status: 200,
+              contentType: 'text/plain',
+              text,
+              truncated: false,
+              finalUrl: url,
+            });
             return { results: [{ title: 'Synthetic Art Walk', url, snippet: text }] };
           }
           const listing = listingByUrl.get(String(values.url));
@@ -418,7 +427,7 @@ describe('public activity actual approval lifecycle (isolated PostgreSQL)', () =
           /\d{4}-\d{2}-\d{2}/,
         )?.[0];
         expect(requestedDate).toBeDefined();
-        expect(finalText).toContain('Synthetic Art Walk');
+        expect(finalText).toContain('example.test');
         expect(finalText).toContain(`https://example.test/art-${requestedDate}`);
         expect(finalText).toContain(requestedDate);
         expect(finalText).toContain('remain unverified');
@@ -627,7 +636,7 @@ describe('public activity actual approval lifecycle (isolated PostgreSQL)', () =
           .where(and(eq(messages.taskId, admitted.taskId), eq(messages.role, 'assistant')));
         const finalText = delivered.map((row) => row.text).join('\n');
         expect(finalText).toMatch(/San Francisco/);
-        expect(finalText).toContain('Synthetic Art Walk');
+        expect(finalText).toContain('example.test');
         expect(finalText).toMatch(/https:\/\/example\.test\/art-2026-10-/);
         expect(finalText).toMatch(/calendar|availability|free time/i);
         expect(finalText).not.toContain('PRIVATE_');
@@ -759,7 +768,7 @@ describe('public activity actual approval lifecycle (isolated PostgreSQL)', () =
           .filter((row) => row.role === 'assistant')
           .map((row) => row.text)
           .join('\n');
-        expect(finalText).toContain('Synthetic Art Walk');
+        expect(finalText).toContain('example.test');
         expect(finalText).toContain('2026-10-24');
         expect(finalText).toContain('https://example.test/art-2026-10-24');
       }

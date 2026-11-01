@@ -1,4 +1,10 @@
-import { type EmbeddingSpace, type Records, snapshotEmbeddingSpace } from '@assistant/persistence';
+import {
+  type EmbeddingSpace,
+  type OwnerEditorTiming,
+  type Records,
+  snapshotEmbeddingSpace,
+} from '@assistant/persistence';
+import { predicateSpec } from '@assistant/persistence/predicate-vocabulary';
 import type { DocumentSnapshot, QueryDocumentSnapshot } from '@google-cloud/firestore';
 import { graphSourceEligible } from './graph-source-eligibility.js';
 import { decodeMemoryRecord } from './memory-record.js';
@@ -14,11 +20,13 @@ type Source = Records['knowledgeGraphSources'];
 
 export interface FirestorePersonGraphEdge {
   id: string;
+  sourceMemoryId?: string;
   predicate: string;
   outbound: boolean;
   reviewStatus: 'confirmed' | 'unreviewed';
   validFrom: string | null;
   validUntil: string | null;
+  assertionTiming?: OwnerEditorTiming | null;
   other: {
     id: string;
     label: string;
@@ -131,13 +139,27 @@ function activeEdge(
   if (!subject || !object) return null;
   const outbound = row.subjectEntityId === entityId;
   const other = outbound ? object : subject;
+  const assertionTiming =
+    predicateSpec(row.predicate)?.group === 'family' &&
+    subject.kind === 'person' &&
+    object.kind === 'person' &&
+    row.assertion != null &&
+    row.assertion.polarity === 'positive' &&
+    row.assertion.modality === 'asserted' &&
+    (row.assertion.tense === 'unspecified' ||
+      row.assertion.tense === 'present' ||
+      row.assertion.tense === 'past')
+      ? row.assertion.tense
+      : null;
   return {
     id: row.id,
+    sourceMemoryId: memory.id,
     predicate: row.predicate,
     outbound,
     reviewStatus: row.reviewStatus === 'confirmed' ? 'confirmed' : 'unreviewed',
     validFrom: row.validFrom,
     validUntil: row.validUntil,
+    ...(assertionTiming == null ? {} : { assertionTiming }),
     other: {
       id: other.id,
       label: other.preferredLabel ?? other.label,

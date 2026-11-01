@@ -36,6 +36,7 @@
     "./memory/occasions": "./src/memory/occasions.ts",
     "./memory/predicate-vocabulary": "./src/memory/predicate-vocabulary.ts",
     "./memory/recall": "./src/memory/recall.ts",
+    "./memory/recall-context": "./src/memory/recall-context.ts",
     "./memory/recall-metrics": "./src/memory/recall-metrics.ts",
     "./memory/skills": "./src/memory/skills.ts",
     "./memory/situation-context": "./src/memory/situation-context.ts",
@@ -78,7 +79,9 @@
     "./workflow/self-repair": "./src/workflow/self-repair.ts",
     "./workflow/repair-github": "./src/workflow/repair-github.ts",
     "./workflow/repair-hosted": "./src/workflow/repair-hosted.ts",
-    "./decisions/jev": "./src/decisions/jev.ts"
+    "./decisions/jev": "./src/decisions/jev.ts",
+    "./memory/owner-family-fact": "./src/memory/owner-family-fact.ts",
+    "./memory/owner-family-presentation": "./src/memory/owner-family-presentation.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

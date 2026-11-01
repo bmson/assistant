@@ -34,7 +34,9 @@ final class StubURLProtocol: URLProtocol {
     private static var recordedBodies: [Data] = []
     private static var recordedHeaders: [[String: String]] = []
     private static var recordedTimeouts: [TimeInterval] = []
+    private static var recordedRequestTimeline: [(method: String, path: String, uptime: TimeInterval)] = []
     private static var heldResponses: [String: StubURLProtocol] = [:]
+    private static var retiredHeldResponses: Set<String> = []
     private static var stoppedPaths: Set<String> = []
     private static var stoppedRequests: Set<String> = []
     private static var stopLoadingObservers: [String: [() -> Void]] = [:]
@@ -48,6 +50,7 @@ final class StubURLProtocol: URLProtocol {
     static func beginTestCase(_ id: String) {
         lock.withLock {
             activeTestCaseID = id
+            retiredHeldResponses = []
             outcomes = []
             pathOutcomes = [:]
             tokenOutcomes = [:]
@@ -56,6 +59,7 @@ final class StubURLProtocol: URLProtocol {
             recordedBodies = []
             recordedHeaders = []
             recordedTimeouts = []
+            recordedRequestTimeline = []
             heldResponses = [:]
             stoppedPaths = []
             stoppedRequests = []
@@ -93,6 +97,7 @@ final class StubURLProtocol: URLProtocol {
             recordedBodies = []
             recordedHeaders = []
             recordedTimeouts = []
+            recordedRequestTimeline = []
             heldResponses = [:]
             stoppedPaths = []
             stoppedRequests = []
@@ -127,6 +132,10 @@ final class StubURLProtocol: URLProtocol {
     static var bodies: [Data] { lock.withLock { recordedBodies } }
     static var headers: [[String: String]] { lock.withLock { recordedHeaders } }
     static var timeouts: [TimeInterval] { lock.withLock { recordedTimeouts } }
+    /// Metadata only, captured when the stub accepts each request, before its response delay.
+    static var requestTimeline: [(method: String, path: String, uptime: TimeInterval)] {
+        lock.withLock { recordedRequestTimeline }
+    }
     static var completedResponsePaths: Set<String> { lock.withLock { completedPaths } }
     static func isHoldingResponse(path: String) -> Bool { lock.withLock { heldResponses[path] != nil } }
     static func observeStopLoading(path: String, testCaseID: String, onStop: @escaping () -> Void) {
@@ -145,6 +154,20 @@ final class StubURLProtocol: URLProtocol {
 
     static func hasStoppedRequest(method: String, url: URL, testCaseID: String) -> Bool {
         lock.withLock { stoppedRequests.contains("\(testCaseID)\u{0}\(method)\u{0}\(url.absoluteString)") }
+    }
+
+    /// Retires this owned case/path even if cancellation precedes registration.
+    static func retireHeldResponse(path: String, testCaseID: String) {
+        let instance = lock.withLock { () -> StubURLProtocol? in
+            retiredHeldResponses.insert(stopLoadingKey(path: path, testCaseID: testCaseID))
+            guard let held = heldResponses[path],
+                  Self.testCaseID(in: held.request.allHTTPHeaderFields ?? [:]) == testCaseID else { return nil }
+            return heldResponses.removeValue(forKey: path)
+        }
+        if let instance {
+            instance.heldResponse = nil
+            instance.client?.urlProtocol(instance, didFailWithError: URLError(.cancelled))
+        }
     }
 
     static func releaseHeldResponse(path: String) {
@@ -224,6 +247,9 @@ final class StubURLProtocol: URLProtocol {
             recordedBodies.append(body)
             recordedHeaders.append(headers)
             recordedTimeouts.append(timeout)
+            if let url {
+                recordedRequestTimeline.append((method, url.path, ProcessInfo.processInfo.systemUptime))
+            }
             if let authorization = headers.first(where: { $0.key.caseInsensitiveCompare("authorization") == .orderedSame })?.value,
                var queued = tokenOutcomes[authorization], !queued.isEmpty {
                 let result = queued.removeFirst()
@@ -328,9 +354,15 @@ final class StubURLProtocol: URLProtocol {
             heldResponse = (status, body)
             heldResponseCorrelatesMutation = false
             let key = Self.stopLoadingKey(path: path, testCaseID: requestTestCaseID)
-            Self.lock.withLock {
+            let canHold = Self.lock.withLock {
+                guard Self.activeTestCaseID == requestTestCaseID, !Self.retiredHeldResponses.contains(key) else { return false }
                 Self.stoppedPaths.remove(key)
                 Self.heldResponses[path] = self
+                return true
+            }
+            if !canHold {
+                heldResponse = nil
+                client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
             }
         case let .heldCalendarConfigureAcknowledgement(status, body):
             guard let requestTestCaseID = Self.testCaseID(in: request.allHTTPHeaderFields ?? [:]),
@@ -534,6 +566,51 @@ private final class LocalNotificationRecorder {
         ))
         return true
     }
+}
+
+/// Immediate, per-model surface recorder. These calls never reach ActivityKit
+/// or the system badge; their trace does not attribute an earlier OS stall.
+@MainActor
+private final class RecordingAppSystemSurfaces: AppSystemSurfaces {
+    private let id = UUID().uuidString
+    private(set) var operations: [String] = []
+    var diagnosticObserver: (@MainActor (String, AssistantThought?) -> Void)?
+
+    private func record(_ operation: String, thought: AssistantThought? = nil) {
+        operations.append(operation)
+        print("Notification fixture surfaces [\(id)]: \(operation); cancelled=\(Task.isCancelled)")
+        diagnosticObserver?(operation, thought)
+    }
+
+    func ensure(agentName: String, thought: AssistantThought, detail: String, pendingCount: Int) async {
+        record("ensure(\(pendingCount))", thought: thought)
+    }
+
+    func start(agentName: String, thought: AssistantThought, detail: String, pendingCount: Int) async {
+        record("start(\(pendingCount))")
+    }
+
+    func update(thought: AssistantThought, detail: String, pendingCount: Int) async {
+        record("update(\(pendingCount))", thought: thought)
+    }
+
+    func needsAttention(agentName: String, detail: String, pendingCount: Int) async {
+        record("needsAttention(\(pendingCount))")
+    }
+
+    func finish(thought: AssistantThought, detail: String, succeeded: Bool) async {
+        record("finish(\(succeeded))")
+    }
+
+    func dismiss() async { record("dismiss") }
+    func updateBadge(_ count: Int) async { record("updateBadge(\(count))") }
+}
+
+private actor StreamTextDeltaRecorder {
+    private var values: [String] = []
+
+    func append(_ value: String) { values.append(value) }
+    func snapshot() -> [String] { values }
 }
 
 final class APIClientRetryTests: XCTestCase {
@@ -1270,6 +1347,10 @@ final class APIClientRetryTests: XCTestCase {
         let headers = StubURLProtocol.headers.first ?? [:]
         XCTAssertEqual(
             headers.first(where: { $0.key.caseInsensitiveCompare("x-assistant-workspace-sections") == .orderedSame })?.value,
+            "1"
+        )
+        XCTAssertEqual(
+            headers.first(where: { $0.key.caseInsensitiveCompare("x-assistant-billing-amounts") == .orderedSame })?.value,
             "1"
         )
     }
@@ -3060,7 +3141,10 @@ final class APIClientRetryTests: XCTestCase {
 
     @MainActor
     func testChatFollowsNewMessagesAndGrowingStreamWhileAtBottom() async throws {
-        let model = AppModel(apiClient: makeClient())
+        let model = AppModel(
+            apiClient: makeClient(),
+            systemSurfaces: RecordingAppSystemSurfaces()
+        )
         // A chat read alone is not an authenticated composer session.
         StubURLProtocol.primeBootstrap(try notificationBootstrap())
         await model.refreshAll()
@@ -3133,17 +3217,57 @@ final class APIClientRetryTests: XCTestCase {
         }
         StubURLProtocol.prime([.stream(body: try chunk("First words.\n"))])
         model.send("Continue with a detailed response.")
-        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
-        while model.messages.last?.text != "First words.\n", ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(50))
+
+        // Keep request dispatch, stream readiness, and consumed text inside
+        // the original three-second first-delta budget. The stub sends the
+        // initial body synchronously before marking this stream ready.
+        let firstDeltaDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        var readyStream: (operationID: String, authorization: String)?
+        while (readyStream == nil || model.messages.last?.text != "First words.\n"),
+              ContinuousClock.now < firstDeltaDeadline {
+            for (method, url, headers, body) in StubURLProtocol.requests
+            where method == "POST" && url.path == "/api/mobile/v1/chat" {
+                let payload = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+                let operationID = payload?["clientOperationId"] as? String
+                let authorization = headers.first {
+                    $0.key.caseInsensitiveCompare("authorization") == .orderedSame
+                }?.value
+                if let operationID, let authorization,
+                   StubURLProtocol.isStreamReady(operationId: operationID, authorization: authorization) {
+                    readyStream = (operationID, authorization)
+                    break
+                }
+            }
+            if readyStream == nil || model.messages.last?.text != "First words.\n" {
+                try await Task.sleep(for: .milliseconds(50))
+            }
         }
+        XCTAssertNotNil(readyStream, "The chat POST and initial stream delivery must become ready within the first-delta budget")
+        let stream = try XCTUnwrap(readyStream)
+        let chatRequests = StubURLProtocol.requests.filter {
+            $0.0 == "POST" && $0.1.path == "/api/mobile/v1/chat"
+        }
+        XCTAssertEqual(chatRequests.count, 1, "The initial text delta belongs to one chat POST")
+        let chatBody = try XCTUnwrap(chatRequests.first?.3)
+        let chatPayload = try XCTUnwrap(JSONSerialization.jsonObject(with: chatBody) as? [String: Any])
+        XCTAssertEqual(chatPayload["conversationId"] as? String, "follow-chat")
+        XCTAssertEqual(chatPayload["clientOperationId"] as? String, stream.operationID)
+        let sentMessages = try XCTUnwrap(chatPayload["messages"] as? [[String: Any]])
+        let sentParts = try XCTUnwrap(sentMessages.first?["parts"] as? [[String: Any]])
+        XCTAssertEqual(sentParts.first?["text"] as? String, "Continue with a detailed response.")
+        XCTAssertEqual(
+            chatRequests.first?.2.first { $0.key.caseInsensitiveCompare("authorization") == .orderedSame }?.value,
+            stream.authorization
+        )
         XCTAssertEqual(model.messages.last?.text, "First words.\n")
         let streamID = model.messages.last?.id
         try await assertAtBottom()
         for index in 1...3 {
             let delta = String(repeating: "Streaming section \(index).\n", count: 35)
             let previousText = model.messages.last?.text ?? ""
-            StubURLProtocol.appendStream(try chunk(delta))
+            StubURLProtocol.appendStream(
+                try chunk(delta), operationId: stream.operationID, authorization: stream.authorization
+            )
             // Use the same bounded state wait as the first streamed chunk above.
             let deltaDeadline = ContinuousClock.now.advanced(by: .seconds(3))
             while model.messages.last?.text != previousText + delta, ContinuousClock.now < deltaDeadline {
@@ -4824,17 +4948,23 @@ extension APIClientRetryTests {
     @MainActor
     private func notificationModel(
         enqueueAutomaticSpeech: ((ChatMessage) -> Void)? = nil,
-        scheduleLocalNotification: LocalNotificationScheduler? = nil
+        scheduleLocalNotification: LocalNotificationScheduler? = nil,
+        systemSurfaces suppliedSystemSurfaces: RecordingAppSystemSurfaces? = nil
     ) async throws -> AppModel {
+        let systemSurfaces = suppliedSystemSurfaces ?? RecordingAppSystemSurfaces()
+        let notificationScheduler: LocalNotificationScheduler = scheduleLocalNotification
+            ?? { _, _, _, _, _, _ in false }
         let model: AppModel
         if let enqueueAutomaticSpeech {
             model = AppModel(
                 apiClient: makeClient(),
                 enqueueAutomaticSpeech: enqueueAutomaticSpeech,
-                scheduleLocalNotification: scheduleLocalNotification
+                scheduleLocalNotification: notificationScheduler,
+                systemSurfaces: systemSurfaces
             )
         } else {
-            model = AppModel(apiClient: makeClient(), scheduleLocalNotification: scheduleLocalNotification)
+            model = AppModel(apiClient: makeClient(), scheduleLocalNotification: notificationScheduler,
+                             systemSurfaces: systemSurfaces)
         }
         model.scenePhaseDidChange(.background)
         StubURLProtocol.primeBootstrap(try notificationBootstrap())
@@ -5125,6 +5255,52 @@ extension APIClientRetryTests {
         XCTAssertTrue(model.messages.contains(where: { $0.id == reply.id }))
         XCTAssertEqual(recorder.entries.map(\.body), ["A new response is ready."])
         XCTAssertNotEqual(model.activityThought, .finished, "Idle reconciliation does not fabricate task completion speech or activity")
+    }
+
+    @MainActor
+    func testEmptyIdlePollPreservesTranscriptObservationAndStillAdvancesCursor() async throws {
+        let model = try await notificationModel()
+        model.scenePhaseDidChange(.active)
+        defer { model.scenePhaseDidChange(.background) }
+        let original = model.messages
+        let messagesChanged = NativeObservationSignal()
+        withObservationTracking { _ = model.messages } onChange: { messagesChanged.mark() }
+
+        let quiet = ChatUpdates(taskStatus: nil, messages: [], refreshed: [], superseded: nil,
+            nextCursor: "quiet-cursor", hasMore: false, activity: [])
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat/status": [.success(status: 200, body: try JSONEncoder().encode(quiet))]
+        ])
+        let quietChanged = await model.refreshIdleConversation()
+        XCTAssertEqual(quietChanged, false)
+        XCTAssertEqual(model.messages, original)
+        XCTAssertFalse(messagesChanged.changed, "An empty held poll must not publish an unchanged transcript")
+
+        var refreshed = try XCTUnwrap(original.first)
+        refreshed.parts = [.init(type: "text", text: "The existing reply was refreshed")]
+        let update = ChatUpdates(taskStatus: nil, messages: [], refreshed: [refreshed], superseded: nil,
+            nextCursor: "refresh-cursor", hasMore: false, activity: [])
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat/status": [.success(status: 200, body: try JSONEncoder().encode(update))]
+        ])
+        let refreshChanged = await model.refreshIdleConversation()
+        XCTAssertEqual(refreshChanged, true)
+        XCTAssertTrue(messagesChanged.changed, "A nonempty refresh still publishes its changed message")
+        XCTAssertEqual(model.messages.first(where: { $0.id == refreshed.id }), refreshed)
+        let statusURL = try XCTUnwrap(StubURLProtocol.urls.first(where: { $0.path == "/api/mobile/v1/chat/status" }))
+        let components = try XCTUnwrap(URLComponents(url: statusURL, resolvingAgainstBaseURL: false))
+        XCTAssertEqual(components.queryItems?.first(where: { $0.name == "cursor" })?.value, "quiet-cursor",
+            "An empty poll still advances the cursor used by the next read")
+
+        let removal = ChatUpdates(taskStatus: nil, messages: [], refreshed: [], superseded: [refreshed.id],
+            nextCursor: nil, hasMore: false, activity: [])
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat/status": [.success(status: 200, body: try JSONEncoder().encode(removal))]
+        ])
+        let removalChanged = await model.refreshIdleConversation()
+        XCTAssertEqual(removalChanged, true)
+        XCTAssertFalse(model.messages.contains(where: { $0.id == refreshed.id }),
+            "Superseded-only updates must still remove rows when both merge inputs are empty")
     }
 
     @MainActor
@@ -5508,7 +5684,14 @@ extension APIClientRetryTests {
 
     @MainActor
     private func assertLateTaskCancellationDoesNotAffectNewerTurn(responseStatus: Int) async throws {
-        let model = try await notificationModel()
+        let surfaces = RecordingAppSystemSurfaces()
+        let model = try await notificationModel(systemSurfaces: surfaces)
+        var surfaceTimeline: [(uptime: TimeInterval, operation: String)] = []
+        surfaces.diagnosticObserver = { operation, thought in
+            surfaceTimeline.append((ProcessInfo.processInfo.systemUptime,
+                "\(operation); thought=\(String(describing: thought))"))
+        }
+        defer { surfaces.diagnosticObserver = nil }
         let workingMessage = ChatMessage(id: "old-task-status-message", role: .assistant,
             parts: [.init(type: "text", text: "The earlier task is still working.")])
         let working = ChatUpdates(
@@ -5540,6 +5723,22 @@ extension APIClientRetryTests {
         ])
         defer { StubURLProtocol.releaseHeldResponse(path: "/api/mobile/v1/activity/task-old-stop") }
 
+        let sendStartedAt = ProcessInfo.processInfo.systemUptime
+        func receiptStageDiagnostics() -> String {
+            // A startingWork recorder update proves sendMessage returned its parsed receipt.
+            // This is a downstream milestone, not a direct timestamp inside the parser.
+            let requests = StubURLProtocol.requestTimeline.map {
+                "\($0.uptime - sendStartedAt)s: \($0.method) \($0.path)"
+            }
+            let surfaceEvents = surfaceTimeline.map {
+                "\($0.uptime - sendStartedAt)s: \($0.operation)"
+            }
+            return "elapsed=\(ProcessInfo.processInfo.systemUptime - sendStartedAt)s; "
+                + "cancelResponseStatus=\(responseStatus); isSending=\(model.isSending); "
+                + "isCancelling=\(model.isCancellingSend); hasError=\(model.errorMessage != nil); "
+                + "thought=\(String(describing: model.activityThought)); "
+                + "requests=\(requests); surfaces=\(surfaceEvents)"
+        }
         model.send("Earlier task")
         let receiptPollDeadline = ContinuousClock.now.advanced(by: .seconds(3))
         while !StubURLProtocol.urls.contains(where: { url in
@@ -5553,7 +5752,7 @@ extension APIClientRetryTests {
             guard url.path == "/api/mobile/v1/chat/status",
                   let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return false }
             return queryItems.contains { $0.name == "taskId" && $0.value == "task-old-stop" }
-        }), "The durable task receipt is parsed before issuing Stop")
+        }), "The durable task receipt is parsed before issuing Stop. \(receiptStageDiagnostics())")
         let workingStatusDeadline = ContinuousClock.now.advanced(by: .seconds(3))
         while !model.messages.contains(where: { $0.id == "old-task-status-message" }),
               ContinuousClock.now < workingStatusDeadline { try await Task.sleep(for: .milliseconds(10)) }
@@ -5958,6 +6157,161 @@ extension APIClientRetryTests {
         )
         let receipt = try await send.value
         XCTAssertNil(receipt.taskId)
+    }
+
+    func testAPIClientConsumesWholeInitialTextDeltaDeliveredInline() async throws {
+        let token = "initial-inline-delta-test"
+        let clientID = "33333333-3333-4333-8333-333333333333"
+        let conversationID = "11111111-1111-4111-8111-111111111111"
+        let operationID = "22222222-2222-4222-8222-222222222222"
+        let expectedDelta = "First words.\n"
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "type": "text-delta", "delta": expectedDelta,
+        ])
+        let initialFrame = Data("data: \(String(decoding: payload, as: UTF8.self))\n\n".utf8)
+        StubURLProtocol.prime([], tokens: ["Bearer \(token)": [.stream(body: initialFrame)]])
+
+        let client = makeClient(clientID: clientID, token: token)
+        let recorder = StreamTextDeltaRecorder()
+        let send = Task {
+            try await client.sendMessage(
+                conversationId: conversationID,
+                text: "Read the initial streamed words",
+                clientOperationId: operationID,
+                autonomous: false,
+                onDelta: { await recorder.append($0) },
+                onCue: { _ in }
+            )
+        }
+
+        let authorization = "Bearer \(token)"
+        defer {
+            send.cancel()
+            StubURLProtocol.cancelStream(operationId: operationID, authorization: authorization)
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        var ready = false
+        var received = await recorder.snapshot()
+        while (!ready || received != [expectedDelta]), ContinuousClock.now < deadline {
+            ready = StubURLProtocol.isStreamReady(operationId: operationID, authorization: authorization)
+            received = await recorder.snapshot()
+            if !ready || received != [expectedDelta] {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+
+        XCTAssertTrue(ready, "The POST's initial inline body must reach the ready stream")
+        guard ready else {
+            send.cancel()
+            StubURLProtocol.cancelStream(operationId: operationID, authorization: authorization)
+            _ = try? await send.value
+            XCTFail("The initial inline stream did not become ready")
+            return
+        }
+        XCTAssertEqual(received, [expectedDelta], "APIClient must parse and consume the initial text event before stream completion")
+        let request = try XCTUnwrap(StubURLProtocol.requests.first { $0.1.path == "/api/mobile/v1/chat" })
+        XCTAssertEqual(request.0, "POST")
+        XCTAssertEqual(
+            request.2.first { $0.key.caseInsensitiveCompare("authorization") == .orderedSame }?.value,
+            authorization
+        )
+        let requestBody = try XCTUnwrap(JSONSerialization.jsonObject(with: request.3) as? [String: Any])
+        XCTAssertEqual(requestBody["clientId"] as? String, clientID)
+        XCTAssertEqual(requestBody["conversationId"] as? String, conversationID)
+        XCTAssertEqual(requestBody["clientOperationId"] as? String, operationID)
+        let sentMessages = try XCTUnwrap(requestBody["messages"] as? [[String: Any]])
+        let sentParts = try XCTUnwrap(sentMessages.first?["parts"] as? [[String: Any]])
+        XCTAssertEqual(sentParts.first?["text"] as? String, "Read the initial streamed words")
+
+        StubURLProtocol.appendStream(
+            Data("data: [DONE]\n\n".utf8), operationId: operationID, authorization: authorization
+        )
+        let receipt = try await send.value
+        XCTAssertNil(receipt.taskId)
+        XCTAssertEqual(receipt.conversationId, conversationID)
+    }
+
+    func testAPIClientReassemblesInitialTextDeltaAcrossUtf8ByteBoundary() async throws {
+        let token = "initial-fragmented-delta-test"
+        let conversationID = "11111111-1111-4111-8111-111111111111"
+        let operationID = "22222222-2222-4222-8222-222222222222"
+        let expectedDelta = "café"
+        let frame = Data("data: {\"type\":\"text-delta\",\"delta\":\"café\"}\n\n".utf8)
+        let accentBytes = Data([0xc3, 0xa9])
+        guard let accentRange = frame.range(of: accentBytes) else {
+            XCTFail("The initial SSE frame must include the raw UTF-8 bytes for é")
+            return
+        }
+        let splitIndex = frame.distance(from: frame.startIndex, to: accentRange.lowerBound) + 1
+        let initialFragment = Data(frame.prefix(splitIndex))
+        let remainingFragment = Data(frame.suffix(frame.count - splitIndex))
+        XCTAssertEqual(Array(initialFragment.suffix(1)), [UInt8(0xc3)])
+        XCTAssertEqual(Array(remainingFragment.prefix(1)), [UInt8(0xa9)])
+        StubURLProtocol.prime([], tokens: ["Bearer \(token)": [.stream(body: initialFragment)]])
+
+        let client = makeClient(token: token)
+        let recorder = StreamTextDeltaRecorder()
+        let send = Task {
+            try await client.sendMessage(
+                conversationId: conversationID,
+                text: "Read a fragmented initial event",
+                clientOperationId: operationID,
+                autonomous: false,
+                onDelta: { await recorder.append($0) },
+                onCue: { _ in }
+            )
+        }
+
+        let authorization = "Bearer \(token)"
+        defer {
+            send.cancel()
+            StubURLProtocol.cancelStream(operationId: operationID, authorization: authorization)
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        var ready = false
+        while !ready, ContinuousClock.now < deadline {
+            ready = StubURLProtocol.isStreamReady(operationId: operationID, authorization: authorization)
+            if !ready { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        XCTAssertTrue(ready, "The initial fragment must be delivered before the remainder is appended")
+        guard ready else {
+            send.cancel()
+            StubURLProtocol.cancelStream(operationId: operationID, authorization: authorization)
+            _ = try? await send.value
+            XCTFail("The fragmented initial stream did not become ready")
+            return
+        }
+        let beforeRemainder = await recorder.snapshot()
+        XCTAssertTrue(beforeRemainder.isEmpty, "An incomplete UTF-8 SSE event must not emit partial text")
+
+        StubURLProtocol.appendStream(
+            remainingFragment, operationId: operationID, authorization: authorization
+        )
+        let request = try XCTUnwrap(StubURLProtocol.requests.first { $0.1.path == "/api/mobile/v1/chat" })
+        XCTAssertEqual(request.0, "POST")
+        XCTAssertEqual(
+            request.2.first { $0.key.caseInsensitiveCompare("authorization") == .orderedSame }?.value,
+            authorization
+        )
+        let requestBody = try XCTUnwrap(JSONSerialization.jsonObject(with: request.3) as? [String: Any])
+        XCTAssertEqual(requestBody["conversationId"] as? String, conversationID)
+        XCTAssertEqual(requestBody["clientOperationId"] as? String, operationID)
+        let sentMessages = try XCTUnwrap(requestBody["messages"] as? [[String: Any]])
+        let sentParts = try XCTUnwrap(sentMessages.first?["parts"] as? [[String: Any]])
+        XCTAssertEqual(sentParts.first?["text"] as? String, "Read a fragmented initial event")
+        var received = await recorder.snapshot()
+        while received != [expectedDelta], ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+            received = await recorder.snapshot()
+        }
+        XCTAssertEqual(received, [expectedDelta], "The actual APIClient parser must reassemble a split UTF-8 text delta")
+
+        StubURLProtocol.appendStream(
+            Data("data: [DONE]\n\n".utf8), operationId: operationID, authorization: authorization
+        )
+        let receipt = try await send.value
+        XCTAssertNil(receipt.taskId)
+        XCTAssertEqual(receipt.conversationId, conversationID)
     }
 
     func testOperationCancellationValidatesIdentityAndTreatsUnknownAsUnknown() async throws {
@@ -8217,6 +8571,131 @@ extension APIClientRetryTests {
 }
 
 extension APIClientRetryTests {
+    func testPersonIdentityUpdateSendsDisplayedRevisionOnceAndPreservesConflict() async throws {
+        let revision = String(repeating: "a", count: 64)
+        StubURLProtocol.prime([
+            .success(status: 409, body: Data(#"{"error":"conflict"}"#.utf8)),
+        ])
+
+        do {
+            try await makeClient().updatePerson(
+                id: "contact-1",
+                person: PersonMutation(
+                    name: "Rae New",
+                    relationship: "friend",
+                    aliases: "Rae",
+                    expectedContactRevision: revision
+                )
+            )
+            XCTFail("A stale displayed revision must remain a conflict")
+        } catch APIError.server(let status, let message) {
+            XCTAssertEqual(status, 409)
+            XCTAssertEqual(message, "conflict")
+        }
+
+        XCTAssertEqual(StubURLProtocol.attempts, ["PATCH"])
+        XCTAssertEqual(StubURLProtocol.urls.map(\.path), ["/api/mobile/v1/memory/people/contact-1"])
+        let body = try XCTUnwrap(StubURLProtocol.bodies.first)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+        XCTAssertEqual(payload["expectedContactRevision"], revision)
+        XCTAssertEqual(payload["name"], "Rae New")
+        XCTAssertEqual(StubURLProtocol.bodies.count, 1, "A stale conflict is not automatically retried")
+    }
+
+    func testPersonIdentityUpdateWithoutRevisionStopsBeforeNetwork() async throws {
+        StubURLProtocol.prime([])
+        do {
+            try await makeClient().updatePerson(
+                id: "contact-1",
+                person: PersonMutation(name: "Rae New", relationship: "friend", aliases: "Rae")
+            )
+            XCTFail("An identity update without a displayed revision must be refused")
+        } catch APIError.invalidResponse {}
+        XCTAssertTrue(StubURLProtocol.urls.isEmpty)
+    }
+
+    @MainActor
+    func testPersonSaveConflictReturnsFailureWithoutChangingCachedSnapshot() async {
+        let revision = String(repeating: "a", count: 64)
+        let personID = "22222222-2222-4222-8222-222222222222"
+        StubURLProtocol.prime([
+            .success(status: 409, body: Data(#"{"error":"conflict"}"#.utf8)),
+        ])
+        let model = AppModel(apiClient: makeClient())
+        model.edits.updateRemote { state in
+            state.personProfiles[personID] = PersonProfileResponse(
+                contact: PersonProfileContact(
+                    id: personID,
+                    name: "Rae",
+                    aliases: ["R"],
+                    relationship: "friend",
+                    trust: "known",
+                    identityRevision: revision
+                ),
+                occasions: [],
+                mergeOptions: []
+            )
+        }
+
+        let saved = await model.savePerson(
+            id: personID,
+            mutation: PersonMutation(
+                name: "Rae New",
+                relationship: "friend",
+                aliases: "R",
+                expectedContactRevision: revision
+            )
+        )
+
+        XCTAssertFalse(saved, "A stale conflict is not treated as a successful save")
+        XCTAssertEqual(model.edits.serverSnapshot.personProfiles[personID]?.contact.name, "Rae")
+        XCTAssertEqual(model.errorMessage, "This person changed. Review the current details before applying your edit.")
+        XCTAssertTrue(model.personIdentityReviewRequired)
+        XCTAssertEqual(StubURLProtocol.attempts, ["PATCH"], "The failed update is not retried")
+    }
+
+    @MainActor
+    func testExistingPersonSaveDoesNotCompleteBeforeServerAcknowledgement() async {
+        let revision = String(repeating: "b", count: 64)
+        let personID = "33333333-3333-4333-8333-333333333333"
+        let mutationPath = "/api/mobile/v1/memory/people/\(personID)"
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/workspace": [.success(status: 401, body: Data(#"{"error":"expired"}"#.utf8))],
+            "/api/mobile/v1/people": [.success(status: 401, body: Data(#"{"error":"expired"}"#.utf8))],
+            "/api/mobile/v1/memory/people/\(personID)": [
+                .held(status: 200, body: Data(#"{"ok":true}"#.utf8)),
+                .success(status: 401, body: Data(#"{"error":"expired"}"#.utf8)),
+            ],
+            "/api/mobile/v1/people/\(personID)": [.success(status: 401, body: Data(#"{"error":"expired"}"#.utf8))],
+        ])
+        let model = AppModel(apiClient: makeClient())
+        var result: Bool?
+        let save = Task { @MainActor in
+            result = await model.savePerson(
+                id: personID,
+                mutation: PersonMutation(
+                    name: "Sam New",
+                    relationship: "friend",
+                    aliases: "Sam",
+                    expectedContactRevision: revision
+                )
+            )
+        }
+
+        for _ in 0..<100 where !StubURLProtocol.isHoldingResponse(path: mutationPath) {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: mutationPath))
+        XCTAssertNil(result, "The editor must not dismiss while the save is unresolved")
+
+        StubURLProtocol.releaseHeldResponse(path: mutationPath)
+        await save.value
+        XCTAssertEqual(result, true, "A successful server acknowledgement completes the save")
+        XCTAssertEqual(StubURLProtocol.attempts.first, "PATCH")
+    }
+}
+
+extension APIClientRetryTests {
     private enum CalendarPreflightDraftEdit: Equatable {
         case none
         case followUp
@@ -8609,5 +9088,151 @@ extension APIClientRetryTests {
         try await exercise("ready-binding-lost", outcome: .bindingLost, edit: .none)
         try await exercise("binding-lost-pending-unsaved-follow-up", outcome: .bindingLost, edit: .pendingFollowUp)
         try await exercise("binding-lost-pending-unsaved-whitespace", outcome: .bindingLost, edit: .pendingWhitespace)
+    }
+}
+
+extension APIClientRetryTests {
+    func testOwnerCallGrantFinalUsesExactlyThreeFieldsAndNoAutomaticTransportRetry() async throws {
+        StubURLProtocol.prime([.failure(URLError(.timedOut))])
+        do {
+            _ = try await makeClient().approveOwnerCallNumberGrant(id: "approval", reviewToken: "sealed-review")
+            XCTFail("A lost final response must remain ambiguous.")
+        } catch {}
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(StubURLProtocol.bodies.first)) as? [String: String])
+        XCTAssertEqual(payload, ["action": "approve_reusable_call_v2", "reviewToken": "sealed-review", "acknowledgement": "owner_call_action_and_limits_any_answerer_v2"])
+    }
+
+    func testOwnerCallGrantPreviewAndRecoveryUseExplicitV2ActionsWithoutMutationRetry() async throws {
+        let denied = Data(#"{"error":"operation unavailable"}"#.utf8)
+        let limits = OwnerCallGrantLimits.defaults
+        StubURLProtocol.prime([.success(status: 409, body: denied)])
+        do { _ = try await makeClient().previewOwnerCallNumberGrant(id: "approval", validityChoice: "7d", limits: limits) }
+        catch {}
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        let preview = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(StubURLProtocol.bodies.first)) as? [String: Any])
+        XCTAssertEqual(preview["action"] as? String, "preview_reusable_call_v2")
+        XCTAssertEqual(preview["validityChoice"] as? String, "7d")
+        XCTAssertEqual(preview["limits"] as? [String: Int], [
+            "maxCallsPerHour": limits.maxCallsPerHour,
+            "maxCallsPerDay": limits.maxCallsPerDay,
+            "maxCostUsdMicrosPerCall": limits.maxCostUsdMicrosPerCall,
+            "maxCostUsdMicrosPerDay": limits.maxCostUsdMicrosPerDay,
+        ])
+
+        StubURLProtocol.prime([.success(status: 409, body: denied)])
+        do { _ = try await makeClient().checkOwnerCallGrantOperation(id: "approval") }
+        catch {}
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        let check = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(StubURLProtocol.bodies.first)) as? [String: String])
+        XCTAssertEqual(check, ["action": "check_reusable_call_v2"])
+
+        StubURLProtocol.prime([.success(status: 409, body: denied)])
+        do { _ = try await makeClient().closeOwnerCallGrantOperation(id: "approval", closeToken: "sealed-close") }
+        catch {}
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        let close = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(StubURLProtocol.bodies.first)) as? [String: String])
+        XCTAssertEqual(close, [
+            "action": "close_reusable_call_v2",
+            "acknowledgement": "close_this_permission_operation_only_v1",
+            "closeToken": "sealed-close",
+            "confirmation": "confirmed",
+        ])
+    }
+
+    func testOwnerCallGrantRecoveryCheckPreservesUncheckedAvailability() async throws {
+        StubURLProtocol.prime([.success(status: 200, body: Data(#"{"ok":true,"status":"committed","permission":"saved","availability":"unchecked","grantId":"grant","closeToken":null,"checkedAt":"2026-10-28T12:00:00.000Z"}"#.utf8))])
+        let result = try await makeClient().checkOwnerCallGrantOperation(id: "resolved-approval")
+        XCTAssertTrue(result.ok)
+        XCTAssertEqual(result.status, "committed")
+        XCTAssertEqual(result.permission, "saved")
+        XCTAssertEqual(result.availability, "unchecked")
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+    }
+
+    @MainActor
+    func testOwnerCallGrantStale409IsDistinctFromDisabled409AndUnknownTransportResult() async throws {
+        let stale = "This review expired or changed. Review again."
+        let ambiguous = "The result is not confirmed. Check the permission operation before reviewing again."
+        for message in [stale, "Reusable owner-number calls are disabled."] {
+            StubURLProtocol.prime([.success(status: 409, body: try JSONSerialization.data(withJSONObject: ["error": message]))])
+            let model = AppModel(apiClient: makeClient())
+            let result = await model.approveOwnerCallNumberGrant(id: "approval", reviewToken: "sealed-review")
+            XCTAssertEqual(result, message == stale ? stale : ambiguous)
+            XCTAssertEqual(StubURLProtocol.attempts.filter { $0 == "POST" }.count, 1)
+        }
+    }
+}
+
+
+extension APIClientRetryTests {
+    @MainActor
+    func testHeldOwnerCallResponsesUseTheProductionPublicationBoundary() async throws {
+        func item(id: String = "owner-call-review", source: JSONValue = .object(["brief": .string("original")]), fingerprint: String = "source-v1") -> PendingApproval {
+            PendingApproval(approval: ApprovalRecord(id: id, taskId: "task", shortCode: "A1", summary: "Synthetic call", payload: source, resolutionPayload: nil, status: "pending", requestedAt: "2026-10-23T12:00:00Z", resolvedAt: nil, resolvedVia: nil, expiresAt: "2099-10-23T12:00:00Z"), taskType: "chat_turn", taskTrust: "owner", toolName: "phone.call", decision: .null, ownerNumberGrantAvailable: true, ownerCallSourceFingerprint: fingerprint)
+        }
+        func projection(_ pending: [PendingApproval]) throws -> OverviewResponse {
+            try JSONDecoder().decode(OverviewResponse.self, from: overviewBody(pending: pending))
+        }
+        let receiptBody = Data(#"{"ok":true,"taskId":"task","toolCallId":"tool","approvalId":"owner-call-review","ownerCallNumberGrant":{"policyId":"policy","grantId":"grant","expiresAt":"2099-10-30T12:00:00Z"}}"#.utf8)
+        for phase in ["preview-error", "final-success", "final-error"] {
+            for change in ["live", "source", "approval", "connection", "validity", "limits", "disappear", "new-review", "post-write-removal"] {
+                let label = "\(phase)/\(change)"
+                let approvalID = "owner-call-review-\(phase)-\(change)"
+                let path = "/api/mobile/v1/approvals/\(approvalID)"
+                let client = makeClient()
+                let model = AppModel(apiClient: client)
+                let original = item(id: approvalID)
+                model.installOwnerCallReviewProjectionForTesting(try projection([original]), connectionRevision: 0)
+                let origin = OwnerCallReviewSourceIdentity(approvalID: original.id, source: original.approval.payload, sourceFingerprint: original.ownerCallSourceFingerprint, connectionRevision: 0)
+                let lease = OwnerCallReviewPublicationLease()
+                let operation = lease.begin(source: origin, validityChoice: "7d")
+                var publications: [String] = []
+                var successfulReceipt: ApprovalResult?
+                let status = phase == "final-success" ? 200 : 409
+                let successfulBody = Data(String(decoding: receiptBody, as: UTF8.self).replacingOccurrences(of: "owner-call-review", with: approvalID).utf8)
+                let body = phase == "final-success" ? successfulBody : Data(#"{"error":"This review expired or changed. Review again."}"#.utf8)
+                StubURLProtocol.prime([], paths: [path: [.held(status: status, body: body)]])
+                let completion = Task {
+                    do {
+                        if phase == "preview-error" { _ = try await client.previewOwnerCallNumberGrant(id: original.id, validityChoice: "7d") }
+                        else { successfulReceipt = try await client.approveOwnerCallNumberGrant(id: original.id, reviewToken: "sealed-review") }
+                        lease.publish(operation, currentSource: { model.ownerCallReviewSourceIsCurrent(origin) }) { publications.append("saved/working=false") }
+                    } catch {
+                        lease.publish(operation, currentSource: { model.ownerCallReviewSourceIsCurrent(origin) }) { publications.append("error/working=false") }
+                    }
+                }
+                defer {
+                    lease.invalidate()
+                    StubURLProtocol.retireHeldResponse(path: path, testCaseID: testCaseID)
+                    completion.cancel()
+                }
+                let clock = ContinuousClock()
+                let deadline = clock.now.advanced(by: .seconds(2))
+                while !StubURLProtocol.isHoldingResponse(path: path), clock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(1))
+                }
+                guard StubURLProtocol.isHoldingResponse(path: path) else {
+                    XCTFail("Owned held response did not become ready before its monotonic deadline: " + label)
+                    throw URLError(.timedOut)
+                }
+                switch change {
+                case "source": model.installOwnerCallReviewProjectionForTesting(try projection([item(id: approvalID, source: .object(["brief": .string("changed")]), fingerprint: "source-v2")]), connectionRevision: 0)
+                case "approval": model.installOwnerCallReviewProjectionForTesting(try projection([item(id: "replacement")]), connectionRevision: 0)
+                case "connection": model.installOwnerCallReviewProjectionForTesting(try projection([original]), connectionRevision: 1)
+                case "validity": _ = lease.begin(source: origin, validityChoice: "30d")
+                case "limits": _ = lease.begin(source: origin, validityChoice: "7d", limits: OwnerCallGrantLimits(maxCallsPerHour: 2, maxCallsPerDay: 3, maxCostUsdMicrosPerCall: 1_000_000, maxCostUsdMicrosPerDay: 3_000_000))
+                case "disappear": lease.invalidate()
+                case "new-review": _ = lease.begin(source: origin, validityChoice: "7d")
+                case "post-write-removal": model.installOwnerCallReviewProjectionForTesting(try projection([]), connectionRevision: 0)
+                default: break
+                }
+                StubURLProtocol.releaseHeldResponse(path: path)
+                await completion.value
+                XCTAssertEqual(publications.count, change == "live" ? 1 : 0, label)
+                if phase == "final-success" { XCTAssertEqual(successfulReceipt?.approvalId, original.id, "A retired view must not undo or misclassify the durable response: " + label) }
+                XCTAssertEqual(StubURLProtocol.attempts, ["POST"], label)
+            }
+        }
     }
 }

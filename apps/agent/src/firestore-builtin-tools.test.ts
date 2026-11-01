@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { GRAPH_EXTRACTION_VERSION } from '@assistant/core/memory/knowledge-graph';
 import type { Db } from '@assistant/db';
 import {
@@ -186,7 +186,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         id,
         agentId: AGENT,
         content: `Anna works at ${id}`,
-        contentHash: `hash-${id}`,
+        contentHash: createHash('sha256').update(`Anna works at ${id}`).digest('hex'),
         createdAt: earlier,
         expiresAt: null,
         embedding: vector,

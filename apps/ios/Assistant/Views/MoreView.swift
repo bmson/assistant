@@ -273,7 +273,7 @@ struct MoreView: View {
                 } header: {
                     Text("Standing approvals")
                 } footer: {
-                    Text("Enabled rules let the assistant take these actions without asking each time.")
+                    Text("Enabled rules let the assistant take these actions without asking each time. Pausing or removing one rule stops that rule; another rule may still allow the same action.")
                 }
             }
         }
@@ -305,11 +305,15 @@ struct MoreView: View {
             titleVisibility: .visible,
             presenting: policyPendingDeletion
         ) { policy in
-            Button("Delete rule", role: .destructive) {
+            Button(policy.toolName == "phone.call" ? "Remove permission" : "Delete rule", role: .destructive) {
                 performSettingsAction(policy.id) { await model.deletePolicy(policy) }
             }
         } message: { policy in
-            Text("This removes “\(policy.displayName)”.")
+            if policy.toolName == "phone.call" {
+                Text("This removes the saved permission for \(policy.phoneCallRecipient ?? "this uninterpreted phone scope").")
+            } else {
+                Text("This removes “\(policy.displayName)”.")
+            }
         }
         .sheet(isPresented: $showingAgentSettings) {
             if model.workspace?.isSectionAvailable("settings") != false,
@@ -515,29 +519,121 @@ struct MoreView: View {
 
     @ViewBuilder
     private func policyRow(_ policy: WorkspacePolicy) -> some View {
-        let detail = VStack(alignment: .leading, spacing: 4) {
-            Text(policy.displayName)
+        if policy.toolName == "phone.call" {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("Call · \(policy.phoneCallRecipient ?? "Saved scope unavailable")")
+                        .font(.body.weight(.medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Text(policy.phoneCallState ?? "Saved scope unavailable")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text(policy.phoneCallLimitLine ?? "Saved scope unavailable · duration and expiry unavailable")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                policyScopeDetails(policy)
+                if needsNewPhonePermissionReview(policy) {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Button("Review a new permission") { model.present(.approvals) }
+                            .buttonStyle(.borderless)
+                        Text("from a pending owner call. This saved rule stays unchanged.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(minHeight: 44, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: 8) {
+                    if policy.enabled {
+                        Button {
+                            performSettingsAction(policy.id) {
+                                await model.setPolicy(policy, enabled: false)
+                            }
+                        } label: {
+                            Text("Pause rule")
+                                .frame(minHeight: 44)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(settingsActionInFlight != nil || model.workspace == nil)
+                    }
+                    policyActions(policy)
+                }
+            }
+        } else if usesAccessibilityLayout {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(policy.displayName)
+                    .font(.body.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Allow automatically")
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 8) {
+                    policyToggle(policy) { Text("Allow automatically") }
+                        .labelsHidden()
+                    Spacer(minLength: 0)
+                    policyActions(policy)
+                }
+                policyScopeDetails(policy)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .center, spacing: 8) {
+                    policyToggle(policy) {
+                        Text(policy.displayName)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    policyActions(policy)
+                }
+                policyScopeDetails(policy)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func policyScopeDetails(_ policy: WorkspacePolicy) -> some View {
+        if let presentation = policy.phoneCallPresentation, presentation.kind == "same_brief" {
+            PhoneCallPolicyScopePresentation(
+                policyId: policy.id,
+                presentation: presentation,
+                savedLabel: policy.label
+            )
+        } else if policy.toolName == "phone.call" {
+            DisclosureGroup("Permission details") {
+                VStack(alignment: .leading, spacing: 6) {
+                    if policy.phonePermissionKind == "owner_number" {
+                        Text(policy.scope ?? "Saved scope unavailable.")
+                        if policy.templateKey == "phone.call.owner_action.v2" {
+                            Text("Only eligible direct requests from you to call this number, within these limits, can use this permission. Future eligible calls may cover different topics or use different scripts and may share personal information from available context. Anyone may answer.")
+                        } else {
+                            Text("Requests that add a topic, script, or other instructions still need approval for that call.")
+                        }
+                        Text("The saved number match does not verify who controls it or who answers the call.")
+                    } else {
+                        Text("Saved scope unavailable. This rule cannot be interpreted.")
+                        if let raw = policy.opaqueDetails ?? policy.phoneCallPresentation?.details {
+                            Text(raw).font(.caption.monospaced()).textSelection(.enabled)
+                        }
+                    }
+                }
+                .font(.caption)
                 .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.caption)
+        } else {
             Text(policy.scope ?? policy.toolName.sentenceCaseIdentifier)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
 
-        if usesAccessibilityLayout {
-            VStack(alignment: .leading, spacing: 8) {
-                detail
-                HStack(spacing: 8) {
-                    policyToggle(policy) { Text("Allow automatically") }
-                    policyActions(policy)
-                }
-            }
-        } else {
-            HStack(alignment: .center, spacing: 8) {
-                policyToggle(policy) { detail }
-                policyActions(policy)
-            }
-        }
+    private func needsNewPhonePermissionReview(_ policy: WorkspacePolicy) -> Bool {
+        !policy.enabled || ["Expired", "Unavailable", "Saved scope unavailable"].contains(policy.phoneCallState ?? "")
     }
 
     private func policyToggle<Label: View>(
@@ -551,23 +647,159 @@ struct MoreView: View {
             }
         ), label: label)
         .accessibilityLabel(policy.displayName)
-        .accessibilityHint(policy.scope ?? policy.toolName.sentenceCaseIdentifier)
+        .accessibilityHint(policyAccessibilityHint(policy))
         .disabled(settingsActionInFlight != nil || model.workspace == nil)
+    }
+
+    private func policyAccessibilityHint(_ policy: WorkspacePolicy) -> String {
+        guard let presentation = policy.phoneCallPresentation else {
+            return policy.scope ?? policy.toolName.sentenceCaseIdentifier
+        }
+        guard presentation.kind == "same_brief" else {
+            return "Saved phone-call scope is not interpreted. Expand to read the saved rule data."
+        }
+        let duration = presentation.maxMinutes.map { "up to \($0) minutes" } ?? "duration unavailable"
+        let context = presentation.mayShare ?? "Not specified"
+        let goal = presentation.goal ?? "Not specified"
+        let mayAgreeTo = presentation.mayAgreeTo ?? "Not specified"
+        let instructions = presentation.mustNot ?? "Not specified"
+        let language = presentation.language ?? "Not specified"
+        let voicemail: String
+        switch presentation.voicemailMode {
+        case "leave_message": voicemail = "leave a voicemail"
+        case "hang_up": voicemail = "hang up on voicemail"
+        default: voicemail = "voicemail condition unavailable"
+        }
+        let savedMessage: String
+        if presentation.voicemailMode == "hang_up",
+           let message = presentation.voicemailMessage,
+           !message.isEmpty
+        {
+            savedMessage = " Saved voicemail message (not used when hanging up): \(message)."
+        } else {
+            savedMessage = ""
+        }
+        return "\(presentation.recipient ?? "Recipient unavailable"), \(duration), exact approved brief. Goal: \(goal). Context from the approved brief: \(context). May agree to: \(mayAgreeTo). Instructions in approved brief: \(instructions). Language: \(language). Voicemail: \(voicemail).\(savedMessage)"
     }
 
     private func policyActions(_ policy: WorkspacePolicy) -> some View {
         Menu {
-            Button("Delete rule", systemImage: "trash", role: .destructive) {
+            Button(policy.toolName == "phone.call" ? "Remove permission" : "Delete rule", systemImage: "trash", role: .destructive) {
                 policyPendingDeletion = policy
             }
         } label: {
             AssistantActionMenuLabel(isUpdating: settingsActionInFlight == policy.id)
         }
         .buttonStyle(.borderless)
-        .accessibilityLabel("Actions for \(policy.displayName)")
+        .accessibilityLabel(policy.toolName == "phone.call" ? "Permission actions for \(policy.phoneCallRecipient ?? "saved phone scope")" : "Actions for \(policy.displayName)")
         .disabled(settingsActionInFlight != nil || model.workspace == nil)
     }
 
+}
+
+struct PhoneCallPolicyScopePresentation: View {
+    let policyId: String
+    let presentation: WorkspacePhoneCallPolicyPresentation
+    let savedLabel: String?
+    @State private var callBriefExpanded: Bool
+
+    init(
+        policyId: String,
+        presentation: WorkspacePhoneCallPolicyPresentation,
+        savedLabel: String? = nil,
+        initiallyExpanded: Bool = false
+    ) {
+        self.policyId = policyId
+        self.presentation = presentation
+        self.savedLabel = savedLabel
+        _callBriefExpanded = State(initialValue: initiallyExpanded)
+    }
+
+    private func value(_ field: String?) -> String {
+        guard let field, !field.isEmpty else { return "Not specified" }
+        return field
+    }
+
+    private var voicemailLabel: String {
+        switch presentation.voicemailMode {
+        case "leave_message": "Leave a voicemail"
+        case "hang_up": "Hang up on voicemail"
+        default: "Voicemail condition unavailable"
+        }
+    }
+
+    var body: some View {
+        Group {
+            if presentation.kind == "same_brief" {
+                DisclosureGroup("Permission details", isExpanded: $callBriefExpanded) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("This rule repeats one exact approved call brief. A different topic or script requires a new review.")
+                            .font(.caption)
+                        Text("The saved number is the destination; a number match does not verify who answers.")
+                            .font(.caption)
+                        if let savedLabel, savedLabel != "Repeat approved call" {
+                            policyCondition("Saved title", savedLabel)
+                        }
+                        if let contactName = presentation.contactName, !contactName.isEmpty {
+                            policyCondition("Saved recipient label", contactName)
+                        }
+                        policyCondition("Recipient", value(presentation.recipient))
+                        policyCondition("Goal", value(presentation.goal))
+                        policyCondition("Maximum duration", presentation.maxMinutes.map { "\($0) minutes" } ?? "Unavailable")
+                        policyCondition("Context from the approved brief", value(presentation.mayShare))
+                        policyCondition("May agree to", value(presentation.mayAgreeTo))
+                        policyCondition("Instructions in approved brief", value(presentation.mustNot))
+                        policyCondition("Language", value(presentation.language))
+                        policyCondition("Voicemail", voicemailLabel)
+                        if presentation.voicemailMode == "leave_message" {
+                            policyCondition("Exact voicemail message", value(presentation.voicemailMessage))
+                        } else if presentation.voicemailMode == "hang_up",
+                                  !(presentation.voicemailMessage?.isEmpty ?? true) {
+                            policyCondition(
+                                "Saved voicemail message (not used when hanging up)",
+                                value(presentation.voicemailMessage)
+                            )
+                        }
+                    }
+                    .padding(.top, 6)
+                }
+                .font(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(minHeight: 44, alignment: .leading)
+                .accessibilityIdentifier("assistant.settings.policy.\(policyId).callBrief")
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Saved phone-call scope (not interpreted)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
+                    DisclosureGroup("Show saved rule data") {
+                        Text(presentation.details ?? "No saved rule data is available.")
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 6)
+                    }
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(minHeight: 44, alignment: .leading)
+                    .accessibilityIdentifier("assistant.settings.policy.\(policyId).opaqueDetails")
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func policyCondition(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label).font(.caption2.weight(.semibold))
+            Text(value).font(.caption).textSelection(.enabled)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 }
 
 private struct RemindersView: View {
@@ -777,44 +1009,50 @@ private struct MCPConnectionsView: View {
     private var usesAccessibilityLayout: Bool { dynamicTypeSize.isAccessibilitySize }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                introduction
-                if loadFailed {
-                    AssistantLoadFailureState(
-                        title: "Couldn’t refresh connected tools",
-                        message: hasLoaded || !model.mcpConnections.isEmpty ? "Previous connections are shown. Refresh before changing them." : "Try again to check your connections.",
-                        retry: { Task { await load() } }
-                    )
-                }
-                if actionFailed {
-                    AssistantInlineFailure(message: "Couldn’t confirm that change. Your entries are kept. Try again or pull to refresh.")
-                        .assistantPanel(in: colorScheme)
-                }
-                if isLoading && !hasLoaded && model.mcpConnections.isEmpty {
-                    AssistantLoadingState(title: "Loading connected tools")
-                } else if model.mcpConnections.isEmpty && !loadFailed && hasLoaded {
-                    AssistantEmptyState(
-                        "No connected tools",
-                        systemImage: "point.3.connected.trianglepath.dotted",
-                        description: "Connect a tool service for your assistant to use."
-                    )
-                } else {
-                    ForEach(model.mcpConnections) { connection in
-                        connectionCard(connection)
+        GeometryReader { viewport in
+            let safeAreaViewportWidth = max(
+                0,
+                viewport.size.width - viewport.safeAreaInsets.leading - viewport.safeAreaInsets.trailing
+            )
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    introduction
+                    if loadFailed {
+                        AssistantLoadFailureState(
+                            title: "Couldn’t refresh connected tools",
+                            message: hasLoaded || !model.mcpConnections.isEmpty ? "Previous connections are shown. Refresh before changing them." : "Try again to check your connections.",
+                            retry: { Task { await load() } }
+                        )
                     }
+                    if actionFailed {
+                        AssistantInlineFailure(message: "Couldn’t confirm that change. Your entries are kept. Try again or pull to refresh.")
+                            .assistantPanel(in: colorScheme)
+                    }
+                    if isLoading && !hasLoaded && model.mcpConnections.isEmpty {
+                        AssistantLoadingState(title: "Loading connected tools")
+                    } else if model.mcpConnections.isEmpty && !loadFailed && hasLoaded {
+                        AssistantEmptyState(
+                            "No connected tools",
+                            systemImage: "point.3.connected.trianglepath.dotted",
+                            description: "Connect a tool service for your assistant to use."
+                        )
+                    } else {
+                        ForEach(model.mcpConnections) { connection in
+                            connectionCard(connection, viewportWidth: safeAreaViewportWidth)
+                        }
+                    }
+                    addConnection
                 }
-                addConnection
+                .padding(16)
+                .padding(.bottom, 28)
             }
-            .padding(16)
-            .padding(.bottom, 28)
+            .scrollBounceBehavior(.basedOnSize)
+            .scrollDismissesKeyboard(.interactively)
+            .background(AssistantTheme.canvas(for: colorScheme).ignoresSafeArea())
+            .refreshable { await load() }
         }
-        .scrollBounceBehavior(.basedOnSize)
-        .scrollDismissesKeyboard(.interactively)
-        .background(AssistantTheme.canvas(for: colorScheme).ignoresSafeArea())
         .navigationTitle("Connected tools")
         .assistantSubmenuChrome()
-        .refreshable { await load() }
         .task { await load() }
     }
 
@@ -904,7 +1142,7 @@ private struct MCPConnectionsView: View {
         }
     }
 
-    private func connectionCard(_ connection: McpConnection) -> some View {
+    private func connectionCard(_ connection: McpConnection, viewportWidth: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 12) {
                 AssistantGlyph(systemName: connection.statusIcon, tint: statusColor(connection))
@@ -957,7 +1195,7 @@ private struct MCPConnectionsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            connectionActions(connection)
+            connectionActions(connection, viewportWidth: viewportWidth)
         }
         .assistantCard(in: colorScheme)
     }
@@ -970,66 +1208,23 @@ private struct MCPConnectionsView: View {
     }
 
     @ViewBuilder
-    private func connectionActions(_ connection: McpConnection) -> some View {
+    private func connectionActions(_ connection: McpConnection, viewportWidth: CGFloat) -> some View {
         let isWorking = workingConnectionID == connection.id
-        if usesAccessibilityLayout {
-            VStack(spacing: 9) {
-                actionButton("Refresh", icon: "arrow.clockwise", connection: connection, action: "refresh", prominent: true, working: isWorking)
-                actionButton(connection.enabled ? "Pause" : "Enable", icon: connection.enabled ? "pause.fill" : "play.fill", connection: connection, action: connection.enabled ? "disable" : "enable", prominent: false, working: isWorking)
-                deleteButton(connection, working: isWorking)
+        ConnectedToolActionRow(
+            connection: connection,
+            viewportWidth: viewportWidth,
+            usesAccessibilityLayout: usesAccessibilityLayout,
+            working: isWorking,
+            disabled: workingConnectionID != nil || isAdding || ((isLoading || loadFailed) && !hasLoaded),
+            onAction: { perform(connection, action: $0) },
+            onRemove: {
+                guard workingConnectionID == nil, !isAdding,
+                      !(isLoading && !hasLoaded), !(loadFailed && !hasLoaded) else { return }
+                workingConnectionID = connection.id
+                actionFailed = !(await model.deleteMcpConnection(id: connection.id))
+                workingConnectionID = nil
             }
-        } else {
-            HStack(spacing: 9) {
-                actionButton("Refresh", icon: "arrow.clockwise", connection: connection, action: "refresh", prominent: true, working: isWorking)
-                actionButton(connection.enabled ? "Pause" : "Enable", icon: connection.enabled ? "pause.fill" : "play.fill", connection: connection, action: connection.enabled ? "disable" : "enable", prominent: false, working: isWorking)
-                deleteButton(connection, working: isWorking)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func actionButton(
-        _ title: String,
-        icon: String,
-        connection: McpConnection,
-        action: String,
-        prominent: Bool,
-        working: Bool
-    ) -> some View {
-        if prominent {
-            Button { perform(connection, action: action) } label: {
-                actionButtonLabel(title, icon: icon, working: working)
-            }
-            .buttonStyle(AssistantActionButtonStyle(kind: .primary))
-            .tint(AssistantTheme.accent(for: colorScheme))
-            .disabled(workingConnectionID != nil || isAdding || ((isLoading || loadFailed) && !hasLoaded))
-        } else {
-            Button { perform(connection, action: action) } label: {
-                actionButtonLabel(title, icon: icon, working: working)
-            }
-            .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
-            .tint(AssistantTheme.inkMuted(for: colorScheme))
-            .disabled(workingConnectionID != nil || isAdding || ((isLoading || loadFailed) && !hasLoaded))
-        }
-    }
-
-    private func actionButtonLabel(_ title: String, icon: String, working: Bool) -> some View {
-        HStack(spacing: 6) {
-            if working { ProgressView().controlSize(.small) }
-            else { Image(systemName: icon) }
-            Text(working ? "Working…" : title)
-        }
-        .frame(maxWidth: .infinity, minHeight: 36)
-    }
-
-    private func deleteButton(_ connection: McpConnection, working: Bool) -> some View {
-        AssistantConfirmationButton("Remove", hint: "Deletes \(connection.name), its tools, and saved credential.") {
-            guard workingConnectionID == nil, !isAdding, !(isLoading && !hasLoaded), !(loadFailed && !hasLoaded) else { return }
-            workingConnectionID = connection.id
-            actionFailed = !(await model.deleteMcpConnection(id: connection.id))
-            workingConnectionID = nil
-        }
-        .disabled(workingConnectionID != nil || working || isAdding || ((isLoading || loadFailed) && !hasLoaded))
+        )
     }
 
     private func statusTag(_ connection: McpConnection) -> some View {
@@ -1096,6 +1291,241 @@ private struct MCPConnectionsView: View {
         }
     }
 }
+
+struct ConnectedToolActionRow: View {
+    @ScaledMetric(relativeTo: .subheadline) private var iconTextSpacing: CGFloat = 8
+    let connection: McpConnection
+    let viewportWidth: CGFloat
+    let usesAccessibilityLayout: Bool
+    let working: Bool
+    let disabled: Bool
+    let onAction: (String) -> Void
+    let onRemove: () async -> Void
+#if DEBUG
+    let layoutReporter: (@MainActor ([String: CGRect]) -> Void)?
+    let initiallyArmedForLayoutReview: Bool
+    let confirmationLabelReporter: (@MainActor (String) -> Void)?
+
+    init(
+        connection: McpConnection,
+        viewportWidth: CGFloat,
+        usesAccessibilityLayout: Bool,
+        working: Bool,
+        disabled: Bool,
+        onAction: @escaping (String) -> Void,
+        onRemove: @escaping () async -> Void,
+        layoutReporter: (@MainActor ([String: CGRect]) -> Void)? = nil,
+        initiallyArmedForLayoutReview: Bool = false,
+        confirmationLabelReporter: (@MainActor (String) -> Void)? = nil
+    ) {
+        self.connection = connection
+        self.viewportWidth = viewportWidth
+        self.usesAccessibilityLayout = usesAccessibilityLayout
+        self.working = working
+        self.disabled = disabled
+        self.onAction = onAction
+        self.onRemove = onRemove
+        self.layoutReporter = layoutReporter
+        self.initiallyArmedForLayoutReview = initiallyArmedForLayoutReview
+        self.confirmationLabelReporter = confirmationLabelReporter
+    }
+#else
+    init(
+        connection: McpConnection,
+        viewportWidth: CGFloat,
+        usesAccessibilityLayout: Bool,
+        working: Bool,
+        disabled: Bool,
+        onAction: @escaping (String) -> Void,
+        onRemove: @escaping () async -> Void
+    ) {
+        self.connection = connection
+        self.viewportWidth = viewportWidth
+        self.usesAccessibilityLayout = usesAccessibilityLayout
+        self.working = working
+        self.disabled = disabled
+        self.onAction = onAction
+        self.onRemove = onRemove
+    }
+#endif
+
+    var body: some View {
+        Group {
+            if usesAccessibilityLayout || viewportWidth <= 360 {
+                VStack(spacing: 8) {
+                    actionButton("Refresh", icon: "arrow.clockwise", action: "refresh", prominent: true, checksIntrinsicWidth: false)
+                    toggleButton(checksIntrinsicWidth: false)
+                    deleteButton(checksIntrinsicWidth: false)
+                }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        actionButton("Refresh", icon: "arrow.clockwise", action: "refresh", prominent: true, checksIntrinsicWidth: true)
+                            .frame(maxWidth: .infinity)
+                        toggleButton(checksIntrinsicWidth: true)
+                            .frame(maxWidth: .infinity)
+                        deleteButton(checksIntrinsicWidth: true)
+                            .frame(maxWidth: .infinity)
+                    }
+
+                    VStack(spacing: 8) {
+                        actionButton("Refresh", icon: "arrow.clockwise", action: "refresh", prominent: true, checksIntrinsicWidth: false)
+                        toggleButton(checksIntrinsicWidth: false)
+                        deleteButton(checksIntrinsicWidth: false)
+                    }
+                }
+            }
+        }
+#if DEBUG
+        .background {
+            if layoutReporter != nil { measureFrame("row.container") }
+        }
+        .onPreferenceChange(ConnectedToolActionLayoutPreferenceKey.self) { layoutReporter?($0) }
+#endif
+    }
+
+    @ViewBuilder
+    private func actionButton(
+        _ title: String,
+        icon: String,
+        action: String,
+        prominent: Bool,
+        checksIntrinsicWidth: Bool
+    ) -> some View {
+        let id = prominent ? "refresh" : "toggle"
+        let button = Button { onAction(action) } label: {
+            actionButtonLabel(title, icon: icon, id: id, checksIntrinsicWidth: checksIntrinsicWidth)
+        }
+        .buttonStyle(AssistantActionButtonStyle(kind: prominent ? .primary : .secondary, fillsWidth: true, minimumHeight: 48))
+        .tint(prominent ? AssistantTheme.accent(for: colorScheme) : AssistantTheme.inkMuted(for: colorScheme))
+        .disabled(working || disabled)
+        .accessibilityIdentifier("connected-tools.\(id)")
+#if DEBUG
+        measured(button, id: "\(id).button")
+#else
+        button
+#endif
+    }
+
+    @ViewBuilder
+    private func toggleButton(checksIntrinsicWidth: Bool) -> some View {
+        actionButton(
+            connection.enabled ? "Pause" : "Enable",
+            icon: connection.enabled ? "pause.fill" : "play.fill",
+            action: connection.enabled ? "disable" : "enable",
+            prominent: false,
+            checksIntrinsicWidth: checksIntrinsicWidth
+        )
+    }
+
+    private func actionButtonLabel(_ title: String, icon: String, id: String, checksIntrinsicWidth: Bool) -> some View {
+        ZStack {
+            ForEach(Array([
+                ("arrow.clockwise", "Refresh"),
+                ("pause.fill", "Pause"),
+                ("play.fill", "Enable"),
+                ("arrow.clockwise", "Working…"),
+                ("trash", "Remove"),
+                ("checkmark", "Confirm?")
+            ].enumerated()), id: \.offset) { reservation in
+                HStack(spacing: iconTextSpacing) {
+                    AssistantIntrinsicActionGlyph(systemImage: reservation.element.0, working: reservation.element.1 == "Working…")
+                    Text(reservation.element.1)
+                }
+                .hidden()
+            }
+            let glyph = AssistantIntrinsicActionGlyph(systemImage: icon, working: working)
+#if DEBUG
+                .reportingIntrinsicLayout(layoutReporter.map { report in
+                    { symbol, frame in report(["\(id).intrinsic.\(symbol)": frame]) }
+                })
+#endif
+            let text = Text(working ? "Working…" : title)
+                .fixedSize(horizontal: checksIntrinsicWidth, vertical: true)
+#if DEBUG
+            let measuredGlyph = measured(glyph, id: "\(id).glyph")
+            let measuredText = measured(text, id: "\(id).text")
+#else
+            let measuredGlyph = glyph
+            let measuredText = text
+#endif
+            let visibleGroup = HStack(spacing: iconTextSpacing) {
+                measuredGlyph
+                measuredText
+            }
+#if DEBUG
+            measured(visibleGroup, id: "\(id).group")
+#else
+            visibleGroup
+#endif
+        }
+        .fixedSize(horizontal: checksIntrinsicWidth, vertical: false)
+    }
+
+    private func deleteButton(checksIntrinsicWidth: Bool) -> some View {
+        let button = AssistantConfirmationButton(
+            "Remove",
+            hint: "Deletes \(connection.name), its tools, and saved credential.",
+            fillsWidth: true,
+            minimumHeight: 48,
+            reservedWidthLabels: ["Refresh", "Pause", "Enable", "Working…"],
+            checksIntrinsicWidth: checksIntrinsicWidth,
+            centersReservedGroup: true
+        ) {
+            await onRemove()
+        }
+#if DEBUG
+        let seededButton = initiallyArmedForLayoutReview ? button.initiallyArmedForLayoutReview() : button
+        let observedButton = seededButton
+            .reportingConfirmationLabel(confirmationLabelReporter)
+            .reportingLayout(layoutReporter.map { report in
+                { component, frame in report(["remove.\(component)": frame]) }
+            })
+#else
+        let observedButton = button
+#endif
+        let control = observedButton
+            .disabled(working || disabled)
+            .accessibilityIdentifier("connected-tools.remove")
+#if DEBUG
+        return measured(control, id: "remove.button")
+#else
+        return control
+#endif
+    }
+
+    @Environment(\.colorScheme) private var colorScheme
+
+#if DEBUG
+    private func measureFrame(_ id: String) -> some View {
+        GeometryReader { proxy in
+            Color.clear.preference(
+                key: ConnectedToolActionLayoutPreferenceKey.self,
+                value: [id: proxy.frame(in: .global)]
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func measured<Content: View>(_ content: Content, id: String) -> some View {
+        if layoutReporter != nil {
+            content.background { measureFrame(id) }
+        } else {
+            content
+        }
+    }
+#endif
+}
+
+#if DEBUG
+private struct ConnectedToolActionLayoutPreferenceKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
+    }
+}
+#endif
 
 private enum MCPField: Hashable {
     case name
