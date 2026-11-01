@@ -145,9 +145,11 @@ or unbounded prior credential lifetime leaves quiescence UNKNOWN. Workflow statu
 alone is not process death or token revocation. Bound maximum old-writer credential
 lifetime/hosted teardown from existing reviewed auth/source/evidence; if that cannot
 be established without additional access, STOP and report the precise missing fact.
-4. Only after identity checks, use existing WIF and pinned SDK capability to perform
+4. Only after identity checks, use the private RAM access token from the budgeted
+existing WIF exchange and DIRECT budget-owned fetch (no SDK process) to perform
 at most THREE Cloud Run native GETs: fixed assistant-web and the two pinned immutable
-revisions.2MiB/body,15s/call, no listing or arbitrary target. Record bounded raw facts
+revisions. Each is one of the three native slots in the shared20-request counter
+and120s deadline.2MiB/body,15s/call, no listing or arbitrary target. Record bounded raw facts
 privately and publish allowlisted hashes/UID/etag/generation/known row facts. Check
 current topology, proposed annotation key presence, total-map size, service/template/
 image/tagURI identities, settled state and genesis expectations. Wrong/unknown head,
