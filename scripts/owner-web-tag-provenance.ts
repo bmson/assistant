@@ -485,19 +485,12 @@ function parseWebManifest(bytes: Uint8Array): WebManifest {
       (peer.max as number) < (peer.min as number)
     )
       return fail('Release component API contract is invalid');
-    const schema = object(component.schema, ['postgres', 'firestore']);
-    for (const driver of ['postgres', 'firestore'] as const) {
-      const range = object(schema[driver], ['min', 'max']);
-      if (
-        !Number.isSafeInteger(range.min) ||
-        !Number.isSafeInteger(range.max) ||
-        (range.min as number) < 0 ||
-        (range.max as number) < (range.min as number)
-      )
-        return fail('Release component schema range is invalid');
-    }
-    const range = schema[String(manifest.storageDriver)] as ObjectValue;
+    const range = object(component.schema, ['min', 'max']);
     if (
+      !Number.isSafeInteger(range.min) ||
+      !Number.isSafeInteger(range.max) ||
+      (range.min as number) < 0 ||
+      (range.max as number) < (range.min as number) ||
       (manifest.schemaVersion as number) < (range.min as number) ||
       (manifest.schemaVersion as number) > (range.max as number)
     )

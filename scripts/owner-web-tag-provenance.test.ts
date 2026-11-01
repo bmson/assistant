@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { createManifest } from '../infra/gcp/release-manifest.mjs';
 import {
   CREATION_ARTIFACT_MEMBER,
   creationArtifactName,
@@ -31,25 +32,26 @@ const runMetadata = {
 const uri = 'https://resume-123456789-2---assistant-web-3gimfiaifa-uw.a.run.app';
 
 function releaseManifest() {
-  const manifest = {
-    format: 1,
+  const manifest = createManifest({
     release: source,
+    imageRoot: 'us-west1-docker.pkg.dev/bmson-assistant/assistant',
     selected: ['web'],
     storageDriver: 'postgres',
     schemaVersion: 132,
-    components: {
-      web: {
-        image,
-        digest: imageDigest,
-        apiContract: 1,
-        peerApi: { min: 1, max: 1 },
-        schema: {
-          postgres: { min: 132, max: 133 },
-          firestore: { min: 1, max: 133 },
+    digests: { web: imageDigest },
+    contract: {
+      components: {
+        web: {
+          apiContract: 1,
+          peerApi: { min: 1, max: 1 },
+          schema: {
+            postgres: { min: 132, max: 133 },
+            firestore: { min: 1, max: 133 },
+          },
         },
       },
     },
-  };
+  });
   return {
     ...manifest,
     manifestDigest: sha256(JSON.stringify(manifest)),
@@ -203,6 +205,12 @@ function fixture(kind: 'candidate' | 'resume' = 'resume') {
 }
 
 describe('protected web-tag creation provenance resolver', () => {
+  it('accepts the flat selected-driver schema emitted by release-manifest.mjs', () => {
+    const f = fixture();
+    expect(f.manifest.components.web.schema).toEqual({ min: 132, max: 133 });
+    expect(resolveProtectedOwnedWebTag(f.input).image).toBe(image);
+  });
+
   it('binds a resume tag to its protected run artifact, manifest, immutable revision and exact URI', () => {
     const f = fixture();
     expect(resolveProtectedOwnedWebTag(f.input)).toEqual({
