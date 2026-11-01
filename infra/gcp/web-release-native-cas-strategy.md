@@ -18,7 +18,7 @@ web writer. The earlier installed586 finding is not production576 evidence.
 The official [Service patch API](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services/patch)
 supports explicit field masks and returns an operation. The official
 [Service/RevisionTemplate contract](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services)
-defines the revision template, optional automatically generated revision name,
+defines the revision template, optional explicit revision name,
 explicit revision traffic targets, etag, generation and reconciliation fields.
 Selecting `updateMask=template` to leave explicit traffic unchanged is a design
 inference from these field-mask semantics; this has not been exercised against
@@ -32,8 +32,9 @@ before traffic must be explicit REVISION-only, a single unambiguous100 allocatio
 with exact retained tag proofs and tombstones checked. One CAS PATCH body is exactly
 `{name,etag,template}`, query `updateMask=template`. Copy the complete native template
 in memory; change only the manifest-bound image, the enumerated existing release
-environment keys, and omit the prior template revision name so the API generates
-a new one. Preserve every other template/service setting, environment/secret entry,
+environment keys, and set a deterministic new template revision name derived from role, protected
+run/attempt and source prefix. Refuse an existing identity; never reuse it for a
+second create. Preserve every other template/service setting, environment/secret entry,
 service account, resource/scaling/network/timeout field. Reject duplicate release
 environment keys, unsupported templates or unexpected diffs instead of reconstructing
 an incomplete template. No allowMissing or forceNewRevision, no traffic field, tag,
@@ -49,7 +50,10 @@ retained tag bindings/URIs and root/URL set unchanged. All service settings outs
 the permitted template delta remain equal. Record a native creation receipt before
 any alias or HTTP probe. Do not log raw template/environment/config values. A
 failed or uncertain create holds; never repeat it or discover revisions by listing.
-Use only the new settled latest identity and fixed revision GET for its proof.
+Require the new settled latest identity to equal that deterministic name and use
+only its fixed revision GET for proof. A bound operation may be recovered only by
+GET of that same operation and exact identity; a lost operation response stays
+unknown and cannot be adopted merely because a revision now exists.
 
 B. **Change traffic only.** Use one independently planned CAS PATCH body exactly
 `{name,etag,traffic}`, query `updateMask=traffic`. Allowed enum modes are attachP,
@@ -158,3 +162,29 @@ No source test establishes actual provider acceptance or serving delivery. Backe
 serving/source/readiness/delivery-guard restoration still precede the already
 conditionally authorized matching phone build/install. Retention remains
 `CURRENT_ONLY_CLEANUP=false`, owned by the manager, with existing serving untouched.
+
+## Pure-model boundary in this source step
+
+`owner-web-release-lifecycle-model.ts` is a pure reducer over supplied snapshots and
+proof projections. It does not read a file/provider, obtain credentials, poll an
+operation, send a request or wire a release. Creation plans use deterministic
+`assistant-web-{p|r}-{run}-{attempt}-{sourcePrefix}` names with explicit template
+field mask; attach/promotion/closure plans have traffic-only masks. Complete
+private templates stay in memory in the prospective request; receipts retain hashes.
+The future protected adapter must construct the proof projections from bounded
+native responses and verify durable receipt provenance/chains; a supplied boolean,
+hash or source-only reducer output is not independent runtime authority.
+
+The model stores unknown attempts without allowing another plan. With no bound
+operation, an observed revision cannot authorize adoption or duplicate creation.
+With a bound operation, only terminal success for that exact fixed-region operation,
+fixed service response and exact new state can settle it. Retirement attempts and
+closures conservatively tombstone possible removals BEFORE mutation. A held
+retirement cannot reset capture or restore the old aliases. Existing retirement
+executor/drain evidence is consumed, not replaced by this model.
+
+Already-paused R recovery has a read-only checkpoint rather than a redundant PATCH.
+If verified R was never attached, a separate supplied full600s drain proof closes
+recovery without inventing an alias. If attached but still0, closeR follows the
+read-only checkpoint. If R was promoted100, a new repauseP CAS plan is necessary.
+No unknown attempt can enter those confirmed-state recovery paths.
