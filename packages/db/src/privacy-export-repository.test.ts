@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { nextOwnerCorrection } from '@assistant/persistence';
 import { describe, expect, it } from 'vitest';
 import type { Db } from './client.js';
 import { createDb } from './client.js';
@@ -48,6 +49,26 @@ describe('PostgreSQL privacy export repository', () => {
           const forgottenId = randomUUID();
           const forgottenHash = randomUUID();
           const activeContentHash = randomUUID();
+          const correctedId = randomUUID();
+          const correctedContent = 'Owner-corrected privacy export test fact';
+          const correctedHash = createHash('sha256').update(correctedContent).digest('hex');
+          const ownerCorrection = nextOwnerCorrection({
+            previous: null,
+            priorContentHash: createHash('sha256')
+              .update('Previous privacy export note')
+              .digest('hex'),
+            currentContentHash: correctedHash,
+            correctedAt: new Date('2026-10-26T00:00:00.000Z'),
+          });
+          await tx.insert(memories).values({
+            id: correctedId,
+            agentId: configured[0].id,
+            category: 'knowledge',
+            kind: 'fact',
+            content: correctedContent,
+            contentHash: correctedHash,
+            ownerCorrection,
+          });
           await tx.insert(memories).values({
             id,
             agentId: configured[0].id,
@@ -259,6 +280,7 @@ describe('PostgreSQL privacy export repository', () => {
             quarantined: false,
             domain: null,
             ownerConfirmed: false,
+            ownerCorrection: null,
             pinned: false,
             source: null,
             createdAt: expect.any(Date),
@@ -266,6 +288,17 @@ describe('PostgreSQL privacy export repository', () => {
           });
           expect(row).not.toHaveProperty('embedding');
           expect(row).not.toHaveProperty('contentHash');
+          const corrected = result.memories.find((candidate) => candidate.id === correctedId);
+          expect(corrected).toEqual({
+            ...row,
+            id: correctedId,
+            content: correctedContent,
+            ownerCorrection,
+            createdAt: expect.any(Date),
+          });
+          expect(corrected).not.toHaveProperty('embedding');
+          expect(corrected).not.toHaveProperty('contentHash');
+          expect(JSON.stringify(corrected)).not.toContain('Previous privacy export note');
           expect(result).not.toHaveProperty('memoryEmbeddingRefreshes');
           expect(JSON.stringify(result)).not.toContain('preparedVector');
           expect(JSON.stringify(result)).not.toContain('test-generation');

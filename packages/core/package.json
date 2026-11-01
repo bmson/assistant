@@ -79,7 +79,9 @@
     "./workflow/self-repair": "./src/workflow/self-repair.ts",
     "./workflow/repair-github": "./src/workflow/repair-github.ts",
     "./workflow/repair-hosted": "./src/workflow/repair-hosted.ts",
-    "./decisions/jev": "./src/decisions/jev.ts"
+    "./decisions/jev": "./src/decisions/jev.ts",
+    "./memory/owner-family-fact": "./src/memory/owner-family-fact.ts",
+    "./memory/owner-family-presentation": "./src/memory/owner-family-presentation.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

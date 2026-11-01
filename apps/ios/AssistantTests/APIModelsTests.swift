@@ -4,6 +4,27 @@ import CoreLocation
 @testable import Assistant
 
 extension APIModelsTests {
+    func testPersonProfileContactTreatsMissingIdentityRevisionAsUnsupportedLegacyRead() throws {
+        let legacy = try JSONDecoder().decode(
+            PersonProfileContact.self,
+            from: Data(#"{"id":"contact-1","name":"Rae","aliases":[],"relationship":"friend","trust":"known"}"#.utf8)
+        )
+        XCTAssertNil(legacy.identityRevision)
+
+        let revision = String(repeating: "a", count: 64)
+        let current = try JSONDecoder().decode(
+            PersonProfileContact.self,
+            from: Data(#"{"id":"contact-1","name":"Rae","aliases":[],"relationship":"friend","trust":"known","identityRevision":"\#(revision)"}"#.utf8)
+        )
+        XCTAssertEqual(current.identityRevision, revision)
+
+        let malformed = try JSONDecoder().decode(
+            PersonProfileContact.self,
+            from: Data(#"{"id":"contact-1","name":"Rae","aliases":[],"relationship":"friend","trust":"known","identityRevision":42}"#.utf8)
+        )
+        XCTAssertNil(malformed.identityRevision)
+    }
+
     func testWorkspaceCostsAcceptsAdditiveBillingCoverageAndLegacyPayloads() throws {
         let decoder = JSONDecoder()
         let legacy = try decoder.decode(

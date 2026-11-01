@@ -15,6 +15,7 @@ import { loadConfig } from '@assistant/config';
 import Link from 'next/link';
 import { BrowseFact } from '@/app/profile/browse-fact';
 import type { FactView } from '@/app/profile/fact-row';
+import { MemoryNavigation } from '@/app/profile/memory-navigation';
 import { requireOwner } from '@/auth';
 import {
   getFirestoreKnowledgeWorkspace,
@@ -22,6 +23,7 @@ import {
 } from '@/lib/firestore-knowledge';
 import { relativeTime } from '@/lib/format';
 import { entityKindLabel } from '@/lib/knowledge';
+import { memoryNoteHref } from '@/lib/memory-note-context';
 import { withPostgresMemoryBrowseRead } from '@/lib/server';
 import {
   btn,
@@ -34,6 +36,8 @@ import {
   segmentedItemClass,
   selectClass,
 } from '@/lib/ui';
+import { ConnectionsFilters } from './connections-filters';
+import { ConnectionsList } from './connections-list';
 import { KnowledgeMap } from './knowledge-map';
 
 export const metadata = { title: 'Knowledge' };
@@ -77,11 +81,12 @@ function fact(
       ? `${memory.validFrom.toISOString().slice(0, 10)}–${memory.validUntil?.toISOString().slice(0, 10) ?? 'now'}`
       : '',
     mapHref: href({ ...context, view: 'map', memory: memory.id }),
+    noteHref: memoryNoteHref(memory.id, href({ ...context, view: 'library' })) ?? undefined,
   };
 }
 /** Reuse bounded queries; no cleanup/header scan is needed for PostgreSQL browse. */
 async function loadWorkspace(
-  view: 'library' | 'map',
+  view: 'library' | 'map' | 'connections',
   libraryInput: LibraryInput,
   mapInput: MapInput,
 ) {
@@ -137,8 +142,8 @@ export default async function KnowledgePage({
 }) {
   const owner = await requireOwner();
   const raw = await searchParams;
-  const view: 'library' | 'map' =
-    raw.view === 'library' || raw.view === 'map'
+  const view: 'library' | 'map' | 'connections' =
+    raw.view === 'library' || raw.view === 'map' || raw.view === 'connections'
       ? raw.view
       : id(raw.entity) || raw.mode === 'map'
         ? 'map'
@@ -222,163 +227,181 @@ export default async function KnowledgePage({
     <PageShell size="wide">
       <PageHeader
         back={{ href: '/profile', label: 'Memory' }}
-        title="Knowledge"
+        title={view === 'connections' ? 'Connections' : 'Knowledge'}
         intro="Browse saved notes and their connections."
       />
-      <p className="mt-4 text-sm text-muted">
-        Browse only. Editing and cleanup are unavailable here.
-      </p>
+      <MemoryNavigation current={view === 'library' ? 'notes' : 'connections'} />
+      {view !== 'connections' ? (
+        <p className="mt-4 text-sm text-muted">
+          Open a saved note or person to review available edits. Editing availability is checked
+          with its source.
+        </p>
+      ) : null}
       <nav aria-label="Knowledge views" className={`${segmentedControlClass} mt-5`}>
-        {(['library', 'map'] as const).map((item) => (
+        {(view === 'connections'
+          ? (['connections', 'map'] as const)
+          : (['library', 'connections', 'map'] as const)
+        ).map((item) => (
           <Link
             key={item}
             href={href({ ...retained, view: item })}
             aria-current={view === item ? 'page' : undefined}
             className={view === item ? segmentedItemActiveClass : segmentedItemClass}
           >
-            {item === 'library' ? 'Library' : 'Map'}
+            {item === 'library' ? 'Library' : item === 'connections' ? 'Connections list' : 'Map'}
           </Link>
         ))}
       </nav>
-      <form
-        method="get"
-        action="/profile/knowledge"
-        className="mt-5 grid min-w-0 gap-3 rounded-2xl bg-sunken/35 p-3 md:grid-cols-3"
-      >
-        <input type="hidden" name="view" value={view} />
-        {Object.entries(retained)
-          .filter(
-            ([key, value]) =>
-              value &&
-              ![
-                'q',
-                ...(view === 'library'
-                  ? ['state', 'filter', 'subject', 'domain', 'source', 'age', 'connectivity']
-                  : ['kind', 'family', 'review']),
-              ].includes(key),
-          )
-          .map(([key, value]) => (
-            <input key={key} type="hidden" name={key} value={String(value)} />
-          ))}
-        <label className="grid min-w-0 gap-1 text-sm">
-          Search {view === 'library' ? 'saved notes' : 'items'}
-          <input name="q" maxLength={120} defaultValue={query} className={inputClass} />
-        </label>
-        {view === 'library' && filters ? (
-          <>
-            <label className="grid gap-1 text-sm">
-              Status
-              <select name="state" defaultValue={state} className={selectClass}>
-                <option value="in-use">In use</option>
-                <option value="review">Held for review</option>
-              </select>
-            </label>
-            <label className="grid gap-1 text-sm">
-              Verification
-              <select name="filter" defaultValue={filter} className={selectClass}>
-                <option value="all">All</option>
-                <option value="verified">Verified</option>
-                <option value="untidied">Not tidied</option>
-              </select>
-            </label>
-            <label className="grid gap-1 text-sm">
-              Subject
-              <select name="subject" defaultValue={subject ?? ''} className={selectClass}>
-                <option value="">Everyone</option>
-                {filters.subjects.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="grid gap-1 text-sm">
-              Domain
-              <select name="domain" defaultValue={domain ?? ''} className={selectClass}>
-                <option value="">Every domain</option>
-                {domains.map((item) => (
-                  <option key={item} value={item}>
-                    {item}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="grid gap-1 text-sm">
-              Source
-              <select name="source" defaultValue={source} className={selectClass}>
-                <option value="">Every source</option>
-                {filters.sources.map((item) => (
-                  <option key={item} value={item}>
-                    {item}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="grid gap-1 text-sm">
-              Age
-              <select name="age" defaultValue={age ?? ''} className={selectClass}>
-                <option value="">Any age</option>
-                {[30, 90, 365].map((item) => (
-                  <option key={item} value={item}>
-                    Last {item} days
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="grid gap-1 text-sm">
-              Connections
-              <select name="connectivity" defaultValue={connectivity} className={selectClass}>
-                <option value="all">Any status</option>
-                <option value="connected">Connected</option>
-                <option value="unconnected">Not connected</option>
-              </select>
-            </label>
-          </>
-        ) : (
-          <>
-            <label className="grid gap-1 text-sm">
-              Item type
-              <select name="kind" defaultValue={kind} className={selectClass}>
-                <option value="">All types</option>
-                {['person', 'organization', 'project', 'place', 'event', 'date', 'topic'].map(
-                  (item) => (
-                    <option key={item} value={item}>
-                      {entityKindLabel(item)}
+      {view === 'connections' ? (
+        <ConnectionsFilters
+          query={query}
+          kind={kind}
+          family={family}
+          review={review}
+          families={families}
+          retained={retained}
+        />
+      ) : (
+        <form
+          method="get"
+          action="/profile/knowledge"
+          className="mt-5 grid min-w-0 gap-3 rounded-2xl bg-sunken/35 p-3 md:grid-cols-3"
+        >
+          <input type="hidden" name="view" value={view} />
+          {Object.entries(retained)
+            .filter(
+              ([key, value]) =>
+                value &&
+                ![
+                  'q',
+                  ...(view === 'library'
+                    ? ['state', 'filter', 'subject', 'domain', 'source', 'age', 'connectivity']
+                    : ['kind', 'family', 'review']),
+                ].includes(key),
+            )
+            .map(([key, value]) => (
+              <input key={key} type="hidden" name={key} value={String(value)} />
+            ))}
+          <label className="grid min-w-0 gap-1 text-sm">
+            Search {view === 'library' ? 'saved notes' : 'items by name'}
+            <input name="q" maxLength={120} defaultValue={query} className={inputClass} />
+          </label>
+          {view === 'library' && filters ? (
+            <>
+              <label className="grid gap-1 text-sm">
+                Status
+                <select name="state" defaultValue={state} className={selectClass}>
+                  <option value="in-use">In use</option>
+                  <option value="review">Held for review</option>
+                </select>
+              </label>
+              <label className="grid gap-1 text-sm">
+                Verification
+                <select name="filter" defaultValue={filter} className={selectClass}>
+                  <option value="all">All</option>
+                  <option value="verified">Verified</option>
+                  <option value="untidied">Not tidied</option>
+                </select>
+              </label>
+              <label className="grid gap-1 text-sm">
+                Subject
+                <select name="subject" defaultValue={subject ?? ''} className={selectClass}>
+                  <option value="">Everyone</option>
+                  {filters.subjects.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.label}
                     </option>
-                  ),
-                )}
-              </select>
-            </label>
-            <label className="grid gap-1 text-sm">
-              Relationship
-              <select name="family" defaultValue={family} className={selectClass}>
-                <option value="">All relationships</option>
-                {families.map((item) => (
-                  <option key={item} value={item}>
-                    {item}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="grid gap-1 text-sm">
-              Review status
-              <select name="review" defaultValue={review} className={selectClass}>
-                <option value="all">All</option>
-                <option value="confirmed">Confirmed</option>
-                <option value="unreviewed">Unreviewed</option>
-              </select>
-            </label>
-          </>
-        )}
-        <div className="flex flex-wrap items-end gap-2">
-          <button className={btn.primary} type="submit">
-            Apply
-          </button>
-          <Link className={btn.outline} href={href({ view })}>
-            Clear filters
-          </Link>
-        </div>
-      </form>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-1 text-sm">
+                Domain
+                <select name="domain" defaultValue={domain ?? ''} className={selectClass}>
+                  <option value="">Every domain</option>
+                  {domains.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-1 text-sm">
+                Source
+                <select name="source" defaultValue={source} className={selectClass}>
+                  <option value="">Every source</option>
+                  {filters.sources.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-1 text-sm">
+                Age
+                <select name="age" defaultValue={age ?? ''} className={selectClass}>
+                  <option value="">Any age</option>
+                  {[30, 90, 365].map((item) => (
+                    <option key={item} value={item}>
+                      Last {item} days
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-1 text-sm">
+                Connections
+                <select name="connectivity" defaultValue={connectivity} className={selectClass}>
+                  <option value="all">Any status</option>
+                  <option value="connected">Connected</option>
+                  <option value="unconnected">Not connected</option>
+                </select>
+              </label>
+            </>
+          ) : (
+            <>
+              <label className="grid gap-1 text-sm">
+                Item type
+                <select name="kind" defaultValue={kind} className={selectClass}>
+                  <option value="">All types</option>
+                  {['person', 'organization', 'project', 'place', 'event', 'date', 'topic'].map(
+                    (item) => (
+                      <option key={item} value={item}>
+                        {entityKindLabel(item)}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </label>
+              <label className="grid gap-1 text-sm">
+                Relationship
+                <select name="family" defaultValue={family} className={selectClass}>
+                  <option value="">All relationships</option>
+                  {families.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-1 text-sm">
+                Review status
+                <select name="review" defaultValue={review} className={selectClass}>
+                  <option value="all">All</option>
+                  <option value="confirmed">Confirmed</option>
+                  <option value="unreviewed">Unreviewed</option>
+                </select>
+              </label>
+            </>
+          )}
+          <div className="flex flex-wrap items-end gap-2">
+            <button className={btn.primary} type="submit">
+              Apply
+            </button>
+            <Link className={btn.outline} href={href({ view })}>
+              Clear filters
+            </Link>
+          </div>
+        </form>
+      )}
       {(raw.entity && !entity) || (raw.memory && !memory) || (raw.subject && !subject) ? (
         <p role="status" className="mt-3 text-sm text-muted">
           An invalid item filter was not applied. Only the supported browse view is shown.
@@ -389,7 +412,7 @@ export default async function KnowledgePage({
           Map filters are retained for the Map view; they do not filter these notes.
         </p>
       ) : null}
-      {view === 'map' &&
+      {view !== 'library' &&
       (subject ||
         domain ||
         source ||
@@ -403,7 +426,7 @@ export default async function KnowledgePage({
       ) : null}
       {memory ? (
         <p className="mt-3 text-sm text-muted">
-          {view === 'map'
+          {view !== 'library'
             ? 'Source note filter'
             : 'Map source note filter retained (not applied to the Library)'}
           : {memory} ·{' '}
@@ -414,7 +437,7 @@ export default async function KnowledgePage({
       ) : null}
       {raw.view === 'cleanup' || raw.mode === 'review' || raw.mode === 'edit' ? (
         <p className="mt-3 text-sm text-muted">
-          Editing and cleanup are unavailable. Showing the browse {view}.
+          Open a saved note or person to review available edits. Cleanup is unavailable here.
         </p>
       ) : null}
       {view === 'library' && library ? (
@@ -449,6 +472,17 @@ export default async function KnowledgePage({
               </Link>
             ) : null}
           </nav>
+        </section>
+      ) : null}
+      {view === 'connections' && map ? (
+        <section className="mt-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm text-muted">
+              {map.edges.length} connections in this view.
+              {map.truncated ? ' Showing a bounded subset of connections.' : ''}
+            </p>
+          </div>
+          <ConnectionsList snapshot={map} contextHref={href({ ...retained, view })} />
         </section>
       ) : null}
       {view === 'map' && map ? (

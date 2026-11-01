@@ -46,9 +46,19 @@ function fetchEvidence(text = listing, source = url): ActionEvidence {
     toolName: 'web.fetch',
     status: 'succeeded',
     args: { url: source },
-    result: { url: source, title: 'Art Walk', text },
+    result: {
+      status: 200,
+      contentType: 'text/plain',
+      finalUrl: source,
+      title: 'Art Walk',
+      text,
+      truncated: false,
+    },
     fromCurrentTask: true,
   };
+}
+function searchEvidence(results: unknown, status = 'succeeded'): ActionEvidence {
+  return { toolName: 'web.search', status, result: { results } };
 }
 describe('public activity response source contract', () => {
   it('renders fetched source title and URL as unverified leads, ignoring all draft details', () => {
@@ -66,6 +76,132 @@ describe('public activity response source contract', () => {
       /Invented Gala|Secret Hall|11:30|\$99|sold out|invented.test|10:00|\$15/,
     );
     expect(result.groundingFallback).toContain('public_event_occurrence_unverified');
+    expect(result.publicActivityEvidenceStatus).toBe('source_leads_found');
+  });
+  it('distinguishes a completed search with no relevant evidence from a web tool failure', () => {
+    const empty = enforceResponseContract('No events exist.', [searchEvidence([])], {
+      publicActivity: scope(),
+    });
+    expect(empty.publicActivityEvidenceStatus).toBe('no_relevant_evidence');
+    expect(empty.text).toContain('searched public sources');
+    expect(empty.text).toContain('does not establish that no public events exist');
+    expect(empty.text).not.toMatch(/No events exist\./);
+
+    const failed = enforceResponseContract('No events exist.', [searchEvidence(null, 'failed')], {
+      publicActivity: scope(),
+    });
+    expect(failed.publicActivityEvidenceStatus).toBe('tool_failure');
+    expect(failed.text).toContain('lookup failed');
+    expect(failed.text).toContain('cannot tell whether matching events are listed');
+    expect(failed.text).not.toMatch(/searched public sources|No events exist\./);
+
+    const providerError = enforceResponseContract(
+      'No events exist.',
+      [{ ...searchEvidence([]), result: { ok: false, status: 503 } }],
+      { publicActivity: scope() },
+    );
+    expect(providerError.publicActivityEvidenceStatus).toBe('tool_failure');
+
+    const denied = enforceResponseContract('No events exist.', [searchEvidence([], 'denied')], {
+      publicActivity: scope(),
+    });
+    expect(denied.publicActivityEvidenceStatus).toBe('lookup_not_completed');
+    expect(denied.text).toContain('could not complete a public web lookup');
+    expect(denied.text).not.toMatch(/searched public sources|No events exist\./);
+  });
+  it('marks partially fetched and malformed search results incomplete, never as an empty search', () => {
+    const search = searchEvidence([{ title: 'Art Walk', url }]);
+    const fetchFailed = enforceResponseContract(
+      'No events exist.',
+      [search, { ...fetchEvidence(), status: 'failed', result: null }],
+      { publicActivity: scope() },
+    );
+    expect(fetchFailed.publicActivityEvidenceStatus).toBe('incomplete');
+    expect(fetchFailed.text).toContain('lookup may be incomplete');
+    expect(fetchFailed.text).toContain('does not establish that no matching events exist');
+
+    const partialWithLead = enforceResponseContract(
+      'Draft details are ignored.',
+      [
+        searchEvidence([
+          { title: 'Art Walk', url },
+          { title: 'Another event', url: 'https://example.test/another' },
+        ]),
+        fetchEvidence(),
+      ],
+      { publicActivity: scope() },
+    );
+    expect(partialWithLead.publicActivityEvidenceStatus).toBe('incomplete');
+    expect(partialWithLead.text).toContain('[Art Walk](https://example.test/art-walk)');
+
+    const failedWithLead = enforceResponseContract(
+      'Draft details are ignored.',
+      [
+        search,
+        fetchEvidence(),
+        { ...fetchEvidence('bad', 'https://example.test/other'), status: 'failed' },
+      ],
+      { publicActivity: scope() },
+    );
+    expect(failedWithLead.publicActivityEvidenceStatus).toBe('incomplete');
+    expect(failedWithLead.text).toContain('[Art Walk](https://example.test/art-walk)');
+
+    const malformed = enforceResponseContract(
+      'No events exist.',
+      [searchEvidence({ error: 'bad' })],
+      {
+        publicActivity: scope(),
+      },
+    );
+    expect(malformed.publicActivityEvidenceStatus).toBe('incomplete');
+    expect(malformed.text).toContain('lookup may be incomplete');
+
+    const malformedFetch = enforceResponseContract(
+      'No events exist.',
+      [search, { ...fetchEvidence(), result: { finalUrl: url } }],
+      { publicActivity: scope() },
+    );
+    expect(malformedFetch.publicActivityEvidenceStatus).toBe('incomplete');
+    expect(malformedFetch.text).toContain('lookup may be incomplete');
+
+    const emptyFetch = enforceResponseContract(
+      'No events exist.',
+      [search, { ...fetchEvidence(), result: { status: 200, finalUrl: url, text: '  ' } }],
+      { publicActivity: scope() },
+    );
+    expect(emptyFetch.publicActivityEvidenceStatus).toBe('incomplete');
+  });
+  it('marks missing public attempts separately and ignores private or prior-task evidence', () => {
+    const none = enforceResponseContract('No events exist.', [], { publicActivity: scope() });
+    expect(none.publicActivityEvidenceStatus).toBe('not_attempted');
+    expect(none.text).toContain('have not completed a public web lookup');
+
+    const privateAndStale = enforceResponseContract(
+      'PRIVATE_CALENDAR_CANARY and PRIVATE_MAIL_CANARY',
+      [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          result: { events: [{ summary: 'PRIVATE_CALENDAR_CANARY' }] },
+        },
+        { ...searchEvidence([]), fromCurrentTask: false },
+      ],
+      { publicActivity: scope() },
+    );
+    expect(privateAndStale.publicActivityEvidenceStatus).toBe('not_attempted');
+    expect(privateAndStale.text).not.toMatch(/PRIVATE_|No events exist/);
+  });
+  it('calls fully inspected but out-of-scope pages no relevant evidence, not a tool failure', () => {
+    const wrongYear = listing.replace('2026', '2025');
+    const result = enforceResponseContract(
+      reply,
+      [searchEvidence([{ title: 'Art Walk', url }]), fetchEvidence(wrongYear)],
+      { publicActivity: scope() },
+    );
+    expect(result.publicActivityEvidenceStatus).toBe('no_relevant_evidence');
+    expect(result.text).toContain('searched public sources');
+    expect(result.text).not.toContain('lookup failed');
+    expect(result.text).not.toContain('Art Walk');
   });
   it.each([
     ['wrong year', listing.replace('2026', '2025')],

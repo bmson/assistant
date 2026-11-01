@@ -22,6 +22,7 @@ import {
   editAndApprove,
 } from '@/app/approvals/actions';
 import { AlwaysApproveButton } from '@/app/approvals/always-approve-button';
+import { OwnerCallNumberGrant } from '@/app/approvals/owner-call-number-grant';
 import {
   btn,
   cardBodyClass,
@@ -142,6 +143,13 @@ export function ApprovalCard({
             {approval.payloadJson}
           </pre>
         </details>
+        {approval.ownerNumberGrantAvailable ? (
+          <OwnerCallNumberGrant
+            key={approval.ownerNumberGrantSourceFingerprint ?? approval.payloadJson}
+            approvalId={approval.id}
+            sourceFingerprint={approval.ownerNumberGrantSourceFingerprint ?? approval.payloadJson}
+          />
+        ) : null}
       </div>
 
       {approval.expired ? (

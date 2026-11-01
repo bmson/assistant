@@ -60,6 +60,8 @@ export interface RecallOptions {
 
 /** One injected recollection, for the UI transparency affordance (Phase 4). */
 export interface RecallSource {
+  /** Server-verified matching correction marker; no private marker bytes. */
+  ownerCorrected?: true;
   /** UTC date of the recalled discussion (YYYY-MM-DD). */
   date: string;
   /** A short human label — the segment summary or the matched line. */

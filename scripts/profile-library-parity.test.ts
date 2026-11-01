@@ -65,6 +65,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('profile library PG/Firest
     sourceTaskId: null,
     kind: 'fact',
     confidence: '0.90',
+    ownerCorrection: null,
     goalId: null,
     originTrust: 'owner',
     category: 'knowledge',

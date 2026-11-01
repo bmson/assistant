@@ -286,6 +286,19 @@ release_traffic_tag_suffix() {
   '
 }
 
+# Intrinsic source capability, never an operator-supplied recovery flag.
+release_basic_editor_forward_only() {
+  node -e '
+    const fs=require("node:fs"),path=require("node:path"),root=process.argv[1];
+    const capability=JSON.parse(fs.readFileSync(path.join(root,"release-contracts.json"),"utf8")).components?.web?.ownerEditorV1;
+    const runtime=fs.existsSync(path.resolve(root,"../../apps/web/lib/owner-editor-runtime.ts"));
+    if(capability===undefined&&!runtime){process.stdout.write("false");process.exit(0)}
+    const expected=["create_person","update_person_identity","add_family_relationship","correct_owner_family_relationship","correct_owner_memory"].sort();
+    if(!runtime||!Array.isArray(capability)||JSON.stringify([...capability].sort())!==JSON.stringify(expected))process.exit(2);
+    process.stdout.write("true");
+  ' "${BASH_SOURCE[0]%/*}"
+}
+
 release_staged_services() {
   local selected="${RELEASE_COMPONENTS:-agent,web}" traffic_tag_suffix staging_tag
   traffic_tag_suffix="$(release_traffic_tag_suffix)" || return $?
@@ -296,7 +309,8 @@ release_staged_services() {
   local worker_env_override="${RELEASE_EMAIL_OBSERVER_WORKER_ENABLED:-}"
   local agent_candidate_env
   local web_candidate_env web_resume_env web_resume_tag="resume-${traffic_tag_suffix}"
-  local web_writes_paused=false
+  local web_writes_paused=false basic_editor_forward_only basic_editor_admission_possible=false basic_editor_resume_verified=false
+  basic_editor_forward_only="$(release_basic_editor_forward_only)" || return 1
   local RELEASE_CHANGED_JOBS=''
   local agent_before='' web_before='' agent_old_traffic='' web_old_traffic=''
   local agent_owned_tags='' web_owned_tags='' agent_serving_revision='' web_serving_revision=''
@@ -492,6 +506,9 @@ release_staged_services() {
       if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" /api/release-probe "$web_writes_paused" writesPaused; then promoted_ok=false; fi
       if [[ "$promoted_ok" == true && "$web_writes_paused" == true ]]; then
         web_resume_env="${web_candidate_env%ASSISTANT_RELEASE_WRITES_PAUSED=true}ASSISTANT_RELEASE_WRITES_PAUSED=false"
+        # An unpaused tag is reachable before 100% promotion. Even an uncertain
+        # create response cannot prove that editor writes have not been admitted.
+        if [[ "$basic_editor_forward_only" == true ]]; then basic_editor_admission_possible=true; fi
         if ! gcloud run services update assistant-web --project "$PROJECT" --region "$REGION" \
           --image "${IMAGE_ROOT}/web@${web_digest}" --no-traffic --tag "$web_resume_tag" \
           --update-env-vars "$web_resume_env" --quiet; then
@@ -500,6 +517,25 @@ release_staged_services() {
         local staged_resume_web_json resume_web_url
         if [[ "$promoted_ok" == true ]]; then
           staged_resume_web_json="$(release_service_json assistant-web)" || promoted_ok=false
+        fi
+        if [[ "$promoted_ok" == true ]]; then
+          web_resume_revision="$(node -e 'const s=JSON.parse(process.argv[1]);const rows=(s.status?.traffic??[]).filter(t=>t.tag===process.argv[2]&&t.revisionName);if(rows.length!==1)process.exit(2);process.stdout.write(rows[0].revisionName)' "$staged_resume_web_json" "$web_resume_tag")" || promoted_ok=false
+        fi
+        if [[ "$promoted_ok" == true && "$basic_editor_forward_only" == true ]]; then
+          local resume_revision_json
+          resume_revision_json="$(release_revision_json assistant-web "$web_resume_revision")" || promoted_ok=false
+          if [[ "$promoted_ok" == true ]]; then
+            if node -e '
+              const r=JSON.parse(process.argv[1]),expected=process.argv[2],old=process.argv[4].split(",").map(x=>x.split("=")[0]);
+              const name=(r.metadata?.name??r.name??"").split("/").at(-1),container=(r.spec?.containers??r.containers??[])[0];
+              const paused=(container?.env??[]).filter(e=>e.name==="ASSISTANT_RELEASE_WRITES_PAUSED");
+              if(name!==expected||old.includes(expected)||container?.image!==process.argv[3]||paused.length!==1||paused[0].value!=="false")process.exit(2);
+            ' "$resume_revision_json" "$web_resume_revision" "${IMAGE_ROOT}/web@${web_digest}" "$web_old_traffic"; then
+              basic_editor_resume_verified=true
+            else
+              promoted_ok=false
+            fi
+          fi
         fi
         if [[ "$promoted_ok" == true ]]; then
           resume_web_url="$(release_tag_url "$staged_resume_web_json" "$web_resume_tag")" || promoted_ok=false
@@ -551,6 +587,37 @@ release_staged_services() {
   fi
 
   if [[ "$promoted_ok" != true ]]; then
+    if [[ "$basic_editor_admission_possible" == true ]]; then
+      # Draining stops requests, not committed owner corrections/receipts. Old
+      # runtimes cannot safely take over after any possible BASIC5 admission.
+      if [[ -z "$web_paused_revision" ]] || ! release_restore_traffic assistant-web "${web_paused_revision}=100"; then
+        echo '  CRITICAL: BASIC5 repause is unconfirmed; retaining current agent/jobs. Require forward recovery or reviewed editor disable.' >&2
+        return 1
+      fi
+      if [[ -z "$web_resume_revision" || "$basic_editor_resume_verified" != true ]]; then
+        echo '  CRITICAL: unpaused BASIC5 revision identity is unknown; retaining current agent/jobs. Inspect reachable aliases and require forward recovery or reviewed editor disable.' >&2
+        return 1
+      fi
+      if ! release_retire_nonserving_candidate_tag assistant-web "$web_resume_tag" "$web_old_traffic" "$web_paused_revision" "$web_resume_revision"; then
+        echo '  CRITICAL: BASIC5 unpaused alias retirement is unconfirmed; retaining current agent/jobs for forward recovery or reviewed editor disable.' >&2
+        return 1
+      fi
+      local recovery_web_json
+      recovery_web_json="$(release_service_json assistant-web)" || return 1
+      if ! node -e '
+        const rows=JSON.parse(process.argv[1]).status?.traffic??[],active=rows.filter(r=>Number(r.percent)>0);
+        if(rows.some(r=>r.tag===process.argv[2])||active.length!==1||Number(active[0].percent)!==100||active[0].revisionName!==process.argv[3])process.exit(2);
+      ' "$recovery_web_json" "$web_resume_tag" "$web_paused_revision"; then
+        echo '  CRITICAL: BASIC5 paused traffic/alias closure is unconfirmed; retaining current agent/jobs for forward recovery or reviewed editor disable.' >&2
+        return 1
+      fi
+      if ! release_drain_revision "$web_resume_revision"; then
+        echo '  CRITICAL: BASIC5 drain is unconfirmed; retaining current paused web/agent/jobs for forward recovery or reviewed editor disable.' >&2
+        return 1
+      fi
+      echo '  BASIC5 may have committed edits: retaining current paused web and marker-aware agent/jobs. Require forward recovery or explicit reviewed editor disable; no old-runtime rollback.' >&2
+      return 1
+    fi
     echo '  staged release failed a promotion/readiness check; restoring captured Cloud Run traffic.' >&2
     local rollback_failed=false
     if [[ "$web_resume_promotion_attempted" == true && -n "$web_paused_revision" ]]; then

@@ -3,12 +3,17 @@ import {
   checksumV3,
   compositeMigrationId,
   deterministicMigrationCompare,
+  isOwnerEditorRuntimeCursorName,
   MIGRATION_TABLES,
   type MigrationBundle,
   type MigrationManifest,
   type MigrationRecord,
   type MigrationTable,
   type MigrationTarget,
+  migrationBundleChecksum,
+  migrationCoverageIsComplete,
+  migrationCoverageOmittedTables,
+  OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
   serializeMigrationTimestamp,
   serializeMigrationValueV3,
   serializeMigrationVector,
@@ -32,6 +37,12 @@ function identifiers(table: MigrationTable) {
 }
 
 const TIMESTAMP_PREFIX = '__assistant_timestamp__';
+
+export function filterPortableMaintenanceCursorRows(
+  rows: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  return rows.filter((row) => !isOwnerEditorRuntimeCursorName(row.name));
+}
 
 // PostgreSQL column names do not always encode the TypeScript field's acronym
 // spelling. Firestore records must use the same keys as the live repositories.
@@ -66,6 +77,26 @@ function serializeTypedColumn(
   column: string,
   value: unknown,
 ): ReturnType<typeof serializeMigrationValueV3> {
+  if (table === 'owner_call_grant_usage' && column === 'events') {
+    if (!Array.isArray(value)) throw new Error('Invalid owner call usage events');
+    return value.map((event) => {
+      if (
+        !event ||
+        typeof event !== 'object' ||
+        Array.isArray(event) ||
+        !('at' in event) ||
+        typeof event.at !== 'string'
+      )
+        throw new Error('Invalid owner call usage event timestamp');
+      const at = serializeMigrationTimestamp(event.at.replace('T', ' '));
+      return Object.fromEntries(
+        Object.entries(event).map(([key, item]) => [
+          key,
+          key === 'at' ? at : serializeMigrationValueV3(item),
+        ]),
+      );
+    });
+  }
   if (table === 'gmail_sync_state' && column === 'last_history_id' && typeof value === 'string') {
     if (!/^-?\d+$/.test(value)) throw new Error(`Invalid bigint ${table}.${column}`);
     return serializeMigrationValueV3(BigInt(value));
@@ -184,6 +215,15 @@ export async function exportWorkspaceSnapshot(
             `select ${select} from ${quoteIdentifier(table)} x join tasks t on t.id = x.task_id where t.agent_id = $1 order by x.${quoteIdentifier(definition.id)}`,
             [options.agentId],
           );
+        } else if (
+          table === 'owner_call_grant_operations' ||
+          table === 'owner_call_grant_operation_slots' ||
+          table === 'owner_call_grant_usage'
+        ) {
+          rows = await connection.unsafe(
+            `select ${select} from ${quoteIdentifier(table)} x where x.owner_id = $1 order by x.${quoteIdentifier(definition.id)}`,
+            [options.agentId],
+          );
         } else if (table === 'generated_card_revisions') {
           rows = await connection.unsafe(
             `select ${select} from generated_card_revisions x join generated_cards c on c.id = x.card_id where c.agent_id = $1 order by x.id`,
@@ -205,6 +245,7 @@ export async function exportWorkspaceSnapshot(
             [options.agentId],
           );
         }
+        if (table === 'maintenance_cursors') rows = filterPortableMaintenanceCursorRows(rows);
         for (const row of rows) {
           const rawId = row[definition.id];
           if (rawId === undefined || rawId === null)
@@ -330,17 +371,21 @@ export async function exportWorkspaceSnapshot(
         target: options.target,
         tables: tableSummary,
         coverage: {
-          complete:
-            sourceTables.length === MIGRATION_TABLES.length &&
-            tables.length === MIGRATION_TABLES.length &&
-            sourceTables.every((row) => tables.includes(row.table_name as MigrationTable)),
+          complete: migrationCoverageIsComplete(
+            sourceTables.map((row) => row.table_name),
+            tables,
+            OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
+          ),
           supportedTables: tables,
-          omittedTables: sourceTables
-            .map((row) => row.table_name)
-            .filter((table) => !tables.includes(table as MigrationTable)),
+          omittedTables: migrationCoverageOmittedTables(
+            sourceTables.map((row) => row.table_name),
+            tables,
+            OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
+          ),
+          runtimeExclusions: OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
         },
         recordCount: records.length,
-        bundleChecksum: checksumV3(records),
+        bundleChecksum: migrationBundleChecksum(records, 3, OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1),
         unsupportedTables: [],
       };
       return { manifest, records };

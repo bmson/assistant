@@ -350,6 +350,7 @@ final class AppModel {
             errorNotice = errorMessage.map { AssistantErrorNotice(message: $0) }
         }
     }
+    private(set) var personIdentityReviewRequired = false
     @ObservationIgnored private var missingTaskReplyNotice: MissingTaskReplyNotice?
     private(set) var errorNotice: AssistantErrorNotice?
     @ObservationIgnored private var errorSource: AssistantErrorSource?
@@ -3852,6 +3853,47 @@ final class AppModel {
 
     func savePerson(id: String? = nil, mutation: PersonMutation) async -> Bool {
         guard id?.hasPrefix("local:") != true else { return false }
+        if let id {
+            personIdentityReviewRequired = false
+            guard let expectedContactRevision = mutation.expectedContactRevision,
+                  expectedContactRevision.range(
+                    of: "^[a-f0-9]{64}$",
+                    options: .regularExpression
+                  ) != nil else {
+                personIdentityReviewRequired = true
+                errorMessage = "Open this person again to review their current details before saving."
+                return false
+            }
+            guard let client else {
+                errorMessage = "Connect to your assistant before saving."
+                return false
+            }
+            let version = connectionVersion
+            errorMessage = nil
+            do {
+                try await client.updatePerson(id: id, person: mutation)
+                guard connectionIsCurrent(client, version: version) else {
+                    personIdentityReviewRequired = true
+                    errorMessage = "Your assistant connection changed before this save could be confirmed. " +
+                        "Reload the person before trying again."
+                    return false
+                }
+                // The write is acknowledged before local views are refreshed.
+                // A failed follow-up read must not turn the save into a retry.
+                _ = await reconcileEdits([.people, .personCaches, .workspace, .person(id)])
+                return true
+            } catch {
+                guard connectionIsCurrent(client, version: version) else { return false }
+                personIdentityReviewRequired = Self.personIdentityFailureRequiresReview(error)
+                if let apiError = error as? APIError, case .transport = apiError {
+                    errorMessage = "Couldn’t confirm whether this person saved. " +
+                        "Reopen the person and review it before trying again."
+                } else {
+                    reportError(error)
+                }
+                return false
+            }
+        }
         let localID = id ?? "local:" + UUID().uuidString
         let aliases = mutation.aliases.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let initials = mutation.name.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined()
@@ -3885,6 +3927,12 @@ final class AppModel {
             if let id { try await client.updatePerson(id: id, person: mutation) }
             else { try await client.createPerson(mutation) }
         }
+    }
+
+    private static func personIdentityFailureRequiresReview(_ error: Error) -> Bool {
+        guard let apiError = error as? APIError else { return true }
+        if case let .server(status, _) = apiError { return status != 400 }
+        return true
     }
 
     func deletePerson(id: String) async -> Bool {
@@ -4516,6 +4564,71 @@ final class AppModel {
         guard let client else { return false }
         return await performApprovalMutation(id: id, status: decision) {
             try await client.decideApproval(id: id, decision: decision)
+        }
+    }
+
+    /// Read the current owner inbox, not properties captured by an older View.
+    /// A removed row retires local review publication; an accepted durable receipt
+    /// remains authoritative and continues through ordinary reconciliation.
+    func ownerCallReviewSourceIsCurrent(_ origin: OwnerCallReviewSourceIdentity) -> Bool {
+        guard activityConnectionRevision == origin.connectionRevision, client != nil,
+              let pending = overview?.approvals.pending.first(where: { $0.id == origin.approvalID }) else { return false }
+        return pending.taskTrust == "owner" && pending.toolName == "phone.call"
+            && pending.approval.status == "pending" && pending.ownerNumberGrantAvailable == true
+            && pending.ownerCallSourceFingerprint == origin.sourceFingerprint
+            && pending.approval.payload == origin.source
+    }
+
+#if DEBUG
+    /// Pure native fixture projection: no notifications, badges, Live Activities or reads.
+    func installOwnerCallReviewProjectionForTesting(_ projection: OverviewResponse, connectionRevision: Int) {
+        overview = projection
+        activityConnectionRevision = connectionRevision
+    }
+#endif
+
+    func previewOwnerCallNumberGrant(id: String, validityChoice: String, limits: OwnerCallGrantLimits = .defaults) async throws -> OwnerCallNumberGrantPreview {
+        guard let client else { throw APIError.invalidServerURL }
+        let version = connectionVersion
+        let review = try await client.previewOwnerCallNumberGrant(id: id, validityChoice: validityChoice, limits: limits)
+        guard connectionIsCurrent(client, version: version) else { throw APIError.invalidResponse }
+        return review
+    }
+
+    func checkOwnerCallGrantOperation(id: String) async throws -> OwnerCallGrantOperationStatus {
+        guard let client else { throw APIError.invalidServerURL }
+        let version = connectionVersion
+        let result = try await client.checkOwnerCallGrantOperation(id: id)
+        guard connectionIsCurrent(client, version: version) else { throw APIError.invalidResponse }
+        return result
+    }
+
+    func closeOwnerCallGrantOperation(id: String, closeToken: String) async throws -> OwnerCallGrantOperationStatus {
+        guard let client else { throw APIError.invalidServerURL }
+        let version = connectionVersion
+        let result = try await client.closeOwnerCallGrantOperation(id: id, closeToken: closeToken)
+        guard connectionIsCurrent(client, version: version) else { throw APIError.invalidResponse }
+        return result
+    }
+
+    /// Keep permission off locally until the atomic approval-and-grant response arrives.
+    func approveOwnerCallNumberGrant(id: String, reviewToken: String) async -> String? {
+        guard let client else { return "Connect to your assistant to review again." }
+        let version = connectionVersion
+        guard approvalsBeingDecided.insert(id).inserted else { return "This decision is still being saved." }
+        defer { if connectionVersion == version { approvalsBeingDecided.remove(id) } }
+        do {
+            let receipt = try await client.approveOwnerCallNumberGrant(id: id, reviewToken: reviewToken)
+            guard connectionIsCurrent(client, version: version), receipt.ok, receipt.ownerCallNumberGrant != nil else { throw APIError.invalidResponse }
+            setDecisionStatus(id: id, status: "approved")
+            scheduleApprovalReconciliation(refreshingWorkspace: true)
+            return nil
+        } catch {
+            if case APIError.server(status: 409, message: "This review expired or changed. Review again.") = error {
+                return "This review expired or changed. Review again."
+            }
+            if connectionIsCurrent(client, version: version) { _ = await refreshOverview(reportFailure: false) }
+            return "The result is not confirmed. Check the permission operation before reviewing again."
         }
     }
 

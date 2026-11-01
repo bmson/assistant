@@ -38,6 +38,7 @@ describe('config', () => {
     expect(config.INTERNAL_AUTH_MODE).toBe('oidc');
     expect(config.AUTH_DEV_BYPASS).toBe(false);
     expect(config.AUTH_LOCALHOST_BYPASS).toBe(false);
+    expect(config.PHONE_CALL_TO_OWNER_GRANT_ENABLED).toBe(false);
     expect(config.WEB_APP_PREVIEW_ENABLED).toBe(false);
     expect(config.MOBILE_API_TOKEN).toBe('');
     expect(config.CANARY_ENABLED).toBe(false);
@@ -54,8 +55,10 @@ describe('config', () => {
       AGENT_PORT: '9000',
       POSTGRES_SOURCE_WRITES_FENCED: 'true',
       WEB_APP_PREVIEW_ENABLED: 'true',
+      PHONE_CALL_TO_OWNER_GRANT_ENABLED: 'true',
     });
     expect(config.WEB_APP_PREVIEW_ENABLED).toBe(true);
+    expect(config.PHONE_CALL_TO_OWNER_GRANT_ENABLED).toBe(true);
     expect(config.QUEUE_DRIVER).toBe('cloudtasks');
     expect(config.AGENT_PORT).toBe(9000);
     expect(config.POSTGRES_SOURCE_WRITES_FENCED).toBe(true);
@@ -282,4 +285,23 @@ describe('config', () => {
 
   // Module-specific production rules moved to each module's metadata; they are
   // covered by the conformance suite in @assistant/modules.
+});
+
+describe('loaded owner phone recipient authority', () => {
+  afterEach(() => resetConfigForTest());
+  it('uses the process-loaded snapshot until an explicit reload; never grants from a noncanonical or different number', async () => {
+    const { configuredOwnerPhoneRecipientFingerprint, reloadConfig } = await import('./index.js');
+    reloadConfig({ OWNER_PHONE: '+14155550123' });
+    const original = configuredOwnerPhoneRecipientFingerprint('+14155550123');
+    expect(original).toMatch(/^[a-f0-9]{64}$/);
+    expect(configuredOwnerPhoneRecipientFingerprint('+14155550999')).toBeNull();
+    // Loading a fresh environment object does not replace a loaded process snapshot.
+    loadConfig({ OWNER_PHONE: '+14155550999' });
+    expect(configuredOwnerPhoneRecipientFingerprint('+14155550123')).toBe(original);
+    reloadConfig({ OWNER_PHONE: '+14155550999' });
+    expect(configuredOwnerPhoneRecipientFingerprint('+14155550123')).toBeNull();
+    expect(configuredOwnerPhoneRecipientFingerprint('+14155550999')).not.toBe(original);
+    reloadConfig({ OWNER_PHONE: '+1 (415) 555-0123' });
+    expect(configuredOwnerPhoneRecipientFingerprint('+14155550123')).toBeNull();
+  });
 });

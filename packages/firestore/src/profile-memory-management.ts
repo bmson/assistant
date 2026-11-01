@@ -5,6 +5,7 @@ import {
   type MemoryForgetReason,
   type MemoryMutation,
   type MemoryProminence,
+  nextOwnerCorrection,
   type ProfileMemoryManagementRepository,
   type Records,
   snapshotEmbeddingSpace,
@@ -166,61 +167,84 @@ export class FirestoreProfileMemoryManagementRepository
     const retrievalRevision = randomUUID();
     return this.store.db.runTransaction(async (tx) => {
       const agentId = await this.configuredAgent(tx);
-      const snapshot = await tx.get(this.store.doc('memories', input.memoryId));
-      const row = this.owned(snapshot, agentId);
-      if (!row) return { status: 'not-found' };
-      if (row.contentHash !== input.expectedContentHash) return { status: 'stale' };
+      return this.correctInTransaction(tx, agentId, input, retrievalRevision);
+    });
+  }
 
-      const oldTombstoneRef = this.store.doc('memoryTombstones', row.contentHash);
-      const newTombstoneRef = this.store.doc('memoryTombstones', input.contentHash);
-      const oldHashRef = this.store.doc('memoryContentHashes', row.contentHash);
-      const newHashRef = this.store.doc('memoryContentHashes', input.contentHash);
-      const sameHash = input.contentHash === row.contentHash;
-      const [oldTombstone, oldHash] = await tx.getAll(oldTombstoneRef, oldHashRef);
-      const [newTombstone, newHash] = sameHash
-        ? [oldTombstone, oldHash]
-        : await tx.getAll(newTombstoneRef, newHashRef);
-      if (oldTombstone?.exists || newTombstone?.exists) return { status: 'tombstoned' };
-      if (newHash?.exists && (!sameHash || newHash.get('memoryId') !== row.id))
-        return { status: 'duplicate' };
+  /** Caller has already established owner/privacy authority on this exact transaction. */
+  async correctInTransaction(
+    tx: Transaction,
+    agentId: string,
+    input: Parameters<ProfileMemoryManagementRepository['correct']>[0],
+    retrievalRevision = randomUUID(),
+  ): Promise<MemoryMutation> {
+    if (!input.content || !input.contentHash || !input.expectedContentHash)
+      throw new Error('Invalid profile memory correction');
+    validateEmbedding(this.embeddingSpace, input.embedding);
+    if (input.embeddingSpaceKey !== embeddingSpaceKey(this.embeddingSpace))
+      throw new Error('Memory embedding space changed');
+    const snapshot = await tx.get(this.store.doc('memories', input.memoryId));
+    const row = this.owned(snapshot, agentId);
+    if (!row) return { status: 'not-found' };
+    if (row.contentHash !== input.expectedContentHash) return { status: 'stale' };
 
-      const now = this.store.now();
-      if (!sameHash) {
-        tx.create(
-          oldTombstoneRef,
-          encodeRecord({
-            id: row.contentHash,
-            contentHash: row.contentHash,
-            reason: 'owner_correct',
-            createdAt: now,
-          }),
-        );
-        if (oldHash?.exists && oldHash.get('memoryId') === row.id) tx.delete(oldHashRef);
-        tx.create(newHashRef, { memoryId: row.id });
-      } else if (!newHash?.exists) {
-        tx.create(newHashRef, { memoryId: row.id });
-      }
-      tx.update(
-        snapshot.ref,
+    const oldTombstoneRef = this.store.doc('memoryTombstones', row.contentHash);
+    const newTombstoneRef = this.store.doc('memoryTombstones', input.contentHash);
+    const oldHashRef = this.store.doc('memoryContentHashes', row.contentHash);
+    const newHashRef = this.store.doc('memoryContentHashes', input.contentHash);
+    const sameHash = input.contentHash === row.contentHash;
+    const [oldTombstone, oldHash] = await tx.getAll(oldTombstoneRef, oldHashRef);
+    const [newTombstone, newHash] = sameHash
+      ? [oldTombstone, oldHash]
+      : await tx.getAll(newTombstoneRef, newHashRef);
+    if (oldTombstone?.exists || newTombstone?.exists) return { status: 'tombstoned' };
+    if (newHash?.exists && (!sameHash || newHash.get('memoryId') !== row.id))
+      return { status: 'duplicate' };
+
+    const now = this.store.now();
+    const raw = decodeRecord<Record<string, unknown>>(snapshot.data());
+    const ownerCorrection = nextOwnerCorrection({
+      previous: raw.ownerCorrection,
+      priorContentHash: row.contentHash,
+      currentContentHash: input.contentHash,
+      correctedAt: now,
+    });
+    if (!sameHash) {
+      tx.create(
+        oldTombstoneRef,
         encodeRecord({
-          content: input.content,
-          contentHash: input.contentHash,
-          embedding: FieldValue.vector(input.embedding),
-          embeddingSpaceKey: embeddingSpaceKey(this.embeddingSpace),
-          embeddingSpace: embeddingSpaceKey(this.embeddingSpace),
-          retrievalRevision,
-          confidence: '1.00',
-          ownerConfirmed: true,
-          originTrust: 'owner',
-          quarantined: false,
+          id: row.contentHash,
+          contentHash: row.contentHash,
+          reason: 'owner_correct',
+          createdAt: now,
         }),
       );
-      this.invalidateOwnerCard(tx, agentId, now);
-      return {
-        status: 'updated',
-        memory: { id: row.id, agentId, contentHash: input.contentHash },
-      };
-    });
+      if (oldHash?.exists && oldHash.get('memoryId') === row.id) tx.delete(oldHashRef);
+      tx.create(newHashRef, { memoryId: row.id });
+    } else if (!newHash?.exists) {
+      tx.create(newHashRef, { memoryId: row.id });
+    }
+    tx.update(
+      snapshot.ref,
+      encodeRecord({
+        content: input.content,
+        contentHash: input.contentHash,
+        ownerCorrection,
+        embedding: FieldValue.vector(input.embedding),
+        embeddingSpaceKey: embeddingSpaceKey(this.embeddingSpace),
+        embeddingSpace: embeddingSpaceKey(this.embeddingSpace),
+        retrievalRevision,
+        confidence: '1.00',
+        ownerConfirmed: true,
+        originTrust: 'owner',
+        quarantined: false,
+      }),
+    );
+    this.invalidateOwnerCard(tx, agentId, now);
+    return {
+      status: 'updated',
+      memory: { id: row.id, agentId, contentHash: input.contentHash },
+    };
   }
 
   async forget(memoryId: string, reason: MemoryForgetReason): Promise<MemoryMutation> {

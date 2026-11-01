@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { type EmbeddingSpace, type Records, validateEmbedding } from '@assistant/persistence';
 import { embeddingSpaceKey } from './memory.js';
 
@@ -12,6 +13,7 @@ export function graphSourceEligible(input: {
     | 'supersededById'
     | 'expiresAt'
     | 'contentHash'
+    | 'content'
     | 'embedding'
   >;
   source: Pick<
@@ -40,6 +42,8 @@ export function graphSourceEligible(input: {
     source.memoryId !== memory.id ||
     source.status !== 'ready' ||
     source.contentHash !== memory.contentHash ||
+    typeof memory.content !== 'string' ||
+    createHash('sha256').update(memory.content).digest('hex') !== memory.contentHash ||
     !Number.isInteger(source.extractionVersion) ||
     source.extractionVersion < extractionVersion ||
     !memory.embedding

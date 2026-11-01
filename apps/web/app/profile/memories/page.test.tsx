@@ -112,7 +112,13 @@ describe.skipIf(!localEmulator)('Firestore owner Memory hub page with PostgreSQL
       for (const method of ['POST', 'DELETE'])
         expect(proxy(request(path, method)).status).toBe(405);
     }
-    for (const path of ['/profile/memories', '/profile/about']) {
+    const savedNote = `/profile/knowledge/notes/${ownerId}`;
+    for (const path of ['/profile/memories', savedNote]) {
+      for (const method of ['GET', 'HEAD']) expect(proxy(request(path, method)).status).toBe(200);
+      for (const method of ['POST', 'DELETE'])
+        expect(proxy(request(path, method)).status).toBe(405);
+    }
+    for (const path of ['/profile/about', '/profile/voice']) {
       for (const method of ['GET', 'HEAD']) expect(proxy(request(path, method)).status).toBe(307);
       expect(proxy(request(path, 'POST')).status).toBe(410);
     }
@@ -130,7 +136,9 @@ describe.skipIf(!localEmulator)('Firestore owner Memory hub page with PostgreSQL
     expect(html).not.toContain('Foreign private fact');
     expect(html).not.toContain('Private owner fact');
     expect(html).not.toContain('<form');
-    expect(html).not.toContain('/profile/knowledge');
+    expect(html).toContain('aria-label="Memory"');
+    expect(html).toContain('href="/profile/knowledge?view=library"');
+    expect(html).toContain('href="/people"');
   });
 
   it('rejects unauthenticated reads before returning private data', async () => {

@@ -19,6 +19,9 @@ vi.mock('@/lib/mobile-access-token', () => ({
   getMobileAccessToken: state.token,
   hasMobileTokenRotationCapability: () => true,
 }));
+vi.mock('@/lib/server', () => ({
+  getWorkspaceSettings: async () => ({ policies: [] }),
+}));
 vi.mock('./mobile-token', () => ({
   MobileTokenPanel: ({ maskedToken, serverUrl }: { maskedToken: string; serverUrl: string }) => (
     <p>

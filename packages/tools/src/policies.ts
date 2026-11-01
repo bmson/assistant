@@ -10,6 +10,14 @@ import {
   type ApprovalPolicyStore,
   listApprovalPolicies,
 } from '@assistant/core/workflow/approval-policies';
+import {
+  parsePhoneCallOwnerActionGrantMatch,
+  parsePhoneCallToOwnerNumberGrantMatch,
+  phoneCallOwnerActionGrantIsLive,
+  phoneCallOwnerActionGrantMatches,
+  phoneCallToOwnerNumberGrantIsLive,
+  phoneCallToOwnerNumberGrantMatches,
+} from '@assistant/persistence';
 import type { ToolContext } from './types.js';
 
 /**
@@ -57,6 +65,54 @@ export const policyTemplates: Record<string, PolicyTemplate> = {
     )
       return false;
     return sameApprovalScope(approved, { ...actual, maxMinutes: approved.maxMinutes });
+  },
+  'phone.call.to_owner_number.v1': (match, args, ctx) => {
+    if (
+      process.env.PHONE_CALL_TO_OWNER_GRANT_ENABLED !== 'true' ||
+      ctx.trust !== 'owner' ||
+      !ctx.ownerCallRequest ||
+      ctx.ownerCallRequest.agentId !== ctx.agentId ||
+      ctx.ownerCallRequest.taskId !== ctx.taskId ||
+      ctx.ownerIntent?.sourceActor !== 'owner' ||
+      !ctx.ownerIntent.authorizedScopes.includes('phone_call')
+    )
+      return false;
+    const grant = parsePhoneCallToOwnerNumberGrantMatch(match);
+    if (
+      !grant ||
+      ctx.ownerCallRecipient !== grant.recipientE164 ||
+      !phoneCallToOwnerNumberGrantMatches(grant, (args.brief ?? {}) as Record<string, unknown>)
+    )
+      return false;
+    try {
+      return phoneCallToOwnerNumberGrantIsLive(grant, ctx.now());
+    } catch {
+      return false;
+    }
+  },
+  'phone.call.owner_action.v2': (match, args, ctx) => {
+    if (
+      process.env.PHONE_CALL_TO_OWNER_GRANT_ENABLED !== 'true' ||
+      ctx.trust !== 'owner' ||
+      !ctx.ownerCallRequest ||
+      ctx.ownerCallRequest.agentId !== ctx.agentId ||
+      ctx.ownerCallRequest.taskId !== ctx.taskId ||
+      ctx.ownerIntent?.sourceActor !== 'owner' ||
+      !ctx.ownerCallActionIntent
+    )
+      return false;
+    const grant = parsePhoneCallOwnerActionGrantMatch(match);
+    if (
+      !grant ||
+      ctx.ownerCallRecipient !== grant.recipientE164 ||
+      !phoneCallOwnerActionGrantMatches(grant, (args.brief ?? {}) as Record<string, unknown>)
+    )
+      return false;
+    try {
+      return phoneCallOwnerActionGrantIsLive(grant, ctx.now());
+    } catch {
+      return false;
+    }
   },
   /** SMS replies from an owner task to the configured owner number only. */
   'sms.reply_to_owner': (match, args, ctx) => {

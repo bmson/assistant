@@ -1,10 +1,14 @@
 import type { UIMessage } from 'ai';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import {
   createChatLogOrder,
   dayLabel,
+  decodeRecallHeader,
   messageText,
   orderChatLog,
+  RecallNote,
   retireProvisionalReplies,
   retireProvisionalUserTurns,
   sameDay,
@@ -329,4 +333,32 @@ describe('date labels', () => {
       'Mar 4, 2025',
     );
   });
+});
+
+it('recall header permits only server true correction attribution, never arbitrary marker payload', () => {
+  const source = { date: '2026-10-25', label: 'Saved note', kind: 'knowledge_graph' };
+  expect(
+    decodeRecallHeader(encodeURIComponent(JSON.stringify([{ ...source, ownerCorrected: true }]))),
+  ).toMatchObject([{ ownerCorrected: true }]);
+  for (const ownerCorrected of ['true', false, {}, 'private note'])
+    expect(
+      decodeRecallHeader(encodeURIComponent(JSON.stringify([{ ...source, ownerCorrected }]))),
+    ).toBeNull();
+  expect(decodeRecallHeader(encodeURIComponent(JSON.stringify([source])))?.[0]).not.toHaveProperty(
+    'ownerCorrected',
+  );
+});
+
+it('renders owner-corrected recall label without marker hashes or source-document claims', () => {
+  const html = renderToStaticMarkup(
+    createElement(RecallNote, {
+      sources: [{ date: '2026-10-25', label: 'Saved note', ownerCorrected: true }],
+    }),
+  );
+  expect(html).toContain('Owner-corrected saved note');
+  expect(html).not.toContain('priorContentHash');
+  const legacy = renderToStaticMarkup(
+    createElement(RecallNote, { sources: [{ date: '2026-10-25', label: 'Saved note' }] }),
+  );
+  expect(legacy).not.toContain('Owner-corrected');
 });

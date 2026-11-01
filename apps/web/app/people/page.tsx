@@ -7,13 +7,26 @@ import {
   type PersonGroup,
 } from '@assistant/application/people-presentation';
 import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
-import { createInstallationStore } from '@assistant/firestore';
+import {
+  assertFirestoreInstallationOwner,
+  assertPrivacyErasureFenceUnchanged,
+  createInstallationStore,
+  readFirestoreOwnerEditorIssuanceContext,
+  readPrivacyErasureFence,
+} from '@assistant/firestore';
 import { CalendarDays, MapPin, Search } from 'lucide-react';
 import Link from 'next/link';
+import {
+  OwnerEditorControls,
+  type OwnerEditorControlsProps,
+} from '@/app/people/owner-editor-controls';
 import { PersonAvatar } from '@/app/people/person-avatar';
+import { MemoryNavigation } from '@/app/profile/memory-navigation';
 import { requireOwner } from '@/auth';
 import { listFirestorePeopleDirectory } from '@/lib/firestore-people';
-import { withPostgresMemoryBrowseRead } from '@/lib/server';
+import { ownerEditorAvailability } from '@/lib/owner-editor-availability';
+import { buildOwnerEditorView } from '@/lib/owner-editor-view';
+import { readPostgresOwnerEditorViewInputs, withPostgresMemoryBrowseRead } from '@/lib/server';
 import {
   Badge,
   btn,
@@ -41,10 +54,38 @@ function matches(person: PersonSummary, query: string): boolean {
   );
 }
 
-async function loadPeopleDirectory(now: Date): Promise<PersonSummary[]> {
+async function loadPeopleDirectory(
+  now: Date,
+  formSessionScope: string | undefined,
+): Promise<{
+  data: PersonSummary[];
+  editor: OwnerEditorControlsProps | null;
+}> {
   const config = loadConfig();
+  const enabled =
+    !config.ASSISTANT_RELEASE_WRITES_PAUSED &&
+    !config.RESTORE_REHEARSAL &&
+    !(config.PERSISTENCE_DRIVER !== 'firestore' && config.POSTGRES_SOURCE_WRITES_FENCED);
   if (config.PERSISTENCE_DRIVER !== 'firestore')
-    return withPostgresMemoryBrowseRead((db) => listPeopleDirectory(db, { now, browseOnly: true }));
+    return withPostgresMemoryBrowseRead(async (db) => {
+      const data = await listPeopleDirectory(db, { now, browseOnly: true });
+      let editor: OwnerEditorControlsProps | null = null;
+      if (enabled && formSessionScope && config.AUTH_SECRET) {
+        try {
+          const inputs = await readPostgresOwnerEditorViewInputs(db, {});
+          if (inputs)
+            editor = buildOwnerEditorView({
+              ...inputs,
+              enabled,
+              formSessionScope,
+              secret: config.AUTH_SECRET,
+            });
+        } catch {
+          /* Editor availability never substitutes an empty browse result. */
+        }
+      }
+      return { data, editor };
+    });
   const problems = validateAgentPersistenceConfig(config);
   if (problems.length) throw new Error(problems.join('; '));
   const store = createInstallationStore({
@@ -53,7 +94,30 @@ async function loadPeopleDirectory(now: Date): Promise<PersonSummary[]> {
     databaseId: config.FIRESTORE_DATABASE_ID,
   });
   try {
-    return await listFirestorePeopleDirectory(store, config.FIRESTORE_AGENT_ID, now);
+    await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
+    const fence = await readPrivacyErasureFence(store, config.FIRESTORE_AGENT_ID);
+    const data = await listFirestorePeopleDirectory(store, config.FIRESTORE_AGENT_ID, now);
+    let editor: OwnerEditorControlsProps | null = null;
+    if (enabled && formSessionScope && config.AUTH_SECRET) {
+      try {
+        const context = await readFirestoreOwnerEditorIssuanceContext(
+          store,
+          config.FIRESTORE_AGENT_ID,
+        );
+        editor = buildOwnerEditorView({
+          enabled,
+          context,
+          snapshot: { ownerId: config.FIRESTORE_AGENT_ID },
+          formSessionScope,
+          secret: config.AUTH_SECRET,
+        });
+      } catch {
+        /* Keep the valid fenced directory usable when issuance is unavailable. */
+      }
+    }
+    await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
+    await assertPrivacyErasureFenceUnchanged(store, config.FIRESTORE_AGENT_ID, fence);
+    return { data, editor };
   } finally {
     await store.db.terminate();
   }
@@ -64,7 +128,7 @@ export default async function PeoplePage({
 }: {
   searchParams: Promise<Record<string, string | undefined>>;
 }) {
-  await requireOwner();
+  const session = await requireOwner();
   const { q } = await searchParams;
   const query = (typeof q === 'string' ? q : '').trim().slice(0, 120);
   const personHref = (id: string) =>
@@ -72,8 +136,11 @@ export default async function PeoplePage({
 
   const now = new Date();
   let everyone: PersonSummary[];
+  let editor: OwnerEditorControlsProps | null = null;
   try {
-    everyone = await loadPeopleDirectory(now);
+    const loaded = await loadPeopleDirectory(now, session.formSessionScope);
+    everyone = loaded.data;
+    editor = loaded.editor;
   } catch {
     return (
       <PageShell size="reading">
@@ -100,37 +167,20 @@ export default async function PeoplePage({
   const upcoming = everyone
     .filter((person) => person.birthday && person.birthday.daysUntil <= BIRTHDAY_HORIZON_DAYS)
     .sort((a, b) => (a.birthday?.daysUntil ?? 0) - (b.birthday?.daysUntil ?? 0));
+  const editorAvailability = ownerEditorAvailability({
+    formSessionScope: session.formSessionScope,
+    editorAvailable: Boolean(editor?.createGrant),
+    currentPath: '/people',
+  });
 
   return (
     <PageShell size="reading">
       <PageHeader
         back={{ href: '/profile', label: 'Memory' }}
         title="People"
-        intro="Browse people and their recorded connections. Search the people loaded in this view."
+        intro="Open a person to view their details and family connections."
       />
-
-      {/* Birthdays first — the one thing on this page that is time-sensitive. */}
-      {upcoming.length > 0 && !query ? (
-        <section className="mt-6">
-          <SectionHeading title="Coming up in this view" count={upcoming.length} />
-          <ul className="mt-3 flex flex-col gap-2">
-            {upcoming.map((person) => (
-              <li key={person.id}>
-                <Link
-                  href={personHref(person.id)}
-                  className="mobile-touch-target flex min-w-0 items-center gap-3 rounded-xl border border-accent/25 bg-accent/[0.06] p-3.5 motion-safe:transition-colors hover:bg-accent/10"
-                >
-                  <CalendarDays className="size-4 shrink-0 text-accent" aria-hidden="true" />
-                  <span className="min-w-0 flex-1 text-sm text-strong">
-                    <span className="font-medium">{person.name}</span>
-                    {person.birthday ? ` · ${birthdayLabel(person.birthday, now)}` : null}
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
+      <MemoryNavigation current="people" />
 
       <section className="mt-8">
         <div className="flex flex-wrap items-end justify-between gap-3">
@@ -139,7 +189,22 @@ export default async function PeoplePage({
             count={people.length}
             hint={`${people.length} shown in this view`}
           />
+          {editor ? <OwnerEditorControls {...editor} /> : null}
         </div>
+
+        {editor?.createGrant ? (
+          <p className="mt-3 text-sm text-muted">
+            Add people here, then open a person to connect them with someone else.
+          </p>
+        ) : editorAvailability.kind === 'sign_in_again' ? (
+          <p role="status" className="mt-3 text-sm text-muted">
+            {editorAvailability.message}
+          </p>
+        ) : (
+          <p className="mt-3 text-sm text-muted">
+            Changes are unavailable in this view. You can still browse saved people and connections.
+          </p>
+        )}
 
         {/* A GET form, so a search is a URL the owner can bookmark or share
             with themselves, and the page stays a server component. */}
@@ -172,7 +237,11 @@ export default async function PeoplePage({
         </form>
 
         {everyone.length === 0 ? (
-          <EmptyState>No people are available in this view yet.</EmptyState>
+          <EmptyState>
+            {editor?.createGrant
+              ? 'No people are available in this view yet. Add a person to start recording their connections.'
+              : 'No people are available in this view yet.'}
+          </EmptyState>
         ) : people.length === 0 ? (
           <EmptyState>No people match “{query}” in this view.</EmptyState>
         ) : (
@@ -208,7 +277,9 @@ export default async function PeoplePage({
                           </span>
                           <MetaLine
                             segments={[
-                              person.relationship || 'Relationship not set',
+                              person.relationship
+                                ? `Relationship to you: ${person.relationship}`
+                                : 'Relationship to you: not recorded',
                               person.location ? (
                                 <>
                                   <MapPin className="size-3" aria-hidden="true" />
@@ -229,6 +300,28 @@ export default async function PeoplePage({
           </div>
         )}
       </section>
+      {/* Upcoming dates follow the people management controls. */}
+      {upcoming.length > 0 && !query ? (
+        <section className="mt-6">
+          <SectionHeading title="Coming up in this view" count={upcoming.length} />
+          <ul className="mt-3 flex flex-col gap-2">
+            {upcoming.map((person) => (
+              <li key={person.id}>
+                <Link
+                  href={personHref(person.id)}
+                  className="mobile-touch-target flex min-w-0 items-center gap-3 rounded-xl border border-accent/25 bg-accent/[0.06] p-3.5 motion-safe:transition-colors hover:bg-accent/10"
+                >
+                  <CalendarDays className="size-4 shrink-0 text-accent" aria-hidden="true" />
+                  <span className="min-w-0 flex-1 text-sm text-strong">
+                    <span className="font-medium">{person.name}</span>
+                    {person.birthday ? ` · ${birthdayLabel(person.birthday, now)}` : null}
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
     </PageShell>
   );
 }

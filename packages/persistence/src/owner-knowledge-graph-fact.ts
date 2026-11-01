@@ -1,3 +1,10 @@
+import type {
+  OwnerEditorClaim,
+  OwnerEditorReply,
+  OwnerEditorTiming,
+  OwnerEditorValidity,
+} from './owner-editor.js';
+
 export type OwnerKnowledgeGraphEntityKind =
   | 'person'
   | 'organization'
@@ -19,6 +26,8 @@ export interface OwnerKnowledgeGraphFactInput {
   predicate: string;
   object: OwnerKnowledgeGraphFactEndpointInput;
   note: string;
+  validity?: OwnerEditorValidity;
+  timing?: OwnerEditorTiming;
 }
 
 export interface OwnerKnowledgeGraphFactResult {
@@ -27,6 +36,8 @@ export interface OwnerKnowledgeGraphFactResult {
   error?: string;
   sourceDisposition?: 'graph_only' | 'whole_fact';
   alreadyApplied?: boolean;
+  assertionId?: string;
+  editorReply?: OwnerEditorReply;
 }
 
 export type OwnerGraphCorrectionDisposition = 'graph_only' | 'whole_fact';
@@ -76,6 +87,9 @@ export interface OwnerKnowledgeGraphFactAtomicInput {
   subjectContactId: string | null;
   createdAt: Date;
   extractionVersion: number;
+  validity?: OwnerEditorValidity;
+  timing?: OwnerEditorTiming;
+  editor?: { claim: OwnerEditorClaim; expected: OwnerEditorGraphExpectations };
   correction?: {
     target: OwnerGraphCorrectionTarget;
     disposition: OwnerGraphCorrectionDisposition;
@@ -99,4 +113,12 @@ export function isOwnerKnowledgeGraphFactRepository(
     value !== null &&
     (value as { kind?: unknown }).kind === 'owner-knowledge-graph-fact-repository'
   );
+}
+
+/** UI-read CAS scope; revisions are compared to fresh locked snapshots, never authority. */
+export interface OwnerEditorGraphExpectations {
+  subjectContactRevision: string;
+  objectContactRevision: string;
+  canonical: { kind: 'absent' } | { kind: 'revision'; revision: string };
+  target?: { relationId: string; revision: string };
 }
