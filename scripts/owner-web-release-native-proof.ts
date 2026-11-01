@@ -216,11 +216,7 @@ const OUTPUT = new Set([
   'template',
 ]);
 /** Full native revisions are consumed here; external hashes/booleans are never accepted. */
-export function projectNativeWebSnapshot(
-  raw: unknown,
-  native: Record<string, unknown>,
-  c: Context,
-): Snapshot {
+function projectSnapshot(raw: unknown, native: Record<string, unknown>, c: Context): Snapshot {
   const s = nativeObject(raw);
   requireNative(
     s.name === WEB_SERVICE &&
@@ -291,4 +287,17 @@ export function projectNativeWebSnapshot(
     urls,
     revisions,
   };
+}
+
+/** Public converter never exposes parser/URL errors or native payload in its exception. */
+export function projectNativeWebSnapshot(
+  raw: unknown,
+  native: Record<string, unknown>,
+  context: Context,
+): Snapshot {
+  try {
+    return projectSnapshot(raw, native, context);
+  } catch {
+    throw new Error('Native release validation held');
+  }
 }

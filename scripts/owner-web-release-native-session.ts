@@ -88,6 +88,7 @@ export function nativeFixtureSession(deps: FixtureDependencies, modes: readonly 
     phase: Reason = 'input_refused';
   let state: State | undefined, original: State | undefined, mode: Mode | undefined;
   let operationDeadline: number | undefined;
+  let operationGets = 0;
   async function json(
     path: string,
     body?: Record<string, unknown>,
@@ -153,20 +154,34 @@ export function nativeFixtureSession(deps: FixtureDependencies, modes: readonly 
   function names(post: boolean) {
     requireNative(original && mode);
     const list = Object.keys(original.snapshot.revisions);
+    const allowed = [
+      original.context.canonical,
+      releaseIdentity(original.context, 'P').revision,
+      releaseIdentity(original.context, 'R').revision,
+    ];
+    requireNative(
+      list.length > 0 && list.length <= 3 && list.every((name) => allowed.includes(name)),
+    );
     if (post && (mode === 'createP' || mode === 'createR'))
       list.push(releaseIdentity(original.context, mode === 'createP' ? 'P' : 'R').revision);
     return [...new Set(list)].sort();
   }
   async function snapshot(post: boolean) {
     requireNative(original);
+    const revisions = names(post);
     const raw = await json(WEB_SERVICE),
       native: Record<string, unknown> = {};
-    for (const name of names(post)) native[name] = await json(`${WEB_SERVICE}/revisions/${name}`);
+    for (const name of revisions) native[name] = await json(`${WEB_SERVICE}/revisions/${name}`);
     return projectNativeWebSnapshot(raw, native, original.context);
   }
   async function persist() {
     requireNative(state);
     await bounded(15000, () => deps.recordIntent(copy(state as State)));
+  }
+  async function readOperation(deadline: number) {
+    requireNative(state?.pending?.operation && operationGets < 60);
+    operationGets++;
+    return json(state.pending.operation, undefined, deadline);
   }
   async function poll(initial: unknown) {
     requireNative(state?.pending?.operation);
@@ -190,7 +205,7 @@ export function nativeFixtureSession(deps: FixtureDependencies, modes: readonly 
           deps.sleep(3000, AbortSignal.any([signal, inner])),
         );
         requireNative(!signal.aborted);
-        op = nativeObject(await json(expected, undefined, deadline));
+        op = nativeObject(await readOperation(deadline));
       }
       throw new Error('Native operation held');
     });
@@ -280,7 +295,7 @@ export function nativeFixtureSession(deps: FixtureDependencies, modes: readonly 
         recoveryUsed = true;
         phase = 'operation_unconfirmed';
         requireNative(operationDeadline !== undefined && operationDeadline > deps.now());
-        return await finish(await json(state.pending.operation, undefined, operationDeadline));
+        return await finish(await readOperation(operationDeadline));
       } catch {
         return hold();
       }
@@ -289,6 +304,7 @@ export function nativeFixtureSession(deps: FixtureDependencies, modes: readonly 
       return {
         used,
         calls,
+        operationGets,
         mutationState: attempted ? 'may_have_been_attempted' : 'not_attempted',
         receipt: state?.receipt ?? null,
         ordinal: state?.ordinal ?? null,

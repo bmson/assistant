@@ -649,7 +649,7 @@ describe('receipt and transport budget failures', () => {
     expect((await c.recoverSameOperation()).phase).toBe('createdP');
     expect(f.writes()).toBe(1);
   });
-  it('enforces the shared100call cap even with a frozen fixture clock', async () => {
+  it('reaches shared60operationGET cap before100requests even with a frozen fixture clock', async () => {
     const f = fixture();
     f.deps.sleep = async () => undefined;
     f.setInitialReply((op) => reply({ name: op.name, done: false }));
@@ -664,7 +664,9 @@ describe('receipt and transport budget failures', () => {
     const c = nativeWebCreationFixtureClient(f.deps);
     await expect(c.execute(f.state(), 'createP', stamp)).rejects.toBeInstanceOf(NativeReleaseHold);
     await expect(c.recoverSameOperation()).rejects.toBeInstanceOf(NativeReleaseHold);
-    expect(f.requests.length).toBe(100);
+    expect(f.requests.length).toBeLessThanOrEqual(100);
+    expect(f.requests.filter((r) => r.url.includes('/operations/'))).toHaveLength(60);
+    expect(c.checkpoint().operationGets).toBe(60);
     expect(f.writes()).toBe(1);
   });
   it('does not extend the original operation deadline for recovery', async () => {
@@ -706,5 +708,85 @@ describe('receipt and transport budget failures', () => {
           !Object.keys(init.headers ?? {}).some((k) => k.toLowerCase() === 'authorization'),
       ),
     ).toBe(true);
+  });
+});
+
+describe('pre-GET fixed revision scope', () => {
+  it('refuses a sealed but unapproved extra native revision before any transport call', async () => {
+    const f = fixture(),
+      projection = projectNativeWebSnapshot(f.service, f.native, f.context);
+    projection.revisions['assistant-web-unrelated'] = copy(projection.revisions[f.pin.revision]!);
+    const s = captureLifecycle(f.context, projection);
+    await expect(
+      nativeWebCreationFixtureClient(f.deps).execute(s, 'createP', stamp),
+    ).rejects.toMatchObject({ mutationState: 'not_attempted' });
+    expect(f.request).not.toHaveBeenCalled();
+  });
+});
+
+describe('shared operation GET recovery budget', () => {
+  it('charges recovery initial GET against the remaining single-session poll budget', async () => {
+    const f = fixture();
+    f.deps.sleep = async () => undefined;
+    f.setInitialReply((op) => reply({ name: op.name, done: false }));
+    let gets = 0;
+    f.setOverride((url) => {
+      if (!url.includes('/operations/')) return undefined;
+      gets++;
+      return reply({
+        name:
+          gets === 59
+            ? 'projects/foreign/locations/us-west1/operations/x'
+            : 'projects/bmson-assistant/locations/us-west1/operations/op-1',
+        done: false,
+      });
+    });
+    const c = nativeWebCreationFixtureClient(f.deps);
+    await expect(c.execute(f.state(), 'createP', stamp)).rejects.toBeInstanceOf(NativeReleaseHold);
+    expect(gets).toBe(59);
+    await expect(c.recoverSameOperation()).rejects.toBeInstanceOf(NativeReleaseHold);
+    expect(gets).toBe(60);
+    expect(c.checkpoint().operationGets).toBe(60);
+    expect(f.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
+  });
+  it('allows terminal read recovery on the final60th operation GET without a61st request', async () => {
+    const f = fixture();
+    f.deps.sleep = async () => undefined;
+    f.setInitialReply((op) => reply({ name: op.name, done: false }));
+    let gets = 0;
+    f.setOverride((url) => {
+      if (!url.includes('/operations/')) return undefined;
+      gets++;
+      if (gets === 59) return reply({ name: 'projects/foreign/locations/us-west1/operations/x' });
+      if (gets < 59)
+        return reply({
+          name: 'projects/bmson-assistant/locations/us-west1/operations/op-1',
+          done: false,
+        });
+      return undefined;
+    });
+    const c = nativeWebCreationFixtureClient(f.deps);
+    await expect(c.execute(f.state(), 'createP', stamp)).rejects.toBeInstanceOf(NativeReleaseHold);
+    expect((await c.recoverSameOperation()).phase).toBe('createdP');
+    expect(gets).toBe(60);
+    expect(c.checkpoint().operationGets).toBe(60);
+    expect(f.writes()).toBe(1);
+  });
+});
+
+describe('raw proof error privacy', () => {
+  it('wraps hostile raw URL parser errors without their input payload', () => {
+    const f = fixture();
+    f.service.uri = 'https://%PRIVATE_NATIVE_PAYLOAD';
+    let error: unknown;
+    try {
+      projectNativeWebSnapshot(f.service, f.native, f.context);
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toBe('Error: Native release validation held');
+    expect(JSON.stringify(error)).not.toContain('PRIVATE_NATIVE_PAYLOAD');
+    expect((error as Error & { input?: unknown }).input).toBeUndefined();
   });
 });

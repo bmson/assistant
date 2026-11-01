@@ -38,7 +38,9 @@ sent once, with the fresh native etag; even a412 remains possibly attempted. The
 are no write retries, allowMissing, SDK calls or flag substitutions.
 
 The original returned operation name is retained privately. Polling is GET-only,
-maximum60polls/180s with its original deadline retained through recovery. No later
+maximum60 cumulative operation GETs/180s with its original deadline retained through
+recovery. The recovery initial GET consumes the same private60GET budget; exhaustion
+refuses before sending any further request. No later
 caller-supplied operation is accepted. An unknown response without a bound operation
 cannot recover or adopt a revision. With a bound operation, at most one recovery
 may GET only that operation and fixed poststate; it cannot send a PATCH. Fresh raw
