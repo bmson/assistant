@@ -42,12 +42,14 @@ describe.skipIf(!enabled)('PostgreSQL owner-editor person-note creation', () => 
   beforeAll(async () => {
     if (process.env.ASSISTANT_TEST_NO_EXTERNAL_CREDENTIALS !== '1')
       throw new Error('Run this suite through the isolated test environment.');
-    const url = assertAllocatedTestTarget({
-      databaseUrl: process.env.DATABASE_URL,
+    const databaseUrl = process.env.DATABASE_URL;
+    assertAllocatedTestTarget({
+      databaseUrl,
       testDatabaseUrl: process.env.TEST_DATABASE_URL,
       token: process.env.ASSISTANT_TEST_TARGET_TOKEN,
     });
-    db = createDb(url, { max: 8 });
+    if (!databaseUrl) throw new Error('Allocated test database URL is unavailable.');
+    db = createDb(databaseUrl, { max: 8 });
     const owners = await db.select({ id: agents.id }).from(agents).limit(2);
     if (owners.length !== 1 || !owners[0])
       throw new Error('Expected exactly one isolated test owner.');
