@@ -17,11 +17,19 @@ set -euo pipefail
 RELEASE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=infra/gcp/release-persistence.sh
 source "${RELEASE_ROOT}/release-persistence.sh"
+# shellcheck source=infra/gcp/release-staged-services.sh
+source "${RELEASE_ROOT}/release-staged-services.sh"
 
 PROJECT="${GCP_PROJECT:?Set GCP_PROJECT to the Google Cloud project id}"
 REGION="${GCP_REGION:-us-west1}"
+REPO="${ARTIFACT_REPOSITORY:-assistant}"
+TAG="${IMAGE_TAG:-$(git rev-parse --short=12 HEAD)}"
+# Identity, scope and fixed target are pure gates. Only then may auto detection
+# read the live services; the actual resolved driver gates mutation below.
+release_validate_basic_editor_preflight_context "${RELEASE_COMPONENTS:-agent,web}" "$TAG" || exit $?
 
 DRIVER="$(resolve_release_persistence)" || exit $?
+release_validate_basic_editor_context "${RELEASE_COMPONENTS:-agent,web}" "$DRIVER" "$TAG" || exit $?
 export RELEASE_PERSISTENCE_DRIVER="$DRIVER"
 echo "Release path: ${DRIVER} (live services, RELEASE_PERSISTENCE_DRIVER=${RELEASE_PERSISTENCE_DRIVER:-auto})"
 case "$DRIVER" in

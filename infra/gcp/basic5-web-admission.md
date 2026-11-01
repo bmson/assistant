@@ -6,10 +6,15 @@ pin or match a protected deployment's creation receipt, manifest and fresh
 immutable native revision. A naming pattern selects a run to inspect; it never
 establishes ownership. Unknown operator aliases are preserved and block release.
 
-Both direct release wrappers check the intrinsic capability, paired Firestore
-scope and protected GitHub main/source identity before their first provider
-read, build, migration or scheduler action. Staging repeats the check. Genuine
-legacy source without the capability and runtime retains its existing paths.
+The normal dispatcher, fast command, direct Firestore/PostgreSQL wrappers and
+staging helper all enforce the intrinsic scope/context gates. Fast BASIC5 web
+release stops before project discovery. The dispatcher performs the pure
+identity/scope/fixed-target check before driver reads, then validates the actual
+resolved driver before entering a mutating child. The production release job
+performs the same pure check before cloud authentication. No assumed driver is
+authority. Genuine legacy source without the capability and runtime retains its
+existing paths; image building and separate customer/bootstrap policies retain
+their distinct scope.
 
 The required order is paused web promotion, old canonical request drain, native
 etag traffic-only retirement of captured proven aliases, fresh postcheck and a

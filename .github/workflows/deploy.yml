@@ -358,6 +358,17 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+      - name: Check intrinsic BASIC5 context before cloud authentication
+        env:
+          IMAGE_TAG: ${{ needs.plan.outputs.sha }}
+          RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}
+        run: |
+          source infra/gcp/release-staged-services.sh
+          PROJECT="$GCP_PROJECT"
+          REGION="$GCP_REGION"
+          REPO="$ARTIFACT_REPOSITORY"
+          TAG="$IMAGE_TAG"
+          release_validate_basic_editor_preflight_context "$RELEASE_COMPONENTS" "$TAG"
       - run: pnpm install --frozen-lockfile
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3

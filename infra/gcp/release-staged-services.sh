@@ -345,11 +345,12 @@ release_basic_editor_forward_only() {
 
 # Entry-point refusal is repeated in staging so direct wrappers cannot build,
 # migrate or refresh delivery configuration before the BASIC5 context is checked.
-release_validate_basic_editor_context() {
-  local selected="$1" driver="$2" source_sha="$3" basic_editor
+release_validate_basic_editor_preflight_context() {
+  local selected="$1" source_sha="$2" basic_editor
   basic_editor="$(release_basic_editor_forward_only)" || return 1
   [[ "$basic_editor" == true ]] || return 0
-  if [[ "$selected" != agent,web || "$driver" != firestore ]]; then
+  case "$selected" in full|agent,web|web,agent) selected=agent,web ;; esac
+  if [[ "$selected" != agent,web ]]; then
     echo '  BASIC5 requires a paired Firestore release; refusing a path without the captured owned-web-tag admission barrier.' >&2
     return 2
   fi
@@ -367,6 +368,18 @@ release_validate_basic_editor_context() {
     echo '  BASIC5 requires the fixed bmson-assistant/us-west1/assistant target before any provider call.' >&2
     return 2
   fi
+}
+
+# The dispatcher must resolve the real driver only after the pure precheck.
+# Never pass an assumed/auto driver through this full mutation-entry check.
+release_validate_basic_editor_context() {
+  local selected="$1" driver="$2" source_sha="$3" basic_editor
+  basic_editor="$(release_basic_editor_forward_only)" || return 1
+  if [[ "$basic_editor" == true && "$driver" != firestore ]]; then
+    echo '  BASIC5 requires a paired Firestore release; refusing a non-Firestore driver.' >&2
+    return 2
+  fi
+  release_validate_basic_editor_preflight_context "$selected" "$source_sha"
 }
 
 release_staged_services() {
