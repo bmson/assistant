@@ -17,7 +17,8 @@ permissions:
   contents: read
 jobs:
   parse:
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # This frozen recipe is one proof allocation, not a gate on future dependency PRs.
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'codex/pdf-runtime-residual'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
