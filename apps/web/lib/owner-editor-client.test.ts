@@ -73,6 +73,25 @@ function seededStorage() {
   return storage;
 }
 
+it('reads future person-note receipts and pending identity without authoring authority', () => {
+  expect(ownerEditorRoute('create_owner_memory')).toBe('/api/profile/knowledge/memory');
+  const saved = receipt({ command: 'create_owner_memory', ids: { memoryId: operationId } });
+  expect(decodeOwnerEditorReply(saved)).toEqual(saved);
+  expect(decodeOwnerEditorReply({ ...saved, outcome: 'unchanged' })).toBeNull();
+  expect(decodeOwnerEditorReply({ ...saved, ids: { contactId: marker.targetId } })).toBeNull();
+  expect(
+    decodeOwnerEditorReply({
+      ...saved,
+      ids: { memoryId: operationId, contactId: marker.targetId },
+    }),
+  ).toBeNull();
+  const storage = new MemoryStorage();
+  const pending = { ...marker, command: 'create_owner_memory' as const };
+  writeOwnerEditorPendingMarker(storage, 'owner-a', 'session-a', pending);
+  expect(readOwnerEditorPendingMarker(storage, 'owner-a', 'session-a')).toEqual(pending);
+  expect([...storage.values.values()].join('')).not.toContain('content');
+});
+
 describe('owner editor client helpers', () => {
   it('maps only declared commands to their exact endpoints', () => {
     expect(ownerEditorRoute('create_person')).toBe('/api/people/editor');

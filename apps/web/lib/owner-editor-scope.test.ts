@@ -118,7 +118,7 @@ describe('actual owner editor HMAC issuance boundary (not driver/write authority
       expect(a.issuedOperationHandle).not.toBe(b.issuedOperationHandle);
     },
   );
-  it.each(['remove_person', 'remove_owner_family_relationship'] as const)(
+  it.each(['create_owner_memory', 'remove_person', 'remove_owner_family_relationship'] as const)(
     'release policy refuses to issue a %s grant before signing',
     (command) => {
       expect(() =>

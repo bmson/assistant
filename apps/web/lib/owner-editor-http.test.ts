@@ -49,15 +49,17 @@ function fixture(command: OwnerEditorCommand = 'create_person') {
     command === 'update_person_identity' ||
     command === 'remove_person'
       ? paths.people
-      : command === 'correct_owner_memory'
+      : command === 'correct_owner_memory' || command === 'create_owner_memory'
         ? paths.memory
         : paths.family;
   const grantCommand: OwnerEditorCommand =
-    command === 'remove_person'
-      ? 'update_person_identity'
-      : command === 'remove_owner_family_relationship'
-        ? 'correct_owner_family_relationship'
-        : command;
+    command === 'create_owner_memory'
+      ? 'correct_owner_memory'
+      : command === 'remove_person'
+        ? 'update_person_identity'
+        : command === 'remove_owner_family_relationship'
+          ? 'correct_owner_family_relationship'
+          : command;
   const issuedGrant = issueOwnerEditorFormGrant({
     context: { ownerId: owner, epoch, privacyGeneration: 'fixture-generation' },
     session,
@@ -175,24 +177,35 @@ function fixture(command: OwnerEditorCommand = 'create_person') {
             }
           : command === 'remove_owner_family_relationship'
             ? { ...envelope, command, targetRelationId: target, expectedTargetRevision: hash }
-            : command === 'correct_owner_memory'
+            : command === 'create_owner_memory'
               ? {
                   ...envelope,
                   command,
-                  memoryId: target,
-                  expectedContentHash: hash,
-                  expectedMemoryRevision: 'd'.repeat(64),
-                  content: 'A corrected saved note',
+                  subjectContactId: target,
+                  expectedSubjectRevision: hash,
+                  content: 'A new note about this person',
+                  domain: 'other',
+                  importance: 3,
+                  pinned: false,
                 }
-              : command === 'add_family_relationship'
-                ? { ...envelope, command, ...fields }
-                : {
+              : command === 'correct_owner_memory'
+                ? {
                     ...envelope,
                     command,
-                    targetRelationId: target,
-                    expectedTargetRevision: hash,
-                    replacement: fields,
-                  };
+                    memoryId: target,
+                    expectedContentHash: hash,
+                    expectedMemoryRevision: 'd'.repeat(64),
+                    content: 'A corrected saved note',
+                  }
+                : command === 'add_family_relationship'
+                  ? { ...envelope, command, ...fields }
+                  : {
+                      ...envelope,
+                      command,
+                      targetRelationId: target,
+                      expectedTargetRevision: hash,
+                      replacement: fields,
+                    };
   function request(
     method: string,
     options: {
@@ -307,7 +320,7 @@ describe('actual two HTTP factories, actual crypto/parser/body guards, offline b
       expect(f.lookup).not.toHaveBeenCalled();
     },
   );
-  it.each(['remove_person', 'remove_owner_family_relationship'] as const)(
+  it.each(['create_owner_memory', 'remove_person', 'remove_owner_family_relationship'] as const)(
     'rejects a correctly signed %s scope before GET or POST reaches the backend',
     async (command) => {
       const f = fixture(command);

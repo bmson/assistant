@@ -107,6 +107,19 @@ const applySchema = z.discriminatedUnion('command', [
       .transform((content) => content.trim())
       .pipe(z.string().min(3).max(4_000)),
   }),
+  z.strictObject({
+    ...envelope,
+    command: z.literal('create_owner_memory'),
+    subjectContactId: uuid,
+    expectedSubjectRevision: revision,
+    content: z
+      .string()
+      .transform((content) => content.trim())
+      .pipe(z.string().min(3).max(4_000)),
+    domain: z.enum(['identity', 'work', 'home', 'relationships', 'preferences', 'health', 'other']),
+    importance: z.number().int().min(1).max(5),
+    pinned: z.boolean(),
+  }),
 ]);
 const reconcileSchema = z.strictObject({
   version: z.literal(1),
@@ -125,6 +138,7 @@ export function ownerEditorPath(command: OwnerEditorCommand): string {
     case 'correct_owner_family_relationship':
       return '/api/profile/knowledge/family';
     case 'correct_owner_memory':
+    case 'create_owner_memory':
       return '/api/profile/knowledge/memory';
     case 'remove_person':
       return '/api/people/editor';
@@ -151,6 +165,8 @@ export function ownerEditorApplyMatchesScope(
         return scope.targetId === request.targetRelationId;
       case 'correct_owner_memory':
         return scope.targetId === request.memoryId;
+      case 'create_owner_memory':
+        return scope.targetId === request.subjectContactId;
       case 'remove_person':
       case 'remove_owner_family_relationship':
         return false;
@@ -202,6 +218,13 @@ export function parseOwnerEditorRequest(value: unknown, path: string): OwnerEdit
       };
     }
   } else if (request.command === 'correct_owner_memory') {
+    request.content = request.content.trim();
+    if (request.content.length < 3 || request.content.length > 4_000)
+      return {
+        ok: false,
+        fieldErrors: { content: 'Enter a saved note between 3 and 4,000 characters.' },
+      };
+  } else if (request.command === 'create_owner_memory') {
     request.content = request.content.trim();
     if (request.content.length < 3 || request.content.length > 4_000)
       return {

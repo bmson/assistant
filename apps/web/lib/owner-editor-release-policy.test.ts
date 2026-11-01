@@ -25,6 +25,7 @@ describe('basic owner-editor release policy', () => {
   });
 
   it.each([
+    'create_owner_memory',
     'remove_person',
     'remove_owner_family_relationship',
     'unknown_command',

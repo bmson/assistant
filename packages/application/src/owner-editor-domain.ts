@@ -91,7 +91,7 @@ export type PreparedOwnerEditor =
       expected: OwnerEditorGraphExpectations;
     };
 
-/** Four commands reuse existing source preparation; no provider I/O occurs in commit. */
+/** Owner-memory creation stays unavailable until its atomic storage port is implemented. */
 export function createOwnerEditorDomain(input: {
   storage: OwnerEditorDomainStorage;
   router: EmbeddingPort;
@@ -103,6 +103,7 @@ export function createOwnerEditorDomain(input: {
       scope: OwnerEditorScope,
     ): ReturnType<OwnerEditorDomainPort<PreparedOwnerEditor>['prepare']> {
       if (
+        request.command === 'create_owner_memory' ||
         request.command === 'remove_person' ||
         request.command === 'remove_owner_family_relationship'
       )
