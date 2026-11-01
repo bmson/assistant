@@ -49,6 +49,17 @@ are never included. The failure receipt does not qualify readiness or authorize
 retry. After entering a PATCH attempt, an error remains possibly mutating even if
 no success receipt exists; investigate before deciding any next operation.
 
+Only a plan-mode canonical traffic disagreement may additionally retain bounded
+discrepancy hints from the service snapshot that was already fetched. This adds no
+provider call and does not change equality or planning. At most32rows per side and
+16KiB of output contain counts, duplicate identities, tag/revision hashes, known
+historical/current membership labels, and native effective percentages. Membership
+is not ownership. Arbitrary tags, revisions, URIs, environment and payload are not
+retained. Invalid, missing or over-bound coverage is explicitly uncomparable or
+unavailable; it does not imply equality or absence. Row order, status URI and omitted
+zero percentages already normalize in the planner and do not explain a canonical
+multiset mismatch. These hints propose no repair and never authorize a retry/apply.
+
 Source/CI approval for this workflow is separate from operational permission.
 Actual execution remains held for the manager's concrete plan review and the
 paired rollout lifecycle fix: retire every captured proven old web alias after

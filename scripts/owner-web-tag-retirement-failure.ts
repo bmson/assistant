@@ -1,5 +1,6 @@
 /** Allowlisted failure facts only. Never serialize an exception or provider response. */
 import { ProtectedCloudCommandError, type ProtectedCloudStage } from './owner-web-tag-cloud.js';
+import { describeWebTrafficDiscrepancy } from './owner-web-traffic-discrepancy.js';
 
 export type RetirementStage =
   | ProtectedCloudStage
@@ -103,6 +104,7 @@ export function retirementFailureReason(error: unknown): string {
 export function retirementFailureTracker(env: NodeJS.ProcessEnv, argument: unknown) {
   let stage: RetirementStage = 'arguments',
     mutationPossible = false;
+  let trafficDiscrepancy: ReturnType<typeof describeWebTrafficDiscrepancy> | undefined;
   const mode =
     argument === '--plan'
       ? 'plan'
@@ -112,6 +114,9 @@ export function retirementFailureTracker(env: NodeJS.ProcessEnv, argument: unkno
           ? 'verify_source'
           : 'unqualified';
   return {
+    noteTrafficSnapshot: (raw: unknown) => {
+      trafficDiscrepancy = describeWebTrafficDiscrepancy(raw);
+    },
     mark: (value: RetirementStage) => {
       stage = value;
     },
@@ -129,6 +134,7 @@ export function retirementFailureTracker(env: NodeJS.ProcessEnv, argument: unkno
       readiness: 'unknown',
       authorityEstablished: false,
       retryAuthorized: false,
+      ...(trafficDiscrepancy ? { trafficDiscrepancy } : {}),
     }),
   };
 }

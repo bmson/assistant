@@ -25,7 +25,12 @@ vi.mock('./owner-web-tag-retirement.js', async (original) => ({
   executeOwnedWebTagRetirement: ports.execute,
 }));
 
-import type { RetirementPlan } from './owner-web-tag-retirement.js';
+import {
+  HISTORICAL_WEB_TAGS,
+  type RetirementPlan,
+  tagHash,
+  WEB_SERVICE,
+} from './owner-web-tag-retirement.js';
 import {
   retirementPacket,
   retirementPacketHash,
@@ -88,6 +93,50 @@ const trackerFor = (mode: '--plan' | '--apply') => {
 };
 
 describe('retirement command diagnostic boundaries with fake transport only', () => {
+  it('reuses the existing service snapshot for mismatch-only hints without another read or weakened refusal', async () => {
+    const old = HISTORICAL_WEB_TAGS[0],
+      current = HISTORICAL_WEB_TAGS[1];
+    if (!old || !current) throw new Error('Missing reviewed pins');
+    const row = (proof: typeof old, percent: number) => ({
+      type: 'TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION',
+      revision: proof.revision,
+      tag: proof.tag,
+      percent,
+    });
+    const secret = 'PRIVATE_NATIVE_ENV_URI_PAYLOAD';
+    ports.readService.mockResolvedValue({
+      name: WEB_SERVICE,
+      traffic: [row(old, 0), row(current, 100)],
+      trafficStatuses: [{ ...row(current, 100), uri: secret }],
+      template: { env: secret },
+    });
+    ports.plan.mockImplementation(() => {
+      throw new Error('Desired and observed traffic differ');
+    });
+    const tracker = trackerFor('--plan');
+    const error = await runRetirementCommand(tracker).catch((error: unknown) => error);
+    const receipt = tracker.receipt(error);
+    expect(receipt).toMatchObject({
+      stage: 'plan_validation',
+      reason: 'traffic_disagreement',
+      mutationState: 'not_attempted',
+      trafficDiscrepancy: {
+        comparison: 'canonical_multiset_differs',
+        desired: { rowCount: 2 },
+        observed: { rowCount: 1 },
+        ownershipProven: false,
+        repairProposed: false,
+      },
+    });
+    expect(JSON.stringify(receipt)).toContain(tagHash(old.tag));
+    for (const privateValue of [secret, old.tag, old.revision, current.tag, current.revision])
+      expect(JSON.stringify(receipt)).not.toContain(privateValue);
+    expect(ports.readService).toHaveBeenCalledTimes(1);
+    expect(ports.readRevision).toHaveBeenCalledTimes(2);
+    expect(ports.patchTraffic).not.toHaveBeenCalled();
+    expect(ports.execute).not.toHaveBeenCalled();
+    expect(ports.write).not.toHaveBeenCalled();
+  });
   it('plan still writes only the same packet and never enters the executor or PATCH', async () => {
     const tracker = trackerFor('--plan');
     await runRetirementCommand(tracker);
@@ -96,6 +145,23 @@ describe('retirement command diagnostic boundaries with fake transport only', ()
     expect(ports.execute).not.toHaveBeenCalled();
     expect(ports.patchTraffic).not.toHaveBeenCalled();
     expect(tracker.receipt(new Error('private')).mutationState).toBe('not_attempted');
+  });
+  it('does not attach read-only discrepancy hints to an apply failure or change its refusal', async () => {
+    ports.plan.mockImplementation(() => {
+      throw new Error('Desired and observed traffic differ');
+    });
+    const tracker = trackerFor('--apply');
+    const error = await runRetirementCommand(tracker).catch((error: unknown) => error);
+    expect(tracker.receipt(error)).toMatchObject({
+      stage: 'plan_validation',
+      reason: 'traffic_disagreement',
+      mutationState: 'not_attempted',
+    });
+    expect(tracker.receipt(error)).not.toHaveProperty('trafficDiscrepancy');
+    expect(ports.readService).toHaveBeenCalledTimes(1);
+    expect(ports.readRevision).toHaveBeenCalledTimes(2);
+    expect(ports.execute).not.toHaveBeenCalled();
+    expect(ports.patchTraffic).not.toHaveBeenCalled();
   });
   it('identifies the fixed helper stage without claiming SDK setup proves token access', async () => {
     ports.cloud.mockImplementation(async (mark) => {

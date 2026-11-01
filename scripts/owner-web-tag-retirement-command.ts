@@ -9,7 +9,10 @@ import {
   planOwnedWebTagRetirement,
   type RetirementPlan,
 } from './owner-web-tag-retirement.js';
-import { retirementFailureTracker } from './owner-web-tag-retirement-failure.js';
+import {
+  retirementFailureReason,
+  retirementFailureTracker,
+} from './owner-web-tag-retirement-failure.js';
 
 const WORKFLOW = 'bmson/assistant/.github/workflows/owner-web-tag-retirement.yml@refs/heads/main';
 export function verifyRetirementContext(env: NodeJS.ProcessEnv) {
@@ -69,13 +72,20 @@ export async function runRetirementCommand(tracker: ReturnType<typeof retirement
     native[proof.revision] = await io.readRevision(proof.revision);
   }
   tracker.mark('plan_validation');
-  const plan = planOwnedWebTagRetirement(before, native, [old], {
-    revision: current.revision,
-    image: current.image,
-    tag: current.tag,
-    uriSha256: current.uriSha256,
-    paused: false,
-  });
+  let plan: RetirementPlan;
+  try {
+    plan = planOwnedWebTagRetirement(before, native, [old], {
+      revision: current.revision,
+      image: current.image,
+      tag: current.tag,
+      uriSha256: current.uriSha256,
+      paused: false,
+    });
+  } catch (error) {
+    if (mode === '--plan' && retirementFailureReason(error) === 'traffic_disagreement')
+      tracker.noteTrafficSnapshot(before);
+    throw error;
+  }
   const packet = retirementPacket(plan, process.env.GITHUB_SHA ?? '', observedAt);
   const packetSha256 = retirementPacketHash(packet);
   // Receipt contains only public resource identities, hashes and CAS metadata, no native env/spec.
