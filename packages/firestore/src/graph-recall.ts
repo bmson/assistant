@@ -168,6 +168,8 @@ export class FirestoreGraphRecallRepository
           objectLabel: object.preferredLabel ?? object.label,
           sourceMemoryId: memory.id,
           content: memory.content,
+          sourceContentHash: memory.contentHash,
+          sourceOwnerCorrection: memory.ownerCorrection,
           evidenceQuote: row.evidenceQuote,
           createdAt: memory.createdAt,
           confidence: row.confidence,

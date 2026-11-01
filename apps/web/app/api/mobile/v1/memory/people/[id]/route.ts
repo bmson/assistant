@@ -3,7 +3,6 @@ import {
   getPersonProfile,
   mergePeople,
   updatePersonIdentity,
-  updatePersonRelationship,
 } from '@assistant/application/profile';
 import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import { FirestoreProfilePeopleReadRepository } from '@assistant/firestore';
@@ -52,6 +51,7 @@ export async function PATCH(
   const mutationBody = await readMobileMutationBody(request, [
     'action',
     'aliases',
+    'expectedContactRevision',
     'name',
     'relationship',
     'targetId',
@@ -61,22 +61,38 @@ export async function PATCH(
   if (!body || Array.isArray(body)) {
     return mobileJson({ error: 'invalid person body' }, { status: 400 });
   }
+  if (
+    typeof body.name !== 'string' ||
+    typeof body.aliases !== 'string' ||
+    (body.relationship !== undefined && typeof body.relationship !== 'string')
+  )
+    return mobileJson({ error: 'invalid person body' }, { status: 400 });
   const config = loadConfig();
   const commands = config.PERSISTENCE_DRIVER === 'firestore' ? getFirestoreProfileCommands() : null;
   const identity = await updatePersonIdentity(
     commands?.people ?? getDb(),
     id,
-    typeof body.name === 'string' ? body.name : '',
-    typeof body.aliases === 'string' ? body.aliases : '',
+    body.name,
+    body.aliases,
+    typeof body.expectedContactRevision === 'string' ? body.expectedContactRevision : undefined,
+    typeof body.relationship === 'string' ? body.relationship : undefined,
   );
-  if (identity.error) return mobileJson({ error: identity.error }, { status: 400 });
-  await updatePersonRelationship(
-    commands?.people ?? getDb(),
-    id,
-    typeof body.relationship === 'string' ? body.relationship : '',
-  );
-  if (commands) await recompileFirestoreProfileCard(commands);
-  return mobileJson({ ok: true });
+  if (identity.error) {
+    if (identity.code === 'review_required')
+      return mobileJson({ error: 'review_required' }, { status: 428 });
+    if (identity.code === 'conflict') return mobileJson({ error: 'conflict' }, { status: 409 });
+    if (identity.code === 'not_found') return mobileJson({ error: 'not_found' }, { status: 404 });
+    return mobileJson({ error: identity.error }, { status: 400 });
+  }
+  let refreshPending = identity.refreshPending ?? false;
+  if (commands) {
+    try {
+      await recompileFirestoreProfileCard(commands);
+    } catch {
+      refreshPending = true;
+    }
+  }
+  return mobileJson({ ok: true, ...(refreshPending ? { refreshPending: true } : {}) });
 }
 
 export async function POST(

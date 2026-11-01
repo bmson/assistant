@@ -52,6 +52,9 @@ vi.mock('@/lib/mobile-access-token', () => ({
 vi.mock('@/app/settings/actions', () => ({
   rotateMobileToken: async () => ({ error: 'Synthetic preview only.' }),
 }));
+vi.mock('@/lib/server', () => ({
+  getWorkspaceSettings: async () => ({ policies: [] }),
+}));
 vi.mock('@/lib/task-activity', () => ({
   discoverTaskActivity: async () => ({
     complete: true,

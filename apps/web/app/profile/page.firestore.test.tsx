@@ -124,7 +124,9 @@ describe.skipIf(!localEmulator)('Firestore memory hub page with PostgreSQL offli
       expect(hubRead).not.toHaveBeenCalled();
       expect(storeRead).not.toHaveBeenCalled();
       expect(html).toContain('What I remember');
-      expect(html).toContain('Browse only. Editing and cleanup are unavailable here.');
+      expect(html).toContain('Open a saved note or person to review available changes.');
+      expect(html).toContain('Editing availability is checked');
+      expect(html).not.toContain('Browse only. Editing and cleanup are unavailable here.');
       expect(html.match(/<h2\b/g)).toHaveLength(2);
       expect(html).toContain('href="/people"');
       expect(html).toContain('href="/profile/knowledge?view=library"');

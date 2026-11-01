@@ -45,12 +45,18 @@ export { createPostgresNotificationOutboxRepository } from './notification-outbo
 export { createPostgresNotificationsConversationRepository } from './notifications-conversation-repository.js';
 export { createPostgresNudgePolicyRepository } from './nudge-policy-repository.js';
 export { createPostgresOccasionToolReadRepository } from './occasion-tool-read-repository.js';
+export * from './owner-call-operation-repository.js';
 export { createPostgresOwnerCardCompilationRepository } from './owner-card-compilation-repository.js';
 export { lockPostgresOwnerChatAction } from './owner-chat-action-lock.js';
 export {
   createPostgresOwnerContextRepository,
   listEligibleOwnerCommitments,
 } from './owner-context-repository.js';
+export * from './owner-editor-graph.js';
+export * from './owner-editor-memory.js';
+export * from './owner-editor-people.js';
+export * from './owner-editor-repository.js';
+export * from './owner-editor-retention.js';
 export { createPostgresPhoneCalendarSharingRepository } from './phone-calendar-sharing-repository.js';
 export {
   assertPostgresPrivacyObservationFence,

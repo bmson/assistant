@@ -367,13 +367,13 @@ describe.skipIf(!localEmulator)('Firestore knowledge workspace with PostgreSQL o
     expect(auth.owner).toHaveBeenCalled();
     expect(library).toContain('Library');
     expect(library).toContain('Grace lives in Oslo');
-    expect(library).toContain('Browse only');
+    expect(library).toContain('Open a saved note or person to review available edits.');
     const map = await render({ view: 'map', entity: seeded.grace });
     expect(map).toContain('Grace');
     expect(map).toContain('Grace works at Acme');
     const cleanup = await render({ view: 'cleanup' });
     expect(cleanup).not.toContain('Remove disconnected graph items');
-    expect(cleanup).toContain('Editing and cleanup are unavailable');
+    expect(cleanup).toContain('Cleanup is unavailable here.');
     expect(cleanup).not.toContain('Retry processing');
   });
 

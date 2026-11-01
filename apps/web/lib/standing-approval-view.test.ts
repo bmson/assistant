@@ -1,0 +1,221 @@
+import { describe, expect, it } from 'vitest';
+import { projectStandingApprovalPolicy } from './standing-approval-view';
+
+const brief = {
+  to: '+14155550123',
+  contactName: 'Harbor Hotel',
+  goal: 'Confirm the late check-in time',
+  context: 'Arriving Friday after 8 PM; booking reference HARBOR-42.',
+  mayAgreeTo: 'A check-in time no later than 10 PM.',
+  mustNot: 'Do not change the reservation or pay a deposit.',
+  language: 'English',
+  maxMinutes: 4,
+  onVoicemail: 'leave_message',
+  voicemailMessage: 'This is Alex confirming a late arrival.',
+};
+
+describe('standing approval web projection', () => {
+  it('adds structured phone details without changing the legacy policy label or scope', () => {
+    const policy = {
+      id: 'call-rule',
+      toolName: 'phone.call',
+      templateKey: 'phone.call.same_brief',
+      match: { brief },
+      effect: 'allow',
+      enabled: true,
+      createdVia: 'owner',
+    };
+
+    expect(projectStandingApprovalPolicy(policy)).toMatchObject({
+      id: 'call-rule',
+      toolName: 'phone.call',
+      templateKey: 'phone.call.same_brief',
+      label: expect.any(String),
+      scope: expect.any(String),
+      effect: 'allow',
+      enabled: true,
+      createdVia: 'owner',
+      phoneCallPresentation: {
+        kind: 'same_brief',
+        recipient: '+14155550123',
+        maxMinutes: 4,
+      },
+      phoneCallRecipient: '+14155550123',
+      phoneCallState: 'Available for exact brief',
+      phoneCallLimitLine: 'Exact approved brief · up to 4 min · expiry not recorded',
+    });
+  });
+
+  it('uses the default dictionary label and preserves a custom saved label', () => {
+    const policy = {
+      id: 'call-rule',
+      toolName: 'phone.call',
+      templateKey: 'phone.call.same_brief',
+      match: { brief },
+      effect: 'allow',
+      enabled: true,
+      createdVia: 'owner',
+    };
+
+    expect(projectStandingApprovalPolicy(policy).label).toBe('Repeat approved call');
+    expect(projectStandingApprovalPolicy({ ...policy, label: 'Call the Harbor desk' }).label).toBe(
+      'Call the Harbor desk',
+    );
+  });
+});
+
+const ownerGrant = {
+  schemaVersion: 1,
+  grantId: 'e25132df-f619-43c2-96c9-b9c349470b6c',
+  recipientE164: '+14155550123',
+  maxMinutes: 12,
+  expiresAt: '2099-10-30T12:00:00.000Z',
+};
+const ownerPolicy = {
+  id: 'owner-call',
+  toolName: 'phone.call',
+  templateKey: 'phone.call.to_owner_number.v1',
+  match: ownerGrant,
+  effect: 'allow',
+  enabled: true,
+  createdVia: 'approval_dialog',
+};
+const boundedOwnerGrant = {
+  schemaVersion: 2,
+  grantId: 'f25132df-f619-43c2-96c9-b9c349470b6c',
+  action: 'phone.call',
+  recipientE164: '+14155550123',
+  maxMinutes: 12,
+  maxCallsPerHour: 2,
+  maxCallsPerDay: 5,
+  maxCostUsdMicrosPerCall: 1_250_000,
+  maxCostUsdMicrosPerDay: 4_500_000,
+  expiresAt: '2099-10-30T12:00:00.000Z',
+};
+const boundedOwnerPolicy = {
+  ...ownerPolicy,
+  id: 'bounded-owner-call',
+  templateKey: 'phone.call.owner_action.v2',
+  match: boundedOwnerGrant,
+};
+
+describe('combined strict phone presentation', () => {
+  it('adds validated C availability and full saved data without changing the accepted A projector', () => {
+    const view = projectStandingApprovalPolicy(ownerPolicy, true);
+    expect(view.phonePermissionKind).toBe('owner_number');
+    expect(view.scope).toContain(
+      'Requests that add a topic, script, or other instructions require approval',
+    );
+    expect(view.label).toBe('Future calls to an approved number');
+    expect(view.effectiveAvailability).toContain('Available for a matching direct request');
+    expect(JSON.parse(view.opaqueDetails!)).toEqual(ownerGrant);
+    expect(view.phoneCallPresentation?.kind).toBe('opaque');
+  });
+
+  it('projects the v2 direct-owner limits, price and expiry without adding answerer claims', () => {
+    const view = projectStandingApprovalPolicy(boundedOwnerPolicy, true);
+    expect(view.phonePermissionKind).toBe('owner_number');
+    expect(view.label).toBe('Future calls to an approved number');
+    expect(view.phoneCallRecipient).toBe('+14155550123');
+    expect(view.phoneCallLimitLine).toContain('2/60 min, 5/24 h');
+    expect(view.phoneCallLimitLine).toContain('USD 1.25/call, 4.50/24 h');
+    expect(view.phoneCallLimitLine).toContain('expires Oct 30, 2099');
+    expect(view.scope).toContain('2 calls in any 60 minutes');
+    expect(view.scope).toContain('$1.25 per call');
+    expect(view.scope).not.toContain('verified');
+    expect(JSON.parse(view.opaqueDetails!)).toEqual(boundedOwnerGrant);
+  });
+
+  it.each([
+    ['system disabled', ownerPolicy, false, 'disabled by the system'],
+    ['paused', { ...ownerPolicy, enabled: false }, true, 'this entry remains paused'],
+    [
+      'expired',
+      { ...ownerPolicy, match: { ...ownerGrant, expiresAt: '2000-10-30T12:00:00.000Z' } },
+      true,
+      'Expired',
+    ],
+  ] as const)('preserves the effective state: %s', (_name, policy, flag, text) => {
+    expect(projectStandingApprovalPolicy(policy, flag).effectiveAvailability).toContain(text);
+  });
+
+  it.each([
+    ['malformed C', 'phone.call.to_owner_number.v1', { ...ownerGrant, extra: true }],
+    ['malformed v2', 'phone.call.owner_action.v2', { ...boundedOwnerGrant, extra: true }],
+    ['unknown phone', 'phone.call.future.v2', { fullUnknownData: 'retain this' }],
+    ['malformed A', 'phone.call.same_brief', { brief: { ...brief, futureUnknownKey: true } }],
+  ])('keeps %s opaque without inferred authority', (_name, templateKey, match) => {
+    const view = projectStandingApprovalPolicy({ ...ownerPolicy, templateKey, match }, true);
+    expect(view.phonePermissionKind).toBe('opaque');
+    expect(view.label).toBe('Stored phone permission');
+    expect(view.scope).toBeNull();
+    expect(view.phoneCallPresentation?.kind).toBe('opaque');
+    expect(JSON.parse(view.opaqueDetails!)).toEqual(match);
+    expect(view.effectiveAvailability ?? '').not.toContain(
+      'Available for a matching direct request',
+    );
+  });
+
+  it('keeps non-phone generic behavior with a phone-like template and never adds phone authority fields', () => {
+    const view = projectStandingApprovalPolicy(
+      { ...ownerPolicy, toolName: 'other.tool', label: 'Custom generic label' },
+      true,
+    );
+    expect(view.label).toBe('Custom generic label');
+    expect(view.phonePermissionKind).toBeNull();
+    expect(view.phoneCallPresentation).toBeNull();
+    expect(view.opaqueDetails).toBeNull();
+    expect(view.effectiveAvailability).toBeNull();
+    expect(view.phoneCallRecipient).toBeNull();
+    expect(view.phoneCallState).toBeNull();
+    expect(view.phoneCallLimitLine).toBeNull();
+  });
+
+  it('projects a canonical owner number and its existing duration and expiry without naming an answerer', () => {
+    const grant = {
+      schemaVersion: 1,
+      grantId: 'e25132df-f619-43c2-96c9-b9c349470b6c',
+      recipientE164: '+14155550123',
+      maxMinutes: 12,
+      expiresAt: '2099-10-30T12:00:00.000Z',
+    };
+    const view = projectStandingApprovalPolicy(
+      {
+        id: 'owner-call',
+        toolName: 'phone.call',
+        templateKey: 'phone.call.to_owner_number.v1',
+        match: grant,
+        effect: 'allow',
+        enabled: true,
+        createdVia: 'approval_dialog',
+      },
+      true,
+    );
+
+    expect(view.phoneCallRecipient).toBe('+14155550123');
+    expect(view.phoneCallState).toBe('Available for direct requests');
+    expect(view.phoneCallLimitLine).toBe(
+      'Future owner-number calls · up to 12 min · expires Oct 30, 2099, 12:00 PM (UTC)',
+    );
+    expect(view.phoneCallLimitLine).not.toContain('contactName');
+  });
+
+  it('does not infer a destination or available state from unknown phone rules', () => {
+    const view = projectStandingApprovalPolicy({
+      id: 'unknown-call',
+      toolName: 'phone.call',
+      templateKey: 'phone.call.future.v2',
+      match: { phone: '+14155550123' },
+      effect: 'allow',
+      enabled: true,
+      createdVia: 'owner',
+    });
+
+    expect(view.phonePermissionKind).toBe('opaque');
+    expect(view.phoneCallRecipient).toBeNull();
+    expect(view.phoneCallState).toBe('Saved scope unavailable');
+    expect(view.phoneCallLimitLine).toBe(
+      'Saved scope unavailable · duration and expiry unavailable',
+    );
+  });
+});

@@ -2,6 +2,7 @@ import type { ApprovalRememberStore } from '@assistant/application/approvals';
 import { loadConfig } from '@assistant/config';
 import {
   assertPrivacyErasureFenceUnchanged,
+  FirestoreApprovalPolicyRepository,
   FirestoreApprovalRepository,
   readPrivacyErasureFence,
 } from '@assistant/firestore';
@@ -32,4 +33,15 @@ export async function withApprovalDecisionStore<T>(
   });
   await assertPrivacyErasureFenceUnchanged(installationStore, config.FIRESTORE_AGENT_ID, fence);
   return result;
+}
+
+/** Read policies through the same authenticated installation composition. */
+export function getApprovalPolicyStore() {
+  const config = loadConfig();
+  return config.PERSISTENCE_DRIVER === 'firestore'
+    ? {
+        agentId: config.FIRESTORE_AGENT_ID,
+        policies: new FirestoreApprovalPolicyRepository(getFirestoreInstallationStore()),
+      }
+    : getDb();
 }

@@ -1,0 +1,937 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1784158479360,
+      "tag": "0000_new_abomination",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1784229518334,
+      "tag": "0001_ambitious_franklin_richards",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784230639325,
+      "tag": "0002_hot_goliath",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1784248476780,
+      "tag": "0003_aromatic_blink",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1784267440434,
+      "tag": "0004_flimsy_the_stranger",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1784271091912,
+      "tag": "0005_tiny_ares",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1784315132165,
+      "tag": "0006_amazing_surge",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1784316680120,
+      "tag": "0007_overrated_leech",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1784319060635,
+      "tag": "0008_mushy_squirrel_girl",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1784320439376,
+      "tag": "0009_nasty_solo",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1784355444132,
+      "tag": "0010_gorgeous_wallow",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1784356818164,
+      "tag": "0011_blushing_tempest",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1784358584976,
+      "tag": "0012_yellow_puck",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1784362080803,
+      "tag": "0013_simple_venom",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1784363828212,
+      "tag": "0014_organic_clint_barton",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1784412650703,
+      "tag": "0015_material_mister_fear",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1784425304611,
+      "tag": "0016_thin_veda",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1784426446184,
+      "tag": "0017_overrated_bulldozer",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1784477307695,
+      "tag": "0018_nasty_moon_knight",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1784492432073,
+      "tag": "0019_extract_role_deepseek_primary",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1784570400000,
+      "tag": "0020_reconcile_runtime_defaults",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1784569354578,
+      "tag": "0021_green_bullseye",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1784609059680,
+      "tag": "0022_brainy_jane_foster",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1784609200000,
+      "tag": "0023_reason_routing_budgets",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1784609300000,
+      "tag": "0024_default_voice_profile",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1784619737509,
+      "tag": "0025_icy_bullseye",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1784619737510,
+      "tag": "0026_occasions_morning_brief",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1784621344079,
+      "tag": "0027_legal_shard",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1784622157464,
+      "tag": "0028_chunky_dark_phoenix",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1784622995191,
+      "tag": "0029_perfect_magus",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1784624454839,
+      "tag": "0030_mixed_roland_deschain",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1784669844856,
+      "tag": "0031_yummy_stature",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1784683114856,
+      "tag": "0032_colossal_bug",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1784683680495,
+      "tag": "0033_sticky_anthem",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1784685076389,
+      "tag": "0034_lush_deadpool",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1784685449914,
+      "tag": "0035_tranquil_sebastian_shaw",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1784687473284,
+      "tag": "0036_modern_night_nurse",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1784734228576,
+      "tag": "0037_thin_madripoor",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1784763024024,
+      "tag": "0038_sturdy_molly_hayes",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1785263796277,
+      "tag": "0039_sad_the_phantom",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1785264608622,
+      "tag": "0040_futuristic_skin",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1785265227019,
+      "tag": "0041_clear_may_parker",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1785265447082,
+      "tag": "0042_flippant_argent",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1785329694667,
+      "tag": "0043_tan_karma",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1787063137849,
+      "tag": "0044_careless_logan",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1787087689353,
+      "tag": "0045_wooden_shaman",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1787464902162,
+      "tag": "0046_flippant_surge",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1787529874288,
+      "tag": "0047_lively_puff_adder",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1787546761649,
+      "tag": "0048_cynical_morph",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1787584098987,
+      "tag": "0049_perpetual_lester",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1787584444757,
+      "tag": "0050_uneven_komodo",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1787587400174,
+      "tag": "0051_chubby_terrax",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1787600380482,
+      "tag": "0052_nostalgic_jackal",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1787605472910,
+      "tag": "0053_loud_whistler",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1787612432947,
+      "tag": "0054_fixed_scarlet_witch",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1787612697717,
+      "tag": "0055_sharp_plazm",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1787613476775,
+      "tag": "0056_tense_green_goblin",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1787675944573,
+      "tag": "0057_past_professor_monster",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1787697495566,
+      "tag": "0058_optimal_betty_ross",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1787700736099,
+      "tag": "0059_omniscient_sway",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1787719978946,
+      "tag": "0060_loose_betty_ross",
+      "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1787720000000,
+      "tag": "0061_bearer_mcp_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1787727653346,
+      "tag": "0062_eager_katie_power",
+      "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1787784157158,
+      "tag": "0063_milky_mephisto",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1787869859160,
+      "tag": "0064_exotic_lord_hawal",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1787897379269,
+      "tag": "0065_elite_martin_li",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1787949317310,
+      "tag": "0066_warm_robin_chapel",
+      "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1788118753989,
+      "tag": "0067_solid_midnight",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1788710438827,
+      "tag": "0068_new_masque",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1788911209204,
+      "tag": "0069_task_lease_fencing",
+      "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "7",
+      "when": 1789109215273,
+      "tag": "0070_fantastic_norman_osborn",
+      "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1789149389272,
+      "tag": "0071_fair_excalibur",
+      "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1789237304953,
+      "tag": "0072_approval_recovery_cursor",
+      "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1789242037865,
+      "tag": "0073_historical_approval_policy",
+      "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1789318929796,
+      "tag": "0074_hidden_chat_messages",
+      "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1789506694437,
+      "tag": "0075_email_ingest_from_name",
+      "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1789506775644,
+      "tag": "0076_disable_morning_brief",
+      "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1790492112147,
+      "tag": "0077_model_connections",
+      "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1790494851133,
+      "tag": "0078_call_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1790494858951,
+      "tag": "0079_voice_role",
+      "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1790569651319,
+      "tag": "0080_cost_evidence",
+      "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1790789027614,
+      "tag": "0081_lyrical_guardsmen",
+      "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1791356813379,
+      "tag": "0082_dapper_kabuki",
+      "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1791356861070,
+      "tag": "0083_blue_punisher",
+      "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1791360000000,
+      "tag": "0084_approval_identity_reconciliation",
+      "breakpoints": true
+    },
+    {
+      "idx": 85,
+      "version": "7",
+      "when": 1791360000001,
+      "tag": "0085_call_voice_route",
+      "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1791360000002,
+      "tag": "0086_call_finish_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1791360537580,
+      "tag": "0087_gmail_sync_lease_fencing",
+      "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1791365366117,
+      "tag": "0088_skill_library_revision_fence",
+      "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1791366110442,
+      "tag": "0089_commitment_source_occurrence_fence",
+      "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1791366572872,
+      "tag": "0090_knowledge_graph_correction_receipt",
+      "breakpoints": true
+    },
+    {
+      "idx": 91,
+      "version": "7",
+      "when": 1791366572873,
+      "tag": "0091_blended_recall_metrics",
+      "breakpoints": true
+    },
+    {
+      "idx": 92,
+      "version": "7",
+      "when": 1791367749892,
+      "tag": "0092_commit_ordered_chat_append",
+      "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1791368808544,
+      "tag": "0093_watch_fire_effect_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 94,
+      "version": "7",
+      "when": 1791369085425,
+      "tag": "0094_ordinary_rawhide_kid",
+      "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1791369085426,
+      "tag": "0095_configuration_provenance",
+      "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1791371404402,
+      "tag": "0096_graph_assertion_metadata",
+      "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1791372209235,
+      "tag": "0097_durable_mission_reports",
+      "breakpoints": true
+    },
+    {
+      "idx": 98,
+      "version": "7",
+      "when": 1791372301295,
+      "tag": "0098_mission_report_legs",
+      "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1791373887968,
+      "tag": "0099_email_obligation_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 100,
+      "version": "7",
+      "when": 1791375338891,
+      "tag": "0100_email_booking_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "7",
+      "when": 1791375795674,
+      "tag": "0101_adorable_killer_shrike",
+      "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1791377096916,
+      "tag": "0102_new_romulus",
+      "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1791378278544,
+      "tag": "0103_booking_cancellation_binding",
+      "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1791379311055,
+      "tag": "0104_milky_masque",
+      "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1791379760679,
+      "tag": "0105_keen_angel",
+      "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1791381854515,
+      "tag": "0106_prepared_email_extraction",
+      "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1791386368785,
+      "tag": "0107_safe_stellaris",
+      "breakpoints": true
+    },
+    {
+      "idx": 108,
+      "version": "7",
+      "when": 1791386715335,
+      "tag": "0108_cc02_client_delivery_provenance",
+      "breakpoints": true
+    },
+    {
+      "idx": 109,
+      "version": "7",
+      "when": 1791386804071,
+      "tag": "0109_tw05_extraction_metadata",
+      "breakpoints": true
+    },
+    {
+      "idx": 110,
+      "version": "7",
+      "when": 1791388025336,
+      "tag": "0110_hm16_import_provenance",
+      "breakpoints": true
+    },
+    {
+      "idx": 111,
+      "version": "7",
+      "when": 1791388707311,
+      "tag": "0111_hm21_arrival_observation_expiry",
+      "breakpoints": true
+    },
+    {
+      "idx": 112,
+      "version": "7",
+      "when": 1791388727413,
+      "tag": "0112_owner_assertion_repair",
+      "breakpoints": true
+    },
+    {
+      "idx": 113,
+      "version": "7",
+      "when": 1791389993345,
+      "tag": "0113_explicit_commitment_reopen",
+      "breakpoints": true
+    },
+    {
+      "idx": 114,
+      "version": "7",
+      "when": 1791390497388,
+      "tag": "0114_commitment_reopen_parent_fence",
+      "breakpoints": true
+    },
+    {
+      "idx": 115,
+      "version": "7",
+      "when": 1791393192097,
+      "tag": "0115_cold_mongoose",
+      "breakpoints": true
+    },
+    {
+      "idx": 116,
+      "version": "7",
+      "when": 1791402592540,
+      "tag": "0116_broad_stryfe",
+      "breakpoints": true
+    },
+    {
+      "idx": 117,
+      "version": "7",
+      "when": 1791413001753,
+      "tag": "0117_import_sources_owner_workspace",
+      "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "7",
+      "when": 1791416841463,
+      "tag": "0118_great_marvel_boy",
+      "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "7",
+      "when": 1791420366086,
+      "tag": "0119_0119_embedding_space_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 120,
+      "version": "7",
+      "when": 1791480000000,
+      "tag": "0120_email_observer_work",
+      "breakpoints": true
+    },
+    {
+      "idx": 121,
+      "version": "7",
+      "when": 1791547200000,
+      "tag": "0121_email_observer_notice_fence",
+      "breakpoints": true
+    },
+    {
+      "idx": 122,
+      "version": "7",
+      "when": 1791600000000,
+      "tag": "0122_direct_email_recovery_routing",
+      "breakpoints": true
+    },
+    {
+      "idx": 123,
+      "version": "7",
+      "when": 1791600000001,
+      "tag": "0123_email_attachment_custody",
+      "breakpoints": true
+    },
+    {
+      "idx": 124,
+      "version": "7",
+      "when": 1791660000000,
+      "tag": "0124_application_confirmation_privacy_generation",
+      "breakpoints": true
+    },
+    {
+      "idx": 125,
+      "version": "7",
+      "when": 1791660000001,
+      "tag": "0125_email_attachment_duplicate_receipt",
+      "breakpoints": true
+    },
+    {
+      "idx": 126,
+      "version": "7",
+      "when": 1791660000002,
+      "tag": "0126_application_confirmation_notice_lineage",
+      "breakpoints": true
+    },
+    {
+      "idx": 127,
+      "version": "7",
+      "when": 1791722034867,
+      "tag": "0127_call_voice_effect_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 128,
+      "version": "7",
+      "when": 1792424759050,
+      "tag": "0128_connected_calendar_accounts",
+      "breakpoints": true
+    },
+    {
+      "idx": 129,
+      "version": "7",
+      "when": 1792702250700,
+      "tag": "0129_slow_archangel",
+      "breakpoints": true
+    },
+    {
+      "idx": 130,
+      "version": "7",
+      "when": 1792966293267,
+      "tag": "0130_strange_aqueduct",
+      "breakpoints": true
+    },
+    {
+      "idx": 131,
+      "version": "7",
+      "when": 1792974848505,
+      "tag": "0131_owner_memory_correction",
+      "breakpoints": true
+    },
+    {
+      "idx": 132,
+      "version": "7",
+      "when": 1793040000000,
+      "tag": "0132_contact_identity_authority",
+      "breakpoints": true
+    }
+  ]
+}

@@ -75,6 +75,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST || !DATABASE_URL)(
       if (!agent) throw new Error('Seed the test database');
       agentId = agent.id;
       store = emulatorStore(() => new Date());
+      // This fixture uses a fresh Firestore installation, so mirror its existing
+      // PostgreSQL owner before maintenance asserts singleton owner identity.
+      await store.doc('agents', agentId).set(encodeRecord(agent));
 
       seed('conversations', conversations, {
         id: ids.conversation,

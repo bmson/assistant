@@ -273,7 +273,7 @@ struct MoreView: View {
                 } header: {
                     Text("Standing approvals")
                 } footer: {
-                    Text("Enabled rules let the assistant take these actions without asking each time.")
+                    Text("Enabled rules let the assistant take these actions without asking each time. Pausing or removing one rule stops that rule; another rule may still allow the same action.")
                 }
             }
         }
@@ -305,11 +305,15 @@ struct MoreView: View {
             titleVisibility: .visible,
             presenting: policyPendingDeletion
         ) { policy in
-            Button("Delete rule", role: .destructive) {
+            Button(policy.toolName == "phone.call" ? "Remove permission" : "Delete rule", role: .destructive) {
                 performSettingsAction(policy.id) { await model.deletePolicy(policy) }
             }
         } message: { policy in
-            Text("This removes “\(policy.displayName)”.")
+            if policy.toolName == "phone.call" {
+                Text("This removes the saved permission for \(policy.phoneCallRecipient ?? "this uninterpreted phone scope").")
+            } else {
+                Text("This removes “\(policy.displayName)”.")
+            }
         }
         .sheet(isPresented: $showingAgentSettings) {
             if model.workspace?.isSectionAvailable("settings") != false,
@@ -515,29 +519,121 @@ struct MoreView: View {
 
     @ViewBuilder
     private func policyRow(_ policy: WorkspacePolicy) -> some View {
-        let detail = VStack(alignment: .leading, spacing: 4) {
-            Text(policy.displayName)
+        if policy.toolName == "phone.call" {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("Call · \(policy.phoneCallRecipient ?? "Saved scope unavailable")")
+                        .font(.body.weight(.medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Text(policy.phoneCallState ?? "Saved scope unavailable")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text(policy.phoneCallLimitLine ?? "Saved scope unavailable · duration and expiry unavailable")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                policyScopeDetails(policy)
+                if needsNewPhonePermissionReview(policy) {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Button("Review a new permission") { model.present(.approvals) }
+                            .buttonStyle(.borderless)
+                        Text("from a pending owner call. This saved rule stays unchanged.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(minHeight: 44, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: 8) {
+                    if policy.enabled {
+                        Button {
+                            performSettingsAction(policy.id) {
+                                await model.setPolicy(policy, enabled: false)
+                            }
+                        } label: {
+                            Text("Pause rule")
+                                .frame(minHeight: 44)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(settingsActionInFlight != nil || model.workspace == nil)
+                    }
+                    policyActions(policy)
+                }
+            }
+        } else if usesAccessibilityLayout {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(policy.displayName)
+                    .font(.body.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Allow automatically")
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 8) {
+                    policyToggle(policy) { Text("Allow automatically") }
+                        .labelsHidden()
+                    Spacer(minLength: 0)
+                    policyActions(policy)
+                }
+                policyScopeDetails(policy)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .center, spacing: 8) {
+                    policyToggle(policy) {
+                        Text(policy.displayName)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    policyActions(policy)
+                }
+                policyScopeDetails(policy)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func policyScopeDetails(_ policy: WorkspacePolicy) -> some View {
+        if let presentation = policy.phoneCallPresentation, presentation.kind == "same_brief" {
+            PhoneCallPolicyScopePresentation(
+                policyId: policy.id,
+                presentation: presentation,
+                savedLabel: policy.label
+            )
+        } else if policy.toolName == "phone.call" {
+            DisclosureGroup("Permission details") {
+                VStack(alignment: .leading, spacing: 6) {
+                    if policy.phonePermissionKind == "owner_number" {
+                        Text(policy.scope ?? "Saved scope unavailable.")
+                        if policy.templateKey == "phone.call.owner_action.v2" {
+                            Text("Only eligible direct requests from you to call this number, within these limits, can use this permission. Future eligible calls may cover different topics or use different scripts and may share personal information from available context. Anyone may answer.")
+                        } else {
+                            Text("Requests that add a topic, script, or other instructions still need approval for that call.")
+                        }
+                        Text("The saved number match does not verify who controls it or who answers the call.")
+                    } else {
+                        Text("Saved scope unavailable. This rule cannot be interpreted.")
+                        if let raw = policy.opaqueDetails ?? policy.phoneCallPresentation?.details {
+                            Text(raw).font(.caption.monospaced()).textSelection(.enabled)
+                        }
+                    }
+                }
+                .font(.caption)
                 .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.caption)
+        } else {
             Text(policy.scope ?? policy.toolName.sentenceCaseIdentifier)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
 
-        if usesAccessibilityLayout {
-            VStack(alignment: .leading, spacing: 8) {
-                detail
-                HStack(spacing: 8) {
-                    policyToggle(policy) { Text("Allow automatically") }
-                    policyActions(policy)
-                }
-            }
-        } else {
-            HStack(alignment: .center, spacing: 8) {
-                policyToggle(policy) { detail }
-                policyActions(policy)
-            }
-        }
+    private func needsNewPhonePermissionReview(_ policy: WorkspacePolicy) -> Bool {
+        !policy.enabled || ["Expired", "Unavailable", "Saved scope unavailable"].contains(policy.phoneCallState ?? "")
     }
 
     private func policyToggle<Label: View>(
@@ -551,23 +647,159 @@ struct MoreView: View {
             }
         ), label: label)
         .accessibilityLabel(policy.displayName)
-        .accessibilityHint(policy.scope ?? policy.toolName.sentenceCaseIdentifier)
+        .accessibilityHint(policyAccessibilityHint(policy))
         .disabled(settingsActionInFlight != nil || model.workspace == nil)
+    }
+
+    private func policyAccessibilityHint(_ policy: WorkspacePolicy) -> String {
+        guard let presentation = policy.phoneCallPresentation else {
+            return policy.scope ?? policy.toolName.sentenceCaseIdentifier
+        }
+        guard presentation.kind == "same_brief" else {
+            return "Saved phone-call scope is not interpreted. Expand to read the saved rule data."
+        }
+        let duration = presentation.maxMinutes.map { "up to \($0) minutes" } ?? "duration unavailable"
+        let context = presentation.mayShare ?? "Not specified"
+        let goal = presentation.goal ?? "Not specified"
+        let mayAgreeTo = presentation.mayAgreeTo ?? "Not specified"
+        let instructions = presentation.mustNot ?? "Not specified"
+        let language = presentation.language ?? "Not specified"
+        let voicemail: String
+        switch presentation.voicemailMode {
+        case "leave_message": voicemail = "leave a voicemail"
+        case "hang_up": voicemail = "hang up on voicemail"
+        default: voicemail = "voicemail condition unavailable"
+        }
+        let savedMessage: String
+        if presentation.voicemailMode == "hang_up",
+           let message = presentation.voicemailMessage,
+           !message.isEmpty
+        {
+            savedMessage = " Saved voicemail message (not used when hanging up): \(message)."
+        } else {
+            savedMessage = ""
+        }
+        return "\(presentation.recipient ?? "Recipient unavailable"), \(duration), exact approved brief. Goal: \(goal). Context from the approved brief: \(context). May agree to: \(mayAgreeTo). Instructions in approved brief: \(instructions). Language: \(language). Voicemail: \(voicemail).\(savedMessage)"
     }
 
     private func policyActions(_ policy: WorkspacePolicy) -> some View {
         Menu {
-            Button("Delete rule", systemImage: "trash", role: .destructive) {
+            Button(policy.toolName == "phone.call" ? "Remove permission" : "Delete rule", systemImage: "trash", role: .destructive) {
                 policyPendingDeletion = policy
             }
         } label: {
             AssistantActionMenuLabel(isUpdating: settingsActionInFlight == policy.id)
         }
         .buttonStyle(.borderless)
-        .accessibilityLabel("Actions for \(policy.displayName)")
+        .accessibilityLabel(policy.toolName == "phone.call" ? "Permission actions for \(policy.phoneCallRecipient ?? "saved phone scope")" : "Actions for \(policy.displayName)")
         .disabled(settingsActionInFlight != nil || model.workspace == nil)
     }
 
+}
+
+struct PhoneCallPolicyScopePresentation: View {
+    let policyId: String
+    let presentation: WorkspacePhoneCallPolicyPresentation
+    let savedLabel: String?
+    @State private var callBriefExpanded: Bool
+
+    init(
+        policyId: String,
+        presentation: WorkspacePhoneCallPolicyPresentation,
+        savedLabel: String? = nil,
+        initiallyExpanded: Bool = false
+    ) {
+        self.policyId = policyId
+        self.presentation = presentation
+        self.savedLabel = savedLabel
+        _callBriefExpanded = State(initialValue: initiallyExpanded)
+    }
+
+    private func value(_ field: String?) -> String {
+        guard let field, !field.isEmpty else { return "Not specified" }
+        return field
+    }
+
+    private var voicemailLabel: String {
+        switch presentation.voicemailMode {
+        case "leave_message": "Leave a voicemail"
+        case "hang_up": "Hang up on voicemail"
+        default: "Voicemail condition unavailable"
+        }
+    }
+
+    var body: some View {
+        Group {
+            if presentation.kind == "same_brief" {
+                DisclosureGroup("Permission details", isExpanded: $callBriefExpanded) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("This rule repeats one exact approved call brief. A different topic or script requires a new review.")
+                            .font(.caption)
+                        Text("The saved number is the destination; a number match does not verify who answers.")
+                            .font(.caption)
+                        if let savedLabel, savedLabel != "Repeat approved call" {
+                            policyCondition("Saved title", savedLabel)
+                        }
+                        if let contactName = presentation.contactName, !contactName.isEmpty {
+                            policyCondition("Saved recipient label", contactName)
+                        }
+                        policyCondition("Recipient", value(presentation.recipient))
+                        policyCondition("Goal", value(presentation.goal))
+                        policyCondition("Maximum duration", presentation.maxMinutes.map { "\($0) minutes" } ?? "Unavailable")
+                        policyCondition("Context from the approved brief", value(presentation.mayShare))
+                        policyCondition("May agree to", value(presentation.mayAgreeTo))
+                        policyCondition("Instructions in approved brief", value(presentation.mustNot))
+                        policyCondition("Language", value(presentation.language))
+                        policyCondition("Voicemail", voicemailLabel)
+                        if presentation.voicemailMode == "leave_message" {
+                            policyCondition("Exact voicemail message", value(presentation.voicemailMessage))
+                        } else if presentation.voicemailMode == "hang_up",
+                                  !(presentation.voicemailMessage?.isEmpty ?? true) {
+                            policyCondition(
+                                "Saved voicemail message (not used when hanging up)",
+                                value(presentation.voicemailMessage)
+                            )
+                        }
+                    }
+                    .padding(.top, 6)
+                }
+                .font(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(minHeight: 44, alignment: .leading)
+                .accessibilityIdentifier("assistant.settings.policy.\(policyId).callBrief")
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Saved phone-call scope (not interpreted)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
+                    DisclosureGroup("Show saved rule data") {
+                        Text(presentation.details ?? "No saved rule data is available.")
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 6)
+                    }
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(minHeight: 44, alignment: .leading)
+                    .accessibilityIdentifier("assistant.settings.policy.\(policyId).opaqueDetails")
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func policyCondition(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label).font(.caption2.weight(.semibold))
+            Text(value).font(.caption).textSelection(.enabled)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 }
 
 private struct RemindersView: View {

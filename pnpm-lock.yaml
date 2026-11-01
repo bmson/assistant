@@ -382,6 +382,9 @@ importers:
 
   packages/firestore:
     dependencies:
+      '@assistant/config':
+        specifier: workspace:*
+        version: link:../config
       '@assistant/persistence':
         specifier: workspace:*
         version: link:../persistence

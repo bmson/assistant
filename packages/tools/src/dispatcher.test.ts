@@ -1818,6 +1818,7 @@ describe('ToolDispatcher (integration)', () => {
     const dispatcher = new ToolDispatcher(db, registry);
     const task = await makeTask('owner');
     const granted = { ...task, autonomyGrant: grant };
+    await db.update(tasks).set({ autonomyGrant: grant }).where(eq(tasks.id, task.id));
 
     // Ordinary approval-gated outward call → autonomous under the grant.
     const outward = await dispatcher.dispatch({
@@ -3165,6 +3166,11 @@ describe('ToolDispatcher (integration)', () => {
   ]) {
     it(`${scenario.toolName}: saved scope works, but changed permissions and taint still require approval`, async (ctx) => {
       if (!dbUp) return ctx.skip();
+      const phoneIntent =
+        scenario.toolName === 'phone.call'
+          ? extractOwnerIntent({ trust: 'owner', text: 'Please call +14155550199.' })
+          : undefined;
+      if (phoneIntent) expect(phoneIntent.authorizedScopes).toContain('phone_call');
       const rule = approvalRule(scenario.toolName, scenario.allowed);
       if (!rule) throw new Error('Expected a saveable approval');
       const registry = new ToolRegistry().register(
@@ -3202,10 +3208,31 @@ describe('ToolDispatcher (integration)', () => {
             step: 1,
             toolName: scenario.toolName,
             args,
-            ctx: { ...ctxFor(task), tainted },
+            ctx: {
+              ...ctxFor(task),
+              tainted,
+              ...(phoneIntent ? { ownerIntent: phoneIntent } : {}),
+            },
             provenance,
           });
           expect(outcome.kind).toBe(expected);
+        }
+        if (scenario.toolName === 'phone.call') {
+          const task = await makeTask('owner');
+          const executedBefore = executions[scenario.toolName];
+          const withoutPhoneIntent = await dispatcher.dispatch({
+            task,
+            step: 1,
+            toolName: scenario.toolName,
+            args: scenario.allowed,
+            ctx: { ...ctxFor(task), tainted: true },
+            provenance,
+          });
+          expect(withoutPhoneIntent.kind).toBe('rejected');
+          expect(withoutPhoneIntent.kind === 'rejected' && withoutPhoneIntent.reason).toContain(
+            'phone_call',
+          );
+          expect(executions[scenario.toolName]).toBe(executedBefore);
         }
       } finally {
         if (policy) await db.delete(approvalPolicies).where(eq(approvalPolicies.id, policy.id));

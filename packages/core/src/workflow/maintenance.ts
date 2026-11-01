@@ -1,5 +1,6 @@
 import {
   approvals,
+  assertPostgresInstallationOwner,
   conversationSegments,
   costEvents,
   type Db,
@@ -9,6 +10,7 @@ import {
   messages,
   modelCallAudit,
   modelCalls,
+  pruneExpiredPostgresOwnerEditorReceipts,
   tasks,
   toolCache,
   toolCallReceiptKeys,
@@ -155,6 +157,13 @@ export async function purgeExpired(
     return { ...purged, reservations, recallMetrics };
   }
   const db = store as Db;
+  // One bounded page per existing sweep. Replay expiry never means a write
+  // failed; old signed scopes retire independently of receipt presence.
+  await pruneExpiredPostgresOwnerEditorReceipts(
+    db,
+    await assertPostgresInstallationOwner(db),
+    new Date(),
+  );
   const expiredCache = db
     .select({ id: toolCache.cacheKey })
     .from(toolCache)

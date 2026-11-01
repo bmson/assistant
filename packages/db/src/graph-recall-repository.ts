@@ -22,6 +22,7 @@ export function postgresActiveGraphWhere(agentId: string, extractionVersion: num
     AND (memory.expires_at IS NULL OR memory.expires_at > now())
     AND source.status = 'ready'
     AND source.content_hash = memory.content_hash
+    AND memory.content_hash = encode(sha256(convert_to(memory.content, 'UTF8')), 'hex')
     AND source.extraction_version >= ${extractionVersion}
     AND memory.embedding IS NOT NULL
     AND relation.review_status <> 'rejected'
@@ -59,6 +60,8 @@ async function seedRelations(
         COALESCE(object.preferred_label, object.label) AS "objectLabel",
         relation.source_memory_id AS "sourceMemoryId",
         memory.content,
+        memory.content_hash AS "sourceContentHash",
+        memory.owner_correction AS "sourceOwnerCorrection",
         relation.evidence_quote AS "evidenceQuote",
         memory.created_at AS "createdAt",
         relation.confidence,
@@ -107,6 +110,8 @@ async function connectedRelations(
         COALESCE(object.preferred_label, object.label) AS "objectLabel",
         relation.source_memory_id AS "sourceMemoryId",
         memory.content,
+        memory.content_hash AS "sourceContentHash",
+        memory.owner_correction AS "sourceOwnerCorrection",
         relation.evidence_quote AS "evidenceQuote",
         memory.created_at AS "createdAt",
         relation.confidence,

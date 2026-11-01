@@ -65,6 +65,8 @@ export interface ContactSnapshot {
   aliases: string[];
   relationship: string;
   trust: string;
+  /** Exact native version of these displayed values; absent on older read adapters. */
+  identityRevision?: string | null;
 }
 
 export interface ProfileOverview {
