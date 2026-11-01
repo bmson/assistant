@@ -367,6 +367,8 @@ const ConfigSchema = z.object({
   GENERATIVE_CARDS_ENABLED: enabledBooleanString,
   /** Allow cardable inbound mail to earn a card task below the urgency threshold. */
   PROACTIVE_CARDS_ENABLED: enabledBooleanString,
+  // Inactive until legacy-key migration and mixed-version writer barriers are reviewed.
+  PROACTIVE_PULSE_RANKING_DEDUPE_V2_ENABLED: booleanString,
   /** Explicit opt-in: graph-backed personal-memory recall, layered over chat recall. */
   GRAPH_RAG_ENABLED: booleanString,
   /**
