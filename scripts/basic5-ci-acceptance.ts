@@ -145,7 +145,45 @@ export type Basic5CiPreflight = {
   provenanceLimitations: string[];
 };
 
+const CENSUS_STAGES = [
+  'snapshot',
+  'enrollment',
+  'new_identity_read',
+  'new_identity_compare',
+  'known_identity_read',
+  'known_identity_compare',
+  'absence_confirmation',
+  'final_snapshot',
+] as const;
+const CENSUS_REASONS = [
+  'process_census_unavailable',
+  'process_stat_unavailable',
+  'process_stat_permission_denied',
+  'process_stat_malformed',
+  'owned_process_identity_ineligible',
+  'process_executable_unavailable',
+  'process_executable_permission_denied',
+  'process_identity_changed',
+  'helper_unclassified',
+  'ancestry_unproven',
+  'snapshot_row_missing',
+  'generation_changed',
+  'parent_changed',
+  'group_changed',
+  'session_changed',
+  'executable_changed',
+  'absence_not_confirmed',
+  'convergence_exhausted',
+  'descendants_still_present',
+  'deadline',
+] as const;
+type Basic5CiCensusDiagnostic = {
+  stage: (typeof CENSUS_STAGES)[number];
+  reason: (typeof CENSUS_REASONS)[number];
+};
+
 export type Basic5CiUtilityChildDiagnostic = {
+  censusDiagnostic?: Basic5CiCensusDiagnostic;
   utility: 'target_database_creation' | 'migration_child' | 'seed_child';
   stage: 'spawn' | 'bootstrap' | 'owned_session_census' | 'final_session_census' | 'completed';
   status:
@@ -305,6 +343,7 @@ function makeUtilityChildDiagnostic(
                         : null;
   return {
     utility,
+    ...(error instanceof Basic5CiCensusHold ? { censusDiagnostic: error.censusDiagnostic } : {}),
     stage,
     status,
     exitCode: Number.isSafeInteger(exitCode) ? exitCode : null,
@@ -394,8 +433,21 @@ function contentFreeUtilityChildDiagnostics(value: unknown): Basic5CiUtilityChil
       'errnoCategory',
       'sqlStateClass',
     ];
+    if ('censusDiagnostic' in row) {
+      const diagnostic = row.censusDiagnostic as Basic5CiCensusDiagnostic | null;
+      if (
+        !diagnostic ||
+        typeof diagnostic !== 'object' ||
+        Object.keys(diagnostic).length !== 2 ||
+        !Object.hasOwn(diagnostic, 'stage') ||
+        !Object.hasOwn(diagnostic, 'reason') ||
+        !CENSUS_STAGES.includes(diagnostic.stage) ||
+        !CENSUS_REASONS.includes(diagnostic.reason)
+      )
+        throw new Basic5CiHold('utility_child_diagnostic_malformed');
+    }
     if (
-      Object.keys(row).length !== keys.length ||
+      Object.keys(row).length !== keys.length + ('censusDiagnostic' in row ? 1 : 0) ||
       keys.some((key) => !Object.hasOwn(row, key)) ||
       !utilities.includes(String(row.utility)) ||
       !stages.includes(String(row.stage)) ||
@@ -428,7 +480,10 @@ function contentFreeUtilityChildDiagnostics(value: unknown): Basic5CiUtilityChil
     )
       throw new Basic5CiHold('utility_child_diagnostic_malformed');
     return Object.fromEntries(
-      keys.map((key) => [key, row[key]]),
+      [...keys, ...('censusDiagnostic' in row ? ['censusDiagnostic'] : [])].map((key) => [
+        key,
+        row[key],
+      ]),
     ) as unknown as Basic5CiUtilityChildDiagnostic;
   });
 }
@@ -630,6 +685,35 @@ export class Basic5CiHold extends Error {
   ) {
     super(code);
   }
+}
+
+class Basic5CiCensusHold extends Basic5CiHold {
+  constructor(
+    readonly censusDiagnostic: Basic5CiCensusDiagnostic,
+    code = 'owned_session_census_unverified',
+  ) {
+    super(code, false);
+  }
+}
+
+function censusFailure(
+  stage: Basic5CiCensusDiagnostic['stage'],
+  error: unknown,
+): Basic5CiCensusHold {
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
+  const reason = CENSUS_REASONS.find((known) => known === code) ?? 'helper_unclassified';
+  return new Basic5CiCensusHold({ stage, reason });
+}
+
+function changedProcessFact(
+  expected: LinuxSnapshot,
+  actual: LinuxSnapshot,
+): Basic5CiCensusDiagnostic['reason'] | undefined {
+  if (actual.startTimeTicks !== expected.startTimeTicks) return 'generation_changed';
+  if (actual.ppid !== expected.ppid) return 'parent_changed';
+  if (actual.pgid !== expected.pgid) return 'group_changed';
+  if (actual.sid !== expected.sid) return 'session_changed';
+  return undefined;
 }
 
 export async function runBasic5CiCaseEntryStep<T>(
@@ -2245,46 +2329,106 @@ export class RealBasic5CiOps implements Basic5CiOps {
     )) as unknown as BuildProvenanceModule;
   }
 
-  private async captureSession(root: LinuxIdentity): Promise<Set<number>> {
+  private async captureSession(
+    root: LinuxIdentity,
+    deadline: number,
+    confirmedSnapshot?: Map<number, LinuxSnapshot>,
+  ): Promise<Set<number>> {
     const proof = this.proof;
     if (!proof) throw new Basic5CiHold('linux_process_proof_unavailable');
-    const snapshot = await proof.readBasic5LinuxProcessSnapshot();
+    const readSnapshot = async (stage: Basic5CiCensusDiagnostic['stage']) => {
+      if (this.now() >= deadline || this.outerExpired)
+        throw new Basic5CiCensusHold({ stage, reason: 'deadline' });
+      try {
+        const snapshot = await proof.readBasic5LinuxProcessSnapshot();
+        if (this.now() >= deadline || this.outerExpired)
+          throw new Basic5CiCensusHold({ stage, reason: 'deadline' });
+        return snapshot;
+      } catch (error) {
+        if (error instanceof Basic5CiCensusHold) throw error;
+        throw censusFailure(stage, error);
+      }
+    };
+    const snapshot = confirmedSnapshot ?? (await readSnapshot('snapshot'));
+    const confirmAbsence = async (pid: number, expected: LinuxSnapshot): Promise<Set<number>> => {
+      if (confirmedSnapshot)
+        throw new Basic5CiCensusHold({
+          stage: 'absence_confirmation',
+          reason: 'convergence_exhausted',
+        });
+      const fresh = await readSnapshot('absence_confirmation');
+      const present = fresh.get(pid);
+      if (present)
+        throw new Basic5CiCensusHold({
+          stage: 'absence_confirmation',
+          reason: changedProcessFact(expected, present) ?? 'absence_not_confirmed',
+        });
+      // Exactly one restart from positive absence. Retain all enrolled identities;
+      // a missing unverified parent never becomes ancestry for a new descendant.
+      return this.captureSession(root, deadline, fresh);
+    };
     const liveSession = new Set(
       [...snapshot.values()].filter((row) => row.sid === root.sid).map((row) => row.pid),
     );
-    const alreadyOwned = new Set(
-      [...this.ownedProcesses.values()]
-        .filter((identity) => identity.sid === root.sid)
-        .map((identity) => identity.pid),
-    );
-    const enrollmentOrder = ownedSessionEnrollmentOrder(snapshot, root.sid, alreadyOwned);
+    const alreadyOwned = new Set<number>();
+    for (const expected of this.ownedProcesses.values()) {
+      if (expected.sid !== root.sid) continue;
+      alreadyOwned.add(expected.pid);
+      const current = snapshot.get(expected.pid);
+      if (current) {
+        const reason = changedProcessFact(expected, current);
+        if (reason) throw new Basic5CiCensusHold({ stage: 'known_identity_compare', reason });
+      }
+    }
+    let enrollmentOrder: number[];
+    if ([...snapshot.values()].some((row) => row.sid === root.sid && row.pgid <= 0))
+      throw new Basic5CiCensusHold({
+        stage: 'enrollment',
+        reason: 'owned_process_identity_ineligible',
+      });
+    try {
+      enrollmentOrder = ownedSessionEnrollmentOrder(snapshot, root.sid, alreadyOwned);
+    } catch {
+      throw new Basic5CiCensusHold({ stage: 'enrollment', reason: 'ancestry_unproven' });
+    }
     for (const pid of enrollmentOrder) {
       const row = snapshot.get(pid);
-      if (!row) throw new Basic5CiHold('owned_child_identity_unknown');
-      const identity = await proof.readBasic5LinuxProcessIdentity(pid);
-      if (
-        !identity ||
-        identity.startTimeTicks !== row.startTimeTicks ||
-        identity.ppid !== row.ppid ||
-        identity.pgid !== row.pgid ||
-        identity.sid !== row.sid
-      )
-        throw new Basic5CiHold('owned_child_identity_unknown');
+      if (!row)
+        throw new Basic5CiCensusHold({
+          stage: 'new_identity_read',
+          reason: 'snapshot_row_missing',
+        });
+      let identity: LinuxIdentity | undefined;
+      try {
+        identity = await proof.readBasic5LinuxProcessIdentity(pid);
+      } catch (error) {
+        throw censusFailure('new_identity_read', error);
+      }
+      if (!identity) return confirmAbsence(pid, row);
+      const reason = changedProcessFact(row, identity);
+      if (reason) throw new Basic5CiCensusHold({ stage: 'new_identity_compare', reason });
+      if (identity.pgid <= 0 || identity.sid <= 0)
+        throw new Basic5CiCensusHold({
+          stage: 'new_identity_compare',
+          reason: 'owned_process_identity_ineligible',
+        });
       this.ownedProcesses.set(pid, identity);
     }
     for (const pid of liveSession) {
       const expected = this.ownedProcesses.get(pid);
-      if (!expected) throw new Basic5CiHold('unregistered_process_inside_owned_session');
-      const current = await proof.readBasic5LinuxProcessIdentity(pid);
-      if (
-        !current ||
-        current.startTimeTicks !== expected.startTimeTicks ||
-        current.ppid !== expected.ppid ||
-        current.pgid !== expected.pgid ||
-        current.sid !== expected.sid ||
-        current.exe !== expected.exe
-      )
-        throw new Basic5CiHold('owned_process_identity_changed');
+      if (!expected)
+        throw new Basic5CiCensusHold({ stage: 'known_identity_read', reason: 'ancestry_unproven' });
+      let current: LinuxIdentity | undefined;
+      try {
+        current = await proof.readBasic5LinuxProcessIdentity(pid);
+      } catch (error) {
+        throw censusFailure('known_identity_read', error);
+      }
+      if (!current) return confirmAbsence(pid, expected);
+      const reason =
+        changedProcessFact(expected, current) ??
+        (current.exe !== expected.exe ? 'executable_changed' : undefined);
+      if (reason) throw new Basic5CiCensusHold({ stage: 'known_identity_compare', reason });
     }
     return liveSession;
   }
@@ -2332,7 +2476,7 @@ export class RealBasic5CiOps implements Basic5CiOps {
         if (signal?.aborted) throw new Basic5CiHold('quiescence_cancelled');
         let live = false;
         for (const root of sessions.values()) {
-          const pids = await this.captureSession(root);
+          const pids = await this.captureSession(root, deadline);
           for (const pid of pids) {
             if (signal?.aborted) throw new Basic5CiHold('quiescence_cancelled');
             live = true;
@@ -2361,7 +2505,7 @@ export class RealBasic5CiOps implements Basic5CiOps {
       }
     }
     for (const root of sessions.values()) {
-      if ((await this.captureSession(root)).size > 0)
+      if ((await this.captureSession(root, deadline)).size > 0)
         throw new Basic5CiHold('owned_processes_remain_after_bounded_stop');
     }
     for (const record of records) {
@@ -2623,7 +2767,7 @@ export class RealBasic5CiOps implements Basic5CiOps {
         );
       }
       try {
-        await this.captureSession(root);
+        await this.captureSession(root, deadline);
       } catch (error) {
         const utility = utilityForChildLabel(label);
         if (utility)
@@ -2697,13 +2841,24 @@ export class RealBasic5CiOps implements Basic5CiOps {
           : undefined,
       );
     try {
-      await this.captureSession(root);
-      const liveRootSession = await proof.readBasic5LinuxProcessSnapshot();
+      await this.captureSession(root, deadline);
+      let liveRootSession: Map<number, LinuxSnapshot>;
+      try {
+        liveRootSession = await proof.readBasic5LinuxProcessSnapshot();
+      } catch (error) {
+        throw censusFailure('final_snapshot', error);
+      }
       if ([...liveRootSession.values()].some((row) => row.sid === root.sid)) {
         await this.stopKnownSessions(
           Math.min(this.started + CLEANUP_END_SECONDS * 1000, this.now() + 4_100),
         );
-        throw new Basic5CiHold(`${label}_descendant_not_closed`);
+        throw new Basic5CiCensusHold(
+          {
+            stage: 'final_snapshot',
+            reason: 'descendants_still_present',
+          },
+          `${label}_descendant_not_closed`,
+        );
       }
     } catch (error) {
       const utility = utilityForChildLabel(label);

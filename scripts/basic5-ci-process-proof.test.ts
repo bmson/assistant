@@ -1,14 +1,90 @@
-import { describe, expect, it } from 'vitest';
+import * as fsPromises from 'node:fs/promises';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   assertBasic5CiProcessClosure,
   assertBasic5CiProcessRegistryComplete,
   BASIC5_CI_CHROME_EXECUTABLE,
+  Basic5CiProcessProofError,
   type Basic5CiProcessRecord,
   type Basic5LinuxProcessSnapshot,
   parseBasic5CiProcessRegistryText,
   parseBasic5LinuxProcessStat,
+  readBasic5LinuxProcessIdentity,
+  readBasic5LinuxProcessSnapshot,
   selectBasic5CiBrowserProcess,
 } from './basic5-ci-process-proof.js';
+
+vi.mock('node:fs/promises', () => ({
+  lstat: vi.fn(),
+  open: vi.fn(),
+  readdir: vi.fn(),
+  readFile: vi.fn(),
+  readlink: vi.fn(),
+  realpath: vi.fn(),
+}));
+
+const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+
+afterEach(() => {
+  vi.resetAllMocks();
+  if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+});
+
+function setLinuxPlatformForMockedProcessReads(): void {
+  Object.defineProperty(process, 'platform', {
+    configurable: true,
+    enumerable: originalPlatform?.enumerable ?? true,
+    value: 'linux',
+    writable: originalPlatform?.writable ?? false,
+  });
+}
+
+function statContents(
+  pid: number,
+  values: { ppid?: number; pgid?: number; sid?: number; startTimeTicks?: string } = {},
+): string {
+  const fields = [
+    'S',
+    String(values.ppid ?? 11),
+    String(values.pgid ?? pid),
+    String(values.sid ?? pid),
+    ...Array.from({ length: 15 }, () => '0'),
+    values.startTimeTicks ?? '987654',
+  ];
+  return `${pid} (node worker) ${fields.join(' ')}`;
+}
+
+function proofErrorCode(error: unknown): string | undefined {
+  return error instanceof Basic5CiProcessProofError ? error.code : undefined;
+}
+
+function codedError(code: string): Error & { code: string } {
+  return Object.assign(new Error('redacted OS detail'), { code });
+}
+
+async function thrownBy(action: () => Promise<unknown>): Promise<unknown> {
+  try {
+    await action();
+  } catch (error) {
+    return error;
+  }
+  throw new Error('Expected the operation to fail.');
+}
+
+function mockReadFile(...contents: Array<string | Error>): void {
+  vi.mocked(fsPromises.readFile).mockClear();
+  vi.mocked(fsPromises.readFile).mockImplementation(async () => {
+    const content = contents.shift();
+    if (content === undefined) throw new Error('Unexpected stat read.');
+    if (content instanceof Error) throw content;
+    return content;
+  });
+}
+
+function expectSafeProofError(error: unknown, expected: string): void {
+  expect(proofErrorCode(error)).toBe(expected);
+  expect((error as Error).message).not.toContain('redacted OS detail');
+}
 
 const worker: Basic5CiProcessRecord = {
   version: 1,
@@ -54,6 +130,116 @@ function rawRegistry(records: readonly Basic5CiProcessRecord[]): string {
 }
 
 describe('BASIC5 Linux process proof', () => {
+  it('classifies unavailable, denied, and malformed stat observations without exposing OS errors', async () => {
+    setLinuxPlatformForMockedProcessReads();
+    vi.mocked(fsPromises.readdir).mockResolvedValue(['42'] as never);
+    vi.mocked(fsPromises.readFile).mockRejectedValueOnce(codedError('EACCES'));
+    expectSafeProofError(
+      await thrownBy(readBasic5LinuxProcessSnapshot),
+      'process_stat_permission_denied',
+    );
+
+    vi.mocked(fsPromises.readFile).mockRejectedValueOnce(codedError('EIO'));
+    expectSafeProofError(
+      await thrownBy(readBasic5LinuxProcessSnapshot),
+      'process_stat_unavailable',
+    );
+
+    vi.mocked(fsPromises.readFile).mockResolvedValueOnce('not a stat record');
+    expectSafeProofError(await thrownBy(readBasic5LinuxProcessSnapshot), 'process_stat_malformed');
+
+    vi.mocked(fsPromises.readdir).mockRejectedValueOnce(codedError('EACCES'));
+    expectSafeProofError(
+      await thrownBy(readBasic5LinuxProcessSnapshot),
+      'process_census_unavailable',
+    );
+  });
+
+  it('rejects zero group or session IDs for owned identities while retaining them in global snapshots', async () => {
+    setLinuxPlatformForMockedProcessReads();
+    vi.mocked(fsPromises.readdir).mockResolvedValue(['42'] as never);
+    mockReadFile(statContents(42, { pgid: 0, sid: 0 }));
+    await expect(readBasic5LinuxProcessSnapshot()).resolves.toEqual(
+      new Map([[42, { pid: 42, ppid: 11, pgid: 0, sid: 0, startTimeTicks: '987654' }]]),
+    );
+
+    for (const field of ['pgid', 'sid'] as const) {
+      mockReadFile(statContents(42, { [field]: 0 }));
+      const error = await thrownBy(() => readBasic5LinuxProcessIdentity(42));
+      expectSafeProofError(error, 'owned_process_identity_ineligible');
+      expect(fsPromises.realpath).not.toHaveBeenCalled();
+    }
+  });
+
+  it('treats executable lookup disappearance as gone only when the PID is absent on reread', async () => {
+    setLinuxPlatformForMockedProcessReads();
+    vi.mocked(fsPromises.realpath).mockRejectedValueOnce(codedError('ENOENT'));
+    mockReadFile(statContents(42), codedError('ESRCH'));
+    await expect(readBasic5LinuxProcessIdentity(42)).resolves.toBeUndefined();
+    expect(fsPromises.readFile).toHaveBeenCalledTimes(2);
+
+    vi.mocked(fsPromises.realpath).mockRejectedValueOnce(codedError('ESRCH'));
+    mockReadFile(statContents(42), statContents(42));
+    const error = await thrownBy(() => readBasic5LinuxProcessIdentity(42));
+    expectSafeProofError(error, 'process_executable_unavailable');
+    expect(fsPromises.readFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('classifies executable identity replacement and permission failures conservatively', async () => {
+    setLinuxPlatformForMockedProcessReads();
+    vi.mocked(fsPromises.realpath).mockRejectedValueOnce(codedError('ENOENT'));
+    mockReadFile(statContents(42), statContents(42, { startTimeTicks: '987655' }));
+    expectSafeProofError(
+      await thrownBy(() => readBasic5LinuxProcessIdentity(42)),
+      'process_identity_changed',
+    );
+
+    vi.mocked(fsPromises.realpath).mockClear();
+    vi.mocked(fsPromises.realpath).mockRejectedValueOnce(codedError('EACCES'));
+    mockReadFile(statContents(42));
+    expectSafeProofError(
+      await thrownBy(() => readBasic5LinuxProcessIdentity(42)),
+      'process_executable_permission_denied',
+    );
+
+    vi.mocked(fsPromises.realpath).mockClear();
+    vi.mocked(fsPromises.realpath).mockRejectedValueOnce(codedError('EIO'));
+    mockReadFile(statContents(42));
+    expectSafeProofError(
+      await thrownBy(() => readBasic5LinuxProcessIdentity(42)),
+      'process_executable_unavailable',
+    );
+  });
+
+  it('rechecks a process when executable-link lookup disappears and detects identity changes', async () => {
+    setLinuxPlatformForMockedProcessReads();
+    vi.mocked(fsPromises.realpath).mockResolvedValue('/usr/bin/node');
+    vi.mocked(fsPromises.readlink).mockRejectedValueOnce(codedError('ENOENT'));
+    mockReadFile(statContents(42), statContents(42), statContents(42));
+    expectSafeProofError(
+      await thrownBy(() => readBasic5LinuxProcessIdentity(42)),
+      'process_executable_unavailable',
+    );
+    expect(fsPromises.readFile).toHaveBeenCalledTimes(3);
+
+    vi.mocked(fsPromises.readFile).mockClear();
+    vi.mocked(fsPromises.realpath).mockResolvedValue('/usr/bin/node');
+    vi.mocked(fsPromises.readlink).mockResolvedValue('/usr/bin/node');
+    mockReadFile(statContents(42), statContents(42, { pgid: 43 }));
+    expectSafeProofError(
+      await thrownBy(() => readBasic5LinuxProcessIdentity(42)),
+      'process_identity_changed',
+    );
+
+    vi.mocked(fsPromises.realpath).mockResolvedValue('/usr/bin/node');
+    vi.mocked(fsPromises.readlink).mockRejectedValueOnce(codedError('EPERM'));
+    mockReadFile(statContents(42), statContents(42));
+    expectSafeProofError(
+      await thrownBy(() => readBasic5LinuxProcessIdentity(42)),
+      'process_executable_permission_denied',
+    );
+  });
+
   it('parses Linux stat fields even when the command name contains spaces or parentheses', () => {
     const fields = ['S', '11', '12', '13', ...Array.from({ length: 15 }, () => '0'), '987654'];
     expect(
@@ -66,7 +252,7 @@ describe('BASIC5 Linux process proof', () => {
       startTimeTicks: '987654',
     });
     expect(() => parseBasic5LinuxProcessStat(42, `43 (wrong pid) ${fields.join(' ')}`)).toThrow(
-      'mismatched',
+      expect.objectContaining({ code: 'process_stat_malformed' }),
     );
   });
 
@@ -84,13 +270,13 @@ describe('BASIC5 Linux process proof', () => {
         42,
         `42 (malformed negative group) ${[...fields.slice(0, 2), '-1', ...fields.slice(3)].join(' ')}`,
       ),
-    ).toThrow('malformed or mismatched');
+    ).toThrow(expect.objectContaining({ code: 'process_stat_malformed' }));
     expect(() =>
       parseBasic5LinuxProcessStat(
         42,
         `42 (malformed negative session) ${[...fields.slice(0, 3), '-1', ...fields.slice(4)].join(' ')}`,
       ),
-    ).toThrow('malformed or mismatched');
+    ).toThrow(expect.objectContaining({ code: 'process_stat_malformed' }));
   });
 
   it('requires exactly the one fresh direct child and exact allowlisted Chrome executable', () => {

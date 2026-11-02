@@ -6,6 +6,26 @@ export const BASIC5_CI_CHROME_EXECUTABLE = '/opt/google/chrome/chrome';
 export const BASIC5_CI_PROCESS_RECORD_LIMIT = 64;
 export const BASIC5_CI_PROCESS_FILE_BYTE_LIMIT = 64 * 1024;
 
+export const BASIC5_CI_PROCESS_PROOF_FAILURES = [
+  'process_census_unavailable',
+  'process_stat_unavailable',
+  'process_stat_permission_denied',
+  'process_stat_malformed',
+  'owned_process_identity_ineligible',
+  'process_executable_unavailable',
+  'process_executable_permission_denied',
+  'process_identity_changed',
+] as const;
+
+export type Basic5CiProcessProofFailure = (typeof BASIC5_CI_PROCESS_PROOF_FAILURES)[number];
+
+export class Basic5CiProcessProofError extends Error {
+  constructor(readonly code: Basic5CiProcessProofFailure) {
+    super(`BASIC5 CI process proof failed: ${code}`);
+    this.name = 'Basic5CiProcessProofError';
+  }
+}
+
 export type Basic5CiProcessRole = 'fixture-worker' | 'web' | 'browser' | 'embedding';
 
 export interface Basic5CiProcessIdentity {
@@ -51,7 +71,7 @@ export function parseBasic5LinuxProcessStat(
   const close = contents.lastIndexOf(')');
   const open = contents.indexOf(' (');
   if (open < 1 || close <= open || !/^\d+$/.test(contents.slice(0, open)))
-    throw new Error('Linux process stat record is malformed.');
+    throw new Basic5CiProcessProofError('process_stat_malformed');
   const pid = Number(contents.slice(0, open));
   const fields = contents
     .slice(close + 1)
@@ -74,7 +94,7 @@ export function parseBasic5LinuxProcessStat(
     !startTimeTicks ||
     !/^\d+$/.test(startTimeTicks)
   )
-    throw new Error('Linux process stat identity is malformed or mismatched.');
+    throw new Basic5CiProcessProofError('process_stat_malformed');
   return { pid, ppid, pgid, sid, startTimeTicks };
 }
 
@@ -208,12 +228,20 @@ async function assertPrivateRegistryFile(filePath: string, expectedUid: number):
 }
 
 async function readStat(pid: number): Promise<Basic5LinuxProcessSnapshot | undefined> {
+  let contents: string;
   try {
-    return parseBasic5LinuxProcessStat(pid, await readFile(`/proc/${pid}/stat`, 'utf8'));
+    contents = await readFile(`/proc/${pid}/stat`, 'utf8');
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'ESRCH') return undefined;
-    throw new Error('Could not read a Linux process identity; census is unknown.');
+    if (code === 'EACCES' || code === 'EPERM')
+      throw new Basic5CiProcessProofError('process_stat_permission_denied');
+    throw new Basic5CiProcessProofError('process_stat_unavailable');
+  }
+  try {
+    return parseBasic5LinuxProcessStat(pid, contents);
+  } catch {
+    throw new Basic5CiProcessProofError('process_stat_malformed');
   }
 }
 
@@ -225,7 +253,7 @@ export async function readBasic5LinuxProcessSnapshot(): Promise<
   try {
     entries = await readdir('/proc');
   } catch {
-    throw new Error('Could not enumerate Linux process identities; census is unknown.');
+    throw new Basic5CiProcessProofError('process_census_unavailable');
   }
   const snapshot = new Map<number, Basic5LinuxProcessSnapshot>();
   for (const entry of entries) {
@@ -245,14 +273,22 @@ export async function readBasic5LinuxProcessIdentity(
   const before = await readStat(pid);
   if (!before) return undefined;
   if (before.pgid <= 0 || before.sid <= 0)
-    throw new Error('Linux process identity is not eligible for owned process tracking.');
+    throw new Basic5CiProcessProofError('owned_process_identity_ineligible');
   let exe: string;
   try {
     exe = await realpath(`/proc/${pid}/exe`);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ESRCH') return undefined;
-    throw new Error('Could not verify a Linux executable identity; census is unknown.');
+    if (code === 'ENOENT' || code === 'ESRCH') {
+      const afterFailure = await readStat(pid);
+      if (!afterFailure) return undefined;
+      if (!sameProcess(before, afterFailure))
+        throw new Basic5CiProcessProofError('process_identity_changed');
+      throw new Basic5CiProcessProofError('process_executable_unavailable');
+    }
+    if (code === 'EACCES' || code === 'EPERM')
+      throw new Basic5CiProcessProofError('process_executable_permission_denied');
+    throw new Basic5CiProcessProofError('process_executable_unavailable');
   }
   const after = await readStat(pid);
   if (!after) return undefined;
@@ -261,11 +297,19 @@ export async function readBasic5LinuxProcessIdentity(
     linkTarget = await readlink(`/proc/${pid}/exe`);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ESRCH') return undefined;
-    throw new Error('Could not recheck a Linux executable identity; census is unknown.');
+    if (code === 'ENOENT' || code === 'ESRCH') {
+      const afterFailure = await readStat(pid);
+      if (!afterFailure) return undefined;
+      if (!sameProcess(before, afterFailure))
+        throw new Basic5CiProcessProofError('process_identity_changed');
+      throw new Basic5CiProcessProofError('process_executable_unavailable');
+    }
+    if (code === 'EACCES' || code === 'EPERM')
+      throw new Basic5CiProcessProofError('process_executable_permission_denied');
+    throw new Basic5CiProcessProofError('process_executable_unavailable');
   }
   if (!sameProcess(before, after) || path.resolve(linkTarget) !== exe)
-    throw new Error('Linux process identity changed while it was being captured.');
+    throw new Basic5CiProcessProofError('process_identity_changed');
   return { ...after, exe };
 }
 
