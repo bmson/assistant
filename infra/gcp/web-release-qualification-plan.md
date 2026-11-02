@@ -227,3 +227,48 @@ consume these same slots; no hidden retries. If a supported flow requires more,
 STOP with UNKNOWN and no native/write fallback. Publication of the one redacted
 audit artifact is separately bounded/accounted as output; no duplicate-upload
 experiment. No qualifier is currently implemented or dispatched.
+
+### Context-only HOLD diagnosis and bounded diagnostics
+
+The one authorized run41372105362 on exact merged source9df28e19 returned only
+`HOLD / context / stopped:true`. Its verified160-byte audit contains neither
+`requestedSource`, `verifiedOrigin` nor `budget`. The failed predicate and request
+counters are **unknown**, not zero; no deeper API/provider failure is established.
+No redispatch, rerun, token inspection, raw environment/log access or provider
+observation is authorized by this diagnosis.
+
+Retained sanitized evidence supports the following limited conclusions:
+
+- The separate source-check step succeeded for main/ref, attempt1, equal source
+  and workflow SHA, and checkout HEAD under that step's environment. This does
+  not prove that the later restricted git subprocess succeeded.
+- The audit writer only writes after its exact RUNNER_TEMP literal check, so the
+  existence of the verified report supports that same literal. A documented
+  example path alone would not establish it.
+- The fresh guard captured the expected project, region, artifact repository,
+  WIF provider and principal. This is configuration evidence; it is not a dump
+  or proof of every later process variable.
+- The consumed audit does not report runner environment/OS/architecture, OIDC
+  endpoint validation or opaque token-shape predicate outcomes. No actual
+  predicate mismatch can be identified from the retained evidence alone.
+
+The concrete source defect is indistinguishable local failures: restricted
+source lookup, individual context predicates and unexpected context errors all
+previously produced the same generic report. The diagnostic-only correction adds
+one optional `contextCode` from a fixed32-code set: a first-failed predicate code,
+`ctx_source_lookup`, or `ctx_unclassified`. Codes contain no environment value,
+value length/hash, URL, token, exception message or stack. No code is added to a
+later identity/artifact/inventory/native failure after context succeeds. All
+existing comparisons, allowlists, token-shape restrictions, ordering, request
+budgets and HOLD/false authority flags remain unchanged. No configuration fix or
+allowlist relaxation is justified by the old audit.
+
+The official [variables contract](https://docs.github.com/en/actions/reference/workflows-and-actions/variables)
+and exact [runner2.338.2 GitHub environment export](https://github.com/actions/runner/blob/v2.338.2/src/Runner.Worker/GitHubContext.cs)
+support the workflow SHA and runner context inputs; the runner's
+[script handler](https://github.com/actions/runner/blob/v2.338.2/src/Runner.Worker/Handlers/ScriptHandler.cs)
+exports the OIDC request inputs. These are source/documentation facts, not runtime
+observations of this run; its consumed audit does not identify the runner build.
+A future hosted attempt requires new exact-source
+review/CI and separate explicit one-shot authorization; its diagnostic cannot be
+backfilled into run41372105362.
