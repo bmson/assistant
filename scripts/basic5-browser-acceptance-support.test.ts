@@ -1,5 +1,7 @@
+import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 import {
+  assertBasic5AnonymousPageResponse,
   assertBasic5ReceiptSequence,
   BASIC5_AUTH_COOKIE_NAME,
   BASIC5_BROWSER_ACTIONS,
@@ -13,9 +15,308 @@ import {
   nextBasic5ReadinessAttempt,
 } from './basic5-browser-acceptance-support.js';
 
+const require = createRequire(import.meta.url);
+const nextRedirect =
+  require('../apps/web/node_modules/next/dist/client/components/redirect.js') as {
+    getRedirectError: (url: string, type: 'push' | 'replace') => Error & { digest: string };
+  };
+const nextServerInsertedHtml =
+  require('../apps/web/node_modules/next/dist/server/app-render/make-get-server-inserted-html.js') as {
+    makeGetServerInsertedHTML: (input: {
+      polyfills: never[];
+      renderServerInsertedHTML: () => never[];
+      serverCapturedErrors: (Error & { digest: string })[];
+      tracingMetadata: undefined;
+      basePath: string;
+    }) => () => Promise<string>;
+  };
+const nextStreamHelper =
+  require('../apps/web/node_modules/next/dist/server/stream-utils/node-web-streams-helper.js') as {
+    createHeadInsertionTransformStream: (
+      insert: () => Promise<string>,
+    ) => TransformStream<Uint8Array, Uint8Array>;
+  };
+
 const secret = 'basic5-offline-auth-cookie-secret-32-bytes';
+const authBaseUrl = 'http://127.0.0.1:3107';
+const defaultProtectedMarkers = ['Alex Rivera', 'synthetic note body'];
+const anonymousHtmlContentType = 'text/html; charset=utf-8';
+
+function anonymousResponse(input: {
+  status: number;
+  location?: string;
+  contentType?: string;
+  body?: string;
+  protectedMarkers?: readonly string[];
+}) {
+  return () =>
+    assertBasic5AnonymousPageResponse({
+      status: input.status,
+      ...(input.location === undefined ? {} : { location: input.location }),
+      ...(input.contentType === undefined ? {} : { contentType: input.contentType }),
+      body: Buffer.from(input.body ?? ''),
+      baseUrl: authBaseUrl,
+      protectedMarkers: input.protectedMarkers ?? defaultProtectedMarkers,
+    });
+}
 
 describe('BASIC5 browser acceptance support', () => {
+  it('accepts the configured same-origin Google sign-in HTTP redirect', () => {
+    expect(
+      anonymousResponse({
+        status: 307,
+        location: '/api/auth/signin',
+      }),
+    ).not.toThrow();
+    expect(
+      anonymousResponse({
+        status: 307,
+        location: `${authBaseUrl}/api/auth/signin`,
+      }),
+    ).not.toThrow();
+  });
+
+  it('accepts the exact streamed redirect markup emitted by the installed Next renderer', async () => {
+    const redirectError = nextRedirect.getRedirectError('/api/auth/signin', 'replace');
+    const renderInsertedHtml = nextServerInsertedHtml.makeGetServerInsertedHTML({
+      polyfills: [],
+      renderServerInsertedHTML: () => [],
+      serverCapturedErrors: [redirectError],
+      tracingMetadata: undefined,
+      basePath: '',
+    });
+    const body = await renderInsertedHtml();
+
+    expect(body).toContain('id="__next-page-redirect"');
+    expect(() =>
+      assertBasic5AnonymousPageResponse({
+        status: 200,
+        contentType: anonymousHtmlContentType,
+        body: Buffer.from(body),
+        baseUrl: authBaseUrl,
+        protectedMarkers: defaultProtectedMarkers,
+      }),
+    ).not.toThrow();
+  });
+
+  it('accepts Next inserting the redirect after the head has committed into the body', async () => {
+    const redirectError = nextRedirect.getRedirectError('/api/auth/signin', 'replace');
+    const capturedErrors: (Error & { digest: string })[] = [];
+    const getInsertedHtml = nextServerInsertedHtml.makeGetServerInsertedHTML({
+      polyfills: [],
+      renderServerInsertedHTML: () => [],
+      serverCapturedErrors: capturedErrors,
+      tracingMetadata: undefined,
+      basePath: '',
+    });
+    const transform = nextStreamHelper.createHeadInsertionTransformStream(getInsertedHtml);
+    const writer = transform.writable.getWriter();
+    const reader = transform.readable.getReader();
+    const output: Uint8Array[] = [];
+    const drain = (async () => {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        if (value) output.push(value);
+      }
+    })();
+
+    await writer.write(new TextEncoder().encode('<html><head></head><body>'));
+    capturedErrors.push(redirectError);
+    await writer.write(new TextEncoder().encode('<main>Public shell</main></body></html>'));
+    await writer.close();
+    await drain;
+    const body = Buffer.concat(output.map((chunk) => Buffer.from(chunk)));
+    const html = body.toString('utf8');
+
+    expect(html.indexOf('</head>')).toBeLessThan(html.indexOf('__next-page-redirect'));
+    expect(html.indexOf('__next-page-redirect')).toBeLessThan(html.indexOf('<main>'));
+    expect(() =>
+      assertBasic5AnonymousPageResponse({
+        status: 200,
+        contentType: anonymousHtmlContentType,
+        body,
+        baseUrl: authBaseUrl,
+        protectedMarkers: defaultProtectedMarkers,
+      }),
+    ).not.toThrow();
+  });
+
+  it('rejects status, destination, ambiguity, malformed markup, and empty-body near misses', () => {
+    const invalid = [
+      anonymousResponse({ status: 200, location: '/api/auth/signin' }),
+      anonymousResponse({ status: 302, location: '/api/auth/signin' }),
+      anonymousResponse({ status: 307, location: 'https://outside.example/api/auth/signin' }),
+      anonymousResponse({ status: 307, location: '/api/auth/signin?next=/people' }),
+      anonymousResponse({ status: 307, location: '/api/auth/signin#fragment' }),
+      anonymousResponse({ status: 307, location: 'http://user@127.0.0.1:3107/api/auth/signin' }),
+      anonymousResponse({
+        status: 200,
+        contentType: anonymousHtmlContentType,
+        body: '',
+      }),
+      anonymousResponse({
+        status: 200,
+        contentType: anonymousHtmlContentType,
+        body: '<meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/people">',
+      }),
+      anonymousResponse({
+        status: 200,
+        contentType: anonymousHtmlContentType,
+        body: '<meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin"><meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin">',
+      }),
+      anonymousResponse({
+        status: 200,
+        contentType: anonymousHtmlContentType,
+        body: '<meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin"><meta http-equiv="refresh" content="1;url=/people">',
+      }),
+      anonymousResponse({
+        status: 200,
+        contentType: anonymousHtmlContentType,
+        body: '<base href="https://outside.example/"><meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin">',
+      }),
+      anonymousResponse({
+        status: 200,
+        contentType: anonymousHtmlContentType,
+        body: '<meta id="__next-page-redirect" id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin">',
+      }),
+      anonymousResponse({
+        status: 200,
+        contentType: anonymousHtmlContentType,
+        body: '<meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin"',
+      }),
+      anonymousResponse({
+        status: 200,
+        contentType: anonymousHtmlContentType,
+        body: '<!-- <meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin"> -->',
+      }),
+      anonymousResponse({
+        status: 200,
+        contentType: anonymousHtmlContentType,
+        body: '<script>const fake = \'<meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin">\';</script>',
+      }),
+      anonymousResponse({
+        status: 200,
+        contentType: anonymousHtmlContentType,
+        body: '<template><meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin"></template>',
+      }),
+      ...['textarea', 'iframe', 'title', 'xmp', 'noembed', 'noframes', 'plaintext'].map((tag) =>
+        anonymousResponse({
+          status: 200,
+          contentType: anonymousHtmlContentType,
+          body: `<${tag}><meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin"></${tag}>`,
+        }),
+      ),
+      ...['svg', 'math', 'select', 'div'].map((tag) =>
+        anonymousResponse({
+          status: 200,
+          contentType: anonymousHtmlContentType,
+          body: `<html><head></head><body><${tag}><meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin"></${tag}></body></html>`,
+        }),
+      ),
+      anonymousResponse({
+        status: 200,
+        contentType: 'application/json',
+        body: '<meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin">',
+      }),
+      anonymousResponse({
+        status: 307,
+        location: '/api/auth/signin',
+        body: '<meta http-equiv="refresh" content="1;url=/people">',
+      }),
+    ];
+    for (const check of invalid) expect(check).toThrow();
+  });
+
+  it('rejects protected fixture text in HTML, entity-decoded text, attributes, and JSON strings', () => {
+    const marker = 'private <person> & note';
+    const nextRedirectMeta =
+      '<meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin">';
+    const bodies = [
+      `${nextRedirectMeta}<main>${marker}</main>`,
+      `${nextRedirectMeta}<main>private &lt;person&gt; &amp; note</main>`,
+      `${nextRedirectMeta}<div title="private &lt;person&gt; &amp; note"></div>`,
+    ];
+    for (const body of bodies)
+      expect(
+        anonymousResponse({
+          status: 200,
+          contentType: anonymousHtmlContentType,
+          body,
+          protectedMarkers: [marker],
+        }),
+      ).toThrow('BASIC5 anonymous person-page response did not satisfy the auth boundary');
+
+    const escapedMarker = 'private "line"\nnote';
+    expect(
+      anonymousResponse({
+        status: 200,
+        contentType: anonymousHtmlContentType,
+        body: `${nextRedirectMeta}<script>self.data=${JSON.stringify(escapedMarker)}</script>`,
+        protectedMarkers: [escapedMarker],
+      }),
+    ).toThrow('BASIC5 anonymous person-page response did not satisfy the auth boundary');
+
+    expect(
+      anonymousResponse({
+        status: 200,
+        contentType: anonymousHtmlContentType,
+        body: '<meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin"><script>self.data="\\u0041lex Rivera"</script>',
+        protectedMarkers: ['Alex Rivera'],
+      }),
+    ).toThrow('BASIC5 anonymous person-page response did not satisfy the auth boundary');
+
+    for (const encodedMarker of ['\\x41lex Rivera', '\\u{41}lex Rivera'])
+      expect(
+        anonymousResponse({
+          status: 200,
+          contentType: anonymousHtmlContentType,
+          body: `<meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin"><script>self.data="${encodedMarker}"</script>`,
+          protectedMarkers: ['Alex Rivera'],
+        }),
+      ).toThrow('BASIC5 anonymous person-page response did not satisfy the auth boundary');
+
+    for (const encodedMarker of ['\\x41le\\u0078 Rivera', '&#x41;le\\u0078 Rivera'])
+      expect(
+        anonymousResponse({
+          status: 200,
+          contentType: anonymousHtmlContentType,
+          body: `<meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin"><div title="${encodedMarker}"></div>`,
+          protectedMarkers: ['Alex Rivera'],
+        }),
+      ).toThrow('BASIC5 anonymous person-page response did not satisfy the auth boundary');
+  });
+
+  it('rejects an editor command marker and oversized or invalid UTF-8 bodies without echoing them', () => {
+    expect(
+      anonymousResponse({
+        status: 200,
+        contentType: anonymousHtmlContentType,
+        body: '<meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin"><script>create_owner_memory</script>',
+        protectedMarkers: ['create_owner_memory'],
+      }),
+    ).toThrow('BASIC5 anonymous person-page response did not satisfy the auth boundary');
+
+    expect(() =>
+      assertBasic5AnonymousPageResponse({
+        status: 200,
+        contentType: anonymousHtmlContentType,
+        body: Buffer.alloc(64 * 1024 + 1),
+        baseUrl: authBaseUrl,
+        protectedMarkers: defaultProtectedMarkers,
+      }),
+    ).toThrow('BASIC5 anonymous person-page response did not satisfy the auth boundary');
+    expect(() =>
+      assertBasic5AnonymousPageResponse({
+        status: 200,
+        contentType: anonymousHtmlContentType,
+        body: Buffer.from([0xff]),
+        baseUrl: authBaseUrl,
+        protectedMarkers: defaultProtectedMarkers,
+      }),
+    ).toThrow('BASIC5 anonymous person-page response did not satisfy the auth boundary');
+  });
+
   it('pins CI to the installed Chrome channel without changing local launch defaults', () => {
     expect(basic5BrowserLaunchOptions(true)).toEqual({ headless: true, channel: 'chrome' });
     expect(basic5BrowserLaunchOptions(false)).toEqual({ headless: true });

@@ -177,7 +177,7 @@ function validEvidence(): Basic5CiEvidence {
       authenticatedPageNavigations: 6,
       browserHttpRequests: 24,
       browserPageHttpRequests: 23,
-      anonymousApiProbeRequests: 1,
+      anonymousPageProbeRequests: 1,
       pageApiMutationRequests: 4,
       applyPosts: 4,
       ownerEditorPostCount: 4,
@@ -2359,6 +2359,8 @@ describe('one-shot BASIC5 CI controller', () => {
       unmatchedReferenceCount: null,
     });
     expect(result.chromeVersionDiagnostic).toEqual(preflight.chromeVersionDiagnostic);
+    expect(ops.writtenReceipt?.counts).toMatchObject({ anonymousPageProbeRequests: 1 });
+    expect(ops.writtenReceipt?.counts).not.toHaveProperty('anonymousApiProbeRequests');
     const savedReceipts = ops.writtenReceipt?.receipts as Array<Record<string, unknown>>;
     expect(savedReceipts[1]?.ids).toMatchObject({
       relationId: '50000000-0000-4000-8000-000000000001',
