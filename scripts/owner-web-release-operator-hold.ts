@@ -30,7 +30,7 @@ export async function boundedResponseJson(
   timeoutMs = RESPONSE_TIMEOUT_MS,
 ): Promise<unknown> {
   if (!response.ok) {
-    await response.body?.cancel();
+    void response.body?.cancel().catch(() => undefined);
     throw new Error('Operator hold unavailable');
   }
   const reader = response.body?.getReader();
@@ -137,19 +137,24 @@ export async function verifyOperatorOwnedHold(
     env.RUNNER_TEMP,
     `owner-web-release-hold-${identity.runId}-${identity.attempt}.json`,
   );
-  let deploy: Json, cleanup: Json;
+  let deploy: Json, cleanup: Json, workspaceImport: Json;
   const deadline = Date.now() + 15 * 60_000;
   for (;;) {
     deploy = await get('/actions/workflows/deploy.yml');
     cleanup = await get('/actions/workflows/cleanup.yml');
+    workspaceImport = await get('/actions/workflows/workspace-import.yml');
     if (
       !/^[1-9][0-9]{0,19}$/.test(String(deploy.id)) ||
       !/^[1-9][0-9]{0,19}$/.test(String(cleanup.id)) ||
+      !/^[1-9][0-9]{0,19}$/.test(String(workspaceImport.id)) ||
       !['active', 'disabled_manually', 'disabled_inactivity', 'disabled_fork'].includes(
         String(deploy.state),
       ) ||
       !['active', 'disabled_manually', 'disabled_inactivity', 'disabled_fork'].includes(
         String(cleanup.state),
+      ) ||
+      !['active', 'disabled_manually', 'disabled_inactivity', 'disabled_fork'].includes(
+        String(workspaceImport.state),
       )
     )
       throw new Error('Operator hold unavailable');
@@ -162,8 +167,10 @@ export async function verifyOperatorOwnedHold(
       event: env.GITHUB_EVENT_NAME,
       deployId: deploy.id,
       cleanupId: cleanup.id,
+      workspaceImportId: workspaceImport.id,
       deployBefore: deploy.state,
       cleanupBefore: cleanup.state,
+      workspaceImportBefore: workspaceImport.state,
       cleanupVariableBefore: env.CURRENT_ONLY_CLEANUP,
     };
     let saved: Json;
@@ -192,16 +199,25 @@ export async function verifyOperatorOwnedHold(
       saved.event !== env.GITHUB_EVENT_NAME ||
       String(saved.deployId) !== String(deploy.id) ||
       String(saved.cleanupId) !== String(cleanup.id) ||
+      String(saved.workspaceImportId) !== String(workspaceImport.id) ||
       saved.cleanupVariableBefore !== env.CURRENT_ONLY_CLEANUP ||
       !['active', 'disabled_manually', 'disabled_inactivity', 'disabled_fork'].includes(
         String(saved.deployBefore),
       ) ||
       !['active', 'disabled_manually', 'disabled_inactivity', 'disabled_fork'].includes(
         String(saved.cleanupBefore),
+      ) ||
+      !['active', 'disabled_manually', 'disabled_inactivity', 'disabled_fork'].includes(
+        String(saved.workspaceImportBefore),
       )
     )
       throw new Error('Operator hold receipt changed');
-    if (deploy.state === 'disabled_manually' && cleanup.state === 'disabled_manually') break;
+    if (
+      deploy.state === 'disabled_manually' &&
+      cleanup.state === 'disabled_manually' &&
+      workspaceImport.state === 'disabled_manually'
+    )
+      break;
     if (!waitForManualDisable) throw new Error('Operator workflow hold changed; release is held');
     if (Date.now() >= deadline) throw new Error('Operator hold was not established');
     await new Promise((resolveWait) => setTimeout(resolveWait, 5000));
@@ -274,6 +290,7 @@ export async function verifyOperatorOwnedHold(
     currentJob: env.GITHUB_JOB,
     deployWorkflowId: deploy.id,
     cleanupWorkflowId: cleanup.id,
+    workspaceImportWorkflowId: workspaceImport.id,
     cleanupVariable: env.CURRENT_ONLY_CLEANUP,
   } as const;
 }

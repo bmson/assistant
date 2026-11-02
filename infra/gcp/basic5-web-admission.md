@@ -68,13 +68,23 @@ and ordinary staging/probes. The separate manual retirement workflow has a
 most about 935 seconds before ordinary process scheduling, leaving setup margin.
 A timeout or interrupted drain still produces no completed barrier receipt.
 
-Before the delivery guard acquires any holds, an operator disables the deploy
-and cleanup workflows. The protected release job snapshots the effective
-production `CURRENT_ONLY_CLEANUP` variable and requires the exact value `false`;
-its private run receipt binds that snapshot to the trusted source, run, attempt,
-and job. Each native phase rechecks the same job snapshot and fresh workflow
-states/run census. The snapshot is not a fresh Variables API read and does not
-separately prove repository and environment variable values.
+Before the delivery guard acquires any holds, an operator disables the deploy,
+cleanup, and workspace-import workflows. Before disabling them, the operator
+must make a separate fresh read of both the repository-level
+`CURRENT_ONLY_CLEANUP` variable and the
+production-environment override, require each to be exactly `false`, and bind
+that evidence to the exact trusted source, run, attempt, and release job. This
+operator record is separate from the job receipt. The protected release job
+also snapshots the effective production `CURRENT_ONLY_CLEANUP` value and
+requires exact `false`; its private run receipt binds that effective snapshot
+to the same source, run, attempt, and job. The operator records the original
+workspace-import workflow state; it is restored manually only after a confirmed
+safe terminal result and only if it was active before the hold. A previously
+disabled workflow stays disabled, and an unknown result keeps it disabled. Each
+native phase rechecks all three disabled workflow states, the job snapshot, and
+the fresh run census. The effective job snapshot is
+not a fresh Variables API read and does not independently prove either
+repository-level or production-environment variable values.
 
 The active-run census checks every active status, with bounded complete
 pagination, for `deploy.yml`, `cleanup.yml`, `owner-web-tag-retirement.yml`,

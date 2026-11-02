@@ -49,13 +49,20 @@ function fixture() {
   };
   const identity = { source, runId: '12345', attempt: '1' };
   const requests: string[] = [];
+  const workflowStates: Record<string, string> = {
+    'deploy.yml': 'disabled_manually',
+    'cleanup.yml': 'disabled_manually',
+    'workspace-import.yml': 'disabled_manually',
+  };
   const request: HoldFetch = async (url) => {
     requests.push(url);
     const path = new URL(url).pathname;
     if (path.endsWith('/actions/workflows/deploy.yml'))
-      return { id: 1, state: 'disabled_manually' };
+      return { id: 1, state: workflowStates['deploy.yml'] };
     if (path.endsWith('/actions/workflows/cleanup.yml'))
-      return { id: 2, state: 'disabled_manually' };
+      return { id: 2, state: workflowStates['cleanup.yml'] };
+    if (path.endsWith('/actions/workflows/workspace-import.yml'))
+      return { id: 3, state: workflowStates['workspace-import.yml'] };
     if (path.includes('/actions/workflows/')) {
       const match = /\/actions\/workflows\/([^/]+)\/runs$/.exec(path);
       if (!match) throw new Error(`Unexpected workflow endpoint: ${path}`);
@@ -73,7 +80,7 @@ function fixture() {
       };
     throw new Error(`Unexpected API request: ${path}`);
   };
-  return { directory, env, identity, request, requests };
+  return { directory, env, identity, request, requests, workflowStates };
 }
 
 describe('operator-owned BASIC5 workflow holds', () => {
@@ -90,6 +97,8 @@ describe('operator-owned BASIC5 workflow holds', () => {
       attempt: '1',
       job: 'release',
       cleanupVariableBefore: 'false',
+      workspaceImportId: 3,
+      workspaceImportBefore: 'disabled_manually',
     });
     const watchedRuns = test.requests.filter((url) => url.includes('/runs?status='));
     expect(watchedRuns).toHaveLength(WRITERS.length * ACTIVE.length);
@@ -136,6 +145,45 @@ describe('operator-owned BASIC5 workflow holds', () => {
     );
   });
 
+  it('captures workspace-import prior state and requires manual disable readback', async () => {
+    const test = fixture();
+    test.workflowStates['workspace-import.yml'] = 'active';
+    await expect(
+      verifyOperatorOwnedHold(test.identity, test.env, test.request, false),
+    ).rejects.toThrow('Operator workflow hold changed; release is held');
+    const receiptPath = join(test.directory, 'owner-web-release-hold-12345-1.json');
+    expect(JSON.parse(readFileSync(receiptPath, 'utf8')).workspaceImportBefore).toBe('active');
+
+    test.workflowStates['workspace-import.yml'] = 'disabled_manually';
+    await expect(
+      verifyOperatorOwnedHold(test.identity, test.env, test.request, false),
+    ).resolves.toMatchObject({ workspaceImportWorkflowId: 3 });
+  });
+
+  it('blocks an already queued workspace import even when its workflow is disabled', async () => {
+    const test = fixture();
+    const request: HoldFetch = async (url, token) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith('/workspace-import.yml/runs'))
+        return {
+          total_count: 1,
+          workflow_runs: [
+            {
+              id: 12347,
+              run_attempt: 1,
+              head_sha: source,
+              event: 'workflow_dispatch',
+              status: new URL(url).searchParams.get('status'),
+            },
+          ],
+        };
+      return test.request(url, token);
+    };
+    await expect(verifyOperatorOwnedHold(test.identity, test.env, request, false)).rejects.toThrow(
+      'Competing release run blocks native phase',
+    );
+  });
+
   it('rejects a changed effective cleanup snapshot before making any API request', async () => {
     const test = fixture();
     test.env.CURRENT_ONLY_CLEANUP = 'true';
@@ -164,6 +212,23 @@ describe('operator-owned BASIC5 workflow holds', () => {
     await expect(boundedResponseJson(response, 64, 100)).resolves.toEqual({
       state: 'disabled_manually',
     });
+  });
+
+  it('rejects an error response without waiting for stalled body cancellation', async () => {
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        pull() {
+          return new Promise<void>(() => undefined);
+        },
+        cancel() {
+          return new Promise<void>(() => undefined);
+        },
+      }),
+      { status: 403 },
+    );
+    await expect(boundedResponseJson(response, 64, 10)).rejects.toThrow(
+      'Operator hold unavailable',
+    );
   });
 
   it('bounds a stalled body even if cancellation does not settle', async () => {

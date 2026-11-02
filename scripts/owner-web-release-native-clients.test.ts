@@ -302,13 +302,15 @@ describe('unwired fixed native fixture clients', () => {
       GITHUB_EVENT_NAME: 'workflow_dispatch',
       GITHUB_JOB: 'release',
       RUNNER_TEMP: root,
+      CURRENT_ONLY_CLEANUP: 'false',
     } as NodeJS.ProcessEnv;
     const request = vi.fn(async (url: string) => {
       if (url.endsWith('/actions/workflows/deploy.yml'))
         return { id: 1, state: 'disabled_manually' };
       if (url.endsWith('/actions/workflows/cleanup.yml'))
         return { id: 2, state: 'disabled_manually' };
-      if (url.endsWith('/actions/variables/CURRENT_ONLY_CLEANUP')) return { value: 'false' };
+      if (url.endsWith('/actions/workflows/workspace-import.yml'))
+        return { id: 3, state: 'disabled_manually' };
       if (url.includes('/runs?')) {
         const active = url.includes('status=in_progress');
         const deploy = url.includes('/deploy.yml/');
@@ -322,6 +324,7 @@ describe('unwired fixed native fixture clients', () => {
                     run_attempt: 1,
                     head_sha: f.context.source,
                     event: 'workflow_dispatch',
+                    status: 'in_progress',
                   },
                 ]
               : [],
@@ -339,6 +342,7 @@ describe('unwired fixed native fixture clients', () => {
       currentJob: 'release',
       deployWorkflowId: 1,
       cleanupWorkflowId: 2,
+      workspaceImportWorkflowId: 3,
       cleanupVariable: 'false',
     });
     await expect(
