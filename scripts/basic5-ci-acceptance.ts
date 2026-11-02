@@ -22,7 +22,7 @@ const CLEANUP_END_SECONDS = 400;
 const PREPARE_END_SECONDS = 130;
 const CAPTURE_BYTES = 64 * 1024;
 const PHASE_SETTLEMENT_GRACE_MS = 5_000;
-const ACCEPTANCE_CONTRACT = 'basic5-ci-standalone-in-checkout-v2';
+const ACCEPTANCE_CONTRACT = 'basic5-ci-standalone-in-checkout-split-budget-v3';
 const CLAIM_SCOPE = {
   runtimeIdentity: 'bounded standalone artifact observed in CI checkout',
   behavior: 'one four-save BASIC5 browser case',
@@ -1709,6 +1709,8 @@ function validateCiEvidence(
       'pageNavigations',
       'authenticatedPageNavigations',
       'browserHttpRequests',
+      'browserDynamicHttpRequests',
+      'browserStaticAssetRequests',
       'browserPageHttpRequests',
       'anonymousPageProbeRequests',
       'pageApiMutationRequests',
@@ -1855,7 +1857,15 @@ function validateCiEvidence(
     counts.authenticatedPageNavigations !== counts.pageNavigations ||
     !Number.isSafeInteger(counts.browserHttpRequests) ||
     Number(counts.browserHttpRequests) < 1 ||
-    Number(counts.browserHttpRequests) > 64 ||
+    Number(counts.browserHttpRequests) > 320 ||
+    !Number.isSafeInteger(counts.browserDynamicHttpRequests) ||
+    Number(counts.browserDynamicHttpRequests) < 1 ||
+    Number(counts.browserDynamicHttpRequests) > 64 ||
+    !Number.isSafeInteger(counts.browserStaticAssetRequests) ||
+    Number(counts.browserStaticAssetRequests) < 0 ||
+    Number(counts.browserStaticAssetRequests) > 256 ||
+    counts.browserHttpRequests !==
+      Number(counts.browserDynamicHttpRequests) + Number(counts.browserStaticAssetRequests) ||
     counts.browserPageHttpRequests !== Number(counts.browserHttpRequests) - 1 ||
     counts.anonymousPageProbeRequests !== 1 ||
     counts.pageApiMutationRequests !== 4 ||
@@ -1978,7 +1988,7 @@ export async function runBasic5CiAcceptance(
   const started = ops.now();
   const deadline = started + OUTER_SECONDS * 1000;
   const receipt: Record<string, unknown> = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     acceptanceContract: ACCEPTANCE_CONTRACT,
     claimScope: CLAIM_SCOPE,
     scope: 'one BASIC5 CI browser acceptance case',
@@ -2065,6 +2075,8 @@ export async function runBasic5CiAcceptance(
           'pageNavigations',
           'authenticatedPageNavigations',
           'browserHttpRequests',
+          'browserDynamicHttpRequests',
+          'browserStaticAssetRequests',
           'browserPageHttpRequests',
           'anonymousPageProbeRequests',
           'pageApiMutationRequests',
