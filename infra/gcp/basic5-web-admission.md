@@ -70,21 +70,24 @@ A timeout or interrupted drain still produces no completed barrier receipt.
 
 Before the delivery guard acquires any holds, an operator disables the deploy,
 cleanup, and workspace-import workflows. Before disabling them, the operator
-must make a separate fresh read of both the repository-level
-`CURRENT_ONLY_CLEANUP` variable and the
-production-environment override, require each to be exactly `false`, and bind
-that evidence to the exact trusted source, run, attempt, and release job. This
-operator record is separate from the job receipt. The protected release job
-also snapshots the effective production `CURRENT_ONLY_CLEANUP` value and
-requires exact `false`; its private run receipt binds that effective snapshot
-to the same source, run, attempt, and job. The operator records the original
-workspace-import workflow state; it is restored manually only after a confirmed
-safe terminal result and only if it was active before the hold. A previously
-disabled workflow stays disabled, and an unknown result keeps it disabled. Each
-native phase rechecks all three disabled workflow states, the job snapshot, and
-the fresh run census. The effective job snapshot is
-not a fresh Variables API read and does not independently prove either
-repository-level or production-environment variable values.
+must separately and freshly read the repository-level `CURRENT_ONLY_CLEANUP`
+variable and the production-environment override. The repository-level value
+must exist and equal exactly `false`. The production override must be freshly
+proven absent (the exact variable endpoint returns 404) or exist and equal
+exactly `false`; do not create an override to make the check pass. Preserve the
+actual distinction between absent and present-false in the operator's record,
+bound to the exact trusted source, run, attempt, and release job. A 403, unknown
+response, or drift is a HOLD. This operator record is separate from the job
+receipt. The protected release job also snapshots the effective production
+`CURRENT_ONLY_CLEANUP` value and requires exact `false`; its private run receipt
+binds that effective snapshot to the same source, run, attempt, and job. The
+operator records the original workspace-import workflow state; it is restored
+manually only after a confirmed safe terminal result and only if it was active
+before the hold. A previously disabled workflow stays disabled, and an unknown
+result keeps it disabled. Each native phase rechecks all three disabled
+workflow states, the job snapshot, and the fresh run census. The effective job
+snapshot is not a fresh Variables API read and does not independently prove
+either repository-level or production-environment variable values.
 
 The active-run census checks every active status, with bounded complete
 pagination, for `deploy.yml`, `cleanup.yml`, `owner-web-tag-retirement.yml`,
