@@ -15,7 +15,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import type { Db } from '@assistant/db';
+import type {
+  OwnerEditorApply,
+  OwnerEditorReceiptReply,
+} from '@assistant/persistence/owner-editor';
 import type {
   Request as BrowserRequest,
   Response as BrowserResponse,
@@ -34,6 +37,7 @@ import {
   BASIC5_FIXTURE_CONNECTION_ID,
   BASIC5_FIXTURE_MODEL_ID,
   BASIC5_READINESS_ATTEMPT_LIMIT,
+  BASIC5_SAVED_STATUS_PATTERN,
   type Basic5ObservedPost,
   basic5BrowserLaunchOptions,
   basic5EmbeddingResponse,
@@ -43,11 +47,10 @@ import {
   createBasic5AuthCookie,
   createBasic5BrowserRequestBudget,
   nextBasic5ReadinessAttempt,
+  qualifyBasic5StoredUserFlowReceipt,
 } from './basic5-browser-acceptance-support.js';
 import {
-  type Basic5ReplyObservation,
   type Basic5SaveObservationDiagnostic,
-  decodeBasic5ObservedReply,
   observeBasic5Save,
 } from './basic5-browser-save-observation.js';
 import {
@@ -108,15 +111,7 @@ const OWNER_EDITOR_PATHS = new Set([
   '/api/profile/knowledge/memory',
 ]);
 
-type Receipt = {
-  authority: string;
-  command: string;
-  operationId: string;
-  requestHash: string;
-  statusVersion: number;
-  outcome: string;
-  ids?: Record<string, string>;
-};
+type Receipt = Extract<OwnerEditorReceiptReply, { outcome: 'saved' | 'unchanged' }>;
 
 const CHECKPOINT_STAGES = [
   'fixture_setup_started',
@@ -415,27 +410,68 @@ async function saveWithReceipt(
     totalMatchingPostCount: () => number;
     onDiagnostic: (diagnostic: Basic5SaveObservationDiagnostic) => void;
   },
+  readStoredReceipt: (request: OwnerEditorApply, requestHash: string) => Promise<Receipt>,
 ): Promise<{ receipt: Receipt; observed: Basic5ObservedPost; response: BrowserResponse }> {
-  const { errors } = await import('playwright');
-  let reply: Basic5ReplyObservation | undefined;
+  const [{ errors }, { ownerEditorRequestHash }, { parseOwnerEditorRequest }] = await Promise.all([
+    import('playwright'),
+    import('../packages/application/src/owner-editor-hash.js'),
+    import('../packages/application/src/owner-editor-wire.js'),
+  ]);
+  const dialog = page.getByRole('dialog');
+  const postsBefore = observation.totalMatchingPostCount();
+  let captured:
+    | { transport: BrowserRequest; request: OwnerEditorApply; requestHash: string }
+    | undefined;
+  let applyPosts = 0;
+  const capturePost = (request: BrowserRequest) => {
+    try {
+      const url = new URL(request.url());
+      if (
+        request.method() !== 'POST' ||
+        !OWNER_EDITOR_PATHS.has(url.pathname) ||
+        url.origin !== new URL(page.url()).origin
+      )
+        return;
+      applyPosts += 1;
+      const parsed = parseOwnerEditorRequest(
+        request.postDataJSON(),
+        url.pathname as
+          | '/api/people/editor'
+          | '/api/profile/knowledge/family'
+          | '/api/profile/knowledge/memory',
+      );
+      if (!parsed.ok || parsed.request.intent !== 'apply' || parsed.request.command !== operation)
+        return;
+      captured = {
+        transport: request,
+        request: parsed.request,
+        requestHash: ownerEditorRequestHash(parsed.request),
+      };
+    } catch {
+      /* Invalid requests cannot supply operation identity. */
+    }
+  };
   return observeBasic5Save({
     operation,
     page,
     ...observation,
-    onDiagnostic: (diagnostic) =>
-      observation.onDiagnostic({ ...diagnostic, ...(reply ? { reply } : {}) }),
-    click: (timeout) => saveButton.click({ timeout }),
-    isTimeoutError: (error) => error instanceof errors.TimeoutError,
-    matchResponse: (response) => {
-      try {
-        return (
-          response.request().method() === 'POST' &&
-          OWNER_EDITOR_PATHS.has(new URL(response.url()).pathname)
-        );
-      } catch {
-        return false;
-      }
+    activateRequestObserver: (notify) => {
+      // Both observers are armed before the click; no body is read via CDP.
+      page.on('request', capturePost);
+      const dispose = observation.activateRequestObserver(notify);
+      return () => {
+        page.off('request', capturePost);
+        dispose();
+      };
     },
+    click: async (timeout) => {
+      assert.equal(await dialog.count(), 1);
+      assert.equal(await dialog.getByRole('status').count(), 0);
+      assert.equal(await saveButton.isEnabled(), true);
+      await saveButton.click({ timeout });
+    },
+    isTimeoutError: (error) => error instanceof errors.TimeoutError,
+    matchResponse: (response) => captured?.transport === response.request(),
     status: (response) => response.status(),
     readUi: () =>
       page.evaluate(
@@ -470,49 +506,25 @@ async function saveWithReceipt(
           : 'Save',
       ),
     parse: async (response) => {
-      if (!response.ok()) throw new Error(`Owner-editor save returned HTTP ${response.status()}`);
-      const [{ decodeOwnerEditorReply }, { ownerEditorRequestHash }, { parseOwnerEditorRequest }] =
-        await Promise.all([
-          import('../apps/web/lib/owner-editor-client.js'),
-          import('../packages/application/src/owner-editor-hash.js'),
-          import('../packages/application/src/owner-editor-wire.js'),
-        ]);
-      const body = response.request().postDataJSON() as Record<string, unknown>;
-      const path = new URL(response.url()).pathname;
-      const parsed = parseOwnerEditorRequest(
-        body,
-        path as
-          | '/api/people/editor'
-          | '/api/profile/knowledge/family'
-          | '/api/profile/knowledge/memory',
-      );
-      if (!parsed.ok || parsed.request.intent !== 'apply' || parsed.request.command !== operation)
-        throw new Error('Owner-editor browser request did not match its exact apply contract');
-      const decoded = await decodeBasic5ObservedReply<ReturnType<typeof decodeOwnerEditorReply>>({
-        response,
-        decode: decodeOwnerEditorReply,
-        onDiagnostic: (diagnostic) => {
-          reply = diagnostic;
-        },
+      // Headers remain independently observed. The app itself must consume and
+      // validate the reply before its current opened form can show Saved.
+      assert.equal(response.status(), 200);
+      const headers = response.headers();
+      assert.match(headers['content-type'] ?? '', /^application\/json(?:\s*;|$)/i);
+      assert.match(headers['cache-control'] ?? '', /(?:^|,)\s*no-store\s*(?:,|$)/i);
+      assert(captured && applyPosts === 1);
+      const saved = dialog.getByRole('status').filter({
+        hasText: BASIC5_SAVED_STATUS_PATTERN,
       });
-      if (!decoded) throw new Error('Owner-editor HTTP reply failed the existing strict decoder');
-      if (decoded.authority !== 'operation_receipt' || decoded.outcome !== 'saved')
-        throw new Error('Owner-editor request did not return its expected durable saved receipt');
-      const receipt: Receipt = {
-        authority: decoded.authority,
-        command: decoded.command,
-        operationId: decoded.operationId,
-        requestHash: decoded.requestHash,
-        statusVersion: decoded.statusVersion,
-        outcome: decoded.outcome,
-        ids: decoded.ids as Record<string, string>,
-      };
-      assert.equal(parsed.request.command, receipt.command);
-      assert.equal(parsed.request.operationId, receipt.operationId);
-      assert.equal(ownerEditorRequestHash(parsed.request), receipt.requestHash);
-      assert.match(receipt.requestHash, /^[a-f0-9]{64}$/);
-      assert.equal(receipt.authority, 'operation_receipt');
-      assert.equal(receipt.outcome, 'saved');
+      await saved.waitFor({ state: 'visible', timeout: 30_000 });
+      assert.equal(await dialog.count(), 1);
+      assert.equal(await saved.count(), 1);
+      assert.equal(await dialog.getByRole('status').count(), 1);
+      assert.equal(applyPosts, 1);
+      assert.equal(observation.totalMatchingPostCount(), postsBefore + 1);
+      // Same-operation durable proof is independent of the UI. An unknown app
+      // result cannot reach this read, even if the backend committed the save.
+      const receipt = await readStoredReceipt(captured.request, captured.requestHash);
       return {
         receipt,
         response,
@@ -524,34 +536,6 @@ async function saveWithReceipt(
         },
       };
     },
-  });
-}
-
-async function assertStoredReceipt(
-  db: Db,
-  ownerEditorOperations: typeof import('@assistant/db').ownerEditorOperations,
-  eq: typeof import('drizzle-orm').eq,
-  receipt: Receipt,
-  ownerId: string,
-  epoch: string,
-) {
-  const [row] = await db
-    .select()
-    .from(ownerEditorOperations)
-    .where(eq(ownerEditorOperations.operationId, receipt.operationId))
-    .limit(1);
-  expect(row).toBeDefined();
-  expect(row).toMatchObject({
-    ownerId,
-    epoch,
-    command: receipt.command,
-    requestHash: receipt.requestHash,
-    status: 'committed',
-    statusVersion: receipt.statusVersion,
-  });
-  expect(row?.result).toMatchObject({
-    outcome: 'saved',
-    ids: receipt.ids,
   });
 }
 
@@ -1187,23 +1171,62 @@ browserTest(
         saveObservation = undefined;
         fixtureCountersAtSave = undefined;
         saveTransport = { operation, routeBlocked: null, requestFailedClass: null };
-        return saveWithReceipt(page, operation, button, {
-          activateRequestObserver: (notify) => {
-            activeSaveOperation = operation;
-            activeSaveRequest = notify;
-            return () => {
-              if (activeSaveRequest === notify) {
-                activeSaveRequest = undefined;
-                activeSaveOperation = undefined;
-              }
-            };
+        return saveWithReceipt(
+          page,
+          operation,
+          button,
+          {
+            activateRequestObserver: (notify) => {
+              activeSaveOperation = operation;
+              activeSaveRequest = notify;
+              return () => {
+                if (activeSaveRequest === notify) {
+                  activeSaveRequest = undefined;
+                  activeSaveOperation = undefined;
+                }
+              };
+            },
+            totalMatchingPostCount: () => ownerEditorPostCount,
+            onDiagnostic: (diagnostic) => {
+              saveObservation = diagnostic;
+              fixtureCountersAtSave = snapshotFixtureCounters('save_settled');
+            },
           },
-          totalMatchingPostCount: () => ownerEditorPostCount,
-          onDiagnostic: (diagnostic) => {
-            saveObservation = diagnostic;
-            fixtureCountersAtSave = snapshotFixtureCounters('save_settled');
+          async (request, requestHash) => {
+            const rows = await db
+              .select()
+              .from(ownerEditorOperations)
+              .where(
+                and(
+                  eq(ownerEditorOperations.ownerId, ownerId),
+                  eq(ownerEditorOperations.epoch, epoch),
+                  eq(ownerEditorOperations.operationId, request.operationId),
+                ),
+              )
+              .limit(2);
+            assert.equal(rows.length, 1);
+            const receipt = qualifyBasic5StoredUserFlowReceipt(
+              rows[0],
+              {
+                ownerId,
+                epoch,
+                privacyGenerationDigest: ownerEditorPrivacyDigest(privacyGeneration),
+                command: operation,
+                operationId: request.operationId,
+                requestHash,
+              },
+              true,
+            );
+            assert(receipt.outcome === 'saved');
+            if (request.command === 'update_person_identity')
+              assert.equal(receipt.ids?.contactId, request.contactId);
+            if (request.command === 'correct_owner_family_relationship')
+              assert.equal(receipt.ids?.previousRelationId, request.targetRelationId);
+            if (request.command === 'correct_owner_memory')
+              assert.equal(receipt.ids?.memoryId, request.memoryId);
+            return receipt;
           },
-        });
+        );
       };
 
       const personUrl = `${baseUrl}/people/${personId}`;
@@ -1230,7 +1253,6 @@ browserTest(
       fixtureManifest.generatedOperationIds.push(identity.receipt.operationId);
       checkpointApplyCount = receipts.length;
       setCheckpoint('identity_apply_complete');
-      await assertStoredReceipt(db, ownerEditorOperations, eq, identity.receipt, ownerId, epoch);
       const [updatedContact] = await db.select().from(contacts).where(eq(contacts.id, personId));
       const [updatedEntity] = await db
         .select()
@@ -1282,7 +1304,6 @@ browserTest(
       fixtureManifest.generatedOperationIds.push(familyAdd.receipt.operationId);
       checkpointApplyCount = receipts.length;
       setCheckpoint('family_add_apply_complete');
-      await assertStoredReceipt(db, ownerEditorOperations, eq, familyAdd.receipt, ownerId, epoch);
       const addedRelationId = familyAdd.receipt.ids?.relationId;
       const addedMemoryId = familyAdd.receipt.ids?.memoryId;
       assert(addedRelationId && addedMemoryId);
@@ -1339,14 +1360,6 @@ browserTest(
       fixtureManifest.generatedOperationIds.push(familyCorrection.receipt.operationId);
       checkpointApplyCount = receipts.length;
       setCheckpoint('family_correction_apply_complete');
-      await assertStoredReceipt(
-        db,
-        ownerEditorOperations,
-        eq,
-        familyCorrection.receipt,
-        ownerId,
-        epoch,
-      );
       expect(familyCorrection.receipt.ids?.previousRelationId).toBe(addedRelationId);
       const correctedRelationId = familyCorrection.receipt.ids?.relationId;
       const correctedMemoryId = familyCorrection.receipt.ids?.memoryId;
@@ -1460,14 +1473,6 @@ browserTest(
       fixtureManifest.generatedOperationIds.push(noteCorrection.receipt.operationId);
       checkpointApplyCount = receipts.length;
       setCheckpoint('note_correction_apply_complete');
-      await assertStoredReceipt(
-        db,
-        ownerEditorOperations,
-        eq,
-        noteCorrection.receipt,
-        ownerId,
-        epoch,
-      );
       expect(noteCorrection.receipt.ids?.memoryId).toBe(noteId);
       const [correctedNote] = await db.select().from(memories).where(eq(memories.id, noteId));
       expect(correctedNote).toMatchObject({
@@ -1610,6 +1615,8 @@ browserTest(
         },
         executionEnvironment,
         receipts: receipts.map((receipt) => ({
+          // Only qualified clean-baseline -> current Saved results enter receipts.
+          uiSavedAfterCleanBaseline: true,
           authority: receipt.authority,
           command: receipt.command,
           operationId: receipt.operationId,

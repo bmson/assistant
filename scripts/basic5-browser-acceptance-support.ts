@@ -1,4 +1,10 @@
 import { createRequire } from 'node:module';
+import {
+  type OwnerEditorReceiptReply,
+  ownerEditorReceipt,
+  parseOwnerEditorOperationRecord,
+} from '@assistant/persistence';
+import { decodeOwnerEditorReply } from '../apps/web/lib/owner-editor-client.js';
 import { isolatedTestEnvironment } from './test-target.js';
 
 const require = createRequire(import.meta.url);
@@ -370,6 +376,55 @@ export const BASIC5_BROWSER_ACTIONS = [
   'correct_owner_family_relationship',
   'correct_owner_memory',
 ] as const;
+
+// A strict end assertion also rejects a trailing line break, unlike `$` alone.
+export const BASIC5_SAVED_STATUS_PATTERN =
+  /^Saved\.(?: Some derived details still need to refresh\.| Related information may still show older details\.)?(?![\s\S])/;
+
+export interface Basic5StoredUserFlowReceiptExpectation {
+  ownerId: string;
+  epoch: string;
+  privacyGenerationDigest: string;
+  command: (typeof BASIC5_BROWSER_ACTIONS)[number];
+  operationId: string;
+  requestHash: string;
+}
+
+function invalidBasic5StoredUserFlowReceipt(): never {
+  throw new Error('BASIC5 stored receipt did not satisfy the exact saved-user-flow contract');
+}
+
+/** UI completion and the same operation's canonical stored receipt are independent gates. */
+export function qualifyBasic5StoredUserFlowReceipt(
+  row: unknown,
+  expected: Basic5StoredUserFlowReceiptExpectation,
+  uiSaved: boolean,
+): OwnerEditorReceiptReply {
+  if (uiSaved !== true) return invalidBasic5StoredUserFlowReceipt();
+  let record: ReturnType<typeof parseOwnerEditorOperationRecord>;
+  try {
+    record = parseOwnerEditorOperationRecord(row);
+  } catch {
+    return invalidBasic5StoredUserFlowReceipt();
+  }
+  if (
+    !BASIC5_BROWSER_ACTIONS.includes(expected.command) ||
+    record.ownerId !== expected.ownerId ||
+    record.epoch !== expected.epoch ||
+    record.privacyGenerationDigest !== expected.privacyGenerationDigest ||
+    record.command !== expected.command ||
+    record.operationId !== expected.operationId ||
+    record.requestHash !== expected.requestHash ||
+    record.protocolVersion !== 1 ||
+    record.status !== 'committed' ||
+    record.statusVersion < 1
+  )
+    return invalidBasic5StoredUserFlowReceipt();
+  const decoded = decodeOwnerEditorReply(ownerEditorReceipt(record));
+  if (decoded?.authority !== 'operation_receipt' || decoded.outcome !== 'saved')
+    return invalidBasic5StoredUserFlowReceipt();
+  return decoded;
+}
 
 export const BASIC5_FIXTURE_MODEL_ID = 'gw:basic5-fixture:embedding';
 export const BASIC5_FIXTURE_CONNECTION_ID = 'basic5-fixture';
