@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  createBasic5BrowserRequestBudget,
+  routeBasic5BrowserRequest,
+} from './basic5-browser-acceptance-support.js';
+import {
   type Basic5CiCaseResult,
   Basic5CiHold,
   RealBasic5CiOps,
@@ -364,7 +368,9 @@ describe('BASIC5 bounded failed Vitest report diagnostics', () => {
   it('retains existing browser-budget and local-fixture counters without inferring server outcome', () => {
     const fixtureCounters = {
       observedAt: 'save_settled',
-      browserHttpRequests: 65,
+      browserHttpRequests: 120,
+      browserControlHttpRequests: 65,
+      browserPresentationHttpRequests: 55,
       browserBudgetExceeded: true,
       localEmbeddingReceived: 0,
       localEmbeddingFinished: 0,
@@ -391,8 +397,13 @@ describe('BASIC5 bounded failed Vitest report diagnostics', () => {
     expect(good.diagnostic.checkpoint?.saveTransport).toEqual(saveTransport);
     expect(contentFreeBasic5CiVitestDiagnostic(good.diagnostic)).toEqual(good.diagnostic);
     for (const patch of [
-      { browserHttpRequests: '65' },
+      { browserHttpRequests: '120' },
       { browserHttpRequests: -1 },
+      { browserControlHttpRequests: -1 },
+      { browserPresentationHttpRequests: 1.5 },
+      { browserControlHttpRequests: 1_000_001 },
+      { browserPresentationHttpRequests: '55' },
+      { browserControlHttpRequests: 64 },
       { browserBudgetExceeded: privateText },
       { localEmbeddingReceived: 0, localEmbeddingFinished: 1 },
       { rawUrl: privateText },
@@ -402,6 +413,48 @@ describe('BASIC5 bounded failed Vitest report diagnostics', () => {
       expect(bad.diagnostic.checkpoint).toBeNull();
       expect(JSON.stringify(bad.diagnostic)).not.toContain(privateText);
     }
+    const { browserPresentationHttpRequests: _missingPresentation, ...missingPresentation } =
+      fixtureCounters;
+    const missingBucket = output({
+      ...checkpoint,
+      fixtureCounters: missingPresentation,
+    });
+    expect(missingBucket.validOutput).toBe(false);
+    expect(missingBucket.diagnostic.checkpoint).toBeNull();
+    const unknownBucket = output({
+      ...checkpoint,
+      fixtureCounters: { ...fixtureCounters, browserControlHttpRequests: null },
+    });
+    expect(unknownBucket.diagnostic.checkpoint?.fixtureCounters).toMatchObject({
+      browserHttpRequests: 120,
+      browserControlHttpRequests: null,
+      browserPresentationHttpRequests: 55,
+    });
+    const unknownTotal = output({
+      ...checkpoint,
+      fixtureCounters: { ...fixtureCounters, browserHttpRequests: null },
+    });
+    expect(unknownTotal.diagnostic.checkpoint?.fixtureCounters).toMatchObject({
+      browserHttpRequests: null,
+      browserControlHttpRequests: 65,
+      browserPresentationHttpRequests: 55,
+    });
+    const legacy = output({
+      ...checkpoint,
+      fixtureCounters: {
+        observedAt: 'checkpoint',
+        browserHttpRequests: 85,
+        browserBudgetExceeded: true,
+        localEmbeddingReceived: 0,
+        localEmbeddingFinished: 0,
+      },
+    });
+    expect(legacy.validOutput).toBe(true);
+    expect(legacy.diagnostic.checkpoint?.fixtureCounters).toMatchObject({
+      browserHttpRequests: 85,
+      browserControlHttpRequests: null,
+      browserPresentationHttpRequests: null,
+    });
     for (const patch of [
       { operation: privateText },
       { routeBlocked: privateText },
@@ -425,6 +478,63 @@ describe('BASIC5 bounded failed Vitest report diagnostics', () => {
     });
     expect(unknown.diagnostic.checkpoint?.fixtureCounters?.localEmbeddingReceived).toBeNull();
     expect(unknown.diagnostic.checkpoint?.saveTransport?.routeBlocked).toBeNull();
+  });
+
+  it('retains sticky over-limit route attempts in the failure checkpoint buckets', async () => {
+    const baseUrl = 'http://127.0.0.1:3107';
+    const budget = createBasic5BrowserRequestBudget(baseUrl);
+    const routeAttempt = async (pathname: string, method: string, expected: boolean) => {
+      const events: string[] = [];
+      const route = {
+        request: () => ({ url: () => `${baseUrl}${pathname}`, method: () => method }),
+        continue: async () => {
+          events.push('continue');
+        },
+        abort: async (code: 'blockedbyclient') => {
+          events.push(`abort:${code}`);
+        },
+      };
+      let observedAllowed: boolean | undefined;
+      await routeBasic5BrowserRequest(budget, route, (allowed) => {
+        observedAllowed = allowed;
+      });
+      expect(observedAllowed).toBe(expected);
+      expect(events).toEqual([expected ? 'continue' : 'abort:blockedbyclient']);
+    };
+
+    for (let index = 0; index < 64; index++)
+      await routeAttempt('/api/profile/knowledge/family', 'POST', true);
+    await routeAttempt('/api/profile/knowledge/family', 'POST', false);
+    for (let index = 0; index < 55; index++) await routeAttempt('/people/person', 'GET', false);
+    await routeAttempt('/api/profile/knowledge/family', 'POST', false);
+
+    const snapshot = budget.snapshot();
+    expect(snapshot).toEqual({
+      browserHttpRequests: 121,
+      browserControlHttpRequests: 66,
+      browserPresentationHttpRequests: 55,
+      browserBudgetExceeded: true,
+    });
+    const checkpoint = {
+      schemaVersion: 1,
+      stage: 'identity_apply_complete',
+      authenticatedNavigationCount: 2,
+      applyCount: 0,
+      durableReadbackCount: 0,
+      freshPageReadbackCount: 0,
+      fixtureCounters: {
+        observedAt: 'save_settled',
+        ...snapshot,
+        localEmbeddingReceived: 0,
+        localEmbeddingFinished: 0,
+      },
+    };
+    const parsed = observe(
+      `BASIC5_ACCEPTANCE_CHECKPOINT ${JSON.stringify(checkpoint)}\n${JSON.stringify(report())}`,
+    );
+    expect(parsed.validOutput).toBe(true);
+    expect(parsed.diagnostic.checkpoint?.fixtureCounters).toEqual(checkpoint.fixtureCounters);
+    expect(contentFreeBasic5CiVitestDiagnostic(parsed.diagnostic)).toEqual(parsed.diagnostic);
   });
 
   it('keeps reply-boundary diagnostics to closed membership and type flags only', () => {

@@ -22,7 +22,7 @@ const CLEANUP_END_SECONDS = 400;
 const PREPARE_END_SECONDS = 130;
 const CAPTURE_BYTES = 64 * 1024;
 const PHASE_SETTLEMENT_GRACE_MS = 5_000;
-const ACCEPTANCE_CONTRACT = 'basic5-ci-user-flow-receipt-readback-v4';
+const ACCEPTANCE_CONTRACT = 'basic5-ci-user-flow-control-presentation-v5';
 const CLAIM_SCOPE = {
   runtimeIdentity: 'bounded standalone artifact observed in CI checkout',
   behavior: 'four BASIC5 saves: scoped UI success and same-operation durable receipts',
@@ -1712,8 +1712,8 @@ function validateCiEvidence(
       'pageNavigations',
       'authenticatedPageNavigations',
       'browserHttpRequests',
-      'browserDynamicHttpRequests',
-      'browserStaticAssetRequests',
+      'browserControlHttpRequests',
+      'browserPresentationHttpRequests',
       'browserPageHttpRequests',
       'anonymousPageProbeRequests',
       'pageApiMutationRequests',
@@ -1872,14 +1872,14 @@ function validateCiEvidence(
     !Number.isSafeInteger(counts.browserHttpRequests) ||
     Number(counts.browserHttpRequests) < 1 ||
     Number(counts.browserHttpRequests) > 320 ||
-    !Number.isSafeInteger(counts.browserDynamicHttpRequests) ||
-    Number(counts.browserDynamicHttpRequests) < 1 ||
-    Number(counts.browserDynamicHttpRequests) > 64 ||
-    !Number.isSafeInteger(counts.browserStaticAssetRequests) ||
-    Number(counts.browserStaticAssetRequests) < 0 ||
-    Number(counts.browserStaticAssetRequests) > 256 ||
+    !Number.isSafeInteger(counts.browserControlHttpRequests) ||
+    Number(counts.browserControlHttpRequests) < 1 ||
+    Number(counts.browserControlHttpRequests) > 64 ||
+    !Number.isSafeInteger(counts.browserPresentationHttpRequests) ||
+    Number(counts.browserPresentationHttpRequests) < 0 ||
+    Number(counts.browserPresentationHttpRequests) > 256 ||
     counts.browserHttpRequests !==
-      Number(counts.browserDynamicHttpRequests) + Number(counts.browserStaticAssetRequests) ||
+      Number(counts.browserControlHttpRequests) + Number(counts.browserPresentationHttpRequests) ||
     counts.browserPageHttpRequests !== Number(counts.browserHttpRequests) - 1 ||
     counts.anonymousPageProbeRequests !== 1 ||
     counts.pageApiMutationRequests !== 4 ||
@@ -2007,7 +2007,7 @@ export async function runBasic5CiAcceptance(
   const started = ops.now();
   const deadline = started + OUTER_SECONDS * 1000;
   const receipt: Record<string, unknown> = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     acceptanceContract: ACCEPTANCE_CONTRACT,
     claimScope: CLAIM_SCOPE,
     scope: 'one BASIC5 CI browser acceptance case',
@@ -2103,8 +2103,8 @@ export async function runBasic5CiAcceptance(
           'pageNavigations',
           'authenticatedPageNavigations',
           'browserHttpRequests',
-          'browserDynamicHttpRequests',
-          'browserStaticAssetRequests',
+          'browserControlHttpRequests',
+          'browserPresentationHttpRequests',
           'browserPageHttpRequests',
           'anonymousPageProbeRequests',
           'pageApiMutationRequests',
