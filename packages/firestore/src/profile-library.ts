@@ -148,17 +148,26 @@ function matches(row: MemoryRow, input: ProfileLibraryInput) {
 export class FirestoreProfileLibraryRepository implements ProfileLibraryRepository {
   readonly kind = 'profile-library-repository' as const;
   private readonly reads = new ProfileReadWave();
-  private readonly memoryReads = new Map<string, Promise<MemoryRow[]>>();
+  // The web loader creates a repository per request. A wave groups overlapping
+  // callers on this instance; decoded results must never become a global cache
+  // when reusing the underlying installation transport.
+  private readonly memoryReads = new WeakMap<
+    ProfileReadBudget,
+    Map<string, Promise<MemoryRow[]>>
+  >();
 
   constructor(readonly store: InstallationStore) {}
 
   private memories(agentId: string, budget: ProfileReadBudget): Promise<MemoryRow[]> {
-    const existing = this.memoryReads.get(agentId);
+    let waveReads = this.memoryReads.get(budget);
+    if (!waveReads) {
+      waveReads = new Map();
+      this.memoryReads.set(budget, waveReads);
+    }
+    const existing = waveReads.get(agentId);
     if (existing) return existing;
-    const read = this.readMemories(agentId, budget).finally(() => {
-      if (this.memoryReads.get(agentId) === read) this.memoryReads.delete(agentId);
-    });
-    this.memoryReads.set(agentId, read);
+    const read = this.readMemories(agentId, budget);
+    waveReads.set(agentId, read);
     return read;
   }
 

@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   map: vi.fn(),
   graph: vi.fn(),
   pgRead: vi.fn(),
+  getStore: vi.fn(),
   fsPeople: vi.fn(),
   fsPerson: vi.fn(),
   fsLibrary: vi.fn(),
@@ -24,6 +25,8 @@ const mocks = vi.hoisted(() => ({
   fsPrivacyRead: vi.fn(),
   fsPrivacyAssert: vi.fn(),
 }));
+const firestoreStore = Object.freeze({ db: Object.freeze({ terminate: mocks.terminate }) });
+mocks.getStore.mockReturnValue(firestoreStore);
 vi.mock('@/auth', () => ({ requireOwner: mocks.owner }));
 vi.mock('@assistant/config', async (original) => ({
   ...(await original<Record<string, unknown>>()),
@@ -54,10 +57,12 @@ vi.mock('@assistant/application', async (original) => ({
   getKnowledgeMapSnapshot: mocks.map,
   getKnowledgeGraphOverview: mocks.graph,
 }));
-vi.mock('@/lib/server', () => ({ withPostgresMemoryBrowseRead: mocks.pgRead }));
+vi.mock('@/lib/server', () => ({
+  withPostgresMemoryBrowseRead: mocks.pgRead,
+  getFirestoreInstallationStore: mocks.getStore,
+}));
 vi.mock('@assistant/firestore', async (original) => ({
   ...(await original<Record<string, unknown>>()),
-  createInstallationStore: () => ({ db: { terminate: mocks.terminate } }),
   assertFirestoreInstallationOwner: mocks.fsOwnerFence,
   readPrivacyErasureFence: mocks.fsPrivacyRead,
   assertPrivacyErasureFenceUnchanged: mocks.fsPrivacyAssert,
@@ -306,7 +311,9 @@ describe('Memory browse server composition', () => {
       noWrites(html);
       if (driver === 'firestore') {
         expect(mocks.pgRead).not.toHaveBeenCalled();
-        expect(mocks.terminate).toHaveBeenCalledOnce();
+        expect(mocks.getStore).toHaveBeenCalledOnce();
+        expect(mocks.getStore.mock.results[0]?.value).toBe(firestoreStore);
+        expect(mocks.terminate).not.toHaveBeenCalled();
       }
     },
   );
@@ -560,7 +567,9 @@ it.each(firestoreFailureCases)(
         await People({ searchParams: Promise.resolve({ q: 'retained' }) }),
       );
       retryPath = '/people?q=retained';
-      expect(mocks.terminate).toHaveBeenCalledTimes(1);
+      expect(mocks.getStore).toHaveBeenCalledOnce();
+      expect(mocks.getStore.mock.results[0]?.value).toBe(firestoreStore);
+      expect(mocks.terminate).not.toHaveBeenCalled();
     } else if (surface === 'dossier') {
       mocks.fsPerson.mockRejectedValueOnce(error);
       html = renderToStaticMarkup(
@@ -571,7 +580,9 @@ it.each(firestoreFailureCases)(
       );
       retryPath = `/people/${personId}?q=retained`;
       expect(html).toContain('Person unavailable');
-      expect(mocks.terminate).toHaveBeenCalledTimes(1);
+      expect(mocks.getStore).toHaveBeenCalledOnce();
+      expect(mocks.getStore.mock.results[0]?.value).toBe(firestoreStore);
+      expect(mocks.terminate).not.toHaveBeenCalled();
     } else {
       mocks.fsLibrary.mockRejectedValueOnce(error);
       html = renderToStaticMarkup(

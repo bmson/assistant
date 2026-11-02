@@ -1,7 +1,12 @@
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const PERSON_PATH =
+  /^\/people\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export function memoryNoteReturnTo(value: unknown): string | null {
-  if (typeof value !== 'string' || value.length > 2048 || !value.startsWith('/profile/knowledge?'))
-    return null;
+  if (typeof value !== 'string' || value.length > 2048) return null;
+  // Person detail links preserve only the exact validated route. Search terms,
+  // selectors, fragments, and external destinations are deliberately dropped.
+  if (PERSON_PATH.test(value)) return value;
+  if (!value.startsWith('/profile/knowledge?')) return null;
   try {
     const url = new URL(value, 'https://internal.invalid');
     if (

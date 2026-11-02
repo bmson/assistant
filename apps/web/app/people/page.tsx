@@ -10,7 +10,6 @@ import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import {
   assertFirestoreInstallationOwner,
   assertPrivacyErasureFenceUnchanged,
-  createInstallationStore,
   readFirestoreOwnerEditorIssuanceContext,
   readPrivacyErasureFence,
 } from '@assistant/firestore';
@@ -26,7 +25,11 @@ import { requireOwner } from '@/auth';
 import { listFirestorePeopleDirectory } from '@/lib/firestore-people';
 import { ownerEditorAvailability } from '@/lib/owner-editor-availability';
 import { buildOwnerEditorView } from '@/lib/owner-editor-view';
-import { readPostgresOwnerEditorViewInputs, withPostgresMemoryBrowseRead } from '@/lib/server';
+import {
+  getFirestoreInstallationStore,
+  readPostgresOwnerEditorViewInputs,
+  withPostgresMemoryBrowseRead,
+} from '@/lib/server';
 import {
   Badge,
   btn,
@@ -88,39 +91,31 @@ async function loadPeopleDirectory(
     });
   const problems = validateAgentPersistenceConfig(config);
   if (problems.length) throw new Error(problems.join('; '));
-  const store = createInstallationStore({
-    projectId: config.GCP_PROJECT,
-    installationId: config.ASSISTANT_WORKSPACE_ID,
-    databaseId: config.FIRESTORE_DATABASE_ID,
-  });
-  try {
-    await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
-    const fence = await readPrivacyErasureFence(store, config.FIRESTORE_AGENT_ID);
-    const data = await listFirestorePeopleDirectory(store, config.FIRESTORE_AGENT_ID, now);
-    let editor: OwnerEditorControlsProps | null = null;
-    if (enabled && formSessionScope && config.AUTH_SECRET) {
-      try {
-        const context = await readFirestoreOwnerEditorIssuanceContext(
-          store,
-          config.FIRESTORE_AGENT_ID,
-        );
-        editor = buildOwnerEditorView({
-          enabled,
-          context,
-          snapshot: { ownerId: config.FIRESTORE_AGENT_ID },
-          formSessionScope,
-          secret: config.AUTH_SECRET,
-        });
-      } catch {
-        /* Keep the valid fenced directory usable when issuance is unavailable. */
-      }
+  const store = getFirestoreInstallationStore();
+  await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
+  const fence = await readPrivacyErasureFence(store, config.FIRESTORE_AGENT_ID);
+  const data = await listFirestorePeopleDirectory(store, config.FIRESTORE_AGENT_ID, now);
+  let editor: OwnerEditorControlsProps | null = null;
+  if (enabled && formSessionScope && config.AUTH_SECRET) {
+    try {
+      const context = await readFirestoreOwnerEditorIssuanceContext(
+        store,
+        config.FIRESTORE_AGENT_ID,
+      );
+      editor = buildOwnerEditorView({
+        enabled,
+        context,
+        snapshot: { ownerId: config.FIRESTORE_AGENT_ID },
+        formSessionScope,
+        secret: config.AUTH_SECRET,
+      });
+    } catch {
+      /* Keep the valid fenced directory usable when issuance is unavailable. */
     }
-    await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
-    await assertPrivacyErasureFenceUnchanged(store, config.FIRESTORE_AGENT_ID, fence);
-    return { data, editor };
-  } finally {
-    await store.db.terminate();
   }
+  await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
+  await assertPrivacyErasureFenceUnchanged(store, config.FIRESTORE_AGENT_ID, fence);
+  return { data, editor };
 }
 
 export default async function PeoplePage({

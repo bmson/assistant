@@ -27,6 +27,12 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      native_web_qualification:
+        description: Read-only native web qualification; no image, release, delivery hold or cleanup
+        required: false
+        default: 'off'
+        type: choice
+        options: ['off', read_only]
       sha:
         description: Commit SHA to release (defaults to the tip of main)
         required: false
@@ -93,7 +99,8 @@ jobs:
     # passes would start this job, check out the fork's commit, and execute its
     # package scripts and Dockerfiles under the production deploy identity.
     if: >-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+       (inputs.native_web_qualification == '' || inputs.native_web_qualification == 'off')) ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository &&
@@ -239,6 +246,7 @@ jobs:
   # The release job still requires the entire matrix to succeed; images pushed
   # by successful siblings remain inert when any other image fails.
   image:
+    if: inputs.native_web_qualification == '' || inputs.native_web_qualification == 'off'
     needs: plan
     runs-on: ubuntu-latest
     environment: production
@@ -375,6 +383,7 @@ jobs:
   # `needs: image` is the whole matrix, so a single failed image means no
   # rollout at all.
   release:
+    if: inputs.native_web_qualification == '' || inputs.native_web_qualification == 'off'
     needs: [plan, image]
     runs-on: ubuntu-latest
     environment: production
@@ -399,6 +408,10 @@ jobs:
           RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}
         run: |
           source infra/gcp/release-staged-services.sh
+          if ! declare -F release_validate_basic_editor_preflight_context >/dev/null; then
+            echo 'Release source lacks the protected BASIC5 preflight validator; refusing an older checkout with this workflow before cloud authentication.' >&2
+            exit 2
+          fi
           PROJECT="$GCP_PROJECT"
           REGION="$GCP_REGION"
           REPO="$ARTIFACT_REPOSITORY"
@@ -567,3 +580,54 @@ jobs:
           python3 infra/gcp/cleanup-current.py
           --project "$GCP_PROJECT" --region "$GCP_REGION"
           --repository "$ARTIFACT_REPOSITORY" --apply
+
+  native_web_qualification:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.native_web_qualification == 'read_only' &&
+      github.ref == 'refs/heads/main' && github.run_attempt == '1' &&
+      github.workflow_ref == 'bmson/assistant/.github/workflows/deploy.yml@refs/heads/main' &&
+      github.workflow_sha == github.sha &&
+      (inputs.sha == '' || inputs.sha == github.sha) && inputs.break_glass != true
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Refuse a mismatched qualification source before setup or authentication
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_SHA" = "$GITHUB_WORKFLOW_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_WORKFLOW_SHA"
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Observe read-only qualification and stop without runtime authority
+        env:
+          OWNER_NATIVE_WEB_QUALIFICATION: ${{ inputs.native_web_qualification }}
+          QUALIFICATION_REQUESTED_SHA: ${{ inputs.sha }}
+          QUALIFICATION_BREAK_GLASS: ${{ inputs.break_glass }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          GH_TOKEN: ${{ github.token }}
+        run: pnpm exec tsx scripts/owner-web-release-qualification.ts --read-only
+      - name: Archive only the one redacted qualification report
+        if: >-
+          always() && github.event_name == 'workflow_dispatch' &&
+          inputs.native_web_qualification == 'read_only' &&
+          github.ref == 'refs/heads/main' && github.run_attempt == '1'
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        timeout-minutes: 2
+        with:
+          name: owner-web-release-qualification-${{ github.sha }}-${{ github.run_id }}-1
+          path: ${{ runner.temp }}/owner-web-release-qualification.json
+          if-no-files-found: ignore
+          retention-days: 14
+          overwrite: false
