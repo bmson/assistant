@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   type OwnerEditorExpiredClaimExpectation,
   type OwnerEditorRecoveryMaintenanceState,
@@ -6,7 +6,7 @@ import {
   ownerEditorPrivacyDigest,
 } from '@assistant/persistence';
 import { and, eq, inArray } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { OwnerEditorPreparingReaderFixture } from '../../persistence/src/owner-editor-reader-fixtures.test-support.js';
 import { readerFixtures } from '../../persistence/src/owner-editor-reader-fixtures.test-support.js';
 import { createDb, type Db } from './client.js';
@@ -30,7 +30,7 @@ const maintenance: OwnerEditorRecoveryMaintenanceState = {
   restoreRehearsal: false,
   postgresSourceWritesFenced: false,
 };
-const primarySnapshotLimit = 5_000;
+const primarySnapshotLimit = 128;
 
 describe.skipIf(!enabled)('PostgreSQL owner-editor V2 recovery adapter qualification', () => {
   let db: Db | undefined;
@@ -39,8 +39,10 @@ describe.skipIf(!enabled)('PostgreSQL owner-editor V2 recovery adapter qualifica
   let privacyGeneration: string | null = null;
   let priorEpoch: { cursor: string | null; updatedAt: Date } | null = null;
   let priorGeneration: { cursor: string | null; updatedAt: Date } | null = null;
-  let priorMemoryIds: string[] = [];
-  let priorCards: { id: number; content: string; compiledAt: Date }[] = [];
+  let initialPrimary: Awaited<ReturnType<typeof snapshotPrimaryState>> | null = null;
+  let primaryBaseline: Awaited<ReturnType<typeof snapshotPrimaryState>> | null = null;
+  let fixtureMemoryIds: string[] = [];
+  let fixtureCardCreated = false;
   const fixtureEpochs: string[] = [];
   const operationIds: string[] = [];
 
@@ -59,7 +61,7 @@ describe.skipIf(!enabled)('PostgreSQL owner-editor V2 recovery adapter qualifica
     if (owners.length !== 1 || !owners[0])
       throw new Error('Expected exactly one isolated test owner.');
     ownerId = owners[0].id;
-    const [epoch, generation, cardsBefore] = await Promise.all([
+    const [epoch, generation] = await Promise.all([
       db
         .select({ cursor: maintenanceCursors.cursor, updatedAt: maintenanceCursors.updatedAt })
         .from(maintenanceCursors)
@@ -70,81 +72,136 @@ describe.skipIf(!enabled)('PostgreSQL owner-editor V2 recovery adapter qualifica
         .from(maintenanceCursors)
         .where(eq(maintenanceCursors.name, generationName(ownerId)))
         .limit(1),
-      db
-        .select({ id: ownerCard.id, content: ownerCard.content, compiledAt: ownerCard.compiledAt })
-        .from(ownerCard)
-        .where(eq(ownerCard.id, 1)),
     ]);
     priorEpoch = epoch[0] ?? null;
     priorGeneration = generation[0] ?? null;
     privacyGeneration = generation[0]?.cursor ?? null;
-    priorMemoryIds = await memoryIdSnapshot(db);
-    priorCards = cardsBefore;
+    initialPrimary = await snapshotPrimaryState();
+    if (initialPrimary.memoryRows.length > primarySnapshotLimit - 2)
+      throw new Error('Test owner has too many memories for the bounded recovery snapshot.');
+
+    // Fixture preparation: create a small, explicitly owned primary-data
+    // sentinel set so no-write assertions cover real memory rows. Never replace
+    // an existing singleton owner card; if absent, create a removable fixture.
+    fixtureMemoryIds = [randomUUID(), randomUUID()];
+    const fixtureContents = fixtureMemoryIds.map((id) => `Recovery test sentinel ${id}`);
+    await db.insert(memories).values(
+      fixtureMemoryIds.map((id, index) => {
+        const content = fixtureContents[index];
+        if (!content) throw new Error('Missing recovery sentinel text.');
+        return {
+          id,
+          agentId: ownerId,
+          category: 'knowledge',
+          kind: 'fact',
+          content,
+          contentHash: createHash('sha256').update(content).digest('hex'),
+          importance: 3,
+          confidence: '1.0',
+          originTrust: 'owner',
+          quarantined: false,
+          subjectContactId: null,
+          domain: 'other',
+          ownerConfirmed: true,
+          pinned: false,
+        };
+      }),
+    );
+    if (initialPrimary.cards.length === 0) {
+      const content = `Recovery card sentinel ${randomUUID()}`;
+      await db.insert(ownerCard).values({ id: 1, content, compiledAt: await databaseNow(db) });
+      fixtureCardCreated = true;
+    }
+    primaryBaseline = await snapshotPrimaryState();
   });
 
   afterAll(async () => {
     let cleanupFailure: unknown;
-    try {
-      if (db && ownerId) {
-        if (operationIds.length)
-          await db
-            .delete(ownerEditorOperations)
-            .where(
-              and(
-                eq(ownerEditorOperations.ownerId, ownerId),
-                inArray(ownerEditorOperations.id, operationIds),
-              ),
-            );
-        const leftoverRows = operationIds.length
-          ? await db
-              .select({ id: ownerEditorOperations.id })
-              .from(ownerEditorOperations)
-              .where(
-                and(
-                  eq(ownerEditorOperations.ownerId, ownerId),
-                  inArray(ownerEditorOperations.id, operationIds),
-                ),
-              )
-          : [];
-        expect(leftoverRows).toEqual([]);
-        if (fixtureEpochs.length) {
-          if (priorEpoch)
-            await db
-              .insert(maintenanceCursors)
-              .values({ name: epochName(ownerId), ...priorEpoch })
-              .onConflictDoUpdate({ target: maintenanceCursors.name, set: priorEpoch });
-          else
-            await db
-              .delete(maintenanceCursors)
-              .where(eq(maintenanceCursors.name, epochName(ownerId)));
-          if (priorGeneration)
-            await db
-              .insert(maintenanceCursors)
-              .values({ name: generationName(ownerId), ...priorGeneration })
-              .onConflictDoUpdate({ target: maintenanceCursors.name, set: priorGeneration });
-          else
-            await db
-              .delete(maintenanceCursors)
-              .where(eq(maintenanceCursors.name, generationName(ownerId)));
-          const [finalEpoch] = await db
-            .select({ cursor: maintenanceCursors.cursor, updatedAt: maintenanceCursors.updatedAt })
-            .from(maintenanceCursors)
-            .where(eq(maintenanceCursors.name, epochName(ownerId)))
-            .limit(1);
-          const [finalGeneration] = await db
-            .select({ cursor: maintenanceCursors.cursor, updatedAt: maintenanceCursors.updatedAt })
-            .from(maintenanceCursors)
-            .where(eq(maintenanceCursors.name, generationName(ownerId)))
-            .limit(1);
-          expect(finalEpoch ?? null).toEqual(priorEpoch);
-          expect(finalGeneration ?? null).toEqual(priorGeneration);
-        }
-        const finalPrimary = await snapshotPrimaryState();
-        expect(finalPrimary.memoryIds).toEqual(priorMemoryIds);
-        expect(finalPrimary.cards).toEqual(priorCards);
+    const database = db;
+    const attemptCleanup = async (run: () => Promise<void>) => {
+      try {
+        await run();
+      } catch (error) {
+        cleanupFailure ??= error;
       }
-    } catch (error) {
-      cleanupFailure = error;
+    };
+    if (database && ownerId) {
+      await attemptCleanup(async () => {
+        if (primaryBaseline) expect(await snapshotPrimaryState()).toEqual(primaryBaseline);
+      });
+      await attemptCleanup(async () => {
+        if (!operationIds.length) return;
+        await database
+          .delete(ownerEditorOperations)
+          .where(
+            and(
+              eq(ownerEditorOperations.ownerId, ownerId),
+              inArray(ownerEditorOperations.id, operationIds),
+            ),
+          );
+        const remaining = await database
+          .select({ id: ownerEditorOperations.id })
+          .from(ownerEditorOperations)
+          .where(
+            and(
+              eq(ownerEditorOperations.ownerId, ownerId),
+              inArray(ownerEditorOperations.id, operationIds),
+            ),
+          );
+        expect(remaining).toEqual([]);
+      });
+      await attemptCleanup(async () => {
+        if (!fixtureEpochs.length) return;
+        if (priorEpoch)
+          await database
+            .insert(maintenanceCursors)
+            .values({ name: epochName(ownerId), ...priorEpoch })
+            .onConflictDoUpdate({ target: maintenanceCursors.name, set: priorEpoch });
+        else
+          await database
+            .delete(maintenanceCursors)
+            .where(eq(maintenanceCursors.name, epochName(ownerId)));
+        if (priorGeneration)
+          await database
+            .insert(maintenanceCursors)
+            .values({ name: generationName(ownerId), ...priorGeneration })
+            .onConflictDoUpdate({ target: maintenanceCursors.name, set: priorGeneration });
+        else
+          await database
+            .delete(maintenanceCursors)
+            .where(eq(maintenanceCursors.name, generationName(ownerId)));
+        const [finalEpoch] = await database
+          .select({ cursor: maintenanceCursors.cursor, updatedAt: maintenanceCursors.updatedAt })
+          .from(maintenanceCursors)
+          .where(eq(maintenanceCursors.name, epochName(ownerId)))
+          .limit(1);
+        const [finalGeneration] = await database
+          .select({ cursor: maintenanceCursors.cursor, updatedAt: maintenanceCursors.updatedAt })
+          .from(maintenanceCursors)
+          .where(eq(maintenanceCursors.name, generationName(ownerId)))
+          .limit(1);
+        expect(finalEpoch ?? null).toEqual(priorEpoch);
+        expect(finalGeneration ?? null).toEqual(priorGeneration);
+      });
+      if (cleanupFailure === undefined && initialPrimary) {
+        await attemptCleanup(async () => {
+          if (primaryBaseline) expect(await snapshotPrimaryState()).toEqual(primaryBaseline);
+          if (fixtureMemoryIds.length)
+            await database
+              .delete(memories)
+              .where(and(eq(memories.agentId, ownerId), inArray(memories.id, fixtureMemoryIds)));
+          const remainingMemories = fixtureMemoryIds.length
+            ? await database
+                .select({ id: memories.id })
+                .from(memories)
+                .where(and(eq(memories.agentId, ownerId), inArray(memories.id, fixtureMemoryIds)))
+            : [];
+          expect(remainingMemories).toEqual([]);
+          if (fixtureCardCreated) await database.delete(ownerCard).where(eq(ownerCard.id, 1));
+          if (fixtureCardCreated) expect(await cardSnapshot(database)).toEqual([]);
+          expect(await snapshotPrimaryState()).toEqual(initialPrimary);
+        });
+      }
     }
     const closings = [
       ...(fencedDb ? [fencedDb.$client.end({ timeout: 5 })] : []),
@@ -155,6 +212,11 @@ describe.skipIf(!enabled)('PostgreSQL owner-editor V2 recovery adapter qualifica
     if (cleanupFailure === undefined && closeFailure?.status === 'rejected')
       cleanupFailure = closeFailure.reason;
     if (cleanupFailure !== undefined) throw cleanupFailure;
+  });
+
+  afterEach(async () => {
+    if (!db || !primaryBaseline) return;
+    expect(await snapshotPrimaryState()).toEqual(primaryBaseline);
   });
 
   async function context(ready = true) {
@@ -255,25 +317,75 @@ describe.skipIf(!enabled)('PostgreSQL owner-editor V2 recovery adapter qualifica
 
   async function snapshotPrimaryState() {
     if (!db) throw new Error('Allocated test database is unavailable.');
-    const [memoryRows, cards] = await Promise.all([
-      memoryIdSnapshot(db),
-      db
-        .select({ id: ownerCard.id, content: ownerCard.content, compiledAt: ownerCard.compiledAt })
-        .from(ownerCard)
-        .where(eq(ownerCard.id, 1)),
-    ]);
-    return { memoryIds: memoryRows, cards };
+    const [memoryRows, cards] = await Promise.all([memorySnapshot(db), cardSnapshot(db)]);
+    return { memoryRows, cards };
   }
 
-  async function memoryIdSnapshot(database: Db): Promise<string[]> {
-    const rows = await database
-      .select({ id: memories.id })
-      .from(memories)
-      .where(eq(memories.agentId, ownerId))
-      .limit(primarySnapshotLimit + 1);
+  async function memorySnapshot(database: Db): Promise<{ id: string; hash: string }[]> {
+    const rows = await database.$client<
+      {
+        id: string;
+        serialized: string;
+        xmin: string;
+        ctid: string;
+        createdAt: string;
+        validFrom: string | null;
+        validUntil: string | null;
+        lastAccessedAt: string | null;
+        lastConsolidatedAt: string | null;
+        expiresAt: string | null;
+      }[]
+    >`
+      select m.id::text as id, to_jsonb(m)::text as serialized,
+        m.xmin::text as xmin, m.ctid::text as ctid, m.created_at::text as "createdAt",
+        m.valid_from::text as "validFrom", m.valid_until::text as "validUntil",
+        m.last_accessed_at::text as "lastAccessedAt",
+        m.last_consolidated_at::text as "lastConsolidatedAt",
+        m.expires_at::text as "expiresAt"
+      from memories as m
+      where m.agent_id = ${ownerId}
+      order by m.id
+      limit ${primarySnapshotLimit + 1}
+    `;
     if (rows.length > primarySnapshotLimit)
-      throw new Error('Owner memory snapshot exceeds the qualification bound.');
-    return rows.map((row) => row.id).sort();
+      throw new Error('Owner memory snapshot exceeds the 128-row qualification bound.');
+    return rows.map((row) => ({
+      id: row.id,
+      hash: createHash('sha256')
+        .update(
+          JSON.stringify([
+            row.serialized,
+            row.xmin,
+            row.ctid,
+            row.createdAt,
+            row.validFrom,
+            row.validUntil,
+            row.lastAccessedAt,
+            row.lastConsolidatedAt,
+            row.expiresAt,
+          ]),
+        )
+        .digest('hex'),
+    }));
+  }
+
+  async function cardSnapshot(database: Db): Promise<{ id: number; hash: string }[]> {
+    const rows = await database.$client<
+      { id: number; serialized: string; xmin: string; ctid: string; compiledAt: string }[]
+    >`
+      select c.id::int as id, to_jsonb(c)::text as serialized,
+        c.xmin::text as xmin, c.ctid::text as ctid, c.compiled_at::text as "compiledAt"
+      from owner_card as c
+      where c.id = 1
+      limit 2
+    `;
+    if (rows.length > 1) throw new Error('Owner-card snapshot exceeds its schema bound.');
+    return rows.map((row) => ({
+      id: row.id,
+      hash: createHash('sha256')
+        .update(JSON.stringify([row.serialized, row.xmin, row.ctid, row.compiledAt]))
+        .digest('hex'),
+    }));
   }
 
   it('reads mixed terminal rows with readiness false and leaves preparing rows unresolved', async () => {

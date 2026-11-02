@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
@@ -10,7 +10,7 @@ import {
   ownerEditorPrivacyDigest,
   parseOwnerEditorOperationRecord,
 } from '@assistant/persistence';
-import { type DocumentReference, Firestore } from '@google-cloud/firestore';
+import { type DocumentReference, Firestore, Timestamp } from '@google-cloud/firestore';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { readerFixtures } from '../../persistence/src/owner-editor-reader-fixtures.test-support.js';
 import { ownerEditorEmulatorAuth } from './owner-editor-emulator-auth.js';
@@ -39,7 +39,8 @@ const enabled =
   Boolean(TMP_DIRECTORY);
 const EXPECTED_TESTS = 9;
 const MAX_TEST_REFS = 160;
-const MAX_TOTAL_REFS = 160;
+const MAX_QUALIFICATION_TOTAL_REFS = 160;
+const MAX_CLEANUP_TOTAL_REFS = 192;
 const MAX_CALLBACKS_PER_TRANSACTION = 9;
 const REPLAY_WINDOW_MS = 24 * 60 * 60_000;
 const cleanMaintenance: OwnerEditorRecoveryMaintenanceState = {
@@ -51,6 +52,12 @@ const cleanMaintenance: OwnerEditorRecoveryMaintenanceState = {
 
 let store: InstallationStore | undefined;
 let cleanupRefs: DocumentReference[] = [];
+let sentinelSnapshots: Array<{
+  ref: DocumentReference;
+  fields: readonly string[];
+  baseline: SentinelSnapshot;
+}> = [];
+let primaryCollectionPaths: { memories: string[]; ownerCards: string[] } | undefined;
 let totalTrackedRefs = 0;
 let completedCleanups = 0;
 let clientsTerminated = 0;
@@ -64,12 +71,126 @@ const cases: Array<{
   terminated: boolean;
 }> = [];
 
+interface SentinelSnapshot {
+  physicalPath: string;
+  projectId: string;
+  databaseId: string;
+  createTime: { seconds: number; nanoseconds: number };
+  updateTime: { seconds: number; nanoseconds: number };
+  contentHash: string;
+}
+
+const MEMORY_SENTINEL_FIELDS = [
+  'id',
+  'agentId',
+  'category',
+  'kind',
+  'content',
+  'contentHash',
+  'confidence',
+  'importance',
+  'originTrust',
+  'sourceTaskId',
+  'expiresAt',
+  'embedding',
+  'goalId',
+  'quarantined',
+  'subjectContactId',
+  'domain',
+  'validFrom',
+  'validUntil',
+  'supersededById',
+  'ownerConfirmed',
+  'pinned',
+  'source',
+  'embeddingSpaceKey',
+  'lastAccessedAt',
+  'lastConsolidatedAt',
+  'createdAt',
+] as const;
+const OWNER_CARD_SENTINEL_FIELDS = ['agentId', 'content', 'compiledAt'] as const;
+
+function canonicalValue(value: unknown): unknown {
+  if (value instanceof Timestamp) return { seconds: value.seconds, nanoseconds: value.nanoseconds };
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (value && typeof value === 'object' && !(value instanceof Date))
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, canonicalValue(item)]),
+    );
+  return value;
+}
+
+async function snapshotSentinel(
+  currentStore: InstallationStore,
+  ref: DocumentReference,
+  fields: readonly string[],
+): Promise<SentinelSnapshot> {
+  const snapshot = await ref.get();
+  if (
+    !snapshot.exists ||
+    snapshot.ref.path !== ref.path ||
+    snapshot.id !== ref.id ||
+    !snapshot.createTime ||
+    !snapshot.updateTime
+  )
+    throw new Error('Sentinel physical identity or update time is unavailable');
+  const data = snapshot.data();
+  if (!data) throw new Error('Sentinel document content is unavailable');
+  if (!currentStore.projectId || snapshot.ref.firestore !== currentStore.db)
+    throw new Error('Sentinel namespace identity is unavailable');
+  if (JSON.stringify(Object.keys(data).sort()) !== JSON.stringify([...fields].sort()))
+    throw new Error('Sentinel field set changed');
+  const selected = Object.fromEntries(fields.map((field) => [field, canonicalValue(data[field])]));
+  const serialized = JSON.stringify(selected);
+  if (Buffer.byteLength(serialized, 'utf8') > 16_384)
+    throw new Error('Sentinel byte bound exceeded');
+  return {
+    physicalPath: snapshot.ref.path,
+    projectId: currentStore.projectId,
+    databaseId: currentStore.databaseId,
+    createTime: {
+      seconds: snapshot.createTime.seconds,
+      nanoseconds: snapshot.createTime.nanoseconds,
+    },
+    updateTime: {
+      seconds: snapshot.updateTime.seconds,
+      nanoseconds: snapshot.updateTime.nanoseconds,
+    },
+    contentHash: createHash('sha256').update(serialized).digest('hex'),
+  };
+}
+
+async function primaryCensus(
+  currentStore: InstallationStore,
+  memoryRefs: readonly DocumentReference[],
+  ownerCardRefs: readonly DocumentReference[],
+): Promise<{ memories: string[]; ownerCards: string[] }> {
+  const [memories, ownerCards] = await Promise.all([
+    currentStore
+      .collection('memories')
+      .limit(memoryRefs.length + 1)
+      .get(),
+    currentStore
+      .collection('ownerCards')
+      .limit(ownerCardRefs.length + 1)
+      .get(),
+  ]);
+  return {
+    memories: memories.docs.map((snapshot) => snapshot.ref.path).sort(),
+    ownerCards: ownerCards.docs.map((snapshot) => snapshot.ref.path).sort(),
+  };
+}
+
 function track(ref: DocumentReference): DocumentReference {
   if (cleanupRefs.some((current) => current.path === ref.path)) return ref;
   cleanupRefs.push(ref);
   totalTrackedRefs += 1;
-  if (cleanupRefs.length > MAX_TEST_REFS || totalTrackedRefs > MAX_TOTAL_REFS)
+  if (cleanupRefs.length > MAX_TEST_REFS || totalTrackedRefs > MAX_CLEANUP_TOTAL_REFS)
     throw new Error('Firestore recovery cleanup reference bound exceeded');
+  if (totalTrackedRefs > MAX_QUALIFICATION_TOTAL_REFS)
+    throw new Error('Firestore recovery qualification reference bound exceeded');
   return ref;
 }
 
@@ -143,6 +264,11 @@ async function fixture(caseName: string): Promise<Fixture> {
   const ownerRef = track(currentStore.doc('agents', ownerId));
   const epochRef = track(currentStore.doc('maintenanceCursors', epochName));
   const operationRef = track(currentStore.doc('ownerEditorOperations', item.record.id));
+  const memoryRefs = [0, 1].map((index) => {
+    const id = randomUUID();
+    return { id, index, ref: track(currentStore.doc('memories', id)) };
+  });
+  const ownerCardRef = track(currentStore.doc('ownerCards', ownerId));
   await ownerRef.create(encodeRecord({ id: ownerId }));
   await epochRef.create(
     encodeRecord({
@@ -156,6 +282,75 @@ async function fixture(caseName: string): Promise<Fixture> {
     }),
   );
   await operationRef.create(encodeRecord(item.record as unknown as Record<string, unknown>));
+  for (const { id, index, ref } of memoryRefs) {
+    await ref.create(
+      encodeRecord({
+        id,
+        agentId: ownerId,
+        category: 'knowledge',
+        kind: 'fact',
+        content: `Recovery qualification sentinel ${index}`,
+        contentHash: createHash('sha256').update(`${ownerId}:${index}`).digest('hex'),
+        confidence: '0.80',
+        importance: 2,
+        originTrust: 'owner',
+        sourceTaskId: null,
+        expiresAt: null,
+        embedding: null,
+        goalId: null,
+        quarantined: false,
+        subjectContactId: null,
+        domain: 'other',
+        validFrom: null,
+        validUntil: null,
+        supersededById: null,
+        ownerConfirmed: true,
+        pinned: false,
+        source: 'test',
+        embeddingSpaceKey: null,
+        lastAccessedAt: null,
+        lastConsolidatedAt: null,
+        createdAt: now,
+      }),
+    );
+  }
+  await ownerCardRef.create(
+    encodeRecord({
+      agentId: ownerId,
+      content: 'Recovery qualification sentinel card',
+      compiledAt: now,
+    }),
+  );
+  sentinelSnapshots = [
+    ...(await Promise.all(
+      memoryRefs.map(async ({ ref }) => ({
+        ref,
+        fields: MEMORY_SENTINEL_FIELDS,
+        baseline: await snapshotSentinel(currentStore, ref, MEMORY_SENTINEL_FIELDS),
+      })),
+    )),
+    {
+      ref: ownerCardRef,
+      fields: OWNER_CARD_SENTINEL_FIELDS,
+      baseline: await snapshotSentinel(currentStore, ownerCardRef, OWNER_CARD_SENTINEL_FIELDS),
+    },
+  ];
+  primaryCollectionPaths = {
+    memories: memoryRefs.map(({ ref }) => ref.path).sort(),
+    ownerCards: [ownerCardRef.path],
+  };
+  const seededPrimaryPaths = await primaryCensus(
+    currentStore,
+    memoryRefs.map(({ ref }) => ref),
+    [ownerCardRef],
+  );
+  if (
+    JSON.stringify(seededPrimaryPaths.memories) !==
+      JSON.stringify(primaryCollectionPaths.memories) ||
+    JSON.stringify(seededPrimaryPaths.ownerCards) !==
+      JSON.stringify(primaryCollectionPaths.ownerCards)
+  )
+    throw new Error('Unexpected primary documents were present after sentinel seeding');
 
   let clock = now;
   let currentMaintenance: unknown = cleanMaintenance;
@@ -229,10 +424,59 @@ describe.skipIf(!enabled)('owner-editor recovery Firestore transaction qualifica
     let terminated = currentStore === undefined;
     if (currentStore) {
       try {
-        if (cleanupRefs.length > MAX_TEST_REFS || totalTrackedRefs > MAX_TOTAL_REFS) {
+        if (
+          cleanupRefs.length > MAX_TEST_REFS ||
+          totalTrackedRefs > MAX_QUALIFICATION_TOTAL_REFS ||
+          totalTrackedRefs > MAX_CLEANUP_TOTAL_REFS
+        ) {
           cleanupErrors.push('reference-bound-exceeded');
           failure = true;
           caseRemainingRefs = 1;
+        }
+        try {
+          if (!primaryCollectionPaths) throw new Error('Primary collection baseline unavailable');
+          const currentPaths = await primaryCensus(
+            currentStore,
+            cleanupRefs.filter((ref) => ref.parent.id === 'memories'),
+            cleanupRefs.filter((ref) => ref.parent.id === 'ownerCards'),
+          );
+          if (
+            JSON.stringify(currentPaths.memories) !==
+              JSON.stringify(primaryCollectionPaths.memories) ||
+            JSON.stringify(currentPaths.ownerCards) !==
+              JSON.stringify(primaryCollectionPaths.ownerCards)
+          ) {
+            cleanupErrors.push('untracked-primary-document-detected');
+            failure = true;
+            // Do not adopt or delete an unexpected primary row. The outer
+            // owner of this isolated emulator database handles unknown state.
+            caseRemainingRefs += 1;
+          }
+        } catch {
+          cleanupErrors.push('primary-collection-census-failed');
+          failure = true;
+          caseRemainingRefs += 1;
+        }
+        for (const sentinel of sentinelSnapshots) {
+          try {
+            const current = await snapshotSentinel(currentStore, sentinel.ref, sentinel.fields);
+            if (
+              current.physicalPath !== sentinel.baseline.physicalPath ||
+              current.projectId !== sentinel.baseline.projectId ||
+              current.databaseId !== sentinel.baseline.databaseId ||
+              current.createTime.seconds !== sentinel.baseline.createTime.seconds ||
+              current.createTime.nanoseconds !== sentinel.baseline.createTime.nanoseconds ||
+              current.updateTime.seconds !== sentinel.baseline.updateTime.seconds ||
+              current.updateTime.nanoseconds !== sentinel.baseline.updateTime.nanoseconds ||
+              current.contentHash !== sentinel.baseline.contentHash
+            ) {
+              cleanupErrors.push('domain-sentinel-changed');
+              failure = true;
+            }
+          } catch {
+            cleanupErrors.push('domain-sentinel-readback-failed');
+            failure = true;
+          }
         }
         for (let index = 0; index < cleanupRefs.length; index += 190) {
           try {
@@ -272,6 +516,8 @@ describe.skipIf(!enabled)('owner-editor recovery Firestore transaction qualifica
         }
         store = undefined;
         cleanupRefs = [];
+        sentinelSnapshots = [];
+        primaryCollectionPaths = undefined;
       }
     }
     remainingRefs += caseRemainingRefs;
@@ -350,7 +596,6 @@ describe.skipIf(!enabled)('owner-editor recovery Firestore transaction qualifica
         privacyGenerationDigest: ownerEditorPrivacyDigest(null),
       }),
     );
-    expect((await f.store.collection('memories').limit(1).get()).size).toBe(0);
     const duplicate = await runAbandon(f);
     expect(duplicate).toBeNull();
     expect(await readOperation(f)).toMatchObject({ statusVersion: f.record.statusVersion + 1 });
