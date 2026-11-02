@@ -308,6 +308,74 @@ describe('BASIC5 bounded failed Vitest report diagnostics', () => {
     expect(output(missingClass).validOutput).toBe(false);
   });
 
+  it('retains only closed save phase metadata and distinguishes unknown POST counts', () => {
+    const saveObservation = {
+      operation: 'add_family_relationship',
+      phase: 'request_seen',
+      totalMatchingPostCount: 2,
+      commandMatched: true,
+      httpStatus: null,
+      nativeValid: true,
+      invalidControlPresent: false,
+      alertPresent: false,
+      saveEnabled: true,
+      pageClosed: false,
+      errorStage: 'wait',
+      errorCategory: 'timeout',
+    };
+    const checkpoint = {
+      schemaVersion: 1,
+      stage: 'identity_fresh_page_readback_complete',
+      authenticatedNavigationCount: 2,
+      applyCount: 1,
+      durableReadbackCount: 1,
+      freshPageReadbackCount: 1,
+      saveObservation,
+    };
+    const output = (value: unknown) =>
+      observe(`BASIC5_ACCEPTANCE_CHECKPOINT ${JSON.stringify(value)}\n${JSON.stringify(report())}`);
+    const good = output(checkpoint);
+    expect(good.diagnostic.checkpoint?.saveObservation).toEqual(saveObservation);
+    expect(contentFreeBasic5CiVitestDiagnostic(good.diagnostic)).toEqual(good.diagnostic);
+    const unknown = output({
+      ...checkpoint,
+      saveObservation: { ...saveObservation, totalMatchingPostCount: null, nativeValid: null },
+    });
+    expect(unknown.diagnostic.checkpoint?.saveObservation?.totalMatchingPostCount).toBeNull();
+    for (const patch of [
+      { operation: privateText },
+      { phase: privateText },
+      { totalMatchingPostCount: 65 },
+      { httpStatus: 600 },
+      { httpStatus: '200' },
+      { nativeValid: privateText },
+      { pageClosed: null },
+      { errorStage: privateText },
+      { errorCategory: privateText },
+      { rawBody: privateText },
+    ]) {
+      const bad = output({ ...checkpoint, saveObservation: { ...saveObservation, ...patch } });
+      expect(bad.validOutput).toBe(false);
+      expect(bad.diagnostic.checkpoint).toBeNull();
+      expect(JSON.stringify(bad.diagnostic)).not.toContain(privateText);
+    }
+  });
+
+  it('permits only the reviewed save helper as an additional first source frame', () => {
+    const result = observe(
+      report({
+        stack: `Error: private message\n    at /reviewed/assistant/scripts/basic5-browser-save-observation.ts:50:7`,
+      }),
+    );
+    expect(result.diagnostic.firstSourceFrame).toEqual({
+      file: 'scripts/basic5-browser-save-observation.ts',
+      line: 50,
+      column: 7,
+    });
+    expect(contentFreeBasic5CiVitestDiagnostic(result.diagnostic)).toEqual(result.diagnostic);
+    expect(JSON.stringify(result.diagnostic)).not.toContain('private message');
+  });
+
   it('retains a single fixed last checkpoint alongside a failed report', () => {
     const checkpoint = {
       schemaVersion: 1,

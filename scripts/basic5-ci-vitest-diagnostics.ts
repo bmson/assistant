@@ -1,7 +1,10 @@
+import type { Basic5SaveObservationDiagnostic } from './basic5-browser-save-observation.js';
+
 /** Bounded projection of the pinned Vitest JSON reporter; never retain raw errors. */
 const CAPTURE_BYTES = 64 * 1024;
 const FIXTURE = 'scripts/basic5-browser-acceptance.integration.test.ts';
 const SUPPORT = 'scripts/basic5-browser-acceptance-support.ts';
+const SAVE = 'scripts/basic5-browser-save-observation.ts';
 const CASE_TITLE =
   'four BASIC5 saves produce exact receipts and fresh PostgreSQL readbacks through Auth.js';
 const EVIDENCE_PREFIX = 'BASIC5_ACCEPTANCE_EVIDENCE ';
@@ -50,6 +53,71 @@ export function classifyBasic5AnonymousLocation(
   }
 }
 
+function safeSaveObservation(value: unknown): Basic5SaveObservationDiagnostic | null {
+  const keys = [
+    'operation',
+    'phase',
+    'totalMatchingPostCount',
+    'commandMatched',
+    'httpStatus',
+    'nativeValid',
+    'invalidControlPresent',
+    'alertPresent',
+    'saveEnabled',
+    'pageClosed',
+    'errorStage',
+    'errorCategory',
+  ];
+  if (
+    !record(value) ||
+    Object.keys(value).length !== keys.length ||
+    keys.some((key) => !Object.hasOwn(value, key)) ||
+    ![
+      'update_person_identity',
+      'add_family_relationship',
+      'correct_owner_family_relationship',
+      'correct_owner_memory',
+    ].includes(typeof value.operation === 'string' ? value.operation : '') ||
+    !['click_pending', 'click_done', 'request_seen', 'response_seen', 'parse'].includes(
+      typeof value.phase === 'string' ? value.phase : '',
+    ) ||
+    !(
+      value.totalMatchingPostCount === null ||
+      (count(value.totalMatchingPostCount) && value.totalMatchingPostCount <= 64)
+    ) ||
+    !(
+      value.httpStatus === null ||
+      (Number.isInteger(value.httpStatus) &&
+        Number(value.httpStatus) >= 100 &&
+        Number(value.httpStatus) <= 599)
+    ) ||
+    ![
+      'commandMatched',
+      'nativeValid',
+      'invalidControlPresent',
+      'alertPresent',
+      'saveEnabled',
+    ].every((key) => value[key] === null || typeof value[key] === 'boolean') ||
+    typeof value.pageClosed !== 'boolean' ||
+    !(
+      value.errorStage === null ||
+      ['click', 'wait', 'parse'].includes(
+        typeof value.errorStage === 'string' ? value.errorStage : '',
+      )
+    ) ||
+    !(
+      value.errorCategory === null ||
+      ['timeout', 'page_closed', 'other'].includes(
+        typeof value.errorCategory === 'string' ? value.errorCategory : '',
+      )
+    )
+  )
+    return null;
+  return Object.fromEntries(
+    keys.map((key) => [key, value[key]]),
+  ) as unknown as Basic5SaveObservationDiagnostic;
+}
+
 export type Basic5CiFixtureCheckpoint = {
   schemaVersion: 1;
   stage: string;
@@ -59,12 +127,16 @@ export type Basic5CiFixtureCheckpoint = {
   freshPageReadbackCount: number;
   anonymousPageStatus?: number;
   anonymousLocationClass?: Basic5AnonymousLocationClass;
+  saveObservation?: Basic5SaveObservationDiagnostic;
 };
 
 function safeCheckpoint(value: unknown): Basic5CiFixtureCheckpoint | null {
   if (
     !record(value) ||
-    Object.keys(value).length !== (Object.hasOwn(value, 'anonymousPageStatus') ? 8 : 6) ||
+    Object.keys(value).length !==
+      (Object.hasOwn(value, 'anonymousPageStatus') ? 8 : 6) +
+        (Object.hasOwn(value, 'saveObservation') ? 1 : 0) ||
+    (Object.hasOwn(value, 'saveObservation') && !safeSaveObservation(value.saveObservation)) ||
     Object.hasOwn(value, 'anonymousPageStatus') !==
       Object.hasOwn(value, 'anonymousLocationClass') ||
     (Object.hasOwn(value, 'anonymousPageStatus') &&
@@ -92,6 +164,13 @@ function safeCheckpoint(value: unknown): Basic5CiFixtureCheckpoint | null {
     applyCount: Number(value.applyCount),
     durableReadbackCount: Number(value.durableReadbackCount),
     freshPageReadbackCount: Number(value.freshPageReadbackCount),
+    ...(Object.hasOwn(value, 'saveObservation')
+      ? {
+          saveObservation: safeSaveObservation(
+            value.saveObservation,
+          ) as Basic5SaveObservationDiagnostic,
+        }
+      : {}),
     ...(Object.hasOwn(value, 'anonymousPageStatus')
       ? {
           anonymousPageStatus: Number(value.anonymousPageStatus),
@@ -121,7 +200,11 @@ export type Basic5CiVitestDiagnostic = {
     | 'import_error'
     | 'runner_failure'
     | 'unknown';
-  firstSourceFrame: { file: typeof FIXTURE | typeof SUPPORT; line: number; column: number } | null;
+  firstSourceFrame: {
+    file: typeof FIXTURE | typeof SUPPORT | typeof SAVE;
+    line: number;
+    column: number;
+  } | null;
   checkpoint: Basic5CiFixtureCheckpoint | null;
 };
 
@@ -133,9 +216,13 @@ function count(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= 1_000_000;
 }
 
-function reviewedPath(value: unknown, repoRoot: string): typeof FIXTURE | typeof SUPPORT | null {
+function reviewedPath(
+  value: unknown,
+  repoRoot: string,
+): typeof FIXTURE | typeof SUPPORT | typeof SAVE | null {
   if (value === FIXTURE || value === `${repoRoot}/${FIXTURE}`) return FIXTURE;
   if (value === SUPPORT || value === `${repoRoot}/${SUPPORT}`) return SUPPORT;
+  if (value === SAVE || value === `${repoRoot}/${SAVE}`) return SAVE;
   return null;
 }
 
@@ -450,7 +537,7 @@ export function contentFreeBasic5CiVitestDiagnostic(value: unknown): Basic5CiVit
     (!record(frame) ||
       Object.keys(frame).length !== 3 ||
       typeof frame.file !== 'string' ||
-      ![FIXTURE, SUPPORT].includes(frame.file) ||
+      ![FIXTURE, SUPPORT, SAVE].includes(frame.file) ||
       !count(frame.line) ||
       frame.line < 1 ||
       !count(frame.column) ||
