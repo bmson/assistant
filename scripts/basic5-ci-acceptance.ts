@@ -517,6 +517,7 @@ type ProcessProof = {
 
 export type Basic5CiUtilityChildTestDriver = {
   spawn: typeof spawn;
+  metadataExec?: MetadataExecFile;
   proof: ProcessProof;
   now: () => number;
   sleep: (milliseconds: number) => Promise<void>;
@@ -2185,9 +2186,9 @@ export class RealBasic5CiOps implements Basic5CiOps {
     clearTimeout(this.outerTimer);
   }
 
-  now(): number {
+  readonly now = (): number => {
     return this.utilityChildTestDriver?.now() ?? performance.now();
-  }
+  };
 
   runUtilityChild(
     command: string,
@@ -2300,7 +2301,9 @@ export class RealBasic5CiOps implements Basic5CiOps {
     )
       throw new Basic5CiHold('refusing_signal_to_changed_process_identity');
     try {
-      (this.utilityChildTestDriver?.killProcess ?? process.kill)(identity.pid, signal);
+      if (this.utilityChildTestDriver)
+        this.utilityChildTestDriver.killProcess(identity.pid, signal);
+      else process.kill(identity.pid, signal);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ESRCH')
         throw new Basic5CiHold('owned_process_signal_failed');
@@ -2417,6 +2420,7 @@ export class RealBasic5CiOps implements Basic5CiOps {
       },
       deadline,
       this.now,
+      this.utilityChildTestDriver?.metadataExec?.bind(this.utilityChildTestDriver),
     );
   }
 
@@ -2439,7 +2443,10 @@ export class RealBasic5CiOps implements Basic5CiOps {
     if (!proof) throw new Basic5CiHold('linux_process_proof_unavailable');
     let child: ReturnType<typeof spawn>;
     try {
-      child = (this.utilityChildTestDriver?.spawn ?? spawn)(command, args, {
+      const spawnChild = this.utilityChildTestDriver
+        ? this.utilityChildTestDriver.spawn.bind(this.utilityChildTestDriver)
+        : spawn;
+      child = spawnChild(command, args, {
         cwd: this.repoRoot,
         env,
         detached: true,
@@ -2641,7 +2648,8 @@ export class RealBasic5CiOps implements Basic5CiOps {
           );
         throw error;
       }
-      await (this.utilityChildTestDriver?.sleep ?? sleep)(50);
+      if (this.utilityChildTestDriver) await this.utilityChildTestDriver.sleep(50);
+      else await sleep(50);
     }
     const utility = utilityForChildLabel(label);
     if (childError)

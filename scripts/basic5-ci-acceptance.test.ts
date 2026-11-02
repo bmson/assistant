@@ -1,7 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { describe, expect, it } from 'vitest';
+import { rm } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it, vi } from 'vitest';
 import {
   assertBasic5CiUtilityChildSucceeded,
   assertBasic5CiWorkflowAdmission,
@@ -387,6 +389,105 @@ describe('one-shot BASIC5 CI controller', () => {
       killProcess: () => undefined,
     };
   }
+
+  it('runs real preflight metadata orchestration with the instance clock and no processes', async () => {
+    const calls: string[] = [];
+    const driver = {
+      ...utilityChildDriver(new FakeDirectChild()),
+      clock: 1_000,
+      now() {
+        return this.clock;
+      },
+      metadataExec(command, args, options, callback) {
+        expect(this).toBe(driver);
+        expect(options.timeout).toBe(5_000 - calls.length * 100);
+        calls.push([command, ...args].join(' '));
+        this.clock += 100;
+        const stdout =
+          args[0] === '--version'
+            ? 'Google Chrome 156.0.8078.47\n'
+            : args[0] === 'status'
+              ? ''
+              : args[1] === 'HEAD'
+                ? preflight.sourceCommit
+                : preflight.sourceWebTree;
+        callback(null, Buffer.from(stdout), Buffer.alloc(0));
+      },
+      spawn() {
+        throw new Error('Real preflight must not use the utility spawn path.');
+      },
+    } satisfies Basic5CiUtilityChildTestDriver & { clock: number };
+    driver.proof.BASIC5_CI_CHROME_EXECUTABLE = '/opt/google/chrome/chrome';
+    const ops = new RealBasic5CiOps(driver);
+    const internal = ops as unknown as {
+      privateRoot: string;
+      importHelpers(): Promise<void>;
+      readListeners(): Promise<Map<string, number>>;
+      provenance: {
+        observeBasic5CiBuildProvenance(): Promise<unknown>;
+      };
+    };
+    const importHelpers = vi.spyOn(internal, 'importHelpers').mockResolvedValue(undefined);
+    const readListeners = vi.spyOn(internal, 'readListeners').mockResolvedValue(new Map());
+    internal.provenance = {
+      observeBasic5CiBuildProvenance: async () => ({
+        source: { commit: preflight.sourceCommit, webTree: preflight.sourceWebTree },
+        requiredArtifactIdentity: preflight.requiredArtifactIdentity,
+        runtime: {
+          nodeVersion: 'v26.13.0',
+          imageOS: preflight.imageOS,
+          imageVersion: preflight.imageVersion,
+        },
+        diagnosticTraceCompleteness: preflight.diagnosticTraceCompleteness,
+        buildExecutionAttribution: preflight.buildExecutionAttribution,
+        limitations: preflight.provenanceLimitations,
+      }),
+    };
+    const originalEnvironment = { ...process.env };
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const version = Object.getOwnPropertyDescriptor(process, 'version');
+    try {
+      Object.defineProperty(process, 'platform', { configurable: true, value: 'linux' });
+      Object.defineProperty(process, 'version', { configurable: true, value: 'v26.13.0' });
+      for (const key of Object.keys(process.env)) delete process.env[key];
+      Object.assign(process.env, {
+        GITHUB_ACTIONS: 'true',
+        GITHUB_WORKFLOW: 'CI',
+        GITHUB_EVENT_NAME: 'push',
+        GITHUB_REF: 'refs/heads/main',
+        GITHUB_RUN_ATTEMPT: '1',
+        GITHUB_SHA: preflight.sourceCommit,
+        GITHUB_WORKFLOW_SHA: preflight.sourceCommit,
+        ASSISTANT_RUN_BASIC5_CI_ACCEPTANCE: '1',
+        ASSISTANT_BASIC5_CI_DATABASE_URL: 'postgres://synthetic:synthetic@127.0.0.1/synthetic',
+        GITHUB_WORKSPACE: fileURLToPath(new URL('..', import.meta.url)),
+        RUNNER_OS: 'Linux',
+        ImageOS: preflight.imageOS,
+        ImageVersion: preflight.imageVersion,
+      });
+      const result = await ops.preflight(6_000, new AbortController().signal);
+      expect(result.sourceCommit).toBe(preflight.sourceCommit);
+      expect(result.chromeVersion).toBe('156.0.8078.47');
+      expect(result.postgresServerVersionNum).toBeNull();
+      expect(calls).toEqual([
+        'git rev-parse HEAD',
+        'git status --porcelain=v1 --untracked-files=all',
+        'git rev-parse HEAD:apps/web',
+        '/opt/google/chrome/chrome --version',
+      ]);
+      expect(driver.clock).toBe(1_400);
+      expect(readListeners).toHaveBeenCalledOnce();
+    } finally {
+      ops.dispose();
+      importHelpers.mockRestore();
+      readListeners.mockRestore();
+      if (platform) Object.defineProperty(process, 'platform', platform);
+      if (version) Object.defineProperty(process, 'version', version);
+      for (const key of Object.keys(process.env)) delete process.env[key];
+      Object.assign(process.env, originalEnvironment);
+      if (internal.privateRoot) await rm(internal.privateRoot, { recursive: true });
+    }
+  });
 
   it.each([
     ['create-target', 'target_database_creation'],
