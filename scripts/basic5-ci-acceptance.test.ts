@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { describe, expect, it } from 'vitest';
 import {
+  assertBasic5CiWorkflowAdmission,
   type Basic5CiCaseResult,
   type Basic5CiDirectChildHandle,
   type Basic5CiEvidence,
@@ -30,25 +31,39 @@ const preflight: Basic5CiPreflight = {
   imageVersion: '20261101.1',
   chromeVersion: '144.0.0.0',
   postgresServerVersionNum: 170000,
-  buildId: 'build-1',
-  serverSha256: 'c'.repeat(64),
-  closureSha256: 'd'.repeat(64),
-  closureEntryCount: 100,
-  closureFileCount: 80,
-  closureSymlinkCount: 20,
-  closureFileBytes: 1_000_000,
-  staticPresent: true,
-  staticFileCount: 8,
-  publicPresent: true,
-  publicFileCount: 4,
-  traceManifestCount: 2,
-  traceManifestBytes: 4_000,
-  traceManifestSha256: 'e'.repeat(64),
-  traceStatus: 'complete',
-  traceReferenceCount: 9,
-  resolvedCheckoutReferenceCount: 1,
-  matchedClosureContentCount: 8,
-  unmatchedReferenceCount: 0,
+  workflowContext: {
+    event: 'push',
+    ref: 'refs/heads/main',
+    runAttempt: 1,
+    frozenLockfileInstallAndBuildSucceeded: true,
+    frozenLockfileBuildBasis: 'ordered_ci_steps_completed_before_acceptance',
+    workflowSha: 'a'.repeat(40),
+    lockfileSha256: 'f'.repeat(64),
+  },
+  requiredArtifactIdentity: {
+    buildId: 'build-1',
+    buildIdSha256: 'a'.repeat(64),
+    serverSha256: 'c'.repeat(64),
+    runtimeInventorySha256: 'd'.repeat(64),
+    runtimeInventoryEntryCount: 100,
+    runtimeInventoryFileCount: 80,
+    runtimeInventorySymlinkCount: 20,
+    runtimeInventoryBytes: 1_000_000,
+    staticAssets: { present: true, fileCount: 8, sha256: 'b'.repeat(64) },
+    publicAssets: { present: true, fileCount: 4, sha256: 'e'.repeat(64) },
+  },
+  diagnosticTraceCompleteness: {
+    scope: 'apps/web/.next/server',
+    collection: 'not_requested',
+    status: 'not_collected',
+    manifestCount: null,
+    manifestBytes: null,
+    manifestSha256: null,
+    referenceCount: null,
+    resolvedCheckoutReferenceCount: null,
+    matchedClosureContentCount: null,
+    unmatchedReferenceCount: null,
+  },
   buildExecutionAttribution: 'unknown-cache-may-have-reused-output',
   provenanceLimitations: ['cache attribution unknown'],
 };
@@ -61,8 +76,8 @@ function validEvidence(): Basic5CiEvidence {
     result: 'passed',
     standalone: {
       sourceCommit: preflight.sourceCommit,
-      buildId: preflight.buildId,
-      serverSha256: preflight.serverSha256,
+      buildId: preflight.requiredArtifactIdentity.buildId,
+      serverSha256: preflight.requiredArtifactIdentity.serverSha256,
     },
     executionEnvironment: {
       platform: 'linux',
@@ -285,6 +300,26 @@ class FakeDirectChild extends EventEmitter implements Basic5CiDirectChildHandle 
 }
 
 describe('one-shot BASIC5 CI controller', () => {
+  it('admits only the authorized first main push workflow invocation', () => {
+    const accepted = {
+      GITHUB_ACTIONS: 'true',
+      GITHUB_WORKFLOW: 'CI',
+      GITHUB_EVENT_NAME: 'push',
+      GITHUB_REF: 'refs/heads/main',
+      GITHUB_RUN_ATTEMPT: '1',
+      GITHUB_SHA: 'a'.repeat(40),
+      GITHUB_WORKFLOW_SHA: 'a'.repeat(40),
+      ASSISTANT_RUN_BASIC5_CI_ACCEPTANCE: '1',
+    };
+    expect(() => assertBasic5CiWorkflowAdmission(accepted)).not.toThrow();
+    expect(() =>
+      assertBasic5CiWorkflowAdmission({ ...accepted, GITHUB_EVENT_NAME: 'pull_request' }),
+    ).toThrow('workflow_admission_context_not_authorized');
+    expect(() => assertBasic5CiWorkflowAdmission({ ...accepted, GITHUB_RUN_ATTEMPT: '2' })).toThrow(
+      'workflow_admission_context_not_authorized',
+    );
+  });
+
   it('retains bounded standalone diagnostic checks on a preallocation hold', async () => {
     const ops = new FakeOps();
     const diagnostic = {
@@ -295,52 +330,48 @@ describe('one-shot BASIC5 CI controller', () => {
         imageOSMatches: true,
         imageVersionMatches: true,
         buildIdPresent: true,
+        buildIdSha256Valid: true,
         serverSha256Valid: true,
-        closureSha256Valid: true,
-        tracesComplete: false,
-        unmatchedTraceReferencesZero: false,
+        runtimeInventorySha256Valid: true,
         limitationsArray: true,
         limitationsCountBounded: true,
         limitationsItemsBounded: true,
-        closureEntryCountPositive: true,
-        closureFileCountPositive: true,
-        closureSymlinkCountValid: true,
-        closureFileBytesPositive: true,
-        staticFileCountValid: true,
-        publicFileCountValid: true,
-        traceManifestCountValid: true,
-        traceManifestBytesValid: true,
-        traceReferenceCountValid: true,
-        resolvedTraceReferenceCountValid: true,
-        matchedTraceContentCountValid: true,
-        unmatchedTraceReferenceCountValid: true,
+        runtimeInventoryEntryCountPositive: true,
+        runtimeInventoryFileCountPositive: true,
+        runtimeInventorySymlinkCountValid: true,
+        runtimeInventoryBytesPositive: true,
+        staticAssetsPresent: true,
+        staticAssetsNonempty: true,
+        staticAssetsSha256Valid: true,
+        publicAssetsPresent: true,
+        publicAssetsNonempty: false,
+        publicAssetsSha256Valid: true,
       },
       observed: {
-        traceStatus: 'incomplete' as const,
-        closureEntryCount: 100,
-        closureFileCount: 80,
-        closureSymlinkCount: 20,
-        closureFileBytes: 2 * 1024 * 1024 * 1024,
-        staticFileCount: 8,
-        publicFileCount: 4,
-        traceManifestCount: 2,
-        traceManifestBytes: 4_000,
-        traceReferenceCount: 9,
-        resolvedCheckoutReferenceCount: 9,
-        matchedClosureContentCount: 8,
-        unmatchedReferenceCount: 1,
+        runtimeInventoryEntryCount: 100,
+        runtimeInventoryFileCount: 80,
+        runtimeInventorySymlinkCount: 20,
+        runtimeInventoryBytes: 2 * 1024 * 1024 * 1024,
+        staticAssetsFileCount: 8,
+        publicAssetsFileCount: 0,
       },
     };
     ops.preflightError = new Basic5CiHold(
-      'standalone_build_provenance_incomplete',
+      'required_runtime_artifact_identity_incomplete',
       true,
       diagnostic,
     );
 
     const result = await runBasic5CiAcceptance(ops);
 
-    expect(result.errorCode).toBe('standalone_build_provenance_incomplete');
+    expect(result.errorCode).toBe('required_runtime_artifact_identity_incomplete');
     expect(result.targetStatus).toBe('not_allocated');
+    expect(result.acceptanceContract).toBe('basic5-ci-standalone-in-checkout-v2');
+    expect(result.claimScope).toMatchObject({
+      ancestorWorkspaceDependencies: 'unqualified',
+      unexercisedRoutes: 'unqualified',
+      containerIndependence: 'unqualified',
+    });
     expect(result.standaloneBuildDiagnostic).toEqual(diagnostic);
     expect(ops.events).toEqual(['preflight', 'receipt']);
   });
@@ -463,6 +494,28 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(result.cleanupComplete).toBe(true);
     expect(result.targetStatus).toBe('removed');
     expect(result.controllerScratchStatus).toBe('retained');
+    expect(result.schemaVersion).toBe(2);
+    expect(result.acceptanceContract).toBe('basic5-ci-standalone-in-checkout-v2');
+    expect(result.workflowContext).toMatchObject({
+      event: 'push',
+      ref: 'refs/heads/main',
+      runAttempt: 1,
+      frozenLockfileInstallAndBuildSucceeded: true,
+      frozenLockfileBuildBasis: 'ordered_ci_steps_completed_before_acceptance',
+    });
+    expect(result.requiredArtifactIdentity).toMatchObject({
+      buildId: 'build-1',
+      runtimeInventorySha256: 'd'.repeat(64),
+      staticAssets: { present: true, fileCount: 8, sha256: 'b'.repeat(64) },
+      publicAssets: { present: true, fileCount: 4, sha256: 'e'.repeat(64) },
+    });
+    expect(result.diagnosticTraceCompleteness).toMatchObject({
+      collection: 'not_requested',
+      status: 'not_collected',
+      manifestCount: null,
+      referenceCount: null,
+      unmatchedReferenceCount: null,
+    });
     const savedReceipts = ops.writtenReceipt?.receipts as Array<Record<string, unknown>>;
     expect(savedReceipts[1]?.ids).toMatchObject({
       relationId: '50000000-0000-4000-8000-000000000001',
