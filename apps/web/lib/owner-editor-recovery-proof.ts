@@ -2,6 +2,7 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   type OwnerEditorCommand,
   type OwnerEditorOperationRecord,
+  type OwnerEditorRecoveryCurrentState,
   type OwnerEditorScope,
   type OwnerEditorSessionView,
   ownerEditorOperationId,
@@ -87,13 +88,7 @@ export interface OwnerEditorRecoveryPostAuthorization {
   operationId: string;
 }
 
-/** Fresh server-side owner/privacy/epoch observation; ready must be true. */
-export interface OwnerEditorRecoveryCurrentState {
-  ownerId: string;
-  epoch: string;
-  privacyGeneration: string | null;
-  ready: boolean;
-}
+export type { OwnerEditorRecoveryCurrentState } from '@assistant/persistence';
 
 interface ProofInput {
   authorization: OwnerEditorRecoveryPostAuthorization;

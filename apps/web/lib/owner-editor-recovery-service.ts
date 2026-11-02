@@ -1,5 +1,7 @@
 import {
+  type OwnerEditorExpiredClaimExpectation,
   type OwnerEditorOperationRecord,
+  type OwnerEditorRecoveryTransaction,
   type OwnerEditorReply,
   type OwnerEditorScope,
   type OwnerEditorSessionView,
@@ -60,43 +62,12 @@ const recognizedCommands = [
   'create_owner_memory',
 ] as const;
 
-export interface OwnerEditorRecoveryMaintenanceState {
-  driver: 'firestore' | 'postgres';
-  releaseWritesPaused: boolean;
-  restoreRehearsal: boolean;
-  postgresSourceWritesFenced: boolean;
-}
-
-export interface OwnerEditorRecoveryFreshSnapshot {
-  current: OwnerEditorRecoveryCurrentState;
-  maintenance: OwnerEditorRecoveryMaintenanceState;
-  operation: unknown;
-}
-
-/** Exact lease and time bounds the storage adapter must recheck atomically. */
-export interface OwnerEditorExpiredClaimExpectation {
-  scope: OwnerEditorScope;
-  session: OwnerEditorSessionView;
-  requestHash: string;
-  claimToken: string;
-  claimExpiresAt: Date;
-  statusVersion: number;
-  now: Date;
-  proofExpiresAt: Date;
-  replayExpiresAt: Date;
-  maintenance: OwnerEditorRecoveryMaintenanceState;
-}
-
-/**
- * Deliberately narrow transaction surface. The adapter must recheck the exact
- * claim, owner, epoch, privacy state, current gates, and proof/replay deadlines
- * at its write time. There is no reserve, apply, prepare, or primary-data API.
- */
-export interface OwnerEditorRecoveryTransaction {
-  readFresh(): Promise<OwnerEditorRecoveryFreshSnapshot>;
-  /** Returns the row written by this CAS or the latest row if it raced. */
-  abandonExpiredOriginal(expected: OwnerEditorExpiredClaimExpectation): Promise<unknown | null>;
-}
+export type {
+  OwnerEditorExpiredClaimExpectation,
+  OwnerEditorRecoveryFreshSnapshot,
+  OwnerEditorRecoveryMaintenanceState,
+  OwnerEditorRecoveryTransaction,
+} from '@assistant/persistence';
 
 export interface OwnerEditorRecoveryServicePorts {
   /** Must authenticate the owner from this actual Request and current session. */
@@ -206,6 +177,14 @@ function currentTime(ports: OwnerEditorRecoveryServicePorts): number | null {
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
+interface RecoveryProofCandidate {
+  kind: 'proof_candidate';
+  authorization: OwnerEditorRecoveryPostAuthorization;
+  scope: OwnerEditorScope;
+  operation: OwnerEditorOperationRecord;
+  current: OwnerEditorRecoveryCurrentState;
+}
+
 /**
  * Unmounted, HTTP-neutral V2 recovery handler. GET performs receipt lookup only;
  * POST uses the exact V2 authorize/reconcile intents and cannot admit new work.
@@ -300,58 +279,72 @@ export async function handleOwnerEditorRecoveryRequest(
   }
 
   try {
-    return await ports.withRecoveryTransaction(scope, async (transaction) => {
-      const fresh = await transaction.readFresh();
-      const current = currentSchema.safeParse(fresh?.current);
-      const maintenance = maintenanceSchema.safeParse(fresh?.maintenance);
-      if (!fresh || !current.success || !maintenance.success) return unavailable();
-      if (
-        maintenance.data.releaseWritesPaused ||
-        maintenance.data.restoreRehearsal ||
-        (!isGet &&
-          maintenance.data.driver === 'postgres' &&
-          maintenance.data.postgresSourceWritesFenced)
-      )
-        return unavailable();
-      const scopeState = currentScopeState(scope, current.data);
-      if (scopeState === 'owner_changed') return reply(ownerEditorUnknown(scope, 'proof_changed'));
-      if (scopeState === 'retired') return reply(ownerEditorRetired(scope));
-      const record = exactRecord(fresh.operation, scope);
-      if (!record) return reply(ownerEditorUnknown(scope, 'receipt_missing'));
-      const transactionNow = currentTime(ports);
-      if (transactionNow === null) return unavailable();
-      if (pastReplayDeadline(scope, transactionNow)) return reply(ownerEditorRetired(scope));
+    const result = await ports.withRecoveryTransaction<Response | RecoveryProofCandidate>(
+      scope,
+      async (transaction) => {
+        const fresh = await transaction.readFresh();
+        const current = currentSchema.safeParse(fresh?.current);
+        const maintenance = maintenanceSchema.safeParse(fresh?.maintenance);
+        if (!fresh || !current.success || !maintenance.success) return unavailable();
+        if (
+          maintenance.data.releaseWritesPaused ||
+          maintenance.data.restoreRehearsal ||
+          (!isGet &&
+            maintenance.data.driver === 'postgres' &&
+            maintenance.data.postgresSourceWritesFenced)
+        )
+          return unavailable();
+        const scopeState = currentScopeState(scope, current.data);
+        if (scopeState === 'owner_changed')
+          return reply(ownerEditorUnknown(scope, 'proof_changed'));
+        if (scopeState === 'retired') return reply(ownerEditorRetired(scope));
+        const record = exactRecord(fresh.operation, scope);
+        if (!record) return reply(ownerEditorUnknown(scope, 'receipt_missing'));
+        const transactionNow = currentTime(ports);
+        if (transactionNow === null) return unavailable();
+        if (pastReplayDeadline(scope, transactionNow)) return reply(ownerEditorRetired(scope));
 
-      if (isGet) {
-        const receipt = terminalReceipt(record, scope);
-        if (receipt) return reply(receipt);
-        return reply(ownerEditorUnknown(scope, 'preparing'));
-      }
-
-      const action = body;
-      if (!action) return json({ error: 'Recovery intent is invalid.' }, 422);
-      if (action.intent === 'authorize_original_reconcile') {
-        const receipt = terminalReceipt(record, scope);
-        if (receipt) return reply(receipt);
-        if (!current.data.ready || record.status !== 'preparing')
+        if (isGet) {
+          const receipt = terminalReceipt(record, scope);
+          if (receipt) return reply(receipt);
           return reply(ownerEditorUnknown(scope, 'preparing'));
-        const authorization = recoveryAuthorization(action.intent, session, scope);
-        const recoveryToken = issueOwnerEditorRecoveryProof({
-          authorization,
-          scope,
-          operation: record,
-          current: current.data,
-          secret: ports.secret,
-          now: transactionNow,
-        });
-        return recoveryToken
-          ? json({ version: 2, intent: 'recovery_authorized', authorization: recoveryToken })
-          : reply(ownerEditorUnknown(scope, 'proof_changed'));
-      }
+        }
 
-      const authorization = recoveryAuthorization(action.intent, session, scope);
-      if (record.status !== 'preparing') {
-        const receiptProof = verifyOwnerEditorRecoveryReceiptProof({
+        const action = body;
+        if (!action) return json({ error: 'Recovery intent is invalid.' }, 422);
+        if (action.intent === 'authorize_original_reconcile') {
+          const receipt = terminalReceipt(record, scope);
+          if (receipt) return reply(receipt);
+          if (!current.data.ready || record.status !== 'preparing')
+            return reply(ownerEditorUnknown(scope, 'preparing'));
+          const authorization = recoveryAuthorization(action.intent, session, scope);
+          // Return data only; Firestore may replay this callback. Mint once only
+          // after the enclosing storage transaction has resolved successfully.
+          return {
+            kind: 'proof_candidate',
+            authorization,
+            scope,
+            operation: record,
+            current: current.data,
+          };
+        }
+
+        const authorization = recoveryAuthorization(action.intent, session, scope);
+        if (record.status !== 'preparing') {
+          const receiptProof = verifyOwnerEditorRecoveryReceiptProof({
+            authorization,
+            scope,
+            operation: record,
+            current: current.data,
+            secret: ports.secret,
+            now: transactionNow,
+            token: action.authorization,
+          });
+          const receipt = receiptProof ? terminalReceipt(record, scope) : null;
+          return receipt ? reply(receipt) : reply(ownerEditorUnknown(scope, 'proof_changed'));
+        }
+        if (!current.data.ready) return reply(ownerEditorUnknown(scope, 'preparing'));
+        const proof = verifyOwnerEditorRecoveryProof({
           authorization,
           scope,
           operation: record,
@@ -360,58 +353,75 @@ export async function handleOwnerEditorRecoveryRequest(
           now: transactionNow,
           token: action.authorization,
         });
-        const receipt = receiptProof ? terminalReceipt(record, scope) : null;
-        return receipt ? reply(receipt) : reply(ownerEditorUnknown(scope, 'proof_changed'));
-      }
-      if (!current.data.ready) return reply(ownerEditorUnknown(scope, 'preparing'));
-      const proof = verifyOwnerEditorRecoveryProof({
-        authorization,
-        scope,
-        operation: record,
-        current: current.data,
-        secret: ports.secret,
-        now: transactionNow,
-        token: action.authorization,
-      });
-      if (!proof || !record.claimToken || !record.claimExpiresAt)
-        return reply(ownerEditorUnknown(scope, 'proof_changed'));
-      const expected: OwnerEditorExpiredClaimExpectation = {
-        scope,
-        session,
-        requestHash: record.requestHash,
-        claimToken: record.claimToken,
-        claimExpiresAt: new Date(record.claimExpiresAt.getTime()),
-        statusVersion: record.statusVersion,
-        now: new Date(transactionNow),
-        proofExpiresAt: new Date(proof.expiresAt),
-        replayExpiresAt: new Date(scope.issuedAt + REPLAY_WINDOW_MS),
-        maintenance: maintenance.data,
-      };
-      const latest = await transaction.abandonExpiredOriginal(expected);
-      const latestRecord = exactRecord(latest, scope);
-      if (!latestRecord || latestRecord.requestHash !== expected.requestHash)
-        return reply(ownerEditorUnknown(scope, 'proof_changed'));
-      if (
-        latestRecord.status === 'abandoned' &&
-        latestRecord.statusVersion > expected.statusVersion &&
-        latestRecord.result?.outcome === 'not_applied' &&
-        latestRecord.result.reason === 'claim_abandoned'
-      )
-        return reply(ownerEditorReceipt(latestRecord));
-      const resultNow = currentTime(ports);
-      if (resultNow === null) return unavailable();
-      const racedReceiptProof = verifyOwnerEditorRecoveryReceiptProof({
-        authorization,
-        scope,
-        operation: latestRecord,
-        current: current.data,
-        secret: ports.secret,
-        now: resultNow,
-        token: action.authorization,
-      });
-      const racedReceipt = racedReceiptProof ? terminalReceipt(latestRecord, scope) : null;
-      return racedReceipt ? reply(racedReceipt) : reply(ownerEditorUnknown(scope, 'proof_changed'));
+        if (!proof || !record.claimToken || !record.claimExpiresAt)
+          return reply(ownerEditorUnknown(scope, 'proof_changed'));
+        const expected: OwnerEditorExpiredClaimExpectation = {
+          scope,
+          session,
+          requestHash: record.requestHash,
+          claimToken: record.claimToken,
+          claimExpiresAt: new Date(record.claimExpiresAt.getTime()),
+          statusVersion: record.statusVersion,
+          now: new Date(transactionNow),
+          proofExpiresAt: new Date(proof.expiresAt),
+          replayExpiresAt: new Date(scope.issuedAt + REPLAY_WINDOW_MS),
+          maintenance: maintenance.data,
+        };
+        const latest = await transaction.abandonExpiredOriginal(expected);
+        const latestRecord = exactRecord(latest, scope);
+        if (!latestRecord || latestRecord.requestHash !== expected.requestHash)
+          return reply(ownerEditorUnknown(scope, 'proof_changed'));
+        if (
+          latestRecord.status === 'abandoned' &&
+          latestRecord.statusVersion > expected.statusVersion &&
+          latestRecord.result?.outcome === 'not_applied' &&
+          latestRecord.result.reason === 'claim_abandoned'
+        )
+          return reply(ownerEditorReceipt(latestRecord));
+        const resultNow = currentTime(ports);
+        if (resultNow === null) return unavailable();
+        const racedReceiptProof = verifyOwnerEditorRecoveryReceiptProof({
+          authorization,
+          scope,
+          operation: latestRecord,
+          current: current.data,
+          secret: ports.secret,
+          now: resultNow,
+          token: action.authorization,
+        });
+        const racedReceipt = racedReceiptProof ? terminalReceipt(latestRecord, scope) : null;
+        return racedReceipt
+          ? reply(racedReceipt)
+          : reply(ownerEditorUnknown(scope, 'proof_changed'));
+      },
+    );
+    if (result instanceof Response) return result;
+    const maintenance = maintenanceSchema.safeParse(await ports.readMaintenance());
+    if (
+      !maintenance.success ||
+      maintenance.data.releaseWritesPaused ||
+      maintenance.data.restoreRehearsal ||
+      (maintenance.data.driver === 'postgres' && maintenance.data.postgresSourceWritesFenced)
+    )
+      return unavailable();
+    const currentSession = await ports.authenticate(request);
+    if (
+      !currentSession ||
+      currentSession.ownerId !== session.ownerId ||
+      currentSession.formSessionScope !== session.formSessionScope
+    )
+      return reply(ownerEditorUnknown(scope, 'proof_changed'));
+    const postTransactionNow = currentTime(ports);
+    if (postTransactionNow === null) return unavailable();
+    if (pastReplayDeadline(scope, postTransactionNow)) return reply(ownerEditorRetired(scope));
+    const recoveryToken = issueOwnerEditorRecoveryProof({
+      ...result,
+      secret: ports.secret,
+      now: postTransactionNow,
     });
+    return recoveryToken
+      ? json({ version: 2, intent: 'recovery_authorized', authorization: recoveryToken })
+      : reply(ownerEditorUnknown(scope, 'proof_changed'));
   } catch {
     return reply(ownerEditorUnknown(scope));
   }
