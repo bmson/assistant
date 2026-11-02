@@ -77,3 +77,45 @@ After success, obtain a NEW normal retirement plan bound to the new state, revie
 separately, and preserve the full600-second retirement drain. Keep root's cleanup
 hold through the already specified first paired rollout/capture checkpoint. Matching
 phone delivery remains conditional on verified backend serving/guard restoration.
+
+## Dedicated one-off source entrypoint (not runtime authorization)
+
+`owner-web-traffic-reconciliation.yml` and
+`scripts/owner-web-traffic-reconciliation-command.ts` implement only the existing
+protected plan/apply pattern for this fixed topology. They do not depend on the
+separate qualification-context diagnostic PR or a new annotation journal. Plan
+reads the fixed service and its two pinned immutable revisions, validates the exact
+known3desired/2observed state, and writes a sanitized packet/hash. A separately
+approved apply run supplies exact reviewed source, packet hash and canonical
+observation time. It reconstructs the whole packet, checks30-minute freshness,
+then the reviewed executor re-reads all native facts and checks freshness again at
+the actual single PATCH boundary. Different plan/apply run IDs are permitted by
+this existing protected pattern; no new same-live-job approval channel is added.
+
+The new dedicated native transport permits only the exact two tagged REVISION
+targets: pinned current100 and pinned historical0. Its only write URL is the fixed
+service with `updateMask=traffic`, and the body has only name, fresh etag and those
+exact rows. The old retirement transport remains single-target-only and unchanged.
+The existing WIF/SDK576 credential acquisition is shared without a caller-selected
+target, new permission or credential discovery. Tokens remain private; artifacts
+contain only the fixed sanitized plan/result/failure files.
+
+Native reads/PATCH bodies have a15-second bound including headers/body,2MiB and
+strict UTF-8/JSON; redirects are refused. One attempt has at most100 native HTTP
+calls, at most60 GETs of its original returned LRO, and a180-second cumulative
+operation deadline. Abort/clock rollback, unknown PATCH result, failed/missing LRO
+or postcheck stops, with no second PATCH, inverse PATCH, recovery mode or automatic
+continuation. These are native-client limits, not limits on setup/install/WIF/SDK
+or GitHub artifact traffic. Plan performs no PATCH. Successful correction still
+returns editingAuthorized:false, retirementDrainCompleted:false and requires a
+new normal retirement plan. It cannot remove aliases, create revisions, write
+annotations, promote/resume/rollback, change epoch, clean up or install a phone.
+
+Source review/offline checks and normal CI precede any separately bounded plan
+request; an actual fresh plan requires its own manager review and apply authority.
+No source merge or workflow input is blanket runtime permission. Shared production
+serialization, exact source/WIF/native identities, manager packet review, strict
+CAS/postcheck and UNKNOWN/no-retry controls remain. General journal/genesis/cold
+recovery is not introduced as a prerequisite to this one-off operation. The later
+old-tag retirement+full600s drain, BASIC5 prerequisites and first paired rollout /
+health / delivery / real Memory-People acceptance remain separate gates.

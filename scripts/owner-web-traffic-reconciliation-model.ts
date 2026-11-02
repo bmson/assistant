@@ -1,4 +1,4 @@
-/** Separate source-only reconciliation model. Not wired to credentials, workflow or production. */
+/** Fixed known-topology reconciliation model; a separate protected command owns CLI authority. */
 import { createHash } from 'node:crypto';
 import { operationName } from './owner-web-tag-native.js';
 import {
@@ -415,7 +415,7 @@ async function bounded<T>(
     controller.abort();
   }
 }
-/** Source-only injected executor. No credential/native adapter or workflow invokes this model. */
+/** Injected executor; the dedicated protected command supplies the fixed transport and packet approval. */
 export async function executeWebTrafficReconciliation(
   plan: WebTrafficReconciliationPlan,
   io: TrafficReconciliationIO,

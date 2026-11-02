@@ -1,0 +1,85 @@
+name: Correct exact known web traffic representation
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Plan first; apply only the exact fresh manager-reviewed packet
+        type: choice
+        options: [plan, apply]
+        default: plan
+        required: true
+      reviewed_source_sha:
+        description: Exact reviewed main workflow source SHA
+        type: string
+        required: true
+      reviewed_plan_sha256:
+        description: Apply only - exact reviewed packet hash
+        type: string
+        required: false
+      reviewed_observed_at:
+        description: Apply only - exact reviewed observation time; expires after30minutes
+        type: string
+        required: false
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+jobs:
+  reconcile:
+    if: >-
+      github.ref == 'refs/heads/main' && github.run_attempt == '1' &&
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.mode == 'plan' || inputs.mode == 'apply') &&
+      github.workflow_ref == 'bmson/assistant/.github/workflows/owner-web-traffic-reconciliation.yml@refs/heads/main' &&
+      github.workflow_sha == github.sha && inputs.reviewed_source_sha == github.sha
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      OWNER_RECONCILIATION_REVIEWED_SOURCE: ${{ inputs.reviewed_source_sha }}
+      OWNER_RECONCILIATION_REVIEWED_PLAN_SHA256: ${{ inputs.reviewed_plan_sha256 }}
+      OWNER_RECONCILIATION_REVIEWED_OBSERVED_AT: ${{ inputs.reviewed_observed_at }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Verify exact reviewed protected source before authentication
+        run: pnpm exec tsx scripts/owner-web-traffic-reconciliation-command.ts --verify-source
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          project_id: ${{ env.GCP_PROJECT }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+        with:
+          version: 576.0.0
+          cache: true
+      - name: Plan fixed known3-to-2 correction without a write
+        if: inputs.mode == 'plan'
+        run: pnpm exec tsx scripts/owner-web-traffic-reconciliation-command.ts --plan
+      - name: Apply only exact fresh reviewed traffic correction and stop
+        if: inputs.mode == 'apply'
+        run: pnpm exec tsx scripts/owner-web-traffic-reconciliation-command.ts --apply
+      - name: Archive only sanitized correction receipts
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: owner-web-traffic-reconciliation-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            owner-web-traffic-reconciliation-plan.json
+            owner-web-traffic-reconciliation-result.json
+            owner-web-traffic-reconciliation-failure.json
+          if-no-files-found: ignore
+          retention-days: 14
+          overwrite: false
