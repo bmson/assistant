@@ -281,6 +281,12 @@ jobs:
             exit 1
           fi
           pnpm smoke:mobile
+      - name: Verify four BASIC5 saves with synthetic Auth.js and durable readback
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1
+        timeout-minutes: 8
+        env:
+          ASSISTANT_RUN_BASIC5_CI_ACCEPTANCE: '1'
+        run: pnpm exec tsx scripts/basic5-ci-acceptance.ts
       # The mounted chat UI is intentionally available only through the
       # loopback development preview. Keep that preview separate from the
       # shipping standalone/mobile smoke above; no provider key is supplied.
