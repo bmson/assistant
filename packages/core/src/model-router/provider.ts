@@ -2,8 +2,12 @@ import { createVertex } from '@ai-sdk/google-vertex';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { type Config, parseFirestoreEmbeddingSpace } from '@assistant/config';
+import { gatewayModelId } from '@assistant/persistence';
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
+
 import type { EmbeddingModel, JSONValue, LanguageModel } from 'ai';
+
+export { gatewayModelId } from '@assistant/persistence';
 
 export type ProviderOptions = Record<string, Record<string, JSONValue>>;
 
@@ -526,18 +530,6 @@ export interface OpenAICompatibleModelProviderOptions {
   connectionId: string;
   baseUrl: string;
   apiKey?: string;
-}
-
-/** The upstream model name after a `gw:<connectionId>:` namespace. */
-export function gatewayModelId(connectionId: string, modelId: string): string {
-  const prefix = `gw:${connectionId}:`;
-  const id = modelId.startsWith(prefix) ? modelId.slice(prefix.length) : '';
-  // Gateways use their own naming (`meta-llama/Llama-4`, `llama3.2:3b`), so
-  // only reject what can never be a model name: empty or whitespace.
-  if (!id || /\s/.test(id)) {
-    throw new Error(`Gateway ${connectionId} cannot serve model identity: ${modelId || '<empty>'}`);
-  }
-  return id;
 }
 
 /**

@@ -361,6 +361,72 @@ describe('BASIC5 bounded failed Vitest report diagnostics', () => {
     }
   });
 
+  it('retains existing browser-budget and local-fixture counters without inferring server outcome', () => {
+    const fixtureCounters = {
+      observedAt: 'save_settled',
+      browserHttpRequests: 65,
+      browserBudgetExceeded: true,
+      localEmbeddingReceived: 0,
+      localEmbeddingFinished: 0,
+    };
+    const saveTransport = {
+      operation: 'add_family_relationship',
+      routeBlocked: true,
+      requestFailedClass: 'blocked_by_client',
+    };
+    const checkpoint = {
+      schemaVersion: 1,
+      stage: 'identity_fresh_page_readback_complete',
+      authenticatedNavigationCount: 2,
+      applyCount: 1,
+      durableReadbackCount: 1,
+      freshPageReadbackCount: 1,
+      fixtureCounters,
+      saveTransport,
+    };
+    const output = (value: unknown) =>
+      observe(`BASIC5_ACCEPTANCE_CHECKPOINT ${JSON.stringify(value)}\n${JSON.stringify(report())}`);
+    const good = output(checkpoint);
+    expect(good.diagnostic.checkpoint?.fixtureCounters).toEqual(fixtureCounters);
+    expect(good.diagnostic.checkpoint?.saveTransport).toEqual(saveTransport);
+    expect(contentFreeBasic5CiVitestDiagnostic(good.diagnostic)).toEqual(good.diagnostic);
+    for (const patch of [
+      { browserHttpRequests: '65' },
+      { browserHttpRequests: -1 },
+      { browserBudgetExceeded: privateText },
+      { localEmbeddingReceived: 0, localEmbeddingFinished: 1 },
+      { rawUrl: privateText },
+    ]) {
+      const bad = output({ ...checkpoint, fixtureCounters: { ...fixtureCounters, ...patch } });
+      expect(bad.validOutput).toBe(false);
+      expect(bad.diagnostic.checkpoint).toBeNull();
+      expect(JSON.stringify(bad.diagnostic)).not.toContain(privateText);
+    }
+    for (const patch of [
+      { operation: privateText },
+      { routeBlocked: privateText },
+      { requestFailedClass: privateText },
+      { errorText: privateText },
+    ]) {
+      const bad = output({ ...checkpoint, saveTransport: { ...saveTransport, ...patch } });
+      expect(bad.validOutput).toBe(false);
+      expect(bad.diagnostic.checkpoint).toBeNull();
+      expect(JSON.stringify(bad.diagnostic)).not.toContain(privateText);
+    }
+    const unknown = output({
+      ...checkpoint,
+      fixtureCounters: {
+        ...fixtureCounters,
+        browserHttpRequests: null,
+        localEmbeddingReceived: null,
+        localEmbeddingFinished: null,
+      },
+      saveTransport: { ...saveTransport, routeBlocked: null, requestFailedClass: null },
+    });
+    expect(unknown.diagnostic.checkpoint?.fixtureCounters?.localEmbeddingReceived).toBeNull();
+    expect(unknown.diagnostic.checkpoint?.saveTransport?.routeBlocked).toBeNull();
+  });
+
   it('keeps reply-boundary diagnostics to closed membership and type flags only', () => {
     const reply = {
       step: 'response_json',

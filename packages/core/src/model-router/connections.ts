@@ -1,5 +1,6 @@
 import { type Config, parseFirestoreEmbeddingSpace } from '@assistant/config';
 import type { Records } from '@assistant/persistence';
+
 import { decryptStoredCredential } from '../mcp-secrets.js';
 import {
   createOpenAICompatibleModelProvider,
@@ -37,8 +38,7 @@ export type ModelConnectionKind = (typeof MODEL_CONNECTION_KINDS)[number];
 
 export type ModelConnectionRecord = Records['modelConnections'];
 
-/** Custom gateway connection ids: short, URL- and model-ID-safe slugs. */
-export const GATEWAY_CONNECTION_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+export { GATEWAY_CONNECTION_ID } from '@assistant/persistence';
 
 /**
  * The connection a model identity belongs to. Built-in kinds use their kind

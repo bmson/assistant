@@ -30,8 +30,26 @@ export function embeddingSpaceIdentityKey(space: EmbeddingSpace): string {
     .digest('hex');
 }
 
+/** Canonical connection slug shared by catalog admission and gateway routing. */
+export const GATEWAY_CONNECTION_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+
+/** Extract a gateway-local model without crossing its connection namespace. */
+export function gatewayModelId(connectionId: string, modelId: string): string {
+  const prefix = `gw:${connectionId}:`;
+  const id = modelId.startsWith(prefix) ? modelId.slice(prefix.length) : '';
+  // Upstream names may contain slashes and colons; empty names/whitespace and
+  // invalid connection slugs cannot name a canonical gateway route.
+  if (!GATEWAY_CONNECTION_ID.test(connectionId) || !id || /\s/.test(id))
+    throw new Error(`Gateway ${connectionId} cannot serve model identity: ${modelId || '<empty>'}`);
+  return id;
+}
+
 /** OpenRouter model IDs already include their vendor namespace. */
 export function embeddingModelId(space: EmbeddingSpace): string {
+  if (space.model.startsWith('gw:')) {
+    gatewayModelId(space.provider, space.model);
+    return space.model;
+  }
   if (space.provider === 'openrouter') return space.model;
   // Configurations may store either the provider-local model name or the
   // fully-qualified catalog ID. Preserve already-qualified IDs so a pinned

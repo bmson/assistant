@@ -172,6 +172,82 @@ function safeSaveObservation(value: unknown): Basic5SaveObservationDiagnostic | 
   } as unknown as Basic5SaveObservationDiagnostic;
 }
 
+export type Basic5FixtureCounters = {
+  observedAt: 'save_settled' | 'checkpoint';
+  browserHttpRequests: number | null;
+  browserBudgetExceeded: boolean;
+  localEmbeddingReceived: number | null;
+  localEmbeddingFinished: number | null;
+};
+export type Basic5SaveTransport = {
+  operation: Basic5SaveObservationDiagnostic['operation'];
+  routeBlocked: boolean | null;
+  requestFailedClass:
+    | 'blocked_by_client'
+    | 'aborted'
+    | 'connection'
+    | 'timeout'
+    | 'name_resolution'
+    | 'other'
+    | 'unknown'
+    | null;
+};
+function safeFixtureCounters(value: unknown): Basic5FixtureCounters | null {
+  if (
+    !record(value) ||
+    Object.keys(value).length !== 5 ||
+    !['save_settled', 'checkpoint'].includes(
+      typeof value.observedAt === 'string' ? value.observedAt : '',
+    ) ||
+    typeof value.browserBudgetExceeded !== 'boolean' ||
+    !['browserHttpRequests', 'localEmbeddingReceived', 'localEmbeddingFinished'].every(
+      (key) => Object.hasOwn(value, key) && (value[key] === null || count(value[key])),
+    ) ||
+    (typeof value.localEmbeddingReceived === 'number' &&
+      typeof value.localEmbeddingFinished === 'number' &&
+      value.localEmbeddingFinished > value.localEmbeddingReceived)
+  )
+    return null;
+  return {
+    observedAt: value.observedAt,
+    browserHttpRequests: value.browserHttpRequests,
+    browserBudgetExceeded: value.browserBudgetExceeded,
+    localEmbeddingReceived: value.localEmbeddingReceived,
+    localEmbeddingFinished: value.localEmbeddingFinished,
+  } as Basic5FixtureCounters;
+}
+function safeSaveTransport(value: unknown): Basic5SaveTransport | null {
+  if (
+    !record(value) ||
+    Object.keys(value).length !== 3 ||
+    ![
+      'update_person_identity',
+      'add_family_relationship',
+      'correct_owner_family_relationship',
+      'correct_owner_memory',
+    ].includes(typeof value.operation === 'string' ? value.operation : '') ||
+    !(value.routeBlocked === null || typeof value.routeBlocked === 'boolean') ||
+    !(
+      value.requestFailedClass === null ||
+      [
+        'blocked_by_client',
+        'aborted',
+        'connection',
+        'timeout',
+        'name_resolution',
+        'other',
+        'unknown',
+      ].includes(typeof value.requestFailedClass === 'string' ? value.requestFailedClass : '')
+    )
+  )
+    return null;
+  return {
+    operation: value.operation,
+    routeBlocked: value.routeBlocked,
+    requestFailedClass: value.requestFailedClass,
+  } as Basic5SaveTransport;
+}
+
 export type Basic5CiFixtureCheckpoint = {
   schemaVersion: 1;
   stage: string;
@@ -182,6 +258,8 @@ export type Basic5CiFixtureCheckpoint = {
   anonymousPageStatus?: number;
   anonymousLocationClass?: Basic5AnonymousLocationClass;
   saveObservation?: Basic5SaveObservationDiagnostic;
+  fixtureCounters?: Basic5FixtureCounters;
+  saveTransport?: Basic5SaveTransport;
 };
 
 function safeCheckpoint(value: unknown): Basic5CiFixtureCheckpoint | null {
@@ -189,7 +267,11 @@ function safeCheckpoint(value: unknown): Basic5CiFixtureCheckpoint | null {
     !record(value) ||
     Object.keys(value).length !==
       (Object.hasOwn(value, 'anonymousPageStatus') ? 8 : 6) +
-        (Object.hasOwn(value, 'saveObservation') ? 1 : 0) ||
+        (Object.hasOwn(value, 'saveObservation') ? 1 : 0) +
+        (Object.hasOwn(value, 'fixtureCounters') ? 1 : 0) +
+        (Object.hasOwn(value, 'saveTransport') ? 1 : 0) ||
+    (Object.hasOwn(value, 'fixtureCounters') && !safeFixtureCounters(value.fixtureCounters)) ||
+    (Object.hasOwn(value, 'saveTransport') && !safeSaveTransport(value.saveTransport)) ||
     (Object.hasOwn(value, 'saveObservation') && !safeSaveObservation(value.saveObservation)) ||
     Object.hasOwn(value, 'anonymousPageStatus') !==
       Object.hasOwn(value, 'anonymousLocationClass') ||
@@ -218,6 +300,12 @@ function safeCheckpoint(value: unknown): Basic5CiFixtureCheckpoint | null {
     applyCount: Number(value.applyCount),
     durableReadbackCount: Number(value.durableReadbackCount),
     freshPageReadbackCount: Number(value.freshPageReadbackCount),
+    ...(Object.hasOwn(value, 'fixtureCounters')
+      ? { fixtureCounters: safeFixtureCounters(value.fixtureCounters) as Basic5FixtureCounters }
+      : {}),
+    ...(Object.hasOwn(value, 'saveTransport')
+      ? { saveTransport: safeSaveTransport(value.saveTransport) as Basic5SaveTransport }
+      : {}),
     ...(Object.hasOwn(value, 'saveObservation')
       ? {
           saveObservation: safeSaveObservation(

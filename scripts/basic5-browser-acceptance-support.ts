@@ -22,6 +22,54 @@ const ANONYMOUS_RESPONSE_TEXT_LIMIT = 2_048;
 const ANONYMOUS_PROTECTED_MARKER_LIMIT = 32;
 const ANONYMOUS_SIGNIN_PATH = '/api/auth/signin';
 
+export type Basic5RequestFailureClass =
+  | 'blocked_by_client'
+  | 'aborted'
+  | 'connection'
+  | 'timeout'
+  | 'name_resolution'
+  | 'other'
+  | 'unknown';
+
+/** Return a closed, content-free class for Chromium's canonical net error tokens. */
+export function classifyBasic5RequestFailure(errorText: unknown): Basic5RequestFailureClass {
+  if (typeof errorText !== 'string') return 'unknown';
+  if (errorText.length > 512) return 'other';
+  const tokens = errorText.match(/\bnet::ERR_[A-Z0-9_]+\b/g) ?? [];
+  if (tokens.length !== 1) return 'other';
+  const token = tokens[0];
+  switch (token) {
+    case 'net::ERR_BLOCKED_BY_CLIENT':
+      return 'blocked_by_client';
+    case 'net::ERR_ABORTED':
+      return 'aborted';
+    case 'net::ERR_CONNECTION_ABORTED':
+    case 'net::ERR_CONNECTION_CLOSED':
+    case 'net::ERR_CONNECTION_FAILED':
+    case 'net::ERR_CONNECTION_REFUSED':
+    case 'net::ERR_CONNECTION_RESET':
+    case 'net::ERR_CONNECTION_TIMED_OUT':
+      return 'connection';
+    case 'net::ERR_TIMED_OUT':
+      return 'timeout';
+    case 'net::ERR_NAME_NOT_RESOLVED':
+    case 'net::ERR_DNS_TIMED_OUT':
+      return 'name_resolution';
+    default:
+      return 'other';
+  }
+}
+
+/** Keep diagnostic counts as observed; invalid, oversized, or fractional values stay unknown. */
+export function boundedBasic5ObservedCount(value: unknown): number | null {
+  return typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= 1_000_000
+    ? value
+    : null;
+}
+
 function anonymousResponseError(): never {
   throw new Error('BASIC5 anonymous person-page response did not satisfy the auth boundary');
 }
