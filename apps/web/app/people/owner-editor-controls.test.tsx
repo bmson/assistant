@@ -1,3 +1,10 @@
+import {
+  Children,
+  type ComponentProps,
+  isValidElement,
+  type ReactElement,
+  type ReactNode,
+} from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -30,6 +37,28 @@ const base: OwnerEditorControlsProps = {
   },
   createGrant,
 };
+
+function actualSelectorNodes(node: ReactNode): ReactElement<ComponentProps<'select'>>[] {
+  const selects: ReactElement<ComponentProps<'select'>>[] = [];
+  const visit = (children: ReactNode) => {
+    Children.forEach(children, (child) => {
+      if (!isValidElement<{ children?: ReactNode }>(child)) return;
+      if (child.type === 'select') selects.push(child as ReactElement<ComponentProps<'select'>>);
+      else visit(child.props.children);
+    });
+  };
+  visit(node);
+  return selects;
+}
+
+function actualSelectorOptions(select: ReactElement<ComponentProps<'select'>>) {
+  return Children.toArray(select.props.children)
+    .filter(
+      (child): child is ReactElement<ComponentProps<'option'>> =>
+        isValidElement<ComponentProps<'option'>>(child) && child.type === 'option',
+    )
+    .map((option) => ({ value: option.props.value, label: option.props.children }));
+}
 describe('removal dialog actions distinguish close from cancellation', () => {
   const noop = () => {};
   it('offers Cancel and one destructive submit only before dispatch', () => {
@@ -195,6 +224,68 @@ describe('actual selector and memory-only draft lifecycle regressions', () => {
       expect(selects[swapped ? 0 : 1]).not.toContain('Sam · 22222222');
     }
   });
+  it.each([false, true])(
+    'keeps the renamed anchor selected and changes only the editable family endpoint (swapped=%s; real tree/handler, not mounted DOM)',
+    (swapped) => {
+      const people = [
+        { contactId: contact, name: 'Alex Rivera Updated', revision: 'c'.repeat(64) },
+        { contactId: other, name: 'Robin Rivera', revision: 'b'.repeat(64) },
+      ];
+      let draft = {
+        subject: swapped ? '' : contact,
+        object: swapped ? contact : '',
+        predicate: 'sibling_of',
+      };
+      const changed = vi.fn((endpoint: 'subject' | 'object', contactId: string) => {
+        draft = { ...draft, [endpoint]: contactId };
+      });
+      // Exercise the exported real control and its handler with controlled props.
+      // There is no fake DOM, mounted dialog, browser actionability or hydration claim.
+      const renderSelectors = () =>
+        actualSelectorNodes(
+          OwnerEditorPeopleSelectors({
+            idPrefix: 'fresh-family',
+            draft,
+            people,
+            anchorPosition: swapped ? 'object' : 'subject',
+            onChange: changed,
+          }),
+        );
+      const before = renderSelectors();
+      const anchor = before[swapped ? 1 : 0];
+      const editable = before[swapped ? 0 : 1];
+      if (!anchor || !editable) throw Error('Expected the real pair of person selects');
+      expect(anchor.props.id).toBe(`fresh-family-${swapped ? 'object' : 'subject'}`);
+      expect(anchor.props.disabled).toBe(true);
+      expect(anchor.props.value).toBe(contact);
+      expect(actualSelectorOptions(anchor)).toContainEqual({
+        value: contact,
+        label: 'Alex Rivera Updated',
+      });
+      expect(editable.props.disabled).toBe(false);
+      expect(editable.props.value).toBe('');
+      expect(actualSelectorOptions(editable)).toEqual([
+        { value: '', label: 'Choose an existing named person' },
+        { value: other, label: 'Robin Rivera' },
+      ]);
+
+      // The disabled anchor is asserted, never driven through its handler.
+      editable.props.onChange?.({
+        target: { value: other },
+      } as Parameters<NonNullable<ComponentProps<'select'>['onChange']>>[0]);
+
+      expect(changed).toHaveBeenCalledExactlyOnceWith(swapped ? 'subject' : 'object', other);
+      expect(draft).toEqual({
+        subject: swapped ? other : contact,
+        object: swapped ? contact : other,
+        predicate: 'sibling_of',
+      });
+      expect(draft.subject).not.toBe(draft.object);
+      const after = renderSelectors();
+      expect(after[swapped ? 1 : 0]?.props).toMatchObject({ disabled: true, value: contact });
+      expect(after[swapped ? 0 : 1]?.props).toMatchObject({ disabled: false, value: other });
+    },
+  );
   it('uses names by default and only adds an ID prefix to disambiguate duplicate names', () => {
     const html = renderToStaticMarkup(
       <OwnerEditorPeopleSelectors
