@@ -45,7 +45,7 @@ export function protectedCommandReason(error: unknown): ProtectedCommandReason {
   }
   return 'sdk_command_failed';
 }
-export async function protectedWebTagCloud(
+export async function protectedWebTagCredential(
   mark: (stage: ProtectedCloudStage) => void = () => undefined,
 ) {
   mark('cloud_wif_validation');
@@ -98,5 +98,11 @@ export async function protectedWebTagCloud(
   mark('cloud_access_token');
   const token = (await command(['auth', 'print-access-token', '--quiet'])).trim();
   mark('cloud_native_client');
-  return nativeRetirementClient(token);
+  return token;
+}
+/** Existing retirement entrypoint retains its exact single-target transport. */
+export async function protectedWebTagCloud(
+  mark: (stage: ProtectedCloudStage) => void = () => undefined,
+) {
+  return nativeRetirementClient(await protectedWebTagCredential(mark));
 }
