@@ -1,6 +1,7 @@
 /** One-shot CI controller for the existing four-save BASIC5 browser case. */
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
+import { lstatSync, realpathSync } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -571,6 +572,7 @@ type ProcessProof = {
 };
 
 export type Basic5CiUtilityChildTestDriver = {
+  repositoryRoot?: string;
   spawn: typeof spawn;
   metadataExec?: MetadataExecFile;
   proof: ProcessProof;
@@ -2258,6 +2260,7 @@ export class RealBasic5CiOps implements Basic5CiOps {
   constructor(utilityChildTestDriver?: Basic5CiUtilityChildTestDriver) {
     this.utilityChildTestDriver = utilityChildTestDriver;
     if (utilityChildTestDriver) {
+      this.repoRoot = utilityChildTestDriver.repositoryRoot ?? '';
       this.started = utilityChildTestDriver.now();
       this.proof = utilityChildTestDriver.proof;
     }
@@ -2585,13 +2588,24 @@ export class RealBasic5CiOps implements Basic5CiOps {
     assertNotAborted(signal, label);
     const proof = this.proof;
     if (!proof) throw new Basic5CiHold('linux_process_proof_unavailable');
+    const cwd = label === 'migrate' ? join(this.repoRoot, 'packages/db') : this.repoRoot;
+    if (label === 'migrate') {
+      try {
+        if (realpathSync(cwd) !== cwd || !lstatSync(cwd).isDirectory())
+          throw new Basic5CiHold('migration_working_directory_unverified');
+      } catch {
+        throw new Basic5CiHold('migration_working_directory_unverified');
+      }
+      this.assertDeadline(deadline, label);
+      assertNotAborted(signal, label);
+    }
     let child: ReturnType<typeof spawn>;
     try {
       const spawnChild = this.utilityChildTestDriver
         ? this.utilityChildTestDriver.spawn.bind(this.utilityChildTestDriver)
         : spawn;
       child = spawnChild(command, args, {
-        cwd: this.repoRoot,
+        cwd,
         env,
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe'],
