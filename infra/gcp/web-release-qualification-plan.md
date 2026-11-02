@@ -87,7 +87,8 @@ HOLD, mutationAuthorized:false and runtimeEligible:false.
 ## One bounded hosted READ-ONLY dispatch, only after that authorization
 
 Checkout and pinned package setup precede the application probe; they do not obtain cloud
-credentials. Dependency install disables lifecycle scripts. Their standard source/package
+credentials. Dependency install disables lifecycle scripts and the qualifier disables package-cache
+publication so its only declared external output is the redacted audit artifact. Their standard source/package
 transport and the separately declared one-report upload are outside the application counter.
 All identity, provider and readback transport initiated by the probe is inside it.
 

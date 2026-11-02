@@ -112,6 +112,7 @@ describe('default-off workflow isolation for the read-only qualification', () =>
       'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
       'actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808',
     ]);
+    expect(job).not.toContain('cache:');
     expect(job).toContain('persist-credentials: false');
     expect(job).toContain('ref: ${{ github.workflow_sha }}');
     expect(job).toContain('pnpm install --frozen-lockfile --ignore-scripts');
