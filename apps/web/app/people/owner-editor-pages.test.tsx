@@ -273,6 +273,23 @@ describe('actual page + real issuance builder composition, named reader/fence po
     expect(html).not.toContain('Edit details');
   });
   it.each(['postgres', 'firestore'] as const)(
+    '%s explains unavailable detail editing when the bounded snapshot only permits person creation',
+    async (driver) => {
+      ports.driver = driver;
+      const createOnlySnapshot = { ...snapshot, identity: null, people: [] };
+      ports.pgEditor.mockResolvedValue({ context, snapshot: createOnlySnapshot });
+      ports.fsSnapshot.mockResolvedValue(createOnlySnapshot);
+      const html = renderToStaticMarkup(await dossier());
+      expect(html).toContain(contact.name);
+      expect(html).toContain('Add person');
+      expect(html).not.toContain('Edit details');
+      expect(html).not.toContain('Add family relationship');
+      expect(html).toContain(
+        'Editing is temporarily unavailable. You can still browse this saved information.',
+      );
+    },
+  );
+  it.each(['postgres', 'firestore'] as const)(
     '%s does not adopt a newer native revision when the displayed values are identical',
     async (driver) => {
       ports.driver = driver;
