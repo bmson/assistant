@@ -27,6 +27,25 @@ export interface Basic5SaveObservationDiagnostic {
   pageClosed: boolean;
   errorStage: Basic5SaveObservationErrorStage;
   errorCategory: Basic5SaveObservationErrorCategory;
+  reply?: Basic5ReplyObservation;
+}
+
+export type Basic5ReplyObservationStep = 'response_json' | 'reply_decode' | 'reply_decoded';
+
+export type Basic5ReplyContentTypeClass = 'json' | 'html' | 'other' | 'missing' | 'unknown';
+
+export interface Basic5ReplyObservation {
+  step: Basic5ReplyObservationStep;
+  contentTypeClass: Basic5ReplyContentTypeClass;
+  decoderCallable: boolean;
+  jsonReadCompleted: boolean;
+  topLevelObject: boolean | null;
+  wireKeysAllowed: boolean | null;
+  receiptKeysPresent: boolean | null;
+  versionTypeNumber: boolean | null;
+  versionOne: boolean | null;
+  wireTypesValid: boolean | null;
+  decoderAccepted: boolean | null;
 }
 
 export interface Basic5SaveObservationPage<TResponse> {
@@ -56,6 +75,179 @@ const BASIC5_SAVE_COMMANDS = new Set<Basic5SaveObservationDiagnostic['operation'
   'correct_owner_family_relationship',
   'correct_owner_memory',
 ]);
+const BASIC5_REPLY_WIRE_KEYS = new Set([
+  'version',
+  'authority',
+  'command',
+  'operationId',
+  'requestHash',
+  'statusVersion',
+  'outcome',
+  'ids',
+  'revision',
+  'refreshPending',
+  'reason',
+  'fieldErrors',
+  'originalOperationTerminal',
+  'receiptBindingToken',
+]);
+const BASIC5_RECEIPT_KEYS = [
+  'version',
+  'authority',
+  'command',
+  'operationId',
+  'requestHash',
+  'statusVersion',
+  'outcome',
+  'ids',
+  'revision',
+] as const;
+
+function replyContentTypeClass(headers: unknown): Basic5ReplyContentTypeClass {
+  if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return 'unknown';
+  const entries = Object.entries(headers as Record<string, unknown>);
+  if (entries.length > 256) return 'other';
+  const raw = entries.find(([key]) => key.toLowerCase() === 'content-type')?.[1];
+  if (raw === undefined) return 'missing';
+  if (typeof raw !== 'string' || raw.length > 256) return 'other';
+  const mediaType = raw.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+  if (
+    mediaType === 'application/json' ||
+    (mediaType.startsWith('application/') && mediaType.endsWith('+json'))
+  )
+    return 'json';
+  if (mediaType === 'text/html') return 'html';
+  return 'other';
+}
+
+function observedReplyShape(
+  value: unknown,
+): Pick<
+  Basic5ReplyObservation,
+  | 'topLevelObject'
+  | 'wireKeysAllowed'
+  | 'receiptKeysPresent'
+  | 'versionTypeNumber'
+  | 'versionOne'
+  | 'wireTypesValid'
+> {
+  const topLevelObject = typeof value === 'object' && value !== null && !Array.isArray(value);
+  if (!topLevelObject)
+    return {
+      topLevelObject: false,
+      wireKeysAllowed: null,
+      receiptKeysPresent: null,
+      versionTypeNumber: null,
+      versionOne: null,
+      wireTypesValid: null,
+    };
+
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  const has = (key: string) => Object.hasOwn(record, key);
+  const versionTypeNumber = typeof record.version === 'number';
+  const baseTypes: [string, (field: unknown) => boolean][] = [
+    ['version', (field) => typeof field === 'number'],
+    ['authority', (field) => typeof field === 'string'],
+    ['command', (field) => typeof field === 'string' || field === null],
+    ['operationId', (field) => typeof field === 'string' || field === null],
+    ['requestHash', (field) => typeof field === 'string'],
+    ['statusVersion', (field) => typeof field === 'number'],
+    ['outcome', (field) => typeof field === 'string'],
+    ['ids', (field) => typeof field === 'object' && field !== null && !Array.isArray(field)],
+    ['revision', (field) => typeof field === 'string'],
+    ['refreshPending', (field) => typeof field === 'boolean'],
+    ['reason', (field) => typeof field === 'string'],
+    [
+      'fieldErrors',
+      (field) => typeof field === 'object' && field !== null && !Array.isArray(field),
+    ],
+    ['originalOperationTerminal', (field) => typeof field === 'boolean'],
+    ['receiptBindingToken', (field) => typeof field === 'string'],
+  ];
+
+  return {
+    topLevelObject: true,
+    wireKeysAllowed:
+      keys.length <= BASIC5_REPLY_WIRE_KEYS.size &&
+      keys.every((key) => BASIC5_REPLY_WIRE_KEYS.has(key)),
+    receiptKeysPresent: BASIC5_RECEIPT_KEYS.every(has),
+    versionTypeNumber,
+    versionOne: versionTypeNumber ? record.version === 1 : null,
+    wireTypesValid: baseTypes.every(([key, accepts]) => !has(key) || accepts(record[key])),
+  };
+}
+
+/** Read and strictly decode one untrusted HTTP JSON body without exposing its contents. */
+export async function decodeBasic5ObservedReply<T>(input: {
+  response: {
+    headers(): Record<string, string>;
+    json(): Promise<unknown>;
+  };
+  decode: unknown;
+  onDiagnostic: (diagnostic: Basic5ReplyObservation) => void;
+}): Promise<T | null> {
+  const decoderCallable = typeof input.decode === 'function';
+  let contentTypeClass: Basic5ReplyContentTypeClass = 'unknown';
+  try {
+    contentTypeClass = replyContentTypeClass(input.response.headers());
+  } catch {
+    // Header inspection is diagnostic only; the single body read remains authoritative.
+  }
+  let diagnostic: Basic5ReplyObservation = {
+    step: 'response_json',
+    contentTypeClass,
+    decoderCallable,
+    jsonReadCompleted: false,
+    topLevelObject: null,
+    wireKeysAllowed: null,
+    receiptKeysPresent: null,
+    versionTypeNumber: null,
+    versionOne: null,
+    wireTypesValid: null,
+    decoderAccepted: null,
+  };
+  const publish = () => {
+    try {
+      input.onDiagnostic(diagnostic);
+    } catch {
+      // Diagnostic callbacks are observational and cannot replace the body result.
+    }
+  };
+  publish();
+
+  let raw: unknown;
+  try {
+    raw = await input.response.json();
+  } catch (error) {
+    publish();
+    throw error;
+  }
+  diagnostic = {
+    ...diagnostic,
+    step: 'reply_decode',
+    jsonReadCompleted: true,
+    ...observedReplyShape(raw),
+  };
+  publish();
+
+  if (!decoderCallable) throw new Error('BASIC5 observed reply decoder is unavailable');
+  let decoded: unknown;
+  try {
+    decoded = await (input.decode as (value: unknown) => T | null | Promise<T | null>)(raw);
+  } catch (error) {
+    publish();
+    throw error;
+  }
+  const decoderAccepted = decoded !== null && decoded !== undefined;
+  diagnostic = {
+    ...diagnostic,
+    step: decoderAccepted ? 'reply_decoded' : 'reply_decode',
+    decoderAccepted,
+  };
+  publish();
+  return decoderAccepted ? (decoded as T) : null;
+}
 
 function timeoutError(): Error {
   return new Error('BASIC5 save observation timed out');

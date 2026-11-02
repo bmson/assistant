@@ -361,6 +361,73 @@ describe('BASIC5 bounded failed Vitest report diagnostics', () => {
     }
   });
 
+  it('keeps reply-boundary diagnostics to closed membership and type flags only', () => {
+    const reply = {
+      step: 'response_json',
+      contentTypeClass: 'html',
+      decoderCallable: true,
+      jsonReadCompleted: false,
+      topLevelObject: null,
+      wireKeysAllowed: null,
+      receiptKeysPresent: null,
+      versionTypeNumber: null,
+      versionOne: null,
+      wireTypesValid: null,
+      decoderAccepted: null,
+    };
+    const saveObservation = {
+      operation: 'update_person_identity',
+      phase: 'parse',
+      totalMatchingPostCount: 1,
+      commandMatched: true,
+      httpStatus: 200,
+      nativeValid: null,
+      invalidControlPresent: null,
+      alertPresent: null,
+      saveEnabled: null,
+      pageClosed: false,
+      errorStage: 'parse',
+      errorCategory: 'other',
+      reply,
+    };
+    const checkpoint = {
+      schemaVersion: 1,
+      stage: 'authenticated_navigation_complete',
+      authenticatedNavigationCount: 1,
+      applyCount: 0,
+      durableReadbackCount: 0,
+      freshPageReadbackCount: 0,
+      saveObservation,
+    };
+    const output = (value: unknown) =>
+      observe(`BASIC5_ACCEPTANCE_CHECKPOINT ${JSON.stringify(value)}\n${JSON.stringify(report())}`);
+    const good = output(checkpoint);
+    expect(good.diagnostic.checkpoint?.saveObservation?.reply).toEqual(reply);
+    expect(contentFreeBasic5CiVitestDiagnostic(good.diagnostic)).toEqual(good.diagnostic);
+    for (const patch of [
+      { step: privateText },
+      { contentTypeClass: privateText },
+      { decoderCallable: privateText },
+      { topLevelObject: privateText },
+      { rawBody: privateText },
+      { decoderAccepted: true },
+      { jsonReadCompleted: true },
+    ]) {
+      const bad = output({
+        ...checkpoint,
+        saveObservation: { ...saveObservation, reply: { ...reply, ...patch } },
+      });
+      expect(bad.validOutput).toBe(false);
+      expect(bad.diagnostic.checkpoint).toBeNull();
+      expect(JSON.stringify(bad.diagnostic)).not.toContain(privateText);
+    }
+    const unknown = output({
+      ...checkpoint,
+      saveObservation: { ...saveObservation, reply: { ...reply, contentTypeClass: 'unknown' } },
+    });
+    expect(unknown.diagnostic.checkpoint?.saveObservation?.reply?.contentTypeClass).toBe('unknown');
+  });
+
   it('permits only the reviewed save helper as an additional first source frame', () => {
     const result = observe(
       report({
