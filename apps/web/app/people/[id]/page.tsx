@@ -9,7 +9,6 @@ import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import {
   assertFirestoreInstallationOwner,
   assertPrivacyErasureFenceUnchanged,
-  createInstallationStore,
   firestoreOwnerEditorViewSnapshot,
   readFirestoreOwnerEditorIssuanceContext,
   readPrivacyErasureFence,
@@ -34,7 +33,11 @@ import { memoryMapReturnTo } from '@/lib/memory-editor-context';
 import { memoryNoteHref } from '@/lib/memory-note-context';
 import { ownerEditorAvailability } from '@/lib/owner-editor-availability';
 import { buildOwnerEditorView } from '@/lib/owner-editor-view';
-import { readPostgresOwnerEditorViewInputs, withPostgresMemoryBrowseRead } from '@/lib/server';
+import {
+  getFirestoreInstallationStore,
+  readPostgresOwnerEditorViewInputs,
+  withPostgresMemoryBrowseRead,
+} from '@/lib/server';
 import {
   Badge,
   EmptyState,
@@ -145,52 +148,44 @@ async function loadPersonDossier(
     });
   const problems = validateAgentPersistenceConfig(config);
   if (problems.length) throw new Error(problems.join('; '));
-  const store = createInstallationStore({
-    projectId: config.GCP_PROJECT,
-    installationId: config.ASSISTANT_WORKSPACE_ID,
-    databaseId: config.FIRESTORE_DATABASE_ID,
+  const store = getFirestoreInstallationStore();
+  await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
+  const fence = await readPrivacyErasureFence(store, config.FIRESTORE_AGENT_ID);
+  const data = await getFirestorePersonDossier(store, config.FIRESTORE_AGENT_ID, id, {
+    factLimit: FACT_LIMIT,
+    now,
+    includeEditingSuggestions: false,
   });
-  try {
-    await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
-    const fence = await readPrivacyErasureFence(store, config.FIRESTORE_AGENT_ID);
-    const data = await getFirestorePersonDossier(store, config.FIRESTORE_AGENT_ID, id, {
-      factLimit: FACT_LIMIT,
-      now,
-      includeEditingSuggestions: false,
-    });
-    let editor: OwnerEditorControlsProps | null = null;
-    if (data && enabled && formSessionScope && config.AUTH_SECRET) {
-      try {
-        const context = await readFirestoreOwnerEditorIssuanceContext(
+  let editor: OwnerEditorControlsProps | null = null;
+  if (data && enabled && formSessionScope && config.AUTH_SECRET) {
+    try {
+      const context = await readFirestoreOwnerEditorIssuanceContext(
+        store,
+        config.FIRESTORE_AGENT_ID,
+      );
+      if (context) {
+        const snapshot = await firestoreOwnerEditorViewSnapshot(
           store,
           config.FIRESTORE_AGENT_ID,
+          editorInput(data),
         );
-        if (context) {
-          const snapshot = await firestoreOwnerEditorViewSnapshot(
-            store,
-            config.FIRESTORE_AGENT_ID,
-            editorInput(data),
-          );
-          editor = buildOwnerEditorView({
-            enabled,
-            context,
-            snapshot,
-            formSessionScope,
-            secret: config.AUTH_SECRET,
-            displayedContact: data.profile.contact,
-            displayedRelationships: data.relations,
-          });
-        }
-      } catch {
-        /* Unsupported/malformed/capped editor snapshot stays read-only. */
+        editor = buildOwnerEditorView({
+          enabled,
+          context,
+          snapshot,
+          formSessionScope,
+          secret: config.AUTH_SECRET,
+          displayedContact: data.profile.contact,
+          displayedRelationships: data.relations,
+        });
       }
+    } catch {
+      /* Unsupported/malformed/capped editor snapshot stays read-only. */
     }
-    await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
-    await assertPrivacyErasureFenceUnchanged(store, config.FIRESTORE_AGENT_ID, fence);
-    return { data, editor };
-  } finally {
-    await store.db.terminate();
   }
+  await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
+  await assertPrivacyErasureFenceUnchanged(store, config.FIRESTORE_AGENT_ID, fence);
+  return { data, editor };
 }
 
 export default async function PersonPage({
@@ -277,11 +272,12 @@ export default async function PersonPage({
   const selectedConnectionId = (selectedRelation ?? selectedNonPersonConnection)?.id.toLowerCase();
   const unavailableConnectionSelection =
     rawConnectionId !== undefined && !selectedRelation && !selectedNonPersonConnection;
+  const detailEditingAvailable = Boolean(
+    editor?.identity?.grant || editor?.family?.grant || editor?.corrections?.length,
+  );
   const editorAvailability = ownerEditorAvailability({
     formSessionScope: session.formSessionScope,
-    editorAvailable: Boolean(
-      editor?.identity?.grant || editor?.family?.grant || editor?.corrections?.length,
-    ),
+    editorAvailable: detailEditingAvailable,
     currentPath: `/people/${id}`,
   });
   const lastContact = lastContactLabel(dossier.lastContactAt, now);
@@ -343,7 +339,7 @@ export default async function PersonPage({
           <OwnerEditorContextTrigger entry="identity" />
           <OwnerEditorContextTrigger entry="create" />
         </div>
-        {!editor && contact.trust !== 'owner' ? (
+        {!detailEditingAvailable && contact.trust !== 'owner' ? (
           <p className="mt-3 text-sm text-muted">
             {editorAvailability.kind === 'available'
               ? 'Changes are unavailable in this view.'
