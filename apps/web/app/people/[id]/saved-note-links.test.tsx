@@ -12,6 +12,7 @@ const ports = vi.hoisted(() => ({
   fsFence: vi.fn(),
   fsAfter: vi.fn(),
   fsDossier: vi.fn(),
+  getStore: vi.fn(),
   terminate: vi.fn(),
 }));
 
@@ -42,16 +43,13 @@ vi.mock('@assistant/application/people', async (original) => ({
   getPersonDossier: ports.dossier,
 }));
 vi.mock('@/lib/server', () => ({
+  getFirestoreInstallationStore: ports.getStore,
   withPostgresMemoryBrowseRead: ports.pgBrowse,
   readPostgresOwnerEditorViewInputs: ports.pgEditor,
 }));
 vi.mock('@/lib/firestore-people', () => ({ getFirestorePersonDossier: ports.fsDossier }));
 vi.mock('@assistant/firestore', async (original) => ({
   ...(await original<Record<string, unknown>>()),
-  createInstallationStore: () => ({
-    fixture: 'database-free-store',
-    db: { terminate: ports.terminate },
-  }),
   assertFirestoreInstallationOwner: ports.fsOwner,
   readPrivacyErasureFence: ports.fsFence,
   assertPrivacyErasureFenceUnchanged: ports.fsAfter,
@@ -60,6 +58,10 @@ vi.mock('@assistant/firestore', async (original) => ({
 import PersonPage from './page';
 
 const synthetic = createProductVisualData(false).dossier;
+const firestoreStore = Object.freeze({
+  fixture: 'database-free-firestore-transport',
+  db: Object.freeze({ terminate: ports.terminate }),
+});
 const personId = synthetic.profile.contact.id;
 const returnTo = `/people/${personId}`;
 const noteId = synthetic.profile.facts[0]?.id;
@@ -67,6 +69,7 @@ const noteId = synthetic.profile.facts[0]?.id;
 beforeEach(() => {
   vi.resetAllMocks();
   ports.driver = 'postgres';
+  ports.getStore.mockReturnValue(firestoreStore);
   ports.owner.mockResolvedValue({ user: { email: 'offline@example.test' } });
   ports.pgBrowse.mockImplementation(async (read) => read({ fixture: 'fake-postgres-reader' }));
   ports.dossier.mockResolvedValue(synthetic);
@@ -111,7 +114,8 @@ describe('real PersonPage saved-note destinations with fake storage ports', () =
         expect(ports.fsFence).toHaveBeenCalledOnce();
         expect(ports.fsAfter).toHaveBeenCalledOnce();
         expect(ports.dossier).not.toHaveBeenCalled();
-        expect(ports.terminate).toHaveBeenCalledOnce();
+        expect(ports.getStore).toHaveBeenCalledOnce();
+        expect(ports.terminate).not.toHaveBeenCalled();
       }
     },
   );

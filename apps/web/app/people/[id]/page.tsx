@@ -9,7 +9,6 @@ import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import {
   assertFirestoreInstallationOwner,
   assertPrivacyErasureFenceUnchanged,
-  createInstallationStore,
   firestoreOwnerEditorViewSnapshot,
   readFirestoreOwnerEditorIssuanceContext,
   readPrivacyErasureFence,
@@ -34,7 +33,11 @@ import { memoryMapReturnTo } from '@/lib/memory-editor-context';
 import { memoryNoteHref } from '@/lib/memory-note-context';
 import { ownerEditorAvailability } from '@/lib/owner-editor-availability';
 import { buildOwnerEditorView } from '@/lib/owner-editor-view';
-import { readPostgresOwnerEditorViewInputs, withPostgresMemoryBrowseRead } from '@/lib/server';
+import {
+  getFirestoreInstallationStore,
+  readPostgresOwnerEditorViewInputs,
+  withPostgresMemoryBrowseRead,
+} from '@/lib/server';
 import {
   Badge,
   EmptyState,
@@ -145,52 +148,44 @@ async function loadPersonDossier(
     });
   const problems = validateAgentPersistenceConfig(config);
   if (problems.length) throw new Error(problems.join('; '));
-  const store = createInstallationStore({
-    projectId: config.GCP_PROJECT,
-    installationId: config.ASSISTANT_WORKSPACE_ID,
-    databaseId: config.FIRESTORE_DATABASE_ID,
+  const store = getFirestoreInstallationStore();
+  await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
+  const fence = await readPrivacyErasureFence(store, config.FIRESTORE_AGENT_ID);
+  const data = await getFirestorePersonDossier(store, config.FIRESTORE_AGENT_ID, id, {
+    factLimit: FACT_LIMIT,
+    now,
+    includeEditingSuggestions: false,
   });
-  try {
-    await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
-    const fence = await readPrivacyErasureFence(store, config.FIRESTORE_AGENT_ID);
-    const data = await getFirestorePersonDossier(store, config.FIRESTORE_AGENT_ID, id, {
-      factLimit: FACT_LIMIT,
-      now,
-      includeEditingSuggestions: false,
-    });
-    let editor: OwnerEditorControlsProps | null = null;
-    if (data && enabled && formSessionScope && config.AUTH_SECRET) {
-      try {
-        const context = await readFirestoreOwnerEditorIssuanceContext(
+  let editor: OwnerEditorControlsProps | null = null;
+  if (data && enabled && formSessionScope && config.AUTH_SECRET) {
+    try {
+      const context = await readFirestoreOwnerEditorIssuanceContext(
+        store,
+        config.FIRESTORE_AGENT_ID,
+      );
+      if (context) {
+        const snapshot = await firestoreOwnerEditorViewSnapshot(
           store,
           config.FIRESTORE_AGENT_ID,
+          editorInput(data),
         );
-        if (context) {
-          const snapshot = await firestoreOwnerEditorViewSnapshot(
-            store,
-            config.FIRESTORE_AGENT_ID,
-            editorInput(data),
-          );
-          editor = buildOwnerEditorView({
-            enabled,
-            context,
-            snapshot,
-            formSessionScope,
-            secret: config.AUTH_SECRET,
-            displayedContact: data.profile.contact,
-            displayedRelationships: data.relations,
-          });
-        }
-      } catch {
-        /* Unsupported/malformed/capped editor snapshot stays read-only. */
+        editor = buildOwnerEditorView({
+          enabled,
+          context,
+          snapshot,
+          formSessionScope,
+          secret: config.AUTH_SECRET,
+          displayedContact: data.profile.contact,
+          displayedRelationships: data.relations,
+        });
       }
+    } catch {
+      /* Unsupported/malformed/capped editor snapshot stays read-only. */
     }
-    await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
-    await assertPrivacyErasureFenceUnchanged(store, config.FIRESTORE_AGENT_ID, fence);
-    return { data, editor };
-  } finally {
-    await store.db.terminate();
   }
+  await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
+  await assertPrivacyErasureFenceUnchanged(store, config.FIRESTORE_AGENT_ID, fence);
+  return { data, editor };
 }
 
 export default async function PersonPage({

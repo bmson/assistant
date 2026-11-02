@@ -217,6 +217,8 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
       store.db.recursiveDelete(store.root),
       foreignStore.db.recursiveDelete(foreignStore.root),
     ]);
+    const { getFirestoreInstallationStore } = await import('@/lib/server');
+    await getFirestoreInstallationStore().db.terminate();
     await Promise.all([store.db.terminate(), foreignStore.db.terminate()]);
     vi.unstubAllEnvs();
     resetConfigForTest();
