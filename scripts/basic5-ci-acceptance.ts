@@ -16,6 +16,14 @@ const PREPARE_END_SECONDS = 130;
 const CAPTURE_BYTES = 64 * 1024;
 const PHASE_SETTLEMENT_GRACE_MS = 5_000;
 const EVIDENCE_PREFIX = 'BASIC5_ACCEPTANCE_EVIDENCE ';
+const ACCEPTANCE_CONTRACT = 'basic5-ci-standalone-in-checkout-v2';
+const CLAIM_SCOPE = {
+  runtimeIdentity: 'bounded standalone artifact observed in CI checkout',
+  behavior: 'one four-save BASIC5 browser case',
+  ancestorWorkspaceDependencies: 'unqualified',
+  unexercisedRoutes: 'unqualified',
+  containerIndependence: 'unqualified',
+} as const;
 const ACTIONS = [
   'update_person_identity',
   'add_family_relationship',
@@ -98,25 +106,39 @@ export type Basic5CiPreflight = {
   imageVersion: string;
   chromeVersion: string;
   postgresServerVersionNum: number;
-  buildId: string;
-  serverSha256: string;
-  closureSha256: string;
-  closureEntryCount: number;
-  closureFileCount: number;
-  closureSymlinkCount: number;
-  closureFileBytes: number;
-  staticPresent: boolean;
-  staticFileCount: number;
-  publicPresent: boolean;
-  publicFileCount: number;
-  traceManifestCount: number;
-  traceManifestBytes: number;
-  traceManifestSha256: string | null;
-  traceStatus: string;
-  traceReferenceCount: number;
-  resolvedCheckoutReferenceCount: number;
-  matchedClosureContentCount: number;
-  unmatchedReferenceCount: number;
+  workflowContext: {
+    event: 'push';
+    ref: 'refs/heads/main';
+    runAttempt: 1;
+    frozenLockfileInstallAndBuildSucceeded: true;
+    frozenLockfileBuildBasis: 'ordered_ci_steps_completed_before_acceptance';
+    workflowSha: string;
+    lockfileSha256: string;
+  };
+  requiredArtifactIdentity: {
+    buildId: string;
+    buildIdSha256: string;
+    serverSha256: string;
+    runtimeInventorySha256: string;
+    runtimeInventoryEntryCount: number;
+    runtimeInventoryFileCount: number;
+    runtimeInventorySymlinkCount: number;
+    runtimeInventoryBytes: number;
+    staticAssets: { present: true; fileCount: number; sha256: string };
+    publicAssets: { present: true; fileCount: number; sha256: string };
+  };
+  diagnosticTraceCompleteness: {
+    scope: 'apps/web/.next/server';
+    collection: 'not_requested' | 'collected';
+    status: 'not_collected' | 'complete' | 'incomplete' | 'unavailable';
+    manifestCount: number | null;
+    manifestBytes: number | null;
+    manifestSha256: string | null;
+    referenceCount: number | null;
+    resolvedCheckoutReferenceCount: number | null;
+    matchedClosureContentCount: number | null;
+    unmatchedReferenceCount: number | null;
+  };
   buildExecutionAttribution: string;
   provenanceLimitations: string[];
 };
@@ -124,19 +146,12 @@ export type Basic5CiPreflight = {
 export type Basic5CiBuildDiagnostic = {
   checks: Record<string, boolean>;
   observed: {
-    traceStatus: 'complete' | 'incomplete' | 'unavailable' | 'unknown';
-    closureEntryCount: number | null;
-    closureFileCount: number | null;
-    closureSymlinkCount: number | null;
-    closureFileBytes: number | null;
-    staticFileCount: number | null;
-    publicFileCount: number | null;
-    traceManifestCount: number | null;
-    traceManifestBytes: number | null;
-    traceReferenceCount: number | null;
-    resolvedCheckoutReferenceCount: number | null;
-    matchedClosureContentCount: number | null;
-    unmatchedReferenceCount: number | null;
+    runtimeInventoryEntryCount: number | null;
+    runtimeInventoryFileCount: number | null;
+    runtimeInventorySymlinkCount: number | null;
+    runtimeInventoryBytes: number | null;
+    staticAssetsFileCount: number | null;
+    publicAssetsFileCount: number | null;
   };
 };
 
@@ -147,39 +162,30 @@ const BUILD_DIAGNOSTIC_CHECK_KEYS = [
   'imageOSMatches',
   'imageVersionMatches',
   'buildIdPresent',
+  'buildIdSha256Valid',
   'serverSha256Valid',
-  'closureSha256Valid',
-  'tracesComplete',
-  'unmatchedTraceReferencesZero',
+  'runtimeInventorySha256Valid',
   'limitationsArray',
   'limitationsCountBounded',
   'limitationsItemsBounded',
-  'closureEntryCountPositive',
-  'closureFileCountPositive',
-  'closureSymlinkCountValid',
-  'closureFileBytesPositive',
-  'staticFileCountValid',
-  'publicFileCountValid',
-  'traceManifestCountValid',
-  'traceManifestBytesValid',
-  'traceReferenceCountValid',
-  'resolvedTraceReferenceCountValid',
-  'matchedTraceContentCountValid',
-  'unmatchedTraceReferenceCountValid',
+  'runtimeInventoryEntryCountPositive',
+  'runtimeInventoryFileCountPositive',
+  'runtimeInventorySymlinkCountValid',
+  'runtimeInventoryBytesPositive',
+  'staticAssetsPresent',
+  'staticAssetsNonempty',
+  'staticAssetsSha256Valid',
+  'publicAssetsPresent',
+  'publicAssetsNonempty',
+  'publicAssetsSha256Valid',
 ] as const;
 const BUILD_DIAGNOSTIC_COUNT_KEYS = [
-  'closureEntryCount',
-  'closureFileCount',
-  'closureSymlinkCount',
-  'closureFileBytes',
-  'staticFileCount',
-  'publicFileCount',
-  'traceManifestCount',
-  'traceManifestBytes',
-  'traceReferenceCount',
-  'resolvedCheckoutReferenceCount',
-  'matchedClosureContentCount',
-  'unmatchedReferenceCount',
+  'runtimeInventoryEntryCount',
+  'runtimeInventoryFileCount',
+  'runtimeInventorySymlinkCount',
+  'runtimeInventoryBytes',
+  'staticAssetsFileCount',
+  'publicAssetsFileCount',
 ] as const;
 
 type LinuxSnapshot = {
@@ -218,31 +224,33 @@ type BuildProvenanceModule = {
     nodeVersion: string;
     imageOS: string;
     imageVersion: string;
+    collectTraceDiagnostic: false;
   }): Promise<{
     source: { commit: string; webTree: string };
-    output: {
+    requiredArtifactIdentity: {
       buildId: string;
+      buildIdSha256: string;
       serverSha256: string;
-      closureSha256: string;
-      closureEntryCount: number;
-      closureFileCount: number;
-      closureSymlinkCount: number;
-      closureFileBytes: number;
-      staticPresent: boolean;
-      staticFileCount: number;
-      publicPresent: boolean;
-      publicFileCount: number;
+      runtimeInventorySha256: string;
+      runtimeInventoryEntryCount: number;
+      runtimeInventoryFileCount: number;
+      runtimeInventorySymlinkCount: number;
+      runtimeInventoryBytes: number;
+      staticAssets: { present: true; fileCount: number; sha256: string };
+      publicAssets: { present: true; fileCount: number; sha256: string };
     };
     runtime: { nodeVersion: string; imageOS: string; imageVersion: string };
-    traces: {
-      status: string;
-      manifestCount: number;
-      manifestBytes: number;
-      manifestSha256: string | null;
-      referenceCount: number;
-      resolvedCheckoutReferenceCount: number;
-      matchedClosureContentCount: number;
-      unmatchedReferenceCount: number;
+    diagnosticTraceCompleteness: {
+      scope: 'apps/web/.next/server';
+      collection: 'not_requested';
+      status: 'not_collected';
+      manifestCount: null;
+      manifestBytes: null;
+      manifestSha256: null;
+      referenceCount: null;
+      resolvedCheckoutReferenceCount: null;
+      matchedClosureContentCount: null;
+      unmatchedReferenceCount: null;
     };
     buildExecutionAttribution: string;
     limitations: readonly string[];
@@ -309,6 +317,22 @@ export class Basic5CiHold extends Error {
   }
 }
 
+export function assertBasic5CiWorkflowAdmission(
+  environment: Readonly<Record<string, string | undefined>>,
+): void {
+  if (
+    environment.GITHUB_ACTIONS !== 'true' ||
+    environment.GITHUB_WORKFLOW !== 'CI' ||
+    environment.GITHUB_EVENT_NAME !== 'push' ||
+    environment.GITHUB_REF !== 'refs/heads/main' ||
+    environment.GITHUB_RUN_ATTEMPT !== '1' ||
+    !/^[a-f0-9]{40}$/i.test(environment.GITHUB_WORKFLOW_SHA ?? '') ||
+    environment.GITHUB_WORKFLOW_SHA !== environment.GITHUB_SHA ||
+    environment.ASSISTANT_RUN_BASIC5_CI_ACCEPTANCE !== '1'
+  )
+    throw new Basic5CiHold('workflow_admission_context_not_authorized');
+}
+
 function boundedCount(value: unknown): number | null {
   return Number.isSafeInteger(value) && Math.abs(value as number) <= 2 * 1024 * 1024 * 1024
     ? (value as number)
@@ -345,12 +369,11 @@ function contentFreeBuildDiagnostic(value: unknown): Basic5CiBuildDiagnostic {
       (key) =>
         !BUILD_DIAGNOSTIC_CHECK_KEYS.includes(key as (typeof BUILD_DIAGNOSTIC_CHECK_KEYS)[number]),
     ) ||
-    Object.keys(rawObserved).length !== BUILD_DIAGNOSTIC_COUNT_KEYS.length + 1 ||
+    Object.keys(rawObserved).length !== BUILD_DIAGNOSTIC_COUNT_KEYS.length ||
     BUILD_DIAGNOSTIC_COUNT_KEYS.some((key) => {
       const count = rawObserved[key];
       return count !== null && boundedCount(count) === null;
-    }) ||
-    !['complete', 'incomplete', 'unavailable', 'unknown'].includes(String(rawObserved.traceStatus))
+    })
   )
     throw new Basic5CiHold('standalone_diagnostic_invalid');
   return {
@@ -358,11 +381,182 @@ function contentFreeBuildDiagnostic(value: unknown): Basic5CiBuildDiagnostic {
       BUILD_DIAGNOSTIC_CHECK_KEYS.map((key) => [key, rawChecks[key] as boolean]),
     ),
     observed: {
-      traceStatus: rawObserved.traceStatus as Basic5CiBuildDiagnostic['observed']['traceStatus'],
       ...Object.fromEntries(
         BUILD_DIAGNOSTIC_COUNT_KEYS.map((key) => [key, rawObserved[key] as number | null]),
       ),
     } as Basic5CiBuildDiagnostic['observed'],
+  };
+}
+
+function contentFreeRequiredArtifactIdentity(
+  value: unknown,
+): Basic5CiPreflight['requiredArtifactIdentity'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Basic5CiHold('required_artifact_identity_invalid');
+  const identity = value as Record<string, unknown>;
+  const identityKeys = [
+    'buildId',
+    'buildIdSha256',
+    'serverSha256',
+    'runtimeInventorySha256',
+    'runtimeInventoryEntryCount',
+    'runtimeInventoryFileCount',
+    'runtimeInventorySymlinkCount',
+    'runtimeInventoryBytes',
+    'staticAssets',
+    'publicAssets',
+  ];
+  if (
+    Object.keys(identity).length !== identityKeys.length ||
+    Object.keys(identity).some((key) => !identityKeys.includes(key)) ||
+    typeof identity.buildId !== 'string' ||
+    !/^[A-Za-z0-9_-]{1,128}$/.test(identity.buildId) ||
+    !/^[a-f0-9]{64}$/.test(String(identity.buildIdSha256)) ||
+    !/^[a-f0-9]{64}$/.test(String(identity.serverSha256)) ||
+    !/^[a-f0-9]{64}$/.test(String(identity.runtimeInventorySha256)) ||
+    !Number.isSafeInteger(identity.runtimeInventoryEntryCount) ||
+    Number(identity.runtimeInventoryEntryCount) < 1 ||
+    !Number.isSafeInteger(identity.runtimeInventoryFileCount) ||
+    Number(identity.runtimeInventoryFileCount) < 1 ||
+    !Number.isSafeInteger(identity.runtimeInventorySymlinkCount) ||
+    Number(identity.runtimeInventorySymlinkCount) < 0 ||
+    !Number.isSafeInteger(identity.runtimeInventoryBytes) ||
+    Number(identity.runtimeInventoryBytes) < 1
+  )
+    throw new Basic5CiHold('required_artifact_identity_invalid');
+  const asset = (raw: unknown, label: string) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+      throw new Basic5CiHold(`${label}_identity_invalid`);
+    const row = raw as Record<string, unknown>;
+    if (
+      Object.keys(row).length !== 3 ||
+      Object.keys(row).some((key) => !['present', 'fileCount', 'sha256'].includes(key)) ||
+      row.present !== true ||
+      !Number.isSafeInteger(row.fileCount) ||
+      Number(row.fileCount) < 1 ||
+      !/^[a-f0-9]{64}$/.test(String(row.sha256))
+    )
+      throw new Basic5CiHold(`${label}_identity_invalid`);
+    return {
+      present: true as const,
+      fileCount: Number(row.fileCount),
+      sha256: row.sha256 as string,
+    };
+  };
+  return {
+    buildId: identity.buildId,
+    buildIdSha256: identity.buildIdSha256 as string,
+    serverSha256: identity.serverSha256 as string,
+    runtimeInventorySha256: identity.runtimeInventorySha256 as string,
+    runtimeInventoryEntryCount: Number(identity.runtimeInventoryEntryCount),
+    runtimeInventoryFileCount: Number(identity.runtimeInventoryFileCount),
+    runtimeInventorySymlinkCount: Number(identity.runtimeInventorySymlinkCount),
+    runtimeInventoryBytes: Number(identity.runtimeInventoryBytes),
+    staticAssets: asset(identity.staticAssets, 'static_assets'),
+    publicAssets: asset(identity.publicAssets, 'public_assets'),
+  };
+}
+
+function contentFreeTraceDiagnostic(
+  value: unknown,
+): Basic5CiPreflight['diagnosticTraceCompleteness'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Basic5CiHold('trace_diagnostic_invalid');
+  const diagnostic = value as Record<string, unknown>;
+  const keys = [
+    'scope',
+    'collection',
+    'status',
+    'manifestCount',
+    'manifestBytes',
+    'manifestSha256',
+    'referenceCount',
+    'resolvedCheckoutReferenceCount',
+    'matchedClosureContentCount',
+    'unmatchedReferenceCount',
+  ];
+  if (
+    Object.keys(diagnostic).length !== keys.length ||
+    Object.keys(diagnostic).some((key) => !keys.includes(key)) ||
+    diagnostic.scope !== 'apps/web/.next/server' ||
+    !['not_requested', 'collected'].includes(String(diagnostic.collection)) ||
+    !['not_collected', 'complete', 'incomplete', 'unavailable'].includes(String(diagnostic.status))
+  )
+    throw new Basic5CiHold('trace_diagnostic_invalid');
+  const countKeys = [
+    'manifestCount',
+    'manifestBytes',
+    'referenceCount',
+    'resolvedCheckoutReferenceCount',
+    'matchedClosureContentCount',
+    'unmatchedReferenceCount',
+  ];
+  if (diagnostic.status === 'not_collected') {
+    if (
+      diagnostic.collection !== 'not_requested' ||
+      diagnostic.manifestSha256 !== null ||
+      countKeys.some((key) => diagnostic[key] !== null)
+    )
+      throw new Basic5CiHold('trace_diagnostic_unknown_must_remain_null');
+  } else if (
+    diagnostic.collection !== 'collected' ||
+    countKeys.some(
+      (key) => !Number.isSafeInteger(diagnostic[key]) || Number(diagnostic[key]) < 0,
+    ) ||
+    (diagnostic.manifestSha256 !== null &&
+      !/^[a-f0-9]{64}$/.test(String(diagnostic.manifestSha256)))
+  ) {
+    throw new Basic5CiHold('trace_diagnostic_collected_shape_invalid');
+  }
+  return {
+    scope: 'apps/web/.next/server',
+    collection: diagnostic.collection as 'not_requested' | 'collected',
+    status: diagnostic.status as Basic5CiPreflight['diagnosticTraceCompleteness']['status'],
+    manifestCount: diagnostic.manifestCount as number | null,
+    manifestBytes: diagnostic.manifestBytes as number | null,
+    manifestSha256: diagnostic.manifestSha256 as string | null,
+    referenceCount: diagnostic.referenceCount as number | null,
+    resolvedCheckoutReferenceCount: diagnostic.resolvedCheckoutReferenceCount as number | null,
+    matchedClosureContentCount: diagnostic.matchedClosureContentCount as number | null,
+    unmatchedReferenceCount: diagnostic.unmatchedReferenceCount as number | null,
+  };
+}
+
+function contentFreeWorkflowContext(value: unknown): Basic5CiPreflight['workflowContext'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Basic5CiHold('workflow_context_invalid');
+  const workflow = value as Record<string, unknown>;
+  if (
+    Object.keys(workflow).length !== 7 ||
+    Object.keys(workflow).some(
+      (key) =>
+        ![
+          'event',
+          'ref',
+          'runAttempt',
+          'frozenLockfileInstallAndBuildSucceeded',
+          'frozenLockfileBuildBasis',
+          'workflowSha',
+          'lockfileSha256',
+        ].includes(key),
+    ) ||
+    workflow.event !== 'push' ||
+    workflow.ref !== 'refs/heads/main' ||
+    workflow.runAttempt !== 1 ||
+    workflow.frozenLockfileInstallAndBuildSucceeded !== true ||
+    workflow.frozenLockfileBuildBasis !== 'ordered_ci_steps_completed_before_acceptance' ||
+    !/^[a-f0-9]{40}$/i.test(String(workflow.workflowSha)) ||
+    !/^[a-f0-9]{64}$/.test(String(workflow.lockfileSha256))
+  )
+    throw new Basic5CiHold('workflow_context_invalid');
+  return {
+    event: 'push',
+    ref: 'refs/heads/main',
+    runAttempt: 1,
+    frozenLockfileInstallAndBuildSucceeded: true,
+    frozenLockfileBuildBasis: 'ordered_ci_steps_completed_before_acceptance',
+    workflowSha: workflow.workflowSha as string,
+    lockfileSha256: workflow.lockfileSha256 as string,
   };
 }
 
@@ -386,67 +580,65 @@ function buildProvenanceDiagnostic(
     imageOSMatches: provenance.runtime.imageOS === expected.imageOS,
     imageVersionMatches: provenance.runtime.imageVersion === expected.imageVersion,
     buildIdPresent:
-      typeof provenance.output.buildId === 'string' && provenance.output.buildId.length > 0,
-    serverSha256Valid: /^[a-f0-9]{64}$/.test(provenance.output.serverSha256),
-    closureSha256Valid: /^[a-f0-9]{64}$/.test(provenance.output.closureSha256),
-    tracesComplete: provenance.traces.status === 'complete',
-    unmatchedTraceReferencesZero: provenance.traces.unmatchedReferenceCount === 0,
+      typeof provenance.requiredArtifactIdentity.buildId === 'string' &&
+      provenance.requiredArtifactIdentity.buildId.length > 0,
+    buildIdSha256Valid: /^[a-f0-9]{64}$/.test(provenance.requiredArtifactIdentity.buildIdSha256),
+    serverSha256Valid: /^[a-f0-9]{64}$/.test(provenance.requiredArtifactIdentity.serverSha256),
+    runtimeInventorySha256Valid: /^[a-f0-9]{64}$/.test(
+      provenance.requiredArtifactIdentity.runtimeInventorySha256,
+    ),
     limitationsArray: Array.isArray(provenance.limitations),
     limitationsCountBounded:
       Array.isArray(provenance.limitations) && provenance.limitations.length <= 16,
     limitationsItemsBounded: limitationsValid,
-    closureEntryCountPositive:
-      Number.isSafeInteger(provenance.output.closureEntryCount) &&
-      provenance.output.closureEntryCount >= 1,
-    closureFileCountPositive:
-      Number.isSafeInteger(provenance.output.closureFileCount) &&
-      provenance.output.closureFileCount >= 1,
-    closureSymlinkCountValid:
-      Number.isSafeInteger(provenance.output.closureSymlinkCount) &&
-      provenance.output.closureSymlinkCount >= 0,
-    closureFileBytesPositive:
-      Number.isSafeInteger(provenance.output.closureFileBytes) &&
-      provenance.output.closureFileBytes >= 1,
-    staticFileCountValid:
-      Number.isSafeInteger(provenance.output.staticFileCount) &&
-      provenance.output.staticFileCount >= 0,
-    publicFileCountValid:
-      Number.isSafeInteger(provenance.output.publicFileCount) &&
-      provenance.output.publicFileCount >= 0,
-    traceManifestCountValid: Number.isSafeInteger(provenance.traces.manifestCount),
-    traceManifestBytesValid: Number.isSafeInteger(provenance.traces.manifestBytes),
-    traceReferenceCountValid: Number.isSafeInteger(provenance.traces.referenceCount),
-    resolvedTraceReferenceCountValid: Number.isSafeInteger(
-      provenance.traces.resolvedCheckoutReferenceCount,
+    runtimeInventoryEntryCountPositive:
+      Number.isSafeInteger(provenance.requiredArtifactIdentity.runtimeInventoryEntryCount) &&
+      provenance.requiredArtifactIdentity.runtimeInventoryEntryCount >= 1,
+    runtimeInventoryFileCountPositive:
+      Number.isSafeInteger(provenance.requiredArtifactIdentity.runtimeInventoryFileCount) &&
+      provenance.requiredArtifactIdentity.runtimeInventoryFileCount >= 1,
+    runtimeInventorySymlinkCountValid:
+      Number.isSafeInteger(provenance.requiredArtifactIdentity.runtimeInventorySymlinkCount) &&
+      provenance.requiredArtifactIdentity.runtimeInventorySymlinkCount >= 0,
+    runtimeInventoryBytesPositive:
+      Number.isSafeInteger(provenance.requiredArtifactIdentity.runtimeInventoryBytes) &&
+      provenance.requiredArtifactIdentity.runtimeInventoryBytes >= 1,
+    staticAssetsPresent: provenance.requiredArtifactIdentity.staticAssets.present === true,
+    staticAssetsNonempty:
+      Number.isSafeInteger(provenance.requiredArtifactIdentity.staticAssets.fileCount) &&
+      provenance.requiredArtifactIdentity.staticAssets.fileCount > 0,
+    staticAssetsSha256Valid: /^[a-f0-9]{64}$/.test(
+      provenance.requiredArtifactIdentity.staticAssets.sha256,
     ),
-    matchedTraceContentCountValid: Number.isSafeInteger(
-      provenance.traces.matchedClosureContentCount,
-    ),
-    unmatchedTraceReferenceCountValid: Number.isSafeInteger(
-      provenance.traces.unmatchedReferenceCount,
+    publicAssetsPresent: provenance.requiredArtifactIdentity.publicAssets.present === true,
+    publicAssetsNonempty:
+      Number.isSafeInteger(provenance.requiredArtifactIdentity.publicAssets.fileCount) &&
+      provenance.requiredArtifactIdentity.publicAssets.fileCount > 0,
+    publicAssetsSha256Valid: /^[a-f0-9]{64}$/.test(
+      provenance.requiredArtifactIdentity.publicAssets.sha256,
     ),
   };
-  const traceStatus = ['complete', 'incomplete', 'unavailable'].includes(provenance.traces.status)
-    ? (provenance.traces.status as Basic5CiBuildDiagnostic['observed']['traceStatus'])
-    : 'unknown';
   return {
     checks,
     observed: {
-      traceStatus,
-      closureEntryCount: boundedCount(provenance.output.closureEntryCount),
-      closureFileCount: boundedCount(provenance.output.closureFileCount),
-      closureSymlinkCount: boundedCount(provenance.output.closureSymlinkCount),
-      closureFileBytes: boundedCount(provenance.output.closureFileBytes),
-      staticFileCount: boundedCount(provenance.output.staticFileCount),
-      publicFileCount: boundedCount(provenance.output.publicFileCount),
-      traceManifestCount: boundedCount(provenance.traces.manifestCount),
-      traceManifestBytes: boundedCount(provenance.traces.manifestBytes),
-      traceReferenceCount: boundedCount(provenance.traces.referenceCount),
-      resolvedCheckoutReferenceCount: boundedCount(
-        provenance.traces.resolvedCheckoutReferenceCount,
+      runtimeInventoryEntryCount: boundedCount(
+        provenance.requiredArtifactIdentity.runtimeInventoryEntryCount,
       ),
-      matchedClosureContentCount: boundedCount(provenance.traces.matchedClosureContentCount),
-      unmatchedReferenceCount: boundedCount(provenance.traces.unmatchedReferenceCount),
+      runtimeInventoryFileCount: boundedCount(
+        provenance.requiredArtifactIdentity.runtimeInventoryFileCount,
+      ),
+      runtimeInventorySymlinkCount: boundedCount(
+        provenance.requiredArtifactIdentity.runtimeInventorySymlinkCount,
+      ),
+      runtimeInventoryBytes: boundedCount(
+        provenance.requiredArtifactIdentity.runtimeInventoryBytes,
+      ),
+      staticAssetsFileCount: boundedCount(
+        provenance.requiredArtifactIdentity.staticAssets.fileCount,
+      ),
+      publicAssetsFileCount: boundedCount(
+        provenance.requiredArtifactIdentity.publicAssets.fileCount,
+      ),
     },
   };
 }
@@ -853,8 +1045,8 @@ function validateCiEvidence(
     throw new Basic5CiHold('acceptance_evidence_not_successful');
   if (
     evidence.standalone.sourceCommit !== preflight.sourceCommit ||
-    evidence.standalone.buildId !== preflight.buildId ||
-    evidence.standalone.serverSha256 !== preflight.serverSha256
+    evidence.standalone.buildId !== preflight.requiredArtifactIdentity.buildId ||
+    evidence.standalone.serverSha256 !== preflight.requiredArtifactIdentity.serverSha256
   )
     throw new Basic5CiHold('standalone_provenance_mismatch');
   const environment = evidence.executionEnvironment;
@@ -986,6 +1178,8 @@ function validateCiEvidence(
 function contentFreeReceipt(record: Record<string, unknown>): Record<string, unknown> {
   const allowed = new Set([
     'schemaVersion',
+    'acceptanceContract',
+    'claimScope',
     'scope',
     'result',
     'sourceCommit',
@@ -995,25 +1189,9 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     'imageVersion',
     'chromeVersion',
     'postgresServerVersionNum',
-    'buildId',
-    'serverSha256',
-    'closureSha256',
-    'closureEntryCount',
-    'closureFileCount',
-    'closureSymlinkCount',
-    'closureFileBytes',
-    'staticPresent',
-    'staticFileCount',
-    'publicPresent',
-    'publicFileCount',
-    'traceStatus',
-    'traceManifestCount',
-    'traceManifestBytes',
-    'traceManifestSha256',
-    'traceReferenceCount',
-    'resolvedCheckoutReferenceCount',
-    'matchedClosureContentCount',
-    'unmatchedReferenceCount',
+    'workflowContext',
+    'requiredArtifactIdentity',
+    'diagnosticTraceCompleteness',
     'buildExecutionAttribution',
     'provenanceLimitations',
     'testCount',
@@ -1036,6 +1214,19 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     'elapsedSeconds',
   ]);
   const clean = Object.fromEntries(Object.entries(record).filter(([key]) => allowed.has(key)));
+  if (clean.acceptanceContract !== ACCEPTANCE_CONTRACT)
+    throw new Basic5CiHold('acceptance_contract_label_missing');
+  clean.claimScope = CLAIM_SCOPE;
+  if ('workflowContext' in clean)
+    clean.workflowContext = contentFreeWorkflowContext(clean.workflowContext);
+  if ('requiredArtifactIdentity' in clean)
+    clean.requiredArtifactIdentity = contentFreeRequiredArtifactIdentity(
+      clean.requiredArtifactIdentity,
+    );
+  if ('diagnosticTraceCompleteness' in clean)
+    clean.diagnosticTraceCompleteness = contentFreeTraceDiagnostic(
+      clean.diagnosticTraceCompleteness,
+    );
   if ('standaloneBuildDiagnostic' in clean)
     clean.standaloneBuildDiagnostic = contentFreeBuildDiagnostic(clean.standaloneBuildDiagnostic);
   const encoded = JSON.stringify(clean);
@@ -1051,7 +1242,9 @@ export async function runBasic5CiAcceptance(
   const started = ops.now();
   const deadline = started + OUTER_SECONDS * 1000;
   const receipt: Record<string, unknown> = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    acceptanceContract: ACCEPTANCE_CONTRACT,
+    claimScope: CLAIM_SCOPE,
     scope: 'one BASIC5 CI browser acceptance case',
     result: 'hold',
     cleanupComplete: false,
@@ -1630,6 +1823,7 @@ class RealBasic5CiOps implements Basic5CiOps {
     this.assertDeadline(deadline, 'preflight');
     assertNotAborted(signal, 'preflight');
     const ambient = { ...process.env };
+    assertBasic5CiWorkflowAdmission(ambient);
     if (process.platform !== 'linux' || !/^v?26\./.test(process.version))
       throw new Basic5CiHold('requires_linux_node_26');
     const sourceUrl = ambient.ASSISTANT_BASIC5_CI_DATABASE_URL ?? ambient.DATABASE_URL;
@@ -1753,6 +1947,7 @@ class RealBasic5CiOps implements Basic5CiOps {
       nodeVersion: process.version,
       imageOS,
       imageVersion,
+      collectTraceDiagnostic: false,
     });
     assertNotAborted(signal, 'preflight');
     const diagnostic = buildProvenanceDiagnostic(provenance, {
@@ -1763,7 +1958,7 @@ class RealBasic5CiOps implements Basic5CiOps {
       imageVersion,
     });
     if (Object.values(diagnostic.checks).some((check) => !check))
-      throw new Basic5CiHold('standalone_build_provenance_incomplete', true, diagnostic);
+      throw new Basic5CiHold('required_runtime_artifact_identity_incomplete', true, diagnostic);
     const proof = this.proof;
     if (!proof) throw new Basic5CiHold('linux_process_proof_unavailable');
     const chrome = await this.runReadOnlyMetadata(
@@ -1791,25 +1986,19 @@ class RealBasic5CiOps implements Basic5CiOps {
       imageVersion,
       chromeVersion,
       postgresServerVersionNum: 0,
-      buildId: provenance.output.buildId,
-      serverSha256: provenance.output.serverSha256,
-      closureSha256: provenance.output.closureSha256,
-      closureEntryCount: provenance.output.closureEntryCount,
-      closureFileCount: provenance.output.closureFileCount,
-      closureSymlinkCount: provenance.output.closureSymlinkCount,
-      closureFileBytes: provenance.output.closureFileBytes,
-      staticPresent: provenance.output.staticPresent,
-      staticFileCount: provenance.output.staticFileCount,
-      publicPresent: provenance.output.publicPresent,
-      publicFileCount: provenance.output.publicFileCount,
-      traceManifestCount: provenance.traces.manifestCount,
-      traceManifestBytes: provenance.traces.manifestBytes,
-      traceManifestSha256: provenance.traces.manifestSha256,
-      traceReferenceCount: provenance.traces.referenceCount,
-      traceStatus: provenance.traces.status,
-      resolvedCheckoutReferenceCount: provenance.traces.resolvedCheckoutReferenceCount,
-      matchedClosureContentCount: provenance.traces.matchedClosureContentCount,
-      unmatchedReferenceCount: provenance.traces.unmatchedReferenceCount,
+      workflowContext: {
+        event: 'push',
+        ref: 'refs/heads/main',
+        runAttempt: 1,
+        frozenLockfileInstallAndBuildSucceeded: true,
+        frozenLockfileBuildBasis: 'ordered_ci_steps_completed_before_acceptance',
+        workflowSha: ambient.GITHUB_WORKFLOW_SHA as string,
+        lockfileSha256: createHash('sha256')
+          .update(await readFile(join(this.repoRoot, 'pnpm-lock.yaml')))
+          .digest('hex'),
+      },
+      requiredArtifactIdentity: provenance.requiredArtifactIdentity,
+      diagnosticTraceCompleteness: provenance.diagnosticTraceCompleteness,
       buildExecutionAttribution: provenance.buildExecutionAttribution,
       provenanceLimitations: [...provenance.limitations],
     };
@@ -1992,8 +2181,9 @@ class RealBasic5CiOps implements Basic5CiOps {
       ASSISTANT_RUN_BASIC5_CI_ACCEPTANCE: '1',
       ASSISTANT_BASIC5_CI_REGISTRY_FILE: this.registryPath,
       ASSISTANT_BASIC5_STANDALONE_SOURCE_SHA: this.preflightResult.sourceCommit,
-      ASSISTANT_BASIC5_STANDALONE_BUILD_ID: this.preflightResult.buildId,
-      ASSISTANT_BASIC5_STANDALONE_SERVER_SHA256: this.preflightResult.serverSha256,
+      ASSISTANT_BASIC5_STANDALONE_BUILD_ID: this.preflightResult.requiredArtifactIdentity.buildId,
+      ASSISTANT_BASIC5_STANDALONE_SERVER_SHA256:
+        this.preflightResult.requiredArtifactIdentity.serverSha256,
     };
     const require = (await import('node:module')).createRequire(
       join(this.repoRoot, 'package.json'),

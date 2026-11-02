@@ -30,6 +30,18 @@ interface ClosureEntry {
   targetPath?: string;
 }
 
+type TraceCoverage = {
+  scope: 'apps/web/.next/server';
+  status: 'complete' | 'incomplete' | 'unavailable';
+  manifestCount: number;
+  manifestBytes: number;
+  manifestSha256: string | null;
+  referenceCount: number;
+  resolvedCheckoutReferenceCount: number;
+  matchedClosureContentCount: number;
+  unmatchedReferenceCount: number;
+};
+
 export interface Basic5CiBuildProvenanceInput {
   repositoryRoot: string;
   artifactRoot: string;
@@ -39,6 +51,7 @@ export interface Basic5CiBuildProvenanceInput {
   nodeVersion: string;
   imageOS: string;
   imageVersion: string;
+  collectTraceDiagnostic?: boolean;
 }
 
 export interface Basic5CiBuildProvenance {
@@ -56,29 +69,29 @@ export interface Basic5CiBuildProvenance {
     imageVersion: string;
     basis: 'controller-provided-CI-observation';
   };
-  output: {
+  requiredArtifactIdentity: {
     buildId: string;
+    buildIdSha256: string;
     serverSha256: string;
-    closureSha256: string;
-    closureEntryCount: number;
-    closureFileCount: number;
-    closureSymlinkCount: number;
-    closureFileBytes: number;
-    staticPresent: boolean;
-    staticFileCount: number;
-    publicPresent: boolean;
-    publicFileCount: number;
+    runtimeInventorySha256: string;
+    runtimeInventoryEntryCount: number;
+    runtimeInventoryFileCount: number;
+    runtimeInventorySymlinkCount: number;
+    runtimeInventoryBytes: number;
+    staticAssets: { present: true; fileCount: number; sha256: string };
+    publicAssets: { present: true; fileCount: number; sha256: string };
   };
-  traces: {
+  diagnosticTraceCompleteness: {
     scope: 'apps/web/.next/server';
-    status: 'complete' | 'incomplete' | 'unavailable';
-    manifestCount: number;
-    manifestBytes: number;
+    collection: 'not_requested' | 'collected';
+    status: 'not_collected' | 'complete' | 'incomplete' | 'unavailable';
+    manifestCount: number | null;
+    manifestBytes: number | null;
     manifestSha256: string | null;
-    referenceCount: number;
-    resolvedCheckoutReferenceCount: number;
-    matchedClosureContentCount: number;
-    unmatchedReferenceCount: number;
+    referenceCount: number | null;
+    resolvedCheckoutReferenceCount: number | null;
+    matchedClosureContentCount: number | null;
+    unmatchedReferenceCount: number | null;
   };
   buildExecutionAttribution: 'unknown-cache-may-have-reused-output';
   limitations: readonly string[];
@@ -275,11 +288,41 @@ async function enumerateClosure(artifactRoot: string): Promise<{
   return { entries, fileHashes, fileBytes, fileCount, symlinkCount };
 }
 
+function fingerprintEntries(
+  entries: ClosureEntry[],
+  root: string,
+): { fileCount: number; sha256: string } {
+  const prefix = root.endsWith('/') ? root : `${root}/`;
+  const selected = entries.filter((entry) => entry.path === root || entry.path.startsWith(prefix));
+  const fileCount = selected.filter(
+    (entry) => entry.kind === 'file' || entry.kind === 'symlink-file-content',
+  ).length;
+  return {
+    fileCount,
+    sha256: createHash('sha256').update(JSON.stringify(selected)).digest('hex'),
+  };
+}
+
+function notRequestedTraceDiagnostic(): Basic5CiBuildProvenance['diagnosticTraceCompleteness'] {
+  return {
+    scope: 'apps/web/.next/server',
+    collection: 'not_requested',
+    status: 'not_collected',
+    manifestCount: null,
+    manifestBytes: null,
+    manifestSha256: null,
+    referenceCount: null,
+    resolvedCheckoutReferenceCount: null,
+    matchedClosureContentCount: null,
+    unmatchedReferenceCount: null,
+  };
+}
+
 async function collectTraceCoverage(
   repositoryRoot: string,
   artifactRoot: string,
   closureHashes: Set<string>,
-): Promise<Basic5CiBuildProvenance['traces']> {
+): Promise<TraceCoverage> {
   const traceRoot = path.join(repositoryRoot, 'apps/web/.next/server');
   if (!(await existsDirectory(traceRoot))) {
     return {
@@ -486,19 +529,18 @@ export async function observeBasic5CiBuildProvenance(
   const staticPresent = await existsDirectory(staticRoot);
   const publicPresent = await existsDirectory(publicRoot);
   const serverRelative = relativePosix(artifactRoot, serverRoot);
-  const staticPrefix = `${serverRelative}/.next/static/`;
-  const publicPrefix = `${serverRelative}/public/`;
-  const staticFileCount = closure.entries.filter(
-    (entry) =>
-      (entry.kind === 'file' || entry.kind === 'symlink-file-content') &&
-      entry.path.startsWith(staticPrefix),
-  ).length;
-  const publicFileCount = closure.entries.filter(
-    (entry) =>
-      (entry.kind === 'file' || entry.kind === 'symlink-file-content') &&
-      entry.path.startsWith(publicPrefix),
-  ).length;
-  const traces = await collectTraceCoverage(repositoryRoot, artifactRoot, closure.fileHashes);
+  const staticAssets = fingerprintEntries(closure.entries, `${serverRelative}/.next/static`);
+  const publicAssets = fingerprintEntries(closure.entries, `${serverRelative}/public`);
+  if (!staticPresent || staticAssets.fileCount < 1)
+    fail('required standalone static assets are missing');
+  if (!publicPresent || publicAssets.fileCount < 1)
+    fail('required standalone public assets are missing');
+  const diagnosticTraceCompleteness = input.collectTraceDiagnostic
+    ? {
+        ...(await collectTraceCoverage(repositoryRoot, artifactRoot, closure.fileHashes)),
+        collection: 'collected' as const,
+      }
+    : notRequestedTraceDiagnostic();
 
   return {
     schemaVersion: 1,
@@ -515,25 +557,25 @@ export async function observeBasic5CiBuildProvenance(
       imageVersion: input.imageVersion,
       basis: 'controller-provided-CI-observation',
     },
-    output: {
+    requiredArtifactIdentity: {
       buildId,
+      buildIdSha256: createHash('sha256').update(buildIdBytes).digest('hex'),
       serverSha256: server.sha256,
-      closureSha256,
-      closureEntryCount: closure.entries.length,
-      closureFileCount: closure.fileCount,
-      closureSymlinkCount: closure.symlinkCount,
-      closureFileBytes: closure.fileBytes,
-      staticPresent,
-      staticFileCount,
-      publicPresent,
-      publicFileCount,
+      runtimeInventorySha256: closureSha256,
+      runtimeInventoryEntryCount: closure.entries.length,
+      runtimeInventoryFileCount: closure.fileCount,
+      runtimeInventorySymlinkCount: closure.symlinkCount,
+      runtimeInventoryBytes: closure.fileBytes,
+      staticAssets: { present: staticPresent, ...staticAssets },
+      publicAssets: { present: publicPresent, ...publicAssets },
     },
-    traces,
+    diagnosticTraceCompleteness,
     buildExecutionAttribution: 'unknown-cache-may-have-reused-output',
     limitations: [
       'Source and CI runtime values are controller-provided observations, not independently read by this helper.',
       'Successful workflow build ordering does not prove a fresh compile because build caches may reuse outputs.',
       'Trace coverage is limited to manifests found under apps/web/.next/server and byte matches in the observed standalone closure.',
+      'Routine acceptance does not collect NFT trace completeness; it verifies runtime artifact identity and exercises one bounded browser flow.',
       'This output does not prove complete dynamic import, native dependency, OS image, or runtime behavior closure.',
     ],
   };
