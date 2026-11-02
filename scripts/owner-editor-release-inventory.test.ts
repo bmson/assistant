@@ -526,10 +526,36 @@ describe('protected read-only release inventory', () => {
           state: 'READY',
         };
       });
-      const fields = spec.fieldOverrides.map((field) => ({
-        name: `${prefix}${field.collectionGroup}/fields/${field.fieldPath}`,
-        indexConfig: {},
-      }));
+      const fields = [
+        ...spec.fieldOverrides.map((field) => ({
+          name: `${prefix}${field.collectionGroup}/fields/${field.fieldPath}`,
+          indexConfig: {},
+        })),
+        {
+          name: `${prefix}__default__/fields/*`,
+          indexConfig: {
+            usesAncestorConfig: false,
+            reverting: false,
+            indexes: [
+              {
+                queryScope: 'COLLECTION',
+                state: 'READY',
+                fields: [{ fieldPath: '*', order: 'ASCENDING' }],
+              },
+              {
+                queryScope: 'COLLECTION',
+                state: 'READY',
+                fields: [{ fieldPath: '*', order: 'DESCENDING' }],
+              },
+              {
+                queryScope: 'COLLECTION',
+                state: 'READY',
+                fields: [{ fieldPath: '*', arrayConfig: 'CONTAINS' }],
+              },
+            ],
+          },
+        },
+      ];
       const calls: string[] = [];
       const read = async (url: string) => {
         calls.push(url);

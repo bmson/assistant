@@ -212,6 +212,7 @@ describe('protected V1 operator entrypoint and private packet envelope', () => {
           documents: [
             {
               name: `${name(urls[0])}/${Buffer.from(target.ownerId).toString('base64url')}`,
+              updateTime: '2026-10-29T22:00:00.123456789Z',
               fields: { id: field(target.ownerId) },
             },
           ],
@@ -229,6 +230,7 @@ describe('protected V1 operator entrypoint and private packet envelope', () => {
           : null,
         {
           name: name(urls[2]),
+          updateTime: '2026-10-29T22:00:01.123456789Z',
           fields: {
             name: field(`owner-editor-epoch:${target.ownerId}`),
             cursor: field(
