@@ -12,6 +12,7 @@ import {
 } from './owner-editor-status';
 
 const owner = '10000000-0000-4000-8000-000000000001';
+const otherOwner = '10000000-0000-4000-8000-000000000002';
 const contact = '20000000-0000-4000-8000-000000000001';
 const other = '20000000-0000-4000-8000-000000000002';
 const relation = '30000000-0000-4000-8000-000000000001';
@@ -91,9 +92,9 @@ function saved(g: OwnerEditorFormGrant): OwnerEditorReply {
     revision,
   };
 }
-async function complete(g = correction) {
+async function complete(g = correction, outcome: 'saved' | 'unchanged' = 'saved') {
   const f = fixture();
-  f.request.mockResolvedValueOnce(Response.json(saved(g)));
+  f.request.mockResolvedValueOnce(Response.json({ ...saved(g), outcome }));
   await f.controller.apply(body(g), g, relation);
   expect(f.controller.getSnapshot().phase).toBe('resolved');
   return f;
@@ -125,6 +126,33 @@ describe('dialog completion status stays bound to the captured operation and tar
     // The open form's tuple stays captured; fresh server props do not replace it.
     expect(render(f.controller, captured)).toContain('Saved.');
     expect(render(f.controller, scope(nextCorrection, relation))).toBe('');
+  });
+  it('scopes an actual unchanged receipt the same way as Saved', async () => {
+    const f = await complete(correction, 'unchanged');
+    expect(render(f.controller, scope(correction, relation))).toContain(
+      'Already saved. No additional change was needed.',
+    );
+    expect(render(f.controller, scope(nextCorrection, replacementRelation))).toBe('');
+    expect(f.request).toHaveBeenCalledTimes(1);
+  });
+  it('does not carry a completed owner status into a controller for another owner', async () => {
+    const f = await complete();
+    const otherSession = { ownerId: otherOwner, formSessionScope: 'other-owner-session' };
+    const otherController = new OwnerEditorOperation(otherSession, () => f.storage, f.request);
+    otherController.initialize();
+
+    expect(otherController.getSnapshot().reply).toBeNull();
+    expect(
+      render(otherController, {
+        command: correction.command,
+        operationId: correction.operationId,
+        targetId: relation,
+      }),
+    ).toBe('');
+    expect(readOwnerEditorPendingMarker(f.storage, otherOwner, otherSession.formSessionScope)).toBe(
+      null,
+    );
+    expect(f.request).toHaveBeenCalledTimes(1);
   });
   it.each(['operationId', 'command', 'targetId'] as const)(
     'requires matching %s independently',

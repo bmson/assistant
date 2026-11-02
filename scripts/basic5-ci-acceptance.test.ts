@@ -162,6 +162,7 @@ function validEvidence(): Basic5CiEvidence {
         requestHash: `${index}`.repeat(64),
         statusVersion: index + 1,
         outcome: 'saved',
+        uiSavedAfterCleanBaseline: true,
         ids: ids as unknown as Record<string, string>,
       };
     }),
@@ -2210,8 +2211,9 @@ describe('one-shot BASIC5 CI controller', () => {
 
     expect(result.errorCode).toBe('required_runtime_artifact_identity_incomplete');
     expect(result.targetStatus).toBe('not_allocated');
-    expect(result.acceptanceContract).toBe('basic5-ci-standalone-in-checkout-split-budget-v3');
+    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-receipt-readback-v4');
     expect(result.claimScope).toMatchObject({
+      behavior: 'four BASIC5 saves: scoped UI success and same-operation durable receipts',
       ancestorWorkspaceDependencies: 'unqualified',
       unexercisedRoutes: 'unqualified',
       containerIndependence: 'unqualified',
@@ -2338,8 +2340,8 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(result.cleanupComplete).toBe(true);
     expect(result.targetStatus).toBe('removed');
     expect(result.controllerScratchStatus).toBe('retained');
-    expect(result.schemaVersion).toBe(3);
-    expect(result.acceptanceContract).toBe('basic5-ci-standalone-in-checkout-split-budget-v3');
+    expect(result.schemaVersion).toBe(4);
+    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-receipt-readback-v4');
     expect(result.workflowContext).toMatchObject({
       event: 'push',
       ref: 'refs/heads/main',
@@ -2362,11 +2364,15 @@ describe('one-shot BASIC5 CI controller', () => {
     });
     expect(result.chromeVersionDiagnostic).toEqual(preflight.chromeVersionDiagnostic);
     expect(ops.writtenReceipt?.counts).toMatchObject({ anonymousPageProbeRequests: 1 });
+    expect(ops.writtenReceipt?.provenanceLimitations).toContain(
+      'The browser acceptance does not independently verify a second wire-body copy.',
+    );
     expect(ops.writtenReceipt?.counts).not.toHaveProperty('anonymousApiProbeRequests');
     const savedReceipts = ops.writtenReceipt?.receipts as Array<Record<string, unknown>>;
     expect(savedReceipts[1]?.ids).toMatchObject({
       relationId: '50000000-0000-4000-8000-000000000001',
     });
+    expect(savedReceipts.every((receipt) => receipt.uiSavedAfterCleanBaseline === true)).toBe(true);
     expect(savedReceipts[2]?.ids).toMatchObject({
       previousRelationId: '50000000-0000-4000-8000-000000000001',
       relationId: '50000000-0000-4000-8000-000000000002',
@@ -2666,6 +2672,35 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(ops.events).toEqual(['preflight', 'prepare', 'case', 'quiesce', 'receipt']);
   });
 
+  it.each([
+    ['missing UI evidence', 'missing', 'save_receipt_keys_invalid'],
+    ['false UI evidence', false, 'save_receipt_ui_save_evidence_missing'],
+    ['string UI evidence', 'true', 'save_receipt_ui_save_evidence_missing'],
+  ])(
+    'holds when a save receipt has %s even with committed DB receipts',
+    async (_label, value, expectedCode) => {
+      const ops = new FakeOps();
+      const receipt = ops.caseResult.evidence.receipts[0];
+      if (!receipt) throw new Error('Missing fake identity receipt');
+      if (value === 'missing') {
+        delete (receipt as unknown as Record<string, unknown>).uiSavedAfterCleanBaseline;
+      } else {
+        (receipt as unknown as Record<string, unknown>).uiSavedAfterCleanBaseline = value;
+      }
+      expect(receipt.outcome).toBe('saved');
+      expect(ops.caseResult.evidence.durableReadbacks).toEqual({
+        identity: true,
+        familyAdd: true,
+        familyCorrection: true,
+        noteCorrection: true,
+      });
+      const result = await runBasic5CiAcceptance(ops);
+      expect(result.result).toBe('hold');
+      expect(result.errorCode).toBe(expectedCode);
+      expect(ops.events).toEqual(['preflight', 'prepare', 'case', 'quiesce', 'receipt']);
+    },
+  );
+
   it('retains the target when receipt lineage or browser request counters diverge', async () => {
     const lineageOps = new FakeOps();
     const correctionReceipt = lineageOps.caseResult.evidence.receipts[2];
@@ -2692,8 +2727,8 @@ describe('one-shot BASIC5 CI controller', () => {
     });
     const result = await runBasic5CiAcceptance(ops);
     expect(result.result).toBe('passed');
-    expect(result.schemaVersion).toBe(3);
-    expect(result.acceptanceContract).toBe('basic5-ci-standalone-in-checkout-split-budget-v3');
+    expect(result.schemaVersion).toBe(4);
+    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-receipt-readback-v4');
     expect(result.counts).toMatchObject({
       browserHttpRequests: 320,
       browserDynamicHttpRequests: 64,

@@ -22,14 +22,16 @@ const CLEANUP_END_SECONDS = 400;
 const PREPARE_END_SECONDS = 130;
 const CAPTURE_BYTES = 64 * 1024;
 const PHASE_SETTLEMENT_GRACE_MS = 5_000;
-const ACCEPTANCE_CONTRACT = 'basic5-ci-standalone-in-checkout-split-budget-v3';
+const ACCEPTANCE_CONTRACT = 'basic5-ci-user-flow-receipt-readback-v4';
 const CLAIM_SCOPE = {
   runtimeIdentity: 'bounded standalone artifact observed in CI checkout',
-  behavior: 'one four-save BASIC5 browser case',
+  behavior: 'four BASIC5 saves: scoped UI success and same-operation durable receipts',
   ancestorWorkspaceDependencies: 'unqualified',
   unexercisedRoutes: 'unqualified',
   containerIndependence: 'unqualified',
 } as const;
+const RECEIPT_PROVENANCE_LIMITATION =
+  'The browser acceptance does not independently verify a second wire-body copy.';
 const ACTIONS = [
   'update_person_identity',
   'add_family_relationship',
@@ -75,6 +77,7 @@ export type Basic5CiEvidence = {
     requestHash: string;
     statusVersion: number;
     outcome: string;
+    uiSavedAfterCleanBaseline: true;
     ids?: Record<string, string> | null;
   }>;
   durableReadbacks: Record<string, boolean>;
@@ -1746,9 +1749,20 @@ function validateCiEvidence(
   for (const receipt of evidence.receipts)
     requireExactKeys(
       receipt,
-      ['authority', 'command', 'operationId', 'requestHash', 'statusVersion', 'outcome', 'ids'],
+      [
+        'authority',
+        'command',
+        'operationId',
+        'requestHash',
+        'statusVersion',
+        'outcome',
+        'uiSavedAfterCleanBaseline',
+        'ids',
+      ],
       'save_receipt',
     );
+  if (evidence.receipts.some((receipt) => receipt.uiSavedAfterCleanBaseline !== true))
+    throw new Basic5CiHold('save_receipt_ui_save_evidence_missing');
   if (
     evidence.result !== 'passed' ||
     evidence.testFailure !== null ||
@@ -1945,6 +1959,11 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
   if (clean.acceptanceContract !== ACCEPTANCE_CONTRACT)
     throw new Basic5CiHold('acceptance_contract_label_missing');
   clean.claimScope = CLAIM_SCOPE;
+  if (Array.isArray(clean.provenanceLimitations))
+    clean.provenanceLimitations = [
+      ...clean.provenanceLimitations.filter((item) => item !== RECEIPT_PROVENANCE_LIMITATION),
+      RECEIPT_PROVENANCE_LIMITATION,
+    ];
   if ('workflowContext' in clean)
     clean.workflowContext = contentFreeWorkflowContext(clean.workflowContext);
   if ('requiredArtifactIdentity' in clean)
@@ -1988,7 +2007,7 @@ export async function runBasic5CiAcceptance(
   const started = ops.now();
   const deadline = started + OUTER_SECONDS * 1000;
   const receipt: Record<string, unknown> = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     acceptanceContract: ACCEPTANCE_CONTRACT,
     claimScope: CLAIM_SCOPE,
     scope: 'one BASIC5 CI browser acceptance case',
@@ -2052,12 +2071,21 @@ export async function runBasic5CiAcceptance(
       skipCount: result.skipped,
       failCount: result.failed,
       receipts: result.evidence.receipts.map(
-        ({ command, operationId, requestHash, statusVersion, outcome, ids }) => ({
+        ({
           command,
           operationId,
           requestHash,
           statusVersion,
           outcome,
+          uiSavedAfterCleanBaseline,
+          ids,
+        }) => ({
+          command,
+          operationId,
+          requestHash,
+          statusVersion,
+          outcome,
+          uiSavedAfterCleanBaseline,
           ids: ids
             ? Object.fromEntries(Object.entries(ids).filter(([key]) => RECEIPT_ID_FIELDS.has(key)))
             : null,

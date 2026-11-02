@@ -1,4 +1,12 @@
 import { createRequire } from 'node:module';
+import {
+  type OwnerEditorOperationRecord,
+  ownerEditorOperationId,
+  ownerEditorPrivacyDigest,
+  ownerEditorReceipt,
+  ownerEditorScopeDigest,
+  parseOwnerEditorOperationRecord,
+} from '@assistant/persistence';
 import { describe, expect, it } from 'vitest';
 import {
   assertBasic5AnonymousPageResponse,
@@ -10,6 +18,8 @@ import {
   BASIC5_BROWSER_TOTAL_REQUEST_LIMIT,
   BASIC5_EMBEDDING_DIMENSIONS,
   BASIC5_READINESS_ATTEMPT_LIMIT,
+  BASIC5_SAVED_STATUS_PATTERN,
+  type Basic5StoredUserFlowReceiptExpectation,
   basic5BrowserLaunchOptions,
   basic5EmbeddingResponse,
   basic5IsolatedWebEnvironment,
@@ -19,6 +29,7 @@ import {
   createBasic5BrowserRequestBudget,
   decodeBasic5AuthCookie,
   nextBasic5ReadinessAttempt,
+  qualifyBasic5StoredUserFlowReceipt,
 } from './basic5-browser-acceptance-support.js';
 
 const require = createRequire(import.meta.url);
@@ -47,6 +58,244 @@ const secret = 'basic5-offline-auth-cookie-secret-32-bytes';
 const authBaseUrl = 'http://127.0.0.1:3107';
 const defaultProtectedMarkers = ['Alex Rivera', 'synthetic note body'];
 const anonymousHtmlContentType = 'text/html; charset=utf-8';
+
+describe('BASIC5 canonical stored receipt plus observed saved UI contract', () => {
+  it.each([
+    'Saved.',
+    'Saved. Some derived details still need to refresh.',
+    'Saved. Related information may still show older details.',
+  ])('accepts only an exact permitted saved status: %s', (message) => {
+    expect(BASIC5_SAVED_STATUS_PATTERN.test(message)).toBe(true);
+  });
+  it.each([
+    'Already saved.',
+    'Saving…',
+    'The result could not be confirmed. Check its result.',
+    'Saved. Check its result.',
+    'Saved. Some derived details still need to refresh. Extra text',
+    'Prefix Saved.',
+    'saved.',
+    'Saved',
+    'Saved!',
+    ' Saved.',
+    'Saved. ',
+    'Saved.\n',
+    'Saved.\r\n',
+    'Changed saved details. Review before saving again.',
+    'Check the highlighted fields.',
+  ])('rejects a status outside the exact saved-status pattern: %s', (message) => {
+    expect(BASIC5_SAVED_STATUS_PATTERN.test(message)).toBe(false);
+  });
+  const differentId = '99999999-9999-4999-8999-999999999999';
+  function stored(
+    command: Basic5StoredUserFlowReceiptExpectation['command'] = 'update_person_identity',
+  ) {
+    const now = new Date('2026-11-01T12:00:00.000Z');
+    const scope = {
+      ownerId: '11111111-1111-4111-8111-111111111111',
+      epoch: '22222222-2222-4222-8222-222222222222',
+      privacyGeneration: null,
+      command,
+      operationId: '33333333-3333-4333-8333-333333333333',
+      targetId: '44444444-4444-4444-8444-444444444444',
+      sessionDigest: 'a'.repeat(64),
+      nonce: '55555555-5555-4555-8555-555555555555',
+      issuedAt: now.getTime(),
+      expiresAt: now.getTime() + 600_000,
+    };
+    const memoryId = '66666666-6666-4666-8666-666666666666';
+    const row: OwnerEditorOperationRecord = {
+      id: ownerEditorOperationId(scope),
+      ownerId: scope.ownerId,
+      epoch: scope.epoch,
+      privacyGenerationDigest: ownerEditorPrivacyDigest(null),
+      operationId: scope.operationId,
+      requestHash: 'b'.repeat(64),
+      scopeDigest: ownerEditorScopeDigest(scope),
+      command,
+      protocolVersion: 1,
+      formIssuedAt: now,
+      formExpiresAt: new Date(now.getTime() + 600_000),
+      claimToken: null,
+      claimExpiresAt: null,
+      status: 'committed',
+      statusVersion: 2,
+      result: {
+        outcome: 'saved',
+        ids:
+          command === 'update_person_identity'
+            ? { contactId: scope.targetId }
+            : command === 'correct_owner_memory'
+              ? { memoryId }
+              : {
+                  relationId: '77777777-7777-4777-8777-777777777777',
+                  memoryId,
+                  assertionId: '88888888-8888-4888-8888-888888888888',
+                  ...(command === 'correct_owner_family_relationship'
+                    ? { previousRelationId: scope.targetId }
+                    : {}),
+                },
+        revision: 'c'.repeat(64),
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+    const expected: Basic5StoredUserFlowReceiptExpectation = {
+      ownerId: row.ownerId,
+      epoch: row.epoch,
+      privacyGenerationDigest: row.privacyGenerationDigest,
+      command,
+      operationId: row.operationId,
+      requestHash: row.requestHash,
+    };
+    return { row, expected };
+  }
+
+  it.each(BASIC5_BROWSER_ACTIONS)(
+    '%s returns the actual persisted codec receipt only with saved UI proof',
+    (command) => {
+      const { row, expected } = stored(command);
+      const parsed = parseOwnerEditorOperationRecord(row);
+      const canonicalReceipt = ownerEditorReceipt(parsed);
+      const before = JSON.stringify(row);
+
+      expect(qualifyBasic5StoredUserFlowReceipt(row, expected, true)).toEqual(canonicalReceipt);
+      expect(JSON.stringify(row)).toBe(before);
+      expect(() => qualifyBasic5StoredUserFlowReceipt(row, expected, false)).toThrow(
+        'exact saved-user-flow contract',
+      );
+    },
+  );
+
+  it('accepts the real refresh-pending saved projection without adding stored-row fields', () => {
+    const { row, expected } = stored();
+    if (row.result?.outcome !== 'saved') throw Error('Invalid saved fixture');
+    row.result.refreshPending = true;
+    const receipt = qualifyBasic5StoredUserFlowReceipt(row, expected, true);
+    expect(receipt).toEqual(ownerEditorReceipt(parseOwnerEditorOperationRecord(row)));
+    expect(receipt).toMatchObject({ outcome: 'saved', refreshPending: true });
+    expect(receipt).not.toHaveProperty('ownerId');
+    expect(receipt).not.toHaveProperty('epoch');
+    expect(receipt).not.toHaveProperty('scopeDigest');
+  });
+
+  it.each([1, 2])(
+    'requires a positive codec/decoder status version and accepts %i',
+    (statusVersion) => {
+      const { row, expected } = stored();
+      row.statusVersion = statusVersion;
+      expect(qualifyBasic5StoredUserFlowReceipt(row, expected, true)).toMatchObject({
+        statusVersion,
+      });
+    },
+  );
+
+  it('rejects another command even when both its stored codec and saved reply are valid', () => {
+    const { expected } = stored('update_person_identity');
+    const { row } = stored('add_family_relationship');
+    expect(() => parseOwnerEditorOperationRecord(row)).not.toThrow();
+    expect(ownerEditorReceipt(parseOwnerEditorOperationRecord(row))).toMatchObject({
+      command: 'add_family_relationship',
+      outcome: 'saved',
+    });
+    expect(() => qualifyBasic5StoredUserFlowReceipt(row, expected, true)).toThrow(
+      'exact saved-user-flow contract',
+    );
+  });
+
+  it.each([
+    ['owner', { ownerId: differentId }],
+    ['epoch', { epoch: differentId }],
+    ['privacy', { privacyGenerationDigest: 'd'.repeat(64) }],
+    ['command', { command: 'correct_owner_memory' }],
+    ['operation', { operationId: differentId }],
+    ['request hash', { requestHash: 'd'.repeat(64) }],
+    ['protocol', { protocolVersion: 2 }],
+    ['status', { status: 'terminal_rejected' }],
+    ['status version zero', { statusVersion: 0 }],
+    ['status version fractional', { statusVersion: 1.5 }],
+    ['malformed row identity', { id: 'not-a-hash' }],
+    ['malformed date', { createdAt: '2026-11-01T12:00:00.000Z' }],
+    ['unexpected row fields', { privatePayload: 'private fixture value' }],
+    ['missing result', { result: null }],
+  ] as const)('rejects a mismatched or malformed %s', (_label, override) => {
+    const { row, expected } = stored();
+    expect(() =>
+      qualifyBasic5StoredUserFlowReceipt({ ...row, ...override }, expected, true),
+    ).toThrow('exact saved-user-flow contract');
+  });
+
+  it.each([
+    { outcome: 'unchanged', ids: { contactId: differentId }, revision: 'c'.repeat(64) },
+    { outcome: 'invalid', fieldErrors: { name: 'private fixture value' } },
+    { outcome: 'conflict', reason: 'changed' },
+    { outcome: 'unavailable', reason: 'not_ready' },
+    { outcome: 'not_applied', reason: 'preparation_failed' },
+    { authority: 'unresolved', outcome: 'outcome_unknown', reason: 'preparing' },
+    { outcome: 'saved', ids: {}, revision: 'c'.repeat(64) },
+    { outcome: 'saved', ids: { contactId: 'not-a-uuid' }, revision: 'c'.repeat(64) },
+    { outcome: 'saved', ids: { contactId: differentId }, revision: 'not-a-hash' },
+  ])('rejects non-saved or malformed stored terminal outcomes %#', (result) => {
+    const { row, expected } = stored();
+    const status =
+      result.outcome === 'not_applied'
+        ? 'abandoned'
+        : ['invalid', 'conflict', 'unavailable'].includes(result.outcome)
+          ? 'terminal_rejected'
+          : 'committed';
+    expect(() =>
+      qualifyBasic5StoredUserFlowReceipt({ ...row, status, result }, expected, true),
+    ).toThrow('exact saved-user-flow contract');
+  });
+
+  it('rejects a legitimate preparing record rather than treating it as a saved receipt', () => {
+    const { row, expected } = stored();
+    expect(() =>
+      qualifyBasic5StoredUserFlowReceipt(
+        {
+          ...row,
+          status: 'preparing',
+          result: null,
+          claimToken: differentId,
+          claimExpiresAt: new Date('2026-11-01T12:01:00.000Z'),
+        },
+        expected,
+        true,
+      ),
+    ).toThrow('exact saved-user-flow contract');
+  });
+
+  it.each([
+    ['update_person_identity', { memoryId: differentId }],
+    ['add_family_relationship', { relationId: differentId, memoryId: differentId }],
+    ['correct_owner_memory', { memoryId: differentId, contactId: differentId }],
+  ] as const)(
+    'uses the real strict reply decoder for command-specific saved IDs: %s',
+    (command, ids) => {
+      const { row, expected } = stored(command);
+      expect(() =>
+        qualifyBasic5StoredUserFlowReceipt(
+          {
+            ...row,
+            result: { outcome: 'saved', ids, revision: 'c'.repeat(64) },
+          },
+          expected,
+          true,
+        ),
+      ).toThrow('exact saved-user-flow contract');
+    },
+  );
+
+  it('does not accept a truthy unknown UI observation even for a committed saved row', () => {
+    const { row, expected } = stored();
+    expect(() =>
+      qualifyBasic5StoredUserFlowReceipt(row, expected, 'Saved.' as unknown as boolean),
+    ).toThrow('exact saved-user-flow contract');
+    expect(() => qualifyBasic5StoredUserFlowReceipt(undefined, expected, true)).toThrow(
+      'exact saved-user-flow contract',
+    );
+  });
+});
 
 describe('task-specific BASIC5 browser request budgets', () => {
   const baseUrl = 'http://127.0.0.1:3107';

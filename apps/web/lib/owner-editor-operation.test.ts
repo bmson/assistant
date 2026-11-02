@@ -83,6 +83,7 @@ function validatedHash(value: unknown) {
 }
 const hash = validatedHash(apply());
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -96,7 +97,160 @@ function fixture() {
 const pending = (storage: Storage) =>
   readOwnerEditorPendingMarker(storage, session.ownerId, session.formSessionScope);
 
+function streamedFamilyResponse() {
+  const f = fixture();
+  const familyGrant: OwnerEditorFormGrant = { ...grant, command: 'add_family_relationship' };
+  const body = {
+    version: 1,
+    intent: 'apply',
+    command: familyGrant.command,
+    operationId: familyGrant.operationId,
+    subjectContactId: contact,
+    objectContactId: second,
+    expectedSubjectRevision: 'a'.repeat(64),
+    expectedObjectRevision: 'b'.repeat(64),
+    predicate: 'sibling_of',
+    timing: 'unspecified',
+    validity: { validFrom: null, validUntil: null },
+    note: 'Synthetic family statement one.',
+    expectedCanonicalState: { kind: 'absent' },
+  };
+  const parsed = parseOwnerEditorRequest(body, '/api/profile/knowledge/family');
+  if (!parsed.ok || parsed.request.intent !== 'apply')
+    throw Error('Invalid streamed family fixture');
+  const receipt = saved({
+    command: familyGrant.command,
+    requestHash: ownerEditorRequestHash(parsed.request),
+    ids: {
+      relationId: relation,
+      memoryId: '77777777-7777-4777-8777-777777777777',
+      assertionId: '88888888-8888-4888-8888-888888888888',
+    },
+  });
+  let source!: ReadableStreamDefaultController<Uint8Array>;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      source = controller;
+    },
+  });
+  const nativeResponse = new Response(stream, {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+  let notifyStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    notifyStarted = resolve;
+  });
+  const transport = { signal: null as AbortSignal | null, abortEvents: 0 };
+  f.fetcher.mockImplementationOnce(async (_url, options) => {
+    const signal = options?.signal;
+    if (!signal) throw Error('Expected the actual owner-client abort signal');
+    transport.signal = signal;
+    // A native Response constructed from a stream has no fetch transport. This
+    // injected fetch wires abort to a real stream error, without browser/CDP proof.
+    signal.addEventListener(
+      'abort',
+      () => {
+        transport.abortEvents += 1;
+        source.error(new DOMException('Synthetic response transport aborted', 'AbortError'));
+      },
+      { once: true },
+    );
+    notifyStarted();
+    return nativeResponse;
+  });
+  return {
+    ...f,
+    familyGrant,
+    body,
+    receipt,
+    nativeResponse,
+    source,
+    started,
+    transport,
+    bytes: new TextEncoder().encode(JSON.stringify(receipt)),
+  };
+}
+
 describe('actual owner editor operation controller with offline named transport', () => {
+  it('keeps a response body unfinished at the client deadline unknown until an explicit same-operation check', async () => {
+    vi.useFakeTimers();
+    const f = streamedFamilyResponse();
+    const applying = f.controller.apply(f.body, f.familyGrant, contact);
+    await f.started;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.nativeResponse.status).toBe(200);
+    expect(f.nativeResponse.body?.locked).toBe(true);
+    // Even syntactically complete receipt bytes do not establish a consumed
+    // body until EOF. The real bounded reader must not accept a partial stream.
+    f.source.enqueue(f.bytes);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(f.transport.signal?.aborted).toBe(false);
+    expect(f.controller.getSnapshot()).toMatchObject({ phase: 'pending', busy: true });
+
+    await vi.advanceTimersByTimeAsync(1);
+    await applying;
+
+    expect(f.transport.signal?.aborted).toBe(true);
+    expect(f.transport.abortEvents).toBe(1);
+    expect(f.controller.getSnapshot()).toMatchObject({
+      phase: 'pending',
+      busy: false,
+      reply: null,
+    });
+    expect(pending(f.storage)).toEqual({
+      id: f.familyGrant.issuedOperationHandle,
+      command: f.familyGrant.command,
+      targetId: contact,
+    });
+    expect(f.controller.canReconcile()).toBe(false);
+    await f.controller.apply(f.body, f.familyGrant, contact);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(f.fetcher).toHaveBeenCalledOnce();
+
+    f.fetcher.mockResolvedValueOnce(Response.json(f.receipt));
+    await f.controller.check();
+
+    expect(f.fetcher.mock.calls.map(([, options]) => options?.method)).toEqual(['POST', 'GET']);
+    expect(f.fetcher.mock.calls[1]?.[0]).toBe(
+      `/api/profile/knowledge/family?operation=${encodeURIComponent(f.familyGrant.issuedOperationHandle)}`,
+    );
+    expect(f.fetcher.mock.calls[1]?.[1]?.body).toBeUndefined();
+    expect(f.controller.getSnapshot()).toMatchObject({
+      phase: 'resolved',
+      busy: false,
+      reply: f.receipt,
+    });
+    expect(pending(f.storage)).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('disposes the client abort timer after full consumption before a late independent native body read', async () => {
+    vi.useFakeTimers();
+    const f = streamedFamilyResponse();
+    const lateNativeConsumer = f.nativeResponse.clone();
+    const applying = f.controller.apply(f.body, f.familyGrant, contact);
+    await f.started;
+    await vi.advanceTimersByTimeAsync(9_000);
+    f.source.enqueue(f.bytes);
+    f.source.close();
+    await applying;
+
+    expect(f.nativeResponse.bodyUsed).toBe(true);
+    expect(f.controller.getSnapshot()).toMatchObject({ phase: 'resolved', reply: f.receipt });
+    expect(pending(f.storage)).toBeNull();
+    expect(f.transport.signal?.aborted).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    // This native tee consumer runs after the former client deadline. It is
+    // deliberately not evidence about Playwright/CDP response-body retrieval.
+    await expect(lateNativeConsumer.json()).resolves.toEqual(f.receipt);
+    expect(f.transport.signal?.aborted).toBe(false);
+    expect(f.transport.abortEvents).toBe(0);
+    expect(f.fetcher).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it.each(['add_family_relationship', 'correct_owner_family_relationship'] as const)(
     'keeps unknown %s pending and checks its result without sending another save',
     async (command) => {
