@@ -21,6 +21,14 @@ const EXPECTED_OWNER_EDITOR_MIGRATIONS = [
     folderMillis: 1_793_040_000_000,
     hash: 'cae24837bad4b9643b9f191bb3320f9f15338bdfb6e56356beff6cf9fb2a0610',
   },
+  {
+    folderMillis: 1_793_211_324_481,
+    hash: '405665b0cfe4181160c973e464b36fa9841a0d3df24c5c8006d99b8758142917',
+  },
+  {
+    folderMillis: 1_793_555_900_804,
+    hash: '498e12eea762a5e9eed316fdacd55a33ce28786d0648a4797b74b8c97b1def5a',
+  },
 ] as const;
 export class IncompatibleOwnerEditorMigrationTailError extends Error {
   constructor() {

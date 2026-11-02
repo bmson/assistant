@@ -99,6 +99,68 @@ describe('owner editor civil meaning and strict wire boundary', () => {
     ).toBe(false);
   });
 
+  it('strictly binds a person note to its exact subject and displayed revision', () => {
+    const create = {
+      version: 1,
+      intent: 'apply',
+      command: 'create_owner_memory',
+      operationId,
+      subjectContactId: subject,
+      expectedSubjectRevision: revision,
+      content: '  Anna prefers written updates.  ',
+      domain: 'relationships',
+      importance: 3,
+      pinned: false,
+    };
+    const parsed = parseOwnerEditorRequest(create, memoryPath);
+    expect(parsed).toMatchObject({
+      ok: true,
+      request: { ...create, content: 'Anna prefers written updates.' },
+    });
+    if (!parsed.ok || parsed.request.intent !== 'apply')
+      throw new Error('Expected a parsed owner memory creation request');
+    if (parsed.request.command !== 'create_owner_memory')
+      throw new Error('Expected the owner memory creation command');
+    expect(parsed.request.command).toBe('create_owner_memory');
+    expect(ownerEditorPath(parsed.request.command)).toBe(memoryPath);
+    const scope = {
+      ownerId: object,
+      sessionDigest: revision,
+      epoch: subject,
+      privacyGeneration: null,
+      command: 'create_owner_memory' as const,
+      operationId,
+      targetId: subject,
+      nonce: object,
+      issuedAt: 1,
+      expiresAt: 2,
+    };
+    expect(ownerEditorApplyMatchesScope(parsed.request, scope)).toBe(true);
+    expect(ownerEditorApplyMatchesScope(parsed.request, { ...scope, targetId: object })).toBe(
+      false,
+    );
+    expect(ownerEditorRequestHash(parsed.request)).not.toBe(
+      ownerEditorRequestHash({ ...parsed.request, subjectContactId: object }),
+    );
+    expect(ownerEditorRequestHash(parsed.request)).not.toBe(
+      ownerEditorRequestHash({ ...parsed.request, expectedSubjectRevision: 'b'.repeat(64) }),
+    );
+    expect(parseOwnerEditorRequest(create, family).ok).toBe(false);
+    for (const invalid of [
+      { unexpected: true },
+      { subjectContactId: 'not-a-uuid' },
+      { expectedSubjectRevision: 'short' },
+      { content: '  x  ' },
+      { content: ` ${'x'.repeat(4_001)} ` },
+      { domain: 'unknown' },
+      { importance: 0 },
+      { importance: 5.5 },
+      { pinned: 'false' },
+    ])
+      expect(parseOwnerEditorRequest({ ...create, ...invalid }, memoryPath).ok).toBe(false);
+    expect(OWNER_EDITOR_COMMANDS).toContain('create_owner_memory');
+  });
+
   it.each([
     ['2000-02-29', true],
     ['1900-02-29', false],
@@ -244,13 +306,14 @@ describe('owner editor civil meaning and strict wire boundary', () => {
     expect(parseOwnerEditorRequest(reconcile, people).ok).toBe(false);
   });
 
-  it('keeps UI removal names outside the five-command parser and scope admission', () => {
+  it('keeps UI removal names outside the operation parser and scope admission', () => {
     expect(OWNER_EDITOR_COMMANDS).toEqual([
       'create_person',
       'update_person_identity',
       'add_family_relationship',
       'correct_owner_family_relationship',
       'correct_owner_memory',
+      'create_owner_memory',
     ]);
     const removals: OwnerEditorApply[] = [
       {

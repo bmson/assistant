@@ -18,14 +18,16 @@ const replayMs = 24 * 60 * 60 * 1000;
 const digest = 'a'.repeat(64);
 
 function operation(issuedAt: Date, overrides: Partial<OwnerEditorOperationRecord> = {}) {
+  const command = overrides.command ?? 'create_person';
+  const targetId = command === 'create_person' ? null : ownerId;
   const scope = {
     ownerId,
     sessionDigest: digest,
     epoch,
     privacyGeneration: null,
-    command: 'create_person' as const,
+    command,
     operationId: randomUUID(),
-    targetId: null,
+    targetId,
     nonce: randomUUID(),
     issuedAt: issuedAt.getTime(),
     expiresAt: issuedAt.getTime() + 10 * 60_000,
@@ -233,6 +235,81 @@ function fixture(
 afterEach(() => vi.restoreAllMocks());
 
 describe('bounded Firestore owner editor receipt retention', () => {
+  it('validates and prunes mixed legacy and create-note receipts as one bounded page', async () => {
+    const cutoff = baseNow.getTime() - replayMs;
+    const legacy = operation(new Date(cutoff - 2), {
+      status: 'committed',
+      statusVersion: 2,
+      claimToken: null,
+      claimExpiresAt: null,
+      result: {
+        outcome: 'saved',
+        ids: { contactId: '44444444-4444-4444-8444-444444444444' },
+        revision: 'c'.repeat(64),
+      },
+    });
+    const createdMemoryId = '66666666-6666-4666-8666-666666666666';
+    const created = operation(new Date(cutoff - 1), {
+      command: 'create_owner_memory',
+      status: 'committed',
+      statusVersion: 2,
+      claimToken: null,
+      claimExpiresAt: null,
+      result: {
+        outcome: 'saved',
+        ids: { memoryId: createdMemoryId },
+        revision: 'd'.repeat(64),
+      },
+    });
+    const f = fixture({ rows: [{ row: legacy }, { row: created }] });
+
+    await expect(pruneExpiredFirestoreOwnerEditorReceipts(f.store, ownerId, baseNow)).resolves.toBe(
+      2,
+    );
+    expect(f.deletions).toEqual([documentKey(legacy.id), documentKey(created.id)]);
+    expect(f.events.slice(0, 3)).toEqual([
+      'query:agents',
+      'getAll:privacy-and-epoch',
+      'query:ownerEditorOperations',
+    ]);
+    expect(f.readsAfterWrite).toBe(false);
+  });
+
+  it('does not partially prune a page containing a malformed create-note receipt', async () => {
+    const cutoff = baseNow.getTime() - replayMs;
+    const legacy = operation(new Date(cutoff - 2), {
+      status: 'committed',
+      statusVersion: 2,
+      claimToken: null,
+      claimExpiresAt: null,
+      result: {
+        outcome: 'saved',
+        ids: { contactId: '44444444-4444-4444-8444-444444444444' },
+        revision: 'c'.repeat(64),
+      },
+    });
+    const malformedCreated = operation(new Date(cutoff - 1), {
+      command: 'create_owner_memory',
+      status: 'committed',
+      statusVersion: 2,
+      claimToken: null,
+      claimExpiresAt: null,
+      result: {
+        outcome: 'saved',
+        ids: { contactId: '44444444-4444-4444-8444-444444444444' },
+        revision: 'd'.repeat(64),
+      },
+    });
+    const f = fixture({ rows: [{ row: legacy }, { row: malformedCreated }] });
+
+    await expect(
+      pruneExpiredFirestoreOwnerEditorReceipts(f.store, ownerId, baseNow),
+    ).rejects.toThrow();
+    expect(f.deletions).toEqual([]);
+    expect(f.values.has(`ownerEditorOperations/${documentKey(legacy.id)}`)).toBe(true);
+    expect(f.values.has(`ownerEditorOperations/${documentKey(malformedCreated.id)}`)).toBe(true);
+  });
+
   it('deletes only rows at or before the replay cutoff in a 50-row page, with metadata reads first', async () => {
     const cutoff = baseNow.getTime() - replayMs;
     const oldRows = Array.from({ length: 51 }, (_, i) => ({

@@ -6,6 +6,7 @@ import {
   type MemoryMutation,
   type MemoryProminence,
   nextOwnerCorrection,
+  type PreparedOwnerMemoryCreation,
   type ProfileMemoryManagementRepository,
   type Records,
   snapshotEmbeddingSpace,
@@ -367,47 +368,79 @@ export class FirestoreProfileMemoryManagementRepository
       if (memorySnapshot?.exists) return { status: 'duplicate' };
 
       const now = this.store.now();
-      const row: Records['memories'] = {
-        id,
-        createdAt: now,
+      return this.createRecordInTransaction(
+        tx,
         agentId,
-        expiresAt: null,
-        embedding: input.embedding,
-        embeddingSpaceKey: input.embeddingSpaceKey ?? null,
-        sourceTaskId: null,
-        kind: 'fact',
-        confidence: '1.00',
-        contentHash: input.contentHash,
-        goalId: null,
-        originTrust: 'owner',
-        category: 'knowledge',
-        content: input.content,
-        importance: input.importance,
-        quarantined: false,
-        subjectContactId: input.subjectContactId,
-        domain: input.domain ?? null,
-        validFrom: null,
-        validUntil: null,
-        supersededById: null,
-        ownerConfirmed: true,
-        pinned: input.pinned,
-        source: 'manual',
-        lastAccessedAt: null,
-        lastConsolidatedAt: null,
-      };
-      tx.create(
-        memoryRef,
-        encodeRecord({
-          ...row,
-          embedding: FieldValue.vector(input.embedding),
-          embeddingSpaceKey: input.embeddingSpaceKey,
-          embeddingSpace: embeddingSpaceKey(this.embeddingSpace),
+        {
+          memoryId: id,
           retrievalRevision,
-        }),
+          subjectContactId: input.subjectContactId,
+          content: input.content,
+          contentHash: input.contentHash,
+          domain: input.domain ?? '',
+          importance: input.importance,
+          pinned: input.pinned,
+          embedding: input.embedding,
+          embeddingSpaceKey: embeddingSpaceKey(this.embeddingSpace),
+        },
+        now,
       );
-      tx.create(hashRef, { memoryId: id });
-      this.invalidateOwnerCard(tx, agentId, now);
-      return { status: 'updated', memory: managed(row) };
     });
+  }
+
+  /** Shared write primitive; caller has read every transaction guard before calling. */
+  createRecordInTransaction(
+    tx: Transaction,
+    agentId: string,
+    input: Omit<PreparedOwnerMemoryCreation, 'expectedSubjectRevision'>,
+    now: Date,
+  ): MemoryMutation {
+    validateCreate(input);
+    validateEmbedding(this.embeddingSpace, input.embedding);
+    if (input.embeddingSpaceKey !== embeddingSpaceKey(this.embeddingSpace))
+      throw new Error('Memory embedding space changed');
+    const row: Records['memories'] = {
+      id: input.memoryId,
+      createdAt: now,
+      agentId,
+      expiresAt: null,
+      embedding: input.embedding,
+      embeddingSpaceKey: input.embeddingSpaceKey,
+      sourceTaskId: null,
+      kind: 'fact',
+      confidence: '1.00',
+      contentHash: input.contentHash,
+      goalId: null,
+      originTrust: 'owner',
+      category: 'knowledge',
+      content: input.content,
+      importance: input.importance,
+      quarantined: false,
+      subjectContactId: input.subjectContactId,
+      domain: input.domain || null,
+      validFrom: null,
+      validUntil: null,
+      supersededById: null,
+      ownerConfirmed: true,
+      pinned: input.pinned,
+      source: 'manual',
+      lastAccessedAt: null,
+      lastConsolidatedAt: null,
+    };
+    tx.create(
+      this.store.doc('memories', input.memoryId),
+      encodeRecord({
+        ...row,
+        embedding: FieldValue.vector(input.embedding),
+        embeddingSpaceKey: input.embeddingSpaceKey,
+        embeddingSpace: embeddingSpaceKey(this.embeddingSpace),
+        retrievalRevision: input.retrievalRevision,
+      }),
+    );
+    tx.create(this.store.doc('memoryContentHashes', input.contentHash), {
+      memoryId: input.memoryId,
+    });
+    this.invalidateOwnerCard(tx, agentId, now);
+    return { status: 'updated', memory: managed(row) };
   }
 }

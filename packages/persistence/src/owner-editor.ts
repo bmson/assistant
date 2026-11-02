@@ -1,20 +1,45 @@
-/** Portable contracts for owner-authored People, Family, and Memory commands. */
+/** Commands recognized by the owner-editor wire and persisted-operation readers. */
 export const OWNER_EDITOR_COMMANDS = [
   'create_person',
   'update_person_identity',
   'add_family_relationship',
   'correct_owner_family_relationship',
   'correct_owner_memory',
+  'create_owner_memory',
 ] as const;
 /**
- * Shared UI command names. The release parser's OWNER_EDITOR_COMMANDS remains
- * the narrower set of commands with current wire/storage implementations.
+ * Shared command names, including commands not enabled for writing in this
+ * release. The web release allowlist remains the separate write gate.
  */
 export type OwnerEditorCommand =
   | (typeof OWNER_EDITOR_COMMANDS)[number]
   | 'remove_person'
   | 'remove_owner_family_relationship';
 export type OwnerEditorTiming = 'unspecified' | 'present' | 'past';
+
+/** Frozen outside native transaction callbacks; no provider work occurs in commit. */
+export interface PreparedOwnerMemoryCreation {
+  memoryId: string;
+  retrievalRevision: string;
+  subjectContactId: string;
+  expectedSubjectRevision: string;
+  content: string;
+  contentHash: string;
+  domain: string;
+  importance: number;
+  pinned: boolean;
+  embedding: number[];
+  embeddingSpaceKey: string;
+}
+
+/** Owner/epoch/privacy and hash eligibility observed in one short driver lease. */
+export interface OwnerMemoryCreationTarget {
+  ownerId: string;
+  subjectContactId: string;
+  subjectRevision: string;
+  subjectTrust: string;
+  status: 'eligible' | 'duplicate' | 'tombstoned';
+}
 
 /** Civil dates, validated before conversion; null means not recorded. */
 export interface OwnerEditorValidity {
@@ -74,6 +99,15 @@ export type OwnerEditorApply = ApplyEnvelope &
         expectedContentHash: string;
         expectedMemoryRevision: string;
         content: string;
+      }
+    | {
+        command: 'create_owner_memory';
+        subjectContactId: string;
+        expectedSubjectRevision: string;
+        content: string;
+        domain: string;
+        importance: number;
+        pinned: boolean;
       }
   );
 /** Resolves a stored request; this body cannot prepare or change a draft. */

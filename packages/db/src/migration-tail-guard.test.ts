@@ -24,6 +24,10 @@ const expected: MigrationTailMetadata[] = [
     folderMillis: 1_793_211_324_481,
     hash: '405665b0cfe4181160c973e464b36fa9841a0d3df24c5c8006d99b8758142917',
   },
+  {
+    folderMillis: 1_793_555_900_804,
+    hash: '498e12eea762a5e9eed316fdacd55a33ce28786d0648a4797b74b8c97b1def5a',
+  },
 ];
 const applied = (count: number): AppliedMigrationTailRow[] =>
   expected.slice(0, count).map((migration) => ({
@@ -41,7 +45,7 @@ describe('owner-editor migration tail guard', () => {
     expect(shipped).toEqual(expected);
   });
 
-  it.each([0, 1, 2, 3, 4])('accepts canonical strict prefix length %i', (count) => {
+  it.each([0, 1, 2, 3, 4, 5])('accepts canonical strict prefix length %i', (count) => {
     expect(() => assertCompatibleOwnerEditorMigrationTail(expected, applied(count))).not.toThrow();
   });
 
@@ -59,7 +63,7 @@ describe('owner-editor migration tail guard', () => {
       [{ hash: 'a'.repeat(64), createdAt: String(expected[0]!.folderMillis) }],
       [{ hash: expected[0]!.hash, createdAt: String(expected[0]!.folderMillis + 1) }],
       [applied(1)[0]!, applied(1)[0]!],
-      [...applied(4), { hash: 'b'.repeat(64), createdAt: String(expected[3]!.folderMillis + 1) }],
+      [...applied(5), { hash: 'b'.repeat(64), createdAt: String(expected[4]!.folderMillis + 1) }],
       [{ hash: expected[0]!.hash, createdAt: null }],
       [{ hash: 'not-a-hash', createdAt: 'not-a-time' }],
     ];
@@ -77,7 +81,7 @@ describe('owner-editor migration tail guard', () => {
       'Incompatible owner-editor migration ledger.',
     );
     expect(() =>
-      assertCompatibleOwnerEditorMigrationTail(expected, applied(4), true),
+      assertCompatibleOwnerEditorMigrationTail(expected, applied(5), true),
     ).not.toThrow();
   });
 
@@ -124,10 +128,10 @@ describe('owner-editor migration tail guard', () => {
   it('rejects an extra ledger row after the reviewed 0133 tail', () => {
     expect(() =>
       assertCompatibleOwnerEditorMigrationTail(expected, [
-        ...applied(4),
+        ...applied(5),
         {
           hash: 'b'.repeat(64),
-          createdAt: String(expected[3]!.folderMillis + 1),
+          createdAt: String(expected[4]!.folderMillis + 1),
         },
       ]),
     ).toThrow('Incompatible owner-editor migration ledger.');

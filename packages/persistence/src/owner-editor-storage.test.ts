@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { OwnerEditorCommand } from './owner-editor.js';
 import {
   ownerEditorOperationId,
   ownerEditorPrivacyDigest,
@@ -19,17 +20,18 @@ const scope = {
   expiresAt: 1_800_000_600_000,
 };
 
-function record(ids: Record<string, string>) {
+function record(ids: Record<string, string>, command: OwnerEditorCommand = scope.command) {
+  const operationScope = { ...scope, command };
   const now = new Date('2026-10-25T12:00:00.000Z');
   return {
-    id: ownerEditorOperationId(scope),
+    id: ownerEditorOperationId(operationScope),
     ownerId: scope.ownerId,
     epoch: scope.epoch,
     privacyGenerationDigest: ownerEditorPrivacyDigest(null),
     operationId: scope.operationId,
     requestHash: 'b'.repeat(64),
-    scopeDigest: ownerEditorScopeDigest(scope),
-    command: scope.command,
+    scopeDigest: ownerEditorScopeDigest(operationScope),
+    command,
     protocolVersion: 1,
     formIssuedAt: now,
     formExpiresAt: new Date(now.getTime() + 600_000),
@@ -64,5 +66,31 @@ describe('owner editor persisted operation codec', () => {
         }),
       ),
     ).toThrow();
+  });
+
+  it('accepts only the new saved memory identity in a note creation receipt', () => {
+    const memoryId = '77777777-7777-4777-8777-777777777777';
+    expect(
+      parseOwnerEditorOperationRecord(record({ memoryId }, 'create_owner_memory')),
+    ).toMatchObject({
+      command: 'create_owner_memory',
+      result: { outcome: 'saved', ids: { memoryId } },
+    });
+    expect(() =>
+      parseOwnerEditorOperationRecord(record({ contactId: scope.targetId }, 'create_owner_memory')),
+    ).toThrow();
+    expect(() =>
+      parseOwnerEditorOperationRecord(
+        record(
+          { memoryId, relationId: '66666666-6666-4666-8666-666666666666' },
+          'create_owner_memory',
+        ),
+      ),
+    ).toThrow();
+    expect(() => {
+      const unchanged = record({ memoryId }, 'create_owner_memory');
+      unchanged.result = { outcome: 'unchanged', ids: { memoryId }, revision: 'c'.repeat(64) };
+      parseOwnerEditorOperationRecord(unchanged);
+    }).toThrow();
   });
 });

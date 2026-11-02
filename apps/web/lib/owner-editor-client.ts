@@ -13,6 +13,7 @@ const COMMAND_ROUTE: Record<OwnerEditorCommand, OwnerEditorRoute> = {
   correct_owner_family_relationship: '/api/profile/knowledge/family',
   remove_owner_family_relationship: '/api/profile/knowledge/family',
   correct_owner_memory: '/api/profile/knowledge/memory',
+  create_owner_memory: '/api/profile/knowledge/memory',
 };
 
 export function ownerEditorRoute(command: OwnerEditorCommand): OwnerEditorRoute {
@@ -25,6 +26,7 @@ const COMMANDS = new Set<string>([
   'add_family_relationship',
   'correct_owner_family_relationship',
   'correct_owner_memory',
+  'create_owner_memory',
   'remove_person',
   'remove_owner_family_relationship',
 ]);
@@ -61,6 +63,8 @@ export function decodeOwnerEditorReply(value: unknown): OwnerEditorReply | null 
   if (!record(value) || value.version !== 1 || typeof value.authority !== 'string') return null;
 
   if (value.authority === 'operation_receipt') {
+    // A pre-existing identical note is not this operation's successful create.
+    if (value.command === 'create_owner_memory' && value.outcome === 'unchanged') return null;
     if (
       !exactKeys(value, [
         'version',
@@ -116,12 +120,16 @@ export function decodeOwnerEditorReply(value: unknown): OwnerEditorReply | null 
         value.command === 'update_person_identity' ||
         value.command === 'remove_person'
           ? ['contactId']
-          : value.command === 'correct_owner_memory'
+          : value.command === 'correct_owner_memory' || value.command === 'create_owner_memory'
             ? ['memoryId']
             : ['relationId', 'memoryId', 'assertionId'];
       const ids = value.ids;
       if (requiredIds.some((key) => !uuid(ids[key]))) return null;
-      if (value.command === 'correct_owner_memory' && Object.keys(ids).length !== 1) return null;
+      if (
+        (value.command === 'correct_owner_memory' || value.command === 'create_owner_memory') &&
+        Object.keys(ids).length !== 1
+      )
+        return null;
     } else if (value.outcome === 'conflict' || value.outcome === 'unavailable') {
       if (typeof value.reason !== 'string' || !value.reason) return null;
     } else if (value.outcome === 'invalid') {

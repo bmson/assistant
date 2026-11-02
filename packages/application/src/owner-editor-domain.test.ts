@@ -258,6 +258,49 @@ describe('actual owner editor domain preparation and transaction handoff', () =>
     expect(f.embed).not.toHaveBeenCalled();
     expect(f.family).not.toHaveBeenCalled();
   });
+  it('keeps recognized person-note creation unavailable before reads, providers, or writers', async () => {
+    const f = fixture();
+    const request: OwnerEditorApply = {
+      version: 1,
+      intent: 'apply',
+      command: 'create_owner_memory',
+      operationId: randomUUID(),
+      subjectContactId: f.left.id,
+      expectedSubjectRevision: f.left.revision,
+      content: 'Anna prefers written updates.',
+      domain: 'relationships',
+      importance: 3,
+      pinned: false,
+    };
+    const scope: OwnerEditorScope = {
+      ...f.scope,
+      command: request.command,
+      operationId: request.operationId,
+      targetId: request.subjectContactId,
+    };
+    const contactRead = vi.spyOn(f.storage, 'contact');
+    const contextRead = vi.spyOn(f.storage, 'context');
+    const graphContextRead = vi.spyOn(f.storage.graph, 'context');
+    const entityRead = vi.spyOn(f.storage.graph, 'entity');
+    const correctionRead = vi.spyOn(f.storage.graph, 'correctionTarget');
+
+    await expect(f.domain.prepare(request, scope)).resolves.toEqual({
+      ok: false,
+      result: { outcome: 'unavailable', reason: 'editor_command_unavailable' },
+    });
+    expect(contactRead).not.toHaveBeenCalled();
+    expect(contextRead).not.toHaveBeenCalled();
+    expect(f.family).not.toHaveBeenCalled();
+    expect(graphContextRead).not.toHaveBeenCalled();
+    expect(entityRead).not.toHaveBeenCalled();
+    expect(correctionRead).not.toHaveBeenCalled();
+    expect(f.embeddingSpace).not.toHaveBeenCalled();
+    expect(f.embed).not.toHaveBeenCalled();
+    expect(f.graphApply).not.toHaveBeenCalled();
+    expect(f.commitPerson).not.toHaveBeenCalled();
+    expect(f.commitFamily).not.toHaveBeenCalled();
+    expect(f.commitUnchangedFamily).not.toHaveBeenCalled();
+  });
   it.each(['remove_person', 'remove_owner_family_relationship'] as const)(
     'refuses typed %s before storage reads, providers, or writers',
     async (command) => {
