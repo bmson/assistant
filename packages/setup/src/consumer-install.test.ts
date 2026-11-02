@@ -54,10 +54,36 @@ const compositeIndexRows = indexSpec.indexes.map((index, number) => {
     state: 'READY',
   };
 });
-const fieldOverrideRows = indexSpec.fieldOverrides.map((field) => ({
-  name: `${indexPrefix}${field.collectionGroup}/fields/${field.fieldPath}`,
-  indexConfig: { indexes: [] },
-}));
+const fieldOverrideRows = [
+  {
+    name: `${indexPrefix}__default__/fields/*`,
+    indexConfig: {
+      usesAncestorConfig: false,
+      reverting: false,
+      indexes: [
+        {
+          queryScope: 'COLLECTION',
+          state: 'READY',
+          fields: [{ fieldPath: '*', order: 'ASCENDING' }],
+        },
+        {
+          queryScope: 'COLLECTION',
+          state: 'READY',
+          fields: [{ fieldPath: '*', order: 'DESCENDING' }],
+        },
+        {
+          queryScope: 'COLLECTION',
+          state: 'READY',
+          fields: [{ fieldPath: '*', arrayConfig: 'CONTAINS' }],
+        },
+      ],
+    },
+  },
+  ...indexSpec.fieldOverrides.map((field) => ({
+    name: `${indexPrefix}${field.collectionGroup}/fields/${field.fieldPath}`,
+    indexConfig: { indexes: [] },
+  })),
+];
 
 const archiveFiles = [
   'infra/gcp/consumer/terraform/main.tf',
