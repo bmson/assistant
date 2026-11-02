@@ -7,6 +7,7 @@ import {
 } from './basic5-ci-acceptance.js';
 import {
   basic5CiVitestCaptureLimit,
+  classifyBasic5AnonymousLocation,
   contentFreeBasic5CiVitestDiagnostic,
   observeBasic5CiVitestOutput,
 } from './basic5-ci-vitest-diagnostics.js';
@@ -261,6 +262,50 @@ describe('BASIC5 bounded failed Vitest report diagnostics', () => {
         firstSourceFrame: { file: '/unreviewed/private.ts', line: 1, column: 2 },
       }),
     ).toThrow();
+  });
+
+  it('projects only observed page status and a fixed destination class without retaining URLs', () => {
+    const base = 'http://127.0.0.1:3107';
+    expect(classifyBasic5AnonymousLocation(undefined, base)).toBe('absent');
+    expect(classifyBasic5AnonymousLocation('/api/auth/signin', base)).toBe('same_origin_signin');
+    expect(classifyBasic5AnonymousLocation('/api/auth/signin?private=secret', base)).toBe(
+      'other_same_origin',
+    );
+    expect(classifyBasic5AnonymousLocation('https://outside.test/private', base)).toBe(
+      'off_origin',
+    );
+    expect(
+      classifyBasic5AnonymousLocation('http://user:secret@127.0.0.1:3107/api/auth/signin', base),
+    ).toBe('invalid');
+    const checkpoint = {
+      schemaVersion: 1,
+      stage: 'browser_launched',
+      authenticatedNavigationCount: 0,
+      applyCount: 0,
+      durableReadbackCount: 0,
+      freshPageReadbackCount: 0,
+      anonymousPageStatus: 200,
+      anonymousLocationClass: 'absent',
+    };
+    const output = (value: unknown) =>
+      observe(`BASIC5_ACCEPTANCE_CHECKPOINT ${JSON.stringify(value)}\n${JSON.stringify(report())}`);
+    const good = output(checkpoint);
+    expect(good.diagnostic.checkpoint).toEqual(checkpoint);
+    expect(contentFreeBasic5CiVitestDiagnostic(good.diagnostic)).toEqual(good.diagnostic);
+    for (const patch of [
+      { anonymousPageStatus: 0 },
+      { anonymousPageStatus: 600 },
+      { anonymousPageStatus: '200' },
+      { anonymousLocationClass: 'https://private.test?token=secret' },
+      { extraBody: privateText },
+    ]) {
+      const bad = output({ ...checkpoint, ...patch });
+      expect(bad.validOutput).toBe(false);
+      expect(bad.diagnostic.checkpoint).toBeNull();
+      expect(JSON.stringify(bad.diagnostic)).not.toContain('secret');
+    }
+    const { anonymousLocationClass: _removed, ...missingClass } = checkpoint;
+    expect(output(missingClass).validOutput).toBe(false);
   });
 
   it('retains a single fixed last checkpoint alongside a failed report', () => {

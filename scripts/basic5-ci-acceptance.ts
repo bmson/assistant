@@ -1710,7 +1710,7 @@ function validateCiEvidence(
       'authenticatedPageNavigations',
       'browserHttpRequests',
       'browserPageHttpRequests',
-      'anonymousApiProbeRequests',
+      'anonymousPageProbeRequests',
       'pageApiMutationRequests',
       'applyPosts',
       'ownerEditorPostCount',
@@ -1857,7 +1857,7 @@ function validateCiEvidence(
     Number(counts.browserHttpRequests) < 1 ||
     Number(counts.browserHttpRequests) > 64 ||
     counts.browserPageHttpRequests !== Number(counts.browserHttpRequests) - 1 ||
-    counts.anonymousApiProbeRequests !== 1 ||
+    counts.anonymousPageProbeRequests !== 1 ||
     counts.pageApiMutationRequests !== 4 ||
     counts.applyPosts !== 4 ||
     counts.ownerEditorPostCount !== 4 ||
@@ -2066,7 +2066,7 @@ export async function runBasic5CiAcceptance(
           'authenticatedPageNavigations',
           'browserHttpRequests',
           'browserPageHttpRequests',
-          'anonymousApiProbeRequests',
+          'anonymousPageProbeRequests',
           'pageApiMutationRequests',
           'applyPosts',
           'ownerEditorPostCount',

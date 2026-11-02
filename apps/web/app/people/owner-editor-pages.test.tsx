@@ -193,6 +193,42 @@ beforeEach(() => {
   });
 });
 describe('actual page + real issuance builder composition, named reader/fence ports only', () => {
+  it.each([
+    ['postgres', 'directory', directory],
+    ['postgres', 'dossier', dossier],
+    ['firestore', 'directory', directory],
+    ['firestore', 'dossier', dossier],
+  ] as const)(
+    '%s %s propagates the owner guard before any protected read',
+    async (driver, _page, render) => {
+      ports.driver = driver;
+      // This is a page-composition ordering proof. Auth.js decoding and Next's
+      // streamed HTTP status behavior are outside these mocked owner-guard ports.
+      const denied = new Error('offline owner guard interruption');
+      ports.owner.mockRejectedValueOnce(denied);
+
+      await expect(render()).rejects.toBe(denied);
+
+      expect(ports.owner).toHaveBeenCalledOnce();
+      expect(ports.trace).toEqual([]);
+      for (const backend of [
+        ports.people,
+        ports.person,
+        ports.pgRead,
+        ports.pgEditor,
+        ports.getStore,
+        ports.fsPeople,
+        ports.fsPerson,
+        ports.fsContext,
+        ports.fsSnapshot,
+        ports.fsOwner,
+        ports.fsFence,
+        ports.fsAfter,
+        ports.terminate,
+      ])
+        expect(backend).not.toHaveBeenCalled();
+    },
+  );
   it('returns to the filtered Connections list by name and places connections before saved dates', async () => {
     const context = '/profile/knowledge?view=connections&q=Alex';
     const html = renderToStaticMarkup(
@@ -262,6 +298,10 @@ describe('actual page + real issuance builder composition, named reader/fence po
   );
   it('PG directory issues only create scope inside same read lease and preserves GET q links', async () => {
     const html = renderToStaticMarkup(await directory());
+    expect(ports.owner).toHaveBeenCalledOnce();
+    expect(ports.owner.mock.invocationCallOrder[0]).toBeLessThan(
+      ports.pgRead.mock.invocationCallOrder[0] ?? 0,
+    );
     expect(ports.trace).toEqual(['pg-before', 'browse', 'editor', 'pg-after']);
     expect(ports.pgEditor).toHaveBeenCalledExactlyOnceWith(leased, {});
     expect(html).toContain('Add person');
@@ -289,6 +329,10 @@ describe('actual page + real issuance builder composition, named reader/fence po
       };
     });
     const html = renderToStaticMarkup(await dossier());
+    expect(ports.owner).toHaveBeenCalledOnce();
+    expect(ports.owner.mock.invocationCallOrder[0]).toBeLessThan(
+      ports.pgRead.mock.invocationCallOrder[0] ?? 0,
+    );
     expect(ports.trace).toEqual(['pg-before', 'browse', 'editor', 'pg-after']);
     expect(ports.pgEditor.mock.calls[0]?.[1]).toMatchObject({ contactId: contact.id });
     expect(html).toContain('Edit details');
@@ -389,6 +433,10 @@ describe('actual page + real issuance builder composition, named reader/fence po
   it('FS directory uses same outer owner/fence/store and context only, zero option scan/PG fallback', async () => {
     ports.driver = 'firestore';
     const html = renderToStaticMarkup(await directory());
+    expect(ports.owner).toHaveBeenCalledOnce();
+    expect(ports.owner.mock.invocationCallOrder[0]).toBeLessThan(
+      ports.getStore.mock.invocationCallOrder[0] ?? 0,
+    );
     expect(ports.trace).toEqual([
       'fs-owner',
       'fs-before',
@@ -407,6 +455,10 @@ describe('actual page + real issuance builder composition, named reader/fence po
   it('FS dossier native editor snapshots stay inside the same owner/privacy read window', async () => {
     ports.driver = 'firestore';
     const html = renderToStaticMarkup(await dossier());
+    expect(ports.owner).toHaveBeenCalledOnce();
+    expect(ports.owner.mock.invocationCallOrder[0]).toBeLessThan(
+      ports.getStore.mock.invocationCallOrder[0] ?? 0,
+    );
     expect(ports.trace).toEqual([
       'fs-owner',
       'fs-before',

@@ -19,6 +19,7 @@ import type { Db } from '@assistant/db';
 import type { Response as BrowserResponse, Page } from 'playwright';
 import { expect, it } from 'vitest';
 import {
+  assertBasic5AnonymousPageResponse,
   assertBasic5ReceiptSequence,
   BASIC5_AUTH_COOKIE_NAME,
   BASIC5_EMBEDDING_DIMENSIONS,
@@ -41,6 +42,10 @@ import {
   readBasic5LinuxProcessSnapshot,
   selectBasic5CiBrowserProcess,
 } from './basic5-ci-process-proof.js';
+import {
+  type Basic5CiFixtureCheckpoint,
+  classifyBasic5AnonymousLocation,
+} from './basic5-ci-vitest-diagnostics.js';
 import {
   assertAllocatedTestDatabaseOwnership,
   assertAllocatedTestTargetMarker,
@@ -455,6 +460,9 @@ browserTest(
     let checkpointApplyCount = 0;
     let checkpointDurableReadbackCount = 0;
     let checkpointFreshPageReadbackCount = 0;
+    let anonymousPageObservation:
+      | Pick<Basic5CiFixtureCheckpoint, 'anonymousPageStatus' | 'anonymousLocationClass'>
+      | undefined;
     const setCheckpoint = (stage: Basic5CheckpointStage) => {
       checkpointStage = stage;
     };
@@ -469,6 +477,7 @@ browserTest(
           applyCount: checkpointApplyCount,
           durableReadbackCount: checkpointDurableReadbackCount,
           freshPageReadbackCount: checkpointFreshPageReadbackCount,
+          ...anonymousPageObservation,
         })}\n`,
       );
     };
@@ -535,7 +544,7 @@ browserTest(
     let embeddingRequests = 0;
     let readinessAttempts: number | null = null;
     let browserHttpRequests = 0;
-    let anonymousApiProbeRequests = 0;
+    let anonymousPageProbeRequests = 0;
     let pageApiMutationRequests = 0;
     let authenticatedPageNavigations = 0;
     let browserBudgetExceeded = false;
@@ -897,14 +906,49 @@ browserTest(
         }
         return allowed ? route.continue() : route.abort('blockedbyclient');
       });
-      // The combined 64-request budget includes this separate API probe.
+      // The combined 64-request budget includes this single anonymous page probe.
       browserHttpRequests += 1;
-      anonymousApiProbeRequests += 1;
+      anonymousPageProbeRequests += 1;
       const anonymous = await context.request.get(`${baseUrl}${ACCEPTANCE_PAGE}/${personId}`, {
         maxRedirects: 0,
       });
-      expect(anonymous.status()).toBeGreaterThanOrEqual(300);
-      expect(anonymous.headers().location).toContain('/api/auth/signin');
+      // App Router may stream its sign-in redirect after committing an HTML 200.
+      // Inspect this same response; never substitute a generic successful status
+      // or missing-data check for a positively identified owner-auth redirect.
+      const anonymousHeaders = anonymous.headers();
+      anonymousPageObservation = {
+        anonymousPageStatus: anonymous.status(),
+        anonymousLocationClass: classifyBasic5AnonymousLocation(anonymousHeaders.location, baseUrl),
+      };
+      const declaredBodyBytes = anonymousHeaders['content-length'];
+      if (
+        declaredBodyBytes &&
+        (!/^\d+$/.test(declaredBodyBytes) || Number(declaredBodyBytes) > 64 * 1024)
+      )
+        throw new Error('Anonymous page response exceeded the bounded inspection contract.');
+      await assertBasic5AnonymousPageResponse({
+        status: anonymous.status(),
+        location: anonymousHeaders.location,
+        contentType: anonymousHeaders['content-type'],
+        body: await anonymous.body(),
+        baseUrl,
+        protectedMarkers: [
+          // The requested personId itself is public routing input, not a dossier canary.
+          'Alex Rivera',
+          OWNER_NOTE_V1,
+          OWNER_NOTE_V2,
+          'Synthetic family statement one.',
+          'Synthetic family statement corrected.',
+          personEntityId,
+          relativeEntityId,
+          ownerId,
+          noteId,
+          'update_person_identity',
+          'add_family_relationship',
+          'correct_owner_family_relationship',
+          'correct_owner_memory',
+        ],
+      });
       setCheckpoint('anonymous_probe_complete');
       const cookie = await createBasic5AuthCookie({
         email: ownerEmail,
@@ -1237,7 +1281,7 @@ browserTest(
       expect(ownerApplyRequests).toBe(4);
       expect(recoveryRequests).toBe(0);
       expect(pageApiMutationRequests).toBe(4);
-      expect(anonymousApiProbeRequests).toBe(1);
+      expect(anonymousPageProbeRequests).toBe(1);
       expect(embeddingRequests).toBe(3);
       const fixtureCalls = await db.execute<{ model: string; role: string }>(
         sql`SELECT model, role FROM model_calls WHERE model = ${BASIC5_FIXTURE_MODEL_ID}`,
@@ -1348,8 +1392,8 @@ browserTest(
           pageNavigations: authenticatedPageNavigations,
           authenticatedPageNavigations,
           browserHttpRequests,
-          browserPageHttpRequests: browserHttpRequests - anonymousApiProbeRequests,
-          anonymousApiProbeRequests,
+          browserPageHttpRequests: browserHttpRequests - anonymousPageProbeRequests,
+          anonymousPageProbeRequests,
           pageApiMutationRequests,
           applyPosts: receipts.length,
           ownerEditorPostCount,

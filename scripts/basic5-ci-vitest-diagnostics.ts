@@ -22,6 +22,34 @@ const CHECKPOINT_STAGES = [
     ),
   ),
 ];
+export type Basic5AnonymousLocationClass =
+  | 'absent'
+  | 'same_origin_signin'
+  | 'other_same_origin'
+  | 'off_origin'
+  | 'invalid';
+
+/** Only a fixed destination class leaves the fixture; never retain a Location URL. */
+export function classifyBasic5AnonymousLocation(
+  location: string | undefined,
+  baseUrl: string,
+): Basic5AnonymousLocationClass {
+  if (location === undefined) return 'absent';
+  if (!location || location.length > 2048) return 'invalid';
+  try {
+    const base = new URL(baseUrl);
+    const target = new URL(location, base);
+    if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password)
+      return 'invalid';
+    if (target.origin !== base.origin) return 'off_origin';
+    return target.pathname === '/api/auth/signin' && !target.search && !target.hash
+      ? 'same_origin_signin'
+      : 'other_same_origin';
+  } catch {
+    return 'invalid';
+  }
+}
+
 export type Basic5CiFixtureCheckpoint = {
   schemaVersion: 1;
   stage: string;
@@ -29,12 +57,24 @@ export type Basic5CiFixtureCheckpoint = {
   applyCount: number;
   durableReadbackCount: number;
   freshPageReadbackCount: number;
+  anonymousPageStatus?: number;
+  anonymousLocationClass?: Basic5AnonymousLocationClass;
 };
 
 function safeCheckpoint(value: unknown): Basic5CiFixtureCheckpoint | null {
   if (
     !record(value) ||
-    Object.keys(value).length !== 6 ||
+    Object.keys(value).length !== (Object.hasOwn(value, 'anonymousPageStatus') ? 8 : 6) ||
+    Object.hasOwn(value, 'anonymousPageStatus') !==
+      Object.hasOwn(value, 'anonymousLocationClass') ||
+    (Object.hasOwn(value, 'anonymousPageStatus') &&
+      (!Number.isInteger(value.anonymousPageStatus) ||
+        Number(value.anonymousPageStatus) < 100 ||
+        Number(value.anonymousPageStatus) > 599 ||
+        typeof value.anonymousLocationClass !== 'string' ||
+        !['absent', 'same_origin_signin', 'other_same_origin', 'off_origin', 'invalid'].includes(
+          value.anonymousLocationClass,
+        ))) ||
     value.schemaVersion !== 1 ||
     typeof value.stage !== 'string' ||
     !CHECKPOINT_STAGES.includes(value.stage) ||
@@ -52,6 +92,12 @@ function safeCheckpoint(value: unknown): Basic5CiFixtureCheckpoint | null {
     applyCount: Number(value.applyCount),
     durableReadbackCount: Number(value.durableReadbackCount),
     freshPageReadbackCount: Number(value.freshPageReadbackCount),
+    ...(Object.hasOwn(value, 'anonymousPageStatus')
+      ? {
+          anonymousPageStatus: Number(value.anonymousPageStatus),
+          anonymousLocationClass: value.anonymousLocationClass as Basic5AnonymousLocationClass,
+        }
+      : {}),
   };
 }
 

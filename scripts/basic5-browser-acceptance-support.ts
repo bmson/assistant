@@ -1,4 +1,228 @@
+import { createRequire } from 'node:module';
 import { isolatedTestEnvironment } from './test-target.js';
+
+const require = createRequire(import.meta.url);
+const nextHtmlParser =
+  require('../apps/web/node_modules/next/dist/compiled/node-html-parser/index.js') as {
+    parse: (html: string) => {
+      textContent: string;
+      querySelectorAll: (selector: string) => Array<{
+        tagName: string;
+        attributes: Record<string, string>;
+        rawAttrs: string;
+        outerHTML: string;
+        parentNode?: { tagName?: string; parentNode?: unknown } | null;
+        getAttribute: (name: string) => string | null;
+      }>;
+    };
+  };
+
+const ANONYMOUS_RESPONSE_BODY_LIMIT = 64 * 1024;
+const ANONYMOUS_RESPONSE_TEXT_LIMIT = 2_048;
+const ANONYMOUS_PROTECTED_MARKER_LIMIT = 32;
+const ANONYMOUS_SIGNIN_PATH = '/api/auth/signin';
+
+function anonymousResponseError(): never {
+  throw new Error('BASIC5 anonymous person-page response did not satisfy the auth boundary');
+}
+
+function isExpectedSigninLocation(value: string, baseUrl: string): boolean {
+  try {
+    const base = new URL(baseUrl);
+    const target = new URL(value, base);
+    return (
+      target.origin === base.origin &&
+      target.pathname === ANONYMOUS_SIGNIN_PATH &&
+      target.search === '' &&
+      target.hash === '' &&
+      target.username === '' &&
+      target.password === ''
+    );
+  } catch {
+    return false;
+  }
+}
+
+function streamedSigninRedirect(body: Buffer, contentType: string | undefined): boolean {
+  if (!contentType || !/^text\/html(?:\s*;|$)/i.test(contentType)) return false;
+  let html: string;
+  try {
+    html = new TextDecoder('utf-8', { fatal: true }).decode(body);
+  } catch {
+    return false;
+  }
+  let document: ReturnType<typeof nextHtmlParser.parse>;
+  try {
+    document = nextHtmlParser.parse(html);
+  } catch {
+    return false;
+  }
+  const elements = document.querySelectorAll('*');
+  if (elements.some((element) => element.tagName.toLowerCase() === 'base')) return false;
+  const htmlElements = elements.filter((element) => element.tagName.toLowerCase() === 'html');
+  const heads = elements.filter((element) => element.tagName.toLowerCase() === 'head');
+  const bodies = elements.filter((element) => element.tagName.toLowerCase() === 'body');
+  if (
+    htmlElements.length > 1 ||
+    heads.length > 1 ||
+    bodies.length > 1 ||
+    (htmlElements.length === 0 && (heads.length > 0 || bodies.length > 0)) ||
+    (htmlElements.length === 1 && (heads.length !== 1 || bodies.length !== 1))
+  )
+    return false;
+  const refreshes = elements.filter(
+    (element) =>
+      element.tagName.toLowerCase() === 'meta' &&
+      (element.getAttribute('http-equiv') ?? '').toLowerCase() === 'refresh',
+  );
+  const redirectMarkers = elements.filter(
+    (element) => element.getAttribute('id') === '__next-page-redirect',
+  );
+  if (refreshes.length !== 1 || redirectMarkers.length !== 1 || refreshes[0] !== redirectMarkers[0])
+    return false;
+  const marker = redirectMarkers[0];
+  const serializedMarker = marker ? `<meta ${marker.rawAttrs}>` : '';
+  if (
+    !marker ||
+    Object.keys(marker.attributes).length !== 3 ||
+    marker.outerHTML !==
+      '<meta id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin">' ||
+    (!html.includes(serializedMarker) && !html.includes(serializedMarker.replace(/>$/, '/>'))) ||
+    marker.rawAttrs !==
+      'id="__next-page-redirect" http-equiv="refresh" content="1;url=/api/auth/signin"'
+  )
+    return false;
+  let ancestor = marker.parentNode;
+  let markerIsInAuthDocumentContext = false;
+  let markerIsUnderHtml = false;
+  while (ancestor?.tagName) {
+    const tag = ancestor.tagName.toLowerCase();
+    if (!['html', 'head', 'body'].includes(tag)) return false;
+    if (tag === 'head' || tag === 'body') markerIsInAuthDocumentContext = true;
+    if (tag === 'html') markerIsUnderHtml = true;
+    ancestor = ancestor.parentNode as typeof ancestor;
+  }
+  if (htmlElements.length === 0) {
+    if (marker.parentNode?.tagName || markerIsUnderHtml) return false;
+  } else if (!markerIsUnderHtml || !markerIsInAuthDocumentContext) {
+    return false;
+  }
+  return marker.getAttribute('content') === `1;url=${ANONYMOUS_SIGNIN_PATH}`;
+}
+
+function hasStreamRedirectMarkup(body: Buffer): boolean {
+  if (body.length === 0) return false;
+  try {
+    const html = new TextDecoder('utf-8', { fatal: true }).decode(body);
+    const elements = nextHtmlParser.parse(html).querySelectorAll('*');
+    return elements.some(
+      (element) =>
+        element.getAttribute('id') === '__next-page-redirect' ||
+        (element.tagName.toLowerCase() === 'meta' &&
+          (element.getAttribute('http-equiv') ?? '').toLowerCase() === 'refresh'),
+    );
+  } catch {
+    return true;
+  }
+}
+
+function decodeEscapedCharacters(value: string): string {
+  return value.replace(
+    /\\u\{([0-9a-f]{1,6})\}|\\u([0-9a-f]{4})|\\x([0-9a-f]{2})/gi,
+    (_match, braced: string | undefined, unicode: string | undefined, hex: string | undefined) => {
+      const code = Number.parseInt(braced ?? unicode ?? hex ?? '', 16);
+      if (!Number.isFinite(code) || code > 0x10ffff) return '';
+      return braced === undefined ? String.fromCharCode(code) : String.fromCodePoint(code);
+    },
+  );
+}
+
+/**
+ * Accept only the two Next HTML page-auth representations for the configured
+ * Google sign-in route. The body and URL are never included in diagnostics.
+ */
+export function assertBasic5AnonymousPageResponse(input: {
+  status: number;
+  location?: string;
+  contentType?: string;
+  body: Buffer;
+  baseUrl: string;
+  protectedMarkers: readonly string[];
+}): void {
+  if (
+    !Number.isInteger(input.status) ||
+    !Buffer.isBuffer(input.body) ||
+    input.body.length > ANONYMOUS_RESPONSE_BODY_LIMIT ||
+    input.baseUrl.length > ANONYMOUS_RESPONSE_TEXT_LIMIT ||
+    (input.location !== undefined && input.location.length > ANONYMOUS_RESPONSE_TEXT_LIMIT) ||
+    (input.contentType !== undefined && input.contentType.length > 256) ||
+    input.protectedMarkers.length > ANONYMOUS_PROTECTED_MARKER_LIMIT ||
+    input.protectedMarkers.length === 0 ||
+    input.protectedMarkers.some(
+      (marker) =>
+        typeof marker !== 'string' ||
+        marker.length === 0 ||
+        marker.length > ANONYMOUS_RESPONSE_TEXT_LIMIT,
+    )
+  )
+    anonymousResponseError();
+
+  let base: URL;
+  try {
+    base = new URL(input.baseUrl);
+  } catch {
+    anonymousResponseError();
+  }
+  if (
+    !['http:', 'https:'].includes(base.protocol) ||
+    base.username ||
+    base.password ||
+    base.pathname !== '/' ||
+    base.search ||
+    base.hash
+  )
+    anonymousResponseError();
+
+  let accepted = false;
+  if (
+    input.status === 307 &&
+    input.location !== undefined &&
+    !hasStreamRedirectMarkup(input.body)
+  ) {
+    accepted = isExpectedSigninLocation(input.location, base.href);
+  } else if (
+    input.status === 200 &&
+    input.location === undefined &&
+    streamedSigninRedirect(input.body, input.contentType)
+  ) {
+    accepted = true;
+  }
+  if (!accepted) anonymousResponseError();
+
+  let rawBody: string;
+  try {
+    rawBody = new TextDecoder('utf-8', { fatal: true }).decode(input.body);
+  } catch {
+    anonymousResponseError();
+  }
+  let document: ReturnType<typeof nextHtmlParser.parse>;
+  try {
+    document = nextHtmlParser.parse(rawBody);
+  } catch {
+    anonymousResponseError();
+  }
+  const searchableContent = [
+    rawBody,
+    document.textContent,
+    ...document.querySelectorAll('*').flatMap((element) => Object.values(element.attributes)),
+  ];
+  const decodedContent = [...searchableContent, ...searchableContent.map(decodeEscapedCharacters)];
+  for (const marker of input.protectedMarkers) {
+    const jsonEscaped = JSON.stringify(marker).slice(1, -1);
+    if (decodedContent.some((part) => part.includes(marker) || part.includes(jsonEscaped)))
+      anonymousResponseError();
+  }
+}
 
 export const BASIC5_BROWSER_ACTIONS = [
   'update_person_identity',
