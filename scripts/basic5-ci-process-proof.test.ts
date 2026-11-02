@@ -1,5 +1,7 @@
+import { EventEmitter } from 'node:events';
 import * as fsPromises from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { type Basic5CiUtilityChildTestDriver, RealBasic5CiOps } from './basic5-ci-acceptance.js';
 import {
   assertBasic5CiProcessClosure,
   assertBasic5CiProcessRegistryComplete,
@@ -41,10 +43,16 @@ function setLinuxPlatformForMockedProcessReads(): void {
 
 function statContents(
   pid: number,
-  values: { ppid?: number; pgid?: number; sid?: number; startTimeTicks?: string } = {},
+  values: {
+    state?: string;
+    ppid?: number;
+    pgid?: number;
+    sid?: number;
+    startTimeTicks?: string;
+  } = {},
 ): string {
   const fields = [
-    'S',
+    values.state ?? 'S',
     String(values.ppid ?? 11),
     String(values.pgid ?? pid),
     String(values.sid ?? pid),
@@ -160,7 +168,7 @@ describe('BASIC5 Linux process proof', () => {
     vi.mocked(fsPromises.readdir).mockResolvedValue(['42'] as never);
     mockReadFile(statContents(42, { pgid: 0, sid: 0 }));
     await expect(readBasic5LinuxProcessSnapshot()).resolves.toEqual(
-      new Map([[42, { pid: 42, ppid: 11, pgid: 0, sid: 0, startTimeTicks: '987654' }]]),
+      new Map([[42, { pid: 42, state: 'S', ppid: 11, pgid: 0, sid: 0, startTimeTicks: '987654' }]]),
     );
 
     for (const field of ['pgid', 'sid'] as const) {
@@ -183,6 +191,194 @@ describe('BASIC5 Linux process proof', () => {
     const error = await thrownBy(() => readBasic5LinuxProcessIdentity(42));
     expectSafeProofError(error, 'process_executable_unavailable');
     expect(fsPromises.readFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('recognizes only a disappeared executable for an unchanged known zombie identity', async () => {
+    setLinuxPlatformForMockedProcessReads();
+    const enrolled = {
+      pid: 42,
+      ppid: 11,
+      pgid: 42,
+      sid: 42,
+      startTimeTicks: '987654',
+      exe: '/usr/bin/node',
+    };
+
+    vi.mocked(fsPromises.realpath).mockRejectedValueOnce(codedError('ENOENT'));
+    mockReadFile(statContents(42), statContents(42, { state: 'Z' }));
+    expectSafeProofError(
+      await thrownBy(() => readBasic5LinuxProcessIdentity(42, enrolled)),
+      'known_process_terminal',
+    );
+    expect(fsPromises.readFile).toHaveBeenCalledTimes(2);
+
+    vi.mocked(fsPromises.realpath).mockRejectedValueOnce(codedError('ESRCH'));
+    mockReadFile(statContents(42, { state: 'Z' }), statContents(42, { state: 'Z' }));
+    expectSafeProofError(
+      await thrownBy(() => readBasic5LinuxProcessIdentity(42, enrolled)),
+      'known_process_terminal',
+    );
+    expect(fsPromises.readFile).toHaveBeenCalledTimes(2);
+
+    vi.mocked(fsPromises.realpath).mockRejectedValueOnce(codedError('ENOENT'));
+    mockReadFile(statContents(42, { state: 'Z' }), statContents(42, { state: 'Z' }));
+    expectSafeProofError(
+      await thrownBy(() => readBasic5LinuxProcessIdentity(42)),
+      'process_executable_unavailable',
+    );
+
+    vi.mocked(fsPromises.realpath).mockResolvedValueOnce('/usr/bin/node');
+    vi.mocked(fsPromises.readlink).mockRejectedValueOnce(codedError('ENOENT'));
+    mockReadFile(
+      statContents(42, { state: 'Z' }),
+      statContents(42, { state: 'Z' }),
+      statContents(42, { state: 'Z' }),
+    );
+    expectSafeProofError(
+      await thrownBy(() => readBasic5LinuxProcessIdentity(42, enrolled)),
+      'known_process_terminal',
+    );
+  });
+
+  it('returns the unchanged state-free registry identity shape for a live process', async () => {
+    setLinuxPlatformForMockedProcessReads();
+    vi.mocked(fsPromises.realpath).mockResolvedValueOnce('/usr/bin/node');
+    vi.mocked(fsPromises.readlink).mockResolvedValueOnce('/usr/bin/node');
+    mockReadFile(statContents(42), statContents(42));
+
+    const identity = await readBasic5LinuxProcessIdentity(42);
+    expect(identity).toEqual({
+      pid: 42,
+      ppid: 11,
+      pgid: 42,
+      sid: 42,
+      startTimeTicks: '987654',
+      exe: '/usr/bin/node',
+    });
+    expect(identity && Object.hasOwn(identity, 'state')).toBe(false);
+    expect(identity && Object.keys(identity).sort()).toEqual([
+      'exe',
+      'pgid',
+      'pid',
+      'ppid',
+      'sid',
+      'startTimeTicks',
+    ]);
+  });
+
+  it('integrates real proof reads with the utility child runner across a known zombie transition', async () => {
+    setLinuxPlatformForMockedProcessReads();
+    const pid = 88;
+    let alive = true;
+    vi.mocked(fsPromises.readdir).mockImplementation(async () => (alive ? ['88'] : []) as never);
+    mockReadFile(
+      statContents(pid, { ppid: process.pid, pgid: pid, sid: pid, startTimeTicks: '1' }),
+      statContents(pid, { ppid: process.pid, pgid: pid, sid: pid, startTimeTicks: '1' }),
+      statContents(pid, { ppid: process.pid, pgid: pid, sid: pid, startTimeTicks: '1' }),
+      statContents(pid, {
+        state: 'Z',
+        ppid: process.pid,
+        pgid: pid,
+        sid: pid,
+        startTimeTicks: '1',
+      }),
+      statContents(pid, {
+        state: 'Z',
+        ppid: process.pid,
+        pgid: pid,
+        sid: pid,
+        startTimeTicks: '1',
+      }),
+    );
+    vi.mocked(fsPromises.realpath)
+      .mockResolvedValueOnce('/synthetic/node')
+      .mockRejectedValueOnce(codedError('ENOENT'));
+    vi.mocked(fsPromises.readlink).mockResolvedValueOnce('/synthetic/node');
+
+    class MockDirectChild extends EventEmitter {
+      pid = 88;
+      stdout = new EventEmitter();
+      stderr = new EventEmitter();
+      kill = vi.fn(() => true);
+    }
+    const child = new MockDirectChild();
+    const killProcess = vi.fn();
+    const proof = {
+      BASIC5_CI_CHROME_EXECUTABLE,
+      readBasic5LinuxProcessSnapshot,
+      readBasic5LinuxProcessIdentity,
+      readBasic5CiProcessRegistry: vi.fn(async () => []),
+      assertBasic5CiProcessRegistryComplete: vi.fn(),
+      assertBasic5CiProcessClosure: vi.fn(),
+    } as unknown as Basic5CiUtilityChildTestDriver['proof'];
+    const driver: Basic5CiUtilityChildTestDriver = {
+      proof,
+      now: () => 100,
+      spawn: vi.fn(() => child) as unknown as Basic5CiUtilityChildTestDriver['spawn'],
+      sleep: async () => {
+        alive = false;
+        child.emit('close', 0, null);
+      },
+      killProcess,
+    };
+    const ops = new RealBasic5CiOps(driver);
+    try {
+      const result = await ops.runUtilityChild(
+        '/synthetic/node',
+        [],
+        {},
+        10_000,
+        'seed',
+        new AbortController().signal,
+      );
+      expect(result.exitCode).toBe(0);
+      expect(result.utilityDiagnostic).toMatchObject({ closed: true, exitCode: 0 });
+      expect(fsPromises.readdir).toHaveBeenCalledTimes(3);
+      expect(fsPromises.readFile).toHaveBeenCalledTimes(5);
+      expect(fsPromises.realpath).toHaveBeenCalledTimes(2);
+      expect(fsPromises.readlink).toHaveBeenCalledTimes(1);
+      expect(child.kill).not.toHaveBeenCalled();
+      expect(killProcess).not.toHaveBeenCalled();
+    } finally {
+      ops.dispose();
+    }
+    expect(alive).toBe(false);
+  });
+
+  it('holds on zombie tuple changes, live executable paths, and permission failures', async () => {
+    setLinuxPlatformForMockedProcessReads();
+    const enrolled = {
+      pid: 42,
+      ppid: 11,
+      pgid: 42,
+      sid: 42,
+      startTimeTicks: '987654',
+      exe: '/usr/bin/node',
+    };
+
+    for (const changed of [{ startTimeTicks: '987655' }, { ppid: 12 }, { pgid: 43 }, { sid: 43 }]) {
+      vi.mocked(fsPromises.realpath).mockRejectedValueOnce(codedError('ENOENT'));
+      mockReadFile(statContents(42), statContents(42, { ...changed, state: 'Z' }));
+      expectSafeProofError(
+        await thrownBy(() => readBasic5LinuxProcessIdentity(42, enrolled)),
+        'process_identity_changed',
+      );
+    }
+
+    vi.mocked(fsPromises.realpath).mockResolvedValueOnce('/usr/bin/node');
+    vi.mocked(fsPromises.readlink).mockResolvedValueOnce('/usr/bin/node');
+    mockReadFile(statContents(42, { state: 'Z' }), statContents(42, { state: 'Z' }));
+    expectSafeProofError(
+      await thrownBy(() => readBasic5LinuxProcessIdentity(42, enrolled)),
+      'owned_process_identity_ineligible',
+    );
+
+    vi.mocked(fsPromises.realpath).mockRejectedValueOnce(codedError('ENOENT'));
+    mockReadFile(statContents(42), codedError('EACCES'));
+    expectSafeProofError(
+      await thrownBy(() => readBasic5LinuxProcessIdentity(42, enrolled)),
+      'process_stat_permission_denied',
+    );
   });
 
   it('classifies executable identity replacement and permission failures conservatively', async () => {
@@ -246,6 +442,7 @@ describe('BASIC5 Linux process proof', () => {
       parseBasic5LinuxProcessStat(42, `42 (node (worker) with spaces) ${fields.join(' ')}`),
     ).toEqual({
       pid: 42,
+      state: 'S',
       ppid: 11,
       pgid: 12,
       sid: 13,
@@ -260,6 +457,7 @@ describe('BASIC5 Linux process proof', () => {
     const fields = ['S', '11', '0', '0', ...Array.from({ length: 15 }, () => '0'), '987654'];
     expect(parseBasic5LinuxProcessStat(42, `42 (kernel worker) ${fields.join(' ')}`)).toEqual({
       pid: 42,
+      state: 'S',
       ppid: 11,
       pgid: 0,
       sid: 0,
@@ -276,6 +474,9 @@ describe('BASIC5 Linux process proof', () => {
         42,
         `42 (malformed negative session) ${[...fields.slice(0, 3), '-1', ...fields.slice(4)].join(' ')}`,
       ),
+    ).toThrow(expect.objectContaining({ code: 'process_stat_malformed' }));
+    expect(() =>
+      parseBasic5LinuxProcessStat(42, `42 (unknown state) ${['?', ...fields.slice(1)].join(' ')}`),
     ).toThrow(expect.objectContaining({ code: 'process_stat_malformed' }));
   });
 

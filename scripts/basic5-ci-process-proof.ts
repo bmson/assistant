@@ -15,6 +15,7 @@ export const BASIC5_CI_PROCESS_PROOF_FAILURES = [
   'process_executable_unavailable',
   'process_executable_permission_denied',
   'process_identity_changed',
+  'known_process_terminal',
 ] as const;
 
 export type Basic5CiProcessProofFailure = (typeof BASIC5_CI_PROCESS_PROOF_FAILURES)[number];
@@ -37,6 +38,20 @@ export interface Basic5CiProcessIdentity {
   exe: string;
 }
 
+export type Basic5LinuxProcessState =
+  | 'R'
+  | 'S'
+  | 'D'
+  | 'Z'
+  | 'T'
+  | 't'
+  | 'X'
+  | 'x'
+  | 'K'
+  | 'W'
+  | 'P'
+  | 'I';
+
 export interface Basic5CiProcessRecord extends Basic5CiProcessIdentity {
   version: 1;
   role: Basic5CiProcessRole;
@@ -45,6 +60,8 @@ export interface Basic5CiProcessRecord extends Basic5CiProcessIdentity {
 
 export interface Basic5LinuxProcessSnapshot {
   pid: number;
+  /** Present on parsed /proc stat rows; optional for existing synthetic snapshots. */
+  state?: Basic5LinuxProcessState;
   ppid: number;
   pgid: number;
   sid: number;
@@ -78,6 +95,7 @@ export function parseBasic5LinuxProcessStat(
     .trim()
     .split(/\s+/);
   const ppid = Number(fields[1]);
+  const state = fields[0];
   const pgid = Number(fields[2]);
   const sid = Number(fields[3]);
   const startTimeTicks = fields[19];
@@ -85,6 +103,8 @@ export function parseBasic5LinuxProcessStat(
     pid !== expectedPid ||
     !Number.isSafeInteger(pid) ||
     pid <= 0 ||
+    !state ||
+    !/^[RSDZTtXxKWPI]$/.test(state) ||
     !Number.isSafeInteger(ppid) ||
     ppid < 0 ||
     !Number.isSafeInteger(pgid) ||
@@ -95,7 +115,7 @@ export function parseBasic5LinuxProcessStat(
     !/^\d+$/.test(startTimeTicks)
   )
     throw new Basic5CiProcessProofError('process_stat_malformed');
-  return { pid, ppid, pgid, sid, startTimeTicks };
+  return { pid, state: state as Basic5LinuxProcessState, ppid, pgid, sid, startTimeTicks };
 }
 
 function sameProcess(left: Basic5LinuxProcessSnapshot, right: Basic5LinuxProcessSnapshot): boolean {
@@ -267,11 +287,14 @@ export async function readBasic5LinuxProcessSnapshot(): Promise<
 
 export async function readBasic5LinuxProcessIdentity(
   pid: number,
+  expectedAlreadyEnrolled?: Basic5CiProcessIdentity,
 ): Promise<Basic5CiProcessIdentity | undefined> {
   assertLinux();
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('Invalid Linux process ID.');
   const before = await readStat(pid);
   if (!before) return undefined;
+  if (expectedAlreadyEnrolled && !sameProcess(before, expectedAlreadyEnrolled))
+    throw new Basic5CiProcessProofError('process_identity_changed');
   if (before.pgid <= 0 || before.sid <= 0)
     throw new Basic5CiProcessProofError('owned_process_identity_ineligible');
   let exe: string;
@@ -284,6 +307,12 @@ export async function readBasic5LinuxProcessIdentity(
       if (!afterFailure) return undefined;
       if (!sameProcess(before, afterFailure))
         throw new Basic5CiProcessProofError('process_identity_changed');
+      if (
+        afterFailure.state === 'Z' &&
+        expectedAlreadyEnrolled &&
+        sameProcess(afterFailure, expectedAlreadyEnrolled)
+      )
+        throw new Basic5CiProcessProofError('known_process_terminal');
       throw new Basic5CiProcessProofError('process_executable_unavailable');
     }
     if (code === 'EACCES' || code === 'EPERM')
@@ -292,6 +321,8 @@ export async function readBasic5LinuxProcessIdentity(
   }
   const after = await readStat(pid);
   if (!after) return undefined;
+  if (expectedAlreadyEnrolled && expectedAlreadyEnrolled.exe !== exe)
+    throw new Basic5CiProcessProofError('process_identity_changed');
   let linkTarget: string;
   try {
     linkTarget = await readlink(`/proc/${pid}/exe`);
@@ -302,6 +333,12 @@ export async function readBasic5LinuxProcessIdentity(
       if (!afterFailure) return undefined;
       if (!sameProcess(before, afterFailure))
         throw new Basic5CiProcessProofError('process_identity_changed');
+      if (
+        afterFailure.state === 'Z' &&
+        expectedAlreadyEnrolled &&
+        sameProcess(afterFailure, expectedAlreadyEnrolled)
+      )
+        throw new Basic5CiProcessProofError('known_process_terminal');
       throw new Basic5CiProcessProofError('process_executable_unavailable');
     }
     if (code === 'EACCES' || code === 'EPERM')
@@ -310,7 +347,15 @@ export async function readBasic5LinuxProcessIdentity(
   }
   if (!sameProcess(before, after) || path.resolve(linkTarget) !== exe)
     throw new Basic5CiProcessProofError('process_identity_changed');
-  return { ...after, exe };
+  if (after.state === 'Z') throw new Basic5CiProcessProofError('owned_process_identity_ineligible');
+  return {
+    pid: after.pid,
+    ppid: after.ppid,
+    pgid: after.pgid,
+    sid: after.sid,
+    startTimeTicks: after.startTimeTicks,
+    exe,
+  };
 }
 
 export async function readBasic5CiProcessRegistry(
