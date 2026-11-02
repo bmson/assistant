@@ -4,6 +4,17 @@ import { dirname, resolve } from 'node:path';
 
 const API = 'https://api.github.com/repos/bmson/assistant';
 const ACTIVE = ['queued', 'in_progress', 'waiting', 'requested', 'pending'] as const;
+const WRITER_WORKFLOWS = [
+  'deploy.yml',
+  'cleanup.yml',
+  'owner-web-tag-retirement.yml',
+  'owner-web-traffic-reconciliation.yml',
+  'prepare-owner-editor-index.yml',
+  'owner-editor-v1-maintenance.yml',
+  'workspace-import.yml',
+] as const;
+const RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
+const RESPONSE_TIMEOUT_MS = 10_000;
 type Json = Record<string, unknown>;
 function object(value: unknown): Json {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -12,6 +23,52 @@ function object(value: unknown): Json {
 }
 export type HoldFetch = (url: string, token: string) => Promise<unknown>;
 export type HoldIdentity = { source: string; runId: string; attempt: string };
+
+export async function boundedResponseJson(
+  response: Response,
+  maxBytes = RESPONSE_MAX_BYTES,
+  timeoutMs = RESPONSE_TIMEOUT_MS,
+): Promise<unknown> {
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error('Operator hold unavailable');
+  }
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('Operator hold unavailable');
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      void reader.cancel().catch(() => undefined);
+      reject(new Error('Operator hold unavailable'));
+    }, timeoutMs);
+  });
+  const read = async () => {
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      for (;;) {
+        const result = await reader.read();
+        if (result.done) break;
+        size += result.value.byteLength;
+        if (size > maxBytes) {
+          void reader.cancel().catch(() => undefined);
+          throw new Error('Operator hold unavailable');
+        }
+        chunks.push(result.value);
+      }
+      const bytes = Buffer.concat(chunks, size);
+      return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    } catch {
+      await reader.cancel().catch(() => undefined);
+      throw new Error('Operator hold unavailable');
+    }
+  };
+  try {
+    return await Promise.race([read(), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 function saveImmutable(path: string, value: unknown) {
   const fd = openSync(path, 'wx', 0o600);
   try {
@@ -43,15 +100,9 @@ export async function verifyOperatorOwnedHold(
         'X-GitHub-Api-Version': '2022-11-28',
       },
       redirect: 'error',
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(RESPONSE_TIMEOUT_MS),
     });
-    if (!response.ok) {
-      await response.body?.cancel();
-      throw new Error('Operator hold unavailable');
-    }
-    const bytes = await response.arrayBuffer();
-    if (bytes.byteLength > 2 * 1024 * 1024) throw new Error('Operator hold unavailable');
-    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    return boundedResponseJson(response);
   },
   waitForManualDisable = false,
 ) {
@@ -63,6 +114,7 @@ export async function verifyOperatorOwnedHold(
     env.GITHUB_RUN_ID !== identity.runId ||
     env.GITHUB_RUN_ATTEMPT !== identity.attempt ||
     env.GITHUB_EVENT_NAME !== 'workflow_dispatch' ||
+    env.CURRENT_ONLY_CLEANUP !== 'false' ||
     !env.GITHUB_JOB ||
     !env.GITHUB_EVENT_NAME ||
     !env.RUNNER_TEMP
@@ -85,12 +137,11 @@ export async function verifyOperatorOwnedHold(
     env.RUNNER_TEMP,
     `owner-web-release-hold-${identity.runId}-${identity.attempt}.json`,
   );
-  let deploy: Json, cleanup: Json, variable: Json;
+  let deploy: Json, cleanup: Json;
   const deadline = Date.now() + 15 * 60_000;
   for (;;) {
     deploy = await get('/actions/workflows/deploy.yml');
     cleanup = await get('/actions/workflows/cleanup.yml');
-    variable = await get('/actions/variables/CURRENT_ONLY_CLEANUP');
     if (
       !/^[1-9][0-9]{0,19}$/.test(String(deploy.id)) ||
       !/^[1-9][0-9]{0,19}$/.test(String(cleanup.id)) ||
@@ -99,8 +150,7 @@ export async function verifyOperatorOwnedHold(
       ) ||
       !['active', 'disabled_manually', 'disabled_inactivity', 'disabled_fork'].includes(
         String(cleanup.state),
-      ) ||
-      variable.value !== 'false'
+      )
     )
       throw new Error('Operator hold unavailable');
     const baseline = {
@@ -114,7 +164,7 @@ export async function verifyOperatorOwnedHold(
       cleanupId: cleanup.id,
       deployBefore: deploy.state,
       cleanupBefore: cleanup.state,
-      cleanupVariableBefore: 'false',
+      cleanupVariableBefore: env.CURRENT_ONLY_CLEANUP,
     };
     let saved: Json;
     try {
@@ -142,7 +192,7 @@ export async function verifyOperatorOwnedHold(
       saved.event !== env.GITHUB_EVENT_NAME ||
       String(saved.deployId) !== String(deploy.id) ||
       String(saved.cleanupId) !== String(cleanup.id) ||
-      saved.cleanupVariableBefore !== 'false' ||
+      saved.cleanupVariableBefore !== env.CURRENT_ONLY_CLEANUP ||
       !['active', 'disabled_manually', 'disabled_inactivity', 'disabled_fork'].includes(
         String(saved.deployBefore),
       ) ||
@@ -157,10 +207,12 @@ export async function verifyOperatorOwnedHold(
     await new Promise((resolveWait) => setTimeout(resolveWait, 5000));
   }
 
-  for (const workflow of ['deploy.yml', 'cleanup.yml']) {
+  for (const workflow of WRITER_WORKFLOWS) {
     for (const status of ACTIVE) {
       let page = 1;
       let seen = 0;
+      let expectedTotal: number | undefined;
+      const runIds = new Set<string>();
       for (;;) {
         const result = await get(
           `/actions/workflows/${workflow}/runs?status=${status}&per_page=100&page=${page}`,
@@ -169,23 +221,35 @@ export async function verifyOperatorOwnedHold(
           !Array.isArray(result.workflow_runs) ||
           !Number.isSafeInteger(result.total_count) ||
           Number(result.total_count) < 0 ||
-          Number(result.total_count) > 1000
+          Number(result.total_count) > 1000 ||
+          result.workflow_runs.length > 100
         )
           throw new Error('Operator hold unavailable');
         const runs = result.workflow_runs.map(object);
+        const total = Number(result.total_count);
+        if (expectedTotal !== undefined && total !== expectedTotal)
+          throw new Error('Operator hold census changed during pagination');
+        expectedTotal = total;
         seen += runs.length;
-        if (
-          seen > Number(result.total_count) ||
-          runs.some(
-            (run) =>
-              String(run.id) !== identity.runId ||
-              String(run.run_attempt) !== identity.attempt ||
-              run.head_sha !== identity.source ||
-              run.event !== env.GITHUB_EVENT_NAME,
-          )
-        )
+        for (const run of runs) {
+          const id = String(run.id);
+          if (!/^[1-9][0-9]{0,19}$/.test(id) || runIds.has(id) || run.status !== status)
+            throw new Error('Operator hold census unavailable');
+          runIds.add(id);
+        }
+        const competingRuns =
+          workflow === 'deploy.yml'
+            ? runs.filter(
+                (run) =>
+                  String(run.id) !== identity.runId ||
+                  String(run.run_attempt) !== identity.attempt ||
+                  run.head_sha !== identity.source ||
+                  run.event !== env.GITHUB_EVENT_NAME,
+              )
+            : runs;
+        if (seen > total || competingRuns.length > 0)
           throw new Error('Competing release run blocks native phase');
-        if (seen === Number(result.total_count)) break;
+        if (seen === total) break;
         if (runs.length === 0 || page >= 10) throw new Error('Operator hold census incomplete');
         page++;
       }
@@ -210,7 +274,7 @@ export async function verifyOperatorOwnedHold(
     currentJob: env.GITHUB_JOB,
     deployWorkflowId: deploy.id,
     cleanupWorkflowId: cleanup.id,
-    cleanupVariable: 'false',
+    cleanupVariable: env.CURRENT_ONLY_CLEANUP,
   } as const;
 }
 

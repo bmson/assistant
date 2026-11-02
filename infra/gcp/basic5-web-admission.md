@@ -67,3 +67,24 @@ and ordinary staging/probes. The separate manual retirement workflow has a
 45 minute job ceiling for its single drain; its bounded command portion is at
 most about 935 seconds before ordinary process scheduling, leaving setup margin.
 A timeout or interrupted drain still produces no completed barrier receipt.
+
+Before the delivery guard acquires any holds, an operator disables the deploy
+and cleanup workflows. The protected release job snapshots the effective
+production `CURRENT_ONLY_CLEANUP` variable and requires the exact value `false`;
+its private run receipt binds that snapshot to the trusted source, run, attempt,
+and job. Each native phase rechecks the same job snapshot and fresh workflow
+states/run census. The snapshot is not a fresh Variables API read and does not
+separately prove repository and environment variable values.
+
+The active-run census checks every active status, with bounded complete
+pagination, for `deploy.yml`, `cleanup.yml`, `owner-web-tag-retirement.yml`,
+`owner-web-traffic-reconciliation.yml`, `prepare-owner-editor-index.yml`,
+`owner-editor-v1-maintenance.yml`, and `workspace-import.yml`. Any active run
+in a manual writer workflow blocks admission, including a queued traffic
+correction, index preparation, metadata apply, or workspace import. The list
+is intentionally conservative when an API run listing does not expose the
+selected mode. `owner-editor-release-inventory.yml --collect` is a read-only
+observation workflow; `workspace-export.yml` reads Firestore and writes an
+export snapshot, not Firestore data. They are not treated as competing
+Firestore writers. Missing, oversized, stalled, malformed, or incomplete API
+responses keep the release held.
