@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { describe, expect, it } from 'vitest';
 import {
+  assertBasic5CiUtilityChildSucceeded,
   assertBasic5CiWorkflowAdmission,
   type Basic5CiCaseEntryDiagnostic,
   type Basic5CiCaseResult,
@@ -12,12 +13,16 @@ import {
   type Basic5CiOps,
   type Basic5CiPreflight,
   type Basic5CiPreparationDiagnostic,
+  type Basic5CiProcessSnapshot,
   type Basic5CiQuiescence,
   type Basic5CiTarget,
+  type Basic5CiUtilityChildTestDriver,
   combineBasic5CiPreparationFailures,
+  holdForBasic5CiUtilityBootstrapFailure,
   observeBasic5CiChromeVersion,
   ownedSessionEnrollmentOrder,
   parseLinuxListenTable,
+  RealBasic5CiOps,
   runBasic5CiAcceptance,
   runBasic5CiCaseEntryStep,
   runBasic5CiPreparationStep,
@@ -44,6 +49,7 @@ const preflight: Basic5CiPreflight = {
     stderrBytes: 0,
   },
   postgresServerVersionNum: 170000,
+  utilityChildDiagnostics: [],
   workflowContext: {
     event: 'push',
     ref: 'refs/heads/main',
@@ -332,8 +338,8 @@ class FakeOps implements Basic5CiOps {
 
 class FakeDirectChild extends EventEmitter implements Basic5CiDirectChildHandle {
   pid: number | undefined = 88;
-  stdout: unknown = {};
-  stderr: unknown = {};
+  stdout: unknown = new EventEmitter();
+  stderr: unknown = new EventEmitter();
   killCalls = 0;
   closed = false;
 
@@ -348,6 +354,551 @@ class FakeDirectChild extends EventEmitter implements Basic5CiDirectChildHandle 
 }
 
 describe('one-shot BASIC5 CI controller', () => {
+  function utilityChildDriver(
+    child: FakeDirectChild,
+    options: {
+      readSnapshot?: () => Promise<Map<number, Basic5CiProcessSnapshot>>;
+      readIdentity?: (pid: number) => Promise<unknown>;
+      now?: () => number;
+    } = {},
+  ): Basic5CiUtilityChildTestDriver {
+    const rootIdentity = {
+      pid: 88,
+      ppid: process.pid,
+      pgid: 88,
+      sid: 88,
+      startTimeTicks: '1',
+      exe: '/synthetic/node',
+    };
+    const proof = {
+      BASIC5_CI_CHROME_EXECUTABLE: '/synthetic/chrome',
+      readBasic5LinuxProcessSnapshot: options.readSnapshot ?? (async () => new Map()),
+      readBasic5LinuxProcessIdentity:
+        options.readIdentity ?? (async (pid: number) => (pid === 88 ? rootIdentity : undefined)),
+      readBasic5CiProcessRegistry: async () => [],
+      assertBasic5CiProcessRegistryComplete: () => undefined,
+      assertBasic5CiProcessClosure: () => undefined,
+    } as unknown as Basic5CiUtilityChildTestDriver['proof'];
+    return {
+      spawn: (() => child) as unknown as Basic5CiUtilityChildTestDriver['spawn'],
+      proof,
+      now: options.now ?? (() => 1),
+      sleep: async () => undefined,
+      killProcess: () => undefined,
+    };
+  }
+
+  it.each([
+    ['create-target', 'target_database_creation'],
+    ['migrate', 'migration_child'],
+    ['seed', 'seed_child'],
+  ] as const)(
+    'runs %s through the owned-child lifecycle and retains stderr counts',
+    async (label, utility) => {
+      const child = new FakeDirectChild();
+      const stdout = child.stdout as EventEmitter;
+      const stderr = child.stderr as EventEmitter;
+      queueMicrotask(() => {
+        stdout.emit('data', Buffer.from('ok\n'));
+        stderr.emit('data', Buffer.from('harmless diagnostic\n'));
+        child.emit('close', 0, null);
+      });
+      const ops = new RealBasic5CiOps(utilityChildDriver(child));
+      try {
+        const result = await ops.runUtilityChild(
+          '/synthetic/node',
+          ['utility'],
+          {},
+          10_000,
+          label,
+          new AbortController().signal,
+        );
+        expect(result.exitCode).toBe(0);
+        expect(result.utilityDiagnostic).toMatchObject({
+          utility,
+          stage: 'completed',
+          status: 'completed',
+          closed: true,
+          stdoutBytes: 3,
+          stderrBytes: 20,
+        });
+        assertBasic5CiUtilityChildSucceeded(utility, result);
+      } finally {
+        ops.dispose();
+      }
+    },
+  );
+
+  it.each([
+    ['ENOENT', 'not_found'],
+    ['EACCES', 'permission_denied'],
+    ['EPERM', 'permission_denied'],
+    ['EMFILE', 'resource_exhausted'],
+    ['ENFILE', 'resource_exhausted'],
+    ['ENOMEM', 'resource_exhausted'],
+  ] as const)(
+    'records asynchronous spawn error %s without closing unknown work',
+    async (code, errnoCategory) => {
+      const child = new FakeDirectChild();
+      child.pid = undefined;
+      queueMicrotask(() => {
+        child.emit('error', Object.assign(new Error('private path'), { code }));
+        child.emit('close', null, null);
+      });
+      const ops = new RealBasic5CiOps(utilityChildDriver(child));
+      try {
+        await expect(
+          ops.runUtilityChild(
+            '/missing/synthetic-node',
+            [],
+            {},
+            10_000,
+            'create-target',
+            new AbortController().signal,
+          ),
+        ).rejects.toMatchObject({
+          operationSettled: false,
+          utilityChildDiagnostic: {
+            stage: 'spawn',
+            status: 'spawn_error',
+            errnoCategory,
+            closed: true,
+          },
+        });
+      } finally {
+        ops.dispose();
+      }
+    },
+  );
+
+  it('retains structural bootstrap identity errno without retaining the error text', async () => {
+    const child = new FakeDirectChild();
+    const ops = new RealBasic5CiOps(
+      utilityChildDriver(child, {
+        readIdentity: async () => {
+          throw Object.assign(new Error('private process path'), { code: 'EACCES' });
+        },
+      }),
+    );
+    try {
+      await expect(
+        ops.runUtilityChild(
+          '/synthetic/node',
+          [],
+          {},
+          10_000,
+          'migrate',
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({
+        operationSettled: false,
+        utilityChildDiagnostic: {
+          stage: 'bootstrap',
+          status: 'bootstrap_unverified',
+          errnoCategory: 'permission_denied',
+        },
+      });
+    } finally {
+      ops.dispose();
+    }
+  });
+
+  it('does not enroll unrelated zero group/session rows from global census', async () => {
+    const child = new FakeDirectChild();
+    queueMicrotask(() => child.emit('close', 0, null));
+    const identityReads: number[] = [];
+    const ops = new RealBasic5CiOps(
+      utilityChildDriver(child, {
+        readIdentity: async (pid) => {
+          identityReads.push(pid);
+          return pid === 88
+            ? {
+                pid,
+                ppid: process.pid,
+                pgid: 88,
+                sid: 88,
+                startTimeTicks: '1',
+                exe: '/synthetic/node',
+              }
+            : undefined;
+        },
+        readSnapshot: async () =>
+          new Map([[77, { pid: 77, ppid: 1, pgid: 0, sid: 0, startTimeTicks: '9' }]]),
+      }),
+    );
+    try {
+      await ops.runUtilityChild(
+        '/synthetic/node',
+        [],
+        {},
+        10_000,
+        'seed',
+        new AbortController().signal,
+      );
+      expect(identityReads).toEqual([88]);
+    } finally {
+      ops.dispose();
+    }
+  });
+
+  it('rejects a direct owned bootstrap identity with zero pgid or sid', async () => {
+    for (const field of ['pgid', 'sid'] as const) {
+      const child = new FakeDirectChild();
+      const ops = new RealBasic5CiOps(
+        utilityChildDriver(child, {
+          readIdentity: async () => ({
+            pid: 88,
+            ppid: process.pid,
+            pgid: field === 'pgid' ? 0 : 88,
+            sid: field === 'sid' ? 0 : 88,
+            startTimeTicks: '1',
+            exe: '/synthetic/node',
+          }),
+        }),
+      );
+      try {
+        await expect(
+          ops.runUtilityChild(
+            '/synthetic/node',
+            [],
+            {},
+            10_000,
+            'seed',
+            new AbortController().signal,
+          ),
+        ).rejects.toMatchObject({ operationSettled: false });
+      } finally {
+        ops.dispose();
+      }
+    }
+  });
+
+  it.each([
+    ['create-target', 'target_database_creation'],
+    ['migrate', 'migration_child'],
+    ['seed', 'seed_child'],
+  ] as const)('%s short-exit bootstrap failure stays unsettled', async (label, utility) => {
+    const child = new FakeDirectChild();
+    child.pid = 88;
+    queueMicrotask(() => child.emit('close', 0, null));
+    const ops = new RealBasic5CiOps(
+      utilityChildDriver(child, {
+        readIdentity: async () => {
+          await Promise.resolve();
+          return undefined;
+        },
+      }),
+    );
+    try {
+      await expect(
+        ops.runUtilityChild(
+          '/synthetic/node',
+          ['utility'],
+          {},
+          10_000,
+          label,
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({
+        operationSettled: false,
+        utilityChildDiagnostic: {
+          utility,
+          stage: 'bootstrap',
+          status: 'bootstrap_unverified',
+          exitCode: 0,
+          closed: true,
+        },
+      });
+    } finally {
+      ops.dispose();
+    }
+  });
+
+  it.each([
+    ['create-target', 'target_database_creation'],
+    ['migrate', 'migration_child'],
+    ['seed', 'seed_child'],
+  ] as const)('%s retains settled nonzero exit as a utility failure', async (label, utility) => {
+    const child = new FakeDirectChild();
+    queueMicrotask(() => child.emit('close', 7, null));
+    const ops = new RealBasic5CiOps(utilityChildDriver(child));
+    try {
+      const result = await ops.runUtilityChild(
+        '/synthetic/node',
+        ['utility'],
+        {},
+        10_000,
+        label,
+        new AbortController().signal,
+      );
+      expect(result.exitCode).toBe(7);
+      let caught: unknown;
+      try {
+        assertBasic5CiUtilityChildSucceeded(utility, result);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({
+        code: `${utility}_nonzero_exit`,
+        utilityChildDiagnostic: { utility, exitCode: 7, closed: true },
+      });
+    } finally {
+      ops.dispose();
+    }
+  });
+
+  it('holds when the owned session census fails during child execution', async () => {
+    const child = new FakeDirectChild();
+    const ops = new RealBasic5CiOps(
+      utilityChildDriver(child, {
+        readSnapshot: async () => {
+          throw new Error('private process details');
+        },
+      }),
+    );
+    try {
+      await expect(
+        ops.runUtilityChild(
+          '/synthetic/node',
+          ['utility'],
+          {},
+          10_000,
+          'migrate',
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({
+        operationSettled: false,
+        utilityChildDiagnostic: {
+          stage: 'owned_session_census',
+          status: 'session_census_unverified',
+          closed: false,
+        },
+      });
+    } finally {
+      ops.dispose();
+    }
+  });
+
+  it('holds when the final child-session census fails after child close', async () => {
+    const child = new FakeDirectChild();
+    queueMicrotask(() => child.emit('close', 0, null));
+    const ops = new RealBasic5CiOps(
+      utilityChildDriver(child, {
+        readSnapshot: async () => {
+          throw new Error('private process details');
+        },
+      }),
+    );
+    try {
+      await expect(
+        ops.runUtilityChild(
+          '/synthetic/node',
+          ['utility'],
+          {},
+          10_000,
+          'seed',
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({
+        operationSettled: false,
+        utilityChildDiagnostic: {
+          stage: 'final_session_census',
+          status: 'session_census_unverified',
+          closed: true,
+        },
+      });
+    } finally {
+      ops.dispose();
+    }
+  });
+
+  it('keeps a final census that sees a child descendant unsettled', async () => {
+    const child = new FakeDirectChild();
+    queueMicrotask(() => child.emit('close', 0, null));
+    const descendant = {
+      pid: 90,
+      ppid: 88,
+      pgid: 88,
+      sid: 88,
+      startTimeTicks: '2',
+    };
+    let snapshotRead = 0;
+    const ops = new RealBasic5CiOps(
+      utilityChildDriver(child, {
+        readIdentity: async (pid) =>
+          pid === 88
+            ? {
+                pid,
+                ppid: process.pid,
+                pgid: 88,
+                sid: 88,
+                startTimeTicks: '1',
+                exe: '/synthetic/node',
+              }
+            : { ...descendant, exe: '/synthetic/descendant' },
+        readSnapshot: async () => {
+          snapshotRead += 1;
+          return snapshotRead === 2 ? new Map([[90, descendant]]) : new Map();
+        },
+      }),
+    );
+    try {
+      await expect(
+        ops.runUtilityChild(
+          '/synthetic/node',
+          [],
+          {},
+          10_000,
+          'seed',
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({
+        operationSettled: false,
+        utilityChildDiagnostic: {
+          stage: 'final_session_census',
+          status: 'session_census_unverified',
+          closed: true,
+        },
+      });
+    } finally {
+      ops.dispose();
+    }
+  });
+
+  it('holds on child output caps with bounded diagnostics', async () => {
+    const child = new FakeDirectChild();
+    queueMicrotask(() => (child.stdout as EventEmitter).emit('data', Buffer.alloc(64 * 1024 + 1)));
+    const ops = new RealBasic5CiOps(utilityChildDriver(child));
+    try {
+      await expect(
+        ops.runUtilityChild(
+          '/synthetic/node',
+          ['utility'],
+          {},
+          10_000,
+          'migrate',
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({
+        operationSettled: false,
+        utilityChildDiagnostic: {
+          status: 'capture_limit',
+          stdoutBytes: 64 * 1024,
+          closed: false,
+        },
+      });
+    } finally {
+      ops.dispose();
+    }
+  });
+
+  it('holds on the owned-child deadline with an unsettled diagnostic', async () => {
+    const child = new FakeDirectChild();
+    let clockReads = 0;
+    const ops = new RealBasic5CiOps(
+      utilityChildDriver(child, {
+        now: () => [1, 1, 5_001, 5_001][clockReads++] ?? 5_001,
+      }),
+    );
+    try {
+      await expect(
+        ops.runUtilityChild(
+          '/synthetic/node',
+          ['utility'],
+          {},
+          5_000,
+          'seed',
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({
+        operationSettled: false,
+        utilityChildDiagnostic: {
+          status: 'deadline',
+          closed: false,
+        },
+      });
+    } finally {
+      ops.dispose();
+    }
+  });
+
+  it.each(['target_database_creation', 'migration_child', 'seed_child'] as const)(
+    '%s accepts settled exit zero with diagnostic stderr',
+    (utility) => {
+      expect(() =>
+        assertBasic5CiUtilityChildSucceeded(utility, {
+          exitCode: 0,
+          stderr: Buffer.from('bounded diagnostic only'),
+          utilityDiagnostic: {
+            utility,
+            stage: 'completed',
+            status: 'completed',
+            exitCode: 0,
+            signal: null,
+            closed: true,
+            stdoutBytes: 0,
+            stderrBytes: 24,
+            errnoCategory: null,
+            sqlStateClass: null,
+          },
+        }),
+      ).not.toThrow();
+    },
+  );
+
+  it.each(['target_database_creation', 'migration_child', 'seed_child'] as const)(
+    '%s holds a settled nonzero exit with content-free child evidence',
+    async (utility) => {
+      const diagnostic = {
+        utility,
+        stage: 'completed' as const,
+        status: 'completed' as const,
+        exitCode: 1,
+        signal: null,
+        closed: true,
+        stdoutBytes: 8,
+        stderrBytes: 16,
+        errnoCategory: null,
+        sqlStateClass: null,
+      };
+      await expect(
+        runBasic5CiPreparationStep(utility, `${utility}_failed`, () =>
+          assertBasic5CiUtilityChildSucceeded(utility, {
+            exitCode: 1,
+            stderr: Buffer.from('private database url must not be retained'),
+            utilityDiagnostic: diagnostic,
+          }),
+        ),
+      ).rejects.toMatchObject({
+        code: `${utility}_nonzero_exit`,
+        preparationDiagnostic: { category: 'controller_hold' },
+        utilityChildDiagnostic: diagnostic,
+      });
+    },
+  );
+
+  it('keeps short-exit bootstrap failure unsettled and does not infer descendant closure', async () => {
+    for (const utility of ['target_database_creation', 'migration_child', 'seed_child'] as const) {
+      const hold = holdForBasic5CiUtilityBootstrapFailure(
+        utility,
+        new Basic5CiHold('child_bootstrap_identity_unavailable', false),
+        { exitCode: 0, closed: true, stdoutBytes: 4, stderrBytes: 7 },
+      );
+      expect(hold).toMatchObject({
+        operationSettled: false,
+        utilityChildDiagnostic: {
+          utility,
+          stage: 'bootstrap',
+          status: 'bootstrap_unverified',
+          exitCode: 0,
+          closed: true,
+          stdoutBytes: 4,
+          stderrBytes: 7,
+        },
+      });
+    }
+  });
+
   it('preserves both the primary database failure and pool-close failure stages', () => {
     const primary = new Basic5CiHold(
       'database_ownership_check_failed',

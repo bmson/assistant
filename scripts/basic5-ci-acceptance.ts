@@ -107,6 +107,7 @@ export type Basic5CiPreflight = {
   chromeVersion: string;
   chromeVersionDiagnostic: Basic5CiChromeVersionDiagnostic;
   postgresServerVersionNum: number | null;
+  utilityChildDiagnostics: Basic5CiUtilityChildDiagnostic[];
   workflowContext: {
     event: 'push';
     ref: 'refs/heads/main';
@@ -142,6 +143,36 @@ export type Basic5CiPreflight = {
   };
   buildExecutionAttribution: string;
   provenanceLimitations: string[];
+};
+
+export type Basic5CiUtilityChildDiagnostic = {
+  utility: 'target_database_creation' | 'migration_child' | 'seed_child';
+  stage: 'spawn' | 'bootstrap' | 'owned_session_census' | 'final_session_census' | 'completed';
+  status:
+    | 'spawn_error'
+    | 'bootstrap_unverified'
+    | 'session_census_unverified'
+    | 'capture_limit'
+    | 'deadline'
+    | 'completed';
+  exitCode: number | null;
+  signal: 'SIGTERM' | 'SIGKILL' | 'SIGINT' | 'SIGABRT' | 'SIGPIPE' | 'SIGQUIT' | null;
+  closed: boolean;
+  stdoutBytes: number;
+  stderrBytes: number;
+  errnoCategory: 'not_found' | 'permission_denied' | 'resource_exhausted' | 'other' | null;
+  sqlStateClass:
+    | 'connection'
+    | 'data'
+    | 'integrity'
+    | 'authorization'
+    | 'transaction'
+    | 'resource'
+    | 'operator'
+    | 'system'
+    | 'internal'
+    | 'other'
+    | null;
 };
 
 export type Basic5CiChromeVersionDiagnostic = {
@@ -182,6 +213,225 @@ export type Basic5CiPreparationDiagnostic = {
   secondaryStage?: Basic5CiPreparationDiagnostic['stage'];
   secondaryCategory?: Basic5CiPreparationDiagnostic['category'];
 };
+
+export function assertBasic5CiUtilityChildSucceeded(
+  utility: Basic5CiUtilityChildDiagnostic['utility'],
+  result: {
+    exitCode: number;
+    stderr: Buffer;
+    utilityDiagnostic?: Basic5CiUtilityChildDiagnostic;
+  },
+): void {
+  void result.stderr;
+  if (result.exitCode !== 0)
+    throw new Basic5CiHold(
+      `${utility}_nonzero_exit`,
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      result.utilityDiagnostic,
+    );
+}
+
+function utilityForChildLabel(
+  label: string,
+): Basic5CiUtilityChildDiagnostic['utility'] | undefined {
+  if (label === 'create-target') return 'target_database_creation';
+  if (label === 'migrate') return 'migration_child';
+  if (label === 'seed') return 'seed_child';
+  return undefined;
+}
+
+function makeUtilityChildDiagnostic(
+  utility: Basic5CiUtilityChildDiagnostic['utility'],
+  stage: Basic5CiUtilityChildDiagnostic['stage'],
+  status: Basic5CiUtilityChildDiagnostic['status'],
+  exitCode: number | null,
+  closed: boolean,
+  stdoutBytes: number,
+  stderrBytes: number,
+  error?: unknown,
+  signal?: NodeJS.Signals | null,
+): Basic5CiUtilityChildDiagnostic {
+  const errorCode =
+    typeof error === 'string'
+      ? error
+      : error && typeof error === 'object'
+        ? (error as NodeJS.ErrnoException).code
+        : undefined;
+  const errnoCategory =
+    errorCode === 'ENOENT'
+      ? 'not_found'
+      : errorCode === 'EACCES' || errorCode === 'EPERM'
+        ? 'permission_denied'
+        : errorCode === 'EMFILE' || errorCode === 'ENFILE' || errorCode === 'ENOMEM'
+          ? 'resource_exhausted'
+          : typeof errorCode === 'string'
+            ? 'other'
+            : null;
+  const safeSignals: NodeJS.Signals[] = [
+    'SIGTERM',
+    'SIGKILL',
+    'SIGINT',
+    'SIGABRT',
+    'SIGPIPE',
+    'SIGQUIT',
+  ];
+  const sqlStatePrefix =
+    typeof errorCode === 'string' && /^[0-9A-Z]{5}$/.test(errorCode) ? errorCode.slice(0, 2) : null;
+  const sqlStateClass =
+    sqlStatePrefix === '08'
+      ? 'connection'
+      : ['21', '22'].includes(sqlStatePrefix ?? '')
+        ? 'data'
+        : sqlStatePrefix === '23'
+          ? 'integrity'
+          : sqlStatePrefix === '28'
+            ? 'authorization'
+            : ['25', '40'].includes(sqlStatePrefix ?? '')
+              ? 'transaction'
+              : ['53', '54', '55'].includes(sqlStatePrefix ?? '')
+                ? 'resource'
+                : sqlStatePrefix === '57'
+                  ? 'operator'
+                  : sqlStatePrefix === '58'
+                    ? 'system'
+                    : sqlStatePrefix === 'XX'
+                      ? 'internal'
+                      : sqlStatePrefix
+                        ? 'other'
+                        : null;
+  return {
+    utility,
+    stage,
+    status,
+    exitCode: Number.isSafeInteger(exitCode) ? exitCode : null,
+    signal:
+      signal && safeSignals.includes(signal)
+        ? (signal as 'SIGTERM' | 'SIGKILL' | 'SIGINT' | 'SIGABRT' | 'SIGPIPE' | 'SIGQUIT')
+        : null,
+    closed,
+    stdoutBytes: Math.min(CAPTURE_BYTES, Math.max(0, stdoutBytes)),
+    stderrBytes: Math.min(CAPTURE_BYTES, Math.max(0, stderrBytes)),
+    errnoCategory,
+    sqlStateClass,
+  };
+}
+
+export function holdForBasic5CiUtilityBootstrapFailure(
+  utility: Basic5CiUtilityChildDiagnostic['utility'],
+  error: unknown,
+  state: {
+    exitCode: number | null;
+    closed: boolean;
+    stdoutBytes: number;
+    stderrBytes: number;
+    signal?: NodeJS.Signals | null;
+    errnoCode?: string;
+    launchAbsent?: boolean;
+  },
+): Basic5CiHold {
+  const hold = error instanceof Basic5CiHold ? error : undefined;
+  const launchAbsent =
+    state.launchAbsent === true &&
+    ['ENOENT', 'EACCES', 'EPERM', 'EMFILE', 'ENFILE', 'ENOMEM'].includes(state.errnoCode ?? '');
+  return new Basic5CiHold(
+    hold?.code ?? `${utility}_bootstrap_unverified`,
+    hold?.operationSettled ?? false,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    makeUtilityChildDiagnostic(
+      utility,
+      launchAbsent ? 'spawn' : 'bootstrap',
+      launchAbsent ? 'spawn_error' : 'bootstrap_unverified',
+      state.exitCode,
+      state.closed,
+      state.stdoutBytes,
+      state.stderrBytes,
+      state.errnoCode ?? error,
+      state.signal,
+    ),
+  );
+}
+
+function contentFreeUtilityChildDiagnostics(value: unknown): Basic5CiUtilityChildDiagnostic[] {
+  if (!Array.isArray(value) || value.length > 3)
+    throw new Basic5CiHold('utility_child_diagnostics_malformed');
+  const utilities = ['target_database_creation', 'migration_child', 'seed_child'];
+  const stages = [
+    'spawn',
+    'bootstrap',
+    'owned_session_census',
+    'final_session_census',
+    'completed',
+  ];
+  const statuses = [
+    'spawn_error',
+    'bootstrap_unverified',
+    'session_census_unverified',
+    'capture_limit',
+    'deadline',
+    'completed',
+  ];
+  const signals = ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGABRT', 'SIGPIPE', 'SIGQUIT'];
+  return value.map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry))
+      throw new Basic5CiHold('utility_child_diagnostic_malformed');
+    const row = entry as Record<string, unknown>;
+    const keys = [
+      'utility',
+      'stage',
+      'status',
+      'exitCode',
+      'signal',
+      'closed',
+      'stdoutBytes',
+      'stderrBytes',
+      'errnoCategory',
+      'sqlStateClass',
+    ];
+    if (
+      Object.keys(row).length !== keys.length ||
+      keys.some((key) => !Object.hasOwn(row, key)) ||
+      !utilities.includes(String(row.utility)) ||
+      !stages.includes(String(row.stage)) ||
+      !statuses.includes(String(row.status)) ||
+      !(row.exitCode === null || Number.isSafeInteger(row.exitCode)) ||
+      !(row.signal === null || signals.includes(String(row.signal))) ||
+      typeof row.closed !== 'boolean' ||
+      !Number.isSafeInteger(row.stdoutBytes) ||
+      Number(row.stdoutBytes) < 0 ||
+      Number(row.stdoutBytes) > CAPTURE_BYTES ||
+      !Number.isSafeInteger(row.stderrBytes) ||
+      Number(row.stderrBytes) < 0 ||
+      Number(row.stderrBytes) > CAPTURE_BYTES ||
+      ![null, 'not_found', 'permission_denied', 'resource_exhausted', 'other'].includes(
+        row.errnoCategory as string | null,
+      ) ||
+      ![
+        null,
+        'connection',
+        'data',
+        'integrity',
+        'authorization',
+        'transaction',
+        'resource',
+        'operator',
+        'system',
+        'internal',
+        'other',
+      ].includes(row.sqlStateClass as string | null)
+    )
+      throw new Basic5CiHold('utility_child_diagnostic_malformed');
+    return Object.fromEntries(
+      keys.map((key) => [key, row[key]]),
+    ) as unknown as Basic5CiUtilityChildDiagnostic;
+  });
+}
 
 export type Basic5CiCaseEntryDiagnostic = {
   stage:
@@ -263,6 +513,14 @@ type ProcessProof = {
     live: ReadonlyMap<number, LinuxSnapshot>,
     ports: ReadonlySet<number>,
   ): void;
+};
+
+export type Basic5CiUtilityChildTestDriver = {
+  spawn: typeof spawn;
+  proof: ProcessProof;
+  now: () => number;
+  sleep: (milliseconds: number) => Promise<void>;
+  killProcess: (pid: number, signal: NodeJS.Signals) => void;
 };
 type BuildProvenanceModule = {
   observeBasic5CiBuildProvenance(input: {
@@ -367,6 +625,7 @@ export class Basic5CiHold extends Error {
     readonly chromeVersionDiagnostic?: Basic5CiChromeVersionDiagnostic,
     readonly preparationDiagnostic?: Basic5CiPreparationDiagnostic,
     readonly caseEntryDiagnostic?: Basic5CiCaseEntryDiagnostic,
+    readonly utilityChildDiagnostic?: Basic5CiUtilityChildDiagnostic,
   ) {
     super(code);
   }
@@ -388,6 +647,7 @@ export async function runBasic5CiCaseEntryStep<T>(
       hold?.chromeVersionDiagnostic,
       hold?.preparationDiagnostic,
       { stage, category: classifyPreparationError(error) },
+      hold?.utilityChildDiagnostic,
     );
   }
 }
@@ -407,6 +667,8 @@ export async function runBasic5CiPreparationStep<T>(
       hold?.buildDiagnostic,
       hold?.chromeVersionDiagnostic,
       { stage, category: classifyPreparationError(error) },
+      undefined,
+      hold?.utilityChildDiagnostic,
     );
   }
 }
@@ -451,6 +713,8 @@ export function combineBasic5CiPreparationFailures(
     primary.buildDiagnostic,
     primary.chromeVersionDiagnostic,
     preparationDiagnostic,
+    undefined,
+    primary.utilityChildDiagnostic ?? secondary.utilityChildDiagnostic,
   );
 }
 
@@ -1526,6 +1790,7 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     'chromeVersion',
     'chromeVersionDiagnostic',
     'postgresServerVersionNum',
+    'utilityChildDiagnostics',
     'workflowContext',
     'requiredArtifactIdentity',
     'diagnosticTraceCompleteness',
@@ -1549,6 +1814,7 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     'errorCode',
     'standaloneBuildDiagnostic',
     'preparationDiagnostic',
+    'utilityChildDiagnostic',
     'caseEntryDiagnostic',
     'elapsedSeconds',
   ]);
@@ -1572,6 +1838,14 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     );
   if ('preparationDiagnostic' in clean)
     clean.preparationDiagnostic = contentFreePreparationDiagnostic(clean.preparationDiagnostic);
+  if ('utilityChildDiagnostic' in clean)
+    clean.utilityChildDiagnostic = contentFreeUtilityChildDiagnostics([
+      clean.utilityChildDiagnostic,
+    ])[0];
+  if ('utilityChildDiagnostics' in clean)
+    clean.utilityChildDiagnostics = contentFreeUtilityChildDiagnostics(
+      clean.utilityChildDiagnostics,
+    );
   if ('caseEntryDiagnostic' in clean)
     clean.caseEntryDiagnostic = contentFreeCaseEntryDiagnostic(clean.caseEntryDiagnostic);
   if ('standaloneBuildDiagnostic' in clean)
@@ -1743,6 +2017,8 @@ export async function runBasic5CiAcceptance(
       receipt.chromeVersionDiagnostic = error.chromeVersionDiagnostic;
     if (error instanceof Basic5CiHold && error.preparationDiagnostic)
       receipt.preparationDiagnostic = error.preparationDiagnostic;
+    if (error instanceof Basic5CiHold && error.utilityChildDiagnostic)
+      receipt.utilityChildDiagnostic = error.utilityChildDiagnostic;
     if (error instanceof Basic5CiHold && error.caseEntryDiagnostic)
       receipt.caseEntryDiagnostic = error.caseEntryDiagnostic;
     if (
@@ -1866,8 +2142,8 @@ export async function runBasic5CiAcceptance(
 
 // Real CI adapter follows below. It imports application and fixture modules only
 // after constructing the private synthetic environment in preflight().
-class RealBasic5CiOps implements Basic5CiOps {
-  private readonly started = performance.now();
+export class RealBasic5CiOps implements Basic5CiOps {
+  private started = performance.now();
   private outerExpired = false;
   private readonly outerTimer: NodeJS.Timeout;
   private repoRoot = '';
@@ -1892,8 +2168,14 @@ class RealBasic5CiOps implements Basic5CiOps {
   private readonly ownedRoots = new Map<number, LinuxIdentity>();
   private baselineListeners = new Map<string, number>();
   private fixtureRecords: RegistryRecord[] = [];
+  private readonly utilityChildTestDriver?: Basic5CiUtilityChildTestDriver;
 
-  constructor() {
+  constructor(utilityChildTestDriver?: Basic5CiUtilityChildTestDriver) {
+    this.utilityChildTestDriver = utilityChildTestDriver;
+    if (utilityChildTestDriver) {
+      this.started = utilityChildTestDriver.now();
+      this.proof = utilityChildTestDriver.proof;
+    }
     this.outerTimer = setTimeout(() => {
       this.outerExpired = true;
     }, OUTER_SECONDS * 1000);
@@ -1904,7 +2186,18 @@ class RealBasic5CiOps implements Basic5CiOps {
   }
 
   now(): number {
-    return performance.now();
+    return this.utilityChildTestDriver?.now() ?? performance.now();
+  }
+
+  runUtilityChild(
+    command: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+    deadline: number,
+    label: 'create-target' | 'migrate' | 'seed',
+    signal: AbortSignal,
+  ) {
+    return this.runChild(command, args, env, deadline, label, signal);
   }
 
   currentPreparationStage(): Basic5CiPreparationDiagnostic['stage'] | undefined {
@@ -2007,7 +2300,7 @@ class RealBasic5CiOps implements Basic5CiOps {
     )
       throw new Basic5CiHold('refusing_signal_to_changed_process_identity');
     try {
-      process.kill(identity.pid, signal);
+      (this.utilityChildTestDriver?.killProcess ?? process.kill)(identity.pid, signal);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ESRCH')
         throw new Basic5CiHold('owned_process_signal_failed');
@@ -2134,17 +2427,38 @@ class RealBasic5CiOps implements Basic5CiOps {
     deadline: number,
     label: string,
     signal: AbortSignal,
-  ): Promise<{ exitCode: number; stdout: Buffer; stderr: Buffer }> {
+  ): Promise<{
+    exitCode: number;
+    stdout: Buffer;
+    stderr: Buffer;
+    utilityDiagnostic?: Basic5CiUtilityChildDiagnostic;
+  }> {
     this.assertDeadline(deadline, label);
     assertNotAborted(signal, label);
     const proof = this.proof;
     if (!proof) throw new Basic5CiHold('linux_process_proof_unavailable');
-    const child = spawn(command, args, {
-      cwd: this.repoRoot,
-      env,
-      detached: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = (this.utilityChildTestDriver?.spawn ?? spawn)(command, args, {
+        cwd: this.repoRoot,
+        env,
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      const utility = utilityForChildLabel(label);
+      if (utility)
+        throw new Basic5CiHold(
+          `${label}_spawn_failed`,
+          true,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          makeUtilityChildDiagnostic(utility, 'spawn', 'spawn_error', null, false, 0, 0, error),
+        );
+      throw error;
+    }
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let outputBytes = 0;
@@ -2152,23 +2466,33 @@ class RealBasic5CiOps implements Basic5CiOps {
     let closed = false;
     let exitCode = 1;
     let childError = false;
+    let childErrorCode: unknown;
+    let identityReadErrorCode: string | undefined;
+    let closeSignal: NodeJS.Signals | null = null;
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     const closedPromise = new Promise<void>((resolveClose) => {
       child.once('close', (code, childSignal) => {
         exitCode = code ?? (childSignal ? 1 : 1);
+        closeSignal = childSignal;
         closed = true;
         resolveClose();
       });
     });
-    child.once('error', () => {
+    child.once('error', (error) => {
       childError = true;
+      childErrorCode =
+        error && typeof error === 'object' ? (error as NodeJS.ErrnoException).code : undefined;
     });
     child.stdout?.on('data', (chunk: Buffer) => {
       outputBytes += chunk.length;
+      stdoutBytes += chunk.length;
       if (outputBytes <= CAPTURE_BYTES) stdout.push(Buffer.from(chunk));
       else overflow = true;
     });
     child.stderr?.on('data', (chunk: Buffer) => {
       outputBytes += chunk.length;
+      stderrBytes += chunk.length;
       if (outputBytes <= CAPTURE_BYTES) stderr.push(Buffer.from(chunk));
       else overflow = true;
     });
@@ -2182,9 +2506,33 @@ class RealBasic5CiOps implements Basic5CiOps {
       root = await verifyDirectChildBootstrap(
         child,
         process.pid,
-        (childPid) => proof.readBasic5LinuxProcessIdentity(childPid),
+        async (childPid) => {
+          try {
+            return await proof.readBasic5LinuxProcessIdentity(childPid);
+          } catch (error) {
+            const code =
+              error && typeof error === 'object'
+                ? (error as NodeJS.ErrnoException).code
+                : undefined;
+            if (typeof code === 'string') identityReadErrorCode = code;
+            throw error;
+          }
+        },
         closedPromise,
       );
+    } catch (error) {
+      const utility = utilityForChildLabel(label);
+      if (utility)
+        throw holdForBasic5CiUtilityBootstrapFailure(utility, error, {
+          exitCode: closed ? exitCode : null,
+          closed,
+          stdoutBytes,
+          stderrBytes,
+          signal: closeSignal,
+          errnoCode: typeof childErrorCode === 'string' ? childErrorCode : identityReadErrorCode,
+          launchAbsent: child.pid === undefined,
+        });
+      throw error;
     } finally {
       signal.removeEventListener('abort', abortDirectChild);
       if (directAbortSettlement) await directAbortSettlement;
@@ -2195,36 +2543,226 @@ class RealBasic5CiOps implements Basic5CiOps {
       await this.stopKnownSessions(
         Math.min(this.started + CLEANUP_END_SECONDS * 1000, this.now() + 4_100),
       );
-      throw new Basic5CiHold(`${label}_cancelled`);
+      const utility = utilityForChildLabel(label);
+      throw new Basic5CiHold(
+        `${label}_cancelled`,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        utility
+          ? makeUtilityChildDiagnostic(
+              utility,
+              'owned_session_census',
+              'deadline',
+              null,
+              closed,
+              stdoutBytes,
+              stderrBytes,
+            )
+          : undefined,
+      );
     }
     while (!closed) {
       if (signal.aborted) {
         await this.stopKnownSessions(
           Math.min(this.started + CLEANUP_END_SECONDS * 1000, this.now() + 4_100),
         );
-        throw new Basic5CiHold(`${label}_cancelled`);
+        const utility = utilityForChildLabel(label);
+        throw new Basic5CiHold(
+          `${label}_cancelled`,
+          false,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          utility
+            ? makeUtilityChildDiagnostic(
+                utility,
+                'owned_session_census',
+                'deadline',
+                null,
+                closed,
+                stdoutBytes,
+                stderrBytes,
+              )
+            : undefined,
+        );
       }
       if (overflow || this.now() >= deadline || this.now() >= this.started + OUTER_SECONDS * 1000) {
         await this.stopKnownSessions(
           Math.min(this.started + CLEANUP_END_SECONDS * 1000, this.now() + 4_100),
         );
-        throw new Basic5CiHold(overflow ? `${label}_capture_limit` : `${label}_deadline`);
+        const utility = utilityForChildLabel(label);
+        throw new Basic5CiHold(
+          overflow ? `${label}_capture_limit` : `${label}_deadline`,
+          false,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          utility
+            ? makeUtilityChildDiagnostic(
+                utility,
+                'owned_session_census',
+                overflow ? 'capture_limit' : 'deadline',
+                null,
+                closed,
+                stdoutBytes,
+                stderrBytes,
+              )
+            : undefined,
+        );
       }
-      await this.captureSession(root);
-      await sleep(50);
+      try {
+        await this.captureSession(root);
+      } catch (error) {
+        const utility = utilityForChildLabel(label);
+        if (utility)
+          throw new Basic5CiHold(
+            `${label}_session_census_failed`,
+            false,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            makeUtilityChildDiagnostic(
+              utility,
+              'owned_session_census',
+              'session_census_unverified',
+              null,
+              closed,
+              stdoutBytes,
+              stderrBytes,
+              error,
+              closeSignal,
+            ),
+          );
+        throw error;
+      }
+      await (this.utilityChildTestDriver?.sleep ?? sleep)(50);
     }
-    if (childError) throw new Basic5CiHold(`${label}_child_error`);
-    if (signal.aborted) throw new Basic5CiHold(`${label}_cancelled`);
-    await this.captureSession(root);
-    const liveRootSession = await proof.readBasic5LinuxProcessSnapshot();
-    if ([...liveRootSession.values()].some((row) => row.sid === root.sid)) {
-      await this.stopKnownSessions(
-        Math.min(this.started + CLEANUP_END_SECONDS * 1000, this.now() + 4_100),
+    const utility = utilityForChildLabel(label);
+    if (childError)
+      throw new Basic5CiHold(
+        `${label}_child_error`,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        utility
+          ? makeUtilityChildDiagnostic(
+              utility,
+              'completed',
+              'completed',
+              exitCode,
+              closed,
+              stdoutBytes,
+              stderrBytes,
+              childErrorCode,
+              closeSignal,
+            )
+          : undefined,
       );
-      throw new Basic5CiHold(`${label}_descendant_not_closed`);
+    if (signal.aborted)
+      throw new Basic5CiHold(
+        `${label}_cancelled`,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        utility
+          ? makeUtilityChildDiagnostic(
+              utility,
+              'final_session_census',
+              'deadline',
+              exitCode,
+              closed,
+              stdoutBytes,
+              stderrBytes,
+              childErrorCode,
+              closeSignal,
+            )
+          : undefined,
+      );
+    try {
+      await this.captureSession(root);
+      const liveRootSession = await proof.readBasic5LinuxProcessSnapshot();
+      if ([...liveRootSession.values()].some((row) => row.sid === root.sid)) {
+        await this.stopKnownSessions(
+          Math.min(this.started + CLEANUP_END_SECONDS * 1000, this.now() + 4_100),
+        );
+        throw new Basic5CiHold(`${label}_descendant_not_closed`);
+      }
+    } catch (error) {
+      const utility = utilityForChildLabel(label);
+      if (utility)
+        throw new Basic5CiHold(
+          error instanceof Basic5CiHold ? error.code : `${label}_final_census_failed`,
+          false,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          makeUtilityChildDiagnostic(
+            utility,
+            'final_session_census',
+            'session_census_unverified',
+            exitCode,
+            closed,
+            stdoutBytes,
+            stderrBytes,
+            error,
+            closeSignal,
+          ),
+        );
+      throw error;
     }
-    if (outputBytes > CAPTURE_BYTES) throw new Basic5CiHold(`${label}_capture_limit`);
-    return { exitCode, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) };
+    if (outputBytes > CAPTURE_BYTES)
+      throw new Basic5CiHold(
+        `${label}_capture_limit`,
+        true,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        utility
+          ? makeUtilityChildDiagnostic(
+              utility,
+              'completed',
+              'capture_limit',
+              exitCode,
+              closed,
+              stdoutBytes,
+              stderrBytes,
+              childErrorCode,
+              closeSignal,
+            )
+          : undefined,
+      );
+    return {
+      exitCode,
+      stdout: Buffer.concat(stdout),
+      stderr: Buffer.concat(stderr),
+      ...(utility
+        ? {
+            utilityDiagnostic: makeUtilityChildDiagnostic(
+              utility,
+              'completed',
+              'completed',
+              exitCode,
+              closed,
+              stdoutBytes,
+              stderrBytes,
+              childErrorCode,
+              closeSignal,
+            ),
+          }
+        : {}),
+    };
   }
 
   async preflight(deadline: number, signal: AbortSignal): Promise<Basic5CiPreflight> {
@@ -2417,6 +2955,7 @@ class RealBasic5CiOps implements Basic5CiOps {
       chromeVersion,
       chromeVersionDiagnostic: chromeObservation.diagnostic,
       postgresServerVersionNum: null,
+      utilityChildDiagnostics: [],
       workflowContext: {
         event: 'push',
         ref: 'refs/heads/main',
@@ -2493,8 +3032,9 @@ class RealBasic5CiOps implements Basic5CiOps {
           'create-target',
           signal,
         );
-        if (created.exitCode !== 0 || created.stderr.length)
-          throw new Basic5CiHold('fresh_target_allocation_failed');
+        if (!created.utilityDiagnostic) throw new Basic5CiHold('utility_child_observation_missing');
+        this.preflightResult?.utilityChildDiagnostics.push(created.utilityDiagnostic);
+        assertBasic5CiUtilityChildSucceeded('target_database_creation', created);
         assertNotAborted(signal, 'prepare');
       },
     );
@@ -2574,8 +3114,9 @@ class RealBasic5CiOps implements Basic5CiOps {
         'migrate',
         signal,
       );
-      if (migrate.exitCode !== 0 || migrate.stderr.length)
-        throw new Basic5CiHold('fresh_target_migration_failed');
+      if (!migrate.utilityDiagnostic) throw new Basic5CiHold('utility_child_observation_missing');
+      this.preflightResult?.utilityChildDiagnostics.push(migrate.utilityDiagnostic);
+      assertBasic5CiUtilityChildSucceeded('migration_child', migrate);
       assertNotAborted(signal, 'prepare');
     });
     await this.runPreparationStep('seed_child', 'fresh_synthetic_seed_failed', async () => {
@@ -2587,8 +3128,9 @@ class RealBasic5CiOps implements Basic5CiOps {
         'seed',
         signal,
       );
-      if (seed.exitCode !== 0 || seed.stderr.length)
-        throw new Basic5CiHold('fresh_synthetic_seed_failed');
+      if (!seed.utilityDiagnostic) throw new Basic5CiHold('utility_child_observation_missing');
+      this.preflightResult?.utilityChildDiagnostics.push(seed.utilityDiagnostic);
+      assertBasic5CiUtilityChildSucceeded('seed_child', seed);
       assertNotAborted(signal, 'prepare');
     });
     return target;
