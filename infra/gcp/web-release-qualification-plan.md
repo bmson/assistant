@@ -1,4 +1,4 @@
-# Converged qualification plan — proposal only, nothing executable is authorized
+# Converged qualification plan — source implementation only, no hosted execution authorized
 
 Decision: stop reducer expansion. Correct the three final validation findings, then
 qualify existing capabilities in one read-only hosted slice. No provider access,
@@ -57,30 +57,39 @@ of a real manager decision to that live job remains unsupported. A future adapte
 cannot choose another composition implicitly. Cold recovery choice above prevents
 using a new job's digest-only history to evade this limitation.
 
-## Minimal exact NEXT implementation slice to request
+## Authorized source implementation slice
 
-After exact corrected-source review, request ONLY a read-only qualification harness
-and offline fixtures, plus an explicitly reviewed manual read-only branch of the
+After exact corrected-source review, the manager authorized ONLY a read-only qualification harness
+and offline fixtures, plus a default-off manual read-only branch of the
 EXISTING deploy.yml so its workflow identity matches the intended production origin.
-Proposed selector: workflow_dispatch input native_web_qualification=read_only;
+Implemented source selector: workflow_dispatch input native_web_qualification=read_only;
 default remains off. This job must skip image build/push, release, delivery holds,
 cleanup, journal writes and phone work. It keeps the existing production concurrency,
 production environment and first-attempt/main-source requirements. No new permission.
 
-Prospective entrypoint (NOT PRESENT/NOT AUTHORIZED):
+Source entrypoint (PRESENT; executing it with real identity/provider access is NOT AUTHORIZED):
 `pnpm exec tsx scripts/owner-web-release-qualification.ts --read-only`.
 Its transport must reject all Cloud Run methods except fixed GETs; there is no
 metadata writer linked to this executable. Use existing supported jose from its
 own declared package for signature verification, not unsigned parsing or a new
-crypto dependency. Any dependency/import/source change is part of that future review.
+crypto dependency. No dependency was added: the helper resides in apps/agent/scripts and resolves that package's existing direct jose dependency. No app runtime entrypoint imports the helper.
 
 Offline tests must verify redaction, actual check-run/job mapping, exact source,
 expired/foreign OIDC, missing job/artifact capability, truncated listings, timeout,
 GET-only routing and refusal of all mutation modes. Exact-head CI and independent
-review precede a separate explicit authorization for ONE hosted dispatch. This
-plan neither creates the harness/workflow nor dispatches anything.
+review precede a separate explicit authorization for ONE hosted dispatch. No hosted dispatch or actual token/provider call has been performed.
+The complete wiring fixtures mock only the immutable manifest verifier because the genuine
+archive is not available locally; separate synthetic ZIP decoder tests and immutable digest
+rejection tests do not establish genuine artifact access. Offline identity fixtures use actual
+RSA signatures and local JWK verification. Every successful observational path still returns
+HOLD, mutationAuthorized:false and runtimeEligible:false.
 
 ## One bounded hosted READ-ONLY dispatch, only after that authorization
+
+Checkout and pinned package setup precede the application probe; they do not obtain cloud
+credentials. Dependency install disables lifecycle scripts. Their standard source/package
+transport and the separately declared one-report upload are outside the application counter.
+All identity, provider and readback transport initiated by the probe is inside it.
 
 Application probe budget: at most20 HTTP requests,15s each,120s overall; fixed
 origins and body bounds. This includes OIDC/JWKS, existing WIF STS/IAM token exchange,
