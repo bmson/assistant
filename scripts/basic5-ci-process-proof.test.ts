@@ -70,6 +70,29 @@ describe('BASIC5 Linux process proof', () => {
     );
   });
 
+  it('keeps zero group/session values visible in global stat snapshots but rejects negative values', () => {
+    const fields = ['S', '11', '0', '0', ...Array.from({ length: 15 }, () => '0'), '987654'];
+    expect(parseBasic5LinuxProcessStat(42, `42 (kernel worker) ${fields.join(' ')}`)).toEqual({
+      pid: 42,
+      ppid: 11,
+      pgid: 0,
+      sid: 0,
+      startTimeTicks: '987654',
+    });
+    expect(() =>
+      parseBasic5LinuxProcessStat(
+        42,
+        `42 (malformed negative group) ${[...fields.slice(0, 2), '-1', ...fields.slice(3)].join(' ')}`,
+      ),
+    ).toThrow('malformed or mismatched');
+    expect(() =>
+      parseBasic5LinuxProcessStat(
+        42,
+        `42 (malformed negative session) ${[...fields.slice(0, 3), '-1', ...fields.slice(4)].join(' ')}`,
+      ),
+    ).toThrow('malformed or mismatched');
+  });
+
   it('requires exactly the one fresh direct child and exact allowlisted Chrome executable', () => {
     const before = new Map<number, Basic5LinuxProcessSnapshot>([
       [500, { pid: 500, ppid: 100, pgid: 500, sid: 100, startTimeTicks: '9001' }],
@@ -126,6 +149,14 @@ describe('BASIC5 Linux process proof', () => {
       'four required process roles',
     );
     expect(() => assertBasic5CiProcessRegistryComplete(records)).not.toThrow();
+  });
+
+  it('rejects zero group/session values in explicitly registered owned identities', () => {
+    for (const field of ['pgid', 'sid'] as const) {
+      expect(() =>
+        parseBasic5CiProcessRegistryText(rawRegistry([{ ...worker, [field]: 0 }])),
+      ).toThrow('strict validation');
+    }
   });
 
   it('fails closed on an exact registered PID/start-time or still-open registered listener', () => {

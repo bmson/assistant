@@ -68,9 +68,9 @@ export function parseBasic5LinuxProcessStat(
     !Number.isSafeInteger(ppid) ||
     ppid < 0 ||
     !Number.isSafeInteger(pgid) ||
-    pgid <= 0 ||
+    pgid < 0 ||
     !Number.isSafeInteger(sid) ||
-    sid <= 0 ||
+    sid < 0 ||
     !startTimeTicks ||
     !/^\d+$/.test(startTimeTicks)
   )
@@ -244,6 +244,8 @@ export async function readBasic5LinuxProcessIdentity(
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('Invalid Linux process ID.');
   const before = await readStat(pid);
   if (!before) return undefined;
+  if (before.pgid <= 0 || before.sid <= 0)
+    throw new Error('Linux process identity is not eligible for owned process tracking.');
   let exe: string;
   try {
     exe = await realpath(`/proc/${pid}/exe`);
