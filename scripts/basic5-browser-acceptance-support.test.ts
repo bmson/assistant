@@ -5,6 +5,9 @@ import {
   assertBasic5ReceiptSequence,
   BASIC5_AUTH_COOKIE_NAME,
   BASIC5_BROWSER_ACTIONS,
+  BASIC5_BROWSER_DYNAMIC_REQUEST_LIMIT,
+  BASIC5_BROWSER_STATIC_ASSET_REQUEST_LIMIT,
+  BASIC5_BROWSER_TOTAL_REQUEST_LIMIT,
   BASIC5_EMBEDDING_DIMENSIONS,
   BASIC5_READINESS_ATTEMPT_LIMIT,
   basic5BrowserLaunchOptions,
@@ -13,6 +16,7 @@ import {
   boundedBasic5ObservedCount,
   classifyBasic5RequestFailure,
   createBasic5AuthCookie,
+  createBasic5BrowserRequestBudget,
   decodeBasic5AuthCookie,
   nextBasic5ReadinessAttempt,
 } from './basic5-browser-acceptance-support.js';
@@ -43,6 +47,215 @@ const secret = 'basic5-offline-auth-cookie-secret-32-bytes';
 const authBaseUrl = 'http://127.0.0.1:3107';
 const defaultProtectedMarkers = ['Alex Rivera', 'synthetic note body'];
 const anonymousHtmlContentType = 'text/html; charset=utf-8';
+
+describe('task-specific BASIC5 browser request budgets', () => {
+  const baseUrl = 'http://127.0.0.1:3107';
+  const assetPath = '/_next/static/chunks/known.js';
+  const bracketPath = '/_next/static/chunks/app/%5Bid%5D/page.js';
+  const known = () => new Set([assetPath, bracketPath]);
+  const checkTotals = (budget: ReturnType<typeof createBasic5BrowserRequestBudget>) => {
+    const snapshot = budget.snapshot();
+    expect(snapshot.browserHttpRequests).toBe(
+      snapshot.browserDynamicHttpRequests + snapshot.browserStaticAssetRequests,
+    );
+    return snapshot;
+  };
+
+  it('pins the separate dynamic, static, and total caps', () => {
+    expect(BASIC5_BROWSER_DYNAMIC_REQUEST_LIMIT).toBe(64);
+    expect(BASIC5_BROWSER_STATIC_ASSET_REQUEST_LIMIT).toBe(256);
+    expect(BASIC5_BROWSER_TOTAL_REQUEST_LIMIT).toBe(320);
+  });
+
+  it('permits more than 64 known static requests followed by a family POST in a synthetic sequence', () => {
+    const paths = new Set(
+      Array.from({ length: 70 }, (_, index) => `/_next/static/chunks/synthetic-${index}.js`),
+    );
+    const budget = createBasic5BrowserRequestBudget(baseUrl, paths);
+    let oldCombinedCount = 0;
+    let oldCombinedWouldBlock = false;
+    // This replay illustrates the old combined-cap failure; it does not claim
+    // to reconstruct any retained CI run's unknown request sequence.
+    expect(budget.observe(`${baseUrl}/people/person`, 'GET')).toBe(true);
+    oldCombinedCount += 1;
+    for (const pathname of paths) {
+      oldCombinedCount += 1;
+      oldCombinedWouldBlock ||= oldCombinedCount > 64;
+      expect(budget.observe(`${baseUrl}${pathname}`, 'GET')).toBe(true);
+    }
+    expect(oldCombinedWouldBlock).toBe(true);
+    expect(budget.observe(`${baseUrl}/api/profile/knowledge/family`, 'POST')).toBe(true);
+    expect(checkTotals(budget)).toEqual({
+      browserHttpRequests: 72,
+      browserDynamicHttpRequests: 2,
+      browserStaticAssetRequests: 70,
+      browserBudgetExceeded: false,
+    });
+  });
+
+  it('counts and blocks dynamic request 65, then keeps the cap violation latched', () => {
+    const budget = createBasic5BrowserRequestBudget(baseUrl, known());
+    for (let count = 1; count <= 64; count++)
+      expect(budget.observe(`${baseUrl}/people`, 'GET')).toBe(true);
+    expect(budget.observe(`${baseUrl}/api/profile/knowledge/family`, 'POST')).toBe(false);
+    expect(checkTotals(budget)).toEqual({
+      browserHttpRequests: 65,
+      browserDynamicHttpRequests: 65,
+      browserStaticAssetRequests: 0,
+      browserBudgetExceeded: true,
+    });
+    expect(budget.observe(`${baseUrl}${assetPath}`, 'GET')).toBe(false);
+    expect(checkTotals(budget)).toEqual({
+      browserHttpRequests: 66,
+      browserDynamicHttpRequests: 65,
+      browserStaticAssetRequests: 1,
+      browserBudgetExceeded: true,
+    });
+  });
+
+  it('counts and blocks static request 257 independently of the dynamic cap', () => {
+    const budget = createBasic5BrowserRequestBudget(baseUrl, known());
+    for (let count = 1; count <= 256; count++)
+      expect(budget.observe(`${baseUrl}${assetPath}`, 'GET')).toBe(true);
+    expect(budget.observe(`${baseUrl}${assetPath}`, 'GET')).toBe(false);
+    expect(checkTotals(budget)).toEqual({
+      browserHttpRequests: 257,
+      browserDynamicHttpRequests: 0,
+      browserStaticAssetRequests: 257,
+      browserBudgetExceeded: true,
+    });
+  });
+
+  it('admits exactly 320 total requests within both class caps, then counts and blocks request 321', () => {
+    const budget = createBasic5BrowserRequestBudget(baseUrl, known());
+    for (let count = 0; count < 64; count++)
+      expect(budget.observe(`${baseUrl}/people`, 'GET')).toBe(true);
+    for (let count = 0; count < 256; count++)
+      expect(budget.observe(`${baseUrl}${assetPath}`, 'GET')).toBe(true);
+    expect(checkTotals(budget)).toEqual({
+      browserHttpRequests: 320,
+      browserDynamicHttpRequests: 64,
+      browserStaticAssetRequests: 256,
+      browserBudgetExceeded: false,
+    });
+    expect(budget.observe(`${baseUrl}/people`, 'GET')).toBe(false);
+    expect(checkTotals(budget)).toEqual({
+      browserHttpRequests: 321,
+      browserDynamicHttpRequests: 65,
+      browserStaticAssetRequests: 256,
+      browserBudgetExceeded: true,
+    });
+  });
+
+  it.each([
+    [assetPath, 'GET', true, true],
+    [bracketPath, 'GET', true, true],
+    [`${assetPath}?v=a%2Fb&label=a%20b&escaped=%2E%5C%23`, 'GET', true, true],
+    [`${assetPath}?`, 'GET', true, true],
+    ['/_next/static/chunks/app/[id]/page.js', 'GET', true, false],
+    ['/_next/static/chunks/unknown.js', 'GET', true, false],
+    ['/_next/staticity/chunks/known.js', 'GET', true, false],
+    ['/_next/static-evil/chunks/known.js', 'GET', true, false],
+    ['/_next/static', 'GET', true, false],
+    [assetPath, 'POST', true, false],
+    [assetPath, 'HEAD', true, false],
+    [assetPath, 'get', true, false],
+    [assetPath, 'GET ', true, false],
+    [assetPath, 'GETX', true, false],
+    ['/api/profile/knowledge/family', 'POST', true, false],
+    [`${assetPath}?q=%`, 'GET', false, false],
+    [`${assetPath}?q=%ZZ`, 'GET', false, false],
+    [`${assetPath}?q=%C0%AF`, 'GET', false, false],
+    [`${assetPath}#fragment`, 'GET', false, false],
+    [`${assetPath}#`, 'GET', false, false],
+    ['/_next/static/chunks/sub/../known.js', 'GET', false, false],
+    ['/_next/static/chunks/./known.js', 'GET', false, false],
+    ['/_next/static/chunks/%2e/known.js', 'GET', false, false],
+    ['/_next/static/chunks/%2E%2e/known.js', 'GET', false, false],
+    ['/_next/static/chunks/known%2ejs', 'GET', false, false],
+    ['/_next/static/chunks/known%2f.js', 'GET', false, false],
+    ['/_next/static/chunks/known%5c.js', 'GET', false, false],
+    ['/_next/static/chunks\\known.js', 'GET', false, false],
+    ['/_next/static//chunks/known.js', 'GET', false, false],
+    ['/_next/static/chunks/known%.js', 'GET', false, false],
+    ['/_next/static/chunks/%252e%252e/known.js', 'GET', false, false],
+  ] as const)(
+    'classifies raw path/query %s with method %s before admission',
+    (pathname, method, allowed, isStatic) => {
+      const budget = createBasic5BrowserRequestBudget(baseUrl, known());
+      expect(budget.observe(`${baseUrl}${pathname}`, method)).toBe(allowed);
+      expect(checkTotals(budget)).toEqual({
+        browserHttpRequests: 1,
+        browserDynamicHttpRequests: isStatic ? 0 : 1,
+        browserStaticAssetRequests: isStatic ? 1 : 0,
+        browserBudgetExceeded: false,
+      });
+    },
+  );
+
+  it.each([
+    'http://remote.example.test/_next/static/chunks/known.js',
+    'https://127.0.0.1:3107/_next/static/chunks/known.js',
+    'http://127.0.0.1:3108/_next/static/chunks/known.js',
+    'http://user:password@127.0.0.1:3107/_next/static/chunks/known.js',
+    'http://@127.0.0.1:3107/_next/static/chunks/known.js',
+    'ftp://127.0.0.1:3107/_next/static/chunks/known.js',
+    '/_next/static/chunks/known.js',
+    'not a URL',
+    'http://127.0.0.1:3107/\n_next/static/chunks/known.js',
+  ])('counts and denies off-origin or malformed URL %s without claiming cap exhaustion', (url) => {
+    const budget = createBasic5BrowserRequestBudget(baseUrl, known());
+    expect(budget.observe(url, 'GET')).toBe(false);
+    expect(checkTotals(budget)).toEqual({
+      browserHttpRequests: 1,
+      browserDynamicHttpRequests: 1,
+      browserStaticAssetRequests: 0,
+      browserBudgetExceeded: false,
+    });
+  });
+
+  it('snapshots the known file inventory and ignores invalid known-path entries', () => {
+    const inventory = new Set([
+      assetPath,
+      '/api/profile/knowledge/family',
+      '/_next/static/',
+      '/_next/static/chunks/../chunks/unsafe.js',
+      '/_next/static/chunks/unsafe%2f.js',
+      '/_next/static/chunks/unknown.js?v=1',
+    ]);
+    const budget = createBasic5BrowserRequestBudget(baseUrl, inventory);
+    inventory.clear();
+    inventory.add('/_next/static/chunks/later.js');
+    expect(budget.observe(`${baseUrl}${assetPath}`, 'GET')).toBe(true);
+    expect(budget.observe(`${baseUrl}/_next/static/chunks/later.js`, 'GET')).toBe(true);
+    expect(budget.observe(`${baseUrl}/api/profile/knowledge/family`, 'GET')).toBe(true);
+    expect(budget.observe(`${baseUrl}/_next/static/`, 'GET')).toBe(true);
+    expect(budget.observe(`${baseUrl}/_next/static/chunks/unsafe%2f.js`, 'GET')).toBe(false);
+    expect(budget.observe(`${baseUrl}/_next/static/chunks/unknown.js?v=1`, 'GET')).toBe(true);
+    expect(checkTotals(budget)).toEqual({
+      browserHttpRequests: 6,
+      browserDynamicHttpRequests: 5,
+      browserStaticAssetRequests: 1,
+      browserBudgetExceeded: false,
+    });
+  });
+
+  it('returns independent content-free count snapshots', () => {
+    const budget = createBasic5BrowserRequestBudget(baseUrl, known());
+    expect(budget.observe(`${baseUrl}${assetPath}`, 'GET')).toBe(true);
+    const snapshot = budget.snapshot();
+    snapshot.browserHttpRequests = 999;
+    snapshot.browserBudgetExceeded = true;
+    expect(budget.snapshot()).toEqual({
+      browserHttpRequests: 1,
+      browserDynamicHttpRequests: 0,
+      browserStaticAssetRequests: 1,
+      browserBudgetExceeded: false,
+    });
+    expect(JSON.stringify(budget.snapshot())).not.toContain(baseUrl);
+    expect(JSON.stringify(budget.snapshot())).not.toContain(assetPath);
+  });
+});
 
 function anonymousResponse(input: {
   status: number;

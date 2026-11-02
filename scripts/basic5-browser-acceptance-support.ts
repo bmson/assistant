@@ -22,6 +22,98 @@ const ANONYMOUS_RESPONSE_TEXT_LIMIT = 2_048;
 const ANONYMOUS_PROTECTED_MARKER_LIMIT = 32;
 const ANONYMOUS_SIGNIN_PATH = '/api/auth/signin';
 
+export const BASIC5_BROWSER_DYNAMIC_REQUEST_LIMIT = 64;
+export const BASIC5_BROWSER_STATIC_ASSET_REQUEST_LIMIT = 256;
+export const BASIC5_BROWSER_TOTAL_REQUEST_LIMIT = 320;
+
+export interface Basic5BrowserRequestBudgetSnapshot {
+  browserHttpRequests: number;
+  browserDynamicHttpRequests: number;
+  browserStaticAssetRequests: number;
+  browserBudgetExceeded: boolean;
+}
+
+/** Validate the raw URL before WHATWG parsing can hide path normalization. */
+function canonicalBasic5RequestUrl(value: string): URL | null {
+  if (
+    value.includes('#') ||
+    [...value].some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 0x20 || code === 0x7f || character === '\\';
+    })
+  )
+    return null;
+  const parts = /^(https?):\/\/([^/?#]+)([^?#]*)(?:\?([^#]*))?$/i.exec(value);
+  if (!parts || parts[2]?.includes('@') || parts[2]?.includes('%')) return null;
+  const rawPath = parts[3] || '/';
+  if (
+    rawPath.includes('//') ||
+    /%(?:2e|2f|5c|25)/i.test(rawPath) ||
+    rawPath.split('/').some((segment) => segment === '.' || segment === '..')
+  )
+    return null;
+  try {
+    // Query values do not participate in membership, but invalid encodings do
+    // not acquire the known-static allowance merely by preceding a valid path.
+    decodeURIComponent(rawPath);
+    decodeURIComponent(parts[4] ?? '');
+    const parsed = new URL(value);
+    return parsed.pathname === rawPath && parsed.username === '' && parsed.password === ''
+      ? parsed
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One BASIC5 case: count every observed request before deciding its admission. */
+export function createBasic5BrowserRequestBudget(
+  baseUrl: string,
+  knownStaticPaths: ReadonlySet<string>,
+): {
+  observe(url: string, method: string): boolean;
+  snapshot(): Basic5BrowserRequestBudgetSnapshot;
+} {
+  const base = canonicalBasic5RequestUrl(baseUrl);
+  if (!base) throw new Error('BASIC5 browser request budget requires a canonical HTTP origin');
+  const origin = base.origin;
+  // The locally observed inventory is fixed for this case; a caller cannot widen the
+  // static allowance by mutating its original Set while the browser is running.
+  const staticPaths = new Set(
+    [...knownStaticPaths].filter((pathname) => {
+      if (!pathname.startsWith('/_next/static/') || pathname.endsWith('/')) return false;
+      const parsed = canonicalBasic5RequestUrl(`${origin}${pathname}`);
+      return parsed?.pathname === pathname && parsed.search === '';
+    }),
+  );
+  let browserHttpRequests = 0;
+  let browserDynamicHttpRequests = 0;
+  let browserStaticAssetRequests = 0;
+  let browserBudgetExceeded = false;
+  return {
+    observe(url, method) {
+      browserHttpRequests += 1;
+      const parsed = canonicalBasic5RequestUrl(url);
+      const sameOrigin = parsed?.origin === origin;
+      if (sameOrigin && method === 'GET' && staticPaths.has(parsed.pathname))
+        browserStaticAssetRequests += 1;
+      else browserDynamicHttpRequests += 1;
+      browserBudgetExceeded ||= Boolean(
+        browserDynamicHttpRequests > BASIC5_BROWSER_DYNAMIC_REQUEST_LIMIT ||
+          browserStaticAssetRequests > BASIC5_BROWSER_STATIC_ASSET_REQUEST_LIMIT ||
+          browserHttpRequests > BASIC5_BROWSER_TOTAL_REQUEST_LIMIT,
+      );
+      return sameOrigin && !browserBudgetExceeded;
+    },
+    snapshot: () => ({
+      browserHttpRequests,
+      browserDynamicHttpRequests,
+      browserStaticAssetRequests,
+      browserBudgetExceeded,
+    }),
+  };
+}
+
 export type Basic5RequestFailureClass =
   | 'blocked_by_client'
   | 'aborted'
