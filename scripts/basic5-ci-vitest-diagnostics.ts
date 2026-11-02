@@ -1,4 +1,7 @@
-import type { Basic5SaveObservationDiagnostic } from './basic5-browser-save-observation.js';
+import type {
+  Basic5ReplyObservation,
+  Basic5SaveObservationDiagnostic,
+} from './basic5-browser-save-observation.js';
 
 /** Bounded projection of the pinned Vitest JSON reporter; never retain raw errors. */
 const CAPTURE_BYTES = 64 * 1024;
@@ -53,6 +56,55 @@ export function classifyBasic5AnonymousLocation(
   }
 }
 
+function safeReplyObservation(value: unknown): Basic5ReplyObservation | null {
+  const keys = [
+    'step',
+    'contentTypeClass',
+    'decoderCallable',
+    'jsonReadCompleted',
+    'topLevelObject',
+    'wireKeysAllowed',
+    'receiptKeysPresent',
+    'versionTypeNumber',
+    'versionOne',
+    'wireTypesValid',
+    'decoderAccepted',
+  ];
+  const nullable = [
+    'topLevelObject',
+    'wireKeysAllowed',
+    'receiptKeysPresent',
+    'versionTypeNumber',
+    'versionOne',
+    'wireTypesValid',
+    'decoderAccepted',
+  ];
+  if (
+    !record(value) ||
+    Object.keys(value).length !== keys.length ||
+    keys.some((key) => !Object.hasOwn(value, key)) ||
+    !['response_json', 'reply_decode', 'reply_decoded'].includes(
+      typeof value.step === 'string' ? value.step : '',
+    ) ||
+    !['json', 'html', 'other', 'missing', 'unknown'].includes(
+      typeof value.contentTypeClass === 'string' ? value.contentTypeClass : '',
+    ) ||
+    typeof value.decoderCallable !== 'boolean' ||
+    typeof value.jsonReadCompleted !== 'boolean' ||
+    nullable.some((key) => value[key] !== null && typeof value[key] !== 'boolean') ||
+    (!value.jsonReadCompleted && nullable.some((key) => value[key] !== null)) ||
+    (value.step === 'response_json' ? value.jsonReadCompleted : !value.jsonReadCompleted) ||
+    (value.decoderAccepted === true &&
+      (!value.decoderCallable || value.step !== 'reply_decoded')) ||
+    (value.step === 'reply_decoded' && value.decoderAccepted !== true) ||
+    (value.versionOne === true && value.versionTypeNumber !== true)
+  )
+    return null;
+  return Object.fromEntries(
+    keys.map((key) => [key, value[key]]),
+  ) as unknown as Basic5ReplyObservation;
+}
+
 function safeSaveObservation(value: unknown): Basic5SaveObservationDiagnostic | null {
   const keys = [
     'operation',
@@ -70,7 +122,8 @@ function safeSaveObservation(value: unknown): Basic5SaveObservationDiagnostic | 
   ];
   if (
     !record(value) ||
-    Object.keys(value).length !== keys.length ||
+    Object.keys(value).length !== keys.length + (Object.hasOwn(value, 'reply') ? 1 : 0) ||
+    (Object.hasOwn(value, 'reply') && !safeReplyObservation(value.reply)) ||
     keys.some((key) => !Object.hasOwn(value, key)) ||
     ![
       'update_person_identity',
@@ -113,9 +166,10 @@ function safeSaveObservation(value: unknown): Basic5SaveObservationDiagnostic | 
     )
   )
     return null;
-  return Object.fromEntries(
-    keys.map((key) => [key, value[key]]),
-  ) as unknown as Basic5SaveObservationDiagnostic;
+  return {
+    ...Object.fromEntries(keys.map((key) => [key, value[key]])),
+    ...(Object.hasOwn(value, 'reply') ? { reply: safeReplyObservation(value.reply) } : {}),
+  } as unknown as Basic5SaveObservationDiagnostic;
 }
 
 export type Basic5CiFixtureCheckpoint = {

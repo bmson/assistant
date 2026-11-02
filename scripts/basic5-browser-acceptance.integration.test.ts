@@ -34,7 +34,9 @@ import {
   nextBasic5ReadinessAttempt,
 } from './basic5-browser-acceptance-support.js';
 import {
+  type Basic5ReplyObservation,
   type Basic5SaveObservationDiagnostic,
+  decodeBasic5ObservedReply,
   observeBasic5Save,
 } from './basic5-browser-save-observation.js';
 import {
@@ -362,10 +364,13 @@ async function saveWithReceipt(
   },
 ): Promise<{ receipt: Receipt; observed: Basic5ObservedPost; response: BrowserResponse }> {
   const { errors } = await import('playwright');
+  let reply: Basic5ReplyObservation | undefined;
   return observeBasic5Save({
     operation,
     page,
     ...observation,
+    onDiagnostic: (diagnostic) =>
+      observation.onDiagnostic({ ...diagnostic, ...(reply ? { reply } : {}) }),
     click: (timeout) => saveButton.click({ timeout }),
     isTimeoutError: (error) => error instanceof errors.TimeoutError,
     matchResponse: (response) => {
@@ -430,7 +435,13 @@ async function saveWithReceipt(
       );
       if (!parsed.ok || parsed.request.intent !== 'apply' || parsed.request.command !== operation)
         throw new Error('Owner-editor browser request did not match its exact apply contract');
-      const decoded = decodeOwnerEditorReply((await response.json()) as unknown);
+      const decoded = await decodeBasic5ObservedReply<ReturnType<typeof decodeOwnerEditorReply>>({
+        response,
+        decode: decodeOwnerEditorReply,
+        onDiagnostic: (diagnostic) => {
+          reply = diagnostic;
+        },
+      });
       if (!decoded) throw new Error('Owner-editor HTTP reply failed the existing strict decoder');
       if (decoded.authority !== 'operation_receipt' || decoded.outcome !== 'saved')
         throw new Error('Owner-editor request did not return its expected durable saved receipt');
