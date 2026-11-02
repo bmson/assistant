@@ -213,6 +213,7 @@ export type Basic5CiUtilityChildDiagnostic = {
     | 'internal'
     | 'other'
     | null;
+  closureProof?: 'direct_child_closed_and_original_session_empty';
 };
 
 export type Basic5CiChromeVersionDiagnostic = {
@@ -294,6 +295,7 @@ function makeUtilityChildDiagnostic(
   stderrBytes: number,
   error?: unknown,
   signal?: NodeJS.Signals | null,
+  closureProof?: Basic5CiUtilityChildDiagnostic['closureProof'],
 ): Basic5CiUtilityChildDiagnostic {
   const errorCode =
     typeof error === 'string'
@@ -358,6 +360,7 @@ function makeUtilityChildDiagnostic(
     stderrBytes: Math.min(CAPTURE_BYTES, Math.max(0, stderrBytes)),
     errnoCategory,
     sqlStateClass,
+    ...(closureProof ? { closureProof } : {}),
   };
 }
 
@@ -449,8 +452,15 @@ function contentFreeUtilityChildDiagnostics(value: unknown): Basic5CiUtilityChil
         throw new Basic5CiHold('utility_child_diagnostic_malformed');
     }
     if (
-      Object.keys(row).length !== keys.length + ('censusDiagnostic' in row ? 1 : 0) ||
+      Object.keys(row).length !==
+        keys.length + ('censusDiagnostic' in row ? 1 : 0) + ('closureProof' in row ? 1 : 0) ||
       keys.some((key) => !Object.hasOwn(row, key)) ||
+      (Object.hasOwn(row, 'closureProof') &&
+        (row.closureProof !== 'direct_child_closed_and_original_session_empty' ||
+          row.stage !== 'completed' ||
+          row.status !== 'completed' ||
+          row.closed !== true ||
+          row.exitCode !== 0)) ||
       !utilities.includes(String(row.utility)) ||
       !stages.includes(String(row.stage)) ||
       !statuses.includes(String(row.status)) ||
@@ -482,10 +492,11 @@ function contentFreeUtilityChildDiagnostics(value: unknown): Basic5CiUtilityChil
     )
       throw new Basic5CiHold('utility_child_diagnostic_malformed');
     return Object.fromEntries(
-      [...keys, ...('censusDiagnostic' in row ? ['censusDiagnostic'] : [])].map((key) => [
-        key,
-        row[key],
-      ]),
+      [
+        ...keys,
+        ...('censusDiagnostic' in row ? ['censusDiagnostic'] : []),
+        ...('closureProof' in row ? ['closureProof'] : []),
+      ].map((key) => [key, row[key]]),
     ) as unknown as Basic5CiUtilityChildDiagnostic;
   });
 }
@@ -1524,21 +1535,22 @@ export async function verifyDirectChildBootstrap(
   parentPid: number,
   readIdentity: (pid: number) => Promise<LinuxIdentity | undefined>,
   closed: Promise<void>,
+  settleOnFailure = true,
 ): Promise<LinuxIdentity> {
   const pid = child.pid;
   if (!Number.isSafeInteger(pid) || !pid || !child.stdout || !child.stderr) {
-    await settleDirectChildHandle(child, closed);
+    if (settleOnFailure) await settleDirectChildHandle(child, closed);
     throw new Basic5CiHold('child_start_unknown', false);
   }
   let identity: LinuxIdentity | undefined;
   try {
     identity = await readIdentity(pid);
   } catch {
-    await settleDirectChildHandle(child, closed);
+    if (settleOnFailure) await settleDirectChildHandle(child, closed);
     throw new Basic5CiHold('child_identity_unavailable', false);
   }
   if (!identity || identity.ppid !== parentPid || identity.pgid !== pid || identity.sid !== pid) {
-    await settleDirectChildHandle(child, closed);
+    if (settleOnFailure) await settleDirectChildHandle(child, closed);
     throw new Basic5CiHold('child_identity_unverified', false);
   }
   return identity;
@@ -2444,7 +2456,12 @@ export class RealBasic5CiOps implements Basic5CiOps {
     return liveSession;
   }
 
-  private async signalExact(identity: LinuxIdentity, signal: NodeJS.Signals): Promise<void> {
+  private async signalExact(
+    identity: LinuxIdentity,
+    signal: NodeJS.Signals,
+    deadline?: number,
+  ): Promise<void> {
+    if (deadline !== undefined) this.assertDeadline(deadline, 'utility_direct_child_stop');
     let current: LinuxIdentity | undefined;
     try {
       current = await this.proof?.readBasic5LinuxProcessIdentity(identity.pid, identity);
@@ -2452,6 +2469,7 @@ export class RealBasic5CiOps implements Basic5CiOps {
       if ((error as { code?: unknown } | null)?.code === 'known_process_terminal') return;
       throw error;
     }
+    if (deadline !== undefined) this.assertDeadline(deadline, 'utility_direct_child_stop');
     if (!current) return;
     if (
       current.startTimeTicks !== identity.startTimeTicks ||
@@ -2468,6 +2486,76 @@ export class RealBasic5CiOps implements Basic5CiOps {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ESRCH')
         throw new Basic5CiHold('owned_process_signal_failed');
+    }
+  }
+
+  private async waitForUtilityChildClose(
+    closed: Promise<void>,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        closed.then(() => true),
+        new Promise<boolean>((resolveTimeout) => {
+          timer = setTimeout(() => resolveTimeout(false), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  private async stopUtilityDirectChild(
+    identity: LinuxIdentity,
+    closed: Promise<void>,
+    deadline: number,
+  ): Promise<boolean> {
+    const wallDeadline = performance.now() + Math.max(0, Math.min(2_000, deadline - this.now()));
+    for (const signal of ['SIGTERM', 'SIGKILL'] as const) {
+      const waitMs = Math.min(1_000, deadline - this.now(), wallDeadline - performance.now());
+      if (waitMs <= 0) return false;
+      try {
+        await this.signalExact(identity, signal, deadline);
+      } catch {
+        return false;
+      }
+      if (await this.waitForUtilityChildClose(closed, waitMs)) return true;
+    }
+    return false;
+  }
+
+  private async assertUtilityOriginalSessionEmpty(
+    root: LinuxIdentity,
+    proof: ProcessProof,
+    deadline: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    for (let pass = 0; pass < 2; pass++) {
+      this.assertDeadline(deadline, 'final_session_census');
+      assertNotAborted(signal, 'final_session_census');
+      let snapshot: Map<number, LinuxSnapshot>;
+      try {
+        snapshot = await proof.readBasic5LinuxProcessSnapshot();
+      } catch (error) {
+        throw censusFailure('final_snapshot', error);
+      }
+      this.assertDeadline(deadline, 'final_session_census');
+      assertNotAborted(signal, 'final_session_census');
+      const rootPid = snapshot.get(root.pid);
+      if (rootPid) {
+        const identityChange = changedProcessFact(root, rootPid);
+        if (identityChange)
+          throw new Basic5CiCensusHold(
+            { stage: 'final_snapshot', reason: identityChange },
+            'utility_root_identity_ambiguous',
+          );
+      }
+      if ([...snapshot.values()].some((row) => row.sid === root.sid))
+        throw new Basic5CiCensusHold(
+          { stage: 'final_snapshot', reason: 'descendants_still_present' },
+          'utility_original_session_not_empty',
+        );
     }
   }
 
@@ -2610,6 +2698,7 @@ export class RealBasic5CiOps implements Basic5CiOps {
   }> {
     this.assertDeadline(deadline, label);
     assertNotAborted(signal, label);
+    const utility = utilityForChildLabel(label);
     const proof = this.proof;
     if (!proof) throw new Basic5CiHold('linux_process_proof_unavailable');
     const cwd = label === 'migrate' ? join(this.repoRoot, 'packages/db') : this.repoRoot;
@@ -2639,7 +2728,7 @@ export class RealBasic5CiOps implements Basic5CiOps {
       if (utility)
         throw new Basic5CiHold(
           `${label}_spawn_failed`,
-          true,
+          false,
           undefined,
           undefined,
           undefined,
@@ -2687,7 +2776,7 @@ export class RealBasic5CiOps implements Basic5CiOps {
     });
     let directAbortSettlement: Promise<boolean> | undefined;
     const abortDirectChild = () => {
-      directAbortSettlement = settleDirectChildHandle(child, closedPromise);
+      if (!utility) directAbortSettlement = settleDirectChildHandle(child, closedPromise);
     };
     signal.addEventListener('abort', abortDirectChild, { once: true });
     let root: LinuxIdentity;
@@ -2708,9 +2797,9 @@ export class RealBasic5CiOps implements Basic5CiOps {
           }
         },
         closedPromise,
+        !utility,
       );
     } catch (error) {
-      const utility = utilityForChildLabel(label);
       if (utility)
         throw holdForBasic5CiUtilityBootstrapFailure(utility, error, {
           exitCode: closed ? exitCode : null,
@@ -2725,6 +2814,96 @@ export class RealBasic5CiOps implements Basic5CiOps {
     } finally {
       signal.removeEventListener('abort', abortDirectChild);
       if (directAbortSettlement) await directAbortSettlement;
+    }
+    if (utility) {
+      const failUtility = async (
+        code: string,
+        status: Basic5CiUtilityChildDiagnostic['status'],
+        error?: unknown,
+      ): Promise<never> => {
+        const cleanupDeadline = Math.min(
+          this.started + CLEANUP_END_SECONDS * 1000,
+          this.started + OUTER_SECONDS * 1000,
+          this.now() + 2_000,
+        );
+        if (!closed) await this.stopUtilityDirectChild(root, closedPromise, cleanupDeadline);
+        const diagnostic = makeUtilityChildDiagnostic(
+          utility,
+          'completed',
+          status,
+          closed ? exitCode : null,
+          closed,
+          stdoutBytes,
+          stderrBytes,
+          error,
+          closeSignal,
+        );
+        throw new Basic5CiHold(code, false, undefined, undefined, undefined, undefined, diagnostic);
+      };
+
+      if (signal.aborted) return failUtility(`${label}_cancelled`, 'deadline');
+      while (!closed) {
+        if (signal.aborted) return failUtility(`${label}_cancelled`, 'deadline');
+        if (overflow) return failUtility(`${label}_capture_limit`, 'capture_limit');
+        if (this.now() >= deadline || this.now() >= this.started + OUTER_SECONDS * 1000)
+          return failUtility(`${label}_deadline`, 'deadline');
+        if (childError) return failUtility(`${label}_child_error`, 'completed', childErrorCode);
+        if (this.utilityChildTestDriver) await this.utilityChildTestDriver.sleep(50);
+        else await sleep(50);
+      }
+
+      if (signal.aborted) return failUtility(`${label}_cancelled`, 'deadline');
+      if (overflow) return failUtility(`${label}_capture_limit`, 'capture_limit');
+      if (this.now() >= deadline || this.now() >= this.started + OUTER_SECONDS * 1000)
+        return failUtility(`${label}_deadline`, 'deadline');
+      if (childError) return failUtility(`${label}_child_error`, 'completed', childErrorCode);
+
+      try {
+        await this.assertUtilityOriginalSessionEmpty(root, proof, deadline, signal);
+      } catch (error) {
+        const hold = error instanceof Basic5CiHold ? error : undefined;
+        const diagnostic = makeUtilityChildDiagnostic(
+          utility,
+          'final_session_census',
+          'session_census_unverified',
+          exitCode,
+          true,
+          stdoutBytes,
+          stderrBytes,
+          error,
+          closeSignal,
+        );
+        throw new Basic5CiHold(
+          hold?.code ?? `${label}_final_census_failed`,
+          false,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          diagnostic,
+        );
+      }
+
+      if (exitCode !== 0) return failUtility(`${label}_nonzero_exit`, 'completed');
+      if (outputBytes > CAPTURE_BYTES)
+        return failUtility(`${label}_capture_limit`, 'capture_limit');
+      return {
+        exitCode,
+        stdout: Buffer.concat(stdout),
+        stderr: Buffer.concat(stderr),
+        utilityDiagnostic: makeUtilityChildDiagnostic(
+          utility,
+          'completed',
+          'completed',
+          exitCode,
+          true,
+          stdoutBytes,
+          stderrBytes,
+          undefined,
+          closeSignal,
+          'direct_child_closed_and_original_session_empty',
+        ),
+      };
     }
     this.ownedRoots.set(root.pid, root);
     this.ownedProcesses.set(root.pid, root);
@@ -2833,7 +3012,6 @@ export class RealBasic5CiOps implements Basic5CiOps {
       if (this.utilityChildTestDriver) await this.utilityChildTestDriver.sleep(50);
       else await sleep(50);
     }
-    const utility = utilityForChildLabel(label);
     if (childError)
       throw new Basic5CiHold(
         `${label}_child_error`,
