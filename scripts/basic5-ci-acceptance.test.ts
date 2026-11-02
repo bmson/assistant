@@ -11,6 +11,7 @@ import {
   type Basic5CiPreflight,
   type Basic5CiQuiescence,
   type Basic5CiTarget,
+  observeBasic5CiChromeVersion,
   ownedSessionEnrollmentOrder,
   parseLinuxListenTable,
   runBasic5CiAcceptance,
@@ -30,6 +31,12 @@ const preflight: Basic5CiPreflight = {
   imageOS: 'ubuntu24',
   imageVersion: '20261101.1',
   chromeVersion: '144.0.0.0',
+  chromeVersionDiagnostic: {
+    status: 'accepted',
+    exitCode: 0,
+    stdoutBytes: 24,
+    stderrBytes: 0,
+  },
   postgresServerVersionNum: 170000,
   workflowContext: {
     event: 'push',
@@ -300,6 +307,110 @@ class FakeDirectChild extends EventEmitter implements Basic5CiDirectChildHandle 
 }
 
 describe('one-shot BASIC5 CI controller', () => {
+  it('accepts a valid Chrome version banner when stderr has harmless diagnostics', () => {
+    const observed = observeBasic5CiChromeVersion({
+      exitCode: 0,
+      stdout: Buffer.from('Google Chrome 144.0.0.0\n'),
+      stderr: Buffer.from('harmless diagnostic\n'),
+    });
+    expect(observed.version).toBe('144.0.0.0');
+    expect(observed.diagnostic).toEqual({
+      status: 'accepted',
+      exitCode: 0,
+      stdoutBytes: 24,
+      stderrBytes: 20,
+    });
+    expect(JSON.stringify(observed)).not.toContain('harmless diagnostic');
+  });
+
+  it('holds on a nonzero Chrome exit even when stdout contains a valid version', () => {
+    const observed = observeBasic5CiChromeVersion({
+      exitCode: 7,
+      stdout: Buffer.from('Google Chrome 144.0.0.0\n'),
+      stderr: Buffer.alloc(0),
+    });
+    expect(observed.version).toBeNull();
+    expect(observed.diagnostic).toMatchObject({ status: 'nonzero_exit', exitCode: 7 });
+  });
+
+  it('holds on malformed Chrome version output without retaining the output', () => {
+    const observed = observeBasic5CiChromeVersion({
+      exitCode: 0,
+      stdout: Buffer.from('untrusted version text\n'),
+      stderr: Buffer.alloc(0),
+    });
+    expect(observed.version).toBeNull();
+    expect(observed.diagnostic.status).toBe('version_unparseable');
+    expect(JSON.stringify(observed)).not.toContain('untrusted version text');
+  });
+
+  it('rejects output above the bounded capture limit', () => {
+    const observed = observeBasic5CiChromeVersion({
+      exitCode: 0,
+      stdout: Buffer.alloc(64 * 1024 + 1, 65),
+      stderr: Buffer.alloc(0),
+    });
+    expect(observed.version).toBeNull();
+    expect(observed.diagnostic.status).toBe('capture_limit');
+    expect(observed.diagnostic.stdoutBytes).toBe(64 * 1024);
+  });
+
+  it('classifies a bounded Chrome command exit without preserving stderr text', async () => {
+    const result = await runBasic5CiReadOnlyMetadata(
+      '/opt/google/chrome/chrome',
+      ['--version'],
+      {
+        cwd: '/synthetic/repo',
+        env: {},
+        encoding: 'buffer',
+        maxBuffer: 1,
+        timeout: 1,
+        killSignal: 'SIGKILL',
+      },
+      10_000,
+      () => 0,
+      (_command, _args, _options, callback) => {
+        callback(null, Buffer.from('Google Chrome 144.0.0.0\n'), Buffer.from('notice\n'));
+        return {};
+      },
+    );
+    expect(observeBasic5CiChromeVersion(result).diagnostic).toEqual({
+      status: 'accepted',
+      exitCode: 0,
+      stdoutBytes: 24,
+      stderrBytes: 7,
+    });
+  });
+
+  it('reports the execFile max-buffer code as a bounded capture limit', async () => {
+    await expect(
+      runBasic5CiReadOnlyMetadata(
+        '/opt/google/chrome/chrome',
+        ['--version'],
+        {
+          cwd: '/synthetic/repo',
+          env: {},
+          encoding: 'buffer',
+          maxBuffer: 1,
+          timeout: 1,
+          killSignal: 'SIGKILL',
+        },
+        10_000,
+        () => 0,
+        (_command, _args, _options, callback) => {
+          callback(
+            Object.assign(new Error('do not retain this'), {
+              code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+            }),
+            Buffer.alloc(64 * 1024),
+            Buffer.alloc(0),
+          );
+          return {};
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'metadata_command_capture_limit' });
+  });
+
   it('admits only the authorized first main push workflow invocation', () => {
     const accepted = {
       GITHUB_ACTIONS: 'true',
@@ -516,6 +627,7 @@ describe('one-shot BASIC5 CI controller', () => {
       referenceCount: null,
       unmatchedReferenceCount: null,
     });
+    expect(result.chromeVersionDiagnostic).toEqual(preflight.chromeVersionDiagnostic);
     const savedReceipts = ops.writtenReceipt?.receipts as Array<Record<string, unknown>>;
     expect(savedReceipts[1]?.ids).toMatchObject({
       relationId: '50000000-0000-4000-8000-000000000001',
@@ -536,6 +648,55 @@ describe('one-shot BASIC5 CI controller', () => {
       'verify-absent',
       'receipt',
     ]);
+  });
+
+  it('records only the fixed Chrome diagnostic when preflight holds', async () => {
+    const ops = new FakeOps();
+    ops.preflightError = new Basic5CiHold(
+      'allowlisted_chrome_version_nonzero_exit',
+      true,
+      undefined,
+      {
+        status: 'nonzero_exit',
+        exitCode: 1,
+        stdoutBytes: 24,
+        stderrBytes: 13,
+      },
+    );
+    const result = await runBasic5CiAcceptance(ops);
+    expect(result.result).toBe('hold');
+    expect(result.chromeVersionDiagnostic).toEqual({
+      status: 'nonzero_exit',
+      exitCode: 1,
+      stdoutBytes: 24,
+      stderrBytes: 13,
+    });
+    expect(JSON.stringify(result)).not.toContain('raw Chrome output');
+    expect(ops.events).toEqual(['preflight', 'receipt']);
+  });
+
+  it('sanitizes a captured-output limit diagnostic in the final receipt', async () => {
+    const observation = observeBasic5CiChromeVersion({
+      exitCode: 0,
+      stdout: Buffer.alloc(40 * 1024),
+      stderr: Buffer.alloc(30 * 1024),
+    });
+    const ops = new FakeOps();
+    ops.preflightError = new Basic5CiHold(
+      'allowlisted_chrome_version_capture_limit',
+      true,
+      undefined,
+      observation.diagnostic,
+    );
+    const result = await runBasic5CiAcceptance(ops);
+    expect(result.errorCode).toBe('allowlisted_chrome_version_capture_limit');
+    expect(result.chromeVersionDiagnostic).toMatchObject({
+      status: 'capture_limit',
+      exitCode: 0,
+      stdoutBytes: 40 * 1024,
+      stderrBytes: 30 * 1024,
+    });
+    expect(JSON.stringify(result)).not.toContain('A'.repeat(20));
   });
 
   it('quiesces after a failed case but retains the database without retry or cleanup', async () => {
