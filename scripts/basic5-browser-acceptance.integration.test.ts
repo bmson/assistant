@@ -1045,10 +1045,15 @@ browserTest(
 
       await page.getByRole('button', { name: 'Add family relationship', exact: true }).click();
       const familyAddDialog = page.getByRole('dialog');
-      await familyAddDialog.getByLabel('First person', { exact: true }).selectOption(personId);
-      await familyAddDialog
-        .getByLabel('Second person', { exact: true })
-        .selectOption(relativePersonId);
+      // The page's person is intentionally the fixed subject, not an editable choice.
+      const firstPerson = familyAddDialog.getByLabel('First person', { exact: true });
+      const secondPerson = familyAddDialog.getByLabel('Second person', { exact: true });
+      expect(await firstPerson.isDisabled()).toBe(true);
+      expect(await firstPerson.inputValue()).toBe(personId);
+      expect(await secondPerson.isEnabled()).toBe(true);
+      await secondPerson.selectOption(relativePersonId);
+      expect(await firstPerson.inputValue()).toBe(personId);
+      expect(await secondPerson.inputValue()).toBe(relativePersonId);
       await familyAddDialog
         .getByLabel('Relationship of the first person to the second', { exact: true })
         .selectOption('sibling_of');
