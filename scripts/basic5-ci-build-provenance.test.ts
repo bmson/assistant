@@ -11,7 +11,8 @@ async function fixture() {
   roots.push(root);
   const repo = path.join(root, 'checkout');
   const webNext = path.join(repo, 'apps/web/.next');
-  const standalone = path.join(webNext, 'standalone/apps/web');
+  const artifactRoot = path.join(webNext, 'standalone');
+  const standalone = path.join(artifactRoot, 'apps/web');
   const traceRoot = path.join(webNext, 'server');
   await mkdir(path.join(standalone, '.next/static'), { recursive: true });
   await mkdir(path.join(standalone, 'public'), { recursive: true });
@@ -23,9 +24,12 @@ async function fixture() {
   const workspacePackage = path.join(repo, 'packages/shared/index.js');
   await mkdir(path.dirname(workspacePackage), { recursive: true });
   await writeFile(workspacePackage, 'workspace package bytes');
+  const copiedWorkspacePackage = path.join(artifactRoot, 'apps/web/packages/shared/index.js');
+  await mkdir(path.dirname(copiedWorkspacePackage), { recursive: true });
+  await writeFile(copiedWorkspacePackage, 'workspace package bytes');
   await mkdir(path.join(standalone, 'node_modules'), { recursive: true });
   await symlink(
-    path.dirname(workspacePackage),
+    path.dirname(copiedWorkspacePackage),
     path.join(standalone, 'node_modules/shared'),
     'dir',
   );
@@ -35,13 +39,14 @@ async function fixture() {
     path.relative(traceRoot, workspacePackage),
   ].map((value) => value.split(path.sep).join('/'));
   await writeFile(manifestPath, JSON.stringify({ version: 1, files: refs }));
-  return { root, repo, standalone, traceRoot, manifestPath, workspacePackage };
+  return { root, repo, artifactRoot, standalone, traceRoot, manifestPath, workspacePackage };
 }
 
 function input(value: Awaited<ReturnType<typeof fixture>>) {
   return {
     repositoryRoot: value.repo,
-    standaloneRoot: value.standalone,
+    artifactRoot: value.artifactRoot,
+    serverRoot: value.standalone,
     sourceCommit: 'a'.repeat(40),
     sourceWebTree: 'b'.repeat(40),
     nodeVersion: 'v26.2.0',
@@ -92,6 +97,47 @@ describe('BASIC5 CI build provenance observation', () => {
     expect(observed.traces.manifestSha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  it('reproduces a monorepo standalone payload with shared dependencies above the server root', async () => {
+    const value = await fixture();
+    const sharedDependency = path.join(
+      value.artifactRoot,
+      'node_modules/@workspace/shared/index.js',
+    );
+    await mkdir(path.dirname(sharedDependency), { recursive: true });
+    await writeFile(sharedDependency, 'copied shared dependency bytes');
+    await writeFile(
+      value.manifestPath,
+      JSON.stringify({
+        version: 1,
+        files: [
+          path.relative(value.traceRoot, path.join(value.standalone, 'server.js')),
+          path.relative(value.traceRoot, sharedDependency),
+        ].map((reference) => reference.split(path.sep).join('/')),
+      }),
+    );
+
+    const observed = await observeBasic5CiBuildProvenance(input(value));
+
+    expect(observed.traces).toMatchObject({
+      status: 'complete',
+      referenceCount: 2,
+      resolvedCheckoutReferenceCount: 2,
+      matchedClosureContentCount: 2,
+      unmatchedReferenceCount: 0,
+    });
+    expect(observed.output.closureFileCount).toBeGreaterThan(3);
+  });
+
+  it('requires the nested server root to remain inside the complete standalone artifact', async () => {
+    const value = await fixture();
+    await expect(
+      observeBasic5CiBuildProvenance({
+        ...input(value),
+        serverRoot: value.repo,
+      }),
+    ).rejects.toThrow('standalone server root must be inside the complete artifact root');
+  });
+
   it('reports a missing trace reference as incomplete rather than zero coverage', async () => {
     const value = await fixture();
     await writeFile(
@@ -126,7 +172,19 @@ describe('BASIC5 CI build provenance observation', () => {
     await writeFile(outside, 'outside bytes');
     await symlink(outside, path.join(value.standalone, 'escape.txt'));
     await expect(observeBasic5CiBuildProvenance(input(value))).rejects.toThrow(
-      'escaped both standalone artifact and CI checkout',
+      'symlink target escaped standalone artifact',
+    );
+  });
+
+  it('rejects runtime symlinks that escape the artifact into the checkout', async () => {
+    const value = await fixture();
+    await symlink(
+      path.dirname(value.workspacePackage),
+      path.join(value.standalone, 'node_modules/checkout-escape'),
+      'dir',
+    );
+    await expect(observeBasic5CiBuildProvenance(input(value))).rejects.toThrow(
+      'symlink target escaped standalone artifact',
     );
   });
 

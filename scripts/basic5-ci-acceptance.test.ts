@@ -191,6 +191,7 @@ class FakeOps implements Basic5CiOps {
   failCleanup = false;
   prepareAdvanceMs = 0;
   prepareThrows = false;
+  preflightError?: Basic5CiHold;
   caseThrows = false;
   neverResolveCase = false;
   uninterruptibleCase = false;
@@ -202,6 +203,7 @@ class FakeOps implements Basic5CiOps {
   async preflight(deadline: number, _signal: AbortSignal): Promise<Basic5CiPreflight> {
     this.events.push('preflight');
     expect(deadline).toBe(20_000);
+    if (this.preflightError) throw this.preflightError;
     return preflight;
   }
   async prepareFreshTarget(deadline: number, _signal: AbortSignal): Promise<Basic5CiTarget> {
@@ -283,6 +285,66 @@ class FakeDirectChild extends EventEmitter implements Basic5CiDirectChildHandle 
 }
 
 describe('one-shot BASIC5 CI controller', () => {
+  it('retains bounded standalone diagnostic checks on a preallocation hold', async () => {
+    const ops = new FakeOps();
+    const diagnostic = {
+      checks: {
+        sourceCommitMatches: true,
+        sourceWebTreeMatches: true,
+        nodeVersionMatches: true,
+        imageOSMatches: true,
+        imageVersionMatches: true,
+        buildIdPresent: true,
+        serverSha256Valid: true,
+        closureSha256Valid: true,
+        tracesComplete: false,
+        unmatchedTraceReferencesZero: false,
+        limitationsArray: true,
+        limitationsCountBounded: true,
+        limitationsItemsBounded: true,
+        closureEntryCountPositive: true,
+        closureFileCountPositive: true,
+        closureSymlinkCountValid: true,
+        closureFileBytesPositive: true,
+        staticFileCountValid: true,
+        publicFileCountValid: true,
+        traceManifestCountValid: true,
+        traceManifestBytesValid: true,
+        traceReferenceCountValid: true,
+        resolvedTraceReferenceCountValid: true,
+        matchedTraceContentCountValid: true,
+        unmatchedTraceReferenceCountValid: true,
+      },
+      observed: {
+        traceStatus: 'incomplete' as const,
+        closureEntryCount: 100,
+        closureFileCount: 80,
+        closureSymlinkCount: 20,
+        closureFileBytes: 2 * 1024 * 1024 * 1024,
+        staticFileCount: 8,
+        publicFileCount: 4,
+        traceManifestCount: 2,
+        traceManifestBytes: 4_000,
+        traceReferenceCount: 9,
+        resolvedCheckoutReferenceCount: 9,
+        matchedClosureContentCount: 8,
+        unmatchedReferenceCount: 1,
+      },
+    };
+    ops.preflightError = new Basic5CiHold(
+      'standalone_build_provenance_incomplete',
+      true,
+      diagnostic,
+    );
+
+    const result = await runBasic5CiAcceptance(ops);
+
+    expect(result.errorCode).toBe('standalone_build_provenance_incomplete');
+    expect(result.targetStatus).toBe('not_allocated');
+    expect(result.standaloneBuildDiagnostic).toEqual(diagnostic);
+    expect(ops.events).toEqual(['preflight', 'receipt']);
+  });
+
   it('parses only Linux LISTEN rows and holds on malformed listener census', () => {
     const tcp = 'sl local_address rem_address st\n0: 0100007F:1F90 00000000:0000 0A';
     const tcp6 =

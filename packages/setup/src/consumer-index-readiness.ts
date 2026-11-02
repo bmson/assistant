@@ -18,6 +18,12 @@ export class ConsumerIndexBuildingError extends Error {
   }
 }
 
+export class ConsumerIndexDefaultConfigurationUnverifiedError extends Error {
+  constructor() {
+    super('Firestore default field configuration is not verified');
+  }
+}
+
 export interface ConsumerIndexWaitOptions {
   /** Bounded wait; a timed-out installation stays resumable at bootstrapped. */
   timeoutMs?: number;
@@ -40,6 +46,107 @@ function string(value: unknown, label: string): string {
 function array(value: unknown, label: string): unknown[] {
   if (!Array.isArray(value)) throw new Error(`${label} is malformed`);
   return value;
+}
+
+function validDefaultAncestor(value: unknown, defaultName: string, prefix: string): boolean {
+  if (typeof value !== 'string' || !value.startsWith(prefix)) return false;
+  const match = /^([^/]+)\/fields\/([^/]+)$/.exec(value.slice(prefix.length));
+  return match?.[1] === '__default__' && match[2] === '*' && value === defaultName;
+}
+
+function validateDefaultField(
+  raw: Record<string, unknown>,
+  defaultName: string,
+  prefix: string,
+): void {
+  if (
+    Object.keys(raw).some((key) => !['name', 'indexConfig', 'ttlConfig'].includes(key)) ||
+    raw.name !== defaultName ||
+    raw.ttlConfig !== undefined
+  )
+    throw new ConsumerIndexDefaultConfigurationUnverifiedError();
+  const config = raw.indexConfig;
+  if (!config || typeof config !== 'object' || Array.isArray(config))
+    throw new ConsumerIndexDefaultConfigurationUnverifiedError();
+  const indexConfig = config as Record<string, unknown>;
+  if (
+    Object.keys(indexConfig).some(
+      (key) => !['indexes', 'usesAncestorConfig', 'ancestorField', 'reverting'].includes(key),
+    ) ||
+    (indexConfig.usesAncestorConfig !== undefined && indexConfig.usesAncestorConfig !== false) ||
+    (indexConfig.reverting !== undefined && indexConfig.reverting !== false) ||
+    (indexConfig.ancestorField !== undefined &&
+      !validDefaultAncestor(indexConfig.ancestorField, defaultName, prefix))
+  )
+    throw new ConsumerIndexDefaultConfigurationUnverifiedError();
+  if (!Array.isArray(indexConfig.indexes) || indexConfig.indexes.length !== 3)
+    throw new ConsumerIndexDefaultConfigurationUnverifiedError();
+
+  const modes = new Set<string>();
+  for (const rawIndex of indexConfig.indexes) {
+    if (!rawIndex || typeof rawIndex !== 'object' || Array.isArray(rawIndex))
+      throw new ConsumerIndexDefaultConfigurationUnverifiedError();
+    const index = rawIndex as Record<string, unknown>;
+    if (
+      Object.keys(index).some(
+        (key) => !['queryScope', 'fields', 'apiScope', 'state'].includes(key),
+      ) ||
+      index.queryScope !== 'COLLECTION' ||
+      (index.apiScope !== undefined && index.apiScope !== 'ANY_API') ||
+      index.state !== 'READY' ||
+      !Array.isArray(index.fields) ||
+      index.fields.length !== 1
+    )
+      throw new ConsumerIndexDefaultConfigurationUnverifiedError();
+    const rawField = index.fields[0];
+    if (!rawField || typeof rawField !== 'object' || Array.isArray(rawField))
+      throw new ConsumerIndexDefaultConfigurationUnverifiedError();
+    const field = rawField as Record<string, unknown>;
+    if (field.fieldPath !== '*') throw new ConsumerIndexDefaultConfigurationUnverifiedError();
+    const keys = Object.keys(field).sort().join(',');
+    const mode =
+      keys === 'fieldPath,order' && (field.order === 'ASCENDING' || field.order === 'DESCENDING')
+        ? `order:${String(field.order)}`
+        : keys === 'arrayConfig,fieldPath' && field.arrayConfig === 'CONTAINS'
+          ? 'array:CONTAINS'
+          : null;
+    if (!mode || modes.has(mode)) throw new ConsumerIndexDefaultConfigurationUnverifiedError();
+    modes.add(mode);
+  }
+  if (
+    modes.size !== 3 ||
+    !modes.has('order:ASCENDING') ||
+    !modes.has('order:DESCENDING') ||
+    !modes.has('array:CONTAINS')
+  )
+    throw new ConsumerIndexDefaultConfigurationUnverifiedError();
+}
+
+/** Validate the unmanifested global sentinel before excluding it from parity or provisioning. */
+export function validateFirestoreDefaultFieldConfiguration(
+  rows: unknown[],
+  identity: Pick<InstallationIdentity, 'projectId' | 'databaseId'>,
+): unknown[] {
+  const prefix = `projects/${identity.projectId}/databases/${identity.databaseId}/collectionGroups/`;
+  const defaultName = `${prefix}__default__/fields/*`;
+  let defaultCount = 0;
+  const explicit: unknown[] = [];
+  for (const raw of rows) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      explicit.push(raw);
+      continue;
+    }
+    const record = raw as Record<string, unknown>;
+    if (record.name === defaultName) {
+      defaultCount++;
+      if (defaultCount !== 1) throw new ConsumerIndexDefaultConfigurationUnverifiedError();
+      validateDefaultField(record, defaultName, prefix);
+    } else {
+      explicit.push(raw);
+    }
+  }
+  if (defaultCount !== 1) throw new ConsumerIndexDefaultConfigurationUnverifiedError();
+  return explicit;
 }
 
 function canonicalField(raw: unknown): IndexField {
@@ -162,6 +269,7 @@ export async function provisionTargetFirestoreIndexes(
     list(runner, ['firestore', 'indexes', 'composite', 'list', ...flags], 'Composite indexes'),
     list(runner, ['firestore', 'indexes', 'fields', 'list', ...flags], 'Field overrides'),
   ]);
+  const explicitOverrides = validateFirestoreDefaultFieldConfiguration(overrides, identity);
   const existingIndexes = new Set(
     composites.map((index) => indexKey(canonicalIndex(index, prefix, false, false))),
   );
@@ -199,10 +307,9 @@ export async function provisionTargetFirestoreIndexes(
   // Existing non-manifest resources are intentionally left untouched. The exact verifier
   // will report them, keeping this tool from taking destructive ownership of the database.
   const existingFieldKeys = new Set<string>();
-  for (const raw of overrides) {
+  for (const raw of explicitOverrides) {
     const field = object(raw, 'Firestore field override');
     const name = string(field.name, 'Firestore field name');
-    if (name === `${prefix}__default__/fields/*`) continue;
     if (!name.startsWith(prefix)) throw new Error(`Foreign Firestore field override ${name}`);
     const match = /^([^/]+)\/fields\/([^/]+)$/.exec(name.slice(prefix.length));
     if (!match?.[1] || !match[2]) throw new Error(`Ambiguous Firestore field override ${name}`);
@@ -298,6 +405,7 @@ export async function verifyConsumerIndexReadiness(
     list(runner, ['firestore', 'indexes', 'composite', 'list', ...flags], 'Composite indexes'),
     list(runner, ['firestore', 'indexes', 'fields', 'list', ...flags], 'Field overrides'),
   ]);
+  const explicitOverrides = validateFirestoreDefaultFieldConfiguration(overrides, identity);
   // Check every definition before waiting on a build. A foreign or changed
   // index must fail immediately even if a different index is still CREATING.
   exactlyExpected(
@@ -305,15 +413,9 @@ export async function verifyConsumerIndexReadiness(
     composites.map((index) => indexKey(canonicalIndex(index, prefix, false, false))),
     'Firestore composite indexes',
   );
-  let defaultFields = 0;
-  const actualFields = overrides.flatMap((raw) => {
+  const actualFields = explicitOverrides.flatMap((raw) => {
     const field = object(raw, 'Firestore field override');
     const name = string(field.name, 'Firestore field name');
-    if (name === `${prefix}__default__/fields/*`) {
-      defaultFields++;
-      if (defaultFields > 1) throw new Error('Duplicate Firestore default field configuration');
-      return [];
-    }
     if (!name.startsWith(prefix)) throw new Error(`Foreign Firestore field override ${name}`);
     const match = /^([^/]+)\/fields\/([^/]+)$/.exec(name.slice(prefix.length));
     if (!match?.[1] || !match[2]) throw new Error(`Ambiguous Firestore field override ${name}`);
