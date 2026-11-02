@@ -676,6 +676,48 @@ describe('owner-editor recovery service', () => {
     expect(failed.getCasWrites()).toBe(0);
   });
 
+  it.each([
+    ['lower', -1, 202, 'unresolved'],
+    ['same', 0, 202, 'unresolved'],
+    ['newer', 1, 200, 'operation_receipt'],
+  ] as const)(
+    'validates %s-version abandoned CAS results against the exact preparing version',
+    async (_label, increment, status, authority) => {
+      const f = fixture();
+      const { value } = await f.authorize();
+      f.setCasResult(
+        f.terminal('abandoned', {
+          statusVersion: f.operation.statusVersion + increment,
+        }),
+      );
+      const response = await handleOwnerEditorRecoveryRequest(
+        f.post('reconcile', {
+          version: 2,
+          intent: 'reconcile_original',
+          authorization: value.authorization,
+        }),
+        f.ports,
+      );
+      expect(response.status).toBe(status);
+      const result = await response.json();
+      expect(result).toMatchObject({ authority });
+      if (increment <= 0) {
+        expect(result).toMatchObject({ outcome: 'outcome_unknown', reason: 'proof_changed' });
+        expect(result).not.toHaveProperty('requestHash');
+      } else {
+        expect(result).toMatchObject({
+          outcome: 'not_applied',
+          reason: 'claim_abandoned',
+          requestHash: f.operation.requestHash,
+          statusVersion: f.operation.statusVersion + 1,
+        });
+      }
+      expect(f.abandonExpiredOriginal).toHaveBeenCalledTimes(1);
+      // These supplied return rows simulate adapter results, not actual writes.
+      expect(f.getCasWrites()).toBe(0);
+    },
+  );
+
   it('rechecks state, gates, claim identity and proof expiry before any final CAS', async () => {
     const updates: Array<(f: ReturnType<typeof fixture>) => void> = [
       (f) =>
