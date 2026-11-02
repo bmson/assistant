@@ -121,6 +121,67 @@ export type Basic5CiPreflight = {
   provenanceLimitations: string[];
 };
 
+export type Basic5CiBuildDiagnostic = {
+  checks: Record<string, boolean>;
+  observed: {
+    traceStatus: 'complete' | 'incomplete' | 'unavailable' | 'unknown';
+    closureEntryCount: number | null;
+    closureFileCount: number | null;
+    closureSymlinkCount: number | null;
+    closureFileBytes: number | null;
+    staticFileCount: number | null;
+    publicFileCount: number | null;
+    traceManifestCount: number | null;
+    traceManifestBytes: number | null;
+    traceReferenceCount: number | null;
+    resolvedCheckoutReferenceCount: number | null;
+    matchedClosureContentCount: number | null;
+    unmatchedReferenceCount: number | null;
+  };
+};
+
+const BUILD_DIAGNOSTIC_CHECK_KEYS = [
+  'sourceCommitMatches',
+  'sourceWebTreeMatches',
+  'nodeVersionMatches',
+  'imageOSMatches',
+  'imageVersionMatches',
+  'buildIdPresent',
+  'serverSha256Valid',
+  'closureSha256Valid',
+  'tracesComplete',
+  'unmatchedTraceReferencesZero',
+  'limitationsArray',
+  'limitationsCountBounded',
+  'limitationsItemsBounded',
+  'closureEntryCountPositive',
+  'closureFileCountPositive',
+  'closureSymlinkCountValid',
+  'closureFileBytesPositive',
+  'staticFileCountValid',
+  'publicFileCountValid',
+  'traceManifestCountValid',
+  'traceManifestBytesValid',
+  'traceReferenceCountValid',
+  'resolvedTraceReferenceCountValid',
+  'matchedTraceContentCountValid',
+  'unmatchedTraceReferenceCountValid',
+] as const;
+const BUILD_DIAGNOSTIC_COUNT_KEYS = [
+  'closureEntryCount',
+  'closureFileCount',
+  'closureSymlinkCount',
+  'closureFileBytes',
+  'staticFileCount',
+  'publicFileCount',
+  'traceManifestCount',
+  'traceManifestBytes',
+  'traceReferenceCount',
+  'resolvedCheckoutReferenceCount',
+  'matchedClosureContentCount',
+  'unmatchedReferenceCount',
+] as const;
+
 type LinuxSnapshot = {
   pid: number;
   ppid: number;
@@ -150,7 +211,8 @@ type ProcessProof = {
 type BuildProvenanceModule = {
   observeBasic5CiBuildProvenance(input: {
     repositoryRoot: string;
-    standaloneRoot: string;
+    artifactRoot: string;
+    serverRoot: string;
     sourceCommit: string;
     sourceWebTree: string;
     nodeVersion: string;
@@ -241,9 +303,152 @@ export class Basic5CiHold extends Error {
   constructor(
     readonly code: string,
     readonly operationSettled = true,
+    readonly buildDiagnostic?: Basic5CiBuildDiagnostic,
   ) {
     super(code);
   }
+}
+
+function boundedCount(value: unknown): number | null {
+  return Number.isSafeInteger(value) && Math.abs(value as number) <= 2 * 1024 * 1024 * 1024
+    ? (value as number)
+    : null;
+}
+
+function contentFreeBuildDiagnostic(value: unknown): Basic5CiBuildDiagnostic {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Basic5CiHold('standalone_diagnostic_invalid');
+  const diagnostic = value as Record<string, unknown>;
+  if (
+    Object.keys(diagnostic).length !== 2 ||
+    !('checks' in diagnostic) ||
+    !('observed' in diagnostic)
+  )
+    throw new Basic5CiHold('standalone_diagnostic_invalid');
+  const checks = diagnostic.checks;
+  const observed = diagnostic.observed;
+  if (
+    !checks ||
+    typeof checks !== 'object' ||
+    Array.isArray(checks) ||
+    !observed ||
+    typeof observed !== 'object' ||
+    Array.isArray(observed)
+  )
+    throw new Basic5CiHold('standalone_diagnostic_invalid');
+  const rawChecks = checks as Record<string, unknown>;
+  const rawObserved = observed as Record<string, unknown>;
+  if (
+    Object.keys(rawChecks).length !== BUILD_DIAGNOSTIC_CHECK_KEYS.length ||
+    BUILD_DIAGNOSTIC_CHECK_KEYS.some((key) => typeof rawChecks[key] !== 'boolean') ||
+    Object.keys(rawChecks).some(
+      (key) =>
+        !BUILD_DIAGNOSTIC_CHECK_KEYS.includes(key as (typeof BUILD_DIAGNOSTIC_CHECK_KEYS)[number]),
+    ) ||
+    Object.keys(rawObserved).length !== BUILD_DIAGNOSTIC_COUNT_KEYS.length + 1 ||
+    BUILD_DIAGNOSTIC_COUNT_KEYS.some((key) => {
+      const count = rawObserved[key];
+      return count !== null && boundedCount(count) === null;
+    }) ||
+    !['complete', 'incomplete', 'unavailable', 'unknown'].includes(String(rawObserved.traceStatus))
+  )
+    throw new Basic5CiHold('standalone_diagnostic_invalid');
+  return {
+    checks: Object.fromEntries(
+      BUILD_DIAGNOSTIC_CHECK_KEYS.map((key) => [key, rawChecks[key] as boolean]),
+    ),
+    observed: {
+      traceStatus: rawObserved.traceStatus as Basic5CiBuildDiagnostic['observed']['traceStatus'],
+      ...Object.fromEntries(
+        BUILD_DIAGNOSTIC_COUNT_KEYS.map((key) => [key, rawObserved[key] as number | null]),
+      ),
+    } as Basic5CiBuildDiagnostic['observed'],
+  };
+}
+
+function buildProvenanceDiagnostic(
+  provenance: Awaited<ReturnType<BuildProvenanceModule['observeBasic5CiBuildProvenance']>>,
+  expected: {
+    sourceCommit: string;
+    sourceWebTree: string;
+    nodeVersion: string;
+    imageOS: string;
+    imageVersion: string;
+  },
+): Basic5CiBuildDiagnostic {
+  const limitationsValid =
+    Array.isArray(provenance.limitations) &&
+    provenance.limitations.every((item) => typeof item === 'string' && item.length <= 500);
+  const checks = {
+    sourceCommitMatches: provenance.source.commit === expected.sourceCommit,
+    sourceWebTreeMatches: provenance.source.webTree === expected.sourceWebTree,
+    nodeVersionMatches: provenance.runtime.nodeVersion === expected.nodeVersion,
+    imageOSMatches: provenance.runtime.imageOS === expected.imageOS,
+    imageVersionMatches: provenance.runtime.imageVersion === expected.imageVersion,
+    buildIdPresent:
+      typeof provenance.output.buildId === 'string' && provenance.output.buildId.length > 0,
+    serverSha256Valid: /^[a-f0-9]{64}$/.test(provenance.output.serverSha256),
+    closureSha256Valid: /^[a-f0-9]{64}$/.test(provenance.output.closureSha256),
+    tracesComplete: provenance.traces.status === 'complete',
+    unmatchedTraceReferencesZero: provenance.traces.unmatchedReferenceCount === 0,
+    limitationsArray: Array.isArray(provenance.limitations),
+    limitationsCountBounded:
+      Array.isArray(provenance.limitations) && provenance.limitations.length <= 16,
+    limitationsItemsBounded: limitationsValid,
+    closureEntryCountPositive:
+      Number.isSafeInteger(provenance.output.closureEntryCount) &&
+      provenance.output.closureEntryCount >= 1,
+    closureFileCountPositive:
+      Number.isSafeInteger(provenance.output.closureFileCount) &&
+      provenance.output.closureFileCount >= 1,
+    closureSymlinkCountValid:
+      Number.isSafeInteger(provenance.output.closureSymlinkCount) &&
+      provenance.output.closureSymlinkCount >= 0,
+    closureFileBytesPositive:
+      Number.isSafeInteger(provenance.output.closureFileBytes) &&
+      provenance.output.closureFileBytes >= 1,
+    staticFileCountValid:
+      Number.isSafeInteger(provenance.output.staticFileCount) &&
+      provenance.output.staticFileCount >= 0,
+    publicFileCountValid:
+      Number.isSafeInteger(provenance.output.publicFileCount) &&
+      provenance.output.publicFileCount >= 0,
+    traceManifestCountValid: Number.isSafeInteger(provenance.traces.manifestCount),
+    traceManifestBytesValid: Number.isSafeInteger(provenance.traces.manifestBytes),
+    traceReferenceCountValid: Number.isSafeInteger(provenance.traces.referenceCount),
+    resolvedTraceReferenceCountValid: Number.isSafeInteger(
+      provenance.traces.resolvedCheckoutReferenceCount,
+    ),
+    matchedTraceContentCountValid: Number.isSafeInteger(
+      provenance.traces.matchedClosureContentCount,
+    ),
+    unmatchedTraceReferenceCountValid: Number.isSafeInteger(
+      provenance.traces.unmatchedReferenceCount,
+    ),
+  };
+  const traceStatus = ['complete', 'incomplete', 'unavailable'].includes(provenance.traces.status)
+    ? (provenance.traces.status as Basic5CiBuildDiagnostic['observed']['traceStatus'])
+    : 'unknown';
+  return {
+    checks,
+    observed: {
+      traceStatus,
+      closureEntryCount: boundedCount(provenance.output.closureEntryCount),
+      closureFileCount: boundedCount(provenance.output.closureFileCount),
+      closureSymlinkCount: boundedCount(provenance.output.closureSymlinkCount),
+      closureFileBytes: boundedCount(provenance.output.closureFileBytes),
+      staticFileCount: boundedCount(provenance.output.staticFileCount),
+      publicFileCount: boundedCount(provenance.output.publicFileCount),
+      traceManifestCount: boundedCount(provenance.traces.manifestCount),
+      traceManifestBytes: boundedCount(provenance.traces.manifestBytes),
+      traceReferenceCount: boundedCount(provenance.traces.referenceCount),
+      resolvedCheckoutReferenceCount: boundedCount(
+        provenance.traces.resolvedCheckoutReferenceCount,
+      ),
+      matchedClosureContentCount: boundedCount(provenance.traces.matchedClosureContentCount),
+      unmatchedReferenceCount: boundedCount(provenance.traces.unmatchedReferenceCount),
+    },
+  };
 }
 
 function contentFreeQuiescence(value: Basic5CiQuiescence): Basic5CiQuiescence {
@@ -827,9 +1032,12 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     'operationSettled',
     'quiescenceStatus',
     'errorCode',
+    'standaloneBuildDiagnostic',
     'elapsedSeconds',
   ]);
   const clean = Object.fromEntries(Object.entries(record).filter(([key]) => allowed.has(key)));
+  if ('standaloneBuildDiagnostic' in clean)
+    clean.standaloneBuildDiagnostic = contentFreeBuildDiagnostic(clean.standaloneBuildDiagnostic);
   const encoded = JSON.stringify(clean);
   if (Buffer.byteLength(encoded) > CAPTURE_BYTES)
     throw new Basic5CiHold('content_free_receipt_too_large');
@@ -991,6 +1199,8 @@ export async function runBasic5CiAcceptance(
     qualifiedPass = true;
   } catch (error) {
     receipt.errorCode = error instanceof Basic5CiHold ? error.code : 'ci_acceptance_failure';
+    if (error instanceof Basic5CiHold && error.buildDiagnostic)
+      receipt.standaloneBuildDiagnostic = error.buildDiagnostic;
     if (error instanceof Basic5CiHold && !error.operationSettled) {
       phaseOperationUnsettled = true;
       receipt.operationSettled = false;
@@ -1530,12 +1740,14 @@ class RealBasic5CiOps implements Basic5CiOps {
       !/^[a-f0-9]{40}$/i.test(sourceWebTree)
     )
       throw new Basic5CiHold('ci_source_checkout_not_exact_clean');
-    const standaloneRoot = join(this.repoRoot, 'apps/web/.next/standalone/apps/web');
+    const artifactRoot = join(this.repoRoot, 'apps/web/.next/standalone');
+    const serverRoot = join(artifactRoot, 'apps/web');
     const provenanceModule = this.provenance;
     if (!provenanceModule) throw new Basic5CiHold('build_provenance_helper_unavailable');
     const provenance = await provenanceModule.observeBasic5CiBuildProvenance({
       repositoryRoot: this.repoRoot,
-      standaloneRoot,
+      artifactRoot,
+      serverRoot,
       sourceCommit,
       sourceWebTree,
       nodeVersion: process.version,
@@ -1543,40 +1755,15 @@ class RealBasic5CiOps implements Basic5CiOps {
       imageVersion,
     });
     assertNotAborted(signal, 'preflight');
-    if (
-      provenance.source.commit !== sourceCommit ||
-      provenance.source.webTree !== sourceWebTree ||
-      provenance.runtime.nodeVersion !== process.version ||
-      provenance.runtime.imageOS !== imageOS ||
-      provenance.runtime.imageVersion !== imageVersion ||
-      !provenance.output.buildId ||
-      !/^[a-f0-9]{64}$/.test(provenance.output.serverSha256) ||
-      !/^[a-f0-9]{64}$/.test(provenance.output.closureSha256) ||
-      provenance.traces.status !== 'complete' ||
-      provenance.traces.unmatchedReferenceCount !== 0 ||
-      !Array.isArray(provenance.limitations) ||
-      provenance.limitations.length > 16 ||
-      provenance.limitations.some((item) => typeof item !== 'string' || item.length > 500) ||
-      !Number.isSafeInteger(provenance.output.closureEntryCount) ||
-      provenance.output.closureEntryCount < 1 ||
-      !Number.isSafeInteger(provenance.output.closureFileCount) ||
-      provenance.output.closureFileCount < 1 ||
-      !Number.isSafeInteger(provenance.output.closureSymlinkCount) ||
-      provenance.output.closureSymlinkCount < 0 ||
-      !Number.isSafeInteger(provenance.output.closureFileBytes) ||
-      provenance.output.closureFileBytes < 1 ||
-      !Number.isSafeInteger(provenance.output.staticFileCount) ||
-      provenance.output.staticFileCount < 0 ||
-      !Number.isSafeInteger(provenance.output.publicFileCount) ||
-      provenance.output.publicFileCount < 0 ||
-      !Number.isSafeInteger(provenance.traces.manifestCount) ||
-      !Number.isSafeInteger(provenance.traces.manifestBytes) ||
-      !Number.isSafeInteger(provenance.traces.referenceCount) ||
-      !Number.isSafeInteger(provenance.traces.resolvedCheckoutReferenceCount) ||
-      !Number.isSafeInteger(provenance.traces.matchedClosureContentCount) ||
-      !Number.isSafeInteger(provenance.traces.unmatchedReferenceCount)
-    )
-      throw new Basic5CiHold('standalone_build_provenance_incomplete');
+    const diagnostic = buildProvenanceDiagnostic(provenance, {
+      sourceCommit,
+      sourceWebTree,
+      nodeVersion: process.version,
+      imageOS,
+      imageVersion,
+    });
+    if (Object.values(diagnostic.checks).some((check) => !check))
+      throw new Basic5CiHold('standalone_build_provenance_incomplete', true, diagnostic);
     const proof = this.proof;
     if (!proof) throw new Basic5CiHold('linux_process_proof_unavailable');
     const chrome = await this.runReadOnlyMetadata(

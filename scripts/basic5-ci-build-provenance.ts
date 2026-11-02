@@ -18,7 +18,7 @@ const HEX_OBJECT = /^[0-9a-f]{40,64}$/;
 const BUILD_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_PATH_BYTES = 4_096;
 
-type RootKind = 'artifact' | 'checkout';
+type RootKind = 'artifact';
 type EntryKind = 'directory' | 'file' | 'symlink' | 'symlink-file-content';
 
 interface ClosureEntry {
@@ -32,7 +32,8 @@ interface ClosureEntry {
 
 export interface Basic5CiBuildProvenanceInput {
   repositoryRoot: string;
-  standaloneRoot: string;
+  artifactRoot: string;
+  serverRoot: string;
   sourceCommit: string;
   sourceWebTree: string;
   nodeVersion: string;
@@ -117,16 +118,13 @@ function relativePosix(root: string, absolute: string): string {
 function targetLocation(
   absolute: string,
   artifactRoot: string,
-  checkoutRoot: string,
 ): {
   root: RootKind;
   path: string;
 } {
   if (isInside(artifactRoot, absolute))
     return { root: 'artifact', path: relativePosix(artifactRoot, absolute) };
-  if (isInside(checkoutRoot, absolute))
-    return { root: 'checkout', path: relativePosix(checkoutRoot, absolute) };
-  fail('symlink target escaped both standalone artifact and CI checkout');
+  fail('symlink target escaped standalone artifact');
 }
 
 async function hashFile(
@@ -192,10 +190,7 @@ async function existsDirectory(absolute: string): Promise<boolean> {
   }
 }
 
-async function enumerateClosure(
-  artifactRoot: string,
-  checkoutRoot: string,
-): Promise<{
+async function enumerateClosure(artifactRoot: string): Promise<{
   entries: ClosureEntry[];
   fileHashes: Set<string>;
   fileBytes: number;
@@ -228,8 +223,7 @@ async function enumerateClosure(
     ancestorRealPaths: ReadonlySet<string>,
   ): Promise<void> => {
     const canonical = await realpath(absolute);
-    if (!isInside(artifactRoot, canonical) && !isInside(checkoutRoot, canonical))
-      fail('directory escaped its evidence roots');
+    if (!isInside(artifactRoot, canonical)) fail('directory escaped standalone artifact');
     if (ancestorRealPaths.has(canonical)) fail('symlink directory cycle detected');
     const nextAncestors = new Set(ancestorRealPaths).add(canonical);
     const directory = await opendir(absolute);
@@ -243,7 +237,7 @@ async function enumerateClosure(
       const childStat = await lstat(child);
       if (childStat.isSymbolicLink()) {
         const realTarget = await realpath(child);
-        const location = targetLocation(realTarget, artifactRoot, checkoutRoot);
+        const location = targetLocation(realTarget, artifactRoot);
         const linkText = await readlink(child);
         const linkBytes = Buffer.from(linkText);
         entries.push({
@@ -283,7 +277,7 @@ async function enumerateClosure(
 
 async function collectTraceCoverage(
   repositoryRoot: string,
-  standaloneRoot: string,
+  artifactRoot: string,
   closureHashes: Set<string>,
 ): Promise<Basic5CiBuildProvenance['traces']> {
   const traceRoot = path.join(repositoryRoot, 'apps/web/.next/server');
@@ -305,7 +299,7 @@ async function collectTraceCoverage(
   let walkedEntries = 0;
   const walk = async (directory: string): Promise<void> => {
     const canonical = await realpath(directory);
-    if (!isInside(repositoryRoot, canonical) && !isInside(standaloneRoot, canonical))
+    if (!isInside(repositoryRoot, canonical) && !isInside(artifactRoot, canonical))
       fail('trace directory escaped checkout/artifact');
     if (visited.has(canonical)) return;
     visited.add(canonical);
@@ -319,7 +313,7 @@ async function collectTraceCoverage(
       const stat = await lstat(child);
       if (stat.isSymbolicLink()) {
         const target = await realpath(child);
-        if (!isInside(repositoryRoot, target) && !isInside(standaloneRoot, target))
+        if (!isInside(repositoryRoot, target) && !isInside(artifactRoot, target))
           fail('trace walk symlink escaped checkout/artifact');
         const targetStat = await lstat(target);
         if (targetStat.isDirectory()) await walk(target);
@@ -395,7 +389,7 @@ async function collectTraceCoverage(
       if (referenceCount > BASIC5_CI_PROVENANCE_LIMITS.traceReferences)
         fail('trace reference cap exceeded');
       const lexicalTarget = path.resolve(path.dirname(canonicalManifest), reference);
-      if (!isInside(repositoryRoot, lexicalTarget) && !isInside(standaloneRoot, lexicalTarget))
+      if (!isInside(repositoryRoot, lexicalTarget) && !isInside(artifactRoot, lexicalTarget))
         fail('trace reference escaped checkout/artifact');
       let canonicalTarget: string;
       try {
@@ -407,7 +401,7 @@ async function collectTraceCoverage(
         }
         throw error;
       }
-      if (!isInside(repositoryRoot, canonicalTarget) && !isInside(standaloneRoot, canonicalTarget))
+      if (!isInside(repositoryRoot, canonicalTarget) && !isInside(artifactRoot, canonicalTarget))
         fail('trace reference symlink escaped checkout/artifact');
       const targetStat = await lstat(canonicalTarget);
       if (!targetStat.isFile()) {
@@ -446,9 +440,14 @@ export async function observeBasic5CiBuildProvenance(
 ): Promise<Basic5CiBuildProvenance> {
   if (!input || typeof input !== 'object') fail('input is malformed');
   assertString(input.repositoryRoot, 'repository root', MAX_PATH_BYTES);
-  assertString(input.standaloneRoot, 'standalone root', MAX_PATH_BYTES);
-  if (!path.isAbsolute(input.repositoryRoot) || !path.isAbsolute(input.standaloneRoot))
-    fail('repository and standalone roots must be absolute');
+  assertString(input.artifactRoot, 'standalone artifact root', MAX_PATH_BYTES);
+  assertString(input.serverRoot, 'standalone server root', MAX_PATH_BYTES);
+  if (
+    !path.isAbsolute(input.repositoryRoot) ||
+    !path.isAbsolute(input.artifactRoot) ||
+    !path.isAbsolute(input.serverRoot)
+  )
+    fail('repository, artifact, and server roots must be absolute');
   if (!HEX_OBJECT.test(input.sourceCommit) || !HEX_OBJECT.test(input.sourceWebTree))
     fail('controller-provided source object IDs are malformed');
   assertString(input.nodeVersion, 'Node version', 64);
@@ -456,34 +455,39 @@ export async function observeBasic5CiBuildProvenance(
   assertString(input.imageVersion, 'CI image version', 128);
 
   const repositoryRoot = await realpath(input.repositoryRoot);
-  const standaloneRoot = await realpath(input.standaloneRoot);
+  const artifactRoot = await realpath(input.artifactRoot);
+  const serverRoot = await realpath(input.serverRoot);
   const repoInfo = await lstat(repositoryRoot);
-  const artifactInfo = await lstat(standaloneRoot);
-  if (!repoInfo.isDirectory() || !artifactInfo.isDirectory())
+  const artifactInfo = await lstat(artifactRoot);
+  const serverInfo = await lstat(serverRoot);
+  if (!repoInfo.isDirectory() || !artifactInfo.isDirectory() || !serverInfo.isDirectory())
     fail('repository/artifact root is unavailable');
-  if (!isInside(repositoryRoot, standaloneRoot) || standaloneRoot === repositoryRoot)
+  if (!isInside(repositoryRoot, artifactRoot) || artifactRoot === repositoryRoot)
     fail('standalone output must be contained by the CI checkout');
+  if (!isInside(artifactRoot, serverRoot) || artifactRoot === serverRoot)
+    fail('standalone server root must be inside the complete artifact root');
 
-  const outputRoot = path.join(standaloneRoot, '.next');
+  const outputRoot = path.join(serverRoot, '.next');
   const buildIdPath = path.join(outputRoot, 'BUILD_ID');
-  const serverPath = path.join(standaloneRoot, 'server.js');
+  const serverPath = path.join(serverRoot, 'server.js');
   const buildIdReal = await realpath(buildIdPath);
   const serverReal = await realpath(serverPath);
-  if (!isInside(standaloneRoot, buildIdReal) || !isInside(standaloneRoot, serverReal))
+  if (!isInside(serverRoot, buildIdReal) || !isInside(serverRoot, serverReal))
     fail('BUILD_ID or standalone server escaped the artifact root');
   const buildIdBytes = await readBytesBounded(buildIdReal, 256);
   const buildId = buildIdBytes.toString('utf8').trim();
   if (!BUILD_ID.test(buildId)) fail('BUILD_ID is malformed');
   const server = await hashFile(serverReal, BASIC5_CI_PROVENANCE_LIMITS.oneFileBytes);
-  const closure = await enumerateClosure(standaloneRoot, repositoryRoot);
+  const closure = await enumerateClosure(artifactRoot);
   const entriesBytes = Buffer.from(JSON.stringify(closure.entries));
   const closureSha256 = createHash('sha256').update(entriesBytes).digest('hex');
-  const staticRoot = path.join(standaloneRoot, '.next/static');
-  const publicRoot = path.join(standaloneRoot, 'public');
+  const staticRoot = path.join(serverRoot, '.next/static');
+  const publicRoot = path.join(serverRoot, 'public');
   const staticPresent = await existsDirectory(staticRoot);
   const publicPresent = await existsDirectory(publicRoot);
-  const staticPrefix = '.next/static/';
-  const publicPrefix = 'public/';
+  const serverRelative = relativePosix(artifactRoot, serverRoot);
+  const staticPrefix = `${serverRelative}/.next/static/`;
+  const publicPrefix = `${serverRelative}/public/`;
   const staticFileCount = closure.entries.filter(
     (entry) =>
       (entry.kind === 'file' || entry.kind === 'symlink-file-content') &&
@@ -494,7 +498,7 @@ export async function observeBasic5CiBuildProvenance(
       (entry.kind === 'file' || entry.kind === 'symlink-file-content') &&
       entry.path.startsWith(publicPrefix),
   ).length;
-  const traces = await collectTraceCoverage(repositoryRoot, standaloneRoot, closure.fileHashes);
+  const traces = await collectTraceCoverage(repositoryRoot, artifactRoot, closure.fileHashes);
 
   return {
     schemaVersion: 1,
