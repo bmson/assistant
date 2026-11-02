@@ -8,6 +8,12 @@ import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
+import {
+  type Basic5CiVitestDiagnostic,
+  basic5CiVitestCaptureLimit,
+  contentFreeBasic5CiVitestDiagnostic,
+  observeBasic5CiVitestOutput,
+} from './basic5-ci-vitest-diagnostics.js';
 
 const OUTER_SECONDS = 420;
 const TEST_START_SECONDS = 130;
@@ -16,7 +22,6 @@ const CLEANUP_END_SECONDS = 400;
 const PREPARE_END_SECONDS = 130;
 const CAPTURE_BYTES = 64 * 1024;
 const PHASE_SETTLEMENT_GRACE_MS = 5_000;
-const EVIDENCE_PREFIX = 'BASIC5_ACCEPTANCE_EVIDENCE ';
 const ACCEPTANCE_CONTRACT = 'basic5-ci-standalone-in-checkout-v2';
 const CLAIM_SCOPE = {
   runtimeIdentity: 'bounded standalone artifact observed in CI checkout',
@@ -700,6 +705,7 @@ export class Basic5CiHold extends Error {
     readonly preparationDiagnostic?: Basic5CiPreparationDiagnostic,
     readonly caseEntryDiagnostic?: Basic5CiCaseEntryDiagnostic,
     readonly utilityChildDiagnostic?: Basic5CiUtilityChildDiagnostic,
+    readonly vitestDiagnostic?: Basic5CiVitestDiagnostic,
   ) {
     super(code);
   }
@@ -751,6 +757,7 @@ export async function runBasic5CiCaseEntryStep<T>(
       hold?.preparationDiagnostic,
       { stage, category: classifyPreparationError(error) },
       hold?.utilityChildDiagnostic,
+      hold?.vitestDiagnostic,
     );
   }
 }
@@ -772,6 +779,7 @@ export async function runBasic5CiPreparationStep<T>(
       { stage, category: classifyPreparationError(error) },
       undefined,
       hold?.utilityChildDiagnostic,
+      hold?.vitestDiagnostic,
     );
   }
 }
@@ -1920,6 +1928,7 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     'preparationDiagnostic',
     'utilityChildDiagnostic',
     'caseEntryDiagnostic',
+    'vitestDiagnostic',
     'elapsedSeconds',
   ]);
   const clean = Object.fromEntries(Object.entries(record).filter(([key]) => allowed.has(key)));
@@ -1952,6 +1961,8 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     );
   if ('caseEntryDiagnostic' in clean)
     clean.caseEntryDiagnostic = contentFreeCaseEntryDiagnostic(clean.caseEntryDiagnostic);
+  if ('vitestDiagnostic' in clean)
+    clean.vitestDiagnostic = contentFreeBasic5CiVitestDiagnostic(clean.vitestDiagnostic);
   if ('standaloneBuildDiagnostic' in clean)
     clean.standaloneBuildDiagnostic = contentFreeBuildDiagnostic(clean.standaloneBuildDiagnostic);
   const encoded = JSON.stringify(clean);
@@ -2125,6 +2136,8 @@ export async function runBasic5CiAcceptance(
       receipt.utilityChildDiagnostic = error.utilityChildDiagnostic;
     if (error instanceof Basic5CiHold && error.caseEntryDiagnostic)
       receipt.caseEntryDiagnostic = error.caseEntryDiagnostic;
+    if (error instanceof Basic5CiHold && error.vitestDiagnostic)
+      receipt.vitestDiagnostic = error.vitestDiagnostic;
     if (
       caseStarted &&
       error instanceof Basic5CiHold &&
@@ -2694,6 +2707,7 @@ export class RealBasic5CiOps implements Basic5CiOps {
     exitCode: number;
     stdout: Buffer;
     stderr: Buffer;
+    observedExitCode?: number | null;
     utilityDiagnostic?: Basic5CiUtilityChildDiagnostic;
   }> {
     this.assertDeadline(deadline, label);
@@ -2981,6 +2995,13 @@ export class RealBasic5CiOps implements Basic5CiOps {
                 stderrBytes,
               )
             : undefined,
+          label === 'basic5-vitest' && overflow
+            ? basic5CiVitestCaptureLimit(
+                closed && !closeSignal ? exitCode : null,
+                stdoutBytes,
+                stderrBytes,
+              )
+            : undefined,
         );
       }
       try {
@@ -3121,11 +3142,19 @@ export class RealBasic5CiOps implements Basic5CiOps {
               closeSignal,
             )
           : undefined,
+        label === 'basic5-vitest'
+          ? basic5CiVitestCaptureLimit(
+              closed && !closeSignal ? exitCode : null,
+              stdoutBytes,
+              stderrBytes,
+            )
+          : undefined,
       );
     return {
       exitCode,
       stdout: Buffer.concat(stdout),
       stderr: Buffer.concat(stderr),
+      ...(label === 'basic5-vitest' ? { observedExitCode: closeSignal ? null : exitCode } : {}),
       ...(utility
         ? {
             utilityDiagnostic: makeUtilityChildDiagnostic(
@@ -3529,55 +3558,59 @@ export class RealBasic5CiOps implements Basic5CiOps {
     return configPath;
   }
 
-  private parseVitest(stdout: Buffer, exitCode: number): Basic5CiCaseResult {
-    if (exitCode !== 0 || stdout.byteLength > CAPTURE_BYTES)
-      throw new Basic5CiHold('vitest_execution_failed_or_output_overflow');
-    const evidenceLines: string[] = [];
-    const summaries: Array<Record<string, unknown>> = [];
-    for (const line of stdout.toString('utf8').split(/\r?\n/)) {
-      if (!line) continue;
-      if (line.startsWith(EVIDENCE_PREFIX)) evidenceLines.push(line.slice(EVIDENCE_PREFIX.length));
-      else {
-        let value: unknown;
-        try {
-          value = JSON.parse(line) as unknown;
-        } catch {
-          throw new Basic5CiHold('vitest_stdout_contains_unrecognized_line');
-        }
-        if (!value || typeof value !== 'object' || !('numTotalTests' in value))
-          throw new Basic5CiHold('vitest_json_summary_malformed');
-        summaries.push(value as Record<string, unknown>);
-      }
-    }
-    if (
-      evidenceLines.length !== 1 ||
-      summaries.length !== 1 ||
-      Buffer.byteLength(evidenceLines[0] ?? '') > 16_384
-    )
-      throw new Basic5CiHold('vitest_requires_one_summary_and_one_content_free_evidence_record');
+  private parseVitest(
+    stdout: Buffer,
+    exitCode: number,
+    stderr: Buffer = Buffer.alloc(0),
+    observedExitCode: number | null = exitCode,
+  ): Basic5CiCaseResult {
+    const observation = observeBasic5CiVitestOutput({
+      stdout,
+      stderr,
+      exitCode: observedExitCode,
+      repoRoot: this.repoRoot,
+    });
+    const hold = (code: string): never => {
+      throw new Basic5CiHold(
+        code,
+        true,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        observation.diagnostic,
+      );
+    };
+    // Parse failed reports before rejecting the run; diagnostics never confer a PASS.
+    if (observation.diagnostic.reportStatus === 'output_limit')
+      hold('vitest_execution_failed_or_output_overflow');
+    if (exitCode !== 0) hold('vitest_execution_failed_or_output_overflow');
+    if (stderr.length) hold('vitest_stderr_not_empty');
+    if (!observation.validOutput || !observation.summary) hold('vitest_json_summary_malformed');
+    if (!observation.evidenceLine)
+      hold('vitest_requires_one_summary_and_one_content_free_evidence_record');
     let evidence: Basic5CiEvidence;
-    const evidenceLine = evidenceLines[0];
-    const summary = summaries[0];
-    if (!evidenceLine || !summary) throw new Basic5CiHold('vitest_json_summary_missing');
     try {
-      evidence = JSON.parse(evidenceLine) as Basic5CiEvidence;
+      evidence = JSON.parse(observation.evidenceLine as string) as Basic5CiEvidence;
     } catch {
-      throw new Basic5CiHold('acceptance_evidence_json_malformed');
+      return hold('acceptance_evidence_json_malformed');
     }
-    const fields = [
-      'numTotalTests',
-      'numPassedTests',
-      'numPendingTests',
-      'numFailedTests',
-      'numTodoTests',
-    ];
-    if (fields.some((key) => !Number.isSafeInteger(summary[key])))
-      throw new Basic5CiHold('vitest_summary_counts_malformed');
-    const total = Number(summary.numTotalTests);
-    const passed = Number(summary.numPassedTests);
-    const skipped = Number(summary.numPendingTests) + Number(summary.numTodoTests);
-    const failed = Number(summary.numFailedTests);
-    return { exitCode, total, passed, skipped, failed, evidence };
+    const diagnostic = observation.diagnostic;
+    if (
+      observation.summary?.success !== true ||
+      diagnostic.failed !== 0 ||
+      !observation.knownCasePassed
+    )
+      hold('vitest_report_not_successful');
+    return {
+      exitCode,
+      total: diagnostic.total as number,
+      passed: diagnostic.passed as number,
+      skipped: (diagnostic.pending as number) + (diagnostic.todo as number),
+      failed: diagnostic.failed as number,
+      evidence,
+    };
   }
 
   async runExactCase(
@@ -3670,12 +3703,11 @@ export class RealBasic5CiOps implements Basic5CiOps {
           'basic5-vitest',
           signal,
         );
-        if (result.stderr.length) throw new Basic5CiHold('vitest_stderr_not_empty');
         return result;
       },
     );
     return this.runCaseEntryStep('vitest_output_parse', 'vitest_output_parse_failed', () =>
-      this.parseVitest(child.stdout, child.exitCode),
+      this.parseVitest(child.stdout, child.exitCode, child.stderr, child.observedExitCode),
     );
   }
 
