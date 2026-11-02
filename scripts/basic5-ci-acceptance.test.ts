@@ -362,7 +362,7 @@ describe('one-shot BASIC5 CI controller', () => {
     child: FakeDirectChild,
     options: {
       readSnapshot?: () => Promise<Map<number, Basic5CiProcessSnapshot>>;
-      readIdentity?: (pid: number) => Promise<unknown>;
+      readIdentity?: (pid: number, enrolled?: typeof censusRoot) => Promise<unknown>;
       now?: () => number;
     } = {},
   ): Basic5CiUtilityChildTestDriver {
@@ -576,7 +576,11 @@ describe('one-shot BASIC5 CI controller', () => {
 
   async function censusSequence(
     snapshots: Array<Map<number, Basic5CiProcessSnapshot> | Error>,
-    readIdentity: (pid: number) => Promise<typeof censusRoot | undefined>,
+    readIdentity: (
+      pid: number,
+      enrolled?: typeof censusRoot,
+    ) => Promise<typeof censusRoot | undefined>,
+    label: 'create-target' | 'migrate' | 'seed' = 'migrate',
   ) {
     const child = new FakeDirectChild();
     const signals: number[] = [];
@@ -605,7 +609,7 @@ describe('one-shot BASIC5 CI controller', () => {
         [],
         {},
         10_000,
-        'migrate',
+        label,
         new AbortController().signal,
       );
     } catch (caught) {
@@ -618,6 +622,212 @@ describe('one-shot BASIC5 CI controller', () => {
     ];
     return { result, error, snapshotReads, signals, enrolled };
   }
+
+  const terminalProof = () =>
+    Object.assign(new Error('fixed known terminal proof'), { code: 'known_process_terminal' });
+
+  it.each(['create-target', 'migrate', 'seed'] as const)(
+    '%s waits for direct close and independent final absence after known zombie transition',
+    async (label) => {
+      let terminalReads = 0;
+      const run = await censusSequence(
+        [censusSnapshot({ ...censusRoot, state: 'Z' }), censusSnapshot(), censusSnapshot()],
+        async (pid, enrolled) => {
+          expect(pid).toBe(88);
+          if (!enrolled) return censusRoot;
+          expect(enrolled).toEqual(censusRoot);
+          terminalReads++;
+          throw terminalProof();
+        },
+        label,
+      );
+      expect(run.error).toBeUndefined();
+      expect(run.result).toMatchObject({ exitCode: 0, utilityDiagnostic: { closed: true } });
+      expect(terminalReads).toBe(1);
+      expect(run.snapshotReads).toBe(3);
+      expect(run.enrolled).toEqual([88]);
+      expect(run.signals).toEqual([]);
+    },
+  );
+
+  it('retains the enrolled descendant and historical executable during terminal transition', async () => {
+    const run = await censusSequence(
+      [censusSnapshot(censusRoot, censusChild), censusSnapshot(), censusSnapshot()],
+      async (pid, enrolled) => {
+        if (pid === 88) return censusRoot;
+        if (!enrolled) return censusChild;
+        expect(enrolled).toEqual(censusChild);
+        throw terminalProof();
+      },
+    );
+    expect(run.error).toBeUndefined();
+    expect(run.enrolled).toEqual([88, 90]);
+    expect(run.signals).toEqual([]);
+  });
+
+  it('rejects an unenrolled terminal candidate even if its helper outcome is forged', async () => {
+    const run = await censusSequence(
+      [censusSnapshot(censusRoot, { ...censusChild, state: 'Z' })],
+      async (pid, enrolled) => {
+        if (pid === 88) return censusRoot;
+        expect(enrolled).toBeUndefined();
+        throw terminalProof();
+      },
+    );
+    expect(run.error).toMatchObject({
+      operationSettled: false,
+      utilityChildDiagnostic: {
+        censusDiagnostic: { stage: 'new_identity_read', reason: 'known_process_terminal' },
+      },
+    });
+    expect(run.enrolled).toEqual([88]);
+    expect(run.signals).toEqual([]);
+  });
+
+  it.each([
+    'process_executable_unavailable',
+    'process_executable_permission_denied',
+    'process_stat_malformed',
+  ])('does not waive %s for an already enrolled process', async (code) => {
+    const run = await censusSequence([censusSnapshot(censusRoot)], async (_pid, enrolled) => {
+      if (!enrolled) return censusRoot;
+      throw Object.assign(new Error('private unavailable detail'), { code });
+    });
+    expect(run.error).toMatchObject({
+      operationSettled: false,
+      utilityChildDiagnostic: {
+        censusDiagnostic: { stage: 'known_identity_read', reason: code },
+      },
+    });
+    expect(run.signals).toEqual([]);
+  });
+
+  it('does not accept a zombie with a reused generation', async () => {
+    const run = await censusSequence(
+      [censusSnapshot({ ...censusRoot, state: 'Z', startTimeTicks: '99' })],
+      async () => censusRoot,
+    );
+    expect(run.error).toMatchObject({
+      operationSettled: false,
+      utilityChildDiagnostic: {
+        censusDiagnostic: { stage: 'known_identity_compare', reason: 'generation_changed' },
+      },
+    });
+    expect(run.signals).toEqual([]);
+  });
+
+  it('does not let a terminal root hide an unknown final orphan', async () => {
+    const run = await censusSequence(
+      [
+        censusSnapshot({ ...censusRoot, state: 'Z' }),
+        censusSnapshot({ ...censusChild, ppid: 999 }),
+      ],
+      async (_pid, enrolled) => {
+        if (!enrolled) return censusRoot;
+        throw terminalProof();
+      },
+    );
+    expect(run.error).toMatchObject({
+      operationSettled: false,
+      utilityChildDiagnostic: {
+        stage: 'final_session_census',
+        censusDiagnostic: { stage: 'enrollment', reason: 'ancestry_unproven' },
+      },
+    });
+    expect(run.signals).toEqual([]);
+  });
+
+  it.each([true, false])(
+    'holds when terminal completion lacks final absence or direct close (persistent=%s)',
+    async (persistent) => {
+      const child = new FakeDirectChild();
+      let clock = 1;
+      let closeSent = false;
+      let snapshotReads = 0;
+      const signals: number[] = [];
+      const driver = utilityChildDriver(child, {
+        now: () => clock,
+        readSnapshot: async () => {
+          snapshotReads++;
+          return persistent || snapshotReads === 1
+            ? censusSnapshot({ ...censusRoot, state: 'Z' })
+            : censusSnapshot();
+        },
+        readIdentity: async (_pid, enrolled) => {
+          if (!enrolled) return censusRoot;
+          throw terminalProof();
+        },
+      });
+      driver.sleep = async () => {
+        clock += 1_000;
+        if (persistent && !closeSent) {
+          closeSent = true;
+          child.emit('close', 0, null);
+        }
+      };
+      driver.killProcess = (pid) => {
+        signals.push(pid);
+      };
+      const ops = new RealBasic5CiOps(driver);
+      try {
+        await expect(
+          ops.runUtilityChild(
+            '/synthetic/node',
+            [],
+            {},
+            10_000,
+            'seed',
+            new AbortController().signal,
+          ),
+        ).rejects.toMatchObject({ operationSettled: false });
+        expect(snapshotReads).toBeLessThan(30);
+        expect(signals).toEqual([]);
+        expect(clock).toBeGreaterThan(1);
+      } finally {
+        ops.dispose();
+      }
+    },
+  );
+
+  it.each(['web', 'browser', 'embedding', 'fixture-worker'] as const)(
+    'waits for registered %s terminal absence without signalling its historical executable',
+    async (role) => {
+      const child = new FakeDirectChild();
+      let alive = true;
+      let clock = 1;
+      const signals: number[] = [];
+      const driver = utilityChildDriver(child, {
+        now: () => clock,
+        readSnapshot: async () =>
+          alive ? censusSnapshot({ ...censusRoot, state: 'Z' }) : censusSnapshot(),
+        readIdentity: async (_pid, enrolled) => {
+          if (!alive) return undefined;
+          expect(enrolled).toMatchObject(censusRoot);
+          throw terminalProof();
+        },
+      });
+      driver.sleep = async () => {
+        alive = false;
+        clock += 50;
+      };
+      driver.killProcess = (pid) => {
+        signals.push(pid);
+      };
+      const ops = new RealBasic5CiOps(driver);
+      const internal = ops as unknown as {
+        fixtureRecords: Array<typeof censusRoot & { version: number; role: string }>;
+        stopKnownSessions(deadline: number): Promise<void>;
+      };
+      internal.fixtureRecords = [{ ...censusRoot, version: 1, role }];
+      try {
+        await internal.stopKnownSessions(10_000);
+        expect(signals).toEqual([]);
+        expect(alive).toBe(false);
+      } finally {
+        ops.dispose();
+      }
+    },
+  );
 
   it('reconciles one vanished new child and still requires independent final session closure', async () => {
     const run = await censusSequence(

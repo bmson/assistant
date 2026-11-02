@@ -165,6 +165,7 @@ const CENSUS_REASONS = [
   'process_executable_unavailable',
   'process_executable_permission_denied',
   'process_identity_changed',
+  'known_process_terminal',
   'helper_unclassified',
   'ancestry_unproven',
   'snapshot_row_missing',
@@ -545,6 +546,7 @@ const BUILD_DIAGNOSTIC_COUNT_KEYS = [
 ] as const;
 
 type LinuxSnapshot = {
+  state?: string;
   pid: number;
   ppid: number;
   pgid: number;
@@ -561,7 +563,10 @@ type RegistryRecord = LinuxIdentity & {
 type ProcessProof = {
   BASIC5_CI_CHROME_EXECUTABLE: string;
   readBasic5LinuxProcessSnapshot(): Promise<Map<number, LinuxSnapshot>>;
-  readBasic5LinuxProcessIdentity(pid: number): Promise<LinuxIdentity | undefined>;
+  readBasic5LinuxProcessIdentity(
+    pid: number,
+    enrolled?: LinuxIdentity,
+  ): Promise<LinuxIdentity | undefined>;
   readBasic5CiProcessRegistry(path: string): Promise<RegistryRecord[]>;
   assertBasic5CiProcessRegistryComplete(records: readonly RegistryRecord[]): void;
   assertBasic5CiProcessClosure(
@@ -2423,8 +2428,11 @@ export class RealBasic5CiOps implements Basic5CiOps {
         throw new Basic5CiCensusHold({ stage: 'known_identity_read', reason: 'ancestry_unproven' });
       let current: LinuxIdentity | undefined;
       try {
-        current = await proof.readBasic5LinuxProcessIdentity(pid);
+        current = await proof.readBasic5LinuxProcessIdentity(pid, expected);
       } catch (error) {
+        // The helper attests a positive Z-state reread matching this full
+        // enrolled tuple. It supplies no replacement identity or signal authority.
+        if ((error as { code?: unknown } | null)?.code === 'known_process_terminal') continue;
         throw censusFailure('known_identity_read', error);
       }
       if (!current) return confirmAbsence(pid, expected);
@@ -2437,7 +2445,13 @@ export class RealBasic5CiOps implements Basic5CiOps {
   }
 
   private async signalExact(identity: LinuxIdentity, signal: NodeJS.Signals): Promise<void> {
-    const current = await this.proof?.readBasic5LinuxProcessIdentity(identity.pid);
+    let current: LinuxIdentity | undefined;
+    try {
+      current = await this.proof?.readBasic5LinuxProcessIdentity(identity.pid, identity);
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code === 'known_process_terminal') return;
+      throw error;
+    }
     if (!current) return;
     if (
       current.startTimeTicks !== identity.startTimeTicks ||
@@ -2490,7 +2504,16 @@ export class RealBasic5CiOps implements Basic5CiOps {
         }
         for (const record of records) {
           if (signal?.aborted) throw new Basic5CiHold('quiescence_cancelled');
-          const current = await this.proof?.readBasic5LinuxProcessIdentity(record.pid);
+          let current: LinuxIdentity | undefined;
+          try {
+            current = await this.proof?.readBasic5LinuxProcessIdentity(record.pid, record);
+          } catch (error) {
+            if ((error as { code?: unknown } | null)?.code === 'known_process_terminal') {
+              live = true;
+              continue;
+            }
+            throw error;
+          }
           if (!current) continue;
           if (
             current.startTimeTicks !== record.startTimeTicks ||
@@ -2504,16 +2527,17 @@ export class RealBasic5CiOps implements Basic5CiOps {
           await this.signalExact(current, sig);
         }
         if (!live) return;
-        await sleep(50);
+        if (this.utilityChildTestDriver) await this.utilityChildTestDriver.sleep(50);
+        else await sleep(50);
       }
     }
     for (const root of sessions.values()) {
       if ((await this.captureSession(root, deadline)).size > 0)
-        throw new Basic5CiHold('owned_processes_remain_after_bounded_stop');
+        throw new Basic5CiHold('owned_processes_remain_after_bounded_stop', false);
     }
     for (const record of records) {
       if (await this.proof?.readBasic5LinuxProcessIdentity(record.pid))
-        throw new Basic5CiHold('registered_process_remains_after_bounded_stop');
+        throw new Basic5CiHold('registered_process_remains_after_bounded_stop', false);
     }
   }
 
