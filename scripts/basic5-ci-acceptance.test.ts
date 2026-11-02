@@ -323,6 +323,55 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(JSON.stringify(observed)).not.toContain('harmless diagnostic');
   });
 
+  it.each([
+    ['no terminator', 'Google Chrome 144.0.0.0'],
+    ['one LF', 'Google Chrome 144.0.0.0\n'],
+    ['one CRLF', 'Google Chrome 144.0.0.0\r\n'],
+    ['ASCII space and tab at line edges', '\t Google Chrome 144.0.0.0 \t'],
+    [
+      'testing build with line-edge whitespace and CRLF',
+      '\tGoogle Chrome for Testing 144.0.0.0 \r\n',
+    ],
+  ])('accepts the bounded Chrome version banner format: %s', (_label, stdout) => {
+    expect(
+      observeBasic5CiChromeVersion({
+        exitCode: 0,
+        stdout: Buffer.from(stdout),
+        stderr: Buffer.alloc(0),
+      }),
+    ).toMatchObject({
+      version: '144.0.0.0',
+      diagnostic: { status: 'accepted', exitCode: 0 },
+    });
+  });
+
+  it.each([
+    ['embedded LF', 'Google Chrome 144.0.0.0\nextra'],
+    ['embedded CRLF', 'Google Chrome 144.0.0.0\r\nextra'],
+    ['two final LFs', 'Google Chrome 144.0.0.0\n\n'],
+    ['LF followed by CRLF', 'Google Chrome 144.0.0.0\n\r\n'],
+    ['bare CR', 'Google Chrome 144.0.0.0\r'],
+    ['NUL', 'Google Chrome 144.0.0.0\0'],
+    ['vertical tab', 'Google Chrome 144.0.0.0\v'],
+    ['form feed', 'Google Chrome 144.0.0.0\f'],
+    ['escape', 'Google Chrome 144.0.0.0\u001b'],
+    ['Unicode space', '\u00a0Google Chrome 144.0.0.0'],
+    ['non-Google banner', 'Chromium 144.0.0.0'],
+    ['digits only', '144.0.0.0'],
+    ['three-part version', 'Google Chrome 144.0.0'],
+    ['five-part version', 'Google Chrome 144.0.0.0.1'],
+    ['non-numeric version part', 'Google Chrome 144.0.x.0'],
+  ])('holds on invalid Chrome banner (%s)', (_label, stdout) => {
+    const observed = observeBasic5CiChromeVersion({
+      exitCode: 0,
+      stdout: Buffer.from(stdout),
+      stderr: Buffer.alloc(0),
+    });
+    expect(observed.version).toBeNull();
+    expect(observed.diagnostic.status).toBe('version_unparseable');
+    expect(JSON.stringify(observed)).not.toContain(stdout);
+  });
+
   it('holds on a nonzero Chrome exit even when stdout contains a valid version', () => {
     const observed = observeBasic5CiChromeVersion({
       exitCode: 7,

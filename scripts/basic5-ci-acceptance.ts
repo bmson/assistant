@@ -344,9 +344,14 @@ export function observeBasic5CiChromeVersion(result: {
     return { version: null, diagnostic: { status: 'capture_limit', ...common } };
   if (result.exitCode !== 0)
     return { version: null, diagnostic: { status: 'nonzero_exit', ...common } };
-  const banner = result.stdout.toString('utf8');
+  // Chrome prints a separator before its channel, even when that channel is empty.
+  // Normalize only ASCII line-edge spacing and one terminal line ending.
+  const banner = result.stdout
+    .toString('utf8')
+    .replace(/\r?\n$/, '')
+    .replace(/^[ \t]+|[ \t]+$/g, '');
   const match = banner.match(
-    /^Google Chrome(?: for Testing)? ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\r?\n?$/,
+    /^Google Chrome(?: for Testing)? ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)$(?![\s\S])/,
   );
   if (!match?.[1])
     return { version: null, diagnostic: { status: 'version_unparseable', ...common } };
