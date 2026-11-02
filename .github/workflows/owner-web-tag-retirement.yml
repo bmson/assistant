@@ -82,5 +82,6 @@ jobs:
           path: |
             owner-web-tag-retirement-plan.json
             owner-web-tag-retirement-result.json
+            owner-web-tag-retirement-failure.json
           if-no-files-found: ignore
           retention-days: 14

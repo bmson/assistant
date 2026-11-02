@@ -111,6 +111,7 @@ export * from './owner-card-compilation.js';
 export * from './owner-context.js';
 export * from './owner-editor.js';
 export * from './owner-editor-identity.js';
+export type * from './owner-editor-recovery.js';
 export * from './owner-editor-state.js';
 export * from './owner-editor-storage.js';
 export * from './owner-knowledge-graph-fact.js';

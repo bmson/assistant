@@ -16,6 +16,7 @@ import {
   modelToolCallIdentityDigest,
   OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
   type OwnerEditorScope,
+  ownerEditorOperationId,
   type SerializedValue,
   serializeMigrationTimestamp,
   serializeMigrationValue,
@@ -1661,6 +1662,15 @@ describe.skipIf(!enabled)('Firestore workspace migration import', () => {
       await expect(
         operations.reserve(scope, 'b'.repeat(64), new Date(issuedAt)),
       ).resolves.toMatchObject({ kind: 'claimed' });
+      const noteScope: OwnerEditorScope = {
+        ...scope,
+        command: 'create_owner_memory',
+        operationId: randomUUID(),
+        targetId: randomUUID(),
+      };
+      await expect(
+        operations.reserve(noteScope, 'c'.repeat(64), new Date(issuedAt)),
+      ).resolves.toMatchObject({ kind: 'claimed' });
 
       await store.doc('maintenanceCursors', 'unrelated-cursor').set({
         name: 'unrelated-cursor',
@@ -1748,14 +1758,16 @@ describe.skipIf(!enabled)('Firestore workspace migration import', () => {
       });
 
       const receipt = await store.collection('ownerEditorOperations').get();
-      const receiptDocument = receipt.docs[0];
+      const receiptDocument = receipt.docs.find(
+        (document) => document.get('id') === ownerEditorOperationId(noteScope),
+      );
       if (!receiptDocument) throw new Error('owner editor receipt fixture missing');
       await receiptDocument.ref.update({ ownerId: randomUUID() });
       await expect(activation()).rejects.toThrow('Owner editor receipt identity is malformed');
       await receiptDocument.ref.update({ ownerId: sourceAgentId });
       await receiptDocument.ref.update({ operationId: randomUUID() });
       await expect(activation()).rejects.toThrow('Owner editor receipt identity is malformed');
-      await receiptDocument.ref.update({ operationId: scope.operationId });
+      await receiptDocument.ref.update({ operationId: noteScope.operationId });
       const wrongPhysical = store.doc('ownerEditorOperations', 'wrong-physical-id');
       await wrongPhysical.set(receiptDocument.data() ?? {});
       await expect(activation()).rejects.toThrow('Owner editor receipt identity is malformed');

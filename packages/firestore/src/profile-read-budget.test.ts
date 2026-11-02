@@ -17,10 +17,12 @@ class Doc {
     readonly id: string,
     readonly row?: Row,
     readonly updateTime?: Timestamp,
+    readonly onData?: () => void,
   ) {
     this.exists = row !== undefined;
   }
   data() {
+    this.onData?.();
     return this.row;
   }
   get(key: string) {
@@ -30,14 +32,23 @@ class Doc {
 function fixture(tables: Record<string, Row[]>) {
   const calls: Array<{ table: string; limit: number; filters: Array<[string, string, unknown]> }> =
     [];
+  const queryDocuments: Record<string, number> = {};
+  const decodedDocuments: Record<string, number> = {};
+  const pointDocuments: Record<string, number> = {};
   const control = {
     repeat: false,
     invalidSize: false,
     missingContactUpdateTime: false,
     error: null as Error | null,
+    memoryErrorOnce: null as Error | null,
     fence: 0,
     changed: false,
+    holdFenceAt: 0,
   };
+  let releaseHeldFence: (() => void) | undefined;
+  const heldFence = new Promise<void>((resolve) => {
+    releaseHeldFence = resolve;
+  });
   const contactUpdateTime = () =>
     control.missingContactUpdateTime ? undefined : new Timestamp(1_798_000_000, 123_456_789);
   class FakeQuery {
@@ -67,6 +78,11 @@ function fixture(tables: Record<string, Row[]>) {
     async get() {
       calls.push({ table: this.table, limit: this.cap, filters: this.filters });
       if (control.error) throw control.error;
+      if (this.table === 'memories' && control.memoryErrorOnce) {
+        const error = control.memoryErrorOnce;
+        control.memoryErrorOnce = null;
+        throw error;
+      }
       const docs = (tables[this.table] ?? [])
         .filter((row) =>
           this.filters.every(([field, op, value]) =>
@@ -79,11 +95,15 @@ function fixture(tables: Record<string, Row[]>) {
               documentKey(String(row.physicalId ?? row.id)),
               row,
               this.table === 'contacts' ? contactUpdateTime() : undefined,
+              () => {
+                decodedDocuments[this.table] = (decodedDocuments[this.table] ?? 0) + 1;
+              },
             ),
         )
         .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
         .filter((doc) => control.repeat || doc.id > this.cursor)
         .slice(0, this.cap);
+      queryDocuments[this.table] = (queryDocuments[this.table] ?? 0) + docs.length;
       return { docs, size: control.invalidSize ? this.cap : docs.length };
     }
   }
@@ -98,6 +118,7 @@ function fixture(tables: Record<string, Row[]>) {
         pointCalls.push(table);
         if (table === 'privacyErasureJobs') {
           control.fence++;
+          if (control.fence === control.holdFenceAt) await heldFence;
           return control.changed && control.fence > 1
             ? new Doc(
                 documentKey(id),
@@ -106,10 +127,14 @@ function fixture(tables: Record<string, Row[]>) {
               )
             : new Doc(documentKey(id));
         }
+        pointDocuments[table] = (pointDocuments[table] ?? 0) + 1;
         return new Doc(
           documentKey(id),
           tables[table]?.find((row) => row.id === id),
           table === 'contacts' ? contactUpdateTime() : undefined,
+          () => {
+            decodedDocuments[table] = (decodedDocuments[table] ?? 0) + 1;
+          },
         );
       },
     }),
@@ -117,15 +142,28 @@ function fixture(tables: Record<string, Row[]>) {
       getAll: async (...refs: Array<{ table: string; id: string }>) =>
         refs.map(({ table, id }) => {
           pointCalls.push(table);
+          pointDocuments[table] = (pointDocuments[table] ?? 0) + 1;
           return new Doc(
             documentKey(id),
             tables[table]?.find((row) => row.id === id),
             table === 'contacts' ? contactUpdateTime() : undefined,
+            () => {
+              decodedDocuments[table] = (decodedDocuments[table] ?? 0) + 1;
+            },
           );
         }),
     },
   } as unknown as InstallationStore;
-  return { store, calls, control, pointCalls };
+  return {
+    store,
+    calls,
+    control,
+    pointCalls,
+    queryDocuments,
+    decodedDocuments,
+    pointDocuments,
+    releaseFence: () => releaseHeldFence?.(),
+  };
 }
 function rows(count: number, extra: Row = {}): Row[] {
   return Array.from({ length: count }, (_, i) => ({
@@ -283,6 +321,115 @@ describe('bounded actual profile repository reads (offline)', () => {
     f.control.fence = 0;
     f.control.changed = true;
     await expect(repo.listFilters('owner')).rejects.toThrow('Privacy erasure changed during read');
+  });
+
+  it('reuses the resolved memory scan only inside an asymmetric shared read wave', async () => {
+    const f = fixture({ memories: rows(401, memory()) });
+    f.control.holdFenceAt = 2;
+    const repo = new FirestoreProfileLibraryRepository(f.store);
+    const listPromise = repo.list('owner', input);
+    const filtersPromise = repo.listFilters('owner');
+    const list = await listPromise;
+    expect(list.total).toBe(401);
+    expect(f.queryDocuments.memories).toBe(401);
+    f.releaseFence();
+    const filters = await filtersPromise;
+
+    expect(filters.subjects).toEqual([]);
+    expect(f.queryDocuments.memories).toBe(401);
+    expect(f.decodedDocuments.memories).toBe(401);
+    expect(f.calls.filter((call) => call.table === 'memories')).toHaveLength(2);
+
+    const priorQueries = f.queryDocuments.memories ?? 0;
+    const priorDecodes = f.decodedDocuments.memories ?? 0;
+    expect(await repo.listFilters('owner')).toEqual({ subjects: [], sources: [] });
+    expect((f.queryDocuments.memories ?? 0) - priorQueries).toBe(401);
+    expect((f.decodedDocuments.memories ?? 0) - priorDecodes).toBe(401);
+
+    f.control.fence = 0;
+    f.control.changed = true;
+    await expect(repo.listFilters('owner')).rejects.toThrow('Privacy erasure changed during read');
+  });
+
+  it('keeps asymmetric near-budget public list and filters within the existing read cap', async () => {
+    const f = fixture({ memories: rows(5000, memory()) });
+    f.control.holdFenceAt = 2;
+    const repo = new FirestoreProfileLibraryRepository(f.store);
+    const listPromise = repo.list('owner', input);
+    const filtersPromise = repo.listFilters('owner');
+    const list = await listPromise;
+    expect(list.total).toBe(5000);
+    expect(list.rows).toHaveLength(input.pageSize);
+    expect(f.queryDocuments.memories).toBe(5000);
+    f.releaseFence();
+    const filters = await filtersPromise;
+
+    expect(filters).toEqual({ subjects: [], sources: [] });
+    expect(f.queryDocuments.memories).toBe(5000);
+    expect(f.decodedDocuments.memories).toBe(5000);
+    expect(f.calls.filter((call) => call.table === 'memories')).toHaveLength(13);
+    expect(f.pointDocuments.knowledgeGraphSources).toBe(input.pageSize);
+  });
+
+  it('shares a failed memory scan only within the wave and retries from a fresh wave', async () => {
+    const f = fixture({ memories: rows(401, memory()) });
+    const failure = new Error('synthetic memory scan interruption');
+    f.control.holdFenceAt = 2;
+    f.control.memoryErrorOnce = failure;
+    const repo = new FirestoreProfileLibraryRepository(f.store);
+    const listPromise = repo.list('owner', input);
+    const filtersPromise = repo.listFilters('owner');
+
+    await expect(listPromise).rejects.toBe(failure);
+    expect(f.calls.filter((call) => call.table === 'memories')).toHaveLength(1);
+    expect(f.queryDocuments.memories ?? 0).toBe(0);
+    f.releaseFence();
+    await expect(filtersPromise).rejects.toBe(failure);
+    expect(f.calls.filter((call) => call.table === 'memories')).toHaveLength(1);
+    expect(f.decodedDocuments.memories ?? 0).toBe(0);
+
+    expect(await repo.listFilters('owner')).toEqual({ subjects: [], sources: [] });
+    expect(f.queryDocuments.memories).toBe(401);
+    expect(f.decodedDocuments.memories).toBe(401);
+    expect(f.calls.filter((call) => call.table === 'memories')).toHaveLength(3);
+  });
+
+  it('keeps shared-wave memory scans isolated by owner and by store', async () => {
+    const f = fixture({
+      memories: [
+        { ...memory(), id: 'owner-row-1' },
+        { ...memory(), id: 'owner-row-2' },
+        { ...memory({ agentId: 'other' }), id: 'other-row-1' },
+      ],
+    });
+    f.control.holdFenceAt = 2;
+    const repo = new FirestoreProfileLibraryRepository(f.store);
+    const ownerListPromise = repo.list('owner', input);
+    const otherFiltersPromise = repo.listFilters('other');
+    const ownerList = await ownerListPromise;
+    f.releaseFence();
+    const otherFilters = await otherFiltersPromise;
+    expect(ownerList.total).toBe(2);
+    expect(otherFilters).toEqual({ subjects: [], sources: [] });
+    expect(f.queryDocuments.memories).toBe(3);
+    expect(f.decodedDocuments.memories).toBe(3);
+    const memoryFilters = f.calls
+      .filter((call) => call.table === 'memories')
+      .map((call) => call.filters.find(([key]) => key === 'agentId')?.[2]);
+    expect(memoryFilters).toEqual(['owner', 'other']);
+
+    const firstStoreFixture = fixture({ memories: rows(3, memory()) });
+    const secondStoreFixture = fixture({ memories: rows(3, memory()) });
+    const firstRepository = new FirestoreProfileLibraryRepository(firstStoreFixture.store);
+    const secondRepository = new FirestoreProfileLibraryRepository(secondStoreFixture.store);
+    await Promise.all([
+      firstRepository.listFilters('owner'),
+      secondRepository.listFilters('owner'),
+    ]);
+    expect(firstStoreFixture.queryDocuments.memories).toBe(3);
+    expect(firstStoreFixture.decodedDocuments.memories).toBe(3);
+    expect(secondStoreFixture.queryDocuments.memories).toBe(3);
+    expect(secondStoreFixture.decodedDocuments.memories).toBe(3);
   });
 
   it('accepts library exact-cap EOF and counts wrong-identity memory rows before skipping', async () => {

@@ -7,13 +7,55 @@ import { verifyWifEnvironment } from './owner-editor-release-inventory.js';
 import { nativeRetirementClient } from './owner-web-tag-native.js';
 
 const exec = promisify(execFile);
-export async function protectedWebTagCloud() {
+export type ProtectedCloudStage =
+  | 'cloud_wif_validation'
+  | 'cloud_runner_validation'
+  | 'cloud_binary_validation'
+  | 'cloud_sdk_version'
+  | 'cloud_access_token'
+  | 'cloud_native_client';
+export type ProtectedCommandReason =
+  | 'sdk_binary_not_found'
+  | 'sdk_permission_denied'
+  | 'sdk_command_timed_out'
+  | 'sdk_output_limit'
+  | 'sdk_nonzero_exit'
+  | 'sdk_command_failed';
+export class ProtectedCloudCommandError extends Error {
+  constructor(readonly reason: ProtectedCommandReason) {
+    super('Protected native command failed');
+  }
+}
+export function protectedCommandReason(error: unknown): ProtectedCommandReason {
+  try {
+    const value = error as { code?: unknown; killed?: unknown } | null;
+    if (value?.code === 'ENOENT') return 'sdk_binary_not_found';
+    if (value?.code === 'EACCES') return 'sdk_permission_denied';
+    if (value?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return 'sdk_output_limit';
+    if (value?.killed === true) return 'sdk_command_timed_out';
+    if (
+      typeof value?.code === 'number' &&
+      Number.isInteger(value.code) &&
+      value.code > 0 &&
+      value.code <= 255
+    )
+      return 'sdk_nonzero_exit';
+  } catch {
+    /* Never inspect or expose hostile exception fields further. */
+  }
+  return 'sdk_command_failed';
+}
+export async function protectedWebTagCloud(
+  mark: (stage: ProtectedCloudStage) => void = () => undefined,
+) {
+  mark('cloud_wif_validation');
   const identity = verifyWifEnvironment(process.env, (file) => {
     const stat = lstatSync(file);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 32768)
       throw new Error('Invalid WIF file');
     return JSON.parse(readFileSync(file, 'utf8'));
   });
+  mark('cloud_runner_validation');
   if (!process.env.RUNNER_TEMP) throw new Error('Missing protected temporary directory');
   const childEnv = {
     PATH: '/usr/bin:/bin',
@@ -31,6 +73,7 @@ export async function protectedWebTagCloud() {
     process.env.RUNNER_TOOL_CACHE !== '/opt/hostedtoolcache'
   )
     throw new Error('Unsupported protected cloud runner');
+  mark('cloud_binary_validation');
   const binary = '/opt/hostedtoolcache/gcloud/576.0.0/x64/bin/gcloud';
   const binaryStat = lstatSync(binary);
   if (!binaryStat.isFile() || binaryStat.isSymbolicLink() || (binaryStat.mode & 0o111) === 0)
@@ -45,11 +88,15 @@ export async function protectedWebTagCloud() {
           killSignal: 'SIGKILL',
         })
       ).stdout;
-    } catch {
-      throw new Error('Protected native command failed');
+    } catch (error) {
+      throw new ProtectedCloudCommandError(protectedCommandReason(error));
     }
   }
+  mark('cloud_sdk_version');
   const version = JSON.parse(await command(['version', '--format=json']));
   if (version['Google Cloud SDK'] !== '576.0.0') throw new Error('Unaudited cloud CLI');
-  return nativeRetirementClient((await command(['auth', 'print-access-token', '--quiet'])).trim());
+  mark('cloud_access_token');
+  const token = (await command(['auth', 'print-access-token', '--quiet'])).trim();
+  mark('cloud_native_client');
+  return nativeRetirementClient(token);
 }
