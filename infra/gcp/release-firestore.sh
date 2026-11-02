@@ -422,6 +422,23 @@ if (( FAILURE_COUNT )); then
   exit 1
 fi
 
+final_web_url="$(gcloud run services describe assistant-web \
+  --project "$PROJECT" --region "$REGION" --format='value(status.url)')" || exit 1
+[[ -n "$final_web_url" ]] || { echo 'Could not resolve the final assistant-web URL.' >&2; exit 1; }
+
+if [[ "$(release_basic_editor_forward_only)" == true ]]; then
+  manifest_path="${RELEASE_MANIFEST_PATH:-}"
+  [[ -n "$manifest_path" && -f "$manifest_path" ]] || {
+    echo 'BASIC5 terminal certification requires the exact release manifest.' >&2
+    exit 1
+  }
+  manifest_sha="$(node -e 'const x=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(String(x.manifestDigest??""))' "$manifest_path")" || exit 1
+  tag_suffix="$(release_traffic_tag_suffix)" || exit 1
+  release_certify_basic_web_terminal "$TAG" "$manifest_path" "$manifest_sha" "candidate-${tag_suffix}" || {
+    echo 'BASIC5 terminal certification failed; delivery holds remain owned.' >&2
+    exit 1
+  }
+fi
+
 echo "Firestore release ${TAG} is live"
-gcloud run services describe assistant-web \
-  --project "$PROJECT" --region "$REGION" --format='value(status.url)'
+printf '%s\n' "$final_web_url"

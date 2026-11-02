@@ -194,6 +194,43 @@ release_capture_owned_web_tags() {
   printf 'capture:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" >>"$STUB_ADMISSION_CALLS"
   [[ "${FAIL_ADMISSION_CAPTURE:-0}" != 1 ]]
 }
+release_initialize_basic_web_lifecycle() {
+  printf 'native-init:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" >>"$STUB_ADMISSION_CALLS"
+}
+release_wait_for_basic_web_operator_hold() {
+  printf 'native-hold:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" >>"$STUB_ADMISSION_CALLS"
+}
+release_accept_basic_web_agent_ready() {
+  printf 'agent-ready:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" >>"$STUB_ADMISSION_CALLS"
+  [[ "${FAIL_AGENT_READY_RECEIPT:-0}" != 1 ]]
+}
+release_run_basic_web_phase() {
+  local phase="$1" source="$2" digest="$4" tag="$5" suffix image env
+  printf 'native-phase:%s\n' "$phase" >>"$STUB_ADMISSION_CALLS"
+  suffix="${tag#candidate-}"
+  image="${IMAGE_ROOT}/web@$(release_component_digest web)"
+  case "$phase" in
+    createP)
+      env="ASSISTANT_RELEASE_API_CONTRACT=${RELEASE_WEB_API},ASSISTANT_RELEASE_AGENT_API_MIN=${RELEASE_WEB_PEER_MIN},ASSISTANT_RELEASE_AGENT_API_MAX=${RELEASE_WEB_PEER_MAX},ASSISTANT_RELEASE_SCHEMA_DRIVER=${RELEASE_STORAGE_DRIVER},ASSISTANT_RELEASE_SCHEMA_MIN=${RELEASE_WEB_SCHEMA_MIN},ASSISTANT_RELEASE_SCHEMA_MAX=${RELEASE_WEB_SCHEMA_MAX},ASSISTANT_RELEASE_SCHEMA_VERSION=${RELEASE_SCHEMA_VERSION},ASSISTANT_RELEASE_MANIFEST=${digest},ASSISTANT_RELEASE_WRITES_PAUSED=true,ASSISTANT_RELEASE_WORKFLOW_RUN_ID=${GITHUB_RUN_ID},ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT},ASSISTANT_RELEASE_SOURCE_SHA=${source}"
+      gcloud run services update assistant-web --project "$PROJECT" --region "$REGION" --image "$image" --no-traffic --tag "$tag" --update-env-vars "$env" --quiet
+      ;;
+    attachP|attachR) : ;;
+    promoteP) gcloud run services update-traffic assistant-web --project "$PROJECT" --region "$REGION" --to-revisions assistant-web-new1=100 --quiet ;;
+    createR)
+      env="ASSISTANT_RELEASE_API_CONTRACT=${RELEASE_WEB_API},ASSISTANT_RELEASE_AGENT_API_MIN=${RELEASE_WEB_PEER_MIN},ASSISTANT_RELEASE_AGENT_API_MAX=${RELEASE_WEB_PEER_MAX},ASSISTANT_RELEASE_SCHEMA_DRIVER=${RELEASE_STORAGE_DRIVER},ASSISTANT_RELEASE_SCHEMA_MIN=${RELEASE_WEB_SCHEMA_MIN},ASSISTANT_RELEASE_SCHEMA_MAX=${RELEASE_WEB_SCHEMA_MAX},ASSISTANT_RELEASE_SCHEMA_VERSION=${RELEASE_SCHEMA_VERSION},ASSISTANT_RELEASE_MANIFEST=${digest},ASSISTANT_RELEASE_WRITES_PAUSED=false,ASSISTANT_RELEASE_WORKFLOW_RUN_ID=${GITHUB_RUN_ID},ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT},ASSISTANT_RELEASE_SOURCE_SHA=${source}"
+      gcloud run services update assistant-web --project "$PROJECT" --region "$REGION" --image "$image" --no-traffic --tag "resume-${suffix}" --update-env-vars "$env" --quiet
+      ;;
+    promoteR) gcloud run services update-traffic assistant-web --project "$PROJECT" --region "$REGION" --to-revisions assistant-web-new2=100 --quiet ;;
+    repauseP) gcloud run services update-traffic assistant-web --project "$PROJECT" --region "$REGION" --to-revisions assistant-web-new1=100 --quiet ;;
+    closeP) gcloud run services update-traffic assistant-web --project "$PROJECT" --region "$REGION" --remove-tags "$tag" --quiet ;;
+    closeR)
+      [[ "${REASSIGN_RESUME_TAG_ON_REPAUSE:-0}" != 1 ]] || return 1
+      gcloud run services update-traffic assistant-web --project "$PROJECT" --region "$REGION" --remove-tags "resume-${suffix}" --quiet
+      ;;
+    restoreC) gcloud run services update-traffic assistant-web --project "$PROJECT" --region "$REGION" --to-revisions web-old=100 --quiet ;;
+    *) return 2 ;;
+  esac
+}
 release_retire_captured_web_tags() {
   printf 'retire:%s:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" "${OWNED_TAGS_ALREADY_ABSENT:-0}" >>"$STUB_ADMISSION_CALLS"
   [[ "${FAIL_ADMISSION_RETIRE:-0}" != 1 ]] || return 1
@@ -221,7 +258,7 @@ JSON
     FAIL_AGENT_PROMOTE FAIL_WEB_PROMOTE FAIL_REPAUSE FAIL_RESUME_DRAIN STUB_WEB_TIMEOUT_SECONDS STUB_WEB_TIMEOUT_MISSING \
     FAIL_WORKER_UPDATE STALE_WORKER_IMAGE FAIL_TAG_REMOVAL MUTATE_TRAFFIC_AFTER_TAG_REMOVAL \
     ADD_FOREIGN_TAG_TO_PROMOTED_REVISION FAIL_RESUME_STAGE_UNCERTAIN REASSIGN_RESUME_TAG_ON_REPAUSE AGENT_IMAGE_PUSH_DIGEST \
-    FAIL_ADMISSION_CAPTURE FAIL_ADMISSION_RETIRE FAIL_ADMISSION_VERIFY FAIL_CANDIDATE_RECEIPT FAIL_RESUME_RECEIPT OWNED_TAGS_ALREADY_ABSENT
+    FAIL_ADMISSION_CAPTURE FAIL_ADMISSION_RETIRE FAIL_ADMISSION_VERIFY FAIL_CANDIDATE_RECEIPT FAIL_RESUME_RECEIPT FAIL_AGENT_READY_RECEIPT OWNED_TAGS_ALREADY_ABSENT
  : >"$STUB_CURL_CALLS"
  : >"$STUB_RELEASE_CALLS"
  : >"$STUB_SERVICE_UPDATE_CALLS"
@@ -534,6 +571,9 @@ resume_receipt=next(i for i,x in enumerate(events) if x.startswith('record:resum
 resume_probe=next(i for i,x in enumerate(events) if x.startswith('probe:https://resume-'))
 assert candidate_receipt<candidate_probe, events
 assert resume_receipt<resume_probe, events
+agent_ready=next(i for i,x in enumerate(events) if x.startswith('agent-ready:'))
+create_resume=next(i for i,x in enumerate(events) if x=='native-phase:createR')
+assert agent_ready<create_resume, events
 assert all(key in web_updates[0] for key in (
  'ASSISTANT_RELEASE_WORKFLOW_RUN_ID=12345',
  'ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT=1',
@@ -640,6 +680,16 @@ import sys
 calls=open(sys.argv[1]).read().splitlines(); events=open(sys.argv[2]).read().splitlines()
 assert not any('assistant-web-new2=100' in x for x in calls), calls
 assert any(x.startswith('record:resume:') for x in events), events
+PYCASE
+reset_case; prepare_firestore_state; export RELEASE_MODULES=browser FAIL_AGENT_READY_RECEIPT=1
+if release_staged_services; then fail 'failed paired agent readiness receipt must prevent unpaused creation'; fi
+assert_old_traffic
+python3 - "$STUB_RELEASE_CALLS" "$STUB_ADMISSION_CALLS" <<'PYCASE'
+import sys
+calls=open(sys.argv[1]).read().splitlines(); events=open(sys.argv[2]).read().splitlines()
+assert not any('assistant-web-new2=100' in x for x in calls), calls
+assert any(x.startswith('agent-ready:') for x in events), events
+assert not any(x=='native-phase:createR' for x in events), events
 PYCASE
 reset_case; prepare_firestore_state; export RELEASE_MODULES=browser RESUME_LIVE_PROBE_FAIL=1
 if release_staged_services; then fail 'postadmission failure must repause and retain marker-aware runtimes'; fi

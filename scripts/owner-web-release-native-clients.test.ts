@@ -1,4 +1,15 @@
 // biome-ignore-all lint/style/noNonNullAssertion: Explicit synthetic fixtures populate each referenced field.
+
+import {
+  chmodSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { nativeWebCreationFixtureClient } from './owner-web-release-creation-client.js';
 import {
@@ -12,8 +23,15 @@ import {
   type State,
   verifyLifecycleState,
 } from './owner-web-release-lifecycle-model.js';
+import {
+  initializePairedWebLifecycle,
+  runPairedWebLifecyclePhase,
+} from './owner-web-release-native-controller.js';
 import { projectNativeWebSnapshot } from './owner-web-release-native-proof.js';
 import { type FixtureDependencies, NativeReleaseHold } from './owner-web-release-native-session.js';
+import { verifyOperatorOwnedHold } from './owner-web-release-operator-hold.js';
+import { createPrivateReleasePhaseReceipts } from './owner-web-release-phase-receipts.js';
+import { bindCapturedRetirementToLifecycle } from './owner-web-release-retirement-binding.js';
 import { nativeWebTrafficFixtureClient } from './owner-web-release-traffic-client.js';
 import { HISTORICAL_WEB_TAGS, WEB_SERVICE } from './owner-web-tag-retirement.js';
 
@@ -229,6 +247,125 @@ function fixture() {
 }
 afterEach(() => vi.useRealTimers());
 describe('unwired fixed native fixture clients', () => {
+  it('initializes only from a fresh canonical-only native projection and checks hold before a phase', async () => {
+    const f = fixture(),
+      root = mkdtempSync(join(tmpdir(), 'owner-web-controller-private-')),
+      receipts = createPrivateReleasePhaseReceipts(root, {
+        source: f.context.source,
+        runId: f.context.runId,
+        attempt: f.context.attempt,
+        manifest: f.context.manifest,
+      });
+    const initial = initializePairedWebLifecycle(f.context, f.service, f.native, receipts);
+    expect(initial.phase).toBe('captured');
+    expect(receipts.readCurrent().receipt).toBe(initial.receipt);
+    const hold = vi.fn(async () => {});
+    const after = await runPairedWebLifecyclePhase('createP', stamp, f.deps, receipts, hold);
+    expect(hold).toHaveBeenCalledOnce();
+    expect(after.phase).toBe('createdP');
+  });
+
+  it('refuses to initialize from unsupported starting aliases', () => {
+    const f = fixture(),
+      root = mkdtempSync(join(tmpdir(), 'owner-web-controller-private-')),
+      receipts = createPrivateReleasePhaseReceipts(root, {
+        source: f.context.source,
+        runId: f.context.runId,
+        attempt: f.context.attempt,
+        manifest: f.context.manifest,
+      }),
+      changed = copy(f.service);
+    changed.traffic.push({
+      type: 'TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION',
+      revision: f.context.canonical,
+      tag: 'resume-40350727924-1',
+      percent: 0,
+    });
+    expect(() => initializePairedWebLifecycle(f.context, changed, f.native, receipts)).toThrow(
+      'canonical web tag',
+    );
+  });
+
+  it('requires manually disabled workflows, cleanup false, and a complete run/job census', async () => {
+    const f = fixture(),
+      root = mkdtempSync(join(tmpdir(), 'owner-web-controller-private-')),
+      tokenPath = join(root, 'owner-web-tag-github-token'),
+      state = f.state();
+    writeFileSync(tokenPath, 'fixture-token', { mode: 0o600 });
+    const env = {
+      GITHUB_REPOSITORY: 'bmson/assistant',
+      GITHUB_WORKFLOW_REF: 'bmson/assistant/.github/workflows/deploy.yml@refs/heads/main',
+      GITHUB_WORKFLOW_SHA: f.context.source,
+      GITHUB_SHA: f.context.source,
+      GITHUB_RUN_ID: f.context.runId,
+      GITHUB_RUN_ATTEMPT: f.context.attempt,
+      GITHUB_EVENT_NAME: 'workflow_dispatch',
+      GITHUB_JOB: 'release',
+      RUNNER_TEMP: root,
+      CURRENT_ONLY_CLEANUP: 'false',
+    } as NodeJS.ProcessEnv;
+    const request = vi.fn(async (url: string) => {
+      if (url.endsWith('/actions/workflows/deploy.yml'))
+        return { id: 1, state: 'disabled_manually' };
+      if (url.endsWith('/actions/workflows/cleanup.yml'))
+        return { id: 2, state: 'disabled_manually' };
+      if (url.endsWith('/actions/workflows/workspace-import.yml'))
+        return { id: 3, state: 'disabled_manually' };
+      if (url.includes('/runs?')) {
+        const active = url.includes('status=in_progress');
+        const deploy = url.includes('/deploy.yml/');
+        return {
+          total_count: active && deploy ? 1 : 0,
+          workflow_runs:
+            active && deploy
+              ? [
+                  {
+                    id: Number(f.context.runId),
+                    run_attempt: 1,
+                    head_sha: f.context.source,
+                    event: 'workflow_dispatch',
+                    status: 'in_progress',
+                  },
+                ]
+              : [],
+        };
+      }
+      if (url.includes('/jobs?'))
+        return { total_count: 1, jobs: [{ name: 'release', status: 'in_progress' }] };
+      throw new Error('unexpected hold URL');
+    });
+    const receipt = await verifyOperatorOwnedHold(state.context, env, request);
+    expect(receipt).toEqual({
+      source: f.context.source,
+      runId: f.context.runId,
+      attempt: f.context.attempt,
+      currentJob: 'release',
+      deployWorkflowId: 1,
+      cleanupWorkflowId: 2,
+      workspaceImportWorkflowId: 3,
+      cleanupVariable: 'false',
+    });
+    await expect(
+      verifyOperatorOwnedHold(
+        state.context,
+        env,
+        vi.fn(async () => {
+          throw new Error('403');
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('grants actions read only to the selected release job', () => {
+    const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
+    expect(workflow).toMatch(
+      / {2}release:\n {4}permissions:\n {6}actions: read\n {6}contents: read\n {6}id-token: write\n/,
+    );
+    const workflowPermissions = workflow.slice(0, workflow.indexOf('\njobs:\n'));
+    expect(workflowPermissions).toMatch(/permissions:\n {2}contents: read\n {2}id-token: write\n/);
+    expect(workflowPermissions).not.toMatch(/actions:\s*read/);
+  });
+
   it('constructs raw proofs, creates without traffic change then attaches and promotes through separate client', async () => {
     const f = fixture(),
       initial = f.state(),
@@ -708,6 +845,317 @@ describe('receipt and transport budget failures', () => {
           !Object.keys(init.headers ?? {}).some((k) => k.toLowerCase() === 'authorization'),
       ),
     ).toBe(true);
+  });
+});
+
+describe('private single-run lifecycle receipts', () => {
+  function storeFor(f: ReturnType<typeof fixture>) {
+    const root = mkdtempSync(join(tmpdir(), 'owner-web-release-private-'));
+    chmodSync(root, 0o700);
+    const store = createPrivateReleasePhaseReceipts(root, {
+      source: f.context.source,
+      runId: f.context.runId,
+      attempt: f.context.attempt,
+      manifest: f.context.manifest,
+    });
+    store.initialize(f.state());
+    return store;
+  }
+  it('fsyncs immutable attempted and completion receipts around one native creation', async () => {
+    const f = fixture(),
+      store = storeFor(f),
+      client = nativeWebCreationFixtureClient({
+        ...f.deps,
+        recordIntent: async (state) => {
+          store.recordIntent(state);
+          await f.deps.recordIntent(state);
+        },
+      });
+    const completed = await client.execute(store.readCurrent(), 'createP', stamp);
+    expect(completed.phase).toBe('createdP');
+    expect(store.readCurrent().receipt).toBe(completed.receipt);
+    expect(readdirSync(store.directory).sort()).toEqual([
+      'attempt-1-createP.json',
+      'complete-3-createdP.json',
+      'operation-2-createP.json',
+      'state.json',
+    ]);
+    expect(statSync(store.directory).mode & 0o777).toBe(0o700);
+    expect(statSync(join(store.directory, 'attempt-1-createP.json')).mode & 0o777).toBe(0o600);
+    expect(readFileSync(join(store.directory, 'attempt-1-createP.json'), 'utf8')).toContain(
+      privateValue,
+    );
+    await expect(
+      nativeWebCreationFixtureClient({
+        ...f.deps,
+        recordIntent: async (state) => {
+          store.recordIntent(state);
+          await f.deps.recordIntent(state);
+        },
+      }).execute(store.readCurrent(), 'createP', stamp),
+    ).rejects.toMatchObject({ mutationState: 'not_attempted' });
+    expect(f.writes()).toBe(1);
+  });
+  it('refuses the native PATCH when the immutable prewrite receipt already exists', async () => {
+    const f = fixture(),
+      store = storeFor(f),
+      initial = store.readCurrent();
+    writeFileSync(join(store.directory, 'attempt-1-createP.json'), 'prior attempt\n', {
+      flag: 'wx',
+      mode: 0o600,
+    });
+    const client = nativeWebCreationFixtureClient({
+      ...f.deps,
+      recordIntent: async (state) => {
+        store.recordIntent(state);
+        await f.deps.recordIntent(state);
+      },
+    });
+    await expect(client.execute(initial, 'createP', stamp)).rejects.toMatchObject({
+      mutationState: 'not_attempted',
+    });
+    expect(f.writes()).toBe(0);
+    expect(() => store.readCurrent()).toThrow('held');
+  });
+  it('persists an unresolved native outcome and refuses a later phase read', async () => {
+    const f = fixture(),
+      store = storeFor(f);
+    f.setOverride((_url, options) =>
+      options.method === 'PATCH' ? reply({ private: privateValue }, 412) : undefined,
+    );
+    const client = nativeWebCreationFixtureClient({
+      ...f.deps,
+      recordIntent: async (state) => {
+        store.recordIntent(state);
+        await f.deps.recordIntent(state);
+      },
+    });
+    await expect(client.execute(store.readCurrent(), 'createP', stamp)).rejects.toMatchObject({
+      mutationState: 'may_have_been_attempted',
+    });
+    expect(readdirSync(store.directory)).toContain('unknown-2-createP.json');
+    expect(() => store.readCurrent()).toThrow('held');
+    expect(f.requests.filter((request) => request.method === 'PATCH')).toHaveLength(1);
+  });
+  it('keeps the phase unresolved when terminal postcheck completion cannot be durably recorded', async () => {
+    const f = fixture(),
+      store = storeFor(f);
+    writeFileSync(join(store.directory, 'complete-3-createdP.json'), 'prior completion\n', {
+      flag: 'wx',
+      mode: 0o600,
+    });
+    const client = nativeWebCreationFixtureClient({
+      ...f.deps,
+      recordIntent: async (state) => {
+        store.recordIntent(state);
+        await f.deps.recordIntent(state);
+      },
+    });
+    await expect(client.execute(store.readCurrent(), 'createP', stamp)).rejects.toMatchObject({
+      mutationState: 'may_have_been_attempted',
+    });
+    expect(() => store.readCurrent()).toThrow('held');
+    expect(f.writes()).toBe(1);
+  });
+});
+
+describe('captured retirement lifecycle binding', () => {
+  async function promotedPausedCandidate() {
+    const f = fixture(),
+      store = (() => {
+        const root = mkdtempSync(join(tmpdir(), 'owner-web-retirement-private-'));
+        chmodSync(root, 0o700);
+        const receipts = createPrivateReleasePhaseReceipts(root, {
+          source: f.context.source,
+          runId: f.context.runId,
+          attempt: f.context.attempt,
+          manifest: f.context.manifest,
+        });
+        receipts.initialize(f.state());
+        return receipts;
+      })();
+    const deps = {
+      ...f.deps,
+      recordIntent: async (state: State) => {
+        store.recordIntent(state);
+        await f.deps.recordIntent(state);
+      },
+    };
+    const created = await nativeWebCreationFixtureClient(deps).execute(
+      store.readCurrent(),
+      'createP',
+      stamp,
+    );
+    const attached = await nativeWebTrafficFixtureClient(deps).execute(created, 'attachP', stamp);
+    const promoted = await nativeWebTrafficFixtureClient(deps).execute(attached, 'promoteP', stamp);
+    return { f, store, promoted };
+  }
+  function retirementBody(state: State) {
+    const candidate = releaseIdentity(state.context, 'P');
+    return {
+      name: WEB_SERVICE as typeof WEB_SERVICE,
+      etag: state.snapshot.etag,
+      traffic: [
+        {
+          type: 'TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION' as const,
+          revision: candidate.revision,
+          tag: candidate.tag,
+          percent: 100,
+        },
+      ],
+    };
+  }
+  it('binds the real returned operation before wait and checkpoints only after captured completion', async () => {
+    const { f, store, promoted } = await promotedPausedCandidate(),
+      initialOperation = {
+        name: 'projects/bmson-assistant/locations/us-west1/operations/op-retire-captured',
+      },
+      patchTraffic = vi.fn(async () => initialOperation),
+      waitOperation = vi.fn(async (operation: unknown) => {
+        expect(operation).toBe(initialOperation);
+        expect(readdirSync(store.directory)).toContain('retirement-operation-11-promotedP.json');
+      }),
+      binding = bindCapturedRetirementToLifecycle(
+        promoted,
+        {
+          readService: async () => ({}),
+          readRevision: async () => ({}),
+          patchTraffic,
+          waitOperation,
+          drain: async (seconds) => expect(seconds).toBe(600),
+        },
+        store,
+      );
+    const operation = await binding.io.patchTraffic(retirementBody(promoted));
+    expect(operation).toBe(initialOperation);
+    await binding.io.waitOperation(operation);
+    expect(readdirSync(store.directory)).toContain('retirement-attempt-10-promotedP.json');
+
+    const candidate = releaseIdentity(promoted.context, 'P');
+    f.service.traffic = retirementBody(promoted).traffic;
+    f.service.trafficStatuses = retirementBody(promoted).traffic.map(
+      (row: {
+        revision: string;
+        tag: string;
+        percent: number;
+        type: 'TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION';
+      }) => ({
+        ...row,
+        uri: `https://${row.tag}---assistant-web-3gimfiaifa-uw.a.run.app`,
+      }),
+    );
+    f.service.urls = [
+      f.service.uri,
+      ...f.service.trafficStatuses.map((row: { uri: string }) => row.uri),
+    ];
+    f.service.latestReadyRevision = candidate.revision;
+    f.service.latestCreatedRevision = candidate.revision;
+    f.service.etag = 'after-retirement';
+    f.service.generation = String(BigInt(f.service.generation) + 1n);
+    f.service.observedGeneration = f.service.generation;
+    const after = projectNativeWebSnapshot(
+      f.service,
+      {
+        [promoted.context.canonical]: f.native[promoted.context.canonical]!,
+        [candidate.revision]: f.native[candidate.revision]!,
+      },
+      promoted.context,
+    );
+    const completed = binding.complete(
+      {
+        serviceEtag: after.etag,
+        serviceGeneration: after.generation,
+        action: 'retire_exact_tags',
+        drainSeconds: 600,
+        drainCompleted: true,
+      },
+      after,
+    );
+    expect(completed.phase).toBe('retired');
+    expect(store.readCurrent().receipt).toBe(completed.receipt);
+    expect(readdirSync(store.directory)).toContain('checkpoint-12-retired.json');
+  });
+  it('does not call the provider if the prewrite retirement receipt cannot be created', async () => {
+    const { store, promoted } = await promotedPausedCandidate(),
+      body = retirementBody(promoted);
+    writeFileSync(
+      join(store.directory, 'retirement-attempt-10-promotedP.json'),
+      'prior attempt\n',
+      {
+        flag: 'wx',
+        mode: 0o600,
+      },
+    );
+    const patchTraffic = vi.fn(async () => ({
+      name: 'projects/bmson-assistant/locations/us-west1/operations/never',
+    }));
+    const binding = bindCapturedRetirementToLifecycle(
+      promoted,
+      {
+        readService: async () => ({}),
+        readRevision: async () => ({}),
+        patchTraffic,
+        waitOperation: async () => {},
+        drain: async () => {},
+      },
+      store,
+    );
+    await expect(binding.io.patchTraffic(body)).rejects.toThrow();
+    expect(patchTraffic).not.toHaveBeenCalled();
+  });
+  it('holds an uncertain patch and refuses to wait when op receipt persistence fails', async () => {
+    const { store, promoted } = await promotedPausedCandidate(),
+      body = retirementBody(promoted),
+      operation = { name: 'projects/bmson-assistant/locations/us-west1/operations/op-bind-fail' };
+    writeFileSync(join(store.directory, 'retirement-operation-11-promotedP.json'), 'prior op\n', {
+      flag: 'wx',
+      mode: 0o600,
+    });
+    const patchTraffic = vi.fn(async () => operation),
+      waitOperation = vi.fn(async () => {}),
+      binding = bindCapturedRetirementToLifecycle(
+        promoted,
+        {
+          readService: async () => ({}),
+          readRevision: async () => ({}),
+          patchTraffic,
+          waitOperation,
+          drain: async () => {},
+        },
+        store,
+      );
+    await expect(binding.io.patchTraffic(body)).rejects.toThrow('held');
+    expect(patchTraffic).toHaveBeenCalledTimes(1);
+    expect(waitOperation).not.toHaveBeenCalled();
+    expect(readdirSync(store.directory)).toContain('retirement-attempt-10-promotedP.json');
+    expect(() => store.readCurrent()).toThrow('held');
+  });
+  it('marks a completed-write postcheck or drain failure unresolved without retry', async () => {
+    const { store, promoted } = await promotedPausedCandidate(),
+      body = retirementBody(promoted),
+      patchTraffic = vi.fn(async () => ({
+        name: 'projects/bmson-assistant/locations/us-west1/operations/op-drain-fail',
+      }));
+    const binding = bindCapturedRetirementToLifecycle(
+      promoted,
+      {
+        readService: async () => ({}),
+        readRevision: async () => ({}),
+        patchTraffic,
+        waitOperation: async () => {},
+        drain: async () => {
+          throw new Error('untrusted drain failure');
+        },
+      },
+      store,
+    );
+    await binding.io.patchTraffic(body);
+    await binding.io.waitOperation({
+      name: 'projects/bmson-assistant/locations/us-west1/operations/op-drain-fail',
+    });
+    binding.markUnresolved();
+    expect(() => store.readCurrent()).toThrow('held');
+    expect(patchTraffic).toHaveBeenCalledTimes(1);
   });
 });
 

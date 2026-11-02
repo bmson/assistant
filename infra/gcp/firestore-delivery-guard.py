@@ -98,6 +98,9 @@ class DeliveryGuard:
         self.agent_url = agent_url
         self.drain_timeout = drain_timeout
         self.workers = workers or {}
+        self.basic5 = os.environ.get("RELEASE_BASIC5", "false")
+        if self.basic5 not in ("true", "false"):
+            raise GuardError("RELEASE_BASIC5 must be exactly true or false")
         self.worker_job_names: list[str] = []
         self.queue_name = f"projects/{project}/locations/{location}/queues/{QUEUE}"
         self.scheduler_names = [
@@ -429,6 +432,8 @@ class DeliveryGuard:
             raise GuardError("delivery guard receipt identity does not match this project")
         owned = list(receipt.get("owned", []))
         self._validate_owned_entries(receipt, owned)
+        if self.basic5 == "true" and owned:
+            self._require_safe_basic5_terminal_certificate()
         child_group = receipt.get("childProcessGroup")
         if receipt.get("childActive") and child_group and self._process_group_exists(int(child_group)):
             raise GuardError(
@@ -454,6 +459,74 @@ class DeliveryGuard:
         os.replace(self.receipt_path, archive)
         os.chmod(archive, 0o600)
         print(f"Restored all owned delivery holds; receipt archived at {archive}")
+
+    def _require_safe_basic5_terminal_certificate(self) -> None:
+        runner_temp = Path(os.environ.get("RUNNER_TEMP", ""))
+        source = os.environ.get("OWNER_TAG_RELEASE_SOURCE", "")
+        run_id = os.environ.get("GITHUB_RUN_ID", "")
+        attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "")
+        job = os.environ.get("GITHUB_JOB", "")
+        if (
+            not runner_temp.is_dir()
+            or not re.fullmatch(r"[a-f0-9]{40}", source)
+            or not re.fullmatch(r"[1-9][0-9]{0,19}", run_id)
+            or attempt != "1"
+            or job != "release"
+        ):
+            raise GuardError("BASIC5 delivery holds require a matching safe terminal certificate")
+        hold_path = runner_temp / f"owner-web-release-hold-{run_id}-{attempt}.json"
+        try:
+            hold_stat = hold_path.lstat()
+            if (
+                not hold_path.is_file()
+                or hold_path.is_symlink()
+                or hold_stat.st_size < 1
+                or hold_stat.st_size > 4096
+                or hold_stat.st_mode & 0o077
+            ):
+                raise GuardError("BASIC5 operator hold receipt is missing or invalid")
+            hold = json.loads(hold_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise GuardError("BASIC5 operator hold receipt is missing or invalid") from error
+        if (
+            not isinstance(hold, dict)
+            or hold.get("format") != 1
+            or hold.get("source") != source
+            or hold.get("runId") != run_id
+            or hold.get("attempt") != attempt
+            or hold.get("job") != job
+            or hold.get("event") != "workflow_dispatch"
+            or hold.get("cleanupVariableBefore") != "false"
+            or hold.get("deployBefore") not in ("active", "disabled_manually", "disabled_inactivity", "disabled_fork")
+            or hold.get("cleanupBefore") not in ("active", "disabled_manually", "disabled_inactivity", "disabled_fork")
+        ):
+            raise GuardError("BASIC5 operator hold receipt does not match this release attempt")
+        path = runner_temp / f"owner-web-release-{run_id}-{attempt}" / "terminal-safe.json"
+        try:
+            metadata = path.lstat()
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or metadata.st_size < 1
+                or metadata.st_size > 4096
+                or metadata.st_mode & 0o077
+            ):
+                raise GuardError("BASIC5 terminal certificate is missing or invalid")
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise GuardError("BASIC5 terminal certificate is missing or invalid") from error
+        if (
+            not isinstance(value, dict)
+            or value.get("format") != 1
+            or value.get("source") != source
+            or value.get("runId") != run_id
+            or value.get("attempt") != attempt
+            or value.get("job") != job
+            or value.get("phase") != "complete"
+            or not re.fullmatch(r"[a-f0-9]{64}", str(value.get("manifest", "")))
+            or not re.fullmatch(r"[a-f0-9]{64}", str(value.get("stateReceipt", "")))
+        ):
+            raise GuardError("BASIC5 terminal certificate does not match this release attempt")
 
     def _validate_owned_entries(self, receipt: dict[str, Any], owned: list[dict[str, Any]]) -> None:
         queue_seen = False

@@ -67,3 +67,37 @@ and ordinary staging/probes. The separate manual retirement workflow has a
 45 minute job ceiling for its single drain; its bounded command portion is at
 most about 935 seconds before ordinary process scheduling, leaving setup margin.
 A timeout or interrupted drain still produces no completed barrier receipt.
+
+Before the delivery guard acquires any holds, an operator disables the deploy,
+cleanup, and workspace-import workflows. Before disabling them, the operator
+must separately and freshly read the repository-level `CURRENT_ONLY_CLEANUP`
+variable and the production-environment override. The repository-level value
+must exist and equal exactly `false`. The production override must be freshly
+proven absent (the exact variable endpoint returns 404) or exist and equal
+exactly `false`; do not create an override to make the check pass. Preserve the
+actual distinction between absent and present-false in the operator's record,
+bound to the exact trusted source, run, attempt, and release job. A 403, unknown
+response, or drift is a HOLD. This operator record is separate from the job
+receipt. The protected release job also snapshots the effective production
+`CURRENT_ONLY_CLEANUP` value and requires exact `false`; its private run receipt
+binds that effective snapshot to the same source, run, attempt, and job. The
+operator records the original workspace-import workflow state; it is restored
+manually only after a confirmed safe terminal result and only if it was active
+before the hold. A previously disabled workflow stays disabled, and an unknown
+result keeps it disabled. Each native phase rechecks all three disabled
+workflow states, the job snapshot, and the fresh run census. The effective job
+snapshot is not a fresh Variables API read and does not independently prove
+either repository-level or production-environment variable values.
+
+The active-run census checks every active status, with bounded complete
+pagination, for `deploy.yml`, `cleanup.yml`, `owner-web-tag-retirement.yml`,
+`owner-web-traffic-reconciliation.yml`, `prepare-owner-editor-index.yml`,
+`owner-editor-v1-maintenance.yml`, and `workspace-import.yml`. Any active run
+in a manual writer workflow blocks admission, including a queued traffic
+correction, index preparation, metadata apply, or workspace import. The list
+is intentionally conservative when an API run listing does not expose the
+selected mode. `owner-editor-release-inventory.yml --collect` is a read-only
+observation workflow; `workspace-export.yml` reads Firestore and writes an
+export snapshot, not Firestore data. They are not treated as competing
+Firestore writers. Missing, oversized, stalled, malformed, or incomplete API
+responses keep the release held.

@@ -4,9 +4,26 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mocked = vi.hoisted(() => ({ cloud: vi.fn(), artifact: vi.fn() }));
+const mocked = vi.hoisted(() => ({
+  cloud: vi.fn(),
+  artifact: vi.fn(),
+  openReceipts: vi.fn(),
+  bindRetirement: vi.fn(),
+  hold: vi.fn(),
+  project: vi.fn(),
+}));
 vi.mock('./owner-web-tag-cloud.js', () => ({ protectedWebTagCloud: mocked.cloud }));
 vi.mock('./owner-web-tag-artifact.js', () => ({ readProtectedWebTagArtifact: mocked.artifact }));
+vi.mock('./owner-web-release-phase-receipts.js', () => ({
+  openPrivateReleasePhaseReceipts: mocked.openReceipts,
+}));
+vi.mock('./owner-web-release-retirement-binding.js', () => ({
+  bindCapturedRetirementToLifecycle: mocked.bindRetirement,
+}));
+vi.mock('./owner-web-release-operator-hold.js', () => ({ verifyOperatorOwnedHold: mocked.hold }));
+vi.mock('./owner-web-release-native-proof.js', () => ({
+  projectNativeWebSnapshot: mocked.project,
+}));
 
 import { runWebTagAdmission, verifyAdmissionContext } from './owner-web-tag-admission.js';
 import { HISTORICAL_WEB_TAGS, WEB_SERVICE } from './owner-web-tag-retirement.js';
@@ -157,6 +174,16 @@ beforeEach(() => {
   io.waitOperation.mockResolvedValue(undefined);
   io.drain.mockResolvedValue(undefined);
   mocked.cloud.mockResolvedValue(io);
+  mocked.openReceipts.mockReturnValue({
+    readCurrent: () => ({ context: {}, phase: 'promotedP', snapshot: { revisions: {} } }),
+  });
+  mocked.bindRetirement.mockImplementation((_state: unknown, retirementIo: unknown) => ({
+    io: retirementIo,
+    markUnresolved: vi.fn(),
+    complete: vi.fn(),
+  }));
+  mocked.hold.mockResolvedValue({});
+  mocked.project.mockReturnValue({});
 });
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -202,7 +229,7 @@ describe('paired native admission command', () => {
     await runWebTagAdmission('--capture');
     staged(true);
     io.drain.mockRejectedValue(new Error('Interrupted drain'));
-    await expect(runWebTagAdmission('--retire-after-paused')).rejects.toThrow('Interrupted drain');
+    await expect(runWebTagAdmission('--retire-after-paused')).rejects.toThrow('unresolved');
     await expect(runWebTagAdmission('--verify-admission')).rejects.toThrow();
   });
   it('post-barrier operator alias blocks the fresh admission check', async () => {
