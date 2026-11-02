@@ -580,7 +580,7 @@ describe('one-shot BASIC5 CI controller', () => {
       pid: number,
       enrolled?: typeof censusRoot,
     ) => Promise<typeof censusRoot | undefined>,
-    label: 'create-target' | 'migrate' | 'seed' = 'migrate',
+    label = 'basic5-vitest',
   ) {
     const child = new FakeDirectChild();
     const signals: number[] = [];
@@ -604,14 +604,18 @@ describe('one-shot BASIC5 CI controller', () => {
     let result: Awaited<ReturnType<typeof ops.runUtilityChild>> | undefined;
     let error: unknown;
     try {
-      result = await ops.runUtilityChild(
-        '/synthetic/node',
-        [],
-        {},
-        10_000,
-        label,
-        new AbortController().signal,
-      );
+      result = await (
+        ops as unknown as {
+          runChild(
+            command: string,
+            args: string[],
+            env: NodeJS.ProcessEnv,
+            deadline: number,
+            label: string,
+            signal: AbortSignal,
+          ): Promise<Awaited<ReturnType<typeof ops.runUtilityChild>>>;
+        }
+      ).runChild('/synthetic/node', [], {}, 10_000, label, new AbortController().signal);
     } catch (caught) {
       error = caught;
     } finally {
@@ -626,29 +630,26 @@ describe('one-shot BASIC5 CI controller', () => {
   const terminalProof = () =>
     Object.assign(new Error('fixed known terminal proof'), { code: 'known_process_terminal' });
 
-  it.each(['create-target', 'migrate', 'seed'] as const)(
-    '%s waits for direct close and independent final absence after known zombie transition',
-    async (label) => {
-      let terminalReads = 0;
-      const run = await censusSequence(
-        [censusSnapshot({ ...censusRoot, state: 'Z' }), censusSnapshot(), censusSnapshot()],
-        async (pid, enrolled) => {
-          expect(pid).toBe(88);
-          if (!enrolled) return censusRoot;
-          expect(enrolled).toEqual(censusRoot);
-          terminalReads++;
-          throw terminalProof();
-        },
-        label,
-      );
-      expect(run.error).toBeUndefined();
-      expect(run.result).toMatchObject({ exitCode: 0, utilityDiagnostic: { closed: true } });
-      expect(terminalReads).toBe(1);
-      expect(run.snapshotReads).toBe(3);
-      expect(run.enrolled).toEqual([88]);
-      expect(run.signals).toEqual([]);
-    },
-  );
+  it('keeps known-zombie reconciliation in the behavioral child-session census path', async () => {
+    let terminalReads = 0;
+    const run = await censusSequence(
+      [censusSnapshot({ ...censusRoot, state: 'Z' }), censusSnapshot(), censusSnapshot()],
+      async (pid, enrolled) => {
+        expect(pid).toBe(88);
+        if (!enrolled) return censusRoot;
+        expect(enrolled).toEqual(censusRoot);
+        terminalReads++;
+        throw terminalProof();
+      },
+      'basic5-vitest',
+    );
+    expect(run.error).toBeUndefined();
+    expect(run.result).toMatchObject({ exitCode: 0 });
+    expect(terminalReads).toBe(1);
+    expect(run.snapshotReads).toBe(3);
+    expect(run.enrolled).toEqual([88]);
+    expect(run.signals).toEqual([]);
+  });
 
   it('retains the enrolled descendant and historical executable during terminal transition', async () => {
     const run = await censusSequence(
@@ -676,9 +677,7 @@ describe('one-shot BASIC5 CI controller', () => {
     );
     expect(run.error).toMatchObject({
       operationSettled: false,
-      utilityChildDiagnostic: {
-        censusDiagnostic: { stage: 'new_identity_read', reason: 'known_process_terminal' },
-      },
+      censusDiagnostic: { stage: 'new_identity_read', reason: 'known_process_terminal' },
     });
     expect(run.enrolled).toEqual([88]);
     expect(run.signals).toEqual([]);
@@ -695,9 +694,7 @@ describe('one-shot BASIC5 CI controller', () => {
     });
     expect(run.error).toMatchObject({
       operationSettled: false,
-      utilityChildDiagnostic: {
-        censusDiagnostic: { stage: 'known_identity_read', reason: code },
-      },
+      censusDiagnostic: { stage: 'known_identity_read', reason: code },
     });
     expect(run.signals).toEqual([]);
   });
@@ -709,9 +706,7 @@ describe('one-shot BASIC5 CI controller', () => {
     );
     expect(run.error).toMatchObject({
       operationSettled: false,
-      utilityChildDiagnostic: {
-        censusDiagnostic: { stage: 'known_identity_compare', reason: 'generation_changed' },
-      },
+      censusDiagnostic: { stage: 'known_identity_compare', reason: 'generation_changed' },
     });
     expect(run.signals).toEqual([]);
   });
@@ -729,10 +724,7 @@ describe('one-shot BASIC5 CI controller', () => {
     );
     expect(run.error).toMatchObject({
       operationSettled: false,
-      utilityChildDiagnostic: {
-        stage: 'final_session_census',
-        censusDiagnostic: { stage: 'enrollment', reason: 'ancestry_unproven' },
-      },
+      censusDiagnostic: { stage: 'enrollment', reason: 'ancestry_unproven' },
     });
     expect(run.signals).toEqual([]);
   });
@@ -876,7 +868,7 @@ describe('one-shot BASIC5 CI controller', () => {
       );
       expect(run.error).toMatchObject({
         operationSettled: false,
-        utilityChildDiagnostic: { censusDiagnostic: { stage: 'absence_confirmation', reason } },
+        censusDiagnostic: { stage: 'absence_confirmation', reason },
       });
       expect(run.snapshotReads).toBe(2);
       expect(run.enrolled).toEqual([88]);
@@ -892,9 +884,7 @@ describe('one-shot BASIC5 CI controller', () => {
     );
     expect(run.error).toMatchObject({
       operationSettled: false,
-      utilityChildDiagnostic: {
-        censusDiagnostic: { stage: 'absence_confirmation', reason: 'convergence_exhausted' },
-      },
+      censusDiagnostic: { stage: 'absence_confirmation', reason: 'convergence_exhausted' },
     });
     expect(run.snapshotReads).toBe(2);
     expect(run.signals).toEqual([]);
@@ -908,9 +898,7 @@ describe('one-shot BASIC5 CI controller', () => {
     );
     expect(run.error).toMatchObject({
       operationSettled: false,
-      utilityChildDiagnostic: {
-        censusDiagnostic: { stage: 'enrollment', reason: 'ancestry_unproven' },
-      },
+      censusDiagnostic: { stage: 'enrollment', reason: 'ancestry_unproven' },
     });
     expect(run.enrolled).toEqual([88]);
     expect(run.signals).toEqual([]);
@@ -929,7 +917,7 @@ describe('one-shot BASIC5 CI controller', () => {
       });
       expect(run.error).toMatchObject({
         operationSettled: false,
-        utilityChildDiagnostic: { censusDiagnostic: { stage: 'new_identity_read', reason: code } },
+        censusDiagnostic: { stage: 'new_identity_read', reason: code },
       });
       expect(JSON.stringify(run.error)).not.toContain('private process content');
       expect(run.snapshotReads).toBe(1);
@@ -944,9 +932,7 @@ describe('one-shot BASIC5 CI controller', () => {
     );
     expect(run.error).toMatchObject({
       operationSettled: false,
-      utilityChildDiagnostic: {
-        censusDiagnostic: { stage: 'new_identity_compare', reason: 'parent_changed' },
-      },
+      censusDiagnostic: { stage: 'new_identity_compare', reason: 'parent_changed' },
     });
     expect(run.signals).toEqual([]);
   });
@@ -960,9 +946,7 @@ describe('one-shot BASIC5 CI controller', () => {
     );
     expect(run.error).toMatchObject({
       operationSettled: false,
-      utilityChildDiagnostic: {
-        censusDiagnostic: { stage: 'known_identity_compare', reason: 'executable_changed' },
-      },
+      censusDiagnostic: { stage: 'known_identity_compare', reason: 'executable_changed' },
     });
     expect(run.signals).toEqual([]);
   });
@@ -974,9 +958,7 @@ describe('one-shot BASIC5 CI controller', () => {
     );
     expect(run.error).toMatchObject({
       operationSettled: false,
-      utilityChildDiagnostic: {
-        censusDiagnostic: { stage: 'known_identity_compare', reason: 'generation_changed' },
-      },
+      censusDiagnostic: { stage: 'known_identity_compare', reason: 'generation_changed' },
     });
     expect(run.enrolled).toEqual([88]);
     expect(run.signals).toEqual([]);
@@ -990,10 +972,7 @@ describe('one-shot BASIC5 CI controller', () => {
     );
     expect(run.error).toMatchObject({
       operationSettled: false,
-      utilityChildDiagnostic: {
-        stage: 'final_session_census',
-        censusDiagnostic: { stage: 'enrollment', reason: 'ancestry_unproven' },
-      },
+      censusDiagnostic: { stage: 'enrollment', reason: 'ancestry_unproven' },
     });
     expect(run.signals).toEqual([]);
     expect(run.enrolled).toEqual([88]);
@@ -1010,10 +989,7 @@ describe('one-shot BASIC5 CI controller', () => {
     );
     expect(run.error).toMatchObject({
       operationSettled: false,
-      utilityChildDiagnostic: {
-        stage: 'final_session_census',
-        censusDiagnostic: { stage: 'final_snapshot', reason: 'process_census_unavailable' },
-      },
+      censusDiagnostic: { stage: 'final_snapshot', reason: 'process_census_unavailable' },
     });
     expect(run.snapshotReads).toBe(3);
     expect(run.signals).toEqual([]);
@@ -1027,9 +1003,7 @@ describe('one-shot BASIC5 CI controller', () => {
     );
     expect(run.error).toMatchObject({
       operationSettled: false,
-      utilityChildDiagnostic: {
-        censusDiagnostic: { stage: 'snapshot', reason: 'process_stat_permission_denied' },
-      },
+      censusDiagnostic: { stage: 'snapshot', reason: 'process_stat_permission_denied' },
     });
     expect(run.signals).toEqual([]);
   });
@@ -1041,8 +1015,37 @@ describe('one-shot BASIC5 CI controller', () => {
         code: 'process_stat_permission_denied',
       });
     });
+    expect(run.error).toMatchObject({
+      operationSettled: false,
+      censusDiagnostic: { stage: 'new_identity_read', reason: 'process_stat_permission_denied' },
+    });
     const ops = new FakeOps();
-    ops.preparationFailure = { stage: 'migration_child', error: run.error };
+    const receiptDiagnostic = {
+      utility: 'migration_child' as const,
+      stage: 'final_session_census' as const,
+      status: 'session_census_unverified' as const,
+      exitCode: null,
+      signal: null,
+      closed: false,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+      errnoCategory: null,
+      sqlStateClass: null,
+      censusDiagnostic: {
+        stage: 'new_identity_read' as const,
+        reason: 'process_stat_permission_denied' as const,
+      },
+    };
+    const receiptError = new Basic5CiHold(
+      'utility_original_session_unverified',
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      receiptDiagnostic,
+    );
+    ops.preparationFailure = { stage: 'migration_child', error: receiptError };
     const receipt = await runBasic5CiAcceptance(ops);
     expect(receipt.utilityChildDiagnostic).toMatchObject({
       censusDiagnostic: {
@@ -1187,6 +1190,7 @@ describe('one-shot BASIC5 CI controller', () => {
           closed: true,
           stdoutBytes: 3,
           stderrBytes: 20,
+          closureProof: 'direct_child_closed_and_original_session_empty',
         });
         assertBasic5CiUtilityChildSucceeded(utility, result);
       } finally {
@@ -1347,14 +1351,15 @@ describe('one-shot BASIC5 CI controller', () => {
     const child = new FakeDirectChild();
     child.pid = 88;
     queueMicrotask(() => child.emit('close', 0, null));
-    const ops = new RealBasic5CiOps(
-      utilityChildDriver(child, {
-        readIdentity: async () => {
-          await Promise.resolve();
-          return undefined;
-        },
-      }),
-    );
+    const driver = utilityChildDriver(child, {
+      readIdentity: async () => {
+        await Promise.resolve();
+        return undefined;
+      },
+    });
+    const killProcess = vi.fn();
+    driver.killProcess = killProcess;
+    const ops = new RealBasic5CiOps(driver);
     try {
       await expect(
         ops.runUtilityChild(
@@ -1375,6 +1380,8 @@ describe('one-shot BASIC5 CI controller', () => {
           closed: true,
         },
       });
+      expect(killProcess).not.toHaveBeenCalled();
+      expect(child.killCalls).toBe(0);
     } finally {
       ops.dispose();
     }
@@ -1384,44 +1391,10 @@ describe('one-shot BASIC5 CI controller', () => {
     ['create-target', 'target_database_creation'],
     ['migrate', 'migration_child'],
     ['seed', 'seed_child'],
-  ] as const)('%s retains settled nonzero exit as a utility failure', async (label, utility) => {
+  ] as const)('%s rejects a closed nonzero utility run as unsettled', async (label, utility) => {
     const child = new FakeDirectChild();
     queueMicrotask(() => child.emit('close', 7, null));
     const ops = new RealBasic5CiOps(utilityChildDriver(child));
-    try {
-      const result = await ops.runUtilityChild(
-        '/synthetic/node',
-        ['utility'],
-        {},
-        10_000,
-        label,
-        new AbortController().signal,
-      );
-      expect(result.exitCode).toBe(7);
-      let caught: unknown;
-      try {
-        assertBasic5CiUtilityChildSucceeded(utility, result);
-      } catch (error) {
-        caught = error;
-      }
-      expect(caught).toMatchObject({
-        code: `${utility}_nonzero_exit`,
-        utilityChildDiagnostic: { utility, exitCode: 7, closed: true },
-      });
-    } finally {
-      ops.dispose();
-    }
-  });
-
-  it('holds when the owned session census fails during child execution', async () => {
-    const child = new FakeDirectChild();
-    const ops = new RealBasic5CiOps(
-      utilityChildDriver(child, {
-        readSnapshot: async () => {
-          throw new Error('private process details');
-        },
-      }),
-    );
     try {
       await expect(
         ops.runUtilityChild(
@@ -1429,17 +1402,68 @@ describe('one-shot BASIC5 CI controller', () => {
           ['utility'],
           {},
           10_000,
-          'migrate',
+          label,
           new AbortController().signal,
         ),
       ).rejects.toMatchObject({
+        code: `${label}_nonzero_exit`,
         operationSettled: false,
-        utilityChildDiagnostic: {
-          stage: 'owned_session_census',
-          status: 'session_census_unverified',
-          closed: false,
-        },
+        utilityChildDiagnostic: { utility, exitCode: 7, closed: true },
       });
+    } finally {
+      ops.dispose();
+    }
+  });
+
+  it('does not census or adopt unknown children while a utility child is running', async () => {
+    const child = new FakeDirectChild();
+    let snapshotReads = 0;
+    const identityReads: number[] = [];
+    const driver = utilityChildDriver(child, {
+      readSnapshot: async () => {
+        snapshotReads += 1;
+        return new Map();
+      },
+      readIdentity: async (pid) => {
+        identityReads.push(pid);
+        return pid === 88
+          ? {
+              pid,
+              ppid: process.pid,
+              pgid: 88,
+              sid: 88,
+              startTimeTicks: '1',
+              exe: '/synthetic/node',
+            }
+          : undefined;
+      },
+    });
+    const killProcess = vi.fn();
+    driver.killProcess = killProcess;
+    driver.sleep = async () => {
+      child.emit('close', 0, null);
+    };
+    const ops = new RealBasic5CiOps(driver);
+    try {
+      const result = await ops.runUtilityChild(
+        '/synthetic/node',
+        ['utility'],
+        {},
+        10_000,
+        'migrate',
+        new AbortController().signal,
+      );
+      expect(result.exitCode).toBe(0);
+      expect(result.utilityDiagnostic?.closureProof).toBe(
+        'direct_child_closed_and_original_session_empty',
+      );
+      expect(snapshotReads).toBe(2);
+      expect(identityReads).toEqual([88]);
+      expect(killProcess).not.toHaveBeenCalled();
+      expect(child.killCalls).toBe(0);
+      expect((ops as unknown as { ownedProcesses: Map<number, unknown> }).ownedProcesses.size).toBe(
+        0,
+      );
     } finally {
       ops.dispose();
     }
@@ -1489,25 +1513,29 @@ describe('one-shot BASIC5 CI controller', () => {
       startTimeTicks: '2',
     };
     let snapshotRead = 0;
-    const ops = new RealBasic5CiOps(
-      utilityChildDriver(child, {
-        readIdentity: async (pid) =>
-          pid === 88
-            ? {
-                pid,
-                ppid: process.pid,
-                pgid: 88,
-                sid: 88,
-                startTimeTicks: '1',
-                exe: '/synthetic/node',
-              }
-            : { ...descendant, exe: '/synthetic/descendant' },
-        readSnapshot: async () => {
-          snapshotRead += 1;
-          return snapshotRead === 2 ? new Map([[90, descendant]]) : new Map();
-        },
-      }),
-    );
+    const identityReads: number[] = [];
+    const killProcess = vi.fn();
+    const driver = utilityChildDriver(child, {
+      readIdentity: async (pid) => {
+        identityReads.push(pid);
+        return pid === 88
+          ? {
+              pid,
+              ppid: process.pid,
+              pgid: 88,
+              sid: 88,
+              startTimeTicks: '1',
+              exe: '/synthetic/node',
+            }
+          : { ...descendant, exe: '/synthetic/descendant' };
+      },
+      readSnapshot: async () => {
+        snapshotRead += 1;
+        return snapshotRead === 2 ? new Map([[90, descendant]]) : new Map();
+      },
+    });
+    driver.killProcess = killProcess;
+    const ops = new RealBasic5CiOps(driver);
     try {
       await expect(
         ops.runUtilityChild(
@@ -1526,6 +1554,111 @@ describe('one-shot BASIC5 CI controller', () => {
           closed: true,
         },
       });
+      expect(identityReads).toEqual([88]);
+      expect(killProcess).not.toHaveBeenCalled();
+      expect(child.killCalls).toBe(0);
+    } finally {
+      ops.dispose();
+    }
+  });
+
+  it('holds on root PID reuse outside the original session after utility close', async () => {
+    const child = new FakeDirectChild();
+    queueMicrotask(() => child.emit('close', 0, null));
+    const reusedRoot = { ...censusRoot, startTimeTicks: '99', sid: 999 };
+    const killProcess = vi.fn();
+    const driver = utilityChildDriver(child, {
+      readSnapshot: async () => new Map([[88, reusedRoot]]),
+    });
+    driver.killProcess = killProcess;
+    const ops = new RealBasic5CiOps(driver);
+    try {
+      await expect(
+        ops.runUtilityChild(
+          '/synthetic/node',
+          [],
+          {},
+          10_000,
+          'seed',
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({
+        operationSettled: false,
+        code: 'utility_root_identity_ambiguous',
+        utilityChildDiagnostic: {
+          stage: 'final_session_census',
+          censusDiagnostic: { stage: 'final_snapshot', reason: 'generation_changed' },
+        },
+      });
+      expect(killProcess).not.toHaveBeenCalled();
+      expect(child.killCalls).toBe(0);
+    } finally {
+      ops.dispose();
+    }
+  });
+
+  it.each(['deadline', 'cancelled'] as const)(
+    'does not qualify utility closure when %s occurs during the second final census',
+    async (reason) => {
+      const child = new FakeDirectChild();
+      queueMicrotask(() => child.emit('close', 0, null));
+      const controller = new AbortController();
+      let clock = 1;
+      let snapshotReads = 0;
+      const killProcess = vi.fn();
+      const driver = utilityChildDriver(child, {
+        now: () => clock,
+        readSnapshot: async () => {
+          snapshotReads += 1;
+          if (snapshotReads === 2) {
+            if (reason === 'deadline') clock = 10_000;
+            else controller.abort();
+          }
+          return new Map();
+        },
+      });
+      driver.killProcess = killProcess;
+      const ops = new RealBasic5CiOps(driver);
+      try {
+        await expect(
+          ops.runUtilityChild('/synthetic/node', [], {}, 10_000, 'seed', controller.signal),
+        ).rejects.toMatchObject({
+          operationSettled: false,
+          code: `final_session_census_${reason}`,
+          utilityChildDiagnostic: {
+            stage: 'final_session_census',
+            status: 'session_census_unverified',
+            closed: true,
+          },
+        });
+        expect(snapshotReads).toBe(2);
+        expect(killProcess).not.toHaveBeenCalled();
+        expect(child.killCalls).toBe(0);
+      } finally {
+        ops.dispose();
+      }
+    },
+  );
+
+  it('sends no utility-child signal when its bounded cleanup window has expired', async () => {
+    const child = new FakeDirectChild();
+    let nowReads = 0;
+    const killProcess = vi.fn();
+    const driver = utilityChildDriver(child, {
+      now: () => [1, 1, 1, 1, 5_001, 400_001][nowReads++] ?? 400_001,
+    });
+    driver.killProcess = killProcess;
+    const ops = new RealBasic5CiOps(driver);
+    try {
+      await expect(
+        ops.runUtilityChild('/synthetic/node', [], {}, 5_000, 'seed', new AbortController().signal),
+      ).rejects.toMatchObject({
+        code: 'seed_deadline',
+        operationSettled: false,
+        utilityChildDiagnostic: { closed: false, status: 'deadline' },
+      });
+      expect(killProcess).not.toHaveBeenCalled();
+      expect(child.killCalls).toBe(0);
     } finally {
       ops.dispose();
     }
@@ -1534,7 +1667,10 @@ describe('one-shot BASIC5 CI controller', () => {
   it('holds on child output caps with bounded diagnostics', async () => {
     const child = new FakeDirectChild();
     queueMicrotask(() => (child.stdout as EventEmitter).emit('data', Buffer.alloc(64 * 1024 + 1)));
-    const ops = new RealBasic5CiOps(utilityChildDriver(child));
+    const driver = utilityChildDriver(child);
+    const killProcess = vi.fn(() => child.emit('close', null, 'SIGTERM'));
+    driver.killProcess = killProcess;
+    const ops = new RealBasic5CiOps(driver);
     try {
       await expect(
         ops.runUtilityChild(
@@ -1550,9 +1686,12 @@ describe('one-shot BASIC5 CI controller', () => {
         utilityChildDiagnostic: {
           status: 'capture_limit',
           stdoutBytes: 64 * 1024,
-          closed: false,
+          closed: true,
         },
       });
+      expect(killProcess).toHaveBeenCalledOnce();
+      expect(killProcess).toHaveBeenCalledWith(88, 'SIGTERM');
+      expect(child.killCalls).toBe(0);
     } finally {
       ops.dispose();
     }
@@ -1561,11 +1700,12 @@ describe('one-shot BASIC5 CI controller', () => {
   it('holds on the owned-child deadline with an unsettled diagnostic', async () => {
     const child = new FakeDirectChild();
     let clockReads = 0;
-    const ops = new RealBasic5CiOps(
-      utilityChildDriver(child, {
-        now: () => [1, 1, 5_001, 5_001][clockReads++] ?? 5_001,
-      }),
-    );
+    const driver = utilityChildDriver(child, {
+      now: () => [1, 1, 5_001, 5_001][clockReads++] ?? 5_001,
+    });
+    const killProcess = vi.fn(() => child.emit('close', null, 'SIGTERM'));
+    driver.killProcess = killProcess;
+    const ops = new RealBasic5CiOps(driver);
     try {
       await expect(
         ops.runUtilityChild(
@@ -1580,12 +1720,75 @@ describe('one-shot BASIC5 CI controller', () => {
         operationSettled: false,
         utilityChildDiagnostic: {
           status: 'deadline',
-          closed: false,
+          closed: true,
         },
       });
+      expect(killProcess).toHaveBeenCalledOnce();
+      expect(killProcess).toHaveBeenCalledWith(88, 'SIGTERM');
+      expect(child.killCalls).toBe(0);
     } finally {
       ops.dispose();
     }
+  });
+
+  it('uses only the exact enrolled direct-child identity when cancellation needs a signal', async () => {
+    const child = new FakeDirectChild();
+    const controller = new AbortController();
+    const driver = utilityChildDriver(child);
+    const killProcess = vi.fn((pid: number, signal: NodeJS.Signals) => {
+      expect(pid).toBe(88);
+      expect(signal).toBe('SIGTERM');
+      child.emit('close', null, signal);
+    });
+    driver.killProcess = killProcess;
+    driver.sleep = async () => controller.abort();
+    const ops = new RealBasic5CiOps(driver);
+    try {
+      await expect(
+        ops.runUtilityChild('/synthetic/node', [], {}, 10_000, 'seed', controller.signal),
+      ).rejects.toMatchObject({
+        code: 'seed_cancelled',
+        operationSettled: false,
+        utilityChildDiagnostic: { closed: true, status: 'deadline' },
+      });
+      expect(killProcess).toHaveBeenCalledOnce();
+      expect(child.killCalls).toBe(0);
+      expect((ops as unknown as { ownedRoots: Map<number, unknown> }).ownedRoots.size).toBe(0);
+      expect((ops as unknown as { ownedProcesses: Map<number, unknown> }).ownedProcesses.size).toBe(
+        0,
+      );
+    } finally {
+      ops.dispose();
+    }
+  });
+
+  it('retains only the bounded original-session closure claim in successful receipts', async () => {
+    const diagnostic = {
+      utility: 'seed_child' as const,
+      stage: 'completed' as const,
+      status: 'completed' as const,
+      exitCode: 0,
+      signal: null,
+      closed: true,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+      errnoCategory: null,
+      sqlStateClass: null,
+      closureProof: 'direct_child_closed_and_original_session_empty' as const,
+    };
+    const ops = new FakeOps();
+    ops.preflightValue = { ...preflight, utilityChildDiagnostics: [diagnostic] };
+    const receipt = await runBasic5CiAcceptance(ops);
+    expect(receipt.utilityChildDiagnostics).toEqual([diagnostic]);
+
+    const malformed = new FakeOps();
+    malformed.preflightValue = {
+      ...preflight,
+      utilityChildDiagnostics: [{ ...diagnostic, closureProof: 'global_process_closure' }],
+    } as unknown as Basic5CiPreflight;
+    await expect(runBasic5CiAcceptance(malformed)).rejects.toMatchObject({
+      code: 'utility_child_diagnostic_malformed',
+    });
   });
 
   it.each(['target_database_creation', 'migration_child', 'seed_child'] as const)(

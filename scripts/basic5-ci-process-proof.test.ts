@@ -266,7 +266,7 @@ describe('BASIC5 Linux process proof', () => {
     ]);
   });
 
-  it('integrates real proof reads with the utility child runner across a known zombie transition', async () => {
+  it('integrates real proof reads with the behavioral runner across a known zombie transition', async () => {
     setLinuxPlatformForMockedProcessReads();
     const pid = 88;
     let alive = true;
@@ -323,16 +323,20 @@ describe('BASIC5 Linux process proof', () => {
     };
     const ops = new RealBasic5CiOps(driver);
     try {
-      const result = await ops.runUtilityChild(
-        '/synthetic/node',
-        [],
-        {},
-        10_000,
-        'seed',
-        new AbortController().signal,
-      );
+      const result = await (
+        ops as unknown as {
+          runChild(
+            command: string,
+            args: string[],
+            env: NodeJS.ProcessEnv,
+            deadline: number,
+            label: string,
+            signal: AbortSignal,
+          ): Promise<{ exitCode: number; utilityDiagnostic?: unknown }>;
+        }
+      ).runChild('/synthetic/node', [], {}, 10_000, 'basic5-vitest', new AbortController().signal);
       expect(result.exitCode).toBe(0);
-      expect(result.utilityDiagnostic).toMatchObject({ closed: true, exitCode: 0 });
+      expect(result.utilityDiagnostic).toBeUndefined();
       expect(fsPromises.readdir).toHaveBeenCalledTimes(3);
       expect(fsPromises.readFile).toHaveBeenCalledTimes(5);
       expect(fsPromises.realpath).toHaveBeenCalledTimes(2);
