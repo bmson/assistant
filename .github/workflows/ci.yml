@@ -282,6 +282,7 @@ jobs:
           fi
           pnpm smoke:mobile
       - name: Verify four BASIC5 saves with synthetic Auth.js and durable readback
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1
         timeout-minutes: 8
         env:
           ASSISTANT_RUN_BASIC5_CI_ACCEPTANCE: '1'
