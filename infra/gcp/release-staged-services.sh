@@ -190,10 +190,13 @@ release_retire_nonserving_candidate_tag() {
 }
 
 release_owner_web_tag_admission_command() {
-  local mode="$1" source_sha="$2" manifest_path="$3" manifest_digest="$4" staging_tag="$5"
+  local mode="$1" source_sha="$2" manifest_path="$3" manifest_digest="$4" staging_tag="$5" native_phase="${6:-}"
   local repository_root
   case "$mode" in
-    --capture|--retire-after-paused|--verify-admission|--record-candidate|--record-resume) ;;
+    --capture|--retire-after-paused|--verify-admission|--record-candidate|--record-resume|--native-init|--verify-native-hold|--certify-native-terminal|--accept-agent-ready) ;;
+    --native-phase)
+      case "$native_phase" in createP|attachP|promoteP|createR|attachR|promoteR|closeP|restoreC|repauseP|closeR) ;; *) return 2 ;; esac
+      ;;
     *) echo '  invalid owned-web-tag admission action.' >&2; return 2 ;;
   esac
   repository_root="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)" || return 1
@@ -203,8 +206,37 @@ release_owner_web_tag_admission_command() {
       OWNER_TAG_MANIFEST_PATH="$manifest_path" \
       OWNER_TAG_MANIFEST_DIGEST="$manifest_digest" \
       OWNER_TAG_STAGING_TAG="$staging_tag" \
+      OWNER_NATIVE_PHASE="$native_phase" \
+      OWNER_NATIVE_REVIEWED_AT="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
       pnpm exec tsx scripts/owner-web-tag-admission.ts "$mode"
   )
+}
+
+release_initialize_basic_web_lifecycle() {
+  [[ "$#" -eq 4 ]] || return 2
+  release_owner_web_tag_admission_command --native-init "$1" "$2" "$3" "$4"
+}
+
+release_wait_for_basic_web_operator_hold() {
+  [[ "$#" -eq 4 ]] || return 2
+  release_owner_web_tag_admission_command --verify-native-hold "$1" "$2" "$3" "$4"
+}
+
+release_certify_basic_web_terminal() {
+  [[ "$#" -eq 4 ]] || return 2
+  release_owner_web_tag_admission_command --certify-native-terminal "$1" "$2" "$3" "$4"
+}
+
+release_accept_basic_web_agent_ready() {
+  [[ "$#" -eq 4 ]] || return 2
+  release_owner_web_tag_admission_command --accept-agent-ready "$1" "$2" "$3" "$4"
+}
+
+release_run_basic_web_phase() {
+  [[ "$#" -eq 5 ]] || return 2
+  local phase="$1"
+  shift
+  release_owner_web_tag_admission_command --native-phase "$1" "$2" "$3" "$4" "$phase"
 }
 
 release_capture_owned_web_tags() {
@@ -476,6 +508,16 @@ release_staged_services() {
     echo '  could not capture the owned web-tag set; refusing to stage a BASIC5 candidate.' >&2
     return 1
   fi
+  if [[ "$basic_editor_forward_only" == true ]] &&
+     ! release_initialize_basic_web_lifecycle "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
+    echo '  could not initialize the canonical-only native web lifecycle; refusing BASIC5 staging.' >&2
+    return 1
+  fi
+  if [[ "$basic_editor_forward_only" == true ]] &&
+     ! release_wait_for_basic_web_operator_hold "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
+    echo '  operator-owned workflow holds or competing-run census are not confirmed; refusing BASIC5 mutation.' >&2
+    return 1
+  fi
 
   # Candidate revisions carry the manifest identity and compatibility contract.
   # --no-traffic and a tag expose a revision URL without moving user traffic.
@@ -497,11 +539,19 @@ release_staged_services() {
   if [[ "$basic_editor_forward_only" == true ]]; then
     web_candidate_env="${web_candidate_env},ASSISTANT_RELEASE_WORKFLOW_RUN_ID=${GITHUB_RUN_ID},ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT},ASSISTANT_RELEASE_SOURCE_SHA=${TAG}"
   fi
-  gcloud run services update assistant-web --project "$PROJECT" --region "$REGION" \
-    --image "${IMAGE_ROOT}/web@${web_digest}" --no-traffic --tag "$staging_tag" \
-    --update-env-vars "$web_candidate_env" --quiet || return 1
+  if [[ "$basic_editor_forward_only" == true ]]; then
+    release_run_basic_web_phase createP "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || return 1
+  else
+    gcloud run services update assistant-web --project "$PROJECT" --region "$REGION" \
+      --image "${IMAGE_ROOT}/web@${web_digest}" --no-traffic --tag "$staging_tag" \
+      --update-env-vars "$web_candidate_env" --quiet || return 1
+  fi
   local staged_web_json
   staged_web_json="$(release_service_json assistant-web)" || return 1
+  if [[ "$basic_editor_forward_only" == true ]]; then
+    release_run_basic_web_phase attachP "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || return 1
+    staged_web_json="$(release_service_json assistant-web)" || return 1
+  fi
   if [[ "$basic_editor_forward_only" == true ]]; then
     release_record_owned_web_tag candidate "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || {
       echo '  could not record the freshly observed paused web candidate; refusing to promote it.' >&2
@@ -572,7 +622,9 @@ release_staged_services() {
       web_serving_revision="$staged_web_revision"
       if [[ "$web_writes_paused" == true ]]; then web_paused_revision="$staged_web_revision"; fi
       web_promotion_attempted=true
-      if ! gcloud run services update-traffic assistant-web \
+      if [[ "$basic_editor_forward_only" == true ]]; then
+        release_run_basic_web_phase promoteP "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || promoted_ok=false
+      elif ! gcloud run services update-traffic assistant-web \
         --project "$PROJECT" --region "$REGION" --to-revisions "${staged_web_revision}=100" --quiet; then
         promoted_ok=false
       fi
@@ -616,6 +668,12 @@ release_staged_services() {
       if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" /api/release-probe true ready; then promoted_ok=false; fi
       if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" /api/release-probe "$web_writes_paused" writesPaused; then promoted_ok=false; fi
       if [[ "$promoted_ok" == true && "$web_writes_paused" == true ]]; then
+        if [[ "$basic_editor_forward_only" == true ]] &&
+           ! release_accept_basic_web_agent_ready "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
+          echo '  stable agent readiness was not durably accepted; refusing unpaused creation.' >&2
+          promoted_ok=false
+        fi
+        if [[ "$promoted_ok" == true ]]; then
         web_resume_env="${web_candidate_env/,ASSISTANT_RELEASE_WRITES_PAUSED=true/,ASSISTANT_RELEASE_WRITES_PAUSED=false}"
         # An unpaused tag is reachable before 100% promotion. Even an uncertain
         # create response cannot prove that editor writes have not been admitted.
@@ -627,7 +685,9 @@ release_staged_services() {
         if [[ "$promoted_ok" == true && "$basic_editor_forward_only" == true ]]; then
           basic_editor_admission_possible=true
         fi
-        if [[ "$promoted_ok" == true ]] && ! gcloud run services update assistant-web --project "$PROJECT" --region "$REGION" \
+        if [[ "$promoted_ok" == true && "$basic_editor_forward_only" == true ]]; then
+          release_run_basic_web_phase createR "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || promoted_ok=false
+        elif [[ "$promoted_ok" == true ]] && ! gcloud run services update assistant-web --project "$PROJECT" --region "$REGION" \
           --image "${IMAGE_ROOT}/web@${web_digest}" --no-traffic --tag "$web_resume_tag" \
           --update-env-vars "$web_resume_env" --quiet; then
           promoted_ok=false
@@ -635,6 +695,12 @@ release_staged_services() {
         local staged_resume_web_json resume_web_url
         if [[ "$promoted_ok" == true ]]; then
           staged_resume_web_json="$(release_service_json assistant-web)" || promoted_ok=false
+        fi
+        if [[ "$promoted_ok" == true && "$basic_editor_forward_only" == true ]]; then
+          release_run_basic_web_phase attachR "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || promoted_ok=false
+          if [[ "$promoted_ok" == true ]]; then
+            staged_resume_web_json="$(release_service_json assistant-web)" || promoted_ok=false
+          fi
         fi
         if [[ "$promoted_ok" == true ]]; then
           web_resume_revision="$(node -e 'const s=JSON.parse(process.argv[1]);const rows=(s.status?.traffic??[]).filter(t=>t.tag===process.argv[2]&&t.revisionName);if(rows.length!==1)process.exit(2);process.stdout.write(rows[0].revisionName)' "$staged_resume_web_json" "$web_resume_tag")" || promoted_ok=false
@@ -682,7 +748,9 @@ release_staged_services() {
             if [[ "$promoted_ok" == true ]]; then
               web_serving_revision="$web_resume_revision"
               web_resume_promotion_attempted=true
-              if ! gcloud run services update-traffic assistant-web --project "$PROJECT" --region "$REGION" \
+              if [[ "$basic_editor_forward_only" == true ]]; then
+                release_run_basic_web_phase promoteR "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || promoted_ok=false
+              elif ! gcloud run services update-traffic assistant-web --project "$PROJECT" --region "$REGION" \
                 --to-revisions "${web_resume_revision}=100" --quiet; then promoted_ok=false; fi
             fi
           fi
@@ -694,6 +762,7 @@ release_staged_services() {
         if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" /api/ready true ready; then promoted_ok=false; fi
         if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" /api/release-probe true ready; then promoted_ok=false; fi
         if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" /api/release-probe false writesPaused; then promoted_ok=false; fi
+        fi
       fi
     fi
   elif [[ "$promoted_ok" == true ]]; then
@@ -722,7 +791,8 @@ release_staged_services() {
     if [[ "$basic_editor_admission_possible" == true ]]; then
       # Draining stops requests, not committed owner corrections/receipts. Old
       # runtimes cannot safely take over after any possible BASIC5 admission.
-      if [[ -z "$web_paused_revision" ]] || ! release_restore_traffic assistant-web "${web_paused_revision}=100"; then
+      if [[ -z "$web_paused_revision" ]] || \
+         ! release_run_basic_web_phase repauseP "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
         echo '  CRITICAL: BASIC5 repause is unconfirmed; retaining current agent/jobs. Require forward recovery or reviewed editor disable.' >&2
         return 1
       fi
@@ -730,7 +800,7 @@ release_staged_services() {
         echo '  CRITICAL: unpaused BASIC5 revision identity is unknown; retaining current agent/jobs. Inspect reachable aliases and require forward recovery or reviewed editor disable.' >&2
         return 1
       fi
-      if ! release_retire_nonserving_candidate_tag assistant-web "$web_resume_tag" "$web_old_traffic" "$web_paused_revision" "$web_resume_revision"; then
+      if ! release_run_basic_web_phase closeR "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
         echo '  CRITICAL: BASIC5 unpaused alias retirement is unconfirmed; retaining current agent/jobs for forward recovery or reviewed editor disable.' >&2
         return 1
       fi
@@ -768,7 +838,13 @@ release_staged_services() {
       fi
     fi
     if [[ "$agent_promotion_attempted" == true ]] && ! release_restore_traffic assistant-agent "$agent_old_traffic"; then rollback_failed=true; fi
-    if [[ "$web_promotion_attempted" == true ]] && ! release_restore_traffic assistant-web "$web_old_traffic"; then rollback_failed=true; fi
+    if [[ "$web_promotion_attempted" == true ]]; then
+      if [[ "$basic_editor_forward_only" == true ]]; then
+        if ! release_run_basic_web_phase restoreC "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then rollback_failed=true; fi
+      elif ! release_restore_traffic assistant-web "$web_old_traffic"; then
+        rollback_failed=true
+      fi
+    fi
     if ! release_restore_jobs; then rollback_failed=true; fi
     if [[ "$rollback_failed" == true ]]; then
       echo '  CRITICAL: automatic rollback failed; inspect both services traffic immediately.' >&2
@@ -786,7 +862,12 @@ release_staged_services() {
   # captured rollback map. Candidate/resume tags on live revisions remain.
   if [[ "$selected" == agent,web && "$RELEASE_STORAGE_DRIVER" == firestore &&
         "$web_resume_promotion_attempted" == true && -n "$web_paused_revision" ]]; then
-    if ! release_retire_nonserving_candidate_tag assistant-web "$staging_tag" "$web_old_traffic" "$web_serving_revision" "$web_paused_revision"; then
+    if [[ "$basic_editor_forward_only" == true ]]; then
+      if ! release_run_basic_web_phase closeP "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
+        echo '  release cannot be certified: native paused-candidate closure is unconfirmed.' >&2
+        return 1
+      fi
+    elif ! release_retire_nonserving_candidate_tag assistant-web "$staging_tag" "$web_old_traffic" "$web_serving_revision" "$web_paused_revision"; then
       echo '  warning: staged release is healthy, but its retired candidate tag needs guarded cleanup.' >&2
     fi
   fi

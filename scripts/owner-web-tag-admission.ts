@@ -3,6 +3,20 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { verifyPreAuthEnvironment } from './owner-editor-release-inventory.js';
+import {
+  acceptPairedAgentReadiness,
+  initializePairedWebLifecycle,
+  pairedWebContext,
+  protectedNativeReleaseDependencies,
+  runPairedWebLifecyclePhase,
+} from './owner-web-release-native-controller.js';
+import { projectNativeWebSnapshot } from './owner-web-release-native-proof.js';
+import { verifyOperatorOwnedHold } from './owner-web-release-operator-hold.js';
+import {
+  createPrivateReleasePhaseReceipts,
+  openPrivateReleasePhaseReceipts,
+} from './owner-web-release-phase-receipts.js';
+import { bindCapturedRetirementToLifecycle } from './owner-web-release-retirement-binding.js';
 import { readProtectedWebTagArtifact } from './owner-web-tag-artifact.js';
 import { protectedWebTagCloud } from './owner-web-tag-cloud.js';
 import {
@@ -82,6 +96,11 @@ export async function runWebTagAdmission(mode: string | undefined) {
       '--retire-after-paused',
       '--verify-admission',
       '--record-resume',
+      '--native-init',
+      '--native-phase',
+      '--verify-native-hold',
+      '--certify-native-terminal',
+      '--accept-agent-ready',
     ].includes(mode ?? '')
   )
     throw new Error('Invalid admission mode');
@@ -277,6 +296,80 @@ export async function runWebTagAdmission(mode: string | undefined) {
     });
     return;
   }
+  const receiptIdentity = {
+    source,
+    runId: String(runId),
+    attempt: String(runAttempt),
+    manifest: manifestDigest,
+  };
+  if (mode === '--native-init') {
+    const receipts = createPrivateReleasePhaseReceipts(temp, receiptIdentity);
+    const context = pairedWebContext({
+      source,
+      runId: String(runId),
+      attempt: String(runAttempt),
+      manifestDigest,
+      manifest,
+    });
+    const raw = await io.readService();
+    const native: Record<string, unknown> = {};
+    native[context.canonical] = await io.readRevision(context.canonical);
+    initializePairedWebLifecycle(context, raw, native, receipts);
+    return;
+  }
+  if (mode === '--native-phase') {
+    const phase = process.env.OWNER_NATIVE_PHASE ?? '';
+    const receipts = openPrivateReleasePhaseReceipts(temp, receiptIdentity);
+    const dependencies = await protectedNativeReleaseDependencies(receipts);
+    await runPairedWebLifecyclePhase(
+      phase as Parameters<typeof runPairedWebLifecyclePhase>[0],
+      process.env.OWNER_NATIVE_REVIEWED_AT ?? '',
+      dependencies,
+      receipts,
+      async (state) => {
+        await verifyOperatorOwnedHold(state.context);
+      },
+    );
+    return;
+  }
+  if (mode === '--verify-native-hold') {
+    const receipts = openPrivateReleasePhaseReceipts(temp, receiptIdentity);
+    await verifyOperatorOwnedHold(receipts.readCurrent().context);
+    return;
+  }
+  if (mode === '--certify-native-terminal') {
+    const receipts = openPrivateReleasePhaseReceipts(temp, receiptIdentity);
+    await verifyOperatorOwnedHold(receipts.readCurrent().context);
+    receipts.writeSafeTerminalCertificate(process.env.GITHUB_JOB ?? '');
+    return;
+  }
+  if (mode === '--accept-agent-ready') {
+    const receipts = openPrivateReleasePhaseReceipts(temp, receiptIdentity);
+    const state = receipts.readCurrent();
+    await verifyOperatorOwnedHold(state.context);
+    const raw = await io.readService();
+    const traffic = rec(raw).traffic;
+    if (!Array.isArray(traffic)) throw new Error('Native agent readiness snapshot held');
+    const names = [
+      ...new Set([
+        ...Object.keys(state.snapshot.revisions),
+        ...traffic.map((row) => rec(row).revision),
+      ]),
+    ];
+    if (names.length < 1 || names.length > 3)
+      throw new Error('Native agent readiness snapshot held');
+    const native: Record<string, unknown> = {};
+    for (const name of names) {
+      if (typeof name !== 'string') throw new Error('Native agent readiness snapshot held');
+      native[name] = await io.readRevision(name);
+    }
+    acceptPairedAgentReadiness(
+      state,
+      projectNativeWebSnapshot(raw, native, state.context),
+      receipts,
+    );
+    return;
+  }
   const capture = readCapture();
   const service = await io.readService(),
     snapshot = webTagTrafficSnapshot(service);
@@ -302,7 +395,34 @@ export async function runWebTagAdmission(mode: string | undefined) {
       uriSha256: tagHash(candidate.uri),
       paused: true,
     });
-    const result = await executeOwnedWebTagRetirement(plan, io);
+    const lifecycleReceipts = openPrivateReleasePhaseReceipts(temp, receiptIdentity);
+    const lifecycle = lifecycleReceipts.readCurrent();
+    await verifyOperatorOwnedHold(lifecycle.context);
+    const binding = bindCapturedRetirementToLifecycle(lifecycle, io, lifecycleReceipts);
+    let result: Awaited<ReturnType<typeof executeOwnedWebTagRetirement>>;
+    try {
+      result = await executeOwnedWebTagRetirement(plan, binding.io);
+      const afterRaw = await io.readService();
+      const afterTraffic = rec(afterRaw).traffic;
+      if (!Array.isArray(afterTraffic)) throw new Error('Native retirement postcheck held');
+      const revisions = [
+        ...new Set([
+          ...Object.keys(lifecycle.snapshot.revisions),
+          ...afterTraffic.map((entry) => rec(entry).revision),
+        ]),
+      ];
+      if (revisions.length < 1 || revisions.length > 3)
+        throw new Error('Native retirement postcheck held');
+      const afterNative: Record<string, unknown> = {};
+      for (const revision of revisions) {
+        if (typeof revision !== 'string') throw new Error('Native retirement postcheck held');
+        afterNative[revision] = await io.readRevision(revision);
+      }
+      binding.complete(result, projectNativeWebSnapshot(afterRaw, afterNative, lifecycle.context));
+    } catch {
+      binding.markUnresolved();
+      throw new Error('Captured retirement outcome is unresolved; release is held');
+    }
     save(barrierPath, { format: 1, source, runId, runAttempt, uid: capture.uid, plan, result });
     return;
   }

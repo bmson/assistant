@@ -383,6 +383,10 @@ jobs:
   # `needs: image` is the whole matrix, so a single failed image means no
   # rollout at all.
   release:
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
     if: inputs.native_web_qualification == '' || inputs.native_web_qualification == 'off'
     needs: [plan, image]
     runs-on: ubuntu-latest
@@ -470,6 +474,11 @@ jobs:
           else
             echo 'firestore_pair=false' >> "$GITHUB_OUTPUT"
           fi
+          if [[ -f apps/web/lib/owner-editor-runtime.ts ]]; then
+            echo 'basic5=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'basic5=false' >> "$GITHUB_OUTPUT"
+          fi
       - name: Check declared basic editor prerequisites before delivery guard mutations
         if: steps.release_path.outputs.firestore_pair == 'true'
         env:
@@ -492,11 +501,18 @@ jobs:
           set -o noclobber
           umask 077
           printf '%s' "$OWNER_TAG_EXISTING_GITHUB_TOKEN" > "${RUNNER_TEMP}/owner-web-tag-github-token"
+      - name: Wait for operator-owned BASIC5 workflow holds before delivery guard
+        if: steps.release_path.outputs.firestore_pair == 'true' && steps.release_path.outputs.basic5 == 'true'
+        env:
+          OWNER_TAG_RELEASE_SOURCE: ${{ needs.plan.outputs.sha }}
+        run: pnpm exec tsx scripts/owner-web-release-operator-hold.ts --wait
       - name: Release Firestore pair with delivery guard
         if: steps.release_path.outputs.firestore_pair == 'true'
         env:
           GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          RELEASE_BASIC5: ${{ steps.release_path.outputs.basic5 }}
+          OWNER_TAG_RELEASE_SOURCE: ${{ needs.plan.outputs.sha }}
           IMAGE_TAG: ${{ needs.plan.outputs.sha }}
           ASSISTANT_MODULES: ${{ needs.plan.outputs.modules }}
           RELEASE_PERSISTENCE_DRIVER: ${{ needs.plan.outputs.persistence }}
@@ -533,6 +549,9 @@ jobs:
         run: bash infra/gcp/release.sh
       - name: Restore Firestore delivery guard
         if: always() && steps.release_path.outputs.firestore_pair == 'true'
+        env:
+          RELEASE_BASIC5: ${{ steps.release_path.outputs.basic5 }}
+          OWNER_TAG_RELEASE_SOURCE: ${{ needs.plan.outputs.sha }}
         run: >-
           python3 infra/gcp/firestore-delivery-guard.py restore
           --project "$GCP_PROJECT" --location "$GCP_REGION"

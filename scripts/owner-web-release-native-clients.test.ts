@@ -23,8 +23,13 @@ import {
   type State,
   verifyLifecycleState,
 } from './owner-web-release-lifecycle-model.js';
+import {
+  initializePairedWebLifecycle,
+  runPairedWebLifecyclePhase,
+} from './owner-web-release-native-controller.js';
 import { projectNativeWebSnapshot } from './owner-web-release-native-proof.js';
 import { type FixtureDependencies, NativeReleaseHold } from './owner-web-release-native-session.js';
+import { verifyOperatorOwnedHold } from './owner-web-release-operator-hold.js';
 import { createPrivateReleasePhaseReceipts } from './owner-web-release-phase-receipts.js';
 import { bindCapturedRetirementToLifecycle } from './owner-web-release-retirement-binding.js';
 import { nativeWebTrafficFixtureClient } from './owner-web-release-traffic-client.js';
@@ -242,6 +247,121 @@ function fixture() {
 }
 afterEach(() => vi.useRealTimers());
 describe('unwired fixed native fixture clients', () => {
+  it('initializes only from a fresh canonical-only native projection and checks hold before a phase', async () => {
+    const f = fixture(),
+      root = mkdtempSync(join(tmpdir(), 'owner-web-controller-private-')),
+      receipts = createPrivateReleasePhaseReceipts(root, {
+        source: f.context.source,
+        runId: f.context.runId,
+        attempt: f.context.attempt,
+        manifest: f.context.manifest,
+      });
+    const initial = initializePairedWebLifecycle(f.context, f.service, f.native, receipts);
+    expect(initial.phase).toBe('captured');
+    expect(receipts.readCurrent().receipt).toBe(initial.receipt);
+    const hold = vi.fn(async () => {});
+    const after = await runPairedWebLifecyclePhase('createP', stamp, f.deps, receipts, hold);
+    expect(hold).toHaveBeenCalledOnce();
+    expect(after.phase).toBe('createdP');
+  });
+
+  it('refuses to initialize from unsupported starting aliases', () => {
+    const f = fixture(),
+      root = mkdtempSync(join(tmpdir(), 'owner-web-controller-private-')),
+      receipts = createPrivateReleasePhaseReceipts(root, {
+        source: f.context.source,
+        runId: f.context.runId,
+        attempt: f.context.attempt,
+        manifest: f.context.manifest,
+      }),
+      changed = copy(f.service);
+    changed.traffic.push({
+      type: 'TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION',
+      revision: f.context.canonical,
+      tag: 'resume-40350727924-1',
+      percent: 0,
+    });
+    expect(() => initializePairedWebLifecycle(f.context, changed, f.native, receipts)).toThrow(
+      'canonical web tag',
+    );
+  });
+
+  it('requires manually disabled workflows, cleanup false, and a complete run/job census', async () => {
+    const f = fixture(),
+      root = mkdtempSync(join(tmpdir(), 'owner-web-controller-private-')),
+      tokenPath = join(root, 'owner-web-tag-github-token'),
+      state = f.state();
+    writeFileSync(tokenPath, 'fixture-token', { mode: 0o600 });
+    const env = {
+      GITHUB_REPOSITORY: 'bmson/assistant',
+      GITHUB_WORKFLOW_REF: 'bmson/assistant/.github/workflows/deploy.yml@refs/heads/main',
+      GITHUB_WORKFLOW_SHA: f.context.source,
+      GITHUB_SHA: f.context.source,
+      GITHUB_RUN_ID: f.context.runId,
+      GITHUB_RUN_ATTEMPT: f.context.attempt,
+      GITHUB_EVENT_NAME: 'workflow_dispatch',
+      GITHUB_JOB: 'release',
+      RUNNER_TEMP: root,
+    } as NodeJS.ProcessEnv;
+    const request = vi.fn(async (url: string) => {
+      if (url.endsWith('/actions/workflows/deploy.yml'))
+        return { id: 1, state: 'disabled_manually' };
+      if (url.endsWith('/actions/workflows/cleanup.yml'))
+        return { id: 2, state: 'disabled_manually' };
+      if (url.endsWith('/actions/variables/CURRENT_ONLY_CLEANUP')) return { value: 'false' };
+      if (url.includes('/runs?')) {
+        const active = url.includes('status=in_progress');
+        const deploy = url.includes('/deploy.yml/');
+        return {
+          total_count: active && deploy ? 1 : 0,
+          workflow_runs:
+            active && deploy
+              ? [
+                  {
+                    id: Number(f.context.runId),
+                    run_attempt: 1,
+                    head_sha: f.context.source,
+                    event: 'workflow_dispatch',
+                  },
+                ]
+              : [],
+        };
+      }
+      if (url.includes('/jobs?'))
+        return { total_count: 1, jobs: [{ name: 'release', status: 'in_progress' }] };
+      throw new Error('unexpected hold URL');
+    });
+    const receipt = await verifyOperatorOwnedHold(state.context, env, request);
+    expect(receipt).toEqual({
+      source: f.context.source,
+      runId: f.context.runId,
+      attempt: f.context.attempt,
+      currentJob: 'release',
+      deployWorkflowId: 1,
+      cleanupWorkflowId: 2,
+      cleanupVariable: 'false',
+    });
+    await expect(
+      verifyOperatorOwnedHold(
+        state.context,
+        env,
+        vi.fn(async () => {
+          throw new Error('403');
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('grants actions read only to the selected release job', () => {
+    const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
+    expect(workflow).toMatch(
+      / {2}release:\n {4}permissions:\n {6}actions: read\n {6}contents: read\n {6}id-token: write\n/,
+    );
+    const workflowPermissions = workflow.slice(0, workflow.indexOf('\njobs:\n'));
+    expect(workflowPermissions).toMatch(/permissions:\n {2}contents: read\n {2}id-token: write\n/);
+    expect(workflowPermissions).not.toMatch(/actions:\s*read/);
+  });
+
   it('constructs raw proofs, creates without traffic change then attaches and promotes through separate client', async () => {
     const f = fixture(),
       initial = f.state(),

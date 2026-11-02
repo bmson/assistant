@@ -104,6 +104,139 @@ class FakeApi:
 
 
 class DeliveryGuardTests(unittest.TestCase):
+    def test_basic5_restore_requires_exact_private_terminal_certificate(self):
+        api = FakeApi()
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as runner_temp:
+            identity = {
+                "RELEASE_BASIC5": "true",
+                "RUNNER_TEMP": runner_temp,
+                "OWNER_TAG_RELEASE_SOURCE": "a" * 40,
+                "GITHUB_RUN_ID": "12345",
+                "GITHUB_RUN_ATTEMPT": "1",
+                "GITHUB_JOB": "release",
+            }
+            with patch.dict(os.environ, identity):
+                hold = Path(runner_temp) / "owner-web-release-hold-12345-1.json"
+                hold.write_text(json.dumps({
+                    "format": 1, "source": "a" * 40, "runId": "12345", "attempt": "1",
+                    "job": "release", "event": "workflow_dispatch", "deployId": 1,
+                    "cleanupId": 2, "deployBefore": "active", "cleanupBefore": "active",
+                    "cleanupVariableBefore": "false",
+                }))
+                hold.chmod(0o600)
+                guard = self.make_guard(api, directory)
+                guard.acquire()
+                with self.assertRaisesRegex(guard_module.GuardError, "terminal certificate"):
+                    guard.restore()
+                self.assertEqual(api.queue_state, "PAUSED")
+                self.assertTrue(all(state == "PAUSED" for state in api.scheduler_states.values()))
+                cert_dir = Path(runner_temp) / "owner-web-release-12345-1"
+                cert_dir.mkdir(mode=0o700)
+                cert = cert_dir / "terminal-safe.json"
+                cert.write_text(json.dumps({
+                    "format": 1, "source": "a" * 40, "runId": "12345", "attempt": "1",
+                    "manifest": "b" * 64, "job": "release", "phase": "complete",
+                    "stateReceipt": "c" * 64,
+                }))
+                cert.chmod(0o600)
+                guard.restore()
+                self.assertEqual(api.queue_state, "RUNNING")
+                self.assertTrue(all(state == "ENABLED" for state in api.scheduler_states.values()))
+
+    def test_basic5_run_finally_and_acquisition_error_keep_holds_without_certificate(self):
+        with tempfile.TemporaryDirectory() as runner_temp:
+            identity = {
+                "RELEASE_BASIC5": "true",
+                "RUNNER_TEMP": runner_temp,
+                "OWNER_TAG_RELEASE_SOURCE": "a" * 40,
+                "GITHUB_RUN_ID": "12345",
+                "GITHUB_RUN_ATTEMPT": "1",
+                "GITHUB_JOB": "release",
+            }
+            with patch.dict(os.environ, identity):
+                hold = Path(runner_temp) / "owner-web-release-hold-12345-1.json"
+                hold.write_text(json.dumps({
+                    "format": 1, "source": "a" * 40, "runId": "12345", "attempt": "1",
+                    "job": "release", "event": "workflow_dispatch", "deployId": 1,
+                    "cleanupId": 2, "deployBefore": "active", "cleanupBefore": "active",
+                    "cleanupVariableBefore": "false",
+                }))
+                hold.chmod(0o600)
+                api = FakeApi()
+                with tempfile.TemporaryDirectory() as directory:
+                    guard = self.make_guard(api, directory)
+                    with self.assertRaisesRegex(guard_module.GuardError, "terminal certificate"):
+                        guard.execute(["true"])
+                    self.assertEqual(api.queue_state, "PAUSED")
+
+    def test_basic5_cancelled_child_keeps_delivery_holds_without_certificate(self):
+        with tempfile.TemporaryDirectory() as runner_temp, tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {
+                "RELEASE_BASIC5": "true", "RUNNER_TEMP": runner_temp,
+                "OWNER_TAG_RELEASE_SOURCE": "a" * 40, "GITHUB_RUN_ID": "12345",
+                "GITHUB_RUN_ATTEMPT": "1", "GITHUB_JOB": "release",
+            }):
+                Path(runner_temp, "owner-web-release-hold-12345-1.json").write_text(json.dumps({
+                    "format": 1, "source": "a" * 40, "runId": "12345", "attempt": "1",
+                    "job": "release", "event": "workflow_dispatch", "deployId": 1,
+                    "cleanupId": 2, "deployBefore": "active", "cleanupBefore": "active",
+                    "cleanupVariableBefore": "false",
+                }))
+                Path(runner_temp, "owner-web-release-hold-12345-1.json").chmod(0o600)
+                api = FakeApi()
+                guard = self.make_guard(api, directory)
+
+                class InterruptedChild:
+                    pid = 4242
+
+                    @staticmethod
+                    def wait():
+                        raise KeyboardInterrupt
+
+                with patch.object(guard, "_stop_process_group"), patch.object(
+                    guard_module.subprocess, "Popen", return_value=InterruptedChild()
+                ), patch("signal.signal"):
+                    with self.assertRaisesRegex(guard_module.GuardError, "terminal certificate"):
+                        guard.execute(["ignored"])
+                self.assertEqual(api.queue_state, "PAUSED")
+                self.assertTrue(all(state == "PAUSED" for state in api.scheduler_states.values()))
+
+    def test_basic5_restore_preserves_preexisting_delivery_pauses(self):
+        api = FakeApi()
+        api.queue_state = "PAUSED"
+        api.scheduler_states[SCHEDULERS[0]] = "PAUSED"
+        api.push_config = {}
+        with tempfile.TemporaryDirectory() as runner_temp, tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {
+                "RELEASE_BASIC5": "true", "RUNNER_TEMP": runner_temp,
+                "OWNER_TAG_RELEASE_SOURCE": "a" * 40, "GITHUB_RUN_ID": "12345",
+                "GITHUB_RUN_ATTEMPT": "1", "GITHUB_JOB": "release",
+            }):
+                hold = Path(runner_temp, "owner-web-release-hold-12345-1.json")
+                hold.write_text(json.dumps({
+                    "format": 1, "source": "a" * 40, "runId": "12345", "attempt": "1",
+                    "job": "release", "event": "workflow_dispatch", "deployId": 1,
+                    "cleanupId": 2, "deployBefore": "active", "cleanupBefore": "active",
+                    "cleanupVariableBefore": "false",
+                }))
+                hold.chmod(0o600)
+                cert_dir = Path(runner_temp, "owner-web-release-12345-1")
+                cert_dir.mkdir(mode=0o700)
+                cert = cert_dir / "terminal-safe.json"
+                cert.write_text(json.dumps({
+                    "format": 1, "source": "a" * 40, "runId": "12345", "attempt": "1",
+                    "manifest": "b" * 64, "job": "release", "phase": "complete",
+                    "stateReceipt": "c" * 64,
+                }))
+                cert.chmod(0o600)
+                guard = self.make_guard(api, directory)
+                guard.acquire()
+                guard.restore()
+                self.assertEqual(api.queue_state, "PAUSED")
+                self.assertEqual(api.scheduler_states[SCHEDULERS[0]], "PAUSED")
+                self.assertEqual(api.push_config, {})
+                self.assertTrue(all(api.scheduler_states[name] == "ENABLED" for name in SCHEDULERS[1:]))
+
     def test_scheduler_resume_permission_uses_enable_without_acquiring_holds(self):
         api = FakeApi()
         with tempfile.TemporaryDirectory() as directory:

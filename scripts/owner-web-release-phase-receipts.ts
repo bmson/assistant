@@ -163,6 +163,31 @@ function privateReleasePhaseReceipts(
       immutable('checkpoint', state);
       replacePrivate(statePath, envelope(state));
     },
+    writeSafeTerminalCertificate(job: string) {
+      const state = this.readCurrent();
+      if (
+        state.phase !== 'complete' ||
+        state.pending ||
+        state.retirementAttempt ||
+        !/^[a-z0-9_-]{1,64}$/.test(job)
+      )
+        throw new Error('Safe terminal lifecycle certificate is unavailable');
+      const target = resolve(directory, 'terminal-safe.json');
+      writeNew(
+        target,
+        `${JSON.stringify({
+          format: 1,
+          source: identity.source,
+          runId: identity.runId,
+          attempt: identity.attempt,
+          manifest: identity.manifest,
+          job,
+          phase: 'complete',
+          stateReceipt: state.receipt,
+        })}\n`,
+      );
+      return target;
+    },
     readCurrent(): State {
       const state = readStoredState();
       if (state.pending || state.retirementAttempt)
