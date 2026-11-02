@@ -47,53 +47,110 @@ const NON_OPERATIVE = ['ci.yml', 'self-repair.yml', 'ios.yml', 'agent-image-pr-s
     (n) => `.github/workflows/${n}`,
   ),
   STATUSES = ['in_progress', 'queued', 'waiting', 'pending', 'requested'];
+const CONTEXT_CODES = [
+  'ctx_actions',
+  'ctx_repository',
+  'ctx_ref',
+  'ctx_event',
+  'ctx_attempt',
+  'ctx_workflow_ref',
+  'ctx_workflow_sha',
+  'ctx_selector',
+  'ctx_runner_environment',
+  'ctx_runner_os',
+  'ctx_runner_arch',
+  'ctx_runner_temp',
+  'ctx_source_sha',
+  'ctx_checkout_sha',
+  'ctx_requested_sha',
+  'ctx_break_glass',
+  'ctx_project',
+  'ctx_region',
+  'ctx_artifact_repository',
+  'ctx_run_id',
+  'ctx_provider',
+  'ctx_principal',
+  'ctx_oidc_url_shape',
+  'ctx_oidc_url_parse',
+  'ctx_oidc_host',
+  'ctx_oidc_userinfo',
+  'ctx_oidc_port',
+  'ctx_oidc_fragment',
+  'ctx_oidc_request_token_shape',
+  'ctx_github_token_shape',
+  'ctx_source_lookup',
+  'ctx_unclassified',
+] as const;
+type ContextCode = (typeof CONTEXT_CODES)[number];
+const contextCodes: ReadonlySet<string> = new Set(CONTEXT_CODES);
+class ContextHold extends QualificationHold {
+  constructor(readonly code: ContextCode) {
+    super('context');
+  }
+}
+function contextRequire(value: unknown, code: ContextCode): asserts value {
+  if (!value) throw new ContextHold(code);
+}
+function contextString(value: unknown, pattern: RegExp, code: ContextCode): string {
+  contextRequire(typeof value === 'string' && pattern.test(value), code);
+  return value;
+}
+/** First-failure codes only: never serialize environment values, token shapes, URLs or exceptions. */
 export function qualificationContext(env: NodeJS.ProcessEnv, head: string) {
-  qualificationRequire(
-    env.GITHUB_ACTIONS === 'true' &&
-      env.GITHUB_REPOSITORY === 'bmson/assistant' &&
-      env.GITHUB_REF === 'refs/heads/main' &&
-      env.GITHUB_EVENT_NAME === 'workflow_dispatch' &&
-      env.GITHUB_RUN_ATTEMPT === '1' &&
-      env.GITHUB_WORKFLOW_REF === 'bmson/assistant/.github/workflows/deploy.yml@refs/heads/main' &&
-      env.GITHUB_WORKFLOW_SHA === env.GITHUB_SHA &&
-      env.OWNER_NATIVE_WEB_QUALIFICATION === 'read_only' &&
-      env.RUNNER_ENVIRONMENT === 'github-hosted' &&
-      env.RUNNER_OS === 'Linux' &&
-      env.RUNNER_ARCH === 'X64' &&
-      env.RUNNER_TEMP === '/home/runner/work/_temp',
-    'context',
+  contextRequire(env.GITHUB_ACTIONS === 'true', 'ctx_actions');
+  contextRequire(env.GITHUB_REPOSITORY === 'bmson/assistant', 'ctx_repository');
+  contextRequire(env.GITHUB_REF === 'refs/heads/main', 'ctx_ref');
+  contextRequire(env.GITHUB_EVENT_NAME === 'workflow_dispatch', 'ctx_event');
+  contextRequire(env.GITHUB_RUN_ATTEMPT === '1', 'ctx_attempt');
+  contextRequire(
+    env.GITHUB_WORKFLOW_REF === 'bmson/assistant/.github/workflows/deploy.yml@refs/heads/main',
+    'ctx_workflow_ref',
   );
-  const source = string(env.GITHUB_SHA, /^[a-f0-9]{40}$/);
-  qualificationRequire(
-    head === source &&
-      (!env.QUALIFICATION_REQUESTED_SHA || env.QUALIFICATION_REQUESTED_SHA === source) &&
-      env.QUALIFICATION_BREAK_GLASS !== 'true',
-    'context',
+  contextRequire(env.GITHUB_WORKFLOW_SHA === env.GITHUB_SHA, 'ctx_workflow_sha');
+  contextRequire(env.OWNER_NATIVE_WEB_QUALIFICATION === 'read_only', 'ctx_selector');
+  contextRequire(env.RUNNER_ENVIRONMENT === 'github-hosted', 'ctx_runner_environment');
+  contextRequire(env.RUNNER_OS === 'Linux', 'ctx_runner_os');
+  contextRequire(env.RUNNER_ARCH === 'X64', 'ctx_runner_arch');
+  contextRequire(env.RUNNER_TEMP === '/home/runner/work/_temp', 'ctx_runner_temp');
+  const source = contextString(env.GITHUB_SHA, /^[a-f0-9]{40}$/, 'ctx_source_sha');
+  contextRequire(head === source, 'ctx_checkout_sha');
+  contextRequire(
+    !env.QUALIFICATION_REQUESTED_SHA || env.QUALIFICATION_REQUESTED_SHA === source,
+    'ctx_requested_sha',
   );
-  qualificationRequire(
-    env.GCP_PROJECT === 'bmson-assistant' &&
-      env.GCP_REGION === 'us-west1' &&
-      env.ARTIFACT_REPOSITORY === 'assistant',
-    'context',
-  );
-  const runId = string(env.GITHUB_RUN_ID, /^[1-9][0-9]{0,19}$/),
-    provider = string(
+  contextRequire(env.QUALIFICATION_BREAK_GLASS !== 'true', 'ctx_break_glass');
+  contextRequire(env.GCP_PROJECT === 'bmson-assistant', 'ctx_project');
+  contextRequire(env.GCP_REGION === 'us-west1', 'ctx_region');
+  contextRequire(env.ARTIFACT_REPOSITORY === 'assistant', 'ctx_artifact_repository');
+  const runId = contextString(env.GITHUB_RUN_ID, /^[1-9][0-9]{0,19}$/, 'ctx_run_id'),
+    provider = contextString(
       env.GCP_WORKLOAD_IDENTITY_PROVIDER,
       /^projects\/[1-9][0-9]{0,19}\/locations\/global\/workloadIdentityPools\/[a-z0-9_-]{1,63}\/providers\/[a-z0-9_-]{1,63}$/,
+      'ctx_provider',
     ),
-    principal = string(
+    principal = contextString(
       env.GCP_DEPLOY_SERVICE_ACCOUNT,
       /^[a-z][a-z0-9-]{4,62}@bmson-assistant\.iam\.gserviceaccount\.com$/,
+      'ctx_principal',
     );
-  const base = new URL(string(env.ACTIONS_ID_TOKEN_REQUEST_URL, /^https:\/\/[^\s]{1,4096}$/));
-  qualificationRequire(
-    /^[a-z0-9-]+\.actions\.githubusercontent\.com$/.test(base.hostname) &&
-      !base.username &&
-      !base.password &&
-      !base.port &&
-      !base.hash,
-    'context',
+  const rawUrl = contextString(
+    env.ACTIONS_ID_TOKEN_REQUEST_URL,
+    /^https:\/\/[^\s]{1,4096}$/,
+    'ctx_oidc_url_shape',
   );
+  let base: URL;
+  try {
+    base = new URL(rawUrl);
+  } catch {
+    throw new ContextHold('ctx_oidc_url_parse');
+  }
+  contextRequire(
+    /^[a-z0-9-]+\.actions\.githubusercontent\.com$/.test(base.hostname),
+    'ctx_oidc_host',
+  );
+  contextRequire(!base.username && !base.password, 'ctx_oidc_userinfo');
+  contextRequire(!base.port, 'ctx_oidc_port');
+  contextRequire(!base.hash, 'ctx_oidc_fragment');
   const providerAud = `https://iam.googleapis.com/${provider}`,
     tokenUrls = [JOURNAL_AUD, providerAud].map((aud) => {
       const u = new URL(base);
@@ -107,8 +164,12 @@ export function qualificationContext(env: NodeJS.ProcessEnv, head: string) {
     principal,
     providerAud,
     tokenUrls,
-    oidcRequestToken: string(env.ACTIONS_ID_TOKEN_REQUEST_TOKEN, /^[A-Za-z0-9._~-]{1,16384}$/),
-    githubToken: string(env.GH_TOKEN, /^[A-Za-z0-9_]{1,4096}$/),
+    oidcRequestToken: contextString(
+      env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+      /^[A-Za-z0-9._~-]{1,16384}$/,
+      'ctx_oidc_request_token_shape',
+    ),
+    githubToken: contextString(env.GH_TOKEN, /^[A-Za-z0-9_]{1,4096}$/, 'ctx_github_token_shape'),
   };
 }
 export interface QualificationDependencies extends QualificationClock {
@@ -125,6 +186,7 @@ export type QualificationReport = {
   verifiedOrigin?: { source: string; runId: string; jobId: string; checkRunId: string };
   checks: Record<string, unknown>;
   reason: QualificationHold['reason'];
+  contextCode?: ContextCode;
   budget?: ReturnType<ReturnType<typeof qualificationBudget>['summary']>;
 };
 export async function qualifyNativeWebReadOnly(
@@ -141,8 +203,16 @@ export async function qualifyNativeWebReadOnly(
     reason: 'context',
   };
   let budget: ReturnType<typeof qualificationBudget> | undefined;
+  let contextComplete = false;
   try {
-    const c = qualificationContext(env, deps.head());
+    let head: string;
+    try {
+      head = deps.head();
+    } catch {
+      throw new ContextHold('ctx_source_lookup');
+    }
+    const c = qualificationContext(env, head);
+    contextComplete = true;
     report.requestedSource = c.source;
     const githubPaths = new Set([
         `${API}/actions/runs/${c.runId}`,
@@ -453,6 +523,11 @@ export async function qualifyNativeWebReadOnly(
     ];
   } catch (e) {
     if (e instanceof QualificationHold) report.reason = e.reason;
+    if (!contextComplete) {
+      report.reason = 'context';
+      report.contextCode =
+        e instanceof ContextHold && contextCodes.has(e.code) ? e.code : 'ctx_unclassified';
+    }
     report.checks.stopped = true;
   } finally {
     if (budget) report.budget = budget.summary();
