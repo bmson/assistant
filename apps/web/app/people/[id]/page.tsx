@@ -277,11 +277,12 @@ export default async function PersonPage({
   const selectedConnectionId = (selectedRelation ?? selectedNonPersonConnection)?.id.toLowerCase();
   const unavailableConnectionSelection =
     rawConnectionId !== undefined && !selectedRelation && !selectedNonPersonConnection;
+  const detailEditingAvailable = Boolean(
+    editor?.identity?.grant || editor?.family?.grant || editor?.corrections?.length,
+  );
   const editorAvailability = ownerEditorAvailability({
     formSessionScope: session.formSessionScope,
-    editorAvailable: Boolean(
-      editor?.identity?.grant || editor?.family?.grant || editor?.corrections?.length,
-    ),
+    editorAvailable: detailEditingAvailable,
     currentPath: `/people/${id}`,
   });
   const lastContact = lastContactLabel(dossier.lastContactAt, now);
@@ -343,7 +344,7 @@ export default async function PersonPage({
           <OwnerEditorContextTrigger entry="identity" />
           <OwnerEditorContextTrigger entry="create" />
         </div>
-        {!editor && contact.trust !== 'owner' ? (
+        {!detailEditingAvailable && contact.trust !== 'owner' ? (
           <p className="mt-3 text-sm text-muted">
             {editorAvailability.kind === 'available'
               ? 'Changes are unavailable in this view.'
