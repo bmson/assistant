@@ -6,7 +6,7 @@ import {
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { describe, expect, it, vi } from 'vitest';
 import { readerFixtures } from '../../persistence/src/owner-editor-reader-fixtures.test-support.js';
-import type { Db } from './client.js';
+import { createDb, type Db } from './client.js';
 import { createPostgresOwnerEditorRecoveryStorage } from './owner-editor-recovery.js';
 import { agents, maintenanceCursors, ownerEditorOperations } from './schema.js';
 
@@ -75,6 +75,7 @@ function fixture() {
     writes: 0,
     updateSql: '',
     updateParams: [] as unknown[],
+    updateCondition: undefined as unknown,
   };
   const db: FakeDb = {
     select() {
@@ -107,6 +108,7 @@ function fixture() {
           return q;
         },
         async returning() {
+          state.updateCondition = condition;
           const query = new PgDialect().sqlToQuery(
             condition as Parameters<PgDialect['sqlToQuery']>[0],
           );
@@ -200,9 +202,9 @@ describe('PostgreSQL dormant owner-editor recovery storage', () => {
     expect(f.state.updateSql).toContain('request_hash');
     expect(f.state.updateSql).toContain('form_issued_at');
     expect(f.state.updateSql).toContain('form_expires_at');
-    expect(f.state.updateSql.match(/clock_timestamp\(\) < \$\d+/g)).toHaveLength(2);
-    expect(f.state.updateParams).toContainEqual(f.expected.proofExpiresAt);
-    expect(f.state.updateParams).toContainEqual(f.expected.replayExpiresAt);
+    expect(f.state.updateSql.match(/clock_timestamp\(\) < \$\d+::timestamptz/g)).toHaveLength(2);
+    expect(f.state.updateParams).toContain(f.expected.proofExpiresAt.toISOString());
+    expect(f.state.updateParams).toContain(f.expected.replayExpiresAt.toISOString());
     for (const column of [
       'id',
       'agent_id',
@@ -216,6 +218,61 @@ describe('PostgreSQL dormant owner-editor recovery storage', () => {
       'claim_token',
     ]) {
       expect(f.state.updateSql).toContain(`"${column}"`);
+    }
+  });
+
+  it('binds exact ISO deadlines through Drizzle and the configured timestamp serializer without SQL', async () => {
+    const f = fixture();
+    const result = await storage(f.db).withRecoveryTransaction(f.scope, (tx) =>
+      tx.abandonExpiredOriginal(f.expected),
+    );
+    expect(result).toMatchObject({ status: 'abandoned' });
+
+    // createDb installs the same Postgres.js serializers used by the DB
+    // adapter; inspect the serializer without executing any query or opening
+    // a connection to the deliberately unusable loopback port.
+    const wireDb = createDb('postgres://test:test@127.0.0.1:1/no_connection', {
+      max: 1,
+      connectTimeoutSeconds: 1,
+    });
+    try {
+      const query = new PgDialect().sqlToQuery(
+        f.state.updateCondition as Parameters<PgDialect['sqlToQuery']>[0],
+      );
+      expect(query.sql).toContain('clock_timestamp()');
+      const deadlineSlots = [...query.sql.matchAll(/\$(\d+)::timestamptz/g)].map(
+        (match) => Number(match[1]) - 1,
+      );
+      const deadlineValues = deadlineSlots.map((slot) => query.params[slot]);
+      expect(deadlineValues).toEqual([
+        f.expected.proofExpiresAt.toISOString(),
+        f.expected.replayExpiresAt.toISOString(),
+      ]);
+      expect(deadlineValues.every((value) => typeof value === 'string')).toBe(true);
+      const timestampSerializer = wireDb.$client.options.serializers[1184];
+      expect(typeof timestampSerializer).toBe('function');
+
+      // Postgres.js's configured timestamptz serializer is identity-preserving:
+      // a raw Date survives it and then fails the driver's string byte-length
+      // operation. This is the failure the SQL adapter must avoid.
+      const rawDate = new Date(f.expected.proofExpiresAt);
+      const rawEncoded = timestampSerializer?.(rawDate);
+      expect(rawEncoded).toBe(rawDate);
+      expect(rawEncoded).toBeInstanceOf(Date);
+      expect(() => Buffer.byteLength(rawEncoded as string)).toThrow(
+        expect.objectContaining({ code: 'ERR_INVALID_ARG_TYPE' }),
+      );
+
+      for (const value of deadlineValues) {
+        const encoded = timestampSerializer?.(value);
+        expect(encoded).toBe(value);
+        expect(typeof encoded).toBe('string');
+        expect(Buffer.byteLength(encoded as string, 'utf8')).toBe(
+          Buffer.byteLength(value as string, 'utf8'),
+        );
+      }
+    } finally {
+      await wireDb.$client.end({ timeout: 1 });
     }
   });
 

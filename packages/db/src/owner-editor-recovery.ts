@@ -253,8 +253,8 @@ export function createPostgresOwnerEditorRecoveryStorage(
                   eq(ownerEditorOperations.claimToken, expected.claimToken),
                   eq(ownerEditorOperations.claimExpiresAt, expected.claimExpiresAt),
                   lte(ownerEditorOperations.claimExpiresAt, sql`clock_timestamp()`),
-                  sql`clock_timestamp() < ${expected.proofExpiresAt}`,
-                  sql`clock_timestamp() < ${expected.replayExpiresAt}`,
+                  sql`clock_timestamp() < ${expected.proofExpiresAt.toISOString()}::timestamptz`,
+                  sql`clock_timestamp() < ${expected.replayExpiresAt.toISOString()}::timestamptz`,
                 ),
               )
               .returning();
