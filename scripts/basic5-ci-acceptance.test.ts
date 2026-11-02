@@ -33,6 +33,7 @@ import {
   runBasic5CiReadOnlyMetadata,
   verifyDirectChildBootstrap,
 } from './basic5-ci-acceptance.js';
+import { observeBasic5CiVitestOutput } from './basic5-ci-vitest-diagnostics.js';
 
 const target: Basic5CiTarget = {
   databaseUrl: 'postgres://synthetic@127.0.0.1:5432/assistant_0123456789abcdef01234567_test',
@@ -411,7 +412,7 @@ describe('one-shot BASIC5 CI controller', () => {
             'data',
             Buffer.from(
               `BASIC5_ACCEPTANCE_EVIDENCE ${JSON.stringify(validEvidence())}\n` +
-                `${JSON.stringify({ numTotalTests: 1, numPassedTests: 1, numPendingTests: 0, numFailedTests: 0, numTodoTests: 0 })}\n`,
+                `${JSON.stringify({ numTotalTests: 1, numPassedTests: 1, numPendingTests: 0, numFailedTests: 0, numTodoTests: 0, numTotalTestSuites: 1, numPassedTestSuites: 1, numFailedTestSuites: 0, numPendingTestSuites: 0, success: true, testResults: [{ name: `${repositoryRoot}/scripts/basic5-browser-acceptance.integration.test.ts`, status: 'passed', assertionResults: [{ title: 'four BASIC5 saves produce exact receipts and fresh PostgreSQL readbacks through Auth.js', fullName: 'four BASIC5 saves produce exact receipts and fresh PostgreSQL readbacks through Auth.js', status: 'passed', failureMessages: [] }] }] })}\n`,
             ),
           );
         }
@@ -2445,6 +2446,88 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(result.targetStatus).toBe('retained');
     expect(JSON.stringify(result)).not.toContain('private-password');
     expect(ops.events).toEqual(['preflight', 'prepare', 'case', 'quiesce', 'receipt']);
+  });
+
+  it('retains a failed runner summary through case wrapping and the final HOLD receipt', async () => {
+    const stdout = Buffer.from(
+      JSON.stringify({
+        numTotalTests: 1,
+        numPassedTests: 0,
+        numFailedTests: 1,
+        numPendingTests: 0,
+        numTodoTests: 0,
+        success: false,
+        testResults: [
+          {
+            name: '/reviewed/scripts/basic5-browser-acceptance.integration.test.ts',
+            status: 'failed',
+            assertionResults: [
+              {
+                title:
+                  'four BASIC5 saves produce exact receipts and fresh PostgreSQL readbacks through Auth.js',
+                fullName:
+                  'four BASIC5 saves produce exact receipts and fresh PostgreSQL readbacks through Auth.js',
+                status: 'failed',
+                failureMessages: [
+                  'AssertionError: private-cookie-token <html> https://private.invalid\n    at apply (/reviewed/scripts/basic5-browser-acceptance.integration.test.ts:800:9)',
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const { diagnostic } = observeBasic5CiVitestOutput({
+      stdout,
+      stderr: Buffer.from('private stderr'),
+      exitCode: 1,
+      repoRoot: '/reviewed',
+    });
+    const ops = new FakeOps();
+    ops.caseEntryFailure = {
+      stage: 'vitest_output_parse',
+      error: new Basic5CiHold(
+        'vitest_execution_failed_or_output_overflow',
+        true,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        diagnostic,
+      ),
+    };
+    const result = await runBasic5CiAcceptance(ops);
+    expect(result).toMatchObject({
+      result: 'hold',
+      cleanupComplete: false,
+      targetRetained: true,
+      caseEntryDiagnostic: { stage: 'vitest_output_parse', category: 'controller_hold' },
+      vitestDiagnostic: {
+        exitCode: 1,
+        reportStatus: 'parsed',
+        total: 1,
+        passed: 0,
+        failed: 1,
+        knownCaseFailed: true,
+        errorCategory: 'assertion_failure',
+        firstSourceFrame: {
+          file: 'scripts/basic5-browser-acceptance.integration.test.ts',
+          line: 800,
+          column: 9,
+        },
+      },
+    });
+    expect(ops.writtenReceipt?.vitestDiagnostic).toEqual(diagnostic);
+    expect(ops.events).not.toContain('cleanup');
+    for (const forbidden of [
+      'private-cookie-token',
+      '<html>',
+      'https://',
+      '/reviewed/',
+      'private stderr',
+    ])
+      expect(JSON.stringify(ops.writtenReceipt)).not.toContain(forbidden);
   });
 
   it('sanitizes a captured-output limit diagnostic in the final receipt', async () => {

@@ -77,6 +77,7 @@ const BROWSER_HTTP_REQUEST_LIMIT = 64;
 const EMBEDDING_REQUEST_LIMIT = 3;
 const EMBEDDING_BODY_BYTE_LIMIT = 64 * 1024;
 const EVIDENCE_PREFIX = 'BASIC5_ACCEPTANCE_EVIDENCE ';
+const CHECKPOINT_PREFIX = 'BASIC5_ACCEPTANCE_CHECKPOINT ';
 const ACCEPTANCE_PAGE = '/people';
 const OWNER_EDITOR_PATHS = new Set([
   '/api/people/editor',
@@ -93,6 +94,53 @@ type Receipt = {
   outcome: string;
   ids?: Record<string, string>;
 };
+
+const CHECKPOINT_STAGES = [
+  'fixture_setup_started',
+  'fixture_prepared',
+  'web_ready',
+  'browser_launch_started',
+  'browser_launched',
+  'anonymous_probe_complete',
+  'auth_cookie_installed',
+  'authenticated_navigation_complete',
+  'identity_apply_complete',
+  'identity_durable_readback_complete',
+  'identity_fresh_page_readback_complete',
+  'family_add_apply_complete',
+  'family_add_durable_readback_complete',
+  'family_add_fresh_page_readback_complete',
+  'family_correction_apply_complete',
+  'family_correction_durable_readback_complete',
+  'family_correction_fresh_page_readback_complete',
+  'note_correction_apply_complete',
+  'note_correction_durable_readback_complete',
+  'note_correction_fresh_page_readback_complete',
+  'case_complete',
+] as const;
+
+type Basic5CheckpointStage = (typeof CHECKPOINT_STAGES)[number];
+
+function withCheckpointOnFailure<T>(emit: () => void, operation: () => T): T {
+  try {
+    return operation();
+  } catch (error) {
+    emit();
+    throw error;
+  }
+}
+
+async function withCheckpointOnFailureAsync<T>(
+  emit: () => void,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    emit();
+    throw error;
+  }
+}
 
 function waitForListening(server: Server): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -401,13 +449,41 @@ const browserTest = enabled ? it : it.skip;
 browserTest(
   'four BASIC5 saves produce exact receipts and fresh PostgreSQL readbacks through Auth.js',
   async () => {
-    assert(targetDatabaseUrl && allocatedToken);
-    const [dbSchema, drizzle, playwright, persistence] = await Promise.all([
-      import('@assistant/db'),
-      import('drizzle-orm'),
-      import('playwright'),
-      import('@assistant/persistence'),
-    ]);
+    let checkpointStage: Basic5CheckpointStage = 'fixture_setup_started';
+    let checkpointEmitted = false;
+    let checkpointAuthenticatedNavigationCount = 0;
+    let checkpointApplyCount = 0;
+    let checkpointDurableReadbackCount = 0;
+    let checkpointFreshPageReadbackCount = 0;
+    const setCheckpoint = (stage: Basic5CheckpointStage) => {
+      checkpointStage = stage;
+    };
+    const emitCheckpoint = () => {
+      if (checkpointEmitted) return;
+      checkpointEmitted = true;
+      process.stdout.write(
+        `${CHECKPOINT_PREFIX}${JSON.stringify({
+          schemaVersion: 1,
+          stage: checkpointStage,
+          authenticatedNavigationCount: checkpointAuthenticatedNavigationCount,
+          applyCount: checkpointApplyCount,
+          durableReadbackCount: checkpointDurableReadbackCount,
+          freshPageReadbackCount: checkpointFreshPageReadbackCount,
+        })}\n`,
+      );
+    };
+
+    withCheckpointOnFailure(emitCheckpoint, () => assert(targetDatabaseUrl && allocatedToken));
+    const [dbSchema, drizzle, playwright, persistence] = await withCheckpointOnFailureAsync(
+      emitCheckpoint,
+      () =>
+        Promise.all([
+          import('@assistant/db'),
+          import('drizzle-orm'),
+          import('playwright'),
+          import('@assistant/persistence'),
+        ]),
+    );
     const {
       agents,
       assertPostgresInstallationOwner,
@@ -426,21 +502,31 @@ browserTest(
     const { and, eq, or, sql } = drizzle;
     const { chromium } = playwright;
     const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-    const standalone = await verifyStandaloneArtifact(repoRoot);
-    if (
-      process.env.OWNER_EMAIL !== SYNTHETIC_OWNER_EMAIL ||
-      process.env.ASSISTANT_EMAIL !== SYNTHETIC_OWNER_EMAIL ||
-      process.env.OWNER_NAME !== SYNTHETIC_OWNER_NAME ||
-      process.env.ASSISTANT_NAME !== SYNTHETIC_OWNER_NAME
-    )
-      throw new Error('Synthetic owner identity must be supplied before allocated-target seeding.');
-    const target = assertAllocatedTestTargetMarker({
-      databaseUrl: targetDatabaseUrl,
-      testDatabaseUrl: process.env.TEST_DATABASE_URL,
-      token: allocatedToken,
-      kind: 'standard',
+    const standalone = await withCheckpointOnFailureAsync(emitCheckpoint, () =>
+      verifyStandaloneArtifact(repoRoot),
+    );
+    withCheckpointOnFailure(emitCheckpoint, () => {
+      if (
+        process.env.OWNER_EMAIL !== SYNTHETIC_OWNER_EMAIL ||
+        process.env.ASSISTANT_EMAIL !== SYNTHETIC_OWNER_EMAIL ||
+        process.env.OWNER_NAME !== SYNTHETIC_OWNER_NAME ||
+        process.env.ASSISTANT_NAME !== SYNTHETIC_OWNER_NAME
+      )
+        throw new Error(
+          'Synthetic owner identity must be supplied before allocated-target seeding.',
+        );
     });
-    const db = createDb(target.databaseUrl, { max: 4 });
+    const target = withCheckpointOnFailure(emitCheckpoint, () =>
+      assertAllocatedTestTargetMarker({
+        databaseUrl: targetDatabaseUrl,
+        testDatabaseUrl: process.env.TEST_DATABASE_URL,
+        token: allocatedToken,
+        kind: 'standard',
+      }),
+    );
+    const db = withCheckpointOnFailure(emitCheckpoint, () =>
+      createDb(target.databaseUrl, { max: 4 }),
+    );
     let processRegistry: Basic5CiProcessRegistry | undefined;
     let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
     let webProcess: ReturnType<typeof startOwnedProcess> | undefined;
@@ -724,6 +810,7 @@ browserTest(
         noteId,
         noteHash: baselineNoteHash,
       };
+      setCheckpoint('fixture_prepared');
 
       const egressPreloader = fileURLToPath(new URL('./deny-test-egress.mjs', import.meta.url));
       emptyHome = await mkdtemp(path.join(tmpdir(), 'basic5-empty-home-'));
@@ -752,11 +839,14 @@ browserTest(
       await waitForWeb(`${baseUrl}/profile`, webProcess.child, (attempt) => {
         readinessAttempts = attempt;
       });
+      setCheckpoint('web_ready');
 
       const browserProcessesBefore = processRegistry
         ? await readBasic5LinuxProcessSnapshot()
         : undefined;
+      setCheckpoint('browser_launch_started');
       browser = await chromium.launch(basic5BrowserLaunchOptions(process.env.CI === 'true'));
+      setCheckpoint('browser_launched');
       executionEnvironment.browserVersion = browser.version();
       if (!/^\d+\.\d+\.\d+\.\d+$/.test(executionEnvironment.browserVersion))
         throw new Error('Browser version metadata is malformed.');
@@ -815,6 +905,7 @@ browserTest(
       });
       expect(anonymous.status()).toBeGreaterThanOrEqual(300);
       expect(anonymous.headers().location).toContain('/api/auth/signin');
+      setCheckpoint('anonymous_probe_complete');
       const cookie = await createBasic5AuthCookie({
         email: ownerEmail,
         subject: ownerId,
@@ -831,6 +922,7 @@ browserTest(
         },
       ]);
       expect(cookie.name).toBe(BASIC5_AUTH_COOKIE_NAME);
+      setCheckpoint('auth_cookie_installed');
       const page = await context.newPage();
       const ownerPosts: Basic5ObservedPost[] = [];
       const ownerReads: string[] = [];
@@ -862,6 +954,8 @@ browserTest(
       const navigate = async (href: string) => {
         await recordFreshPage(page, href);
         authenticatedPageNavigations += 1;
+        checkpointAuthenticatedNavigationCount = authenticatedPageNavigations;
+        setCheckpoint('authenticated_navigation_complete');
       };
       await navigate(personUrl);
       await page.getByRole('heading', { name: 'Alex Rivera', exact: true }).waitFor();
@@ -877,6 +971,8 @@ browserTest(
       ownerPosts.push(identity.observed);
       receipts.push(identity.receipt);
       fixtureManifest.generatedOperationIds.push(identity.receipt.operationId);
+      checkpointApplyCount = receipts.length;
+      setCheckpoint('identity_apply_complete');
       await assertStoredReceipt(db, ownerEditorOperations, eq, identity.receipt, ownerId, epoch);
       const [updatedContact] = await db.select().from(contacts).where(eq(contacts.id, personId));
       const [updatedEntity] = await db
@@ -896,8 +992,12 @@ browserTest(
         label: 'Alex Rivera',
       });
       durableReadbacks.identity = true;
+      checkpointDurableReadbackCount = Object.values(durableReadbacks).filter(Boolean).length;
+      setCheckpoint('identity_durable_readback_complete');
       await navigate(personUrl);
       await page.getByRole('heading', { name: 'Alex Rivera Updated', exact: true }).waitFor();
+      checkpointFreshPageReadbackCount += 1;
+      setCheckpoint('identity_fresh_page_readback_complete');
 
       await page.getByRole('button', { name: 'Add family relationship', exact: true }).click();
       const familyAddDialog = page.getByRole('dialog');
@@ -917,6 +1017,8 @@ browserTest(
       ownerPosts.push(familyAdd.observed);
       receipts.push(familyAdd.receipt);
       fixtureManifest.generatedOperationIds.push(familyAdd.receipt.operationId);
+      checkpointApplyCount = receipts.length;
+      setCheckpoint('family_add_apply_complete');
       await assertStoredReceipt(db, ownerEditorOperations, eq, familyAdd.receipt, ownerId, epoch);
       const addedRelationId = familyAdd.receipt.ids?.relationId;
       const addedMemoryId = familyAdd.receipt.ids?.memoryId;
@@ -943,6 +1045,8 @@ browserTest(
         ownerConfirmed: true,
       });
       durableReadbacks.familyAdd = true;
+      checkpointDurableReadbackCount = Object.values(durableReadbacks).filter(Boolean).length;
+      setCheckpoint('family_add_durable_readback_complete');
       await navigate(personUrl);
       const addedRelationRow = page.locator(`#person-connection-${addedRelationId.toLowerCase()}`);
       await addedRelationRow
@@ -951,6 +1055,8 @@ browserTest(
           { exact: true },
         )
         .waitFor();
+      checkpointFreshPageReadbackCount += 1;
+      setCheckpoint('family_add_fresh_page_readback_complete');
       await addedRelationRow
         .getByRole('button', { name: 'Edit relationship', exact: true })
         .click();
@@ -967,6 +1073,8 @@ browserTest(
       ownerPosts.push(familyCorrection.observed);
       receipts.push(familyCorrection.receipt);
       fixtureManifest.generatedOperationIds.push(familyCorrection.receipt.operationId);
+      checkpointApplyCount = receipts.length;
+      setCheckpoint('family_correction_apply_complete');
       await assertStoredReceipt(
         db,
         ownerEditorOperations,
@@ -1058,6 +1166,8 @@ browserTest(
       expect(supersededMemory?.supersededById).toBe(correctedMemoryId);
       expect(correctedMemory?.content).toContain('Synthetic family statement corrected.');
       durableReadbacks.familyCorrection = true;
+      checkpointDurableReadbackCount = Object.values(durableReadbacks).filter(Boolean).length;
+      setCheckpoint('family_correction_durable_readback_complete');
       await navigate(personUrl);
       const correctedRelationRow = page.locator(
         `#person-connection-${correctedRelationId.toLowerCase()}`,
@@ -1069,6 +1179,8 @@ browserTest(
         )
         .waitFor();
       await page.getByText('Synthetic family statement corrected.').waitFor();
+      checkpointFreshPageReadbackCount += 1;
+      setCheckpoint('family_correction_fresh_page_readback_complete');
 
       const noteUrl = `${baseUrl}/profile/knowledge/notes/${noteId}?returnTo=${encodeURIComponent(`/people/${personId}`)}`;
       await navigate(noteUrl);
@@ -1081,6 +1193,8 @@ browserTest(
       ownerPosts.push(noteCorrection.observed);
       receipts.push(noteCorrection.receipt);
       fixtureManifest.generatedOperationIds.push(noteCorrection.receipt.operationId);
+      checkpointApplyCount = receipts.length;
+      setCheckpoint('note_correction_apply_complete');
       await assertStoredReceipt(
         db,
         ownerEditorOperations,
@@ -1107,8 +1221,12 @@ browserTest(
         currentContentHash: correctedNote?.contentHash,
       });
       durableReadbacks.noteCorrection = true;
+      checkpointDurableReadbackCount = Object.values(durableReadbacks).filter(Boolean).length;
+      setCheckpoint('note_correction_durable_readback_complete');
       await navigate(noteUrl);
       await page.getByText(OWNER_NOTE_V2, { exact: true }).waitFor();
+      checkpointFreshPageReadbackCount += 1;
+      setCheckpoint('note_correction_fresh_page_readback_complete');
 
       assertBasic5ReceiptSequence(ownerPosts);
       expect(fixtureManifest.generatedOperationIds).toEqual(
@@ -1137,6 +1255,7 @@ browserTest(
       expect(readinessAttempts).toBeLessThanOrEqual(BASIC5_READINESS_ATTEMPT_LIMIT);
       expect(authenticatedPageNavigations).toBe(6);
       if (processRegistry) assertBasic5CiProcessRegistryComplete(await processRegistry.records());
+      setCheckpoint('case_complete');
     } catch (error) {
       testError = error;
     }
@@ -1201,6 +1320,7 @@ browserTest(
       }
     }
     const result = testError || cleanupErrors.length > 0 ? 'failed' : 'passed';
+    emitCheckpoint();
     process.stdout.write(
       `${EVIDENCE_PREFIX}${JSON.stringify({
         schemaVersion: 1,
