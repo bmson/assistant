@@ -15,6 +15,11 @@ import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { readerFixtures } from '../../persistence/src/owner-editor-reader-fixtures.test-support.js';
 import { ownerEditorEmulatorAuth } from './owner-editor-emulator-auth.js';
 import { createFirestoreOwnerEditorRecoveryStorage } from './owner-editor-recovery.js';
+import {
+  MAX_RECOVERY_CONFLICT_CALLBACKS_PER_RACER,
+  MAX_RECOVERY_CONFLICT_CALLBACKS_TOTAL,
+  OwnerEditorRecoveryConflictBarrier,
+} from './owner-editor-recovery-conflict.test-support.js';
 import { decodeRecord, encodeRecord, InstallationStore } from './store.js';
 
 const TARGET_PROJECT = 'demo-owner-editor-recovery-qualification';
@@ -41,7 +46,7 @@ const EXPECTED_TESTS = 9;
 const MAX_TEST_REFS = 160;
 const MAX_QUALIFICATION_TOTAL_REFS = 160;
 const MAX_CLEANUP_TOTAL_REFS = 192;
-const MAX_CALLBACKS_PER_TRANSACTION = 9;
+const CONFLICT_COMPLETION_BOUND_MS = 10_000;
 const REPLAY_WINDOW_MS = 24 * 60 * 60_000;
 const cleanMaintenance: OwnerEditorRecoveryMaintenanceState = {
   driver: 'firestore',
@@ -407,6 +412,23 @@ async function readOperation(f: Fixture) {
   return parseOwnerEditorOperationRecord(decodeRecord(snapshot.data()));
 }
 
+async function withinCompletionBound<T>(promise: Promise<T>, boundMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Conflict racers exceeded the ${boundMs}ms completion bound`)),
+          boundMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function runAbandon(f: Fixture, expected = f.expected) {
   return storage(f).withRecoveryTransaction(f.scope, async (transaction) => {
     await transaction.readFresh();
@@ -633,50 +655,146 @@ describe.skipIf(!enabled)('owner-editor recovery Firestore transaction qualifica
 
   it('observes an actual concurrent claim change, retries the SDK callback and does not write stale abandonment', async () => {
     const f = await fixture('real-transaction-conflict-retry');
-    let arrivals = 0;
-    let releaseReaders: (() => void) | undefined;
-    let barrierTimedOut = false;
-    const bothRead = new Promise<void>((resolve) => {
-      releaseReaders = resolve;
-    });
-    let fallback: ReturnType<typeof setTimeout> | undefined;
-    const callbacks = [0, 0];
-    const runRacer = (index: number) =>
+    const barrier = new OwnerEditorRecoveryConflictBarrier();
+    const runRacer = (index: 0 | 1) =>
       storage(f).withRecoveryTransaction(f.scope, async (transaction) => {
-        callbacks[index] = (callbacks[index] ?? 0) + 1;
+        barrier.callbackStarted(index);
         const snapshot = await transaction.readFresh();
         if (
           snapshot.operation &&
           parseOwnerEditorOperationRecord(snapshot.operation).status === 'preparing'
         ) {
-          arrivals += 1;
-          if (arrivals === 2) {
-            if (fallback) clearTimeout(fallback);
-            releaseReaders?.();
-          }
-          await bothRead;
+          const gate = await barrier.waitForBothPreparing(index);
+          if (gate !== 'both-racers-preparing')
+            throw new Error(`Conflict rendezvous ended with ${gate}`);
         }
         return transaction.abandonExpiredOriginal(f.expected);
       });
-    fallback = setTimeout(() => {
-      barrierTimedOut = true;
-      releaseReaders?.();
-    }, 5_000);
+    const racers = [runRacer(0), runRacer(1)];
+    const settledPromise = Promise.allSettled(racers);
+    let settled = false;
     try {
-      const results = await Promise.all([runRacer(0), runRacer(1)]);
-      expect(barrierTimedOut).toBe(false);
-      expect(arrivals).toBe(2);
-      expect(callbacks.reduce((sum, count) => sum + count, 0)).toBeGreaterThan(2);
-      expect(callbacks.every((count) => count <= MAX_CALLBACKS_PER_TRANSACTION)).toBe(true);
-      expect(results.filter(Boolean)).toHaveLength(1);
-      expect(await readOperation(f)).toMatchObject({
+      const boundedResults = await withinCompletionBound(
+        settledPromise,
+        CONFLICT_COMPLETION_BOUND_MS,
+      );
+      settled = true;
+      barrier.dispose();
+      const barrierResult = barrier.snapshot();
+
+      const [operationDocumentResult, operationQueryResult] = await Promise.allSettled([
+        f.operationRef.get(),
+        f.store.collection('ownerEditorOperations').limit(2).get(),
+      ]);
+      const finalRecord =
+        operationDocumentResult.status === 'fulfilled' &&
+        operationDocumentResult.value.exists &&
+        operationDocumentResult.value.data()
+          ? (() => {
+              try {
+                return parseOwnerEditorOperationRecord(
+                  decodeRecord(operationDocumentResult.value.data()),
+                );
+              } catch {
+                return null;
+              }
+            })()
+          : null;
+      const operationDocumentCount =
+        operationQueryResult.status === 'fulfilled' ? operationQueryResult.value.size : null;
+      const exactDurableRow = Boolean(
+        finalRecord &&
+          operationDocumentCount === 1 &&
+          finalRecord.id === f.record.id &&
+          finalRecord.ownerId === f.record.ownerId &&
+          finalRecord.epoch === f.record.epoch &&
+          finalRecord.privacyGenerationDigest === f.record.privacyGenerationDigest &&
+          finalRecord.operationId === f.record.operationId &&
+          finalRecord.command === f.record.command &&
+          finalRecord.scopeDigest === f.record.scopeDigest &&
+          finalRecord.protocolVersion === f.record.protocolVersion &&
+          finalRecord.requestHash === f.record.requestHash &&
+          finalRecord.formIssuedAt.getTime() === f.record.formIssuedAt.getTime() &&
+          finalRecord.formExpiresAt.getTime() === f.record.formExpiresAt.getTime() &&
+          finalRecord.status === 'abandoned' &&
+          finalRecord.statusVersion === f.record.statusVersion + 1 &&
+          finalRecord.claimToken === null &&
+          finalRecord.claimExpiresAt === null &&
+          finalRecord.result?.outcome === 'not_applied' &&
+          finalRecord.result.reason === 'claim_abandoned',
+      );
+      const successfulResults = boundedResults.filter(
+        (result) => result.status === 'fulfilled' && Boolean(result.value),
+      ).length;
+      const receipt = {
+        formatVersion: 1,
+        case: 'real-transaction-conflict-retry',
+        barrier: {
+          timeoutMs: barrierResult.timeoutMs,
+          timedOut: barrierResult.timedOut,
+          firstAttemptClients: barrierResult.firstAttemptClients,
+          preparingClients: barrierResult.distinctPreparingClients,
+          callbackEntries: barrierResult.callbackEntries,
+          preparingReads: barrierResult.preparingReads,
+          totalCallbacks: barrierResult.totalCallbacks,
+          totalPreparingReads: barrierResult.totalPreparingReads,
+          disposed: barrierResult.disposed,
+        },
+        native: {
+          sdkCallbackTotal: barrierResult.totalCallbacks,
+          successfulResults,
+          settledClients: boundedResults.length,
+          fulfilledClients: boundedResults.filter((result) => result.status === 'fulfilled').length,
+          rejectedClients: boundedResults.filter((result) => result.status === 'rejected').length,
+          completionBoundMs: CONFLICT_COMPLETION_BOUND_MS,
+          exactDurableRow,
+          operationDocumentCount,
+        },
+      };
+      if (!TMP_DIRECTORY) throw new Error('TMPDIR is required for conflict evidence');
+      await writeFile(
+        join(TMP_DIRECTORY, 'recovery-fs-conflict.json'),
+        `${JSON.stringify(receipt, null, 2)}\n`,
+        { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+      );
+
+      expect(barrierResult.timedOut).toBe(false);
+      expect(barrierResult.firstAttemptClients).toEqual([0, 1]);
+      expect(barrierResult.distinctPreparingClients).toEqual([0, 1]);
+      expect(barrierResult.totalCallbacks).toBeGreaterThan(2);
+      expect(barrierResult.totalCallbacks).toBeLessThanOrEqual(
+        MAX_RECOVERY_CONFLICT_CALLBACKS_TOTAL,
+      );
+      expect(
+        barrierResult.callbackEntries.every(
+          (count) => count <= MAX_RECOVERY_CONFLICT_CALLBACKS_PER_RACER,
+        ),
+      ).toBe(true);
+      expect(boundedResults.every((result) => result.status === 'fulfilled')).toBe(true);
+      expect(successfulResults).toBe(1);
+      expect(operationDocumentCount).toBe(1);
+      expect(finalRecord).toMatchObject({
+        id: f.record.id,
+        ownerId: f.record.ownerId,
+        epoch: f.record.epoch,
+        privacyGenerationDigest: f.record.privacyGenerationDigest,
+        operationId: f.record.operationId,
+        command: f.record.command,
+        scopeDigest: f.record.scopeDigest,
+        protocolVersion: f.record.protocolVersion,
+        requestHash: f.record.requestHash,
         status: 'abandoned',
         statusVersion: f.record.statusVersion + 1,
-        requestHash: f.record.requestHash,
+        claimToken: null,
+        claimExpiresAt: null,
+        result: { outcome: 'not_applied', reason: 'claim_abandoned' },
       });
+      expect(exactDurableRow).toBe(true);
     } finally {
-      if (fallback) clearTimeout(fallback);
-      releaseReaders?.();
+      barrier.dispose();
+      if (!settled) {
+        await withinCompletionBound(settledPromise, CONFLICT_COMPLETION_BOUND_MS);
+      }
     }
   }, 60_000);
 
