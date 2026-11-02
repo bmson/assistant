@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   embeddingModelId,
   embeddingSpaceIdentityKey,
+  gatewayModelId,
   snapshotEmbeddingSpace,
   validateEmbedding,
 } from './embedding.js';
@@ -16,6 +17,59 @@ describe('embedding model identity', () => {
     expect(embeddingModelId({ ...base, provider: 'vertex', model: 'gemini-embedding-001' })).toBe(
       'vertex/gemini-embedding-001',
     );
+  });
+
+  it('preserves only the matching gateway connection and its nonempty upstream model', () => {
+    const base = { provider: 'basic5-fixture', dimensions: 1536, revision: 'r1' };
+    for (const model of ['embedding', 'vendor/text-embedding', 'llama3.2:3b']) {
+      const qualified = `gw:basic5-fixture:${model}`;
+      expect(embeddingModelId({ ...base, model: qualified })).toBe(qualified);
+      expect(gatewayModelId(base.provider, qualified)).toBe(model);
+    }
+    for (const model of [
+      'gw:other:embedding',
+      'gw:basic5-fixture-extra:embedding',
+      'gw:basic5-fixture:',
+      'gw:basic5-fixture:two names',
+    ])
+      expect(() => embeddingModelId({ ...base, model })).toThrow('cannot serve');
+    expect(() =>
+      embeddingModelId({ ...base, provider: 'openrouter', model: 'gw:basic5-fixture:embedding' }),
+    ).toThrow('cannot serve');
+    expect(() =>
+      embeddingModelId({
+        ...base,
+        provider: 'bad:connection',
+        model: 'gw:bad:connection:embedding',
+      }),
+    ).toThrow('cannot serve');
+  });
+
+  it.each([
+    [
+      'gw:basic5-fixture:embedding',
+      'gw:basic5-fixture:embedding',
+      '1a8caab1523ced91f5b742da2b953f4d36591c50bf23133d27e22c8b9da48a1d',
+    ],
+    [
+      'basic5-fixture/gw:basic5-fixture:embedding',
+      'basic5-fixture/gw:basic5-fixture:embedding',
+      '0ef8339d14a401458ad75c1738e9aeb7ee995a7a3dc9ab7176910c39eaba7d85',
+    ],
+    [
+      'embedding',
+      'basic5-fixture/embedding',
+      '71e3ce30fd5c1089ad5e006ac7550d0f368221c76b30ffe52c42ba32c4359288',
+    ],
+  ])('retains the pre-change storage identity for %s', (model, route, key) => {
+    const space = Object.freeze({
+      provider: 'basic5-fixture',
+      model,
+      dimensions: 1536,
+      revision: 'fixture-legacy-r1',
+    });
+    expect(embeddingModelId(space)).toBe(route);
+    expect(embeddingSpaceIdentityKey(space)).toBe(key);
   });
 
   it('snapshots and freezes exact identity before the caller can mutate its input', () => {

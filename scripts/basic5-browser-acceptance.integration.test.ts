@@ -16,7 +16,12 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import type { Db } from '@assistant/db';
-import type { Response as BrowserResponse, Locator, Page } from 'playwright';
+import type {
+  Request as BrowserRequest,
+  Response as BrowserResponse,
+  Locator,
+  Page,
+} from 'playwright';
 import { expect, it } from 'vitest';
 import {
   assertBasic5AnonymousPageResponse,
@@ -30,6 +35,8 @@ import {
   basic5BrowserLaunchOptions,
   basic5EmbeddingResponse,
   basic5IsolatedWebEnvironment,
+  boundedBasic5ObservedCount,
+  classifyBasic5RequestFailure,
   createBasic5AuthCookie,
   nextBasic5ReadinessAttempt,
 } from './basic5-browser-acceptance-support.js';
@@ -50,6 +57,8 @@ import {
 } from './basic5-ci-process-proof.js';
 import {
   type Basic5CiFixtureCheckpoint,
+  type Basic5FixtureCounters,
+  type Basic5SaveTransport,
   classifyBasic5AnonymousLocation,
 } from './basic5-ci-vitest-diagnostics.js';
 import {
@@ -518,6 +527,23 @@ browserTest(
     let checkpointApplyCount = 0;
     let checkpointDurableReadbackCount = 0;
     let checkpointFreshPageReadbackCount = 0;
+    let browserHttpRequests = 0;
+    let browserBudgetExceeded = false;
+    let embeddingRequests = 0;
+    let embeddingResponsesFinished = 0;
+    let fixtureCountersAtSave: Basic5FixtureCounters | undefined;
+    let saveTransport: Basic5SaveTransport | undefined;
+    let stopRequestFailureObservation: (() => void) | undefined;
+    const snapshotFixtureCounters = (
+      observedAt: Basic5FixtureCounters['observedAt'],
+    ): Basic5FixtureCounters => ({
+      observedAt,
+      browserHttpRequests: boundedBasic5ObservedCount(browserHttpRequests),
+      browserBudgetExceeded,
+      localEmbeddingReceived: boundedBasic5ObservedCount(embeddingRequests),
+      localEmbeddingFinished: boundedBasic5ObservedCount(embeddingResponsesFinished),
+    });
+
     let ownerEditorPostCount = 0;
     let saveObservation: Basic5SaveObservationDiagnostic | undefined;
     let activeSaveRequest: ((matched: boolean | null) => void) | undefined;
@@ -540,6 +566,8 @@ browserTest(
           durableReadbackCount: checkpointDurableReadbackCount,
           freshPageReadbackCount: checkpointFreshPageReadbackCount,
           ...anonymousPageObservation,
+          fixtureCounters: fixtureCountersAtSave ?? snapshotFixtureCounters('checkpoint'),
+          ...(saveTransport ? { saveTransport: { ...saveTransport } } : {}),
           ...(saveObservation
             ? {
                 saveObservation: {
@@ -611,13 +639,10 @@ browserTest(
     let webProcess: ReturnType<typeof startOwnedProcess> | undefined;
     let embeddingServer: Server | undefined;
     let emptyHome: string | undefined;
-    let embeddingRequests = 0;
     let readinessAttempts: number | null = null;
-    let browserHttpRequests = 0;
     let anonymousPageProbeRequests = 0;
     let pageApiMutationRequests = 0;
     let authenticatedPageNavigations = 0;
-    let browserBudgetExceeded = false;
     let ownerEditorGetCount = 0;
     let ownerApplyRequests = 0;
     let recoveryRequests = 0;
@@ -734,6 +759,9 @@ browserTest(
 
       embeddingServer = createServer((request, response) => {
         embeddingRequests += 1;
+        response.once('finish', () => {
+          embeddingResponsesFinished += 1;
+        });
         if (embeddingRequests > EMBEDDING_REQUEST_LIMIT) {
           response.writeHead(429, { 'cache-control': 'no-store' });
           response.end();
@@ -961,10 +989,22 @@ browserTest(
       if (!/^\d+\.\d+\.\d+\.\d+$/.test(executionEnvironment.browserVersion))
         throw new Error('Browser version metadata is malformed.');
       const context = await browser.newContext();
+      const isIntendedPost = (request: BrowserRequest): boolean => {
+        if (!activeSaveOperation || !activeSaveRequest || request.method() !== 'POST') return false;
+        try {
+          if (!OWNER_EDITOR_PATHS.has(new URL(request.url()).pathname)) return false;
+          const body = request.postDataJSON();
+          return body?.intent === 'apply' && body?.command === activeSaveOperation;
+        } catch {
+          return false;
+        }
+      };
       await context.route('**/*', (route) => {
         browserHttpRequests += 1;
+        const intended = isIntendedPost(route.request());
         if (browserHttpRequests > BROWSER_HTTP_REQUEST_LIMIT) {
           browserBudgetExceeded = true;
+          if (intended && saveTransport) saveTransport.routeBlocked = true;
           return route.abort('blockedbyclient');
         }
         let allowed = false;
@@ -973,6 +1013,8 @@ browserTest(
         } catch {
           allowed = false;
         }
+        if (intended && saveTransport)
+          saveTransport.routeBlocked = saveTransport.routeBlocked === true || !allowed;
         return allowed ? route.continue() : route.abort('blockedbyclient');
       });
       // The combined 64-request budget includes this single anonymous page probe.
@@ -1072,11 +1114,30 @@ browserTest(
         }
       });
 
+      const onIntendedRequestFailed = (request: BrowserRequest) => {
+        // Ignore browser-close/cleanup failures after the save observer ends.
+        if (!isIntendedPost(request) || !saveTransport) return;
+        let errorText: unknown;
+        try {
+          errorText = request.failure()?.errorText;
+        } catch {
+          errorText = undefined;
+        }
+        saveTransport.requestFailedClass = classifyBasic5RequestFailure(errorText);
+      };
+      page.on('requestfailed', onIntendedRequestFailed);
+      stopRequestFailureObservation = () => {
+        page.off('requestfailed', onIntendedRequestFailed);
+      };
+
       const saveObserved = (
         operation: Basic5SaveObservationDiagnostic['operation'],
         button: Locator,
-      ) =>
-        saveWithReceipt(page, operation, button, {
+      ) => {
+        saveObservation = undefined;
+        fixtureCountersAtSave = undefined;
+        saveTransport = { operation, routeBlocked: null, requestFailedClass: null };
+        return saveWithReceipt(page, operation, button, {
           activateRequestObserver: (notify) => {
             activeSaveOperation = operation;
             activeSaveRequest = notify;
@@ -1090,8 +1151,10 @@ browserTest(
           totalMatchingPostCount: () => ownerEditorPostCount,
           onDiagnostic: (diagnostic) => {
             saveObservation = diagnostic;
+            fixtureCountersAtSave = snapshotFixtureCounters('save_settled');
           },
         });
+      };
 
       const personUrl = `${baseUrl}/people/${personId}`;
       const navigate = async (href: string) => {
@@ -1410,6 +1473,12 @@ browserTest(
       setCheckpoint('case_complete');
     } catch (error) {
       testError = error;
+    }
+    // Diagnostic listeners cannot replace the original test result or cleanup.
+    try {
+      stopRequestFailureObservation?.();
+    } catch {
+      /* observational only */
     }
     const cleanupErrors: unknown[] = [];
     const cleanup = {

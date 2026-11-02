@@ -10,6 +10,8 @@ import {
   basic5BrowserLaunchOptions,
   basic5EmbeddingResponse,
   basic5IsolatedWebEnvironment,
+  boundedBasic5ObservedCount,
+  classifyBasic5RequestFailure,
   createBasic5AuthCookie,
   decodeBasic5AuthCookie,
   nextBasic5ReadinessAttempt,
@@ -61,6 +63,49 @@ function anonymousResponse(input: {
 }
 
 describe('BASIC5 browser acceptance support', () => {
+  it('classifies only recognized Chromium request failures without retaining error text', () => {
+    const cases = [
+      ['net::ERR_BLOCKED_BY_CLIENT', 'blocked_by_client'],
+      ['page.goto: net::ERR_ABORTED', 'aborted'],
+      ['net::ERR_CONNECTION_REFUSED', 'connection'],
+      ['net::ERR_CONNECTION_RESET', 'connection'],
+      ['net::ERR_TIMED_OUT', 'timeout'],
+      ['net::ERR_NAME_NOT_RESOLVED', 'name_resolution'],
+      ['net::ERR_DNS_TIMED_OUT', 'name_resolution'],
+      ['provider secret: private-route-token', 'other'],
+      ['net::ERR_ABORTED'.padEnd(513), 'other'],
+      ['net::ERR_CERT_AUTHORITY_INVALID', 'other'],
+      ['net::ERR_ABORTED then net::ERR_CONNECTION_RESET', 'other'],
+    ] as const;
+    for (const [errorText, expected] of cases) {
+      expect(classifyBasic5RequestFailure(errorText)).toBe(expected);
+      expect(JSON.stringify({ category: classifyBasic5RequestFailure(errorText) })).not.toContain(
+        errorText,
+      );
+    }
+    for (const value of [undefined, null, 42, {}, ['net::ERR_ABORTED']])
+      expect(classifyBasic5RequestFailure(value)).toBe('unknown');
+  });
+
+  it('keeps observed counts only when they are bounded safe integers', () => {
+    for (const [value, expected] of [
+      [0, 0],
+      [1, 1],
+      [1_000_000, 1_000_000],
+      [-1, null],
+      [1_000_001, null],
+      [1.5, null],
+      [Number.MAX_SAFE_INTEGER + 1, null],
+      [Number.NaN, null],
+      [Infinity, null],
+      ['3', null],
+      [null, null],
+      [undefined, null],
+    ] as const) {
+      expect(boundedBasic5ObservedCount(value)).toBe(expected);
+    }
+  });
+
   it('accepts the configured same-origin Google sign-in HTTP redirect', () => {
     expect(
       anonymousResponse({
