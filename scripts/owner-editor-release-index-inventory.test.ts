@@ -17,6 +17,8 @@ const spec = JSON.parse(manifest.toString('utf8')) as {
   fieldOverrides: Array<{ collectionGroup: string; fieldPath: string }>;
 };
 const prefix = 'projects/bmson-assistant/databases/assistant-production/collectionGroups/';
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
 
 function liveComposites() {
   return spec.indexes.map((index, position) => {
@@ -40,11 +42,39 @@ function liveComposites() {
   });
 }
 
-function liveOverrides() {
-  return spec.fieldOverrides.map((field) => ({
+function liveOverrides(): unknown[] {
+  const explicit = spec.fieldOverrides.map((field) => ({
     name: `${prefix}${field.collectionGroup}/fields/${field.fieldPath}`,
     indexConfig: { usesAncestorConfig: false, reverting: false, indexes: [] },
   }));
+  const defaultName = `${prefix}__default__/fields/*`;
+  return [
+    ...explicit,
+    {
+      name: defaultName,
+      indexConfig: {
+        usesAncestorConfig: false,
+        reverting: false,
+        indexes: [
+          {
+            queryScope: 'COLLECTION',
+            state: 'READY',
+            fields: [{ fieldPath: '*', order: 'ASCENDING' }],
+          },
+          {
+            queryScope: 'COLLECTION',
+            state: 'READY',
+            fields: [{ fieldPath: '*', order: 'DESCENDING' }],
+          },
+          {
+            queryScope: 'COLLECTION',
+            state: 'READY',
+            fields: [{ fieldPath: '*', arrayConfig: 'CONTAINS' }],
+          },
+        ],
+      },
+    },
+  ];
 }
 
 const complete = { compositesComplete: true, fieldsComplete: true } as const;
@@ -58,8 +88,12 @@ describe('compareIndexInventory', () => {
       complete,
     );
 
+    if (result.status !== 'exact_manifest_parity')
+      throw new Error('expected exact manifest parity');
     expect(result.status).toBe('exact_manifest_parity');
     expect(result.manifestSha256).toBe(OWNER_EDITOR_RELEASE_MANIFEST_SHA256);
+    expect(result.fieldOverrideCount).toBe(spec.fieldOverrides.length + 1);
+    expect(result.explicitFieldOverrideCount).toBe(spec.fieldOverrides.length);
     expect(result.globalReadiness).toBe('not_established');
   });
 
@@ -77,38 +111,36 @@ describe('compareIndexInventory', () => {
     });
   });
 
-  it('does not report parity when the unpinned default field configuration is present', async () => {
-    const overrides = [
-      ...liveOverrides(),
-      {
-        name: `${prefix}__default__/fields/*`,
-        indexConfig: {
-          indexes: [
-            { queryScope: 'COLLECTION', fields: [{ fieldPath: '*', order: 'ASCENDING' }] },
-            { queryScope: 'COLLECTION', fields: [{ fieldPath: '*', order: 'DESCENDING' }] },
-            { queryScope: 'COLLECTION', fields: [{ fieldPath: '*', arrayConfig: 'CONTAINS' }] },
-          ],
-        },
-      },
-    ];
-
+  it('validates the documented global default modes then excludes only that sentinel from parity', async () => {
     await expect(
-      compareIndexInventory(manifest, liveComposites(), overrides, complete),
+      compareIndexInventory(manifest, liveComposites(), liveOverrides(), complete),
     ).resolves.toMatchObject({
-      status: 'unknown',
-      reason: 'default_configuration_unverified',
+      status: 'exact_manifest_parity',
+      fieldOverrideCount: spec.fieldOverrides.length + 1,
     });
   });
 
+  it('accepts documented canonical ancestor metadata without treating it as inherited configuration', async () => {
+    const overrides = liveOverrides();
+    const defaultName = `${prefix}__default__/fields/*`;
+    const index = overrides.findIndex((row) => isRecord(row) && row.name === defaultName);
+    const row = overrides[index];
+    if (!row || !isRecord(row)) throw new Error('missing default fixture');
+    const config = row.indexConfig as Record<string, unknown>;
+    overrides[index] = { ...row, indexConfig: { ...config, ancestorField: defaultName } };
+    await expect(
+      compareIndexInventory(manifest, liveComposites(), overrides, complete),
+    ).resolves.toMatchObject({ status: 'exact_manifest_parity' });
+  });
+
   it('keeps default field TTL configuration unverified', async () => {
-    const ttlDefault = [
-      ...liveOverrides(),
-      {
-        name: `${prefix}__default__/fields/*`,
-        indexConfig: { indexes: [] },
-        ttlConfig: { state: 'ENABLED' },
-      },
-    ];
+    const ttlDefault = liveOverrides();
+    const defaultIndex = ttlDefault.findIndex((row) =>
+      isRecord(row) ? row.name === `${prefix}__default__/fields/*` : false,
+    );
+    const defaultRow = ttlDefault[defaultIndex];
+    if (!defaultRow || !isRecord(defaultRow)) throw new Error('missing default fixture');
+    ttlDefault[defaultIndex] = { ...defaultRow, ttlConfig: { state: 'ENABLED' } };
 
     await expect(
       compareIndexInventory(manifest, liveComposites(), ttlDefault, complete),
@@ -116,6 +148,155 @@ describe('compareIndexInventory', () => {
       status: 'unknown',
       reason: 'default_configuration_unverified',
     });
+  });
+
+  it.each([
+    {
+      label: 'missing',
+      change: (rows: unknown[]) =>
+        rows.filter((row) => !(isRecord(row) && row.name === `${prefix}__default__/fields/*`)),
+    },
+    {
+      label: 'duplicate',
+      change: (rows: unknown[]) => [
+        ...rows,
+        rows.find((row) => isRecord(row) && row.name === `${prefix}__default__/fields/*`),
+      ],
+    },
+    {
+      label: 'missing a standard mode',
+      change: (rows: unknown[]) =>
+        rows.map((row) => {
+          if (!isRecord(row) || row.name !== `${prefix}__default__/fields/*`) return row;
+          const config = row.indexConfig as Record<string, unknown>;
+          return {
+            ...row,
+            indexConfig: { ...config, indexes: (config.indexes as unknown[]).slice(0, 2) },
+          };
+        }),
+    },
+    {
+      label: 'building a standard mode',
+      change: (rows: unknown[]) =>
+        rows.map((row) => {
+          if (!isRecord(row) || row.name !== `${prefix}__default__/fields/*`) return row;
+          const config = row.indexConfig as Record<string, unknown>;
+          const indexes = config.indexes as Array<Record<string, unknown>>;
+          return {
+            ...row,
+            indexConfig: {
+              ...config,
+              indexes: indexes.map((index, position) =>
+                position === 0 ? { ...index, state: 'CREATING' } : index,
+              ),
+            },
+          };
+        }),
+    },
+    {
+      label: 'missing an explicit READY state',
+      change: (rows: unknown[]) =>
+        rows.map((row) => {
+          if (!isRecord(row) || row.name !== `${prefix}__default__/fields/*`) return row;
+          const config = row.indexConfig as Record<string, unknown>;
+          const indexes = config.indexes as Array<Record<string, unknown>>;
+          const first = { ...(indexes[0] ?? {}) };
+          delete first.state;
+          return { ...row, indexConfig: { ...config, indexes: [first, ...indexes.slice(1)] } };
+        }),
+    },
+    {
+      label: 'inheriting ancestor configuration',
+      change: (rows: unknown[]) =>
+        rows.map((row) => {
+          if (!isRecord(row) || row.name !== `${prefix}__default__/fields/*`) return row;
+          const config = row.indexConfig as Record<string, unknown>;
+          return { ...row, indexConfig: { ...config, usesAncestorConfig: true } };
+        }),
+    },
+    {
+      label: 'extra mode',
+      change: (rows: unknown[]) =>
+        rows.map((row) => {
+          if (!isRecord(row) || row.name !== `${prefix}__default__/fields/*`) return row;
+          const config = row.indexConfig as Record<string, unknown>;
+          return {
+            ...row,
+            indexConfig: {
+              ...config,
+              indexes: [
+                ...(config.indexes as unknown[]),
+                { queryScope: 'COLLECTION', fields: [{ fieldPath: '*', order: 'ASCENDING' }] },
+              ],
+            },
+          };
+        }),
+    },
+  ])('keeps the global default configuration unverified when $label', async ({ change }) => {
+    await expect(
+      compareIndexInventory(manifest, liveComposites(), change(liveOverrides()), complete),
+    ).resolves.toMatchObject({ status: 'unknown', reason: 'default_configuration_unverified' });
+  });
+
+  it('accepts only a documented same-database ancestor field on explicit exemptions', async () => {
+    const overrides = liveOverrides();
+    const first = overrides[0];
+    if (!first || !isRecord(first)) throw new Error('missing explicit override');
+    const config = first.indexConfig as Record<string, unknown>;
+    overrides[0] = {
+      ...first,
+      indexConfig: { ...config, ancestorField: `${prefix}__default__/fields/*` },
+    };
+    await expect(
+      compareIndexInventory(manifest, liveComposites(), overrides, complete),
+    ).resolves.toMatchObject({ status: 'exact_manifest_parity' });
+
+    const invalid = liveOverrides();
+    const invalidFirst = invalid[0];
+    if (!invalidFirst || !isRecord(invalidFirst)) throw new Error('missing explicit override');
+    const invalidConfig = invalidFirst.indexConfig as Record<string, unknown>;
+    invalid[0] = {
+      ...invalidFirst,
+      indexConfig: {
+        ...invalidConfig,
+        ancestorField: 'projects/other/databases/private/collectionGroups/tasks/fields/*',
+      },
+    };
+    await expect(
+      compareIndexInventory(manifest, liveComposites(), invalid, complete),
+    ).resolves.toMatchObject({ status: 'unknown', reason: 'inventory_not_exact' });
+
+    const inherited = liveOverrides();
+    const inheritedFirst = inherited[0];
+    if (!inheritedFirst || !isRecord(inheritedFirst)) throw new Error('missing explicit override');
+    const inheritedConfig = inheritedFirst.indexConfig as Record<string, unknown>;
+    inherited[0] = {
+      ...inheritedFirst,
+      indexConfig: { ...inheritedConfig, usesAncestorConfig: true },
+    };
+    await expect(
+      compareIndexInventory(manifest, liveComposites(), inherited, complete),
+    ).resolves.toMatchObject({ status: 'unknown', reason: 'inventory_not_exact' });
+  });
+
+  it('rejects unknown top-level field resource settings without reporting parity', async () => {
+    const overrides = liveOverrides();
+    const first = overrides[0];
+    if (!first || !isRecord(first)) throw new Error('missing explicit override');
+    overrides[0] = { ...first, unrelatedConfiguration: true };
+    await expect(
+      compareIndexInventory(manifest, liveComposites(), overrides, complete),
+    ).resolves.toMatchObject({ status: 'unknown', reason: 'inventory_not_exact' });
+
+    const defaultRows = liveOverrides();
+    const defaultName = `${prefix}__default__/fields/*`;
+    const index = defaultRows.findIndex((row) => isRecord(row) && row.name === defaultName);
+    const defaultRow = defaultRows[index];
+    if (!defaultRow || !isRecord(defaultRow)) throw new Error('missing default fixture');
+    defaultRows[index] = { ...defaultRow, unrelatedConfiguration: true };
+    await expect(
+      compareIndexInventory(manifest, liveComposites(), defaultRows, complete),
+    ).resolves.toMatchObject({ status: 'unknown', reason: 'default_configuration_unverified' });
   });
 
   it('keeps inventory coverage unknown when either caller completeness assertion is absent', async () => {
@@ -139,6 +320,7 @@ describe('compareIndexInventory', () => {
       compareIndexInventory(manifest, composites, liveOverrides(), complete),
     ).resolves.toMatchObject({
       status: 'only_approved_owner_editor_index_missing',
+      explicitFieldOverrideCount: spec.fieldOverrides.length,
       missingIndex: {
         collectionGroup: 'ownerEditorOperations',
         queryScope: 'COLLECTION',

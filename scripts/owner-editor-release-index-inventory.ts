@@ -34,6 +34,7 @@ export type OwnerEditorIndexInventoryResult =
       manifestSha256: string;
       compositeCount: number;
       fieldOverrideCount: number;
+      explicitFieldOverrideCount: number;
       coverage: 'caller_asserted_complete';
       globalReadiness: 'not_established';
     }
@@ -42,6 +43,7 @@ export type OwnerEditorIndexInventoryResult =
       manifestSha256: string;
       compositeCount: number;
       fieldOverrideCount: number;
+      explicitFieldOverrideCount: number;
       missingIndex: typeof OWNER_EDITOR_INDEX;
       coverage: 'caller_asserted_complete';
       globalReadiness: 'not_established';
@@ -75,7 +77,72 @@ function fail(message: string): never {
 
 class DefaultFieldConfigurationUnverified extends Error {}
 
-function validateInventory(composites: unknown[], overrides: unknown[]): void {
+function validAncestorField(value: unknown, currentName: string): boolean {
+  if (typeof value !== 'string' || !value.startsWith(PREFIX)) return false;
+  const ancestor = /^([^/]+)\/fields\/([^/]+)$/.exec(value.slice(PREFIX.length));
+  const current = /^([^/]+)\/fields\/([^/]+)$/.exec(currentName.slice(PREFIX.length));
+  if (!ancestor?.[1] || !ancestor[2] || !current?.[1] || !current[2]) return false;
+  return ancestor[1] === '__default__'
+    ? ancestor[2] === '*'
+    : ancestor[1] === current[1] && ancestor[2] === '*';
+}
+
+function validateDefaultField(raw: Record<string, unknown>): void {
+  if (raw.ttlConfig !== undefined) throw new DefaultFieldConfigurationUnverified();
+  const config = raw.indexConfig;
+  if (!isRecord(config)) throw new DefaultFieldConfigurationUnverified();
+  if (
+    Object.keys(config).some(
+      (key) => !['usesAncestorConfig', 'ancestorField', 'reverting', 'indexes'].includes(key),
+    ) ||
+    config.usesAncestorConfig === true ||
+    (config.usesAncestorConfig !== undefined && config.usesAncestorConfig !== false) ||
+    config.reverting === true ||
+    (config.reverting !== undefined && config.reverting !== false) ||
+    (config.ancestorField !== undefined &&
+      !validAncestorField(config.ancestorField, raw.name as string))
+  )
+    throw new DefaultFieldConfigurationUnverified();
+  if (!Array.isArray(config.indexes) || config.indexes.length !== 3)
+    throw new DefaultFieldConfigurationUnverified();
+
+  const modes = new Set<string>();
+  for (const index of config.indexes) {
+    if (!isRecord(index)) throw new DefaultFieldConfigurationUnverified();
+    if (
+      Object.keys(index).some(
+        (key) => !['queryScope', 'fields', 'apiScope', 'state'].includes(key),
+      ) ||
+      index.queryScope !== 'COLLECTION' ||
+      (index.apiScope !== undefined && index.apiScope !== 'ANY_API') ||
+      index.state !== 'READY' ||
+      !Array.isArray(index.fields) ||
+      index.fields.length !== 1
+    )
+      throw new DefaultFieldConfigurationUnverified();
+    const field = index.fields[0];
+    if (!isRecord(field) || field.fieldPath !== '*')
+      throw new DefaultFieldConfigurationUnverified();
+    const keys = Object.keys(field).sort().join(',');
+    const mode =
+      keys === 'fieldPath,order' && (field.order === 'ASCENDING' || field.order === 'DESCENDING')
+        ? `order:${String(field.order)}`
+        : keys === 'arrayConfig,fieldPath' && field.arrayConfig === 'CONTAINS'
+          ? 'array:CONTAINS'
+          : null;
+    if (!mode || modes.has(mode)) throw new DefaultFieldConfigurationUnverified();
+    modes.add(mode);
+  }
+  if (
+    modes.size !== 3 ||
+    !modes.has('order:ASCENDING') ||
+    !modes.has('order:DESCENDING') ||
+    !modes.has('array:CONTAINS')
+  )
+    throw new DefaultFieldConfigurationUnverified();
+}
+
+function validateInventory(composites: unknown[], overrides: unknown[]): unknown[] {
   if (composites.length > MAX_INVENTORY_ROWS || overrides.length > MAX_INVENTORY_ROWS)
     fail('inventory row limit exceeded');
 
@@ -100,6 +167,8 @@ function validateInventory(composites: unknown[], overrides: unknown[]): void {
   }
 
   const fieldNames = new Set<string>();
+  let defaultConfigurationSeen = false;
+  const explicitOverrides: unknown[] = [];
   for (const raw of overrides) {
     if (!isRecord(raw) || typeof raw.name !== 'string') fail('field override row is malformed');
     if (raw.name !== `${PREFIX}__default__/fields/*` && !raw.name.startsWith(PREFIX))
@@ -111,11 +180,24 @@ function validateInventory(composites: unknown[], overrides: unknown[]): void {
       )
     )
       fail('field override resource name is malformed');
-    if (fieldNames.has(raw.name)) fail('duplicate field override resource name');
+    if (Object.keys(raw).some((key) => !['name', 'indexConfig', 'ttlConfig'].includes(key))) {
+      if (raw.name === `${PREFIX}__default__/fields/*`)
+        throw new DefaultFieldConfigurationUnverified();
+      fail('field override contains unknown resource settings');
+    }
+    if (fieldNames.has(raw.name)) {
+      if (raw.name === `${PREFIX}__default__/fields/*`)
+        throw new DefaultFieldConfigurationUnverified();
+      fail('duplicate field override resource name');
+    }
     fieldNames.add(raw.name);
 
-    if (raw.name === `${PREFIX}__default__/fields/*`)
-      throw new DefaultFieldConfigurationUnverified();
+    if (raw.name === `${PREFIX}__default__/fields/*`) {
+      if (defaultConfigurationSeen) throw new DefaultFieldConfigurationUnverified();
+      defaultConfigurationSeen = true;
+      validateDefaultField(raw);
+      continue;
+    }
 
     // The canonical verifier compares exemption identity, but not all Admin API
     // configuration. Reject any non-default behavior before delegating parity.
@@ -123,7 +205,7 @@ function validateInventory(composites: unknown[], overrides: unknown[]): void {
     if (!isRecord(config)) fail('field override config is unknown');
     if (
       Object.keys(config).some(
-        (key) => !['usesAncestorConfig', 'reverting', 'indexes'].includes(key),
+        (key) => !['usesAncestorConfig', 'ancestorField', 'reverting', 'indexes'].includes(key),
       )
     )
       fail('field override config contains unknown settings');
@@ -131,12 +213,17 @@ function validateInventory(composites: unknown[], overrides: unknown[]): void {
       fail('field override inherits an unknown ancestor config');
     if (config.reverting !== undefined && config.reverting !== false)
       fail('field override is reverting');
+    if (config.ancestorField !== undefined && !validAncestorField(config.ancestorField, raw.name))
+      fail('field override ancestor is outside the pinned canonical hierarchy');
     if (config.indexes !== undefined && !Array.isArray(config.indexes))
       fail('field override index configuration is malformed');
     if (config.indexes !== undefined && config.indexes.length !== 0)
       fail('field override contains active indexes');
     if (raw.ttlConfig !== undefined) fail('field override has TTL configuration');
+    explicitOverrides.push(raw);
   }
+  if (!defaultConfigurationSeen) throw new DefaultFieldConfigurationUnverified();
+  return explicitOverrides;
 }
 
 function createInventoryRunner(composites: unknown[], overrides: unknown[]): CommandRunner {
@@ -227,8 +314,8 @@ export async function compareIndexInventory(
       globalReadiness: 'not_established',
     };
   try {
-    validateInventory(composites, overrides);
-    const runner = createInventoryRunner(composites, overrides);
+    const explicitOverrides = validateInventory(composites, overrides);
+    const runner = createInventoryRunner(composites, explicitOverrides);
     try {
       await verifyConsumerIndexReadiness(runner, identity, manifest);
       return {
@@ -236,6 +323,7 @@ export async function compareIndexInventory(
         manifestSha256: digest,
         compositeCount: composites.length,
         fieldOverrideCount: overrides.length,
+        explicitFieldOverrideCount: explicitOverrides.length,
         coverage: 'caller_asserted_complete',
         globalReadiness: 'not_established',
       };
@@ -255,7 +343,7 @@ export async function compareIndexInventory(
       },
     ];
     await verifyConsumerIndexReadiness(
-      createInventoryRunner(withApproved, overrides),
+      createInventoryRunner(withApproved, explicitOverrides),
       identity,
       manifest,
     );
@@ -264,6 +352,7 @@ export async function compareIndexInventory(
       manifestSha256: digest,
       compositeCount: composites.length,
       fieldOverrideCount: overrides.length,
+      explicitFieldOverrideCount: explicitOverrides.length,
       missingIndex: OWNER_EDITOR_INDEX,
       coverage: 'caller_asserted_complete',
       globalReadiness: 'not_established',
