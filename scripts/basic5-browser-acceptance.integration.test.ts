@@ -16,7 +16,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import type { Db } from '@assistant/db';
-import type { Response as BrowserResponse, Page } from 'playwright';
+import type { Response as BrowserResponse, Locator, Page } from 'playwright';
 import { expect, it } from 'vitest';
 import {
   assertBasic5AnonymousPageResponse,
@@ -33,6 +33,10 @@ import {
   createBasic5AuthCookie,
   nextBasic5ReadinessAttempt,
 } from './basic5-browser-acceptance-support.js';
+import {
+  type Basic5SaveObservationDiagnostic,
+  observeBasic5Save,
+} from './basic5-browser-save-observation.js';
 import {
   assertBasic5CiProcessRegistryComplete,
   BASIC5_CI_CHROME_EXECUTABLE,
@@ -349,71 +353,114 @@ async function verifyStandaloneArtifact(repoRoot: string): Promise<{ entry: stri
 
 async function saveWithReceipt(
   page: Page,
-  save: () => Promise<void>,
-): Promise<{
-  receipt: Receipt;
-  observed: Basic5ObservedPost;
-  response: BrowserResponse;
-}> {
-  const responsePromise = page.waitForResponse((response) => {
-    const request = response.request();
-    let path: string;
-    try {
-      path = new URL(response.url()).pathname;
-    } catch {
-      return false;
-    }
-    return request.method() === 'POST' && OWNER_EDITOR_PATHS.has(path);
-  });
-  await save();
-  const response = await responsePromise;
-  if (!response.ok()) throw new Error(`Owner-editor save returned HTTP ${response.status()}`);
-  const [{ decodeOwnerEditorReply }, { ownerEditorRequestHash }, { parseOwnerEditorRequest }] =
-    await Promise.all([
-      import('../apps/web/lib/owner-editor-client.js'),
-      import('../packages/application/src/owner-editor-hash.js'),
-      import('../packages/application/src/owner-editor-wire.js'),
-    ]);
-  const body = response.request().postDataJSON() as Record<string, unknown>;
-  const path = new URL(response.url()).pathname;
-  const parsed = parseOwnerEditorRequest(
-    body,
-    path as
-      | '/api/people/editor'
-      | '/api/profile/knowledge/family'
-      | '/api/profile/knowledge/memory',
-  );
-  if (!parsed.ok || parsed.request.intent !== 'apply')
-    throw new Error('Owner-editor browser request did not match its exact apply contract');
-  const decoded = decodeOwnerEditorReply((await response.json()) as unknown);
-  if (!decoded) throw new Error('Owner-editor HTTP reply failed the existing strict decoder');
-  if (decoded.authority !== 'operation_receipt' || decoded.outcome !== 'saved')
-    throw new Error('Owner-editor request did not return its expected durable saved receipt');
-  const receipt: Receipt = {
-    authority: decoded.authority,
-    command: decoded.command,
-    operationId: decoded.operationId,
-    requestHash: decoded.requestHash,
-    statusVersion: decoded.statusVersion,
-    outcome: decoded.outcome,
-    ids: decoded.ids as Record<string, string>,
-  };
-  assert.equal(parsed.request.command, receipt.command);
-  assert.equal(parsed.request.operationId, receipt.operationId);
-  assert.equal(ownerEditorRequestHash(parsed.request), receipt.requestHash);
-  assert.match(receipt.requestHash, /^[a-f0-9]{64}$/);
-  assert.equal(receipt.authority, 'operation_receipt');
-  assert.equal(receipt.outcome, 'saved');
-  return {
-    receipt,
-    response,
-    observed: {
-      command: receipt.command,
-      operationId: receipt.operationId,
-      authority: receipt.authority,
-      outcome: receipt.outcome,
+  operation: Basic5SaveObservationDiagnostic['operation'],
+  saveButton: Locator,
+  observation: {
+    activateRequestObserver: (notify: (matched: boolean | null) => void) => () => void;
+    totalMatchingPostCount: () => number;
+    onDiagnostic: (diagnostic: Basic5SaveObservationDiagnostic) => void;
+  },
+): Promise<{ receipt: Receipt; observed: Basic5ObservedPost; response: BrowserResponse }> {
+  const { errors } = await import('playwright');
+  return observeBasic5Save({
+    operation,
+    page,
+    ...observation,
+    click: (timeout) => saveButton.click({ timeout }),
+    isTimeoutError: (error) => error instanceof errors.TimeoutError,
+    matchResponse: (response) => {
+      try {
+        return (
+          response.request().method() === 'POST' &&
+          OWNER_EDITOR_PATHS.has(new URL(response.url()).pathname)
+        );
+      } catch {
+        return false;
+      }
     },
-  };
+    status: (response) => response.status(),
+    readUi: () =>
+      page.evaluate(
+        (label) => {
+          // Read only fixed-label presence and native validity: no values, IDs, HTML,
+          // storage, validation events, focus, submit or recovery actions.
+          const unknown = {
+            nativeValid: null,
+            invalidControlPresent: null,
+            alertPresent: null,
+            saveEnabled: null,
+          };
+          const buttons = document.querySelectorAll<HTMLButtonElement>('button[type="submit"]');
+          if (buttons.length > 16) return unknown;
+          const visible = Array.from(buttons).filter(
+            (button) => button.getClientRects().length > 0 && button.textContent?.trim() === label,
+          );
+          if (visible.length !== 1) return unknown;
+          const button = visible[0];
+          const form = button?.form;
+          return {
+            nativeValid: form ? form.matches(':valid') : null,
+            invalidControlPresent: form
+              ? Boolean(form.querySelector('[aria-invalid="true"]'))
+              : null,
+            alertPresent: form ? Boolean(form.querySelector('[role="alert"]')) : null,
+            saveEnabled: button ? !button.matches(':disabled') : null,
+          };
+        },
+        operation === 'correct_owner_family_relationship' || operation === 'correct_owner_memory'
+          ? 'Save correction'
+          : 'Save',
+      ),
+    parse: async (response) => {
+      if (!response.ok()) throw new Error(`Owner-editor save returned HTTP ${response.status()}`);
+      const [{ decodeOwnerEditorReply }, { ownerEditorRequestHash }, { parseOwnerEditorRequest }] =
+        await Promise.all([
+          import('../apps/web/lib/owner-editor-client.js'),
+          import('../packages/application/src/owner-editor-hash.js'),
+          import('../packages/application/src/owner-editor-wire.js'),
+        ]);
+      const body = response.request().postDataJSON() as Record<string, unknown>;
+      const path = new URL(response.url()).pathname;
+      const parsed = parseOwnerEditorRequest(
+        body,
+        path as
+          | '/api/people/editor'
+          | '/api/profile/knowledge/family'
+          | '/api/profile/knowledge/memory',
+      );
+      if (!parsed.ok || parsed.request.intent !== 'apply' || parsed.request.command !== operation)
+        throw new Error('Owner-editor browser request did not match its exact apply contract');
+      const decoded = decodeOwnerEditorReply((await response.json()) as unknown);
+      if (!decoded) throw new Error('Owner-editor HTTP reply failed the existing strict decoder');
+      if (decoded.authority !== 'operation_receipt' || decoded.outcome !== 'saved')
+        throw new Error('Owner-editor request did not return its expected durable saved receipt');
+      const receipt: Receipt = {
+        authority: decoded.authority,
+        command: decoded.command,
+        operationId: decoded.operationId,
+        requestHash: decoded.requestHash,
+        statusVersion: decoded.statusVersion,
+        outcome: decoded.outcome,
+        ids: decoded.ids as Record<string, string>,
+      };
+      assert.equal(parsed.request.command, receipt.command);
+      assert.equal(parsed.request.operationId, receipt.operationId);
+      assert.equal(ownerEditorRequestHash(parsed.request), receipt.requestHash);
+      assert.match(receipt.requestHash, /^[a-f0-9]{64}$/);
+      assert.equal(receipt.authority, 'operation_receipt');
+      assert.equal(receipt.outcome, 'saved');
+      return {
+        receipt,
+        response,
+        observed: {
+          command: receipt.command,
+          operationId: receipt.operationId,
+          authority: receipt.authority,
+          outcome: receipt.outcome,
+        },
+      };
+    },
+  });
 }
 
 async function assertStoredReceipt(
@@ -460,6 +507,10 @@ browserTest(
     let checkpointApplyCount = 0;
     let checkpointDurableReadbackCount = 0;
     let checkpointFreshPageReadbackCount = 0;
+    let ownerEditorPostCount = 0;
+    let saveObservation: Basic5SaveObservationDiagnostic | undefined;
+    let activeSaveRequest: ((matched: boolean | null) => void) | undefined;
+    let activeSaveOperation: Basic5SaveObservationDiagnostic['operation'] | undefined;
     let anonymousPageObservation:
       | Pick<Basic5CiFixtureCheckpoint, 'anonymousPageStatus' | 'anonymousLocationClass'>
       | undefined;
@@ -478,6 +529,14 @@ browserTest(
           durableReadbackCount: checkpointDurableReadbackCount,
           freshPageReadbackCount: checkpointFreshPageReadbackCount,
           ...anonymousPageObservation,
+          ...(saveObservation
+            ? {
+                saveObservation: {
+                  ...saveObservation,
+                  totalMatchingPostCount: ownerEditorPostCount <= 64 ? ownerEditorPostCount : null,
+                },
+              }
+            : {}),
         })}\n`,
       );
     };
@@ -548,7 +607,6 @@ browserTest(
     let pageApiMutationRequests = 0;
     let authenticatedPageNavigations = 0;
     let browserBudgetExceeded = false;
-    let ownerEditorPostCount = 0;
     let ownerEditorGetCount = 0;
     let ownerApplyRequests = 0;
     let recoveryRequests = 0;
@@ -982,17 +1040,47 @@ browserTest(
           if (request.method() === 'POST') {
             ownerEditorPostCount += 1;
             let intent: unknown;
+            let command: unknown;
             try {
-              intent = request.postDataJSON()?.intent;
+              const body = request.postDataJSON();
+              intent = body?.intent;
+              command = body?.command;
             } catch {
               intent = undefined;
             }
+            // Correlate locally; retain only a closed intent and match boolean.
+            activeSaveRequest?.(
+              typeof command === 'string'
+                ? intent === 'apply' && command === activeSaveOperation
+                : null,
+            );
             if (intent === 'apply') ownerApplyRequests += 1;
             if (intent === 'reconcile') recoveryRequests += 1;
           }
           if (request.method() === 'GET') ownerEditorGetCount += 1;
         }
       });
+
+      const saveObserved = (
+        operation: Basic5SaveObservationDiagnostic['operation'],
+        button: Locator,
+      ) =>
+        saveWithReceipt(page, operation, button, {
+          activateRequestObserver: (notify) => {
+            activeSaveOperation = operation;
+            activeSaveRequest = notify;
+            return () => {
+              if (activeSaveRequest === notify) {
+                activeSaveRequest = undefined;
+                activeSaveOperation = undefined;
+              }
+            };
+          },
+          totalMatchingPostCount: () => ownerEditorPostCount,
+          onDiagnostic: (diagnostic) => {
+            saveObservation = diagnostic;
+          },
+        });
 
       const personUrl = `${baseUrl}/people/${personId}`;
       const navigate = async (href: string) => {
@@ -1009,8 +1097,9 @@ browserTest(
         .getByRole('heading', { name: 'Edit name and aliases', exact: true })
         .waitFor();
       await identityDialog.getByLabel('Name', { exact: true }).fill('Alex Rivera Updated');
-      const identity = await saveWithReceipt(page, () =>
-        identityDialog.getByRole('button', { name: 'Save', exact: true }).click(),
+      const identity = await saveObserved(
+        'update_person_identity',
+        identityDialog.getByRole('button', { name: 'Save', exact: true }),
       );
       ownerPosts.push(identity.observed);
       receipts.push(identity.receipt);
@@ -1060,8 +1149,9 @@ browserTest(
       await familyAddDialog
         .getByLabel('Note (optional)', { exact: true })
         .fill('Synthetic family statement one.');
-      const familyAdd = await saveWithReceipt(page, () =>
-        familyAddDialog.getByRole('button', { name: 'Save', exact: true }).click(),
+      const familyAdd = await saveObserved(
+        'add_family_relationship',
+        familyAddDialog.getByRole('button', { name: 'Save', exact: true }),
       );
       ownerPosts.push(familyAdd.observed);
       receipts.push(familyAdd.receipt);
@@ -1116,8 +1206,9 @@ browserTest(
       await familyDialog
         .getByLabel('Note (optional)', { exact: true })
         .fill('Synthetic family statement corrected.');
-      const familyCorrection = await saveWithReceipt(page, () =>
-        familyDialog.getByRole('button', { name: 'Save correction', exact: true }).click(),
+      const familyCorrection = await saveObserved(
+        'correct_owner_family_relationship',
+        familyDialog.getByRole('button', { name: 'Save correction', exact: true }),
       );
       ownerPosts.push(familyCorrection.observed);
       receipts.push(familyCorrection.receipt);
@@ -1236,8 +1327,9 @@ browserTest(
       await page.getByText(OWNER_NOTE_V1, { exact: true }).waitFor();
       await page.getByRole('button', { name: 'Edit saved note', exact: true }).click();
       await page.getByLabel('Your corrected note', { exact: true }).fill(OWNER_NOTE_V2);
-      const noteCorrection = await saveWithReceipt(page, () =>
-        page.getByRole('button', { name: 'Save correction', exact: true }).click(),
+      const noteCorrection = await saveObserved(
+        'correct_owner_memory',
+        page.getByRole('button', { name: 'Save correction', exact: true }),
       );
       ownerPosts.push(noteCorrection.observed);
       receipts.push(noteCorrection.receipt);
