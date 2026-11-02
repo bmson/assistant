@@ -105,6 +105,7 @@ export type Basic5CiPreflight = {
   imageOS: string;
   imageVersion: string;
   chromeVersion: string;
+  chromeVersionDiagnostic: Basic5CiChromeVersionDiagnostic;
   postgresServerVersionNum: number;
   workflowContext: {
     event: 'push';
@@ -141,6 +142,18 @@ export type Basic5CiPreflight = {
   };
   buildExecutionAttribution: string;
   provenanceLimitations: string[];
+};
+
+export type Basic5CiChromeVersionDiagnostic = {
+  status:
+    | 'accepted'
+    | 'nonzero_exit'
+    | 'version_unparseable'
+    | 'spawn_or_timeout'
+    | 'capture_limit';
+  exitCode: number | null;
+  stdoutBytes: number | null;
+  stderrBytes: number | null;
 };
 
 export type Basic5CiBuildDiagnostic = {
@@ -312,9 +325,102 @@ export class Basic5CiHold extends Error {
     readonly code: string,
     readonly operationSettled = true,
     readonly buildDiagnostic?: Basic5CiBuildDiagnostic,
+    readonly chromeVersionDiagnostic?: Basic5CiChromeVersionDiagnostic,
   ) {
     super(code);
   }
+}
+
+/** Parse only the bounded version banner; output bytes themselves are never retained. */
+export function observeBasic5CiChromeVersion(result: {
+  exitCode: number;
+  stdout: Buffer;
+  stderr: Buffer;
+}): { version: string | null; diagnostic: Basic5CiChromeVersionDiagnostic } {
+  const stdoutBytes = Math.min(result.stdout.byteLength, CAPTURE_BYTES);
+  const stderrBytes = Math.min(result.stderr.byteLength, CAPTURE_BYTES);
+  const common = { exitCode: result.exitCode, stdoutBytes, stderrBytes };
+  if (result.stdout.byteLength + result.stderr.byteLength > CAPTURE_BYTES)
+    return { version: null, diagnostic: { status: 'capture_limit', ...common } };
+  if (result.exitCode !== 0)
+    return { version: null, diagnostic: { status: 'nonzero_exit', ...common } };
+  const banner = result.stdout.toString('utf8');
+  const match = banner.match(
+    /^Google Chrome(?: for Testing)? ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\r?\n?$/,
+  );
+  if (!match?.[1])
+    return { version: null, diagnostic: { status: 'version_unparseable', ...common } };
+  return { version: match[1], diagnostic: { status: 'accepted', ...common } };
+}
+
+function chromeVersionFailureDiagnostic(
+  status: 'spawn_or_timeout' | 'capture_limit',
+): Basic5CiChromeVersionDiagnostic {
+  return { status, exitCode: null, stdoutBytes: null, stderrBytes: null };
+}
+
+function contentFreeChromeVersionDiagnostic(value: unknown): Basic5CiChromeVersionDiagnostic {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Basic5CiHold('chrome_version_diagnostic_invalid');
+  const diagnostic = value as Record<string, unknown>;
+  if (
+    Object.keys(diagnostic).length !== 4 ||
+    ![
+      'accepted',
+      'nonzero_exit',
+      'version_unparseable',
+      'spawn_or_timeout',
+      'capture_limit',
+    ].includes(String(diagnostic.status)) ||
+    (diagnostic.exitCode !== null &&
+      (!Number.isSafeInteger(diagnostic.exitCode) || Number(diagnostic.exitCode) < 0)) ||
+    (diagnostic.stdoutBytes !== null &&
+      (!Number.isSafeInteger(diagnostic.stdoutBytes) ||
+        Number(diagnostic.stdoutBytes) < 0 ||
+        Number(diagnostic.stdoutBytes) > CAPTURE_BYTES)) ||
+    (diagnostic.stderrBytes !== null &&
+      (!Number.isSafeInteger(diagnostic.stderrBytes) ||
+        Number(diagnostic.stderrBytes) < 0 ||
+        Number(diagnostic.stderrBytes) > CAPTURE_BYTES)) ||
+    (diagnostic.status === 'spawn_or_timeout' &&
+      (diagnostic.exitCode !== null ||
+        diagnostic.stdoutBytes !== null ||
+        diagnostic.stderrBytes !== null)) ||
+    (diagnostic.status === 'accepted' &&
+      (diagnostic.exitCode !== 0 ||
+        diagnostic.stdoutBytes === null ||
+        diagnostic.stderrBytes === null)) ||
+    (diagnostic.status === 'nonzero_exit' &&
+      (diagnostic.exitCode === null ||
+        diagnostic.exitCode === 0 ||
+        diagnostic.stdoutBytes === null ||
+        diagnostic.stderrBytes === null)) ||
+    (diagnostic.status === 'version_unparseable' &&
+      (diagnostic.exitCode !== 0 ||
+        diagnostic.stdoutBytes === null ||
+        diagnostic.stderrBytes === null)) ||
+    (diagnostic.status === 'capture_limit' &&
+      !(
+        diagnostic.exitCode === null &&
+        diagnostic.stdoutBytes === null &&
+        diagnostic.stderrBytes === null
+      ) &&
+      !(
+        Number.isSafeInteger(diagnostic.exitCode) &&
+        diagnostic.stdoutBytes !== null &&
+        diagnostic.stderrBytes !== null &&
+        (Number(diagnostic.stdoutBytes) + Number(diagnostic.stderrBytes) > CAPTURE_BYTES ||
+          Number(diagnostic.stdoutBytes) === CAPTURE_BYTES ||
+          Number(diagnostic.stderrBytes) === CAPTURE_BYTES)
+      ))
+  )
+    throw new Basic5CiHold('chrome_version_diagnostic_invalid');
+  return {
+    status: diagnostic.status as Basic5CiChromeVersionDiagnostic['status'],
+    exitCode: diagnostic.exitCode as number | null,
+    stdoutBytes: diagnostic.stdoutBytes as number | null,
+    stderrBytes: diagnostic.stderrBytes as number | null,
+  };
 }
 
 export function assertBasic5CiWorkflowAdmission(
@@ -782,6 +888,10 @@ export function runBasic5CiReadOnlyMetadata(
             return;
           }
           const code = (error as { code?: unknown } | null)?.code;
+          if (code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+            reject(new Basic5CiHold('metadata_command_capture_limit'));
+            return;
+          }
           if (error && !Number.isSafeInteger(code)) {
             reject(new Basic5CiHold('metadata_command_failed_or_timed_out'));
             return;
@@ -1188,6 +1298,7 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     'imageOS',
     'imageVersion',
     'chromeVersion',
+    'chromeVersionDiagnostic',
     'postgresServerVersionNum',
     'workflowContext',
     'requiredArtifactIdentity',
@@ -1226,6 +1337,10 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
   if ('diagnosticTraceCompleteness' in clean)
     clean.diagnosticTraceCompleteness = contentFreeTraceDiagnostic(
       clean.diagnosticTraceCompleteness,
+    );
+  if ('chromeVersionDiagnostic' in clean)
+    clean.chromeVersionDiagnostic = contentFreeChromeVersionDiagnostic(
+      clean.chromeVersionDiagnostic,
     );
   if ('standaloneBuildDiagnostic' in clean)
     clean.standaloneBuildDiagnostic = contentFreeBuildDiagnostic(clean.standaloneBuildDiagnostic);
@@ -1392,6 +1507,8 @@ export async function runBasic5CiAcceptance(
     qualifiedPass = true;
   } catch (error) {
     receipt.errorCode = error instanceof Basic5CiHold ? error.code : 'ci_acceptance_failure';
+    if (error instanceof Basic5CiHold && error.chromeVersionDiagnostic)
+      receipt.chromeVersionDiagnostic = error.chromeVersionDiagnostic;
     if (error instanceof Basic5CiHold && error.buildDiagnostic)
       receipt.standaloneBuildDiagnostic = error.buildDiagnostic;
     if (error instanceof Basic5CiHold && !error.operationSettled) {
@@ -1961,21 +2078,43 @@ class RealBasic5CiOps implements Basic5CiOps {
       throw new Basic5CiHold('required_runtime_artifact_identity_incomplete', true, diagnostic);
     const proof = this.proof;
     if (!proof) throw new Basic5CiHold('linux_process_proof_unavailable');
-    const chrome = await this.runReadOnlyMetadata(
-      proof.BASIC5_CI_CHROME_EXECUTABLE,
-      ['--version'],
-      this.baseEnv,
-      deadline,
-      'chrome-version',
-      signal,
-    );
-    if (chrome.exitCode !== 0 || chrome.stderr.length)
-      throw new Basic5CiHold('allowlisted_chrome_version_unavailable');
-    const chromeMatch = chrome.stdout
-      .toString('utf8')
-      .match(/\b([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\b/);
-    const chromeVersion = chromeMatch?.[1];
-    if (!chromeVersion) throw new Basic5CiHold('allowlisted_chrome_version_malformed');
+    let chrome: { exitCode: number; stdout: Buffer; stderr: Buffer };
+    try {
+      chrome = await this.runReadOnlyMetadata(
+        proof.BASIC5_CI_CHROME_EXECUTABLE,
+        ['--version'],
+        this.baseEnv,
+        deadline,
+        'chrome-version',
+        signal,
+      );
+    } catch (error) {
+      const status =
+        error instanceof Basic5CiHold && error.code.includes('capture_limit')
+          ? 'capture_limit'
+          : 'spawn_or_timeout';
+      throw new Basic5CiHold(
+        error instanceof Basic5CiHold ? error.code : 'allowlisted_chrome_version_unavailable',
+        error instanceof Basic5CiHold ? error.operationSettled : true,
+        error instanceof Basic5CiHold ? error.buildDiagnostic : undefined,
+        chromeVersionFailureDiagnostic(status),
+      );
+    }
+    const chromeObservation = observeBasic5CiChromeVersion(chrome);
+    const chromeVersion = chromeObservation.version;
+    if (!chromeVersion) {
+      const status = chromeObservation.diagnostic.status;
+      throw new Basic5CiHold(
+        status === 'nonzero_exit'
+          ? 'allowlisted_chrome_version_nonzero_exit'
+          : status === 'capture_limit'
+            ? 'allowlisted_chrome_version_capture_limit'
+            : 'allowlisted_chrome_version_malformed',
+        true,
+        undefined,
+        chromeObservation.diagnostic,
+      );
+    }
     this.baselineListeners = await this.readListeners();
     assertNotAborted(signal, 'preflight');
     this.preflightResult = {
@@ -1985,6 +2124,7 @@ class RealBasic5CiOps implements Basic5CiOps {
       imageOS,
       imageVersion,
       chromeVersion,
+      chromeVersionDiagnostic: chromeObservation.diagnostic,
       postgresServerVersionNum: 0,
       workflowContext: {
         event: 'push',
