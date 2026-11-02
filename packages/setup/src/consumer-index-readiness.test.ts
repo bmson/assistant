@@ -60,7 +60,27 @@ function liveOverrides(databaseId = identity.databaseId) {
   return [
     {
       name: `${databasePrefix}__default__/fields/*`,
-      indexConfig: { indexes: [] },
+      indexConfig: {
+        usesAncestorConfig: false,
+        reverting: false,
+        indexes: [
+          {
+            queryScope: 'COLLECTION',
+            state: 'READY',
+            fields: [{ fieldPath: '*', order: 'ASCENDING' }],
+          },
+          {
+            queryScope: 'COLLECTION',
+            state: 'READY',
+            fields: [{ fieldPath: '*', order: 'DESCENDING' }],
+          },
+          {
+            queryScope: 'COLLECTION',
+            state: 'READY',
+            fields: [{ fieldPath: '*', arrayConfig: 'CONTAINS' }],
+          },
+        ],
+      },
     },
     ...spec.fieldOverrides.map((field) => ({
       name: `${databasePrefix}${field.collectionGroup}/fields/${field.fieldPath}`,
@@ -110,7 +130,13 @@ describe('consumer Firestore index readiness', () => {
     const runner: CommandRunner = {
       async run(command, args) {
         if (args[0] === 'firestore' && args[3] === 'list')
-          return { ok: true, stdout: '[]', stderr: '' };
+          return {
+            ok: true,
+            stdout: JSON.stringify(
+              args[2] === 'fields' ? liveOverrides('assistant-production').slice(0, 1) : [],
+            ),
+            stderr: '',
+          };
         commands.push([command, ...args]);
         return { ok: true, stdout: '', stderr: '' };
       },
@@ -134,6 +160,44 @@ describe('consumer Firestore index readiness', () => {
       ),
     ).toBe(true);
   });
+
+  it.each([
+    ['missing', []],
+    [
+      'invalid default mode',
+      liveOverrides().map((row, index) =>
+        index === 0
+          ? {
+              ...row,
+              indexConfig: {
+                ...row.indexConfig,
+                indexes: row.indexConfig.indexes.map((entry, mode) =>
+                  mode === 0 ? { ...entry, state: 'CREATING' } : entry,
+                ),
+              },
+            }
+          : row,
+      ),
+    ],
+  ])(
+    'refuses provisioning when the global default is %s before any writes',
+    async (_label, fields) => {
+      const calls: string[][] = [];
+      const runner: CommandRunner = {
+        async run(command, args) {
+          calls.push([command, ...args]);
+          if (args[2] === 'fields') return { ok: true, stdout: JSON.stringify(fields), stderr: '' };
+          if (args[2] === 'composite') return { ok: true, stdout: '[]', stderr: '' };
+          return { ok: true, stdout: '', stderr: '' };
+        },
+      };
+      await expect(provisionTargetFirestoreIndexes(runner, identity, specBytes)).rejects.toThrow(
+        'default field configuration is not verified',
+      );
+      expect(calls).toHaveLength(2);
+      expect(calls.every((call) => call.includes('list'))).toBe(true);
+    },
+  );
 
   it('is idempotent when every shared resource already exists', async () => {
     const calls: string[] = [];
@@ -252,6 +316,25 @@ describe('consumer Firestore index readiness', () => {
 
   it.each([
     ['missing composite', () => liveIndexes().slice(1), liveOverrides],
+    ['missing default field configuration', liveIndexes, () => liveOverrides().slice(1)],
+    [
+      'invalid default field state',
+      liveIndexes,
+      () =>
+        liveOverrides().map((row, index) =>
+          index === 0
+            ? {
+                ...row,
+                indexConfig: {
+                  ...row.indexConfig,
+                  indexes: row.indexConfig.indexes.map((entry, mode) =>
+                    mode === 0 ? { ...entry, state: 'CREATING' } : entry,
+                  ),
+                },
+              }
+            : row,
+        ),
+    ],
     [
       'building composite',
       () => liveIndexes().map((row, i) => (i ? row : { ...row, state: 'CREATING' })),

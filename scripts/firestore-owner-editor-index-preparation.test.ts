@@ -130,10 +130,36 @@ class MockFirestore implements CommandRunner {
   failCreate = false;
   constructor(spec: FixtureManifest) {
     this.indexes = listedIndexes(spec.indexes);
-    this.overrides = spec.fieldOverrides.map((field) => ({
-      name: `${prefix}${field.collectionGroup}/fields/${field.fieldPath}`,
-      indexConfig: { indexes: [] },
-    }));
+    this.overrides = [
+      {
+        name: `${prefix}__default__/fields/*`,
+        indexConfig: {
+          usesAncestorConfig: false,
+          reverting: false,
+          indexes: [
+            {
+              queryScope: 'COLLECTION',
+              state: 'READY',
+              fields: [{ fieldPath: '*', order: 'ASCENDING' }],
+            },
+            {
+              queryScope: 'COLLECTION',
+              state: 'READY',
+              fields: [{ fieldPath: '*', order: 'DESCENDING' }],
+            },
+            {
+              queryScope: 'COLLECTION',
+              state: 'READY',
+              fields: [{ fieldPath: '*', arrayConfig: 'CONTAINS' }],
+            },
+          ],
+        },
+      },
+      ...spec.fieldOverrides.map((field) => ({
+        name: `${prefix}${field.collectionGroup}/fields/${field.fieldPath}`,
+        indexConfig: { indexes: [] },
+      })),
+    ];
   }
   async run(command: string, args: readonly string[]): Promise<CommandResult> {
     expect(command).toBe('gcloud');
