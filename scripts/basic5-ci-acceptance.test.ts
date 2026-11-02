@@ -390,6 +390,289 @@ describe('one-shot BASIC5 CI controller', () => {
     };
   }
 
+  const censusRoot = {
+    pid: 88,
+    ppid: process.pid,
+    pgid: 88,
+    sid: 88,
+    startTimeTicks: '1',
+    exe: '/synthetic/node',
+  };
+  const censusChild = { ...censusRoot, pid: 90, ppid: 88, startTimeTicks: '2' };
+  const censusSnapshot = (...rows: Basic5CiProcessSnapshot[]) =>
+    new Map(rows.map((row) => [row.pid, row]));
+
+  async function censusSequence(
+    snapshots: Array<Map<number, Basic5CiProcessSnapshot> | Error>,
+    readIdentity: (pid: number) => Promise<typeof censusRoot | undefined>,
+  ) {
+    const child = new FakeDirectChild();
+    const signals: number[] = [];
+    let snapshotReads = 0;
+    const driver = utilityChildDriver(child, {
+      readSnapshot: async () => {
+        const next = snapshots[snapshotReads++];
+        if (!next) throw new Error('Unexpected extra census');
+        if (next instanceof Error) throw next;
+        return next;
+      },
+      readIdentity,
+    });
+    driver.sleep = async () => {
+      child.emit('close', 0, null);
+    };
+    driver.killProcess = (pid) => {
+      signals.push(pid);
+    };
+    const ops = new RealBasic5CiOps(driver);
+    let result: Awaited<ReturnType<typeof ops.runUtilityChild>> | undefined;
+    let error: unknown;
+    try {
+      result = await ops.runUtilityChild(
+        '/synthetic/node',
+        [],
+        {},
+        10_000,
+        'migrate',
+        new AbortController().signal,
+      );
+    } catch (caught) {
+      error = caught;
+    } finally {
+      ops.dispose();
+    }
+    const enrolled = [
+      ...(ops as unknown as { ownedProcesses: Map<number, unknown> }).ownedProcesses.keys(),
+    ];
+    return { result, error, snapshotReads, signals, enrolled };
+  }
+
+  it('reconciles one vanished new child and still requires independent final session closure', async () => {
+    const run = await censusSequence(
+      [
+        censusSnapshot(censusRoot, censusChild),
+        censusSnapshot(censusRoot),
+        censusSnapshot(),
+        censusSnapshot(),
+      ],
+      async (pid) => (pid === 88 ? censusRoot : undefined),
+    );
+    expect(run.error).toBeUndefined();
+    expect(run.result?.exitCode).toBe(0);
+    expect(run.snapshotReads).toBe(4);
+    expect(run.enrolled).toEqual([88]);
+    expect(run.signals).toEqual([]);
+  });
+
+  it('retains enrolled provenance when the known child exits between identity reads', async () => {
+    let childReads = 0;
+    const run = await censusSequence(
+      [
+        censusSnapshot(censusRoot, censusChild),
+        censusSnapshot(censusRoot),
+        censusSnapshot(),
+        censusSnapshot(),
+      ],
+      async (pid) => (pid === 88 ? censusRoot : ++childReads === 1 ? censusChild : undefined),
+    );
+    expect(run.error).toBeUndefined();
+    expect(run.enrolled).toEqual([88, 90]);
+    expect(run.snapshotReads).toBe(4);
+    expect(run.signals).toEqual([]);
+  });
+
+  it.each([
+    ['same live row', censusChild, 'absence_not_confirmed'],
+    ['reused PID', { ...censusChild, startTimeTicks: '99' }, 'generation_changed'],
+    ['changed session', { ...censusChild, sid: 999 }, 'session_changed'],
+  ] as const)(
+    'holds rather than adopting %s after an absent identity',
+    async (_name, present, reason) => {
+      const run = await censusSequence(
+        [censusSnapshot(censusRoot, censusChild), censusSnapshot(censusRoot, present)],
+        async (pid) => (pid === 88 ? censusRoot : undefined),
+      );
+      expect(run.error).toMatchObject({
+        operationSettled: false,
+        utilityChildDiagnostic: { censusDiagnostic: { stage: 'absence_confirmation', reason } },
+      });
+      expect(run.snapshotReads).toBe(2);
+      expect(run.enrolled).toEqual([88]);
+      expect(run.signals).toEqual([]);
+    },
+  );
+
+  it('does not retry a second disappearance during the one convergence pass', async () => {
+    const second = { ...censusChild, pid: 91, startTimeTicks: '3' };
+    const run = await censusSequence(
+      [censusSnapshot(censusRoot, censusChild), censusSnapshot(censusRoot, second)],
+      async (pid) => (pid === 88 ? censusRoot : undefined),
+    );
+    expect(run.error).toMatchObject({
+      operationSettled: false,
+      utilityChildDiagnostic: {
+        censusDiagnostic: { stage: 'absence_confirmation', reason: 'convergence_exhausted' },
+      },
+    });
+    expect(run.snapshotReads).toBe(2);
+    expect(run.signals).toEqual([]);
+  });
+
+  it('does not adopt a descendant whose vanished parent was never verified', async () => {
+    const orphan = { ...censusChild, pid: 91, ppid: 90, startTimeTicks: '3' };
+    const run = await censusSequence(
+      [censusSnapshot(censusRoot, censusChild), censusSnapshot(censusRoot, orphan)],
+      async (pid) => (pid === 88 ? censusRoot : undefined),
+    );
+    expect(run.error).toMatchObject({
+      operationSettled: false,
+      utilityChildDiagnostic: {
+        censusDiagnostic: { stage: 'enrollment', reason: 'ancestry_unproven' },
+      },
+    });
+    expect(run.enrolled).toEqual([88]);
+    expect(run.signals).toEqual([]);
+  });
+
+  it.each([
+    ['missing executable', 'process_executable_unavailable'],
+    ['permission', 'process_executable_permission_denied'],
+    ['malformed stat', 'process_stat_malformed'],
+  ])(
+    'reports a fixed %s helper reason without absence retries or raw detail',
+    async (_name, code) => {
+      const run = await censusSequence([censusSnapshot(censusRoot, censusChild)], async (pid) => {
+        if (pid === 88) return censusRoot;
+        throw Object.assign(new Error('private process content'), { code });
+      });
+      expect(run.error).toMatchObject({
+        operationSettled: false,
+        utilityChildDiagnostic: { censusDiagnostic: { stage: 'new_identity_read', reason: code } },
+      });
+      expect(JSON.stringify(run.error)).not.toContain('private process content');
+      expect(run.snapshotReads).toBe(1);
+      expect(run.enrolled).toEqual([88]);
+      expect(run.signals).toEqual([]);
+    },
+  );
+
+  it('holds precisely on reparenting between snapshot and first identity', async () => {
+    const run = await censusSequence([censusSnapshot(censusRoot, censusChild)], async (pid) =>
+      pid === 88 ? censusRoot : { ...censusChild, ppid: 1 },
+    );
+    expect(run.error).toMatchObject({
+      operationSettled: false,
+      utilityChildDiagnostic: {
+        censusDiagnostic: { stage: 'new_identity_compare', reason: 'parent_changed' },
+      },
+    });
+    expect(run.signals).toEqual([]);
+  });
+
+  it('holds precisely on executable change between enrollment and known identity recheck', async () => {
+    let childReads = 0;
+    const run = await censusSequence([censusSnapshot(censusRoot, censusChild)], async (pid) =>
+      pid === 88
+        ? censusRoot
+        : { ...censusChild, exe: ++childReads === 1 ? '/synthetic/node' : '/synthetic/other' },
+    );
+    expect(run.error).toMatchObject({
+      operationSettled: false,
+      utilityChildDiagnostic: {
+        censusDiagnostic: { stage: 'known_identity_compare', reason: 'executable_changed' },
+      },
+    });
+    expect(run.signals).toEqual([]);
+  });
+
+  it('rejects a reused known root before enrolling children', async () => {
+    const run = await censusSequence(
+      [censusSnapshot({ ...censusRoot, startTimeTicks: '99' }, censusChild)],
+      async () => censusRoot,
+    );
+    expect(run.error).toMatchObject({
+      operationSettled: false,
+      utilityChildDiagnostic: {
+        censusDiagnostic: { stage: 'known_identity_compare', reason: 'generation_changed' },
+      },
+    });
+    expect(run.enrolled).toEqual([88]);
+    expect(run.signals).toEqual([]);
+  });
+
+  it('still holds on an unknown final descendant after an absence reconciliation', async () => {
+    const orphan = { ...censusChild, pid: 91, ppid: 90, startTimeTicks: '3' };
+    const run = await censusSequence(
+      [censusSnapshot(censusRoot, censusChild), censusSnapshot(censusRoot), censusSnapshot(orphan)],
+      async (pid) => (pid === 88 ? censusRoot : undefined),
+    );
+    expect(run.error).toMatchObject({
+      operationSettled: false,
+      utilityChildDiagnostic: {
+        stage: 'final_session_census',
+        censusDiagnostic: { stage: 'enrollment', reason: 'ancestry_unproven' },
+      },
+    });
+    expect(run.signals).toEqual([]);
+    expect(run.enrolled).toEqual([88]);
+  });
+
+  it('attributes the independent final snapshot failure without raw helper text', async () => {
+    const run = await censusSequence(
+      [
+        censusSnapshot(censusRoot),
+        censusSnapshot(),
+        Object.assign(new Error('private process row'), { code: 'process_census_unavailable' }),
+      ],
+      async () => censusRoot,
+    );
+    expect(run.error).toMatchObject({
+      operationSettled: false,
+      utilityChildDiagnostic: {
+        stage: 'final_session_census',
+        censusDiagnostic: { stage: 'final_snapshot', reason: 'process_census_unavailable' },
+      },
+    });
+    expect(run.snapshotReads).toBe(3);
+    expect(run.signals).toEqual([]);
+    expect(JSON.stringify(run.error)).not.toContain('private process row');
+  });
+
+  it('reports snapshot helper failures as a fixed census reason', async () => {
+    const run = await censusSequence(
+      [Object.assign(new Error('private row'), { code: 'process_stat_permission_denied' })],
+      async () => censusRoot,
+    );
+    expect(run.error).toMatchObject({
+      operationSettled: false,
+      utilityChildDiagnostic: {
+        censusDiagnostic: { stage: 'snapshot', reason: 'process_stat_permission_denied' },
+      },
+    });
+    expect(run.signals).toEqual([]);
+  });
+
+  it('carries only the fixed census fields into the content-free receipt', async () => {
+    const run = await censusSequence([censusSnapshot(censusRoot, censusChild)], async (pid) => {
+      if (pid === 88) return censusRoot;
+      throw Object.assign(new Error('private row must never enter receipt'), {
+        code: 'process_stat_permission_denied',
+      });
+    });
+    const ops = new FakeOps();
+    ops.preparationFailure = { stage: 'migration_child', error: run.error };
+    const receipt = await runBasic5CiAcceptance(ops);
+    expect(receipt.utilityChildDiagnostic).toMatchObject({
+      censusDiagnostic: {
+        stage: 'new_identity_read',
+        reason: 'process_stat_permission_denied',
+      },
+    });
+    expect(receipt.operationSettled).toBe(false);
+    expect(receipt.cleanupComplete).toBe(false);
+    expect(JSON.stringify(receipt)).not.toContain('private row');
+  });
+
   it('runs real preflight metadata orchestration with the instance clock and no processes', async () => {
     const calls: string[] = [];
     const driver = {
