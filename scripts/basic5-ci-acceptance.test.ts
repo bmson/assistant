@@ -1,20 +1,26 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { describe, expect, it } from 'vitest';
 import {
   assertBasic5CiWorkflowAdmission,
+  type Basic5CiCaseEntryDiagnostic,
   type Basic5CiCaseResult,
   type Basic5CiDirectChildHandle,
   type Basic5CiEvidence,
   Basic5CiHold,
   type Basic5CiOps,
   type Basic5CiPreflight,
+  type Basic5CiPreparationDiagnostic,
   type Basic5CiQuiescence,
   type Basic5CiTarget,
+  combineBasic5CiPreparationFailures,
   observeBasic5CiChromeVersion,
   ownedSessionEnrollmentOrder,
   parseLinuxListenTable,
   runBasic5CiAcceptance,
+  runBasic5CiCaseEntryStep,
+  runBasic5CiPreparationStep,
   runBasic5CiReadOnlyMetadata,
   verifyDirectChildBootstrap,
 } from './basic5-ci-acceptance.js';
@@ -213,7 +219,15 @@ class FakeOps implements Basic5CiOps {
   failCleanup = false;
   prepareAdvanceMs = 0;
   prepareThrows = false;
+  neverResolvePreparation = false;
+  preparationStage?: Basic5CiPreparationDiagnostic['stage'];
+  reportPreparationStage = true;
   preflightError?: Basic5CiHold;
+  preflightValue = preflight;
+  preparationFailure?: { stage: Basic5CiPreparationDiagnostic['stage']; error: unknown };
+  caseEntryFailure?: { stage: Basic5CiCaseEntryDiagnostic['stage']; error: unknown };
+  caseEntryStage?: Basic5CiCaseEntryDiagnostic['stage'];
+  reportCaseEntryStage = true;
   caseThrows = false;
   neverResolveCase = false;
   uninterruptibleCase = false;
@@ -226,14 +240,32 @@ class FakeOps implements Basic5CiOps {
     this.events.push('preflight');
     expect(deadline).toBe(20_000);
     if (this.preflightError) throw this.preflightError;
-    return preflight;
+    return this.preflightValue;
   }
   async prepareFreshTarget(deadline: number, _signal: AbortSignal): Promise<Basic5CiTarget> {
     this.events.push('prepare');
     expect(deadline).toBe(130_000);
     this.time += this.prepareAdvanceMs;
+    if (this.neverResolvePreparation)
+      return runBasic5CiPreparationStep(
+        this.preparationStage ?? 'target_database_creation',
+        'fake_prepare_failed',
+        () => new Promise<Basic5CiTarget>(() => {}),
+      );
+    if (this.preparationFailure) this.preparationStage = this.preparationFailure.stage;
+    if (this.preparationFailure)
+      await runBasic5CiPreparationStep(
+        this.preparationFailure.stage,
+        'fake_preparation_failed',
+        () => {
+          throw this.preparationFailure?.error;
+        },
+      );
     if (this.prepareThrows) throw new Error('redacted prepare error');
     return target;
+  }
+  currentPreparationStage(): Basic5CiPreparationDiagnostic['stage'] | undefined {
+    return this.reportPreparationStage ? this.preparationStage : undefined;
   }
   async runExactCase(
     _target: Basic5CiTarget,
@@ -242,6 +274,12 @@ class FakeOps implements Basic5CiOps {
   ): Promise<Basic5CiCaseResult> {
     this.events.push('case');
     expect(deadline).toBe(310_000);
+    if (this.caseEntryFailure) {
+      this.caseEntryStage = this.caseEntryFailure.stage;
+      await runBasic5CiCaseEntryStep(this.caseEntryFailure.stage, 'fake_case_entry_failed', () => {
+        throw this.caseEntryFailure?.error;
+      });
+    }
     if (this.caseThrows) throw new Error('redacted case error');
     if (this.neverResolveCase && this.uninterruptibleCase) return new Promise(() => {});
     if (this.resolveCaseAfterAbort)
@@ -257,6 +295,9 @@ class FakeOps implements Basic5CiOps {
         });
       });
     return this.caseResult;
+  }
+  currentCaseEntryStage(): Basic5CiCaseEntryDiagnostic['stage'] | undefined {
+    return this.reportCaseEntryStage ? this.caseEntryStage : undefined;
   }
   async quiesceApplication(deadline: number, _signal: AbortSignal): Promise<Basic5CiQuiescence> {
     this.events.push('quiesce');
@@ -307,6 +348,126 @@ class FakeDirectChild extends EventEmitter implements Basic5CiDirectChildHandle 
 }
 
 describe('one-shot BASIC5 CI controller', () => {
+  it('preserves both the primary database failure and pool-close failure stages', () => {
+    const primary = new Basic5CiHold(
+      'database_ownership_check_failed',
+      true,
+      undefined,
+      undefined,
+      {
+        stage: 'database_ownership_check',
+        category: 'operation_error',
+      },
+    );
+    const close = new Basic5CiHold('database_pool_close_failed', true, undefined, undefined, {
+      stage: 'database_pool_close',
+      category: 'operation_error',
+    });
+    expect(combineBasic5CiPreparationFailures(primary, close)).toMatchObject({
+      code: 'database_ownership_check_failed',
+      preparationDiagnostic: {
+        stage: 'database_ownership_check',
+        category: 'operation_error',
+        secondaryStage: 'database_pool_close',
+        secondaryCategory: 'operation_error',
+      },
+    });
+  });
+
+  it('resolves the actual TSX preparation module imports without opening a database', () => {
+    const script = [
+      "const { pathToFileURL } = await import('node:url');",
+      "const { createRequire } = await import('node:module');",
+      "const { dirname, resolve } = await import('node:path');",
+      "const { readFileSync, lstatSync } = await import('node:fs');",
+      "const root = pathToFileURL(process.cwd() + '/');",
+      "const targetSupport = await import(new URL('./scripts/test-target.js', root).href);",
+      "const databasePackage = await import('@assistant/db');",
+      "const require = createRequire(pathToFileURL(process.cwd() + '/package.json'));",
+      "const vitestManifestPath = require.resolve('vitest/package.json');",
+      "const vitestConfigEntry = require.resolve('vitest/config');",
+      "const vitestManifest = JSON.parse(readFileSync(vitestManifestPath, 'utf8'));",
+      "const vitestCli = resolve(dirname(vitestManifestPath), 'vitest.mjs');",
+      "if (typeof targetSupport.allocateTestTarget !== 'function') process.exitCode = 1;",
+      "if (typeof databasePackage.createDb !== 'function') process.exitCode = 1;",
+      "if (typeof vitestConfigEntry !== 'string' || vitestConfigEntry.length === 0) process.exitCode = 1;",
+      "if (vitestManifest.name !== 'vitest' || vitestManifest.bin?.vitest !== './vitest.mjs') process.exitCode = 1;",
+      'const vitestCliStat = lstatSync(vitestCli);',
+      'if (!vitestCliStat.isFile() || vitestCliStat.isSymbolicLink()) process.exitCode = 1;',
+    ].join('\n');
+    execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', script], {
+      cwd: process.cwd(),
+      env: {
+        PATH: process.env.PATH ?? '/usr/bin:/bin',
+        HOME: process.env.HOME ?? '/tmp',
+        NODE_OPTIONS: process.env.NODE_OPTIONS ?? '',
+        ASSISTANT_TEST_NO_EXTERNAL_CREDENTIALS: '1',
+      },
+      timeout: 10_000,
+      maxBuffer: 1_024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  });
+
+  it.each([
+    'test_target_module_import',
+    'target_allocation',
+    'target_environment',
+    'target_database_creation',
+    'target_marker_verification',
+    'database_module_import',
+    'database_connection_open',
+    'database_ownership_check',
+    'server_version_query',
+    'database_pool_close',
+    'migration_child',
+    'seed_child',
+  ] as const)('bounds the diagnostic for preparation stage %s', async (stage) => {
+    let caught: unknown;
+    try {
+      await runBasic5CiPreparationStep(stage, 'fixed_prepare_failure', () => {
+        throw new Error('postgres://private-user:private-password@host/private-database');
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      code: 'fixed_prepare_failure',
+      preparationDiagnostic: { stage, category: 'operation_error' },
+    });
+    expect((caught as Error).message).not.toContain('private-password');
+  });
+
+  it.each([
+    ['ERR_MODULE_NOT_FOUND', 'Error', 'module_resolution'],
+    ['ERR_PACKAGE_PATH_NOT_EXPORTED', 'Error', 'module_resolution'],
+    ['ERR_UNKNOWN_FILE_EXTENSION', 'TypeError', 'module_resolution'],
+    ['ENOENT', 'Error', 'filesystem_missing'],
+    ['EACCES', 'Error', 'permission_denied'],
+    ['EPERM', 'Error', 'permission_denied'],
+    [undefined, 'TypeError', 'type_error'],
+    [undefined, 'SyntaxError', 'syntax_error'],
+    ['EIO', 'Error', 'operation_error'],
+  ] as const)('classifies preparation error code %s and name %s', async (code, name, category) => {
+    const failure = Object.assign(new Error('postgres://private-user:private-password@host/db'), {
+      ...(code ? { code } : {}),
+      name,
+    });
+    let caught: unknown;
+    try {
+      await runBasic5CiPreparationStep('database_module_import', 'fixed_import_failure', () => {
+        throw failure;
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      code: 'fixed_import_failure',
+      preparationDiagnostic: { stage: 'database_module_import', category },
+    });
+    expect((caught as Error).message).not.toContain('private-password');
+  });
+
   it('accepts a valid Chrome version banner when stderr has harmless diagnostics', () => {
     const observed = observeBasic5CiChromeVersion({
       exitCode: 0,
@@ -724,6 +885,48 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(ops.events).toEqual(['preflight', 'receipt']);
   });
 
+  it('reports the preparation stage and retains unknown target state on an injected failure', async () => {
+    const ops = new FakeOps();
+    ops.preflightValue = { ...preflight, postgresServerVersionNum: null };
+    ops.preparationFailure = {
+      stage: 'database_ownership_check',
+      error: new Error('postgres://private-user:private-password@host/private-database'),
+    };
+    const result = await runBasic5CiAcceptance(ops);
+    expect(result.result).toBe('hold');
+    expect(result.errorCode).toBe('fake_preparation_failed');
+    expect(result.preparationDiagnostic).toEqual({
+      stage: 'database_ownership_check',
+      category: 'operation_error',
+    });
+    expect(result.targetStatus).toBe('unknown');
+    expect(result.targetRetained).toBeNull();
+    expect(result.postgresServerVersionNum).toBeNull();
+    expect(JSON.stringify(result)).not.toContain('private-password');
+    expect(ops.events).toEqual(['preflight', 'prepare', 'quiesce', 'receipt']);
+  });
+
+  it('records fixed case-entry failures and retains the prepared target', async () => {
+    const ops = new FakeOps();
+    ops.caseEntryFailure = {
+      stage: 'vitest_entry_resolution',
+      error: Object.assign(
+        new Error('postgres://private-user:private-password@host/private-database'),
+        { code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' },
+      ),
+    };
+    const result = await runBasic5CiAcceptance(ops);
+    expect(result.result).toBe('hold');
+    expect(result.errorCode).toBe('fake_case_entry_failed');
+    expect(result.caseEntryDiagnostic).toEqual({
+      stage: 'vitest_entry_resolution',
+      category: 'module_resolution',
+    });
+    expect(result.targetStatus).toBe('retained');
+    expect(JSON.stringify(result)).not.toContain('private-password');
+    expect(ops.events).toEqual(['preflight', 'prepare', 'case', 'quiesce', 'receipt']);
+  });
+
   it('sanitizes a captured-output limit diagnostic in the final receipt', async () => {
     const observation = observeBasic5CiChromeVersion({
       exitCode: 0,
@@ -783,6 +986,51 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(ops.events).toEqual(['preflight', 'prepare', 'quiesce', 'receipt']);
   });
 
+  it('records last-entered preparation stage on an unsettled prepare deadline without cleaning up', async () => {
+    const ops = new FakeOps();
+    ops.neverResolvePreparation = true;
+    ops.preparationStage = 'database_ownership_check';
+    const timers = {
+      schedule(callback: () => void) {
+        return setTimeout(callback, 0);
+      },
+      cancel(timer: ReturnType<typeof setTimeout>) {
+        clearTimeout(timer);
+      },
+    };
+    const result = await runBasic5CiAcceptance(ops, timers);
+    expect(result.errorCode).toBe('prepare_operation_unsettled');
+    expect(result.operationSettled).toBe(false);
+    expect(result.preparationDiagnostic).toEqual({
+      stage: 'database_ownership_check',
+      category: 'phase_deadline_or_unsettled',
+    });
+    expect(result.targetStatus).toBe('unknown');
+    expect(result.targetRetained).toBeNull();
+    expect(ops.events).toEqual(['preflight', 'prepare', 'receipt']);
+  });
+
+  it('leaves preparation stage unknown when an injected driver cannot report it', async () => {
+    const ops = new FakeOps();
+    ops.neverResolvePreparation = true;
+    ops.reportPreparationStage = false;
+    const timers = {
+      schedule(callback: () => void) {
+        return setTimeout(callback, 0);
+      },
+      cancel(timer: ReturnType<typeof setTimeout>) {
+        clearTimeout(timer);
+      },
+    };
+    const result = await runBasic5CiAcceptance(ops, timers);
+    expect(result.errorCode).toBe('prepare_operation_unsettled');
+    expect(result.operationSettled).toBe(false);
+    expect(result.preparationDiagnostic).toBeUndefined();
+    expect(result.targetStatus).toBe('unknown');
+    expect(result.targetRetained).toBeNull();
+    expect(ops.events).toEqual(['preflight', 'prepare', 'receipt']);
+  });
+
   it('retains when cleanup or exact-target absence cannot be verified', async () => {
     const cleanupOps = new FakeOps();
     cleanupOps.failCleanup = true;
@@ -830,6 +1078,8 @@ describe('one-shot BASIC5 CI controller', () => {
   it('races a never-resolving test phase against its deadline and reserves teardown', async () => {
     const ops = new FakeOps();
     ops.neverResolveCase = true;
+    ops.preparationStage = 'seed_child';
+    ops.caseEntryStage = 'vitest_child_execution';
     const timers = {
       schedule(callback: () => void, delayMs: number) {
         void delayMs;
@@ -843,6 +1093,11 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(result.result).toBe('hold');
     expect(result.errorCode).toBe('test_deadline');
     expect(result.targetStatus).toBe('retained');
+    expect(result.caseEntryDiagnostic).toEqual({
+      stage: 'vitest_child_execution',
+      category: 'phase_deadline_or_unsettled',
+    });
+    expect(result.preparationDiagnostic).toBeUndefined();
     expect(ops.events).toEqual(['preflight', 'prepare', 'case', 'quiesce', 'receipt']);
   });
 

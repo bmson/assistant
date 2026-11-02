@@ -3,7 +3,7 @@ import { execFile, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { chmod, lstat, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
@@ -106,7 +106,7 @@ export type Basic5CiPreflight = {
   imageVersion: string;
   chromeVersion: string;
   chromeVersionDiagnostic: Basic5CiChromeVersionDiagnostic;
-  postgresServerVersionNum: number;
+  postgresServerVersionNum: number | null;
   workflowContext: {
     event: 'push';
     ref: 'refs/heads/main';
@@ -154,6 +154,43 @@ export type Basic5CiChromeVersionDiagnostic = {
   exitCode: number | null;
   stdoutBytes: number | null;
   stderrBytes: number | null;
+};
+
+export type Basic5CiPreparationDiagnostic = {
+  stage:
+    | 'test_target_module_import'
+    | 'target_allocation'
+    | 'target_environment'
+    | 'target_database_creation'
+    | 'target_marker_verification'
+    | 'database_module_import'
+    | 'database_connection_open'
+    | 'database_ownership_check'
+    | 'server_version_query'
+    | 'database_pool_close'
+    | 'migration_child'
+    | 'seed_child';
+  category:
+    | 'controller_hold'
+    | 'module_resolution'
+    | 'type_error'
+    | 'syntax_error'
+    | 'filesystem_missing'
+    | 'permission_denied'
+    | 'phase_deadline_or_unsettled'
+    | 'operation_error';
+  secondaryStage?: Basic5CiPreparationDiagnostic['stage'];
+  secondaryCategory?: Basic5CiPreparationDiagnostic['category'];
+};
+
+export type Basic5CiCaseEntryDiagnostic = {
+  stage:
+    | 'process_registry_precheck'
+    | 'vitest_config_generation'
+    | 'vitest_entry_resolution'
+    | 'vitest_child_execution'
+    | 'vitest_output_parse';
+  category: Basic5CiPreparationDiagnostic['category'];
 };
 
 export type Basic5CiBuildDiagnostic = {
@@ -307,6 +344,8 @@ export interface Basic5CiOps {
   ): Promise<Basic5CiCaseResult>;
   quiesceApplication(deadline: number, signal: AbortSignal): Promise<Basic5CiQuiescence>;
   cleanupExactTarget(target: Basic5CiTarget, deadline: number, signal: AbortSignal): Promise<void>;
+  currentPreparationStage?(): Basic5CiPreparationDiagnostic['stage'] | undefined;
+  currentCaseEntryStage?(): Basic5CiCaseEntryDiagnostic['stage'] | undefined;
   verifyTargetAbsent(
     target: Basic5CiTarget,
     deadline: number,
@@ -326,9 +365,191 @@ export class Basic5CiHold extends Error {
     readonly operationSettled = true,
     readonly buildDiagnostic?: Basic5CiBuildDiagnostic,
     readonly chromeVersionDiagnostic?: Basic5CiChromeVersionDiagnostic,
+    readonly preparationDiagnostic?: Basic5CiPreparationDiagnostic,
+    readonly caseEntryDiagnostic?: Basic5CiCaseEntryDiagnostic,
   ) {
     super(code);
   }
+}
+
+export async function runBasic5CiCaseEntryStep<T>(
+  stage: Basic5CiCaseEntryDiagnostic['stage'],
+  failureCode: string,
+  operation: () => T | Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    const hold = error instanceof Basic5CiHold ? error : undefined;
+    throw new Basic5CiHold(
+      hold?.code ?? failureCode,
+      hold?.operationSettled ?? true,
+      hold?.buildDiagnostic,
+      hold?.chromeVersionDiagnostic,
+      hold?.preparationDiagnostic,
+      { stage, category: classifyPreparationError(error) },
+    );
+  }
+}
+
+export async function runBasic5CiPreparationStep<T>(
+  stage: Basic5CiPreparationDiagnostic['stage'],
+  failureCode: string,
+  operation: () => T | Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    const hold = error instanceof Basic5CiHold ? error : undefined;
+    throw new Basic5CiHold(
+      hold?.code ?? failureCode,
+      hold?.operationSettled ?? true,
+      hold?.buildDiagnostic,
+      hold?.chromeVersionDiagnostic,
+      { stage, category: classifyPreparationError(error) },
+    );
+  }
+}
+
+function classifyPreparationError(error: unknown): Basic5CiPreparationDiagnostic['category'] {
+  if (error instanceof Basic5CiHold) return 'controller_hold';
+  if (!error || typeof error !== 'object') return 'operation_error';
+  const safeError = error as { code?: unknown; name?: unknown };
+  if (
+    [
+      'ERR_MODULE_NOT_FOUND',
+      'MODULE_NOT_FOUND',
+      'ERR_PACKAGE_PATH_NOT_EXPORTED',
+      'ERR_UNKNOWN_FILE_EXTENSION',
+    ].includes(String(safeError.code))
+  )
+    return 'module_resolution';
+  if (safeError.code === 'ENOENT') return 'filesystem_missing';
+  if (safeError.code === 'EACCES' || safeError.code === 'EPERM') return 'permission_denied';
+  if (safeError.name === 'TypeError') return 'type_error';
+  if (safeError.name === 'SyntaxError') return 'syntax_error';
+  return 'operation_error';
+}
+
+export function combineBasic5CiPreparationFailures(
+  primary: Basic5CiHold,
+  secondary: Basic5CiHold,
+): Basic5CiHold {
+  const primaryDiagnostic = primary.preparationDiagnostic;
+  const secondaryDiagnostic = secondary.preparationDiagnostic;
+  const preparationDiagnostic =
+    primaryDiagnostic && secondaryDiagnostic
+      ? {
+          ...primaryDiagnostic,
+          secondaryStage: secondaryDiagnostic.stage,
+          secondaryCategory: secondaryDiagnostic.category,
+        }
+      : (primaryDiagnostic ?? secondaryDiagnostic);
+  return new Basic5CiHold(
+    primary.code,
+    primary.operationSettled && secondary.operationSettled,
+    primary.buildDiagnostic,
+    primary.chromeVersionDiagnostic,
+    preparationDiagnostic,
+  );
+}
+
+function contentFreePreparationDiagnostic(value: unknown): Basic5CiPreparationDiagnostic {
+  const stages: Basic5CiPreparationDiagnostic['stage'][] = [
+    'test_target_module_import',
+    'target_allocation',
+    'target_environment',
+    'target_database_creation',
+    'target_marker_verification',
+    'database_module_import',
+    'database_connection_open',
+    'database_ownership_check',
+    'server_version_query',
+    'database_pool_close',
+    'migration_child',
+    'seed_child',
+  ];
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    ![2, 4].includes(Object.keys(value).length) ||
+    !stages.includes(
+      (value as Record<string, unknown>).stage as Basic5CiPreparationDiagnostic['stage'],
+    ) ||
+    ![
+      'controller_hold',
+      'module_resolution',
+      'type_error',
+      'syntax_error',
+      'filesystem_missing',
+      'permission_denied',
+      'phase_deadline_or_unsettled',
+      'operation_error',
+    ].includes(String((value as Record<string, unknown>).category)) ||
+    Object.hasOwn(value, 'secondaryStage') !== Object.hasOwn(value, 'secondaryCategory') ||
+    (Object.hasOwn(value, 'secondaryStage') &&
+      (!stages.includes(
+        (value as Record<string, unknown>).secondaryStage as Basic5CiPreparationDiagnostic['stage'],
+      ) ||
+        ![
+          'controller_hold',
+          'module_resolution',
+          'type_error',
+          'syntax_error',
+          'filesystem_missing',
+          'permission_denied',
+          'phase_deadline_or_unsettled',
+          'operation_error',
+        ].includes(String((value as Record<string, unknown>).secondaryCategory))))
+  )
+    throw new Basic5CiHold('preparation_diagnostic_invalid');
+  const diagnostic = value as Basic5CiPreparationDiagnostic;
+  return {
+    stage: diagnostic.stage,
+    category: diagnostic.category,
+    ...(diagnostic.secondaryStage
+      ? {
+          secondaryStage: diagnostic.secondaryStage,
+          secondaryCategory: diagnostic.secondaryCategory,
+        }
+      : {}),
+  };
+}
+
+function contentFreeCaseEntryDiagnostic(value: unknown): Basic5CiCaseEntryDiagnostic {
+  const stages: Basic5CiCaseEntryDiagnostic['stage'][] = [
+    'process_registry_precheck',
+    'vitest_config_generation',
+    'vitest_entry_resolution',
+    'vitest_child_execution',
+    'vitest_output_parse',
+  ];
+  const categories: Basic5CiPreparationDiagnostic['category'][] = [
+    'controller_hold',
+    'module_resolution',
+    'type_error',
+    'syntax_error',
+    'filesystem_missing',
+    'permission_denied',
+    'phase_deadline_or_unsettled',
+    'operation_error',
+  ];
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 2 ||
+    !stages.includes(
+      (value as Record<string, unknown>).stage as Basic5CiCaseEntryDiagnostic['stage'],
+    ) ||
+    !categories.includes(
+      (value as Record<string, unknown>).category as Basic5CiPreparationDiagnostic['category'],
+    )
+  )
+    throw new Basic5CiHold('case_entry_diagnostic_invalid');
+  const diagnostic = value as Basic5CiCaseEntryDiagnostic;
+  return { stage: diagnostic.stage, category: diagnostic.category };
 }
 
 /** Parse only the bounded version banner; output bytes themselves are never retained. */
@@ -1327,6 +1548,8 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     'quiescenceStatus',
     'errorCode',
     'standaloneBuildDiagnostic',
+    'preparationDiagnostic',
+    'caseEntryDiagnostic',
     'elapsedSeconds',
   ]);
   const clean = Object.fromEntries(Object.entries(record).filter(([key]) => allowed.has(key)));
@@ -1347,6 +1570,10 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     clean.chromeVersionDiagnostic = contentFreeChromeVersionDiagnostic(
       clean.chromeVersionDiagnostic,
     );
+  if ('preparationDiagnostic' in clean)
+    clean.preparationDiagnostic = contentFreePreparationDiagnostic(clean.preparationDiagnostic);
+  if ('caseEntryDiagnostic' in clean)
+    clean.caseEntryDiagnostic = contentFreeCaseEntryDiagnostic(clean.caseEntryDiagnostic);
   if ('standaloneBuildDiagnostic' in clean)
     clean.standaloneBuildDiagnostic = contentFreeBuildDiagnostic(clean.standaloneBuildDiagnostic);
   const encoded = JSON.stringify(clean);
@@ -1514,6 +1741,37 @@ export async function runBasic5CiAcceptance(
     receipt.errorCode = error instanceof Basic5CiHold ? error.code : 'ci_acceptance_failure';
     if (error instanceof Basic5CiHold && error.chromeVersionDiagnostic)
       receipt.chromeVersionDiagnostic = error.chromeVersionDiagnostic;
+    if (error instanceof Basic5CiHold && error.preparationDiagnostic)
+      receipt.preparationDiagnostic = error.preparationDiagnostic;
+    if (error instanceof Basic5CiHold && error.caseEntryDiagnostic)
+      receipt.caseEntryDiagnostic = error.caseEntryDiagnostic;
+    if (
+      caseStarted &&
+      error instanceof Basic5CiHold &&
+      !error.caseEntryDiagnostic &&
+      (error.code === 'test_deadline' || !error.operationSettled)
+    ) {
+      const stage = ops.currentCaseEntryStage?.();
+      if (stage)
+        receipt.caseEntryDiagnostic = {
+          stage,
+          category: 'phase_deadline_or_unsettled',
+        } satisfies Basic5CiCaseEntryDiagnostic;
+    }
+    if (
+      prepareAttempted &&
+      !caseStarted &&
+      error instanceof Basic5CiHold &&
+      !error.preparationDiagnostic &&
+      (error.code === 'prepare_deadline' || !error.operationSettled)
+    ) {
+      const stage = ops.currentPreparationStage?.();
+      if (stage)
+        receipt.preparationDiagnostic = {
+          stage,
+          category: 'phase_deadline_or_unsettled',
+        } satisfies Basic5CiPreparationDiagnostic;
+    }
     if (error instanceof Basic5CiHold && error.buildDiagnostic)
       receipt.standaloneBuildDiagnostic = error.buildDiagnostic;
     if (error instanceof Basic5CiHold && !error.operationSettled) {
@@ -1628,6 +1886,8 @@ class RealBasic5CiOps implements Basic5CiOps {
   private provenance?: BuildProvenanceModule;
   private preflightResult?: Basic5CiPreflight;
   private target?: Basic5CiTarget;
+  private preparationStage?: Basic5CiPreparationDiagnostic['stage'];
+  private caseEntryStage?: Basic5CiCaseEntryDiagnostic['stage'];
   private readonly ownedProcesses = new Map<number, LinuxIdentity>();
   private readonly ownedRoots = new Map<number, LinuxIdentity>();
   private baselineListeners = new Map<string, number>();
@@ -1645,6 +1905,32 @@ class RealBasic5CiOps implements Basic5CiOps {
 
   now(): number {
     return performance.now();
+  }
+
+  currentPreparationStage(): Basic5CiPreparationDiagnostic['stage'] | undefined {
+    return this.preparationStage;
+  }
+
+  private runPreparationStep<T>(
+    stage: Basic5CiPreparationDiagnostic['stage'],
+    failureCode: string,
+    operation: () => T | Promise<T>,
+  ): Promise<T> {
+    this.preparationStage = stage;
+    return runBasic5CiPreparationStep(stage, failureCode, operation);
+  }
+
+  currentCaseEntryStage(): Basic5CiCaseEntryDiagnostic['stage'] | undefined {
+    return this.caseEntryStage;
+  }
+
+  private runCaseEntryStep<T>(
+    stage: Basic5CiCaseEntryDiagnostic['stage'],
+    failureCode: string,
+    operation: () => T | Promise<T>,
+  ): Promise<T> {
+    this.caseEntryStage = stage;
+    return runBasic5CiCaseEntryStep(stage, failureCode, operation);
   }
 
   private assertDeadline(deadline: number, phase: string): void {
@@ -2130,7 +2416,7 @@ class RealBasic5CiOps implements Basic5CiOps {
       imageVersion,
       chromeVersion,
       chromeVersionDiagnostic: chromeObservation.diagnostic,
-      postgresServerVersionNum: 0,
+      postgresServerVersionNum: null,
       workflowContext: {
         event: 'push',
         ref: 'refs/heads/main',
@@ -2153,88 +2439,158 @@ class RealBasic5CiOps implements Basic5CiOps {
   async prepareFreshTarget(deadline: number, signal: AbortSignal): Promise<Basic5CiTarget> {
     this.assertDeadline(deadline, 'prepare');
     assertNotAborted(signal, 'prepare');
-    const support = (await import(
-      new URL('./test-target.js', import.meta.url).href
-    )) as unknown as TargetSupport;
+    const support = await this.runPreparationStep(
+      'test_target_module_import',
+      'fresh_target_support_unavailable',
+      async () =>
+        (await import(
+          new URL('./test-target.js', import.meta.url).href
+        )) as unknown as TargetSupport,
+    );
     assertNotAborted(signal, 'prepare');
     this.targetSupport = support;
-    const token = randomBytes(12).toString('hex');
-    const target = support.allocateTestTarget(this.sourceDatabaseUrl, token, 'standard');
+    const allocation = await this.runPreparationStep(
+      'target_allocation',
+      'fresh_target_allocation_failed',
+      () => {
+        const token = randomBytes(12).toString('hex');
+        return support.allocateTestTarget(this.sourceDatabaseUrl, token, 'standard');
+      },
+    );
+    const target = allocation;
     this.target = target;
-    this.targetEnv = {
-      ...this.baseEnv,
-      DATABASE_URL: target.databaseUrl,
-      TEST_DATABASE_URL: target.databaseUrl,
-      ASSISTANT_TEST_TARGET_TOKEN: target.token,
-      ASSISTANT_TEST_TARGET_KIND: 'standard',
-      OWNER_EMAIL: 'basic5-owner@example.test',
-      ASSISTANT_EMAIL: 'basic5-owner@example.test',
-      OWNER_NAME: 'BASIC5 Synthetic Owner',
-      ASSISTANT_NAME: 'BASIC5 Synthetic Owner',
-      OWNER_PHONE: '',
-      PERSISTENCE_DRIVER: 'postgres',
-      LLM_PROVIDER: 'vertex',
-      OPENROUTER_API_KEY: '',
-      ASSISTANT_RELEASE_WRITES_PAUSED: 'false',
-      POSTGRES_SOURCE_WRITES_FENCED: 'false',
-    };
+    this.targetEnv = await this.runPreparationStep(
+      'target_environment',
+      'fresh_target_environment_failed',
+      () => ({
+        ...this.baseEnv,
+        DATABASE_URL: target.databaseUrl,
+        TEST_DATABASE_URL: target.databaseUrl,
+        ASSISTANT_TEST_TARGET_TOKEN: target.token,
+        ASSISTANT_TEST_TARGET_KIND: 'standard',
+        OWNER_EMAIL: 'basic5-owner@example.test',
+        ASSISTANT_EMAIL: 'basic5-owner@example.test',
+        OWNER_NAME: 'BASIC5 Synthetic Owner',
+        ASSISTANT_NAME: 'BASIC5 Synthetic Owner',
+        OWNER_PHONE: '',
+        PERSISTENCE_DRIVER: 'postgres',
+        LLM_PROVIDER: 'vertex',
+        OPENROUTER_API_KEY: '',
+        ASSISTANT_RELEASE_WRITES_PAUSED: 'false',
+        POSTGRES_SOURCE_WRITES_FENCED: 'false',
+      }),
+    );
     const testDb = join(this.repoRoot, 'packages/db/src/test-db.ts');
-    const created = await this.runChild(
-      process.execPath,
-      ['--import', 'tsx', testDb],
-      this.targetEnv,
-      deadline,
-      'create-target',
-      signal,
+    await this.runPreparationStep(
+      'target_database_creation',
+      'fresh_target_allocation_failed',
+      async () => {
+        const created = await this.runChild(
+          process.execPath,
+          ['--import', 'tsx', testDb],
+          this.targetEnv,
+          deadline,
+          'create-target',
+          signal,
+        );
+        if (created.exitCode !== 0 || created.stderr.length)
+          throw new Basic5CiHold('fresh_target_allocation_failed');
+        assertNotAborted(signal, 'prepare');
+      },
     );
-    if (created.exitCode !== 0 || created.stderr.length)
-      throw new Basic5CiHold('fresh_target_allocation_failed');
-    assertNotAborted(signal, 'prepare');
-    support.assertAllocatedTestTargetMarker({
-      databaseUrl: target.databaseUrl,
-      testDatabaseUrl: target.databaseUrl,
-      token: target.token,
-      kind: 'standard',
-    });
-    const dbPackage = (await import('@assistant/db')) as unknown as DbModule;
+    await this.runPreparationStep(
+      'target_marker_verification',
+      'fresh_target_marker_verification_failed',
+      () =>
+        support.assertAllocatedTestTargetMarker({
+          databaseUrl: target.databaseUrl,
+          testDatabaseUrl: target.databaseUrl,
+          token: target.token,
+          kind: 'standard',
+        }),
+    );
+    const dbPackage = await this.runPreparationStep(
+      'database_module_import',
+      'database_module_unavailable',
+      async () => (await import('@assistant/db')) as unknown as DbModule,
+    );
     this.dbModule = dbPackage;
-    const db = dbPackage.createDb(target.databaseUrl, { max: 1, statementTimeoutMs: 5_000 });
+    const db = await this.runPreparationStep(
+      'database_connection_open',
+      'database_connection_open_failed',
+      () => dbPackage.createDb(target.databaseUrl, { max: 1, statementTimeoutMs: 5_000 }),
+    );
+    let databaseFailure: unknown;
+    let poolCloseFailure: unknown;
     try {
-      await support.assertAllocatedTestDatabaseOwnership(db, target);
-      const [version] = await db.$client.unsafe('SHOW server_version_num');
-      assertNotAborted(signal, 'prepare');
-      const serverVersion = Number(version?.server_version_num);
-      if (!Number.isSafeInteger(serverVersion) || serverVersion < 170000 || serverVersion >= 180000)
-        throw new Basic5CiHold('target_postgres_not_version_17');
-      const preflightResult = this.preflightResult;
-      if (!preflightResult) throw new Basic5CiHold('preflight_observation_missing');
-      preflightResult.postgresServerVersionNum = serverVersion;
-    } finally {
-      await db.$client.end({ timeout: 3 });
+      await this.runPreparationStep(
+        'database_ownership_check',
+        'allocated_database_ownership_check_failed',
+        () => support.assertAllocatedTestDatabaseOwnership(db, target),
+      );
+      await this.runPreparationStep(
+        'server_version_query',
+        'target_postgres_version_unavailable',
+        async () => {
+          const [version] = await db.$client.unsafe('SHOW server_version_num');
+          assertNotAborted(signal, 'prepare');
+          const serverVersion = Number(version?.server_version_num);
+          if (
+            !Number.isSafeInteger(serverVersion) ||
+            serverVersion < 170000 ||
+            serverVersion >= 180000
+          )
+            throw new Basic5CiHold('target_postgres_not_version_17');
+          const preflightResult = this.preflightResult;
+          if (!preflightResult) throw new Basic5CiHold('preflight_observation_missing');
+          preflightResult.postgresServerVersionNum = serverVersion;
+        },
+      );
+    } catch (error) {
+      databaseFailure = error;
     }
+    try {
+      await this.runPreparationStep('database_pool_close', 'database_pool_close_failed', () =>
+        db.$client.end({ timeout: 3 }),
+      );
+    } catch (error) {
+      poolCloseFailure = error;
+    }
+    if (databaseFailure && poolCloseFailure) {
+      throw combineBasic5CiPreparationFailures(
+        databaseFailure as Basic5CiHold,
+        poolCloseFailure as Basic5CiHold,
+      );
+    }
+    if (databaseFailure) throw databaseFailure;
+    if (poolCloseFailure) throw poolCloseFailure;
     assertNotAborted(signal, 'prepare');
-    const migrate = await this.runChild(
-      process.execPath,
-      ['--import', 'tsx', join(this.repoRoot, 'packages/db/src/migrate.ts')],
-      this.targetEnv,
-      deadline,
-      'migrate',
-      signal,
-    );
-    if (migrate.exitCode !== 0 || migrate.stderr.length)
-      throw new Basic5CiHold('fresh_target_migration_failed');
-    assertNotAborted(signal, 'prepare');
-    const seed = await this.runChild(
-      process.execPath,
-      ['--import', 'tsx', join(this.repoRoot, 'packages/db/src/seed.ts')],
-      this.targetEnv,
-      deadline,
-      'seed',
-      signal,
-    );
-    if (seed.exitCode !== 0 || seed.stderr.length)
-      throw new Basic5CiHold('fresh_synthetic_seed_failed');
-    assertNotAborted(signal, 'prepare');
+    await this.runPreparationStep('migration_child', 'fresh_target_migration_failed', async () => {
+      const migrate = await this.runChild(
+        process.execPath,
+        ['--import', 'tsx', join(this.repoRoot, 'packages/db/src/migrate.ts')],
+        this.targetEnv,
+        deadline,
+        'migrate',
+        signal,
+      );
+      if (migrate.exitCode !== 0 || migrate.stderr.length)
+        throw new Basic5CiHold('fresh_target_migration_failed');
+      assertNotAborted(signal, 'prepare');
+    });
+    await this.runPreparationStep('seed_child', 'fresh_synthetic_seed_failed', async () => {
+      const seed = await this.runChild(
+        process.execPath,
+        ['--import', 'tsx', join(this.repoRoot, 'packages/db/src/seed.ts')],
+        this.targetEnv,
+        deadline,
+        'seed',
+        signal,
+      );
+      if (seed.exitCode !== 0 || seed.stderr.length)
+        throw new Basic5CiHold('fresh_synthetic_seed_failed');
+      assertNotAborted(signal, 'prepare');
+    });
     return target;
   }
 
@@ -2312,13 +2668,23 @@ class RealBasic5CiOps implements Basic5CiOps {
     assertNotAborted(signal, 'test');
     if (!this.preflightResult || !this.targetSupport || this.target?.token !== target.token)
       throw new Basic5CiHold('ci_case_preconditions_missing');
-    try {
-      await lstat(this.registryPath);
-      throw new Basic5CiHold('process_registry_preexisted');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
-    const config = await this.vitestConfig();
+    await this.runCaseEntryStep(
+      'process_registry_precheck',
+      'process_registry_precheck_failed',
+      async () => {
+        try {
+          await lstat(this.registryPath);
+          throw new Basic5CiHold('process_registry_preexisted');
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      },
+    );
+    const config = await this.runCaseEntryStep(
+      'vitest_config_generation',
+      'vitest_config_generation_failed',
+      () => this.vitestConfig(),
+    );
     assertNotAborted(signal, 'test');
     const env: NodeJS.ProcessEnv = {
       ...this.targetEnv,
@@ -2330,11 +2696,35 @@ class RealBasic5CiOps implements Basic5CiOps {
       ASSISTANT_BASIC5_STANDALONE_SERVER_SHA256:
         this.preflightResult.requiredArtifactIdentity.serverSha256,
     };
-    const require = (await import('node:module')).createRequire(
-      join(this.repoRoot, 'package.json'),
+    const vitest = await this.runCaseEntryStep(
+      'vitest_entry_resolution',
+      'vitest_entry_resolution_failed',
+      async () => {
+        const require = (await import('node:module')).createRequire(
+          join(this.repoRoot, 'package.json'),
+        );
+        assertNotAborted(signal, 'test');
+        const manifestPath = require.resolve('vitest/package.json');
+        const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
+          name?: unknown;
+          bin?: unknown;
+        };
+        if (
+          manifest.name !== 'vitest' ||
+          !manifest.bin ||
+          typeof manifest.bin !== 'object' ||
+          Array.isArray(manifest.bin) ||
+          (manifest.bin as Record<string, unknown>).vitest !== './vitest.mjs'
+        )
+          throw new Basic5CiHold('vitest_cli_entry_manifest_unexpected');
+        const packageDirectory = dirname(manifestPath);
+        const entry = resolve(packageDirectory, 'vitest.mjs');
+        const entryInfo = await lstat(entry);
+        if (!entryInfo.isFile() || entryInfo.isSymbolicLink())
+          throw new Basic5CiHold('vitest_cli_entry_not_regular_file');
+        return entry;
+      },
     );
-    assertNotAborted(signal, 'test');
-    const vitest = require.resolve('vitest/vitest.mjs');
     const args = [
       '--import',
       'tsx',
@@ -2347,19 +2737,40 @@ class RealBasic5CiOps implements Basic5CiOps {
       '--config',
       config,
     ];
-    const child = await this.runChild(
-      process.execPath,
-      args,
-      env,
-      deadline,
-      'basic5-vitest',
-      signal,
+    const child = await this.runCaseEntryStep(
+      'vitest_child_execution',
+      'vitest_child_execution_failed',
+      async () => {
+        const result = await this.runChild(
+          process.execPath,
+          args,
+          env,
+          deadline,
+          'basic5-vitest',
+          signal,
+        );
+        if (result.stderr.length) throw new Basic5CiHold('vitest_stderr_not_empty');
+        return result;
+      },
     );
-    if (child.stderr.length) throw new Basic5CiHold('vitest_stderr_not_empty');
-    return this.parseVitest(child.stdout, child.exitCode);
+    return this.runCaseEntryStep('vitest_output_parse', 'vitest_output_parse_failed', () =>
+      this.parseVitest(child.stdout, child.exitCode),
+    );
   }
 
   async quiesceApplication(deadline: number, signal: AbortSignal): Promise<Basic5CiQuiescence> {
+    try {
+      return await this.observeAndQuiesceOwnedApplication(deadline, signal);
+    } catch (error) {
+      if (error instanceof Basic5CiHold) throw error;
+      throw new Basic5CiHold('owned_application_quiescence_failed');
+    }
+  }
+
+  private async observeAndQuiesceOwnedApplication(
+    deadline: number,
+    signal: AbortSignal,
+  ): Promise<Basic5CiQuiescence> {
     this.assertDeadline(deadline, 'quiescence');
     assertNotAborted(signal, 'quiescence');
     if (!this.proof) throw new Basic5CiHold('linux_process_proof_unavailable');
