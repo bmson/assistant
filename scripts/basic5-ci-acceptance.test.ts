@@ -1,7 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -382,6 +384,7 @@ describe('one-shot BASIC5 CI controller', () => {
       assertBasic5CiProcessClosure: () => undefined,
     } as unknown as Basic5CiUtilityChildTestDriver['proof'];
     return {
+      repositoryRoot: resolve(fileURLToPath(new URL('..', import.meta.url))),
       spawn: (() => child) as unknown as Basic5CiUtilityChildTestDriver['spawn'],
       proof,
       now: options.now ?? (() => 1),
@@ -389,6 +392,175 @@ describe('one-shot BASIC5 CI controller', () => {
       killProcess: () => undefined,
     };
   }
+
+  it('uses canonical invocation directories through real preparation and case spawn adapters', async () => {
+    const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
+    const privateRoot = await mkdtemp(join(tmpdir(), 'basic5-invocation-fixture-'));
+    const invocations: Array<{
+      command: string;
+      args: string[];
+      options: Record<string, unknown>;
+    }> = [];
+    const driver = utilityChildDriver(new FakeDirectChild());
+    driver.spawn = ((command: string, args: string[], options: Record<string, unknown>) => {
+      invocations.push({ command, args, options });
+      const child = new FakeDirectChild();
+      queueMicrotask(() => {
+        if (invocations.length === 4) {
+          (child.stdout as EventEmitter).emit(
+            'data',
+            Buffer.from(
+              `BASIC5_ACCEPTANCE_EVIDENCE ${JSON.stringify(validEvidence())}\n` +
+                `${JSON.stringify({ numTotalTests: 1, numPassedTests: 1, numPendingTests: 0, numFailedTests: 0, numTodoTests: 0 })}\n`,
+            ),
+          );
+        }
+        child.emit('close', 0, null);
+      });
+      return child;
+    }) as unknown as Basic5CiUtilityChildTestDriver['spawn'];
+    const ops = new RealBasic5CiOps(driver);
+    const internal = ops as unknown as {
+      privateRoot: string;
+      registryPath: string;
+      sourceDatabaseUrl: string;
+      baseEnv: NodeJS.ProcessEnv;
+      targetEnv: NodeJS.ProcessEnv;
+      preflightResult: Basic5CiPreflight;
+      runPreparationStep(stage: string, code: string, operation: () => unknown): Promise<unknown>;
+    };
+    Object.assign(internal, {
+      privateRoot,
+      registryPath: join(privateRoot, 'missing-registry.ndjson'),
+      sourceDatabaseUrl: 'postgres://synthetic@127.0.0.1/source',
+      baseEnv: {
+        NODE_ENV: 'test',
+        NODE_OPTIONS: '--import=/synthetic/deny-egress.mjs',
+        ASSISTANT_TEST_NO_EXTERNAL_CREDENTIALS: '1',
+      },
+      preflightResult: { ...preflight, utilityChildDiagnostics: [] },
+    });
+    const database = {
+      $client: {
+        unsafe: vi.fn(async () => [{ server_version_num: '170000' }]),
+        end: vi.fn(async () => undefined),
+      },
+    };
+    const support = {
+      allocateTestTarget: vi.fn(() => target),
+      assertAllocatedTestTargetMarker: vi.fn(),
+      assertAllocatedTestDatabaseOwnership: vi.fn(),
+    };
+    const originalStep = internal.runPreparationStep.bind(internal);
+    const step = vi
+      .spyOn(internal, 'runPreparationStep')
+      .mockImplementation((stage, code, operation) => {
+        if (stage === 'test_target_module_import') return Promise.resolve(support);
+        if (stage === 'database_module_import')
+          return Promise.resolve({ createDb: () => database });
+        return originalStep(stage, code, operation);
+      });
+    try {
+      const prepared = await ops.prepareFreshTarget(10_000, new AbortController().signal);
+      const result = await ops.runExactCase(prepared, 10_000, new AbortController().signal);
+      expect(result).toMatchObject({ exitCode: 0, total: 1, passed: 1, failed: 0, skipped: 0 });
+      expect(invocations).toHaveLength(4);
+      for (const [index, file] of ['test-db.ts', 'migrate.ts', 'seed.ts'].entries()) {
+        expect(invocations[index]).toMatchObject({
+          command: process.execPath,
+          args: ['--import', 'tsx', join(repositoryRoot, 'packages/db/src', file)],
+          options: {
+            cwd: index === 1 ? join(repositoryRoot, 'packages/db') : repositoryRoot,
+            detached: true,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        });
+        expect(invocations[index]?.options.env).toBe(internal.targetEnv);
+      }
+      const caseInvocation = invocations[3];
+      expect(caseInvocation?.command).toBe(process.execPath);
+      const vitestEntry = caseInvocation?.args[2];
+      expect(vitestEntry).toMatch(/[/\\]vitest[/\\]vitest\.mjs$/);
+      expect(caseInvocation?.args).toEqual([
+        '--import',
+        'tsx',
+        vitestEntry,
+        'run',
+        'scripts/basic5-browser-acceptance.integration.test.ts',
+        '--project',
+        'scripts',
+        '--maxWorkers=1',
+        '--config',
+        join(privateRoot, 'basic5-vitest.config.mjs'),
+      ]);
+      expect(caseInvocation?.options).toMatchObject({
+        cwd: repositoryRoot,
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      expect(caseInvocation?.options.env).toMatchObject({
+        ...internal.targetEnv,
+        ASSISTANT_RUN_BASIC5_BROWSER_ACCEPTANCE: '1',
+      });
+      const config = await readFile(join(privateRoot, 'basic5-vitest.config.mjs'), 'utf8');
+      expect(config).toContain(JSON.stringify(repositoryRoot));
+      expect(config).toContain(new URL('../vitest.config.ts', import.meta.url).href);
+      expect(support.assertAllocatedTestDatabaseOwnership).toHaveBeenCalledWith(database, target);
+      expect(database.$client.end).toHaveBeenCalledOnce();
+    } finally {
+      step.mockRestore();
+      ops.dispose();
+      await rm(privateRoot, { recursive: true });
+    }
+  });
+
+  it('confines migration cwd and refuses a symlink before any child launch', async () => {
+    const fixture = await realpath(await mkdtemp(join(tmpdir(), 'basic5-cwd-fixture-')));
+    const repositoryRoot = join(fixture, 'repo');
+    await mkdir(join(repositoryRoot, 'packages'), { recursive: true });
+    await mkdir(join(fixture, 'outside'));
+    await symlink(join(fixture, 'outside'), join(repositoryRoot, 'packages/db'));
+    const driver = utilityChildDriver(new FakeDirectChild());
+    driver.repositoryRoot = repositoryRoot;
+    driver.spawn = vi.fn(() => {
+      throw new Error('Child must not launch');
+    }) as unknown as Basic5CiUtilityChildTestDriver['spawn'];
+    const ops = new RealBasic5CiOps(driver);
+    try {
+      await expect(
+        ops.runUtilityChild(
+          '/synthetic/node',
+          [],
+          {},
+          10_000,
+          'migrate',
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({ code: 'migration_working_directory_unverified' });
+      expect(driver.spawn).not.toHaveBeenCalled();
+    } finally {
+      ops.dispose();
+      await rm(fixture, { recursive: true });
+    }
+  });
+
+  it('matches the nested migration tool and config paths to the package source contract', async () => {
+    const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
+    const packageRoot = join(repositoryRoot, 'packages/db');
+    const manifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'));
+    const source = await readFile(join(packageRoot, 'src/migrate.ts'), 'utf8');
+    const config = await readFile(join(packageRoot, 'drizzle.config.ts'), 'utf8');
+    expect(manifest.scripts.migrate).toBe('tsx src/migrate.ts');
+    expect(manifest.devDependencies['drizzle-kit']).toBeTruthy();
+    expect(source).toContain("spawnSync('pnpm', ['exec', 'drizzle-kit', 'migrate'], {");
+    expect(source).toContain("stdio: 'inherit'");
+    expect(config).toContain("schema: './src/schema.ts'");
+    expect(config).toContain("out: './drizzle'");
+    expect(await readFile(join(packageRoot, 'src/schema.ts'), 'utf8')).toBeTruthy();
+    expect(await readFile(join(packageRoot, 'node_modules/.bin/drizzle-kit'), 'utf8')).toContain(
+      '/drizzle-kit/bin.cjs',
+    );
+  });
 
   const censusRoot = {
     pid: 88,
