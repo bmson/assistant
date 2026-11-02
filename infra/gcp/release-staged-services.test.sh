@@ -205,7 +205,7 @@ release_accept_basic_web_agent_ready() {
   [[ "${FAIL_AGENT_READY_RECEIPT:-0}" != 1 ]]
 }
 release_run_basic_web_phase() {
-  local phase="$1" source="$2" manifest="$3" digest="$4" tag="$5" suffix image env revision
+  local phase="$1" source="$2" digest="$4" tag="$5" suffix image env
   printf 'native-phase:%s\n' "$phase" >>"$STUB_ADMISSION_CALLS"
   suffix="${tag#candidate-}"
   image="${IMAGE_ROOT}/web@$(release_component_digest web)"
