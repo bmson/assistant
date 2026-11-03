@@ -1978,6 +1978,21 @@ struct WorkspaceView: View {
                     .foregroundStyle(AssistantTheme.errorInk(for: colorScheme))
             }
             if document.status != "ready" {
+                Button {
+                    Task { await refresh() }
+                } label: {
+                    if isLoading {
+                        ProgressView("Refreshing document status")
+                    } else {
+                        Label("Refresh document status", systemImage: "arrow.clockwise")
+                    }
+                }
+                .buttonStyle(AssistantActionButtonStyle(kind: .secondary, minimumHeight: 48))
+                .disabled(isLoading || workspaceActionInFlight != nil)
+                .accessibilityHint("Checks the saved document status again. It does not upload the file again.")
+#if DEBUG
+                .overlay { documentLayoutProbe("action:document.refresh-status:\(document.id)") }
+#endif
                 AssistantConfirmationButton("Delete", hint: "Removes the file and its searchable passages.", minimumHeight: 48) {
                     workspaceActionInFlight = document.id
                     _ = await model.deleteDocument(document)

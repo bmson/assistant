@@ -125,6 +125,8 @@ struct SituationPacksView: View {
                     if let creationError {
                         Text(creationError).font(.footnote).foregroundStyle(.red)
                     }
+                    Text("Closing keeps this title draft while you stay on Situation packs. Clear the title first if you don’t want to reuse it.")
+                        .font(.footnote).foregroundStyle(.secondary)
                     Button(busy ? "Creating…" : "Create pack") { Task { await create() } }
                         .disabled(
                             busy || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -132,7 +134,7 @@ struct SituationPacksView: View {
                 .navigationTitle("New pack").navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button("Cancel") { creating = false }.disabled(busy)
+                        Button("Close") { creating = false }.disabled(busy)
                     }
                 }
                 .interactiveDismissDisabled(busy)

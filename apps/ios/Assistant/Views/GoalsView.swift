@@ -22,7 +22,7 @@ struct GoalsView: View {
                     AssistantEmptyState(
                         "No goals yet",
                         systemImage: "scope",
-                        description: "Give the assistant an outcome in chat and it can keep moving it forward on a schedule."
+                        description: "Tap Add goal to create one here, or give the assistant an outcome in chat and it can keep moving it forward on a schedule."
                     )
                 } else {
                     digest
