@@ -660,7 +660,8 @@ export async function stageFinalResponse(
         .filter(
           (line) =>
             !(
-              line.includes(requestedSkill) && /\b(?:used|applied|followed|retrieved)\b/i.test(line)
+              line.toLowerCase().includes(requestedSkill.toLowerCase()) &&
+              /\b(?:used|applied|followed|retrieved)\b/i.test(line)
             ),
         )
         .join('\n')

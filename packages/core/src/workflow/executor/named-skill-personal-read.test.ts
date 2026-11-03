@@ -881,6 +881,40 @@ describe('named saved skill use during a personal read', () => {
     expect(pending.text).not.toContain('I followed Calendar review');
   });
 
+  it.each(['calendar review', 'CALENDAR REVIEW', 'cAlEnDaR ReViEw'] as const)(
+    'removes unverified use claims when model capitalization is %s',
+    async (modelSkillName) => {
+      const f = await runPersonalRead(
+        'What is on my calendar today? Apply my saved skill named "Calendar review".',
+      );
+      f.state.usedSkillIds = [];
+      f.state.skillRetrievalReceipts = [];
+      const pending = {
+        text: `I applied ${modelSkillName}. Your calendar has a 9:00 design review.\nNext step: Review the design review materials.`,
+        progress: 'Calendar checked.',
+        terminalStatus: 'done' as const,
+        outcome: 'done' as const,
+      };
+
+      const result = await stageFinalResponse(
+        f.deps as unknown as import('./types.js').ExecutorDeps,
+        { ...f.task, type: 'scheduled_task', conversationId: null } as never,
+        f.state,
+        f.window as never,
+        pending,
+      );
+
+      expect(result.outcome).toBe('needs_attention');
+      expect(f.dispatch).toHaveBeenCalledOnce();
+      expect(pending.text).toContain(
+        'I could not verify retrieval of the saved skill “Calendar review”; the answer does not establish that it was used.',
+      );
+      expect(pending.text).not.toContain(`I applied ${modelSkillName}`);
+      expect(pending.text).toContain('Your calendar has a 9:00 design review.');
+      expect(pending.text).toContain('Next step: Review the design review materials.');
+    },
+  );
+
   it.each(['unused', 'missing', 'lookup throws', 'receipt missing', 'receipt changed'] as const)(
     'does not turn an unsupported model use claim into a successful receipt when skill is %s',
     async (condition) => {
