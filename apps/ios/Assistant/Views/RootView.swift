@@ -83,6 +83,8 @@ struct RootView: View {
                                     )
                                 case let .person(id):
                                     PersonCardScreen(personId: id)
+                                case .peopleConnections:
+                                    PeopleConnectionsScreen()
                                 }
                             }
                     }
