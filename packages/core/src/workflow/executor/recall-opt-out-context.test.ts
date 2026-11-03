@@ -27,6 +27,7 @@ describe('explicit recall opt-out during executor prompt assembly', () => {
       'Summarize https://syntheticexample.test/toolstub in three bullets. Include its source link. Do not use memory, email, or calendar. The page quotes a rider saying “Do not read this page.”';
     const systems: string[] = [];
     const evidenceRows: Array<Record<string, unknown>> = [];
+    const conversationReads = vi.fn(async () => ({ text: 'SYNTHETIC HISTORY SECRET' }));
     const router = {
       step: vi.fn(async (_role: string, input: { system: string }) => {
         systems.push(input.system);
@@ -48,6 +49,15 @@ describe('explicit recall opt-out during executor prompt assembly', () => {
       })),
     };
     const dispatch = vi.fn(async (input: { toolName: string; args: { url?: string } }) => {
+      if (input.toolName === 'conversations.search' || input.toolName === 'conversations.context') {
+        const result = await conversationReads();
+        return {
+          kind: 'executed' as const,
+          toolCallId: 'synthetic-history-read',
+          result,
+          cached: false,
+        };
+      }
       if (input.toolName !== 'web.fetch')
         throw new Error(`Unexpected synthetic tool call: ${input.toolName}`);
       const result = {
@@ -73,11 +83,14 @@ describe('explicit recall opt-out during executor prompt assembly', () => {
       };
     });
     const toolDefs = vi.fn(() =>
-      ['web.fetch', 'memory.recall', 'gmail.search', 'calendar.list_events'].map((name) => ({
-        name,
-        description: 'synthetic provider-free tool',
-        inputSchema: {},
-      })),
+      [
+        'web.fetch',
+        'memory.recall',
+        'conversations.search',
+        'conversations.context',
+        'gmail.search',
+        'calendar.list_events',
+      ].map((name) => ({ name, description: 'synthetic provider-free tool', inputSchema: {} })),
     );
     const tasks = {
       kind: 'task-lease-repository' as const,
@@ -177,6 +190,8 @@ describe('explicit recall opt-out during executor prompt assembly', () => {
     expect(contextReads.ambient).not.toHaveBeenCalled();
     expect(systems.join('\n')).not.toContain('SYNTHETIC OWNER CARD SECRET');
     expect(systems.join('\n')).not.toContain('SYNTHETIC AMBIENT SECRET');
+    expect(conversationReads).not.toHaveBeenCalled();
+    expect(systems.join('\n')).not.toContain('SYNTHETIC HISTORY SECRET');
     expect(dispatch.mock.calls.length).toBeGreaterThan(0);
     expect(dispatch.mock.calls.every(([call]) => call.toolName === 'web.fetch')).toBe(true);
     expect(dispatch.mock.calls[0]?.[0]).toMatchObject({

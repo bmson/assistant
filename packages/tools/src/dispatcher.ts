@@ -84,6 +84,17 @@ const MISSION_ROOT_TOOLS = new Set([
 
 const OWNER_READ_PROHIBITION_SOURCES: Readonly<Record<string, readonly string[]>> = {
   memory: ['memory', 'memories', 'saved memory', 'saved memories'],
+  conversations: [
+    'memory',
+    'memories',
+    'history',
+    'past chats',
+    'old messages',
+    'older messages',
+    'previous conversations',
+    'old conversations',
+    'anything up',
+  ],
   gmail: [
     'gmail',
     'email',

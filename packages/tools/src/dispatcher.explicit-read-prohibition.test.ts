@@ -158,6 +158,8 @@ function fixture(docsReplayKey = false, preparedDocumentId?: string) {
   const repositories = makeRepositories();
   const read = vi.fn(async () => ({ messages: [] }));
   const memoryRead = vi.fn(async () => ({ memories: [] }));
+  const conversationSearch = vi.fn(async () => ({ matches: [], mode: 'text' }));
+  const conversationContext = vi.fn(async () => ({ matches: [], observationGeneration: null }));
   const webFetch = vi.fn(async (args: unknown) => {
     const { url } = args as { url: string };
     return {
@@ -204,6 +206,41 @@ function fixture(docsReplayKey = false, preparedDocumentId?: string) {
         execute: webFetch,
       },
       { networkEgress: true },
+    )
+    .register(
+      {
+        name: 'conversations.search',
+        description: 'synthetic private history search',
+        inputSchema: z.object({
+          query: z.string(),
+          limit: z.number().optional(),
+          mode: z.enum(['semantic', 'text']).optional(),
+        }),
+        risk: 'autonomous',
+        acceptsUntrustedInput: true,
+        execute: conversationSearch,
+      },
+      { confidentialRead: true, returnsUntrustedContent: true },
+    )
+    .register(
+      {
+        name: 'conversations.context',
+        description: 'synthetic bounded private history context',
+        inputSchema: z.object({
+          anchors: z.array(
+            z.object({
+              messageId: z.string().uuid(),
+              conversationId: z.string().uuid(),
+              sourceRevision: z.string(),
+              speakerRevision: z.string(),
+            }),
+          ),
+        }),
+        risk: 'autonomous',
+        acceptsUntrustedInput: true,
+        execute: conversationContext,
+      },
+      { confidentialRead: true, returnsUntrustedContent: true },
     )
     .register(
       {
@@ -375,6 +412,8 @@ function fixture(docsReplayKey = false, preparedDocumentId?: string) {
     dispatcher,
     read,
     memoryRead,
+    conversationSearch,
+    conversationContext,
     webFetch,
     send,
     calendarRead,
@@ -1049,6 +1088,32 @@ describe('P03 owner intent at ToolDispatcher boundary (synthetic repositories on
     expect(calendarRead).not.toHaveBeenCalled();
   });
 
+  it('blocks owner-opted-out conversation search and context before execution', async () => {
+    const { dispatch, conversationSearch, conversationContext } = fixture();
+    const text = 'Do not use memory, email, or calendar for this answer.';
+    const anchors = [
+      {
+        messageId: '00000000-0000-4000-8000-000000000001',
+        conversationId: '00000000-0000-4000-8000-000000000002',
+        sourceRevision: 'a'.repeat(64),
+        speakerRevision: 'b'.repeat(64),
+      },
+    ];
+
+    expect(
+      await dispatch(text, 'conversations.search', { query: 'transit', limit: 5, mode: 'text' }),
+    ).toMatchObject({
+      kind: 'rejected',
+      reason: 'owner explicitly prohibited reading data from conversations',
+    });
+    expect(await dispatch(text, 'conversations.context', { anchors })).toMatchObject({
+      kind: 'rejected',
+      reason: 'owner explicitly prohibited reading data from conversations',
+    });
+    expect(conversationSearch).not.toHaveBeenCalled();
+    expect(conversationContext).not.toHaveBeenCalled();
+  });
+
   it('keeps a quoted no-memory sentence from overriding an explicit owner memory read', async () => {
     const { dispatch, memoryRead } = fixture();
     expect(
@@ -1058,6 +1123,18 @@ describe('P03 owner intent at ToolDispatcher boundary (synthetic repositories on
       ),
     ).toMatchObject({ kind: 'executed' });
     expect(memoryRead).toHaveBeenCalledOnce();
+  });
+
+  it('keeps an owner-positive history read available despite a quoted no-memory sentence', async () => {
+    const { dispatch, conversationSearch } = fixture();
+    expect(
+      await dispatch(
+        'Search my previous conversations for the transit plan. The quoted note says “Do not use memory.”',
+        'conversations.search',
+        { query: 'transit plan', limit: 5, mode: 'text' },
+      ),
+    ).toMatchObject({ kind: 'executed' });
+    expect(conversationSearch).toHaveBeenCalledOnce();
   });
 
   it('allows the explicitly requested public URL while keeping private reads blocked', async () => {
