@@ -244,7 +244,7 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
     expect(html).toContain('daughter');
     // Saved facts, the timeline, occasions, and graph relations.
     expect(html).toContain('Anna is close friends with Bob');
-    expect(html).toContain('Review / edit saved note');
+    expect(html).toContain('Open saved note');
     expect(html).toContain(
       `href="/profile/knowledge/notes/${factId}?returnTo=${encodeURIComponent(`/people/${contactId}`)}"`,
     );
