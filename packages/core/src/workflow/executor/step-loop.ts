@@ -3278,8 +3278,8 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       return stageFinalResponse(deps, lease, state, rc.window, {
         text,
         progress: text.slice(0, 200),
-        terminalStatus: 'done',
-        outcome: 'done',
+        terminalStatus: 'needs_attention',
+        outcome: 'needs_attention',
       });
     }
     if (boundedForcedReadTool && !toolDefs.some((tool) => tool.name === boundedForcedReadTool)) {
