@@ -55,6 +55,7 @@ import {
   type Basic5SaveObservationDiagnostic,
   observeBasic5Save,
 } from './basic5-browser-save-observation.js';
+import { buildBasic5CiEvidence } from './basic5-ci-acceptance.js';
 import {
   assertBasic5CiProcessRegistryComplete,
   BASIC5_CI_CHROME_EXECUTABLE,
@@ -1577,59 +1578,59 @@ browserTest(
     const result = testError || cleanupErrors.length > 0 ? 'failed' : 'passed';
     emitCheckpoint();
     process.stdout.write(
-      `${EVIDENCE_PREFIX}${JSON.stringify({
-        schemaVersion: 1,
-        label: 'synthetic Auth.js cookie; provider-unqualified local embedding transport',
-        result,
-        fixture: fixtureManifest,
-        standalone: {
-          sourceCommit: process.env.ASSISTANT_BASIC5_STANDALONE_SOURCE_SHA ?? null,
-          buildId: process.env.ASSISTANT_BASIC5_STANDALONE_BUILD_ID ?? null,
-          serverSha256: process.env.ASSISTANT_BASIC5_STANDALONE_SERVER_SHA256 ?? null,
-        },
-        executionEnvironment,
-        receipts: receipts.map((receipt) => ({
-          // Only qualified clean-baseline -> current Saved results enter receipts.
-          uiSavedAfterCleanBaseline: true,
-          authority: receipt.authority,
-          command: receipt.command,
-          operationId: receipt.operationId,
-          requestHash: receipt.requestHash,
-          statusVersion: receipt.statusVersion,
-          outcome: receipt.outcome,
-          ids: receipt.ids ?? null,
-        })),
-        durableReadbacks,
-        counts: {
-          readinessAttempts,
-          pageNavigations: authenticatedPageNavigations,
-          authenticatedPageNavigations,
-          browserHttpRequests,
-          browserControlHttpRequests,
-          browserPresentationHttpRequests,
-          browserPageHttpRequests: browserHttpRequests - anonymousPageProbeRequests,
-          anonymousPageProbeRequests,
-          pageApiMutationRequests,
-          applyPosts: receipts.length,
-          ownerEditorPostCount,
-          ownerApplyRequests,
-          recoveryGets: ownerEditorGetCount,
-          recoveryRequests,
-          embeddingRequests,
-          fixtureModelCalls: fixtureModelCallCount,
-          foreignModelCalls: foreignModelCallCount,
-          providerRequests: {
-            localEmbeddingHttpRequests: embeddingRequests,
-            fixtureModelCallRows: fixtureModelCallCount,
-            nonFixtureModelCallRows: foreignModelCallCount,
+      `${EVIDENCE_PREFIX}${JSON.stringify(
+        buildBasic5CiEvidence({
+          result,
+          fixture: fixtureManifest,
+          standalone: {
+            sourceCommit: process.env.ASSISTANT_BASIC5_STANDALONE_SOURCE_SHA ?? null,
+            buildId: process.env.ASSISTANT_BASIC5_STANDALONE_BUILD_ID ?? null,
+            serverSha256: process.env.ASSISTANT_BASIC5_STANDALONE_SERVER_SHA256 ?? null,
           },
-        },
-        cleanup,
-        externalCleanupSupervisorRequired: true,
-        standardTestWrapperCleanupIsUnconditional: true,
-        testFailure: testError ? 'test_failed' : null,
-        cleanupFailure: cleanupErrors.length > 0 ? 'cleanup_incomplete' : null,
-      })}\n`,
+          executionEnvironment,
+          receipts: receipts.map((receipt) => ({
+            // Only qualified clean-baseline -> current Saved results enter receipts.
+            uiSavedAfterCleanBaseline: true,
+            authority: receipt.authority,
+            command: receipt.command,
+            operationId: receipt.operationId,
+            requestHash: receipt.requestHash,
+            statusVersion: receipt.statusVersion,
+            outcome: receipt.outcome,
+            ids: receipt.ids ?? null,
+          })),
+          durableReadbacks,
+          counts: {
+            readinessAttempts,
+            pageNavigations: authenticatedPageNavigations,
+            authenticatedPageNavigations,
+            browserHttpRequests,
+            browserControlHttpRequests,
+            browserPresentationHttpRequests,
+            browserPageHttpRequests: browserHttpRequests - anonymousPageProbeRequests,
+            anonymousPageProbeRequests,
+            pageApiMutationRequests,
+            applyPosts: receipts.length,
+            ownerEditorPostCount,
+            ownerApplyRequests,
+            recoveryGets: ownerEditorGetCount,
+            recoveryRequests,
+            embeddingRequests,
+            fixtureModelCalls: fixtureModelCallCount,
+            foreignModelCalls: foreignModelCallCount,
+            providerRequests: {
+              localEmbeddingHttpRequests: embeddingRequests,
+              fixtureModelCallRows: fixtureModelCallCount,
+              nonFixtureModelCallRows: foreignModelCallCount,
+            },
+          },
+          cleanup,
+          externalCleanupSupervisorRequired: true,
+          standardTestWrapperCleanupIsUnconditional: true,
+          testFailure: testError ? 'test_failed' : null,
+          cleanupFailure: cleanupErrors.length > 0 ? 'cleanup_incomplete' : null,
+        }),
+      )}\n`,
     );
     if (testError && cleanupErrors.length > 0)
       throw new AggregateError(

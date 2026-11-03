@@ -8,6 +8,7 @@ import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
+import type { OwnerEditorSavedIds } from '@assistant/persistence';
 import {
   type Basic5CiVitestDiagnostic,
   basic5CiVitestCaptureLimit,
@@ -32,6 +33,8 @@ const CLAIM_SCOPE = {
 } as const;
 const RECEIPT_PROVENANCE_LIMITATION =
   'The browser acceptance does not independently verify a second wire-body copy.';
+export const BASIC5_CI_EVIDENCE_LABEL =
+  'synthetic Auth.js cookie; provider-unqualified local embedding transport' as const;
 const ACTIONS = [
   'update_person_identity',
   'add_family_relationship',
@@ -54,8 +57,10 @@ export type Basic5CiTarget = {
 };
 
 export type Basic5CiEvidence = {
+  schemaVersion: 1;
+  label: typeof BASIC5_CI_EVIDENCE_LABEL;
   result: 'passed' | 'failed';
-  standalone: { sourceCommit: string; buildId: string; serverSha256: string };
+  standalone: { sourceCommit: string | null; buildId: string | null; serverSha256: string | null };
   executionEnvironment: {
     platform: string;
     nodeVersion: string;
@@ -78,7 +83,7 @@ export type Basic5CiEvidence = {
     statusVersion: number;
     outcome: string;
     uiSavedAfterCleanBaseline: true;
-    ids?: Record<string, string> | null;
+    ids: OwnerEditorSavedIds | null;
   }>;
   durableReadbacks: Record<string, boolean>;
   counts: Record<string, unknown>;
@@ -88,6 +93,13 @@ export type Basic5CiEvidence = {
   testFailure: string | null;
   cleanupFailure: string | null;
 };
+
+export type Basic5CiEvidencePayload = Omit<Basic5CiEvidence, 'schemaVersion' | 'label'>;
+
+/** Add the controller's exact inner-evidence identity to a typed producer payload. */
+export function buildBasic5CiEvidence(payload: Basic5CiEvidencePayload): Basic5CiEvidence {
+  return { ...payload, schemaVersion: 1, label: BASIC5_CI_EVIDENCE_LABEL };
+}
 
 export type Basic5CiQuiescence = {
   known: boolean;
@@ -1659,6 +1671,8 @@ function validateCiEvidence(
   requireExactKeys(
     evidence,
     [
+      'schemaVersion',
+      'label',
       'result',
       'standalone',
       'executionEnvironment',
@@ -1674,6 +1688,8 @@ function validateCiEvidence(
     ],
     'acceptance_evidence',
   );
+  if (evidence.schemaVersion !== 1 || evidence.label !== BASIC5_CI_EVIDENCE_LABEL)
+    throw new Basic5CiHold('acceptance_evidence_schema_or_label_mismatch');
   requireExactKeys(
     evidence.standalone,
     ['sourceCommit', 'buildId', 'serverSha256'],
