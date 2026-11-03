@@ -175,6 +175,8 @@ function safeSaveObservation(value: unknown): Basic5SaveObservationDiagnostic | 
 export type Basic5FixtureCounters = {
   observedAt: 'save_settled' | 'checkpoint';
   browserHttpRequests: number | null;
+  browserControlHttpRequests: number | null;
+  browserPresentationHttpRequests: number | null;
   browserBudgetExceeded: boolean;
   localEmbeddingReceived: number | null;
   localEmbeddingFinished: number | null;
@@ -193,9 +195,41 @@ export type Basic5SaveTransport = {
     | null;
 };
 function safeFixtureCounters(value: unknown): Basic5FixtureCounters | null {
+  const legacyKeys = [
+    'observedAt',
+    'browserHttpRequests',
+    'browserBudgetExceeded',
+    'localEmbeddingReceived',
+    'localEmbeddingFinished',
+  ];
+  const currentKeys = [
+    'observedAt',
+    'browserHttpRequests',
+    'browserControlHttpRequests',
+    'browserPresentationHttpRequests',
+    'browserBudgetExceeded',
+    'localEmbeddingReceived',
+    'localEmbeddingFinished',
+  ];
+  const legacy =
+    record(value) &&
+    Object.keys(value).length === legacyKeys.length &&
+    legacyKeys.every((key) => Object.hasOwn(value, key));
+  const current =
+    record(value) &&
+    Object.keys(value).length === currentKeys.length &&
+    currentKeys.every((key) => Object.hasOwn(value, key));
+  const totalRequests = record(value) ? value.browserHttpRequests : undefined;
+  const controlRequests = record(value) ? value.browserControlHttpRequests : undefined;
+  const presentationRequests = record(value) ? value.browserPresentationHttpRequests : undefined;
+  const browserCountsConsistent =
+    typeof totalRequests !== 'number' ||
+    typeof controlRequests !== 'number' ||
+    typeof presentationRequests !== 'number' ||
+    totalRequests === controlRequests + presentationRequests;
   if (
     !record(value) ||
-    Object.keys(value).length !== 5 ||
+    (!legacy && !current) ||
     !['save_settled', 'checkpoint'].includes(
       typeof value.observedAt === 'string' ? value.observedAt : '',
     ) ||
@@ -203,6 +237,11 @@ function safeFixtureCounters(value: unknown): Basic5FixtureCounters | null {
     !['browserHttpRequests', 'localEmbeddingReceived', 'localEmbeddingFinished'].every(
       (key) => Object.hasOwn(value, key) && (value[key] === null || count(value[key])),
     ) ||
+    (current &&
+      !['browserControlHttpRequests', 'browserPresentationHttpRequests'].every(
+        (key) => value[key] === null || count(value[key]),
+      )) ||
+    (current && !browserCountsConsistent) ||
     (typeof value.localEmbeddingReceived === 'number' &&
       typeof value.localEmbeddingFinished === 'number' &&
       value.localEmbeddingFinished > value.localEmbeddingReceived)
@@ -211,6 +250,8 @@ function safeFixtureCounters(value: unknown): Basic5FixtureCounters | null {
   return {
     observedAt: value.observedAt,
     browserHttpRequests: value.browserHttpRequests,
+    browserControlHttpRequests: current ? value.browserControlHttpRequests : null,
+    browserPresentationHttpRequests: current ? value.browserPresentationHttpRequests : null,
     browserBudgetExceeded: value.browserBudgetExceeded,
     localEmbeddingReceived: value.localEmbeddingReceived,
     localEmbeddingFinished: value.localEmbeddingFinished,

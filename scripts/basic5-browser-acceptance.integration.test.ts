@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { access, lstat, mkdtemp, opendir, readFile, realpath, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -30,14 +30,15 @@ import {
   assertBasic5AnonymousPageResponse,
   assertBasic5ReceiptSequence,
   BASIC5_AUTH_COOKIE_NAME,
-  BASIC5_BROWSER_DYNAMIC_REQUEST_LIMIT,
-  BASIC5_BROWSER_STATIC_ASSET_REQUEST_LIMIT,
+  BASIC5_BROWSER_CONTROL_REQUEST_LIMIT,
+  BASIC5_BROWSER_PRESENTATION_REQUEST_LIMIT,
   BASIC5_BROWSER_TOTAL_REQUEST_LIMIT,
   BASIC5_EMBEDDING_DIMENSIONS,
   BASIC5_FIXTURE_CONNECTION_ID,
   BASIC5_FIXTURE_MODEL_ID,
   BASIC5_READINESS_ATTEMPT_LIMIT,
   BASIC5_SAVED_STATUS_PATTERN,
+  type Basic5BrowserRequestBudgetSnapshot,
   type Basic5ObservedPost,
   basic5BrowserLaunchOptions,
   basic5EmbeddingResponse,
@@ -48,6 +49,7 @@ import {
   createBasic5BrowserRequestBudget,
   nextBasic5ReadinessAttempt,
   qualifyBasic5StoredUserFlowReceipt,
+  routeBasic5BrowserRequest,
 } from './basic5-browser-acceptance-support.js';
 import {
   type Basic5SaveObservationDiagnostic,
@@ -299,9 +301,7 @@ async function waitForWeb(
   );
 }
 
-async function verifyStandaloneArtifact(
-  repoRoot: string,
-): Promise<{ entry: string; cwd: string; staticAssetPaths: ReadonlySet<string> }> {
+async function verifyStandaloneArtifact(repoRoot: string): Promise<{ entry: string; cwd: string }> {
   const expectedSource = process.env.ASSISTANT_BASIC5_STANDALONE_SOURCE_SHA;
   const expectedBuildId = process.env.ASSISTANT_BASIC5_STANDALONE_BUILD_ID;
   const expectedServerHash = process.env.ASSISTANT_BASIC5_STANDALONE_SERVER_SHA256;
@@ -359,46 +359,7 @@ async function verifyStandaloneArtifact(
     throw new Error('Standalone build ID does not match the approved artifact pin.');
   if (createHash('sha256').update(serverBytes).digest('hex') !== expectedServerHash)
     throw new Error('Standalone server hash does not match the approved artifact pin.');
-  // This locally observed path set classifies synthetic HTTP budget only; it
-  // is not an independent comparison against the preflight static digest.
-  const staticRoot = path.join(cwd, '.next/static');
-  const staticInfo = await lstat(staticRoot);
-  const staticReal = await realpath(staticRoot);
-  const serverReal = await realpath(cwd);
-  if (
-    !staticInfo.isDirectory() ||
-    staticInfo.isSymbolicLink() ||
-    !staticReal.startsWith(`${serverReal}${path.sep}`)
-  )
-    throw new Error('Static asset root must be a confined regular directory.');
-  const staticAssetPaths = new Set<string>();
-  let staticEntries = 0;
-  const inventoryStaticPaths = async (directory: string, segments: string[]): Promise<void> => {
-    for await (const item of await opendir(directory)) {
-      staticEntries += 1;
-      const parts = [...segments, item.name];
-      if (
-        staticEntries > 50_000 ||
-        Buffer.byteLength(parts.join('/')) > 4096 ||
-        parts.some(
-          (part) =>
-            !part ||
-            part === '.' ||
-            part === '..' ||
-            part.includes('\\') ||
-            [...part].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127),
-        )
-      )
-        throw new Error('Static asset inventory exceeded its safe path bounds.');
-      if (item.isDirectory()) await inventoryStaticPaths(path.join(directory, item.name), parts);
-      else if (item.isFile())
-        staticAssetPaths.add(`/_next/static/${parts.map(encodeURIComponent).join('/')}`);
-      else throw new Error('Static asset inventory must not contain symlinks or special files.');
-    }
-  };
-  await inventoryStaticPaths(staticRoot, []);
-  if (staticAssetPaths.size === 0) throw new Error('Static asset inventory must not be empty.');
-  return { entry, cwd, staticAssetPaths };
+  return { entry, cwd };
 }
 
 async function saveWithReceipt(
@@ -556,12 +517,12 @@ browserTest(
     let checkpointDurableReadbackCount = 0;
     let checkpointFreshPageReadbackCount = 0;
     let browserHttpRequests = 0;
-    let browserDynamicHttpRequests = 0;
-    let browserStaticAssetRequests = 0;
+    let browserControlHttpRequests = 0;
+    let browserPresentationHttpRequests = 0;
     let browserBudgetExceeded = false;
     let embeddingRequests = 0;
     let embeddingResponsesFinished = 0;
-    let fixtureCountersAtSave: Basic5FixtureCounters | undefined;
+    let fixtureCountersAtSettlement: Basic5FixtureCounters | undefined;
     let saveTransport: Basic5SaveTransport | undefined;
     let stopRequestFailureObservation: (() => void) | undefined;
     const snapshotFixtureCounters = (
@@ -569,6 +530,8 @@ browserTest(
     ): Basic5FixtureCounters => ({
       observedAt,
       browserHttpRequests: boundedBasic5ObservedCount(browserHttpRequests),
+      browserControlHttpRequests: boundedBasic5ObservedCount(browserControlHttpRequests),
+      browserPresentationHttpRequests: boundedBasic5ObservedCount(browserPresentationHttpRequests),
       browserBudgetExceeded,
       localEmbeddingReceived: boundedBasic5ObservedCount(embeddingRequests),
       localEmbeddingFinished: boundedBasic5ObservedCount(embeddingResponsesFinished),
@@ -596,7 +559,7 @@ browserTest(
           durableReadbackCount: checkpointDurableReadbackCount,
           freshPageReadbackCount: checkpointFreshPageReadbackCount,
           ...anonymousPageObservation,
-          fixtureCounters: fixtureCountersAtSave ?? snapshotFixtureCounters('checkpoint'),
+          fixtureCounters: fixtureCountersAtSettlement ?? snapshotFixtureCounters('checkpoint'),
           ...(saveTransport ? { saveTransport: { ...saveTransport } } : {}),
           ...(saveObservation
             ? {
@@ -1019,19 +982,14 @@ browserTest(
       if (!/^\d+\.\d+\.\d+\.\d+$/.test(executionEnvironment.browserVersion))
         throw new Error('Browser version metadata is malformed.');
       const context = await browser.newContext();
-      const browserRequestBudget = createBasic5BrowserRequestBudget(
-        baseUrl,
-        standalone.staticAssetPaths,
-      );
-      const observeBrowserRequest = (url: string, method: string): boolean => {
-        const allowed = browserRequestBudget.observe(url, method);
+      const browserRequestBudget = createBasic5BrowserRequestBudget(baseUrl);
+      const retainBrowserRequestCounts = (snapshot: Basic5BrowserRequestBudgetSnapshot) => {
         ({
           browserHttpRequests,
-          browserDynamicHttpRequests,
-          browserStaticAssetRequests,
+          browserControlHttpRequests,
+          browserPresentationHttpRequests,
           browserBudgetExceeded,
-        } = browserRequestBudget.snapshot());
-        return allowed;
+        } = snapshot);
       };
       const isIntendedPost = (request: BrowserRequest): boolean => {
         if (!activeSaveOperation || !activeSaveRequest || request.method() !== 'POST') return false;
@@ -1045,13 +1003,21 @@ browserTest(
       };
       await context.route('**/*', (route) => {
         const intended = isIntendedPost(route.request());
-        const allowed = observeBrowserRequest(route.request().url(), route.request().method());
-        if (intended && saveTransport)
-          saveTransport.routeBlocked = saveTransport.routeBlocked === true || !allowed;
-        return allowed ? route.continue() : route.abort('blockedbyclient');
+        return routeBasic5BrowserRequest(browserRequestBudget, route, (allowed, snapshot) => {
+          retainBrowserRequestCounts(snapshot);
+          if (intended && saveTransport)
+            saveTransport.routeBlocked = saveTransport.routeBlocked === true || !allowed;
+        });
       });
-      // The one anonymous probe consumes the same dynamic and total allowance.
-      if (!observeBrowserRequest(`${baseUrl}${ACCEPTANCE_PAGE}/${personId}`, 'GET'))
+      // APIRequestContext bypasses browser routing: count this one existing
+      // anonymous probe explicitly as control before issuing it, exactly once.
+      const anonymousAllowed = browserRequestBudget.observe(
+        `${baseUrl}${ACCEPTANCE_PAGE}/${personId}`,
+        'GET',
+        true,
+      );
+      retainBrowserRequestCounts(browserRequestBudget.snapshot());
+      if (!anonymousAllowed)
         throw new Error('Anonymous probe exceeded the browser request budget.');
       anonymousPageProbeRequests += 1;
       const anonymous = await context.request.get(`${baseUrl}${ACCEPTANCE_PAGE}/${personId}`, {
@@ -1169,7 +1135,7 @@ browserTest(
         button: Locator,
       ) => {
         saveObservation = undefined;
-        fixtureCountersAtSave = undefined;
+        fixtureCountersAtSettlement = undefined;
         saveTransport = { operation, routeBlocked: null, requestFailedClass: null };
         return saveWithReceipt(
           page,
@@ -1189,7 +1155,7 @@ browserTest(
             totalMatchingPostCount: () => ownerEditorPostCount,
             onDiagnostic: (diagnostic) => {
               saveObservation = diagnostic;
-              fixtureCountersAtSave = snapshotFixtureCounters('save_settled');
+              fixtureCountersAtSettlement = snapshotFixtureCounters('save_settled');
             },
           },
           async (request, requestHash) => {
@@ -1521,11 +1487,13 @@ browserTest(
       foreignModelCallCount = foreignCalls.length;
       expect(browserBudgetExceeded).toBe(false);
       expect(browserHttpRequests).toBeLessThanOrEqual(BASIC5_BROWSER_TOTAL_REQUEST_LIMIT);
-      expect(browserDynamicHttpRequests).toBeLessThanOrEqual(BASIC5_BROWSER_DYNAMIC_REQUEST_LIMIT);
-      expect(browserStaticAssetRequests).toBeLessThanOrEqual(
-        BASIC5_BROWSER_STATIC_ASSET_REQUEST_LIMIT,
+      expect(browserControlHttpRequests).toBeLessThanOrEqual(BASIC5_BROWSER_CONTROL_REQUEST_LIMIT);
+      expect(browserPresentationHttpRequests).toBeLessThanOrEqual(
+        BASIC5_BROWSER_PRESENTATION_REQUEST_LIMIT,
       );
-      expect(browserHttpRequests).toBe(browserDynamicHttpRequests + browserStaticAssetRequests);
+      expect(browserHttpRequests).toBe(
+        browserControlHttpRequests + browserPresentationHttpRequests,
+      );
       expect(readinessAttempts).not.toBeNull();
       expect(readinessAttempts).toBeLessThanOrEqual(BASIC5_READINESS_ATTEMPT_LIMIT);
       expect(authenticatedPageNavigations).toBe(6);
@@ -1534,6 +1502,9 @@ browserTest(
     } catch (error) {
       testError = error;
     }
+    // Capture the latest attempted requests after any save or fresh-page failure,
+    // before browser teardown can create unrelated aborts or late route events.
+    fixtureCountersAtSettlement = snapshotFixtureCounters('checkpoint');
     // Diagnostic listeners cannot replace the original test result or cleanup.
     try {
       stopRequestFailureObservation?.();
@@ -1631,8 +1602,8 @@ browserTest(
           pageNavigations: authenticatedPageNavigations,
           authenticatedPageNavigations,
           browserHttpRequests,
-          browserDynamicHttpRequests,
-          browserStaticAssetRequests,
+          browserControlHttpRequests,
+          browserPresentationHttpRequests,
           browserPageHttpRequests: browserHttpRequests - anonymousPageProbeRequests,
           anonymousPageProbeRequests,
           pageApiMutationRequests,

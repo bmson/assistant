@@ -177,8 +177,8 @@ function validEvidence(): Basic5CiEvidence {
       pageNavigations: 6,
       authenticatedPageNavigations: 6,
       browserHttpRequests: 24,
-      browserDynamicHttpRequests: 16,
-      browserStaticAssetRequests: 8,
+      browserControlHttpRequests: 16,
+      browserPresentationHttpRequests: 8,
       browserPageHttpRequests: 23,
       anonymousPageProbeRequests: 1,
       pageApiMutationRequests: 4,
@@ -2211,7 +2211,7 @@ describe('one-shot BASIC5 CI controller', () => {
 
     expect(result.errorCode).toBe('required_runtime_artifact_identity_incomplete');
     expect(result.targetStatus).toBe('not_allocated');
-    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-receipt-readback-v4');
+    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v5');
     expect(result.claimScope).toMatchObject({
       behavior: 'four BASIC5 saves: scoped UI success and same-operation durable receipts',
       ancestorWorkspaceDependencies: 'unqualified',
@@ -2340,8 +2340,8 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(result.cleanupComplete).toBe(true);
     expect(result.targetStatus).toBe('removed');
     expect(result.controllerScratchStatus).toBe('retained');
-    expect(result.schemaVersion).toBe(4);
-    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-receipt-readback-v4');
+    expect(result.schemaVersion).toBe(5);
+    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v5');
     expect(result.workflowContext).toMatchObject({
       event: 'push',
       ref: 'refs/heads/main',
@@ -2717,51 +2717,51 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(counterOps.events).toEqual(['preflight', 'prepare', 'case', 'quiesce', 'receipt']);
   });
 
-  it('accepts the explicit split-budget contract at its exact bounds', async () => {
+  it('accepts the control and presentation budgets at their exact bounds', async () => {
     const ops = new FakeOps();
     Object.assign(ops.caseResult.evidence.counts, {
       browserHttpRequests: 320,
       browserPageHttpRequests: 319,
-      browserDynamicHttpRequests: 64,
-      browserStaticAssetRequests: 256,
+      browserControlHttpRequests: 64,
+      browserPresentationHttpRequests: 256,
     });
     const result = await runBasic5CiAcceptance(ops);
     expect(result.result).toBe('passed');
-    expect(result.schemaVersion).toBe(4);
-    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-receipt-readback-v4');
+    expect(result.schemaVersion).toBe(5);
+    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v5');
     expect(result.counts).toMatchObject({
       browserHttpRequests: 320,
-      browserDynamicHttpRequests: 64,
-      browserStaticAssetRequests: 256,
+      browserControlHttpRequests: 64,
+      browserPresentationHttpRequests: 256,
     });
   });
 
   it.each([
     {
-      browserDynamicHttpRequests: 65,
-      browserStaticAssetRequests: 8,
+      browserControlHttpRequests: 65,
+      browserPresentationHttpRequests: 8,
       browserHttpRequests: 73,
       browserPageHttpRequests: 72,
     },
     {
-      browserDynamicHttpRequests: 16,
-      browserStaticAssetRequests: 257,
+      browserControlHttpRequests: 16,
+      browserPresentationHttpRequests: 257,
       browserHttpRequests: 273,
       browserPageHttpRequests: 272,
     },
     {
-      browserDynamicHttpRequests: 64,
-      browserStaticAssetRequests: 257,
+      browserControlHttpRequests: 64,
+      browserPresentationHttpRequests: 257,
       browserHttpRequests: 321,
       browserPageHttpRequests: 320,
     },
     { browserHttpRequests: 25, browserPageHttpRequests: 24 },
-    { browserDynamicHttpRequests: 0 },
-    { browserDynamicHttpRequests: -1 },
-    { browserStaticAssetRequests: -1 },
-    { browserStaticAssetRequests: 1.5 },
-    { browserStaticAssetRequests: '8' },
-  ])('retains the target for invalid split budget %j', async (counts) => {
+    { browserControlHttpRequests: 0 },
+    { browserControlHttpRequests: -1 },
+    { browserPresentationHttpRequests: -1 },
+    { browserPresentationHttpRequests: 1.5 },
+    { browserPresentationHttpRequests: '8' },
+  ])('retains the target for invalid control/presentation budget %j', async (counts) => {
     const ops = new FakeOps();
     Object.assign(ops.caseResult.evidence.counts, counts);
     const result = await runBasic5CiAcceptance(ops);
@@ -2769,10 +2769,21 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(ops.events).toEqual(['preflight', 'prepare', 'case', 'quiesce', 'receipt']);
   });
 
-  it('does not relabel old combined-budget evidence as split-budget PASS', async () => {
+  it('rejects v4 dynamic/static bucket names instead of accepting them as v5 aliases', async () => {
     const ops = new FakeOps();
-    delete ops.caseResult.evidence.counts.browserDynamicHttpRequests;
-    delete ops.caseResult.evidence.counts.browserStaticAssetRequests;
+    delete ops.caseResult.evidence.counts.browserControlHttpRequests;
+    delete ops.caseResult.evidence.counts.browserPresentationHttpRequests;
+    ops.caseResult.evidence.counts.browserDynamicHttpRequests = 16;
+    ops.caseResult.evidence.counts.browserStaticAssetRequests = 8;
+    const result = await runBasic5CiAcceptance(ops);
+    expect(result.result).toBe('hold');
+    expect(ops.events).toEqual(['preflight', 'prepare', 'case', 'quiesce', 'receipt']);
+  });
+
+  it('rejects v4 bucket aliases even when valid v5 fields are also present', async () => {
+    const ops = new FakeOps();
+    ops.caseResult.evidence.counts.browserDynamicHttpRequests = 16;
+    ops.caseResult.evidence.counts.browserStaticAssetRequests = 8;
     const result = await runBasic5CiAcceptance(ops);
     expect(result.result).toBe('hold');
     expect(ops.events).toEqual(['preflight', 'prepare', 'case', 'quiesce', 'receipt']);
