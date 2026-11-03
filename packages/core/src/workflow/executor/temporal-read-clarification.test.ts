@@ -218,19 +218,32 @@ async function runFlightContinuation(
           unavailable: ['Synthetic Work'],
         };
       } else if (toolName === 'calendar.list_events' && options.focusPlanFixture) {
-        const event = {
-          eventId: 'synthetic-meeting',
-          calendarId: 'synthetic-work',
-          calendar: 'Synthetic Work',
-          calendarTimeZone: 'America/Los_Angeles',
-          summary: 'Synthetic team meeting',
-          start: '2026-10-12T17:00:00.000Z',
-          end: '2026-10-12T18:00:00.000Z',
-          ownerResponse: 'accepted',
-          blocksTime: true,
-        };
+        const events = [
+          {
+            eventId: 'synthetic-meeting',
+            calendarId: 'synthetic-work',
+            calendar: 'Synthetic Work',
+            calendarTimeZone: 'America/Los_Angeles',
+            summary: 'Synthetic team meeting',
+            start: '2026-10-12T17:00:00.000Z',
+            end: '2026-10-12T18:00:00.000Z',
+            ownerResponse: 'accepted',
+            blocksTime: true,
+          },
+          ...(['2026-10-13', '2026-10-14'] as const).map((day) => ({
+            eventId: `synthetic-unavailable-workday-${day}`,
+            calendarId: 'synthetic-work',
+            calendar: 'Synthetic Work',
+            calendarTimeZone: 'America/Los_Angeles',
+            summary: 'Synthetic unavailable workday',
+            start: `${day}T16:00:00.000Z`,
+            end: `${day}T23:59:00.000Z`,
+            ownerResponse: 'accepted',
+            blocksTime: true,
+          })),
+        ];
         result = {
-          events: [event],
+          events,
           complete: true,
           calendarRosterComplete: true,
           calendarsSearchedIds: ['synthetic-work'],
@@ -746,7 +759,7 @@ describe('unsupported temporal requests through the actual executor step loop', 
     const availabilityArgs = availabilityRow?.args as Record<string, unknown> | undefined;
     const listedEvents = (eventListRow?.result as { events?: Array<Record<string, unknown>> })
       ?.events;
-    const meeting = listedEvents?.[0];
+    const meeting = listedEvents?.find((event) => event.eventId === 'synthetic-meeting');
     expect(availabilityArgs).toMatchObject({
       timeMin: '2026-10-12T07:00:00.000Z',
       timeMax: '2026-10-15T07:00:00.000Z',
@@ -795,7 +808,9 @@ describe('unsupported temporal requests through the actual executor step loop', 
     const toMinute = (hour: string, minute: string, period: string) =>
       ((Number(hour) % 12) + (period === 'PM' ? 12 : 0)) * 60 + Number(minute);
     expect(focusSlots).toHaveLength(2);
-    for (const slot of focusSlots) {
+    const meetingDaySlots = focusSlots.filter((slot) => slot[1] === dayLabel);
+    expect(meetingDaySlots.length).toBeGreaterThan(0);
+    for (const slot of meetingDaySlots) {
       const [, candidateDay, startHour, startMinute, startPeriod, endHour, endMinute, endPeriod] =
         slot;
       if (
