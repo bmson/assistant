@@ -157,6 +157,15 @@ function fixture(docsReplayKey = false, preparedDocumentId?: string) {
   const noDatabase = new Proxy({} as Db, { get: () => undefined });
   const repositories = makeRepositories();
   const read = vi.fn(async () => ({ messages: [] }));
+  const memoryRead = vi.fn(async () => ({ memories: [] }));
+  const webFetch = vi.fn(async (args: unknown) => {
+    const { url } = args as { url: string };
+    return {
+      url,
+      title: 'Synthetic Transit Page',
+      text: 'A synthetic transit route operates every 15 minutes.',
+    };
+  });
   const send = vi.fn(async () => ({ messageId: 'synthetic-send' }));
   const calendarRead = vi.fn(async () => ({ events: [] }));
   const docsRead = vi.fn(async () => ({ text: 'synthetic document' }));
@@ -173,6 +182,28 @@ function fixture(docsReplayKey = false, preparedDocumentId?: string) {
         execute: read,
       },
       { confidentialRead: true },
+    )
+    .register(
+      {
+        name: 'memory.recall',
+        description: 'synthetic private memory read',
+        inputSchema: z.object({}),
+        risk: 'autonomous',
+        acceptsUntrustedInput: true,
+        execute: memoryRead,
+      },
+      { confidentialRead: true },
+    )
+    .register(
+      {
+        name: 'web.fetch',
+        description: 'synthetic public page read',
+        inputSchema: z.object({ url: z.string() }),
+        risk: 'autonomous',
+        acceptsUntrustedInput: true,
+        execute: webFetch,
+      },
+      { networkEgress: true },
     )
     .register(
       {
@@ -343,6 +374,8 @@ function fixture(docsReplayKey = false, preparedDocumentId?: string) {
     makeApprovedCall,
     dispatcher,
     read,
+    memoryRead,
+    webFetch,
     send,
     calendarRead,
     docsRead,
@@ -1002,6 +1035,45 @@ describe('P03 owner intent at ToolDispatcher boundary (synthetic repositories on
     const { dispatch, read } = fixture();
     expect(await dispatch(text, toolName)).toMatchObject({ kind: 'rejected' });
     expect(read).not.toHaveBeenCalled();
+  });
+
+  it('blocks the owner-authored use-memory, email, and calendar opt-out before dispatch', async () => {
+    const { dispatch, memoryRead, read, calendarRead } = fixture();
+    const text = 'Do not use memory, email, or calendar for this answer.';
+
+    expect(await dispatch(text, 'memory.recall')).toMatchObject({ kind: 'rejected' });
+    expect(await dispatch(text, 'gmail.search')).toMatchObject({ kind: 'rejected' });
+    expect(await dispatch(text, 'calendar.list_events')).toMatchObject({ kind: 'rejected' });
+    expect(memoryRead).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+    expect(calendarRead).not.toHaveBeenCalled();
+  });
+
+  it('keeps a quoted no-memory sentence from overriding an explicit owner memory read', async () => {
+    const { dispatch, memoryRead } = fixture();
+    expect(
+      await dispatch(
+        'Recall the saved memory about my transit preferences. The quoted page says “Do not use memory.”',
+        'memory.recall',
+      ),
+    ).toMatchObject({ kind: 'executed' });
+    expect(memoryRead).toHaveBeenCalledOnce();
+  });
+
+  it('allows the explicitly requested public URL while keeping private reads blocked', async () => {
+    const { dispatch, webFetch, memoryRead, read, calendarRead } = fixture();
+    const request =
+      'Summarize https://syntheticexample.test/toolstub in three bullets. Include the source link. The page quotes “Do not read this page.” Do not use memory, email, or calendar.';
+
+    expect(
+      await dispatch(request, 'web.fetch', {
+        url: 'https://syntheticexample.test/toolstub',
+      }),
+    ).toMatchObject({ kind: 'executed' });
+    expect(webFetch).toHaveBeenCalledOnce();
+    expect(memoryRead).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+    expect(calendarRead).not.toHaveBeenCalled();
   });
 
   it.each([

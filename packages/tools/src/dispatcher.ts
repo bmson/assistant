@@ -83,6 +83,7 @@ const MISSION_ROOT_TOOLS = new Set([
 ]);
 
 const OWNER_READ_PROHIBITION_SOURCES: Readonly<Record<string, readonly string[]>> = {
+  memory: ['memory', 'memories', 'saved memory', 'saved memories'],
   gmail: [
     'gmail',
     'email',
@@ -131,7 +132,7 @@ const OWNER_READ_PROHIBITION_SOURCES: Readonly<Record<string, readonly string[]>
 };
 
 const EXPLICIT_READ_PROHIBITION =
-  /\b(?:do\s+not|don['’]t|never|without)\s+(?:(?:want\s+you\s+to|you\s+to)\s+)?(?:read(?:ing)?|search(?:ing)?|access(?:ing)?|check(?:ing)?|open(?:ing)?|review(?:ing)?|fetch(?:ing)?|scan(?:ning)?|look(?:\s+(?:at|through|up))?)(?:\s+through)?[\s:]+([^.!?;\n]{0,120})/giu;
+  /\b(?:do\s+not|don['’]t|never|without)\s+(?:(?:want\s+you\s+to|you\s+to)\s+)?(?:read(?:ing)?|search(?:ing)?|access(?:ing)?|check(?:ing)?|open(?:ing)?|review(?:ing)?|fetch(?:ing)?|scan(?:ning)?|use|using|look(?:\s+(?:at|through|up))?)(?:\s+through)?[\s:]+([^.!?;\n]{0,120})/giu;
 
 function ownerExplicitlyProhibitsPrivateRead(
   toolName: string,
