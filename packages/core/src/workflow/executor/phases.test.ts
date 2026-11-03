@@ -1,14 +1,18 @@
 import type { TaskLease } from '@assistant/persistence';
 import type { ModelMessage } from 'ai';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const recallEntrySpy = vi.hoisted(() => ({ calls: [] as Array<Record<string, unknown>> }));
+const recallEntrySpy = vi.hoisted(() => ({
+  calls: [] as Array<Record<string, unknown>>,
+  rejection: null as Error | null,
+}));
 vi.mock('../../memory/recall-context.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../memory/recall-context.js')>();
   return {
     ...actual,
     retrieveOwnerContext: async (input: Record<string, unknown>) => {
       recallEntrySpy.calls.push(input);
+      if (recallEntrySpy.rejection) throw recallEntrySpy.rejection;
       return actual.retrieveOwnerContext(input as never);
     },
   };
@@ -32,6 +36,8 @@ import {
 
 afterEach(() => {
   resetConfigForTest();
+  recallEntrySpy.calls.length = 0;
+  recallEntrySpy.rejection = null;
 });
 
 describe('explicit email recipient extraction', () => {
@@ -477,6 +483,241 @@ describe('pre-planning context retrieval', () => {
     expect(retrieveSituationDecisions).not.toHaveBeenCalled();
     expect(context.state.plannerState.planningRecall).toMatchObject({ status: 'skipped_by_owner' });
     expect(window.some((message) => message.role === 'system')).toBe(false);
+  });
+});
+
+describe('optional recall failure and independent planning', () => {
+  const ownerRequest =
+    'Please plan a two-day visit to fictional Northport for 2027-04-12 and 2027-04-13. Preference: quiet mornings. Historical memory may help but is optional; complete a plan from these details if retrieval is unavailable.';
+  const independentPlan = {
+    action: 'workflow' as const,
+    reasoning: 'Use only the dates and preference supplied in the current request.',
+    steps: [
+      'Keep the morning of 2027-04-12 quiet, following the supplied preference.',
+      'Keep the morning of 2027-04-13 quiet, following the supplied preference.',
+    ],
+    missingInfo: [],
+  };
+
+  function planningFixture(options?: {
+    checkpointResult?: boolean;
+    planUnavailable?: boolean;
+    recallRows?: 'none' | 'relevant-and-unrelated';
+  }) {
+    const checkpoint = vi.fn(async () => options?.checkpointResult ?? true);
+    const renew = vi.fn(async () => true);
+    const persistPlan = vi.fn(async (_lease: unknown, _plan: unknown) => true);
+    const parkForBudget = vi.fn(async () => true);
+    const append = vi.fn(async () => undefined);
+    const tasks = {
+      kind: 'task-lease-repository',
+      checkpoint,
+      renew,
+      persistPlan,
+      parkForBudget,
+    };
+    const messageRepository = { kind: 'message-repository', append };
+    const segments = vi.fn(async () =>
+      options?.recallRows === 'relevant-and-unrelated'
+        ? [
+            {
+              conversationId: 'prior-conversation',
+              summary: 'For Northport visits, the owner prefers quiet mornings.',
+              startMessageId: 'relevant-message',
+              startedAt: new Date('2026-03-01T00:00:00.000Z'),
+              endedAt: new Date('2026-03-01T00:00:00.000Z'),
+              similarity: 0.99,
+              keyMessage: {
+                id: 'relevant-message',
+                role: 'user' as const,
+                text: 'I prefer quiet mornings when visiting Northport.',
+              },
+            },
+            {
+              conversationId: 'prior-conversation',
+              summary: 'UNRELATED_SYNTHETIC_SENTINEL: the owner likes ceramic mugs.',
+              startMessageId: 'unrelated-message',
+              startedAt: new Date('2026-02-01T00:00:00.000Z'),
+              endedAt: new Date('2026-02-01T00:00:00.000Z'),
+              similarity: 0.1,
+              keyMessage: {
+                id: 'unrelated-message',
+                role: 'user' as const,
+                text: 'I like ceramic mugs.',
+              },
+            },
+          ]
+        : [],
+    );
+    const object = vi.fn(async (role: string, _input?: { prompt?: string }) => {
+      if (role === 'classify') return { ok: true, object: { trivial: false } };
+      if (options?.planUnavailable) {
+        return {
+          ok: false,
+          decision: { mode: 'block', reason: 'Synthetic planning budget blocker.' },
+        };
+      }
+      return { ok: true, object: independentPlan };
+    });
+    const dispatcher = { dispatch: vi.fn() };
+    const context = {
+      deps: {
+        persistence: {
+          tasks,
+          messages: messageRepository,
+          history: {
+            kind: 'history-recall-repository',
+            recentWindowStart: vi.fn(async () => new Date('2026-10-01T00:00:00.000Z')),
+            segments,
+            messages: vi.fn(async () => []),
+            neighborhood: vi.fn(async () => []),
+          },
+          ownerContext: {
+            kind: 'owner-context-repository',
+            listOpenCommitments: vi.fn(async () => []),
+          },
+          recallMetrics: {
+            kind: 'recall-metrics-repository',
+            record: vi.fn(async () => undefined),
+          },
+          recallSurfacing: {
+            kind: 'recall-surfacing-repository',
+            suppressed: vi.fn(async () => new Set<string>()),
+          },
+          situationDecisionContext: {
+            kind: 'situation-decision-context-repository',
+            retrieve: vi.fn(async () => []),
+          },
+        },
+      },
+      db: undefined,
+      router: {
+        embeddingSpace: vi.fn(async () => ({
+          provider: 'synthetic',
+          model: 'd12-fixture',
+          dimensions: 2,
+          revision: '1',
+        })),
+        embed: vi.fn(async (values: string[]) => values.map(() => [1, 0])),
+        object,
+      },
+      dispatcher,
+      task: {
+        id: 'task-d12',
+        agentId: 'agent-d12',
+        conversationId: 'conversation-d12',
+        trust: 'owner',
+        type: 'chat_turn',
+        trigger: { source: 'chat', payload: { text: ownerRequest } },
+        plan: null,
+        budgetUsdLimit: '0.05',
+        spentUsd: '0',
+      },
+      agent: { id: 'agent-d12', name: 'Synthetic Assistant', timezone: 'UTC' },
+      state: { plannerState: {}, untrustedContext: false, contextWindow: [] },
+      ctx: {},
+      window: [{ role: 'user', content: ownerRequest }],
+    } as unknown as RunContext;
+    return {
+      context,
+      checkpoint,
+      renew,
+      persistPlan,
+      parkForBudget,
+      append,
+      dispatcher,
+      object,
+      segments,
+    };
+  }
+
+  beforeEach(() => {
+    loadConfig({ CHAT_RECALL_ENABLED: 'true', GRAPH_RAG_ENABLED: 'false' });
+  });
+
+  it('continues the supplied planning branch after optional recall rejects', async () => {
+    recallEntrySpy.rejection = new Error('Synthetic optional recall rejection.');
+    const fixture = planningFixture();
+
+    const result = await runPlanPhase(fixture.context);
+
+    expect(recallEntrySpy.calls).toHaveLength(1);
+    expect(recallEntrySpy.calls[0]).toMatchObject({ mode: 'automatic' });
+    expect(fixture.checkpoint).toHaveBeenCalledOnce();
+    expect(fixture.object.mock.calls.map(([role]) => role)).toEqual(['classify', 'plan']);
+    const planningPrompt = fixture.object.mock.calls[1]?.[1] as { prompt?: string };
+    expect(planningPrompt.prompt).toContain('2027-04-12');
+    expect(planningPrompt.prompt).toContain('2027-04-13');
+    expect(planningPrompt.prompt).toContain('quiet mornings');
+    expect(planningPrompt.prompt).toContain(
+      'Prior conversation and memory retrieval was unavailable',
+    );
+    expect(planningPrompt.prompt).not.toContain('UNRELATED_SYNTHETIC_SENTINEL');
+    expect(planningPrompt.prompt).not.toContain('recalled preference');
+    expect(result).toMatchObject({ plan: independentPlan });
+    expect(fixture.persistPlan).toHaveBeenCalledOnce();
+    expect(fixture.context.state.plannerState.planningRecall).toMatchObject({
+      status: 'unavailable',
+      sourceCount: 0,
+    });
+    expect(fixture.dispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it('reports the planner blocker when recall rejects and planning is independently budget-blocked', async () => {
+    recallEntrySpy.rejection = new Error('Synthetic optional recall rejection.');
+    const fixture = planningFixture({ planUnavailable: true });
+
+    const result = await runPlanPhase(fixture.context);
+
+    expect(recallEntrySpy.calls).toHaveLength(1);
+    expect(recallEntrySpy.calls[0]).toMatchObject({ mode: 'automatic' });
+    expect(fixture.object.mock.calls.map(([role]) => role)).toEqual(['classify', 'plan']);
+    expect(fixture.renew).toHaveBeenCalledOnce();
+    expect(fixture.parkForBudget).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      outcome: 'parked',
+      detail: 'Synthetic planning budget blocker.',
+    });
+    expect(fixture.append).toHaveBeenCalledOnce();
+    expect(fixture.persistPlan).not.toHaveBeenCalled();
+    expect(fixture.dispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it('stops before planning when the required checkpoint loses lease authority', async () => {
+    recallEntrySpy.rejection = new Error('Synthetic optional recall rejection.');
+    const fixture = planningFixture({ checkpointResult: false });
+
+    const result = await runPlanPhase(fixture.context);
+
+    expect(recallEntrySpy.calls).toHaveLength(1);
+    expect(recallEntrySpy.calls[0]).toMatchObject({ mode: 'automatic' });
+    expect(fixture.checkpoint).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      outcome: 'not_claimable',
+      detail: 'task lease was cancelled, expired, or reclaimed',
+    });
+    expect(fixture.object).not.toHaveBeenCalled();
+    expect(fixture.persistPlan).not.toHaveBeenCalled();
+    expect(fixture.dispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it('plans with only eligible context when optional recall succeeds', async () => {
+    const fixture = planningFixture({ recallRows: 'relevant-and-unrelated' });
+
+    const result = await runPlanPhase(fixture.context);
+
+    expect(recallEntrySpy.calls).toHaveLength(1);
+    expect(recallEntrySpy.calls[0]).toMatchObject({ mode: 'automatic' });
+    expect(fixture.segments).toHaveBeenCalledOnce();
+    expect(fixture.object.mock.calls.map(([role]) => role)).toEqual(['classify', 'plan']);
+    const planningPrompt = fixture.object.mock.calls[1]?.[1] as { prompt?: string };
+    expect(planningPrompt.prompt).toContain(
+      'For Northport visits, the owner prefers quiet mornings.',
+    );
+    expect(planningPrompt.prompt).not.toContain('UNRELATED_SYNTHETIC_SENTINEL');
+    expect(result).toMatchObject({ plan: independentPlan });
+    expect(fixture.persistPlan).toHaveBeenCalledOnce();
+    expect(fixture.dispatcher.dispatch).not.toHaveBeenCalled();
   });
 });
 
