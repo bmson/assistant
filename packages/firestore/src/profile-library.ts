@@ -155,6 +155,12 @@ export class FirestoreProfileLibraryRepository implements ProfileLibraryReposito
     ProfileReadBudget,
     Map<string, Promise<MemoryRow[]>>
   >();
+  // Contact lookups are shared only by the budget object that identifies one
+  // overlapping read wave. Keying by agent keeps identities scoped to owner.
+  private readonly contactReads = new WeakMap<
+    ProfileReadBudget,
+    Map<string, Map<string, Promise<Records['contacts'] | undefined>>>
+  >();
 
   constructor(readonly store: InstallationStore) {}
 
@@ -206,22 +212,83 @@ export class FirestoreProfileLibraryRepository implements ProfileLibraryReposito
     return rows;
   }
 
+  private contacts(agentId: string, ids: readonly string[], budget: ProfileReadBudget) {
+    let waveReads = this.contactReads.get(budget);
+    if (!waveReads) {
+      waveReads = new Map();
+      this.contactReads.set(budget, waveReads);
+    }
+    let agentReads = waveReads.get(agentId);
+    if (!agentReads) {
+      agentReads = new Map();
+      waveReads.set(agentId, agentReads);
+    }
+    const unique = [...new Set(ids)];
+    const uncached: string[] = [];
+    const resolutions = new Map<
+      string,
+      {
+        resolve: (contact: Records['contacts'] | undefined) => void;
+        reject: (error: unknown) => void;
+      }
+    >();
+    for (const id of unique) {
+      if (agentReads.has(id)) continue;
+      let resolve!: (contact: Records['contacts'] | undefined) => void;
+      let reject!: (error: unknown) => void;
+      const pending = new Promise<Records['contacts'] | undefined>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      void pending.catch(() => undefined);
+      agentReads.set(id, pending);
+      uncached.push(id);
+      // Keep the resolver associated with the pending identity until this
+      // invocation's existing getAll batching finishes.
+      resolutions.set(id, { resolve, reject });
+    }
+    if (uncached.length > 0) {
+      void getRecords<Records['contacts']>(
+        this.store,
+        'contacts',
+        uncached,
+        (row) => row.id,
+        budget,
+      )
+        .then((contacts) => {
+          for (const id of uncached) resolutions.get(id)?.resolve(contacts.get(id));
+        })
+        .catch((error: unknown) => {
+          for (const id of uncached) resolutions.get(id)?.reject(error);
+        })
+        .finally(() => {
+          for (const id of uncached) resolutions.delete(id);
+        });
+    }
+    const readsForAgent = agentReads;
+    return Promise.all(
+      unique.map((id) => readsForAgent?.get(id) ?? Promise.resolve(undefined)),
+    ).then(
+      (contacts) =>
+        new Map(
+          unique.flatMap((id, index) => {
+            const contact = contacts[index];
+            return contact ? [[id, contact] as const] : [];
+          }),
+        ),
+    );
+  }
+
   async listFilters(agentId: string) {
     return this.reads.run(async (budget) => {
       const fence = await readPrivacyErasureFence(this.store, agentId);
       const memories = (await this.memories(agentId, budget))
         .map((row) => row.memory)
         .filter((row) => row.category === 'knowledge');
-      const contacts = await getRecords<Records['contacts']>(
-        this.store,
-        'contacts',
-        memories.flatMap((row) => (row.subjectContactId ? [row.subjectContactId] : [])),
-        (row) => row.id,
-        budget,
-      );
       const subjectIds = new Set(
         memories.flatMap((row) => (row.subjectContactId ? [row.subjectContactId] : [])),
       );
+      const contacts = await this.contacts(agentId, [...subjectIds], budget);
       const result = {
         subjects: [...subjectIds]
           .flatMap((id) => {
@@ -321,13 +388,11 @@ export class FirestoreProfileLibraryRepository implements ProfileLibraryReposito
           }
         }
       }
-      const contacts = await getRecords<Records['contacts']>(
-        this.store,
-        'contacts',
+      const contacts = await this.contacts(
+        agentId,
         pageRows.flatMap((row) =>
           row.memory.subjectContactId ? [row.memory.subjectContactId] : [],
         ),
-        (row) => row.id,
         budget,
       );
       const rows: ProfileLibraryRecord[] = pageRows.map(({ memory }) => {
