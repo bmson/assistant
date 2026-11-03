@@ -11,10 +11,11 @@ export const MOBILE_OWNER_MEMORY_CORRECTION_REPLAY_MS = 24 * 60 * 60_000;
 const uuid = z
   .string()
   .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+const deviceId = z.string().regex(/^[a-z0-9]{24}$/);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const principalSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('configured_installation_bearer') }),
-  z.strictObject({ kind: z.literal('owner_device_bearer'), deviceId: uuid }),
+  z.strictObject({ kind: z.literal('owner_device_bearer'), deviceId }),
 ]);
 const scopeSchema = z
   .strictObject({

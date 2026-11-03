@@ -33,7 +33,7 @@ import {
 const ownerId = '11111111-1111-4111-8111-111111111111';
 const memoryId = '22222222-2222-4222-8222-222222222222';
 const epoch = '33333333-3333-4333-8333-333333333333';
-const deviceId = '44444444-4444-4444-8444-444444444444';
+const deviceId = '0123456789abcdef01234567';
 const secret = 'unit-test-secret-with-sufficient-entropy';
 const hashA = 'a'.repeat(64);
 const revisionA = 'b'.repeat(64);
@@ -383,6 +383,13 @@ describe('native owner-memory correction protocol', () => {
     const replay = await f.handlers.apply(applyRequest(token, operationId), memoryId, operationId);
     expect(replay.status).toBe(200);
     expect(await replay.json()).toMatchObject({ outcome: 'saved', authority: 'operation_receipt' });
+    const status = await f.handlers.status(
+      statusRequest(token, operationId),
+      memoryId,
+      operationId,
+    );
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({ outcome: 'saved', authority: 'operation_receipt' });
     expect(f.prepare).toHaveBeenCalledTimes(1);
   });
 
@@ -573,12 +580,53 @@ describe('native owner-memory correction protocol', () => {
       authorization: device.authorization,
       secret,
       now: initialNow + 1,
-      principal: { kind: 'owner_device_bearer', deviceId: randomUUID() },
+      principal: { kind: 'owner_device_bearer', deviceId: '89abcdef0123456701234567' },
       ownerId,
       memoryId,
       operationId: device.operationId,
     });
     expect(checked.kind).toBe('principal_mismatch');
+  });
+
+  it('authorizes, applies, and reads original-operation status for a source-real device bearer', async () => {
+    const f = makePorts({ principal: { kind: 'owner_device_bearer', deviceId } });
+    const issued = await authorize(f);
+    expect(issued.response.status).toBe(200);
+    const token = String(issued.value.authorization);
+    const operationId = String(issued.value.operationId);
+
+    const applied = await f.handlers.apply(applyRequest(token, operationId), memoryId, operationId);
+    expect(applied.status).toBe(200);
+    expect(await applied.json()).toMatchObject({
+      authority: 'operation_receipt',
+      outcome: 'saved',
+    });
+
+    const status = await f.handlers.status(
+      statusRequest(token, operationId),
+      memoryId,
+      operationId,
+    );
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({ authority: 'operation_receipt', outcome: 'saved' });
+  });
+
+  it('rejects UUID-shaped device IDs because the verified bearer parser requires 24 lowercase alphanumerics', () => {
+    expect(() =>
+      issueMobileOwnerMemoryCorrectionAuthorization({
+        principal: { kind: 'owner_device_bearer', deviceId: randomUUID() },
+        ownerId,
+        epoch,
+        privacyGeneration: null,
+        memoryId,
+        operationId: randomUUID(),
+        expectedContentHash: hashA,
+        expectedMemoryRevision: revisionA,
+        requestHash: 'f'.repeat(64),
+        secret,
+        now: initialNow,
+      }),
+    ).toThrow();
   });
 
   it('rejects invalid bearer without Auth.js cookie fallback', async () => {

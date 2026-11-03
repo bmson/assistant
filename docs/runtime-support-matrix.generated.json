@@ -5,7 +5,7 @@
     "packages/config/src/index.ts": "1775232bbff153dc4bbfb9dc9fec659a38fd0afdce7f0e67f50d8c6c1822c6d7",
     "apps/agent/src/deps.ts": "fb30df8600bbcf24da0d5cfa9ef1c92e28700b663429cdbbe37d65ecee0ea655",
     "apps/agent/src/index.ts": "6da57b60f853ca6622142a12b70bb31a73e8155eac30dd7d905218c19ca2fd56",
-    "apps/web/lib/server.ts": "0dcff7b64c70a35f830cf797b616b143d06c8db9b5cc0d7d4b32e0384050022a",
+    "apps/web/lib/server.ts": "6daeeb56a0d673549468fe73f8f77681e91a034593010abe7e8fefa813e7ca20",
     "apps/web/proxy.ts": "0d3bae71bd7a094b3e70615c89bd82db8b2fa1196e7ccde8a1d7b2e6c4872cc6",
     "packages/db/drizzle/meta/_journal.json": "ac17b3e7559af6f8d95401ca274579fec87011f3c17cb62ca996f91acae3bb72",
     "infra/gcp/release-contracts.json": "7e9166bef85bb64fb010d04301af4338fbd1aa861d44b1644b9512b28fae18f8"
@@ -75,7 +75,7 @@
     }
   },
   "agentWebSchemaCompatible": true,
-  "webApiRouteCount": 100,
+  "webApiRouteCount": 103,
   "routes": {
     "apps/web/app/api/audit/[id]/route.ts": {
       "methods": ["GET"],
@@ -280,6 +280,18 @@
     "apps/web/app/api/mobile/v1/mcp/route.ts": {
       "methods": ["GET", "POST"],
       "sha256": "6784a41cd0ffc352447c226cc9b958a183a64d8effd20baad5dde05b9e0e9e0f"
+    },
+    "apps/web/app/api/mobile/v1/memory/[id]/correction/[operationId]/apply/route.ts": {
+      "methods": ["POST"],
+      "sha256": "7ae01ff10c2bc72d9ea210bf84e4e95cd1fa7687830847e1495c2e2d7ecb20f5"
+    },
+    "apps/web/app/api/mobile/v1/memory/[id]/correction/[operationId]/status/route.ts": {
+      "methods": ["GET"],
+      "sha256": "51c8f40e7d8f01558ffd0787f5392becbd6dca34ed889f7c55c24722c67d54ea"
+    },
+    "apps/web/app/api/mobile/v1/memory/[id]/correction/authorize/route.ts": {
+      "methods": ["POST"],
+      "sha256": "282a65039fcf38b9f775dc2cfbe78afc83d625ef52bdcb93636b6f39fb2863a3"
     },
     "apps/web/app/api/mobile/v1/memory/[id]/route.ts": {
       "methods": ["PATCH", "POST"],
