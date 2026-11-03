@@ -1780,7 +1780,8 @@ struct APIClient: Sendable {
         spoken: Bool = false,
         encodedRequestBody: Data? = nil,
         onDelta: @escaping @Sendable (String) async -> Void,
-        onCue: @escaping @Sendable (MessagePart) async -> Void
+        onCue: @escaping @Sendable (MessagePart) async -> Void,
+        onAccepted: (@Sendable (SendReceipt) async -> Void)? = nil
     ) async throws -> SendReceipt {
         let url = configuration.baseURL.appending(path: "api/mobile/v1/chat")
         var request = makeRequest(url: url)
@@ -1825,6 +1826,7 @@ struct APIClient: Sendable {
         let taskId = http.value(forHTTPHeaderField: "x-async-task")
         let cursor = http.value(forHTTPHeaderField: "x-message-cursor")
         let responseConversation = http.value(forHTTPHeaderField: "x-conversation-id") ?? conversationId
+        await onAccepted?(.init(taskId: taskId, cursor: cursor, conversationId: responseConversation))
 
         for try await line in bytes.lines {
             guard line.hasPrefix("data:") else { continue }

@@ -613,6 +613,32 @@ private actor StreamTextDeltaRecorder {
     func snapshot() -> [String] { values }
 }
 
+private actor StreamLifecycleRecorder {
+    private var events: [String] = []
+
+    func append(_ event: String) { events.append(event) }
+    func snapshot() -> [String] { events }
+}
+
+@MainActor
+private final class HeldEnsureAppSystemSurfaces: AppSystemSurfaces {
+    private(set) var ensureEntered = false
+    private var ensureContinuation: CheckedContinuation<Void, Never>?
+
+    func ensure(agentName: String, thought: AssistantThought, detail: String, pendingCount: Int) async {
+        ensureEntered = true
+        await withCheckedContinuation { ensureContinuation = $0 }
+    }
+
+    func releaseEnsure() { ensureContinuation?.resume(); ensureContinuation = nil }
+    func start(agentName: String, thought: AssistantThought, detail: String, pendingCount: Int) async {}
+    func update(thought: AssistantThought, detail: String, pendingCount: Int) async {}
+    func needsAttention(agentName: String, detail: String, pendingCount: Int) async {}
+    func finish(thought: AssistantThought, detail: String, succeeded: Bool) async {}
+    func dismiss() async {}
+    func updateBadge(_ count: Int) async {}
+}
+
 final class APIClientRetryTests: XCTestCase {
     private let sessionLock = NSLock()
     private var testSessions: [URLSession] = []
@@ -3140,6 +3166,60 @@ final class APIClientRetryTests: XCTestCase {
     }
 
     @MainActor
+    func testHeldSystemSurfaceEnsureDelaysChatPOSTUntilReleased() async throws {
+        let surfaces = HeldEnsureAppSystemSurfaces()
+        let model = AppModel(apiClient: makeClient(), systemSurfaces: surfaces)
+        StubURLProtocol.primeBootstrap(try notificationBootstrap())
+        await model.refreshAll()
+        XCTAssertNotNil(model.composerDraftScope)
+
+        StubURLProtocol.prime([], tokens: ["Bearer t": [
+            .stream(body: Data()),
+            .operationCancellation(status: 200, outcome: "cancelled_before_admission"),
+        ]])
+        model.send("Check the locally held system surface before sending")
+        XCTAssertEqual(model.sendDisplayState?.phase, .sending)
+        let ensureDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !surfaces.ensureEntered && ContinuousClock.now < ensureDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(surfaces.ensureEntered, "The send task should enter the injected surface dependency")
+        XCTAssertFalse(StubURLProtocol.requests.contains {
+            $0.0 == "POST" && $0.1.path == "/api/mobile/v1/chat"
+        }, "The current implementation awaits systemSurfaces.ensure before dispatching the chat POST")
+
+        surfaces.releaseEnsure()
+        let postDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !StubURLProtocol.requests.contains(where: {
+            $0.0 == "POST" && $0.1.path == "/api/mobile/v1/chat"
+        }), ContinuousClock.now < postDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let acceptedDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while model.sendDisplayState?.phase != .working && ContinuousClock.now < acceptedDeadline {
+            await Task.yield()
+        }
+        let chatRequest = try XCTUnwrap(StubURLProtocol.requests.first {
+            $0.0 == "POST" && $0.1.path == "/api/mobile/v1/chat"
+        })
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: chatRequest.3) as? [String: Any])
+        let operationID = try XCTUnwrap(payload["clientOperationId"] as? String)
+        let authorization = try XCTUnwrap(chatRequest.2.first {
+            $0.key.caseInsensitiveCompare("authorization") == .orderedSame
+        }?.value)
+        XCTAssertEqual(model.sendDisplayState?.phase, .working,
+            "The validated HTTP response advances the same turn from local Sending to Working")
+
+        model.cancelSend()
+        let cancellationDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while model.isSending && ContinuousClock.now < cancellationDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        StubURLProtocol.cancelStream(operationId: operationID, authorization: authorization)
+        XCTAssertFalse(model.isSending, "The fixture settles through the existing operation-cancellation receipt")
+    }
+
+    @MainActor
     func testChatFollowsNewMessagesAndGrowingStreamWhileAtBottom() async throws {
         let model = AppModel(
             apiClient: makeClient(),
@@ -3217,6 +3297,9 @@ final class APIClientRetryTests: XCTestCase {
         }
         StubURLProtocol.prime([.stream(body: try chunk("First words.\n"))])
         model.send("Continue with a detailed response.")
+        XCTAssertEqual(model.sendDisplayState?.phase, .sending,
+            "The provisional assistant row gives immediate honest local feedback")
+        let provisionalStreamID = model.messages.last?.id
 
         // Keep request dispatch, stream readiness, and consumed text inside
         // the original three-second first-delta budget. The stub sends the
@@ -3261,6 +3344,10 @@ final class APIClientRetryTests: XCTestCase {
         )
         XCTAssertEqual(model.messages.last?.text, "First words.\n")
         let streamID = model.messages.last?.id
+        XCTAssertEqual(streamID, provisionalStreamID,
+            "The first actual delta updates the exact provisional assistant row already shown")
+        XCTAssertNil(model.sendDisplayState,
+            "The first readable delta replaces the phase label in the same provisional row")
         try await assertAtBottom()
         for index in 1...3 {
             let delta = String(repeating: "Streaming section \(index).\n", count: 35)
@@ -5082,6 +5169,8 @@ extension APIClientRetryTests {
 
         XCTAssertFalse(model.isSending)
         XCTAssertFalse(model.isCancellingSend)
+        XCTAssertFalse(model.messages.contains(where: { $0.id.hasPrefix("stream-") }),
+            "A terminal cancellation without reply removes the empty provisional row instead of showing a no-reply fallback")
         XCTAssertEqual(StubURLProtocol.urls.first(where: { $0.path == "/api/mobile/v1/activity/\(taskId)" })?.path,
                        "/api/mobile/v1/activity/\(taskId)")
         XCTAssertEqual(model.errorMessage,
@@ -5163,6 +5252,62 @@ extension APIClientRetryTests {
     }
 
     @MainActor
+    func testTaskFailureAndAttentionWithoutReplyRemoveOnlyTheEmptyProvisionalRow() async throws {
+        let taskId = "33333333-3333-4333-8333-333333333333"
+        for status in ["failed", "needs_attention"] {
+            let model = try await notificationModel()
+            let updates = try JSONEncoder().encode(ChatUpdates(
+                taskStatus: status, messages: [], refreshed: [], superseded: nil,
+                nextCursor: nil, hasMore: false, activity: []
+            ))
+            StubURLProtocol.prime([], paths: [
+                "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: taskId)],
+                "/api/mobile/v1/chat/status": Array(repeating: .success(status: 200, body: updates), count: 4),
+                "/api/mobile/v1/overview": [.success(status: 200, body: try overviewBody(pending: []))],
+                "/api/mobile/v1/workspace": [.success(status: 401, body: Data())],
+            ])
+
+            model.send("Check a task with no readable reply")
+            let deadline = ContinuousClock.now.advanced(by: .seconds(12))
+            while model.hasUnresolvedTurn && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+
+            XCTAssertFalse(model.hasUnresolvedTurn, "The \(status) status should settle in the held fixture")
+            XCTAssertFalse(model.messages.contains(where: { $0.id.hasPrefix("stream-") }),
+                "\(status) with no reply must not leave an empty row that renders ‘No readable reply’")
+            XCTAssertNil(model.sendDisplayState)
+            XCTAssertFalse(model.errorMessage?.localizedCaseInsensitiveContains("no readable reply") ?? false)
+        }
+    }
+
+    @MainActor
+    func testUnknownChatAdmissionRemovesEmptyPlaceholderButKeepsOriginalTurnFenced() async throws {
+        let model = try await notificationModel()
+        StubURLProtocol.prime([.failure(URLError(.timedOut))])
+
+        model.send("Keep this uncertain request recoverable")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !((model.errorMessage ?? "").localizedCaseInsensitiveContains("outcome is unknown")),
+              ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertTrue(model.hasUnresolvedTurn, "A timeout after POST keeps the same operation unresolved")
+        XCTAssertFalse(model.messages.contains(where: { $0.id.hasPrefix("stream-") }),
+            "Unknown admission removes only the empty placeholder, avoiding a false no-reply claim")
+        XCTAssertTrue(model.messages.contains(where: {
+            $0.role == .user && $0.text == "Keep this uncertain request recoverable"
+        }), "The original submitted words remain visible for same-operation recovery")
+        XCTAssertNil(model.sendDisplayState)
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 1)
+
+        model.send("Do not create a second turn")
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 1,
+            "An unresolved original operation must block a blind retry")
+    }
+
+    @MainActor
     func testDoneTaskWithoutItsOwnReplyNeverUsesAnOlderOrForeignReply() async throws {
         let recorder = LocalNotificationRecorder()
         let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
@@ -5219,6 +5364,8 @@ extension APIClientRetryTests {
         XCTAssertEqual(model.activityThought, .replyUnavailable)
         XCTAssertEqual(model.errorMessage, "This task is marked complete, but its reply has not appeared yet.")
         XCTAssertFalse(model.isSending)
+        XCTAssertFalse(model.messages.contains(where: { $0.id.hasPrefix("stream-") }),
+            "Completed without reply removes the empty provisional row")
         XCTAssertTrue(model.messages.contains(where: { $0.id == unrelated.id }))
         XCTAssertTrue(model.messages.contains(where: { $0.id == intermediateToolRow.id }))
         XCTAssertTrue(model.messages.contains(where: { $0.id == unsupportedCardRow.id }))
@@ -6024,7 +6171,14 @@ extension APIClientRetryTests {
             "/api/mobile/v1/chat/cancel": [.operationCancellation(status: 200, outcome: "cancelled_before_admission")],
         ])
         model.send("A request whose receipt is delayed")
+        XCTAssertEqual(model.sendDisplayState?.phase, .sending)
         while !StubURLProtocol.urls.contains(where: { $0.path == "/api/mobile/v1/chat" }) { await Task.yield() }
+        let acceptedDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while model.sendDisplayState?.phase != .working && ContinuousClock.now < acceptedDeadline {
+            await Task.yield()
+        }
+        XCTAssertEqual(model.sendDisplayState?.phase, .working,
+            "A validated response header, rather than waiting for body completion, advances the status")
         let sendBody = try XCTUnwrap(StubURLProtocol.bodies.first)
         let send = try XCTUnwrap(JSONSerialization.jsonObject(with: sendBody) as? [String: Any])
         let operationId = try XCTUnwrap(send["clientOperationId"] as? String)
@@ -6033,6 +6187,8 @@ extension APIClientRetryTests {
         model.saveComposerDraft("Follow up about the return flight", in: scope)
 
         model.cancelSend()
+        XCTAssertEqual(model.sendDisplayState?.phase, .stopping,
+            "Stop changes the same pending row to Stopping until the matching receipt settles")
         while !StubURLProtocol.urls.contains(where: { $0.path == "/api/mobile/v1/chat/cancel" }) { await Task.yield() }
         let cancelIndex = try XCTUnwrap(StubURLProtocol.urls.firstIndex(where: { $0.path == "/api/mobile/v1/chat/cancel" }))
         let cancel = try XCTUnwrap(JSONSerialization.jsonObject(with: StubURLProtocol.bodies[cancelIndex]) as? [String: String])
@@ -6042,6 +6198,7 @@ extension APIClientRetryTests {
         let settlementDeadline = ContinuousClock.now.advanced(by: .seconds(3))
         while model.isSending, ContinuousClock.now < settlementDeadline { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertFalse(model.isSending)
+        XCTAssertNil(model.sendDisplayState, "A confirmed pre-admission cancellation removes its transient phase")
         XCTAssertFalse(model.messages.contains(where: { $0.role == .user && $0.text == "A request whose receipt is delayed" }))
         XCTAssertEqual(model.restoreFailedDraft(), "A request whose receipt is delayed")
         XCTAssertEqual(model.composerDraft(in: scope), "Follow up about the return flight")
@@ -6059,9 +6216,13 @@ extension APIClientRetryTests {
     func testTerminalOperationCancellationUnblocksHeldStreamAndFencesLateCallback() async throws {
         let model = try await notificationModel()
         let cancelledTaskId = "33333333-3333-4333-8333-333333333333"
+        let initialDelta = try JSONSerialization.data(withJSONObject: [
+            "type": "text-delta", "delta": "Partial response before stop",
+        ])
+        let partialFrame = Data("data: \(String(decoding: initialDelta, as: UTF8.self))\n\n".utf8)
         StubURLProtocol.prime([], paths: [
             "/api/mobile/v1/chat": [
-                .stream(body: Data()),
+                .stream(body: partialFrame),
                 .stream(body: Data()),
             ],
             "/api/mobile/v1/chat/cancel": [
@@ -6072,10 +6233,15 @@ extension APIClientRetryTests {
 
         model.send("Older turn with a held stream")
         while !StubURLProtocol.urls.contains(where: { $0.path == "/api/mobile/v1/chat" }) { await Task.yield() }
+        let partialDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while model.messages.last?.text != "Partial response before stop",
+              ContinuousClock.now < partialDeadline { await Task.yield() }
+        XCTAssertEqual(model.messages.last?.text, "Partial response before stop")
         let firstSend = try XCTUnwrap(JSONSerialization.jsonObject(with: StubURLProtocol.bodies[0]) as? [String: Any])
         let firstOperationId = try XCTUnwrap(firstSend["clientOperationId"] as? String)
 
         model.cancelSend()
+        XCTAssertEqual(model.sendDisplayState?.phase, .stopping)
         let cancelDeadline = ContinuousClock.now.advanced(by: .seconds(2))
         while !StubURLProtocol.urls.contains(where: { $0.path == "/api/mobile/v1/chat/cancel" }),
               ContinuousClock.now < cancelDeadline { await Task.yield() }
@@ -6085,9 +6251,13 @@ extension APIClientRetryTests {
         XCTAssertFalse(model.isSending, "A terminal cancellation receipt settles without waiting for the SSE stream to close")
         XCTAssertFalse(model.isCancellingSend)
         XCTAssertTrue(model.messages.contains(where: { $0.role == .user && $0.text == "Older turn with a held stream" }))
+        XCTAssertTrue(model.messages.contains(where: { $0.id.hasPrefix("stream-") && $0.text == "Partial response before stop" }),
+            "Confirmed stop keeps already visible partial assistant text")
+        XCTAssertNil(model.sendDisplayState, "A matching terminal receipt resolves Stopping while retaining the partial text")
         XCTAssertTrue(model.errorMessage?.contains("external action already started") == true)
 
         model.send("Newer turn")
+        XCTAssertEqual(model.sendDisplayState?.phase, .sending)
         let secondSendDeadline = ContinuousClock.now.advanced(by: .seconds(2))
         while StubURLProtocol.urls.filter({ $0.path == "/api/mobile/v1/chat" }).count < 2,
               ContinuousClock.now < secondSendDeadline { await Task.yield() }
@@ -6109,10 +6279,57 @@ extension APIClientRetryTests {
         try await Task.sleep(for: .milliseconds(30))
         XCTAssertTrue(model.isSending, "The old stream callback cannot settle the newer operation")
         XCTAssertFalse(model.messages.contains(where: { $0.text.contains("late output from the cancelled operation") }))
+        XCTAssertEqual(model.sendDisplayState?.phase, .working,
+            "A late callback from the cancelled turn cannot change the newer turn's phase")
         XCTAssertTrue(model.messages.contains(where: { $0.role == .user && $0.text == "Newer turn" }))
         XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat/cancel" }.count, 1,
                        "A terminal receipt must not trigger duplicate polling or cancellation")
         StubURLProtocol.appendStream(Data("data: [DONE]\n\n".utf8), operationId: try XCTUnwrap(secondSend["clientOperationId"] as? String))
+    }
+
+    @MainActor
+    func testTerminalStopRetainsStructuredOnlyStreamCue() async throws {
+        let model = try await notificationModel()
+        let taskId = "33333333-3333-4333-8333-333333333333"
+        let cardPart = RichMessageFixture.generated()
+        let encodedCard = try JSONEncoder().encode(cardPart)
+        let cardObject = try XCTUnwrap(JSONSerialization.jsonObject(with: encodedCard) as? [String: Any])
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "type": "data-card", "data": try XCTUnwrap(cardObject["data"]),
+        ])
+        let cardFrame = Data("data: \(String(decoding: payload, as: UTF8.self))\n\n".utf8)
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.stream(body: cardFrame)],
+            "/api/mobile/v1/chat/cancel": [
+                .terminalOperationCancellation(status: 200, outcome: "cancelled",
+                    taskId: taskId, taskStatus: "cancelled", transitioned: true),
+            ],
+        ])
+
+        model.send("Stop after the structured result arrives")
+        let streamID = try XCTUnwrap(model.messages.last?.id)
+        let postDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !StubURLProtocol.urls.contains(where: { $0.path == "/api/mobile/v1/chat" }),
+              ContinuousClock.now < postDeadline { await Task.yield() }
+        let cueDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !((model.messages.first(where: { $0.id == streamID })?.parts.contains(where: { $0.type == "data-card" })) ?? false),
+              ContinuousClock.now < cueDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(model.sendDisplayState?.phase, .working)
+
+        model.cancelSend()
+        XCTAssertEqual(model.sendDisplayState?.phase, .stopping)
+        let settlementDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while model.hasUnresolvedTurn && ContinuousClock.now < settlementDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertFalse(model.hasUnresolvedTurn)
+        let retainedStream = try XCTUnwrap(model.messages.first(where: { $0.id == streamID }))
+        XCTAssertTrue(retainedStream.parts.contains(where: { $0.type == "data-card" }),
+            "Terminal cancellation must not treat a structured-only cue as an empty text row")
+        XCTAssertNil(model.sendDisplayState)
     }
 
     func testChatOperationKeepsTheExactFrozenRequestBytes() async throws {
@@ -6181,14 +6398,22 @@ extension APIClientRetryTests {
 
         let client = makeClient(clientID: clientID, token: token)
         let recorder = StreamTextDeltaRecorder()
+        let lifecycle = StreamLifecycleRecorder()
         let send = Task {
             try await client.sendMessage(
                 conversationId: conversationID,
                 text: "Read the initial streamed words",
                 clientOperationId: operationID,
                 autonomous: false,
-                onDelta: { await recorder.append($0) },
-                onCue: { _ in }
+                onDelta: {
+                    await lifecycle.append("delta")
+                    await recorder.append($0)
+                },
+                onCue: { _ in },
+                onAccepted: { receipt in
+                    XCTAssertEqual(receipt.conversationId, conversationID)
+                    await lifecycle.append("accepted")
+                }
             )
         }
 
@@ -6217,6 +6442,9 @@ extension APIClientRetryTests {
             return
         }
         XCTAssertEqual(received, [expectedDelta], "APIClient must parse and consume the initial text event before stream completion")
+        let lifecycleEvents = await lifecycle.snapshot()
+        XCTAssertEqual(lifecycleEvents, ["accepted", "delta"],
+            "A validated response is observable before the client consumes its first SSE text event")
         let request = try XCTUnwrap(StubURLProtocol.requests.first { $0.1.path == "/api/mobile/v1/chat" })
         XCTAssertEqual(request.0, "POST")
         XCTAssertEqual(
@@ -6494,6 +6722,8 @@ extension APIClientRetryTests {
         while model.isCancellingSend, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertFalse(model.isCancellingSend)
         XCTAssertTrue(model.isSending)
+        XCTAssertEqual(model.sendDisplayState?.phase, .stopping,
+            "An unconfirmed stop remains visibly pending after the cancellation request itself returns unknown")
         XCTAssertTrue(model.errorMessage?.localizedCaseInsensitiveContains("outcome is unknown") == true)
 
         model.send("This must not create a second operation")
