@@ -399,7 +399,12 @@ struct MessageBubble: View {
             )
                 .padding(.horizontal, resolvedBubbleHorizontalInset)
                 .padding(.vertical, resolvedBubbleVerticalInset)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(
+                    maxWidth: dynamicTypeSize.isAccessibilitySize
+                        ? .infinity
+                        : min((conversationViewportWidth ?? 390) * 0.88, 420),
+                    alignment: .leading
+                )
                 .background(
                     AssistantTheme.stageWell(for: colorScheme),
                     in: RoundedRectangle(
@@ -418,6 +423,9 @@ struct MessageBubble: View {
                         )
                 }
                 .contextMenu { cardMenu(copyLabel: "Copy message") }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("You: \(message.text)")
+                .frame(maxWidth: .infinity, alignment: .trailing)
         }
     }
 
