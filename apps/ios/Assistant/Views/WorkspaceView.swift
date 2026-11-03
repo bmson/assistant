@@ -3403,6 +3403,9 @@ private struct IssueReportForm: View {
     @State private var expected = ""
     @State private var submitting = false
     @State private var submissionError: String?
+#if DEBUG
+    @State private var pendingInputAttemptID: UUID?
+#endif
 
     private var cleanTitle: String { title.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var cleanHappened: String { happened.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -3483,10 +3486,23 @@ private struct IssueReportForm: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") { dismiss() }.disabled(submitting)
+                Button("Cancel") {
+#if DEBUG
+                    let attemptID = UUID()
+                    QAInputDiagnostics.emit(QAInputRecord(form: .issueReport, event: .issueCancelEntered, attemptID: attemptID))
+                    pendingInputAttemptID = attemptID
+                    QAInputDiagnostics.emit(QAInputRecord(form: .issueReport, event: .dismissRequested, attemptID: attemptID))
+#endif
+                    dismiss()
+                }.disabled(submitting)
             }
         }
         .interactiveDismissDisabled(submitting)
+#if DEBUG
+        .onDisappear {
+            QAInputDiagnostics.emit(QAInputRecord(form: .issueReport, event: .viewOnDisappear, attemptID: pendingInputAttemptID))
+        }
+#endif
     }
 
     private func submit() {

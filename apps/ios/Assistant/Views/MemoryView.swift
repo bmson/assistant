@@ -1,5 +1,37 @@
 import SwiftUI
 import UniformTypeIdentifiers
+#if DEBUG
+import OSLog
+
+enum QAInputForm: String {
+    case memoryEditor
+    case issueReport
+}
+
+enum QAInputEvent: String {
+    case memorySaveEntered
+    case memoryCancelEntered
+    case issueCancelEntered
+    case enqueueAccepted
+    case enqueueNotAccepted
+    case dismissRequested
+    case viewOnDisappear
+}
+
+struct QAInputRecord {
+    let form: QAInputForm
+    let event: QAInputEvent
+    let attemptID: UUID?
+}
+
+enum QAInputDiagnostics {
+    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Assistant", category: "QAInputDiagnostics")
+
+    static func emit(_ record: QAInputRecord) {
+        logger.info("form=\(record.form.rawValue, privacy: .public) event=\(record.event.rawValue, privacy: .public) attemptID=\(record.attemptID?.uuidString ?? "nil", privacy: .public)")
+    }
+}
+#endif
 
 /// The memory home.
 ///
@@ -1373,6 +1405,9 @@ struct MemoryEditor: View {
     @State private var importance: Int
     @State private var pinned: Bool
     @State private var isSaving = false
+#if DEBUG
+    @State private var pendingInputAttemptID: UUID?
+#endif
 
     init(ownerContactId: String, fact: WorkspaceMemoryFact?) {
         self.ownerContactId = ownerContactId
@@ -1422,16 +1457,33 @@ struct MemoryEditor: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") { dismiss() }
+                Button("Cancel") {
+#if DEBUG
+                    let attemptID = UUID()
+                    QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: .memoryCancelEntered, attemptID: attemptID))
+                    pendingInputAttemptID = attemptID
+                    QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: .dismissRequested, attemptID: attemptID))
+#endif
+                    dismiss()
+                }
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button(isSaving ? "Saving…" : "Save") { save() }
                     .disabled(isSaving || content.trimmingCharacters(in: .whitespacesAndNewlines).count < 3)
             }
         }
+#if DEBUG
+        .onDisappear {
+            QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: .viewOnDisappear, attemptID: pendingInputAttemptID))
+        }
+#endif
     }
 
     private func save() {
+#if DEBUG
+        let attemptID = UUID()
+        QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: .memorySaveEntered, attemptID: attemptID))
+#endif
         isSaving = true
         Task {
             let succeeded: Bool
@@ -1446,8 +1498,17 @@ struct MemoryEditor: View {
                     subjectContactId: ownerContactId
                 ))
             }
+#if DEBUG
+            QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: succeeded ? .enqueueAccepted : .enqueueNotAccepted, attemptID: attemptID))
+#endif
             isSaving = false
-            if succeeded { dismiss() }
+            if succeeded {
+#if DEBUG
+                pendingInputAttemptID = attemptID
+                QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: .dismissRequested, attemptID: attemptID))
+#endif
+                dismiss()
+            }
         }
     }
 }
