@@ -368,6 +368,40 @@ describe('calendar day and practical briefing fidelity', () => {
     ).toBe(false);
   });
 
+  it('keeps a timed row without an end unresolved and omits its default event card', () => {
+    const missingEnd = {
+      eventId: 'missing-end',
+      calendar: 'Work',
+      summary: 'Missing end review',
+      start: '2026-10-15T09:00:00-07:00',
+      links: link('missing-end'),
+    };
+    const rows = evidence([missingEnd]);
+
+    expect(calendarSourceInterval(missingEnd)).toBeUndefined();
+    expect(calendarWindowMembership(missingEnd, request)).toBe('source-date-only');
+    const response = verifiedReadResponse(request, rows);
+    expect(response).toContain('Missing end review');
+    expect(response).toContain(
+      'raw source time: 2026\\-10\\-15T09:00:00\\-07:00 – end unavailable',
+    );
+    expect(response).toContain('Could not compare **Missing end review**');
+    expect(response).toContain('Its overlap status is unknown.');
+    expect(response).not.toContain('Nothing on the calendar');
+    expect(response).not.toContain('No unresolved overlaps between timed calendar entries');
+    expect(calendarResponseCards(rows, request)).toEqual([]);
+
+    const explicitlyIncluded = calendarResponseCards(rows, request, {
+      includeUnresolvedDates: true,
+    });
+    expect(explicitlyIncluded).toHaveLength(1);
+    expect(explicitlyIncluded[0]?.time).toBe(
+      'Local time unresolved · 2026-10-15T09:00:00-07:00 – end unavailable',
+    );
+    expect(JSON.stringify(explicitlyIncluded)).not.toMatch(/\b(?:duration|minutes?|hours?)\b/i);
+    expect(JSON.stringify(explicitlyIncluded)).not.toContain('9:00 AM');
+  });
+
   it('uses the actual source zone to classify cross-zone all-day dates without changing their civil dates', () => {
     const tokyo = { ...floating, calendarTimeZone: 'Asia/Tokyo' };
     const losAngeles = { ...floating, calendarTimeZone: 'America/Los_Angeles' };
