@@ -102,6 +102,7 @@ struct MessageBubble: View {
     let message: ChatMessage
     let userPrompt: String?
     let isStreaming: Bool
+    var sendPhase: ChatSendDisplayPhase? = nil
     let openApprovals: () -> Void
     /// The off-course card's fix: resend the prompt through the executor.
     /// Nil when another turn is in flight, so a stale rerun can't jump the queue.
@@ -229,10 +230,15 @@ struct MessageBubble: View {
                 if message.role == .assistant, !message.recallSources.isEmpty {
                     recallNote
                 }
+                if let sendPhase { sendPhaseLabel(sendPhase) }
             } else if isStreaming {
-                HStack {
-                    thinkingIndicator
-                    Spacer(minLength: 40)
+                if let sendPhase {
+                    sendPhaseLabel(sendPhase)
+                } else {
+                    HStack {
+                        thinkingIndicator
+                        Spacer(minLength: 40)
+                    }
                 }
             } else if let fallback = message.outputFallback(isStreaming: false, hasRenderableCards: !responseCards.isEmpty) {
                 VStack(alignment: .leading, spacing: 10) {
@@ -312,6 +318,14 @@ struct MessageBubble: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
+    }
+
+    private func sendPhaseLabel(_ phase: ChatSendDisplayPhase) -> some View {
+        Text(phase.label)
+            .font(.subheadline)
+            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+            .accessibilityAddTraits(.updatesFrequently)
+            .accessibilityLabel(phase.label)
     }
 
     /// One menu for every card in the log: take a copy of what it says, or take
@@ -6735,6 +6749,7 @@ extension MessageBubble: Equatable {
         lhs.message == rhs.message
             && lhs.userPrompt == rhs.userPrompt
             && lhs.isStreaming == rhs.isStreaming
+            && lhs.sendPhase == rhs.sendPhase
             && (lhs.runForReal == nil) == (rhs.runForReal == nil)
             && (lhs.retry == nil) == (rhs.retry == nil)
             && (lhs.decideApproval == nil) == (rhs.decideApproval == nil)

@@ -806,6 +806,7 @@ extension EnvironmentValues {
 struct ChatTranscriptRows: View, Equatable {
     let messages: [ChatMessage]
     let isSending: Bool
+    let sendDisplayState: ChatSendDisplayState?
     let openApprovals: () -> Void
     let send: (String, Bool) -> Void
     let decideApproval: (String, String) async -> Bool
@@ -827,6 +828,7 @@ struct ChatTranscriptRows: View, Equatable {
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.messages == rhs.messages && lhs.isSending == rhs.isSending
+            && lhs.sendDisplayState == rhs.sendDisplayState
             && lhs.cardFormStateRevision == rhs.cardFormStateRevision
             && lhs.cardFormTaskRevision == rhs.cardFormTaskRevision
     }
@@ -877,6 +879,7 @@ struct ChatTranscriptRows: View, Equatable {
                 message: message,
                 userPrompt: context.userPrompt(before: index),
                 isStreaming: message.id.hasPrefix("stream-") && isSending,
+                sendPhase: sendDisplayState?.streamID == message.id ? sendDisplayState?.phase : nil,
                 openApprovals: openApprovals,
                 runForReal: isSending ? nil : { send($0, true) },
                 retry: isSending ? nil : { send($0, false) },
@@ -1437,6 +1440,7 @@ struct ChatView: View {
                             ChatTranscriptRows(
                                 messages: model.messages,
                                 isSending: model.isSending,
+                                sendDisplayState: model.sendDisplayState,
                                 openApprovals: { model.present(.approvals) },
                                 send: { sendWithComposerContext($0, force: $1) },
                                 decideApproval: { await model.decideApproval(id: $0, decision: $1) },

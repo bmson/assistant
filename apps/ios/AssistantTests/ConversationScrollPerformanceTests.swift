@@ -12,7 +12,7 @@ final class ConversationScrollPerformanceTests: XCTestCase {
     func testSyntheticTranscriptScrollFrameIntervals() async throws {
         let messages = Self.fixtureMessages(count: 100)
         let transcript = ChatTranscriptRows(
-            messages: messages, isSending: false,
+            messages: messages, isSending: false, sendDisplayState: nil,
             openApprovals: {}, send: { _, _ in },
             decideApproval: { _, _ in false }, rememberApproval: { _ in false },
             decideSuggestion: { _, _ in nil }, openActivity: {},
@@ -100,7 +100,7 @@ final class ConversationScrollPerformanceTests: XCTestCase {
         // Immutable payload; existing mixed Markdown/recall/card factory, no IO.
         let messages = Self.fixtureMessages(count: 100)
         let rows = ChatTranscriptRows(
-            messages: messages, isSending: false,
+            messages: messages, isSending: false, sendDisplayState: nil,
             openApprovals: {}, send: { _, _ in },
             decideApproval: { _, _ in false }, rememberApproval: { _ in false },
             decideSuggestion: { _, _ in nil }, openActivity: {},

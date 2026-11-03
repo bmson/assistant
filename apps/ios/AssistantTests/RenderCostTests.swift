@@ -183,7 +183,7 @@ final class RenderCostTests: XCTestCase {
     func testTranscriptBoundaryNoticesTokensDecisionsAndSendAvailability() {
         let rows = { (messages: [ChatMessage], sending: Bool) in
             ChatTranscriptRows(
-                messages: messages, isSending: sending,
+                messages: messages, isSending: sending, sendDisplayState: nil,
                 openApprovals: {}, send: { _, _ in },
                 decideApproval: { _, _ in false }, rememberApproval: { _ in false },
                 decideSuggestion: { _, _ in nil }, openActivity: {},

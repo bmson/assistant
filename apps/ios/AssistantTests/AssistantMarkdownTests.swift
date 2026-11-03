@@ -2417,6 +2417,7 @@ private struct OwnedTranscriptHostRegressionFixture: View {
                         ChatTranscriptRows(
                             messages: receipts + state.appendedMessages,
                             isSending: false,
+                            sendDisplayState: nil,
                             openApprovals: {},
                             send: { _, _ in },
                             decideApproval: { _, _ in true },

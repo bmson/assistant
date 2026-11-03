@@ -1706,7 +1706,7 @@ final class NativeVisualReviewTests: XCTestCase {
         ]
         func transcript(sending: Bool) -> ChatTranscriptRows {
             ChatTranscriptRows(
-            messages: messages, isSending: sending,
+            messages: messages, isSending: sending, sendDisplayState: nil,
             openApprovals: {}, send: { _, _ in },
             decideApproval: { _, _ in false }, rememberApproval: { _ in false },
             decideSuggestion: { _, _ in nil }, openActivity: {},

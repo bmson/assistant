@@ -5,6 +5,25 @@ import SwiftUI
 import UIKit
 import CoreLocation
 
+enum ChatSendDisplayPhase: Equatable {
+    case sending
+    case working
+    case stopping
+
+    var label: String {
+        switch self {
+        case .sending: "Sending…"
+        case .working: "Working…"
+        case .stopping: "Stopping…"
+        }
+    }
+}
+
+struct ChatSendDisplayState: Equatable {
+    let streamID: String
+    let phase: ChatSendDisplayPhase
+}
+
 /// Per-model system presentation keeps routing tests independent of OS surface
 /// work. Production forwards each operation with the same await semantics.
 @MainActor
@@ -324,6 +343,7 @@ final class AppModel {
         }
     }
     private(set) var isCancellingSend = false
+    private(set) var sendDisplayState: ChatSendDisplayState?
     private(set) var isCardFormAdmissionPending = false
     var hasUnresolvedTurn: Bool { ordinaryTurn != nil || resumableTurn != nil }
     var canCancelCurrentSend: Bool {
@@ -1805,6 +1825,7 @@ final class AppModel {
         ordinaryTurn = nil
         isCardFormAdmissionPending = false
         isCancellingSend = false
+        sendDisplayState = nil
         cancelRequestedWithoutTaskID = false
         pendingNotificationDestination = nil
         notificationNavigationVersion += 1
@@ -4263,6 +4284,7 @@ final class AppModel {
         let localUser = ChatMessage.optimistic(role: .user, text: text)
         let streamID = "stream-\(UUID().uuidString)"
         let turnToken = UUID()
+        sendDisplayState = ChatSendDisplayState(streamID: streamID, phase: .sending)
         messages.append(localUser)
         messages.append(.optimistic(role: .assistant, text: "", id: streamID))
         // Neither row has a send time yet, so both anchor to the end of the
@@ -4315,11 +4337,15 @@ final class AppModel {
                     onCue: { [weak self] part in
                         await self?.receive(cue: part, streamID: streamID, client: client,
                             version: version, conversationId: conversationId, turnToken: turnToken)
+                    },
+                    onAccepted: { [weak self] receipt in
+                        await self?.acceptedOrdinaryResponse(receipt, streamID: streamID,
+                            client: client, version: version, conversationId: conversationId,
+                            turnToken: turnToken)
                     }
                 )
                 guard self.isCurrentOrdinaryTurn(turnToken, client: client, version: version, conversationId: conversationId) else { return }
                 if receipt.taskId != nil {
-                    self.messages.removeAll { $0.id == streamID }
                     await self.publishThought(.startingWork, detail: text)
                 }
                 guard self.isCurrentOrdinaryTurn(turnToken, client: client, version: version, conversationId: conversationId) else { return }
@@ -4356,11 +4382,13 @@ final class AppModel {
                 }
                 if Self.isAmbiguousChatAdmissionError(error) {
                     self.isSending = false
+                    self.clearSendDisplayState(turnToken: turnToken)
                     self.errorMessage = "This turn’s outcome is unknown. Check the same turn before sending another message."
                     self.setActivityThought(.thinking, proposedDetail: "Turn status unknown. Check this same operation.")
                     return
                 }
                 self.messages.removeAll { $0.id == streamID && $0.text.isEmpty }
+                self.clearSendDisplayState(turnToken: turnToken)
                 // The composer cleared the draft when it sent; a failed turn
                 // gives the words back rather than losing them to the failure.
                 self.restorableDraft = text
@@ -4371,6 +4399,7 @@ final class AppModel {
                 defer { self.notificationTurnSettlements.finish(settlement) }
                 self.isSending = false
                 self.isCancellingSend = false
+                self.clearSendDisplayState(turnToken: turnToken)
                 self.resumableTurn = nil
                 self.setActivityThought(.stopped, proposedDetail: error.localizedDescription)
                 await systemSurfaces.finish(
@@ -4754,6 +4783,28 @@ final class AppModel {
             && ordinaryTurn?.conversationId == conversationId
     }
 
+    private func acceptedOrdinaryResponse(
+        _ receipt: SendReceipt,
+        streamID: String,
+        client: APIClient,
+        version: Int,
+        conversationId: String,
+        turnToken: UUID
+    ) {
+        guard receipt.conversationId == conversationId,
+              isCurrentOrdinaryTurn(turnToken, client: client, version: version, conversationId: conversationId),
+              sendDisplayState?.streamID == streamID else { return }
+        sendDisplayState = ChatSendDisplayState(
+            streamID: streamID,
+            phase: isCancellingSend ? .stopping : .working
+        )
+    }
+
+    private func clearSendDisplayState(turnToken: UUID) {
+        guard ordinaryTurn?.token == turnToken else { return }
+        sendDisplayState = nil
+    }
+
     private func settleCancelledBeforeAdmission(turnToken: UUID, text: String, draftScope: ComposerDraftScope) {
         guard ordinaryTurn?.token == turnToken else { return }
         let streamID = ordinaryTurn?.streamID
@@ -4764,6 +4815,7 @@ final class AppModel {
         conversationDrafts.preserveUnsent(text, in: draftScope)
         composerRecoveryRevision += 1
         ordinaryTurn = nil
+        sendDisplayState = nil
         resumableTurn = nil
         isSending = false
         isCancellingSend = false
@@ -4778,6 +4830,9 @@ final class AppModel {
         guard (isSending || ordinaryTurn != nil),
               !isCancellingSend, !isCardFormAdmissionPending else { return }
         isCancellingSend = true
+        if let turn = ordinaryTurn {
+            sendDisplayState = ChatSendDisplayState(streamID: turn.streamID, phase: .stopping)
+        }
         stopSpeaking()
         let detail = "Stop requested. Checking the server status."
         setActivityThought(.thinking, proposedDetail: detail)
@@ -4881,6 +4936,7 @@ final class AppModel {
         if messages.contains(where: { $0.id == turn.streamID && $0.text.isEmpty }) {
             messages.removeAll { $0.id == turn.streamID && $0.text.isEmpty }
         }
+        if sendDisplayState?.streamID == turn.streamID { sendDisplayState = nil }
         spokenTurn = nil
         ordinaryTurn = nil
         resumableTurn = nil
@@ -5018,6 +5074,13 @@ final class AppModel {
     private func receive(delta: String, streamID: String, client: APIClient, version: Int, conversationId: String, turnToken: UUID? = nil) async {
         guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
               turnToken == nil || ordinaryTurn?.token == turnToken else { return }
+        if delta.contains(where: { !$0.isWhitespace }),
+           let displayState = sendDisplayState, displayState.streamID == streamID,
+           displayState.phase != .stopping {
+            sendDisplayState = isCancellingSend
+                ? ChatSendDisplayState(streamID: streamID, phase: .stopping)
+                : nil
+        }
         append(delta: delta, to: streamID)
         await publishThought(.replying, detail: "Writing a response")
     }
@@ -5174,6 +5237,10 @@ final class AppModel {
                   ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
                 if let nextCursor = updates.nextCursor { cursor = nextCursor }
                 refreshCurrentReplyState()
+                if receivedCurrentReply {
+                    messages.removeAll { $0.id == streamID }
+                    if sendDisplayState?.streamID == streamID { sendDisplayState = nil }
+                }
                 gapMilliseconds = PollingPolicy.gapMilliseconds(
                     elapsedMilliseconds: elapsedMilliseconds,
                     // `superseded` is optional on the wire — a server that sent
@@ -5224,6 +5291,7 @@ final class AppModel {
             spokenTurn = nil
             isSending = false
             isCancellingSend = false
+            if let ordinaryTurnToken { clearSendDisplayState(turnToken: ordinaryTurnToken) }
             errorMessage = "The task outcome is unknown. Reconnect to reconcile its status before starting another turn."
             setActivityThought(.thinking, proposedDetail: "Task status unknown. Reconnect to check the outcome.")
             return
@@ -5306,6 +5374,7 @@ final class AppModel {
             await syncNotificationBadge()
         } else {
             let completedWithoutReply = finalStatus == "done" && !receivedCurrentReply
+            if completedWithoutReply { messages.removeAll { $0.id == streamID } }
             let succeeded = finalStatus != "failed" && finalStatus != "cancelled" && !completedWithoutReply
             let thought: AssistantThought = completedWithoutReply
                 ? .replyUnavailable
@@ -5345,6 +5414,7 @@ final class AppModel {
         notificationTurnSettlements.finish(settlement)
         await resolvePendingNotificationDestination()
         if let ordinaryTurnToken, ordinaryTurn?.token == ordinaryTurnToken {
+            clearSendDisplayState(turnToken: ordinaryTurnToken)
             ordinaryTurn = nil
         }
     }
