@@ -1263,6 +1263,44 @@ final class APIModelsTests: XCTestCase {
         )
     }
 
+    func testReplyProgressCountsChangesOnceWithoutTreatingRepeatedActivityAsNews() {
+        typealias Entry = PollingPolicy.ReplyProgress.Activity
+        let first = Entry(toolName: "fixture.read", step: 1, status: "executing")
+        let second = Entry(toolName: "fixture.read", step: 2, status: "executing")
+        var progress = PollingPolicy.ReplyProgress()
+        XCTAssertFalse(progress.observe(activity: [], taskStatus: nil))
+        XCTAssertTrue(progress.observe(activity: [first, second], taskStatus: "working"))
+        XCTAssertFalse(progress.observe(activity: [second, first], taskStatus: "working"))
+        XCTAssertFalse(progress.observe(activity: [first, second], taskStatus: nil))
+        XCTAssertFalse(progress.observe(activity: [second, first], taskStatus: "working"))
+        XCTAssertTrue(progress.observe(activity: [first, first, second], taskStatus: nil),
+                      "Duplicate tuple multiplicity is part of the supplied snapshot")
+        XCTAssertFalse(progress.observe(activity: [second, first, first], taskStatus: nil))
+        XCTAssertTrue(progress.observe(activity: [first], taskStatus: nil))
+        XCTAssertTrue(progress.observe(activity: [], taskStatus: nil))
+        XCTAssertFalse(progress.observe(activity: [], taskStatus: nil))
+        XCTAssertTrue(progress.observe(activity: [], taskStatus: "waiting_approval"))
+        XCTAssertFalse(progress.observe(activity: [], taskStatus: "waiting_approval"))
+        var nextInvocation = PollingPolicy.ReplyProgress()
+        XCTAssertTrue(nextInvocation.observe(activity: [first], taskStatus: "working"))
+    }
+
+    func testQuietProgressRetainsLegacyCadenceAndHeldResponseThreshold() {
+        var progress = PollingPolicy.ReplyProgress()
+        let activity = [PollingPolicy.ReplyProgress.Activity(toolName: "fixture.read", step: 1, status: "executing")]
+        XCTAssertTrue(progress.observe(activity: activity, taskStatus: "working"))
+        for (attempt, expected): (Int, Int64) in [(0, 1_500), (4, 3_000), (20, 5_000)] {
+            let news = progress.observe(activity: activity, taskStatus: nil)
+            XCTAssertFalse(news)
+            XCTAssertEqual(PollingPolicy.gapMilliseconds(elapsedMilliseconds: 40,
+                carriedNews: news, attempt: attempt, hasTaskID: true), expected)
+        }
+        XCTAssertEqual(PollingPolicy.gapMilliseconds(elapsedMilliseconds: 1_999,
+            carriedNews: true, attempt: 20, hasTaskID: true), 250)
+        XCTAssertEqual(PollingPolicy.gapMilliseconds(elapsedMilliseconds: 2_000,
+            carriedNews: false, attempt: 20, hasTaskID: true), 0)
+    }
+
     func testHoldStaysUnderTheServerCeiling() {
         // MAX_CHAT_WAIT_MS in the application service is 25s. Asking for less
         // keeps the server the one that ends the hold.

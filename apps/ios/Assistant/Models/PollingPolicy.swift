@@ -4,6 +4,31 @@ import Foundation
 /// AppModel makes the user-visible state owner smaller and lets tests lock down
 /// network behavior without constructing an API client or a SwiftUI view.
 enum PollingPolicy {
+    /// Semantic progress within one reply poll invocation. Multiplicity matters,
+    /// but ordering does not: repeating a snapshot must retain quiet backoff.
+    struct ReplyProgress {
+        struct Activity: Hashable {
+            let toolName: String
+            let step: Int
+            let status: String
+        }
+
+        private var activityCounts: [Activity: Int] = [:]
+        private var lastReportedTaskStatus: String?
+
+        mutating func observe(activity: [Activity], taskStatus: String?) -> Bool {
+            let next = activity.reduce(into: [Activity: Int]()) { counts, entry in
+                counts[entry, default: 0] += 1
+            }
+            let activityChanged = next != activityCounts
+            let statusChanged = taskStatus.map { $0 != lastReportedTaskStatus } ?? false
+            activityCounts = next
+            // An omitted optional wire field says nothing about a transition.
+            if let taskStatus { lastReportedTaskStatus = taskStatus }
+            return activityChanged || statusChanged
+        }
+    }
+
     /// Activity is visible for a while; poll conservatively and back off after
     /// transient failures without stopping the screen from recovering.
     static func activityIntervalSeconds(consecutiveFailures: Int) -> Double {
