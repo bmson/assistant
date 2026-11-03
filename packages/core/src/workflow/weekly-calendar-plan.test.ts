@@ -235,6 +235,41 @@ describe('weeklyCalendarPlan', () => {
     );
   });
 
+  it('asks to review returned data when a complete page contains an invalid event row shape', () => {
+    const result = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin, timeMax, maxResults: 50 },
+            result: {
+              events: [null],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+    });
+
+    expect(result.coverageComplete).toBe(false);
+    expect(result.text).toContain('Some returned calendar event rows could not be validated');
+    expect(result.text).toContain(
+      'Review the returned calendar data before relying on this review',
+    );
+    expect(result.text).not.toContain(
+      'Confirm the missing calendars before relying on this review',
+    );
+    expect(result.text).not.toContain(
+      'Confirm the remaining calendar coverage before relying on this review',
+    );
+  });
+
   it('keeps an unresolved all-day blocking row as a conservative full-window hold', () => {
     const result = weeklyCalendarPlanResult({
       timeMin,

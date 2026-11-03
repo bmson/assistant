@@ -1384,6 +1384,14 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       unavailableCalendars.length > 0 ||
       !eventPageCoverageComplete ||
       (!availabilityDeclaredComplete && !invalidBusyIntervals);
+    const invalidEventRowsOnly =
+      !eventRowsValid &&
+      eventPageCoverageComplete &&
+      unresolvedTimedEvents.length === 0 &&
+      unresolvedAllDayEvents.length === 0 &&
+      unavailableCalendars.length === 0 &&
+      availabilityDeclaredComplete &&
+      !invalidBusyIntervals;
     const nextStep = sourceTimestampsUnresolved
       ? unavailableCalendars.length > 0
         ? 'Verify the unresolved source timestamps and time zone; confirm the unavailable calendars before relying on this review'
@@ -1392,7 +1400,9 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
           : 'Verify the unresolved source timestamps and time zone before relying on this review'
       : unavailableCalendars.length > 0
         ? 'Confirm the missing calendars before relying on this review'
-        : 'Confirm the remaining calendar coverage before relying on this review';
+        : invalidEventRowsOnly
+          ? 'Review the returned calendar data before relying on this review'
+          : 'Confirm the remaining calendar coverage before relying on this review';
     coverageNotes.push(
       `${reasons.join('; ')}; proposed times are tentative, not confirmed free. ${nextStep}`,
     );
