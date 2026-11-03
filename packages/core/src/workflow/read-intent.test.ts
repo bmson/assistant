@@ -286,6 +286,26 @@ describe('detectPersonalReadRequest', () => {
     ).toBeNull();
   });
 
+  it('routes explicit recall of fictional history without opening prohibited account sources', () => {
+    const requests = [
+      'Find the earlier hypothetical planning exercise called Nimbus in our past chats. Recall its project name, budget, deadline, and travel constraint, citing the conversation source. Clearly distinguish the fictional exercise from facts about me. Do not use email or calendar, and do not save new memories.',
+      'Look back at the earlier hypothetical Nimbus exercise. Did I earmark its project budget for public transport, or was that an Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step, citing the relevant conversation messages. Keep the fictional exercise separate from my real plans, and do not save new memories.',
+    ];
+    for (const text of requests) {
+      expect(detectPersonalReadRequest(turn(text))).toMatchObject({
+        kind: 'memory',
+        conversationQuery: expect.any(String),
+        firstToolName: 'conversations.search',
+      });
+    }
+    expect(
+      detectPersonalReadRequest(turn('Find a hypothetical exercise. Do not use history.')),
+    ).toBeNull();
+    expect(
+      detectPersonalReadRequest(turn('Do not read our past chats. What is on my calendar Friday?')),
+    ).toMatchObject({ kind: 'calendar', firstToolName: 'calendar.list_events' });
+  });
+
   it('routes a subscription audit to bounded Gmail only and asks for a zone or month count before reading', () => {
     const text =
       'Audit recurring subscriptions evidenced in authorized billing messages over the last 3 complete local calendar months. Separate actual charges, trials, refunds, cancellation notices and uncertain recurring purchases. No login/account change/cancel/unsubscribe/purchase/hold/send/Gmail draft/document/calendar/memory writes.';
@@ -1363,6 +1383,64 @@ describe('detectPersonalReadRequest', () => {
 
   it('does not route a public published train schedule to the personal calendar', () => {
     expect(detectPersonalReadRequest(turn('What is the published train schedule?'))).toBeNull();
+  });
+
+  it('routes ticket confirmation mail to Gmail but not public email address lookups', () => {
+    expect(
+      detectPersonalReadRequest(turn('Find the museum ticket confirmation email.')),
+    ).toMatchObject({ kind: 'email', firstToolName: 'gmail.search' });
+    expect(
+      detectPersonalReadRequest(
+        turn('Find the museum email address to contact the ticket office.'),
+      ),
+    ).toBeNull();
+    expect(
+      detectPersonalReadRequest(turn('Find a ticket confirmation email template online.')),
+    ).toBeNull();
+    expect(
+      detectPersonalReadRequest(
+        turn('Search the public museum website for ticket confirmation email examples.'),
+      ),
+    ).toBeNull();
+    expect(
+      detectPersonalReadRequest(
+        turn('Search the public museum website and find the ticket confirmation email.'),
+      ),
+    ).toBeNull();
+    expect(
+      detectPersonalReadRequest(
+        turn('Find the public email address for the museum ticket confirmation office.'),
+      ),
+    ).toBeNull();
+    expect(
+      detectPersonalReadRequest(turn('Which email address sent the museum ticket confirmation?')),
+    ).toMatchObject({ kind: 'email', firstToolName: 'gmail.search' });
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'Search my email for my reservation confirmation. Find the public museum email address to contact the ticket office.',
+        ),
+      ),
+    ).toMatchObject({ kind: 'calendar_email', mailQuery: 'reservation' });
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'Find the museum ticket confirmation email. Find the public museum email address to contact the ticket office.',
+        ),
+      ),
+    ).toMatchObject({ kind: 'email', firstToolName: 'gmail.search' });
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'Read my Gmail for the invoice. Find the public museum email address to contact the ticket office.',
+        ),
+      ),
+    ).toMatchObject({ kind: 'email', firstToolName: 'gmail.search' });
+    expect(
+      detectPersonalReadRequest(
+        turn('For a fictional exercise, show a sample museum ticket confirmation email.'),
+      ),
+    ).toBeNull();
   });
 
   it('preserves an owner calendar read beside a separate public transit page request', () => {

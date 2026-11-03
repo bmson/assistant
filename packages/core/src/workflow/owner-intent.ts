@@ -185,13 +185,17 @@ export function ownerIntentForResolvedRead(
 
 /** Explicit opt-outs override ambient retrieval from older chats and memory. */
 export function explicitlyOptsOutOfRecall(text: string): boolean {
-  return (
-    /\b(?:do not|don't|never|without)\s+(?:search|read|look\s+up|check|consult|use|retrieve|review)\b[^.!?\n]{0,120}\b(?:memory|memories|history|past chats|old messages|older messages|previous conversations|old conversations|anything up|anything else)\b/i.test(
-      text,
-    ) ||
-    /\b(?:do not|don't|never)\s+look\s+anything\s+up\b|\bwithout\s+(?:looking|checking|searching)\s+anything\s+up\b/i.test(
-      text,
-    )
+  const independentClauses = text.split(
+    /[.!?;\n]+|\b(?:and|but|then|however)\b(?=\s*(?:(?:do not|don't|don’t|never|without|avoid)\s+)?(?:search|read|look\s+up|check|consult|use|retrieve|review|save|store|write|update|add|retain|record)\b)/iu,
+  );
+  return independentClauses.some(
+    (clause) =>
+      /\b(?:do not|don't|never|without|avoid)\s+(?:search|read|look\s+up|check|consult|use|retrieve|review)\b[^.!?\n]{0,120}\b(?:memory|memories|history|past chats|old messages|older messages|previous conversations|old conversations|anything up|anything else)\b/i.test(
+        clause,
+      ) ||
+      /\b(?:do not|don't|never)\s+look\s+anything\s+up\b|\bwithout\s+(?:looking|checking|searching)\s+anything\s+up\b/i.test(
+        clause,
+      ),
   );
 }
 
@@ -452,6 +456,77 @@ function orderedReadThenSend(text: string, sendVerbs: string): boolean {
   return !/\b(?:do not|don't|never|should not|shouldn't|would not|wouldn't|not to)\b/i.test(prefix);
 }
 
+/** A coordinated lookup inherits a public source qualifier from its lead clause. */
+export function hasPublicSourceQualifiedEmailRead(text: string): boolean {
+  const sentences = text.split(/[.!?;\n]+/);
+  return sentences.some((sentence) => {
+    const clauses = sentence.split(/(?:,|\b(?:and|then|also|but)\b)/i);
+    return clauses.some((clause, index) => {
+      const confirmationEmail =
+        /\b(?:ticket|booking|reservation|order|purchase|payment|delivery)\s+confirmation\s+email\b/i.test(
+          clause,
+        );
+      const publicSourceQualifier =
+        /\b(?:public|online|website|webpage|internet|template|templates|example|examples|sample|samples)\b/i.test(
+          clause,
+        );
+      const inheritedPublicSource = clauses
+        .slice(0, index)
+        .some((previous) => /\b(?:public|online|website|webpage|internet)\b/i.test(previous));
+      const emailAddress = /\b(?:e-?mail)\s+address(?:es)?\b/i.test(clause);
+      const publicEmailAddress =
+        emailAddress &&
+        (/\b(?:public|contact|reach|website|webpage|ticket office)\b/i.test(clause) ||
+          inheritedPublicSource);
+      return (
+        affirmativeAction(clause, '(?:search|check|find|look up|read|review)') &&
+        ((confirmationEmail && (publicSourceQualifier || inheritedPublicSource)) ||
+          publicEmailAddress)
+      );
+    });
+  });
+}
+
+/** A directly named personal mailbox is independent of other public sources in the turn. */
+export function hasExplicitOwnerMailReadSource(text: string): boolean {
+  return (
+    affirmativeAction(text, '(?:search|check|find|look up|read|review)') &&
+    /\b(?:my|our)\s+(?:inbox|email|mail|gmail|mailbox)\b/i.test(text)
+  );
+}
+
+/** A direct request names the owner's calendar source independently of mail context. */
+export function hasExplicitOwnerCalendarReadSource(text: string): boolean {
+  return (
+    affirmativeAction(text, '(?:search|check|find|look up|read|review)') &&
+    /\b(?:my|our)\s+(?:calendar|schedule|agenda)\b/i.test(text)
+  );
+}
+
+/** A direct request for a named confirmation message can identify the mailbox artifact. */
+export function hasAffirmativePersonalConfirmationEmailRead(text: string): boolean {
+  const sentences = text.split(/[.!?;\n]+/);
+  return sentences.some((sentence) => {
+    const clauses = sentence.split(/(?:,|\b(?:and|then|also|but)\b)/i);
+    return clauses.some((clause, index) => {
+      const inheritedPublicSource = clauses
+        .slice(0, index)
+        .some((previous) => /\b(?:public|online|website|webpage|internet)\b/i.test(previous));
+      return (
+        affirmativeAction(clause, '(?:search|check|find|look up|read|review)') &&
+        /\b(?:ticket|booking|reservation|order|purchase|payment|delivery)\s+confirmation\s+email\b/i.test(
+          clause,
+        ) &&
+        !/\b(?:public|online|website|webpage|internet|template|templates|example|examples|sample|samples)\b/i.test(
+          clause,
+        ) &&
+        !inheritedPublicSource &&
+        !/\bemail\s+address(?:es)?\b/i.test(clause)
+      );
+    });
+  });
+}
+
 /** Reuse and repository proofs share the same deterministic recipient parser. */
 export function explicitOwnerCallRecipient(text: string): string | null {
   const request = ownerPhoneRecipientRequest(text);
@@ -496,11 +571,12 @@ function scopesFor(text: string): OwnerIntentScope[] {
   // A private source noun in a question is not owner authorization by itself.
   // Preserve affirmative direct requests for a named personal source even
   // when the canonical read-intent parser does not yet recognize its wording.
-  if (
-    affirmativeAction(text, '(?:search|check|find|look up|read|review)') &&
-    /\b(?:my|our)\s+(?:calendar|schedule|agenda|inbox|email|mail|gmail|mailbox)\b/i.test(text)
-  )
+  if (hasExplicitOwnerCalendarReadSource(text) || hasExplicitOwnerMailReadSource(text))
     scopes.add('private_read');
+  // A named ticket or booking confirmation email is an explicit personal
+  // mailbox artifact even when the owner omits “my”. This stays narrower than
+  // granting private scope from any question or email-address mention.
+  if (hasAffirmativePersonalConfirmationEmailRead(text)) scopes.add('private_read');
   if (
     affirmativeAction(text, '(?:search|check|find|look up|read|review)') &&
     /\b(?:my|our)\s+(?:hotel|reservation|booking)\b/i.test(text)
@@ -512,9 +588,16 @@ function scopesFor(text: string): OwnerIntentScope[] {
     /\b(?:mailbox|inbox|email|mail)\b/i.test(text)
   )
     scopes.add('private_read');
+  const personalRead = detectPersonalReadRequest([{ role: 'user', content: text }]);
+  const broadLookupProhibition =
+    /\b(?:do not|don't|never)\s+look\s+anything\s+up\b|\bwithout\s+(?:looking|checking|searching)\s+anything\s+up\b/i.test(
+      text,
+    );
   if (
-    !explicitlyOptsOutOfRecall(text) &&
-    detectPersonalReadRequest([{ role: 'user', content: text }])
+    personalRead &&
+    (!explicitlyOptsOutOfRecall(text) ||
+      (!broadLookupProhibition &&
+        (personalRead.kind !== 'memory' || personalRead.explicitSource !== 'history')))
   )
     scopes.add('private_read');
   if (
