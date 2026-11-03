@@ -13,7 +13,7 @@ enum QAInputEvent: String {
     case memoryCancelEntered
     case issueCancelEntered
     case enqueueAccepted
-    case enqueueRejected
+    case enqueueNotAccepted
     case dismissRequested
     case viewOnDisappear
 }
@@ -1499,7 +1499,7 @@ struct MemoryEditor: View {
                 ))
             }
 #if DEBUG
-            QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: succeeded ? .enqueueAccepted : .enqueueRejected, attemptID: attemptID))
+            QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: succeeded ? .enqueueAccepted : .enqueueNotAccepted, attemptID: attemptID))
 #endif
             isSaving = false
             if succeeded {
