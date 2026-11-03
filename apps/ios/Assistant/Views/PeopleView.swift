@@ -82,7 +82,17 @@ struct PeopleView: View {
                 }
 
                 if matches.isEmpty {
-                    ContentUnavailableView.search(text: query)
+                    if let pagination = model.peoplePagination,
+                       pagination.isSupported,
+                       pagination.hasMore {
+                        AssistantEmptyState(
+                            "No matches in loaded people",
+                            systemImage: "magnifyingglass",
+                            description: "Load more to search the remaining people."
+                        )
+                    } else {
+                        ContentUnavailableView.search(text: query)
+                    }
                 } else {
                     ForEach(groups) { group in
                         Section {
