@@ -30,3 +30,32 @@ export function UnknownCostAttempts({ summary }: { summary: UnknownCostAttemptSu
     </div>
   );
 }
+
+export function DispatchingCostAttempts({ summary }: { summary: UnknownCostAttemptSummary }) {
+  if (summary.count === 0 && summary.countComplete) return null;
+
+  return (
+    <div className="mt-4 rounded-xl bg-raised px-3 py-2 text-sm">
+      {!summary.countComplete && summary.count === 0 ? (
+        <p>Dispatching reservation coverage unavailable.</p>
+      ) : (
+        <>
+          <p className="font-medium">
+            Dispatching reservations:{' '}
+            {summary.countComplete ? summary.count : `at least ${summary.count}`}
+          </p>
+          {summary.estimateComplete && summary.estimatedUsd !== null ? (
+            <p className="mt-1 text-muted">
+              Retained estimate {formatUsdExposure(summary.estimatedUsd)}, based on dispatching
+              status. Estimate only, not confirmed provider spend. Included in budget holds above.
+            </p>
+          ) : (
+            <p className="mt-1 text-muted">
+              Retained reservation estimate unavailable. Included in budget holds above.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}

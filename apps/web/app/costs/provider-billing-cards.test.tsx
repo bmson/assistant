@@ -5,6 +5,7 @@ import {
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { BillingCoverageSummary, ProviderBillingCards } from './provider-billing-cards';
+import { DispatchingCostAttempts } from './unknown-cost-attempts';
 
 const report: ProviderBilling = {
   id: 'google-cloud',
@@ -21,6 +22,24 @@ const report: ProviderBilling = {
 };
 
 describe('provider billing presentation', () => {
+  it('labels dispatching exposure as retained status, included budget holds, and not confirmed spend', () => {
+    const html = renderToStaticMarkup(
+      <DispatchingCostAttempts
+        summary={{
+          count: 1,
+          countComplete: true,
+          estimatedUsd: '0.020000',
+          estimateComplete: true,
+        }}
+      />,
+    );
+    expect(html).toContain('Dispatching reservations: 1');
+    expect(html).toContain('based on dispatching status');
+    expect(html).toContain('Estimate only, not confirmed provider spend');
+    expect(html).toContain('Included in budget holds above');
+    expect(html).not.toContain('In-flight');
+  });
+
   it('renders OpenRouter amount-only values as reported cost without invented credits or net', () => {
     const html = renderToStaticMarkup(
       <ProviderBillingCards

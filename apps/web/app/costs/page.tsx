@@ -6,7 +6,7 @@ import { COST_BASIS_LABELS, costBasis } from '@assistant/persistence';
 import Link from 'next/link';
 import { BudgetCapsForm } from '@/app/costs/budget-caps-form';
 import { BillingCoverageSummary, ProviderBillingCards } from '@/app/costs/provider-billing-cards';
-import { UnknownCostAttempts } from '@/app/costs/unknown-cost-attempts';
+import { DispatchingCostAttempts, UnknownCostAttempts } from '@/app/costs/unknown-cost-attempts';
 import { requireOwner } from '@/auth';
 import { formatDateTime, formatUsd, truncate } from '@/lib/format';
 import { getBillingOverview, getDb } from '@/lib/server';
@@ -165,6 +165,7 @@ export default async function CostsPage() {
             </section>
           ) : null}
 
+          <DispatchingCostAttempts summary={dashboard.dispatchingAttempts} />
           <UnknownCostAttempts summary={dashboard.unknownAttempts} />
 
           <section className="mt-5 grid gap-6 sm:grid-cols-2">

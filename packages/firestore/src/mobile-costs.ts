@@ -97,6 +97,24 @@ export async function unknownAttemptSummary(
   );
 }
 
+/** One bounded snapshot of reservations with the retained dispatching status. */
+export async function dispatchingAttemptSummary(
+  store: Pick<InstallationStore, 'collection'>,
+): Promise<UnknownAttemptSummary> {
+  const snapshot = await store
+    .collection('costReservations')
+    .where('status', '==', 'dispatching')
+    .select('estimatedUsd')
+    .limit(UNKNOWN_ATTEMPT_SCAN_LIMIT)
+    .get();
+  const complete = snapshot.size < UNKNOWN_ATTEMPT_SCAN_LIMIT;
+  if (!complete) return summarizeUnknownAttemptEstimates([], true);
+  return summarizeUnknownAttemptEstimates(
+    snapshot.docs.map((doc) => doc.get('estimatedUsd')),
+    false,
+  );
+}
+
 /** Reads every matching page. A dashboard must never present a partial spend total. */
 async function scan<T>(query: Query, visit: (row: T) => void): Promise<void> {
   let cursor: QueryDocumentSnapshot | undefined;
@@ -179,6 +197,7 @@ export async function getFirestoreMobileCosts(store: InstallationStore, agentId:
   const [
     taskDefault,
     heldSnapshot,
+    dispatchingAttempts,
     unknownAttempts,
     recentSnapshot,
     parkedSnapshot,
@@ -190,6 +209,7 @@ export async function getFirestoreMobileCosts(store: InstallationStore, agentId:
       .where('status', '==', 'held')
       .orderBy('createdAt', 'desc')
       .get(),
+    dispatchingAttemptSummary(store),
     unknownAttemptSummary(store),
     store.collection('costEvents').orderBy('createdAt', 'desc').limit(15).get(),
     store.collection('tasks').where('status', '==', 'waiting_budget').count().get(),
@@ -235,6 +255,7 @@ export async function getFirestoreMobileCosts(store: InstallationStore, agentId:
     byModel: ranked(byModel).map(({ key, ...value }) => ({ model: key, ...value })),
     topTasks,
     held,
+    dispatchingAttempts,
     unknownAttempts,
     recent,
     parkedTasks: parkedSnapshot.data().count,
