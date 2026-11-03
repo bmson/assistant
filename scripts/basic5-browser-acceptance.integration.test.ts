@@ -1367,7 +1367,10 @@ browserTest(
         validFrom: null,
         validUntil: null,
         sourceMemoryId: addedMemoryId,
-        reviewStatus: 'confirmed',
+        reviewStatus: 'rejected',
+        correctedByRelationId: correctedRelationId,
+        correctionSourceContentHash: addedMemory?.contentHash,
+        correctionDisposition: 'whole_fact',
       });
       expect(correctedRelation?.assertionId).toBe(originalRelationAfterCorrection?.assertionId);
       if (!correctedRelation?.assertionId)
