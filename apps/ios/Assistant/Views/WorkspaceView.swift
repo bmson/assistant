@@ -3405,6 +3405,7 @@ private struct IssueReportForm: View {
     @State private var submissionError: String?
 #if DEBUG
     @State private var pendingInputAttemptID: UUID?
+    @State private var diagnosticFormID = UUID()
 #endif
 
     private var cleanTitle: String { title.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -3456,6 +3457,16 @@ private struct IssueReportForm: View {
                     }
                 }
                 .accessibilityIdentifier("issue-report-related-task")
+#if DEBUG
+                .onChange(of: sourceTaskId) { _, _ in
+                    QAInputDiagnostics.emit(QAInputRecord(
+                        form: .issueReport,
+                        event: .relatedActivitySelectionChanged,
+                        attemptID: nil,
+                        formID: diagnosticFormID
+                    ))
+                }
+#endif
             } footer: {
                 Text("Select the task that went wrong to include its diagnostic history. Personal content stays out of the coding brief.")
             }
@@ -3489,18 +3500,22 @@ private struct IssueReportForm: View {
                 Button("Cancel") {
 #if DEBUG
                     let attemptID = UUID()
-                    QAInputDiagnostics.emit(QAInputRecord(form: .issueReport, event: .issueCancelEntered, attemptID: attemptID))
+                    QAInputDiagnostics.emit(QAInputRecord(form: .issueReport, event: .issueCancelEntered, attemptID: attemptID, formID: diagnosticFormID))
                     pendingInputAttemptID = attemptID
-                    QAInputDiagnostics.emit(QAInputRecord(form: .issueReport, event: .dismissRequested, attemptID: attemptID))
+                    QAInputDiagnostics.emit(QAInputRecord(form: .issueReport, event: .dismissRequested, attemptID: attemptID, formID: diagnosticFormID))
 #endif
                     dismiss()
+#if DEBUG
+                    QAInputDiagnostics.emit(QAInputRecord(form: .issueReport, event: .dismissReturned, attemptID: attemptID, formID: diagnosticFormID))
+#endif
                 }.disabled(submitting)
             }
         }
         .interactiveDismissDisabled(submitting)
 #if DEBUG
+        .qaInputResponsivenessProbe(form: .issueReport, formID: diagnosticFormID)
         .onDisappear {
-            QAInputDiagnostics.emit(QAInputRecord(form: .issueReport, event: .viewOnDisappear, attemptID: pendingInputAttemptID))
+            QAInputDiagnostics.emit(QAInputRecord(form: .issueReport, event: .viewOnDisappear, attemptID: pendingInputAttemptID, formID: diagnosticFormID))
         }
 #endif
     }

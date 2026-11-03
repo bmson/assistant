@@ -416,6 +416,10 @@ struct GoalEditor: View {
     @State private var nextAction: String
     @State private var mirrorToPrimary: Bool
     @State private var isSaving = false
+#if DEBUG
+    @State private var pendingCancelAttemptID: UUID?
+    @State private var diagnosticFormID = UUID()
+#endif
 
     init(goal: GoalRecord?) {
         self.goal = goal
@@ -478,7 +482,18 @@ struct GoalEditor: View {
         .navigationTitle(goal == nil ? "New goal" : "Edit goal")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") { dismiss() }
+                Button("Cancel") {
+#if DEBUG
+                    let attemptID = UUID()
+                    QAInputDiagnostics.emit(QAInputRecord(form: .goalEditor, event: .goalCancelEntered, attemptID: attemptID, formID: diagnosticFormID))
+                    pendingCancelAttemptID = attemptID
+                    QAInputDiagnostics.emit(QAInputRecord(form: .goalEditor, event: .dismissRequested, attemptID: attemptID, formID: diagnosticFormID))
+#endif
+                    dismiss()
+#if DEBUG
+                    QAInputDiagnostics.emit(QAInputRecord(form: .goalEditor, event: .dismissReturned, attemptID: attemptID, formID: diagnosticFormID))
+#endif
+                }
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button(isSaving ? "Saving…" : (goal == nil ? "Start" : "Save")) {
@@ -487,6 +502,17 @@ struct GoalEditor: View {
                 .disabled(isSaving || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
+#if DEBUG
+        .qaInputResponsivenessProbe(form: .goalEditor, formID: diagnosticFormID)
+        .onDisappear {
+            QAInputDiagnostics.emit(QAInputRecord(
+                form: .goalEditor,
+                event: .viewOnDisappear,
+                attemptID: pendingCancelAttemptID,
+                formID: diagnosticFormID
+            ))
+        }
+#endif
     }
 
     private func save() {

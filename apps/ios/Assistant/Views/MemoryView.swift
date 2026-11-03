@@ -6,15 +6,23 @@ import OSLog
 enum QAInputForm: String {
     case memoryEditor
     case issueReport
+    case goalEditor
 }
 
 enum QAInputEvent: String {
+    case formAppeared
+    case mainActorPulse
+    case probeCompleted
+    case topicSelectionChanged
+    case relatedActivitySelectionChanged
     case memorySaveEntered
     case memoryCancelEntered
     case issueCancelEntered
+    case goalCancelEntered
     case enqueueAccepted
     case enqueueNotAccepted
     case dismissRequested
+    case dismissReturned
     case viewOnDisappear
 }
 
@@ -22,13 +30,72 @@ struct QAInputRecord {
     let form: QAInputForm
     let event: QAInputEvent
     let attemptID: UUID?
+    let formID: UUID?
+    let elapsedMilliseconds: Int?
+
+    init(
+        form: QAInputForm,
+        event: QAInputEvent,
+        attemptID: UUID?,
+        formID: UUID? = nil,
+        elapsedMilliseconds: Int? = nil
+    ) {
+        self.form = form
+        self.event = event
+        self.attemptID = attemptID
+        self.formID = formID
+        self.elapsedMilliseconds = elapsedMilliseconds
+    }
 }
 
 enum QAInputDiagnostics {
     private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Assistant", category: "QAInputDiagnostics")
 
     static func emit(_ record: QAInputRecord) {
-        logger.info("form=\(record.form.rawValue, privacy: .public) event=\(record.event.rawValue, privacy: .public) attemptID=\(record.attemptID?.uuidString ?? "nil", privacy: .public)")
+        let elapsedMilliseconds = record.elapsedMilliseconds.map(String.init) ?? "none"
+        logger.info("form=\(record.form.rawValue, privacy: .public) event=\(record.event.rawValue, privacy: .public) formID=\(record.formID?.uuidString ?? "nil", privacy: .public) attemptID=\(record.attemptID?.uuidString ?? "nil", privacy: .public) elapsedMs=\(elapsedMilliseconds, privacy: .public)")
+    }
+}
+
+private struct QAInputResponsivenessProbe: ViewModifier {
+    let form: QAInputForm
+    let formID: UUID
+
+    func body(content: Content) -> some View {
+        content.task { await monitorMainActor() }
+    }
+
+    @MainActor
+    private func monitorMainActor() async {
+        QAInputDiagnostics.emit(QAInputRecord(form: form, event: .formAppeared, attemptID: nil, formID: formID))
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        for _ in 0..<10 {
+            do { try await Task.sleep(for: .seconds(1)) }
+            catch { return }
+            guard !Task.isCancelled else { return }
+            let elapsedMilliseconds = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000)
+            QAInputDiagnostics.emit(QAInputRecord(
+                form: form,
+                event: .mainActorPulse,
+                attemptID: nil,
+                formID: formID,
+                elapsedMilliseconds: elapsedMilliseconds
+            ))
+        }
+        let elapsedMilliseconds = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000)
+        QAInputDiagnostics.emit(QAInputRecord(
+            form: form,
+            event: .probeCompleted,
+            attemptID: nil,
+            formID: formID,
+            elapsedMilliseconds: elapsedMilliseconds
+        ))
+    }
+}
+
+extension View {
+    func qaInputResponsivenessProbe(form: QAInputForm, formID: UUID) -> some View {
+        modifier(QAInputResponsivenessProbe(form: form, formID: formID))
     }
 }
 #endif
@@ -1407,6 +1474,7 @@ struct MemoryEditor: View {
     @State private var isSaving = false
 #if DEBUG
     @State private var pendingInputAttemptID: UUID?
+    @State private var diagnosticFormID = UUID()
 #endif
 
     init(ownerContactId: String, fact: WorkspaceMemoryFact?) {
@@ -1442,6 +1510,16 @@ struct MemoryEditor: View {
                             Text(value.sentenceCaseIdentifier).tag(value)
                         }
                     }
+#if DEBUG
+                    .onChange(of: domain) { _, _ in
+                        QAInputDiagnostics.emit(QAInputRecord(
+                            form: .memoryEditor,
+                            event: .topicSelectionChanged,
+                            attemptID: nil,
+                            formID: diagnosticFormID
+                        ))
+                    }
+#endif
                     Picker("Importance", selection: $importance) {
                         Text("Very high").tag(5)
                         Text("High").tag(4)
@@ -1460,11 +1538,14 @@ struct MemoryEditor: View {
                 Button("Cancel") {
 #if DEBUG
                     let attemptID = UUID()
-                    QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: .memoryCancelEntered, attemptID: attemptID))
+                    QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: .memoryCancelEntered, attemptID: attemptID, formID: diagnosticFormID))
                     pendingInputAttemptID = attemptID
-                    QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: .dismissRequested, attemptID: attemptID))
+                    QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: .dismissRequested, attemptID: attemptID, formID: diagnosticFormID))
 #endif
                     dismiss()
+#if DEBUG
+                    QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: .dismissReturned, attemptID: attemptID, formID: diagnosticFormID))
+#endif
                 }
             }
             ToolbarItem(placement: .confirmationAction) {
@@ -1473,8 +1554,9 @@ struct MemoryEditor: View {
             }
         }
 #if DEBUG
+        .qaInputResponsivenessProbe(form: .memoryEditor, formID: diagnosticFormID)
         .onDisappear {
-            QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: .viewOnDisappear, attemptID: pendingInputAttemptID))
+            QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: .viewOnDisappear, attemptID: pendingInputAttemptID, formID: diagnosticFormID))
         }
 #endif
     }
@@ -1482,7 +1564,7 @@ struct MemoryEditor: View {
     private func save() {
 #if DEBUG
         let attemptID = UUID()
-        QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: .memorySaveEntered, attemptID: attemptID))
+        QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: .memorySaveEntered, attemptID: attemptID, formID: diagnosticFormID))
 #endif
         isSaving = true
         Task {
@@ -1499,13 +1581,13 @@ struct MemoryEditor: View {
                 ))
             }
 #if DEBUG
-            QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: succeeded ? .enqueueAccepted : .enqueueNotAccepted, attemptID: attemptID))
+            QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: succeeded ? .enqueueAccepted : .enqueueNotAccepted, attemptID: attemptID, formID: diagnosticFormID))
 #endif
             isSaving = false
             if succeeded {
 #if DEBUG
                 pendingInputAttemptID = attemptID
-                QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: .dismissRequested, attemptID: attemptID))
+                QAInputDiagnostics.emit(QAInputRecord(form: .memoryEditor, event: .dismissRequested, attemptID: attemptID, formID: diagnosticFormID))
 #endif
                 dismiss()
             }
