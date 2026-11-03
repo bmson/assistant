@@ -6,25 +6,53 @@ const authState = vi.hoisted(() => ({
     MOBILE_API_TOKEN_SECRET_NAME: 'fixture-mobile-token',
     MOBILE_API_TOKEN: 'startup-token',
     OWNER_AUTH_MODE: 'google',
+    PERSISTENCE_DRIVER: 'firestore',
+    FIRESTORE_AGENT_ID: '11111111-1111-4111-8111-111111111111',
     AUTH_URL: 'https://assistant.example.com',
     PUBLIC_URL: 'https://assistant.example.com',
   },
   cookie: vi.fn(),
   device: vi.fn(),
+  deviceIdentity: vi.fn(),
+  postgresOwner: vi.fn(),
+  database: vi.fn(),
+  validatePersistence: vi.fn(),
 }));
-vi.mock('@assistant/config', () => ({ loadConfig: () => authState.config }));
+vi.mock('@assistant/config', () => ({
+  loadConfig: () => authState.config,
+  validateAgentPersistenceConfig: authState.validatePersistence,
+}));
 vi.mock('./auth', () => ({ isAuthed: authState.cookie }));
-vi.mock('./lib/owner-auth/runtime', () => ({ verifyOwnerDeviceToken: authState.device }));
+vi.mock('./lib/owner-auth/runtime', () => ({
+  verifyOwnerDeviceToken: authState.device,
+  ownerAuthService: () => ({ verifyDeviceToken: authState.deviceIdentity }),
+}));
+vi.mock('./lib/server', () => ({
+  getDb: authState.database,
+  assertPostgresInstallationOwner: authState.postgresOwner,
+}));
 
 import { clearMobileAccessTokenCache } from './lib/mobile-access-token';
-import { isMobileAuthed, mobileJson } from './mobile-auth';
+import {
+  authenticateMobileBearer,
+  authenticateMobileOwner,
+  isMobileAuthed,
+  mobileJson,
+} from './mobile-auth';
 import { secureTokenMatches } from './mobile-token';
 
 beforeEach(() => {
   clearMobileAccessTokenCache();
   authState.cookie.mockReset().mockResolvedValue(false);
   authState.device.mockReset().mockResolvedValue(false);
+  authState.deviceIdentity.mockReset().mockResolvedValue(null);
+  authState.postgresOwner.mockReset().mockResolvedValue('postgres-owner');
+  authState.database.mockReset().mockReturnValue({ kind: 'fixture-db' });
+  authState.validatePersistence.mockReset().mockReturnValue([]);
   authState.config.OWNER_AUTH_MODE = 'google';
+  authState.config.MOBILE_API_TOKEN = 'startup-token';
+  authState.config.PERSISTENCE_DRIVER = 'firestore';
+  authState.config.FIRESTORE_AGENT_ID = '11111111-1111-4111-8111-111111111111';
 });
 afterEach(() => {
   clearMobileAccessTokenCache();
@@ -67,10 +95,17 @@ describe('mobile bearer authentication', () => {
     );
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(await isMobileAuthed(request('old-token'))).toBe(true);
+    expect(await authenticateMobileBearer(request('old-token'))).toEqual({
+      kind: 'configured_installation_bearer',
+    });
     token = 'new-token';
     expect(await isMobileAuthed(request(token))).toBe(false);
+    expect(await authenticateMobileBearer(request(token))).toBeNull();
     vi.advanceTimersByTime(30_001);
     expect(await isMobileAuthed(request(token))).toBe(true);
+    expect(await authenticateMobileBearer(request(token))).toEqual({
+      kind: 'configured_installation_bearer',
+    });
     expect(await isMobileAuthed(request('old-token'))).toBe(false);
     expect(fetcher).toHaveBeenCalledTimes(4);
   });
@@ -88,6 +123,13 @@ describe('mobile bearer authentication', () => {
           }),
         ),
       ).toBe(false);
+    expect(
+      await authenticateMobileBearer(
+        new Request('https://assistant.example.com/api/mobile/v1/activity', {
+          headers: { authorization: 'Bearer startup-token' },
+        }),
+      ),
+    ).toBeNull();
     expect(fetcher).toHaveBeenCalledTimes(1);
     log.mockRestore();
   });
@@ -147,6 +189,103 @@ describe('mobile bearer authentication', () => {
         }),
       ),
     ).toBe(true);
+  });
+});
+
+describe('typed bearer authentication and owner resolution', () => {
+  const request = (authorization?: string, body?: string) =>
+    new Request('https://assistant.example.com/api/mobile/v1/owner-editor', {
+      method: 'POST',
+      ...(authorization ? { headers: { authorization, 'content-type': 'application/json' } } : {}),
+      ...(body ? { body } : {}),
+    });
+
+  it('accepts the configured installation bearer without inventing a user or scope', async () => {
+    expect(await authenticateMobileBearer(request('Bearer startup-token'))).toEqual({
+      kind: 'configured_installation_bearer',
+    });
+  });
+
+  it('freshly resolves a device ID on every typed check while legacy auth keeps its Boolean path', async () => {
+    authState.config.OWNER_AUTH_MODE = 'passkey';
+    authState.device.mockResolvedValue(true);
+    authState.deviceIdentity.mockResolvedValueOnce('device-123').mockResolvedValueOnce(null);
+    const deviceRequest = request('Bearer asd1_fixture');
+
+    expect(await isMobileAuthed(deviceRequest)).toBe(true);
+    expect(await authenticateMobileBearer(deviceRequest)).toEqual({
+      kind: 'owner_device_bearer',
+      deviceId: 'device-123',
+    });
+    expect(await authenticateMobileBearer(deviceRequest)).toBeNull();
+    expect(authState.deviceIdentity).toHaveBeenCalledTimes(2);
+    expect(authState.device).toHaveBeenCalledTimes(1);
+  });
+
+  it('reserves asd1_ tokens for passkey device verification with no configured-token fallback', async () => {
+    authState.config.MOBILE_API_TOKEN = 'asd1_fixture';
+    expect(await authenticateMobileBearer(request('Bearer asd1_fixture'))).toBeNull();
+    expect(authState.deviceIdentity).not.toHaveBeenCalled();
+
+    authState.config.OWNER_AUTH_MODE = 'passkey';
+    expect(await authenticateMobileBearer(request('Bearer asd1_fixture'))).toBeNull();
+    expect(authState.deviceIdentity).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects cookie-only and invalid-bearer-plus-cookie requests without calling Auth.js', async () => {
+    authState.cookie.mockResolvedValue(true);
+    const cookieOnly = new Request('https://assistant.example.com/api/mobile/v1/owner-editor', {
+      method: 'POST',
+      headers: { origin: 'https://assistant.example.com' },
+    });
+    const invalidBearerAndCookie = new Request(
+      'https://assistant.example.com/api/mobile/v1/owner-editor',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer invalid',
+          origin: 'https://assistant.example.com',
+        },
+      },
+    );
+
+    expect(await authenticateMobileBearer(cookieOnly)).toBeNull();
+    expect(await authenticateMobileBearer(invalidBearerAndCookie)).toBeNull();
+    expect(await authenticateMobileOwner(invalidBearerAndCookie)).toBeNull();
+    expect(authState.cookie).not.toHaveBeenCalled();
+    expect(authState.validatePersistence).not.toHaveBeenCalled();
+    expect(authState.database).not.toHaveBeenCalled();
+  });
+
+  it('resolves Firestore owner from validated server config and ignores a request owner field', async () => {
+    const resolved = await authenticateMobileOwner(
+      request('Bearer startup-token', JSON.stringify({ ownerId: 'attacker-owner' })),
+    );
+    expect(resolved).toEqual({
+      principal: { kind: 'configured_installation_bearer' },
+      ownerId: '11111111-1111-4111-8111-111111111111',
+    });
+    expect(authState.validatePersistence).toHaveBeenCalledWith(authState.config);
+  });
+
+  it('resolves Postgres owner only after bearer authentication', async () => {
+    authState.config.PERSISTENCE_DRIVER = 'postgres';
+    const resolved = await authenticateMobileOwner(request('Bearer startup-token'));
+    expect(resolved).toEqual({
+      principal: { kind: 'configured_installation_bearer' },
+      ownerId: 'postgres-owner',
+    });
+    expect(authState.database).toHaveBeenCalledTimes(1);
+    expect(authState.postgresOwner).toHaveBeenCalledWith({ kind: 'fixture-db' });
+  });
+
+  it('fails closed for invalid Firestore configuration and owner-resolution errors', async () => {
+    authState.validatePersistence.mockReturnValue(['missing installation owner']);
+    expect(await authenticateMobileOwner(request('Bearer startup-token'))).toBeNull();
+
+    authState.config.PERSISTENCE_DRIVER = 'postgres';
+    authState.postgresOwner.mockRejectedValue(new Error('ambiguous owner'));
+    expect(await authenticateMobileOwner(request('Bearer startup-token'))).toBeNull();
   });
 });
 
